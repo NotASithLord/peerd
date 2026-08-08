@@ -54,7 +54,7 @@ const saveJsonFile = (payload, filename) => {
 /**
  * @typedef {{ state: ChatViewState, attrs: {
  *   state: ChatState, send: Send, voiceManager: any, uiActions?: UiActions,
- *   surface?: string, activeTabIsWeb?: boolean,
+ *   surface?: string, activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive',
  * } }} ChatViewVnode
  */
 
@@ -73,7 +73,7 @@ export const ChatView = {
   },
 
   /** @param {ChatViewVnode} vnode */
-  view: ({ attrs: { state, send, voiceManager, uiActions, surface, activeTabIsWeb }, state: ui }) => {
+  view: ({ attrs: { state, send, voiceManager, uiActions, surface, activeTabStatus }, state: ui }) => {
     const sid = state.session?.sessionId;
     const messages = state.session?.messages ?? [];
     const changedSession = sid !== ui._sid;
@@ -168,7 +168,7 @@ export const ChatView = {
       showVoiceOnboarding ? m(VoiceOnboardingCard, { send }) : null,
 
       messages.length === 0 ? m(EmptyState, {
-        hasKey, send, surface, activeTabIsWeb,
+        hasKey, send, surface, activeTabStatus,
         actorExecution: state.capabilities?.actorExecution,
       })
         : m(MessageList, {
@@ -453,6 +453,8 @@ const VoiceOnboardingCard = {
 // The `text` is what gets sent; clicking one fires it immediately. For now
 // these are just the prompts; later the same surface presents recipes /
 // workflows (a mix of deterministic code + agent execution).
+/** @typedef {{ type: string, label: string, text: string, blocked?: boolean }} StarterPrompt */
+/** @type {StarterPrompt[]} */
 const STARTER_PROMPTS = [
   { type: 'ask', label: 'Ask', text: 'What can you do?' },
   { type: 'web', label: 'Browse', text: 'Open Hacker News and summarize the top 5 stories.' },
@@ -468,12 +470,24 @@ const STARTER_PROMPTS = [
 // instead of the generic Hacker News demo. On the home full-tab surface (no
 // "page next to you") it always shows the Hacker News prompt. Kept a pure fn of
 // attrs so armReveal + view agree on the exact text they animate/render.
-/** @param {{ surface?: string, activeTabIsWeb?: boolean }} attrs */
-const promptsFor = (attrs) => (attrs.surface !== 'home' && attrs.activeTabIsWeb
-  ? STARTER_PROMPTS.map((p) => (p.type === 'web'
-      ? { ...p, label: 'Summarize', text: 'Summarize the current page.' }
-      : p))
-  : STARTER_PROMPTS);
+/** @param {{ surface?: string, activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive' }} attrs */
+export const promptsFor = (attrs) => {
+  if (attrs.surface === 'home') return STARTER_PROMPTS;
+  if (attrs.activeTabStatus === 'web') {
+    return STARTER_PROMPTS.map((prompt) => (prompt.type === 'web'
+      ? { ...prompt, label: 'Summarize', text: 'Summarize the current page.' }
+      : prompt));
+  }
+  const protectedCopy = attrs.activeTabStatus === 'protected_private'
+    ? 'This private-network page is protected. peerd will not read or automate it.'
+    : attrs.activeTabStatus === 'protected_sensitive'
+      ? 'This sensitive page is protected. peerd will not read or automate it.'
+      : null;
+  if (!protectedCopy) return STARTER_PROMPTS;
+  return STARTER_PROMPTS.map((prompt) => (prompt.type === 'web'
+    ? { ...prompt, label: 'Protected', text: protectedCopy, blocked: true }
+    : prompt));
+};
 
 // Action-type glyphs for the path cards. Two voices, both monochrome
 // (currentColor): conceptual paths (ask / web) are stroked LINE icons in
@@ -552,7 +566,7 @@ export const PATH_TYPE = { ms: 18, start: 980, cascade: 90 };
  * @property {boolean[]} started
  */
 
-/** @typedef {{ state: EmptyState_State, attrs: { hasKey?: boolean, send: Send, surface?: string, activeTabIsWeb?: boolean, actorExecution?: { status?: string } } }} EmptyStateVnode */
+/** @typedef {{ state: EmptyState_State, attrs: { hasKey?: boolean, send: Send, surface?: string, activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive', actorExecution?: { status?: string } } }} EmptyStateVnode */
 
 // Arm the one-shot type-in (step 3) for every card. Idempotent via
 // `ui.armed`, so the redraw-driven onupdate can't re-trigger it; only runs
@@ -619,7 +633,10 @@ const EmptyState = {
     // wider container and the 3-column track (CSS owns the actual widths).
     const isHome = attrs.surface === 'home';
     const prompts = promptsFor(attrs);
-    return m('.placeholder', m('.empty-state', { class: isHome ? 'empty-state--home' : '' }, [
+    return m('.placeholder', m('.empty-state', {
+      class: isHome ? 'empty-state--home' : '',
+      'data-active-tab-status': attrs.activeTabStatus ?? 'none',
+    }, [
     m('p', 'peerd is ready.'),
     m('p.muted', hasKey
       ? 'Ask anything — or pick a path:'
@@ -629,20 +646,26 @@ const EmptyState = {
           const shown = ui.shown?.[i] ?? Infinity;
           const done = shown >= p.text.length;
           const actorUnavailable = attrs.actorExecution && attrs.actorExecution.status !== 'available' && p.type !== 'ask';
+          const blocked = p.blocked === true;
           // cursor shows only once this tile has STARTED typing and isn't done
           const typing = (ui.started?.[i] ?? true) && !done;
           return m('button.path-card', {
+            class: blocked ? 'path-card--protected' : '',
             // why data-path (not an inline style): the per-type accent
             // color lives in CSS (styles.css owns the brand palette — no
             // hexes in JS). The glyph + label carry that color permanently;
             // the tile background + outline stay grey.
             'data-path': p.type,
-            title: actorUnavailable ? 'Unavailable until the isolated actor worker recovers' : p.text,
+            title: blocked
+              ? p.text
+              : actorUnavailable ? 'Unavailable until the isolated actor worker recovers' : p.text,
             // a11y reads the full prompt even mid-type
-            'aria-label': actorUnavailable
+            'aria-label': blocked
+              ? `${p.label}: ${p.text}`
+              : actorUnavailable
               ? `${p.label}: unavailable while actor work is paused`
               : `${p.label}: ${p.text}`,
-            disabled: actorUnavailable,
+            disabled: blocked || actorUnavailable,
             // Fire-and-forget: the SW pushes turn state, which flips the
             // view out of the empty state into the live transcript.
             onclick: () => send({ type: 'agent/send', text: p.text }),

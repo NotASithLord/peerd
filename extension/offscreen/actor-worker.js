@@ -69,9 +69,10 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       const callModel = makeRelayedCallModel(requestModel, m.maxOutputTokens);
       const toolDispatch = makeRelayedToolDispatch(requestTool);
       // Phase 3: a WEB/API actor self-fences its own untrusted-provenance rolling
-      // summary. The SW's closure (over the live tab url) can't cross postMessage,
-      // so rebuild it here from the pure fence fns using the turn-start provenance.
-      const fenceActorSummary = makeActorSummaryFence({ actorType: m.actorType, backing: m.backing, tabUrl: m.tabUrl, origin: m.origin });
+      // summary. The SW's closure (over a policy-reduced live tab origin) can't
+      // cross postMessage, so rebuild it here from the pure fence fns using the
+      // turn-start provenance.
+      const fenceActorSummary = makeActorSummaryFence({ actorType: m.actorType, backing: m.backing, tabOrigin: m.tabOrigin, origin: m.origin });
       const result = await runActorLoop(
         {
           runUserTurn, sessions, callModel, toolDispatch,

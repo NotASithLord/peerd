@@ -4,6 +4,10 @@ import { signItem } from '../../extension/peerd-distributed/dht/records.js';
 import { fromHex } from '../../extension/shared/bundle/bytes.js';
 
 const labels = (n: number, p: string) => Array.from({ length: n }, (_, i) => `${p}${i}`);
+const waitFor = async (predicate: () => boolean, timeoutMs = 1_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await tick(10);
+};
 
 describe('network simulation — real node actors at scale', () => {
   test('gossip floods to every node across a sparse ring+chord (16 nodes)', async () => {
@@ -15,7 +19,7 @@ describe('network simulation — real node actors at scale', () => {
     for (const n of nodes) { got[n.label] = []; n.node.gossip.subscribe('feed', (m: any) => got[n.label].push(m.data)); }
 
     await nodes[0].node.gossip.publish('feed', { msg: 'hi everyone' });
-    await tick(80);
+    await waitFor(() => nodes.slice(1).every((n) => got[n.label].length === 1));
 
     // every other node heard it exactly once — the flood crossed multiple hops
     for (const n of nodes.slice(1)) {

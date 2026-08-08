@@ -146,7 +146,7 @@ let activeJobs = 0;
  *   DIRECT-CALLER seam (tests) — offscreen.js never forwards it from a
  *   message, so the production budget cannot be picked over the wire.
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any>, abortRun?: (runId: string, ownerSessionId?: string) => Promise<unknown>, extractMarkdown?: import('/shared/fetch-extract.js').ExtractMarkdownFn, opfsForRoot?: typeof opfsHelpers }} deps
- * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, usedEgress?: boolean, usedActors?: boolean, actorDeliveryIds?: string[], usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<object>, codeTrace?: Array<object>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
+ * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, usedEgress?: boolean, usedActors?: boolean, actorDeliveryIds?: string[], browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }>, usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<object>, codeTrace?: Array<object>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
  */
 export const runJob = async (job, deps) => {
   if (activeJobs >= MAX_CONCURRENT_JOBS) {
@@ -347,6 +347,11 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
   let usedPage = false;
   /** @type {Array<{ data: string, mediaType: string }>} */
   let pageImages = [];
+  /** @type {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} */
+  const pagePolicies = [];
+  const pagePolicyCustody = () => pagePolicies.length > 0
+    ? { browserPolicies: pagePolicies.slice() }
+    : {};
   // A uniform, privacy-minimal trace for EVERY code-client bridge. It records
   // no arguments or results — only which bridge/method ran, whether it settled,
   // and its duration. The existing actor-specific trace remains for model-facing
@@ -557,7 +562,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
         abortHostOperations();
         try { worker.terminate(); } catch {}
         recordToolboxUse(false);
-        resolve({ value: undefined, consoleOutput: [], durationMs: timeoutMs, error: `job timed out after ${timeoutMs}ms`, usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+        resolve({ value: undefined, consoleOutput: [], durationMs: timeoutMs, error: `job timed out after ${timeoutMs}ms`, usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
       }, Math.ceil(remainingMs()));
       // Stop plumbing: a runId-carrying job can be terminated from the SW
       // (script tool abort). The trace survives — partial work stays visible.
@@ -566,7 +571,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           clearTimeout(timer);
           abortHostOperations();
           try { worker.terminate(); } catch {}
-          resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: 'job aborted (Stop)', usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+          resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: 'job aborted (Stop)', usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
         };
         liveJobs.set(runId, { kill, owner: ownerSessionId });
         // Stop already arrived while we were still building — honor it now.
@@ -830,6 +835,15 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
               () => sendToSW('page/call', { method: m.method, args: m.args, ownerSessionId, runId }),
               (response) => response?.ok === true,
             );
+            const policies = Array.isArray(resp?.browserPolicies)
+              ? resp.browserPolicies
+              : Array.isArray(resp?.value?.browserPolicies)
+                ? resp.value.browserPolicies
+                : resp?.value?.browserPolicy ? [resp.value.browserPolicy] : [];
+            for (const policy of policies) {
+              if (pagePolicies.length >= 32) break;
+              pagePolicies.push(policy);
+            }
             if (resp?.ok) {
               // `view` pixels are host-authored tool-result blocks, never realm
               // output. Keep only the newest capture so a loop cannot amass
@@ -869,7 +883,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
               value: undefined, consoleOutput: [], durationMs: 0,
               error: `import resolution failed: ${error.message}`,
               errorCode: error.code,
-              usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages,
+              usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(),
               usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace,
               usedProvider, providerCalls, providerTokens,
             });
@@ -928,7 +942,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           // this error; a user-code line number is actionable, a blob one isn't.
           const error = m.error ? mapWorkerError(m.error, blobUrl, bodyLine, 'job.js') : null;
           recordToolboxUse(!error);
-          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: Math.min(timeoutMs, Math.max(0, Date.now() - runStartedAt)), error, usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: Math.min(timeoutMs, Math.max(0, Date.now() - runStartedAt)), error, usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
         }
       });
 
@@ -940,7 +954,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           e.error?.stack || e.error?.message || e.message || 'worker crashed (no detail)',
           blobUrl, bodyLine, 'job.js');
         recordToolboxUse(false);
-        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}`, usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}`, usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
       });
     });
   } finally {

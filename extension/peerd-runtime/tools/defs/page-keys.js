@@ -30,8 +30,11 @@
 // Same trust model as page_exec: requires debugger attach (banner
 // shows), denylist-gated against the active tab.
 
-import { wrapUntrusted } from '../prompt-wrap.js';
-import { resolveTargetTab, originOfUrl, cdpUnavailableError } from './dom-helpers.js';
+import { resolveTargetTab, cdpUnavailableError } from './dom-helpers.js';
+import {
+  browserTargetRefusalResult,
+  unverifiedBrowserTargetVerdict,
+} from '../browser-automation-policy.js';
 
 const MAX_KEYS_LENGTH = 1000;
 const MAX_TOKENS = 200;
@@ -55,11 +58,10 @@ export const pageKeysTool = {
   name: 'page_keys',
   primitive: 'tab',
   description: [
-    'Dispatch real (isTrusted=true) keyboard events through CDP. Use',
-    'when a site has keyboard shortcuts that beat its UI ergonomically',
-    '(Gmail "* u" to select-all-unread + Shift+I to mark-as-read,',
-    'Slack/Linear Cmd+K, etc.) AND when synthetic events would be',
-    'rejected (Gmail filters isTrusted=false).',
+    'Trusted keyboard shortcuts are currently unavailable. CDP can create',
+    'isTrusted=true events, but it cannot bind them to a verified document,',
+    'so this tool refuses without sending keys if the tab could change.',
+    'Use type with a selector or element ref for form input.',
     '',
     '`keys` is a space-separated sequence of key tokens. Each token',
     'is `+`-joined modifiers ending in the base key:',
@@ -112,9 +114,6 @@ export const pageKeysTool = {
           'Use type {selector|ref} for form fields; keyboard-shortcut-driven UIs cannot be driven here.'),
       };
     }
-    const tab = await resolveTargetTab(args, ctx);
-    if (!tab?.id) return { ok: false, error: 'no_target_tab' };
-
     let events;
     try {
       events = parseKeySequence(args.keys);
@@ -124,28 +123,18 @@ export const pageKeysTool = {
     if (events.length > MAX_TOKENS) {
       return { ok: false, error: `too_many_tokens: ${events.length} > ${MAX_TOKENS}` };
     }
+    const tab = await resolveTargetTab(args, ctx);
+    if (!tab?.id) return { ok: false, error: 'no_target_tab' };
 
-    try {
-      await debuggerPool.dispatchKeys(tab.id, events);
-    } catch (e) {
-      const msg = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
-      if (/Detached|debugger is not attached/i.test(msg)) {
-        return { ok: false, error: `debugger_detached: ${msg}` };
-      }
-      if (/Cannot access|cannot attach|chrome:\/\//i.test(msg)) {
-        return { ok: false, error: `cannot_attach_to_tab: ${msg}` };
-      }
-      return { ok: false, error: `dispatch_failed: ${msg}` };
-    }
+    // CDP trusted input is tab-scoped. Input.dispatchKeyEvent has no document,
+    // frame, execution-context, or loader target, so a navigation between the
+    // verified-document check and dispatch could deliver keys to a private
+    // replacement page. There is no honest trusted-input fallback.
+    return browserTargetRefusalResult(unverifiedBrowserTargetVerdict({
+      message: 'Trusted keyboard input cannot be bound to the verified document, so peerd did not send any keys.',
+      correction: 'Use type with a selector or element ref. That operation is bound to the checked document.',
+    }), { effectCompleted: false });
 
-    return {
-      ok: true,
-      content: wrapUntrusted({
-        origin: originOfUrl(tab.url),
-        tool: 'page_keys',
-        body: `Dispatched ${events.length} key event(s): ${args.keys}`,
-      }),
-    };
   },
 };
 

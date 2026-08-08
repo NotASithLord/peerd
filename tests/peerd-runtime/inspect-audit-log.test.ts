@@ -125,3 +125,22 @@ describe('inspect session_access hardens the page-chosen title', () => {
     expect(res.content).toContain('Quarterly report');
   });
 });
+
+describe('inspect session_access browser scope', () => {
+  test('hides private-network and denylisted tabs and explains the scope', async () => {
+    const ctx: any = {
+      tabs: { query: async () => [
+        { id: 1, url: 'https://example.com/docs', title: 'Docs', active: true },
+        { id: 2, url: 'http://127.0.0.1/admin', title: 'Admin', active: false },
+        { id: 3, url: 'https://bank.test/account', title: 'Bank', active: false },
+      ] },
+      denylist: ['bank.test'],
+    };
+    const result: any = await inspectTool.execute({ kind: 'session_access' }, ctx);
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain('Private-network, cloud-metadata, and denylisted tabs');
+    expect(result.content).toContain('example.com');
+    expect(result.content).not.toContain('127.0.0.1');
+    expect(result.content).not.toContain('bank.test');
+  });
+});

@@ -62,6 +62,33 @@ blocker below is resolved against the package being uploaded.
 > collected or transmitted anywhere except, when relevant to a task, to
 > the AI provider the user configured.
 
+### `webNavigation`
+
+> The assistant uses child-tab navigation events to identify the exact child
+> opened by a tab it is already driving. It applies the child tab's network
+> guard before allowing that child to continue to a public destination. A child
+> aimed at a protected destination is closed. Events
+> from ordinary user tabs are ignored. The extension does not keep navigation
+> history or send these events to a developer server. During a service-worker
+> restart, early handling requires both restored source ownership and the
+> complete surviving private-network rule set on that exact source. Without
+> both, the extension leaves the child alone until ownership data has loaded.
+>
+> Firefox may summarize this as "Access browser activity during navigation."
+> In peerd, the permission is used only for the child-tab correlation above.
+
+### `webRequest` and `webRequestBlocking` (Firefox only)
+
+> Firefox uses these permissions to synchronously cancel a private-network,
+> local, cloud-metadata, or denylisted request from the exact child of a tab the
+> assistant is already driving. This closes the first-request gap while the child's
+> tab-scoped network rules are installed, then the temporary child marker is
+> released. peerd does not read request bodies, alter public requests, or apply
+> this guard to children from ordinary user tabs. A subrequest stopped by this
+> temporary guard produces a URL-free tool and Activity receipt. A request
+> blocked first by the declarative rule is silent. Chrome packages do not
+> request these permissions.
+
 ### `tabGroups`
 
 > The assistant's sandboxes (Linux VM, Notebook, app pages) each run
@@ -98,7 +125,12 @@ blocker below is resolved against the package being uploaded.
 > cannot be enumerated in advance. Page injection and page automation occur
 > only during an active user task. A default-ON denylist constrains page access
 > on sensitive sites such as banks, health portals, and password managers.
-> Direct fetch and document-reading paths also block private-network targets.
+> Direct fetch, document reading, and browser automation also block
+> private-network targets. Driven tabs use tab-scoped network rules so page
+> redirects and tab-associated requests cannot bypass that check. A child tab
+> is guarded only when the browser identifies its exact source as a tab the
+> assistant is already driving. Protected children are closed. Other tabs are
+> not changed.
 > Provider setup and user-enabled runtime downloads are separate user-initiated
 > network uses.
 > The local Activity log records tool outcomes, direct open-web fetches, and

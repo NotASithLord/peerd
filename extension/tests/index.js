@@ -111,6 +111,7 @@ import './unit/sidepanel/model-picker.test.js';
 import './unit/sidepanel/tools-chip.test.js';
 import './unit/sidepanel/attachments.test.js';
 import './unit/sidepanel/message-list.test.js';
+import './unit/sidepanel/protected-tab-starter.test.js';
 import './unit/sidepanel/failure-chip.test.js';
 import './unit/sidepanel/actor-isolation.test.js';
 import './unit/sidepanel/confirm-note.test.js';

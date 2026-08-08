@@ -48,6 +48,11 @@ const CHROME_ONLY_KEYS = ['update_url', 'key', 'side_panel', 'sandbox',
 // validation clean; Firefox runtime parity is its own workstream — the
 // packaging system's job is only to emit a structurally valid manifest.
 const CHROME_ONLY_PERMISSIONS = ['sidePanel', 'offscreen', 'debugger', 'tabGroups'];
+// Firefox keeps MV3 blocking webRequest for extensions. peerd uses it only to
+// close the first-request race for an exact child of a driven tab while the
+// child's durable declarativeNetRequest rules are being installed. Chrome
+// rejects this permission for ordinary MV3 extensions.
+const FIREFOX_ONLY_PERMISSIONS = ['webRequest', 'webRequestBlocking'];
 
 // Permissions held OUT of the store channel for initial submission. why:
 // `debugger` (the CDP path) is the single highest-risk Chrome Web Store
@@ -69,9 +74,12 @@ const applyBrowserTransform = (manifest: any, browser: GenBrowser): any => {
     for (const k of FIREFOX_ONLY_KEYS) delete out[k];
   } else {
     for (const k of CHROME_ONLY_KEYS) delete out[k];
-    out.permissions = (out.permissions ?? []).filter(
-      (p: string) => !CHROME_ONLY_PERMISSIONS.includes(p),
-    );
+    out.permissions = [
+      ...(out.permissions ?? []).filter(
+        (p: string) => !CHROME_ONLY_PERMISSIONS.includes(p),
+      ),
+      ...FIREFOX_ONLY_PERMISSIONS,
+    ];
     // Defensive: also strip these from optional_permissions if a future
     // patch ever adds the key. NOTE: peerd does NOT use optional_permissions
     // for `debugger` — Chrome forbids it ("Permission 'debugger' cannot be

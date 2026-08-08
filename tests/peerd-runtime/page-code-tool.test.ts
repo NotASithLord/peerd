@@ -52,6 +52,20 @@ describe('page_code — the code-REPL action tool', () => {
     expect(noClient).toEqual({ ok: false, error: 'page_code_unavailable' });
   });
 
+  test('returns host-captured page policies even when code returns another value', async () => {
+    const browserPolicy = {
+      reason: 'protected_child_navigation', outcome: 'not_run', child: 'closed', retryable: false,
+    };
+    const { ctx } = ctxWith({
+      jsOffscreenClient: {
+        execHeadless: async () => ({ ...RESULT, value: 'discarded click result', browserPolicies: [browserPolicy] }),
+      },
+    });
+    const out: any = await pageCodeTool.execute({ code: 'await page.click("#open"); return 1' }, ctx as any);
+    expect(out.browserChildPolicyNotices).toEqual([browserPolicy]);
+    expect(out.content).not.toContain('protected_child_navigation');
+  });
+
   test('is a web-primitive, write-effect tool that names no static origins', () => {
     expect(pageCodeTool.name).toBe('page_code');
     expect(pageCodeTool.primitive).toBe('web');

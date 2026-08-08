@@ -8,6 +8,16 @@
 import { describe, it, expect } from '../../framework.js';
 import { queryDomTool } from '/peerd-runtime/tools/defs/index.js';
 import { BUILTIN_TOOLS } from '/peerd-runtime/index.js';
+import {
+  browserProbeResult,
+  TEST_DOCUMENT_ID,
+} from '../../helpers/browser-scripting.js';
+
+/** @param {any} opts @param {any} result */
+const scriptReply = (opts, result) => {
+  const probe = browserProbeResult(opts, { url: 'https://mail.example.com/u/0/#inbox' });
+  return probe ?? [{ documentId: TEST_DOCUMENT_ID, result }];
+};
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
 /** @typedef {import('/shared/tool-types.js').ToolResultOk} ToolResultOk */
@@ -29,7 +39,7 @@ const mockCtx = (scriptResult, overrides = {}) => /** @type {ToolContext} */ ({
     query: async () => [{ id: 1, url: 'https://mail.example.com/u/0/#inbox' }],
   },
   scripting: {
-    executeScript: async () => [{ result: scriptResult }],
+    executeScript: async (/** @type {any} */ opts) => scriptReply(opts, scriptResult),
   },
   ...overrides,
 });
@@ -84,7 +94,7 @@ describe('query_dom — outer tool', () => {
       scripting: {
         executeScript: async (/** @type {any} */ opts) => {
           capturedArgs = opts.args;
-          return [{ result: SAMPLE_OK }];
+          return scriptReply(opts, SAMPLE_OK);
         },
       },
     });
@@ -102,8 +112,8 @@ describe('query_dom — outer tool', () => {
     const ctx = mockCtx(SAMPLE_OK, {
       scripting: {
         executeScript: async (/** @type {any} */ opts) => {
-          captured.push(opts.args[1]);
-          return [{ result: SAMPLE_OK }];
+          if (opts.args) captured.push(opts.args[1]);
+          return scriptReply(opts, SAMPLE_OK);
         },
       },
     });
@@ -118,7 +128,10 @@ describe('query_dom — outer tool', () => {
     let captured;
     const ctx = mockCtx(SAMPLE_OK, {
       scripting: {
-        executeScript: async (/** @type {any} */ opts) => { captured = opts.args[1]; return [{ result: SAMPLE_OK }]; },
+        executeScript: async (/** @type {any} */ opts) => {
+          if (opts.args) captured = opts.args[1];
+          return scriptReply(opts, SAMPLE_OK);
+        },
       },
     });
     await queryDomTool.execute({ selector: 'a' }, ctx);
@@ -171,7 +184,11 @@ describe('query_dom — outer tool', () => {
 
   it('surfaces a script_inject_failed error when scripting throws', async () => {
     const ctx = mockCtx(SAMPLE_OK, {
-      scripting: { executeScript: async () => { throw new Error('frame removed'); } },
+      scripting: { executeScript: async (/** @type {any} */ opts) => {
+        if (opts?.func?.name === 'liveDocumentLocationInjected'
+            || opts?.func?.name === 'hasPasswordFieldInjected') return scriptReply(opts, SAMPLE_OK);
+        throw new Error('frame removed');
+      } },
     });
     const r = await queryDomTool.execute({ selector: 'a' }, ctx);
     expect(r.ok).toBe(false);

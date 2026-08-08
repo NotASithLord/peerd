@@ -33,6 +33,7 @@ import {
   isOffscreenSender as senderIsOffscreen, isOptionsSender,
 } from '/shared/sender-trust.js';
 import { loadDweb } from '/shared/dweb-loader.js';
+import { makeSiteCaptureManager } from '/background/site-capture-manager.js';
 import {
   CHANNEL_DEFAULTS, CHANNEL, DWEB_ENABLED, REMOTE_MODULE_IMPORTS_ENABLED,
 } from '/shared/channel-config.js';
@@ -301,6 +302,7 @@ import {
   actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
   ACTORS_RUN_MAX_OPS, ACTORS_TRACE_TARGET_MAX_CHARS, ACTORS_TRACE_ERROR_MAX_CHARS,
   canonicalCodeTraceLabel, DWEB_INBOUND_TOOL_NAMES, resolveWebActorSurface,
+  browserNetworkGuardUnavailableResult, classifyBrowserAutomationTarget,
   // Design 5 — the pure core the script/model-call route runs: text-only arg
   // validation, per-run quota arithmetic, and the provider-event fold.
   validateProviderCallArgs, providerQuotaError, foldProviderEvents,
@@ -310,7 +312,7 @@ import {
   createConversationRegistry,
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
   // registry (the 0-or-1-tab actor), + the self-fenced summary.
-  makeWebActorTabBindings, makeWebActorRegistry, fenceWebActorSummary,
+  makeWebActorTabBindings, makeWebActorRegistry, safeWebActorSummaryOrigin, fenceWebActorSummary,
   // PR #119: the code-REPL arm's host-side page-call handler + the pure
   // adopt-first-tab-on-goto decision.
   makePageCallHandler, resolvePageTab,
@@ -324,13 +326,21 @@ import {
   // narrowing, and the report a stop turns into.
   makeOriginStateStore, makeLearnedOrigins, makeJudgeLanding, makeCredentialScope,
   isKnownIdp, knownIdpDomains, describeLandingStop, originPhrase, isUgcHost,
+  isAddressableBrowserTab,
   finalActorTurnReply, finalAssistantText,
   // The debug surface: the bundle assembler + the delegation-tree walk the
   // session/debugBundle route runs (pure; the SW supplies the reads).
   assembleDebugBundle, childSessionIdsOf,
 } from '/peerd-runtime/index.js';
 
-import { flattenCategorisedDenylist, normalizeDenylistPattern, denylistSessionRuleUpdate } from '/peerd-egress/index.js';
+import {
+  flattenCategorisedDenylist,
+  normalizeDenylistPattern,
+  denylistSessionRuleUpdate,
+  PRIVATE_NETWORK_RULE_IDS,
+  DENYLIST_RESOURCE_TYPES,
+  CHROME_DNR_RESOURCE_TYPES,
+} from '/peerd-egress/index.js';
 
 import { createVmClient } from './vm-client.js';
 import { createVmTabTracker } from './vm-tab-tracker.js';
@@ -384,8 +394,16 @@ import {
 import { createDebuggerPool } from './debugger-pool.js';
 import { normalizeSettingsPatch } from './settings-patch.js';
 import { makeSettingsStore } from './settings-store.js';
-import { makeDenylistStore } from './denylist-store.js';
+import { makeDenylistStore, requireDenylistPolicy } from './denylist-store.js';
 import { makeDenylistNetGuard } from './denylist-net-guard.js';
+import { createBrowserNetworkCustody } from './browser-network-custody.js';
+import { makeDrivenPopupGuard, popupSourceState } from './driven-popup-guard.js';
+import {
+  classifyDrivenChildRequestTarget,
+  makeDrivenChildRequestGuard,
+  registerFirefoxDrivenChildRequestGuard,
+} from './driven-child-request-guard.js';
+import { makeStartupPopupNetworkGuard } from './startup-popup-network-guard.js';
 import { makeSessionState } from './session-state.js';
 import { makeLocalModelState } from './local-model-state.js';
 import { makeProfileState } from './profile-state.js';
@@ -778,7 +796,13 @@ export const safeFetch = makeSafeFetch({
 // reach arbitrary HTTPS hosts. The denylist still applies as defense
 // in depth alongside the dispatcher's origin gate.
 export const webFetch = makeWebFetch({
-  getDenylist: () => denylistStore.patterns(),
+  getDenylist: () => {
+    // why here as well as buildToolContext: WebVM, Notebook, skill install,
+    // and site-fetch call this boundary directly. A missing seed must pause
+    // every open-web request, including paths that do not dispatch a tool.
+    requireDenylistPolicy(denylistPolicyReady ? { ok: true } : null);
+    return denylistStore.patterns();
+  },
   matchDenylist: (host, patterns) => matchesDenylist(host, patterns),
   audit: /** @type {any} */ (auditLog.append),
 });
@@ -1037,12 +1061,11 @@ const denylistStore = makeDenylistStore({
 });
 
 // why (SECURITY): the seed loads ASYNC. Until it resolves, the effective list is
-// [] — and the origin gate would allow a denylisted site (the cold-start race).
-// buildToolContext awaits denylistReady before constructing any tool context, so
-// NO tool can dispatch against an unloaded denylist. The promise RESOLVES (never
-// rejects) when the load finishes or fails — it can't hang a turn, and
-// fails-closed to [] (the seed is a bundled extension asset, so a real failure
-// is near-impossible).
+// empty and must not be treated as permission. buildToolContext awaits
+// denylistReady, the browser network floor treats a load failure as fatal, and
+// the Firefox exact-child guard holds requests until denylistPolicyReady. The
+// seed is a bundled asset, but a missing or malformed package still fails
+// closed instead of silently authorizing an empty policy.
 /**
  * The seed's OWN category map ({ banks_us: [...], health_us: [...], … }), kept
  * for the settings list to group by.
@@ -1055,29 +1078,34 @@ const denylistStore = makeDenylistStore({
  * @type {Record<string, string[]>}
  */
 let seedCategories = {};
+let denylistPolicyReady = false;
 /** Live read for the settings list — the map is replaced when the seed loads. */
 const getSeedCategories = () => seedCategories;
 const loadDenylist = async () => {
-  /** @type {any[]} */ let seed = [];
-  try {
-    const res = await fetch('/peerd-egress/denylist/default.json');
-    if (!res.ok) console.error('[sw] denylist seed fetch failed:', res.status);
-    else {
-      const json = await res.json();
-      seedCategories = (json && typeof json === 'object' && json.categories) ? json.categories : {};
-      seed = flattenCategorisedDenylist(json);
-    }
-  } catch (e) {
-    console.error('[sw] denylist load threw', e);
+  const res = await fetch('/peerd-egress/denylist/default.json');
+  if (!res.ok) throw new Error(`denylist seed fetch failed: ${res.status}`);
+  const json = await res.json();
+  const categories = (json && typeof json === 'object' && json.categories)
+    ? json.categories
+    : null;
+  const seed = flattenCategorisedDenylist(json);
+  if (!categories || seed.length === 0) {
+    throw new Error('denylist seed is empty or malformed');
   }
   await denylistStore.load(seed);
+  seedCategories = categories;
+  denylistPolicyReady = true;
   console.log('[sw] denylist loaded —', denylistStore.patterns().length, 'patterns');
-  // The backstop's rule set is derived from the list, so it has to be rebuilt
-  // the moment the list exists (a live SW restart can find tabs already driven).
-  denylistNetGuard.sync();
 };
-/** @type {Promise<void>} */
-const denylistReady = loadDenylist();
+const denylistReady = loadDenylist()
+  .then(() => ({ ok: true }))
+  .catch((error) => {
+    console.error('[sw] denylist load failed', error);
+    return {
+      ok: false,
+      error: `denylist_hydration_failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  });
 
 // ── the denylist's NETWORK-level backstop ──────────────────────────────────
 //
@@ -1086,20 +1114,41 @@ const denylistReady = loadDenylist();
 // `location =`s onto a bank reaches the bank's DOM through a tool call that
 // never named the bank, so no gate ever got a URL to refuse. Same gap in an App
 // sandbox, whose agent-authored code reaches the network without passing
-// webFetch at all. declarativeNetRequest closes it below the page: one
-// session-scoped rule, blocking denylisted domains in the tabs peerd is
-// CURRENTLY DRIVING and nowhere else. See background/denylist-net-guard.js and
+// webFetch at all. declarativeNetRequest closes it below the page with a
+// session-scoped rule set on tabs peerd is currently driving and nowhere else.
+// See background/denylist-net-guard.js and
 // peerd-egress/denylist/dnr-rules.js.
 //
 // Deliberately a BACKSTOP, not a replacement: the JS gates still produce the
 // refusal the model reads and the audit entry the user sees. Where DNR is
-// unavailable (Firefox's partial implementation) the guard is a no-op and
-// behavior is exactly what it was before.
+// unavailable or a rule update fails, browser actions fail closed before page
+// access. Current Firefox supports the portable rule shape; Chrome receives
+// its additional request-type enums below.
+const GUARDED_BROWSER_TABS_KEY = 'guardedBrowserTabIds';
+const browserDnr = /** @type {any} */ ((globalThis).chrome?.declarativeNetRequest);
+const startupPopupNetworkGuard = makeStartupPopupNetworkGuard(browserDnr, PRIVATE_NETWORK_RULE_IDS);
+const browserNetworkCustody = createBrowserNetworkCustody({
+  persist: (tabIds) => sessionCache.sessionSet(GUARDED_BROWSER_TABS_KEY, tabIds),
+});
+const guardedBrowserTabsReady = Promise.resolve(sessionCache.sessionGet(GUARDED_BROWSER_TABS_KEY))
+  .then(async (ids) => {
+    await browserNetworkCustody.hydrate(Array.isArray(ids) ? ids : []);
+    return { ok: true };
+  })
+  .catch((error) => {
+    return {
+      ok: false,
+      error: `guarded_tabs_hydration_failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  });
+
 const drivenTabIds = () => {
   /** @type {Set<number>} */
   const ids = new Set();
   // Tabs a web actor owns — the ones it navigates and reads the DOM of.
   for (const [tabId] of webActorTabBindings.entries()) ids.add(tabId);
+  for (const tabId of browserNetworkCustody.tabIds()) ids.add(tabId);
+  for (const tabId of startupPopupNetworkGuard.tabIds()) ids.add(tabId);
   // Engine tabs. The WebVM's network already proxies through webFetch and the
   // Notebook worker is sealed, so App tabs are the ones with a real un-gated
   // network edge — but scoping all three keeps the rule uniform and costs a
@@ -1112,13 +1161,18 @@ const drivenTabIds = () => {
   }
   return [...ids];
 };
+
 // The IdP registry as bare domains for the allow rule — derived NEXT TO the
 // registry (knownIdpDomains) so a registry edit moves the excursion rule and
 // this carve-out together. Computed once; the registry is a frozen constant.
 const idpExemptDomains = knownIdpDomains();
+const dnrResourceTypes = /** @type {any} */ (browser.runtime.getManifest())
+  .browser_specific_settings?.gecko
+  ? DENYLIST_RESOURCE_TYPES
+  : CHROME_DNR_RESOURCE_TYPES;
 
 const denylistNetGuard = makeDenylistNetGuard({
-  dnr: /** @type {any} */ (globalThis).chrome?.declarativeNetRequest,
+  dnr: browserDnr,
   // The IdP carve-out. The origin lock lets a bound actor's tab leave its owned
   // origin exactly once, for a sign-in, and several identity providers are also
   // denylist entries — an overlap both halves intend (the denylist stops the
@@ -1129,6 +1183,7 @@ const denylistNetGuard = makeDenylistNetGuard({
   // isDenylistedTab still refuses every DOM tool on such a tab.
   buildUpdate: (/** @type {any} */ input) => denylistSessionRuleUpdate({
     ...input,
+    resourceTypes: dnrResourceTypes,
     exemptDomains: idpExemptDomains,
     appTabIds: appTabTracker.listLive()
       .map((/** @type {string} */ id) => appTabTracker.getTabId(id))
@@ -1137,6 +1192,326 @@ const denylistNetGuard = makeDenylistNetGuard({
   getPatterns: () => denylistStore.patterns(),
   getTabIds: drivenTabIds,
   audit: (/** @type {any} */ entry) => { auditLog.append(entry).catch(() => {}); },
+  // Existing session rules survive an MV3 worker restart. Do not replace them
+  // from a half-hydrated tab set. The boot barrier starts reconciliation after
+  // stored custody, actor bindings, and engine trackers are all restored.
+  deferUntilStarted: true,
+});
+
+// Add a tab to the browser-network floor before any page-affecting tool runs.
+// The private-network DNR rules share the existing serialized guard, so a rule
+// update either lands before execution or the tool fails closed.
+const holdBrowserNetworkGuard = async (
+  /** @type {number} */ tabId,
+  /** @type {{ tabId: number, token: string } | undefined} */ requiredLease,
+) => {
+  await browserNetworkGuardReady;
+  const before = denylistNetGuard.state();
+  if (before.lastError) {
+    return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  }
+  /** @type {{ tabId: number, token: string, added: boolean }} */
+  let claim;
+  try { claim = await browserNetworkCustody.claimDurable(tabId, requiredLease); }
+  catch {
+    // The custody layer has rolled its optimistic hold back. Reconcile before
+    // returning so an unrelated sync that observed it cannot leave stale DNR
+    // scope behind, and a retry starts from one coherent snapshot.
+    await denylistNetGuard.sync();
+    return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  }
+  await denylistNetGuard.sync();
+  const state = denylistNetGuard.state();
+  if (state.supported && !state.lastError
+      && browserNetworkCustody.isDurableClaimValid(claim)) return { ok: true };
+  if (!browserNetworkCustody.isDurableClaimValid(claim)) {
+    // A close can interleave after persistence but before DNR sync settles.
+    // Reconcile the removal and never authorize a reused numeric tab id.
+    await denylistNetGuard.sync();
+    return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  }
+  if (claim.added) {
+    await browserNetworkCustody.removeDurable(tabId).catch(() => {});
+    await denylistNetGuard.sync();
+  }
+  return browserNetworkGuardUnavailableResult(
+    state.supported ? 'network_guard_install_failed' : 'network_guard_unsupported',
+  );
+};
+
+const acquireBrowserNetworkGuardLease = async (/** @type {number} */ tabId) => {
+  await browserNetworkGuardReady;
+  const before = denylistNetGuard.state();
+  if (before.lastError) {
+    return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  }
+  const lease = browserNetworkCustody.acquire(tabId);
+  await denylistNetGuard.sync();
+  const state = denylistNetGuard.state();
+  if (state.supported && !state.lastError
+      && browserNetworkCustody.isLeaseValid(lease)) return { ok: true, lease };
+  browserNetworkCustody.release(lease);
+  await denylistNetGuard.sync();
+  return browserNetworkGuardUnavailableResult(
+    state.supported ? 'network_guard_install_failed' : 'network_guard_unsupported',
+  );
+};
+
+const releaseBrowserNetworkGuardLease = async (
+  /** @type {{ tabId?: number, token?: string } | undefined} */ lease,
+) => {
+  if (!lease || typeof lease.tabId !== 'number' || typeof lease.token !== 'string') return;
+  await browserNetworkGuardReady;
+  if (!browserNetworkCustody.release(lease)) return;
+  await denylistNetGuard.sync();
+};
+
+// A page-created child receives authority only from the exact peerd-owned
+// source tab reported by the browser. Unknown startup state is queued, never
+// treated as permission to touch a user-owned child.
+let browserNetworkGuardBootAuthoritative = false;
+/** @type {Map<number, { tabId: number, token: string }>} */
+const startupPopupLeases = new Map();
+let startupPopupCandidatesOpen = true;
+let startupPopupCandidateQueue = Promise.resolve();
+const adoptStartupPopupBrowserNetworkGuard = (
+  /** @type {number} */ sourceTabId,
+  /** @type {number} */ childTabId,
+) => {
+  if (!startupPopupCandidatesOpen) return Promise.resolve(false);
+  const lease = browserNetworkCustody.acquire(childTabId);
+  startupPopupLeases.set(childTabId, lease);
+  const operation = startupPopupCandidateQueue.then(async () => {
+    await Promise.all([guardedBrowserTabsReady, webActorBindingsReady]);
+    if (!browserNetworkCustody.isLeaseValid(lease)) return false;
+    const sourceOwned = browserNetworkCustody.hasDurable(sourceTabId)
+      || webActorTabBindings.has(sourceTabId);
+    if (!sourceOwned) return false;
+    const adopted = await startupPopupNetworkGuard.adopt(sourceTabId, childTabId);
+    return adopted && browserNetworkCustody.isLeaseValid(lease);
+  }, () => false);
+  const settled = operation.then(async (adopted) => {
+    if (adopted) return true;
+    if (startupPopupLeases.get(childTabId) === lease) startupPopupLeases.delete(childTabId);
+    browserNetworkCustody.release(lease);
+    await startupPopupNetworkGuard.release(childTabId);
+    return false;
+  }, async () => {
+    if (startupPopupLeases.get(childTabId) === lease) startupPopupLeases.delete(childTabId);
+    browserNetworkCustody.release(lease);
+    await startupPopupNetworkGuard.release(childTabId);
+    return false;
+  });
+  startupPopupCandidateQueue = settled.then(() => {}, () => {});
+  return settled;
+};
+const adoptPopupBrowserNetworkGuard = async (
+  /** @type {number} */ sourceTabId,
+  /** @type {number} */ childTabId,
+) => {
+  await browserNetworkGuardReady;
+  const startupLease = startupPopupLeases.get(childTabId);
+  const releaseStartupLease = () => {
+    if (!startupLease) return;
+    if (startupPopupLeases.get(childTabId) === startupLease) startupPopupLeases.delete(childTabId);
+    browserNetworkCustody.release(startupLease);
+  };
+  if (startupLease && !browserNetworkCustody.isLeaseValid(startupLease)) {
+    releaseStartupLease();
+    await startupPopupNetworkGuard.release(childTabId);
+    await denylistNetGuard.sync();
+    return { ok: true, adopted: false };
+  }
+  if (denylistNetGuard.state().lastError) {
+    releaseStartupLease();
+    await startupPopupNetworkGuard.release(childTabId);
+    await denylistNetGuard.sync();
+    return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  }
+  if (!drivenTabIds().includes(sourceTabId)) {
+    releaseStartupLease();
+    await startupPopupNetworkGuard.release(childTabId);
+    await denylistNetGuard.sync();
+    const state = denylistNetGuard.state();
+    return { ok: !state.supported || !state.lastError, adopted: false };
+  }
+  const result = await holdBrowserNetworkGuard(childTabId, startupLease);
+  releaseStartupLease();
+  if (result.ok) startupPopupNetworkGuard.handoff(childTabId);
+  else {
+    await startupPopupNetworkGuard.release(childTabId);
+    await denylistNetGuard.sync();
+  }
+  return { ...result, adopted: result.ok };
+};
+
+const classifyPopupTarget = (/** @type {string} */ rawUrl) => {
+  const verdict = classifyBrowserAutomationTarget(rawUrl);
+  if (!verdict.allowed) return { allowed: false, reason: verdict.reason };
+  try {
+    const parsed = new URL(rawUrl);
+    return matchesDenylist(parsed.hostname, denylistStore.patterns())
+      ? { allowed: false, reason: 'sensitive_site' }
+      : { allowed: true };
+  } catch { return { allowed: false, reason: 'invalid_url' }; }
+};
+
+const drivenChildRequestGuard = makeDrivenChildRequestGuard({
+  // The synchronous Firefox stop is narrower than the async popup guard: only
+  // a live web-actor binding can mark a child. Aggregate custody also includes
+  // short operation leases and engine tabs, which are not proof that an opener
+  // belongs to the web actor and could capture an ordinary user-created tab.
+  isDrivenSource: (sourceTabId) => webActorTabBindings.has(sourceTabId),
+  classifyTarget: (rawUrl) => classifyDrivenChildRequestTarget(
+    rawUrl,
+    (hostname) => matchesDenylist(hostname, denylistStore.patterns()),
+    denylistPolicyReady,
+  ),
+  onBlocked: (event) => recordBrowserChildRequestBlocked(event),
+});
+
+/** @typedef {{ reason: string, outcome: string, child: string, retryable: boolean }} BrowserChildPolicyNotice */
+/** @type {Map<number, BrowserChildPolicyNotice[]>} */
+const browserChildPolicyNotices = new Map();
+/** @type {Map<number, Set<() => void>>} */
+const browserChildPolicyWaiters = new Map();
+const BROWSER_CHILD_POLICY_NOTICE_MAX = 32;
+const recordBrowserChildOutcome = (
+  /** @type {{ sourceTabId: number, tabId: number, reason: string, child: 'closed'|'left_blank'|'uncontained', guarded: boolean, outcome?: 'not_run'|'unverified' }} */ event,
+  /** @type {'blocked'|'failed'|'unverified'} */ outcome,
+) => {
+  const notice = {
+    reason: outcome === 'blocked'
+      ? 'protected_child_navigation'
+      : outcome === 'unverified'
+        ? 'child_navigation_unverified'
+        : 'child_navigation_failed',
+    outcome: outcome === 'blocked' && event.outcome === 'not_run' ? 'not_run' : 'unverified',
+    child: event.child,
+    retryable: false,
+  };
+  const notices = browserChildPolicyNotices.get(event.sourceTabId) ?? [];
+  // why bounded: a hostile driven page can open children in a loop. Preserve
+  // ordered receipts without allowing an unread source queue to grow forever.
+  if (notices.length < BROWSER_CHILD_POLICY_NOTICE_MAX) notices.push(notice);
+  browserChildPolicyNotices.set(event.sourceTabId, notices);
+  for (const wake of browserChildPolicyWaiters.get(event.sourceTabId) ?? []) wake();
+  auditLog.append({
+    type: outcome === 'blocked'
+      ? 'browser_child_navigation_blocked'
+      : outcome === 'unverified'
+        ? 'browser_child_navigation_unverified'
+        : 'browser_child_navigation_failed',
+    details: {
+      browserPolicy: {
+        reason: event.reason,
+        child: event.child,
+        guarded: event.guarded,
+        outcome: notice.outcome,
+      },
+    },
+  }).catch(() => {});
+  if (event.child === 'left_blank') {
+    noteAgentTab(event.tabId, {
+      label: 'blank child', opened: true, protected: event.guarded,
+    }).catch(() => {});
+  }
+};
+const recordBrowserChildRequestBlocked = (
+  /** @type {{ sourceTabId: number, tabId: number, reason: string }} */ event,
+) => {
+  const notice = {
+    reason: 'protected_child_request',
+    outcome: 'not_run',
+    child: 'guarded',
+    retryable: false,
+  };
+  const notices = browserChildPolicyNotices.get(event.sourceTabId) ?? [];
+  if (notices.length < BROWSER_CHILD_POLICY_NOTICE_MAX) notices.push(notice);
+  browserChildPolicyNotices.set(event.sourceTabId, notices);
+  for (const wake of browserChildPolicyWaiters.get(event.sourceTabId) ?? []) wake();
+  auditLog.append({
+    type: 'browser_child_request_blocked',
+    details: {
+      browserPolicy: {
+        reason: event.reason,
+        child: notice.child,
+        guarded: true,
+        outcome: notice.outcome,
+      },
+    },
+  }).catch(() => {});
+};
+const consumeBrowserChildPolicyNotice = (/** @type {number} */ tabId) => {
+  const notices = browserChildPolicyNotices.get(tabId) ?? [];
+  if (notices.length > 0) browserChildPolicyNotices.delete(tabId);
+  return notices;
+};
+const waitForBrowserChildPolicyNotice = (
+  /** @type {number} */ tabId,
+  /** @type {number} */ timeoutMs,
+) => {
+  if ((browserChildPolicyNotices.get(tabId)?.length ?? 0) > 0) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (/** @type {boolean} */ found) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const waiters = browserChildPolicyWaiters.get(tabId);
+      waiters?.delete(wake);
+      if (waiters?.size === 0) browserChildPolicyWaiters.delete(tabId);
+      resolve(found);
+    };
+    const wake = () => finish(true);
+    const timer = setTimeout(() => finish(false), Math.max(0, timeoutMs));
+    const waiters = browserChildPolicyWaiters.get(tabId) ?? new Set();
+    waiters.add(wake);
+    browserChildPolicyWaiters.set(tabId, waiters);
+  });
+};
+
+const drivenPopupGuard = makeDrivenPopupGuard({
+  adoptFromSource: adoptPopupBrowserNetworkGuard,
+  adoptUnknownFromSource: adoptStartupPopupBrowserNetworkGuard,
+  sourceState: (sourceTabId) => popupSourceState(
+    sourceTabId,
+    drivenTabIds(),
+    browserNetworkGuardBootAuthoritative,
+  ),
+  neutralize: (tabId) => browser.tabs.update(tabId, { url: 'about:blank' }),
+  close: (tabId) => browser.tabs.remove(tabId),
+  resume: (tabId, url) => browser.tabs.update(tabId, { url }),
+  classifyTarget: classifyPopupTarget,
+  onBlocked: (event) => recordBrowserChildOutcome(event, 'blocked'),
+  onFailed: (event) => recordBrowserChildOutcome(event, 'failed'),
+  onBlank: (event) => recordBrowserChildOutcome(event, 'unverified'),
+  onGuarded: ({ tabId }) => drivenChildRequestGuard.release(tabId),
+});
+browser.tabs.onCreated?.addListener((tab) => {
+  drivenPopupGuard.onCreated(tab);
+});
+browser.tabs.onUpdated?.addListener(drivenPopupGuard.onUpdated);
+browser.tabs.onRemoved?.addListener((tabId) => {
+  drivenChildRequestGuard.release(tabId);
+  drivenPopupGuard.onRemoved(tabId);
+  startupPopupNetworkGuard.release(tabId).catch(() => {});
+  browserChildPolicyNotices.delete(tabId);
+  for (const wake of browserChildPolicyWaiters.get(tabId) ?? []) wake();
+  browserChildPolicyWaiters.delete(tabId);
+});
+browser.webNavigation?.onCreatedNavigationTarget?.addListener((details) => {
+  // This event is the browser's exact source-to-child statement. Keep the
+  // synchronous marker first so Firefox can stop the first private request.
+  // tabs.onCreated is intentionally not authority here: API-created ordinary
+  // tabs can carry opener metadata without being page-created children.
+  drivenChildRequestGuard.onNavigationTarget(details);
+  drivenPopupGuard.onNavigationTarget(details);
+});
+registerFirefoxDrivenChildRequestGuard({
+  isFirefox: Boolean(browser.runtime.getManifest().browser_specific_settings?.gecko),
+  event: browser.webRequest?.onBeforeRequest,
+  listener: drivenChildRequestGuard.onBeforeRequest,
 });
 
 // ---------------------------------------------------------------------------
@@ -1496,12 +1871,11 @@ const pageActivity = createPageActivityReporter({
 });
 
 const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, actorInstanceId, actorType, actorBacking, actorSurface } = {}) => {
-  // SECURITY: never build a tool context against an unloaded denylist. The seed
-  // loads async; this await closes the cold-start race so the origin gate always
-  // sees the real denylist before any tool can dispatch. Resolves (never
-  // rejects) — it cannot hang the turn. Every dispatch path (main turn, direct
-  // dispatch, spawned actors) routes through here, so all are covered.
-  await denylistReady;
+  // SECURITY: never build a tool context against an unloaded or failed
+  // denylist. Every dispatch path (main turn, direct dispatch, spawned actors)
+  // routes through here, so browser and open-web tools cannot interpret an
+  // empty policy as permission.
+  requireDenylistPolicy(await denylistReady);
   // The lifecycle tracker must be ARMED before any ctx exists — otherwise a
   // Class D/E dispatch could race the boot into running untracked. The
   // promise settles once (subsequent awaits are free) and never rejects; a
@@ -1669,10 +2043,14 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     ...(actorType === 'web'
       ? {
         // DESIGN-18: an API actor self-fences its learned memory tagged with its FIXED
-        // owned origin (actorInstanceId); a tab actor tags its current tab url.
+        // owned origin (actorInstanceId). A tab actor gets only a policy-approved
+        // public origin. A later private/denylisted location contributes no target
+        // text to the model-facing trim fence.
         fenceActorSummary: actorBacking === 'api'
           ? (/** @type {string} */ text) => fenceApiActorSummary(text, { origin: actorInstanceId })
-          : (/** @type {string} */ text) => fenceWebActorSummary(text, { tabUrl: activeTab?.url }),
+          : (/** @type {string} */ text) => fenceWebActorSummary(text, {
+            tabOrigin: safeWebActorSummaryOrigin(activeTab?.url, denylistStore.patterns()),
+          }),
       }
       : {}),
     // why: the exposure gate's SECOND check — the session's resolved tool
@@ -1875,6 +2253,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // or, for DOM-walk pseudo-snapshot refs, to a page-side walkId.
     domRefs,
     tabs: browser.tabs,
+    ensureBrowserNetworkGuard: holdBrowserNetworkGuard,
+    acquireBrowserNetworkGuardLease,
+    releaseBrowserNetworkGuardLease,
+    consumeBrowserChildPolicyNotice,
+    waitForBrowserChildPolicyNotice,
+    hasPendingBrowserChildPolicy: (/** @type {number} */ tabId) =>
+      drivenPopupGuard.hasPendingSource(tabId),
     // open_tab opens in the background and announces a "go there" card instead of
     // stealing focus; this is the late-bound announce (defined below).
     // noteTab updates the "current agent tab" card to whatever tab a tool just
@@ -3589,18 +3974,16 @@ browser.tabs.onRemoved.addListener((tabId) => {
   // its next op (the clients ensureTab internally); the binding persists.
   // Drop any DOM-nav refs for the closed tab.
   domRefs.clear(tabId);
-  // ...and drop it out of the network backstop's tab scope. Tab ids are REUSED
-  // within a browser session, so a stale entry would silently apply the block
-  // to whatever unrelated tab inherits the id.
+  browserNetworkCustody.close(tabId).catch(() => {});
+  // ...and drop it out of the network backstop's tab scope. Tab ids remain
+  // unique within one browser session, but closed tabs no longer need rules.
   denylistNetGuard.sync();
 });
 
-// Invalidate a tab's DOM-nav refs when it starts navigating — the
-// backendDOMNodeIds belong to the old document. why: tabs.onUpdated
-// (status 'loading') instead of a new webNavigation permission — full
-// navigations are covered, and an SPA route change that slips through
-// still fails safe (DOM.resolveNode can't find the node → tool errors →
-// the model re-snapshots).
+// Invalidate a tab's DOM-nav refs when it starts navigating. The backend DOM
+// node ids belong to the old document. tabs.onUpdated covers full navigations;
+// an SPA route change that slips through still fails safe when DOM.resolveNode
+// cannot find the node and the model has to take a new snapshot.
 browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading') domRefs.clear(tabId);
 });
@@ -3756,7 +4139,7 @@ const prewalk = makePrewalkController({
 
 const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
-  sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser, originOfTabUrl,
+  sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser,
   skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
   filterByDwebActive, filterByDwebEnabled,
   filterDescriptorsByManifest, mainAgentDescriptors, listTools, settingsStore, DWEB_ENABLED,
@@ -3766,6 +4149,7 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   resolveFailoverChain, shouldFailover, callModel, runUserTurn, getSecret,
   safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
   contextWindowFor, liveContextWindow, currentAppScope, checkpointMgr, detectInterruptedTurn,
+  getDenylist: () => denylistStore.patterns(),
   // Lifecycle recovery notices → the next turn's <context> message (read-once).
   drainRecoveryNotices: (/** @type {string} */ sid) => lifecycleBoot.drainNoticesFor(sid),
   recordModelCall: contextSnapshots.record,
@@ -4025,6 +4409,18 @@ const hydrateRegistry = (/** @type {string} */ key, /** @type {{ load: (e: any) 
   Promise.resolve(sessionCache.sessionGet(key))
     .then((e) => { if (Array.isArray(e)) registry.load(/** @type {any} */ (e)); })
     .catch(() => {});
+const hydrateRegistryForGuard = (
+  /** @type {string} */ key,
+  /** @type {{ load: (e: any) => void }} */ registry,
+) => Promise.resolve(sessionCache.sessionGet(key))
+  .then((entries) => {
+    if (Array.isArray(entries)) registry.load(/** @type {any} */ (entries));
+    return { ok: true };
+  })
+  .catch((error) => ({
+    ok: false,
+    error: `web_bindings_hydration_failed: ${error instanceof Error ? error.message : String(error)}`,
+  }));
 
 const webActorTabBindings = makeWebActorTabBindings();
 const WEB_BINDINGS_KEY = 'webActorTabBindings';
@@ -4038,8 +4434,7 @@ const persistWebBindings = () => { persistWebBindingsOnly(); denylistNetGuard.sy
 // Rehydration restores bindings without going through persistWebBindings (an
 // SW restart finds tabs still being driven), so the guard is told once the load
 // lands — not before, or it would re-derive the same empty set it started with.
-hydrateRegistry(WEB_BINDINGS_KEY, webActorTabBindings)
-  .then(() => denylistNetGuard.sync());
+const webActorBindingsReady = hydrateRegistryForGuard(WEB_BINDINGS_KEY, webActorTabBindings);
 
 // The chat→web-actor registry — the 0-or-1-tab web actor (addressed by `to:'web'`,
 // the SINGLE entry point for web work). Separate from webActorTabBindings because
@@ -4301,35 +4696,26 @@ const siteClientRoutes = {
 // (advancedAutomationOn — the SAME gate every other CDP path uses), else the
 // chrome.scripting MAIN-world fetch/XHR wrap (all channels, no new permission).
 // Returns a redacted, templatized endpoint inventory via the pure digester.
-const siteCaptureManager = {
-  /** @param {{ tabId: number, origins: string[] }} o */
-  start: async ({ tabId }) => {
-    if (advancedAutomationOn() && debuggerPool.startNetworkCapture) {
-      await debuggerPool.startNetworkCapture(tabId);
-      return { tap: 'cdp' };
-    }
-    await browser.scripting.executeScript({
-      target: { tabId }, world: 'MAIN', func: installFetchTapInjected,
-    });
-    return { tap: 'tap' };
-  },
-  /** @param {{ tabId: number, origins: string[] }} o */
-  stop: async ({ tabId, origins }) => {
-    /** @type {any[]} */
-    let events = [];
-    let deriver = 'capture-tap';
-    if (advancedAutomationOn() && debuggerPool.stopNetworkCapture && debuggerPool.isAttached?.(tabId)) {
-      events = await debuggerPool.stopNetworkCapture(tabId);
-      deriver = 'capture-cdp';
-    } else {
-      const [res] = await browser.scripting.executeScript({
-        target: { tabId }, world: 'MAIN', func: drainFetchTapInjected,
-      });
-      events = /** @type {any} */ (res?.result)?.events ?? [];
-    }
-    return digestCapture(events, { origins, deriver: /** @type {any} */ (deriver) });
-  },
-};
+const siteCaptureManager = makeSiteCaptureManager({
+  advancedAutomationOn,
+  debuggerPool,
+  scripting: browser.scripting,
+  installFetchTapInjected,
+  drainFetchTapInjected,
+  digestCapture,
+});
+
+// The tab has already destroyed both capture backends. Release the host-side
+// ownership record too, since tab ids can be reused within a browser session.
+browser.tabs.onRemoved.addListener((tabId) => { siteCaptureManager.release(tabId); });
+// A capture is document-bound, while tabs.onUpdated is the earliest host-side
+// signal that the tab has begun replacing that document. Discard immediately;
+// a later stop reports the cancellation instead of digesting stale traffic.
+browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (!siteCaptureManager.has(tabId)) return;
+  if (changeInfo?.status !== 'loading' && typeof changeInfo?.url !== 'string') return;
+  siteCaptureManager.cancel({ tabId, reason: 'page_changed' }).catch(() => {});
+});
 
 // DESIGN-18 — API actors. An API integration is a `web` actor (backing:'api') with NO
 // tab: it owns ONE FIXED origin and reaches it fetch-only. Keyed by (ownerChatId,
@@ -4524,7 +4910,10 @@ const mintWebActorForTab = async (/** @type {number} */ tabId) => {
 // (SW death cleared session storage) so a live tab is always reachable.
 const resolveWebActorForTab = async (/** @type {number} */ tabId) => {
   const tab = await browser.tabs.get(tabId).catch(() => null);
-  if (!tab) return null;
+  if (!tab || !isAddressableBrowserTab(tab.url)) return null;
+  let liveHost = '';
+  try { liveHost = new URL(/** @type {string} */ (tab.url)).hostname; } catch { return null; }
+  if (matchesDenylist(liveHost, denylistStore.patterns())) return null;
   let actorSessionId = webActorTabBindings.resolve(tabId);
   if (actorSessionId && !(await sessions.get(actorSessionId))) {
     webActorTabBindings.drop(tabId);
@@ -5288,7 +5677,11 @@ const resolveApiActor = async (/** @type {string} */ origin, /** @type {string |
 // re-pin ctx.activeTab for the rest of THIS turn.
 const adoptWebTab = async (/** @type {string} */ actorSessionId, /** @type {AbortSignal | undefined} */ signal = undefined) => {
   if (signal?.aborted) throw new Error('adopt_web_tab: aborted');
-  const created = await browser.tabs.create({ active: false });
+  // `chrome.tabs.create({ active:false })` opens chrome://newtab/, which is a
+  // browser-owned page and must stay outside automation authority. Create the
+  // documented neutral document explicitly so navigate can move only this
+  // internally minted blank tab onto its first public page.
+  const created = await browser.tabs.create({ active: false, url: 'about:blank' });
   const tabId = created?.id;
   if (typeof tabId !== 'number') throw new Error('adopt_web_tab: no tab id');
   if (signal?.aborted) {
@@ -5415,16 +5808,20 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
       : undefined;
     // Phase 3: the WEB/API actor self-fence provenance (the worker rebuilds
     // ctx.fenceActorSummary from it — the SW's closure can't cross postMessage). A
-    // tab actor tags its turn-START tab url (the body-wrap is what matters; a tag
-    // that lags a mid-turn navigate is cosmetic); an API actor tags its FIXED origin.
-    let tabUrl;
+    // tab actor gets only a policy-approved turn-start origin; a private,
+    // metadata, or denylisted live tab contributes no location. An API actor
+    // tags its FIXED origin.
+    let tabOrigin;
     let apiOrigin;
     if (kind === 'web') {
       if (rec.backing === 'api') {
         apiOrigin = instanceId;
       } else {
         const ownedTab = actorTabId ?? webActorTabBindings.tabFor(actorSessionId);
-        if (ownedTab != null) tabUrl = (await browser.tabs.get(ownedTab).catch(() => null))?.url;
+        if (ownedTab != null) {
+          const liveUrl = (await browser.tabs.get(ownedTab).catch(() => null))?.url;
+          tabOrigin = safeWebActorSummaryOrigin(liveUrl, denylistStore.patterns());
+        }
       }
     }
     const r = await runActorIsolated({
@@ -5435,7 +5832,7 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
       // hardcoded fifth of it. Seed the actor's prior history for statefulness.
       tools, priorMessages: rec.messages ?? [], reasoning, contextWindow,
       // Phase 3 web/API parity: oneShot loop mode + the self-fence provenance.
-      oneShot: oneShot === true, actorType: kind, backing: rec.backing, tabUrl, origin: apiOrigin,
+      oneShot: oneShot === true, actorType: kind, backing: rec.backing, tabOrigin, origin: apiOrigin,
       ...(actorSurface ? { actorSurface } : {}),
       inbound: inbound === true,
     }, { signal: controller.signal, onEvent });
@@ -5800,9 +6197,14 @@ const initOrchestrator = makeInitOrchestrator({
   memory,
   confirm: /** @type {any} */ (confirmAction),
   postChatNote,
+  getDenylist: () => denylistStore.patterns(),
 });
 const runInit = async () => {
   if (vault.isLocked()) throw new VaultLockedError();
+  // /init scans open tabs directly rather than building a tool context.
+  // Keep the same cold-start posture: no scan while sensitive-origin policy
+  // is unavailable, even though the orchestrator also classifies each tab.
+  requireDenylistPolicy(await denylistReady);
   return initOrchestrator.runInit();
 };
 
@@ -6351,7 +6753,7 @@ ensureOffscreen().then(async () => {
 // Instance registry + tracker init for all three kinds: pull persisted
 // catalogs and re-discover live tabs (a SW restart while tabs are open
 // is common — Chrome kills the SW after 30s idle but leaves tabs alone).
-(async () => {
+const engineTrackersReady = (async () => {
   try {
     await vmRegistry.load();
     await vmTabTracker.bootstrap();
@@ -6366,7 +6768,8 @@ ensureOffscreen().then(async () => {
     // registry catalog (files, metadata) persists; the running process is
     // gone. Reap → audit → the §14 resource-lost notice to the owner's
     // chat + the agent's next turn.
-    try {
+    void (async () => {
+      try {
       const surviving = [
         ...vmTabTracker.listLive().map((/** @type {string} */ id) => `vm:${id}`),
         ...jsTabTracker.listLive().map((/** @type {string} */ id) => `notebook:${id}`),
@@ -6400,16 +6803,41 @@ ensureOffscreen().then(async () => {
         console.log('[sw] engine orphans reaped:',
           lost.map((/** @type {any} */ l) => `${l.kind}:${l.id}`));
       }
-    } catch (e) {
-      console.warn('[sw] engine orphan sweep failed', e);
-    }
-    // An SW restart re-adopts engine tabs that never stopped running, so the
-    // network backstop's tab scope has to be rebuilt from what bootstrap found.
-    denylistNetGuard.sync();
+      } catch (e) {
+        console.warn('[sw] engine orphan sweep failed', e);
+      }
+    })();
+    return { ok: true };
   } catch (e) {
     console.error('[sw] instance init failed', e);
+    return {
+      ok: false,
+      error: `engine_tracker_hydration_failed: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 })();
+
+// One authoritative first reconcile. Existing DNR session rules remain intact
+// until every source of tab custody has rehydrated, so a worker restart cannot
+// briefly or permanently narrow protection for a live actor, App, or peerd-opened
+// tab. All queued sync calls coalesce on the state read after start().
+const browserNetworkGuardReady = Promise.all([
+  denylistReady,
+  guardedBrowserTabsReady,
+  webActorBindingsReady,
+  engineTrackersReady,
+]).then(async (results) => {
+  const failed = results.find((result) => result?.ok === false);
+  startupPopupCandidatesOpen = false;
+  await startupPopupCandidateQueue;
+  await startupPopupNetworkGuard.seal();
+  await denylistNetGuard.start(failed ?? { ok: true });
+  if (!failed) {
+    await denylistNetGuard.sync();
+    browserNetworkGuardBootAuthoritative = true;
+    drivenPopupGuard.onBootReady();
+  }
+});
 
 // Attempt to resume the vault from chrome.storage.session. If the SW
 // died and respawned within the same browser session, the unwrapped DK

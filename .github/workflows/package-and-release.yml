@@ -74,6 +74,9 @@ jobs:
   checks:
     name: lint + boundary + drift
     runs-on: ubuntu-latest
+    # addons-linter currently depends on an image parser with a known infinite
+    # loop. This bounds a crafted PR asset until upstream publishes a fix.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -648,6 +651,8 @@ jobs:
     name: GitHub Release (preview channel)
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    # Bound the same image-validation exposure on the trusted signing path.
+    timeout-minutes: 30
     needs: [test, checks, firefox-runtime, package]
     # The one job that holds signing secrets. Bound to a GitHub Environment so
     # the secrets can be scoped to it AND protection rules (required reviewers,

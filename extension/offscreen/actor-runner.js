@@ -59,7 +59,7 @@ export const abortActor = (runId) => {
 
 /**
  * Run one BOUND-actor turn in a dedicated Worker.
- * @param {{ runId?: string, relayToken?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabUrl?: string, origin?: string, inbound?: boolean }} job
+ * @param {{ runId?: string, relayToken?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabOrigin?: string, origin?: string, inbound?: boolean }} job
  * @param {{ workerUrl: string, sendToSW: (type: string, payload: object) => Promise<any>, createWorker?: (url: string) => Worker, startupMs?: number }} deps
  * @returns {Promise<{ ok: boolean, started?: boolean, phase?: string, code?: string, finalText?: string, newMessages?: any[], usage?: object, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean, outcomeKnown?: boolean }>}
  */
@@ -159,7 +159,7 @@ export const runActor = async (job, {
             provider: job.provider, model: job.model, depth: job.depth, tools: job.tools ?? [],
             priorMessages: job.priorMessages ?? [],
             maxSteps: job.maxSteps, maxOutputTokens: job.maxOutputTokens, reasoning: job.reasoning, contextWindow: job.contextWindow,
-            oneShot: job.oneShot, actorType: job.actorType, backing: job.backing, tabUrl: job.tabUrl, origin: job.origin,
+            oneShot: job.oneShot, actorType: job.actorType, backing: job.backing, tabOrigin: job.tabOrigin, origin: job.origin,
             inbound: job.inbound === true,
           });
           return;
@@ -224,7 +224,7 @@ export const runActor = async (job, {
         finish({
           ok: false, started, phase: started ? 'run' : 'startup', code: 'actor_worker_message_error',
           error: 'actor worker sent a message that could not be decoded',
-      });
+        });
       });
     });
   } catch (e) {

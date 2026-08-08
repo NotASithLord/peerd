@@ -595,9 +595,16 @@ export const reduceChat = (state, msg) => {
       const idx = state.agentTabEvents.findIndex((e) => e.sessionId === sid && e.tabId === tab.tabId);
       if (idx >= 0) {
         // Already announced → resurface into the current turn (no-op if it's
-        // already anchored there).
-        if (state.agentTabEvents[idx].turnId === turnId) return { ...state, agentTab: tab };
-        const events = state.agentTabEvents.map((e, i) => (i === idx ? { ...e, turnId } : e));
+        // already anchored there). The custody state can change independently
+        // of the turn anchor, so refresh it even when the notice stays put.
+        const protectedTab = tab.protected !== false;
+        if (state.agentTabEvents[idx].turnId === turnId
+          && state.agentTabEvents[idx].protected === protectedTab) {
+          return { ...state, agentTab: tab };
+        }
+        const events = state.agentTabEvents.map((e, i) => (i === idx
+          ? { ...e, turnId, protected: protectedTab }
+          : e));
         return { ...state, agentTab: tab, agentTabEvents: events };
       }
       // A NEW tab → mint a notice ONLY if peerd opened it (not when the agent
@@ -607,7 +614,7 @@ export const reduceChat = (state, msg) => {
         key: `${sid ?? 's'}:${tab.tabId}`,
         sessionId: sid, tabId: tab.tabId, windowId: tab.windowId ?? null,
         kind: tab.kind ?? null, name: tab.name ?? null, label: tab.label ?? null,
-        turnId,
+        protected: tab.protected !== false, turnId,
       };
       return { ...state, agentTab: tab, agentTabEvents: [...state.agentTabEvents, ev].slice(-50) };
     }

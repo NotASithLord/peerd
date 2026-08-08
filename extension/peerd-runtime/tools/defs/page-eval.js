@@ -31,7 +31,7 @@
 // forcing it through five narrower tool calls.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { resolveTargetTab, originOfUrl } from './dom-helpers.js';
+import { resolveTargetTab, originOfUrl, scriptingTarget } from './dom-helpers.js';
 
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
 /** @typedef {import('/shared/tool-types.js').ToolResult} ToolResult */
@@ -102,7 +102,7 @@ export const pageEvalTool = {
     let scriptResult;
     try {
       const results = await scripting.executeScript({
-        target: { tabId: tab.id },
+        target: scriptingTarget(tab),
         // why: MAIN world — the code runs in the page's own JS context.
         // Without this, fetch() doesn't carry session cookies, page
         // globals are invisible, and the use cases that motivate this

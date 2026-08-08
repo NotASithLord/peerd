@@ -7,9 +7,9 @@
 > [`docs/security/THREAT-MODEL.md`](./THREAT-MODEL.md) and to a CI-gated test
 > (`tests/red-team/red-team.test.ts`, plus the in-browser suite for realm escapes).
 
-_Last run: 2026-08-08 · Bun 1.3.9 · 11 scenarios._
+_Generated from the current checkout by the command above._
 
-11 of 11 scenarios held. 152 of 152 individual hostile probes blocked.
+11 of 11 scenarios held. 172 of 172 individual hostile probes blocked.
 
 | # | Attack | Adversary | Asset | Invariant | Result |
 |---|--------|-----------|-------|-----------|--------|
@@ -175,9 +175,10 @@ _Last run: 2026-08-08 · Bun 1.3.9 · 11 scenarios._
 
 - Adversary: malicious webpage
 - Asset: internal network + cloud metadata credentials
-- Claim checked: webFetch refuses private / loopback / link-local / metadata hosts (including encoded and IPv4-mapped forms) before any network call, and fails closed on redirects.
+- Claim checked: Open-web and browser entry points refuse private targets, browser network rules stay tab-scoped, and child guards require exact source identity.
 - Threat-model invariant: INV-7
-- Defenses exercised: isPrivateOrLocalHost (SSRF guard), webFetch pre-flight host check, redirect fail-closed
+- Defenses exercised: isPrivateOrLocalHost (SSRF guard), webFetch pre-flight host check, browser automation target classifier, tab-scoped private-network DNR rules, exact-child synchronous Firefox request stop, exact-source startup child rule copy, redirect fail-closed
+- Verified in the browser by: `scripts/cdp/states.mjs (browser network floor); scripts/firefox/run-runtime-tests.mjs (Firefox private-network and child navigation probes)`
 
 | Probe (adversary action) | Result | Evidence |
 |--------------------------|--------|----------|
@@ -202,6 +203,26 @@ _Last run: 2026-08-08 · Bun 1.3.9 · 11 scenarios._
 | disguise internal host as "255.255.255.255" | blocked | isPrivateOrLocalHost() = true |
 | disguise internal host as "240.0.0.1" | blocked | isPrivateOrLocalHost() = true |
 | public host 3xx-redirects toward an internal target | blocked | redirect refused (reason=redirect_blocked) |
+| automate cloud metadata endpoint at pre_navigation | blocked | browser target refused as cloud_metadata; result contains no target URL |
+| automate cloud metadata endpoint at committed_origin | blocked | browser target refused as cloud_metadata; result contains no target URL |
+| automate RFC1918 LAN admin panel at pre_navigation | blocked | browser target refused as private_network; result contains no target URL |
+| automate RFC1918 LAN admin panel at committed_origin | blocked | browser target refused as private_network; result contains no target URL |
+| automate private 10.0.0.0/8 host at pre_navigation | blocked | browser target refused as private_network; result contains no target URL |
+| automate private 10.0.0.0/8 host at committed_origin | blocked | browser target refused as private_network; result contains no target URL |
+| automate loopback service at pre_navigation | blocked | browser target refused as private_network; result contains no target URL |
+| automate loopback service at committed_origin | blocked | browser target refused as private_network; result contains no target URL |
+| automate decimal-encoded loopback (2130706433 = 127.0.0.1) at pre_navigation | blocked | browser target refused as private_network; result contains no target URL |
+| automate decimal-encoded loopback (2130706433 = 127.0.0.1) at committed_origin | blocked | browser target refused as private_network; result contains no target URL |
+| automate IPv4-mapped IPv6 loopback via URL parser at pre_navigation | blocked | browser target refused as private_network; result contains no target URL |
+| automate IPv4-mapped IPv6 loopback via URL parser at committed_origin | blocked | browser target refused as private_network; result contains no target URL |
+| automate IPv4-mapped IPv6 metadata via URL parser at pre_navigation | blocked | browser target refused as private_network; result contains no target URL |
+| automate IPv4-mapped IPv6 metadata via URL parser at committed_origin | blocked | browser target refused as private_network; result contains no target URL |
+| turn the private-network floor into a browser-wide rule | blocked | every known rule is block-only and scoped to the driven tab |
+| install the private-network floor with no driven tab | blocked | the rule builder returned no rules |
+| use an ordinary source tab to acquire its child during startup | blocked | no browser rule changed without the complete exact-source rule set |
+| redirect startup protection onto an unrelated tab | blocked | the complete rule set was copied only from the exact source to the exact child |
+| claim startup child custody from a partial surviving rule set | blocked | partial browser evidence changed no rule |
+| race a protected request through a newly opened child | blocked | private HTTP, WebSocket, denylisted, and cold-policy requests were cancelled only for exact children, with source-bound receipts |
 
 ## 08-prompt-injection-benchmark: Prompt-injection benchmark (versus single-context agents)
 

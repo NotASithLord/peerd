@@ -122,9 +122,20 @@ let actorAppState = { spawned: 0, childCalls: 0, appCalls: 0, appId: null };
 let actorAppProbeUrl = '';
 let actorAppStunPort = 0;
 
+const toolResultsIn = (postData) => {
+  try {
+    const body = JSON.parse(postData);
+    return (body.messages ?? [])
+      .filter((message) => message?.role === 'tool')
+      .map((message) => typeof message.content === 'string'
+        ? message.content
+        : JSON.stringify(message.content));
+  } catch { return []; }
+};
+
 // --- harvest: the FULL personal-data flow, incl. reading a real page ---------
-// An order page served over localhost. The order lines are ANCHOR text so the
-// web actor's read_page returns the item names + prices as visible page text.
+// An order page served locally through a reserved public-looking .test name.
+// The order lines are anchor text so the web actor returns them as visible text.
 const ORDERS_HTML = [
   '<!doctype html><html><head><title>My Orders</title></head><body>',
   '<h1>My Orders</h1><ul>',
@@ -149,7 +160,7 @@ return { total: rows.reduce((a, r) => a + r.amount, 0), count: rows.length, sour
 
 // harvest sequencing (post-#61 actor flow). The orchestrator delegates the read
 // to the WEB ACTOR via message_actor; the web actor OWNS a tab, opens the fixture
-// itself (navigate — not under the SSRF guard, which is fetch_url-only) and reads
+// itself and reads
 // it (read_page). We capture the actor request that carries the read_page RESULT
 // to PROVE the actor genuinely read the live page, and sequence the actor's
 // navigate→read→report turns and the orchestrator's post-reply index→answer turns
@@ -160,6 +171,13 @@ let harvestOrchTurn = 0;
 let harvestDelegated = false;
 let harvestActorUsedCode = false;
 let harvestFixtureUrl = '';
+let networkGuardActorTurn = 0;
+let networkGuardDelegated = false;
+let networkGuardActorReady = false;
+let networkGuardActorResult = '';
+let networkGuardFixtureUrl = '';
+let networkGuardActorTask = 'open';
+let networkGuardTrustedBurstComplete = false;
 
 // --- issue 251: the origin lock, end to end --------------------------------
 //
@@ -174,9 +192,8 @@ let harvestFixtureUrl = '';
 // landing check hands off. So this state exercises the learned signal and the
 // enforcement together — which is the only way to find out whether they agree.
 //
-// It is served on `*.localhost` (Chrome resolves it to loopback) because
-// `normalizeApiOrigin` refuses a bare IP literal, so a 127.0.0.1 fixture could
-// never be classified sensitive and the lock could never fire on it.
+// The harness maps reserved `*.peerd.test` names to loopback. This keeps the
+// fixture public under the product's lexical host policy while remaining local.
 const LOGIN_HTML = `<!doctype html><html><head><title>Acme — Sign in</title></head><body>
 <h1>Sign in to Acme</h1>
 <form><label>Email <input type="email" name="email"></label>
@@ -218,6 +235,412 @@ export const STATES = [
       rec.check('assistant turn renders the streamed text', out.assistantText === SMOKE_TEXT, JSON.stringify(out.assistantText));
       rec.check('turn reaches a terminal/idle state', out.busy === false);
       await rec.shot('final');
+    },
+  },
+
+  // --- functional: Chrome accepts and installs the private-network floor ---
+  {
+    name: 'browser-network-rules', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const result = await evalIn(ctx.page, `(async () => {
+          const rules = await import(chrome.runtime.getURL('peerd-egress/denylist/dnr-rules.js'));
+          const validations = await Promise.all(
+            rules.PRIVATE_NETWORK_REGEX_RULES.map(async ({ id, regex }) => ({
+              id,
+              ...await chrome.declarativeNetRequest.isRegexSupported({
+                regex,
+                isCaseSensitive: false,
+              }),
+            })),
+          );
+          const tab = await chrome.tabs.getCurrent();
+          const testIdOffset = 1000;
+          const candidates = rules.buildPrivateNetworkBlockRules({
+            tabIds: [tab.id],
+            resourceTypes: rules.CHROME_DNR_RESOURCE_TYPES,
+          })
+            .map((rule) => ({ ...rule, id: rule.id + testIdOffset }));
+          const testRuleIds = candidates.map((rule) => rule.id);
+          try {
+            await chrome.declarativeNetRequest.updateSessionRules({
+              removeRuleIds: testRuleIds,
+              addRules: candidates,
+            });
+            const installed = await chrome.declarativeNetRequest.getSessionRules();
+            return {
+              validations,
+              expectedRuleIds: testRuleIds,
+              privateRuleIds: installed
+                .filter((rule) => testRuleIds.includes(rule.id))
+                .map((rule) => rule.id)
+                .sort((left, right) => left - right),
+            };
+          } finally {
+            await chrome.declarativeNetRequest.updateSessionRules({
+              removeRuleIds: testRuleIds,
+            });
+          }
+        })()`, true);
+      const evaluationDetail = JSON.stringify(result);
+      rec.check('Chrome accepts every private-network request regex',
+        result?.validations?.every(({ isSupported }) => isSupported === true) === true,
+        JSON.stringify(result?.validations) ?? evaluationDetail);
+      rec.check('all private-network session rules are installed',
+        JSON.stringify(result?.privateRuleIds) === JSON.stringify(result?.expectedRuleIds), evaluationDetail);
+    },
+  },
+
+  // --- functional: private targets never receive a driven-tab request -----
+  {
+    name: 'browser-network-floor', kind: 'functional', phase: 'post-unlock',
+    responder: (_callIndex, request) => {
+      const body = request?.postData ?? '';
+      if (body.includes('<actor_agent>')) {
+        if (networkGuardActorTurn > 0) {
+          const results = toolResultsIn(body).join('\n');
+          networkGuardActorResult = results;
+          if (networkGuardActorTask === 'open' && results.includes('network-guard-controller')) {
+            networkGuardActorReady = true;
+          }
+          if (networkGuardActorTask === 'trusted-blank-burst' && results.includes('clicked')) {
+            networkGuardTrustedBurstComplete = true;
+          }
+        }
+        const turn = networkGuardActorTurn++;
+        if (body.includes('tools: page_code')) {
+          if (turn === 0) {
+            return { sse: sseToolCall('page_code', {
+              code: networkGuardActorTask === 'trusted-blank-burst'
+                ? 'await page.snapshot(); return await page.click("@e1");'
+                : `await page.goto(${JSON.stringify(networkGuardFixtureUrl)}); return await page.content();`,
+            }) };
+          }
+          return { sse: sseText('The network guard controller is ready.') };
+        }
+        if (turn === 0) return { sse: sseToolCall('navigate', { url: networkGuardFixtureUrl }) };
+        if (turn === 1) return { sse: sseToolCall('read_page', {}) };
+        return { sse: sseText('The network guard controller is ready.') };
+      }
+      if (!networkGuardDelegated) {
+        networkGuardDelegated = true;
+        return { sse: sseToolCall('message_actor', {
+          to: 'web',
+          message: networkGuardActorTask === 'trusted-blank-burst'
+            ? 'Click the only button on the current controller page.'
+            : `Open ${networkGuardFixtureUrl} and report when the controller is ready.`,
+        }) };
+      }
+      return { sse: sseText('The browser network test is delegated.') };
+    },
+    async run(ctx, rec) {
+      networkGuardActorTurn = 0;
+      networkGuardDelegated = false;
+      networkGuardActorReady = false;
+      networkGuardActorResult = '';
+      networkGuardActorTask = 'open';
+      networkGuardTrustedBurstComplete = false;
+      let probeConnections = 0;
+      let probeRequests = [];
+      let controllerRequests = 0;
+      const controllerAttempts = new Set();
+      const probeServer = createServer((req, res) => {
+        probeRequests.push(req.url ?? '/');
+        res.writeHead(204, { connection: 'close' });
+        res.end();
+      });
+      probeServer.on('connection', () => { probeConnections += 1; });
+      const controllerServer = createServer((req, res) => {
+        controllerRequests += 1;
+        const requestUrl = new URL(req.url ?? '/', 'http://orders.peerd.test');
+        if (requestUrl.pathname === '/attempt') {
+          controllerAttempts.add(requestUrl.searchParams.get('vector') ?? '');
+          res.writeHead(204);
+          res.end();
+          return;
+        }
+        res.setHeader('content-type', 'text/html');
+        res.setHeader('connection', 'close');
+        if (requestUrl.pathname === '/redirect') {
+          const target = `http://127.0.0.1:${probePort}/probe?vector=redirect`;
+          res.writeHead(302, { location: target });
+          res.end();
+          return;
+        }
+        if (requestUrl.pathname === '/meta') {
+          const target = `http://127.0.0.1:${probePort}/probe?vector=meta`;
+          res.end(`<!doctype html><meta http-equiv="refresh" content="0;url=${target}">`);
+          return;
+        }
+        if (requestUrl.pathname === '/script') {
+          const target = `http://127.0.0.1:${probePort}/probe?vector=script`;
+          res.end(`<!doctype html><script>location.href=${JSON.stringify(target)}<\/script>`);
+          return;
+        }
+        if (requestUrl.pathname === '/cross-frame-popup') {
+          const target = `http://127.0.0.1:${probePort}/probe?vector=cross-frame-popup`;
+          res.end(`<!doctype html><script>
+            navigator.sendBeacon('/attempt?vector=cross-frame-popup');
+            const link = document.createElement('a');
+            link.href = ${JSON.stringify(target)};
+            link.target = '_blank';
+            document.body.append(link);
+            link.click();
+          <\/script>`);
+          return;
+        }
+        if (requestUrl.pathname === '/cross-frame-blank') {
+          const target = `http://127.0.0.1:${probePort}/probe?vector=cross-frame-blank`;
+          res.end(`<!doctype html><script>
+            const name = 'private-child-' + Math.random();
+            const link = document.createElement('a');
+            link.href = 'about:blank';
+            link.target = name;
+            document.body.append(link);
+            link.click();
+            const child = window.open('', name);
+            if (child) {
+              navigator.sendBeacon('/attempt?vector=cross-frame-blank');
+              child.fetch(${JSON.stringify(target)}, { mode: 'no-cors' }).catch(() => {});
+            }
+          <\/script>`);
+          return;
+        }
+        const trustedTarget = `http://127.0.0.1:${probePort}/probe?vector=trusted-click-blank`;
+        res.end(`<!doctype html><title>network-guard-controller</title>
+          <h1>network-guard-controller</h1>
+          <button id="trusted-blank-burst">Open child</button>
+          <script>
+            document.querySelector('#trusted-blank-burst').addEventListener('click', () => {
+              const child = window.open(${JSON.stringify(trustedTarget)}, 'trusted-private-child');
+              if (!child) return;
+              navigator.sendBeacon('/attempt?vector=trusted-click-blank');
+              child.fetch(${JSON.stringify(trustedTarget)}, { mode: 'no-cors' }).catch(() => {});
+            });
+          <\/script>`);
+      });
+      await Promise.all([
+        new Promise((resolve) => probeServer.listen(0, '127.0.0.1', resolve)),
+        new Promise((resolve) => controllerServer.listen(0, '127.0.0.1', resolve)),
+      ]);
+      const probePort = /** @type {{ port: number }} */ (probeServer.address()).port;
+      const controllerPort = /** @type {{ port: number }} */ (controllerServer.address()).port;
+      networkGuardFixtureUrl = `http://orders.peerd.test:${controllerPort}/`;
+      const resetProbe = async () => {
+        probeServer.closeAllConnections?.();
+        await sleep(100);
+        probeConnections = 0;
+        probeRequests = [];
+      };
+      try {
+        const fixtureTab = await evalIn(ctx.page, `(async () => {
+          const tab = await chrome.tabs.create({ active: false });
+          try {
+            const updated = await chrome.tabs.update(tab.id, {
+              url: ${JSON.stringify(networkGuardFixtureUrl)},
+            });
+            return { tab, updated };
+          } catch (error) {
+            return { tab, error: String(error) };
+          }
+        })()`, true);
+        await waitFor(() => controllerRequests > 0, { budgetMs: 5_000, pollMs: 25 });
+        rec.check('the public-looking controller fixture resolves locally',
+          controllerRequests > 0, JSON.stringify({ controllerRequests, fixtureTab }));
+        if (typeof fixtureTab?.tab?.id === 'number') {
+          await evalIn(ctx.page, `chrome.tabs.remove(${fixtureTab.tab.id})`, true).catch(() => {});
+        }
+
+        const sent = await rpc(ctx.page, {
+          type: 'agent/send',
+          text: 'Open the browser network test controller and wait.',
+        });
+        rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+        const actorReady = await waitFor(() => networkGuardActorReady, {
+          budgetMs: 30_000, pollMs: 100,
+        });
+        rec.check('the web actor loaded the public controller',
+          actorReady === true, networkGuardActorResult.slice(0, 2000));
+        const tabs = await evalIn(ctx.page, `chrome.tabs.query({}).then((items) => items.map(({ id, url, openerTabId }) => ({ id, url, openerTabId })))`, true);
+        const drivenTab = tabs.find((tab) => tab.url?.startsWith(networkGuardFixtureUrl));
+        const networkGuardDiagnostics = typeof drivenTab?.id === 'number'
+          ? null
+          : await evalIn(ctx.page, `(async () => {
+            const definitions = await import(chrome.runtime.getURL('peerd-egress/denylist/dnr-rules.js'));
+            const rules = (await chrome.declarativeNetRequest.getSessionRules())
+              .filter((rule) => definitions.PRIVATE_NETWORK_RULE_IDS.includes(rule.id));
+            const guardedTabIds = [...new Set(rules.flatMap((rule) => rule.condition?.tabIds ?? []))];
+            const matches = [];
+            for (const tabId of guardedTabIds) {
+              matches.push({
+                tabId,
+                outcome: await chrome.declarativeNetRequest.testMatchOutcome({
+                  url: ${JSON.stringify(networkGuardFixtureUrl)},
+                  type: 'main_frame',
+                  tabId,
+                }),
+              });
+            }
+            return { guardedTabIds, matches, rules };
+          })()`, true).catch((error) => ({ error: String(error) }));
+        rec.check('the controller is owned by the production web actor',
+          typeof drivenTab?.id === 'number', JSON.stringify({ tabs, networkGuardDiagnostics }));
+        if (typeof drivenTab?.id !== 'number') throw new Error('driven controller tab not found');
+        const productionRules = await evalIn(ctx.page, `(async () => {
+          const rules = await import(chrome.runtime.getURL('peerd-egress/denylist/dnr-rules.js'));
+          const installed = await chrome.declarativeNetRequest.getSessionRules();
+          return {
+            expected: rules.PRIVATE_NETWORK_RULE_IDS,
+            scoped: installed
+              .filter((rule) => rules.PRIVATE_NETWORK_RULE_IDS.includes(rule.id)
+                && rule.condition?.tabIds?.includes(${drivenTab.id}))
+              .map((rule) => rule.id)
+              .sort((left, right) => left - right),
+          };
+        })()`, true);
+        rec.check('production private-network rules are scoped to the driven tab',
+          JSON.stringify(productionRules.scoped) === JSON.stringify(productionRules.expected),
+          JSON.stringify(productionRules));
+
+        const baselineUrl = `http://127.0.0.1:${probePort}/probe?vector=user-tab`;
+        const userTab = await evalIn(ctx.page, `chrome.tabs.create({ url: ${JSON.stringify(baselineUrl)}, active: false })`, true);
+        await waitFor(() => probeRequests.length > 0, { budgetMs: 5_000, pollMs: 25 });
+        rec.check('an ordinary user tab can still reach the private probe',
+          probeRequests.length > 0 && probeConnections > 0,
+          JSON.stringify({ probeConnections, probeRequests }));
+        if (typeof userTab?.id === 'number') {
+          await evalIn(ctx.page, `chrome.tabs.remove(${userTab.id})`, true).catch(() => {});
+        }
+
+        await resetProbe();
+        networkGuardActorTask = 'trusted-blank-burst';
+        networkGuardActorTurn = 0;
+        networkGuardDelegated = false;
+        networkGuardActorResult = '';
+        networkGuardTrustedBurstComplete = false;
+        const burstTabIdsBefore = new Set((await evalIn(ctx.page,
+          'chrome.tabs.query({}).then((tabs) => tabs.map((tab) => tab.id))', true))
+          .filter((id) => typeof id === 'number'));
+        const burstSent = await rpc(ctx.page, {
+          type: 'agent/send',
+          text: 'Click the controller button once.',
+        });
+        rec.check('trusted child-burst turn accepted', !!burstSent?.ok, JSON.stringify(burstSent));
+        const burstComplete = await waitFor(() => networkGuardTrustedBurstComplete, {
+          budgetMs: 30_000, pollMs: 100,
+        });
+        await sleep(800);
+        const burstTabs = await evalIn(ctx.page, `chrome.tabs.query({}).then((tabs) =>
+          tabs.map(({ id, openerTabId, url, pendingUrl, status }) => ({ id, openerTabId, url, pendingUrl, status })))`, true);
+        const burstObserved = {
+          completed: burstComplete === true,
+          attempted: controllerAttempts.has('trusted-click-blank'),
+          connections: probeConnections,
+          requests: [...probeRequests],
+          tabs: burstTabs,
+        };
+        rec.check('the trusted click reaches its about:blank child action',
+          burstObserved.completed && burstObserved.attempted, JSON.stringify(burstObserved));
+        rec.check('the trusted about:blank child causes no private TCP or HTTP side effect',
+          burstObserved.connections === 0 && burstObserved.requests.length === 0,
+          JSON.stringify(burstObserved));
+        rec.check('the protected child is closed instead of left as a blank tab',
+          !burstTabs.some((tab) => !burstTabIdsBefore.has(tab.id) && tab.openerTabId === drivenTab.id),
+          JSON.stringify(burstTabs));
+        rec.check('the source actor receives the fixed child policy outcome',
+          networkGuardActorResult.includes('protected_child_navigation')
+            && networkGuardActorResult.includes('closed')
+            && !networkGuardActorResult.includes(`127.0.0.1:${probePort}`),
+          networkGuardActorResult.slice(0, 2000));
+
+        const runVector = async (vector) => {
+          await resetProbe();
+          const target = `${vector === 'websocket' ? 'ws' : 'http'}://127.0.0.1:${probePort}/probe?vector=${vector}`;
+          await evalIn(ctx.page, `(async () => chrome.scripting.executeScript({
+            target: { tabId: ${drivenTab.id} },
+            world: 'MAIN',
+            func: (kind, privateTarget, publicBase) => {
+              const frame = (url, name = '') => {
+                const node = document.createElement('iframe');
+                if (name) node.name = name;
+                node.hidden = true;
+                node.src = url;
+                document.body.append(node);
+                return node;
+              };
+              if (kind === 'fetch') fetch(privateTarget).catch(() => {});
+              if (kind === 'websocket') new WebSocket(privateTarget);
+              if (kind === 'image') {
+                const image = new Image();
+                image.src = privateTarget;
+                document.body.append(image);
+              }
+              if (kind === 'form') {
+                const name = 'private-probe-frame';
+                frame('about:blank', name);
+                const form = document.createElement('form');
+                form.method = 'post';
+                form.action = privateTarget;
+                form.target = name;
+                document.body.append(form);
+                form.submit();
+              }
+              if (['redirect', 'meta', 'script'].includes(kind)) {
+                frame(publicBase + kind);
+              }
+              if (kind === 'popup') {
+                const link = document.createElement('a');
+                link.href = privateTarget;
+                link.target = '_blank';
+                document.body.append(link);
+                link.click();
+              }
+              if (kind === 'cross-frame-popup') {
+                const crossOrigin = publicBase.replace('orders.peerd.test', 'acct.peerd.test');
+                frame(crossOrigin + 'cross-frame-popup');
+              }
+              if (kind === 'cross-frame-blank') {
+                const crossOrigin = publicBase.replace('orders.peerd.test', 'acct.peerd.test');
+                frame(crossOrigin + 'cross-frame-blank');
+              }
+              if (kind === 'location') location.href = privateTarget;
+            },
+            args: [${JSON.stringify(vector)}, ${JSON.stringify(target)}, ${JSON.stringify(networkGuardFixtureUrl)}],
+          }))()`, true);
+          await sleep(800);
+          const observed = {
+            connections: probeConnections,
+            requests: [...probeRequests],
+            attempted: controllerAttempts.has(vector),
+          };
+          if (['popup', 'cross-frame-popup', 'cross-frame-blank'].includes(vector)) {
+            const children = await evalIn(ctx.page, `chrome.tabs.query({}).then((items) => items.filter((tab) => tab.openerTabId === ${drivenTab.id}).map((tab) => tab.id))`, true);
+            for (const childId of children) {
+              await evalIn(ctx.page, `chrome.tabs.remove(${childId})`, true).catch(() => {});
+            }
+          }
+          return observed;
+        };
+
+        for (const vector of [
+          'fetch', 'websocket', 'image', 'form', 'redirect', 'meta', 'script',
+          'popup', 'cross-frame-popup', 'cross-frame-blank', 'location',
+        ]) {
+          const observed = await runVector(vector);
+          if (vector === 'cross-frame-popup') {
+            rec.check(`${vector} reaches its cross-origin action`, observed.attempted === true,
+              JSON.stringify(observed));
+          }
+          rec.check(`${vector} causes no private TCP or HTTP side effect`,
+            observed.connections === 0 && observed.requests.length === 0,
+            JSON.stringify(observed));
+        }
+      } finally {
+        probeServer.closeAllConnections?.();
+        controllerServer.closeAllConnections?.();
+        probeServer.close();
+        controllerServer.close();
+      }
     },
   },
 
@@ -590,7 +1013,7 @@ export const STATES = [
       // request that carries the read_page RESULT (the page's own order text rides
       // back here) as the load-bearing proof it genuinely read the live page.
       if (body.includes('<actor_agent>')) {
-        if (body.includes('Coffee Mug')) harvestActorSawPage = body;
+        if (harvestActorTurn > 0) harvestActorSawPage = toolResultsIn(body).join('\n');
         const t = harvestActorTurn++;
         if (body.includes('tools: page_code')) {
           harvestActorUsedCode = true;
@@ -623,14 +1046,13 @@ export const STATES = [
       harvestOrchTurn = 0;
       harvestDelegated = false;
       harvestActorUsedCode = false;
-      // Serve the order page over localhost; the WEB ACTOR opens + reads it ITSELF
-      // through the real actor-model path. navigate is NOT under the private-network
-      // SSRF guard (that's fetch_url-only) and localhost isn't denylisted, so the
-      // actor's own tab really loads the fixture — no out-of-band /json/new tab.
+      // The web actor opens and reads the locally served fixture through the
+      // real actor-model path. The harness maps the reserved .test host to this
+      // server, so product localhost blocking remains active.
       const server = createServer((_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(ORDERS_HTML); });
       await new Promise((r) => server.listen(0, '127.0.0.1', r));
       const fxPort = /** @type {{ port: number }} */ (server.address()).port;
-      harvestFixtureUrl = `http://127.0.0.1:${fxPort}/`;
+      harvestFixtureUrl = `http://orders.peerd.test:${fxPort}/`;
       try {
         const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Index my orders from my orders page and tell me what I spent.' });
         rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
@@ -661,7 +1083,7 @@ export const STATES = [
         // own order text rode back into the actor's model request via read_page.
         rec.check('the web actor REALLY read the live page (real order data in its read result)',
           harvestActorSawPage.includes('Coffee Mug') && harvestActorSawPage.includes('12.00'),
-          harvestActorSawPage.slice(0, 220));
+          harvestActorSawPage.slice(0, 2000));
         rec.check('the harvested on-device answer renders', (out.bubbles || []).some((b) => /35\.50/.test(b)), JSON.stringify(out.bubbles));
         await rec.shot('final');
       } finally {
@@ -722,10 +1144,8 @@ export const STATES = [
       });
       await new Promise((r) => server.listen(0, '127.0.0.1', r));
       const port = /** @type {{ port: number }} */ (server.address()).port;
-      // Chrome maps *.localhost to loopback (RFC 6761), and unlike a bare IP this
-      // is a host normalizeApiOrigin will canonicalize — so it can be classified.
-      lockFixtureUrl = `http://acme.localhost:${port}/`;
-      const fixtureOrigin = `http://acme.localhost:${port}`;
+      lockFixtureUrl = `http://acme.peerd.test:${port}/`;
+      const fixtureOrigin = `http://acme.peerd.test:${port}`;
       try {
         const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Look at the Acme sign-in page for me.' });
         rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
@@ -763,7 +1183,7 @@ export const STATES = [
         const reportOnly = leadAt >= 0 ? lockReportBody.slice(leadAt, leadAt + 4000) : '';
         rec.check('the report itself was located in the reply', reportOnly.length > 0);
         rec.check('the report carries the ORIGIN only — no path from the refused page',
-          reportOnly.length > 0 && !/acme\.localhost:\\?\/*\d*\/?login/.test(reportOnly) && !reportOnly.includes('/login'),
+          reportOnly.length > 0 && !/acme\.peerd\.test:\\?\/*\d*\/?login/.test(reportOnly) && !reportOnly.includes('/login'),
           reportOnly.slice(0, 600));
 
         // RECOVERY: the stop released the tab, so the same web actor still works.
@@ -796,7 +1216,7 @@ export const STATES = [
     responder: (callIndex, request) => {
       const body = (request && request.postData) || '';
       if (body.includes('<actor_agent>')) {
-        if (body.includes('Members only')) siteActorSawPage = body;
+        if (siteActorTurn > 0) siteActorSawPage = toolResultsIn(body).join('\n');
         const t = siteActorTurn++;
         if (body.includes('tools: page_code')) {
           if (t === 0) return { sse: sseToolCall('page_code', {
@@ -833,8 +1253,8 @@ export const STATES = [
       });
       await new Promise((r) => server.listen(0, '127.0.0.1', r));
       const port = /** @type {{ port: number }} */ (server.address()).port;
-      siteFixtureUrl = `http://acct.localhost:${port}/`;
-      siteFixtureOrigin = `http://acct.localhost:${port}`;
+      siteFixtureUrl = `http://acct.peerd.test:${port}/`;
+      siteFixtureOrigin = `http://acct.peerd.test:${port}`;
       try {
         const sent = await rpc(ctx.page, { type: 'agent/send', text: 'What is my Acme balance?' });
         rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
@@ -1045,6 +1465,111 @@ export const STATES = [
   // exercising the retry banner needs a keyed provider wired into the harness.
   // Likewise tool-use rendering is already covered by the goal state's
   // complete_goal card; a distinct safe-tool state is a later add.)
+
+  // Functional and rendered coverage for the page-aware fresh-chat starter.
+  // A protected foreground page must produce a readable policy receipt, not a
+  // task that the host will refuse after the user clicks it.
+  {
+    name: 'protected-page-starter', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const server = createServer((_request, response) => {
+        response.writeHead(200, { 'content-type': 'text/html' });
+        response.end('<!doctype html><title>Private fixture</title><p>private fixture</p>');
+      });
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const privateUrl = `http://127.0.0.1:${/** @type {{ port: number }} */ (server.address()).port}/private`;
+      const priorActive = await evalIn(ctx.page, `(async () =>
+        (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id ?? null)()`, true);
+      let protectedTabId = null;
+      try {
+        protectedTabId = await evalIn(ctx.page, `(async () =>
+          (await chrome.tabs.create({ url: ${JSON.stringify(privateUrl)}, active: true })).id)()`, true);
+        const starter = await waitFor(() => evalIn(ctx.page, `(() => {
+          const card = [...document.querySelectorAll('button.path-card')]
+            .find((candidate) => candidate.dataset.path === 'web');
+          if (!card || !card.textContent.includes('Protected')) return null;
+          const style = getComputedStyle(card);
+          return {
+            text: card.textContent.trim(),
+            disabled: card.disabled,
+            label: card.getAttribute('aria-label') || '',
+            opacity: style.opacity,
+            filter: style.filter,
+          };
+        })()`), { budgetMs: 8_000, pollMs: 50 });
+        const diagnostics = starter ?? await evalIn(ctx.page, `(async () => ({
+          activeTabs: (await chrome.tabs.query({ active: true, currentWindow: true }))
+            .map((tab) => ({ id: tab.id, url: tab.url, pendingUrl: tab.pendingUrl })),
+          status: document.querySelector('.empty-state')?.dataset.activeTabStatus || '',
+          cards: [...document.querySelectorAll('button.path-card')]
+            .map((card) => ({ path: card.dataset.path, text: card.textContent.trim() })),
+        }))()`, true);
+        rec.check('a private foreground page replaces the summarize starter',
+          starter?.disabled === true
+            && starter?.text.includes('private-network page')
+            && !starter?.text.includes('Summarize the current page'),
+          JSON.stringify(diagnostics));
+        rec.check('the protected starter remains readable and names the policy',
+          starter?.opacity === '1'
+            && starter?.filter === 'none'
+            && starter?.label.includes('peerd will not read or automate it'),
+          JSON.stringify(diagnostics));
+        // The harness hosts the side panel in a tab. Bringing that tab to the
+        // foreground would correctly replace the private-page receipt before
+        // capture, unlike a real side panel which stays beside the active tab.
+        await rec.shotPage('protected-page-starter', ctx.page, { bringToFront: false });
+      } finally {
+        if (Number.isInteger(protectedTabId)) {
+          await evalIn(ctx.page, `chrome.tabs.remove(${JSON.stringify(protectedTabId)}).catch(() => {})`, true).catch(() => {});
+        }
+        if (Number.isInteger(priorActive)) {
+          await evalIn(ctx.page, `chrome.tabs.update(${JSON.stringify(priorActive)}, { active: true }).catch(() => {})`, true).catch(() => {});
+        }
+        await new Promise((resolve) => server.close(resolve));
+      }
+    },
+  },
+
+  // --- functional + visual artifact: protected-tab notice ------------------
+  {
+    name: 'protected-tab-notice', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex) => callIndex === 0
+      ? { sse: sseToolCall('open_tab', {}) }
+      : { sse: sseText('The protected tab is ready.') },
+    async run(ctx, rec) {
+      const before = await evalIn(ctx.page, `(async () =>
+        (await chrome.tabs.query({})).map((tab) => tab.id).filter(Number.isInteger))()`);
+      try {
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Open a protected blank tab.' });
+        rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+        const notice = await waitFor(() => evalIn(ctx.page, `(() => {
+          const row = document.querySelector('.agent-tab-notice');
+          return row ? {
+            primary: row.querySelector('.agent-tab-notice-text')?.textContent?.trim() || '',
+            detail: row.querySelector('.agent-tab-notice-detail')?.textContent?.trim() || '',
+            go: row.querySelector('.agent-tab-notice-go')?.textContent?.trim() || '',
+          } : null;
+        })()`), { budgetMs: 20_000 });
+        rec.check('the notice labels the tab as protected',
+          notice?.primary?.includes('protected tab'), JSON.stringify(notice));
+        rec.check('the notice explains both restrictions and their lifetime',
+          notice?.detail?.includes('Local network')
+            && notice.detail.includes('sensitive sites')
+            && notice.detail.includes('until you close it'),
+          JSON.stringify(notice));
+        rec.check('the Go action remains available', notice?.go === 'Go ↗', JSON.stringify(notice));
+        await rec.shot('protected-tab-notice');
+      } finally {
+        await evalIn(ctx.page, `(async () => {
+          const before = new Set(${JSON.stringify(before)});
+          const tabs = await chrome.tabs.query({});
+          await Promise.all(tabs.filter((tab) => Number.isInteger(tab.id) && !before.has(tab.id))
+            .map((tab) => chrome.tabs.remove(tab.id).catch(() => {})));
+        })()`, true).catch(() => {});
+      }
+    },
+  },
 
   // --- visual: a completed assistant turn ------------------------------------
   {

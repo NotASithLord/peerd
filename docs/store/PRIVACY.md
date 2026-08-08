@@ -48,11 +48,12 @@ some sensitive sites but is not a guarantee about the content of every page.
 
 ### Websites and user-directed network requests
 
-peerd can request websites and APIs needed for a task. Direct fetch and
-document-reading paths block private-network targets. Configured sensitive-site
-rules apply on supported browser and fetch paths. The local Activity log records
-tool outcomes, direct open-web fetches, and policy denials. It is not a complete
-record of every network request or visited URL.
+peerd can request websites and APIs needed for a task. Direct fetch, document
+reading, and browser automation block private-network targets. Driven browser
+tabs also carry tab-scoped network rules for private targets and configured
+sensitive sites. The local Activity log records tool outcomes, direct open-web
+fetches, and policy denials. It is not a complete record of every network
+request or visited URL.
 
 ### Runtime assets
 

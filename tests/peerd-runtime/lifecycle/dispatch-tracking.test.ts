@@ -243,6 +243,17 @@ describe('typed failure outcomes outrank string heuristics', () => {
     expect(record!.state).toBe(S.FAILED);
   });
 
+  test('effect-completed settles completed without rewriting the policy refusal', async () => {
+    const { rewrite, record } = await settleTyped(
+      'E',
+      'browser_private_network_blocked: navigation stopped after the page loaded',
+      'effect-completed',
+    );
+    expect(rewrite).toBeNull();
+    expect(record!.state).toBe(S.COMPLETED);
+    expect(record!.evidence).toEqual({ kind: 'success-response' });
+  });
+
   test('transport-lost settles ambiguous even when the message looks definitive', async () => {
     const { record } = await settleTyped('E', 'element not found: #missing', 'transport-lost');
     expect(record!.state).toBe(S.OUTCOME_UNKNOWN);

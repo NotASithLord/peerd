@@ -30,6 +30,7 @@ import {
 import { classifyLoginAffordance } from '../../../extension/peerd-runtime/tools/login-affordance.js';
 import { loginTool } from '../../../extension/peerd-runtime/tools/defs/login.js';
 import { isKnownIdp } from '../../../extension/peerd-runtime/actor/idp-registry.js';
+import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 
 const deps = { isKnownIdp };
 
@@ -148,6 +149,8 @@ const makeCtx = (over: Record<string, any> = {}) => {
     scripting: {
       executeScript: async (opts: any) => {
         const fn = opts?.func?.name;
+        const probe = browserProbeResult(opts, { url: `${origin}/login` });
+        if (probe) return probe;
         if (fn === 'loginTargetReader') return [{ result: { ok: true, descriptor: over.descriptor ?? { tag: 'button', name: 'Sign in with Google' } } }];
         if (fn === 'clickInjected') { calls.click += 1; return [{ result: { ok: true, tag: 'button', matchedCount: 1, nth: 0 } }]; }
         return [{ result: null }];

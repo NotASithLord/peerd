@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'bun:test';
 import { captureSnapshot, describeSource } from '../../../extension/peerd-runtime/dom/capture.js';
 import { domWalkInjected } from '../../../extension/peerd-runtime/dom/walk-injected.js';
+import { TEST_DOCUMENT_ID, TEST_TIME_ORIGIN } from '../../helpers/browser-scripting.ts';
 
 // One snapshot contract, two channels: CDP when the pool is wired, the
 // chrome.scripting DOM-walk otherwise. These tests pin the channel
@@ -8,6 +9,13 @@ import { domWalkInjected } from '../../../extension/peerd-runtime/dom/walk-injec
 // DOM in the in-browser suite (extension/tests/unit/peerd-runtime/dom-walk.test.js).
 
 const TAB = { id: 7 };
+const SCRIPTING_TAB = { ...TAB, peerdDocumentId: TEST_DOCUMENT_ID };
+const CDP_TAB = {
+  ...TAB,
+  url: 'https://example.com/',
+  peerdDocumentId: TEST_DOCUMENT_ID,
+  peerdDocumentTimeOrigin: TEST_TIME_ORIGIN,
+};
 
 const CDP_NODES = {
   nodes: [
@@ -28,12 +36,19 @@ const WALK_RESULT = {
 
 describe('captureSnapshot — channel selection', () => {
   test('CDP pool present → cdp source, backend ids on refs', async () => {
-    const ctx = { debuggerPool: { getAxTree: async () => CDP_NODES } };
-    const cap = await captureSnapshot(TAB, ctx);
+    let scriptingCalls = 0;
+    const ctx = {
+      debuggerPool: { getAxTree: async () => CDP_NODES },
+      scripting: { executeScript: async () => { scriptingCalls += 1; return []; } },
+    };
+    const cap = await captureSnapshot(CDP_TAB, ctx);
     expect(cap.ok).toBe(true);
     if (!cap.ok) throw new Error('expected ok capture'); // narrow for TS — expect() does not
     expect(cap.source).toBe('cdp');
     expect(cap.refs[0]).toMatchObject({ ref: '@e1', backendDOMNodeId: 22, walkId: null });
+    // resolveTargetTab already owns the bounded password-field probe. The
+    // capture layer must not add another renderer wait after AX succeeds.
+    expect(scriptingCalls).toBe(0);
   });
 
   test('no pool → DOM-walk via scripting, walk ids on refs', async () => {
@@ -43,14 +58,28 @@ describe('captureSnapshot — channel selection', () => {
         executeScript: async (req: any) => { injected = req; return [{ result: WALK_RESULT }]; },
       },
     };
-    const cap = await captureSnapshot(TAB, ctx);
+    const cap = await captureSnapshot(SCRIPTING_TAB, ctx);
     expect(cap.ok).toBe(true);
     if (!cap.ok) throw new Error('expected ok capture');
     expect(cap.source).toBe('dom-walk');
     expect(cap.refs[0]).toMatchObject({ ref: '@e1', backendDOMNodeId: null, walkId: 1, name: 'Send' });
     // The injected function is the self-contained walk, aimed at the tab.
-    expect(injected.target).toEqual({ tabId: 7 });
+    expect(injected.target).toEqual({ tabId: 7, documentIds: [TEST_DOCUMENT_ID] });
     expect(injected.func).toBe(domWalkInjected);
+  });
+
+  test('DOM-walk refuses an unpinned direct call before injection', async () => {
+    let scriptingCalls = 0;
+    const ctx = {
+      scripting: {
+        executeScript: async () => { scriptingCalls += 1; return [{ result: WALK_RESULT }]; },
+      },
+    };
+    const cap = await captureSnapshot(TAB, ctx);
+    expect(cap.ok).toBe(false);
+    if (cap.ok) throw new Error('expected error capture');
+    expect(cap.error).toBe('browser_target_unverified');
+    expect(scriptingCalls).toBe(0);
   });
 
   test('CDP errors do NOT fall back to the walk — they surface', async () => {
@@ -58,7 +87,7 @@ describe('captureSnapshot — channel selection', () => {
       debuggerPool: { getAxTree: async () => { throw new Error('cdp gone'); } },
       scripting: { executeScript: async () => [{ result: WALK_RESULT }] },
     };
-    const cap = await captureSnapshot(TAB, ctx);
+    const cap = await captureSnapshot(CDP_TAB, ctx);
     expect(cap.ok).toBe(false);
     if (cap.ok) throw new Error('expected error capture');
     expect(cap.source).toBe('cdp');
@@ -73,22 +102,25 @@ describe('captureSnapshot — channel selection', () => {
     expect(cap.error).toContain('snapshot_unavailable');
   });
 
-  test('injection refusal (chrome:// etc.) surfaces as dom_walk_failed', async () => {
+  test('an injection refusal surfaces as an unverified exact document', async () => {
     const ctx = {
       scripting: { executeScript: async () => { throw new Error('Cannot access a chrome:// URL'); } },
     };
-    const cap = await captureSnapshot(TAB, ctx);
+    const cap = await captureSnapshot(SCRIPTING_TAB, ctx);
     expect(cap.ok).toBe(false);
     if (cap.ok) throw new Error('expected error capture');
     expect(cap.source).toBe('dom-walk');
-    expect(cap.error).toContain('dom_walk_failed');
+    expect(cap.error).toBe('browser_target_unverified');
+    expect(cap.refusal?.structured).toMatchObject({
+      reason: 'unverified_target', stage: 'committed_origin', outcome: 'not_run',
+    });
   });
 
   test('walk-side failure result surfaces its message', async () => {
     const ctx = {
       scripting: { executeScript: async () => [{ result: { ok: false, error: 'no body' } }] },
     };
-    const cap = await captureSnapshot(TAB, ctx);
+    const cap = await captureSnapshot(SCRIPTING_TAB, ctx);
     expect(cap.ok).toBe(false);
     if (cap.ok) throw new Error('expected error capture');
     expect(cap.error).toBe('dom_walk_failed: no body');

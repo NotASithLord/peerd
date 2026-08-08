@@ -132,7 +132,7 @@ export const makeOffscreenActorClient = ({
    * session (and a human label for WHOSE call this is) is stashed at run() time. */
   const runMeta = new Map();
   /**
-   * @param {{ actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, ollamaHost?: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, actorSurface?: 'tools'|'code', tabUrl?: string, origin?: string, inbound?: boolean }} job
+   * @param {{ actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, ollamaHost?: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, actorSurface?: 'tools'|'code', tabOrigin?: string, origin?: string, inbound?: boolean }} job
    * @param {{ signal?: AbortSignal, onEvent?: (ev: object) => void }} [opts]
    */
   const run = async (job, { signal, onEvent } = {}) => {

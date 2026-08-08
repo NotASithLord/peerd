@@ -62,6 +62,7 @@ const RULES = [
   // why gate_blocked/hook_blocked (not 'tool_blocked'): these are the
   // dispatcher's ACTUAL refusal prefixes in tool results (dispatcher.js);
   // tool_blocked is only the audit event's type and never reaches a card.
+  { kind: 'policy', test: /^browser_[a-z0-9_]+\b/i },
   { kind: 'policy', test: /^message_actor:|^actor refused\b|^gate_blocked:|^hook_blocked:/i },
   { kind: 'policy', test: new RegExp(
     `^(${REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE}|${UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE}):`, 'i') },

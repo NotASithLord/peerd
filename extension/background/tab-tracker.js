@@ -178,6 +178,7 @@ export const createTabTracker = ({
       }
     } catch (e) {
       console.warn(`[tab-tracker ${tabPath}] bootstrap failed`, e);
+      throw e;
     }
   };
 

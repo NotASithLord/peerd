@@ -16,6 +16,19 @@ const setup = (over: any = {}) => {
 };
 
 describe('webFetch — private-network SSRF block', () => {
+  test('a denylist provider failure stops the request before fetch', async () => {
+    let fetchCalls = 0;
+    const policyError = new Error('policy unavailable');
+    const webFetch = makeWebFetch({
+      getDenylist: () => { throw policyError; },
+      matchDenylist: () => false,
+      fetchFn: (async () => { fetchCalls += 1; return new Response('unexpected'); }) as any,
+    });
+
+    await expect(webFetch('https://example.com/')).rejects.toBe(policyError);
+    expect(fetchCalls).toBe(0);
+  });
+
   test('blocks a LAN target, audits private_network, never calls fetch', async () => {
     const { webFetch, audits, fetched } = setup();
     await expect(webFetch('https://192.168.1.1/admin')).rejects.toBeInstanceOf(EgressDeniedError);

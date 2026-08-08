@@ -13,8 +13,7 @@ import { runScenario, formatMarkdown, formatConsole } from './harness.ts';
 
 const ran = await Promise.all(CATALOG.map(runScenario));
 
-const stamp = new Date().toISOString().slice(0, 10);
-const note = `_Last run: ${stamp} · Bun ${Bun.version} · ${CATALOG.length} scenarios._`;
+const note = '_Generated from the current checkout by the command above._';
 
 const md = formatMarkdown(ran, note);
 const out = join(import.meta.dir, '..', '..', 'docs', 'security', 'RED-TEAM-RESULTS.md');

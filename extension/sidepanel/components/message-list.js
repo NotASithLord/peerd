@@ -64,7 +64,7 @@ const actorOutcomeUnknownFailure = (_text) =>
  * @property {string} [tool_use_id]
  * @property {boolean} [is_error]
  * @property {string} [content]
- * @property {{ primitive?: string, durationMs?: number, dispatch?: string, gates: Array<{ name: string, reason: string, allowed: boolean }> }|null} [meta]
+ * @property {{ primitive?: string, durationMs?: number, dispatch?: string, gates: Array<{ name: string, reason: string, allowed: boolean }>, browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }> }|null} [meta]
  */
 
 /** @typedef {{ toolUse: ToolUse, toolResult: ToolResult|null }} PairedTool */
@@ -79,6 +79,7 @@ const actorOutcomeUnknownFailure = (_text) =>
  * @property {string|null} [kind]
  * @property {string|null} [name]
  * @property {string|null} [label]
+ * @property {boolean} [protected]
  * @property {string|null} [turnId]
  */
 
@@ -216,6 +217,21 @@ const recoveryReceiptsForMessage = (message) => {
 /** @param {ChatMessage[]|undefined} messages */
 const recoveryReceipts = (messages) => (messages ?? []).flatMap(recoveryReceiptsForMessage);
 
+/** @param {any} state @param {TabEvent[]|undefined} tabEvents */
+const freshTabAnnouncements = (state, tabEvents) => {
+  const announcements = [];
+  for (const event of tabEvents ?? []) {
+    const isProtected = event.protected !== false;
+    if (state.seenTabEventStates.has(event.key)
+        && state.seenTabEventStates.get(event.key) === isProtected) continue;
+    state.seenTabEventStates.set(event.key, isProtected);
+    announcements.push(!isProtected
+      ? 'peerd left a blank tab because browser control was not confirmed. Close it before continuing. Use Go to focus it.'
+      : 'peerd opened a protected tab. Local network and sensitive sites remain blocked until you close it. Use Go to focus it.');
+  }
+  return announcements;
+};
+
 /** @param {any} state @param {string} announcement */
 const replaceRecoveryAnnouncement = (state, announcement) => {
   if (state.recoveryAnnouncementTimer) {
@@ -255,6 +271,11 @@ export const MessageList = {
     const seen = existing ?? new Set();
     for (const receipt of receipts) seen.add(receipt.id);
     vnode.state.seenRecoveryIdsBySession.set(vnode.attrs.sessionId, seen);
+    // Existing tab receipts are history. Announce only events added after this
+    // list mounts. Track the host-stamped key and containment state so a later
+    // downgrade from protected to blank is announced instead of deduplicated.
+    vnode.state.seenTabEventStates = new Map((vnode.attrs.tabEvents ?? [])
+      .map((event) => [event.key, event.protected !== false]));
     vnode.state.recoveryAnnouncement = fresh.map((receipt) => receipt.announcement).join(' ');
     vnode.state.recoveryAnnouncementTimer = null;
   },
@@ -270,6 +291,9 @@ export const MessageList = {
       const seen = existing ?? new Set();
       for (const receipt of receipts) seen.add(receipt.id);
       vnode.state.seenRecoveryIdsBySession.set(vnode.attrs.sessionId, seen);
+      for (const event of vnode.attrs.tabEvents ?? []) {
+        vnode.state.seenTabEventStates.set(event.key, event.protected !== false);
+      }
       replaceRecoveryAnnouncement(vnode.state, fresh
         .map((receipt) => receipt.announcement)
         .join(' '));
@@ -278,12 +302,14 @@ export const MessageList = {
     const seen = vnode.state.seenRecoveryIdsBySession.get(vnode.attrs.sessionId) ?? new Set();
     const receipts = recoveryReceipts(vnode.attrs.messages);
     const fresh = receipts.filter((receipt) => !seen.has(receipt.id));
+    const tabAnnouncements = freshTabAnnouncements(vnode.state, vnode.attrs.tabEvents);
     for (const receipt of receipts) seen.add(receipt.id);
     vnode.state.seenRecoveryIdsBySession.set(vnode.attrs.sessionId, seen);
-    if (fresh.length > 0) {
-      replaceRecoveryAnnouncement(vnode.state, fresh
-        .map((receipt) => receipt.announcement)
-        .join(' '));
+    if (fresh.length > 0 || tabAnnouncements.length > 0) {
+      replaceRecoveryAnnouncement(vnode.state, [
+        ...fresh.map((receipt) => receipt.announcement),
+        ...tabAnnouncements,
+      ].join(' '));
     }
     return true;
   },
@@ -309,7 +335,7 @@ export const MessageList = {
     m('.message-list', [
       renderTranscript({ messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth: 0, tabEvents, uiActions }),
       state.recoveryAnnouncement
-        ? m('span.sr-only.actor-recovery-announcement', {
+        ? m('span.sr-only.actor-recovery-announcement.message-list-announcement', {
             role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true',
           }, state.recoveryAnnouncement)
         : null,
@@ -326,12 +352,22 @@ const AgentTabNotice = {
   /** @param {{ attrs: { ev: TabEvent, fresh: boolean, uiActions?: UiActions } }} vnode */
   view: ({ attrs: { ev, fresh, uiActions } }) => {
     const label = (ev.kind && ev.name) ? `${ev.kind} · ${ev.name}` : (ev.label || 'a tab');
+    const protectedTab = ev.protected !== false;
     return m(`.agent-tab-notice${fresh ? '.agent-tab-notice--fresh' : ''}`, [
       m('span.agent-tab-notice-icon', { 'aria-hidden': 'true' }, '▦'),
-      m('span.agent-tab-notice-text', ['peerd opened ', m('span.agent-tab-notice-label', label)]),
+      m('span.agent-tab-notice-copy', [
+        m('span.agent-tab-notice-text', [
+          protectedTab ? 'peerd opened a protected tab · ' : 'peerd left a blank tab · ',
+          m('span.agent-tab-notice-label', label),
+        ]),
+        m('span.agent-tab-notice-detail', protectedTab
+          ? 'Local network and sensitive sites are blocked until you close it.'
+          : 'Browser control was not confirmed. Close this tab before continuing.'),
+      ]),
       m('button.agent-tab-notice-go', {
         type: 'button',
         title: 'Go to this tab',
+        'aria-label': `Go to ${protectedTab ? 'protected' : 'blank'} tab: ${label}`,
         onclick: () => uiActions?.openAgentTab?.(ev.tabId, ev.windowId),
       }, 'Go ↗'),
     ]);
@@ -678,6 +714,7 @@ const ToolCall = {
     const status = toolResult
       ? (toolResult.is_error ? 'failed' : 'ok')
       : (interrupted ? 'cancelled' : 'pending');
+    const policyStatus = browserPolicyStatus(toolResult);
     const showLiveStream = toolUse.name === 'vm_boot' && !toolResult
       && liveStream && (liveStream.stdout || liveStream.stderr);
     // The live DELEGATION feed for a `script` run: one line per actors op
@@ -703,6 +740,9 @@ const ToolCall = {
           { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : status === 'cancelled' ? 'cancelled' : 'ok' }),
         m('span.tool-name', toolUse.name),
         m('span.tool-args', argsSummary(toolUse.input)),
+        policyStatus
+          ? m('span.policy-kind-chip', { title: policyStatus.title }, policyStatus.label)
+          : null,
         // Failure-class chip on a failed card: the classified neighborhood
         // (policy / environment / timeout / …) at a glance; the raw error
         // stays one click away in the expanded result body.
@@ -984,6 +1024,34 @@ const argsSummary = (input) => {
  * @param {number} n
  */
 const truncate = (s, n) => s.length <= n ? s : `${s.slice(0, n - 1)}…`;
+
+/** @param {ToolResult|null} toolResult */
+const browserPolicyStatus = (toolResult) => {
+  if (!toolResult) return null;
+  const notices = (toolResult.meta?.browserPolicies ?? []).filter((notice) =>
+    notice && typeof notice === 'object'
+    && ['protected_child_navigation', 'protected_child_request', 'child_navigation_failed', 'child_navigation_unverified']
+      .includes(notice.reason)
+    && ['not_run', 'unverified'].includes(notice.outcome)
+    && ['closed', 'left_blank', 'guarded', 'uncontained'].includes(notice.child)
+    && notice.retryable === false);
+  if (notices.length === 0) return null;
+  if (notices.some((/** @type {{ child?: string }} */ notice) => notice?.child === 'uncontained')) {
+    return {
+      label: 'child control not confirmed',
+      title: 'The browser did not confirm that the child tab was closed or blank',
+    };
+  }
+  const blocked = notices.filter(
+    (/** @type {{ outcome?: string }} */ notice) => notice?.outcome === 'not_run',
+  ).length;
+  return {
+    label: notices.length > 1 ? `${notices.length} child actions stopped` : 'child action stopped',
+    title: blocked === notices.length
+      ? 'A protected child action did not run'
+      : 'A child navigation could not be verified',
+  };
+};
 
 /** @param {ToolResult} toolResult */
 const formatResultContent = (toolResult) => {

@@ -32,7 +32,12 @@ import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 // dom-helpers.originOfUrl (the @-tab gate must match read_page's origin
 // exactly); we import the canonical one so the two can't drift. Re-exported
 // here to keep the composer's public surface stable.
-import { originOfUrl } from '../tools/defs/dom-helpers.js';
+import {
+  originOfUrl,
+  resolveTargetTab,
+  scriptingTarget,
+} from '../tools/defs/dom-helpers.js';
+import { BrowserAutomationPolicyError } from '../tools/browser-automation-policy.js';
 
 export { originOfUrl };
 
@@ -43,12 +48,12 @@ export { originOfUrl };
  *
  * @typedef {Object} ComposerRefCtx
  * @property {{
- *   get: (tabId: number) => Promise<{ id?: number, url?: string } | null | undefined>,
- *   query: (q: { active: boolean, currentWindow: boolean }) => Promise<Array<{ id?: number, url?: string }>>,
+ *   get: (tabId: number) => Promise<{ id?: number, url?: string, title?: string } | null | undefined>,
+ *   query: (q: { active: boolean, currentWindow: boolean }) => Promise<Array<{ id?: number, url?: string, title?: string }>>,
  * }} tabs
  * @property {{ id?: number } | null} [activeTab]
  * @property {readonly string[]} [denylist]
- * @property {{ executeScript: (opts: { target: { tabId: number }, func: () => any }) => Promise<Array<{ result?: TabSnapshot }>> }} scripting
+ * @property {{ executeScript: (opts: { target: { tabId: number, documentIds?: string[] }, func: () => any }) => Promise<Array<{ documentId?: string, result?: any }>> }} scripting
  * @property {{ readFile?: (args: { path: string, sessionId?: string }) => Promise<string> }} [appClient]
  * @property {{ sessionId?: string }} [session]
  */
@@ -203,10 +208,36 @@ export const resolveTabRef = async (ref, ctx) => {
     return { ok: false, error: `tab_blocked: ${gate.reason}${gate.pattern ? ` (${gate.pattern})` : ''}` };
   }
 
+  // why: the tab record above is only a user-facing lookup. The shared target
+  // resolver is the authority boundary: it checks the live committed location,
+  // refuses private destinations, and returns the browser-issued documentId
+  // that the capture must use. Suppress noteTab because an explicit composer
+  // reference is a read, not adoption of a tab by the web actor.
+  try {
+    tab = await resolveTargetTab({ tabId: tab.id }, {
+      tabs: ctx.tabs,
+      scripting: ctx.scripting,
+      denylist: ctx.denylist,
+    });
+  } catch (error) {
+    if (error instanceof BrowserAutomationPolicyError) {
+      return { ok: false, error: `${error.code}: ${error.content}` };
+    }
+    return { ok: false, error: 'tab_blocked: target_verification_failed' };
+  }
+  if (!tab?.id) return { ok: false, error: 'tab_blocked: target_refused' };
+
+  // Preserve the composer's denylist contract on the live URL chosen by the
+  // central resolver. This also keeps its public error vocabulary stable.
+  const liveGate = decideTabGate({ url: tab.url || '', denylist: ctx.denylist || [] });
+  if (!liveGate.allowed) {
+    return { ok: false, error: `tab_blocked: ${liveGate.reason}${liveGate.pattern ? ` (${liveGate.pattern})` : ''}` };
+  }
+
   let snap;
   try {
     const results = await ctx.scripting.executeScript({
-      target: { tabId: tab.id },
+      target: scriptingTarget(tab),
       func: captureTabInjected,
     });
     snap = results[0]?.result;

@@ -100,10 +100,19 @@ export {
   denylistBlockDomains,
   buildDenylistBlockRule,
   buildAppEgressBlockRule,
+  buildPrivateNetworkBlockRules,
   denylistSessionRuleUpdate,
   DENYLIST_RULE_ID,
   APP_EGRESS_RULE_ID,
+  PRIVATE_NETWORK_HOST_RULE_ID,
+  PRIVATE_NETWORK_HOSTS,
+  PRIVATE_NETWORK_IPV4_REGEX_RULES,
+  PRIVATE_NETWORK_IPV6_REGEX_RULES,
+  PRIVATE_NETWORK_DOTTED_HOST_REGEX_RULES,
+  PRIVATE_NETWORK_REGEX_RULES,
+  PRIVATE_NETWORK_RULE_IDS,
   DENYLIST_RESOURCE_TYPES,
+  CHROME_DNR_RESOURCE_TYPES,
 } from './denylist/dnr-rules.js';
 
 // --- confirm protocol ---------------------------------------------------

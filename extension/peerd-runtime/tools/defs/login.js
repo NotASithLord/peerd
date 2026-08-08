@@ -22,7 +22,7 @@
 //      (WebAuthn needs transient user activation); it does NOT fake a synthetic
 //      gesture when CDP is absent (page_keys' no-fake posture).
 
-import { resolveTargetTab, originOfUrl } from './dom-helpers.js';
+import { resolveTargetTab, originOfUrl, scriptingTarget } from './dom-helpers.js';
 import { classifyLoginAffordance, loginTargetReader } from '../login-affordance.js';
 import { clickInjected } from './click.js';
 import { isKnownIdp } from '../../actor/idp-registry.js';
@@ -124,7 +124,7 @@ export const loginTool = {
     let descriptor;
     try {
       const results = await scripting.executeScript({
-        target: { tabId: tab.id },
+        target: scriptingTarget(tab),
         func: loginTargetReader,
         args: [selector, nth, walkId],
       });
@@ -232,7 +232,7 @@ export const loginTool = {
     }
     let d2;
     try {
-      const rr = await scripting.executeScript({ target: { tabId: tab2.id }, func: loginTargetReader, args: [null, 0, walkId] });
+      const rr = await scripting.executeScript({ target: scriptingTarget(tab2), func: loginTargetReader, args: [null, 0, walkId] });
       const r2 = rr[0]?.result;
       if (!r2 || !r2.ok) return { ok: false, error: 'login_affordance_changed', content: 'the sign-in element changed after you approved; re-run.' };
       d2 = r2.descriptor;
@@ -249,7 +249,7 @@ export const loginTool = {
     let scriptResult;
     try {
       const results = await scripting.executeScript({
-        target: { tabId: tab2.id },
+        target: scriptingTarget(tab2),
         func: clickInjected,
         args: [null, 0, walkId, 1],
       });

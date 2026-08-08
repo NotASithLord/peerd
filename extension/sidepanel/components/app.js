@@ -33,11 +33,11 @@ export const App = {
    * @param {{ attrs: {
    *   state: ChatState, send: Send, voiceManager: any,
    *   uiActions: UiActions, view: string, optionsActive: boolean,
-   *   activeTabIsWeb?: boolean,
+   *   activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive',
    * } }} vnode
    */
   view: ({ attrs }) => {
-    const { state, send, voiceManager, uiActions, view, optionsActive, activeTabIsWeb } = attrs;
+    const { state, send, voiceManager, uiActions, view, optionsActive, activeTabStatus } = attrs;
     const unlocked = state.vault.initialized && !state.vault.locked;
     // First-run onboarding is a HOME-page blocker (home.js), not a side-panel
     // route — the panel is reached by popping it from an onboarded home.
@@ -71,7 +71,7 @@ export const App = {
       actorIsolation,
       m('.body', unlocked
         ? [
-            view === 'chat'   ? m(ChatView, { state, send, voiceManager, uiActions, surface: 'sidepanel', activeTabIsWeb })
+            view === 'chat'   ? m(ChatView, { state, send, voiceManager, uiActions, surface: 'sidepanel', activeTabStatus })
             : view === 'chats'  ? m(SessionsView, { state, send })
             : m(PlaceholderView, { label: 'Unknown view' }),
           ]

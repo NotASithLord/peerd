@@ -12,6 +12,27 @@
 // See the spec: docs/specs/DESIGN-17-actor-agents.md §"The web actor".
 
 import { wrapUntrusted } from '../tools/prompt-wrap.js';
+import { classifyBrowserAutomationTarget } from '../tools/browser-automation-policy.js';
+import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
+
+/**
+ * Reduce a live actor tab URL to provenance that is safe to send to a model.
+ * Restricted tabs contribute no location at all; allowed tabs contribute only
+ * their origin, never a page-controlled path, query, fragment, or credentials.
+ *
+ * @param {string | null | undefined} tabUrl
+ * @param {readonly string[]} [denylist]
+ * @returns {string | undefined}
+ */
+export const safeWebActorSummaryOrigin = (tabUrl, denylist = []) => {
+  const target = classifyBrowserAutomationTarget(tabUrl);
+  if (!target.allowed) return undefined;
+  let hostname = '';
+  try { hostname = new URL(/** @type {string} */ (tabUrl)).hostname; }
+  catch { return undefined; }
+  if (findDenylistMatch(hostname, denylist)) return undefined;
+  return target.origin;
+};
 
 // The web actor is STATEFUL (it accumulates a rolling progress summary), but
 // its accumulation is 100% UNTRUSTED-PROVENANCE (every byte derives from page
@@ -23,13 +44,17 @@ import { wrapUntrusted } from '../tools/prompt-wrap.js';
 /**
  * Wrap the web actor's own rolling summary as untrusted content for re-insertion.
  * @param {string} summary
- * @param {{ tabUrl?: string, now?: () => number }} [opts]
+ * @param {{ tabOrigin?: string, now?: () => number }} [opts]
  * @returns {string}
  */
 export const fenceWebActorSummary = (summary, opts = {}) => {
-  const { tabUrl, now = Date.now } = opts;
+  const { tabOrigin, now = Date.now } = opts;
+  // why validate again: the SW normally supplies an already-sanitized origin,
+  // but the fence is the final model boundary. A future caller passing a raw
+  // private URL must still fail closed, and a public path must still be erased.
+  const safeOrigin = safeWebActorSummaryOrigin(tabOrigin);
   return wrapUntrusted({
-    origin: tabUrl ? `web-actor(${tabUrl})` : 'web-actor',
+    origin: safeOrigin ? `web-actor(${safeOrigin})` : 'web-actor',
     tool: 'rolling_summary',
     body: typeof summary === 'string' ? summary : '',
     retrievedAt: new Date(now()).toISOString(),

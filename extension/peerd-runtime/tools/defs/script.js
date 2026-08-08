@@ -49,6 +49,8 @@ const MAX_TIMEOUT_MS = 120_000;
  *   actor replies consumed by this run; host-only, never part of formatted output
  * @property {boolean} [usedPage]     the run consumed page/DOM/pixel data through page.*
  * @property {Array<{ data: string, mediaType: string }>} [images] host-captured page images (bounded by job-runner)
+ * @property {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} [browserPolicies]
+ *   host-captured child-navigation receipts from page calls; never user-code output
  * @property {boolean} [usedWorkspace]   the job was workspace-mounted (host-set, never inferred from ops)
  * @property {boolean} [workspaceOverBudget]   the workspace exceeded its size budget — writes were refused
  * @property {Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean, cancelled?: boolean }>} [actorsTrace]
