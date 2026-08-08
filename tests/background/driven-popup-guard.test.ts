@@ -23,6 +23,7 @@ describe('driven popup network guard', () => {
         return { ok: true, adopted: true };
       },
       classifyTarget: () => ({ allowed: true }),
+      onGuarded: ({ sourceTabId, tabId }) => { events.push(`release:${sourceTabId}:${tabId}`); },
       resume: async (_tabId, url) => { events.push(`resume:${url}`); },
     });
 
@@ -32,6 +33,7 @@ describe('driven popup network guard', () => {
       'blank',
       'guard:7:9',
       'resume:https://example.com/popup',
+      'release:7:9',
     ]);
   });
 

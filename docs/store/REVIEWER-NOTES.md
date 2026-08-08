@@ -117,6 +117,14 @@ both restored source ownership and the complete surviving private-network rule
 set on that exact source. Without both, the child is not changed until the
 ownership registry has loaded.
 
+Firefox packages also request `webRequest` and `webRequestBlocking`. Firefox
+uses them only to cancel a private-network, local, metadata, or denylisted
+request from the exact child while its tab-scoped rules are being installed,
+then releases the temporary child marker. Other public requests and children
+from ordinary user tabs are not changed. A subrequest stopped by this temporary
+guard produces a URL-free tool and Activity receipt. A request blocked first by
+the declarative rule is silent. Chrome packages do not request these permissions.
+
 The assistant's core job is operating pages on the user's instruction,
 and three things keep that honest regardless of channel:
 

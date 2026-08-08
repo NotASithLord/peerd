@@ -86,6 +86,7 @@ describe('web.tools', () => {
     it('returns the data URL from captureVisibleTab', async () => {
       const guarded = /** @type {number[]} */ ([]);
       const released = /** @type {number[]} */ ([]);
+      const tokenUrl = 'https://example.com/document/private-name?token=screenshot-secret';
       const ctx = mockCtx(/** @type {any} */ ({
         acquireBrowserNetworkGuardLease: async (/** @type {number} */ tabId) => {
           guarded.push(tabId);
@@ -93,6 +94,8 @@ describe('web.tools', () => {
         },
         releaseBrowserNetworkGuardLease: async (/** @type {{ tabId: number }} */ lease) => { released.push(lease.tabId); },
         tabs: {
+          get: async () => ({ id: 7, url: tokenUrl, active: true, windowId: 1 }),
+          query: async () => [{ id: 7, url: tokenUrl, active: true, windowId: 1 }],
           captureVisibleTab: async () => 'data:image/png;base64,iVBORw0KGgo=',
         },
       }));
@@ -101,6 +104,10 @@ describe('web.tools', () => {
       const payload = JSON.parse(unwrap(contentOf(r)));
       expect(payload.dataUrl.startsWith('data:image/png')).toBe(true);
       expect(payload.bytes > 0).toBe(true);
+      expect(payload.origin).toBe('https://example.com');
+      expect(payload.tabUrl).toBe(undefined);
+      expect(JSON.stringify(payload).includes('screenshot-secret')).toBe(false);
+      expect(JSON.stringify(payload).includes('private-name')).toBe(false);
       expect(guarded).toEqual([7]);
       expect(released).toEqual([7]);
     });

@@ -32,6 +32,7 @@ export const popupSourceState = (sourceTabId, drivenTabIds, bootAuthoritative) =
  * @param {(event: PopupOutcomeEvent & { outcome: 'not_run'|'unverified' }) => unknown} [deps.onBlocked]
  * @param {(event: PopupOutcomeEvent) => unknown} [deps.onFailed]
  * @param {(event: PopupOutcomeEvent) => unknown} [deps.onBlank]
+ * @param {(event: { sourceTabId: number, tabId: number }) => unknown} [deps.onGuarded]
  * @param {number} [deps.blankDelayMs]
  */
 export const makeDrivenPopupGuard = ({
@@ -45,6 +46,7 @@ export const makeDrivenPopupGuard = ({
   onBlocked = () => {},
   onFailed = () => {},
   onBlank = () => {},
+  onGuarded = () => {},
   blankDelayMs = 75,
 }) => {
   /**
@@ -77,6 +79,16 @@ export const makeDrivenPopupGuard = ({
     flows.delete(tabId);
   };
   const settle = (/** @type {number} */ tabId) => {
+    const flow = flows.get(tabId);
+    // The synchronous request marker stays only through the guarded resume or
+    // containment step. Releasing as soon as DNR installation returned left a
+    // race where DNR blocked an immediate child request but no source receipt
+    // could be attached to the creating action.
+    if (flow?.guarded && flow.sourceTabId != null) {
+      try {
+        Promise.resolve(onGuarded({ sourceTabId: flow.sourceTabId, tabId })).catch(() => {});
+      } catch { /* release notification is best-effort; tab removal also cleans up */ }
+    }
     forget(tabId);
     settled.add(tabId);
   };

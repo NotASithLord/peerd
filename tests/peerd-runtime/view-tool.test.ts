@@ -45,6 +45,8 @@ describe('view tool — captures the gated tab, not the foreground tab', () => {
     expect(r.ok).toBe(true);
     expect(r.images).toEqual([{ mediaType: 'image/jpeg', data: 'aW1n' }]);
     expect(r.content).toContain('figma.com');
+    expect(r.content).not.toContain('/file/x');
+    expect(JSON.parse(r.content).tabUrl).toBeUndefined();
     // bytes-free metadata — the base64 lives only in images
     expect(r.content).not.toContain('aW1n');
     expect(captureArgs).toEqual([7, {

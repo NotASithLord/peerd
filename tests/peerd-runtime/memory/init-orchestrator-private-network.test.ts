@@ -21,7 +21,11 @@ const makeHarness = ({ tabUrl, liveUrl = tabUrl }: { tabUrl: string; liveUrl?: s
       if (request.func === probeInitTabInjected) {
         return [{
           documentId: TEST_DOCUMENT_ID,
-          result: { headings: ['Project heading'], textSnippet: 'Public project summary' },
+          result: {
+            title: 'Exact public title',
+            headings: ['Project heading'],
+            textSnippet: 'Public project summary',
+          },
         }];
       }
       throw new Error('unexpected script');
@@ -48,6 +52,18 @@ const makeHarness = ({ tabUrl, liveUrl = tabUrl }: { tabUrl: string; liveUrl?: s
 };
 
 describe('/init browser target policy', () => {
+  test('an internal browser page contributes no URL or title to durable memory', async () => {
+    const harness = makeHarness({ tabUrl: 'chrome://history/?q=medical-private-term' });
+    await harness.orchestrator.runInit();
+
+    expect(harness.scriptingCalls).toHaveLength(0);
+    expect(harness.written().body).not.toContain('chrome://');
+    expect(harness.written().body).not.toContain('medical-private-term');
+    expect(harness.written().body).not.toContain('token-private');
+    expect(harness.notes.some((note) =>
+      note === '/init skipped the browser page because this URL type cannot be verified.')).toBe(true);
+  });
+
   test('a direct private page is excluded from durable memory without scripting', async () => {
     const privateUrl = 'http://127.0.0.1/admin?token=private-secret';
     const harness = makeHarness({ tabUrl: privateUrl });
@@ -93,6 +109,8 @@ describe('/init browser target policy', () => {
       documentIds: [TEST_DOCUMENT_ID],
     });
     expect(harness.written().body).toContain('https://example.com/work');
+    expect(harness.written().body).toContain('Exact public title');
+    expect(harness.written().body).not.toContain('token-private');
     expect(harness.written().body).toContain('Project heading');
     expect(harness.written().body).toContain('Public project summary');
   });

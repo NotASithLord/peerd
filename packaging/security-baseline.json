@@ -140,7 +140,9 @@
         "storage",
         "tabs",
         "unlimitedStorage",
-        "webNavigation"
+        "webNavigation",
+        "webRequest",
+        "webRequestBlocking"
       ],
       "sidebar_action": {
         "default_panel": "sidepanel/sidepanel.html",
@@ -289,7 +291,9 @@
         "storage",
         "tabs",
         "unlimitedStorage",
-        "webNavigation"
+        "webNavigation",
+        "webRequest",
+        "webRequestBlocking"
       ],
       "sidebar_action": {
         "default_panel": "sidepanel/sidepanel.html",
@@ -446,7 +450,9 @@
         "storage",
         "tabs",
         "unlimitedStorage",
-        "webNavigation"
+        "webNavigation",
+        "webRequest",
+        "webRequestBlocking"
       ],
       "sidebar_action": {
         "default_panel": "sidepanel/sidepanel.html",

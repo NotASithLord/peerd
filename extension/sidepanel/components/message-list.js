@@ -1030,10 +1030,10 @@ const browserPolicyStatus = (toolResult) => {
   if (!toolResult) return null;
   const notices = (toolResult.meta?.browserPolicies ?? []).filter((notice) =>
     notice && typeof notice === 'object'
-    && ['protected_child_navigation', 'child_navigation_failed', 'child_navigation_unverified']
+    && ['protected_child_navigation', 'protected_child_request', 'child_navigation_failed', 'child_navigation_unverified']
       .includes(notice.reason)
     && ['not_run', 'unverified'].includes(notice.outcome)
-    && ['closed', 'left_blank', 'uncontained'].includes(notice.child)
+    && ['closed', 'left_blank', 'guarded', 'uncontained'].includes(notice.child)
     && notice.retryable === false);
   if (notices.length === 0) return null;
   if (notices.some((/** @type {{ child?: string }} */ notice) => notice?.child === 'uncontained')) {
@@ -1048,7 +1048,7 @@ const browserPolicyStatus = (toolResult) => {
   return {
     label: notices.length > 1 ? `${notices.length} child actions stopped` : 'child action stopped',
     title: blocked === notices.length
-      ? 'A protected child navigation did not run'
+      ? 'A protected child action did not run'
       : 'A child navigation could not be verified',
   };
 };

@@ -77,6 +77,18 @@ blocker below is resolved against the package being uploaded.
 > Firefox may summarize this as "Access browser activity during navigation."
 > In peerd, the permission is used only for the child-tab correlation above.
 
+### `webRequest` and `webRequestBlocking` (Firefox only)
+
+> Firefox uses these permissions to synchronously cancel a private-network,
+> local, cloud-metadata, or denylisted request from the exact child of a tab the
+> assistant is already driving. This closes the first-request gap while the child's
+> tab-scoped network rules are installed, then the temporary child marker is
+> released. peerd does not read request bodies, alter public requests, or apply
+> this guard to children from ordinary user tabs. A subrequest stopped by this
+> temporary guard produces a URL-free tool and Activity receipt. A request
+> blocked first by the declarative rule is silent. Chrome packages do not
+> request these permissions.
+
 ### `tabGroups`
 
 > The assistant's sandboxes (Linux VM, Notebook, app pages) each run

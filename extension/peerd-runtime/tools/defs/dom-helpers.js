@@ -297,10 +297,10 @@ export const resolveTargetTab = async (args, ctx, options = {}) => {
   // recorded, read out of a record frozen before this function was called. The
   // document committed right now can be a different origin, and the tool's own
   // injection lands in that one. Re-checking the origin the document reports
-  // about ITSELF narrows the window from "however stale the tab record is" to
-  // "one message round trip". It does not close it: the tool injects after we
-  // return, and only pinning the judged documentId at injection time would make
-  // that airtight. Stated plainly so the next reader does not over-trust it.
+  // about ITSELF narrows the window, then the browser-issued documentId below
+  // closes it. Every scripting caller uses scriptingTarget(tab), and every CDP
+  // caller supplies browserDocumentIdentity(tab). A replacement document makes
+  // either channel fail instead of silently retargeting the operation.
   //
   // issue 267: while we are in there, observe the password field — so every DOM
   // tool teaches the classifier, not just `snapshot`.

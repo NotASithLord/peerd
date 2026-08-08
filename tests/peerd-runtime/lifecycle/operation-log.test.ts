@@ -21,7 +21,10 @@ const makeStorage = () => {
       get: async (key: string) => map.get(key),
       set: async (key: string, value: unknown) => {
         map.set(key, structuredClone(value));
-        writes.push(structuredClone(value));
+        // why: these tests assert only the number of durable writes. Keeping
+        // a second full snapshot per write makes the bounded-log cases retain
+        // quadratic test data that the production adapter never keeps.
+        writes.push(undefined);
       },
     },
     map, writes,

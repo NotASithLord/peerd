@@ -46,6 +46,7 @@ const DNR_META_PATH = '/__firefox-dnr-meta';
 const DNR_SCRIPT_PATH = '/__firefox-dnr-script';
 const DNR_ACTION_PATH = '/__firefox-dnr-action';
 const DNR_ATTEMPT_PATH = '/__firefox-dnr-attempt';
+const DNR_CHILD_PATH = '/__firefox-dnr-child';
 const RESULT_BUDGET_MS = 180_000;
 const PROVIDER_PATH = '/v1/messages';
 const PASSPHRASE_CANARY = 'firefox-runtime-passphrase-canary-7d12f198';
@@ -301,6 +302,8 @@ const startProviderServer = async () => {
   const httpRequests = [];
   const webSocketUpgrades = [];
   const dnrRedirectAttempts = [];
+  const dnrVectors = new Map();
+  let nextDnrVectorId = 0;
   let dnrFlow = null;
   let lastDnrFlow = null;
   const certificateDirectory = mkdtempSync(join(tmpdir(), 'peerd-firefox-provider-'));
@@ -558,16 +561,48 @@ const startProviderServer = async () => {
       response.end('unexpected proxy target');
       return;
     }
-    const privateTarget = target.searchParams.get('target') ?? '';
-    const dnrAction = target.searchParams.get('action') ?? '';
-    const dnrToken = target.searchParams.get('token') ?? '';
-    const attemptUrl = new URL(DNR_ATTEMPT_PATH, target.origin);
-    attemptUrl.searchParams.set('action', dnrAction);
-    attemptUrl.searchParams.set('token', dnrToken);
-    const attemptLiteral = JSON.stringify(attemptUrl.href).replaceAll('<', '\\u003c');
-    const childAttemptUrl = new URL(attemptUrl.href);
-    childAttemptUrl.searchParams.set('action', `${dnrAction}-created`);
-    const childAttemptLiteral = JSON.stringify(childAttemptUrl.href).replaceAll('<', '\\u003c');
+    if (target.pathname === DNR_FIXTURE_PATH) {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      response.end('<!doctype html><meta charset="utf-8"><title>DNR public fixture</title><body data-dnr-ready="yes">public fixture</body>');
+      return;
+    }
+    if (target.pathname === DNR_CHILD_PATH) {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      response.end('<!doctype html><meta charset="utf-8"><title>DNR public child</title><body>public child</body>');
+      return;
+    }
+    if (target.pathname === FIXTURE_PATH) {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      response.end(FIREFOX_RUNTIME_FIXTURE);
+      return;
+    }
+    if (target.pathname === DNR_ATTEMPT_PATH) {
+      request.resume();
+      response.writeHead(204, { 'cache-control': 'no-store' });
+      response.end();
+      return;
+    }
+    if (![DNR_REDIRECT_PATH, DNR_META_PATH, DNR_SCRIPT_PATH, DNR_ACTION_PATH].includes(target.pathname)) {
+      response.writeHead(404, { connection: 'close' });
+      response.end('not found');
+      return;
+    }
+    const dnrVector = dnrVectors.get(target.searchParams.get('route') ?? '');
+    if (!dnrVector) {
+      response.writeHead(400, { connection: 'close' });
+      response.end('unknown DNR vector');
+      return;
+    }
+    const {
+      routeId, action: dnrAction, token: dnrToken, target: privateTarget,
+    } = dnrVector;
+    const attemptParams = new URLSearchParams({ action: dnrAction, token: dnrToken });
+    const attemptLiteral = JSON.stringify(`${DNR_ATTEMPT_PATH}?${attemptParams}`).replaceAll('<', '\\u003c');
+    const childAttemptParams = new URLSearchParams({
+      action: `${dnrAction}-created`, token: dnrToken,
+    });
+    const childAttemptLiteral = JSON.stringify(`${DNR_ATTEMPT_PATH}?${childAttemptParams}`)
+      .replaceAll('<', '\\u003c');
     const tokenLiteral = JSON.stringify(dnrToken).replaceAll('<', '\\u003c');
     const wrapDnrAction = (source) => `
       document.documentElement.dataset.dnrActionLoaded = ${tokenLiteral};
@@ -576,12 +611,6 @@ const startProviderServer = async () => {
         void navigator.sendBeacon(${attemptLiteral});
       }
     `;
-    if (target.pathname === DNR_ATTEMPT_PATH) {
-      request.resume();
-      response.writeHead(204, { 'cache-control': 'no-store' });
-      response.end();
-      return;
-    }
     if (target.pathname === DNR_REDIRECT_PATH) {
       dnrRedirectAttempts.push({ action: dnrAction, token: dnrToken, target: privateTarget });
       response.writeHead(302, { location: privateTarget, 'cache-control': 'no-store' });
@@ -609,13 +638,19 @@ const startProviderServer = async () => {
     if (target.pathname === DNR_ACTION_PATH) {
       const literal = JSON.stringify(privateTarget).replaceAll('<', '\\u003c');
       if (dnrAction === 'burst') {
+        const socketTarget = new URL(privateTarget);
+        socketTarget.protocol = 'ws:';
+        socketTarget.searchParams.set('transport', 'websocket');
+        const socketLiteral = JSON.stringify(socketTarget.href).replaceAll('<', '\\u003c');
+        const publicChildLiteral = JSON.stringify(`http://${DNR_PUBLIC_HOST}${DNR_CHILD_PATH}`);
         const source = `
           document.querySelector('#dnr-child-burst').addEventListener('click', () => {
-            const child = window.open(${literal}, 'firefox-private-child');
+            const child = window.open(${publicChildLiteral}, 'firefox-guarded-child');
             if (!child) return;
             document.documentElement.dataset.dnrActionAttempted = ${tokenLiteral};
             void navigator.sendBeacon(${attemptLiteral});
             void child.fetch(${literal}, { mode: 'no-cors', cache: 'no-store' }).catch(() => {});
+            try { void new child.WebSocket(${socketLiteral}); } catch { /* child may close first */ }
           });
         `;
         response.writeHead(200, {
@@ -626,9 +661,8 @@ const startProviderServer = async () => {
           <script>${source}</script>`);
         return;
       }
-      const frameTarget = new URL(target.href);
-      frameTarget.hostname = DNR_FRAME_HOST;
-      frameTarget.searchParams.set('phase', 'child');
+      const frameTarget = new URL(DNR_ACTION_PATH, `http://${DNR_FRAME_HOST}`);
+      frameTarget.searchParams.set('route', routeId);
       const frameLiteral = JSON.stringify(frameTarget.href).replaceAll('<', '\\u003c');
       const source = dnrAction === 'fetch'
         ? `void fetch(${literal}, { mode: 'no-cors', cache: 'no-store' }).catch(() => {});`
@@ -647,7 +681,7 @@ const startProviderServer = async () => {
               : dnrAction === 'popup'
                 ? `const child = window.open(${literal}, '_blank'); if (child) void navigator.sendBeacon(${childAttemptLiteral});`
                 : dnrAction === 'cross-popup'
-                  ? target.searchParams.get('phase') === 'child'
+                  ? target.hostname === DNR_FRAME_HOST
                     ? `const child = window.open(${literal}, '_blank'); if (child) void navigator.sendBeacon(${childAttemptLiteral});`
                     : `const frame = document.createElement('iframe'); frame.hidden = true; frame.src = ${frameLiteral}; document.body.append(frame);`
                 : '';
@@ -659,18 +693,6 @@ const startProviderServer = async () => {
         : '<!doctype html><title>Unknown DNR action</title>');
       return;
     }
-    if (target.pathname === DNR_FIXTURE_PATH) {
-      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-      response.end('<!doctype html><meta charset="utf-8"><title>DNR public fixture</title><body data-dnr-ready="yes">public fixture</body>');
-      return;
-    }
-    if (target.pathname === FIXTURE_PATH) {
-      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-      response.end(FIREFOX_RUNTIME_FIXTURE);
-      return;
-    }
-    response.writeHead(404, { connection: 'close' });
-    response.end('not found');
   });
   proxyServer.on('connection', (socket) => {
     sockets.add(socket);
@@ -729,6 +751,11 @@ const startProviderServer = async () => {
   }
   return {
     port, records, connections, tlsErrors, httpRequests, webSocketUpgrades, dnrRedirectAttempts,
+    registerDnrVector: ({ action, token, target }) => {
+      const routeId = `dnr-${nextDnrVectorId += 1}`;
+      dnrVectors.set(routeId, Object.freeze({ routeId, action, token, target }));
+      return routeId;
+    },
     get workerStartupProbes() { return workerStartupProbes; },
     get lifetimeActorResponses() { return lifetimeActorResponses; },
     get lifetimeActorResponseAt() { return lifetimeActorResponseAt; },
@@ -747,6 +774,7 @@ const startProviderServer = async () => {
     },
     get dnrFlow() { return dnrFlow ?? lastDnrFlow; },
     close: async () => {
+      dnrVectors.clear();
       for (const socket of sockets) socket.destroy();
       await Promise.all([
         new Promise((resolveClose) => proxyServer.close(resolveClose)),
@@ -2590,22 +2618,24 @@ const runPrivateNetworkDnrSmoke = async (driver, providerServer) => {
         const done = arguments[arguments.length - 1];
         (async () => {
           const tab = await browser.tabs.create({ url: target, active: false });
-          try {
-            for (let attempt = 0; attempt < 100; attempt += 1) {
-              const live = await browser.tabs.get(tab.id).catch(() => null);
-              if (!live || live.status === 'complete') break;
-              await new Promise((resolveWait) => setTimeout(resolveWait, 50));
-            }
-            return { ok: true, tabId: tab.id };
-          } finally {
-            await browser.tabs.remove(tab.id).catch(() => {});
-          }
+          return { ok: true, tabId: tab.id };
         })().then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
       `, [`http://localhost.:${unrelatedProbe.port}/unrelated-user-tab`]);
-      await delay(200);
-      assert(unrelated?.ok === true && unrelatedProbe.connections > 0 && unrelatedProbe.requests.length > 0,
-        'an unrelated user tab still reaches trailing-dot localhost while scoped rules are active',
-        JSON.stringify({ unrelated, connections: unrelatedProbe.connections, requests: unrelatedProbe.requests }));
+      try {
+        await waitFor(() => unrelatedProbe.connections > 0 && unrelatedProbe.requests.length > 0
+          ? true : null, { budgetMs: 5_000, pollMs: 50 });
+        assert(unrelated?.ok === true && unrelatedProbe.connections > 0 && unrelatedProbe.requests.length > 0,
+          'an unrelated user tab still reaches trailing-dot localhost while scoped rules are active',
+          JSON.stringify({ unrelated, connections: unrelatedProbe.connections, requests: unrelatedProbe.requests }));
+      } finally {
+        if (Number.isInteger(unrelated?.tabId)) {
+          await driver.executeAsync(`
+            const [tabId] = arguments;
+            const done = arguments[arguments.length - 1];
+            browser.tabs.remove(tabId).then(() => done(true), () => done(false));
+          `, [unrelated.tabId]);
+        }
+      }
     } finally {
       await unrelatedProbe.close();
     }
@@ -2629,12 +2659,14 @@ const runPrivateNetworkDnrSmoke = async (driver, providerServer) => {
       const probe = await startNetworkProbe();
       const target = `${vector.protocol ?? 'http'}://${vector.host}:${probe.port}/dnr-${encodeURIComponent(vector.action)}`;
       const token = `${vector.action}-${probe.port}`;
-      const query = `action=${encodeURIComponent(vector.action)}&token=${encodeURIComponent(token)}&target=${encodeURIComponent(target)}`;
+      const routeId = providerServer.registerDnrVector({ action: vector.action, token, target });
+      const query = `route=${encodeURIComponent(routeId)}`;
       return {
         ...vector,
         probe,
         target,
         token,
+        routeId,
         publicActionUrl: vector.publicPath
           ? `${publicBase}${vector.publicPath}?${query}`
           : '',
@@ -2719,8 +2751,7 @@ const runPrivateNetworkDnrSmoke = async (driver, providerServer) => {
           const url = new URL(request.url);
           return request.host === DNR_PUBLIC_HOST
             && request.path === publicPath
-            && url.searchParams.get('action') === vector.action
-            && url.searchParams.get('token') === vector.token;
+            && url.searchParams.get('route') === vector.routeId;
         });
         assert(loaded, `Firefox loads the public ${vector.name} action page`, JSON.stringify(proxied));
         const attempted = vector.action === 'redirect'
@@ -2766,8 +2797,10 @@ const runPrivateNetworkDnrSmoke = async (driver, providerServer) => {
     try {
       const burstTarget = `http://127.0.0.1:${burstProbe.port}/dnr-child-burst`;
       const burstToken = `burst-${burstProbe.port}`;
-      const burstUrl = `${publicBase}${DNR_ACTION_PATH}?action=burst`
-        + `&token=${encodeURIComponent(burstToken)}&target=${encodeURIComponent(burstTarget)}`;
+      const burstRouteId = providerServer.registerDnrVector({
+        action: 'burst', token: burstToken, target: burstTarget,
+      });
+      const burstUrl = `${publicBase}${DNR_ACTION_PATH}?route=${encodeURIComponent(burstRouteId)}`;
       const burstProxyStart = providerServer.httpRequests.length;
       const prepared = await driver.executeAsync(`
         const [tabId] = arguments;
@@ -2812,7 +2845,7 @@ const runPrivateNetworkDnrSmoke = async (driver, providerServer) => {
       assert(Number.isInteger(sourceTab?.id), 'Firefox actor owns the child burst fixture tab', JSON.stringify(burstTabs));
       parentTabId = sourceTab.id;
       const beforeIds = new Set(prepared.beforeTabIds);
-      const childRemaining = burstTabs.some((tab) =>
+      const publicChild = burstTabs.find((tab) =>
         !beforeIds.has(tab.id) && tab.openerTabId === parentTabId);
       const burstHttp = providerServer.httpRequests.slice(burstProxyStart);
       const attempted = burstHttp.some((request) => {
@@ -2833,19 +2866,26 @@ const runPrivateNetworkDnrSmoke = async (driver, providerServer) => {
         const content = typeof toolResult?.content === 'string' ? JSON.parse(toolResult.content) : null;
         childReceipt = content?.browserPolicy ?? null;
       } catch { childReceipt = null; }
-      assert(attempted, 'the Firefox actor click reaches the immediate child-fetch action', JSON.stringify(burstHttp));
+      assert(attempted, 'the Firefox actor click reaches the immediate child-request action', JSON.stringify(burstHttp));
       assert(burstProbe.connections === 0 && burstProbe.requests.length === 0,
-        'the Firefox immediate child fetch causes zero raw TCP or HTTP side effects',
+        'the Firefox immediate child fetch and WebSocket cause zero network side effects',
         JSON.stringify({ connections: burstProbe.connections, requests: burstProbe.requests }));
-      assert(childRemaining === false,
-        'Firefox closes the exact protected child created by the actor click', JSON.stringify(burstTabs));
-      assert(childReceipt?.reason === 'protected_child_navigation'
-        && childReceipt?.outcome === 'not_run'
-        && childReceipt?.child === 'closed'
-        && childReceipt?.retryable === false
-        && !actorToolResultBody.includes(`127.0.0.1:${burstProbe.port}`),
-      'the Firefox source actor receives a URL-free protected child receipt',
-      JSON.stringify({ childReceipt, body: actorToolResultBody.slice(0, 1200) }));
+      assert(Number.isInteger(publicChild?.id),
+        'Firefox leaves the exact public child available', JSON.stringify(burstTabs));
+      assert(!actorToolResultBody.includes(`127.0.0.1:${burstProbe.port}`),
+        'the Firefox source actor transcript contains no protected destination',
+        actorToolResultBody.slice(0, 1200));
+      assert(childReceipt == null || (childReceipt.reason === 'protected_child_request'
+        && childReceipt.outcome === 'not_run'
+        && childReceipt.child === 'guarded'
+        && childReceipt.retryable === false),
+      'a synchronous Firefox child stop emits only the URL-free protected request receipt',
+      JSON.stringify({ childReceipt }));
+      await driver.executeAsync(`
+        const [tabId] = arguments;
+        const done = arguments[arguments.length - 1];
+        browser.tabs.remove(tabId).then(() => done(true), () => done(false));
+      `, [publicChild.id]);
     } finally {
       await burstProbe.close();
     }
@@ -3052,6 +3092,7 @@ const main = async () => {
           ]);
           tab = await browser.tabs.create({ url: fixtureUrl, active: true });
           let fixtureReady = false;
+          let fixtureDocumentId = null;
           for (let attempt = 0; attempt < 200; attempt += 1) {
             try {
               const [probe] = await browser.scripting.executeScript({
@@ -3059,29 +3100,34 @@ const main = async () => {
                 func: () => document.readyState === 'complete'
                   && document.getElementById('firefox-action') !== null,
               });
-              if (probe?.result === true) {
+              if (probe?.result === true && typeof probe?.documentId === 'string') {
                 fixtureReady = true;
+                fixtureDocumentId = probe.documentId;
                 break;
               }
             } catch { /* Firefox may reject injection while navigation is in flight */ }
             await new Promise((resolveWait) => setTimeout(resolveWait, 100));
           }
-          if (!fixtureReady) throw new Error('fixture tab did not become scriptable');
+          if (!fixtureReady || !fixtureDocumentId) {
+            throw new Error('fixture tab did not produce an exact scriptable document');
+          }
           const snapshot = await captureSnapshot(
-            { id: tab.id }, { scripting: browser.scripting }, { budget: 4_000 },
+            { id: tab.id, peerdDocumentId: fixtureDocumentId },
+            { scripting: browser.scripting },
+            { budget: 4_000 },
           );
           const [typed] = await browser.scripting.executeScript({
-            target: { tabId: tab.id },
+            target: { tabId: tab.id, documentIds: [fixtureDocumentId] },
             func: typeInjected,
             args: ['#firefox-input', 'typed in Firefox', false, null, 1],
           });
           const [clicked] = await browser.scripting.executeScript({
-            target: { tabId: tab.id },
+            target: { tabId: tab.id, documentIds: [fixtureDocumentId] },
             func: clickInjected,
             args: ['#firefox-action', 0, null, 1],
           });
           const [observed] = await browser.scripting.executeScript({
-            target: { tabId: tab.id },
+            target: { tabId: tab.id, documentIds: [fixtureDocumentId] },
             func: () => ({
               clicked: document.body.dataset.clicked,
               value: document.getElementById('firefox-input')?.value,

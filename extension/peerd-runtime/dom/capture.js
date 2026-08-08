@@ -24,7 +24,7 @@
 
 import { serializeAxTree } from './ax-serialize.js';
 import { domWalkInjected } from './walk-injected.js';
-import { browserDocumentIdentity } from '../tools/defs/dom-helpers.js';
+import { browserDocumentIdentity, scriptingTarget } from '../tools/defs/dom-helpers.js';
 import {
   browserDocumentRefusalFrom,
   browserTargetRefusalResult,
@@ -85,10 +85,7 @@ export const captureSnapshot = async (tab, ctx, { budget = 8000 } = {}) => {
   let walk;
   try {
     const results = await scripting.executeScript({
-      target: {
-        tabId: tab.id,
-        ...(typeof tab.peerdDocumentId === 'string' ? { documentIds: [tab.peerdDocumentId] } : {}),
-      },
+      target: scriptingTarget(tab),
       func: domWalkInjected,
     });
     walk = results?.[0]?.result;

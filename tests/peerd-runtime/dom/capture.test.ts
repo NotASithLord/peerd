@@ -9,6 +9,7 @@ import { TEST_DOCUMENT_ID, TEST_TIME_ORIGIN } from '../../helpers/browser-script
 // DOM in the in-browser suite (extension/tests/unit/peerd-runtime/dom-walk.test.js).
 
 const TAB = { id: 7 };
+const SCRIPTING_TAB = { ...TAB, peerdDocumentId: TEST_DOCUMENT_ID };
 const CDP_TAB = {
   ...TAB,
   url: 'https://example.com/',
@@ -57,14 +58,28 @@ describe('captureSnapshot — channel selection', () => {
         executeScript: async (req: any) => { injected = req; return [{ result: WALK_RESULT }]; },
       },
     };
-    const cap = await captureSnapshot(TAB, ctx);
+    const cap = await captureSnapshot(SCRIPTING_TAB, ctx);
     expect(cap.ok).toBe(true);
     if (!cap.ok) throw new Error('expected ok capture');
     expect(cap.source).toBe('dom-walk');
     expect(cap.refs[0]).toMatchObject({ ref: '@e1', backendDOMNodeId: null, walkId: 1, name: 'Send' });
     // The injected function is the self-contained walk, aimed at the tab.
-    expect(injected.target).toEqual({ tabId: 7 });
+    expect(injected.target).toEqual({ tabId: 7, documentIds: [TEST_DOCUMENT_ID] });
     expect(injected.func).toBe(domWalkInjected);
+  });
+
+  test('DOM-walk refuses an unpinned direct call before injection', async () => {
+    let scriptingCalls = 0;
+    const ctx = {
+      scripting: {
+        executeScript: async () => { scriptingCalls += 1; return [{ result: WALK_RESULT }]; },
+      },
+    };
+    const cap = await captureSnapshot(TAB, ctx);
+    expect(cap.ok).toBe(false);
+    if (cap.ok) throw new Error('expected error capture');
+    expect(cap.error).toBe('browser_target_unverified');
+    expect(scriptingCalls).toBe(0);
   });
 
   test('CDP errors do NOT fall back to the walk — they surface', async () => {
@@ -91,7 +106,7 @@ describe('captureSnapshot — channel selection', () => {
     const ctx = {
       scripting: { executeScript: async () => { throw new Error('Cannot access a chrome:// URL'); } },
     };
-    const cap = await captureSnapshot(TAB, ctx);
+    const cap = await captureSnapshot(SCRIPTING_TAB, ctx);
     expect(cap.ok).toBe(false);
     if (cap.ok) throw new Error('expected error capture');
     expect(cap.source).toBe('dom-walk');
@@ -105,7 +120,7 @@ describe('captureSnapshot — channel selection', () => {
     const ctx = {
       scripting: { executeScript: async () => [{ result: { ok: false, error: 'no body' } }] },
     };
-    const cap = await captureSnapshot(TAB, ctx);
+    const cap = await captureSnapshot(SCRIPTING_TAB, ctx);
     expect(cap.ok).toBe(false);
     if (cap.ok) throw new Error('expected error capture');
     expect(cap.error).toBe('dom_walk_failed: no body');

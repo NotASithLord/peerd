@@ -125,7 +125,6 @@ export const captureTool = {
           dataUrl,
           bytes: estimateBase64Bytes(dataUrl),
           origin: originOfUrl(tab.url) || null,
-          tabUrl: tab.url ?? null,
         }, null, 2),
       };
     } catch (e) {

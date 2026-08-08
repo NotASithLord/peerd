@@ -23,7 +23,7 @@ export const createBrowserNetworkCustody = ({ persist, makeToken = () => crypto.
   const durableTokens = new Map();
   /** @type {Map<number, Set<string>>} */
   const leases = new Map();
-  /** @type {Map<number, Promise<BrowserNetworkCustodyClaim>>} */
+  /** @type {Map<number, { promise: Promise<BrowserNetworkCustodyClaim> }>} */
   const pendingDurableAdds = new Map();
   const closedDuringHydration = new Set();
   let hydrated = false;
@@ -68,7 +68,7 @@ export const createBrowserNetworkCustody = ({ persist, makeToken = () => crypto.
       }
       const pending = pendingDurableAdds.get(tabId);
       if (pending) {
-        const claim = await pending;
+        const claim = await pending.promise;
         // Never let a caller waiting on an older tab generation silently adopt
         // a newer tab that reused the same numeric id.
         if (!isDurableClaimValid(claim)
@@ -111,7 +111,10 @@ export const createBrowserNetworkCustody = ({ persist, makeToken = () => crypto.
           throw error;
         }
       })();
-      pendingDurableAdds.set(tabId, write);
+      // why: the wrapper is an identity token. Comparing the Promise itself
+      // looks like a missing await to static analysis and obscures the intent.
+      const pendingAdd = { promise: write };
+      pendingDurableAdds.set(tabId, pendingAdd);
       try {
         const storedClaim = await write;
         if (!isDurableClaimValid(storedClaim)
@@ -120,7 +123,7 @@ export const createBrowserNetworkCustody = ({ persist, makeToken = () => crypto.
         }
         return { ...storedClaim, added: true };
       } finally {
-        if (pendingDurableAdds.get(tabId) === write) pendingDurableAdds.delete(tabId);
+        if (pendingDurableAdds.get(tabId) === pendingAdd) pendingDurableAdds.delete(tabId);
       }
     }
   };

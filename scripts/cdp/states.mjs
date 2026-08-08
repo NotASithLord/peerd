@@ -353,7 +353,6 @@ export const STATES = [
       const controllerServer = createServer((req, res) => {
         controllerRequests += 1;
         const requestUrl = new URL(req.url ?? '/', 'http://orders.peerd.test');
-        const target = requestUrl.searchParams.get('target') ?? '';
         if (requestUrl.pathname === '/attempt') {
           controllerAttempts.add(requestUrl.searchParams.get('vector') ?? '');
           res.writeHead(204);
@@ -363,19 +362,23 @@ export const STATES = [
         res.setHeader('content-type', 'text/html');
         res.setHeader('connection', 'close');
         if (requestUrl.pathname === '/redirect') {
+          const target = `http://127.0.0.1:${probePort}/probe?vector=redirect`;
           res.writeHead(302, { location: target });
           res.end();
           return;
         }
         if (requestUrl.pathname === '/meta') {
+          const target = `http://127.0.0.1:${probePort}/probe?vector=meta`;
           res.end(`<!doctype html><meta http-equiv="refresh" content="0;url=${target}">`);
           return;
         }
         if (requestUrl.pathname === '/script') {
+          const target = `http://127.0.0.1:${probePort}/probe?vector=script`;
           res.end(`<!doctype html><script>location.href=${JSON.stringify(target)}<\/script>`);
           return;
         }
         if (requestUrl.pathname === '/cross-frame-popup') {
+          const target = `http://127.0.0.1:${probePort}/probe?vector=cross-frame-popup`;
           res.end(`<!doctype html><script>
             navigator.sendBeacon('/attempt?vector=cross-frame-popup');
             const link = document.createElement('a');
@@ -387,6 +390,7 @@ export const STATES = [
           return;
         }
         if (requestUrl.pathname === '/cross-frame-blank') {
+          const target = `http://127.0.0.1:${probePort}/probe?vector=cross-frame-blank`;
           res.end(`<!doctype html><script>
             const name = 'private-child-' + Math.random();
             const link = document.createElement('a');
@@ -582,7 +586,7 @@ export const STATES = [
                 form.submit();
               }
               if (['redirect', 'meta', 'script'].includes(kind)) {
-                frame(publicBase + kind + '?target=' + encodeURIComponent(privateTarget));
+                frame(publicBase + kind);
               }
               if (kind === 'popup') {
                 const link = document.createElement('a');
@@ -593,11 +597,11 @@ export const STATES = [
               }
               if (kind === 'cross-frame-popup') {
                 const crossOrigin = publicBase.replace('orders.peerd.test', 'acct.peerd.test');
-                frame(crossOrigin + 'cross-frame-popup?target=' + encodeURIComponent(privateTarget));
+                frame(crossOrigin + 'cross-frame-popup');
               }
               if (kind === 'cross-frame-blank') {
                 const crossOrigin = publicBase.replace('orders.peerd.test', 'acct.peerd.test');
-                frame(crossOrigin + 'cross-frame-blank?target=' + encodeURIComponent(privateTarget));
+                frame(crossOrigin + 'cross-frame-blank');
               }
               if (kind === 'location') location.href = privateTarget;
             },

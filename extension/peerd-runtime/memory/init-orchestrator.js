@@ -31,7 +31,7 @@ export function probeInitTabInjected() {
   const headings = [...document.querySelectorAll('h1,h2,h3')]
     .map((heading) => heading.textContent?.trim() ?? '').filter(Boolean).slice(0, 12);
   const text = (document.body?.innerText || '').slice(0, 1500);
-  return { headings, textSnippet: text };
+  return { title: document.title, headings, textSnippet: text };
 }
 
 /**
@@ -60,8 +60,12 @@ export const makeInitOrchestrator = (deps) => {
   const probeActiveTab = async () => {
     try {
       const [tab] = await tabs.query({ active: true, currentWindow: true });
-      if (!tab?.id || !tab.url || /^(chrome|about|devtools|edge):/.test(tab.url)) {
-        return { value: tab?.url ? { url: tab.url, title: tab.title } : null };
+      if (!tab?.id || !tab.url) return { value: null };
+      if (!/^https?:/.test(tab.url)) {
+        return {
+          value: null,
+          warning: '/init skipped the browser page because this URL type cannot be verified.',
+        };
       }
       let target;
       try {
@@ -92,7 +96,7 @@ export const makeInitOrchestrator = (deps) => {
       // durable injection, and be invisible both at the confirm gate and in the
       // Memory tab. Strip at the source, exactly as read_page / fetch_url do.
       /** @type {{ url?: string, title?: string, headings?: string[], textSnippet?: string }} */
-      let probe = { url: target.url, title: disarmText(target.title) };
+      let probe = { url: target.url };
       try {
         const [res] = await scripting.executeScript({
           target: scriptingTarget(target),
@@ -102,6 +106,7 @@ export const makeInitOrchestrator = (deps) => {
           const r = res.result;
           probe = {
             ...probe,
+            title: typeof r.title === 'string' ? disarmText(r.title) : undefined,
             headings: Array.isArray(r.headings) ? r.headings.map((/** @type {unknown} */ h) => disarmText(String(h))) : r.headings,
             textSnippet: typeof r.textSnippet === 'string' ? disarmText(r.textSnippet) : r.textSnippet,
           };

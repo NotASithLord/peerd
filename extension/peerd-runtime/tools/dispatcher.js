@@ -110,16 +110,20 @@ const withBrowserChildPolicyNotices = (result, notices) => {
     }
   } catch {
     const receipt = (
-      /** @type {{ outcome: string, child: string }} */ entry,
+      /** @type {{ reason: string, outcome: string, child: string }} */ entry,
       /** @type {number} */ index,
     ) => {
       const outcome = entry.outcome === 'not_run'
-        ? 'A protected child navigation did not run.'
+        ? entry.reason === 'protected_child_request'
+          ? 'A protected child request did not run.'
+          : 'A protected child navigation did not run.'
         : 'A child navigation was not verified.';
       const child = entry.child === 'closed'
         ? 'The child tab was closed.'
         : entry.child === 'left_blank'
           ? 'The child tab was left blank.'
+          : entry.child === 'guarded'
+            ? 'The child tab remained guarded.'
           : 'The browser did not confirm that the child tab was closed or blank.';
       const label = notices.length > 1 ? `[HOST POLICY ${index + 1}/${notices.length}]` : '[HOST POLICY]';
       return `${label}\n${outcome} ${child} `
@@ -145,10 +149,10 @@ const normalizeBrowserChildPolicyNotices = (value) => (Array.isArray(value) ? va
   .filter((entry) => {
     const notice = /** @type {any} */ (entry);
     return notice && typeof notice === 'object'
-      && ['protected_child_navigation', 'child_navigation_failed', 'child_navigation_unverified']
+      && ['protected_child_navigation', 'protected_child_request', 'child_navigation_failed', 'child_navigation_unverified']
         .includes(notice.reason)
       && ['not_run', 'unverified'].includes(notice.outcome)
-      && ['closed', 'left_blank', 'uncontained'].includes(notice.child)
+      && ['closed', 'left_blank', 'guarded', 'uncontained'].includes(notice.child)
       && notice.retryable === false;
   })
   .map((entry) => ({

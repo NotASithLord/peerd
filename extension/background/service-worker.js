@@ -394,10 +394,15 @@ import {
 import { createDebuggerPool } from './debugger-pool.js';
 import { normalizeSettingsPatch } from './settings-patch.js';
 import { makeSettingsStore } from './settings-store.js';
-import { makeDenylistStore } from './denylist-store.js';
+import { makeDenylistStore, requireDenylistPolicy } from './denylist-store.js';
 import { makeDenylistNetGuard } from './denylist-net-guard.js';
 import { createBrowserNetworkCustody } from './browser-network-custody.js';
 import { makeDrivenPopupGuard, popupSourceState } from './driven-popup-guard.js';
+import {
+  classifyDrivenChildRequestTarget,
+  makeDrivenChildRequestGuard,
+  registerFirefoxDrivenChildRequestGuard,
+} from './driven-child-request-guard.js';
 import { makeStartupPopupNetworkGuard } from './startup-popup-network-guard.js';
 import { makeSessionState } from './session-state.js';
 import { makeLocalModelState } from './local-model-state.js';
@@ -791,7 +796,13 @@ export const safeFetch = makeSafeFetch({
 // reach arbitrary HTTPS hosts. The denylist still applies as defense
 // in depth alongside the dispatcher's origin gate.
 export const webFetch = makeWebFetch({
-  getDenylist: () => denylistStore.patterns(),
+  getDenylist: () => {
+    // why here as well as buildToolContext: WebVM, Notebook, skill install,
+    // and site-fetch call this boundary directly. A missing seed must pause
+    // every open-web request, including paths that do not dispatch a tool.
+    requireDenylistPolicy(denylistPolicyReady ? { ok: true } : null);
+    return denylistStore.patterns();
+  },
   matchDenylist: (host, patterns) => matchesDenylist(host, patterns),
   audit: /** @type {any} */ (auditLog.append),
 });
@@ -1050,12 +1061,11 @@ const denylistStore = makeDenylistStore({
 });
 
 // why (SECURITY): the seed loads ASYNC. Until it resolves, the effective list is
-// [] — and the origin gate would allow a denylisted site (the cold-start race).
-// buildToolContext awaits denylistReady before constructing any tool context, so
-// NO tool can dispatch against an unloaded denylist. The promise RESOLVES (never
-// rejects) when the load finishes or fails — it can't hang a turn, and
-// fails-closed to [] (the seed is a bundled extension asset, so a real failure
-// is near-impossible).
+// empty and must not be treated as permission. buildToolContext awaits
+// denylistReady, the browser network floor treats a load failure as fatal, and
+// the Firefox exact-child guard holds requests until denylistPolicyReady. The
+// seed is a bundled asset, but a missing or malformed package still fails
+// closed instead of silently authorizing an empty policy.
 /**
  * The seed's OWN category map ({ banks_us: [...], health_us: [...], … }), kept
  * for the settings list to group by.
@@ -1068,30 +1078,34 @@ const denylistStore = makeDenylistStore({
  * @type {Record<string, string[]>}
  */
 let seedCategories = {};
+let denylistPolicyReady = false;
 /** Live read for the settings list — the map is replaced when the seed loads. */
 const getSeedCategories = () => seedCategories;
 const loadDenylist = async () => {
-  /** @type {any[]} */ let seed = [];
-  try {
-    const res = await fetch('/peerd-egress/denylist/default.json');
-    if (!res.ok) console.error('[sw] denylist seed fetch failed:', res.status);
-    else {
-      const json = await res.json();
-      seedCategories = (json && typeof json === 'object' && json.categories) ? json.categories : {};
-      seed = flattenCategorisedDenylist(json);
-    }
-  } catch (e) {
-    console.error('[sw] denylist load threw', e);
+  const res = await fetch('/peerd-egress/denylist/default.json');
+  if (!res.ok) throw new Error(`denylist seed fetch failed: ${res.status}`);
+  const json = await res.json();
+  const categories = (json && typeof json === 'object' && json.categories)
+    ? json.categories
+    : null;
+  const seed = flattenCategorisedDenylist(json);
+  if (!categories || seed.length === 0) {
+    throw new Error('denylist seed is empty or malformed');
   }
   await denylistStore.load(seed);
+  seedCategories = categories;
+  denylistPolicyReady = true;
   console.log('[sw] denylist loaded —', denylistStore.patterns().length, 'patterns');
 };
 const denylistReady = loadDenylist()
   .then(() => ({ ok: true }))
-  .catch((error) => ({
-    ok: false,
-    error: `denylist_hydration_failed: ${error instanceof Error ? error.message : String(error)}`,
-  }));
+  .catch((error) => {
+    console.error('[sw] denylist load failed', error);
+    return {
+      ok: false,
+      error: `denylist_hydration_failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  });
 
 // ── the denylist's NETWORK-level backstop ──────────────────────────────────
 //
@@ -1342,6 +1356,20 @@ const classifyPopupTarget = (/** @type {string} */ rawUrl) => {
   } catch { return { allowed: false, reason: 'invalid_url' }; }
 };
 
+const drivenChildRequestGuard = makeDrivenChildRequestGuard({
+  // The synchronous Firefox stop is narrower than the async popup guard: only
+  // a live web-actor binding can mark a child. Aggregate custody also includes
+  // short operation leases and engine tabs, which are not proof that an opener
+  // belongs to the web actor and could capture an ordinary user-created tab.
+  isDrivenSource: (sourceTabId) => webActorTabBindings.has(sourceTabId),
+  classifyTarget: (rawUrl) => classifyDrivenChildRequestTarget(
+    rawUrl,
+    (hostname) => matchesDenylist(hostname, denylistStore.patterns()),
+    denylistPolicyReady,
+  ),
+  onBlocked: (event) => recordBrowserChildRequestBlocked(event),
+});
+
 /** @typedef {{ reason: string, outcome: string, child: string, retryable: boolean }} BrowserChildPolicyNotice */
 /** @type {Map<number, BrowserChildPolicyNotice[]>} */
 const browserChildPolicyNotices = new Map();
@@ -1389,6 +1417,31 @@ const recordBrowserChildOutcome = (
     }).catch(() => {});
   }
 };
+const recordBrowserChildRequestBlocked = (
+  /** @type {{ sourceTabId: number, tabId: number, reason: string }} */ event,
+) => {
+  const notice = {
+    reason: 'protected_child_request',
+    outcome: 'not_run',
+    child: 'guarded',
+    retryable: false,
+  };
+  const notices = browserChildPolicyNotices.get(event.sourceTabId) ?? [];
+  if (notices.length < BROWSER_CHILD_POLICY_NOTICE_MAX) notices.push(notice);
+  browserChildPolicyNotices.set(event.sourceTabId, notices);
+  for (const wake of browserChildPolicyWaiters.get(event.sourceTabId) ?? []) wake();
+  auditLog.append({
+    type: 'browser_child_request_blocked',
+    details: {
+      browserPolicy: {
+        reason: event.reason,
+        child: notice.child,
+        guarded: true,
+        outcome: notice.outcome,
+      },
+    },
+  }).catch(() => {});
+};
 const consumeBrowserChildPolicyNotice = (/** @type {number} */ tabId) => {
   const notices = browserChildPolicyNotices.get(tabId) ?? [];
   if (notices.length > 0) browserChildPolicyNotices.delete(tabId);
@@ -1433,19 +1486,33 @@ const drivenPopupGuard = makeDrivenPopupGuard({
   onBlocked: (event) => recordBrowserChildOutcome(event, 'blocked'),
   onFailed: (event) => recordBrowserChildOutcome(event, 'failed'),
   onBlank: (event) => recordBrowserChildOutcome(event, 'unverified'),
+  onGuarded: ({ tabId }) => drivenChildRequestGuard.release(tabId),
 });
-browser.tabs.onCreated?.addListener(drivenPopupGuard.onCreated);
+browser.tabs.onCreated?.addListener((tab) => {
+  drivenPopupGuard.onCreated(tab);
+});
 browser.tabs.onUpdated?.addListener(drivenPopupGuard.onUpdated);
 browser.tabs.onRemoved?.addListener((tabId) => {
+  drivenChildRequestGuard.release(tabId);
   drivenPopupGuard.onRemoved(tabId);
   startupPopupNetworkGuard.release(tabId).catch(() => {});
   browserChildPolicyNotices.delete(tabId);
   for (const wake of browserChildPolicyWaiters.get(tabId) ?? []) wake();
   browserChildPolicyWaiters.delete(tabId);
 });
-browser.webNavigation?.onCreatedNavigationTarget?.addListener(
-  drivenPopupGuard.onNavigationTarget,
-);
+browser.webNavigation?.onCreatedNavigationTarget?.addListener((details) => {
+  // This event is the browser's exact source-to-child statement. Keep the
+  // synchronous marker first so Firefox can stop the first private request.
+  // tabs.onCreated is intentionally not authority here: API-created ordinary
+  // tabs can carry opener metadata without being page-created children.
+  drivenChildRequestGuard.onNavigationTarget(details);
+  drivenPopupGuard.onNavigationTarget(details);
+});
+registerFirefoxDrivenChildRequestGuard({
+  isFirefox: Boolean(browser.runtime.getManifest().browser_specific_settings?.gecko),
+  event: browser.webRequest?.onBeforeRequest,
+  listener: drivenChildRequestGuard.onBeforeRequest,
+});
 
 // ---------------------------------------------------------------------------
 // issue 251 — the origin lock, made live.
@@ -1804,12 +1871,11 @@ const pageActivity = createPageActivityReporter({
 });
 
 const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, actorInstanceId, actorType, actorBacking, actorSurface } = {}) => {
-  // SECURITY: never build a tool context against an unloaded denylist. The seed
-  // loads async; this await closes the cold-start race so the origin gate always
-  // sees the real denylist before any tool can dispatch. Resolves (never
-  // rejects) — it cannot hang the turn. Every dispatch path (main turn, direct
-  // dispatch, spawned actors) routes through here, so all are covered.
-  await denylistReady;
+  // SECURITY: never build a tool context against an unloaded or failed
+  // denylist. Every dispatch path (main turn, direct dispatch, spawned actors)
+  // routes through here, so browser and open-web tools cannot interpret an
+  // empty policy as permission.
+  requireDenylistPolicy(await denylistReady);
   // The lifecycle tracker must be ARMED before any ctx exists — otherwise a
   // Class D/E dispatch could race the boot into running untracked. The
   // promise settles once (subsequent awaits are free) and never rejects; a
@@ -6135,6 +6201,10 @@ const initOrchestrator = makeInitOrchestrator({
 });
 const runInit = async () => {
   if (vault.isLocked()) throw new VaultLockedError();
+  // /init scans open tabs directly rather than building a tool context.
+  // Keep the same cold-start posture: no scan while sensitive-origin policy
+  // is unavailable, even though the orchestrator also classifies each tab.
+  requireDenylistPolicy(await denylistReady);
   return initOrchestrator.runInit();
 };
 

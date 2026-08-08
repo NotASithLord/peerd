@@ -282,6 +282,32 @@ describe('dispatcher lineage spine fields', () => {
     expect(JSON.stringify(result)).not.toContain('127.0.0.1');
   });
 
+  test('a blocked child subrequest has an honest guarded receipt', async () => {
+    registerTool(baseTool({
+      primitive: 'tab',
+      sideEffect: 'write',
+      execute: async () => ({ ok: true, content: 'clicked' }),
+    }) as any);
+    const notice = {
+      reason: 'protected_child_request',
+      outcome: 'not_run',
+      child: 'guarded',
+      retryable: false,
+    };
+    const queuedNotices = [notice];
+    const result: any = await dispatchToolCall(
+      { id: 'child-request-policy', name: 'lt', args: {} } as any,
+      {
+        ...ctx,
+        activeTab: { id: 7, url: 'https://example.com', origin: 'https://example.com' },
+        consumeBrowserChildPolicyNotice: () => queuedNotices.splice(0),
+      },
+    );
+    expect(result.content).toContain('A protected child request did not run.');
+    expect(result.content).toContain('The child tab remained guarded.');
+    expect(result.structured.browserPolicy).toEqual(notice);
+  });
+
   test('ordered child policy receipts survive one tool result', async () => {
     registerTool(baseTool({
       primitive: 'tab',

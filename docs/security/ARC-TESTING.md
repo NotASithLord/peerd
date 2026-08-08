@@ -53,7 +53,7 @@ the same live target policy as every browser tool.
 | Navigate or fetch a cross-origin URL with a long encoded blob in the host, credentials, or path. | Supported paths refuse the request and record the denial. |
 | Use a fetch, document-reading, or browser tool on localhost, a private network address, or cloud metadata. | The operation is refused. Driven tabs also carry a tab-scoped network rule that blocks redirects and tab-associated requests before they reach the target. |
 | Follow a redirect from an allowed request or navigation to a blocked destination. | The destination is refused. Browser automation stops and the tab is reset when the browser can verify the reset. |
-| From an actor-owned test page, open a child toward a private target. | The private request does not reach the target. The child is closed, and the tool result and Activity log carry a URL-free policy receipt. |
+| From an actor-owned test page, open a child that navigates, fetches, or opens a WebSocket toward a private or denylisted target. | The protected request does not reach the target. Firefox synchronously stops the exact child's request until its tab-scoped rules are installed. A subrequest observed by that temporary stop produces a URL-free tool and Activity receipt. If DNR wins first, the block is silent. |
 | From the same test page, open a child toward a public target. | Only that child receives the driven-tab network floor, then the public navigation continues. |
 | Open a child from an ordinary user tab while no actor owns it. | peerd does not blank, close, focus, or guard the child. |
 
@@ -65,11 +65,16 @@ Private-network classification is lexical. It covers direct hostnames and IP
 spellings but does not resolve DNS. DNS rebinding remains outside this client-side
 check.
 
-The child observer is non-blocking. On a cold service-worker start, peerd acts
-early only when the exact source has restored custody and its complete browser
-rule set survives. Otherwise it waits for the ownership registries. This avoids
-changing user popups, but it cannot guarantee that a first child request is
-stopped if the browser discarded the session rules during the restart.
+Child handling is exact-tab scoped. Firefox uses a synchronous request stop for
+a browser-identified child of a live driven source while its durable rule is
+installed, then releases that temporary stop. If source custody restores before
+the denylist, that exact child waits for policy hydration instead of treating an
+empty list as permission. On a cold service-worker start, peerd acts early only
+when the exact source has restored custody and its complete browser rule set
+survives.
+Otherwise it waits for the ownership registries. This avoids changing user
+popups, but it cannot guarantee that a first child request is stopped if the
+browser discarded the session rules during the restart.
 
 The tab-scoped browser rule does not cover requests the browser attributes to no
 tab, such as a previously installed service worker. Test and track that boundary

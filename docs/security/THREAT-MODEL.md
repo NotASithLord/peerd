@@ -339,9 +339,16 @@ to the committed document. Driven tabs also receive tab-scoped DNR rules for
 private hosts and address ranges, covering redirects, forms, frames, and
 tab-associated requests at the browser network layer. A page-created child is
 blanked and guarded only when `webNavigation` reports that its exact source tab
-is already under peerd custody. A protected child is closed after the network
-guard takes custody. Children from user-owned tabs are ignored. The rules never
-apply to tabs peerd is not driving. Requests the browser attributes
+is already under peerd custody. Firefox also synchronously cancels private,
+local, metadata, or denylisted HTTP and WebSocket requests from that exact child
+while its tab-scoped DNR rules are being installed, then releases the temporary
+listener state for that child. It does not read request bodies or act on children
+from user-owned tabs. If actor custody restores before denylist hydration, that
+exact child waits instead of treating an empty policy as permission. A protected
+child is closed after the network guard takes custody. A missing or malformed
+bundled denylist pauses tool dispatch instead of authorizing an empty policy for
+browser or open-web work. The rules never apply to tabs peerd is not driving. Requests the
+browser attributes
 to no tab, including service-worker fetches, remain outside this tab-scoped
 backstop. During a service-worker restart, early adoption requires two positive
 signals for the exact source: restored durable custody or a restored web-actor
@@ -355,7 +362,7 @@ later registry restore still identifies the source as driven. DNS resolution
 and rebinding also remain outside this client-side lexical boundary.
 Code: `shared/private-network.js`, `peerd-egress/fetch/web-fetch.js`,
 `peerd-egress/denylist/dnr-rules.js`, `background/denylist-net-guard.js`,
-`background/startup-popup-network-guard.js`,
+`background/driven-child-request-guard.js`, `background/startup-popup-network-guard.js`,
 `peerd-runtime/tools/browser-automation-policy.js`, and
 `offscreen/pdf-extract.js`. Red-team: scenario 07.
 

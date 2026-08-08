@@ -25,6 +25,10 @@ import {
   BROWSER_TARGET_STAGES, browserTargetRefusalResult, classifyBrowserAutomationTarget,
 } from '../../../extension/peerd-runtime/tools/browser-automation-policy.js';
 import { makeStartupPopupNetworkGuard } from '../../../extension/background/startup-popup-network-guard.js';
+import {
+  classifyDrivenChildRequestTarget,
+  makeDrivenChildRequestGuard,
+} from '../../../extension/background/driven-child-request-guard.js';
 
 // A webFetch wired so that ANY network call is observable, if fetchFn ever
 // fires for a hostile URL, the guard failed open and the probe leaks.
@@ -65,7 +69,7 @@ export const scenario: Scenario = {
   title: 'Private-network / metadata SSRF',
   adversary: 'malicious webpage',
   asset: 'internal network + cloud metadata credentials',
-  claim: 'Open-web and browser entry points refuse private targets, browser network rules stay tab-scoped, and startup child adoption requires the complete exact-source rule set.',
+  claim: 'Open-web and browser entry points refuse private targets, browser network rules stay tab-scoped, and child guards require exact source identity.',
   threatModelRef: 'INV-7',
   tier: 'unit',
   async run() {
@@ -197,12 +201,65 @@ export const scenario: Scenario = {
         : leaked('claim startup child custody from a partial surviving rule set', 'partial browser evidence was accepted'));
     }
 
+    // 7) Firefox's synchronous first-request stop is exact-child scoped. It
+    // does not infer ownership from an ordinary opener and it does not block a
+    // public request from the adopted child.
+    {
+      const stopped: Array<{ sourceTabId: number, tabId: number, reason: string }> = [];
+      let policyReady = true;
+      const guard = makeDrivenChildRequestGuard({
+        isDrivenSource: (tabId) => tabId === 73,
+        classifyTarget: (url) => classifyDrivenChildRequestTarget(
+          url,
+          (hostname) => hostname === 'vault.example',
+          policyReady,
+        ),
+        onBlocked: (event) => { stopped.push(event); },
+      });
+      guard.onNavigationTarget({ tabId: 75, sourceTabId: 73 });
+      guard.onNavigationTarget({ tabId: 76, sourceTabId: 74 });
+      guard.onNavigationTarget({ tabId: 77, sourceTabId: 73 });
+      guard.onNavigationTarget({ tabId: 78, sourceTabId: 73 });
+      const drivenPrivate = guard.onBeforeRequest({ tabId: 75, url: 'http://127.0.0.1/' });
+      const drivenSocket = guard.onBeforeRequest({
+        tabId: 75, url: 'ws://127.0.0.1/socket', type: 'websocket',
+      });
+      const drivenPublic = guard.onBeforeRequest({ tabId: 75, url: 'https://public.example/' });
+      const ordinaryPrivate = guard.onBeforeRequest({ tabId: 76, url: 'http://127.0.0.1/' });
+      const drivenSensitive = guard.onBeforeRequest({
+        tabId: 77, url: 'https://vault.example/account', type: 'xmlhttprequest',
+      });
+      policyReady = false;
+      const drivenCold = guard.onBeforeRequest({
+        tabId: 78, url: 'https://public.example/', type: 'xmlhttprequest',
+      });
+      const ordinaryCold = guard.onBeforeRequest({
+        tabId: 76, url: 'https://public.example/', type: 'xmlhttprequest',
+      });
+      policyReady = true;
+      const hydratedPublic = guard.onBeforeRequest({
+        tabId: 78, url: 'https://public.example/', type: 'xmlhttprequest',
+      });
+      probes.push(drivenPrivate.cancel === true
+          && drivenSocket.cancel === true
+          && drivenSensitive.cancel === true
+          && drivenCold.cancel === true
+          && ordinaryCold.cancel !== true
+          && hydratedPublic.cancel !== true
+          && drivenPublic.cancel !== true
+          && ordinaryPrivate.cancel !== true
+          && stopped.length === 3
+        ? blocked('race a protected request through a newly opened child', 'private HTTP, WebSocket, denylisted, and cold-policy requests were cancelled only for exact children, with source-bound receipts')
+        : leaked('race a protected request through a newly opened child', 'the synchronous child scope was missing or overbroad'));
+    }
+
     return {
       ...summarize(probes, [
         'isPrivateOrLocalHost (SSRF guard)',
         'webFetch pre-flight host check',
         'browser automation target classifier',
         'tab-scoped private-network DNR rules',
+        'exact-child synchronous Firefox request stop',
         'exact-source startup child rule copy',
         'redirect fail-closed',
       ]),
