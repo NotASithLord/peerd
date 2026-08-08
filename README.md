@@ -60,9 +60,15 @@ https://github.com/user-attachments/assets/d2e4c285-6952-4c95-bf5a-d06087de084d
 I think we're putting agents in the wrong place.
 
 A lot of agent systems run somewhere else and reach back into your computer
-through a cloud browser or a growing collection of external tool servers. But
-your browser already contains the applications, sessions, identity, networking,
-security model, and increasingly the compute an agent needs.
+through a cloud browser or a growing collection of external tool servers. The
+other—and often bigger—problem is the local harness running directly on your
+host with broad or effectively full access to the shell, filesystem,
+credentials, and browser sessions.
+
+Remote and host-privileged are opposite deployment choices, but both can put
+reasoning too close to authority. Your browser already contains the
+applications, sessions, identity, networking, security model, and increasingly
+the compute an agent needs—inside boundaries designed for hostile content.
 
 It also has decades of scar tissue from running powerful software against
 hostile content.
@@ -86,8 +92,8 @@ permission gates, Content Security Policy, and mediated access to the network
 and local state.
 
 **The web already solved the shape of this problem.** peerd builds on those
-primitives instead of placing a monolithic agent beside the browser and giving
-it remote control.
+primitives instead of placing a monolithic agent beside the browser with broad
+host permissions or somewhere else with remote control.
 
 That choice does not trade capability away. The browser is where your
 applications, identity, sessions, storage, UI, networking, WebAssembly, Workers,

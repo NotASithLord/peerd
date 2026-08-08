@@ -16,6 +16,13 @@ treats the browser as the harness. That matters because the browser already
 contains both sides of the agent problem: enormous capability and decades of
 isolation designed for hostile content.
 
+**Architectural contrast:** Remote harnesses outsource the browser and reach
+back through a cloud session or tool connection. Local host harnesses can pose
+the larger authority problem: the reasoning loop often runs with broad or
+effectively full access to the shell, filesystem, credentials, and browser
+sessions. peerd takes a third path—local to the user, but inside browser
+boundaries rather than ambient host authority.
+
 **Security posture:** Prompt injection is a containment problem, not a filtering
 problem. Assume hostile content can influence reasoning; prevent that reasoning
 from automatically inheriting credentials and broad authority.
@@ -30,6 +37,7 @@ recovery, model choice, and preview P2P.
 - The browser-native agent harness.
 - The browser is both the capability surface and the security boundary.
 - The web already solved the shape of this problem.
+- Local does not have to mean ambient authority over the host.
 - Assume the page wins the prompt injection.
 - A mixture of actors, not one omnipotent agent.
 - Capability is composed. Authority is not ambient.
