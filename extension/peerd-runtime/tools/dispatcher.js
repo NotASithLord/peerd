@@ -392,11 +392,14 @@ export const dispatchToolCall = async (call, ctx) => {
   // decideAction is the single source of that rule. Outcome is reflected
   // back into the confirmation gate's meta entry so the lineage stays
   // honest.
-  // why: memory tools (primitive 'memory') run their OWN always-on
-  // confirmation inside execute() — the lethal-trifecta defense that can't
-  // be toggled off, rendered as a diff. Skip the generic dispatcher prompt
-  // for them so the user isn't asked twice.
-  const selfConfirms = tool.primitive === 'memory';
+  // why: memory tools and site_client_write run their OWN always-on
+  // confirmation inside execute(), security surfaces that can't be toggled
+  // off and that render the actual diff/dossier. The site-client tool performs
+  // its final live-origin authorization BEFORE that prompt, which a generic
+  // dispatcher confirmation cannot do. Skip the generic prompt for both so the
+  // user is neither asked twice nor prompted for an origin the actor no longer
+  // owns. Plan mode was already enforced by the persona gate above.
+  const selfConfirms = tool.primitive === 'memory' || tool.name === 'site_client_write';
   const permMode = normalizeMode(ctx.permission?.mode);
   const permConfirm = ctx.permission?.confirmActions ?? DEFAULT_CONFIRM_ACTIONS;
   const verdict = decideAction({ mode: permMode, confirmActions: permConfirm, tool });

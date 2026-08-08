@@ -21,7 +21,7 @@
 
 import {
   ProviderHttpError, ProviderKeyMissingError, ProviderUsageLimitError, UnknownProviderError,
-} from '/peerd-provider/index.js';
+} from '../../peerd-provider/index.js';
 import {
   ActorCredentialBoundaryError, ACTOR_CREDENTIAL_BOUNDARY_FAILURE, SessionNotFoundError,
 } from '../errors.js';
@@ -234,7 +234,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   const actorType = isActor ? turnSession.actorType : undefined;
   /** @type {string|undefined} */
   const actorInstanceId = isActor ? turnSession.instanceId : undefined;
-  // DESIGN-18: a web actor's backing — 'api' (origin-owned, fetch-only, no tab) vs the
+  // DESIGN-18: a web actor's backing: 'api' (origin-owned, no tab/DOM) vs the
   // default tab backing. Threaded to buildToolContext so the gate refuses DOM tools and
   // the egress boundary scopes to the FIXED origin for an API actor.
   /** @type {'tab'|'api'|undefined} */

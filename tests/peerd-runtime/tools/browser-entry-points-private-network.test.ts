@@ -96,7 +96,7 @@ describe('browser entry-point private-network policy', () => {
     expect(canceled).toBe(1);
   });
 
-  test('site_capture uses the live public tab origin, not the stale pin', async () => {
+  test('site_capture scopes the live origin and API sibling for attributed digesting', async () => {
     let input: any = null;
     const ctx: any = {
       actorType: 'web',
@@ -125,5 +125,54 @@ describe('browser entry-point private-network policy', () => {
         timeOrigin: TEST_TIME_ORIGIN,
       },
     });
+  });
+
+  test('an empty attributed capture directs split-host sites to the API actor', async () => {
+    const ctx: any = {
+      actorType: 'web',
+      activeTab: { id: 7, url: 'https://app.example/', origin: 'https://app.example' },
+      tabs: { get: async () => ({ id: 7, url: 'https://app.example/' }) },
+      scripting: {
+        executeScript: async (request: any) => browserProbeResult(request, {
+          url: 'https://app.example/',
+        }),
+      },
+      siteCapture: {
+        start: async () => ({ tap: 'test' }),
+        stop: async () => ({ endpoints: [], dropped: 3 }),
+      },
+    };
+    const result: any = await siteCaptureTool.execute({ action: 'stop' }, ctx);
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain('another origin');
+    expect(result.content).toContain('exact API actor');
+    expect(result.content).toContain('never inferred as shared custody');
+  });
+
+  test('split-host capture output keeps endpoint evidence attributed per origin', async () => {
+    const ctx: any = {
+      actorType: 'web',
+      activeTab: { id: 7, url: 'https://app.example/', origin: 'https://app.example' },
+      tabs: { get: async () => ({ id: 7, url: 'https://app.example/' }) },
+      scripting: {
+        executeScript: async (request: any) => browserProbeResult(request, { url: 'https://app.example/' }),
+      },
+      siteCapture: {
+        start: async () => ({ tap: 'test' }),
+        stop: async () => ({
+          deriver: 'capture-tap', dropped: 0,
+          originDigests: [
+            { origin: 'https://app.example', auth: 'session', endpoints: [{ method: 'GET', path: '/me' }] },
+            { origin: 'https://api.app.example', auth: 'bearer', endpoints: [{ method: 'POST', path: '/v1/items' }] },
+          ],
+        }),
+      },
+    };
+    const result: any = await siteCaptureTool.execute({ action: 'stop' }, ctx);
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain('origin: https://app.example (owned tab)');
+    expect(result.content).toContain('origin: https://api.app.example (related observation; separate custody)');
+    expect(result.content).toContain('POST /v1/items');
+    expect(result.content).toContain('delegate to that exact API actor');
   });
 });

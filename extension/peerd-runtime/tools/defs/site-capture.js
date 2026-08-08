@@ -1,18 +1,18 @@
 // @ts-check
-// site_capture — record the page's OWN network traffic while you drive it, then
+// site_capture: record the page's OWN network traffic while you drive it, then
 // digest it into a draft SITE CLIENT dossier (DESIGN-19 Phase 2).
 //
 // Two taps behind ONE capability (the CDP-vs-scripting dual-backend posture): on
 // preview/dev, CDP Network on the debugger pool (full fidelity); on store-Chrome
 // AND Firefox, a chrome.scripting MAIN-world fetch/XHR wrap (no new permission).
-// The SW picks by the SAME availability check the DOM tools use — never a channel
+// The SW picks by the SAME availability check the DOM tools use; never a channel
 // probe. Credentials are redacted at the tap boundary (digest.js) before anything
 // reaches here, the model, or the store.
 //
 // Flow: site_capture({action:'start'}) → drive the site (navigate/click/type) →
 // site_capture({action:'stop'}) returns a redacted endpoint inventory the actor
 // turns into a client via site_client_write (a confirmed write). Web-actor-only,
-// tab backing only (an API actor has no tab to observe — it derives by probing).
+// tab backing only (an API actor has no tab to observe; it derives by probing).
 
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { browserDocumentIdentity, originOfUrl, resolveTargetTab } from './dom-helpers.js';
@@ -27,8 +27,9 @@ export const siteCaptureTool = {
     'on that document. Use click/type without navigating; navigation cancels and',
     'discards the capture. { action: "stop" } returns a',
     'redacted endpoint inventory (credentials are never captured). Turn that inventory',
-    'into a client with site_client_write. Only records same-origin API calls on the',
-    'tab you own — open the site first (navigate).',
+    'into a client with site_client_write. It records the tab origin and a common',
+    'api. sibling as separately attributed evidence. Only the exact-origin actor',
+    'may verify and persist each client. Open the site first (navigate).',
   ].join(' '),
   schema: {
     type: 'object',
@@ -72,8 +73,9 @@ export const siteCaptureTool = {
         error: 'site_capture_discarded: the owned tab has no web origin; the capture was canceled and its data discarded.',
       };
     }
-    // Same-origin (+ obvious api. sibling) scope for the digest — third-party
-    // analytics noise is dropped. The tab's LIVE origin is authoritative.
+    // Observe the tab plus its common api.<host> sibling, but keep the digest
+    // attributed per exact origin. A syntactic DNS sibling is useful discovery,
+    // never custody: only that origin's API actor may verify/persist its client.
     const origins = relatedOrigins(tabOrigin);
 
     try {
@@ -94,17 +96,26 @@ export const siteCaptureTool = {
           content: 'The capture ended and its data was discarded because the tab changed pages. Start a new capture on the current page before driving it.',
         };
       }
-      const endpoints = (digest?.endpoints ?? []);
-      if (!endpoints.length) {
-        return { ok: true, content: `capture stopped — no same-origin API traffic observed (dropped ${digest?.dropped ?? 0} out-of-scope). If the page loaded before capture started, re-run with capture on from the start.` };
+      const groups = Array.isArray(digest?.originDigests)
+        ? digest.originDigests.filter((/** @type {{ endpoints?: unknown[] }} */ group) => group.endpoints?.length)
+        : [];
+      if (!groups.length) {
+        return {
+          ok: true,
+          content: `capture stopped: no in-scope API traffic observed (dropped ${digest?.dropped ?? 0} out-of-scope). If the page loaded before capture started, re-run with capture on from the start. If its API is on another origin, address that exact API actor and derive its client there; sibling hosts are observed only when explicitly attributed, never inferred as shared custody.`,
+        };
       }
       const body = [
         `deriver: ${digest.deriver}`,
-        `auth posture: ${digest.auth}`,
-        `endpoints (${endpoints.length}):`,
-        ...endpoints.map((/** @type {{method:string,path:string,note?:string}} */ e) => `  ${e.method} ${e.path}${e.note ? ` — ${e.note}` : ''}`),
+        `captured origins (${groups.length}):`,
+        ...groups.flatMap((/** @type {{origin:string,auth:string,endpoints:Array<{method:string,path:string,note?:string}>}} */ group) => [
+          `origin: ${group.origin}${group.origin === tabOrigin ? ' (owned tab)' : ' (related observation; separate custody)'}`,
+          `  auth posture: ${group.auth}`,
+          `  endpoints (${group.endpoints.length}):`,
+          ...group.endpoints.map((e) => `    ${e.method} ${e.path}${e.note ? ` - ${e.note}` : ''}`),
+        ]),
         '',
-        'Turn this into a client module with site_client_write (a confirmed write).',
+        `Persist only the ${tabOrigin} group here with site_client_write. For every other origin, report the attributed group and have the orchestrator delegate to that exact API actor to verify and derive its own client.`,
       ].join('\n');
       // The inventory is derived from page traffic → fenced, tagged with the origin.
       const fenced = wrapUntrusted({ origin: tabOrigin, tool: 'site_capture', body });
@@ -116,18 +127,18 @@ export const siteCaptureTool = {
 };
 
 /**
- * The origins in scope for a capture: the tab's own origin plus an `api.<domain>`
- * sibling (common split — the app on www., the API on api.). Pure-ish (URL parse).
+ * Capture the owned origin plus the common API sibling as separately
+ * attributed evidence. This expands observation, never client custody.
  * @param {string} origin
  * @returns {string[]}
  */
 const relatedOrigins = (origin) => {
   const out = [origin];
   try {
-    const u = new URL(origin);
-    const host = u.hostname.replace(/^www\./, '');
+    const url = new URL(origin);
+    const host = url.hostname.replace(/^www\./, '');
     const apiHost = `api.${host}`;
-    if (apiHost !== u.hostname) out.push(`${u.protocol}//${apiHost}`);
-  } catch { /* keep just the origin */ }
+    if (apiHost !== url.hostname) out.push(`${url.protocol}//${apiHost}`);
+  } catch { /* keep just the exact origin */ }
   return out;
 };

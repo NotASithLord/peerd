@@ -16,6 +16,7 @@ import {
   normalizeSiteOrigin,
   buildClientWriteProposal,
 } from '../../site-clients/index.js';
+import { siteClientOriginRefusal } from './site-client-origin.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const siteClientWriteTool = {
@@ -71,13 +72,19 @@ export const siteClientWriteTool = {
 
   execute: async (args, ctx) => {
     const origin = normalizeSiteOrigin(args?.origin);
-    if (!origin) return { ok: false, error: `bad_origin: ${args?.origin}` };
+    if (!origin) return { ok: false, error: 'bad_origin: expected a public HTTP(S) site origin' };
+    const refusal = await siteClientOriginRefusal(origin, ctx);
+    if (refusal) return refusal;
     const store = /** @type {import('../../site-clients/store.js').SiteClientStore | undefined} */ (
       /** @type {any} */ (ctx).siteClients);
     if (!store) return { ok: false, error: 'site_clients_unavailable' };
     if (args?.body !== undefined && typeof args.body !== 'string') return { ok: false, error: 'body_must_be_string' };
 
     const prior = await store.get(origin).catch(() => null);
+    // The prior-record read yielded. Do not use its bytes to build a prompt if
+    // the actor lost custody during IDB.
+    const postReadRefusal = await siteClientOriginRefusal(origin, ctx);
+    if (postReadRefusal) return postReadRefusal;
     /** @type {ReturnType<typeof buildClientWriteProposal>} */
     let proposal;
     try {
@@ -122,6 +129,16 @@ export const siteClientWriteTool = {
     }, ctx.abortSignal);
     if (ans !== 'yes_once' && ans !== 'yes_session' && ans !== true) {
       return { ok: false, error: 'site_client_write_rejected', content: 'User declined the site-client write.' };
+    }
+    if (ctx.abortSignal?.aborted) {
+      return { ok: false, error: 'site_client_write_aborted: the turn stopped during confirmation' };
+    }
+    // Confirmation is intentionally unbounded human time. Reauthorize after it
+    // and immediately before the mutation; approval is not durable custody.
+    const postConfirmRefusal = await siteClientOriginRefusal(origin, ctx);
+    if (postConfirmRefusal) return postConfirmRefusal;
+    if (ctx.abortSignal?.aborted) {
+      return { ok: false, error: 'site_client_write_aborted: the turn stopped before mutation' };
     }
 
     try {

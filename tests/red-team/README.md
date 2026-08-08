@@ -52,6 +52,8 @@ to prompt injection.
 | 09 | Hostile page content steers reads, writes, or egress | content disarmament, user-generated-content confirmation, egress checks |
 | 10 | A moved or redirected tab retasks a web actor | origin lock, landing checks, trusted terminal reply |
 | 11 | Login orchestration captures a credential | verified affordance, fixed confirmation, user-held authentication factor |
+| 12 | Contributor Metrics collects without consent | versioned consent, bounded schema, exact-sender routes, no uploader |
+| 13 | Page content retargets a stored site client | exact-origin client custody at gate, tool, and worker relay boundaries |
 
 ### Scenario 05 and MCP
 

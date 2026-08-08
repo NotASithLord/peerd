@@ -87,6 +87,10 @@ describe('restrictCtxCapabilities', () => {
     safeFetch: () => {},
     webFetch: () => {},
     webCache: { get: () => {}, put: () => {}, key: () => 'k' },
+    siteClients: { get: () => {}, put: () => {}, remove: () => {} },
+    canUseSiteClientOrigin: () => true,
+    authorizeSiteClientOrigin: async () => true,
+    siteCapture: { start: () => {}, stop: () => {} },
     memory: { read: () => {} },
     kv: { get: () => {} },
     idb: { getAll: () => {} },
@@ -140,6 +144,16 @@ describe('restrictCtxCapabilities', () => {
     expect('webCache' in restrictCtxCapabilities(fullCtx(), new Set(['read_web_cache']))).toBe(true);
     expect('memory' in restrictCtxCapabilities(fullCtx(), new Set(['remember']))).toBe(true);
     expect('requestReview' in restrictCtxCapabilities(fullCtx(), new Set(['request_review']))).toBe(true);
+    for (const tool of ['site_client_read', 'site_client_run', 'site_client_write']) {
+      const narrowed = restrictCtxCapabilities(fullCtx(), new Set([tool]));
+      expect('siteClients' in narrowed).toBe(true);
+      expect('canUseSiteClientOrigin' in narrowed).toBe(true);
+      expect('authorizeSiteClientOrigin' in narrowed).toBe(true);
+    }
+    const unrelated = restrictCtxCapabilities(fullCtx(), new Set(['fetch_url']));
+    expect('siteClients' in unrelated).toBe(false);
+    expect('canUseSiteClientOrigin' in unrelated).toBe(false);
+    expect('authorizeSiteClientOrigin' in unrelated).toBe(false);
     // sandbox_create keeps the dweb closure (its app arm reads ctx.dweb for the dwapp flag)
     expect('dweb' in restrictCtxCapabilities(fullCtx(), new Set(['sandbox_create']))).toBe(true);
     expect('dweb' in restrictCtxCapabilities(fullCtx(), new Set(['dweb_share']))).toBe(true);
