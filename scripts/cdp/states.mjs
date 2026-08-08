@@ -20,7 +20,7 @@
 import { createServer } from 'node:http';
 import { createSocket } from 'node:dgram';
 import {
-  rpc, evalIn, waitFor, sseText, sseToolCall, openExtPage, openWidePage,
+  rpc, evalIn, waitFor, sseText, sseToolCall, sseToolCalls, openExtPage, openWidePage,
   sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
 } from './e2e-harness.mjs';
 
@@ -120,6 +120,7 @@ let actorDelegatesState = { spawned: 0, childCalls: 0, webCalls: 0 };
 let actorFabricHierarchyState = {
   spawned: 0, nestedCalls: 0, siblingCalls: 0, webCalls: 0,
 };
+let actorOverviewState = { alphaSpawned: 0, betaSpawned: 0 };
 // heap-split phase 4: an offscreen actor BUILDING an app (create + delegate).
 let actorAppState = { spawned: 0, childCalls: 0, appCalls: 0, appId: null };
 let actorAppProbeUrl = '';
@@ -2996,6 +2997,189 @@ export const STATES = [
         JSON.stringify(finished));
       if (finished) await rec.shot('actor-fabric-hierarchy-finished');
       await evalIn(ctx.page, `document.querySelector('.input-bar textarea')?.focus()`);
+    },
+  },
+
+  // --- functional + visual: full-page, cross-session Actor Space -----------
+  // Two chats keep temporary actors alive at once. The home monitor must show
+  // two independent orchestrator rooms without merging their lineages, expose
+  // an inspectable physical boundary, and collapse to its permanent empty state
+  // after both workers settle.
+  {
+    name: 'actor-overview', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      if (body.includes('<actor_agent>') && body.includes('alpha isolated research')) {
+        return { delayMs: 18_000, sse: sseText('ALPHA-ACTOR-DONE') };
+      }
+      if (body.includes('ALPHA-ROOT')) {
+        if (actorOverviewState.alphaSpawned === 0) {
+          actorOverviewState.alphaSpawned = 4;
+          return { sse: sseToolCalls(Array.from({ length: 4 }, (_, index) => ({
+            name: 'actor_create',
+            args: { task: `alpha isolated research ${index + 1}`, tools: [] },
+          }))) };
+        }
+        return { sse: sseText('ALPHA-DELEGATED') };
+      }
+      if (body.includes('BETA-ROOT')) {
+        return { delayMs: 18_000, sse: sseText('BETA-ORCHESTRATOR-DONE') };
+      }
+      return { sse: sseText('overview-state-idle') };
+    },
+    async run(ctx, rec) {
+      actorOverviewState = { alphaSpawned: 0, betaSpawned: 0 };
+      // A reset leaves a deliberately sessionless composer until first send.
+      // Seed two ordinary chats before starting either long-running actor so
+      // switching between their durable ids cannot stop the other's work.
+      await rpc(ctx.page, { type: 'agent/send', text: 'Launch risk orchestration workspace' });
+      const firstState = await waitFor(async () => {
+        const state = await rpc(ctx.page, { type: 'state/get' });
+        return state?.state?.session?.sessionId && !(await probe(ctx)).busy ? state : null;
+      }, { budgetMs: 10_000, pollMs: 80 });
+      const alphaRoot = firstState?.state?.session?.sessionId;
+      await rpc(ctx.page, { type: 'session/reset' });
+      await waitFor(async () => !(await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.sessionId,
+        { budgetMs: 5_000, pollMs: 50 });
+      await rpc(ctx.page, { type: 'agent/send', text: 'Rollout options workspace' });
+      const secondState = await waitFor(async () => {
+        const state = await rpc(ctx.page, { type: 'state/get' });
+        return state?.state?.session?.sessionId && !(await probe(ctx)).busy ? state : null;
+      }, { budgetMs: 10_000, pollMs: 80 });
+      const betaRoot = secondState?.state?.session?.sessionId;
+      rec.check('two distinct orchestrator sessions exist',
+        !!alphaRoot && !!betaRoot && alphaRoot !== betaRoot,
+        `${alphaRoot} / ${betaRoot}`);
+
+      const page = await openWidePage(ctx, 'home/home.html#actors');
+      try {
+        await rpc(ctx.page, { type: 'session/switch', sessionId: alphaRoot });
+        await rpc(ctx.page, { type: 'agent/send', text: 'ALPHA-ROOT research the launch risks' });
+        const alphaLive = await waitFor(async () => {
+          const overview = await rpc(page, { type: 'actors/overview' });
+          return overview?.roots?.some((root) => root.session?.sessionId === alphaRoot
+            && Object.keys(root.topology?.spawned?.sessions ?? {}).length >= 4);
+        }, { budgetMs: 15_000, pollMs: 80 });
+        rec.check('the first chat keeps a high-fanout actor room live', !!alphaLive);
+
+        const switched = await rpc(ctx.page, { type: 'session/switch', sessionId: betaRoot });
+        rec.check('a second orchestrator can become active while the first actor works', switched?.ok === true, JSON.stringify(switched));
+        await rpc(ctx.page, { type: 'agent/send', text: 'BETA-ROOT compare the rollout options' });
+        const bothLive = await waitFor(async () => {
+          const overview = await rpc(page, { type: 'actors/overview' });
+          const alpha = (overview?.roots ?? []).find((root) => root.session?.sessionId === alphaRoot);
+          const beta = (overview?.roots ?? []).find((root) => root.session?.sessionId === betaRoot);
+          return Object.keys(alpha?.topology?.spawned?.sessions ?? {}).length >= 4
+            && beta?.busy === true
+            ? overview : null;
+        }, { budgetMs: 15_000, pollMs: 80 });
+        rec.check('the server snapshot reports both roots without cross-session merging',
+          bothLive?.roots?.length === 2,
+          JSON.stringify(bothLive?.roots?.map((root) => root.session?.sessionId)));
+
+        const rendered = await waitFor(() => evalIn(page, `(() => {
+          const space = document.querySelector('.actor-space');
+          const rooms = [...document.querySelectorAll('.actor-space-room')];
+          const nodes = [...document.querySelectorAll('.actor-space-node')];
+          if (!space || rooms.length < 2 || nodes.length < 6) return null;
+          const rect = space.getBoundingClientRect();
+          const alphaRoom = rooms.find((room) => room.getAttribute('data-root-session') === ${JSON.stringify(alphaRoot)});
+          const alphaTree = alphaRoom?.querySelector('.actor-space-tree');
+          const alphaHead = alphaRoom?.querySelector('.actor-space-room-head');
+          return {
+            rooms: rooms.length,
+            roots: rooms.map((room) => room.getAttribute('data-root-session')),
+            nodes: nodes.length,
+            subactors: document.querySelectorAll('.actor-space-node.is-subactor').length,
+            orbs: document.querySelectorAll('.actor-space .peerd-spinner').length,
+            text: space.textContent ?? '',
+            highFanoutScrolls: !!alphaTree && alphaTree.scrollHeight > alphaTree.clientHeight,
+            headerVisible: !!alphaHead && alphaHead.getBoundingClientRect().top >= 0,
+            fits: rect.left >= 0 && rect.right <= innerWidth
+              && document.documentElement.scrollWidth <= innerWidth,
+          };
+        })()`), { budgetMs: 10_000, pollMs: 80 });
+        rec.check('Actor Space renders two orchestrator rooms and both workers',
+          rendered?.rooms === 2 && rendered?.nodes >= 6 && rendered?.subactors >= 4,
+          JSON.stringify(rendered));
+        rec.check('the rooms stay root-separated and use the brand orb on live contexts',
+          rendered?.roots?.includes(alphaRoot)
+            && rendered?.roots?.includes(betaRoot)
+            && rendered?.orbs >= 5,
+          JSON.stringify(rendered));
+        rec.check('the full-screen map exposes current work, topology semantics, and fits the viewport',
+          rendered?.text.includes('alpha isolated research')
+            && rendered?.text.includes('BETA-ROOT compare the rollout options')
+            && rendered?.text.includes('solid · resource-bound actor')
+            && rendered?.text.includes('dashed · temporary subactor')
+            && rendered?.fits === true,
+          JSON.stringify(rendered));
+        rec.check('a high-fanout room scrolls internally without pushing away its header',
+          rendered?.highFanoutScrolls === true && rendered?.headerVisible === true,
+          JSON.stringify(rendered));
+        if (rendered) await rec.shotPage('actor-space-live.light', page);
+
+        await page.send('Emulation.setDeviceMetricsOverride', {
+          width: 390, height: 844, deviceScaleFactor: 1, mobile: false,
+        });
+        await sleep(100);
+        const narrow = await evalIn(page, `(() => {
+          const shell = document.querySelector('.home-shell');
+          const rail = document.querySelector('.home-rail');
+          const targets = [...document.querySelectorAll('.home-rail button')];
+          return {
+            direction: getComputedStyle(shell).flexDirection,
+            viewport: innerWidth,
+            documentWidth: document.documentElement.scrollWidth,
+            railWidth: rail.getBoundingClientRect().width,
+            targetsTall: targets.every((button) => button.getBoundingClientRect().height >= 44),
+          };
+        })()`);
+        rec.check('Actor Space reflows to a compact top rail at 390 CSS pixels',
+          narrow?.direction === 'column'
+            && narrow?.documentWidth <= narrow?.viewport
+            && narrow?.railWidth <= narrow?.viewport
+            && narrow?.targetsTall === true,
+          JSON.stringify(narrow));
+        if (narrow) await rec.shotPage('actor-space-live-narrow.light', page);
+
+        await evalIn(page, `document.querySelector('.actor-space-node.is-subactor')?.click()`);
+        const inspected = await waitFor(() => evalIn(page, `(() => {
+          const panel = document.querySelector('.actor-space-inspector');
+          return panel ? { text: panel.textContent ?? '', pressed:
+            document.querySelector('.actor-space-node.is-subactor')?.getAttribute('aria-pressed') } : null;
+        })()`), { budgetMs: 2_000, pollMs: 40 });
+        rec.check('a worker opens an exact access and isolation inspector',
+          inspected?.pressed === 'true'
+            && inspected?.text.includes('reasoning only')
+            && inspected?.text.includes('Dedicated keyless worker'),
+          JSON.stringify(inspected));
+        await evalIn(page, `document.querySelector('.actor-space-inspector')?.scrollIntoView({ block: 'center' })`);
+        await setEmulatedTheme(page, 'dark');
+        await sleep(100);
+        if (inspected) await rec.shotPage('actor-space-inspected-narrow.dark', page);
+
+        await page.send('Emulation.setDeviceMetricsOverride', {
+          width: 320, height: 720, deviceScaleFactor: 1, mobile: false,
+        });
+        await sleep(100);
+        const zoomReflow = await evalIn(page, `({
+          viewport: innerWidth,
+          documentWidth: document.documentElement.scrollWidth,
+          railWidth: document.querySelector('.home-rail')?.getBoundingClientRect().width,
+        })`);
+        rec.check('Actor Space still reflows at the 320 CSS-pixel equivalent of 400% zoom',
+          zoomReflow?.documentWidth <= zoomReflow?.viewport
+            && zoomReflow?.railWidth <= zoomReflow?.viewport,
+          JSON.stringify(zoomReflow));
+
+        const empty = await waitFor(() => evalIn(page,
+          `document.querySelector('.actor-space-empty')?.textContent ?? null`),
+        { budgetMs: 28_000, pollMs: 150 });
+        rec.check('the permanent monitor settles to an honest empty state',
+          typeof empty === 'string' && empty.includes('The instance is quiet'), String(empty));
+        if (empty) await rec.shotPage('actor-space-empty-narrow.dark', page);
+      } finally { try { page.close(); } catch { /* */ } }
     },
   },
 

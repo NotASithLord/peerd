@@ -125,3 +125,23 @@ export const isOptionsSender = (sender, { runtimeId, extensionOrigin, optionsUrl
   const documentUrl = hashAt === -1 ? url : url.slice(0, hashAt);
   return !documentUrl.includes('?') && documentUrl === optionsUrl;
 };
+
+/**
+ * Is this sender the full-tab Home SPA that owns instance-wide observability?
+ * Home accepts hash routes (openHome uses them to select a section), rejects
+ * queries/sibling paths, and must carry tab provenance. Keeping this predicate
+ * narrower than `isFirstPartySender` prevents engine hosts and other extension
+ * pages from reading cross-session actor topology.
+ * @param {{ id?: string, url?: string, tab?: { id?: number } } | null | undefined} sender
+ * @param {{ runtimeId?: string, extensionOrigin?: string, homeUrl?: string }} [trust]
+ * @returns {boolean}
+ */
+export const isHomeSender = (sender, { runtimeId, extensionOrigin, homeUrl } = {}) => {
+  if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
+  if (typeof homeUrl !== 'string' || homeUrl.length === 0) return false;
+  if (typeof sender?.tab?.id !== 'number') return false;
+  const url = /** @type {string} */ (sender.url);
+  const hashAt = url.indexOf('#');
+  const documentUrl = hashAt === -1 ? url : url.slice(0, hashAt);
+  return !documentUrl.includes('?') && documentUrl === homeUrl;
+};

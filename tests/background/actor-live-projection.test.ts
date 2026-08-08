@@ -50,4 +50,26 @@ describe('actor live projection', () => {
     }]);
     expect(live.snapshot('root').spawned.sessions).toEqual({});
   });
+
+  test('enumerates every active root without merging their snapshots', () => {
+    const live = createActorLiveProjection();
+    live.startBound({
+      rootSessionId: 'root-b', parentSessionId: 'root-b',
+      parentToolUseId: 'tu-bound', sessionId: 'web-b', kind: 'web',
+    });
+    live.foldSpawned({
+      type: 'actor-start', rootSessionId: 'root-a', parentSessionId: 'root-a',
+      parentToolUseId: 'tu-spawn', sessionId: 'child-a', task: 'inspect',
+    });
+    live.setAsyncTasks('root-c', [{ taskId: 'as-c', task: 'compare', status: 'running' }]);
+
+    expect(live.rootSessionIds()).toEqual(['root-a', 'root-b', 'root-c']);
+    expect(Object.keys(live.snapshot('root-a').actors)).toEqual([]);
+    expect(Object.keys(live.snapshot('root-b').actors)).toEqual(['tu-bound']);
+
+    live.finishBound({ rootSessionId: 'root-b', parentToolUseId: 'tu-bound' });
+    live.foldSpawned({ type: 'actor-stop', sessionId: 'child-a', parentToolUseId: 'tu-spawn' });
+    live.setAsyncTasks('root-c', [{ taskId: 'as-c', task: 'compare', status: 'delivered' }]);
+    expect(live.rootSessionIds()).toEqual([]);
+  });
 });

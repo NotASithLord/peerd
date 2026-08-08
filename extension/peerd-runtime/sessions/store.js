@@ -135,6 +135,14 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     return withKindDefaults({ ...rest, messages });
   };
 
+  // Metadata-only readers must never accidentally expose conversation bodies
+  // in their caller-facing result. This shape is also safe for legacy v1 records:
+  // their inline `messages` array is dropped without triggering migration.
+  const presentMetadata = (/** @type {any} */ record) => {
+    const { msgIndex: _i, messagesV2: _v, messages: _m, ...rest } = record;
+    return withKindDefaults(rest);
+  };
+
   // Externalize a pre-v2 record's inline messages into the message store and
   // rewrite it in v2 shape. Idempotent; a no-op once `messagesV2` is set.
   const migrate = async (/** @type {any} */ record) => {
@@ -309,6 +317,21 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     });
     // Stable order: newest first. UUIDv7 keys sort chronologically.
     return out.sort((a, b) => b.createdAt - a.createdAt);
+  };
+
+  /**
+   * List session records without reading the per-message store or assembling
+   * message bodies. Unlike `list()`, this touches only the session-record
+   * store, making it suitable
+   * for high-frequency lifecycle discovery such as the instance actor map.
+   * Read-only over legacy and v2 shapes; never migrates.
+   * @returns {Promise<Array<Omit<Session, 'messages'>>>}
+   */
+  const listMetadata = async () => {
+    const records = await idb.getAll(STORE);
+    return records
+      .map(presentMetadata)
+      .sort((a, b) => b.createdAt - a.createdAt);
   };
 
   const archive = (/** @type {string} */ sessionId) => enqueueSessionOperation(sessionId, async () => {
@@ -509,6 +532,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     create,
     get,
     list,
+    listMetadata,
     findActorSession,
     archive,
     appendMessage,

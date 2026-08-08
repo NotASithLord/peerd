@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import {
-  isFirstPartySender, isOffscreenSender, isOptionsSender, isServiceWorkerSender,
+  isFirstPartySender, isHomeSender, isOffscreenSender, isOptionsSender, isServiceWorkerSender,
 } from '../../extension/shared/sender-trust.js';
 
 const ID = 'abcdefghijklmnopabcdefghijklmnop';
@@ -164,6 +164,34 @@ describe('isOptionsSender', () => {
     expect(isOptionsSender(
       { id: ID, url: 'https://evil.example/options/options.html', tab: { id: 11 } },
       optionsTrust,
+    )).toBe(false);
+  });
+});
+
+describe('isHomeSender', () => {
+  const homeUrl = `${ORIGIN}home/home.html`;
+  const homeTrust = { ...trust, homeUrl };
+
+  it('accepts only the exact tab-hosted Home SPA and its hash routes', () => {
+    expect(isHomeSender(
+      { id: ID, url: homeUrl, tab: { id: 13 } }, homeTrust,
+    )).toBe(true);
+    expect(isHomeSender(
+      { id: ID, url: `${homeUrl}#actors`, tab: { id: 13 } }, homeTrust,
+    )).toBe(true);
+  });
+
+  it('rejects engine pages, no-tab copies, queries, and sibling paths', () => {
+    expect(isHomeSender(
+      { id: ID, url: `${ORIGIN}engine-tabs/notebook-tab/index.html`, tab: { id: 7 } },
+      homeTrust,
+    )).toBe(false);
+    expect(isHomeSender({ id: ID, url: homeUrl }, homeTrust)).toBe(false);
+    expect(isHomeSender(
+      { id: ID, url: `${homeUrl}?view=actors`, tab: { id: 13 } }, homeTrust,
+    )).toBe(false);
+    expect(isHomeSender(
+      { id: ID, url: `${homeUrl}.evil`, tab: { id: 13 } }, homeTrust,
     )).toBe(false);
   });
 });

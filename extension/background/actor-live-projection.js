@@ -134,8 +134,33 @@ export const createActorLiveProjection = () => {
     };
   };
 
+  // The chat snapshot above is intentionally root-scoped. The full-page home
+  // needs a separate discovery seam so it can ask which roots currently own
+  // work WITHOUT receiving transcripts from unrelated sessions. Only roots
+  // with server-observed topology are enumerated; session titles/status are
+  // joined by the read-only route that owns access to the session store.
+  const rootSessionIds = () => {
+    const roots = new Set();
+    for (const card of bound.values()) {
+      if (typeof card?.rootSessionId === 'string' && card.rootSessionId) {
+        roots.add(card.rootSessionId);
+      }
+    }
+    for (const session of spawned.values()) {
+      if (typeof session?.rootSessionId === 'string' && session.rootSessionId) {
+        roots.add(session.rootSessionId);
+      }
+    }
+    for (const [parentSessionId, tasks] of asyncTasks) {
+      if (!(tasks ?? []).some((task) => task?.status === 'running' || task?.status === 'done')) continue;
+      const rootSessionId = spawned.get(parentSessionId)?.rootSessionId ?? parentSessionId;
+      if (rootSessionId) roots.add(rootSessionId);
+    }
+    return [...roots].sort();
+  };
+
   return {
     startBound, patchBound, finishBound,
-    foldSpawned, rootForSpawned, setAsyncTasks, snapshot,
+    foldSpawned, rootForSpawned, setAsyncTasks, snapshot, rootSessionIds,
   };
 };

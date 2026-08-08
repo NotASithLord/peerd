@@ -18,16 +18,21 @@ const makeIdb = () => {
     return stores.get(name)!;
   };
   let getManyCalls = 0;
+  const getAllCalls: string[] = [];
   return {
     _tbl: tbl,
     _getManyCalls: () => getManyCalls,
+    _getAllCalls: () => [...getAllCalls],
     get: async (store: string, key: string) => tbl(store).get(key),
     getMany: async (store: string, keys: string[]) => {
       getManyCalls++;
       return (keys ?? []).map((k) => tbl(store).get(k));
     },
     put: async (store: string, val: any) => { tbl(store).set(val.id ?? val.sessionId, val); },
-    getAll: async (store: string) => [...tbl(store).values()],
+    getAll: async (store: string) => {
+      getAllCalls.push(store);
+      return [...tbl(store).values()];
+    },
   };
 };
 
@@ -49,6 +54,36 @@ describe('session store v2 — per-message records', () => {
     // The internal fields are not leaked into the public shape.
     expect('msgIndex' in s).toBe(false);
     expect('messagesV2' in s).toBe(false);
+  });
+
+  test('listMetadata never reads or returns message bodies', async () => {
+    const idb = makeIdb();
+    const store = makeStore(idb);
+    const session = await store.create({ provider: 'openai', model: 'gpt-test' });
+    await store.appendMessage(session.sessionId, {
+      role: 'user', content: 'Visible session title', id: 'title-message', when: 1,
+    } as any);
+    await store.appendMessage(session.sessionId, {
+      role: 'assistant', content: 'private transcript body', id: 'private-message', when: 2,
+    } as any);
+    // Legacy inline records must also stay body-free without being migrated.
+    await idb.put('sessions', {
+      sessionId: 'legacy', createdAt: 2, provider: 'anthropic', model: 'legacy',
+      messages: [{ role: 'user', content: 'legacy private body' }],
+    });
+
+    const callsBefore = idb._getAllCalls().length;
+    const rows = await store.listMetadata();
+    const calls = idb._getAllCalls().slice(callsBefore);
+
+    expect(calls).toEqual(['sessions']);
+    expect(rows.map((row: any) => row.sessionId)).toEqual([session.sessionId, 'legacy']);
+    expect(rows.every((row: any) => !Object.hasOwn(row, 'messages'))).toBe(true);
+    expect(rows.every((row: any) => !Object.hasOwn(row, 'msgIndex'))).toBe(true);
+    expect(rows.every((row: any) => !Object.hasOwn(row, 'messagesV2'))).toBe(true);
+    expect(JSON.stringify(rows)).not.toContain('private transcript body');
+    expect(JSON.stringify(rows)).not.toContain('legacy private body');
+    expect(idb._tbl('sessions').get('legacy').messages).toHaveLength(1);
   });
 
   // DESIGN-18 REGRESSION GUARD: create() rebuilds the record from a fixed field

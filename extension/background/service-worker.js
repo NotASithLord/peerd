@@ -30,7 +30,7 @@
 import browser from '/vendor/browser-polyfill.js';
 import { makeDispatcher, isTrustedSender } from '/shared/messaging.js';
 import {
-  isOffscreenSender as senderIsOffscreen, isOptionsSender,
+  isHomeSender, isOffscreenSender as senderIsOffscreen, isOptionsSender,
 } from '/shared/sender-trust.js';
 import { loadDweb } from '/shared/dweb-loader.js';
 import { makeSiteCaptureManager } from '/background/site-capture-manager.js';
@@ -430,6 +430,7 @@ import { makeHooksRoutes } from './routes/hooks.js';
 import { makeSkillsRoutes } from './routes/skills.js';
 import { makeMemoryRoutes } from './routes/memory.js';
 import { makeContactsRoutes } from './routes/contacts.js';
+import { makeActorOverviewRoutes } from './routes/actor-overview.js';
 import { makeSessionRoutes } from './routes/sessions.js';
 import { makeEngineRoutes } from './routes/engine.js';
 import { makeSystemRoutes } from './routes/system.js';
@@ -3105,6 +3106,11 @@ const isActualOptionsSender = (/** @type {any} */ sender) => isOptionsSender(sen
   runtimeId: browser.runtime?.id,
   extensionOrigin: browser.runtime?.getURL?.('') ?? '',
   optionsUrl: browser.runtime?.getURL?.('options/options.html') ?? '',
+});
+const isActualHomeSender = (/** @type {any} */ sender) => isHomeSender(sender, {
+  runtimeId: browser.runtime?.id,
+  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
+  homeUrl: browser.runtime?.getURL?.('home/home.html') ?? '',
 });
 
 // Root creation and recovery share one serialized custody lane. Without it,
@@ -6534,7 +6540,7 @@ privateTransferPort = makePrivateTransferPort({
 // tests/meta/sw-routes-wiring.test.ts proves each module's deps object matches
 // what it destructures, exactly (no missing, no dead).
 //
-// ALL 103 routes now live in modules — none are inline here. The reassigned
+// Routes live in modules rather than accumulating inline here. The reassigned
 // module state that once forced routes inline lives in stores (settings-store /
 // denylist-store / session-state / local-model-state / profile-state); routes
 // reach it through a store method (always-live) handed in via deps. A new route
@@ -6593,6 +6599,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     USER_DOC_SCOPE, appendNoteToUserDoc, profileState, seedUserDocBody,
   }),
   ...makeContactsRoutes({ vault, auditLog, contacts, appRegistry, mergeContacts }),
+  ...makeActorOverviewRoutes({ vault, sessions, turnSlots, actorLiveProjection, isActualHomeSender }),
   ...makeSessionRoutes({
     vault, auditLog, sessions, sessionCache, turnSlots, manifestLabel, buildToolContext,
     applyComposer, commandSources, prepareUserAttachmentsWithDocs, runAgentTurn, runInit,
