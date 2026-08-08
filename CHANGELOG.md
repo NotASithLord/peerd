@@ -10,8 +10,14 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-08
+
 ### Added
 
+- Firefox actors now run in dedicated Worker heaps hosted by the MV3 background
+  page. An acknowledged heartbeat detects host loss, revokes ambiguous work,
+  pauses actor tools, and exposes an explicit recovery flow instead of silently
+  replaying a side effect.
 - Preview users can include the local dweb identity in a password-protected
   backup and restore it on another preview install. Identity replacement is a
   separate explicit action and remains blocked while local shares depend on the
@@ -21,11 +27,33 @@ and storage formats may move until the surface stabilizes.
 
 ### Changed
 
+- Code is now the primary contract for compound actor orchestration. A single
+  capability manifest drives scoped clients, relay authorization, prompt
+  kernels, traces, deadlines, and cancellation; `message_actor` remains the
+  lightweight scalar path.
+- Preview and dev web actors default to the sealed `page_code` surface and may
+  persist origin-pinned API clients. Store builds retain the discrete tool
+  surface, and every channel falls back safely when the full code grant is not
+  available.
 - Store and web builds now refuse direct remote JavaScript imports without
   requesting the module source. Preview keeps the audited literal static path.
 - Trusted spawned actors can orchestrate delegation from JavaScript when both
   `script` and `message_actor` are explicitly granted. Bound environment actors
   remain pinned and cannot cross-delegate.
+- Release CI now exercises the installed extension on current Firefox and
+  dispatches peerd.ai feed deployment after publishing. Repository copy hygiene
+  is enforced as a release gate.
+
+### Fixed
+
+- Firefox bound actors remain keyless across the Worker boundary, actor-code
+  relays re-check sender and owner provenance, and App sandboxes can no longer
+  escape through page-initiated network paths.
+- Reviewer file grants are revalidated against live read-only policy, saved-App
+  search results are fenced as untrusted, and `fetch_url` inspects headers and
+  request bodies for off-origin exfiltration attempts.
+- Narrow Firefox sidebars keep authority controls visible and accessible, while
+  stale model-catalog responses can no longer overwrite the current selection.
 
 ## [0.5.0] - 2026-08-06
 
