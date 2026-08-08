@@ -150,6 +150,7 @@ import {
   DOC_TEXT_MAX_CHARS,
   makeSpawnActor,
   makeRequestReview,
+  isReadOnlyTool,
   createRefRegistry,
   SessionNotFoundError,
   registerTool,
@@ -2899,6 +2900,10 @@ const actorClient = actorIsolationAvailable(baseActorIsolation) ? makeOffscreenA
   sessions,
   buildToolContext,
   dispatchToolCall: /** @type {any} */ (dispatchToolCall),
+  // Clean-context review layer 2: persisted/narrowed grants are re-checked
+  // against the live registry at dispatch time on every isolated actor host.
+  reviewToolAllowed: (/** @type {string} */ name) => isReadOnlyTool(name,
+    listTools().map((tool) => ({ name: tool.name, sideEffect: tool.sideEffect }))),
   pinActorCall,
   // Phase 4: rebuild an actor's narrowed-general tool ctx SW-side from its persisted
   // grantedTools (capability-by-need strip), the analog of the actor's kind-scoped strip.

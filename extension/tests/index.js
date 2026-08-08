@@ -107,6 +107,7 @@ import './unit/sidepanel/goal-toggle.test.js';
 import './unit/sidepanel/goal-bar.test.js';
 import './unit/sidepanel/memory-suggestions.test.js';
 import './unit/sidepanel/api-integrations.test.js';
+import './unit/sidepanel/model-picker.test.js';
 import './unit/sidepanel/tools-chip.test.js';
 import './unit/sidepanel/attachments.test.js';
 import './unit/sidepanel/message-list.test.js';

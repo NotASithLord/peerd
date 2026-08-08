@@ -24,6 +24,7 @@ const baseDeps = (over: any = {}) => ({
   sessions: { get: async () => null },
   buildToolContext: async () => ({}),
   dispatchToolCall: async () => ({ ok: true }),
+  reviewToolAllowed: () => true,
   pinActorCall: () => {},
   EXPOSURE_ACTOR: 'actor',
   inboundDwebToolNames: DWEB_INBOUND_TOOL_NAMES,
@@ -735,8 +736,8 @@ describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ct
   });
 
   // #160: the review exemption must fire on the LIVE relay path — the gate tests
-  // hand-build {exposure} ctxs, which is how the "stamped only on the in-SW
-  // fallback" regression stayed invisible. These pin the relay's own logic:
+  // hand-build {exposure} ctxs, which would let a missing host-side stamp stay
+  // invisible. These pin the isolated relay's own logic:
   // given a record with review:true it stamps, otherwise it doesn't. The OTHER
   // half — that create() actually persists review so a real record carries it —
   // is pinned in sessions/custom-system-prompt.test.ts (a real create→get
@@ -752,6 +753,25 @@ describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ct
     const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'js_read_file', args: {} } }, OFFSCREEN));
     expect(out.ok).toBe(true);
     expect(seenCtx.exposure).toBe('review');
+  });
+
+  test('a REVIEW child is refused at call time when the live allowlist drops a stale grant', async () => {
+    let dispatched = false;
+    const { client, during } = clientWithRelay(subDeps({
+      sessions: { get: async () => ({
+        kind: 'spawned', parentSessionId: 'p1', depth: 1,
+        grantedTools: ['app_search'], review: true,
+      }) },
+      reviewToolAllowed: () => false,
+      dispatchToolCall: async () => { dispatched = true; return { ok: true }; },
+      EXPOSURE_REVIEW: 'review',
+    }));
+    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({
+      relayToken, call: { name: 'app_search', args: { query: 'x' } },
+    }, OFFSCREEN));
+    expect(out.ok).toBe(false);
+    expect(out.error).toContain('tool_not_available_to_reviewer');
+    expect(dispatched).toBe(false);
   });
 
   test('a NON-review spawned child gets NO exposure from the relay (fail-closed)', async () => {

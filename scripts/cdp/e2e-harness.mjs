@@ -137,9 +137,13 @@ const DETERMINISM_FLAGS = Object.freeze([
 
 // A side-panel-shaped frame. why: with no override, headless Chrome captured at
 // 756x413 — a landscape letterbox the side panel never has in production. The
-// panel stylesheet has NO width media queries, so the capture width IS the
-// design under test; pin it so every machine composes the same layout.
+// normal 400px capture remains the broad sidebar authority; the explicit
+// narrow metrics below exercise the intentional Firefox-width breakpoints.
 export const PANEL_METRICS = Object.freeze({ width: 400, height: 900, deviceScaleFactor: 1, mobile: false });
+// Firefox's installed sidebar screenshot has a 282px content column. The panel
+// viewport is 310px; .body contributes 14px padding on each side. Keep this as
+// the single narrow-width authority shared by the visual states.
+export const NARROW_PANEL_METRICS = Object.freeze({ width: 310, height: 900, deviceScaleFactor: 1, mobile: false });
 
 const STABLE_STYLE_ID = 'e2e-visual-stable';
 

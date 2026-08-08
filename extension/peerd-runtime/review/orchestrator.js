@@ -137,9 +137,9 @@ export const makeRequestReview = (deps) => {
     // registry, giving the reviewer a clean session scoped to read-only
     // tools. No shared context: the child sees only `task`.
     //
-    // Layer 2 (what it can DO): the spawn machinery already refuses any
-    // tool outside the granted subset at dispatch — the subset narrowing
-    // is the enforcement; the reviewer never gets a write tool to call.
+    // Layer 2 (what it can DO): the isolated actor dispatch re-runs the live
+    // isReadOnlyTool predicate injected by the service worker. grantedTools is
+    // persisted state, so subset membership alone is deliberately insufficient.
     const out = await spawnActor({
       task,
       tools: allowed,
