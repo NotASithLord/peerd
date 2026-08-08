@@ -1,14 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Keep this 128px export geometrically identical to peerd-icon.svg. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 96 96">
   <defs>
-    <style>@font-face{font-family:'Geist Mono';font-style:normal;font-weight:700;src:url(data:font/woff2;base64,d09GMgABAAAAAASkABQAAAAAChQAAAQ6AAGzMwAAAAAAAAAAAAAAAAAAAAAAAAAAGhQbIBwqP0hWQVIwP01WQVI8BmA/U1RBVIE4ADQvfhEICnCBBjCBPgE2AiQDCAsGAAQgBYhEByAMBxvMCFGUUM6PKL46sIPB+R2gWUIwX5rTkG7Ex4knfBRftDRB0dvM73m7utK9k3mFYACEiCjI/DFCjIgNCPpnIIvWdEKoI88GUAKxfYb9gq8WpR7+RrPvB0AJ5QXOd/nPWRj+LShh893nOWa8tQ4s/9ZUzJnWttbpKJpGPI0OO9zzCxwd2PHREeHB1/XbEXtfm8hJnpGV01crEBAAAJSPgSUhRd16HJ/I4gK8AQCIU0MtprryvMnkoEK/CyAAPFDn5i8GEFCZAAMAGIQA8GNIvBS4AKx6VAKQTQi9haCTKRhAUGJxzSjt5QOzfaMAfad/SU2gVwcYUQoAgAAAAEbciyP+ebxz93cS3E7aDgRgqu5HIKMEIfwYwGOBArNypkYxYPbHW7HqhCejnlZ6eeJYfvwRgKqZBghAQT8DAlC4esABDEZ7Yb4BAlC8IhCAkhsFEIDSENmTASN/tik7CKMamIEBHMDjIAm7ZIBLUGDRX8q82YcAulVmEJ5S7LJJkEB70fR8hKqBaSCvIPgZFCoM1YMiRaG9UKw4VIQSJWFGAaVKa5YyZeFkoFx5De9IBUJvUAkAA4ALGKAAmgEAFwAwyaGKw31lw0MfHy/bcfQom44csduP/ZsKm5E7jmvzMbv9yBE2HT068NC7A1r5aftxHdsPnNa/4frevU+qadzA2j3i2vyt/9DJ7gNmjh+vR7s36FK3MLJz5/zIrnUBQIAAiGFE4MwhmwyV6bWJH6DvJjohb+2xYydPXnt07dL1ve3l68Xb546fPHLkZSAdzLLnD3/krIuPtzK//Hxxi2sDFMsVatahLX/+eZtgk1gn6ePF5T+35k+caNS0SdNaDbIhL9qGsg3qNW5ap0GD8rPfBPNsuc01ODdvt24KWOu6Pmtt5Uq+l8/1SraULl3Cvsc/x/NPFH2hJl22IkAfN41UbDx+YqV2//sd5wbA1VHvjwSuFis/m8wrtvvKgRIMAIIf4TKjCP3VNxo3dYsZFTUhQa5iV+JP1TFb8VEAAHAQkGgECeSWAm8jITxvw1CRr+DQys9wKQR8xCpwS8jVQUoQ0CRU49c8eBItQ5DXXoTU6jDCrH5HRKpj7qhXVSrWSIhTikjIDCRVXgYphTVCmt8MQ0Zi45BVdauQU2PbkWfNByhI7StUFzAnzDXg17liweX5FdCpNIRpopEmmskYRiNjepLpQoQZJOAyyESE6SxCNK5AiKllFkI8ob6GGppJz90jgpapXLa2FWQBkcySoWdQ0wwuB2n5pdVXWPsTVRHuP6WKWHiBrgZaaqSRtka4Wzga2MYs01Tm58ux4X+TF7TqyM005tpC+Bi+N/6k0SuTawSxlR9UwDvKaGXEuZRRL3Uik+gi9khFhMcrbbo5l0Wy0sKsDaOMS2TtZKK1z1l4IrOM5LeyQ3gWnejOZeM5EgDwZpoAcSR+0Zs+cHcB) format('woff2');}</style>
     <clipPath id="r"><rect width="96" height="96" rx="8" ry="8"/></clipPath>
   </defs>
   <g clip-path="url(#r)">
-    <rect y="0"    width="96" height="19.2" fill="#00BCE5"/>
+    <rect y="0" width="96" height="19.2" fill="#00BCE5"/>
     <rect y="19.2" width="96" height="19.2" fill="#EF4444"/>
     <rect y="38.4" width="96" height="19.2" fill="#F59E0B"/>
     <rect y="57.6" width="96" height="19.2" fill="#22C55E"/>
     <rect y="76.8" width="96" height="19.2" fill="#DB2777"/>
   </g>
-  <text x="48" y="66" text-anchor="middle" fill="#FFFFFF" font-family="'Geist Mono'" font-size="100" font-weight="700" letter-spacing="-0.02">p</text>
+  <path transform="matrix(1.15 0 0 1.15 -8.235 -5.015)" d="M23.60 81.00V12.40H36.68L37.06 24.76L35.80 24.16Q37.86 17.90 42.18 14.55Q46.50 11.20 52.96 11.20Q60.08 11.20 64.80 14.92Q69.52 18.64 71.86 24.97Q74.20 31.30 74.20 39.20Q74.20 47.04 71.86 53.40Q69.52 59.76 64.80 63.48Q60.08 67.20 52.96 67.20Q48.74 67.20 45.34 65.89Q41.94 64.58 39.55 61.96Q37.16 59.34 35.72 55.40L37.16 54.06V81.00ZM48.80 55.24Q54.20 55.24 57.16 51.33Q60.12 47.42 60.12 39.20Q60.12 30.98 57.16 27.07Q54.20 23.16 48.80 23.16Q45.40 23.16 42.77 24.88Q40.14 26.60 38.65 30.16Q37.16 33.72 37.16 39.20Q37.16 44.68 38.63 48.24Q40.10 51.80 42.75 53.52Q45.40 55.24 48.80 55.24Z" fill="#FFFFFF"/>
 </svg>
