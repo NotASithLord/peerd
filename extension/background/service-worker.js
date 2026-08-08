@@ -307,7 +307,8 @@ import {
   browserNetworkGuardUnavailableResult, classifyBrowserAutomationTarget,
   // Contributor Metrics: a closed local-only accumulator. This surface has no
   // arbitrary event/property API and no network IO.
-  contributorActionForTool, contributorTurnResult, contributorFeedbackTargets,
+  contributorActionForTool, contributorTurnResult,
+  contributorFeedbackContextKey, contributorFeedbackTargets,
   makeContributorStore,
   // Design 5 — the pure core the script/model-call route runs: text-only arg
   // validation, per-run quota arithmetic, and the provider-event fold.
@@ -6353,9 +6354,7 @@ const actorMessaging = makeActorMessaging({
         await contributorStore.recordWebSettlement({
           consentGeneration: contributorArm.generation,
           operationKey: correlationId,
-          feedbackContextKey: beforeRecord.parentSessionId && parentToolUseId
-            ? `${beforeRecord.parentSessionId}:${parentToolUseId}`
-            : undefined,
+          feedbackContextKey: contributorFeedbackContextKey(parentSessionId, parentToolUseId),
           turn: {
             ...base,
             outcome,

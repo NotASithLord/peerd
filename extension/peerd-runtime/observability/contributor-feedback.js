@@ -23,6 +23,22 @@ const isTerminalAssistant = (message) => message?.role === 'assistant'
   && message?.stopReason === 'end_turn';
 
 /**
+ * Bind a settled actor cohort to the chat that issued this turn.
+ *
+ * A durable per-tab actor may have been minted by an older chat, so its stored
+ * parent is provenance, not current feedback authority. The service worker
+ * supplies the server-threaded sender for each message_actor delivery.
+ * @param {string | null | undefined} currentParentSessionId
+ * @param {string | null | undefined} parentToolUseId
+ * @returns {string | undefined}
+ */
+export const contributorFeedbackContextKey = (currentParentSessionId, parentToolUseId) =>
+  typeof currentParentSessionId === 'string' && currentParentSessionId.length > 0
+    && typeof parentToolUseId === 'string' && parentToolUseId.length > 0
+    ? `${currentParentSessionId}:${parentToolUseId}`
+    : undefined;
+
+/**
  * Return the terminal feedback targets keyed by assistant message id.
  * Each value identifies the real human task and every tool context folded into
  * it, including late correlated actor-reply continuations.

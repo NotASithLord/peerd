@@ -294,6 +294,45 @@ describe('makeAsyncActors', () => {
     expect(as.actorTasks('parent')[0].status).toBe('cancelled');
   });
 
+  test('Stop during child allocation cancels it as soon as actor-start reveals its id', async () => {
+    const slots = makeTurnSlots();
+    const parentLease = slots.claim('parent');
+    const stoppedSubtrees: string[] = [];
+    const reenters: any[] = [];
+    let childLease: ReturnType<typeof slots.claim> | undefined;
+    let publishStart!: () => void;
+    let finishChild!: (value: any) => void;
+    const as = makeAsyncActors(baseDeps({
+      turnSlots: slots,
+      stopSubtree: (sessionId: string) => { stoppedSubtrees.push(sessionId); return [sessionId]; },
+      spawnActor: (req: any) => new Promise((resolve) => {
+        publishStart = () => {
+          childLease = slots.claim('child-delayed');
+          req.onEvent({ type: 'actor-start', sessionId: 'child-delayed', grantedTools: [] });
+        };
+        finishChild = resolve;
+      }),
+      reenter: async (opts: any) => { reenters.push(opts); },
+    }));
+
+    const spawning = as.spawnActorAsync({ task: 'delayed allocation', parentSessionId: 'parent' });
+    await Promise.resolve();
+    expect(slots.stop('parent')).toBe(true);
+    publishStart();
+    const handle = await spawning;
+
+    expect(handle.ok).toBe(true);
+    expect(stoppedSubtrees).toEqual(['child-delayed']);
+    expect(childLease?.controller.signal.aborted).toBe(true);
+    expect(as.actorTasks('parent')[0].status).toBe('cancelled');
+
+    finishChild({ result: 'must not return', sessionId: 'child-delayed', stopped: true });
+    await flush();
+    expect(reenters).toHaveLength(0);
+    childLease?.release();
+    parentLease.release();
+  });
+
   test('vault-locked defers the wake (notify only); onVaultUnlock drains it', async () => {
     const reenters: any[] = [];
     let locked = true;

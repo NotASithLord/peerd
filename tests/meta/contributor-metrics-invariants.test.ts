@@ -101,5 +101,9 @@ describe('Contributor Metrics source invariants', () => {
     expect(actorTurn.indexOf('beginLandingTurn(actorSessionId)')).toBeGreaterThanOrEqual(0);
     expect(actorTurn.indexOf('beginLandingTurn(actorSessionId)'))
       .toBeLessThan(actorTurn.indexOf('await '));
+    expect(actorTurn).toContain(
+      'feedbackContextKey: contributorFeedbackContextKey(parentSessionId, parentToolUseId)',
+    );
+    expect(actorTurn).not.toContain('feedbackContextKey: beforeRecord.parentSessionId');
   });
 });

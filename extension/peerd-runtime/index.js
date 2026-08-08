@@ -118,7 +118,9 @@ export {
 } from './observability/contributor-metrics.js';
 export { CONTRIBUTOR_LOCAL_KEY, ContributorReadOnlyError, makeContributorStore }
   from './observability/contributor-store.js';
-export { contributorFeedbackTargets } from './observability/contributor-feedback.js';
+export {
+  contributorFeedbackContextKey, contributorFeedbackTargets,
+} from './observability/contributor-feedback.js';
 // The per-turn imperative shell over the accumulator: fold usage events,
 // persist the session total, push the live meter, fire the hard-limit
 // halt once. All IO injected; the SW's streaming switch stays two lines.

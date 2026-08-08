@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { contributorFeedbackTargets } from '../../extension/peerd-runtime/observability/contributor-feedback.js';
+import {
+  contributorFeedbackContextKey, contributorFeedbackTargets,
+} from '../../extension/peerd-runtime/observability/contributor-feedback.js';
 
 const human = (id: string, content = id) => ({ role: 'user', id, content, toolResults: [] });
 const terminal = (id: string, content = id) => ({
@@ -7,6 +9,17 @@ const terminal = (id: string, content = id) => ({
 });
 
 describe('Contributor Metrics task feedback attribution', () => {
+  test('a reused tab actor settles against the current chat, not its original parent', () => {
+    const actorRecord = { parentSessionId: 'chat-that-minted-the-tab' };
+    const currentChat = 'chat-that-issued-this-turn';
+    expect(contributorFeedbackContextKey(currentChat, 'tool-current')).toBe(
+      'chat-that-issued-this-turn:tool-current',
+    );
+    expect(contributorFeedbackContextKey(currentChat, 'tool-current')).not.toContain(
+      actorRecord.parentSessionId,
+    );
+  });
+
   test('ordinary completed answers remain attributable to their human turns', () => {
     const targets = contributorFeedbackTargets([
       human('user-a'), terminal('answer-a'), human('user-b'), terminal('answer-b'),

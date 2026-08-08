@@ -315,15 +315,22 @@ export const makeAsyncActors = (deps) => {
         entry.grantedTools = Array.isArray(ev.grantedTools)
           ? ev.grantedTools.filter((tool) => typeof tool === 'string')
           : null;
+        // Stop can land after the async entry is created but before spawn.js
+        // publishes the minted child id. The parent generation is the only
+        // authority available across that allocation gap. Once the id arrives,
+        // cancel stale work immediately instead of merely suppressing its later
+        // reply while the child continues with tools.
+        if (typeof turnSlots.generation === 'function'
+          && turnSlots.generation(parentSessionId) !== entry.parentStopGeneration) {
+          entry.status = 'cancelled';
+        }
         // The first snapshot was pushed before spawnActor had minted the child.
         // Push again now that the stable session id + authoritative grants are
         // known, so a reconnecting Actor Fabric can replace its placeholder.
         onTasksChanged(parentSessionId);
-        // #9 race: a cancel that landed BEFORE this start event couldn't stop a
-        // child whose id it didn't yet know (childSessionId was null), so it
-        // only flipped status. Now that the id has arrived, honor that pending
-        // cancel — abort the child (and its subtree) so the copy "its work is
-        // being stopped" is true instead of leaving it running its full budget.
+        // A cancel or parent Stop that landed BEFORE this start event could not
+        // stop a child whose id it did not yet know. Now that the id has arrived,
+        // abort the child and its subtree instead of leaving it on budget.
         if (entry.status === 'cancelled' && entry.childSessionId) {
           stopSubtree?.(entry.childSessionId);
           turnSlots.stop?.(entry.childSessionId);
