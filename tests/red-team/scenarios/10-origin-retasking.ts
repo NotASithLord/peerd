@@ -1,4 +1,4 @@
-// Scenario 10: retasking a web actor by moving the tab under it (issue #251).
+// Scenario 10: retasking or minting a web actor through a moved tab (#251, #263).
 //
 // Scenario 09 covers the arc's other three layers and says, in its own header,
 // that this vector is deliberately absent because "its defense is issue #251,
@@ -31,8 +31,10 @@
 import {
   type Scenario, type Probe, blocked, leaked, summarize,
 } from '../harness.ts';
+import { readFileSync } from 'node:fs';
 import { decideLanding, mayHoldCredentials, MAX_EXCURSIONS } from '../../../extension/peerd-runtime/actor/landing-rule.js';
 import { classifyOriginSensitivity } from '../../../extension/peerd-runtime/actor/origin-sensitivity.js';
+import { decideNumericTabAuthority } from '../../../extension/peerd-runtime/actor/numeric-tab-authority.js';
 import { describeLandingStop } from '../../../extension/peerd-runtime/actor/origin-lock-report.js';
 import { isKnownIdp } from '../../../extension/peerd-runtime/actor/idp-registry.js';
 
@@ -47,7 +49,49 @@ interface Case {
 const sensitive = (origin: string) =>
   classifyOriginSensitivity(origin, { hasVaultSecret: (o: string) => o === 'https://bank.test' }).sensitive;
 
+const numericRefusalSource = () => {
+  const source = readFileSync(new URL('../../../extension/background/service-worker.js', import.meta.url), 'utf8');
+  const start = source.indexOf('if (!authority.allowed) {');
+  const end = source.indexOf('let actorSessionId = webActorTabBindings.resolve(tabId);', start);
+  return start >= 0 && end > start ? source.slice(start, end) : '';
+};
+
 const CORPUS: Case[] = [
+  {
+    vector: 'ordinary page redirects to a learned signed-in origin before its numeric tab id is addressed',
+    seeks: 'make the page-selected destination the owned origin of a new bound actor',
+    defense: 'numeric tab authority policy (location is not authority)',
+    check: () => {
+      const verdict = decideNumericTabAuthority('https://bank.test/inbox?payload=hidden', {
+        policyReady: true,
+        learned: new Map([['https://bank.test', 'password-field']]),
+      });
+      const refusal = verdict.allowed ? null : verdict;
+      return {
+        denied: refusal?.code === 'actor_sensitive_tab_requires_site'
+          && refusal.origin === 'https://bank.test'
+          && refusal.suggestedHandle === 'site:https://bank.test',
+        evidence: verdict.allowed ? 'numeric authority granted' : `verdict=${verdict.code}`,
+      };
+    },
+  },
+  {
+    vector: 'numerically address a sensitive tab already owned by a legitimate site actor',
+    seeks: 'erase the existing binding and its live origin lock during refusal',
+    defense: 'numeric refusal is read-only with respect to existing actor custody',
+    check: () => {
+      const source = numericRefusalSource();
+      const preservesBinding = source.length > 0
+        && !source.includes('webActorTabBindings.drop')
+        && !source.includes('originStates.forget');
+      return {
+        denied: preservesBinding,
+        evidence: preservesBinding
+          ? 'refusal branch audits and returns without custody mutation'
+          : 'refusal branch mutates or cannot prove existing custody',
+      };
+    },
+  },
   {
     vector: 'roaming actor 302d onto a site the user has an account on',
     seeks: 'act as the user on that site with a hijacked, page-steered actor',
@@ -255,11 +299,11 @@ const CORPUS: Case[] = [
 
 export const scenario: Scenario = {
   id: '10-origin-retasking',
-  title: 'Retasking a web actor by moving the tab under it (issue #251)',
+  title: 'Retasking or minting a web actor through a moved tab (issues #251 and #263)',
   adversary: 'malicious webpage, open redirect, or a hostile link on a trusted host',
   asset: "the user's live browser session on the sites they are signed in to",
-  claim: 'A helper that browses the open web cannot enter a site the user has an account on, and cannot hold that site\'s session. A helper bound to one site cannot be moved off it — by a redirect, a self-navigation, or an unnameable host — except through a bounded sign-in corridor toward a dedicated identity provider, which is capped for the actor\'s lifetime and cannot be re-pointed at a second credentialed site. When a helper is stopped, what reaches the orchestrator names origins only. Ordinary browsing, genuine sign-ins, and apex-to-www redirects are unaffected.',
-  threatModelRef: 'INV-13',
+  claim: 'A numeric tab id cannot turn a page-selected redirect destination into bound authority. A helper that browses the open web cannot enter a site the user has an account on or hold that site\'s session. A helper bound to one site cannot be moved off it except through a bounded sign-in corridor toward a dedicated identity provider. When a helper is stopped or numeric addressing is refused, what reaches the orchestrator names origins only. Ordinary browsing, genuine sign-ins, and apex-to-www redirects are unaffected.',
+  threatModelRef: 'INV-19',
   tier: 'unit',
   async run() {
     const probes: Probe[] = CORPUS.map((c) => {
@@ -271,6 +315,8 @@ export const scenario: Scenario = {
     });
     return summarize(probes, [
       'origin lock: roaming may not enter a credentialed origin',
+      'numeric tab ids identify locations, not signed-in-site authority',
+      'numeric refusal preserves an existing actor binding and origin lock',
       'origin lock: bound may not leave its owned origin',
       'excursion rule: opener-scoped, budgeted, lifetime-capped',
       'IdP registry: dedicated auth hosts only, anchored matching',

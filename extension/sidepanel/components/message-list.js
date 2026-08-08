@@ -34,6 +34,14 @@ import {
 
 /** @param {string} text @returns {string|null} */
 const actorUserFailure = (text) => {
+  if (/actor_sensitive_tab_requires_site/i.test(text)) {
+    return 'No actor work was started. This tab is on a site peerd treats as signed in. '
+      + 'To continue, ask peerd to work on that site directly.';
+  }
+  if (/actor_tab_sensitivity_unavailable/i.test(text)) {
+    return 'No actor work was started because peerd could not verify this tab. '
+      + 'Reload peerd, then try again.';
+  }
   if (/actor-provider-boundary-blocked|model request was not run/i.test(text)) {
     return ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE;
   }
@@ -1001,7 +1009,7 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
   const userFailure = actorUserFailure(failureText);
   const notRun = status === 'failed' && !outcomeUnknown
     && (userFailure !== null
-      || /not run|no work was started|actor isolation|isolated worker.*(did not|unavailable)/i.test(failureText));
+      || /not run|no work was started|actor isolation|isolated worker.*(did not|unavailable)|actor_sensitive_tab_requires_site/i.test(failureText));
   const handedOff = !card && toolUse.input?.await === true
     && /is still working; its reply will arrive as a fenced note on a later turn/i.test(resultText);
   const acceptedAsync = !card && !!toolResult && toolResult.is_error !== true

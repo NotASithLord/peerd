@@ -176,6 +176,12 @@ let harvestOrchTurn = 0;
 let harvestDelegated = false;
 let harvestActorUsedCode = false;
 let harvestFixtureUrl = '';
+let numericTabAuthorityState = {
+  addressed: false,
+  tabId: null, refusalBody: '', actorCallsAfterAddress: 0,
+};
+let numericTabAuthorityRequestBodies = [];
+let numericTabAuthorityRedirectUrl = '';
 let networkGuardActorTurn = 0;
 let networkGuardDelegated = false;
 let networkGuardActorReady = false;
@@ -213,6 +219,10 @@ let siteReplyBody = '';
 let siteActorSawPage = '';
 let siteFixtureUrl = '';
 let siteFixtureOrigin = '';
+let siteNumericTarget = null;
+let siteNumericAddressed = false;
+let siteNumericRefusalBody = '';
+let siteNumericActorCalls = 0;
 let lockActorTurn = 0;
 let lockDelegated = false;
 let lockReportBody = '';
@@ -1457,6 +1467,163 @@ export const STATES = [
     },
   },
 
+  // --- functional: issue 263, a redirected numeric id cannot mint authority --
+  {
+    name: 'numeric-tab-authority', kind: 'functional', phase: 'post-unlock',
+    responder: (_callIndex, request) => {
+      const body = (request && request.postData) || '';
+      numericTabAuthorityRequestBodies.push(body);
+      if (body.includes('<actor_agent>')) {
+        numericTabAuthorityState.actorCallsAfterAddress++;
+        return { sse: sseText('NUMERIC-ACTOR-RAN-ON-SENSITIVE-TAB') };
+      }
+      if (!numericTabAuthorityState.addressed && Number.isInteger(numericTabAuthorityState.tabId)) {
+        numericTabAuthorityState.addressed = true;
+        return { sse: sseToolCall('message_actor', {
+          to: String(numericTabAuthorityState.tabId), message: 'Read this page',
+        }) };
+      }
+      if (numericTabAuthorityState.addressed && body.includes('actor_sensitive_tab_requires_site')) {
+        numericTabAuthorityState.refusalBody = body;
+        return { sse: sseText('The redirected numeric tab was refused before actor work.') };
+      }
+      return { sse: sseText('Waiting for the security boundary result.') };
+    },
+    async run(ctx, rec) {
+      numericTabAuthorityState = {
+        addressed: false,
+        tabId: null, refusalBody: '', actorCallsAfterAddress: 0,
+      };
+      let redirectRequests = 0;
+      let loginRequests = 0;
+      let authenticatedInboxRequests = 0;
+      const server = createServer((req, res) => {
+        const host = String(req.headers.host || '').split(':')[0];
+        if (host === 'acme.peerd.test' && req.url === '/redirect') {
+          redirectRequests++;
+          const port = /** @type {{ port: number }} */ (server.address()).port;
+          res.writeHead(302, { location: `http://acct.peerd.test:${port}/inbox` });
+          res.end();
+          return;
+        }
+        if (host === 'acct.peerd.test' && req.url === '/login') {
+          loginRequests++;
+          res.writeHead(200, {
+            'content-type': 'text/html',
+            'set-cookie': 'peerd263=authenticated; Path=/; SameSite=Lax',
+          });
+          res.end(LOGIN_HTML);
+          return;
+        }
+        if (host === 'acct.peerd.test' && req.url === '/inbox'
+            && String(req.headers.cookie || '').includes('peerd263=authenticated')) {
+          authenticatedInboxRequests++;
+          res.writeHead(200, { 'content-type': 'text/html' });
+          res.end('<!doctype html><title>Account inbox</title><p>NUMERIC-SECRET-263</p>');
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'text/html' });
+        res.end(PLAIN_HTML);
+      });
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const port = /** @type {{ port: number }} */ (server.address()).port;
+      numericTabAuthorityRedirectUrl = `http://acme.peerd.test:${port}/redirect`;
+      const accountOrigin = `http://acct.peerd.test:${port}`;
+      numericTabAuthorityRequestBodies = [];
+      try {
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } });
+        const seeded = await rpc(ctx.page, {
+          type: 'debug/originLock', origin: accountOrigin, seedReason: 'password-field',
+        });
+        rec.check('the browser probe seeded the production learned-origin policy',
+          seeded?.learned === true, JSON.stringify(seeded));
+        const loginTabId = await evalIn(ctx.page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          const tab = await browser.tabs.create({ active: false, url: ${JSON.stringify(`${accountOrigin}/login`)} });
+          return tab.id;
+        })()`, true);
+        await waitFor(() => loginRequests > 0, { budgetMs: 10_000, pollMs: 50 });
+        if (Number.isInteger(loginTabId)) {
+          await evalIn(ctx.page, `(async () => {
+            const browser = (await import('/vendor/browser-polyfill.js')).default;
+            await browser.tabs.remove(${JSON.stringify(loginTabId)}).catch(() => {});
+          })()`, true);
+        }
+        numericTabAuthorityState.tabId = await evalIn(ctx.page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          const tab = await browser.tabs.create({ active: false, url: ${JSON.stringify(numericTabAuthorityRedirectUrl)} });
+          return tab.id;
+        })()`, true);
+        await waitFor(() => authenticatedInboxRequests > 0, { budgetMs: 10_000, pollMs: 50 });
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Test the redirected account tab.' });
+        rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+        await waitFor(() => numericTabAuthorityState.refusalBody.length > 0,
+          { budgetMs: 60_000, pollMs: 100 });
+        rec.check('the ordinary page issued its cross-origin redirect',
+          redirectRequests > 0, `redirect requests: ${redirectRequests}`);
+        rec.check('the destination loaded authenticated content before addressing',
+          authenticatedInboxRequests > 0, `authenticated requests: ${authenticatedInboxRequests}`);
+        rec.check('numeric addressing returned the stable pre-effect refusal',
+          numericTabAuthorityState.refusalBody.includes('actor_sensitive_tab_requires_site'),
+          numericTabAuthorityState.refusalBody.slice(0, 600));
+        rec.check('no actor model turn started after the numeric address',
+          numericTabAuthorityState.actorCallsAfterAddress === 0,
+          `actor calls: ${numericTabAuthorityState.actorCallsAfterAddress}`);
+        rec.check('the sensitive destination never entered an actor model request',
+          !numericTabAuthorityRequestBodies.some((body) => body.includes('<actor_agent>')
+            || body.includes('NUMERIC-SECRET-263')),
+          numericTabAuthorityRequestBodies.find((body) => body.includes('<actor_agent>')
+            || body.includes('NUMERIC-SECRET-263'))?.slice(0, 300));
+        rec.check('the recovery is origin-only and requires explicit user intent',
+          numericTabAuthorityState.refusalBody.includes(`site:${accountOrigin}`)
+            && numericTabAuthorityState.refusalBody.includes('requiresUserIntent')
+            && !numericTabAuthorityState.refusalBody.includes('/inbox'),
+          numericTabAuthorityState.refusalBody.slice(0, 900));
+        const audits = await auditEntries(ctx);
+        rec.check('the refusal was audited without minting a numeric actor',
+          audits.some((entry) => entry.type === 'actor_tab_authority_refused'
+            && entry.details?.performed === false)
+            && !audits.some((entry) => entry.type === 'actor_minted'
+              && entry.details?.instanceId === String(numericTabAuthorityState.tabId)),
+          JSON.stringify(audits.slice(-20)));
+        const disclosureBefore = await evalIn(ctx.page, `(() => {
+          const header = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')]
+            .find((node) => node.querySelector('.tool-name')?.textContent === 'message_actor');
+          const collapsed = header?.innerText ?? '';
+          const initiallyExpanded = header?.getAttribute('aria-expanded') ?? null;
+          header?.click();
+          return { collapsed, initiallyExpanded };
+        })()`);
+        const disclosureAfter = await waitFor(() => evalIn(ctx.page, `(() => {
+          const header = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')]
+            .find((node) => node.querySelector('.tool-name')?.textContent === 'message_actor');
+          const value = {
+            detail: header?.parentElement?.querySelector('.actor-body .error-line')?.textContent ?? '',
+            expanded: header?.getAttribute('aria-expanded') ?? null,
+          };
+          return value.expanded === 'true' && value.detail ? value : null;
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the human sees a collapsed Not run disclosure with a plain explanation',
+          disclosureBefore?.initiallyExpanded === 'false'
+            && disclosureBefore?.collapsed.includes('Not run')
+            && disclosureAfter?.expanded === 'true'
+            && disclosureAfter?.detail.includes('No actor work was started')
+            && disclosureAfter?.detail.includes('ask peerd to work on that site directly'),
+          JSON.stringify({ disclosureBefore, disclosureAfter }));
+        await rec.shot('final');
+      } finally {
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
+        if (Number.isInteger(numericTabAuthorityState.tabId)) {
+          await evalIn(ctx.page, `(async () => {
+            const browser = (await import('/vendor/browser-polyfill.js')).default;
+            await browser.tabs.remove(${JSON.stringify(numericTabAuthorityState.tabId)}).catch(() => {});
+          })()`, true).catch(() => {});
+        }
+        server.close();
+      }
+    },
+  },
+
   // --- functional: issue 251 — the SITE actor the handoff points at -----------
   //
   // The origin-lock state proves a roaming actor is STOPPED and that the report
@@ -1468,6 +1635,23 @@ export const STATES = [
     name: 'site-actor', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
       const body = (request && request.postData) || '';
+      if (Number.isInteger(siteNumericTarget)) {
+        if (body.includes('<actor_agent>')) {
+          siteNumericActorCalls++;
+          return { sse: sseText('SITE-NUMERIC-ACTOR-SHOULD-NOT-RUN') };
+        }
+        if (!siteNumericAddressed) {
+          siteNumericAddressed = true;
+          return { sse: sseToolCall('message_actor', {
+            to: String(siteNumericTarget), message: 'Read the bound account page',
+          }) };
+        }
+        if (body.includes('actor_sensitive_tab_requires_site')) {
+          siteNumericRefusalBody = body;
+          return { sse: sseText('The existing site actor stayed bound.') };
+        }
+        return { sse: sseText('Waiting for the preserved site binding result.') };
+      }
       if (body.includes('<actor_agent>')) {
         if (siteActorTurn > 0) siteActorSawPage = toolResultsIn(body).join('\n');
         const t = siteActorTurn++;
@@ -1499,6 +1683,10 @@ export const STATES = [
       siteDelegated = false;
       siteReplyBody = '';
       siteActorSawPage = '';
+      siteNumericTarget = null;
+      siteNumericAddressed = false;
+      siteNumericRefusalBody = '';
+      siteNumericActorCalls = 0;
       const server = createServer((_req, res) => {
         res.writeHead(200, { 'content-type': 'text/html' });
         res.end(`<!doctype html><html><head><title>Acme account</title></head><body>
@@ -1529,8 +1717,38 @@ export const STATES = [
           !state || state.siteActorState?.mode === 'bound', JSON.stringify(state));
         rec.check('and it owns exactly that origin',
           !state || state.siteActorState?.ownedOrigin === siteFixtureOrigin, JSON.stringify(state));
+        rec.check('the site actor exposes its browser-owned tab id only to the debug probe',
+          Number.isInteger(state?.siteActorTabId), JSON.stringify(state));
+
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } });
+        const seeded = await rpc(ctx.page, {
+          type: 'debug/originLock', origin: siteFixtureOrigin, seedReason: 'password-field',
+        });
+        siteNumericTarget = seeded?.siteActorTabId;
+        const beforeNumeric = seeded?.siteActorState;
+        await waitFor(async () => !(await probe(ctx)).busy,
+          { budgetMs: 10_000, pollMs: 100 });
+        const numericSent = await rpc(ctx.page, {
+          type: 'agent/send', text: 'Test the existing account tab by numeric id.',
+        });
+        rec.check('the existing-binding numeric probe starts',
+          numericSent?.ok === true && Number.isInteger(siteNumericTarget), JSON.stringify(numericSent));
+        await waitFor(() => siteNumericRefusalBody.length > 0,
+          { budgetMs: 45_000, pollMs: 100 });
+        const afterNumeric = await rpc(ctx.page, {
+          type: 'debug/originLock', origin: siteFixtureOrigin,
+        });
+        rec.check('numeric refusal starts no actor turn against the existing site tab',
+          siteNumericActorCalls === 0, `actor calls: ${siteNumericActorCalls}`);
+        rec.check('numeric refusal preserves the existing site actor binding and origin lock',
+          afterNumeric?.siteActorTabId === siteNumericTarget
+            && afterNumeric?.siteActorState?.mode === 'bound'
+            && afterNumeric?.siteActorState?.ownedOrigin === siteFixtureOrigin
+            && JSON.stringify(afterNumeric.siteActorState) === JSON.stringify(beforeNumeric),
+          JSON.stringify({ beforeNumeric, afterNumeric }));
         await rec.shot('final');
       } finally {
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
         server.close();
       }
     },

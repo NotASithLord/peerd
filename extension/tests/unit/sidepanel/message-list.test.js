@@ -374,6 +374,58 @@ describe('sidepanel.message-list actor disclosures', () => {
     } finally { unmount(); }
   });
 
+  it('explains a sensitive numeric tab without exposing actor policy language', async () => {
+    const { root, unmount } = mount([
+      {
+        role: 'assistant', id: 'a-sensitive', content: '',
+        toolUses: [{ id: 't-sensitive', name: 'message_actor', input: { to: '42', message: 'inspect it' } }],
+      },
+      {
+        role: 'user', id: 'u-sensitive', content: '',
+        toolResults: [{
+          tool_use_id: 't-sensitive', is_error: true,
+          content: 'actor_sensitive_tab_requires_site Policy: {"suggestedHandle":"site:https://account.test"}',
+        }],
+      },
+    ]);
+    try {
+      await flush();
+      const toggle = /** @type {HTMLButtonElement} */ (root.querySelector('.tool-actor > button.tool-call-header'));
+      expect(toggle.textContent).toContain('Not run');
+      toggle.click();
+      await flush();
+      expect(root.textContent).toContain('To continue, ask peerd to work on that site directly');
+      expect(root.textContent.includes('suggestedHandle')).toBe(false);
+      expect(root.textContent.includes('explicit actor')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('gives a plain retry path when numeric-tab policy is unavailable', async () => {
+    const { root, unmount } = mount([
+      {
+        role: 'assistant', id: 'a-unavailable', content: '',
+        toolUses: [{ id: 't-unavailable', name: 'message_actor', input: { to: '43', message: 'inspect it' } }],
+      },
+      {
+        role: 'user', id: 'u-unavailable', content: '',
+        toolResults: [{
+          tool_use_id: 't-unavailable', is_error: true,
+          content: 'actor_tab_sensitivity_unavailable Policy: {"retryable":false}',
+        }],
+      },
+    ]);
+    try {
+      await flush();
+      const toggle = /** @type {HTMLButtonElement} */ (root.querySelector('.tool-actor > button.tool-call-header'));
+      expect(toggle.textContent).toContain('Not run');
+      toggle.click();
+      await flush();
+      expect(root.textContent).toContain('Reload peerd, then try again');
+      expect(root.textContent.includes('Policy:')).toBe(false);
+      expect(root.textContent.includes('retryable')).toBe(false);
+    } finally { unmount(); }
+  });
+
   it('renders actor_create with native disclosure state and a visible terminal label', async () => {
     const { root, unmount } = mount([
       {

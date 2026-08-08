@@ -656,6 +656,27 @@ Code: `peerd-runtime/actor/origin-lock.js` (`mayUseSiteClientOrigin`),
 `tools/defs/site-capture.js`, and `background/service-worker.js`. Red-team:
 scenario 13.
 
+<a id="inv-19"></a>
+### INV-19. A numeric tab id identifies location, not site authority
+A numeric tab handle may bind an actor only to an ordinary origin observed by
+the browser after the durable sensitivity inputs are ready. If that tab is on a
+known signed-in origin, numeric resolution refuses before session creation,
+mailbox persistence, model work, or page access. The only route to a bound actor
+for that origin is the explicit `site:<origin>` handle, used when the user's own
+request already targets the site. A redirect chosen by a page therefore cannot
+choose the origin that receives bound authority.
+
+The resolver classifies the same canonical origin it passes to the mint
+function. The mint function does not read the tab again or replace that origin.
+If the page moves later, the existing landing lock compares the live destination
+to the ordinary origin already bound and stops the actor before page access.
+Refusals expose only the canonical origin and a machine-authored recovery rule.
+They never expose the path, query, title, or other page-authored text.
+
+Code: `peerd-runtime/actor/numeric-tab-authority.js`,
+`background/service-worker.js`, and `peerd-runtime/actor/actor-messaging.js`.
+Red-team: scenario 10.
+
 ### Additional invariants (not scenario-gated, enforced in code)
 
 - INV-9. Vault fails closed. A secret read or write is refused with `VaultLockedError`

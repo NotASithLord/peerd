@@ -202,6 +202,10 @@ export {
 // points that will consume them live outside this module (background/).
 export { classifyOriginSensitivity, sameOrigin, LEARNED_REASONS } from './actor/origin-sensitivity.js';
 export {
+  decideNumericTabAuthority, numericTabAuthorityRefusal,
+  NUMERIC_TAB_SENSITIVE_CODE, NUMERIC_TAB_POLICY_UNAVAILABLE_CODE,
+} from './actor/numeric-tab-authority.js';
+export {
   RUNTIME_CAPABILITY_VERSION, resolveRuntimeCapabilities, runtimeCapabilityAvailable,
   runtimeCapabilityForTool, filterByRuntimeCapabilities, runtimeCapabilityRefusal,
   runtimeCapabilityPromptBlock, RuntimeCapabilityUnavailableError, requireRuntimeCapability,
