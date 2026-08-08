@@ -339,8 +339,8 @@ export const makeAsyncActors = (deps) => {
       ok: true,
       taskId,
       content: childSessionId
-        ? `actor ${taskId} started (session ${childSessionId}, async) — its result will arrive on a later turn. Do NOT wait or poll; continue or end your turn.`
-        : `actor ${taskId} started (async) — its result will arrive on a later turn. Do NOT wait or poll; continue or end your turn.`,
+        ? `actor ${taskId} started (session ${childSessionId}, async). Its result will arrive on a later turn. Do NOT wait or poll; continue or end your turn.`
+        : `actor ${taskId} started (async). Its result will arrive on a later turn. Do NOT wait or poll; continue or end your turn.`,
     };
   };
 

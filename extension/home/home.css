@@ -1,6 +1,6 @@
-/* home.css — the full-tab SPA shell (DESIGN-12). A left rail switches between
+/* home.css: the full-tab SPA shell (DESIGN-12). A left rail switches between
    the agent Chat and the Library / Discover / Network sections; the content
-   area swaps per selection. Monochrome per the brand rule — color rides only
+   area swaps per selection. Monochrome per the brand rule; color rides only
    on the wordmark and peerd orbs (including live Actor Space nodes). Base
    component styling (cards, inputs, the chat surface) comes from styles.css;
    the locked-vault gate comes from options.css. */

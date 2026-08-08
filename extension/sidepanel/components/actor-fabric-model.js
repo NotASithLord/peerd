@@ -149,7 +149,7 @@ export const buildActorFabric = ({ rootSession, actors = {}, spawned = {}, async
     }
   }
 
-  // Keep a settled parent as a lineage stub while a descendant still works —
+  // Keep a settled parent as a lineage stub while a descendant still works,
   // including the brief interval where an async child's session is allocated
   // but its first actor-start snapshot has not hydrated yet.
   const visibleSessionIds = new Set(liveSessionIds);

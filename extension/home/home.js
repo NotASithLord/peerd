@@ -269,7 +269,7 @@ const bringChatHome = () => send({ type: 'sidepanel/close' });
 
 // Actor Space spans every session, but its room action still lands on one
 // concrete chat. When home owns chat, navigate there; when the side panel owns
-// it, switching the shared session is enough — the visible panel updates live.
+// it, switching the shared session is enough; the visible panel updates live.
 /** @param {string} sessionId */
 const openActorSession = async (sessionId) => {
   const result = await send({ type: 'session/switch', sessionId });
@@ -673,8 +673,8 @@ const HomeApp = {
     const showDweb = DWEB_ENABLED && currentState.settings?.dwebEnabled;
     const items = navItems(showDweb);
     // Keep activeView valid if it vanished from the rail (dweb switched off, or the
-    // side panel took Chat). Fall back to the FIRST available item — which is
-    // Actors when the panel owns chat, Chat otherwise — never a dead view.
+    // side panel took Chat). Fall back to the FIRST available item, which is
+    // Actors when the panel owns chat and Chat otherwise, never a dead view.
     if (!items.some((it) => it.id === activeView)) activeView = items[0]?.id ?? 'library';
 
     const rail = m('nav.home-rail', [

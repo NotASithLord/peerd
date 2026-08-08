@@ -161,8 +161,8 @@ export const ChatView = {
 
       // The Actor Fabric unifies the previously separate background-task bar,
       // bound-actor cards, and spawned streams into one live topology. It is a
-      // projection only — transcript cards remain the durable chronological
-      // receipt — and self-hides when this chat has no isolated work running.
+      // projection only. Transcript cards remain the durable chronological
+      // receipt, and the fabric self-hides when this chat has no isolated work running.
       m(ActorFabric, {
         session: state.session,
         actors: state.actors,

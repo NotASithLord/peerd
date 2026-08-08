@@ -1,5 +1,5 @@
 // @ts-check
-// Live Actor Fabric — one compact topology for isolated model contexts working
+// Live Actor Fabric: one compact topology for isolated model contexts working
 // under the current chat. The transcript remains the durable receipt; this view
 // answers what is alive, what it can access, and which boundary is physical.
 

@@ -2215,7 +2215,7 @@ button.tool-call-header:focus-visible {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-/* Actor Fabric — the live topology of the current chat's isolated contexts.
+/* Actor Fabric: the live topology of the current chat's isolated contexts.
    Surfaces stay grayscale; the existing brand orb is the only color carrier.
    Solid nodes are resident resource-bound actors, dashed nodes temporary
    subactors. The line style carries meaning without relying on color. */

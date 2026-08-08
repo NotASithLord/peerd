@@ -1,7 +1,7 @@
 // @ts-check
 // Instance-wide Actor Space. Unlike the compact chat fabric, this full-screen
 // monitor intentionally spans every active root session in this peerd instance.
-// Its input is the SW-owned projection — never actor-authored claims.
+// Its input is the SW-owned projection, never actor-authored claims.
 
 import m from '/vendor/mithril/mithril.js';
 import { buildActorFabric } from '/sidepanel/components/actor-fabric-model.js';
