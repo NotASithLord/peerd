@@ -24,7 +24,7 @@
  * @param {Object} deps
  * @param {(req: object) => Promise<{ result?: string, sessionId?: string|null, exceeded?: boolean, refused?: boolean, timedOut?: boolean, stopped?: boolean, executionFailed?: boolean, outcomeKnown?: boolean }>} deps.spawnActor
  *   The bound child runner (resolves when the child's whole loop finishes).
- * @param {{ runWhenIdle: (sessionId: string, fn: () => void) => void, isBusy: (sessionId: string) => boolean, stop?: (sessionId: string) => boolean }} deps.turnSlots
+ * @param {{ runWhenIdle: (sessionId: string, fn: () => void) => void, runWhenIdleClaimed?: (sessionId: string, fn: (lease: { controller: AbortController, release: () => void }) => void) => void, generation?: (sessionId: string) => number, isBusy: (sessionId: string) => boolean, stop?: (sessionId: string) => boolean }} deps.turnSlots
  *   stop (optional — PR #134): abort a child session's live turn slot, so
  *   actor_cancel actually ENDS the child's work instead of only dropping
  *   its result. Absent (older harnesses/tests) → cancel keeps the drop-only
@@ -32,7 +32,7 @@
  * @param {(sessionId: string) => string[]} [deps.stopSubtree]
  *   Transitively stop a cancelled child's OWN descendants (spawn.js
  *   stopSubtree) — a cancel must end the whole subtree, like Stop does.
- * @param {(opts: { userText: string, sessionId: string, synthetic: boolean }) => Promise<unknown>} deps.reenter
+ * @param {(opts: { userText: string, sessionId: string, synthetic: boolean, actorReply?: { kind: string, instanceId: string, failed: boolean, outcomeKnown?: boolean, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }, turnLease?: { controller: AbortController, release: () => void } }) => Promise<unknown>} deps.reenter
  *   Re-enter a session with a (synthetic) turn — the SW's runAgentTurn.
  * @param {() => Promise<string|null>} deps.getActiveSessionId
  * @param {() => boolean} deps.isVaultLocked
@@ -83,6 +83,8 @@ export const makeAsyncActors = (deps) => {
    * @property {string[] | null} grantedTools  server-resolved grant set once the child starts
    * @property {boolean} reintegrated
    * @property {string[]} ring
+   * @property {string | null} parentToolUseId the actor_create call that launched it
+   * @property {number} parentStopGeneration  Stop epoch captured at launch
    */
 
   /** @type {Map<string, Map<string, ChildEntry>>} parentSessionId -> Map<taskId, entry>. In-memory: in-session durability only. */
@@ -138,11 +140,26 @@ export const makeAsyncActors = (deps) => {
   // Coalesce all of a parent's finished-but-unreintegrated children into ONE
   // synthetic wake turn. Idempotent (flips `reintegrated` before re-entry) and
   // vault-aware (defers while locked, re-drains on unlock).
-  /** @param {string} parentSessionId */
-  const drainReintegration = async (parentSessionId) => {
+  /**
+   * @param {string} parentSessionId
+   * @param {{ controller: AbortController, release: () => void } | undefined} [turnLease]
+   */
+  const drainReintegration = async (parentSessionId, turnLease = undefined) => {
     const kids = children.get(parentSessionId);
     if (!kids) return;
-    const finished = [...kids.values()].filter((c) => c.status === 'done' && !c.reintegrated);
+    const waiting = [...kids.values()].filter((c) => c.status === 'done' && !c.reintegrated);
+    if (waiting.length === 0) return;
+
+    // Stop is a mailbox boundary, not merely an AbortSignal for work that is
+    // still running. A child may have finished just before Stop while its wake
+    // sat behind the parent's live turn (or while the vault was locked). Drop
+    // every result launched in an older parent epoch so it cannot start a fresh
+    // synthetic turn after the user explicitly stopped that task.
+    const parentStopGeneration = turnSlots.generation?.(parentSessionId) ?? 0;
+    const stale = waiting.filter((c) => c.parentStopGeneration !== parentStopGeneration);
+    for (const child of stale) child.status = 'cancelled';
+    const finished = waiting.filter((c) => c.parentStopGeneration === parentStopGeneration);
+    if (stale.length > 0) onTasksChanged(parentSessionId);
     if (finished.length === 0) return;
 
     // Vault-locked: the model key is gated — cannot run the wake turn. Hold the
@@ -190,12 +207,50 @@ export const makeAsyncActors = (deps) => {
         : `${finished.length} actors you started earlier have finished. Here are their results:`;
     const wakeText = `${lead}\n\n${blocks.join('\n\n')}`;
 
-    // Passive surfacing if the parent is NOT the user's active chat (#20).
-    const active = await getActiveSessionId();
-    if (active !== parentSessionId) notify(finished.length);
+    const parentToolUseIds = [...new Set(finished.flatMap((child) =>
+      typeof child.parentToolUseId === 'string' && child.parentToolUseId
+        ? [child.parentToolUseId]
+        : []))];
+    const correlationComplete = finished.every((child) =>
+      typeof child.parentToolUseId === 'string' && child.parentToolUseId.length > 0);
 
-    // runWhenIdle guaranteed the slot is free, so this re-entry aborts nothing.
-    await reenter({ userText: wakeText, sessionId: parentSessionId, synthetic: true });
+    // Passive surfacing is informational and must not sit between the claimed
+    // idle slot and re-entry. Start it independently: otherwise its storage read
+    // creates a gap in which a human turn can claim the session, only for this
+    // older synthetic wake to claim again and steer-abort the user.
+    Promise.resolve(getActiveSessionId())
+      .then((active) => { if (active !== parentSessionId) notify(finished.length); })
+      .catch(() => {});
+
+    await reenter({
+      userText: wakeText, sessionId: parentSessionId, synthetic: true,
+      actorReply: {
+        kind: 'spawned', instanceId: 'spawned',
+        failed: hasUnknownOutcome || hasKnownFailure,
+        ...(hasUnknownOutcome ? { outcomeKnown: false } : {}),
+        ...(parentToolUseIds.length === 1 ? { parentToolUseId: parentToolUseIds[0] } : {}),
+        ...(parentToolUseIds.length > 0 ? { parentToolUseIds } : {}),
+        ...(correlationComplete ? {} : { correlationComplete: false }),
+      },
+      ...(turnLease ? { turnLease } : {}),
+    });
+  };
+
+  // Claim the parent synchronously at dequeue, then thread that exact lease
+  // into the turn driver. This is the actor-mailbox analogue of an Erlang
+  // process taking one message from its mailbox: one receiver owns the next
+  // turn, and later arrivals queue instead of stealing it.
+  const queueReintegration = (/** @type {string} */ parentSessionId) => {
+    const start = (/** @type {{ controller: AbortController, release: () => void } | undefined} */ turnLease) => {
+      Promise.resolve(drainReintegration(parentSessionId, turnLease))
+        .catch(() => {})
+        .finally(() => turnLease?.release());
+    };
+    if (typeof turnSlots.runWhenIdleClaimed === 'function') {
+      turnSlots.runWhenIdleClaimed(parentSessionId, start);
+    } else {
+      turnSlots.runWhenIdle(parentSessionId, () => start(undefined));
+    }
   };
 
   // The non-blocking spawn. Registers the child, waits only for its durable
@@ -234,7 +289,10 @@ export const makeAsyncActors = (deps) => {
       taskId, task: String(req.task ?? ''), status: 'running', result: '',
       exceeded: false, interrupted: false, timedOut: false, stopped: false,
       executionFailed: false, outcomeKnown: true,
-      childSessionId: null, grantedTools: null, reintegrated: false, ring: [],
+      childSessionId: null, reintegrated: false, ring: [],
+      parentToolUseId: typeof req.parentToolUseId === 'string' ? req.parentToolUseId : null,
+      parentStopGeneration: turnSlots.generation?.(parentSessionId) ?? 0,
+      grantedTools: null,
     };
     kids.set(taskId, entry);
     onTasksChanged(parentSessionId); // new task → appears on the live bar
@@ -257,15 +315,22 @@ export const makeAsyncActors = (deps) => {
         entry.grantedTools = Array.isArray(ev.grantedTools)
           ? ev.grantedTools.filter((tool) => typeof tool === 'string')
           : null;
+        // Stop can land after the async entry is created but before spawn.js
+        // publishes the minted child id. The parent generation is the only
+        // authority available across that allocation gap. Once the id arrives,
+        // cancel stale work immediately instead of merely suppressing its later
+        // reply while the child continues with tools.
+        if (typeof turnSlots.generation === 'function'
+          && turnSlots.generation(parentSessionId) !== entry.parentStopGeneration) {
+          entry.status = 'cancelled';
+        }
         // The first snapshot was pushed before spawnActor had minted the child.
         // Push again now that the stable session id + authoritative grants are
         // known, so a reconnecting Actor Fabric can replace its placeholder.
         onTasksChanged(parentSessionId);
-        // #9 race: a cancel that landed BEFORE this start event couldn't stop a
-        // child whose id it didn't yet know (childSessionId was null), so it
-        // only flipped status. Now that the id has arrived, honor that pending
-        // cancel — abort the child (and its subtree) so the copy "its work is
-        // being stopped" is true instead of leaving it running its full budget.
+        // A cancel or parent Stop that landed BEFORE this start event could not
+        // stop a child whose id it did not yet know. Now that the id has arrived,
+        // abort the child and its subtree instead of leaving it on budget.
         if (entry.status === 'cancelled' && entry.childSessionId) {
           stopSubtree?.(entry.childSessionId);
           turnSlots.stop?.(entry.childSessionId);
@@ -303,9 +368,7 @@ export const makeAsyncActors = (deps) => {
       }
       Object.assign(entry, patch, { status: 'done' });
       onTasksChanged(parentSessionId); // running → done (still on the bar until delivered)
-      turnSlots.runWhenIdle(parentSessionId, () => {
-        Promise.resolve(drainReintegration(parentSessionId)).catch(() => {});
-      });
+      queueReintegration(parentSessionId);
     };
     Promise.resolve().then(() => spawnActor({ ...req, onEvent }))
       .then((out) => {
@@ -348,9 +411,7 @@ export const makeAsyncActors = (deps) => {
   const onVaultUnlock = () => {
     for (const [parentSessionId, kids] of children) {
       if ([...kids.values()].some((c) => c.status === 'done' && !c.reintegrated)) {
-        turnSlots.runWhenIdle(parentSessionId, () => {
-          Promise.resolve(drainReintegration(parentSessionId)).catch(() => {});
-        });
+        queueReintegration(parentSessionId);
       }
     }
   };

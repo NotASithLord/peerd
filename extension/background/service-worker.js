@@ -30,7 +30,7 @@
 import browser from '/vendor/browser-polyfill.js';
 import { makeDispatcher, isTrustedSender } from '/shared/messaging.js';
 import {
-  isHomeSender, isOffscreenSender as senderIsOffscreen, isOptionsSender,
+  isHomeSender, isOffscreenSender as senderIsOffscreen, isOptionsSender, isSidepanelSender,
 } from '/shared/sender-trust.js';
 import { loadDweb } from '/shared/dweb-loader.js';
 import { makeSiteCaptureManager } from '/background/site-capture-manager.js';
@@ -302,8 +302,14 @@ import {
   actorIsolationRefusal, actorIsolationSpawnRefusal, filterByActorIsolation, actorIsolationPromptBlock,
   actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
   ACTORS_RUN_MAX_OPS, ACTORS_TRACE_TARGET_MAX_CHARS, ACTORS_TRACE_ERROR_MAX_CHARS,
-  canonicalCodeTraceLabel, DWEB_INBOUND_TOOL_NAMES, resolveWebActorSurface,
+  canonicalCodeTraceLabel, DWEB_INBOUND_TOOL_NAMES,
+  resolveWebActorSurface, resolveWebActorSurfaceDecision,
   browserNetworkGuardUnavailableResult, classifyBrowserAutomationTarget,
+  // Contributor Metrics: a closed local-only accumulator. This surface has no
+  // arbitrary event/property API and no network IO.
+  contributorActionForTool, contributorTurnResult,
+  contributorFeedbackContextKey, contributorFeedbackTargets,
+  makeContributorStore,
   // Design 5 — the pure core the script/model-call route runs: text-only arg
   // validation, per-run quota arithmetic, and the provider-event fold.
   validateProviderCallArgs, providerQuotaError, foldProviderEvents,
@@ -443,6 +449,7 @@ import { makeDwebRoutes } from './routes/dweb.js';
 import { makeToolboxRoutes } from './routes/toolbox.js';
 import { makeActorsRoutes } from './routes/actors.js';
 import { makeScriptRunControlRoutes } from './routes/script-run-control.js';
+import { makeContributorRoutes } from './routes/contributor-metrics.js';
 
 // ---- §11.5 universal write guard -------------------------------------------
 // EVERY store this file constructs gets its storage through these wrapped
@@ -458,6 +465,11 @@ const kv = storeWriteGuard.wrapKv(rawKv);
 const idb = storeWriteGuard.wrapIdb(rawIdb);
 const idbKV = (/** @type {string} */ store) =>
   storeWriteGuard.wrapIdbKvAdapter(store, rawIdbKV(store));
+// Separate from settings/session/vault by construction. Nothing is created
+// until the trusted Options route enables contribution and a typed settlement
+// occurs; transfer import/export has no reference to these keys.
+const contributorStore = makeContributorStore({ kv });
+const CONTRIBUTOR_METRICS_AVAILABLE = CHANNEL === 'preview' || CHANNEL === 'dev';
 // The two SELF-HOSTED databases (own IDB, unreachable through the wrapped
 // adapters) get the same verdict via injected gates: skills below at its
 // construction, App bodies here (dormant store, gate installed anyway so a
@@ -2635,6 +2647,8 @@ const asyncActorsOrchestrator = makeAsyncActors({
   // after boot), so deferring the references avoids a TDZ at module load.
   turnSlots: {
     runWhenIdle: (sessionId, fn) => turnSlots.runWhenIdle(sessionId, fn),
+    runWhenIdleClaimed: (sessionId, fn) => turnSlots.runWhenIdleClaimed(sessionId, fn),
+    generation: (sessionId) => turnSlots.generation(sessionId),
     isBusy: (sessionId) => turnSlots.isBusy(sessionId),
     // PR #134: actor_cancel aborts the child's live slot (children run
     // under slots now), instead of only dropping the result.
@@ -2645,7 +2659,8 @@ const asyncActorsOrchestrator = makeAsyncActors({
   // async-actor wakes are NOT trusted to delegate (a parent reacting to a
   // actor result stays attended-gated for message_actor, like today) —
   // so this reenter deliberately does not forward trusted.
-  reenter: ({ userText, sessionId, synthetic }) => runAgentTurn({ userText, sessionId, synthetic }),
+  reenter: ({ userText, sessionId, synthetic, actorReply, turnLease }) =>
+    runAgentTurn({ userText, sessionId, synthetic, actorReply, turnLease }),
   getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
   isVaultLocked: () => vault.isLocked(),
   wrapUntrusted,
@@ -3106,6 +3121,11 @@ const isActualOptionsSender = (/** @type {any} */ sender) => isOptionsSender(sen
   runtimeId: browser.runtime?.id,
   extensionOrigin: browser.runtime?.getURL?.('') ?? '',
   optionsUrl: browser.runtime?.getURL?.('options/options.html') ?? '',
+});
+const isActualSidepanelSender = (/** @type {any} */ sender) => isSidepanelSender(sender, {
+  runtimeId: browser.runtime?.id,
+  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
+  sidepanelUrl: browser.runtime?.getURL?.('sidepanel/index.html') ?? '',
 });
 const isActualHomeSender = (/** @type {any} */ sender) => isHomeSender(sender, {
   runtimeId: browser.runtime?.id,
@@ -5284,8 +5304,10 @@ const a2aResolveConsent = async (/** @type {string} */ target, /** @type {string
   auditLog.append({ type: 'a2a_consent', details: { target, op, approved: ok, standing: persist } }).catch(() => {});
   return ok;
 };
-const meshHostRoom = (/** @type {object} */ payload) => withDwebPublication(async (isCurrent) => {
-  if (!isCurrent() || !dwebAgentOn()) return { ok: false, error: 'dweb-disabled' };
+const meshHostRoom = (/** @type {object} */ payload, /** @type {() => boolean} */ guard = () => true) => withDwebPublication(async (isCurrent) => {
+  if (!isCurrent() || !dwebAgentOn() || guard() !== true) {
+    return { ok: false, error: 'dweb-disabled-or-revoked' };
+  }
   return browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, ...payload });
 });
 // Standing peer conversations (conversation-registry.js): the SW-side thread
@@ -5294,8 +5316,40 @@ const meshHostRoom = (/** @type {object} */ payload) => withDwebPublication(asyn
 // actor with prior turns as context) and the actor's answer goes BACK to the
 // peer under PER-CONVERSATION reply consent.
 const conversationRegistry = createConversationRegistry();
+/** @type {Map<string, Promise<void>>} */
+const dwebConversationTails = new Map();
+/**
+ * Preserve causal reply/consent order within one standing conversation. The
+ * dweb actor has its own global turn slot, but that slot ends before human
+ * consent and mesh send; without this second lane a later same-thread reply can
+ * overtake while the first is waiting for the user.
+ * @param {string} convId
+ * @param {() => Promise<void>} operation
+ */
+const runDwebConversationOrdered = (convId, operation) => {
+  const previous = dwebConversationTails.get(convId) ?? Promise.resolve();
+  const result = previous.then(operation, operation);
+  const tail = result.then(() => undefined, () => undefined);
+  dwebConversationTails.set(convId, tail);
+  tail.finally(() => {
+    if (dwebConversationTails.get(convId) === tail) dwebConversationTails.delete(convId);
+  });
+  return result;
+};
 const meshDispatch = makeMeshDispatch({
-  sendDm: async (to, env) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'dm', to, data: env }).catch(() => null)); return { ok: r?.ok === true, id: r?.id, error: r?.error }; },
+  sendDm: async (to, env) => {
+    // A standing reply's thread ownership is checked INSIDE the one existing
+    // publication fence. dweb_block uses that same lane, so block-before-send
+    // fails closed and send-before-block is an honestly completed publication.
+    const replyConvId = env?.kind === 'reply' && typeof env?.convId === 'string'
+      ? env.convId
+      : null;
+    const guard = replyConvId
+      ? () => conversationRegistry.ownedBy(replyConvId, to)
+      : () => true;
+    const r = /** @type {any} */ (await meshHostRoom({ op: 'dm', to, data: env }, guard).catch(() => null));
+    return { ok: r?.ok === true, id: r?.id, error: r?.error };
+  },
   listPeers: async () => { const r = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }).catch(() => null)); return Array.isArray(r?.peers) ? r.peers.map((/** @type {any} */ p) => ({ did: p.did, name: p.name })) : []; },
   fetchCard: async (did) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'card-get', did }).catch(() => null)); return r?.ok ? (r.card ?? null) : null; },
   publishCard: async (card) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'card-set', card }).catch(() => null)); return { ok: r?.ok === true, did: r?.did, error: r?.error }; },
@@ -5544,18 +5598,9 @@ const a2aCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessi
 let runWhenActorRecoveryReady = async () => false;
 let dwebRecoveryWakeSequence = 0;
 
-const handleDwebAgentInbound = async (/** @type {{ from?: string, data?: unknown, ts?: number }} */ evt) => {
+const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?: number }} */ evt) => {
   if (!dwebAgentOn() || vault.isLocked()) return;           // opt-out or locked → drop
-  await actorIsolationReady;
-  if (!dwebAgentOn() || vault.isLocked()) return;
   const did = typeof evt?.from === 'string' ? evt.from : 'unknown';
-  if (!actorIsolationAvailable(actorIsolation)) {
-    auditLog.append({
-      type: 'dweb_agent_inbound_dropped',
-      details: { did, reason: 'actor_isolation_unavailable', performed: false },
-    }).catch(() => {});
-    return;
-  }
   // A2A routing FIRST: an inbound a2a REPLY resolves a pending ask and is
   // consumed (never a wake); an a2a ask/tell falls through to the fenced wake
   // below (the actor sees a peer's request). A non-a2a DM also falls through.
@@ -5573,89 +5618,144 @@ const handleDwebAgentInbound = async (/** @type {{ from?: string, data?: unknown
   // Cap the wire convId (a peer controls it; an unbounded key is a memory sink).
   const rawConvId = typeof deliver?.convId === 'string' ? deliver.convId : null;
   const convId = rawConvId && rawConvId.length <= 128 ? rawConvId : null;
-  // ADOPT BEFORE the gate, and only record the peer turn when the thread is
-  // OURS to extend. adopt() binds convId→did (rejecting a foreign did), so a
-  // fresh thread is owned by this sender and record() extends it; a convId
-  // owned by ANOTHER did is refused here — record() has no did check of its
-  // own, so this is where the bearer-token invariant is enforced for inbound.
+  // ADOPT BEFORE lane admission so every event for an owned thread reserves the
+  // same mailbox synchronously. The peer turn itself is recorded only when that
+  // lane entry starts: then earlier self replies are visible to later prompts,
+  // while later peer arrivals cannot contaminate an earlier one.
   let ownsThread = false;
   if (convId && deliver) {
     conversationRegistry.adopt(convId, did);
     ownsThread = conversationRegistry.ownedBy(convId, did);
-    if (ownsThread) conversationRegistry.record(convId, 'peer', deliver.message);
   }
   // Reply back only on an OWNED ask thread — computed AFTER adopt so a peer's
   // first converse turn (a fresh thread) can still be answered.
   const canReplyToPeer = ownsThread && deliver?.kind === 'ask';
   const body = typeof evt?.data === 'string' ? evt.data : JSON.stringify(evt?.data ?? null);
   auditLog.append({ type: 'dweb_agent_inbound', details: { did, chars: body.length, ...(convId ? { convId } : {}) } }).catch(() => {});
-  await runWhenActorRecoveryReady(`dweb-inbound:${++dwebRecoveryWakeSequence}`, async () => {
+  const recoveryKey = `dweb-inbound:${++dwebRecoveryWakeSequence}`;
+  const runInboundWake = async () => {
+    // why this await lives INSIDE the conversation lane: same-thread arrivals
+    // reserve their causal order synchronously at ingress. A slower isolation or
+    // actor-resolution await for message A therefore cannot let message B enter
+    // the consent/send phase first.
+    await actorIsolationReady;
     if (!dwebAgentOn() || vault.isLocked()) return;
-    const actor = await resolveDwebActor();
-    if (!actor) return;
-    const fenced = wrapUntrusted({ origin: did, tool: 'mesh_inbound', body: body.slice(0, 16 * 1024) });
-    // On a standing thread, hand the actor the recent turns (fenced — they carry
-    // peer bytes) so it answers in context, and steer it to reply to the PEER.
-    // Thread context only for a thread WE own (ownsThread) — a foreign convId
-    // must not pull another peer's turns into this wake.
-    const priorTurns = ownsThread ? conversationRegistry.turnsFor(/** @type {string} */ (convId)).slice(0, -1) : [];
-    const threadContext = priorTurns.length
-      ? `\n\nEarlier turns in this conversation (oldest first):\n${wrapUntrusted({ origin: did, tool: 'mesh_thread', body: priorTurns.map((t) => `${t.role === 'self' ? 'you' : 'peer'}: ${t.message}`).join('\n') })}`
-      : '';
-    const wake = canReplyToPeer
-      ? `A mesh peer is having an ongoing conversation with your agent (their did is in the fence origin). Read their latest message and the thread, then END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph reply to send back to the PEER.${threadContext}\n\n${fenced}`
-      : `A mesh peer sent your agent a direct message (their did is in the fence origin). Observe it, update your ledger, block if abusive, and END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph note for the user.\n\n${fenced}`;
-    turnSlots.runWhenIdle(actor.actorSessionId, () => {
-      (async () => {
-        const before = ((await sessions.get(actor.actorSessionId))?.messages ?? []).length;
-        // HEAP ISOLATION: the inbound wake feeds live untrusted peer bytes to the
-        // actor's reasoning, so it must run in a dedicated keyless worker. A host
-        // failure drops the wake after audit; it never moves those bytes into the
-        // privileged background heap.
-        const off = await runActorTurnOffscreen({
-          actorSessionId: actor.actorSessionId, message: wake,
-          instanceId: 'dweb', kind: 'dweb', oneShot: false, display: null,
-          // SW-stamped once at the remote-message ingress. Every offscreen relay
-          // preserves this monotonic bit and rebuilds synthetic/untrusted ctx from it.
-          inbound: true,
+    if (!actorIsolationAvailable(actorIsolation)) {
+      auditLog.append({
+        type: 'dweb_agent_inbound_dropped',
+        details: { did, reason: 'actor_isolation_unavailable', performed: false },
+      }).catch(() => {});
+      return;
+    }
+    await runWhenActorRecoveryReady(recoveryKey, async () => {
+      if (!dwebAgentOn() || vault.isLocked()) return;
+      // This is the first operation after the recovery gate. If recovery queued
+      // multiple same-thread events, its ordered flush preserves this mailbox
+      // sequence too. Snapshot completed earlier turns, then append THIS peer
+      // turn, so later prompts include earlier self replies but not future peers.
+      /** @type {Array<{ role: 'peer'|'self', message: string, ts: number }>} */
+      let priorTurnsForWake = [];
+      if (ownsThread && convId && deliver) {
+        if (!conversationRegistry.ownedBy(convId, did)) return;
+        priorTurnsForWake = conversationRegistry.turnsFor(convId);
+        conversationRegistry.record(convId, 'peer', deliver.message);
+      }
+      const actor = await resolveDwebActor();
+      if (!actor || !dwebAgentOn() || vault.isLocked()) return;
+      const fenced = wrapUntrusted({ origin: did, tool: 'mesh_inbound', body: body.slice(0, 16 * 1024) });
+      // On a standing thread, hand the actor the recent turns. They are fenced because they carry
+      // peer bytes) so it answers in context, and steer it to reply to the PEER.
+      // Include thread context only for a thread WE own (ownsThread). A foreign convId
+      // must not pull another peer's turns into this wake.
+      const threadContext = priorTurnsForWake.length
+        ? `\n\nEarlier turns in this conversation (oldest first):\n${wrapUntrusted({ origin: did, tool: 'mesh_thread', body: priorTurnsForWake.map((t) => `${t.role === 'self' ? 'you' : 'peer'}: ${t.message}`).join('\n') })}`
+        : '';
+      const wake = canReplyToPeer
+        ? `A mesh peer is having an ongoing conversation with your agent (their did is in the fence origin). Read their latest message and the thread, then END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph reply to send back to the PEER.${threadContext}\n\n${fenced}`
+        : `A mesh peer sent your agent a direct message (their did is in the fence origin). Observe it, update your ledger, block if abusive, and END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph note for the user.\n\n${fenced}`;
+      await new Promise((resolve) => {
+        turnSlots.runWhenIdleClaimed(actor.actorSessionId, (turnLease) => {
+          (async () => {
+            const before = ((await sessions.get(actor.actorSessionId))?.messages ?? []).length;
+            // HEAP ISOLATION: the inbound wake feeds live untrusted peer bytes to the
+            // actor's reasoning, so it must run in a dedicated keyless worker. A host
+            // failure drops the wake after audit; it never moves those bytes into the
+            // privileged background heap.
+            const off = await runActorTurnOffscreen({
+              actorSessionId: actor.actorSessionId, message: wake,
+              instanceId: 'dweb', kind: 'dweb', oneShot: false, display: null,
+              // SW-stamped once at the remote-message ingress. Every offscreen relay
+              // preserves this monotonic bit and rebuilds synthetic/untrusted ctx from it.
+              inbound: true,
+              turnLease,
+            });
+            if (off?.stopped) return;
+            // Read the immutable pre-release snapshot. A second peer wake may append
+            // as soon as the lease is released; a session re-read would then mix turns.
+            const settledMessages = off?.turnSnapshot?.messages ?? [];
+            const note = off?.result ?? finalAssistantText(/** @type {any} */ ({ messages: settledMessages.slice(before) })) ?? '';
+            // Trickle up ONLY the notable: the lore's stay-quiet default is enforced
+            // here by the NO_REPORT convention; silence costs the user nothing.
+            if (!note.trim() || note.includes(DWEB_AGENT_NO_REPORT)) return;
+            // STANDING CONVERSATION: the actor's answer goes BACK to the peer, gated
+            // by per-conversation reply consent (the owner's chosen gate for this new
+            // outbound edge). Revocation wins every await: dweb_block deletes the
+            // thread, so ownership is rechecked after consent and at publication.
+            if (canReplyToPeer) {
+              const cid = /** @type {string} */ (convId);
+              const consented = await resolveReplyConsent(cid, did, actor.actorSessionId);
+              if (consented && dwebAgentOn() && conversationRegistry.ownedBy(cid, did)) {
+                const sent = await meshDispatch.reply(did, /** @type {any} */ (deliver).reqId, note, cid);
+                if (sent?.ok === true) {
+                  conversationRegistry.record(cid, 'self', note);
+                  auditLog.append({ type: 'a2a_reply_sent', details: { did, convId } }).catch(() => {});
+                  return;
+                }
+                auditLog.append({
+                  type: 'a2a_reply_failed',
+                  details: { did, convId, error: sent?.error ?? 'mesh send failed', performed: false },
+                }).catch(() => {});
+              }
+            }
+            const active = /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
+            if (!active) return;
+            const lead = 'Your dweb agent flagged inbound mesh activity:';
+            const userText = `${lead}\n\n${wrapUntrusted({ origin: 'dweb', tool: 'message_actor', body: note })}`;
+            const parentStopGeneration = turnSlots.generation(active);
+            // Claim the ACTIVE chat at dequeue. NEVER steer-abort the user's live turn
+            // (DECISIONS #20 work-theft; the deliver() path guards the same way). The
+            // note is a fenced, untrusted-derived summary, so trusted:false. A mesh
+            // event must not hand the orchestrator delegation authority.
+            turnSlots.runWhenIdleClaimed(active, (parentLease) => {
+              // Stop may land while this wake is queued behind the user's live
+              // turn. The claimed lease is new, so its signal alone cannot carry
+              // that earlier Stop; the per-session epoch makes the cancellation
+              // durable across dequeue and prevents post-Stop resurrection.
+              if (turnSlots.generation(active) !== parentStopGeneration) {
+                parentLease.release();
+                return;
+              }
+              runAgentTurn({
+                sessionId: active, userText, synthetic: true, trusted: false,
+                actorReply: { kind: 'dweb', instanceId: 'dweb', failed: false },
+                turnLease: parentLease,
+              })
+                .catch((e) => console.warn('[sw] dweb agent trickle-up failed', e))
+                .finally(() => parentLease.release());
+            });
+          })()
+            .catch((e) => console.warn('[sw] dweb agent inbound wake failed', e))
+            // runActorTurnOffscreen normally releases it; this idempotent backstop
+            // covers setup failures before the driver receives the reservation.
+            .finally(() => { turnLease.release(); resolve(undefined); });
         });
-        if (off?.stopped) return;
-        const s = await sessions.get(actor.actorSessionId);
-        const note = off?.result ?? finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) })) ?? '';
-        // Trickle up ONLY the notable: the lore's stay-quiet default is enforced
-        // here by the NO_REPORT convention — silence costs the user nothing.
-        if (!note.trim() || note.includes(DWEB_AGENT_NO_REPORT)) return;
-        // STANDING CONVERSATION: the actor's answer goes BACK to the peer, gated
-        // by per-conversation reply consent (the owner's chosen gate for this new
-        // outbound edge). On grant, record the self turn and send the mesh reply;
-        // a decline falls through to the user note so the answer isn't lost.
-        if (canReplyToPeer) {
-          const cid = /** @type {string} */ (convId);
-          const consented = await resolveReplyConsent(cid, did, actor.actorSessionId);
-          if (consented) {
-            conversationRegistry.record(cid, 'self', note);
-            meshDispatch.reply(did, /** @type {any} */ (deliver).reqId, note, cid);
-            auditLog.append({ type: 'a2a_reply_sent', details: { did, convId } }).catch(() => {});
-            return;
-          }
-        }
-        const active = /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
-        if (!active) return;
-        const lead = 'Your dweb agent flagged inbound mesh activity:';
-        const userText = `${lead}\n\n${wrapUntrusted({ origin: 'dweb', tool: 'message_actor', body: note })}`;
-        // runWhenIdle on the ACTIVE chat — NEVER steer-abort the user's live turn
-        // (DECISIONS #20 work-theft; the deliver() path guards the same way). The
-        // note is a fenced, untrusted-derived summary, so trusted:false — a mesh
-        // event must not hand the orchestrator delegation authority.
-        turnSlots.runWhenIdle(active, () => {
-          runAgentTurn({
-            sessionId: active, userText, synthetic: true, trusted: false,
-            actorReply: { kind: 'dweb', instanceId: 'dweb', failed: false },
-          }).catch((e) => console.warn('[sw] dweb agent trickle-up failed', e));
-        });
-      })().catch((e) => console.warn('[sw] dweb agent inbound wake failed', e));
+      });
     });
-  });
+  };
+  const run = ownsThread && convId
+    ? runDwebConversationOrdered(convId, runInboundWake)
+    : runInboundWake();
+  void run.catch((e) => console.warn('[sw] dweb conversation lane failed', e));
 };
 
 browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
@@ -5755,14 +5855,21 @@ browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
 // (statefulness), forwards loop events to the card, and persists the turn back.
 // Returns the runActorTurn reply shape. It never falls back to the background
 // heap: unavailable or failed isolation is a visible stopped turn.
-const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, message, instanceId, kind, actorTabId, oneShot, display, inbound }) => {
+const runActorTurnOffscreen = async (/** @type {any} */ {
+  actorSessionId, message, instanceId, kind, actorTabId, oneShot, display,
+  inbound, actorSurface: latchedActorSurface, onBeforeRelease, turnLease,
+}) => {
   await actorIsolationReady;
   if (!actorClient || !actorIsolationAvailable(actorIsolation)) {
     const refusal = actorIsolationRefusal(actorIsolation, { targetRead: false, targetChanged: false });
+    if (turnLease) turnLease.release();
     return { result: refusal.error, stopped: true, isolationFailure: refusal };
   }
   const loaded = await sessions.get(actorSessionId);
-  if (!loaded) return { result: 'the actor session no longer exists.', stopped: true };
+  if (!loaded) {
+    if (turnLease) turnLease.release();
+    return { result: 'the actor session no longer exists.', stopped: true };
+  }
   // Engine-actor prewalk swap on the isolated path. The background turn driver
   // refuses actor sessions, so this is the one place an engine actor can swap.
   // why here: the worker is seeded from rec.provider/rec.model
@@ -5772,7 +5879,7 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
   let rec = loaded;
   try { rec = (await prewalk.reconcileEngineActor(rec)) ?? rec; }
   catch (e) { console.warn('[actor] engine prewalk reconcile failed', e); }
-  const { controller, release } = turnSlots.claim(actorSessionId);
+  const { controller, release } = turnLease ?? turnSlots.claim(actorSessionId);
   try {
     // Bound-actor prompt contract: temporal grounding + any /system override
     // (rec.customSystemPrompt). Actors get no memory/skills block. Absolute-time
@@ -5784,13 +5891,13 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     // advertised the TOOLS descriptors (no page_code) and taught the tools
     // lore, so the whole code arm silently degrades on the offscreen heap.
     const actorToolAllow = resolveManifestAllow(rec.toolManifest);
-    const actorSurface = (kind === 'web' && rec.backing !== 'api')
+    const actorSurface = latchedActorSurface ?? ((kind === 'web' && rec.backing !== 'api')
       ? resolveWebActorSurface({
         requested: settingsStore.get().webActorActionSurface,
         allowedTools: actorToolAllow,
         headlessAvailable: offscreenAvailable,
       })
-      : undefined;
+      : undefined);
     // #241 parity, and it is the load-bearing one: on Chrome EVERY actor turn
     // runs through this path, so a schemaReply stamped only in buildToolContext
     // would arm the validator while the actor was never told the format — every
@@ -5934,7 +6041,7 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
       try {
         const localProvider = !!listProviders().find((/** @type {any} */ p) => p.name === rec.provider)?.keyless;
         const cost = costOf(/** @type {any} */ (rec.model), /** @type {any} */ (r.usage), /** @type {any} */ (settingsStore.get().pricingOverrides), { localProvider });
-        foldSessionCost(actorSessionId, r.usage, /** @type {any} */ (cost)?.cost ?? 0);
+        await foldSessionCost(actorSessionId, r.usage, /** @type {any} */ (cost)?.cost ?? 0);
         // usage rides along RAW: costOf returns only { cost: USD } — consumers
         // that account TOKENS (the eval runner's ACTOR bucket) need the fields
         // costOf collapsed. Additive; the sidepanel reducer reads `cost` only.
@@ -5959,6 +6066,13 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     const outcomeUnknown = terminalError != null
       && (!persistOk || r.outcomeKnown !== true);
     const turnOk = persistOk && persistedAssistantError == null && r.ok === true && r.aborted !== true;
+    // This immutable settlement snapshot is captured while the actor still owns
+    // its slot. A queued turn may append immediately after release, so metrics
+    // must never re-read the session later and accidentally attribute turn B to A.
+    const turnSnapshot = {
+      messages: [...(rec.messages ?? []), ...newMessages],
+      usage: { ...normalizeTally(r.usage) },
+    };
     auditLog.append({
       type: 'actor_ran_isolated',
       details: {
@@ -5993,6 +6107,7 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
         executionFailed: true,
         outcomeKnown: false,
         persistenceFailure: { performed: true, outcomeKnown: false, retryable: false },
+        turnSnapshot,
       };
     }
     if (terminalError) {
@@ -6002,11 +6117,21 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
         executionFailed: true,
         outcomeKnown: !outcomeUnknown,
         executionFailure: r,
+        turnSnapshot,
       };
     }
-    if (r.aborted === true) return { result: fresh.result, stopped: true, aborted: true };
-    return fresh;
+    if (r.aborted === true) {
+      return { result: fresh.result, stopped: true, aborted: true, turnSnapshot };
+    }
+    return { ...fresh, turnSnapshot };
   } finally {
+    // The origin lock writes its stop report asynchronously during page work.
+    // Consume it before releasing, because release synchronously starts the next
+    // queued turn and that turn clears the per-session report at its own start.
+    if (typeof onBeforeRelease === 'function') {
+      try { await onBeforeRelease(); }
+      catch (error) { console.warn('[actor] pre-release snapshot skipped', error); }
+    }
     actorLiveProjection.finishBound(display);
     release();
     // The turn is over, so the pill comes down — leaving it up through the idle
@@ -6090,9 +6215,14 @@ const actorMessaging = makeActorMessaging({
   // tools (and the origin gate) target THAT tab; undefined for engine kinds, where
   // buildToolContext leaves activeTab unset (they act on their instance, not a tab).
   runActorTurn: async ({
-    actorSessionId, message, actorTabId, instanceId, kind, parentToolUseId,
-    parentSessionId, rootSessionId, name, oneShot,
+    actorSessionId, message, actorTabId, instanceId, kind, correlationId,
+    parentToolUseId, parentSessionId, rootSessionId, name, oneShot, turnLease,
   }) => {
+    // Advance the origin-lock epoch before ANY await. The claimed actor lease
+    // already belongs to this turn; a delayed judge from the previous turn must
+    // become stale before site-client/session/contributor storage can yield.
+    landingStopReports.delete(actorSessionId);
+    beginLandingTurn(actorSessionId);
     // DESIGN-19 mint-time injection: if this web/API actor's origin has a stored
     // site client, prepend its dossier — the tool-authored staleness header
     // OUTSIDE the fence, the dossier body wrapUntrusted-fenced (every byte is
@@ -6139,20 +6269,34 @@ const actorMessaging = makeActorMessaging({
           kind, instanceId, name, task: message,
         }
       : undefined;
-    // issue 251 — clear any report left over from an earlier turn BEFORE running,
-    // so a stop can only ever be attributed to the turn that caused it. A stale
-    // report surfacing on a later, unrelated message would be a lie in the one
-    // place the orchestrator is being asked to trust us.
-    //
-    // The delete alone is NOT enough, and adversarial review is the reason this
-    // sentence exists: it only clears reports written before the turn starts,
-    // while the dangerous one is written AFTER — by a navigate still inside its
-    // 30-second load wait when the previous turn was aborted, whose judge runs
-    // when it finally resolves. Opening a turn token makes that judge inert: it
-    // captured the old token at context-build time, so it can neither file a
-    // report against this turn nor abort it.
-    landingStopReports.delete(actorSessionId);
-    beginLandingTurn(actorSessionId);
+    const beforeRecord = await sessions.get(actorSessionId);
+    const before = beforeRecord?.messages?.length ?? 0;
+    const contributorStartedAt = Date.now();
+    // Snapshot the experiment decision at turn start. A Settings change while
+    // the actor is running applies to the next turn and must not relabel this
+    // one. API-backed actors are a different experiment and contribute nothing.
+    const contributorDecision = kind === 'web' && beforeRecord?.backing !== 'api'
+      ? resolveWebActorSurfaceDecision({
+        requested: settingsStore.get().webActorActionSurface,
+        allowedTools: resolveManifestAllow(beforeRecord?.toolManifest),
+        headlessAvailable: offscreenAvailable,
+      })
+      : null;
+    const contributorArm = contributorDecision && CONTRIBUTOR_METRICS_AVAILABLE
+      ? await contributorStore.arm()
+      : null;
+    const actorSurface = contributorDecision?.resolved;
+    /** @type {string | null} */
+    let landingStopSnapshot = null;
+    const captureLandingStop = () => {
+      // The next queued turn clears this report at its own start. Consume it
+      // while this turn still owns the actor slot.
+      const report = landingStopReports.get(actorSessionId);
+      if (report) {
+        landingStopReports.delete(actorSessionId);
+        landingStopSnapshot = report;
+      }
+    };
     /**
      * If the origin lock stopped this actor mid-turn, its own reply is not the
      * answer — the report is. Overriding UNCONDITIONALLY is the point: a stopped
@@ -6164,10 +6308,68 @@ const actorMessaging = makeActorMessaging({
      * @returns {{ result: string, stopped?: boolean }}
      */
     const withLandingStop = (reply) => {
-      const report = landingStopReports.get(actorSessionId);
+      const report = landingStopSnapshot;
       if (!report) return reply;
-      landingStopReports.delete(actorSessionId);
       return { result: report, stopped: true };
+    };
+    /**
+     * Record only fixed enums/counters after the actor session has settled.
+     * Session/tool ids exist solely in bounded local dedupe maps; the serialized
+     * contribution schema has no field through which they can exit.
+     * @param {{ result: string, stopped?: boolean }} reply
+     * @param {{ messages: any[], usage: any } | null | undefined} snapshot
+     */
+    const finishContributor = async (reply, snapshot) => {
+      const finalReply = withLandingStop(reply);
+      if (!contributorDecision || !beforeRecord || contributorArm?.enabled !== true) return finalReply;
+      try {
+        if (!snapshot) return finalReply;
+        const freshMessages = snapshot.messages.slice(before);
+        const toolUses = freshMessages.flatMap((entry) =>
+          Array.isArray((/** @type {any} */ (entry))?.toolUses)
+            ? (/** @type {any} */ (entry)).toolUses : []);
+        const base = {
+          feature: 'web_actor_surface',
+          ...contributorDecision,
+          browser: browser.runtime.getURL('').startsWith('moz-extension://') ? 'firefox' : 'chrome',
+          extensionVersion: browser.runtime.getManifest().version,
+          channel: CHANNEL,
+          provider: beforeRecord.provider,
+          model: beforeRecord.model,
+        };
+        const actions = [];
+        for (const toolUse of toolUses) {
+          const action = contributorActionForTool(toolUse?.name);
+          if (action) actions.push({ ...base, action });
+        }
+        const assistantMessages = freshMessages.filter((entry) => entry?.role === 'assistant');
+        const { outcome, failure } = contributorTurnResult({
+          assistantMessages,
+          stopped: finalReply.stopped,
+          result: finalReply.result,
+        });
+        const usage = normalizeTally(snapshot.usage);
+        const tokens = usage.inputTokens + usage.outputTokens
+          + usage.cacheReadTokens + usage.cacheWriteTokens;
+        await contributorStore.recordWebSettlement({
+          consentGeneration: contributorArm.generation,
+          operationKey: correlationId,
+          feedbackContextKey: contributorFeedbackContextKey(parentSessionId, parentToolUseId),
+          turn: {
+            ...base,
+            outcome,
+            failure,
+            durationMs: Date.now() - contributorStartedAt,
+            tokens,
+          },
+          actions,
+        });
+      } catch (error) {
+        // Contribution is optional and local; corrupt/newer state must never
+        // change the actor result or weaken the actor-isolation boundary.
+        console.warn('[contributor] local settlement skipped', error);
+      }
+      return finalReply;
     };
     // Heap-split: every BOUND actor runs its loop in its own dedicated Worker heap.
     // engine kinds (vm/notebook/app, phase 2) AND the web/API actor (phase 3, the
@@ -6175,12 +6377,30 @@ const actorMessaging = makeActorMessaging({
     // tools + fetch_url run in the privileged host via the gated relay; the worker
     // holds no key or extension APIs. There is no background-heap fallback.
     if (kind === 'webvm' || kind === 'notebook' || kind === 'app' || kind === 'web' || kind === 'dweb') {
-      const off = await runActorTurnOffscreen({ actorSessionId, message: deliveredMessage, instanceId, kind, actorTabId, oneShot: oneShot === true, display, inbound: false });
-      return withLandingStop(off);
+      const off = await runActorTurnOffscreen({
+        actorSessionId,
+        message: deliveredMessage,
+        instanceId,
+        kind,
+        actorTabId,
+        oneShot: oneShot === true,
+        display,
+        inbound: false,
+        actorSurface,
+        onBeforeRelease: captureLandingStop,
+        turnLease,
+      });
+      return finishContributor(off, off.turnSnapshot);
     }
-    return withLandingStop({ result: `actor kind ${kind || 'unknown'} is unsupported`, stopped: true });
+    captureLandingStop();
+    if (turnLease) turnLease.release();
+    return finishContributor(
+      { result: `actor kind ${kind || 'unknown'} is unsupported`, stopped: true },
+      null,
+    );
   },
-  reenter: ({ userText, sessionId, synthetic, trusted, actorReply }) => runAgentTurn({ userText, sessionId, synthetic, trusted, actorReply }),
+  reenter: ({ userText, sessionId, synthetic, trusted, actorReply, turnLease }) =>
+    runAgentTurn({ userText, sessionId, synthetic, trusted, actorReply, turnLease }),
   // Restart recovery is a receipt, not a turn. Persist it directly with a
   // stable id so a second background loss can finish the same append without
   // duplicating the notice or giving the model another chance to act.
@@ -6230,6 +6450,12 @@ const actorMessaging = makeActorMessaging({
   mailbox: actorMailbox,
   log: (/** @type {any[]} */ ...a) => console.warn('[actor]', ...a),
 });
+// Human-feedback admission must see both the parent chat slot and any actor
+// delivery still settling for that chat. Keep these as explicit bindings so
+// route wiring remains shorthand-only and statically auditable.
+const isSessionBusy = (/** @type {string} */ sessionId) => turnSlots.isBusy(sessionId);
+const hasInFlightFor = (/** @type {string} */ sessionId) => actorMessaging.hasInFlightFor(sessionId);
+const channel = CHANNEL;
 
 // Recover the durable mailbox before any automatic model work. Stored actor work
 // is never executed here. A failed receipt stays durable and gets another passive
@@ -6597,6 +6823,11 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...makeMemoryRoutes({
     vault, auditLog, pushState, memory, memorySuggestions, runInit, postChatNote,
     USER_DOC_SCOPE, appendNoteToUserDoc, profileState, seedUserDocBody,
+  }),
+  ...makeContributorRoutes({
+    contributorStore, sessions, isActualOptionsSender, isActualSidepanelSender,
+    isActualHomeSender, isSessionBusy, hasInFlightFor, actorRecoveryReady,
+    contributorFeedbackTargets, channel,
   }),
   ...makeContactsRoutes({ vault, auditLog, contacts, appRegistry, mergeContacts }),
   ...makeActorOverviewRoutes({ vault, sessions, turnSlots, actorLiveProjection, isActualHomeSender }),

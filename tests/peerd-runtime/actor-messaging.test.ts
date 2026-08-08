@@ -1,14 +1,15 @@
 import { describe, test, expect } from 'bun:test';
 import { makeActorMessaging } from '../../extension/peerd-runtime/actor/actor-messaging.js';
 import { ACTOR_CREDENTIAL_BOUNDARY_FAILURE } from '../../extension/peerd-runtime/errors.js';
-import { ABORT_STEER, ABORT_STOP } from '../../extension/peerd-runtime/loop/turn-slots.js';
+import { ABORT_STEER, ABORT_STOP, makeTurnSlots } from '../../extension/peerd-runtime/loop/turn-slots.js';
 
 // A flush for the fire-and-forget runWhenIdle → runActorTurn → deliver chain.
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 type Reenter = {
   userText: string; sessionId: string; synthetic: boolean;
-  actorReply?: { kind: string; instanceId: string; name?: string; failed?: boolean; outcomeKnown?: boolean; performed?: boolean; actorDeliveryId?: string };
+  turnLease?: { controller: AbortController; release: () => void };
+  actorReply?: { kind: string; instanceId: string; name?: string; failed?: boolean; outcomeKnown?: boolean; performed?: boolean; actorDeliveryId?: string; parentToolUseId?: string };
 };
 type RecoveryNotice = Reenter & { recoveryId: string };
 
@@ -16,12 +17,14 @@ const harness = (over: Partial<Parameters<typeof makeActorMessaging>[0]> = {}) =
   const reentries: Reenter[] = [];
   const recoveryNotices: RecoveryNotice[] = [];
   const turnsRun: Array<{ actorSessionId: string; message: string; parentSessionId?: string; rootSessionId?: string }> = [];
+  const turnCalls: any[] = [];
   const deps = {
     resolveActor: async (to: string) =>
       to === 'app-1'
         ? { instanceId: 'app-1', kind: 'app', actorSessionId: 'res-1', name: 'todo', tabId: 7 }
         : null,
-    runActorTurn: async (o: { actorSessionId: string; message: string; parentSessionId?: string; rootSessionId?: string }) => {
+    runActorTurn: async (o: any) => {
+      turnCalls.push(o);
       turnsRun.push({
         actorSessionId: o.actorSessionId, message: o.message,
         parentSessionId: o.parentSessionId, rootSessionId: o.rootSessionId,
@@ -37,10 +40,11 @@ const harness = (over: Partial<Parameters<typeof makeActorMessaging>[0]> = {}) =
     wrapUntrusted: ({ origin, body }: { origin: string; body: string }) => `<u origin="${origin}">${body}</u>`,
     appendAudit: async () => {},
     now: () => 1000,
+    makeCorrelationId: (() => { let sequence = 0; return () => `correlation-${++sequence}`; })(),
     log: () => {},
     ...over,
   } as Parameters<typeof makeActorMessaging>[0];
-  return { ...makeActorMessaging(deps), reentries, recoveryNotices, turnsRun };
+  return { ...makeActorMessaging(deps), reentries, recoveryNotices, turnsRun, turnCalls };
 };
 
 describe('message_actor — the sender gate (fail closed)', () => {
@@ -157,6 +161,33 @@ describe('message_actor: actor isolation wall', () => {
 });
 
 describe('message_actor — happy path + correlation', () => {
+  test('reserves the actor slot before async setup so a second delivery cannot overtake', async () => {
+    const slots = makeTurnSlots();
+    const started: string[] = [];
+    const releases: Array<() => void> = [];
+    const { messageActor } = harness({
+      caps: { rateCap: 100, outstanding: 100 },
+      turnSlots: slots,
+      runActorTurn: (opts: any) => {
+        expect(opts.turnLease?.controller).toBeInstanceOf(AbortController);
+        started.push(opts.message);
+        return new Promise<{ result: string }>((resolve) => {
+          releases.push(() => resolve({ result: `${opts.message} done` }));
+        });
+      },
+    });
+    await messageActor({ to: 'app-1', message: 'A', senderSessionId: 'chat-1' });
+    await messageActor({ to: 'app-1', message: 'B', senderSessionId: 'chat-1' });
+    await tick();
+    expect(started).toEqual(['A']);
+    releases[0]();
+    await tick();
+    expect(started).toEqual(['A', 'B']);
+    releases[1]();
+    await tick();
+    expect(slots.isBusy('res-1')).toBe(false);
+  });
+
   test('runs the actor turn and re-enters the SENDER with a fenced synthetic reply', async () => {
     const { messageActor, reentries, turnsRun } = harness();
     const r = await messageActor({ to: 'app-1', message: 'build a todo app', senderSessionId: 'chat-1' });
@@ -174,6 +205,44 @@ describe('message_actor — happy path + correlation', () => {
     // attributed bubble (trickle-up) instead of hiding it as plumbing.
     expect(reentries[0].actorReply).toMatchObject({ kind: 'app', instanceId: 'app-1', name: 'todo', failed: false });
     expect(typeof reentries[0].actorReply?.actorDeliveryId).toBe('string');
+  });
+
+  test('reserves the parent slot before reply reentry setup so sibling replies cannot steer-abort', async () => {
+    const slots = makeTurnSlots();
+    const parentStarts: string[] = [];
+    const parentReleases: Array<() => void> = [];
+    const { messageActor, hasInFlightFor } = harness({
+      caps: { rateCap: 100, outstanding: 100 },
+      turnSlots: slots,
+      resolveActor: async (to: string) => to === 'app-1' || to === 'app-2'
+        ? { instanceId: to, kind: 'app', actorSessionId: `actor-${to}` }
+        : null,
+      runActorTurn: async ({ message }: any) => ({ result: `${message} done` }),
+      reenter: (entry: Reenter) => {
+        expect(entry.turnLease?.controller.signal.aborted).toBe(false);
+        parentStarts.push(entry.userText.includes('A done') ? 'A' : 'B');
+        return new Promise<void>((resolve) => {
+          parentReleases.push(() => {
+            entry.turnLease?.release();
+            resolve();
+          });
+        });
+      },
+    });
+    await messageActor({ to: 'app-1', message: 'A', senderSessionId: 'chat-1' });
+    await messageActor({ to: 'app-2', message: 'B', senderSessionId: 'chat-1' });
+    await tick();
+    expect(parentStarts).toEqual(['A']);
+    expect(slots.isBusy('chat-1')).toBe(true);
+    expect(hasInFlightFor('chat-1')).toBe(true);
+    parentReleases[0]();
+    await tick();
+    expect(parentStarts).toEqual(['A', 'B']);
+    expect(hasInFlightFor('chat-1')).toBe(true);
+    parentReleases[1]();
+    await tick();
+    expect(slots.isBusy('chat-1')).toBe(false);
+    expect(hasInFlightFor('chat-1')).toBe(false);
   });
 
   test('a FAILED reply wake carries actorReply.failed so the bubble can show the failure', async () => {
@@ -578,6 +647,9 @@ describe('message_actor — durable mailbox (persist + redrain)', () => {
     expect(mb.appended[0]).toMatchObject({
       senderSessionId: 'chat-1', to: 'app-1', message: 'build', state: 'queued', kind: 'app',
     });
+    expect(mb.appended[0].id).toBe('correlation-1');
+    expect(mb.appended[0].id).not.toContain('app-1');
+    expect(mb.appended[0].id).not.toContain('1000');
     expect(mb.started).toEqual([mb.appended[0].id]);
     await tick();
     // Reentry fulfillment is not the commit acknowledgement. The id rides the
@@ -587,10 +659,26 @@ describe('message_actor — durable mailbox (persist + redrain)', () => {
     expect(mb.removed).toEqual([]);
   });
 
+  test('a live delivery runs with the durable correlation and parent tool identity', async () => {
+    const mb = makeMailbox();
+    const { messageActor, turnCalls, reentries } = harness({ mailbox: mb.mailbox });
+    await messageActor({
+      to: 'app-1', message: 'build', senderSessionId: 'chat-1', toolUseId: 'tool-parent',
+    });
+    await tick();
+    expect(turnCalls).toHaveLength(1);
+    expect(turnCalls[0]).toMatchObject({
+      correlationId: mb.appended[0].id,
+      parentToolUseId: 'tool-parent',
+    });
+    expect(mb.appended[0].parentToolUseId).toBe('tool-parent');
+    expect(reentries[0].actorReply?.parentToolUseId).toBe('tool-parent');
+  });
+
   test('a live async reply keeps its mailbox row while the parent slot is busy', async () => {
     const mb = makeMailbox();
     const parentCallbacks: Array<() => void> = [];
-    const { messageActor, reentries } = harness({
+    const { messageActor, reentries, hasInFlightFor } = harness({
       mailbox: mb.mailbox,
       turnSlots: {
         runWhenIdle: (sessionId: string, fn: () => void) => {
@@ -606,17 +694,19 @@ describe('message_actor — durable mailbox (persist + redrain)', () => {
     expect(parentCallbacks).toHaveLength(1);
     expect(reentries).toEqual([]);
     expect(mb.removed).toEqual([]);
+    expect(hasInFlightFor('chat-1')).toBe(true);
 
     parentCallbacks[0]();
     await tick();
     expect(reentries).toHaveLength(1);
     expect(reentries[0].actorReply?.actorDeliveryId).toBe(mb.appended[0].id);
     expect(mb.removed).toEqual([]);
+    expect(hasInFlightFor('chat-1')).toBe(false);
   });
 
-  test('a live async reply keeps its mailbox row when parent reentry fails', async () => {
+  test('a failed parent reentry persists a passive receipt and closes the mailbox row', async () => {
     const mb = makeMailbox();
-    const { messageActor, reentries } = harness({
+    const { messageActor, reentries, recoveryNotices, hasInFlightFor } = harness({
       mailbox: mb.mailbox,
       reenter: async () => { throw new Error('parent session write failed'); },
     });
@@ -625,7 +715,51 @@ describe('message_actor — durable mailbox (persist + redrain)', () => {
     await tick();
 
     expect(reentries).toEqual([]);
+    expect(recoveryNotices).toHaveLength(1);
+    expect(recoveryNotices[0].recoveryId).toBe(mb.appended[0].id);
+    expect(recoveryNotices[0].actorReply?.actorDeliveryId).toBe(mb.appended[0].id);
+    expect(mb.removed).toEqual([mb.appended[0].id]);
+    expect(hasInFlightFor('chat-1')).toBe(false);
+  });
+
+  test('a failed parent reentry retains custody and terminal blocking when passive persistence fails', async () => {
+    const mb = makeMailbox();
+    const { messageActor, reentries, recoveryNotices, hasInFlightFor } = harness({
+      mailbox: mb.mailbox,
+      reenter: async () => { throw new Error('parent session write failed'); },
+      recordRecovery: async () => false,
+    });
+
+    await messageActor({ to: 'app-1', message: 'build', senderSessionId: 'chat-1' });
+    await tick();
+
+    expect(reentries).toEqual([]);
+    expect(recoveryNotices).toEqual([]);
     expect(mb.removed).toEqual([]);
+    expect(hasInFlightFor('chat-1')).toBe(true);
+  });
+
+  test('a post-Stop queued reply stays terminally blocked when mailbox cancellation cannot persist', async () => {
+    const mb = makeMailbox();
+    const slots = makeTurnSlots();
+    const parentTurn = slots.claim('chat-1');
+    const { messageActor, stopActorsFor, hasInFlightFor, reentries } = harness({
+      turnSlots: slots,
+      mailbox: {
+        ...mb.mailbox,
+        remove: async () => { throw new Error('mailbox delete failed'); },
+      },
+    });
+
+    await messageActor({ to: 'app-1', message: 'build', senderSessionId: 'chat-1' });
+    await tick();
+    expect(hasInFlightFor('chat-1')).toBe(true);
+    stopActorsFor('chat-1');
+    parentTurn.release();
+    await tick();
+
+    expect(reentries).toEqual([]);
+    expect(hasInFlightFor('chat-1')).toBe(true);
   });
 
   test('a WEB message IS persisted now (async like every kind)', async () => {
@@ -645,7 +779,7 @@ describe('message_actor — durable mailbox (persist + redrain)', () => {
     const mb = makeMailbox();
     mb.setLoad([{
       id: 'c1', senderSessionId: 'chat-1', to: 'app-1', message: 'resume me',
-      createdAt: 1, state: 'queued', kind: 'app',
+      createdAt: 1, state: 'queued', kind: 'app', parentToolUseId: 'tool-original',
     }]);
     const { redrain, reentries, recoveryNotices, turnsRun } = harness({ mailbox: mb.mailbox });
     const r = await redrain();
@@ -657,6 +791,7 @@ describe('message_actor — durable mailbox (persist + redrain)', () => {
     expect(recoveryNotices[0].sessionId).toBe('chat-1');
     expect(recoveryNotices[0].actorReply?.outcomeKnown).toBe(true);
     expect(recoveryNotices[0].actorReply?.performed).toBe(false);
+    expect(recoveryNotices[0].actorReply?.parentToolUseId).toBe('tool-original');
     expect(recoveryNotices[0].userText.split('\n\n')[0]).toContain('did not run the request');
     expect(recoveryNotices[0].userText).toContain('It was not run');
     expect(mb.removed).toEqual(['c1']);
@@ -852,6 +987,19 @@ describe('message_actor — durable mailbox (persist + redrain)', () => {
     await messageActor({ to: 'app-1', message: 'x', senderSessionId: 'chat-1' });
     await tick();
     expect(actorsFor('chat-1')).toEqual(['res-1']);
+  });
+
+  test('hasInFlightFor tracks asynchronous actor work without exposing bookkeeping', async () => {
+    let release: ((value: { result: string }) => void) | undefined;
+    const { messageActor, hasInFlightFor } = harness({
+      runActorTurn: () => new Promise<{ result: string }>((resolve) => { release = resolve; }),
+    });
+    expect(hasInFlightFor('chat-1')).toBe(false);
+    await messageActor({ to: 'app-1', message: 'x', senderSessionId: 'chat-1' });
+    expect(hasInFlightFor('chat-1')).toBe(true);
+    release?.({ result: 'done' });
+    await tick();
+    expect(hasInFlightFor('chat-1')).toBe(false);
   });
 
   test('actorsFor keeps an actor visible until ALL its in-flight messages settle (refcount)', async () => {

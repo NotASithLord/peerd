@@ -60,7 +60,7 @@
 // orphan turn nobody consumes AND rebuild its context on the MAIN exposure
 // surface, escalating past the child's narrowed toolset.
 
-import { escapeAttr, uuidv7 } from '/shared/util.js';
+import { escapeAttr } from '/shared/util.js';
 import { ASYNC_ACTOR_ACTORS, mayMessageActor, messageProvenance } from './delegation-lineage.js';
 // #241 — the deterministic schema boundary for an untrusted actor's reply.
 // Pure policy (no IO), imported directly like the other pure helpers here; the
@@ -118,22 +118,22 @@ const SCHEMA_VALIDATED_KINDS = new Set(['web', 'api']);
  *   chat that sent this message — the chat-scoped WEB actor (to:'web') is owned by it,
  *   so it must be threaded (not re-derived from the ambient active chat, which is wrong
  *   on a boot redrain). Engine/per-tab kinds ignore it (globally/tab keyed).
- * @param {(opts: { actorSessionId: string, message: string, actorTabId?: number, instanceId: string, kind: string, parentToolUseId?: string, parentSessionId: string, rootSessionId: string, name?: string, oneShot?: boolean }) => Promise<{ result: string, stopped?: boolean, executionFailed?: boolean, outcomeKnown?: boolean }>} deps.runActorTurn
+ * @param {(opts: { actorSessionId: string, message: string, actorTabId?: number, instanceId: string, kind: string, correlationId: string, parentToolUseId?: string, parentSessionId: string, rootSessionId: string, name?: string, oneShot?: boolean, turnLease?: { controller: AbortController, release: () => void } }) => Promise<{ result: string, stopped?: boolean, executionFailed?: boolean, outcomeKnown?: boolean }>} deps.runActorTurn
  *   Drive ONE actor turn (runAgentTurn against the actor session) and
- *   resolve with its final assistant text. parentToolUseId (the message_actor
- *   tool_use id, absent on a boot redrain) keys the actor's live DISPLAY stream
- *   to its card. Contracted to CLAIM the actor's
+ *   resolve with its final assistant text. correlationId is the durable mailbox
+ *   identity; parentToolUseId keys the actor's live DISPLAY stream to its card.
+ *   Contracted to CLAIM the actor's
  *   turn slot (so runWhenIdle drains correctly).
- * @param {(opts: { userText: string, sessionId: string, synthetic: boolean, trusted?: boolean, actorReply?: { kind: string, instanceId: string, name?: string, failed: boolean, outcomeKnown?: boolean, performed?: boolean, actorDeliveryId?: string } }) => Promise<unknown>} deps.reenter
+ * @param {(opts: { userText: string, sessionId: string, synthetic: boolean, trusted?: boolean, actorReply?: { kind: string, instanceId: string, name?: string, failed: boolean, outcomeKnown?: boolean, performed?: boolean, actorDeliveryId?: string, parentToolUseId?: string }, turnLease?: { controller: AbortController, release: () => void } }) => Promise<unknown>} deps.reenter
  *   Re-enter a session with a (synthetic) turn — the SW's runAgentTurn. trusted:true
  *   marks a first-party continuation allowed to message actors (the reply-wake).
- * @param {(opts: { userText: string, sessionId: string, synthetic: true, actorReply: { kind: string, instanceId: string, name?: string, failed: boolean, outcomeKnown?: boolean, performed?: boolean }, recoveryId: string }) => Promise<boolean>} [deps.recordRecovery]
+ * @param {(opts: { userText: string, sessionId: string, synthetic: true, actorReply: { kind: string, instanceId: string, name?: string, failed: boolean, outcomeKnown?: boolean, performed?: boolean, actorDeliveryId?: string, parentToolUseId?: string }, recoveryId: string }) => Promise<boolean>} [deps.recordRecovery]
  *   Persist a restart notice without running a model turn. The shell gives the
  *   notice a stable id derived from recoveryId, making a second restart safe.
  * @param {(opts: { sessionId: string, deliveryId: string }) => Promise<boolean>} [deps.deliveryCommitted]
  *   Check whether the original reply or outer tool result is already durable.
  *   Recovery removes that mailbox row without adding a second warning.
- * @param {{ runWhenIdle: (sessionId: string, fn: () => void) => void, advanceQueue?: (sessionId: string) => void, stop?: (sessionId: string) => boolean }} deps.turnSlots
+ * @param {{ runWhenIdle: (sessionId: string, fn: () => void) => void, runWhenIdleClaimed?: (sessionId: string, fn: (lease: { controller: AbortController, release: () => void }) => void) => void, advanceQueue?: (sessionId: string) => void, stop?: (sessionId: string) => boolean }} deps.turnSlots
  * @param {() => Promise<string | null>} deps.getActiveSessionId
  * @param {(sessionId: string) => Promise<Array<import('./delegation-lineage.js').LineageHop>>} [deps.getAncestry]
  * @param {() => boolean} [deps.schemaValidatedReplies] issue 241 - force an untrusted (web/api) actor's reply through the strict JSON envelope validator before it reaches the orchestrator. Read PER REPLY (a getter, not a boolean) so flipping the setting takes effect without an SW restart. Default `() => false` (free-form fenced path).
@@ -146,9 +146,10 @@ const SCHEMA_VALIDATED_KINDS = new Set(['web', 'api']);
  * @param {(opts: { origin: string, tool: string, body: string, retrievedAt?: string }) => string} deps.wrapUntrusted
  * @param {(entry: object) => Promise<unknown>} [deps.appendAudit]
  * @param {() => number} [deps.now]
+ * @param {() => string} [deps.makeCorrelationId]
  * @param {{ outstanding?: number, rateCap?: number, rateWindowMs?: number, resultChars?: number }} [deps.caps]
  * @param {(...args: unknown[]) => void} [deps.log]
- * @param {{ append: (e: { id: string, senderSessionId: string, to: string, message: string, createdAt: number, state?: 'queued'|'started', kind?: string, name?: string, provenance?: { rootSessionId: string, lineagePath: string[] }, oneShot?: boolean }) => Promise<unknown>, markStarted?: (id: string) => Promise<unknown>, remove: (id: string) => Promise<unknown>, load: () => Promise<any[]> }} [deps.mailbox]
+ * @param {{ append: (e: { id: string, senderSessionId: string, to: string, message: string, createdAt: number, state?: 'queued'|'started', kind?: string, name?: string, parentToolUseId?: string, provenance?: { rootSessionId: string, lineagePath: string[] }, oneShot?: boolean }) => Promise<unknown>, markStarted?: (id: string) => Promise<unknown>, remove: (id: string) => Promise<unknown>, load: () => Promise<any[]> }} [deps.mailbox]
  *   DURABLE MAILBOX (DESIGN-17 P1). Persists EVERY actor's in-flight
  *   message→reply correlation — web included — so an SW death between accept and
  *   deliver() doesn't silently drop the reply-wake. append() records queued,
@@ -175,7 +176,9 @@ export const makeActorMessaging = (deps) => {
     schemaValidatedReplies = () => false,
     recordRecovery = async () => false,
     deliveryCommitted = async () => false,
-    appendAudit = async () => {}, now = Date.now, caps = {}, log = () => {},
+    appendAudit = async () => {}, now = Date.now,
+    makeCorrelationId = () => globalThis.crypto.randomUUID(),
+    caps = {}, log = () => {},
     mailbox: mailboxInput = {},
   } = deps;
   const mailbox = {
@@ -204,6 +207,12 @@ export const makeActorMessaging = (deps) => {
   // sender, root === sender, so the pre-#134 behavior is unchanged.
   /** @type {Map<string, number>} rootSessionId → actor messages currently in flight */
   const inFlight = new Map();
+  // Settled actor replies that still await a parent wake or a passive durable
+  // receipt. They remain terminally relevant even though actor execution has
+  // ended: feedback on the parent's earlier assistant answer must stay closed
+  // until this later reply is committed or explicitly cancelled by Stop.
+  /** @type {Map<string, number>} rootSessionId → uncommitted settled replies */
+  const pendingReplies = new Map();
   /** @type {Map<string, number[]>} rootSessionId → recent dispatch timestamps (the burst guard) */
   const recentSends = new Map();
   // rootSessionId → (actorSessionId → REFCOUNT). A set can't represent two
@@ -267,6 +276,11 @@ export const makeActorMessaging = (deps) => {
   // sender, so agent/stop's call with the current chat id covers the whole tree.
   /** @param {string} root @returns {string[]} the actor sessions this lineage has in flight */
   const actorsFor = (root) => [...(inFlightActors.get(root)?.keys() ?? [])];
+  // Feedback and other human-only terminal actions need to distinguish an idle
+  // main turn from a chat whose actor work is still outstanding.
+  /** @param {string} root @returns {boolean} */
+  const hasInFlightFor = (root) =>
+    (inFlight.get(root) ?? 0) > 0 || (pendingReplies.get(root) ?? 0) > 0;
   // Stop every actor this lineage has in flight: bump the generation (so QUEUED
   // turns skip) and return the RUNNING ones (so the caller aborts their slots).
   /** @param {string} root @returns {string[]} */
@@ -305,6 +319,15 @@ export const makeActorMessaging = (deps) => {
   const decInFlight = (root) => {
     const c = (inFlight.get(root) ?? 1) - 1;
     if (c <= 0) inFlight.delete(root); else inFlight.set(root, c);
+  };
+  /** @param {string} root */
+  const trackPendingReply = (root) => {
+    pendingReplies.set(root, (pendingReplies.get(root) ?? 0) + 1);
+  };
+  /** @param {string} root */
+  const clearPendingReply = (root) => {
+    const count = (pendingReplies.get(root) ?? 1) - 1;
+    if (count <= 0) pendingReplies.delete(root); else pendingReplies.set(root, count);
   };
 
   // Build the ONE reply text shape (trusted lead + fenced body) both reply
@@ -351,10 +374,13 @@ export const makeActorMessaging = (deps) => {
   // Build the one envelope used by live delivery and passive restart recovery.
   // Only the locally composed lead is trusted. The body remains fenced even for
   // fixed recovery copy, so the model-facing shape never depends on its source.
-  /** @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} failed @param {string|undefined} via @param {boolean} outcomeUnknown @param {boolean|undefined} performed @param {string|undefined} actorDeliveryId */
-  const deliveryEnvelope = (instanceId, kind, name, body, failed, via, outcomeUnknown, performed, actorDeliveryId = undefined) => {
+  /** @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} failed @param {string|undefined} via @param {boolean} outcomeUnknown @param {boolean|undefined} performed @param {string|undefined} actorDeliveryId @param {string|undefined} parentToolUseId */
+  const deliveryEnvelope = (instanceId, kind, name, body, failed, via, outcomeUnknown, performed, actorDeliveryId = undefined, parentToolUseId = undefined) => {
     const userText = replyText(instanceId, kind, name, body, failed, outcomeUnknown, performed);
     const safeName = name ? escapeAttr(name.replace(/\s+/g, ' ').trim().slice(0, 80)) : undefined;
+    const safeParentToolUseId = typeof parentToolUseId === 'string' && parentToolUseId.length <= 512
+      ? parentToolUseId
+      : undefined;
     return {
       userText,
       actorReply: {
@@ -363,17 +389,18 @@ export const makeActorMessaging = (deps) => {
         ...(performed !== undefined ? { performed } : {}),
         ...(via ? { via } : {}),
         ...(actorDeliveryId ? { actorDeliveryId } : {}),
+        ...(safeParentToolUseId ? { parentToolUseId: safeParentToolUseId } : {}),
       },
     };
   };
 
   // Re-enter the SENDER with the actor's reply as a synthetic, wrapUntrusted-
-  // fenced wake — via runWhenIdle(senderSessionId) so it NEVER steer-aborts the
+  // fenced wake, via a claimed idle wake so it NEVER steer-aborts the
   // user's live turn (the focus/work-theft bug, DECISIONS #20). Only the one-line
   // lead is trusted; the actor's body is fenced (mandatory for App actors,
   // which render attacker content).
-  /** @param {string} senderSessionId @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} [failed] @param {string} [via] @param {boolean} [outcomeUnknown] @param {boolean} [performed] @param {string} [actorDeliveryId] @returns {Promise<boolean>} */
-  const deliver = (senderSessionId, instanceId, kind, name, body, failed = false, via = undefined, outcomeUnknown = false, performed = undefined, actorDeliveryId = undefined) => {
+  /** @param {string} senderSessionId @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} [failed] @param {string} [via] @param {boolean} [outcomeUnknown] @param {boolean} [performed] @param {string} [actorDeliveryId] @param {string} [parentToolUseId] @param {() => boolean} [shouldSkip] @param {() => Promise<unknown>} [onSkip] @returns {Promise<boolean>} */
+  const deliver = (senderSessionId, instanceId, kind, name, body, failed = false, via = undefined, outcomeUnknown = false, performed = undefined, actorDeliveryId = undefined, parentToolUseId = undefined, shouldSkip = () => false, onSkip = async () => {}) => {
     // actorReply rides the wake so the UI can render the reply as its OWN
     // attributed chat bubble at the bottom (not buried in the tool-call card).
     // `synthetic` alone can't carry this — it also marks truncation/resume
@@ -382,18 +409,60 @@ export const makeActorMessaging = (deps) => {
     // attributes a mediated delegation if a future async code surface routes
     // its reply here; without that, a late bubble would be unexplainable.
     const { userText, actorReply } = deliveryEnvelope(
-      instanceId, kind, name, body, failed, via, outcomeUnknown, performed, actorDeliveryId,
+      instanceId, kind, name, body, failed, via, outcomeUnknown, performed, actorDeliveryId, parentToolUseId,
     );
     return new Promise((resolve) => {
       try {
-        turnSlots.runWhenIdle(senderSessionId, () => {
+        const start = (/** @type {{ controller: AbortController, release: () => void } | undefined} */ turnLease) => {
+          // The actor may have settled while its parent was still busy. Stop's
+          // generation is rechecked at the exact parent dequeue boundary so an
+          // explicit Stop cannot be followed by a fresh synthetic model turn.
+          if (shouldSkip()) {
+            Promise.resolve(onSkip())
+              .then(
+                () => resolve(true),
+                (e) => { log('stopped reply cleanup failed', e); resolve(false); },
+              )
+              .finally(() => turnLease?.release());
+            return;
+          }
           // trusted:true: the reply wake is a first-party continuation. The reply
           // body remains fenced. Resolve false instead of rejecting because most
           // live deliveries are fire-and-forget; recovery callers use the boolean
           // to retain their durable record until the warning lands successfully.
-          Promise.resolve(reenter({ userText, sessionId: senderSessionId, synthetic: true, trusted: true, actorReply }))
-            .then(() => resolve(true), (e) => { log('reenter failed', e); resolve(false); });
-        });
+          Promise.resolve(reenter({
+            userText, sessionId: senderSessionId, synthetic: true, trusted: true,
+            actorReply, ...(turnLease ? { turnLease } : {}),
+          }))
+            .then(
+              () => resolve(true),
+              async (e) => {
+                log('reenter failed', e);
+                // Preserve the already-settled reply without starting another
+                // model turn. If this passive write succeeds, acknowledge the
+                // mailbox now; otherwise retain it for restart recovery.
+                let recorded = false;
+                if (actorDeliveryId) {
+                  try {
+                    recorded = await recordRecovery({
+                      userText, actorReply, sessionId: senderSessionId,
+                      synthetic: true, recoveryId: actorDeliveryId,
+                    });
+                  } catch (error) { log('passive reply receipt failed', error); }
+                  if (recorded) await mailbox.remove(actorDeliveryId).catch(() => {});
+                }
+                resolve(recorded);
+              },
+            )
+            // runAgentTurn owns the normal release. This backstop covers a
+            // synchronous/early reentry failure before it reaches the driver.
+            .finally(() => turnLease?.release());
+        };
+        if (typeof turnSlots.runWhenIdleClaimed === 'function') {
+          turnSlots.runWhenIdleClaimed(senderSessionId, start);
+        } else {
+          turnSlots.runWhenIdle(senderSessionId, () => start(undefined));
+        }
       } catch (e) {
         log('reenter queue failed', e);
         resolve(false);
@@ -440,7 +509,8 @@ export const makeActorMessaging = (deps) => {
       // it on settle so the set never grows past the in-flight deliveries.
       cancelledDeliveries.delete(correlationId);
     };
-    const clearMailbox = () => mailbox.remove(correlationId).catch(() => {});
+    const removeMailbox = () => mailbox.remove(correlationId);
+    const clearMailbox = () => removeMailbox().catch(() => {});
     // ONE reply seam for both modes (see routing note above). `bare` hands the
     // awaiting caller the RAW reply body instead of the formatted lead+fence:
     // the script surface's asks resolve into CODE, where fence markup is
@@ -508,16 +578,29 @@ export const makeActorMessaging = (deps) => {
       // correlation id into the appended user message; the session post-commit
       // hook owns mailbox removal. A busy or failed parent keeps the row for
       // passive recovery, and even a fulfilled turn cannot clear it early.
+      trackPendingReply(rootSessionId);
       void deliver(
         senderSessionId, instanceId, kind, name, outBody, outFailed, via,
-        outcomeUnknown, undefined, correlationId,
-      );
+        outcomeUnknown, undefined, correlationId, parentToolUseId,
+        () => (stopGen.get(rootSessionId) ?? 0) !== genAtQueue,
+        removeMailbox,
+      ).then((committedOrCancelled) => {
+        if (committedOrCancelled) clearPendingReply(rootSessionId);
+      });
     };
     // Serialize on the ACTOR's slot — runWhenIdle runs the turn the moment the
     // actor is idle (never interrupting an in-flight actor turn). A thrown/
     // failed actor turn STILL wakes the sender (with an error notice) so the
     // caller is never left hanging.
-    turnSlots.runWhenIdle(actorSessionId, () => {
+    /** @param {(lease: { controller: AbortController, release: () => void } | undefined) => void} fn */
+    const runClaimed = (fn) => {
+      if (typeof turnSlots.runWhenIdleClaimed === 'function') {
+        turnSlots.runWhenIdleClaimed(actorSessionId, fn);
+      } else {
+        turnSlots.runWhenIdle(actorSessionId, () => fn(undefined));
+      }
+    };
+    runClaimed((turnLease) => {
       // Stopped after we queued → don't start the turn. Two cancel signals land
       // here: the user's tree-wide Stop (the root's generation advanced) and the
       // awaiting actor's own abort (THIS delivery marked cancelled — never a
@@ -535,12 +618,13 @@ export const makeActorMessaging = (deps) => {
         }
         clearTracking();
         clearMailbox();
+        if (turnLease) turnLease.release();
         // We were handed the idle actor slot but are DECLINING to run a turn
         // (Stopped after we queued). No claim/release will happen, so nothing
         // would re-drain the actor's queue — every turn queued behind us would
         // strand until the next unrelated message to this actor. Hand the slot
         // to the next queued wake so post-Stop skips cascade to completion.
-        turnSlots.advanceQueue?.(actorSessionId);
+        if (!turnLease) turnSlots.advanceQueue?.(actorSessionId);
         return;
       }
       // Instrumentation (temporary): the actor turn's wall-clock. It spans the
@@ -556,8 +640,9 @@ export const makeActorMessaging = (deps) => {
       runningOnActor.set(actorSessionId, correlationId);
       Promise.resolve(runActorTurn({
         actorSessionId, message, actorTabId: tabId, instanceId, kind,
-        parentToolUseId, parentSessionId: senderSessionId, rootSessionId,
+        correlationId, parentToolUseId, parentSessionId: senderSessionId, rootSessionId,
         name, oneShot,
+        ...(turnLease ? { turnLease } : {}),
       }))
         .then((res) => {
           log('actor.timing', { kind, instanceId, actorTurnMs: now() - turnStartedAt });
@@ -575,7 +660,12 @@ export const makeActorMessaging = (deps) => {
           true,
           true,
         ))
-        .finally(clearTracking);
+        .finally(() => {
+          // The driver normally releases this lease. This idempotent backstop
+          // covers setup failures before it reaches the driver.
+          if (turnLease) turnLease.release();
+          clearTracking();
+        });
     });
   };
 
@@ -742,13 +832,16 @@ export const makeActorMessaging = (deps) => {
     // origins and may legitimately be much longer than the post-commit hook's
     // defensive id ceiling; embedding the address would make those replies
     // impossible to acknowledge. The mailbox record already stores `to`.
-    const correlationId = `actor:${uuidv7(() => nowMs)}`;
+    const correlationId = makeCorrelationId();
     // Persist oneShot for diagnostics. The provenance rides the envelope so boot
     // recovery can reroute a notice whose awaiting sender was ephemeral.
     try {
       await Promise.resolve(mailbox.append({
         id: correlationId, senderSessionId: sender, to: instanceId, message, createdAt: nowMs,
         state: 'queued', kind, ...(name ? { name } : {}),
+        ...(typeof toolUseId === 'string' && toolUseId.length <= 512
+          ? { parentToolUseId: toolUseId }
+          : {}),
         provenance: { rootSessionId, lineagePath: provenance.lineagePath },
         ...(oneShot === true ? { oneShot: true } : {}),
       }));
@@ -978,6 +1071,8 @@ export const makeActorMessaging = (deps) => {
           undefined,
           true,
           undefined,
+          undefined,
+          typeof e.parentToolUseId === 'string' ? e.parentToolUseId : undefined,
         );
         let recorded = false;
         try {
@@ -1004,6 +1099,8 @@ export const makeActorMessaging = (deps) => {
         undefined,
         false,
         false,
+        undefined,
+        typeof e.parentToolUseId === 'string' ? e.parentToolUseId : undefined,
       );
       let recorded = false;
       try {
@@ -1019,5 +1116,5 @@ export const makeActorMessaging = (deps) => {
     return { redrained: 0, retained };
   };
 
-  return { messageActor, redrain, actorsFor, stopActorsFor };
+  return { messageActor, redrain, actorsFor, hasInFlightFor, stopActorsFor };
 };

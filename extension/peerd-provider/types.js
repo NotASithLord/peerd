@@ -58,7 +58,7 @@
  *                                               trim drop-summary, loop/trim.js); consumers
  *                                               that must skip non-human content check it
  *                                               (e.g. memory/auto-memory.js)
- * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, actorDeliveryId?: string }} [actorReply]
+ * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, actorDeliveryId?: string, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }} [actorReply]
  *                                               set on an actor's reply-wake (a synthetic turn
  *                                               the chat SHOWS, attributed to the actor —
  *                                               unlike the hidden plumbing synthetics)

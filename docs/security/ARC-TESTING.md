@@ -88,6 +88,20 @@ separately. Do not treat the tab vectors above as service-worker coverage.
 | Present an ambiguous or unsupported login control. | peerd hands the step back to the user. |
 | Complete a passkey, SSO, or password step. | The user and browser handle the factor. The actor does not read or store it. |
 
+## Contributor Metrics
+
+Run these checks only in preview or dev. Store and web packages must not expose the
+surface.
+
+| Check | Expected result |
+|---|---|
+| Open Contributor Metrics on a fresh profile. | It is disabled, has no pending payload, and states that peerd works fully without it. |
+| Enable it from Settings, complete a web-actor task, then reopen Settings. | The exact canonical payload bytes are shown locally. They contain only the disclosed aggregate fields. |
+| Inspect browser network activity while enabling, recording, previewing, and voting. | No Contributor Metrics request, endpoint, alarm, or upload exists. |
+| Use the worked or didn’t-work control on a final answer. | The control is a named binary group, creates no chat message, and contributes only while consent is current. |
+| Disable and clear, then reopen Settings. | Consent, pending rows, local dedupe tokens, and feedback are gone. |
+| Attempt consent or feedback from an engine tab or other extension surface. | The background refuses the sender before any contribution mutation. |
+
 ## Recovery and Stop
 
 | Check | Expected result |

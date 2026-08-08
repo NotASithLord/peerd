@@ -25,7 +25,7 @@
  * @property {string} [thinking]
  * @property {boolean} [streaming]
  * @property {boolean} [synthetic]
- * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean }} [actorReply]
+ * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, actorDeliveryId?: string, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }} [actorReply]
  * @property {string} [stopReason]
  * @property {string} [error]
  * @property {unknown[]} [toolResults]

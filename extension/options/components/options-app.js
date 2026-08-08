@@ -33,10 +33,12 @@ import { TransferSection } from '../sections/transfer.js';
 import { MemoryView } from '../sections/memory.js';
 import { ActivityView } from '../sections/activity.js';
 import { DwebSection } from '../sections/dweb.js';
+import { ContributorMetricsSection } from '../sections/contributor-metrics.js';
 
-// The IA: three permanent groups + the preview-only dweb group.
-// DWEB_ENABLED is a build-time literal, so the store artifact's nav
-// simply never contains the Preview group.
+const CONTRIBUTOR_METRICS_ENABLED = CHANNEL === 'preview' || CHANNEL === 'dev';
+
+// The IA: three permanent groups + preview-scoped additions. Both gates are
+// build-time literals, so store artifacts structurally omit unavailable nav.
 /** @type {{ label: string, items: [string, string][] }[]} */
 const NAV = [
   {
@@ -55,6 +57,9 @@ const NAV = [
       ['memory', 'Memory'],
       ['costs', 'Costs'],
       ['transfer', 'Backup & restore'],
+      ...(CONTRIBUTOR_METRICS_ENABLED
+        ? /** @type {[string, string][]} */ ([['contributor-metrics', 'Contributor metrics']])
+        : []),
     ],
   },
   {
@@ -252,6 +257,8 @@ export const OptionsApp = {
       });
       case 'costs':     return m(CostsSection, { state, send });
       case 'transfer':  return m(TransferSection, { send });
+      case 'contributor-metrics': return CONTRIBUTOR_METRICS_ENABLED
+        ? m(ContributorMetricsSection, { send }) : null;
       case 'vault':     return m(VaultSection, { state, send });
       // Git credentials are folded UNDER API integrations (both are host/origin-bound
       // vault secrets) — ApiIntegrationsSection renders the GitCredentialsSection as a

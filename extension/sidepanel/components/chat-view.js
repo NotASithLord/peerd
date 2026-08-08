@@ -200,6 +200,12 @@ export const ChatView = {
             // — not a bright sticky footer. Filtered to this session.
             tabEvents: (state.agentTabEvents ?? []).filter((e) => e.sessionId === state.session?.sessionId),
             uiActions,
+            send,
+            // A model turn may be idle after acknowledging asynchronous actor
+            // work. That is not yet the human task's final answer; mirror the
+            // route's in-flight guard so the UI never offers a no-op verdict.
+            busy: state.streaming || Object.values(state.actors ?? {})
+              .some((card) => /** @type {any} */ (card)?.streaming === true),
           }),
 
       // Per-chat model picker, above the composer. Available at all times —

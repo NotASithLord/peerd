@@ -30,7 +30,9 @@ describe('makeAsyncActors', () => {
       reenter: async (o: any) => { reenters.push(o); },
     }));
 
-    const handle = await as.spawnActorAsync({ task: 'research bromantane', parentSessionId: 'parent' });
+    const handle = await as.spawnActorAsync({
+      task: 'research bromantane', parentSessionId: 'parent', parentToolUseId: 'spawn-tool-1',
+    });
     expect(handle.ok).toBe(true);
     expect(handle.taskId).toBe('as-1');
     expect(handle.content).toContain('(session c1, async)');
@@ -40,6 +42,10 @@ describe('makeAsyncActors', () => {
     expect(reenters).toHaveLength(1);
     expect(reenters[0].sessionId).toBe('parent');
     expect(reenters[0].synthetic).toBe(true);
+    expect(reenters[0].actorReply).toMatchObject({
+      kind: 'spawned', instanceId: 'spawned', parentToolUseId: 'spawn-tool-1',
+      parentToolUseIds: ['spawn-tool-1'],
+    });
     expect(reenters[0].userText).toContain('BROMANTANE FACTS');
     expect(reenters[0].userText).toContain('[UNTRUSTED]'); // child result is wrapped
   });
@@ -210,8 +216,8 @@ describe('makeAsyncActors', () => {
       reenter: async (o: any) => { reenters.push(o); },
     }));
 
-    await as.spawnActorAsync({ task: 'A', parentSessionId: 'parent' });
-    await as.spawnActorAsync({ task: 'B', parentSessionId: 'parent' });
+    await as.spawnActorAsync({ task: 'A', parentSessionId: 'parent', parentToolUseId: 'spawn-a' });
+    await as.spawnActorAsync({ task: 'B', parentSessionId: 'parent', parentToolUseId: 'spawn-b' });
     await flush();
     expect(reenters).toHaveLength(0);   // nothing fires while the parent turn is busy
 
@@ -220,11 +226,111 @@ describe('makeAsyncActors', () => {
     expect(reenters).toHaveLength(1);    // ONE coalesced wake…
     expect(reenters[0].userText).toContain('R:A');
     expect(reenters[0].userText).toContain('R:B');
+    expect(reenters[0].actorReply.parentToolUseIds).toEqual(['spawn-a', 'spawn-b']);
 
     // a redelivered drain finds nothing un-reintegrated → no second wake
     await as.drainReintegration('parent');
     await flush();
     expect(reenters).toHaveLength(1);
+  });
+
+  test('claims the idle parent before setup so a human turn cannot be stolen', async () => {
+    const slots = makeTurnSlots();
+    let resolveActive: ((id: string) => void) | undefined;
+    const active = new Promise<string>((resolve) => { resolveActive = resolve; });
+    let finishReentry: (() => void) | undefined;
+    const heldReentry = new Promise<void>((resolve) => { finishReentry = resolve; });
+    const reenters: any[] = [];
+    const as = makeAsyncActors(baseDeps({
+      turnSlots: slots,
+      getActiveSessionId: () => active,
+      reenter: async (opts: any) => {
+        reenters.push(opts);
+        // Model the turn driver's historical fallback: without a threaded
+        // lease it would claim here, after setup, and abort a newer user turn.
+        const lease = opts.turnLease ?? slots.claim(opts.sessionId);
+        await heldReentry;
+        lease.release();
+      },
+    }));
+
+    await as.spawnActorAsync({
+      task: 'A', parentSessionId: 'parent', parentToolUseId: 'spawn-a',
+    });
+    await flush();
+    expect(reenters).toHaveLength(1); // active-session lookup is still pending
+    expect(reenters[0].turnLease).toBeDefined();
+
+    const actorLease = reenters[0].turnLease;
+    const humanLease = slots.claim('parent');
+    expect(actorLease.controller.signal.aborted).toBe(true);
+    expect(humanLease.controller.signal.aborted).toBe(false);
+
+    resolveActive?.('parent');
+    finishReentry?.();
+    await flush();
+    humanLease.release();
+  });
+
+  test('a finished child queued behind its parent cannot wake after Stop', async () => {
+    const slots = makeTurnSlots({ forceReleaseMs: 1 });
+    const liveParent = slots.claim('parent');
+    const reenters: any[] = [];
+    const as = makeAsyncActors(baseDeps({
+      turnSlots: slots,
+      reenter: async (opts: any) => { reenters.push(opts); },
+    }));
+
+    await as.spawnActorAsync({
+      task: 'done just before Stop', parentSessionId: 'parent', parentToolUseId: 'spawn-a',
+    });
+    await flush();
+    expect(reenters).toHaveLength(0);
+
+    expect(slots.stop('parent')).toBe(true);
+    liveParent.release();
+    await flush();
+    expect(reenters).toHaveLength(0);
+    expect(as.actorTasks('parent')[0].status).toBe('cancelled');
+  });
+
+  test('Stop during child allocation cancels it as soon as actor-start reveals its id', async () => {
+    const slots = makeTurnSlots();
+    const parentLease = slots.claim('parent');
+    const stoppedSubtrees: string[] = [];
+    const reenters: any[] = [];
+    let childLease: ReturnType<typeof slots.claim> | undefined;
+    let publishStart!: () => void;
+    let finishChild!: (value: any) => void;
+    const as = makeAsyncActors(baseDeps({
+      turnSlots: slots,
+      stopSubtree: (sessionId: string) => { stoppedSubtrees.push(sessionId); return [sessionId]; },
+      spawnActor: (req: any) => new Promise((resolve) => {
+        publishStart = () => {
+          childLease = slots.claim('child-delayed');
+          req.onEvent({ type: 'actor-start', sessionId: 'child-delayed', grantedTools: [] });
+        };
+        finishChild = resolve;
+      }),
+      reenter: async (opts: any) => { reenters.push(opts); },
+    }));
+
+    const spawning = as.spawnActorAsync({ task: 'delayed allocation', parentSessionId: 'parent' });
+    await Promise.resolve();
+    expect(slots.stop('parent')).toBe(true);
+    publishStart();
+    const handle = await spawning;
+
+    expect(handle.ok).toBe(true);
+    expect(stoppedSubtrees).toEqual(['child-delayed']);
+    expect(childLease?.controller.signal.aborted).toBe(true);
+    expect(as.actorTasks('parent')[0].status).toBe('cancelled');
+
+    finishChild({ result: 'must not return', sessionId: 'child-delayed', stopped: true });
+    await flush();
+    expect(reenters).toHaveLength(0);
+    childLease?.release();
+    parentLease.release();
   });
 
   test('vault-locked defers the wake (notify only); onVaultUnlock drains it', async () => {

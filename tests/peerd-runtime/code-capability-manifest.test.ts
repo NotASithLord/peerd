@@ -9,7 +9,9 @@ import {
   codeClientMethods,
   codeClientReference,
   resolveWebActorSurface,
+  resolveWebActorSurfaceDecision,
   renderCodeOpTrace,
+  WEB_ACTOR_CODE_CLIENT_TOOL_NAMES,
 } from '../../extension/peerd-runtime/actor/capability-manifest.js';
 import { ACTORS_API_ACCEPTED_METHODS, ACTORS_API_METHODS } from '../../extension/peerd-runtime/actor/actors-api.js';
 import { PAGE_API_METHODS } from '../../extension/peerd-runtime/actor/page-api.js';
@@ -65,6 +67,16 @@ describe('declarative code-capability contract', () => {
       requested: 'code', headlessAvailable: true,
       allowedTools: new Set(actorCapabilityManifest('web', 'tab').tools.concat('page_code')),
     })).toBe('code');
+    expect(resolveWebActorSurfaceDecision({ requested: 'code', headlessAvailable: false }))
+      .toEqual({ requested: 'code', resolved: 'tools', fallback: 'worker_unavailable' });
+    expect(resolveWebActorSurfaceDecision({
+      requested: 'code', headlessAvailable: true,
+      allowedTools: new Set(['page_code', 'navigate']),
+    })).toEqual({
+      requested: 'code', resolved: 'tools', fallback: 'capability_grant_incomplete',
+    });
+    expect(resolveWebActorSurfaceDecision({ requested: 'tools', headlessAvailable: false }))
+      .toEqual({ requested: 'tools', resolved: 'tools', fallback: 'none' });
   });
 
   test('page methods never exceed the tab web actor direct authority', () => {
@@ -80,6 +92,7 @@ describe('declarative code-capability contract', () => {
     // other direct web capability has exact code-client parity.
     expect([...allowed].filter((tool) => tool !== 'site_client_run').sort())
       .toEqual([...mapped].sort());
+    expect([...WEB_ACTOR_CODE_CLIENT_TOOL_NAMES].sort()).toEqual([...mapped].sort());
     expect(actorCodeSurfaceTools('web', 'tab')).toEqual(['page_code', 'site_client_run']);
     expect(actorCapabilityManifest('web', 'api').tools).toEqual(ACTOR_CAPABILITY_MANIFESTS.api.tools);
   });

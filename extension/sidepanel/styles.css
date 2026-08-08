@@ -1054,6 +1054,32 @@ button.icon.is-active {
   white-space: pre-wrap;
   word-break: break-word;
 }
+.task-feedback {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-top: 5px;
+  color: var(--fg-muted);
+  font-size: 10px;
+}
+.task-feedback-note {
+  flex-basis: 100%;
+}
+.task-feedback button {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-muted);
+  padding: 2px 7px;
+  font-size: 10px;
+}
+.task-feedback button:hover,
+.task-feedback button.is-selected {
+  background: var(--elev2);
+  color: var(--fg);
+  border-color: var(--fg-muted);
+}
 /* The user's voice — "operator cyan" (redesign EXPLORE 1a): a faint cyan tint +
    a 2px accent rail, replacing the retired legacy indigo. Cyan already means
    "your intent" (Plan/Act, primary actions), so it stays within the sanctioned
@@ -2851,6 +2877,30 @@ button.tool-call-header:focus-visible {
    ready/connected — green (.key-set) is reserved for that, never default. */
 .key-badge.key-local { color: var(--fg-muted); }
 .provider-card-form { margin-top: 10px; }
+.contributor-metrics { display: flex; flex-direction: column; gap: 10px; }
+.contributor-disclosure h3,
+.contributor-preview h3 { margin: 0 0 8px; font-size: 14px; }
+.contributor-disclosure h4 { margin: 10px 0 4px; font-size: 13px; }
+.contributor-disclosure p { margin: 0 0 9px; color: var(--fg-muted); font-size: 13px; line-height: 1.45; }
+.contributor-disclosure ul { margin: 0 0 9px; padding-left: 20px; color: var(--fg-muted); font-size: 13px; line-height: 1.45; }
+.contributor-disclosure p:last-child { margin-bottom: 0; }
+.contributor-actions { margin-top: 12px; }
+.contributor-preview-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.contributor-preview-head > div { min-width: 0; }
+.contributor-preview-head p { margin: 0; }
+.contributor-payload {
+  width: 100%;
+  min-height: 180px;
+  margin-top: 10px;
+  resize: vertical;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: var(--r3);
+  background: var(--code);
+  color: var(--fg);
+  padding: 10px;
+  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
 /* why: flex-direction:row is REQUIRED — the generic `.input-row` sets
    column, so without this the input + Save stack vertically (and centered
    by align-items). Row keeps the field and a compact Save on one line. */

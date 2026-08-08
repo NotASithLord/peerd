@@ -127,14 +127,34 @@ export const isOptionsSender = (sender, { runtimeId, extensionOrigin, optionsUrl
 };
 
 /**
- * Is this sender the full-tab Home SPA that owns instance-wide observability?
- * Home accepts hash routes (openHome uses them to select a section), rejects
- * queries/sibling paths, and must carry tab provenance. Keeping this predicate
- * narrower than `isFirstPartySender` prevents engine hosts and other extension
- * pages from reading cross-session actor topology.
+ * Is this sender specifically the browser-owned peerd panel/sidebar page?
+ *
+ * why separate from first-party: the binary feedback route is a HUMAN click,
+ * not an agent capability. Engine tabs also have first-party extension URLs
+ * while hosting agent-authored state, so admitting all first-party senders
+ * would let an App/Notebook forge task verdicts. Exact URL and no tab
+ * provenance identifies Chrome's side panel and Firefox's sidebar document.
+ * @param {{ id?: string, url?: string, tab?: unknown } | null | undefined} sender
+ * @param {{ runtimeId?: string, extensionOrigin?: string, sidepanelUrl?: string }} [trust]
+ */
+export const isSidepanelSender = (sender, { runtimeId, extensionOrigin, sidepanelUrl } = {}) => {
+  if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
+  if (typeof sidepanelUrl !== 'string' || sidepanelUrl.length === 0) return false;
+  if (sender && typeof sender === 'object' && 'tab' in sender) return false;
+  return sender?.url === sidepanelUrl;
+};
+
+/**
+ * Is this sender the full-tab Home SPA that owns human feedback and
+ * instance-wide observability?
+ *
+ * why separate from first-party: Home renders the same human chat controls as
+ * the side panel, including binary task feedback, but an engine tab must not
+ * inherit that human-only route merely because it shares the extension origin.
+ * Hashes are one-shot Home deep links and are safe; queries and sibling paths
+ * are not. A real Home caller is tab-hosted, unlike the browser side panel.
  * @param {{ id?: string, url?: string, tab?: { id?: number } } | null | undefined} sender
  * @param {{ runtimeId?: string, extensionOrigin?: string, homeUrl?: string }} [trust]
- * @returns {boolean}
  */
 export const isHomeSender = (sender, { runtimeId, extensionOrigin, homeUrl } = {}) => {
   if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;

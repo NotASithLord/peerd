@@ -566,6 +566,31 @@ still non-extractable, still `exportKey`-rejecting, and still signing a proof th
 verifies against its persisted public key; the Bun tier can only prove this over a
 `Map`, which never crosses the clone boundary).
 
+<a id="inv-16"></a>
+### INV-16. Local Contributor Metrics cannot collect or transmit without consent
+Contributor Metrics is a closed local accumulator, not an event bus. Before current
+versioned consent, its turn and feedback recorders are inert and create no storage
+record. Only the exact Options document may enable, disable, or clear consent. Only
+the exact side panel and Home chat surfaces may submit binary feedback, and the
+background re-derives the final human turn and cohort instead of accepting them from
+the page.
+
+The schema accepts reviewed enums, bounded counters, and named histogram buckets.
+Unknown keys fail closed. Unknown provider and model strings collapse to `custom`, so
+a caller cannot encode a URL, prompt, identifier, or other content in a cohort field.
+Restart-safe operation and feedback tokens are consent-rotated, bounded, local-only,
+and absent from the canonical payload bytes shown in Settings. Disabling deletes the
+consent, aggregate, tokens, and pending feedback in one storage key.
+
+This stage has no uploader, endpoint, alarm, collector origin, or network primitive.
+Store and web channels register no Contributor Metrics routes or UI. A later uploader
+is a separate security boundary and cannot inherit consent if the disclosure version
+changes.
+Code: `peerd-runtime/observability/contributor-metrics.js`,
+`peerd-runtime/observability/contributor-store.js`,
+`background/routes/contributor-metrics.js`, and
+`options/sections/contributor-metrics.js`. Red-team: scenario 12.
+
 ### Additional invariants (not scenario-gated, enforced in code)
 
 - INV-9. Vault fails closed. A secret read or write is refused with `VaultLockedError`
