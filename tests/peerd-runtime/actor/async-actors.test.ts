@@ -33,6 +33,7 @@ describe('makeAsyncActors', () => {
     const handle = await as.spawnActorAsync({ task: 'research bromantane', parentSessionId: 'parent' });
     expect(handle.ok).toBe(true);
     expect(handle.taskId).toBe('as-1');
+    expect(handle.content).toContain('(session c1, async)');
     expect(handle.content).toContain('Do NOT wait'); // the anti-poll instruction baked into the handle
 
     await flush();
@@ -140,6 +141,23 @@ describe('makeAsyncActors', () => {
     expect(calls.length).toBeGreaterThanOrEqual(2);
   });
 
+  test('task snapshots gain the child id + server-resolved grants when the actor starts', async () => {
+    let finish!: (value: any) => void;
+    const as = makeAsyncActors(baseDeps({
+      spawnActor: async (req: any) => {
+        req.onEvent({ type: 'actor-start', sessionId: 'c1', grantedTools: ['script', 'message_actor'] });
+        return new Promise((resolve) => { finish = resolve; });
+      },
+    }));
+    await as.spawnActorAsync({ task: 'T', parentSessionId: 'parent' });
+    const live = as.actorTasks('parent')[0];
+    expect(live).toMatchObject({
+      status: 'running', childSessionId: 'c1', grantedTools: ['script', 'message_actor'],
+    });
+    finish({ result: 'ok', sessionId: 'c1' });
+    await flush();
+  });
+
   // THE BUG: a wake turn whose model re-spawns → its child wakes → re-spawn …
   // unbounded. The rate cap must stop the burst instead of looping forever.
   test('a re-spawning wake turn is bounded by the rate cap (runaway guard)', async () => {
@@ -170,7 +188,10 @@ describe('makeAsyncActors', () => {
     // children never settle → they stay "running" and fill the outstanding cap
     const as = makeAsyncActors(baseDeps({
       caps: { outstanding: 4, rateCap: 100 },
-      spawnActor: () => new Promise(() => {}), // never resolves
+      spawnActor: (req: any) => {
+        req.onEvent({ type: 'actor-start', sessionId: `child-${req.task}`, grantedTools: [] });
+        return new Promise(() => {});
+      }, // never resolves after allocation
     }));
     for (let i = 0; i < 4; i++) {
       expect((await as.spawnActorAsync({ task: `t${i}`, parentSessionId: 'parent' })).ok).toBe(true);
@@ -231,7 +252,10 @@ describe('makeAsyncActors', () => {
   test('cancel drops the result (no wake) and frees the slot', async () => {
     const reenters: any[] = [];
     const as = makeAsyncActors(baseDeps({
-      spawnActor: () => new Promise(() => {}), // never settles on its own
+      spawnActor: (req: any) => {
+        req.onEvent({ type: 'actor-start', sessionId: 'child-cancel', grantedTools: [] });
+        return new Promise(() => {});
+      }, // never settles on its own
       reenter: async (o: any) => { reenters.push(o); },
     }));
     const h = await as.spawnActorAsync({ task: 'cancel me', parentSessionId: 'parent' });

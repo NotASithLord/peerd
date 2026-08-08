@@ -29,6 +29,15 @@ describe('makeTurnSlots', () => {
     expect(slots.isBusy('b')).toBe(true);
   });
 
+  test('enumerates only live slot ids for targeted observability', () => {
+    const slots = makeTurnSlots();
+    const a = slots.claim('a');
+    slots.claim('b');
+    expect(slots.busySessionIds()).toEqual(['a', 'b']);
+    a.release();
+    expect(slots.busySessionIds()).toEqual(['b']);
+  });
+
   test('claiming the SAME session aborts the prior turn (steer-live)', () => {
     const slots = makeTurnSlots();
     const first = slots.claim('a');

@@ -154,7 +154,9 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 660 → 662: the shared private-network and browser-target policies are checked.
 // 662 → 670: browser navigation custody and exact-document helpers are checked.
 // 672 → 673: cold-start popup network custody is checked.
-const COVERED_FLOOR = 673;
+// 673 → 676: the Actor Fabric adds its pure topology model, SW live projection,
+// and rendered browser contract while replacing the checked async-task bar.
+const COVERED_FLOOR = 676;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

@@ -17,7 +17,7 @@ import { InputBar } from './input-bar.js';
 import { ModeSelector, EffortDial, GoalToggle } from './mode-badge.js';
 import { GoalBar } from './goal-bar.js';
 import { TodoCard } from './todo-card.js';
-import { AsyncTasksBar } from './async-tasks-bar.js';
+import { ActorFabric } from './actor-fabric.js';
 import { ContextInspector } from './context-inspector.js';
 
 // The transfer section's Blob + anchor pattern — the panel document is a
@@ -159,11 +159,16 @@ export const ChatView = {
         active: !!state.goalRuns?.[state.session?.sessionId ?? '']?.active,
       }),
 
-      // In-flight async spawned (DESIGN-11). Pinned + self-hiding: the agent
-      // can fire background spawned whose results land later as wake turns,
-      // so this shows what's still cooking. Keyed to the ACTIVE session —
-      // background chats run their own; the panel mirrors only the viewed one.
-      m(AsyncTasksBar, { tasks: state.asyncTasks?.[state.session?.sessionId ?? ''] ?? [] }),
+      // The Actor Fabric unifies the previously separate background-task bar,
+      // bound-actor cards, and spawned streams into one live topology. It is a
+      // projection only. Transcript cards remain the durable chronological
+      // receipt, and the fabric self-hides when this chat has no isolated work running.
+      m(ActorFabric, {
+        session: state.session,
+        actors: state.actors,
+        spawned: state.spawned,
+        asyncTasks: state.asyncTasks,
+      }),
 
       showVoiceOnboarding ? m(VoiceOnboardingCard, { send }) : null,
 

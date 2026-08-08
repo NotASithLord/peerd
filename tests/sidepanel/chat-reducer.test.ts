@@ -106,11 +106,39 @@ describe('reduceChat', () => {
     expect(s1.asyncTasks.p1).toEqual([{ taskId: 'as-1' }]);
   });
 
-  test('actor-start seeds a shell; actor-state folds the authoritative session', () => {
-    const seeded = reduceChat(INITIAL_STATE, { type: 'turn/spawned-start', sessionId: 'c1', depth: 1, task: 'research' });
-    expect(seeded.spawned.sessions.c1.task).toBe('research');
+  test('spawned lifecycle keeps live parentage + server-resolved grants through state, then settles', () => {
+    const seeded = reduceChat(INITIAL_STATE, {
+      type: 'turn/spawned-start', sessionId: 'c1', parentSessionId: 'root',
+      depth: 1, task: 'research', grantedTools: ['script'],
+    });
+    expect(seeded.spawned.sessions.c1).toMatchObject({
+      task: 'research', parentSessionId: 'root', grantedTools: ['script'], running: true,
+    });
     const folded = reduceChat(seeded, { type: 'turn/spawned-state', session: { sessionId: 'c1', messages: [{ id: 'x' }] } });
     expect(folded.spawned.sessions.c1.messages).toHaveLength(1);
+    expect(folded.spawned.sessions.c1).toMatchObject({
+      parentSessionId: 'root', grantedTools: ['script'], running: true,
+    });
+    const done = reduceChat(folded, { type: 'turn/spawned-done', sessionId: 'c1' });
+    expect(done.spawned.sessions.c1.running).toBe(false);
+  });
+
+  test('foreign actor lifecycle events never enter the viewed chat', () => {
+    const viewingB: any = { ...INITIAL_STATE, session: { sessionId: 'chat-B', messages: [], cost: null } };
+    const spawned = reduceChat(viewingB, {
+      type: 'turn/spawned-start', rootSessionId: 'chat-A', parentSessionId: 'chat-A',
+      sessionId: 'private-child', task: 'private A task',
+    });
+    const bound = reduceChat(viewingB, {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentSessionId: 'chat-A',
+      parentToolUseId: 'private-tool', sessionId: 'private-actor', fromIndex: 0,
+    });
+    expect(spawned).toBe(viewingB);
+    expect(bound).toBe(viewingB);
+    expect(reduceChat(viewingB, {
+      type: 'async-tasks/update', parentSessionId: 'chat-A',
+      tasks: [{ taskId: 'private', task: 'private pending task' }],
+    })).toBe(viewingB);
   });
 
   test('actor display card: start seeds, state slices to fromIndex, done stops streaming', () => {
@@ -192,6 +220,67 @@ describe('reduceChat', () => {
     expect(switched.actors).toEqual({});
     expect(switched.spawned).toEqual(INITIAL_STATE.spawned);
     expect(switched.asyncTasks).toEqual(INITIAL_STATE.asyncTasks);
+
+    const replayed = reduceChat(a0, {
+      type: 'state',
+      state: {
+        session: { sessionId: 'B', messages: [] },
+        actors: { live: { sessionId: 'actor-B', streaming: true } },
+        spawned: { byToolUse: {}, sessions: { child: { sessionId: 'child', messages: [] } } },
+        asyncTasks: { B: [{ taskId: 'task-B', status: 'running' }] },
+      },
+    });
+    expect(replayed.actors.live.sessionId).toBe('actor-B');
+    expect(replayed.spawned.sessions.child.sessionId).toBe('child');
+    expect(replayed.asyncTasks.B).toHaveLength(1);
+  });
+
+  test('a same-session live snapshot settles but preserves terminal actor evidence', () => {
+    const viewing: any = { ...INITIAL_STATE, session: { sessionId: 'A', messages: [], cost: null } };
+    const started = reduceChat(viewing, {
+      type: 'turn/actor-start', rootSessionId: 'A', parentSessionId: 'A',
+      parentToolUseId: 'tu-1', sessionId: 'actor-a', fromIndex: 0,
+      task: 'inspect', grantedTools: ['read_page'],
+    });
+    const withActivity = reduceChat(started, {
+      type: 'turn/actor-state', rootSessionId: 'A', parentToolUseId: 'tu-1', fromIndex: 0,
+      session: { sessionId: 'actor-a', messages: [{ id: 'reply' }] },
+    });
+    const snap = reduceChat(withActivity, {
+      type: 'state', state: {
+        session: { sessionId: 'A', messages: [] }, actors: {},
+        spawned: { byToolUse: {}, sessions: {} }, asyncTasks: {},
+      },
+    });
+    expect(snap.actors['tu-1']).toMatchObject({
+      sessionId: 'actor-a', task: 'inspect', grantedTools: ['read_page'],
+      streaming: false, messages: [{ id: 'reply' }],
+    });
+  });
+
+  test('a same-session live snapshot preserves a completed spawned transcript and card mapping', () => {
+    const viewing: any = { ...INITIAL_STATE, session: { sessionId: 'A', messages: [], cost: null } };
+    const started = reduceChat(viewing, {
+      type: 'turn/spawned-start', rootSessionId: 'A', parentSessionId: 'A',
+      parentToolUseId: 'tu-spawn', sessionId: 'child-a', task: 'research',
+    });
+    const hydrated = reduceChat(started, {
+      type: 'turn/spawned-state', rootSessionId: 'A',
+      session: { sessionId: 'child-a', messages: [{ id: 'answer', content: 'done' }] },
+    });
+    const done = reduceChat(hydrated, {
+      type: 'turn/spawned-done', rootSessionId: 'A', sessionId: 'child-a',
+    });
+    const snap = reduceChat(done, {
+      type: 'state', state: {
+        session: { sessionId: 'A', messages: [] }, actors: {},
+        spawned: { byToolUse: {}, sessions: {} }, asyncTasks: {},
+      },
+    });
+    expect(snap.spawned.byToolUse['tu-spawn']).toBe('child-a');
+    expect(snap.spawned.sessions['child-a']).toMatchObject({
+      running: false, messages: [{ id: 'answer', content: 'done' }],
+    });
   });
 
   test('goal/state tracks a run per session, and a terminal phase clears it', () => {

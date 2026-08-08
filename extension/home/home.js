@@ -22,6 +22,7 @@ import { LibrarySection } from './library-section.js';
 import { NetworkSection } from './network-section.js';
 import { DiscoverSection } from './discover-section.js';
 import { ContactsSection } from './contacts-section.js';
+import { ActorsSection } from './actors-section.js';
 // EvalSection (the Lab) is LAZY-loaded — see loadEvalSection below.
 import { INITIAL_STATE, reduceChat, putSpawnedSession } from '../sidepanel/chat-reducer.js';
 import { ChatView } from '../sidepanel/components/chat-view.js';
@@ -68,7 +69,7 @@ const loadEvalSection = () => {
     .catch(() => { evalLoadState = 'unavailable'; m.redraw(); });
 };
 
-const ALL_VIEWS = new Set(['chat', 'chats', 'library', 'eval', 'discover', 'contacts', 'network']);
+const ALL_VIEWS = new Set(['chat', 'chats', 'actors', 'library', 'eval', 'discover', 'contacts', 'network']);
 /** @param {string | null | undefined} v */
 const isValidView = (v) => !!v && ALL_VIEWS.has(v) && (!DWEB_VIEWS.has(v) || DWEB_ENABLED);
 // A `#view` fragment is an explicit deep-link (openHome('library') → "Open
@@ -95,10 +96,24 @@ const readView = () => {
   } catch { /* storage disabled / private mode */ }
   return 'chat';
 };
-let activeView = readView();  // chat | chats | library | eval | discover | contacts | network
+let activeView = readView();  // chat | actors | library | eval | discover | contacts | network
 clearHash();                  // deep-link consumed at boot — see viewFromHash
 /** @param {string} v */
 const setView = (v) => { activeView = v; try { localStorage.setItem(VIEW_KEY, v); } catch { /* ignore */ } };
+// SPA navigation keeps the rail mounted, so explicitly land keyboard and AT
+// users in the new content instead of leaving focus on a now-stale trigger.
+const focusActiveContent = () => requestAnimationFrame(() => {
+  const target = document.querySelector('.home-content textarea, .home-content h1, .home-content h2');
+  if (!(target instanceof HTMLElement)) return;
+  if (!target.matches('textarea, button, input, select, a[href]')) target.setAttribute('tabindex', '-1');
+  target.focus();
+});
+/** @param {string} view */
+const navigateHome = (view) => {
+  setView(view);
+  m.redraw();
+  focusActiveContent();
+};
 // Single-homed chat (DESIGN-12, owner 2026-06-18): when a side panel is open it
 // OWNS Chat + Chats, and home shows only the tool sections. The SW broadcasts
 // this on every surface connect/disconnect.
@@ -252,6 +267,18 @@ const popToSide = () => {
 // "go to tab" card). The panel's own close button does the same.
 const bringChatHome = () => send({ type: 'sidepanel/close' });
 
+// Actor Space spans every session, but its room action still lands on one
+// concrete chat. When home owns chat, navigate there; when the side panel owns
+// it, switching the shared session is enough; the visible panel updates live.
+/** @param {string} sessionId */
+const openActorSession = async (sessionId) => {
+  const result = await send({ type: 'session/switch', sessionId });
+  if (!result?.ok) return;
+  if (!sidePanelOpen) setView('chat');
+  m.redraw();
+  if (!sidePanelOpen) focusActiveContent();
+};
+
 // Auto-close the side panel when the user RETURNS to the home tab (a hidden →
 // visible transition) — UNLESS they explicitly popped it (sticky). So a card-
 // opened panel ("watch the agent on its tab") closes when you come back and chat
@@ -273,7 +300,10 @@ function applySidePanelOpen(open) {
   if (open === sidePanelOpen) return;
   sidePanelOpen = open;
   if (open) {
-    if (activeView === 'chat') { stashedChatView = activeView; activeView = 'library'; }
+    // Chat in the side panel + instance-wide Actors on the full tab is the
+    // complementary two-level view: local work beside the page, global runtime
+    // topology on home.
+    if (activeView === 'chat') { stashedChatView = activeView; activeView = 'actors'; }
   } else {
     panelStickyByPop = false;   // panel closed → stickiness resets
     if (stashedChatView) { activeView = stashedChatView; stashedChatView = null; }
@@ -341,23 +371,93 @@ const gate = (heading, copy) => m('.options-gate', m('.options-gate-card', [
   m('p', copy),
 ]));
 
-// The rail's nav items. Chat + Chats are present only when home OWNS the chat
+// The rail's nav items. Chat is present only when home OWNS the chat; Actors is
+// permanent because its scope is the whole instance, not the selected session.
 // (no side panel open — single-homed). Discover/Network/Contacts are dweb-only
 // (absent on the store build and when the user switches dweb off).
 /** @param {boolean} showDweb */
 const navItems = (showDweb) => [
   // "Chats" is the top-level rail item; the chat page itself carries the
   // recent-chats list + "New chat" column (ChatListPanel, ChatGPT-style).
-  ...(sidePanelOpen ? [] : [{ id: 'chat', label: 'Chats' }]),
-  { id: 'library', label: 'Library' },
+  ...(sidePanelOpen ? [] : [{ id: 'chat', label: 'Chats', group: 'agent' }]),
+  { id: 'actors', label: 'Actors', group: 'agent' },
+  { id: 'library', label: 'Library', group: 'create' },
+  { id: 'eval', label: 'Lab', group: 'create' },
   ...(showDweb ? [
-    { id: 'discover', label: 'Discover' },
-    { id: 'contacts', label: 'Contacts' },
+    { id: 'discover', label: 'Discover', group: 'network' },
+    { id: 'contacts', label: 'Contacts', group: 'network' },
+    { id: 'network', label: 'Network', group: 'network' },
   ] : []),
-  // Lab sits next-to-last, just before Network (when the dweb group is present).
-  { id: 'eval', label: 'Lab' },
-  ...(showDweb ? [{ id: 'network', label: 'Network' }] : []),
 ];
+
+const NAV_GROUPS = Object.freeze([
+  { id: 'agent', label: 'Agent' },
+  { id: 'create', label: 'Create' },
+  { id: 'network', label: 'Network' },
+]);
+
+/** @param {ReturnType<typeof navItems>} items */
+const groupedNavItems = (items) => NAV_GROUPS
+  .map((group) => ({ ...group, items: items.filter((item) => item.group === group.id) }))
+  .filter((group) => group.items.length > 0);
+
+let reportedActorCount = 0;
+/** @type {Set<(count: number) => void>} */
+const actorCountListeners = new Set();
+
+/** @param {number} value */
+const reportActorCount = (value) => {
+  const next = Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+  if (next === reportedActorCount) return;
+  reportedActorCount = next;
+  for (const listener of actorCountListeners) listener(next);
+};
+
+// The Actors destination doubles as a quiet instance activity lamp. This
+// intentionally polls slower than the open monitor: it is a navigation hint,
+// not a second live console. While the monitor is open, its fresher snapshot
+// feeds this badge so the rail and empty state can never contradict each other.
+const ActorsNavCount = () => {
+  let count = reportedActorCount;
+  let inFlight = false;
+  let active = true;
+  /** @type {ReturnType<typeof setInterval>|null} */
+  let timer = null;
+  /** @param {number} next */
+  const updateCount = (next) => {
+    if (!active || next === count) return;
+    count = next;
+    m.redraw();
+  };
+  const load = async () => {
+    if (inFlight || document.hidden || activeView === 'actors') return;
+    inFlight = true;
+    try {
+      const result = await send({ type: 'actors/count' });
+      if (!active || !result?.ok) return;
+      reportActorCount(result.activeActors);
+    } catch { /* the destination remains useful without its optional count */ }
+    finally { inFlight = false; }
+  };
+  return {
+    oninit: () => {
+      actorCountListeners.add(updateCount);
+      void load();
+    },
+    oncreate: () => { timer = setInterval(() => { void load(); }, 4_000); },
+    onremove: () => {
+      active = false;
+      if (timer) clearInterval(timer);
+      actorCountListeners.delete(updateCount);
+    },
+    view: () => count > 0
+      ? m.fragment({}, [
+          m('span.home-nav-count', { 'aria-hidden': 'true' }, String(count)),
+          m('span.sr-only', `${count} active actors`),
+        ])
+      : null,
+  };
+};
 
 // The chat switcher — Chats live INSIDE the chat page (owner 2026-06-18): the
 // current chat's title + a dropdown of all chats and "+ New chat". Switching is
@@ -469,13 +569,14 @@ const NotificationsBell = () => {
           'aria-expanded': String(open),
           onclick: () => { open = !open; if (open) peerNotifications.markAllSeen(); },
         }, [
-          m('span', '🔔 Notifications'),
+          m('span.home-action-icon', { 'aria-hidden': 'true' }, '🔔'),
+          m('span.home-action-label', 'Notifications'),
           unseen ? m('span.notif-badge', String(unseen > 9 ? '9+' : unseen)) : null,
         ]),
         open ? m('.notif-menu', items.length
           ? items.map((n) => m('button.notif-item', {
               key: n.id,
-              onclick: () => { open = false; setView(n.link); m.redraw(); },
+              onclick: () => { open = false; navigateHome(n.link); },
             }, [m('.notif-item-title', n.title), m('.notif-item-body', n.body)]))
           : m('.notif-empty.muted', 'Nothing yet. New peers and apps show up here.')) : null,
       ]);
@@ -527,6 +628,13 @@ const content = (showDweb) => {
       ]),
     ]);
   }
+  if (activeView === 'actors') return m(ActorsSection, {
+    send,
+    onActiveActorCount: reportActorCount,
+    onOpenSession: openActorSession,
+    currentSessionId: currentState.session?.sessionId,
+    chatOwnedBySidePanel: sidePanelOpen,
+  });
   if (activeView === 'library') return m(LibrarySection, { send, dweb: showDweb });
   if (activeView === 'eval') {
     loadEvalSection();
@@ -565,8 +673,8 @@ const HomeApp = {
     const showDweb = DWEB_ENABLED && currentState.settings?.dwebEnabled;
     const items = navItems(showDweb);
     // Keep activeView valid if it vanished from the rail (dweb switched off, or the
-    // side panel took Chat/Chats). Fall back to the FIRST available item — which is
-    // Library when the panel owns chat, Chat otherwise — never a dead view.
+    // side panel took Chat). Fall back to the FIRST available item, which is
+    // Actors when the panel owns chat and Chat otherwise, never a dead view.
     if (!items.some((it) => it.id === activeView)) activeView = items[0]?.id ?? 'library';
 
     const rail = m('nav.home-rail', [
@@ -578,19 +686,43 @@ const HomeApp = {
           ? m('span.channel-badge.channel-badge--in', { title: 'peerd preview — dweb preview package' }, 'preview')
           : null,
       ]),
-      m('.home-nav', items.map((it) =>
-        m('button.home-nav-item', {
-          key: it.id,
-          class: it.id === activeView ? 'is-active' : '',
-          onclick: () => { setView(it.id); },
-        }, it.label))),
+      m('.home-nav', groupedNavItems(items).map((group) =>
+        m('.home-nav-group', {
+          key: group.id,
+          role: 'group',
+          'data-nav-group': group.id,
+          'aria-labelledby': `home-nav-group-${group.id}`,
+        }, [
+          m('span.home-nav-group-label', { id: `home-nav-group-${group.id}` }, group.label),
+          m('.home-nav-group-items', group.items.map((it) =>
+            m('button.home-nav-item', {
+              key: it.id,
+              class: it.id === activeView ? 'is-active' : '',
+              'data-home-view': it.id,
+              'aria-current': it.id === activeView ? 'page' : undefined,
+              onclick: () => { navigateHome(it.id); },
+            }, [
+              m('span.home-nav-label', it.label),
+              it.id === 'actors' ? m(ActorsNavCount) : null,
+            ]))),
+        ]))),
       m('.spacer', { style: 'flex:1;' }),
       // peerd notifications — new peers / apps on the dweb (preview only).
       showDweb ? m(NotificationsBell) : null,
       // Manual lock — for stepping away. The SW pushes the locked state, which
       // flips home back to the vault gate.
-      m('button.home-nav-item', { onclick: () => send({ type: 'vault/lock' }) }, '🔒 Lock'),
-      m('button.home-nav-item', { onclick: () => openOptions() }, '⚙ Settings'),
+      m('button.home-nav-item.home-rail-action.home-rail-lock', {
+        'aria-label': 'Lock', onclick: () => send({ type: 'vault/lock' }),
+      }, [
+        m('span.home-action-icon', { 'aria-hidden': 'true' }, '🔒'),
+        m('span.home-action-label', 'Lock'),
+      ]),
+      m('button.home-nav-item.home-rail-action.home-rail-settings', {
+        'aria-label': 'Settings', onclick: () => openOptions(),
+      }, [
+        m('span.home-action-icon', { 'aria-hidden': 'true' }, '⚙'),
+        m('span.home-action-label', 'Settings'),
+      ]),
     ]);
 
     return [
