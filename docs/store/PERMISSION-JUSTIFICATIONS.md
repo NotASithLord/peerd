@@ -127,10 +127,13 @@ blocker below is resolved against the package being uploaded.
 > on sensitive sites such as banks, health portals, and password managers.
 > Direct fetch, document reading, and browser automation also block
 > private-network targets. Driven tabs use tab-scoped network rules so page
-> redirects and tab-associated requests cannot bypass that check. A child tab
+> redirects and tab-associated requests cannot bypass that check. Private-network
+> rules also cover service-worker fetches from public domains visited in the
+> driven tab until custody ends. A user-owned tab on the same matching domain
+> can temporarily lose private-network service-worker fetch access. A child tab
 > is guarded only when the browser identifies its exact source as a tab the
 > assistant is already driving. Protected children are closed. Other tabs are
-> not changed.
+> not navigated, closed, or focused.
 > Provider setup and user-enabled runtime downloads are separate user-initiated
 > network uses.
 > The local Activity log records tool outcomes, direct open-web fetches, and

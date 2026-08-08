@@ -228,6 +228,22 @@ export const browserNetworkGuardUnavailableResult = (reason = 'network_guard_una
   });
 
 /**
+ * A navigation can commit before the worker-origin companion rule finishes
+ * installing. Report the browser effect truthfully while withholding further
+ * page authority.
+ * @param {'network_guard_unavailable' | 'network_guard_unsupported' | 'network_guard_install_failed'} [reason]
+ */
+export const browserNetworkGuardPostNavigationResult = (reason = 'network_guard_unavailable') => {
+  const base = browserNetworkGuardUnavailableVerdict(reason);
+  return browserTargetRefusalResult({
+    ...base,
+    stage: BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,
+    outcome: 'page_loaded_not_automated',
+    message: 'Navigation loaded a public page, but peerd stopped further browser automation because private-network request blocking could not be installed.',
+  }, { effectCompleted: true });
+};
+
+/**
  * A public navigation can redirect onto a site protected by the user's
  * denylist. Keep that landing on the same URL-free recovery contract as a
  * private-network redirect, while naming the distinct user-controlled policy.

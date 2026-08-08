@@ -47,6 +47,9 @@ const DNR_SCRIPT_PATH = '/__firefox-dnr-script';
 const DNR_ACTION_PATH = '/__firefox-dnr-action';
 const DNR_ATTEMPT_PATH = '/__firefox-dnr-attempt';
 const DNR_CHILD_PATH = '/__firefox-dnr-child';
+const DNR_SERVICE_WORKER_FIXTURE_PATH = '/__firefox-dnr-service-worker';
+const DNR_SERVICE_WORKER_SCRIPT_PATH = '/__firefox-dnr-service-worker.js';
+const DNR_SERVICE_WORKER_ATTEMPT_PATH = '/__firefox-dnr-service-worker-attempt';
 const RESULT_BUDGET_MS = 180_000;
 const PROVIDER_PATH = '/v1/messages';
 const PASSPHRASE_CANARY = 'firefox-runtime-passphrase-canary-7d12f198';
@@ -107,6 +110,55 @@ const FIREFOX_RUNTIME_FIXTURE = `<!doctype html>
     });
   </script>
 </body></html>`;
+
+const FIREFOX_DNR_SERVICE_WORKER_FIXTURE = `<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Firefox DNR Service Worker fixture</title>
+<body>Service Worker fixture<script type="module">
+  const params = new URLSearchParams(location.search);
+  const action = params.get('action');
+  const target = params.get('target');
+  const token = params.get('token');
+  if (action && target && token) {
+    const registration = await navigator.serviceWorker.register(${JSON.stringify(DNR_SERVICE_WORKER_SCRIPT_PATH)}, {
+      scope: '/',
+    });
+    const ready = await navigator.serviceWorker.ready;
+    const worker = ready.active || registration.active || registration.waiting;
+    if (!worker) throw new Error('Service Worker did not activate');
+    worker.postMessage({ action, target, token });
+    document.body.dataset.dnrServiceWorkerReady = 'yes';
+  }
+</script></body></html>`;
+
+const FIREFOX_DNR_SERVICE_WORKER_SCRIPT = `
+self.addEventListener('install', (event) => event.waitUntil(self.skipWaiting()));
+self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+self.addEventListener('message', (event) => {
+  const { action, target, token } = event.data || {};
+  const report = (phase) => fetch(${JSON.stringify(DNR_SERVICE_WORKER_ATTEMPT_PATH)}
+    + '?action=' + encodeURIComponent(action)
+    + '&token=' + encodeURIComponent(token)
+    + '&phase=' + encodeURIComponent(phase), {
+    method: 'POST', cache: 'no-store',
+  });
+  const fetchTarget = () => fetch(target, { mode: 'no-cors', cache: 'no-store' }).catch(() => {});
+  const openSocket = () => new Promise((resolve) => {
+    let socket;
+    try { socket = new WebSocket(target); } catch { resolve(); return; }
+    const finish = () => {
+      try { socket.close(); } catch { /* socket did not open */ }
+      resolve();
+    };
+    socket.addEventListener('open', finish, { once: true });
+    socket.addEventListener('error', finish, { once: true });
+    setTimeout(finish, 1_500);
+  });
+  event.waitUntil((async () => {
+    await report('started');
+    await (action === 'fetch' ? fetchTarget() : openSocket());
+    await report('settled');
+  })());
+});`;
 
 const onPath = (name) => (process.env.PATH ?? '').split(delimiter)
   .map((directory) => join(directory, name))
@@ -287,8 +339,9 @@ const KEEPALIVE_LOSS_CLICK_RESPONSE = toolUseResponse({
 // and safeFetch correctly rejects HTTP redirects. The proxy leaves the URL as
 // https://api.anthropic.com/v1/messages, so the real adapter and egress policy
 // run unchanged while the local server can inspect the final request header.
-// The proxy refuses every other CONNECT target. Its certificate key exists only
-// in the OS temp directory for this run and is deleted during cleanup.
+// The proxy also admits the named TLS browser fixtures and refuses every other
+// CONNECT target. Its certificate key exists only in the OS temp directory for
+// this run and is deleted during cleanup.
 const startProviderServer = async () => {
   const records = [];
   const connections = [];
@@ -302,6 +355,7 @@ const startProviderServer = async () => {
   const httpRequests = [];
   const webSocketUpgrades = [];
   const dnrRedirectAttempts = [];
+  const dnrServiceWorkerAttempts = [];
   const dnrVectors = new Map();
   let nextDnrVectorId = 0;
   let dnrFlow = null;
@@ -313,7 +367,7 @@ const startProviderServer = async () => {
     execFileSync('openssl', [
       'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
       '-subj', '/CN=api.anthropic.com',
-      '-addext', 'subjectAltName=DNS:api.anthropic.com',
+      '-addext', `subjectAltName=DNS:api.anthropic.com,DNS:${DNR_PUBLIC_HOST},DNS:${DNR_FRAME_HOST}`,
       '-keyout', keyPath, '-out', certificatePath,
     ], { stdio: ['ignore', 'ignore', 'pipe'] });
   } catch (error) {
@@ -323,6 +377,41 @@ const startProviderServer = async () => {
   }
 
   const providerRequestHandler = (request, response) => {
+    const host = String(request.headers.host ?? '').split(':')[0].toLowerCase();
+    const requestUrl = new URL(request.url ?? '/', `https://${host || 'localhost'}`);
+    if ([DNR_PUBLIC_HOST, DNR_FRAME_HOST].includes(host) && request.method === 'GET'
+        && requestUrl.pathname === DNR_SERVICE_WORKER_FIXTURE_PATH) {
+      response.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+        'service-worker-allowed': '/',
+      });
+      response.end(FIREFOX_DNR_SERVICE_WORKER_FIXTURE);
+      return;
+    }
+    if ([DNR_PUBLIC_HOST, DNR_FRAME_HOST].includes(host) && request.method === 'GET'
+        && requestUrl.pathname === DNR_SERVICE_WORKER_SCRIPT_PATH) {
+      response.writeHead(200, {
+        'content-type': 'text/javascript; charset=utf-8',
+        'cache-control': 'no-store',
+        'service-worker-allowed': '/',
+      });
+      response.end(FIREFOX_DNR_SERVICE_WORKER_SCRIPT);
+      return;
+    }
+    if ([DNR_PUBLIC_HOST, DNR_FRAME_HOST].includes(host) && request.method === 'POST'
+        && requestUrl.pathname === DNR_SERVICE_WORKER_ATTEMPT_PATH) {
+      dnrServiceWorkerAttempts.push({
+        host,
+        action: requestUrl.searchParams.get('action'),
+        token: requestUrl.searchParams.get('token'),
+        phase: requestUrl.searchParams.get('phase'),
+      });
+      request.resume();
+      response.writeHead(204, { 'cache-control': 'no-store' });
+      response.end();
+      return;
+    }
     if (request.method === 'POST' && request.url === WORKER_PROBE_PATH) {
       workerStartupProbes += 1;
       response.writeHead(204, {
@@ -699,11 +788,17 @@ const startProviderServer = async () => {
     socket.once('close', () => sockets.delete(socket));
   });
   proxyServer.on('connect', (request, socket, head) => {
-    if (request.url?.toLowerCase() !== 'api.anthropic.com:443') {
+    const authority = request.url?.toLowerCase();
+    const providerAuthority = 'api.anthropic.com:443';
+    const serviceWorkerAuthorities = new Set([
+      `${DNR_PUBLIC_HOST}:${tlsPort}`,
+      `${DNR_FRAME_HOST}:${tlsPort}`,
+    ]);
+    if (authority !== providerAuthority && !serviceWorkerAuthorities.has(authority)) {
       socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
       return;
     }
-    connections.push(request.url);
+    if (authority === providerAuthority) connections.push(request.url);
     const upstream = connectSocket({ host: '127.0.0.1', port: tlsPort }, () => {
       socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head.length > 0) upstream.write(head);
@@ -750,7 +845,8 @@ const startProviderServer = async () => {
     throw new Error('Firefox provider proxy did not receive a port');
   }
   return {
-    port, records, connections, tlsErrors, httpRequests, webSocketUpgrades, dnrRedirectAttempts,
+    port, tlsPort, records, connections, tlsErrors, httpRequests, webSocketUpgrades,
+    dnrRedirectAttempts, dnrServiceWorkerAttempts,
     registerDnrVector: ({ action, token, target }) => {
       const routeId = `dnr-${nextDnrVectorId += 1}`;
       dnrVectors.set(routeId, Object.freeze({ routeId, action, token, target }));
@@ -2522,6 +2618,50 @@ return 'REACHED';`;
   }
 };
 
+const serviceWorkerProbeUrl = (providerServer, {
+  action, target, token, host = DNR_PUBLIC_HOST,
+}) => {
+  const url = new URL(DNR_SERVICE_WORKER_FIXTURE_PATH,
+    `https://${host}:${providerServer.tlsPort}`);
+  url.searchParams.set('action', action);
+  url.searchParams.set('target', target);
+  url.searchParams.set('token', token);
+  return url.href;
+};
+
+const driveServiceWorkerProbe = async ({
+  driver, providerServer, tabId = null, action, target, token, host = DNR_PUBLIC_HOST,
+}) => {
+  const url = serviceWorkerProbeUrl(providerServer, { action, target, token, host });
+  const opened = await driver.executeAsync(`
+    const [tabId, url] = arguments;
+    const done = arguments[arguments.length - 1];
+    (Number.isInteger(tabId)
+      ? browser.tabs.update(tabId, { url, active: false })
+      : browser.tabs.create({ url, active: false }))
+      .then((tab) => done({ ok: true, tabId: tab.id, url: tab.url }),
+        (error) => done({ ok: false, error: error?.message || String(error) }));
+  `, [tabId, url]);
+  assert(opened?.ok === true && Number.isInteger(opened.tabId),
+    `Firefox opens the ${action} Service Worker probe page`, JSON.stringify(opened));
+  const started = await waitFor(() => providerServer.dnrServiceWorkerAttempts.some((attempt) =>
+    attempt.host === host && attempt.action === action && attempt.token === token
+      && attempt.phase === 'started') ? true : null,
+  { budgetMs: 10_000, pollMs: 50 });
+  assert(started === true, `Firefox ${action} Service Worker probe started`, JSON.stringify({ host, token }));
+  return opened.tabId;
+};
+
+const waitForServiceWorkerProbe = async (providerServer, {
+  action, token, host = DNR_PUBLIC_HOST,
+}) => {
+  const settled = await waitFor(() => providerServer.dnrServiceWorkerAttempts.some((attempt) =>
+    attempt.host === host && attempt.action === action && attempt.token === token
+      && attempt.phase === 'settled') ? true : null,
+  { budgetMs: 5_000, pollMs: 50 });
+  assert(settled === true, `Firefox ${action} Service Worker probe settled`, JSON.stringify({ host, token }));
+};
+
 const runPrivateNetworkDnrSmoke = async (driver, providerServer) => {
   console.log('Firefox private-network DNR smoke: enforce the packaged portable rules before network IO');
   const publicBase = `http://${DNR_PUBLIC_HOST}`;
@@ -2529,6 +2669,55 @@ const runPrivateNetworkDnrSmoke = async (driver, providerServer) => {
   let parentTabId = null;
   let extensionTabId = null;
   try {
+    const preflightFetchProbe = await startNetworkProbe();
+    const preflightSocketProbe = await startNetworkProbe();
+    let preflightTabId = null;
+    try {
+      preflightTabId = await driveServiceWorkerProbe({
+        driver,
+        providerServer,
+        action: 'fetch',
+        target: `http://127.0.0.1:${preflightFetchProbe.port}/service-worker-preflight-fetch`,
+        token: `preflight-fetch-${preflightFetchProbe.port}`,
+      });
+      await waitFor(() => preflightFetchProbe.connections > 0 && preflightFetchProbe.requests.length > 0
+        ? true : null, { budgetMs: 5_000, pollMs: 50 });
+      await waitForServiceWorkerProbe(providerServer, {
+        action: 'fetch', token: `preflight-fetch-${preflightFetchProbe.port}`,
+      });
+      assert(preflightFetchProbe.connections > 0 && preflightFetchProbe.requests.length > 0,
+        'Firefox Service Worker fetch reaches the private probe before origin custody',
+        JSON.stringify({
+          connections: preflightFetchProbe.connections,
+          requests: preflightFetchProbe.requests,
+        }));
+      preflightTabId = await driveServiceWorkerProbe({
+        driver,
+        providerServer,
+        tabId: preflightTabId,
+        action: 'websocket',
+        target: `ws://127.0.0.1:${preflightSocketProbe.port}/service-worker-preflight-websocket`,
+        token: `preflight-websocket-${preflightSocketProbe.port}`,
+      });
+      await waitFor(() => preflightSocketProbe.connections > 0 ? true : null,
+        { budgetMs: 5_000, pollMs: 50 });
+      await waitForServiceWorkerProbe(providerServer, {
+        action: 'websocket', token: `preflight-websocket-${preflightSocketProbe.port}`,
+      });
+      assert(preflightSocketProbe.connections > 0,
+        'Firefox Service Worker WebSocket reaches the private probe before origin custody',
+        JSON.stringify({ connections: preflightSocketProbe.connections }));
+    } finally {
+      if (Number.isInteger(preflightTabId)) {
+        await driver.executeAsync(`
+          const [tabId] = arguments;
+          const done = arguments[arguments.length - 1];
+          browser.tabs.remove(tabId).then(() => done(true), () => done(false));
+        `, [preflightTabId]).catch(() => {});
+      }
+      await Promise.all([preflightFetchProbe.close(), preflightSocketProbe.close()]);
+    }
+
     providerServer.beginDnrFlow(fixtureUrl);
     const started = await driver.executeAsync(`
       const done = arguments[arguments.length - 1];
@@ -2564,6 +2753,7 @@ const runPrivateNetworkDnrSmoke = async (driver, providerServer) => {
         const tab = await browser.tabs.get(lock.ownedTabId).catch(() => null);
         if (tab?.url !== fixtureUrl) return null;
         const ids = [...policy.PRIVATE_NETWORK_RULE_IDS];
+        const initiatorIds = [...policy.PRIVATE_NETWORK_INITIATOR_RULE_IDS];
         const liveRules = await browser.declarativeNetRequest.getSessionRules();
         const [extensionTab] = await browser.tabs.query({ active: true, currentWindow: true });
         return {
@@ -2571,9 +2761,12 @@ const runPrivateNetworkDnrSmoke = async (driver, providerServer) => {
           tabId: lock.ownedTabId,
           extensionTabId: extensionTab?.id,
           expectedIds: ids,
+          expectedInitiatorIds: initiatorIds,
+          noTabId: policy.PRIVATE_NETWORK_NO_TAB_ID,
           expectedResourceTypes: [...policy.DENYLIST_RESOURCE_TYPES],
           hostRuleId: policy.PRIVATE_NETWORK_HOST_RULE_ID,
           rules: liveRules.filter((rule) => ids.includes(rule.id)),
+          initiatorRules: liveRules.filter((rule) => initiatorIds.includes(rule.id)),
         };
       })().then(done, (error) => done({ failed: error?.message || String(error) }));
     `, [DNR_ACTOR_REPLY_CANARY, DNR_FINAL_REPLY_CANARY, fixtureUrl]), { budgetMs: 60_000, pollMs: 200 });
@@ -2597,6 +2790,21 @@ const runPrivateNetworkDnrSmoke = async (driver, providerServer) => {
       && JSON.stringify([...(rule.condition?.resourceTypes ?? [])].sort()) === JSON.stringify(expectedTypes));
     assert(ruleShapeOk, 'installed Firefox DNR rules are block-only, tab-scoped, and use portable resource types',
       JSON.stringify(installed.rules));
+    const installedInitiatorIds = installed.initiatorRules.map((rule) => rule.id).sort((a, b) => a - b);
+    const expectedInitiatorIds = [...installed.expectedInitiatorIds].sort((a, b) => a - b);
+    assert(JSON.stringify(installedInitiatorIds) === JSON.stringify(expectedInitiatorIds),
+      'Firefox retains every no-tab private-network companion rule id',
+      JSON.stringify({ installedInitiatorIds, expectedInitiatorIds }));
+    const initiatorRuleShapeOk = installed.initiatorRules.every((rule) =>
+      rule.action?.type === 'block'
+      && rule.priority === 4
+      && JSON.stringify(rule.condition?.tabIds ?? []) === JSON.stringify([installed.noTabId])
+      && JSON.stringify([...(rule.condition?.initiatorDomains ?? [])].sort())
+        === JSON.stringify([DNR_PUBLIC_HOST])
+      && JSON.stringify([...(rule.condition?.resourceTypes ?? [])].sort()) === JSON.stringify(expectedTypes));
+    assert(initiatorRuleShapeOk,
+      'installed Firefox companion rules cover no-tab requests only from the custodied domain',
+      JSON.stringify(installed.initiatorRules));
     const hostRule = installed.rules.find((rule) => rule.id === installed.hostRuleId);
     assert(hostRule?.condition?.requestDomains?.includes('localhost')
       && expectedTypes.includes('main_frame')
@@ -2638,6 +2846,127 @@ const runPrivateNetworkDnrSmoke = async (driver, providerServer) => {
       }
     } finally {
       await unrelatedProbe.close();
+    }
+
+    const workerFetchProbe = await startNetworkProbe();
+    const workerSocketProbe = await startNetworkProbe();
+    let workerTabId = null;
+    try {
+      workerTabId = await driveServiceWorkerProbe({
+        driver,
+        providerServer,
+        action: 'fetch',
+        target: `http://127.0.0.1:${workerFetchProbe.port}/service-worker-guarded-fetch`,
+        token: `guarded-fetch-${workerFetchProbe.port}`,
+      });
+      const workerTabScope = await driver.executeAsync(`
+        const [tabId] = arguments;
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const policy = await import(browser.runtime.getURL('peerd-egress/index.js'));
+          const rules = await browser.declarativeNetRequest.getSessionRules();
+          return {
+            tabId,
+            baseRuleIds: rules.filter((rule) =>
+              policy.PRIVATE_NETWORK_RULE_IDS.includes(rule.id)
+                && rule.condition?.tabIds?.includes(tabId)).map((rule) => rule.id),
+          };
+        })().then(done, (error) => done({ failed: error?.message || String(error) }));
+      `, [workerTabId]);
+      assert(workerTabScope?.baseRuleIds?.length === 0,
+        'the Service Worker probe tab is outside every tab-scoped private-network rule',
+        JSON.stringify(workerTabScope));
+      await waitForServiceWorkerProbe(providerServer, {
+        action: 'fetch', token: `guarded-fetch-${workerFetchProbe.port}`,
+      });
+      assert(workerFetchProbe.connections === 0 && workerFetchProbe.requests.length === 0,
+        'custodied Firefox Service Worker fetch causes zero private-network side effects',
+        JSON.stringify({
+          connections: workerFetchProbe.connections,
+          requests: workerFetchProbe.requests,
+        }));
+      workerTabId = await driveServiceWorkerProbe({
+        driver,
+        providerServer,
+        tabId: workerTabId,
+        action: 'websocket',
+        target: `ws://127.0.0.1:${workerSocketProbe.port}/service-worker-guarded-websocket`,
+        token: `guarded-websocket-${workerSocketProbe.port}`,
+      });
+      await waitForServiceWorkerProbe(providerServer, {
+        action: 'websocket', token: `guarded-websocket-${workerSocketProbe.port}`,
+      });
+      assert(workerSocketProbe.connections === 0 && workerSocketProbe.requests.length === 0,
+        'custodied Firefox Service Worker WebSocket causes zero private-network side effects',
+        JSON.stringify({
+          connections: workerSocketProbe.connections,
+          requests: workerSocketProbe.requests,
+        }));
+    } finally {
+      if (Number.isInteger(workerTabId)) {
+        await driver.executeAsync(`
+          const [tabId] = arguments;
+          const done = arguments[arguments.length - 1];
+          browser.tabs.remove(tabId).then(() => done(true), () => done(false));
+        `, [workerTabId]).catch(() => {});
+      }
+      await Promise.all([workerFetchProbe.close(), workerSocketProbe.close()]);
+    }
+
+    const otherOriginFetchProbe = await startNetworkProbe();
+    const otherOriginSocketProbe = await startNetworkProbe();
+    let otherOriginTabId = null;
+    try {
+      otherOriginTabId = await driveServiceWorkerProbe({
+        driver,
+        providerServer,
+        host: DNR_FRAME_HOST,
+        action: 'fetch',
+        target: `http://127.0.0.1:${otherOriginFetchProbe.port}/service-worker-other-origin-fetch`,
+        token: `other-origin-fetch-${otherOriginFetchProbe.port}`,
+      });
+      await waitFor(() => otherOriginFetchProbe.connections > 0
+        && otherOriginFetchProbe.requests.length > 0 ? true : null,
+      { budgetMs: 5_000, pollMs: 50 });
+      await waitForServiceWorkerProbe(providerServer, {
+        host: DNR_FRAME_HOST,
+        action: 'fetch',
+        token: `other-origin-fetch-${otherOriginFetchProbe.port}`,
+      });
+      assert(otherOriginFetchProbe.connections > 0 && otherOriginFetchProbe.requests.length > 0,
+        'another Firefox Service Worker origin still reaches private fetch while custody is active',
+        JSON.stringify({
+          connections: otherOriginFetchProbe.connections,
+          requests: otherOriginFetchProbe.requests,
+        }));
+      otherOriginTabId = await driveServiceWorkerProbe({
+        driver,
+        providerServer,
+        tabId: otherOriginTabId,
+        host: DNR_FRAME_HOST,
+        action: 'websocket',
+        target: `ws://127.0.0.1:${otherOriginSocketProbe.port}/service-worker-other-origin-websocket`,
+        token: `other-origin-websocket-${otherOriginSocketProbe.port}`,
+      });
+      await waitFor(() => otherOriginSocketProbe.connections > 0 ? true : null,
+        { budgetMs: 5_000, pollMs: 50 });
+      await waitForServiceWorkerProbe(providerServer, {
+        host: DNR_FRAME_HOST,
+        action: 'websocket',
+        token: `other-origin-websocket-${otherOriginSocketProbe.port}`,
+      });
+      assert(otherOriginSocketProbe.connections > 0,
+        'another Firefox Service Worker origin still reaches private WebSocket while custody is active',
+        JSON.stringify({ connections: otherOriginSocketProbe.connections }));
+    } finally {
+      if (Number.isInteger(otherOriginTabId)) {
+        await driver.executeAsync(`
+          const [tabId] = arguments;
+          const done = arguments[arguments.length - 1];
+          browser.tabs.remove(tabId).then(() => done(true), () => done(false));
+        `, [otherOriginTabId]).catch(() => {});
+      }
+      await Promise.all([otherOriginFetchProbe.close(), otherOriginSocketProbe.close()]);
     }
 
     const vectors = [
@@ -2904,14 +3233,65 @@ const runPrivateNetworkDnrSmoke = async (driver, providerServer) => {
           const stillScoped = rules.some((rule) =>
             policy.PRIVATE_NETWORK_RULE_IDS.includes(rule.id)
               && rule.condition?.tabIds?.includes(tabId));
-          if (!stillScoped) return { ok: true };
+          const initiatorStillScoped = rules.some((rule) =>
+            policy.PRIVATE_NETWORK_INITIATOR_RULE_IDS.includes(rule.id));
+          if (!stillScoped && !initiatorStillScoped) return { ok: true };
           await new Promise((resolveWait) => setTimeout(resolveWait, 50));
         }
-        return { ok: false, error: 'closed actor tab remained in private-network rules' };
+        return { ok: false, error: 'closed actor tab or origin remained in private-network rules' };
       })().then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
     `, [parentTabId, extensionTabId]);
     assert(released?.ok === true, 'closing the driven actor tab removes its production DNR scope', JSON.stringify(released));
     parentTabId = null;
+
+    const releasedFetchProbe = await startNetworkProbe();
+    const releasedSocketProbe = await startNetworkProbe();
+    let releasedTabId = null;
+    try {
+      releasedTabId = await driveServiceWorkerProbe({
+        driver,
+        providerServer,
+        action: 'fetch',
+        target: `http://127.0.0.1:${releasedFetchProbe.port}/service-worker-released-fetch`,
+        token: `released-fetch-${releasedFetchProbe.port}`,
+      });
+      await waitFor(() => releasedFetchProbe.connections > 0 && releasedFetchProbe.requests.length > 0
+        ? true : null, { budgetMs: 5_000, pollMs: 50 });
+      await waitForServiceWorkerProbe(providerServer, {
+        action: 'fetch', token: `released-fetch-${releasedFetchProbe.port}`,
+      });
+      assert(releasedFetchProbe.connections > 0 && releasedFetchProbe.requests.length > 0,
+        'Firefox Service Worker fetch reaches the private probe after custody release',
+        JSON.stringify({
+          connections: releasedFetchProbe.connections,
+          requests: releasedFetchProbe.requests,
+        }));
+      releasedTabId = await driveServiceWorkerProbe({
+        driver,
+        providerServer,
+        tabId: releasedTabId,
+        action: 'websocket',
+        target: `ws://127.0.0.1:${releasedSocketProbe.port}/service-worker-released-websocket`,
+        token: `released-websocket-${releasedSocketProbe.port}`,
+      });
+      await waitFor(() => releasedSocketProbe.connections > 0 ? true : null,
+        { budgetMs: 5_000, pollMs: 50 });
+      await waitForServiceWorkerProbe(providerServer, {
+        action: 'websocket', token: `released-websocket-${releasedSocketProbe.port}`,
+      });
+      assert(releasedSocketProbe.connections > 0,
+        'Firefox Service Worker WebSocket reaches the private probe after custody release',
+        JSON.stringify({ connections: releasedSocketProbe.connections }));
+    } finally {
+      if (Number.isInteger(releasedTabId)) {
+        await driver.executeAsync(`
+          const [tabId] = arguments;
+          const done = arguments[arguments.length - 1];
+          browser.tabs.remove(tabId).then(() => done(true), () => done(false));
+        `, [releasedTabId]).catch(() => {});
+      }
+      await Promise.all([releasedFetchProbe.close(), releasedSocketProbe.close()]);
+    }
   } finally {
     if (parentTabId != null) {
       await driver.executeAsync(`
@@ -2961,6 +3341,7 @@ const main = async () => {
         // own DNR behavior, so the probe counters isolate the product boundary.
         'network.lna.enabled': false,
         'network.lna.blocking': false,
+        'network.lna.websocket.enabled': false,
         'network.dns.disableIPv6': true,
         'dom.disable_open_during_load': false,
       },

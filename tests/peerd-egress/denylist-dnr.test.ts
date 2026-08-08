@@ -10,11 +10,15 @@ import {
   DENYLIST_ALLOW_RULE_ID,
   DENYLIST_RESOURCE_TYPES,
   buildPrivateNetworkBlockRules,
+  buildPrivateNetworkInitiatorBlockRules,
   PRIVATE_NETWORK_HOSTS,
   PRIVATE_NETWORK_IPV4_REGEX_RULES,
   PRIVATE_NETWORK_IPV6_REGEX_RULES,
   PRIVATE_NETWORK_DOTTED_HOST_REGEX_RULES,
   PRIVATE_NETWORK_RULE_IDS,
+  PRIVATE_NETWORK_INITIATOR_RULE_ID_OFFSET,
+  PRIVATE_NETWORK_INITIATOR_RULE_IDS,
+  PRIVATE_NETWORK_NO_TAB_ID,
   CHROME_DNR_RESOURCE_TYPES,
 } from '../../extension/peerd-egress/denylist/dnr-rules.js';
 
@@ -23,11 +27,13 @@ const ALL_RULE_IDS = [
   DENYLIST_ALLOW_RULE_ID,
   APP_EGRESS_RULE_ID,
   ...PRIVATE_NETWORK_RULE_IDS,
+  ...PRIVATE_NETWORK_INITIATOR_RULE_IDS,
 ];
 
 // The denylist's network-level backstop, pure half. The property that matters
-// most is negative: this must never produce a rule that isn't scoped to peerd's
-// own driven tabs, because that rule would block the USER's browsing.
+// most is negative: every rule must be scoped either to peerd's driven tabs or
+// to a custodied initiator with no-tab narrowing. An unscoped rule would block
+// the user's browsing.
 
 describe('denylistBlockDomains — patterns → requestDomains', () => {
   test('apex and its wildcard collapse to one domain', () => {
@@ -260,6 +266,70 @@ describe('buildPrivateNetworkBlockRules, tab-associated network floor', () => {
       'http://[64:ff9b::808:808]',
       'http://[::ffff:808:808]',
     ]) expect(matches(raw)).toBe(false);
+  });
+});
+
+describe('buildPrivateNetworkInitiatorBlockRules, no-tab worker floor', () => {
+  test('no custodied initiator domains means no no-tab rule', () => {
+    expect(buildPrivateNetworkInitiatorBlockRules({ initiatorDomains: [] })).toEqual([]);
+  });
+
+  test('every rule requires both no-tab and canonical initiator scope', () => {
+    const rules: any[] = buildPrivateNetworkInitiatorBlockRules({
+      initiatorDomains: ['worker.example', 'worker.example', 'api.worker.example'],
+    });
+    expect(rules.map((rule) => rule.id)).toEqual([...PRIVATE_NETWORK_INITIATOR_RULE_IDS]);
+    expect(rules).toHaveLength(PRIVATE_NETWORK_RULE_IDS.length);
+    for (const rule of rules) {
+      expect(rule.action).toEqual({ type: 'block' });
+      expect(rule.priority).toBe(4);
+      expect(rule.condition.tabIds).toEqual([PRIVATE_NETWORK_NO_TAB_ID]);
+      expect(rule.condition.initiatorDomains).toEqual(['api.worker.example', 'worker.example']);
+      expect(rule.condition.resourceTypes).toEqual([...DENYLIST_RESOURCE_TYPES]);
+    }
+  });
+
+  test('the companion ids are disjoint from every tab-scoped rule id', () => {
+    expect(PRIVATE_NETWORK_INITIATOR_RULE_IDS.every((id) =>
+      id >= PRIVATE_NETWORK_INITIATOR_RULE_ID_OFFSET
+        && !PRIVATE_NETWORK_RULE_IDS.includes(id))).toBe(true);
+  });
+
+  test('invalid or non-canonical initiators cannot widen the no-tab scope', () => {
+    const rules: any[] = buildPrivateNetworkInitiatorBlockRules({
+      initiatorDomains: [
+        '', 'Worker.Example', 'https://worker.example', 'worker.example:8443',
+        '*.worker.example', 'worker.example/path', 'work\u00e9r.example',
+      ],
+    });
+    expect(rules).toEqual([]);
+  });
+
+  test('a caller cannot substitute an ordinary or browser-wide tab scope', () => {
+    expect(buildPrivateNetworkInitiatorBlockRules({
+      initiatorDomains: ['worker.example'], noTabId: 7,
+    })).toEqual([]);
+  });
+
+  test('the full reconcile adds companions only for live initiators', () => {
+    const withoutInitiator = denylistSessionRuleUpdate({ patterns: [], tabIds: [7] });
+    expect(withoutInitiator.addRules).toHaveLength(PRIVATE_NETWORK_RULE_IDS.length);
+
+    const withInitiator: any = denylistSessionRuleUpdate({
+      patterns: [], tabIds: [7], initiatorDomains: ['worker.example'],
+    });
+    expect(withInitiator.removeRuleIds).toEqual(ALL_RULE_IDS);
+    expect(withInitiator.addRules).toHaveLength(
+      PRIVATE_NETWORK_RULE_IDS.length
+        + PRIVATE_NETWORK_INITIATOR_RULE_IDS.length,
+    );
+    const companions = withInitiator.addRules.filter((rule: any) =>
+      PRIVATE_NETWORK_INITIATOR_RULE_IDS.includes(rule.id));
+    expect(companions).toHaveLength(PRIVATE_NETWORK_INITIATOR_RULE_IDS.length);
+    expect(companions.every((rule: any) =>
+      JSON.stringify(rule.condition.tabIds) === JSON.stringify([PRIVATE_NETWORK_NO_TAB_ID])
+        && JSON.stringify(rule.condition.initiatorDomains) === JSON.stringify(['worker.example'])))
+      .toBe(true);
   });
 });
 

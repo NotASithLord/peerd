@@ -51,7 +51,10 @@ some sensitive sites but is not a guarantee about the content of every page.
 peerd can request websites and APIs needed for a task. Direct fetch, document
 reading, and browser automation block private-network targets. Driven browser
 tabs also carry tab-scoped network rules for private targets and configured
-sensitive sites. The local Activity log records tool outcomes, direct open-web
+sensitive sites. Private-network rules also cover service-worker fetches from
+public domains visited in a driven tab. Those domains remain covered until the
+tab's custody ends. A normal tab on the same matching domain can temporarily
+lose private-network service-worker fetch access. The local Activity log records tool outcomes, direct open-web
 fetches, and policy denials. It is not a complete record of every network
 request or visited URL.
 

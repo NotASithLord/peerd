@@ -10,6 +10,7 @@
 import { isDenylistedTab, originOfUrl } from './dom-helpers.js';
 import {
   BROWSER_TARGET_STAGES,
+  browserNetworkGuardPostNavigationResult,
   browserTargetRefusalResult,
   classifyBrowserAutomationTarget,
   sensitiveSiteBrowserTargetVerdict,
@@ -100,7 +101,7 @@ export const openTabTool = {
     const tabsApi = /** @type {import('./committed-navigation.js').NavigationTabsApi & { create: (opts: CreateOpts) => Promise<BrowserTab>, remove?: (tabId: number) => Promise<unknown> }} */ (ctx.tabs);
     // why: noteTab / hintPullIn are optional SW-injected context extras not on
     // the ToolContext contract slot.
-    const ctxExtras = /** @type {{ noteTab?: (id: number | undefined, label?: string) => Promise<unknown>, hintPullIn?: (id: number | undefined, url: string) => unknown, judgeLanding?: (url: string) => Promise<unknown>, navigationTimeoutMs?: number, ensureBrowserNetworkGuard?: (tabId: number) => Promise<import('/shared/tool-types.js').ToolResult> }} */ (ctx);
+    const ctxExtras = /** @type {{ noteTab?: (id: number | undefined, label?: string) => Promise<unknown>, hintPullIn?: (id: number | undefined, url: string) => unknown, judgeLanding?: (url: string) => Promise<unknown>, navigationTimeoutMs?: number, ensureBrowserNetworkGuard?: (tabId: number, targetUrl?: string) => Promise<import('/shared/tool-types.js').ToolResult>, updateBrowserNetworkGuardOrigin?: (tabId: number, rawUrl?: string) => Promise<import('/shared/tool-types.js').ToolResult> }} */ (ctx);
     /** @type {BrowserTab} */
     let tab;
     try { tab = await tabsApi.create(opts); }
@@ -109,7 +110,7 @@ export const openTabTool = {
     }
     if (!tab.id) return { ok: false, error: 'tabs_create_failed: browser returned no tab id' };
     if (typeof ctxExtras.ensureBrowserNetworkGuard === 'function') {
-      const guarded = await ctxExtras.ensureBrowserNetworkGuard(tab.id);
+      const guarded = await ctxExtras.ensureBrowserNetworkGuard(tab.id, requestedUrl ?? tab.url);
       if (!guarded.ok) {
         await tabsApi.remove?.(tab.id).catch(() => {});
         return guarded;
@@ -146,11 +147,7 @@ export const openTabTool = {
         const committedVerdict = classifyBrowserAutomationTarget(finalTab?.url, {
           stage: BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,
         });
-        const privateLanding = !committedVerdict.allowed
-          && (committedVerdict.reason === 'private_network'
-            || committedVerdict.reason === 'cloud_metadata');
-        if (!committedVerdict.allowed
-          && (privateLanding || navigation.status === 'complete')) {
+        if (!committedVerdict.allowed) {
           if (ctxExtras.judgeLanding && finalTab?.url) {
             try { await ctxExtras.judgeLanding(finalTab.url); } catch { /* best-effort */ }
           }
@@ -184,6 +181,29 @@ export const openTabTool = {
           };
         }
 
+        if (typeof ctxExtras.updateBrowserNetworkGuardOrigin === 'function') {
+          const guarded = await ctxExtras.updateBrowserNetworkGuardOrigin(tab.id, finalTab?.url);
+          if (!guarded.ok) {
+            let closed = false;
+            if (typeof tabsApi.remove === 'function') {
+              try {
+                await tabsApi.remove(tab.id);
+                closed = true;
+              } catch { /* the policy result below reports the failed cleanup */ }
+            }
+            const refusal = browserNetworkGuardPostNavigationResult(
+              guarded.structured?.reason,
+            );
+            return {
+              ...refusal,
+              structured: { ...refusal.structured, neutralized: closed },
+              content: `${refusal.content} ${closed
+                ? 'The new tab was closed.'
+                : 'The new tab could not be closed, so browser automation remains stopped for it.'}`,
+            };
+          }
+        }
+
         if (navigation.status !== 'complete') {
           return {
             ok: false,
@@ -214,9 +234,11 @@ export const openTabTool = {
         tabId: tab.id,
         url: tab.url || tab.pendingUrl || requestedUrl || '',
         networkGuard: {
-          scope: 'tab',
+          scope: 'tab_and_visited_origin_workers',
           lifetime: 'until_tab_closed',
           blocks: ['private_network', 'sensitive_site_denylist'],
+          workerScope: 'private_network_fetch',
+          chromeWorkerWebSocket: 'not_covered_by_dnr',
         },
       }, null, 2),
     };

@@ -154,8 +154,12 @@ task time. Page injection and page automation occur only during an active user
 task. The denylist applies to page access. Direct fetch, document reading, and
 browser automation apply private-network checks. Driven tabs also use
 tab-scoped network rules that cover redirects and tab-associated requests.
+Private-network rules also cover service-worker fetches from public domains
+visited in the driven tab until custody ends. A user-owned tab on the same
+matching domain can temporarily lose private-network service-worker fetch access.
 Children receive those rules only when the browser reports that their exact
-source tab is already under assistant control. User-owned tabs are not changed.
+source tab is already under assistant control. Other tabs are not navigated,
+closed, or focused.
 Provider setup and user-enabled runtime downloads are separate user-initiated
 network uses. Tool outcomes and policy denials are recorded locally.
 

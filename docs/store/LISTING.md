@@ -60,8 +60,12 @@ GUARDRAILS ON BY DEFAULT
 • Direct fetch, document reading, and browser automation block localhost,
   private-network, link-local, and cloud-metadata targets. Driven tabs use a
   tab-scoped browser network rule so redirects and tab-associated requests are
-  blocked before the target loads. Local AI providers use a separate opt-in
-  path.
+  blocked before the target loads. Private-network rules also cover service-worker
+  fetches from public domains visited in the driven tab until custody ends.
+  A normal tab on the same matching domain can temporarily lose private-network
+  service-worker fetch access.
+  Local AI providers use a
+  separate opt-in path.
 • Risky actions ask for your confirmation first.
 
 Choose a supported local provider or supply your own provider API key. peerd is

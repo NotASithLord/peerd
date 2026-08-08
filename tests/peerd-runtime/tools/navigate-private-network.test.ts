@@ -171,6 +171,32 @@ describe('navigate private-network policy', () => {
     expect(pin).toEqual({ id: 7, url: privateUrl, origin: 'http://127.0.0.1' });
   });
 
+  test('reports a committed effect and resets the tab when origin protection fails', async () => {
+    const landingUrl = 'https://public.example/landed';
+    const { ctx, pin, publicUrl, updates } = redirectContext({ landingUrl });
+    ctx.updateBrowserNetworkGuardOrigin = async () => ({
+      ok: false,
+      error: 'browser_network_guard_unavailable',
+      outcomeKind: 'pre-effect-failure',
+      structured: { reason: 'network_guard_install_failed' },
+    });
+    const result = await navigateTool.execute({ url: publicUrl }, ctx);
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'browser_network_guard_unavailable',
+      outcomeKind: 'effect-completed',
+      structured: {
+        reason: 'network_guard_install_failed',
+        stage: 'committed_origin',
+        outcome: 'page_loaded_not_automated',
+        neutralized: true,
+      },
+    });
+    expect(result.content).toContain('verified blank page');
+    expect(updates).toEqual([publicUrl, 'about:blank']);
+    expect(pin).toEqual({ id: 7, url: 'about:blank', origin: '' });
+  });
+
   test('a timed-out navigation still classifies and resets a private landing', async () => {
     const publicUrl = 'https://example.com/start';
     const privateUrl = 'http://127.0.0.1/private';
@@ -268,8 +294,8 @@ describe('navigate private-network policy', () => {
   test('refuses before tabs.update when the tab-scoped network floor is unavailable', async () => {
     const { ctx, publicUrl, updates } = redirectContext();
     const guarded: Array<[number, string | undefined]> = [];
-    ctx.ensureBrowserNetworkGuard = async (tabId: number) => {
-      guarded.push([tabId, undefined]);
+    ctx.ensureBrowserNetworkGuard = async (tabId: number, targetUrl?: string) => {
+      guarded.push([tabId, targetUrl]);
       if (guarded.length === 1) return { ok: true };
       return {
         ok: false,
@@ -282,7 +308,10 @@ describe('navigate private-network policy', () => {
       error: 'browser_network_guard_unavailable',
       outcomeKind: 'pre-effect-failure',
     });
-    expect(guarded).toEqual([[7, undefined], [7, undefined]]);
+    expect(guarded).toEqual([
+      [7, publicUrl],
+      [7, publicUrl],
+    ]);
     expect(updates).toEqual([]);
   });
 });
