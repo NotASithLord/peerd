@@ -52,7 +52,7 @@ export const messageActorTool = {
     'instance id; "site:<origin>" (e.g. "site:https://github.com") to work on ONE site',
     'the user is logged into (drives a real tab, that site only, so it can sign in',
     'where "web" may not go); or an API integration\'s ORIGIN (a bare host like',
-    '"api.github.com" — fetch-only, keyless, origin-locked, ACCUMULATING what it',
+    '"api.github.com" (tab-free, keyless, origin-locked, ACCUMULATING what it',
     'learns across messages). An actor is minted on first message, holds that',
     'environment\'s tools, and works in its own focused context. By DEFAULT you send',
     'a goal and DON\'T wait — the reply lands as a fenced note on a LATER turn; fan',

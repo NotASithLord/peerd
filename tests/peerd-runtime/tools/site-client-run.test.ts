@@ -10,6 +10,8 @@ describe('site_client_run code-run custody', () => {
       origin: 'https://api.example.com', code: 'return await client.list()',
     }, {
       session: { sessionId: 'api-actor-1' },
+      canUseSiteClientOrigin: () => true,
+      authorizeSiteClientOrigin: async () => true,
       siteClients: {
         get: async () => ({ body: 'return { list: () => site.fetch("/items") };' }),
         recordRun: async () => {},
@@ -36,6 +38,8 @@ describe('site_client_run code-run custody', () => {
     let started = false;
     const result = await siteClientRunTool.execute({ origin: 'https://api.example.com', code: 'return 1' }, {
       session: { sessionId: 'api-actor-1' },
+      canUseSiteClientOrigin: () => true,
+      authorizeSiteClientOrigin: async () => true,
       siteClients: { get: async () => ({ body: 'return {};' }) },
       abortSignal: { aborted: true },
       scriptRuns: { mintRunId: () => 'x', register: () => {}, release: () => {} },
@@ -48,6 +52,8 @@ describe('site_client_run code-run custody', () => {
   test('Stop while loading the stored client prevents registration and execution', async () => {
     let finishLoad = (_value: any) => {};
     const load = new Promise((resolve) => { finishLoad = resolve; });
+    let markLoading = () => {};
+    const loading = new Promise<void>((resolve) => { markLoading = resolve; });
     let registered = false;
     let started = false;
     const controller = new AbortController();
@@ -55,7 +61,9 @@ describe('site_client_run code-run custody', () => {
       origin: 'https://api.example.com', code: 'return 1',
     }, {
       session: { sessionId: 'api-actor-1' },
-      siteClients: { get: async () => load },
+      canUseSiteClientOrigin: () => true,
+      authorizeSiteClientOrigin: async () => true,
+      siteClients: { get: async () => { markLoading(); return load; } },
       abortSignal: controller.signal,
       scriptRuns: {
         mintRunId: () => 'x',
@@ -66,6 +74,7 @@ describe('site_client_run code-run custody', () => {
         execHeadless: async () => { started = true; return {}; },
       },
     } as any);
+    await loading;
     controller.abort();
     finishLoad({ body: 'return {};' });
     expect(await pending).toEqual({
@@ -87,6 +96,8 @@ describe('site_client_run code-run custody', () => {
       origin: 'https://api.example.com', code: 'return await client.list()',
     }, {
       session: { sessionId: 'api-actor-1' },
+      canUseSiteClientOrigin: () => true,
+      authorizeSiteClientOrigin: async () => true,
       siteClients: {
         get: async () => ({ body: 'return { list: async () => [] };' }),
         recordRun: async () => { recordRuns++; },

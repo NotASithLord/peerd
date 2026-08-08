@@ -152,15 +152,28 @@ export const actorTierGate = (tool, args, ctx) => {
     }
     return null;
   }
-  // DESIGN-18: an API actor (actorType:'web', backing:'api') is fetch-only — its
+  // DESIGN-18: an API actor (actorType:'web', backing:'api') is tab-free; its
   // allow-set drops the DOM toolset (which needs a tab it never has), so a DOM tool
   // refuses HERE, at the gate, not just at execute-time. PR #119: surface-aware —
   // a code-surface web actor's set is {snapshot, read_page, page_code}, so a
   // discrete click/type/navigate FROM THE MODEL refuses here too (the page/call
   // route's inner dispatch builds a tools-surface ctx, which stays allowed).
   if (!isAllowedForActor(tool.name, ctx.actorType, ctx.backing, ctx.actorSurface)) {
-    const scope = ctx.backing === 'api' ? 'API integration (no tab — fetch_url only)' : `${ctx.actorType ?? 'unknown'}`;
+    const scope = ctx.backing === 'api' ? 'API integration (no tab or DOM)' : `${ctx.actorType ?? 'unknown'}`;
     return { allowed: false, reason: `'${tool.name}' is not in this actor's (${scope}) toolset` };
+  }
+  // Durable site-client records are origin-owned executable knowledge. This
+  // runs before confirmation/store access; each tool repeats it at execute time
+  // because pre-tool hooks may rewrite args after the gate stack has completed.
+  if (['site_client_read', 'site_client_run', 'site_client_write'].includes(tool.name)) {
+    const origin = typeof args?.origin === 'string' ? args.origin : '';
+    let allowed = false;
+    try { allowed = ctx.canUseSiteClientOrigin?.(origin) === true; } catch { allowed = false; }
+    if (!allowed) {
+      // Fixed prose: raw model args (path/query/newlines) must not ride through
+      // dispatcher audit into a later main-agent `inspect` result.
+      return { allowed: false, reason: 'actor does not own that site client origin' };
+    }
   }
   // The actor dispatch wrapper (turn-driver pinActorCall) already FORCE-
   // normalizes any id/name arg to the bound instance id before dispatch, so by

@@ -335,6 +335,9 @@ import {
   // live — the state store, the judge, the synchronous credential-scope
   // narrowing, and the report a stop turns into.
   makeOriginStateStore, makeLearnedOrigins, makeJudgeLanding, makeCredentialScope,
+  makeSiteClientOriginGuard, makeSiteClientOriginAuthorizer,
+  makeFixedSiteClientOriginGuard, authorizeSiteClientRelayOrigin,
+  hasDurableSiteClientState,
   isKnownIdp, knownIdpDomains, describeLandingStop, originPhrase, isUgcHost,
   isAddressableBrowserTab,
   finalActorTurnReply, finalAssistantText,
@@ -1766,9 +1769,7 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
   // the dispatch it will judge was authorized.
   const myTurn = landingTurnTokens.get(actorSessionId) ?? null;
   const isCurrentTurn = () => myTurn === null || landingTurnTokens.get(actorSessionId) === myTurn;
-  return {
-    getState,
-    judgeLanding: makeJudgeLanding({
+  const judgeLanding = makeJudgeLanding({
       getState,
       saveState: (patch) => originStates.write(actorSessionId, patch),
       onStop: (event) => {
@@ -1862,10 +1863,37 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
       },
       isIdp: isKnownIdp,
       ...sensitivitySignals(),
-    }),
+    });
+  return {
+    getState,
+    judgeLanding,
     makeScope: (/** @type {() => string | undefined} */ getOrigin) =>
       makeCredentialScope({ getState, getOrigin, ...sensitivitySignals() }),
+    canUseSiteClientOrigin: makeSiteClientOriginGuard({ getState, ...sensitivitySignals() }),
+    authorizeSiteClientOrigin: (/** @type {() => Promise<{ status: 'none' | 'unreadable' } | { status: 'live', url: string }>} */ getLiveLanding) =>
+      makeSiteClientOriginAuthorizer({
+        getState, getLiveLanding, judgeLanding,
+        ...sensitivitySignals(),
+      }),
   };
+};
+
+/**
+ * Read the actor's ACTUAL owned tab, distinguishing a deliberate 0-tab actor
+ * from a tab that exists but can no longer be verified.
+ * @param {string} actorSessionId
+ * @param {number} [trustedTabId]
+ * @returns {Promise<{ status: 'none' | 'unreadable' } | { status: 'live', url: string }>}
+ */
+const liveSiteClientLandingFor = async (actorSessionId, trustedTabId) => {
+  const tabId = typeof trustedTabId === 'number'
+    ? trustedTabId
+    : webActorTabBindings.tabFor(actorSessionId);
+  if (typeof tabId !== 'number') return { status: 'none' };
+  const tab = await browser.tabs.get(tabId).catch(() => null);
+  return typeof tab?.url === 'string' && tab.url
+    ? { status: 'live', url: tab.url }
+    : { status: 'unreadable' };
 };
 
 /**
@@ -2446,8 +2474,9 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // credential stubs. The turn driver's provider wrapper adds live functions
   // only at the model-call boundary. Non-actor ctx is unchanged.
   if (exposure === EXPOSURE_ACTOR) {
-    // DESIGN-18: an API actor's allow-set is fetch_url-only (backing-aware), so the
-    // strip drops the closures keyed in CAPABILITY_CONSUMERS that fetch_url doesn't use
+    // DESIGN-18: an API actor's allow-set is tab-free and origin-scoped
+    // (backing-aware), so the strip drops closures its fetch/cache/site-client
+    // tools do not use
     // (getSecret/safeFetch/adoptWebTab/engine/spawn/…). NB scripting + debuggerPool are
     // NOT in CAPABILITY_CONSUMERS (shared with the web actor's DOM tools), so they survive
     // here — the no-DOM guarantee for an API actor rests on the GATE refusing every DOM
@@ -2470,6 +2499,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     //   - api   → the FIXED bound origin (actorInstanceId) — no tab, never changes.
     if (actorType === 'web' && actorBacking === 'api') {
       const ownedOrigin = typeof actorInstanceId === 'string' ? actorInstanceId : undefined;
+      // A stored client is durable executable knowledge keyed by origin. The API
+      // actor owns exactly its fixed instance origin; a model-supplied client key
+      // may not retarget it to a sibling record before the fetch relay gets a say.
+      const canUseFixedSiteClient = makeFixedSiteClientOriginGuard(ownedOrigin);
+      resCtx.canUseSiteClientOrigin = canUseFixedSiteClient;
+      resCtx.authorizeSiteClientOrigin = async (/** @type {string} */ targetOrigin) =>
+        canUseFixedSiteClient(targetOrigin);
       // DESIGN-18 P1: session-scope cookies AND inject the vault origin:<origin> key
       // same-origin (keyless: getSecret is the SW's, closed over here, never on resCtx).
       resCtx.webFetch = withDpopCredentials(webFetch, () => ownedOrigin, {
@@ -2489,9 +2525,21 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       // inside the store. Adversarial review found why that matters: a load that
       // threw fell back to `roaming`, so a transient storage error quietly
       // DEMOTED a bound actor, which for the credential scope is a widening.
-      originStates.hydrate(sessionId, /** @type {any} */ (activeSession?.originState));
+      const durableOriginState = /** @type {any} */ (activeSession?.originState);
+      const hasDurableCustody = hasDurableSiteClientState(durableOriginState);
+      originStates.hydrate(sessionId, durableOriginState);
       const lock = originLockFor(sessionId);
       resCtx.judgeLanding = lock?.judgeLanding;
+      // The sync gate is an early state-only refusal. The execute-time check is
+      // async and re-reads + judges the ACTUAL owned tab after hooks have
+      // rewritten args. A missing durable state must not be hydrated into
+      // roaming authority for this durable artifact family.
+      resCtx.canUseSiteClientOrigin = hasDurableCustody
+        ? lock?.canUseSiteClientOrigin
+        : () => false;
+      resCtx.authorizeSiteClientOrigin = hasDurableCustody && lock
+        ? lock.authorizeSiteClientOrigin(() => liveSiteClientLandingFor(sessionId))
+        : async () => false;
       // The session-credential scope, NARROWED by the same policy. `ctx.activeTab.origin`
       // IS the scope — read live on every request — so a page that redirects itself onto
       // a credentialed origin moves the scope with no tool call in between to judge. The
@@ -4725,6 +4773,36 @@ const siteFetchCallRoute = {
       const hit = matchesDenylist(host, denylistStore.patterns());
       if (hit) return { ok: false, error: `denylisted: ${host} matches '${hit}'` };
     }
+    // Recheck durable-client custody at EVERY worker bridge operation. The
+    // tool boundary already refuses before loading the module, but a run may
+    // outlive an origin-state change and this relay is also a privileged entry
+    // point in its own right. API actors own their fixed instance origin;
+    // tab-backed actors consume the same live origin-state predicate as the
+    // direct tools. Do this before a write confirmation so a forged relay can't
+    // manufacture a prompt for an origin its owner never held.
+    /** @type {ReturnType<typeof originLockFor>} */
+    let tabOriginLock = null;
+    // Legacy tab actors omit `backing`; an explicit null/unknown value is
+    // malformed persisted authority, not another spelling of that legacy.
+    const relayBacking = owner.backing === undefined ? 'tab' : owner.backing;
+    const ownedApiOrigin = owner.backing === 'api' && typeof owner.instanceId === 'string'
+      ? normalizeApiOrigin(owner.instanceId)
+      : null;
+    if (relayBacking === 'tab' && hasDurableSiteClientState(owner.originState)) {
+      originStates.hydrate(ownerSessionId, /** @type {any} */ (owner.originState));
+      tabOriginLock = originLockFor(ownerSessionId);
+    }
+    const authorizeTabOrigin = tabOriginLock?.authorizeSiteClientOrigin(
+      () => liveSiteClientLandingFor(ownerSessionId),
+    );
+    const reauthorizeSiteFetch = () => authorizeSiteClientRelayOrigin({
+      backing: relayBacking,
+      instanceOrigin: ownedApiOrigin,
+      durableState: /** @type {any} */ (owner.originState),
+      targetOrigin: pin,
+      authorizeTabOrigin,
+    });
+    if (!await reauthorizeSiteFetch()) return { ok: false, error: 'site_fetch_cross_origin' };
     const httpMethod = String(method ?? 'GET').toUpperCase();
     // Anti-exfil: a non-GET can transmit in-context data. Confirm by default via
     // the SHARED web:write key (one approval governs fetch_url + call_api + this).
@@ -4782,11 +4860,9 @@ const siteFetchCallRoute = {
       // named site_client_* as uncovered, and a relay that quietly kept the
       // wider scope would have made that note the only thing standing between a
       // hijacked actor and the user's session.
-      originStates.hydrate(ownerSessionId, /** @type {any} */ (owner.originState));
-      const lock = originLockFor(ownerSessionId);
       scopedFetch = withSessionScopedCredentials(
         webFetch,
-        lock ? lock.makeScope(() => tabOrigin) : () => tabOrigin,
+        tabOriginLock ? tabOriginLock.makeScope(() => tabOrigin) : () => tabOrigin,
       );
     }
     // Strip tool-supplied credential headers (a laundered injection forging one) —
@@ -4804,6 +4880,10 @@ const siteFetchCallRoute = {
       reqBody = JSON.stringify(reqBody);
       if (!safeHeaders['Content-Type'] && !safeHeaders['content-type']) safeHeaders['Content-Type'] = 'application/json';
     }
+    // Consent, tab reads, and request shaping all happened after the first
+    // check. Re-read custody with no further await before starting network IO.
+    if (!await reauthorizeSiteFetch()) return { ok: false, error: 'site_fetch_cross_origin' };
+    if (runSignal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
     try {
       const res = await scopedFetch(url, { method: httpMethod, headers: safeHeaders, body: /** @type {string|undefined} */ (reqBody), ...(runSignal ? { signal: runSignal } : {}) });
       const ct = res.headers.get('content-type') ?? '';
@@ -6260,20 +6340,35 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
 // note the actor already had).
 const siteClientInjected = new Set();
 
-// Resolve the ORIGIN a web/API actor is bound to, for the site-client lookup: an
-// API actor owns its FIXED origin (the session record's instanceId/origin), a tab
-// actor owns its tab's LIVE origin. Returns a normalized origin or null.
-const resolveActorOrigin = async (/** @type {string} */ actorSessionId, /** @type {string} */ instanceId, /** @type {number|undefined} */ actorTabId) => {
+// Resolve and authorize the origin whose DOSSIER may be injected at actor mint.
+// The returned closure repeats the same live check after IDB; choosing an origin
+// once is not a durable grant while the tab can move.
+const siteClientMintCustodyFor = async (/** @type {string} */ actorSessionId, /** @type {string} */ instanceId, /** @type {number|undefined} */ actorTabId) => {
   const rec = await sessions.get(actorSessionId).catch(() => null);
-  if (rec?.backing === 'api') {
-    // The API actor's owned origin is its instanceId (mintApiActor sets it).
-    return normalizeApiOrigin(rec.instanceId ?? instanceId);
+  if (!rec) return null;
+  if (rec.backing === 'api') {
+    const origin = normalizeApiOrigin(rec.instanceId ?? instanceId);
+    const guard = makeFixedSiteClientOriginGuard(origin);
+    return origin && guard(origin)
+      ? { origin, authorize: async () => guard(origin) }
+      : null;
   }
-  // A tab actor: the live origin of its owned tab.
-  const tabId = typeof actorTabId === 'number' ? actorTabId : webActorTabBindings.tabFor(actorSessionId);
-  if (typeof tabId !== 'number') return null;
-  const t = await browser.tabs.get(tabId).catch(() => null);
-  return t?.url ? normalizeApiOrigin(originOfTabUrl(/** @type {string} */ (t.url))) : null;
+  if (rec.backing !== undefined && rec.backing !== 'tab') return null;
+  if (!hasDurableSiteClientState(rec.originState)) return null;
+  originStates.hydrate(actorSessionId, /** @type {any} */ (rec.originState));
+  const lock = originLockFor(actorSessionId);
+  if (!lock) return null;
+  const getLiveLanding = () => liveSiteClientLandingFor(actorSessionId, actorTabId);
+  const authorizeOrigin = lock.authorizeSiteClientOrigin(getLiveLanding);
+  let origin = rec.originState?.mode === 'bound'
+    ? normalizeApiOrigin(rec.originState.ownedOrigin)
+    : null;
+  if (!origin && rec.originState?.mode === 'roaming') {
+    const landing = await getLiveLanding();
+    if (landing.status === 'live') origin = normalizeApiOrigin(landing.url);
+  }
+  if (!origin || await authorizeOrigin(origin) !== true) return null;
+  return { origin, authorize: () => authorizeOrigin(origin) };
 };
 
 const actorMessaging = makeActorMessaging({
@@ -6342,10 +6437,12 @@ const actorMessaging = makeActorMessaging({
     let deliveredMessage = message;
     if (kind === 'web' && !siteClientInjected.has(actorSessionId)) {
       try {
-        const originForClient = await resolveActorOrigin(actorSessionId, instanceId, actorTabId);
-        if (originForClient) {
-          const meta = await siteClientStore.getMeta(originForClient).catch(() => null);
-          if (meta) {
+        const custody = await siteClientMintCustodyFor(actorSessionId, instanceId, actorTabId);
+        if (custody) {
+          const meta = await siteClientStore.getMeta(custody.origin).catch(() => null);
+          // IDB yielded after the first authorization. Dossier bytes stay out
+          // unless the same actor still owns the same origin now.
+          if (meta && await custody.authorize() === true) {
             siteClientInjected.add(actorSessionId);
             deliveredMessage = `${buildMintInjection(meta)}\n\n---\n\n${message}`;
           }

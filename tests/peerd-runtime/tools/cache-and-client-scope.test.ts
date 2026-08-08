@@ -2,6 +2,7 @@ import { describe, test, expect } from 'bun:test';
 import { readWebCacheTool } from '../../../extension/peerd-runtime/tools/defs/read-web-cache.js';
 import { siteClientReadTool } from '../../../extension/peerd-runtime/tools/defs/site-client-read.js';
 import { siteClientWriteTool } from '../../../extension/peerd-runtime/tools/defs/site-client-write.js';
+import { siteClientRunTool } from '../../../extension/peerd-runtime/tools/defs/site-client-run.js';
 
 // Two tools that took a caller-supplied handle and consulted no gate:
 //
@@ -51,8 +52,13 @@ describe('site_client read/write declare the origin they touch', () => {
     expect(siteClientWriteTool.origins({ origin: 'https://bank.test' }, {} as any)).toEqual(['https://bank.test']);
   });
 
+  test('run stays on the same normalized declaration contract', () => {
+    expect(siteClientRunTool.origins({ origin: 'HTTPS://BANK.TEST:443/path' }, {} as any)).toEqual(['https://bank.test']);
+  });
+
   test('a junk origin declares nothing rather than a bogus entry', () => {
     expect(siteClientReadTool.origins({ origin: 'not a url' }, {} as any)).toEqual([]);
     expect(siteClientWriteTool.origins({}, {} as any)).toEqual([]);
+    expect(siteClientRunTool.origins({ origin: 'not a url' }, {} as any)).toEqual([]);
   });
 });

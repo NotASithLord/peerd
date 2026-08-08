@@ -1986,11 +1986,21 @@ button.tool-call-header:focus-visible {
 .peerd-modal h3 { margin: 0 0 8px; font-size: 16px; }
 .peerd-modal ul { margin: 6px 0 14px; padding-left: 18px; font-size: 13px; }
 .peerd-modal ul li { margin-bottom: 2px; }
+.confirm-modal {
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
 .peerd-modal .peerd-modal-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 4px;
+}
+.confirm-modal .peerd-modal-actions {
+  position: sticky;
+  bottom: 0;
+  padding-top: 10px;
+  background: var(--bg);
 }
 
 /* --- first-run extras (voice onboarding) --- */

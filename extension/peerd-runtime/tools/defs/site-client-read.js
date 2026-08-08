@@ -8,6 +8,7 @@
 
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { normalizeSiteOrigin, stalenessHeader } from '../../site-clients/index.js';
+import { siteClientOriginRefusal } from './site-client-origin.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const siteClientReadTool = {
@@ -38,11 +39,17 @@ export const siteClientReadTool = {
   },
   execute: async (args, ctx) => {
     const origin = normalizeSiteOrigin(args?.origin);
-    if (!origin) return { ok: false, error: `bad_origin: ${args?.origin}` };
+    if (!origin) return { ok: false, error: 'bad_origin: expected a public HTTP(S) site origin' };
+    const refusal = await siteClientOriginRefusal(origin, ctx);
+    if (refusal) return refusal;
     const store = /** @type {import('../../site-clients/store.js').SiteClientStore | undefined} */ (
       /** @type {any} */ (ctx).siteClients);
     if (!store) return { ok: false, error: 'site_clients_unavailable' };
     const record = await store.get(origin).catch(() => null);
+    // IDB yielded after the first check. Re-read live custody before record
+    // bytes cross into the model result; a tab may have moved meanwhile.
+    const postReadRefusal = await siteClientOriginRefusal(origin, ctx);
+    if (postReadRefusal) return postReadRefusal;
     if (!record) return { ok: false, error: `no_site_client: none stored for ${origin}` };
     const header = stalenessHeader(record.meta);
     const endpoints = record.meta.endpoints?.length

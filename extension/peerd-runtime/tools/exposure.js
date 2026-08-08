@@ -251,11 +251,10 @@ export const isAllowedForActorType = (name, kind) => actorAllowedTools(kind).has
 
 // DESIGN-18: an API actor is a `web` actor with `backing:'api'` — it owns ONE origin
 // and has NO tab, so the whole DOM toolset (which needs a tab it never has) is removed
-// from its allow-set. It keeps only the keyless, tab-free fetch_url. Used by BOTH the
-// gate (refuse a DOM tool for an API backing) and the capability strip (drop the DOM
-// capabilities), so an API actor is genuinely fetch-only, not just gated.
-// Plus the site-client run/read/write (an API actor CAN persist + replay a client
-// for its fixed origin) — but NOT site_capture, which needs a tab it never has.
+// from its allow-set. It keeps the keyless, tab-free fetch/cache surface plus
+// site-client run/read/write for its fixed origin, but NOT site_capture, which
+// needs a tab it never has. Used by BOTH the gate and capability strip, so the
+// no-DOM boundary is enforced rather than merely omitted from descriptors.
 const WEB_API_TOOLS = Object.freeze(new Set(actorCapabilityManifest('web', 'api').tools));
 
 /**
@@ -269,6 +268,9 @@ const WEB_API_TOOLS = Object.freeze(new Set(actorCapabilityManifest('web', 'api'
  */
 export const actorAllowedToolsFor = (kind, backing, surface) => {
   if (kind === 'web' && backing === 'api') return WEB_API_TOOLS;
+  // Absent is the legacy tab spelling. Any PRESENT unknown value is corrupt or
+  // from a future policy version and must not inherit the full tab surface.
+  if (kind === 'web' && backing !== undefined && backing !== 'tab') return new Set();
   if (kind === 'web' && surface === 'code') return WEB_ACTOR_CODE_TOOLS;
   return actorAllowedTools(kind);
 };

@@ -173,6 +173,11 @@
  * @property {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} [safeFetch]
  *                                     provider-allowlist fetch (locked down;
  *                                     for tools that legitimately hit a provider)
+ * @property {(origin: string) => boolean} [canUseSiteClientOrigin]
+ *                                     synchronous early custody check
+ * @property {(origin: string) => Promise<boolean>} [authorizeSiteClientOrigin]
+ *                                     final live-tab custody check; web actors
+ *                                     only, fail-closed when absent
  * @property {Record<string, any>} [settings]   settings snapshot at ctx-build time
  *                                     (web tools no longer read any — tab focus is
  *                                     policy, not a setting; see DECISIONS #20)

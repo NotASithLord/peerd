@@ -158,7 +158,8 @@ export const makeWebActorRegistry = () => {
 // ── DESIGN-18: the API actor (an origin actor with NO tab) ──────────────────
 //
 // An API integration is the SAME web actor (actorType:'web') reaching ONE origin
-// with no DOM — fetch_url only. Unlike a tab actor, whose owned origin is MUTABLE
+// with no DOM; it has only tab-free fetch/cache/site-client tools. Unlike a tab
+// actor, whose owned origin is MUTABLE
 // (it navigates), an API actor's origin is FIXED for its whole life, so it is keyed
 // by (ownerChatId, origin), not by a tab. The origin IS its instanceId, so the
 // egress boundary reads the owned origin straight off the ctx (no reverse lookup).
@@ -198,7 +199,7 @@ export const normalizeApiOrigin = (input) => {
  *
  * why a distinct handle rather than reusing the bare origin: addressing a bare
  * origin already means something — a DESIGN-18 API integration, which is
- * fetch-only and never opens a tab. Both are "an actor bound to one origin", and
+ * tab-free and never opens a tab. Both are "an actor bound to one origin", and
  * that is exactly why they must not share a spelling: one can log in and click,
  * the other cannot, and the orchestrator has to be able to ask for the right one.
  * `site:` is the prefix because it reads as what it is.

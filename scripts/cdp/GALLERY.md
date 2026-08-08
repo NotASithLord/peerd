@@ -1,6 +1,6 @@
 # peerd — visual gallery
 
-**24 states · 48 screens · baselines `linux-x64`**
+**25 states · 50 screens · baselines `linux-x64`**
 
 Every screen below is the live UI rendered through the E2E harness at a pinned
 Chrome build and viewport — the exact images the visual-regression gate compares
@@ -197,7 +197,15 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-transfer-conflict.light.png" alt="options-transfer-conflict (light)" width="380"> | <img src="baselines/linux-x64/options-transfer-conflict.dark.png" alt="options-transfer-conflict (dark)" width="380"> |
 
-### 24 · vm-tab-failed
+### 24 · site-client-confirm
+
+`site-client-confirm`
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/site-client-confirm.light.png" alt="site-client-confirm (light)" width="380"> | <img src="baselines/linux-x64/site-client-confirm.dark.png" alt="site-client-confirm (dark)" width="380"> |
+
+### 25 · vm-tab-failed
 
 `vm-tab-failed`
 

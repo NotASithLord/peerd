@@ -48,7 +48,7 @@
 // handoff, the segmentation becomes decorative and #251's whole point is lost.
 
 import { decideLanding, mayHoldCredentials } from './landing-rule.js';
-import { classifyOriginSensitivity } from './origin-sensitivity.js';
+import { classifyOriginSensitivity, sameOrigin } from './origin-sensitivity.js';
 
 /**
  * @typedef {object} ActorOriginState
@@ -210,4 +210,192 @@ export const makeCredentialScope = (deps) => {
       ? origin
       : undefined;
   };
+};
+
+/**
+ * May this web actor touch the durable SITE CLIENT keyed by `targetOrigin`?
+ *
+ * This is intentionally NOT `judgeLanding(targetOrigin)`: a stored-client key
+ * is not a tab landing, and pretending it is would mutate excursion state and
+ * could stop/release the actor's real tab. Durable client custody is a
+ * side-effect-free question:
+ *
+ *   - a bound actor owns exactly its canonical origin;
+ *   - a roaming actor may preliminarily address ordinary public clients, but
+ *     final authorization also requires that exact live tab origin;
+ *   - missing/corrupt state fails closed.
+ *
+ * @param {object} input
+ * @param {ActorOriginState | null | undefined} input.state
+ * @param {string} input.targetOrigin
+ * @param {boolean} [input.targetIsSensitive]
+ * @returns {boolean}
+ */
+export const mayAddressSiteClientOrigin = ({ state, targetOrigin, targetIsSensitive = false }) => {
+  if (!state) return false;
+  // The same canonicalizer the store uses must be able to name the target; a
+  // roaming default may not turn malformed/private/single-label input into an
+  // accidental allow before the tool's own bad_origin response.
+  if (!sameOrigin(targetOrigin, targetOrigin)) return false;
+  if (state.mode === 'roaming') return targetIsSensitive !== true;
+  if (state.mode !== 'bound' || !state.ownedOrigin) return false;
+  return sameOrigin(targetOrigin, state.ownedOrigin);
+};
+
+/**
+ * Does a durable session record carry an explicit client-custody state? The
+ * origin-state store seeds legacy absence as roaming for navigation
+ * compatibility; durable clients must keep that absence distinguishable so it
+ * cannot silently become arbitrary-origin artifact access.
+ * @param {unknown} state
+ * @returns {boolean}
+ */
+export const hasDurableSiteClientState = (state) => {
+  if (!state || typeof state !== 'object') return false;
+  const value = /** @type {Partial<ActorOriginState>} */ (state);
+  if (value.mode === 'roaming') return true;
+  return value.mode === 'bound'
+    && typeof value.ownedOrigin === 'string'
+    && sameOrigin(value.ownedOrigin, value.ownedOrigin);
+};
+
+/**
+ * Final tab-backed custody decision after the actor's ACTUAL live landing has
+ * been read and judged. A bound actor may use its owned client before it opens a
+ * tab; once a tab exists it must still be home. A roaming actor owns no durable
+ * origin, so it must have a tab and may use only that exact ordinary origin.
+ *
+ * @param {object} input
+ * @param {ActorOriginState | null | undefined} input.state
+ * @param {string} input.targetOrigin
+ * @param {boolean} [input.targetIsSensitive]
+ * @param {'none' | 'live' | 'unreadable'} input.tabStatus
+ * @param {string} [input.liveOrigin]
+ * @returns {boolean}
+ */
+export const mayUseSiteClientOrigin = ({
+  state, targetOrigin, targetIsSensitive = false, tabStatus, liveOrigin,
+}) => {
+  if (!mayAddressSiteClientOrigin({ state, targetOrigin, targetIsSensitive })) return false;
+  if (state?.mode === 'bound') {
+    if (tabStatus === 'none') return true;
+    return tabStatus === 'live' && sameOrigin(liveOrigin, state.ownedOrigin);
+  }
+  return state?.mode === 'roaming'
+    && tabStatus === 'live'
+    && sameOrigin(liveOrigin, targetOrigin);
+};
+
+/**
+ * Build the complete custody predicate for a tab-free API actor. Its instance
+ * id is the origin it owns, so there is no mutable tab landing to consult.
+ * Keeping this next to the tab policy gives the context builder and worker
+ * relay one canonical comparison instead of two open-coded approximations.
+ *
+ * @param {string | null | undefined} ownedOrigin
+ * @returns {(targetOrigin: string) => boolean}
+ */
+export const makeFixedSiteClientOriginGuard = (ownedOrigin) =>
+  (targetOrigin) => mayUseSiteClientOrigin({
+    state: { mode: 'bound', ownedOrigin: ownedOrigin ?? null },
+    targetOrigin,
+    tabStatus: 'none',
+  });
+
+/**
+ * Build the synchronous state-only preliminary predicate carried by a
+ * tab-backed actor's tool context. The async authorizer below reads the tab.
+ *
+ * @param {object} deps
+ * @param {() => ActorOriginState | null} deps.getState
+ * @param {(origin: string) => boolean} [deps.isUgcZone]
+ * @param {(origin: string) => boolean} [deps.hasVaultSecret]
+ * @param {() => ReadonlySet<string> | ReadonlyMap<string, any>} [deps.getLearned]
+ * @returns {(origin: string) => boolean}
+ */
+export const makeSiteClientOriginGuard = ({ getState, isUgcZone, hasVaultSecret, getLearned }) =>
+  (origin) => mayAddressSiteClientOrigin({
+    state: getState(),
+    targetOrigin: origin,
+    targetIsSensitive: classifyOriginSensitivity(origin, {
+      isUgcZone, hasVaultSecret, learned: getLearned?.(),
+    }).sensitive,
+  });
+
+/**
+ * Build the final async site-client authorizer. The caller injects the owned
+ * tab lookup so this core stays browser-free and testable. `judgeLanding` is
+ * given ONLY the actual live URL, never the model-supplied client key.
+ *
+ * @param {object} deps
+ * @param {() => ActorOriginState | null} deps.getState
+ * @param {() => Promise<{ status: 'none' | 'unreadable' } | { status: 'live', url: string }>} deps.getLiveLanding
+ * @param {(url: string) => Promise<{ action: string } | null>} deps.judgeLanding
+ * @param {(origin: string) => boolean} [deps.isUgcZone]
+ * @param {(origin: string) => boolean} [deps.hasVaultSecret]
+ * @param {() => ReadonlySet<string> | ReadonlyMap<string, any>} [deps.getLearned]
+ * @returns {(origin: string) => Promise<boolean>}
+ */
+export const makeSiteClientOriginAuthorizer = ({
+  getState, getLiveLanding, judgeLanding, isUgcZone, hasVaultSecret, getLearned,
+}) => async (origin) => {
+  const targetIsSensitive = () => classifyOriginSensitivity(origin, {
+    isUgcZone, hasVaultSecret, learned: getLearned?.(),
+  }).sensitive;
+  if (!mayAddressSiteClientOrigin({
+    state: getState(), targetOrigin: origin, targetIsSensitive: targetIsSensitive(),
+  })) return false;
+
+  const landing = await getLiveLanding().catch(() => ({ status: /** @type {'unreadable'} */ ('unreadable') }));
+  if (landing.status === 'live') {
+    const verdict = await judgeLanding(landing.url).catch(() => null);
+    if (verdict?.action !== 'continue') return false;
+    // judgeLanding may persist state or emit a stop, so the tab can move while
+    // it awaits. Never authorize from the pre-await snapshot. A same-origin
+    // path hop is fine (custody is origin-scoped); any origin/status change
+    // refuses this operation and the next browser chokepoint will judge it.
+    const verified = await getLiveLanding()
+      .catch(() => ({ status: /** @type {'unreadable'} */ ('unreadable') }));
+    if (verified.status !== 'live' || !sameOrigin(verified.url, landing.url)) return false;
+    return mayUseSiteClientOrigin({
+      state: getState(),
+      targetOrigin: origin,
+      targetIsSensitive: targetIsSensitive(),
+      tabStatus: 'live',
+      liveOrigin: verified.url,
+    });
+  }
+  return mayUseSiteClientOrigin({
+    state: getState(),
+    targetOrigin: origin,
+    targetIsSensitive: targetIsSensitive(),
+    tabStatus: landing.status,
+  });
+};
+
+/**
+ * Recheck custody at the sealed-worker relay. This helper deliberately accepts
+ * only the minimum trusted owner facts; the route supplies those from the
+ * persisted actor session, never from worker bytes.
+ *
+ * @param {object} input
+ * @param {unknown} input.backing
+ * @param {string | null | undefined} [input.instanceOrigin]
+ * @param {ActorOriginState | null | undefined} [input.durableState]
+ * @param {string} input.targetOrigin
+ * @param {(origin: string) => Promise<boolean>} [input.authorizeTabOrigin]
+ * @returns {Promise<boolean>}
+ */
+export const authorizeSiteClientRelayOrigin = async ({
+  backing, instanceOrigin, durableState, targetOrigin, authorizeTabOrigin,
+}) => {
+  if (backing === 'api') return makeFixedSiteClientOriginGuard(instanceOrigin)(targetOrigin);
+  // Tab backing is historically represented by an absent field; only API
+  // actors persist a backing value. Preserve that exact trusted record shape,
+  // while refusing any unknown future spelling until it earns policy here.
+  if ((backing !== undefined && backing !== 'tab')
+    || !hasDurableSiteClientState(durableState)
+    || !authorizeTabOrigin) return false;
+  try { return await authorizeTabOrigin(targetOrigin) === true; }
+  catch { return false; }
 };
