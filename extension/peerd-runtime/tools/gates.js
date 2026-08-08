@@ -53,6 +53,7 @@ import {
   normalizeMode,
 } from '../permissions/index.js';
 import { ACTOR_ISOLATION_UNAVAILABLE_TOOLS, actorIsolationAvailable } from '../actor/isolation.js';
+import { runtimeCapabilityRefusal } from '../runtime-capabilities.js';
 
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
@@ -75,6 +76,7 @@ import { ACTOR_ISOLATION_UNAVAILABLE_TOOLS, actorIsolationAvailable } from '../a
  *   backing?: 'tab' | 'api',
  *   actorSurface?: 'tools' | 'code',
  *   actorIsolation?: import('../actor/isolation.js').ActorIsolationCapability,
+ *   runtimeCapabilities?: ReturnType<typeof import('../runtime-capabilities.js').resolveRuntimeCapabilities>,
  * }} GateContext
  */
 
@@ -227,6 +229,13 @@ export const actorTierGate = (tool, args, ctx) => {
  * @returns {Omit<GateResult, 'name'>}
  */
 export const exposureGate = (tool, args, ctx) => {
+  const runtimeRefusal = runtimeCapabilityRefusal(tool.name, ctx?.runtimeCapabilities);
+  if (runtimeRefusal) {
+    return {
+      allowed: false,
+      reason: `runtime facility ${runtimeRefusal.facility} is unavailable; alternative: ${runtimeRefusal.alternative}`,
+    };
+  }
   if (ctx?.actorIsolation
       && !actorIsolationAvailable(ctx.actorIsolation)
       && ACTOR_ISOLATION_UNAVAILABLE_TOOLS.has(tool.name)) {

@@ -1,9 +1,9 @@
 // @ts-check
 // Options → OCR (rendered inside the combined "Voice & OCR" tab).
 //
-// peerd reads PDFs with pdf.js (text layer) by default — no download, always
-// on (the read_pdf tool). Scanned / image-only PDFs have NO text layer, so they
-// need OCR: an on-device engine downloaded ONCE (the Moonshine-voice pattern).
+// Where the runtime has a document host, peerd reads PDF text with pdf.js by
+// default. Scanned or image-only PDFs have no text layer, so they need OCR: an
+// on-device engine downloaded once.
 // This section owns that opt-in download. It lives in its own file (one section
 // = one file, the established options pattern) but is mounted alongside the
 // Voice section under a single "Voice & OCR" nav entry — both are heavy on-device
@@ -32,7 +32,8 @@ export const OcrSection = {
       .catch(() => { vnode.state.installed = false; m.redraw(); });
   },
 
-  view: (/** @type {{ attrs: { send: any }, state: any }} */ { attrs: { send }, state: ui }) => {
+  view: (/** @type {{ attrs: { state: any, send: any }, state: any }} */ { attrs: { state, send }, state: ui }) => {
+    const hostAvailable = state.capabilities?.pdfOcr?.status === 'available';
     const shippable = hasValidOcrSris();
     // Readiness reflects the ACTUAL cached engine (isInstalled), not the
     // ocrEnabled setting — a cleared IDB cache must not show "✓ installed" while
@@ -42,6 +43,11 @@ export const OcrSection = {
 
     const enableOcr = async () => {
       if (ui.busy) return;
+      if (!hostAvailable) {
+        ui.error = 'OCR is unavailable in this browser. Use page images or a searchable PDF instead.';
+        m.redraw();
+        return;
+      }
       ui.busy = true;
       ui.error = null;
       ui.confirmOpen = false;
@@ -61,15 +67,15 @@ export const OcrSection = {
 
     return m('.ocr-section', [
       m('h3', { style: 'margin:0 0 4px; font-size:15px;' }, 'PDF OCR (scanned documents)'),
-      m('p.muted', { style: 'margin:0 0 8px;' }, [
+      m('p.muted', { style: 'margin:0 0 8px;' }, hostAvailable ? [
         'peerd reads PDFs automatically with the built-in pdf.js text reader — ',
         'no setup needed. ',
         m('strong', 'Scanned or photographed PDFs'),
         ' have no text layer, so they need OCR: an on-device engine that ',
         `downloads once (~${sizeMb} MB, cached locally) and then recognizes text fully on this device.`,
-      ]),
+      ] : 'PDF OCR is unavailable in this browser. Use page images or a searchable PDF instead.'),
 
-      ocrReady
+      hostAvailable && ocrReady
         ? m('.voice-status.is-ok', '✓ OCR engine installed — scanned PDFs are readable')
         : null,
 
@@ -80,7 +86,7 @@ export const OcrSection = {
 
       ui.error ? m('.voice-status.is-err', `Error: ${ui.error}`) : null,
 
-      m('div', { style: 'display:flex; gap:8px; align-items:center; margin-top:8px;' }, [
+      hostAvailable ? m('div', { style: 'display:flex; gap:8px; align-items:center; margin-top:8px;' }, [
         ocrReady
           ? null
           : m('button', {
@@ -88,15 +94,15 @@ export const OcrSection = {
               disabled: ui.busy || !shippable,
               onclick: () => { ui.confirmOpen = true; m.redraw(); },
             }, shippable ? `Download OCR engine (~${sizeMb} MB)` : 'OCR not available in this build yet'),
-      ]),
+      ]) : null,
 
-      !shippable
+      hostAvailable && !shippable
         ? m('p.muted', { style: 'font-size:12px; margin:8px 0 0;' },
             'The OCR engine has not been pinned for this build. pdf.js still reads born-digital PDFs.')
         : null,
 
       // Download confirmation — facts shown BEFORE any download (the voice rule).
-      ui.confirmOpen ? m('.peerd-modal-backdrop', {
+      hostAvailable && ui.confirmOpen ? m('.peerd-modal-backdrop', {
         onclick: (/** @type {any} */ e) => { if (e.target === e.currentTarget) { ui.confirmOpen = false; m.redraw(); } },
       }, m('.peerd-modal', [
         m('h3', 'Download on-device OCR engine?'),

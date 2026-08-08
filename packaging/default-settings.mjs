@@ -259,9 +259,9 @@ export const defaults = {
   // them toggle dweb on before the demo is pure friction, and the channel
   // boundary IS friction tolerance, not a safety floor (see the file
   // header) — same posture as `advancedAutomationEnabled: { preview: true }`. NOT a safety
-  // relaxation: the dweb module is preview-channel-only (the store package
-  // prunes it and sets DWEB_ENABLED=false, so this key is absent there
-  // entirely from CHANNEL_DEFAULTS), identity needs an unlocked vault, and
+  // relaxation: the dweb module ships only where the preview target has a mesh
+  // host. Other packages prune it and omit this key from CHANNEL_DEFAULTS.
+  // Identity needs an unlocked vault, and
   // NOTHING connects until the user explicitly joins a room (the bridge's
   // consent gate). On = the dweb UI is live and the commons opens without
   // a pre-step; it does not auto-connect anywhere.

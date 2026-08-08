@@ -35,6 +35,9 @@ const VERSION = String(JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8
 const ADDON_ID = 'peerd@peerd.ai';
 const TEST_UUID = '7d12f198-31fc-4e95-9184-e954123981a6';
 const EXTENSION_ORIGIN = `moz-extension://${TEST_UUID}`;
+const PREVIEW_ADDON_ID = 'peerd-preview@peerd.ai';
+const PREVIEW_TEST_UUID = '7d12f198-31fc-4e95-9184-e954123981a7';
+const PREVIEW_EXTENSION_ORIGIN = `moz-extension://${PREVIEW_TEST_UUID}`;
 const FIXTURE_PATH = '/__firefox-runtime-fixture';
 const WORKER_PROBE_PATH = '/__firefox-worker-startup-probe';
 const MODULE_IMPORT_PROBE_PATH = '/__firefox-module-import-probe.js';
@@ -999,6 +1002,14 @@ const runBoundActorSmoke = async (driver, providerServer) => {
     && actorExecution?.retryable === false,
   'the installed Firefox package reports the dedicated-worker actor host as available',
   JSON.stringify(actorExecution));
+  for (const facility of [
+    'sealedJobs', 'pdfReader', 'documentReader', 'moonshineVoiceHost',
+    'pdfOcr', 'localWebGpuHost', 'dwebMesh',
+  ]) {
+    assert(actorProof.state?.capabilities?.[facility]?.status === 'unsupported',
+      `the installed Firefox package marks ${facility} unsupported`,
+      JSON.stringify(actorProof.state?.capabilities?.[facility]));
+  }
   assert(actorProof.bundle.contextSnapshots.some((snapshot) => snapshot.label === 'actor:web'),
     'the installed Firefox path labels model context as the isolated actor relay');
   const isolatedAudit = actorProof.audit.find((entry) => entry.type === 'actor_ran_isolated');
@@ -1027,6 +1038,16 @@ const runBoundActorSmoke = async (driver, providerServer) => {
     try { return JSON.parse(record.body); }
     catch { return null; }
   });
+  const parsedActorRequests = actorRequests.map((record) => {
+    try { return JSON.parse(record.body); }
+    catch { return null; }
+  }).filter(Boolean);
+  const parsedParentRequests = providerRequests
+    .filter((record) => !record.body.includes('<actor_agent>'))
+    .map((record) => {
+      try { return JSON.parse(record.body); }
+      catch { return null; }
+    }).filter(Boolean);
   const parentContinuation = parsedRequests.find((request) =>
     request?.messages?.some((message) => Array.isArray(message.content)
       && message.content.some((block) => block?.type === 'tool_result'
@@ -1045,6 +1066,31 @@ const runBoundActorSmoke = async (driver, providerServer) => {
     String(providerRequests.length));
   assert(actorRequests.length >= 1, 'the provider observes an actor-marked model request',
     String(actorRequests.length));
+  const toolNames = (request) => (request?.tools ?? []).map((tool) => tool?.name).filter(Boolean);
+  assert(parsedParentRequests.every((request) => !toolNames(request).includes('script')),
+    'Firefox parent model requests omit the unsupported script tool',
+    JSON.stringify(parsedParentRequests.map(toolNames)));
+  const unsupportedActorTools = new Set([
+    'read_pdf', 'read_doc', 'page_code', 'site_client_run', 'a2a_run',
+  ]);
+  assert(parsedActorRequests.every((request) => toolNames(request).every((name) =>
+    !unsupportedActorTools.has(name) && !name.startsWith('dweb_'))),
+  'Firefox actor model requests omit unsupported document, code, and dweb tools',
+  JSON.stringify(parsedActorRequests.map(toolNames)));
+  const actorTools = parsedActorRequests.flatMap((request) => request?.tools ?? []);
+  const fetchDescriptor = actorTools.find((tool) => tool?.name === 'fetch_url');
+  const readPageDescriptor = actorTools.find((tool) => tool?.name === 'read_page');
+  assert(fetchDescriptor?.description?.includes('sanitized raw response body')
+    && !fetchDescriptor?.description?.includes('read_doc and read_pdf open them')
+    && fetchDescriptor?.input_schema?.properties?.raw?.description
+      ?.includes('no hosted Markdown extractor'),
+  'Firefox fetch_url model contract names the raw fallback and no missing readers',
+  JSON.stringify(fetchDescriptor));
+  assert(readPageDescriptor?.description?.includes('falls back to the same visible-text snapshot')
+    && readPageDescriptor?.input_schema?.properties?.mode?.description
+      ?.includes('falls back to the same snapshot'),
+  'Firefox read_page model contract names the snapshot fallback',
+  JSON.stringify(readPageDescriptor));
   assert(providerRequests.every((record) => record.headers['x-api-key'] === PROVIDER_KEY_CANARY),
     'the installed provider boundary attaches the model-provider API key to every model request');
   assert(actorToolResult?.tool_use_id === 'firefox-actor-tool'
@@ -3309,6 +3355,7 @@ const main = async () => {
   mkdirSync(OUTPUT, { recursive: true });
   for (const diagnostic of [
     'failure.png', 'geckodriver.log', 'sidepanel.png',
+    'options-voice-unavailable.png', 'options-local-webgpu-unavailable.png',
     BROKEN_WORKER_SCREENSHOT, KEEPALIVE_LOSS_SCREENSHOT,
     KEEPALIVE_LOSS_LOG, KEEPALIVE_LOSS_DIAGNOSTIC,
     LIFETIME_FAILURE_SCREENSHOT, LIFETIME_FAILURE_LOG, LIFETIME_FAILURE_DIAGNOSTIC,
@@ -3319,6 +3366,9 @@ const main = async () => {
   console.log('Firefox packaged Store smoke: build and install');
   const artifact = await packageArtifact({
     channel: 'store', browser: 'firefox', version: VERSION, sign: false, verify: true,
+  });
+  const previewArtifact = await packageArtifact({
+    channel: 'preview', browser: 'firefox', version: VERSION, sign: false, verify: false,
   });
   const server = await startTestServer();
   let providerServer = null;
@@ -3336,7 +3386,10 @@ const main = async () => {
         noProxy: ['localhost', 'localhost.', '127.0.0.1'],
       },
       prefs: {
-        'extensions.webextensions.uuids': JSON.stringify({ [ADDON_ID]: TEST_UUID }),
+        'extensions.webextensions.uuids': JSON.stringify({
+          [ADDON_ID]: TEST_UUID,
+          [PREVIEW_ADDON_ID]: PREVIEW_TEST_UUID,
+        }),
         // why: keep native LNA and popup policy from preempting the extension's
         // own DNR behavior, so the probe counters isolate the product boundary.
         'network.lna.enabled': false,
@@ -3437,6 +3490,7 @@ const main = async () => {
             && wrongUnlock?.error === 'wrong-passphrase'
             && afterWrongUnlock?.state?.vault?.locked === true,
           unlocked: unlocked?.ok === true && afterUnlock?.state?.vault?.locked === false,
+          capabilities: afterUnlock?.state?.capabilities ?? null,
         };
       })().then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
     `);
@@ -3452,6 +3506,21 @@ const main = async () => {
       'Firefox refuses a wrong vault passphrase', JSON.stringify(background));
     assert(background?.locked === true && background?.unlocked === true,
       'Firefox locks and unlocks the vault with the same passphrase', JSON.stringify(background));
+    assert(background?.capabilities?.actorExecution?.status === 'available'
+      && background?.capabilities?.actorExecution?.host === 'background-page-worker',
+    'Firefox keeps dedicated actor execution available', JSON.stringify(background?.capabilities));
+    assert(background?.capabilities?.sealedJobs?.status === 'unsupported'
+      && background?.capabilities?.pdfReader?.status === 'unsupported'
+      && background?.capabilities?.documentReader?.status === 'unsupported'
+      && background?.capabilities?.moonshineVoiceHost?.status === 'unsupported',
+    'Firefox reports offscreen-hosted facilities unavailable before use', JSON.stringify(background?.capabilities));
+
+    const unsupportedVoiceNudge = await driver.execute(`
+      return [...document.querySelectorAll('.onboarding-card h3')]
+        .some((heading) => heading.textContent === 'Try voice input');
+    `);
+    assert(unsupportedVoiceNudge === false,
+      'Firefox hides voice setup when no transcription engine can run');
 
     await runPrivateNetworkDnrSmoke(driver, providerServer);
     await runModuleImportPolicySmoke(driver, server);
@@ -3551,6 +3620,83 @@ const main = async () => {
       ), { budgetMs: 30_000 });
       assert(ready === true, `packaged Firefox ${page} mounts`);
     }
+
+    await driver.setWindowRect({ width: 1280, height: 900, x: 0, y: 0 });
+    await driver.navigate(`${EXTENSION_ORIGIN}/options/options.html#!/voice`);
+    const voicePosture = await waitFor(() => driver.execute(`
+      const voice = document.querySelector('.voice-section');
+      const ocr = document.querySelector('.ocr-section');
+      if (!voice || !ocr) return null;
+      return {
+        voice: voice.textContent,
+        ocr: ocr.textContent,
+        buttons: [...document.querySelectorAll('button')].map((button) => button.textContent),
+      };
+    `), { budgetMs: 30_000 });
+    assert(voicePosture?.voice?.includes('Voice input is unavailable in this browser')
+      && voicePosture?.ocr?.includes('PDF OCR is unavailable in this browser'),
+    'Firefox Voice and OCR settings explain unavailable hosts and name alternatives',
+    JSON.stringify(voicePosture));
+    assert(!voicePosture?.buttons?.some((label) => /Download (?:& enable|OCR engine)/.test(label)),
+      'Firefox Voice and OCR settings offer no unsupported download action',
+      JSON.stringify(voicePosture?.buttons));
+    assert(!voicePosture?.buttons?.includes('Unavailable'),
+      'Firefox Voice settings do not render an unavailable action as a button',
+      JSON.stringify(voicePosture?.buttons));
+    writeFileSync(join(OUTPUT, 'options-voice-unavailable.png'),
+      Buffer.from(await driver.screenshot(), 'base64'));
+
+    await driver.navigate(`${EXTENSION_ORIGIN}/options/options.html#!/providers`);
+    const localModelPosture = await waitFor(() => driver.execute(`
+      const card = document.querySelector('.provider-card-local');
+      if (!card) return null;
+      return {
+        text: card.textContent,
+        buttons: [...card.querySelectorAll('button')].map((button) => button.textContent),
+      };
+    `), { budgetMs: 30_000 });
+    assert(localModelPosture?.text?.includes('Local WebGPU models are unavailable in this browser')
+      && localModelPosture?.text?.includes('Use Ollama for local inference'),
+    'Firefox Local WebGPU settings explain the unavailable host and local alternative',
+    JSON.stringify(localModelPosture));
+    assert(localModelPosture?.buttons?.length === 0,
+      'Firefox Local WebGPU settings offer no unsupported test or download action',
+      JSON.stringify(localModelPosture?.buttons));
+    writeFileSync(join(OUTPUT, 'options-local-webgpu-unavailable.png'),
+      Buffer.from(await driver.screenshot(), 'base64'));
+
+    console.log(`  installing ${previewArtifact}`);
+    const installedPreviewId = await driver.installAddon(resolve(previewArtifact));
+    assert(installedPreviewId === PREVIEW_ADDON_ID,
+      'temporary add-on id matches the Firefox Preview manifest', String(installedPreviewId));
+    await driver.navigate(`${PREVIEW_EXTENSION_ORIGIN}/sidepanel/sidepanel.html`);
+    const previewMounted = await waitFor(() => driver.execute(
+      "return document.readyState === 'complete' && (document.getElementById('app')?.childElementCount || 0) > 0;",
+    ), { budgetMs: 30_000 });
+    assert(previewMounted === true, 'packaged Firefox Preview side panel mounts');
+    const previewPosture = await driver.executeAsync(`
+      const done = arguments[arguments.length - 1];
+      Promise.all([
+        browser.runtime.sendMessage({ type: 'state/get' }),
+        import('/shared/channel-config.js'),
+        import('/shared/dweb-loader.js').then((module) => module.loadDweb()),
+      ]).then(([state, config, dweb]) => done({
+        stateOk: state?.ok === true,
+        dwebEnabled: config.DWEB_ENABLED,
+        hasDwebSetting: Object.hasOwn(state?.state?.settings ?? {}, 'dwebEnabled'),
+        meshStatus: state?.state?.capabilities?.dwebMesh?.status,
+        dwebAvailable: dweb.available,
+      }), (error) => done({ error: error?.message || String(error) }));
+    `);
+    assert(previewPosture?.stateOk === true
+      && previewPosture?.dwebEnabled === false
+      && previewPosture?.hasDwebSetting === false
+      && previewPosture?.meshStatus === 'unsupported'
+      && previewPosture?.dwebAvailable === false,
+    'installed Firefox Preview omits the dweb surface until it has a mesh host',
+    JSON.stringify(previewPosture));
+
+    await driver.setWindowRect({ width: 400, height: 900, x: 0, y: 0 });
 
     await driver.navigate(`${EXTENSION_ORIGIN}/sidepanel/sidepanel.html`);
     const remounted = await waitFor(() => driver.execute(

@@ -7,7 +7,7 @@
 //   (Chrome/Edge → cloud; Safari → on-device since ~2021).
 //   Moonshine (~250 MB WASM, fully on-device) is the OPT-IN PRIVACY UPGRADE —
 //   picked only when the user prefers 'moonshine', or as the required fallback
-//   when Web Speech is absent (Firefox has no SpeechRecognition). The download
+//   when Web Speech is absent and a Moonshine host exists. The download
 //   rationale is shown by the settings UI BEFORE Moonshine is selected, never
 //   here.
 //
@@ -29,7 +29,7 @@ const moonshineReady = () => isMoonshineVendored() && hasValidModelSris();
  * Pure resolution of which engine to run, given a preference + what each
  * engine offers. The single chokepoint for the web-speech-default reframe;
  * exported pure so the truth table is unit-testable without stubbing globals.
- *   'auto'       — Web Speech when available, else Moonshine (Firefox).
+ *   'auto': Web Speech when available, else hosted Moonshine.
  *   'web-speech' — force the browser engine (cloud-routed on most browsers).
  *   'moonshine'  — force the local model; degrades to Web Speech if the model
  *                  isn't ready so voice still works rather than dying.
@@ -52,6 +52,7 @@ export const resolveEngine = (pref, webSpeech, moonshine) => {
  * Web Speech is the active engine.
  *
  * @param {'auto'|'web-speech'|'moonshine'} [pref] default 'auto'
+ * @param {{ moonshineHostAvailable?: boolean }} [hosts]
  * @returns {{
  *   engine: 'web-speech'|'moonshine'|null,  // what WOULD run, given pref
  *   webSpeech: boolean,                     // instant browser engine present?
@@ -60,9 +61,9 @@ export const resolveEngine = (pref, webSpeech, moonshine) => {
  *   source: 'browser'|'vendored'|null,
  * }}
  */
-export const detectVoiceCapability = (pref = 'auto') => {
+export const detectVoiceCapability = (pref = 'auto', hosts = {}) => {
   const webSpeech = isWebSpeechAvailable();
-  const moonshine = moonshineReady();
+  const moonshine = hosts.moonshineHostAvailable !== false && moonshineReady();
   const engine = resolveEngine(pref, webSpeech, moonshine);
   /** @type {string|null} */
   let cloudVendor = null;

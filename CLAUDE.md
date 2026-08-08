@@ -33,7 +33,7 @@ Each maps to one letter and color in the brand wordmark:
 | `e` | red     | `peerd-egress/`       | Security: vault, allowlist (`safeFetch`), denylist, audit |
 | `e` | amber   | `peerd-engine/`       | Execution instances — Sandboxes. Three kinds run in their own visible tab: WebVMs (CheerpX Linux), Notebooks (sealed JS worker + OPFS), Apps (opaque-origin iframe). A fourth, the **headless worker** (`script`), runs the Notebook's sealed worker offscreen with no tab — the agent's own quick compute. The sandbox is the isolate; a tab is one way to host it (taxonomy in the `peerd-engine/` code). |
 | `r` | green   | `peerd-runtime/`      | Agent loop, tools + per-environment actors (`message_actor`), sessions, profiles, skills, memory, permissions (Plan/Act), review, goal mode (autonomous loop), composer, cost, transfer, voice, clock, web tool policy |
-| `d` | magenta | `peerd-distributed/` | The dweb. An always-on P2P base network (offscreen mesh + DHT + gossip), did:key identity, signed content addressing, the dwapp bridge, and a peer-to-peer app store that **users AND the agent** build, share, and run dwapps on. Preview channel only |
+| `d` | magenta | `peerd-distributed/` | The dweb. An always-on P2P base network (offscreen mesh + DHT + gossip), did:key identity, signed content addressing, the dwapp bridge, and a peer-to-peer app store that **users AND the agent** build, share, and run dwapps on. Chrome preview only until Firefox has a mesh host. |
 
 The extension *chassis* lives outside these modules: `background/`,
 `offscreen/`, `sidepanel/`, `engine-tabs/`, `permissions/`, `eval/`,
@@ -411,10 +411,10 @@ gotchas to know going in:
   Install over the mesh, no server); and the **agent reaches all of it**
   through the `dweb_share`/`dweb_discover`/`dweb_install` tools + the
   dwapp bridge (it builds p2p dwapps that users and agents both use).
-  Preview-channel only (the store package prunes the module and CI
-  verifies zero dweb traces). See the `peerd-distributed/` code.
+  Chrome-preview only until Firefox has a mesh host. Other artifacts prune the
+  module and CI verifies the package boundary. See the `peerd-distributed/` code.
 - The **dweb actor** — a fifth bound-actor kind (`actorType:'dweb'`) and the
-  first DAEMON actor: an opt-in (`dwebAgentEnabled`, preview-only, default
+  first DAEMON actor: an opt-in (`dwebAgentEnabled`, Chrome-preview-only, default
   off), persistent, GLOBAL singleton addressable as `message_actor("dweb",…)`.
   It ABSORBS the dweb tools (they leave the orchestrator unconditionally —
   `mainAgentDescriptors` drops them by name + the tier gate refuses them for
@@ -443,7 +443,7 @@ gotchas to know going in:
   transport, did:key the address, the fenced inbound wake the stream. Signing
   ops (ask/send/publishCard) need per-target user consent, remembered and
   revocable via `dweb_block`; peer bytes are `wrapUntrusted`-fenced by
-  construction. dweb-actor-only, preview-only (the store build prunes it).
+  construction. Dweb-actor-only and Chrome-preview-only.
 
 **Still ahead** (backlog — not version-pinned. Don't front-run; let each
 land with deliberate design work):

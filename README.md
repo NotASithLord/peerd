@@ -61,8 +61,11 @@ peerd is an experimental 0.x beta. Breaking changes are likely. Storage formats
 and product behavior may change. It can drive browser pages and use API keys, so
 review the security model before using it with sensitive data.
 
-Chromium is the primary product target. Firefox support is experimental and
-lacks several execution features available on Chrome.
+Chromium is the primary product target. Firefox support is experimental. It
+runs actors in dedicated workers and uses visible Notebooks for JavaScript
+compute. Features that need Chrome's offscreen document host are removed from
+Firefox controls and model tools before use. The Firefox preview package also
+omits dweb until Firefox has a mesh host.
 
 The code is the source of truth for current behavior. Start with
 [`CLAUDE.md`](CLAUDE.md), then read the relevant module under `extension/`.
@@ -71,7 +74,8 @@ The code is the source of truth for current behavior. Start with
 
 - Runs an agent loop in Chrome and an experimental Firefox package.
 - Reads and drives browser tabs through per-environment actors.
-- Runs Linux WebVMs, JavaScript Notebooks, browser Apps, and headless scripts.
+- Runs Linux WebVMs, JavaScript Notebooks, browser Apps, and, where the runtime
+  host supports them, headless scripts.
 - Supports cloud and local model providers. The live list is in
   [`extension/peerd-provider/registry.js`](extension/peerd-provider/registry.js).
 - Stores provider secrets in a local encrypted vault.

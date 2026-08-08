@@ -43,6 +43,9 @@ import {
 } from '../actor/isolation.js';
 import { classifyBrowserAutomationTarget } from '../tools/browser-automation-policy.js';
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
+import {
+  filterByRuntimeCapabilities, runtimeCapabilityPromptBlock, runtimeCapabilityRefusal,
+} from '../runtime-capabilities.js';
 
 /**
  * Reduce the foreground tab to safe, minimal prompt context.
@@ -125,6 +128,7 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     // The service-worker shell hydrates durable actor-host health before a
     // turn may snapshot it. Tests and non-browser callers stay synchronous.
     waitForActorIsolation = async () => {},
+    getRuntimeCapabilities = () => null,
   } = deps;
 
 /**
@@ -342,6 +346,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     const isolation = actorIsolationForModelStep;
     return isolation ? actorIsolationPromptBlock(isolation) : '';
   };
+  const runtimeCapabilities = getRuntimeCapabilities();
   const contextMessage = isActor
     ? ''
     : [buildTemporalContext({ temporalBlock, activeTab: activeTabContext, protectedTab: protectedTabContext }), recoveryBlock]
@@ -389,8 +394,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // promise would bake "[object Promise]" into the prompt.
       })) + prewalkBlock;
     }
-    const executionBlock = actorExecutionBlock();
-    return systemPromptBase + (executionBlock ? `\n\n${executionBlock}` : '');
+    const suffixes = [actorExecutionBlock(), isActor ? '' : runtimeCapabilityPromptBlock(runtimeCapabilities)]
+      .filter(Boolean);
+    return systemPromptBase + (suffixes.length > 0 ? `\n\n${suffixes.join('\n\n')}` : '');
   };
 
   // Tool descriptors passed to the provider — name, description, and
@@ -469,7 +475,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       ),
     );
     const isolation = effectiveActorIsolation();
-    const descriptors = (isolation ? filterByActorIsolation(exposed, isolation) : exposed)
+    const descriptors = filterByRuntimeCapabilities(
+      isolation ? filterByActorIsolation(exposed, isolation) : exposed,
+      runtimeCapabilities,
+    )
       .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
     actorIsolationForModelStep = isolation;
     return descriptors;
@@ -482,9 +491,12 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // browse-only chat's web actor is shown only the read DOM tools, matching the
   // gate (which refuses click/type for it). null manifest passes through unchanged.
   const refreshActorTools = async () => {
-    const descriptors = filterDescriptorsByManifest(
-      actorDescriptors(listTools(), actorType, actorBacking, toolContext.actorSurface),
-      sessionToolAllow,
+    const descriptors = filterByRuntimeCapabilities(
+      filterDescriptorsByManifest(
+        actorDescriptors(listTools(), actorType, actorBacking, toolContext.actorSurface),
+        sessionToolAllow,
+      ),
+      runtimeCapabilities,
     );
     const inboundAllowed = new Set(DWEB_INBOUND_TOOL_NAMES);
     return (toolContext.inbound === true && actorType === 'dweb'
@@ -495,6 +507,8 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   const refreshTools = isActor ? refreshActorTools : refreshMainTools;
   const toolDescriptors = await refreshTools();
   const toolDispatch = async (/** @type {any} */ call) => {
+    const capabilityRefusal = runtimeCapabilityRefusal(String(call?.name ?? ''), getRuntimeCapabilities());
+    if (capabilityRefusal) return capabilityRefusal;
     // The descriptor filter is model guidance. A remote-peer wake may use only
     // the positive inbound dweb subset even if it forges a hidden tool name.
     if (!inboundActorCallAllowed({

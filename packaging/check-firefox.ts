@@ -28,9 +28,9 @@
 // Run: bun run check:firefox   (also part of `bun run preflight`)
 
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { REPO_ROOT, ARTIFACTS_DIR } from './lib.ts';
+import { REPO_ROOT, ARTIFACTS_DIR, STORE_LOADER_TEMPLATE } from './lib.ts';
 
 /**
  * Chrome-only APIs we KNOWINGLY ship into the Firefox package, each behind a
@@ -106,6 +106,20 @@ const main = () => {
 
   const problems: string[] = [];
   for (const { name, dir } of builds) {
+    if (existsSync(join(dir, 'peerd-distributed'))) {
+      problems.push(`  [${name}] dweb module is present without a Firefox mesh host`);
+    }
+    const loader = join(dir, 'shared', 'dweb-loader.js');
+    if (!existsSync(loader)
+        || !readFileSync(loader).equals(readFileSync(STORE_LOADER_TEMPLATE))) {
+      problems.push(`  [${name}] dweb loader is not the inert package template`);
+    }
+    const channelConfig = readFileSync(join(dir, 'shared', 'channel-config.js'), 'utf8');
+    if (!channelConfig.includes('export const DWEB_ENABLED = false')
+        || channelConfig.includes('dwebEnabled:')
+        || channelConfig.includes('dwebAgentEnabled:')) {
+      problems.push(`  [${name}] channel config advertises dweb without a Firefox mesh host`);
+    }
     const { errors, warnings } = lint(dir);
     for (const e of errors) {
       problems.push(`  [${name}] ERROR ${e.code} — ${e.message} (${e.file ?? 'manifest'}${e.line ? `:${e.line}` : ''})`);

@@ -88,7 +88,7 @@
  * @property {{ initialized: boolean, locked: boolean, unlockedAt: number, prfEnrolled: boolean, hasRecovery: boolean }} vault
  * @property {SessionState} session
  * @property {{ current: string, hasKey: boolean, model: string }} providers
- * @property {{ actorExecution?: { status: string, host: string|null, reason: string|null, retryable: boolean } }} [capabilities]
+ * @property {{ actorExecution?: { status: string, host: string|null, reason: string|null, retryable: boolean }, moonshineVoiceHost?: { status: string }, documentReader?: { status: string } }} [capabilities]
  * @property {{ id: string, peerName: string, onboardingComplete: boolean }} profile
  * @property {SettingsState} settings
  * @property {any} pendingConfirm

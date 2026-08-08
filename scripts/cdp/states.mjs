@@ -2331,6 +2331,33 @@ export const STATES = [
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
+  {
+    name: 'options-voice-capabilities', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html#!/voice');
+      try {
+        const posture = await waitFor(() => evalIn(page, `(() => {
+          const voice = document.querySelector('.voice-section');
+          const ocr = document.querySelector('.ocr-section');
+          if (!voice || !ocr) return null;
+          return {
+            voice: voice.textContent,
+            ocr: ocr.textContent,
+            buttons: [...document.querySelectorAll('button')].map((button) => button.textContent),
+          };
+        })()`), { budgetMs: 15_000, pollMs: 80 });
+        rec.check('Chrome Voice and OCR settings expose only hosted facilities',
+          !posture?.voice?.includes('unavailable in this browser')
+            && !posture?.ocr?.includes('unavailable in this browser')
+            && posture?.buttons?.some((label) => label.includes('Enable voice')),
+          JSON.stringify(posture));
+        await rec.shotPage('options-voice-capabilities.light', page);
+        await setEmulatedTheme(page, 'dark');
+        await rec.shotPage('options-voice-capabilities.dark', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
 
   // --- visual (WIDE): the two settings pages the redesign rebuilt -------------
   //
