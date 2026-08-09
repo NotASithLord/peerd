@@ -151,6 +151,8 @@ export const makeEngineRoutes = (deps) => {
         const ev = /** @type {{ name?: string, message?: string }} */ (e);
         return { ok: false, error: ev?.name === 'AbortError'
           ? 'aborted'
+          : ev?.name === 'DenylistPolicyUnavailableError'
+            ? 'The sensitive-origin policy is unavailable. Network access is blocked.'
           : ev?.name === 'EgressDeniedError'
             ? `denylisted: ${ev.message}` : (ev?.message ?? String(e)) };
       } finally {
