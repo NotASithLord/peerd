@@ -1698,6 +1698,7 @@ export const STATES = [
         header.click();
         return {
           label: header.innerText,
+          args: header.querySelector('.tool-args')?.textContent ?? '',
           cardClass: header.parentElement?.className ?? '',
           dotClass: header.querySelector('.tool-status-dot')?.className ?? '',
         };
@@ -1711,14 +1712,12 @@ export const STATES = [
       })()`), { budgetMs: 5_000, pollMs: 50 }) : null;
       rec.check('the human sees a plain transit-only explanation',
         disclosureReady?.label.includes('sign-in service')
-          && !disclosureReady?.label.includes('accounts.google.com')
+          && disclosureReady?.args === 'sign-in service: "Use this sign-in service as an API inte…"'
           && disclosureReady?.cardClass.includes('tool-not-run')
           && disclosureReady?.dotClass.includes('dot-not-run')
           && disclosure?.expanded === 'true'
-          && disclosure?.detail.includes('sign-in service')
-          && disclosure?.detail.includes('site you want to sign in to')
-          && !disclosure?.detail.includes('Policy'),
-        JSON.stringify(disclosure));
+          && disclosure?.detail === 'No actor work was started. This is a sign-in service, which peerd can visit only while signing in to another site. Ask peerd to work through the site you want to sign in to.',
+        JSON.stringify({ disclosureReady, disclosure }));
       await rec.shot('final');
     },
   },

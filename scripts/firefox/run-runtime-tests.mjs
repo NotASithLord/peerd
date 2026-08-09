@@ -1323,6 +1323,7 @@ const runNumericTabAuthoritySmoke = async (driver, providerServer) => {
       header.click();
       return {
         label: header.innerText,
+        args: header.querySelector('.tool-args')?.textContent ?? '',
         cardClass: header.parentElement?.className ?? '',
         dotClass: header.querySelector('.tool-status-dot')?.className ?? '',
         dotAriaHidden: header.querySelector('.tool-status-dot')?.getAttribute('aria-hidden') ?? null,
@@ -1337,16 +1338,14 @@ const runNumericTabAuthoritySmoke = async (driver, providerServer) => {
     `), { budgetMs: 5_000, pollMs: 100 }) : null;
     assert(idpDisclosureReady?.label?.includes('sign-in service')
       && !idpDisclosureReady?.label?.includes('site:')
-      && !idpDisclosureReady?.label?.includes('accounts.google.com')
       && !idpDisclosureReady?.label?.includes('actor ·')
+      && idpDisclosureReady?.args === 'sign-in service: "Work directly on this sign-in service."'
       && idpDisclosureReady?.cardClass?.includes('tool-not-run')
       && !idpDisclosureReady?.cardClass?.includes('tool-failed')
       && idpDisclosureReady?.dotClass?.includes('dot-not-run')
       && !idpDisclosureReady?.dotClass?.includes('dot-failed')
       && idpDisclosureReady?.dotAriaHidden === 'true'
-      && idpDisclosure?.detail?.includes('sign-in service')
-      && idpDisclosure?.detail?.includes('site you want to sign in to')
-      && !idpDisclosure?.detail?.includes('Policy'),
+      && idpDisclosure?.detail === 'No actor work was started. This is a sign-in service, which peerd can visit only while signing in to another site. Ask peerd to work through the site you want to sign in to.',
     'the Firefox disclosure explains transit-only IdP handling in plain language',
     JSON.stringify(idpDisclosure));
 

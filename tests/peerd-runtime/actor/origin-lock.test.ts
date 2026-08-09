@@ -63,7 +63,10 @@ describe('roaming', () => {
   });
 
   test('an identity provider ends without suggesting a standalone successor', async () => {
-    const isIdp = (origin: string) => origin.startsWith('https://idp.test');
+    const isIdp = (value: string) => {
+      const url = new URL(value);
+      return url.protocol === 'https:' && url.hostname === 'idp.test' && url.port === '';
+    };
     const { judge, stops } = harness({ mode: 'roaming' }, {
       isIdp,
       isKnownIdp: isIdp,
@@ -100,8 +103,8 @@ describe('bound — persistence is the point', () => {
 
 describe('excursions — the state that must survive', () => {
   const idp = {
-    isIdp: (u: string) => u.startsWith('https://idp.test'),
-    isKnownIdp: (u: string) => u.startsWith('https://idp.test'),
+    isIdp: (value: string) => new URL(value).origin === 'https://idp.test',
+    isKnownIdp: (value: string) => new URL(value).hostname === 'idp.test',
   };
 
   test('opening one persists it AND increments the lifetime counter', async () => {

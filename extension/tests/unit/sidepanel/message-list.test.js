@@ -427,8 +427,8 @@ describe('sidepanel.message-list actor disclosures', () => {
       expect(toggle.textContent).toContain('Not run');
       expect(toggle.textContent).toContain('sign-in service');
       expect(toggle.textContent.includes('site:')).toBe(false);
-      expect(toggle.textContent.includes('accounts.google.com')).toBe(false);
       expect(toggle.textContent.includes('actor ·')).toBe(false);
+      expect(root.querySelector('.tool-args')?.textContent).toBe('sign-in service: "inspect it"');
       const card = root.querySelector('.tool-actor');
       expect(card?.classList.contains('tool-not-run')).toBe(true);
       expect(card?.classList.contains('tool-failed')).toBe(false);
@@ -438,11 +438,8 @@ describe('sidepanel.message-list actor disclosures', () => {
       expect(dot?.getAttribute('aria-hidden')).toBe('true');
       toggle.click();
       await flush();
-      expect(root.textContent).toContain('sign-in service');
-      expect(root.textContent).toContain('work through the site you want to sign in to');
       const detail = root.querySelector('.actor-body .error-line')?.textContent ?? '';
-      expect(detail.includes('site:https://accounts.google.com')).toBe(false);
-      expect(detail.includes('Policy')).toBe(false);
+      expect(detail).toBe('No actor work was started. This is a sign-in service, which peerd can visit only while signing in to another site. Ask peerd to work through the site you want to sign in to.');
     } finally { unmount(); }
   });
 
