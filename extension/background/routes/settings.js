@@ -34,6 +34,9 @@ export const makeSettingsRoutes = (deps) => {
         knownProviderNames: listProviders().map((/** @type {{ name: string }} */ p) => p.name),
         reasoningEffortLevels: REASONING_EFFORT_LEVELS,
         dwebEnabled: DWEB_ENABLED,
+        // Preview-only key: its presence in this package's defaults IS the
+        // channel gate (no separate build flag, unlike dweb).
+        autoUpdateAvailable: Object.hasOwn(DEFAULT_SETTINGS, 'autoUpdateEnabled'),
         normalizeVariant,
         normalizeEngine,
       });

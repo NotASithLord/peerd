@@ -230,7 +230,7 @@ const PlaceholderView = {
 // equality) — /init progress and the grant-debugger nudge must be visible
 // wherever the user is, not just the side panel.
 /**
- * @typedef {{ id: number, text?: string, action?: { kind?: string, label?: string } | null }} Notice
+ * @typedef {{ id: number, text?: string, action?: { kind?: string, label?: string, url?: string } | null }} Notice
  */
 
 export const NoticeBar = {
@@ -253,6 +253,17 @@ export const NoticeBar = {
               type: 'button',
               onclick: () => uiActions?.requestDebugger?.(n.id),
             }, n.action.label ?? 'Enable')
+          : null,
+        // open-url: the SW attaches an https link (e.g. the preview
+        // update's XPI - background/update-check.js). The click IS the user
+        // gesture the target flow needs, so no SW round-trip: open the tab
+        // from here. https only, checked again at render (defense in depth -
+        // the SW already validates the feed's link).
+        n.action?.kind === 'open-url' && n.action.url?.startsWith('https://')
+          ? m('button.notice-action', {
+              type: 'button',
+              onclick: () => { window.open(n.action?.url, '_blank', 'noopener'); },
+            }, n.action.label ?? 'Open')
           : null,
         m('button.notice-dismiss', {
           type: 'button',
