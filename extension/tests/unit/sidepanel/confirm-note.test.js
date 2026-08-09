@@ -76,6 +76,7 @@ describe('sidepanel.confirm note (issue 242)', () => {
       ...base,
       note: 'A matching earlier action has an unknown outcome. Verify the target before approving this repeat.',
       lifecycleTarget: target,
+      oneShot: true,
       tool: 'submit_payment',
       summary: 'submit_payment({ orderId: "order-7" })',
     });
@@ -87,6 +88,9 @@ describe('sidepanel.confirm note (issue 242)', () => {
       expect(values).toEqual([target, 'submit_payment']);
       expect(claim.textContent.includes('Exact target')).toBe(true);
       expect(claim.textContent.includes('Action')).toBe(true);
+      const buttons = [...root.querySelectorAll('.peerd-modal-actions button')];
+      expect(buttons.map((button) => button.textContent)).toEqual(['Reject', 'Allow once']);
+      expect(buttons[1].classList.contains('lifecycle-confirm-allow')).toBe(true);
     } finally { unmount(); }
   });
 

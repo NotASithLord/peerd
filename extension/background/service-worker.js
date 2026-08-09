@@ -42,6 +42,7 @@ import { ACTOR_WORKER_PROTOCOL } from '/offscreen/actor-worker-protocol.js';
 import { makeActorIsolationStateStore } from './actor-isolation-state.js';
 import { actorDeliveryIdsFromMessage, makeActorRecoveryGate } from './actor-recovery-gate.js';
 import { createActorLiveProjection } from './actor-live-projection.js';
+import { answerWithSessionConfirmGrant } from './confirm-session-grants.js';
 
 import {
   // vault
@@ -371,7 +372,6 @@ import { createJsTabTracker } from './notebook-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
 import { createScriptRunRegistry } from './script-runs.js';
 import { createContextSnapshots } from './context-snapshots.js';
-import { confirmGrantKey } from './confirm-grant-key.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import {
   makeOffscreenActorChannelClient, selectExactActorHostClient,
@@ -4033,7 +4033,7 @@ const sessionConfirmGrants = new Map();
  * prior "yes for session" doesn't re-prompt, then falls back to the
  * round-trip. Records new session grants.
  *
- * @param {{ tool: string, sessionId?: string|null, origins?: string[] }} prompt
+ * @param {{ tool: string, sessionId?: string|null, origins?: string[], oneShot?: boolean }} prompt
  * @param {AbortSignal} [signal]
  * @returns {Promise<'yes_once'|'yes_session'|'no'>}
  */
@@ -4077,7 +4077,6 @@ const confirmAction = async (prompt, signal) => {
   // origin for DOM tools, the target host for web writes), and the grant key
   // folds it in. Approving `click` on site A no longer covers site B. Tools
   // with no origin surface keep the bare tool key (confirm-grant-key.js).
-  const grantKey = confirmGrantKey(prompt);
   // DESIGN-17: an ACTOR never accumulates a STANDING grant — its confirms are
   // strictly PER-TURN (an actor can be steered by untrusted instance output
   // across turns, so a once-granted "yes for session" must not silence the next
@@ -4088,32 +4087,33 @@ const confirmAction = async (prompt, signal) => {
     try { ephemeral = (await sessions.get(sid))?.kind === 'actor'; } catch { ephemeral = false; }
   }
   if (signal?.aborted) return 'no';
-  if (!ephemeral && sid && sessionConfirmGrants.get(sid)?.has(grantKey)) {
-    return 'yes_session';
-  }
-  // Keep execution custody and display custody separate. `sessionId` remains
-  // the exact turn that can be stopped or granted; `ownerSessionId` is the root
-  // chat where a human may see and answer the prompt. This prevents a background
-  // actor from placing an authority dialog over whichever unrelated chat happens
-  // to be open when it asks.
-  const ownerSessionId = sid ? await resolveLifecycleRootSession(sid) : null;
-  const ownedPrompt = { ...prompt, ownerSessionId };
-  // ...and TELL THE PANEL, so it can stop offering a button that grants
-  // nothing. why this became load-bearing with #242: before the UGC override, a
-  // default-config user (confirmActions OFF) never saw an actor confirm at all,
-  // so the dead "Allow for session" was unreachable. Now it is the second thing
-  // they see on a GitHub issue, twice per comment — a control that looks like
-  // the way to stop the prompting and silently isn't. The downgrade itself is
-  // correct and stays; what was wrong was offering the choice.
-  const answer = await confirmCoordinator.confirm(/** @type {any} */ (
-    downgradesActorConfirm(prompt.tool, ephemeral, 'yes_session')
-      ? { ...ownedPrompt, ephemeral: true }
-      : ownedPrompt
-  ), signal);
-  if (answer === 'yes_session' && sid && !ephemeral) {
-    if (!sessionConfirmGrants.has(sid)) sessionConfirmGrants.set(sid, new Set());
-    (/** @type {Set<string>} */ (sessionConfirmGrants.get(sid))).add(grantKey);
-  }
+  const answer = await answerWithSessionConfirmGrant({
+    prompt,
+    sessionId: sid,
+    ephemeral,
+    grants: sessionConfirmGrants,
+    request: async () => {
+      // Keep execution custody and display custody separate. `sessionId` remains
+      // the exact turn that can be stopped or granted; `ownerSessionId` is the root
+      // chat where a human may see and answer the prompt. This prevents a background
+      // actor from placing an authority dialog over whichever unrelated chat happens
+      // to be open when it asks.
+      const ownerSessionId = sid ? await resolveLifecycleRootSession(sid) : null;
+      const ownedPrompt = { ...prompt, ownerSessionId };
+      // ...and TELL THE PANEL, so it can stop offering a button that grants
+      // nothing. why this became load-bearing with #242: before the UGC override, a
+      // default-config user (confirmActions OFF) never saw an actor confirm at all,
+      // so the dead "Allow for session" was unreachable. Now it is the second thing
+      // they see on a GitHub issue, twice per comment. A control that looks like
+      // the way to stop the prompting and silently isn't. The downgrade itself is
+      // correct and stays; what was wrong was offering the choice.
+      return confirmCoordinator.confirm(/** @type {any} */ (
+        downgradesActorConfirm(prompt.tool, ephemeral, 'yes_session')
+          ? { ...ownedPrompt, ephemeral: true }
+          : ownedPrompt
+      ), signal);
+    },
+  });
   // Ephemeral: an actor's yes_session approves THIS call only (no standing grant),
   // EXCEPT a2a_contact — the sanctioned exception (an explicit first-contact
   // allowlist decision, the peer did shown to the user), whose raw answer survives

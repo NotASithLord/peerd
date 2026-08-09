@@ -2307,22 +2307,48 @@ export const STATES = [
             id: 'e2e-unknown-outcome', tool: 'submit_payment',
             actionClass: 'external', sideEffect: 'mutate_external',
             lifecycleTarget: 'https://payments.example',
+            oneShot: true,
             note: 'A matching earlier action has an unknown outcome. Verify the target before approving this repeat.',
             summary: 'submit_payment({ orderId: "order-7" })', origins: [],
           } }));
         })()`, true);
         const rendered = await waitFor(() => evalIn(ctx.page, `(() => {
           const claim = document.querySelector('#e2e-unknown-outcome-confirm [aria-label="Unknown-outcome repeat approval"]');
+          const button = document.querySelector('#e2e-unknown-outcome-confirm .lifecycle-confirm-allow');
+          const style = button ? getComputedStyle(button) : null;
           return claim ? {
             labels: [...claim.querySelectorAll('span')].map((node) => node.textContent),
             values: [...claim.querySelectorAll('code')].map((node) => node.textContent),
+            buttons: [...document.querySelectorAll('#e2e-unknown-outcome-confirm .peerd-modal-actions button')]
+              .map((node) => node.textContent),
+            foreground: style?.color ?? null,
+            background: style?.backgroundColor ?? null,
           } : null;
         })()`), { budgetMs: 5_000, pollMs: 50 });
+        const channel = (value) => {
+          value /= 255;
+          return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+        };
+        const luminance = (color) => {
+          const rgb = String(color).match(/[\d.]+/g)?.slice(0, 3).map(Number) ?? [];
+          return rgb.length === 3
+            ? 0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2])
+            : Number.NaN;
+        };
+        const foreground = luminance(rendered?.foreground);
+        const background = luminance(rendered?.background);
+        const contrast = (Math.max(foreground, background) + 0.05)
+          / (Math.min(foreground, background) + 0.05);
         rec.check('unknown-outcome consent shows the exact bound target and action',
           JSON.stringify(rendered?.labels) === JSON.stringify(['Exact target', 'Action'])
             && JSON.stringify(rendered?.values)
               === JSON.stringify(['https://payments.example', 'submit_payment']),
           JSON.stringify(rendered));
+        rec.check('unknown-outcome consent is one-shot',
+          JSON.stringify(rendered?.buttons) === JSON.stringify(['Reject', 'Allow once']),
+          JSON.stringify(rendered?.buttons));
+        rec.check('unknown-outcome approval text meets WCAG AA contrast',
+          contrast >= 4.5, `${contrast} (${rendered?.foreground} on ${rendered?.background})`);
         await rec.shot('unknown-outcome-confirm');
       } finally {
         await evalIn(ctx.page, `document.querySelector('#e2e-unknown-outcome-confirm')?.remove()`);

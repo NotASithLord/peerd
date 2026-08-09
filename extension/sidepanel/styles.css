@@ -47,6 +47,7 @@
   --accent:     var(--p);
   --accent-ink: #0089ac;
   --on-accent:  var(--w);
+  --on-accent-aa: #0B0D0E;
   --danger:     var(--er);
   --danger-ink: #d23b3b;
   --warn:       var(--am);
@@ -2604,6 +2605,13 @@ button.tool-call-header:focus-visible {
   color: var(--fg);
 }
 .confirm-modal .peerd-modal-actions { flex-wrap: wrap; }
+.lifecycle-confirm-allow {
+  /* why: this is the safety-critical approval after an unknown outcome. The
+   * ordinary light-theme white-on-cyan button is only 2.24:1; fixed dark ink
+   * keeps this decision at 8.32:1 in both color schemes without moving every
+   * existing primary-button baseline. */
+  color: var(--on-accent-aa);
+}
 
 /* --- login consent card (the `login` tool, kind:'login') --------------
  * A sign-in is the highest-stakes confirm, so it gets a distinctive card:

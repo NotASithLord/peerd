@@ -709,6 +709,7 @@ describe('the full dispatcher path', () => {
     expect(prompts[0].note).toContain('outcome is unknown');
     expect(prompts[0].lifecycleTarget).toBe('https://payments.example');
     expect(prompts[0].lifecycleTarget).toBe(boundApprovalClaim.target);
+    expect(prompts[0].oneShot).toBe(true);
   });
 
   test('a self-confirming tool can resolve unknown intent without losing its detailed consent', async () => {

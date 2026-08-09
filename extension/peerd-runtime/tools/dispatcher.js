@@ -554,6 +554,10 @@ export const dispatchToolCall = async (call, ctx) => {
         lifecycleTarget: lifecycleRepeatConfirm
           ? lifecycleRepeatConfirm.target
           : undefined,
+        // Unknown-outcome recovery is an approval of this exact repeat, not a
+        // reusable tool grant. The SW independently bypasses and refuses to
+        // create session grants when this flag is present.
+        oneShot: lifecycleRepeatConfirm ? true : undefined,
         // why the note and not a longer summary: summarizeCall truncates every
         // string arg to 40 chars, so the card can't show the payload anyway —
         // what it CAN do is tell the user the one fact they can't see, which is

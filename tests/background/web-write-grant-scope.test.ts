@@ -15,14 +15,21 @@ const src = readFileSync(
   join(import.meta.dir, '../../extension/background/service-worker.js'),
   'utf8',
 );
+const grantPolicySrc = readFileSync(
+  join(import.meta.dir, '../../extension/background/confirm-session-grants.js'),
+  'utf8',
+);
 
 describe('service worker — session grants are origin-scoped', () => {
   test('the grant key comes from the origin-folding confirmGrantKey', () => {
-    expect(src).toMatch(/grantKey\s*=\s*confirmGrantKey\(prompt\)/);
-    expect(src).toMatch(/from '\.\/confirm-grant-key\.js'/);
+    expect(src).toContain('answerWithSessionConfirmGrant({');
+    expect(src).toMatch(/from '\.\/confirm-session-grants\.js'/);
+    expect(grantPolicySrc).toMatch(/from '\.\/confirm-grant-key\.js'/);
   });
   test('both the grant check and the grant record use grantKey, not prompt.tool', () => {
-    expect(src).toMatch(/sessionConfirmGrants\.get\(sid\)\?\.has\(grantKey\)/);
-    expect(src).toMatch(/\.add\(grantKey\)/);
+    expect(grantPolicySrc).toContain('cachedSessionConfirmAnswer({');
+    expect(grantPolicySrc).toContain('rememberSessionConfirmAnswer({');
+    expect(grantPolicySrc).toContain('.has(confirmGrantKey(prompt))');
+    expect(grantPolicySrc).toContain('.add(confirmGrantKey(prompt))');
   });
 });

@@ -253,6 +253,8 @@
  * @property {string} [lifecycleTarget] immutable target from an unknown-outcome
  *                                    approval claim; the confirmation UI shows
  *                                    this exact value rather than a mutable live URL
+ * @property {boolean} [oneShot]      this approval must be answered directly
+ *                                    and cannot read or create a session grant
  * @property {string | null} [sessionId]   exact execution session; lets the
  *                                    coordinator decline a turn's pending
  *                                    confirms when it is aborted

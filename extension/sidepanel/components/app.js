@@ -356,6 +356,8 @@ const confirmationDialogAttrs = (answer, state) => {
  *   override or a repeat after an unknown outcome. Plain prose, rendered verbatim.
  * @property {string} [lifecycleTarget] immutable target bound to an
  *   unknown-outcome repeat approval; never derived from the current live tab
+ * @property {boolean} [oneShot] this approval cannot read or create a standing
+ *   session grant; used for exact unknown-outcome repeats
  * @property {boolean} [ephemeral]  this answer cannot become a standing grant —
  *   DESIGN-17 downgrades an actor's yes_session to yes_once. Set by the SW so
  *   the card does not offer a button that would do nothing.
@@ -563,10 +565,14 @@ export const ConfirmModal = {
           // gives the user a control that reads as "stop asking me" and does
           // nothing — worse than not offering it, because they stop looking for
           // another way out.
-          isMemory || isSiteClient || prompt.ephemeral
+          isMemory || isSiteClient || prompt.ephemeral || prompt.oneShot
             ? null
             : m('button.secondary', { type: 'button', onclick: () => answer('yes_session') }, 'Allow for session'),
-          m('button', { type: 'button', onclick: () => answer('yes_once') },
+          m('button', {
+            type: 'button',
+            class: prompt.oneShot ? 'lifecycle-confirm-allow' : '',
+            onclick: () => answer('yes_once'),
+          },
             isMemory ? 'Save' : isSiteClient ? (p.op === 'delete' ? 'Delete client' : 'Save client') : 'Allow once'),
         ]),
       ]),
