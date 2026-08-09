@@ -85,6 +85,8 @@ const KEEPALIVE_LOSS_LOG = 'keepalive-loss-geckodriver.log';
 const KEEPALIVE_LOSS_DIAGNOSTIC = 'keepalive-loss.json';
 const RECOVERY_SEED_KEY = 'peerdFirefoxActorRecoverySeed';
 const RECOVERY_BOOT_KEY = 'peerdFirefoxActorRecoveryBoot';
+const LIFECYCLE_OPERATIONS_KEY = 'peerd.lifecycle.operations';
+const LIFECYCLE_NOTICES_KEY = 'peerd.lifecycle.pendingNotices';
 const FAILURE_FINAL_CANARY = 'firefox-actor-not-run-final-7d12f198';
 const FAILURE_ACTOR_PROMPT = 'Click the Firefox parity action and report the page status.';
 const BROKEN_WORKER_SCREENSHOT = 'broken-worker.png';
@@ -1642,10 +1644,41 @@ if (seed?.active === true && Array.isArray(seed.entries)) {
     .map((entry) => [entry.id, entry]));
   await browser.storage.session.set({ actorMailbox: mailbox });
 }
-browser.runtime.onMessage.addListener((message) =>
-  message?.type === 'firefox-recovery/probe'
-    ? Promise.resolve({ ok: true, boot })
-    : undefined);
+const lifecycleStorage = {
+  get: async (key) => (await browser.storage.local.get(key))[key],
+  set: async (key, value) => browser.storage.local.set({ [key]: value }),
+};
+browser.runtime.onMessage.addListener((message) => {
+  if (message?.type === 'firefox-recovery/probe') {
+    return Promise.resolve({ ok: true, boot });
+  }
+  if (message?.type !== 'firefox-recovery/seed-operations') return undefined;
+  return (async () => {
+    const { createOperationLog } = await import('/peerd-runtime/index.js');
+    const operationLog = createOperationLog({ storage: lifecycleStorage });
+    const generation = await lifecycleStorage.get('peerd.lifecycle.generation');
+    if (!generation?.id) throw new Error('lifecycle generation is not ready');
+    const sessionId = String(message.sessionId ?? '');
+    const seeds = [
+      ['read_pdf', 'B'],
+      ['remember', 'C'],
+      ['dweb_share', 'D'],
+      ['script', 'E'],
+    ];
+    const operationIds = [];
+    for (const [toolName, retryClass] of seeds) {
+      const operationId = sessionId + ':firefox-fault-' + retryClass.toLowerCase();
+      await operationLog.begin({
+        operationId, sessionId, toolName, retryClass,
+        generationId: generation.id,
+      });
+      await operationLog.transition(operationId, 'running');
+      await operationLog.markDispatched(operationId);
+      operationIds.push(operationId);
+    }
+    return { ok: true, operationIds };
+  })();
+});
 `, { flag: 'wx', mode: 0o600 });
   const serviceWorker = join(staging, 'background', 'service-worker.js');
   const source = readFileSync(serviceWorker, 'utf8');
@@ -2429,6 +2462,14 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
 
 const runActorRecoverySmoke = async ({ providerServer }) => {
   console.log('Firefox actor recovery smoke: idle-restart twice without replaying durable mailbox work');
+  const backgroundFaultCapability = {
+    forcedTerminationAvailable: false,
+    exercisedBoundary: 'event-page-idle-discard',
+    reason: 'WebDriver exposes browsing contexts but no command that terminates an active extension background page. Active work retains the event page.',
+  };
+  writeFileSync(join(OUTPUT, 'background-fault-capability.json'),
+    JSON.stringify(backgroundFaultCapability, null, 2));
+  console.log('  NOTE forced active-background termination is unavailable in Firefox WebDriver; testing physical idle discard');
   const { artifact, directory } = createRecoveryArtifact();
   let driver = null;
   try {
@@ -2487,11 +2528,16 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
         await browser.storage.session.remove('actorMailbox');
         await browser.storage.local.set({ [seedKey]: { active: true, entries } });
         const probe = await send({ type: 'firefox-recovery/probe' });
+        const lifecycle = await send({
+          type: 'firefox-recovery/seed-operations', sessionId,
+        });
         return {
           ok: vault?.ok === true && provider?.ok === true
-            && command?.ok === true && typeof probe?.boot?.bootId === 'string',
+            && command?.ok === true && typeof probe?.boot?.bootId === 'string'
+            && lifecycle?.ok === true && lifecycle.operationIds?.length === 4,
           sessionId,
           entryIds: entries.map((entry) => entry.id),
+          operationIds: lifecycle?.operationIds ?? [],
           boot: probe?.boot ?? null,
         };
       })().then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
@@ -2506,7 +2552,7 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
       .sort();
 
     const readRecoveryState = () => driver.executeAsync(`
-      const [sessionId, expectedIds] = arguments;
+      const [sessionId, expectedIds, operationKey, noticeKey] = arguments;
       const done = arguments[arguments.length - 1];
       const send = (message) => browser.runtime.sendMessage(message);
       Promise.all([
@@ -2514,7 +2560,8 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
         browser.storage.session.get('actorMailbox'),
         send({ type: 'firefox-recovery/probe' }),
         send({ type: 'audit/list', limit: 500 }),
-      ]).then(([sessionReply, mailboxStored, probe, audit]) => {
+        browser.storage.local.get([operationKey, noticeKey]),
+      ]).then(([sessionReply, mailboxStored, probe, audit, lifecycle]) => {
         const messages = sessionReply?.session?.messages ?? [];
         const expected = new Set(expectedIds);
         const receipts = messages.filter((message) => expected.has(message?.id));
@@ -2530,9 +2577,12 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
             performed: message.actorReply?.performed,
           })),
           audit: audit?.entries ?? [],
+          operations: lifecycle?.[operationKey] ?? {},
+          notices: lifecycle?.[noticeKey]?.[sessionId] ?? [],
         });
       }, (error) => done({ ok: false, error: error?.message || String(error) }));
-    `, [prepared.sessionId, expectedReceiptIds]);
+    `, [prepared.sessionId, expectedReceiptIds,
+      LIFECYCLE_OPERATIONS_KEY, LIFECYCLE_NOTICES_KEY]);
 
     const idleRestartAndRecover = async (previousBoot) => {
       // Exercise Firefox's real event-page lifecycle. runtime.reload tears down
@@ -2619,6 +2669,22 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
     };
 
     const first = await idleRestartAndRecover(prepared.boot);
+    const expectedLifecycleStates = {
+      [`${prepared.sessionId}:firefox-fault-b`]: 'interrupted',
+      [`${prepared.sessionId}:firefox-fault-c`]: 'interrupted',
+      [`${prepared.sessionId}:firefox-fault-d`]: 'outcome_unknown',
+      [`${prepared.sessionId}:firefox-fault-e`]: 'outcome_unknown',
+    };
+    assert(Object.entries(expectedLifecycleStates).every(([id, state]) =>
+      first.operations?.[id]?.state === state),
+    'physical idle discard reconciles B/C safely and preserves D/E ambiguity',
+    JSON.stringify(first.operations));
+    assert(first.notices.some((notice) =>
+      notice?.recoveryRecord?.recoveryState === 'interrupted')
+      && first.notices.some((notice) =>
+        notice?.recoveryRecord?.recoveryState === 'outcome_unknown'),
+    'Firefox recovery notices preserve safe versus uncertain outcomes',
+    JSON.stringify(first.notices));
     assert(first.receipts.some((receipt) => receipt.id.endsWith(':firefox-recovery-queued')
       && receipt.outcomeKnown === true && receipt.performed === false
       && receipt.content.includes('It was not run')),
@@ -4492,6 +4558,11 @@ const main = async () => {
         'the targeted Notebook run installs the Firefox Preview package');
       await runPreviewRemoteModuleSmoke(driver, providerServer);
       console.log('Firefox Notebook module smoke OK');
+      return;
+    }
+    if (process.env.FIREFOX_RUNTIME_ONLY === 'recovery') {
+      await runActorRecoverySmoke({ providerServer });
+      console.log('Firefox recovery smoke OK');
       return;
     }
 

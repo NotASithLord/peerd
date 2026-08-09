@@ -124,6 +124,19 @@ refusal. Boundary tests verify that uncertain writes do not execute when
 tracking is unavailable and that replay identity survives operation-log
 compaction.
 
+The browser lanes exercise the durable boundary against actual background
+lifecycle loss. When its lifecycle boot precondition is available, the Chrome
+lane closes the MV3 service-worker target and wakes a distinct target. It writes
+an explicit blocked-capability result when the CDP harness cannot establish that
+precondition. The Firefox lane closes every extension UI context, waits
+for Firefox to discard the idle background page, and then wakes a distinct
+background generation. WebDriver has no command for terminating an active
+Firefox extension background page, and active work retains that page, so the
+Firefox result records this capability limit instead of simulating a kill.
+Both lanes verify safe B/C interruption, preserved D/E uncertainty, recovery
+notices, and no replay. See `scripts/cdp/run-lifecycle-faults.mjs` and the
+recovery smoke in `scripts/firefox/run-runtime-tests.mjs`.
+
 Relevant tests and historical inputs live under
 `tests/peerd-runtime/lifecycle/`. Test names and fixture contents are the live
 inventory.
