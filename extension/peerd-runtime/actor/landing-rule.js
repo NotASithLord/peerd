@@ -38,9 +38,11 @@ import { sameOrigin } from './origin-sensitivity.js';
 import { normalizeApiOrigin } from './web-actor.js';
 
 /**
- * @typedef {'continue' | 'handoff' | 'end'} LandingAction
+ * @typedef {'continue' | 'wait' | 'handoff' | 'end'} LandingAction
  *
  *   continue  nothing to do — the actor may proceed.
+ *   wait      a confirmed sign-in is in progress. The tab stays bound, but the
+ *             actor may not touch the identity provider. The user owns this leg.
  *   handoff   a ROAMING actor reached a credentialed origin. It ends, and the
  *             orchestrator routes the work to that origin's bound actor. The
  *             distinction from `end` is that there IS a successor.
@@ -53,17 +55,21 @@ import { normalizeApiOrigin } from './web-actor.js';
  *
  * @typedef {object} Excursion
  * @property {string} returnTo    the owned origin this must come back to
- * @property {string} openedAt    the IdP origin that opened it. why recorded:
- *   without it, "is this hop part of the sign-in I authorized" is not merely
- *   unenforced but UNREPRESENTABLE, and an open corridor becomes a free window
- *   onto any origin at all.
- * @property {string} lastLanding the landing this excursion last saw. why: the
- *   budget is spent per NAVIGATION, but this function is called per TOOL CALL
- *   (resolveTargetTab runs on every DOM tool). Without this, a single-page login
- *   — snapshot, type, click, snapshot — would burn the budget standing still and
- *   end the actor mid-sign-in.
- * @property {number} budget      navigations remaining
+ * @property {string} idpOrigin   the exact identity-provider origin the user
+ *   approved. No intermediate origin is part of the corridor.
  * @property {number} deadline    epoch ms after which it is over regardless
+ * @property {true} authorized    a host-stamped marker. Persisted excursions
+ *   from the old landing-only design do not have it and fail closed.
+ */
+
+/**
+ * A one-shot grant created by the host after the user confirms a verified
+ * sign-in affordance. The landing rule consumes it into an Excursion.
+ *
+ * @typedef {object} AuthGrant
+ * @property {string} returnTo
+ * @property {string} idpOrigin
+ * @property {number} deadline
  */
 
 /**
@@ -77,6 +83,7 @@ import { normalizeApiOrigin } from './web-actor.js';
  *   on exactly the hosts that matter, so a caller deriving its own would disagree
  *   with the rule that later judges it.
  * @property {Excursion} [excursion] the excursion state going forward.
+ * @property {AuthGrant} [authGrant] the unused sign-in grant going forward.
  *
  *   READ THIS AS A REPLACEMENT, NEVER AS A PATCH. Absent means "no excursion is
  *   running" — including the case where one just ENDED by returning home. A
@@ -85,10 +92,9 @@ import { normalizeApiOrigin } from './web-actor.js';
  *   a permanent hole. Always assign, never coalesce.
  */
 
-/** Navigations one sign-in may take: app → IdP → consent → back is three. */
+/** Kept as a public compatibility export. Exact-origin corridors use no hop budget. */
 export const EXCURSION_BUDGET = 4;
-/** why a deadline as well as a budget: a budget only decrements on navigation,
- * so a tab parked mid-excursion would hold the exception open indefinitely. */
+/** A deadline keeps an unused grant or parked sign-in from living indefinitely. */
 export const EXCURSION_MS = 3 * 60_000;
 /** How many excursions one bound actor may open, ever.
  *
@@ -157,6 +163,18 @@ const isWwwFold = (landing, owned) => {
 };
 
 /**
+ * Durable grants carry origins, not arbitrary URLs. Requiring the stored value
+ * to equal the canonical form makes a corrupted path, casing change, or port
+ * spelling fail closed instead of being silently broadened by `sameOrigin`.
+ *
+ * @param {unknown} value
+ * @returns {value is string}
+ */
+const isCanonicalHttpsOrigin = (value) => typeof value === 'string'
+  && value.startsWith('https://')
+  && normalizeApiOrigin(value) === value;
+
+/**
  * Decide what happens now that the tab is at `landing`.
  *
  * @param {object} state
@@ -170,6 +188,7 @@ const isWwwFold = (landing, owned) => {
  *   spelled; false for a handoff successor, whose origin a roaming actor was
  *   already on. Only a provisional origin may settle onto its own www-fold.
  * @param {Excursion | null} [state.excursion]  in-flight excursion, if any
+ * @param {AuthGrant | null} [state.authGrant]   unused host-stamped grant
  * @param {number} [state.excursionsUsed]       how many this actor has opened
  * @param {number} [state.now]                  injected clock
  * @returns {LandingVerdict}
@@ -177,7 +196,8 @@ const isWwwFold = (landing, owned) => {
 export const decideLanding = (state) => {
   const {
     mode, ownedOrigin = null, landing, landingIsSensitive,
-    landingIsIdp = false, excursion = null, excursionsUsed = 0, now = 0,
+    landingIsIdp = false, excursion = null, authGrant = null,
+    excursionsUsed = 0, now = 0,
     provisional = false,
   } = state;
 
@@ -191,11 +211,40 @@ export const decideLanding = (state) => {
 
   const { kind, origin: landingOrigin } = locate(landing);
 
+  // Validate durable corridor state before interpreting the landing. A service
+  // worker restart must not turn malformed, expired, or legacy data into
+  // permission. Null means absent; every present value must be exact.
+  const validGrant = authGrant !== null
+    && typeof authGrant === 'object'
+    && sameOrigin(authGrant.returnTo, ownedOrigin)
+    && isCanonicalHttpsOrigin(authGrant.returnTo)
+    && isCanonicalHttpsOrigin(authGrant.idpOrigin)
+    && Number.isFinite(authGrant.deadline)
+    && now <= authGrant.deadline;
+  const validExcursion = excursion !== null
+    && typeof excursion === 'object'
+    && excursion.authorized === true
+    && sameOrigin(excursion.returnTo, ownedOrigin)
+    && isCanonicalHttpsOrigin(excursion.returnTo)
+    && isCanonicalHttpsOrigin(excursion.idpOrigin)
+    && Number.isFinite(excursion.deadline)
+    && now <= excursion.deadline;
+  if (mode === 'bound'
+    && ((authGrant !== null && !validGrant)
+      || (excursion !== null && !validExcursion)
+      || (authGrant !== null && excursion !== null))) {
+    return { action: 'end', reason: 'the sign-in authorization was invalid or expired, so this task was stopped' };
+  }
+
   // Nowhere in particular. Transient; not a violation. Carry any excursion
   // through UNCHANGED — a blank read mid-sign-in must not discharge it, because
   // absence of the field means "cleared" to the caller.
   if (kind === 'none') {
-    return { action: 'continue', reason: 'no page loaded', ...(excursion ? { excursion } : {}) };
+    return {
+      action: 'continue', reason: 'no page loaded',
+      ...(validGrant ? { authGrant: /** @type {AuthGrant} */ (authGrant) } : {}),
+      ...(validExcursion ? { excursion: /** @type {Excursion} */ (excursion) } : {}),
+    };
   }
 
   if (mode === 'roaming') {
@@ -271,60 +320,52 @@ export const decideLanding = (state) => {
   }
 
   if (sameOrigin(landingOrigin, ownedOrigin)) {
-    // Home. Any excursion is over, successfully — the only good ending, and the
-    // omission of `excursion` here is what discharges it.
-    return { action: 'continue', reason: 'still on the owned site' };
-  }
-
-  // Off-origin. The only survivable case is an auth excursion still in credit.
-  if (excursion) {
-    if (now > excursion.deadline) {
-      return { action: 'end', reason: 'the sign-in step took too long, so this task was stopped' };
-    }
-    // Where may a sign-in actually go? The IdP that opened it, and pages with
-    // no identity of their own (interstitials, CDNs). NOT another credentialed
-    // site: an open corridor must not become a window onto your mail or your
-    // bank just because a sign-in started. why not "refuse every sensitive
-    // hop": an IdP is definitionally a password-field origin, so the learned
-    // signal will mark it — hence the openedAt exemption rather than a blanket
-    // rule.
-    const atOpener = sameOrigin(landingOrigin, excursion.openedAt);
-    if (landingIsSensitive && !atOpener) {
-      return { action: 'end', reason: 'the sign-in step led to another site you have an account on, so this task was stopped' };
-    }
-    // Spend budget only on an actual MOVE. This function runs per tool call,
-    // not per navigation; without this a single-page login would burn the
-    // budget standing still.
-    const moved = !sameOrigin(landingOrigin, excursion.lastLanding);
-    if (!moved) return { action: 'continue', reason: 'signing in', excursion };
-    if (excursion.budget <= 0) {
-      return { action: 'end', reason: 'the sign-in step went further than expected, so this task was stopped' };
-    }
+    // Home discharges an active excursion. An unused live grant stays armed:
+    // login re-verifies the relying page after consent and before clicking, so
+    // consuming it on that safety read would break the confirmed flow.
     return {
-      action: 'continue',
-      reason: 'signing in',
-      excursion: { ...excursion, lastLanding: /** @type {string} */ (landingOrigin), budget: excursion.budget - 1 },
+      action: 'continue', reason: 'still on the owned site',
+      ...(validGrant ? { authGrant: /** @type {AuthGrant} */ (authGrant) } : {}),
     };
   }
 
-  // No excursion running. Landing on a known IdP OPENS one — deliberately
-  // narrow: bound actors only, toward a known IdP only, with a budget, a
-  // deadline, a recorded opener, and a lifetime cap.
-  if (landingIsIdp) {
+  // The actor never works on the identity provider. The browser and user own
+  // that leg. A later page action is allowed only after the tab returns home.
+  if (validExcursion) {
+    if (!landingIsIdp || !sameOrigin(landingOrigin, excursion.idpOrigin)) {
+      return { action: 'end', reason: 'the sign-in step left its approved provider, so this task was stopped' };
+    }
+    return {
+      action: 'wait',
+      reason: 'finish signing in in the open tab, then return here to continue',
+      excursion: /** @type {Excursion} */ (excursion),
+    };
+  }
+
+  // A known IdP landing is not self-authorizing. It consumes one exact,
+  // unexpired grant stamped by the host after the user's login confirmation.
+  if (landingIsIdp && validGrant && sameOrigin(landingOrigin, authGrant.idpOrigin)) {
     if (excursionsUsed >= MAX_EXCURSIONS) {
       return { action: 'end', reason: 'this task has already signed in as many times as peerd allows, so it was stopped' };
     }
     return {
-      action: 'continue',
-      reason: 'signing in',
+      action: 'wait',
+      reason: 'finish signing in in the open tab, then return here to continue',
       excursion: {
         returnTo: ownedOrigin,
-        openedAt: /** @type {string} */ (landingOrigin),
-        lastLanding: /** @type {string} */ (landingOrigin),
-        budget: EXCURSION_BUDGET,
-        deadline: now + EXCURSION_MS,
+        idpOrigin: /** @type {string} */ (landingOrigin),
+        deadline: authGrant.deadline,
+        authorized: true,
       },
     };
+  }
+
+  // Keep this reason distinct from an ordinary foreign-origin stop. The report
+  // layer uses it to avoid suggesting a standalone site helper for an identity
+  // provider. A matching grant whose target is no longer in the IdP registry
+  // lands here too, so registry tightening fails closed.
+  if (landingIsIdp || (validGrant && sameOrigin(landingOrigin, authGrant.idpOrigin))) {
+    return { action: 'end', reason: 'this sign-in was not authorized, so this task was stopped' };
   }
 
   // Anywhere else: the environment this actor owned is not where it is.
@@ -354,11 +395,9 @@ export const decideLanding = (state) => {
  * narrowing, never a widening: it can only withhold a scope the pre-#251 code
  * would have handed over.
  *
- * why an excursion does NOT re-open the scope: signing in is a DOM flow — typing
- * into a form on the IdP's page — and the browser attaches that origin's own
- * cookies regardless. Letting peerd's fetch ALSO ride the user's session at an
- * origin the actor doesn't own would hand the corridor a capability the corridor
- * was never for.
+ * why an excursion does NOT re-open the scope: the user and browser own the IdP
+ * step, including its cookies. Letting peerd's fetch also ride that session
+ * would give the parked actor authority the confirmed transition never granted.
  *
  * @param {object} state
  * @param {'roaming' | 'bound'} state.mode
@@ -369,7 +408,7 @@ export const decideLanding = (state) => {
  * @returns {boolean}
  */
 export const mayHoldCredentials = (state) => {
-  const { mode, ownedOrigin = null, excursion = null, origin, originIsSensitive } = state;
+  const { mode, ownedOrigin = null, origin, originIsSensitive } = state;
   if (mode !== 'roaming' && mode !== 'bound') return false;   // fail closed, as above
   const { kind, origin: scope } = locate(origin);
   // Not a web page at all (blank, about:, an extension page). Nothing to scope.
@@ -409,14 +448,14 @@ export const mayHoldCredentials = (state) => {
   // why the excursion check comes second, which is the opposite of a first
   // draft: this function is synchronous and therefore cannot discharge an
   // excursion, while `decideLanding` (which can) only runs on a tool call. So a
-  // tab that has already come home sits with a stale open corridor until the
+  // tab that has already come home sits with stale active state until the
   // next DOM tool judges it. Refusing the owned origin during that window broke
   // the actor's session on the one site it is definitionally allowed to use —
-  // and bought nothing, since a corridor never widened what "home" means.
+  // and bought nothing, since the sign-in state never widened what "home" means.
   if (sameOrigin(scope, ownedOrigin)) return true;
-  // Off-origin, corridor or not. An excursion is a DOM flow — typing into a form
-  // on the IdP's page — and the browser attaches that origin's own cookies
-  // regardless. Letting peerd's fetch also ride the user's session somewhere the
-  // actor does not own would hand the corridor a capability it was never for.
+  // Off-origin, excursion or not. The user and browser own the IdP step, and the
+  // browser attaches that origin's own cookies regardless. Letting peerd's fetch
+  // also ride the user's session somewhere the actor does not own would grant a
+  // capability the confirmed transition never included.
   return false;
 };

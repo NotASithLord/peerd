@@ -5,12 +5,13 @@ import { describe, it, expect } from '../../framework.js';
 import {
   makeJudgeLanding,
   makeSignInOriginAuthorizer,
+  makeSignInExcursionAuthorizer,
 } from '/peerd-runtime/actor/origin-lock.js';
 import { isKnownIdp, isKnownIdpHost } from '/peerd-runtime/actor/idp-registry.js';
 import { loginTool } from '/peerd-runtime/tools/defs/login.js';
 
 describe('identity-provider transit sign-in flow', () => {
-  it('binds the confirmed relying site, permits one IdP excursion, and returns home', async () => {
+  it('binds the relying site, parks at the exact confirmed IdP, and resumes at home', async () => {
     const state = /** @type {any} */ ({ mode: 'roaming' });
     let liveUrl = 'https://app.test/login';
     const stops = [];
@@ -21,6 +22,13 @@ describe('identity-provider transit sign-in flow', () => {
       saveState,
       isKnownIdp: isKnownIdpHost,
     });
+    const authorizeSignInExcursion = makeSignInExcursionAuthorizer({
+      getState: () => state,
+      getLiveLanding: async () => ({ status: 'live', url: liveUrl }),
+      saveState,
+      isKnownIdp: isKnownIdpHost,
+      now: () => 1_000,
+    });
     const executeScript = async (/** @type {any} */ options) => {
       if (options.func?.name === 'liveDocumentLocationInjected') {
         return [{
@@ -30,7 +38,10 @@ describe('identity-provider transit sign-in flow', () => {
       }
       if (options.func?.name === 'hasPasswordFieldInjected') return [{ result: { has: false } }];
       if (options.func?.name === 'loginTargetReader') {
-        return [{ result: { ok: true, descriptor: { tag: 'button', name: 'Sign in with Google' } } }];
+        return [{ result: { ok: true, descriptor: {
+          tag: 'button', name: 'Sign in with Google',
+          href: 'https://accounts.google.com/o/oauth2/v2/auth',
+        } } }];
       }
       return [{ result: null }];
     };
@@ -43,6 +54,7 @@ describe('identity-provider transit sign-in flow', () => {
       confirm: async () => 'yes_once',
       audit: async () => {},
       authorizeSignInOrigin,
+      authorizeSignInExcursion,
     }));
     expect(loginResult.ok).toBe(true);
     expect(state.mode).toBe('bound');
@@ -57,8 +69,9 @@ describe('identity-provider transit sign-in flow', () => {
       now: () => 1_000,
     });
     liveUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
-    expect((await judge(liveUrl))?.action).toBe('continue');
+    expect((await judge(liveUrl))?.action).toBe('wait');
     expect(state.excursion?.returnTo).toBe('https://app.test');
+    expect(state.excursion?.idpOrigin).toBe('https://accounts.google.com');
     liveUrl = 'https://app.test/callback';
     expect((await judge(liveUrl))?.action).toBe('continue');
     expect(state.excursion).toBe(null);

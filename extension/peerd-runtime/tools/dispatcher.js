@@ -15,6 +15,10 @@
 
 import { getTool } from './registry.js';
 import { GATES } from './gates.js';
+import {
+  AUTH_BOUNDARY_STOPPED_MESSAGE, AUTH_STATE_UNAVAILABLE_MESSAGE,
+  AUTH_WAITING_FOR_USER_CODE, AUTH_WAITING_FOR_USER_MESSAGE,
+} from '../actor/auth-wait.js';
 import { listHooks } from './hooks/registry.js';
 import { runPreToolUse, runPostToolUse } from './hooks/runner.js';
 import { ugcWriteConfirm } from '../actor/ugc-registry.js';
@@ -350,6 +354,52 @@ export const dispatchToolCall = async (call, ctx) => {
       }),
     };
   };
+  /** @returns {Promise<ToolResult | null>} */
+  const refuseInvalidLanding = async () => {
+    if (!ctx.revalidateActorLanding) return null;
+    let landing;
+    try {
+      landing = await ctx.revalidateActorLanding();
+    } catch (e) {
+      const reason = /** @type {{ message?: string }} */ (e)?.message ?? 'auth_state_unavailable';
+      gateResults.push({ name: 'live-landing', allowed: false, reason });
+      ctx.audit({ type: 'tool_blocked', details: { tool: call.name, gate: 'live-landing', reason } }).catch(() => {});
+      return {
+        ok: false,
+        error: 'auth_state_unavailable',
+        content: AUTH_STATE_UNAVAILABLE_MESSAGE,
+        endTurn: true,
+        meta: /** @type {DispatchMeta} */ ({
+          toolName: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
+          gates: gateResults, hooks: hookOutcomes, durationMs: 0,
+        }),
+      };
+    }
+    if (!landing || landing.action === 'continue') return null;
+    const waiting = landing.action === 'wait';
+    gateResults.push({ name: 'live-landing', allowed: false, reason: landing.reason });
+    ctx.audit({
+      type: 'tool_blocked',
+      details: { tool: call.name, gate: 'live-landing', reason: landing.reason },
+    }).catch(() => {});
+    return {
+      ok: false,
+      error: waiting ? AUTH_WAITING_FOR_USER_CODE : `origin_lock: ${landing.reason}`,
+      content: waiting
+        ? AUTH_WAITING_FOR_USER_MESSAGE
+        : AUTH_BOUNDARY_STOPPED_MESSAGE,
+      endTurn: true,
+      meta: /** @type {DispatchMeta} */ ({
+        toolName: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
+        gates: gateResults, hooks: hookOutcomes, durationMs: 0,
+      }),
+    };
+  };
+  // A web actor's tab may move while the model is choosing a tool. Recheck the
+  // live landing immediately before policy gates and any effect, across the
+  // whole actor surface. Persistence failures end the turn fail-closed.
+  const initialLandingRefusal = await refuseInvalidLanding();
+  if (initialLandingRefusal) return initialLandingRefusal;
   for (const { name, fn } of GATES) {
     let result;
     try {
@@ -367,9 +417,11 @@ export const dispatchToolCall = async (call, ctx) => {
         type: 'tool_blocked',
         details: { tool: call.name, gate: name, reason: result.reason },
       }).catch(() => {});
+      const authWait = name === 'auth-wait' && result.reason === AUTH_WAITING_FOR_USER_CODE;
       return {
         ok: false,
-        error: `gate_blocked:${name}:${result.reason}`,
+        error: authWait ? AUTH_WAITING_FOR_USER_CODE : `gate_blocked:${name}:${result.reason}`,
+        ...(authWait ? { content: AUTH_WAITING_FOR_USER_MESSAGE, endTurn: true } : {}),
         meta: /** @type {DispatchMeta} */ ({
           toolName: call.name,
           primitive: tool.primitive, dispatch: tool.dispatch,
@@ -634,6 +686,22 @@ export const dispatchToolCall = async (call, ctx) => {
     return abortedResult('before_execution');
   }
 
+  // Confirmation, hooks, and lifecycle persistence all yield. Recheck at the
+  // last possible point so a redirect during any of them cannot reach execute.
+  const finalLandingRefusal = await refuseInvalidLanding();
+  if (finalLandingRefusal) {
+    if (tracking && ctx.lifecycle?.settleTracking) {
+      await ctx.lifecycle.settleTracking(tracking, {
+        ok: false,
+        error: 'error' in finalLandingRefusal
+          ? finalLandingRefusal.error
+          : 'landing refused before execution',
+        aborted: true,
+      }).catch(() => null);
+    }
+    return finalLandingRefusal;
+  }
+
   // ---- Execute -----------------------------------------------------------
   // why: thread the call's tool_use_id into ctx so tools that stream
   // intermediate state back to the UI (currently vm_boot) can key their
@@ -814,6 +882,8 @@ export const dispatchToolCall = async (call, ctx) => {
     }
     const message = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
     const exposedError = projectExposedToolError(e);
+    const endTurn = /** @type {{ endTurn?: boolean }} */ (e)?.endTurn === true;
+    const endingContent = /** @type {{ content?: unknown }} */ (e)?.content;
     const browserPolicy = browserPolicyAuditDetails(exposedError);
     ctx.audit({
       type: 'tool_failed',
@@ -851,6 +921,12 @@ export const dispatchToolCall = async (call, ctx) => {
       ok: false,
       error: recoveryRewrite?.error ?? exposedError?.error ?? message,
       ...(exposedError && !recoveryRewrite ? exposedError : {}),
+      ...(endTurn ? {
+        content: typeof endingContent === 'string'
+          ? endingContent
+          : 'peerd stopped this helper because its authority state could not be saved safely.',
+        endTurn: true,
+      } : {}),
       meta: /** @type {DispatchMeta} */ ({
         toolName: call.name,
         primitive: tool.primitive, dispatch: tool.dispatch,

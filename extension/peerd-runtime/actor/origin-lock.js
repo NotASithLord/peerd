@@ -47,7 +47,7 @@
 // actor. If a future change makes this file forward actor-authored text into a
 // handoff, the segmentation becomes decorative and #251's whole point is lost.
 
-import { decideLanding, mayHoldCredentials } from './landing-rule.js';
+import { decideLanding, mayHoldCredentials, EXCURSION_MS, MAX_EXCURSIONS } from './landing-rule.js';
 import { classifyOriginSensitivity, sameOrigin } from './origin-sensitivity.js';
 import { normalizeApiOrigin } from './web-actor.js';
 
@@ -59,6 +59,7 @@ import { normalizeApiOrigin } from './web-actor.js';
  *   OBSERVED (a `site:<origin>` handle the orchestrator spelled)? Cleared the
  *   moment a real landing settles it. See decideLanding's provisional branch.
  * @property {import('./landing-rule.js').Excursion | null} [excursion]
+ * @property {import('./landing-rule.js').AuthGrant | null} [authGrant]
  * @property {number} [excursionsUsed]
  */
 
@@ -78,16 +79,19 @@ import { normalizeApiOrigin } from './web-actor.js';
  * @param {(origin: string) => boolean} [deps.isKnownIdp]
  * @param {() => ReadonlySet<string> | ReadonlyMap<string, any>} [deps.getLearned]
  * @param {(origin: string) => boolean} [deps.isIdp]
+ * @param {() => boolean} [deps.isCurrent]
  * @param {() => number} [deps.now]
  * @returns {(url: string) => Promise<{ action: string, reason: string } | null>}
  */
 export const makeJudgeLanding = (deps) => {
   const {
     getState, saveState, onStop,
-    isUgcZone, hasVaultSecret, isKnownIdp, getLearned, isIdp, now = Date.now,
+    isUgcZone, hasVaultSecret, isKnownIdp, getLearned, isIdp,
+    isCurrent = () => true, now = Date.now,
   } = deps;
 
   return async (url) => {
+    if (!isCurrent()) return null;
     const state = getState();
     // No state means the lock does not apply here. why not fail closed: this
     // function runs on EVERY DOM tool call including the orchestrator's own
@@ -107,12 +111,13 @@ export const makeJudgeLanding = (deps) => {
       landingIsSensitive: sensitivity.sensitive,
       landingIsIdp: isIdp?.(url) === true,
       excursion: state.excursion ?? null,
+      authGrant: state.authGrant ?? null,
       excursionsUsed: state.excursionsUsed ?? 0,
       provisional: state.provisional === true,
       now: now(),
     });
 
-    if (verdict.action === 'continue') {
+    if (verdict.action === 'continue' || verdict.action === 'wait') {
       // Persist BOTH excursion transitions and the first-landing adoption.
       //
       // why `excursion` is written unconditionally rather than only when
@@ -120,7 +125,10 @@ export const makeJudgeLanding = (deps) => {
       // excursion returns no field), so coalescing it against the stored value
       // would keep a spent corridor alive forever. Always assign.
       /** @type {Partial<ActorOriginState>} */
-      const patch = { excursion: verdict.excursion ?? null };
+      const patch = {
+        excursion: verdict.excursion ?? null,
+        authGrant: verdict.authGrant ?? null,
+      };
       // Adopt on a first landing (no owned origin yet) AND on the one other
       // case the rule returns adoptOrigin for: a PROVISIONAL origin settling
       // onto its own www-fold. Guarding on `!state.ownedOrigin` alone silently
@@ -133,14 +141,29 @@ export const makeJudgeLanding = (deps) => {
       // A NAMED landing settles the question of what this actor owns, so the
       // origin stops being a guess. Cleared on any continue past that point —
       // 'no page loaded' is not a landing and must not consume the allowance.
-      if (state.provisional && verdict.reason !== 'no page loaded') patch.provisional = false;
+      if (verdict.action === 'continue'
+        && state.provisional && verdict.reason !== 'no page loaded') patch.provisional = false;
       // Count an excursion when one OPENS — the lifetime cap is what stops the
       // corridor being refreshed by bouncing home, so it must not be reset by
       // the same discharge that clears the corridor.
-      if (verdict.excursion && !state.excursion) patch.excursionsUsed = (state.excursionsUsed ?? 0) + 1;
+      if (verdict.action === 'wait' && verdict.excursion && !state.excursion) {
+        patch.excursionsUsed = (state.excursionsUsed ?? 0) + 1;
+      }
+      if (!isCurrent()) return null;
       await saveState(patch);
+      if (!isCurrent()) return null;
       return verdict;
     }
+
+    // A terminal landing consumes any pending or active corridor state. Without
+    // this, recovering the actor after a wrong IdP or third-origin stop could
+    // replay the same durable grant.
+    if (state.authGrant != null || state.excursion != null) {
+      if (!isCurrent()) return null;
+      await saveState({ authGrant: null, excursion: null });
+    }
+
+    if (!isCurrent()) return null;
 
     // end | handoff — both stop this actor. The distinction rides in the event
     // so the orchestrator knows whether a successor is implied.
@@ -261,6 +284,87 @@ export const makeSignInOriginAuthorizer = ({
     try { await onBound?.(requested); } catch { /* audit is best-effort */ }
     return true;
   };
+
+/**
+ * Stamp the one-shot grant that lets a confirmed relying-site login enter one
+ * exact identity provider. Both origins are independently checked against live
+ * host state. The caller cannot grant from a stale tab or stale turn.
+ *
+ * @param {object} deps
+ * @param {() => ActorOriginState | null} deps.getState
+ * @param {() => Promise<{ status: 'none' | 'unreadable' } | { status: 'live', url: string }>} deps.getLiveLanding
+ * @param {(patch: Partial<ActorOriginState>) => void | Promise<void>} deps.saveState
+ * @param {(origin: string) => boolean} deps.isKnownIdp
+ * @param {() => boolean} [deps.isCurrent]
+ * @param {() => number} [deps.now]
+ * @returns {(idpOrigin: string, signal?: AbortSignal) => Promise<boolean>}
+ */
+export const makeSignInExcursionAuthorizer = ({
+  getState, getLiveLanding, saveState, isKnownIdp, isCurrent = () => true, now = Date.now,
+}) => async (idpOrigin, signal) => {
+  if (signal?.aborted || !isCurrent()) return false;
+  const idp = normalizeApiOrigin(idpOrigin);
+  if (!idp || !idp.startsWith('https://')) return false;
+  try { if (isKnownIdp(idp) !== true) return false; } catch { return false; }
+
+  const landing = await getLiveLanding()
+    .catch(() => ({ status: /** @type {'unreadable'} */ ('unreadable') }));
+  if (signal?.aborted || !isCurrent() || landing.status !== 'live') return false;
+
+  const state = getState();
+  if (state?.mode !== 'bound' || !state.ownedOrigin) return false;
+  const owned = normalizeApiOrigin(state.ownedOrigin);
+  if (!owned || !sameOrigin(landing.url, owned)) return false;
+  if (state.excursion != null || (state.excursionsUsed ?? 0) >= MAX_EXCURSIONS) return false;
+
+  const grant = { returnTo: owned, idpOrigin: idp, deadline: now() + EXCURSION_MS };
+  if (!Number.isFinite(grant.deadline) || signal?.aborted || !isCurrent()) return false;
+  await saveState({ authGrant: grant });
+  // A turn can become stale while the durable write is settling. Remove the
+  // grant before reporting failure so a later turn cannot inherit it.
+  if (signal?.aborted || !isCurrent()) {
+    await saveState({ authGrant: null });
+    return false;
+  }
+  return true;
+};
+
+/**
+ * Revoke only the still-pending grant for one exact provider. This is used when
+ * the verified login action fails after arming. It cannot clear an active
+ * excursion or another provider's grant.
+ *
+ * @param {object} deps
+ * @param {() => ActorOriginState | null} deps.getState
+ * @param {() => Promise<{ status: 'none' | 'unreadable' } | { status: 'live', url: string }>} deps.getLiveLanding
+ * @param {(patch: Partial<ActorOriginState>) => void | Promise<void>} deps.saveState
+ * @param {(origin: string) => boolean} deps.isKnownIdp
+ * @param {() => boolean} [deps.isCurrent]
+ * @returns {(idpOrigin: string, signal?: AbortSignal) => Promise<boolean>}
+ */
+export const makeSignInExcursionRevoker = ({
+  getState, getLiveLanding, saveState, isKnownIdp, isCurrent = () => true,
+}) => async (idpOrigin, signal) => {
+  if (signal?.aborted || !isCurrent()) return false;
+  const idp = normalizeApiOrigin(idpOrigin);
+  if (!idp || !idp.startsWith('https://')) return false;
+  try { if (isKnownIdp(idp) !== true) return false; } catch { return false; }
+
+  const landing = await getLiveLanding()
+    .catch(() => ({ status: /** @type {'unreadable'} */ ('unreadable') }));
+  if (signal?.aborted || !isCurrent() || landing.status !== 'live') return false;
+
+  const state = getState();
+  const grant = state?.authGrant;
+  if (state?.mode !== 'bound' || !state.ownedOrigin || !grant || state.excursion != null) return false;
+  if (!sameOrigin(landing.url, state.ownedOrigin)
+    || !sameOrigin(grant.returnTo, state.ownedOrigin)
+    || !sameOrigin(grant.idpOrigin, idp)) return false;
+
+  if (signal?.aborted || !isCurrent()) return false;
+  await saveState({ authGrant: null });
+  return true;
+};
 
 /**
  * May this web actor touch the durable SITE CLIENT keyed by `targetOrigin`?

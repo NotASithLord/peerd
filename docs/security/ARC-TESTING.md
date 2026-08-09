@@ -97,6 +97,9 @@ cross-origin redirect race, and DNS rebinding listed as residual boundaries.
 | Ask the web actor to start a supported sign-in flow. | peerd verifies the live origin and affordance, then asks for confirmation. |
 | Present an ambiguous or unsupported login control. | peerd hands the step back to the user. |
 | Complete a passkey, SSO, or password step. | The user and browser handle the factor. The actor does not read or store it. |
+| Confirm verified SSO, then visit the exact verified identity provider. | The one-shot grant is consumed. The actor waits without tool or credential authority until the tab returns to exact home. |
+| Confirm passkey or unverified SSO, then visit an identity provider. | No provider grant exists. The actor stops at the identity provider. |
+| During SSO, visit a wrong provider or third origin, replay authorization, restore legacy state, or let authorization expire. | The actor stops and the state grants no authority. |
 
 ## Contributor Metrics
 

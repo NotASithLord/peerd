@@ -24,6 +24,13 @@ import {
   classifyBrowserAutomationTarget,
   unverifiedBrowserTargetVerdict,
 } from '../browser-automation-policy.js';
+import { AUTH_WAITING_FOR_USER_CODE, AUTH_WAITING_FOR_USER_MESSAGE } from '../../actor/auth-wait.js';
+export { AUTH_WAITING_FOR_USER_CODE, AUTH_WAITING_FOR_USER_MESSAGE } from '../../actor/auth-wait.js';
+
+const authWaitError = () => Object.assign(
+  new Error(`${AUTH_WAITING_FOR_USER_CODE}: ${AUTH_WAITING_FOR_USER_MESSAGE}`),
+  { endTurn: true, outcomeKind: 'pre-effect-failure' },
+);
 //
 //   2. Functions that get INJECTED into the page via
 //      chrome.scripting.executeScript. Those functions:
@@ -288,6 +295,9 @@ export const resolveTargetTab = async (args, ctx, options = {}) => {
   // treats null as a refusal" was asserted here once and was not true.
   if (ctx.judgeLanding) {
     const verdict = await ctx.judgeLanding(tab.url);
+    if (verdict?.action === 'wait') {
+      throw authWaitError();
+    }
     if (verdict && verdict.action !== 'continue') return null;
   }
   // ONE live look at the document that is actually there — the answer to two
@@ -317,6 +327,9 @@ export const resolveTargetTab = async (args, ctx, options = {}) => {
     if (isDenylistedTab(liveUrl, ctx.denylist)) return null;
     if (ctx.judgeLanding) {
       const verdict = await ctx.judgeLanding(liveUrl);
+      if (verdict?.action === 'wait') {
+        throw authWaitError();
+      }
       if (verdict && verdict.action !== 'continue') return null;
     }
     // It moved somewhere allowed — so hand the caller where it IS. A copy, not a

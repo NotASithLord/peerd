@@ -47,7 +47,7 @@ describe('buildWorkerSource — bodyLine + mapWorkerError', () => {
     expect(lines[bodyLine + 1]).toBe('mean([A]);');
   });
 
-  test('mapWorkerError rewrites entry-blob frames to entryPath:userLine and leaves others alone', () => {
+  test('mapWorkerError rewrites entry and imported-module blob frames to source paths', () => {
     const blobUrl = 'blob:chrome-extension://abc/uuid-1';
     const raw = [
       'ReferenceError: nope is not defined',
@@ -55,10 +55,13 @@ describe('buildWorkerSource — bodyLine + mapWorkerError', () => {
       `    at ${blobUrl}:12:1`,                                 // preamble frame (before body) → untouched
       '    at blob:chrome-extension://abc/other-module:7:3',    // another module → untouched
     ].join('\n');
-    const out = mapWorkerError(raw, blobUrl, 213, 'notebook.js');
+    const out = mapWorkerError(raw, blobUrl, 213, 'notebook.js', new Map([
+      ['lib/failure.js', { blobUrl: 'blob:chrome-extension://abc/other-module' }],
+    ]));
     expect(out).toContain('at notebook.js:2:9');
     expect(out).toContain(`at ${blobUrl}:12:1`);
-    expect(out).toContain('at blob:chrome-extension://abc/other-module:7:3');
+    expect(out).toContain('at ./lib/failure.js:7:3');
+    expect(out).not.toContain('blob:chrome-extension://abc/other-module');
     expect(out).not.toContain(`${blobUrl}:214:9`);
   });
 

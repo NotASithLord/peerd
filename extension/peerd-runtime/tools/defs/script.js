@@ -15,6 +15,8 @@
 import { clamp } from '/shared/util.js';
 import {
   moduleImportPolicyMessage,
+  REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE,
+  REMOTE_MODULE_RESTRICTED_CODE,
 } from '/peerd-engine/index.js';
 import { JS_PITFALLS_NOTE, SCRIPT_BUILTINS_NOTE } from './code-style-note.js';
 import { oncePerSession } from './once-per-session.js';
@@ -41,9 +43,13 @@ const MAX_TIMEOUT_MS = 120_000;
  * @property {number} durationMs
  * @property {string} [error]
  * @property {string} [errorCode]
+ * @property {boolean} [endTurn]
+ * @property {string} [endTurnContent]
+ * @property {string} [endTurnOutcomeKind]
  * @property {Array<{ level: string, text: string }>} [consoleOutput]
  * @property {unknown} [value]
  * @property {boolean} [usedEgress]   the run called peerd.egress.fetch (job-runner)
+ * @property {boolean} [usedRemoteModules] the resolved graph included remote code
  * @property {boolean} [usedActors]   the run delegated via the actors client
  * @property {string[]} [actorDeliveryIds] durable mailbox correlations for
  *   actor replies consumed by this run; host-only, never part of formatted output
@@ -352,7 +358,9 @@ export const scriptTool = {
  * the security property depend on classifying every relay op forever.
  * @param {RunResult} r
  */
-export const runIsFenced = (r) => !!(r.usedEgress || r.usedActors || r.usedPage || r.usedWorkspace);
+export const runIsFenced = (r) => !!(
+  r.usedEgress || r.usedRemoteModules || r.usedActors || r.usedPage || r.usedWorkspace
+);
 
 /**
  * The fence origin label for a run — names every untrusted source the run
@@ -362,6 +370,7 @@ export const runIsFenced = (r) => !!(r.usedEgress || r.usedActors || r.usedPage 
 export const runOriginLabel = (r) => {
   const parts = [
     ...(r.usedEgress ? ['fetched web content'] : []),
+    ...(r.usedRemoteModules ? ['remote modules'] : []),
     ...(r.usedActors ? ['actor replies'] : []),
     ...(r.usedPage ? ['page content'] : []),
     ...(r.usedWorkspace ? ['workspace files'] : []),
@@ -443,6 +452,9 @@ export const formatRunResult = (code, r, valueSpill, serializedValue) => {
   // never be able to forge or suppress them; caller-computed values only).
   if (r.workspaceOverBudget) {
     lines.push('[WORKSPACE OVER BUDGET — writes were refused this run; delete files (await peerd.self.deleteFile(path) in a workspace run) to get back under the budget]');
+  }
+  if (r.usedRemoteModules) {
+    lines.push(`[${REMOTE_MODULE_RESTRICTED_CODE}] ${REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE}`);
   }
   if (valueSpill) {
     lines.push([

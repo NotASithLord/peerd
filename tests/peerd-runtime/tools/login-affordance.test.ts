@@ -65,13 +65,19 @@ describe('classifyLoginAffordance — SSO', () => {
       { tag: 'button', name: 'Sign in with Google', href: 'https://accounts.google.com/o/oauth2/v2/auth' },
       deps,
     );
-    expect(byHref).toMatchObject({ method: 'sso', supported: true, verified: true });
+    expect(byHref).toMatchObject({
+      method: 'sso', supported: true, verified: true,
+      idpOrigin: 'https://accounts.google.com',
+    });
     // form action to a known IdP → verified too
     const byForm = classifyLoginAffordance(
       { tag: 'input', type: 'submit', name: 'Continue', formAction: 'https://acme.okta.com/sso' },
       deps,
     );
-    expect(byForm).toMatchObject({ method: 'sso', supported: true, verified: true });
+    expect(byForm).toMatchObject({
+      method: 'sso', supported: true, verified: true,
+      idpOrigin: 'https://acme.okta.com',
+    });
     // NAME only, no destination to check → supported but NOT verified (assisted-manual)
     const byName = classifyLoginAffordance({ tag: 'button', name: 'Sign in with Google' }, deps);
     expect(byName).toMatchObject({ method: 'sso', supported: true, verified: false });

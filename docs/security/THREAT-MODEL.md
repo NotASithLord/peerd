@@ -210,19 +210,29 @@ Defenses (partial): there is no npm runtime inside the extension. Third-party co
 vendored in `vendor/` with a `SOURCE.txt`. The Moonshine voice model is SHA-384
 SRI-verified and refuses to load on a null SRI
 (`peerd-runtime/voice/model-store.js`). Store and web builds refuse direct
-remote JavaScript imports without requesting the module source. Preview literal
-static remote modules cross the audited web-fetch path, have source and graph
-caps, and may carry an optional SHA-256 pin. Dynamic imports are refused in
-every package. Remote modules run inside a sealed worker. The store build strips
+remote JavaScript imports without requesting the module source. On package
+targets where Preview enables literal static remote modules, they cross the
+audited web-fetch path, have source and graph
+caps, and may carry an optional SHA-256 pin. Any remote module marks the whole
+resolved graph as untrusted compute. Runtime network and file access, agents,
+model calls, browser and site clients, and dweb are disabled for that run. A
+remote module cannot import a local toolbox module. Generated worker shims and
+independent host relay checks enforce the same profile. Firefox links the
+authorized graph and realm seal in a disposable compiler Worker, then runs the
+result through a sandboxed opaque-origin host with no extension APIs, string
+compilation, or network. Stop terminates the compiler or code Worker and
+cancels the host fetch operation. Returned values, console output, and errors
+are fenced as untrusted.
+Pins verify exact bytes and improve reproducibility. They do not grant trust or
+authority. Dynamic imports are refused in every package. Remote modules run
+inside a sealed worker. The store build strips
 the `debugger` permission and the dweb module, and CI verifies zero dweb traces.
 Accepted residuals: the CheerpX WebVM streams its root filesystem image from a
 third-party host over WSS, which cannot be SRI-pinned. In Preview, an unpinned
-HTTPS module can change at its publisher's discretion and inherits the execution
-lane's capabilities. Visible Notebook results also lack remote-import provenance,
-so remote-controlled output is not fenced before the Notebook actor reads it.
+HTTPS module can change at its publisher's discretion.
 The separate Store risk where code is fetched as data and then executed through
 a local JavaScript or WebAssembly surface is tracked on the issue board.
-Proven by (partial): scenario 06 for sandbox confinement of whatever the VM runs.
+Proven by: scenario 06.
 
 ---
 
@@ -315,8 +325,15 @@ at an opaque origin (the manifest sandbox omits `allow-same-origin` and
 `allow-top-navigation`) with all `chrome.*` stripped, and its inlined worker source is
 escaped against a `</script>` breakout. The WebVM's only network path is an HTTP bridge
 that refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth
-field, and confirms body-bearing verbs.
+field, and confirms body-bearing verbs. If a resolved Notebook or Script graph
+includes remote code, the entire run uses the compute-only profile. The resolver
+blocks remote access to local toolbox modules. The worker and host both refuse
+every authority-bearing relay, and the tool boundary fences all remote-controlled
+output.
 Code: `engine-tabs/notebook-tab/notebook-neutralizers.js` (`applyRealmSeal`),
+`engine-tabs/notebook-tab/worker-source.js`,
+`engine-tabs/notebook-tab/notebook-tab.js`, `offscreen/job-runner.js`,
+`peerd-runtime/tools/defs/js-notebook.js`, `peerd-runtime/tools/defs/script.js`,
 `peerd-engine/app-compose.js`, `peerd-engine/vm-net/http-bridge.js`,
 `peerd-engine/module-resolver.js`, and the manifest sandbox CSP. Red-team: scenario 06,
 with the real-realm proof in
@@ -452,13 +469,13 @@ reads GROUND TRUTH off the page and runs a pure, deterministic classifier, so th
 method and provider the confirm names come from the page rather than a model argument
 that could spoof the consent; the provider shown is a CANONICAL single-word title-cased
 label, never the raw captured phrase. SSO for a provider outside the identity-provider
-corridor (github/gitlab/facebook/unknown) is refused GRACEFULLY — no click, no actor
-kill — and a password affordance is refused because Tier 0 holds no credentials.
+registry is refused without a click or actor stop. A password affordance is refused
+because Tier 0 holds no credentials.
 
 **The auto-click rule.** peerd AUTO-CLICKS a login only when it has (a) VERIFIED the
 destination is a known IdP (an href/formAction host that passes `isKnownIdp`), (b)
-pinned a STABLE `walkId` (a snapshot registry node the page cannot re-point — a raw
-selector or a CDP-only backend ref is NOT stable across the up-to-120s confirm), and
+pinned a STABLE `walkId` (a snapshot registry node the page cannot re-point; a raw
+selector or a CDP-only backend ref is not stable across confirmation), and
 (c) RE-VERIFIED, AFTER the consent, that the live origin is unchanged and a re-read via
 the SAME walkId re-classifies to the identical verdict (method/provider/verified) —
 aborting on any change (`login_origin_changed` / `login_affordance_changed` /
@@ -481,13 +498,24 @@ work and out of scope here. Residual, stated plainly: destination verification i
 BEST-EFFORT — it proves the element's declared navigation target (its href, or, for a
 SUBMIT control only, its form action) is a known IdP, but a script `onclick` can still do
 something other than that declared target. So an auto-click carries the residual that a
-verified-looking button runs a different handler; this is bounded by the origin lock
-(a cross-origin hop off the corridor ends the actor) and by the fact that peerd only
-auto-clicks — never fills a credential — so the worst case is a same-origin action on the
-origin the user already consented to interact with, not a credential leak.
+verified-looking button runs a different handler. This is bounded by the exact-origin
+grant and landing wait, and by the fact that peerd only auto-clicks and never fills a
+credential. The worst case is a same-origin action on the origin the user already
+consented to interact with, not a credential leak.
+
+**The identity-provider grant.** Confirmation alone does not give the actor general
+sign-in authority. Only confirmed SSO with a verified destination can stamp a durable,
+one-shot grant for that exact IdP origin. Unverified SSO and passkey flows do not stamp
+one. The grant is consumed when the tab first lands on that exact known IdP. The actor
+then waits and has no tool or credential authority there. It can continue on a
+later request only after the same tab returns to the exact relying-site origin. A wrong provider, third origin,
+expired or replayed authorization, malformed state, or legacy excursion state stops the
+actor. The grant and active excursion survive a service-worker restart without widening
+their authority.
 Code: `peerd-runtime/tools/defs/login.js`, `peerd-runtime/tools/login-affordance.js`,
-`peerd-runtime/tools/exposure.js`, `peerd-runtime/actor/idp-registry.js`. Red-team:
-scenario 11.
+`peerd-runtime/tools/exposure.js`, `peerd-runtime/actor/idp-registry.js`,
+`peerd-runtime/actor/origin-lock.js`, and `peerd-runtime/actor/landing-rule.js`.
+Red-team: scenarios 10 and 11.
 
 <a id="inv-15"></a>
 ### INV-15. A proof-of-possession credential cannot be exfiltrated
@@ -669,9 +697,12 @@ choose the origin that receives bound authority.
 A dedicated identity-provider origin is a third category: transit-only. It is
 sensitive for session and durable-client custody, but it cannot receive a
 roaming, numeric-tab, or standalone `site:` actor. A bound relying-party actor
-may enter it only through the existing opener-pinned, budgeted, time-limited
-sign-in excursion. This keeps real sign-in working without treating the user's
-identity provider as an ordinary destination.
+may enter it only after a confirmed verified SSO action creates a one-shot grant
+for that exact known IdP origin. Landing consumes the grant and parks the actor.
+While parked, the actor has no tool or credential authority at the IdP.
+Returning to the exact relying-site origin clears the excursion so a later request can continue.
+Any other origin or invalid durable state stops the actor. This keeps real sign-in
+working without treating the user's identity provider as an ordinary destination.
 
 The resolver classifies the same canonical origin it passes to the mint
 function. The mint function does not read the tab again or replace that origin.
@@ -914,12 +945,19 @@ evaluating peerd should know. Each cites where it lives in the code.
   the origin the probe REPORTS rather than to the caller's tab record, so a page that
   navigates mid-call cannot spend it on someone else (#278). Detecting credentials
   directly would need the `cookies` permission, which is not requested because it
-  would expose browser-wide credential state.
+  would expose browser-wide credential state. Learned signals are keyed by hostname,
+  not origin: scheme and port changes cannot route around a learned mark, and a mark
+  on a parent host also covers its descendants (#264). A mark learned on a child host
+  does not spread to its parent or siblings. Without cookie metadata peerd cannot know
+  whether that child set an authentication cookie with `Domain=` on a parent, and
+  spreading every child mark across a registrable site would let a hostile or
+  multi-tenant sibling cause persistent false handoffs. Bound helper authority and
+  the handoff target remain pinned to the exact live origin.
 - R16. The identity-provider list is the one place a bound actor may leave its origin,
   and it is deliberately short — a host qualifies only if signing in is essentially all
   it does. github.com, gitlab.com and facebook.com are excluded despite speaking OAuth,
-  because admitting them would hand a bound actor a budgeted corridor onto the whole
-  site. The cost is a real one: a bound actor sent through "sign in with GitHub" ENDS.
+  because admitting them would make the whole product origin eligible for a sign-in
+  grant. The cost is a real one: a bound actor sent through "sign in with GitHub" ENDS.
   That is the safe failure, but it is a failure, and whether it happens often enough to
   change the trade is a question for use rather than for this document.
   (`peerd-runtime/actor/idp-registry.js`.)
@@ -932,27 +970,22 @@ evaluating peerd should know. Each cites where it lives in the code.
   trust, so a hijacked page gets one attempt at persuading it to open a helper somewhere
   the user never asked about. (`peerd-runtime/actor/origin-lock-report.js`.)
 
-- R19. Learning is unauthenticated, page-controlled input (#268). A hostile page that
-  renders one password field classifies ITSELF as credentialed, and the landing rule
-  then hands off to a successor bound to the attacker's own origin. R17 already records
-  that the attacker names the successor; what this adds is the CAPABILITY difference —
-  the successor is bound, so it may open an auth excursion onto a real IdP host, which
-  the roaming actor it replaced could not. Two things bound it today: a signal is
-  credited to the origin the probe reports rather than to the caller's tab record
-  (#278), so a page can only mark the document it controls; and Settings → Learned
-  sites shows what was inferred and removes it (#262). Moving the probe to the DOM
-  chokepoint (#267) deliberately widened the trigger from one tool to all of them,
-  which widens this too — the trade is stated in that commit: unfixed #267 let a
-  hijacked actor KEEP authority on a real credentialed site, while this direction costs
-  availability and fills the learned cap faster.
-- R20. Type-the-scrape-into-a-form exfil is invisible to the tripwire (#269). The
-  scanner inspects tool ARGUMENTS for URL-shaped payloads. Typing a scraped blob into a
-  form field and clicking submit moves the same bytes with no URL in any argument: the
-  blob is seen in the `text` slot and discarded because it does not parse as a URL, and
-  the request that actually carries it — the form submission — is a `click`, whose args
-  are a ref or a selector. The module header already puts page-driven beacons out of
-  scope; this path is tool-driven, so it is inside the stated scope and is a gap rather
-  than an exclusion (`tools/egress-heuristics.js`).
+- R20. Direct native cross-origin form actions are blocked before activation (#269).
+  The URL tripwire cannot see a form destination or its live values in `click` or
+  `type` arguments, so the injected click and type bodies resolve the native form action
+  on the exact document and element immediately before the effect. A cross-origin action
+  is refused before click activation, value mutation, or submit events. The fixed result
+  says that nothing was submitted and directs the user to review and submit the form
+  manually. Verified login is the narrow exception because its exact identity-provider
+  destination already has fresh user consent and a one-shot excursion grant
+  (`tools/defs/click.js`, `tools/defs/type.js`, `tools/browser-automation-policy.js`).
+
+  The boundary is intentionally limited to the live native action that peerd can resolve
+  before it fires page events. Page-script beacons remain outside the tool action path.
+  A handler can change a same-origin action after an input or click event, submit through
+  JavaScript, or send data without using the form action. A same-origin endpoint can also
+  relay the body or redirect after it receives the request. Those page-driven channels
+  remain residuals. Red-team: scenario 09.
 - R21. `fetch_url` headers and body are structurally invisible to the same scanner
   (#270). The tripwire was widened to cover the web actor's own fetch, but it reads
   only the URL-shaped fields; header values and any request body are never examined,
@@ -961,14 +994,6 @@ evaluating peerd should know. Each cites where it lives in the code.
   and passes the rest through verbatim. The scanner is already a pure function over
   strings, so the cheapest close is to run it over those values too — it is listed here
   because it is not done, not because it is hard.
-- R22. The auth excursion is scoped to TIME, not to the sign-in it was opened for
-  (#273). Inside a live excursion the only refusals are the deadline, a sensitive
-  landing that is not the opener, and budget exhaustion — and budget is spent on an
-  ORIGIN CHANGE, so one hop onto an attacker origin buys read/click/type across every
-  path of it for the rest of the window. The opener is recorded but only used to exempt
-  itself; the return-to is never enforced. Whether an excursion should be bounded by
-  the flow that opened it rather than by a clock is the open question
-  (`actor/landing-rule.js`).
 - R23. The password probe is top-frame and light-DOM only (#277). A site whose sign-in
   lives in an iframe — an embedded IdP or payment widget, or a plain `<iframe
   src=/login>` — or inside a shadow root is invisible to the learned signal

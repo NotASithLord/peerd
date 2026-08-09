@@ -149,7 +149,7 @@ The Store Script and Notebook resolver refuses direct HTTP and HTTPS JavaScript
 imports without requesting the module source. The package generates
 `REMOTE_MODULE_IMPORTS_ENABLED = false`, both hosts consume it, and the
 resolver requires an explicit true value before it can use the audited fetch
-relay. Preview keeps that import path.
+relay. Supported Preview targets keep that import path.
 
 This does not settle every remote code question. A run can still fetch bytes as
 data and later use local JavaScript or WebAssembly execution surfaces. The open

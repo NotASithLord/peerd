@@ -15,33 +15,20 @@
 // THREE PROPERTIES THIS FILE EXISTS TO GUARANTEE, each of which was a real hole
 // in the design before it had a home:
 //
-//   1. THE READ-MODIFY-WRITE IS ATOMIC, and it is worth being precise about WHY,
-//      because an earlier version of this comment credited the wrong mechanism
-//      and a reviewer relying on it would have drawn the wrong boundary.
-//
-//      The tool loop runs READ-class calls CONCURRENTLY (loop/tool-batch.js
-//      partitionToolBatch) and every DOM tool judges its landing, so two judges
-//      can be in flight for one actor. They cannot interleave because
-//      `makeJudgeLanding` has NO await between `getState()` and `saveState()`,
-//      and `write()` below does its compare-and-assign synchronously. Single-
-//      threaded JS does the rest. It is NOT the promise chain that protects
-//      this — the chain orders the DURABLE writes only.
-//
-//      *** DO NOT INTRODUCE AN AWAIT into that span. *** Making the classifier
-//      async, or awaiting an audit append inside the judge, would let two
-//      concurrent judges both read `excursionsUsed: 0` and both store 1 —
-//      doubling MAX_EXCURSIONS, whose entire job is to be un-refreshable.
+//   1. AUTHORITY TRANSITIONS COMMIT DURABLY BEFORE THEY REACH THE CACHE. Writes
+//      for one actor share a promise lane, so concurrent tool calls cannot both
+//      spend the same allowance. The operation re-reads current cache state in
+//      that lane, writes the full next snapshot, then publishes its patch.
+//      Failed persistence therefore cannot leave usable in-memory authority.
 //
 //      The chain is keyed PER SESSION, not per store. A global chain would make
-//      every actor's `judgeLanding` await every other actor's IDB write — and
-//      the injected save is `sessions.update`, which re-reads the whole session
-//      — so one slow save in one chat would stall the DOM tools of every web
-//      actor in every other chat.
+//      every actor's `judgeLanding` await every other actor's IDB write, so one
+//      slow save in one chat would stall unrelated actors.
 //
-//   2. THE CACHE IS UPDATED BEFORE THE AWAIT. The shell's next sync `getState`
-//      may happen before the storage write resolves. Applying the patch to the
-//      cached object first means the in-heap truth is never behind the decision
-//      that produced it; the durable write is catch-up, not the source.
+//   2. CALLERS SEE PERSISTENCE FAILURE. The internal lane catches a rejection
+//      only so later writes can continue. The individual write still rejects,
+//      which makes the policy shell fail closed instead of reporting authority
+//      that was never committed.
 //
 //   3. NO-OP WRITES ARE ELIDED. The overwhelmingly common verdict is "continue,
 //      nothing changed", whose patch is `{ excursion: null }` over a state that
@@ -69,9 +56,19 @@
 const sameExcursion = (a, b) => {
   if (!a || !b) return !a === !b;
   return a.returnTo === b.returnTo
-    && a.openedAt === b.openedAt
-    && a.lastLanding === b.lastLanding
-    && a.budget === b.budget
+    && a.idpOrigin === b.idpOrigin
+    && a.deadline === b.deadline
+    && a.authorized === b.authorized;
+};
+
+/**
+ * @param {import('./landing-rule.js').AuthGrant | null | undefined} a
+ * @param {import('./landing-rule.js').AuthGrant | null | undefined} b
+ */
+const sameAuthGrant = (a, b) => {
+  if (!a || !b) return !a === !b;
+  return a.returnTo === b.returnTo
+    && a.idpOrigin === b.idpOrigin
     && a.deadline === b.deadline;
 };
 
@@ -84,6 +81,12 @@ const changesSomething = (state, patch) => Object.entries(patch).some(([key, nex
   if (key === 'excursion') {
     return !sameExcursion(
       /** @type {any} */ (state).excursion,
+      /** @type {any} */ (next),
+    );
+  }
+  if (key === 'authGrant') {
+    return !sameAuthGrant(
+      /** @type {any} */ (state).authGrant,
       /** @type {any} */ (next),
     );
   }
@@ -108,6 +111,8 @@ export const makeOriginStateStore = ({ save, onError }) => {
   const cache = new Map();
   /** Per-SESSION durable-write chains — see property 1. @type {Map<string, Promise<unknown>>} */
   const chains = new Map();
+  /** Per-session policy lanes. Decisions and their writes must be one operation. @type {Map<string, Promise<unknown>>} */
+  const transitions = new Map();
 
   const report = (/** @type {string} */ message, /** @type {unknown} */ error) => {
     if (onError) onError(message, error);
@@ -167,7 +172,9 @@ export const makeOriginStateStore = ({ save, onError }) => {
   const read = (sessionId) => cache.get(sessionId) ?? null;
 
   /**
-   * Apply a patch. Cache first (property 2), durable second (properties 1+3).
+   * Apply a patch in the actor's durable lane, then publish it to the heap.
+   * Authority must never become usable before its durable write commits, and
+   * a failed consume/clear must leave the old restrictive state in memory.
    *
    * @param {string} sessionId
    * @param {Partial<ActorOriginState>} patch
@@ -179,25 +186,54 @@ export const makeOriginStateStore = ({ save, onError }) => {
     // state to merge into would invent one. Drop it.
     if (!state) return Promise.resolve();
     if (!changesSomething(state, patch)) return Promise.resolve();
-    Object.assign(state, patch);
-    const snapshot = { ...state };
-    // why the snapshot and not `state`: the chain runs later, by which time a
-    // subsequent verdict may have mutated the live object. Persisting the value
-    // as it was AT THIS VERDICT keeps the durable record a sequence of real
-    // states rather than a smear of two.
-    const next = (chains.get(sessionId) ?? Promise.resolve())
-      .then(() => save(sessionId, snapshot))
-      // Caught HERE so one actor's storage failure cannot poison its own next
-      // write, let alone anyone else's.
-      .catch((e) => report('state save failed — this actor is heap-only until the next write', e));
-    chains.set(sessionId, next);
-    return next.then(() => undefined);
+    const operation = (chains.get(sessionId) ?? Promise.resolve()).then(async () => {
+      const current = cache.get(sessionId);
+      if (!current || !changesSomething(current, patch)) return;
+      const snapshot = { ...current, ...patch };
+      await save(sessionId, snapshot);
+      Object.assign(current, patch);
+    });
+    // Keep the internal lane recoverable, but return the original operation so
+    // security callers fail closed instead of acting on a state that did not
+    // persist. A later write still gets a clean predecessor.
+    const recovered = operation.catch((e) => {
+      report('state save failed; the authority transition was not applied', e);
+    });
+    chains.set(sessionId, recovered);
+    return operation.then(() => undefined).catch((cause) => {
+      const error = Object.assign(new Error('origin_state_persistence_failed'), {
+        cause,
+        endTurn: true,
+        content: "peerd could not safely save this helper's browser authority, so it stopped. Review the open tab, then tell peerd what to do next.",
+      });
+      throw error;
+    });
+  };
+
+  /**
+   * Serialize an authority decision together with every durable write it makes.
+   * Serializing writes alone is insufficient: a second caller could decide from
+   * a grant that the first caller has committed as spent, then queue a stale
+   * patch that resurrects it. All production origin-lock entry points use this
+   * lane, so each decision reads the state left by its predecessor.
+   *
+   * @template T
+   * @param {string} sessionId
+   * @param {() => Promise<T> | T} operation
+   * @returns {Promise<T>}
+   */
+  const serialize = (sessionId, operation) => {
+    const current = transitions.get(sessionId) ?? Promise.resolve();
+    const next = current.then(operation);
+    transitions.set(sessionId, next.catch(() => {}));
+    return next;
   };
 
   /** Drop an actor's cached state (its session vanished). */
   const forget = (/** @type {string} */ sessionId) => {
     cache.delete(sessionId);
     chains.delete(sessionId);
+    transitions.delete(sessionId);
   };
 
   /** Test seam: has anything been hydrated for this actor? */
@@ -206,5 +242,5 @@ export const makeOriginStateStore = ({ save, onError }) => {
   /** Test seam: await every queued durable write, across all sessions. */
   const settled = () => Promise.all([...chains.values()]).then(() => undefined, () => undefined);
 
-  return Object.freeze({ hydrate, read, write, forget, isHydrated, settled });
+  return Object.freeze({ hydrate, read, write, serialize, forget, isHydrated, settled });
 };

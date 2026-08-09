@@ -22,6 +22,21 @@ export const makeEngineRoutes = (deps) => {
     listOffscreenContexts, scriptRuns, isOffscreenSender,
   } = deps;
 
+  /** @type {Map<string, AbortController>} */
+  const notebookFetchControllers = new Map();
+  /** @param {unknown} abortToken @param {unknown} notebookId @param {any} sender */
+  const notebookFetchKey = (abortToken, notebookId, sender) => {
+    if (typeof abortToken !== 'string' || abortToken.length > 128
+      || typeof notebookId !== 'string' || notebookId.length > 128) return null;
+    const notebookRoot = browser.runtime.getURL('engine-tabs/notebook-tab/');
+    const senderUrl = sender?.url ?? sender?.tab?.url;
+    if (!senderUrl?.startsWith(notebookRoot)) return null;
+    try {
+      if (new URL(senderUrl).hash.slice(1).split(/[?&]/)[0] !== notebookId) return null;
+    } catch { return null; }
+    return `${notebookId}:${abortToken}`;
+  };
+
   return {
     // VM-originated HTTP egress. The VM tab's HTTP-marker dispatcher
     // calls this when it sees a wrapper script's request marker. webFetch
@@ -33,7 +48,7 @@ export const makeEngineRoutes = (deps) => {
     // an IO-injected factory (vm-net/vm-http-fetch.js) so it's bun-testable — it
     // layers the revalidating IDB GET cache + host-bound git-auth + body cap +
     // chunked base64 on top of webFetch's denylist/SSRF/audit chokepoint.
-    'sw/web-fetch': async ({ url, method, headers, body, gitAuth, noCache, extract, runId, ownerSessionId, deadlineAt }, sender = undefined) => {
+    'sw/web-fetch': async ({ url, method, headers, body, gitAuth, noCache, extract, runId, ownerSessionId, deadlineAt, abortToken, notebookId }, sender = undefined) => {
       if (typeof url !== 'string' || url.length === 0) {
         return { ok: false, error: 'url-required' };
       }
@@ -45,6 +60,7 @@ export const makeEngineRoutes = (deps) => {
       let onAbort = null;
       /** @type {ReturnType<typeof setTimeout> | null} */
       let deadlineTimer = null;
+      const notebookKey = notebookFetchKey(abortToken, notebookId, sender);
       const carriesRun = runId !== undefined || ownerSessionId !== undefined;
       if (carriesRun) {
         if (typeof runId !== 'string' || typeof ownerSessionId !== 'string'
@@ -59,6 +75,17 @@ export const makeEngineRoutes = (deps) => {
         runController = new AbortController();
         onAbort = () => runController?.abort();
         sourceSignal?.addEventListener('abort', onAbort, { once: true });
+        if (typeof deadlineAt === 'number' && Number.isFinite(deadlineAt)) {
+          const remaining = deadlineAt - Date.now();
+          if (remaining <= 0) runController.abort();
+          else deadlineTimer = setTimeout(() => runController?.abort(), remaining);
+        }
+      } else if (notebookKey) {
+        if (notebookFetchControllers.has(notebookKey)) {
+          return { ok: false, error: 'duplicate_notebook_fetch_token' };
+        }
+        runController = new AbortController();
+        notebookFetchControllers.set(notebookKey, runController);
         if (typeof deadlineAt === 'number' && Number.isFinite(deadlineAt)) {
           const remaining = deadlineAt - Date.now();
           if (remaining <= 0) runController.abort();
@@ -87,7 +114,16 @@ export const makeEngineRoutes = (deps) => {
       } finally {
         if (deadlineTimer) clearTimeout(deadlineTimer);
         if (sourceSignal && onAbort) sourceSignal.removeEventListener('abort', onAbort);
+        if (notebookKey && notebookFetchControllers.get(notebookKey) === runController) {
+          notebookFetchControllers.delete(notebookKey);
+        }
       }
+    },
+    'sw/web-fetch-abort': async ({ abortToken, notebookId }, sender = undefined) => {
+      const key = notebookFetchKey(abortToken, notebookId, sender);
+      const controller = key ? notebookFetchControllers.get(key) : null;
+      controller?.abort();
+      return { ok: true, aborted: controller != null };
     },
 
     // --- App metadata fetch -----------------------------------------------

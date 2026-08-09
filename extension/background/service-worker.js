@@ -140,6 +140,10 @@ import {
   createSessionStore,
   renderSystemPrompt,
   runUserTurn,
+  learnedOriginCovers,
+  AUTH_BOUNDARY_STOPPED_MESSAGE,
+  AUTH_STATE_UNAVAILABLE_MESSAGE,
+  AUTH_WAITING_FOR_USER_MESSAGE,
   // auto-resume: detect a turn the SW reclaimed mid-flight + the synthetic
   // nudge that drives the continuation (maybeAutoResume, below).
   detectInterruptedTurn,
@@ -336,7 +340,7 @@ import {
   // live — the state store, the judge, the synchronous credential-scope
   // narrowing, and the report a stop turns into.
   makeOriginStateStore, makeLearnedOrigins, makeJudgeLanding, makeCredentialScope,
-  makeSignInOriginAuthorizer,
+  makeSignInOriginAuthorizer, makeSignInExcursionAuthorizer, makeSignInExcursionRevoker,
   makeSiteClientOriginGuard, makeSiteClientOriginAuthorizer,
   makeFixedSiteClientOriginGuard, authorizeSiteClientRelayOrigin,
   hasDurableSiteClientState,
@@ -1215,7 +1219,7 @@ const drivenTabIds = () => {
 };
 
 // The IdP registry as bare domains for the allow rule — derived NEXT TO the
-// registry (knownIdpDomains) so a registry edit moves the excursion rule and
+// registry (knownIdpDomains) so a registry edit moves the exact grant rule and
 // this carve-out together. Computed once; the registry is a frozen constant.
 const idpExemptDomains = knownIdpDomains();
 const dnrResourceTypes = /** @type {any} */ (browser.runtime.getManifest())
@@ -1681,18 +1685,18 @@ const originStates = makeOriginStateStore({
 const learnedOrigins = makeLearnedOrigins({
   load: async () => /** @type {any} */ (await kv.get('learnedOrigins.v1')),
   save: async (all) => { await kv.set('learnedOrigins.v1', all); },
-  // Audit the FIRST time an origin is learned. why: this list silently changes
+  // Audit the FIRST time a host is learned. why: this list silently changes
   // what peerd will and won't let a helper do, so a user asking "why did it
   // refuse to open that site" deserves a record naming the signal and the moment.
-  onLearn: (origin, reason) => {
-    auditLog.append({ type: 'origin_learned_sensitive', details: { origin, reason } }).catch(() => {});
+  onLearn: (host, reason) => {
+    auditLog.append({ type: 'origin_learned_sensitive', details: { host, reason } }).catch(() => {});
   },
   // The inverse, from Settings. Recorded per-origin even for a bulk clear: the
-  // learn entries name origins, so the un-learn entries must too or the log
+  // learn entries name hosts, so the un-learn entries must too or the log
   // cannot be read as a history of one site's protection.
-  onForget: (origins) => {
-    for (const origin of origins) {
-      auditLog.append({ type: 'origin_unlearned_sensitive', details: { origin } }).catch(() => {});
+  onForget: (hosts) => {
+    for (const host of hosts) {
+      auditLog.append({ type: 'origin_unlearned_sensitive', details: { host } }).catch(() => {});
     }
   },
   onError: (message, error) => console.warn('[learned-origins]', message, error),
@@ -1728,7 +1732,7 @@ const noteLearnedOrigin = (rawOrigin, reason) => {
 const sensitivitySignals = () => ({
   // Dedicated identity providers are transit-only. They are sensitive for
   // credential and custody decisions, while landing-rule.js separately keeps
-  // the bounded relying-party sign-in corridor working.
+  // the confirmed relying-party sign-in transition working.
   isKnownIdp: isKnownIdpHost,
   // SEED 1 — #242's curated UGC registry, asked at ORIGIN level (isUgcHost, not
   // classifyUrl). #242 is path-scoped because it gates one WRITE on a page
@@ -1791,7 +1795,7 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
   // the dispatch it will judge was authorized.
   const myTurn = landingTurnTokens.get(actorSessionId) ?? null;
   const isCurrentTurn = () => myTurn === null || landingTurnTokens.get(actorSessionId) === myTurn;
-  const judgeLanding = makeJudgeLanding({
+  const judgeLandingUnserialized = makeJudgeLanding({
       getState,
       saveState: (patch) => originStates.write(actorSessionId, patch),
       onStop: (event) => {
@@ -1846,15 +1850,14 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
               dropped = true;
             }
             if (dropped) persistSiteActors();
-            originStates.forget(actorSessionId);
+            // Keep the stopped state as a tombstone for calls already queued
+            // in this turn. Null means unlocked, so forgetting it here would
+            // let those calls proceed after the binding was removed.
           }
         }
         auditLog.append({
           type: 'actor_origin_stop',
           sessionId: actorSessionId,
-          // The audit trail keeps the FULL landing url (unlike the report): it is
-          // local, append-only, and read by a human investigating — exactly the
-          // place the detail belongs, and the one place it can't be read by a model.
           details: {
             action: event.action,
             from: event.from,
@@ -1884,8 +1887,46 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
         }
       },
       isIdp: isKnownIdp,
+      isCurrent: isCurrentTurn,
       ...sensitivitySignals(),
     });
+  const judgeLanding = (/** @type {string} */ url) => originStates.serialize(
+    actorSessionId,
+    () => {
+      if (!isCurrentTurn()) {
+        const error = new Error('stale_actor_turn');
+        error.name = 'AbortError';
+        throw error;
+      }
+      return judgeLandingUnserialized(url);
+    },
+  );
+  const authorizeSignInOriginUnserialized = makeSignInOriginAuthorizer({
+    getState,
+    getLiveLanding: () => liveSiteClientLandingFor(actorSessionId),
+    saveState: (patch) => originStates.write(actorSessionId, patch),
+    isKnownIdp: isKnownIdpHost,
+    isCurrent: isCurrentTurn,
+    onBound: (origin) => auditLog.append({
+      type: 'actor_origin_bound_for_sign_in',
+      sessionId: actorSessionId,
+      details: { origin },
+    }).then(() => undefined),
+  });
+  const authorizeSignInExcursionUnserialized = makeSignInExcursionAuthorizer({
+    getState,
+    getLiveLanding: () => liveSiteClientLandingFor(actorSessionId),
+    saveState: (patch) => originStates.write(actorSessionId, patch),
+    isKnownIdp,
+    isCurrent: isCurrentTurn,
+  });
+  const revokeSignInExcursionUnserialized = makeSignInExcursionRevoker({
+    getState,
+    getLiveLanding: () => liveSiteClientLandingFor(actorSessionId),
+    saveState: (patch) => originStates.write(actorSessionId, patch),
+    isKnownIdp,
+    isCurrent: isCurrentTurn,
+  });
   return {
     getState,
     judgeLanding,
@@ -1897,18 +1938,33 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
         getState, getLiveLanding, judgeLanding,
         ...sensitivitySignals(),
       }),
-    authorizeSignInOrigin: makeSignInOriginAuthorizer({
-      getState,
-      getLiveLanding: () => liveSiteClientLandingFor(actorSessionId),
-      saveState: (patch) => originStates.write(actorSessionId, patch),
-      isKnownIdp: isKnownIdpHost,
-      isCurrent: isCurrentTurn,
-      onBound: (origin) => auditLog.append({
-        type: 'actor_origin_bound_for_sign_in',
-        sessionId: actorSessionId,
-        details: { origin },
-      }).then(() => undefined),
-    }),
+    authorizeSignInOrigin: (/** @type {string} */ origin, /** @type {AbortSignal | undefined} */ signal) => originStates.serialize(
+      actorSessionId,
+      () => authorizeSignInOriginUnserialized(origin, signal),
+    ),
+    authorizeSignInExcursion: (/** @type {string} */ origin, /** @type {AbortSignal | undefined} */ signal) => originStates.serialize(
+      actorSessionId,
+      () => authorizeSignInExcursionUnserialized(origin, signal),
+    ),
+    revokeSignInExcursion: (/** @type {string} */ origin, /** @type {AbortSignal | undefined} */ signal) => originStates.serialize(
+      actorSessionId,
+      () => revokeSignInExcursionUnserialized(origin, signal),
+    ),
+    terminateUnreadableSignIn: () => originStates.serialize(
+      actorSessionId,
+      () => {
+        if (!isCurrentTurn()) {
+          const error = new Error('stale_actor_turn');
+          error.name = 'AbortError';
+          throw error;
+        }
+        // A bound actor with active sign-in state may not resume when its tab
+        // disappears or becomes unreadable. This reserved synthetic landing is
+        // always outside the approved corridor, so the normal terminal path
+        // clears the grant, records the stop, and ends the turn.
+        return judgeLandingUnserialized('https://unreadable.invalid/');
+      },
+    ),
   };
 };
 
@@ -2568,6 +2624,33 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       const lock = originLockFor(sessionId);
       resCtx.judgeLanding = lock?.judgeLanding;
       resCtx.authorizeSignInOrigin = lock?.authorizeSignInOrigin;
+      resCtx.authorizeSignInExcursion = lock?.authorizeSignInExcursion;
+      resCtx.revokeSignInExcursion = lock?.revokeSignInExcursion;
+      // Revalidate the owned tab at execution time for EVERY actor tool, not
+      // only DOM tools. A tab can move after context construction and before a
+      // model call finishes. Without this closure, fetch/cache/site-client and
+      // delegation tools would run against the stale home snapshot. Missing or
+      // unreadable tabs terminate active auth state instead of parking forever.
+      const revalidateActorLanding = lock
+        ? async () => {
+            const live = await liveSiteClientLandingFor(sessionId);
+            if (live.status === 'live') return lock.judgeLanding(live.url);
+            const state = originStates.read(sessionId);
+            if (state?.authGrant != null || state?.excursion != null) {
+              return lock.terminateUnreadableSignIn();
+            }
+            return null;
+          }
+        : undefined;
+      resCtx.revalidateActorLanding = revalidateActorLanding;
+      if (revalidateActorLanding) {
+        try {
+          const authVerdict = await revalidateActorLanding();
+          resCtx.authWaitingForUser = authVerdict?.action === 'wait';
+        } catch {
+          resCtx.authWaitingForUser = true;
+        }
+      }
       // The sync gate is an early state-only refusal. The execute-time check is
       // async and re-reads + judges the ACTUAL owned tab after hooks have
       // rewritten args. A missing durable state must not be hydrated into
@@ -6108,6 +6191,27 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
   catch (e) { console.warn('[actor] engine prewalk reconcile failed', e); }
   const { controller, release } = turnLease ?? turnSlots.claim(actorSessionId);
   try {
+    let preflightReply;
+    if (kind === 'web' && rec.backing !== 'api') {
+      originStates.hydrate(actorSessionId, rec.originState);
+      const lock = originLockFor(actorSessionId);
+      try {
+        const live = await liveSiteClientLandingFor(actorSessionId, actorTabId);
+        const state = originStates.read(actorSessionId);
+        const verdict = live.status === 'live'
+          ? await lock?.judgeLanding(live.url)
+          : (state?.authGrant != null || state?.excursion != null)
+            ? await lock?.terminateUnreadableSignIn()
+            : null;
+        if (verdict?.action === 'wait') preflightReply = AUTH_WAITING_FOR_USER_MESSAGE;
+        else if (verdict && verdict.action !== 'continue') {
+          preflightReply = AUTH_BOUNDARY_STOPPED_MESSAGE;
+        }
+      } catch (e) {
+        if ((/** @type {{ name?: string }} */ (e))?.name === 'AbortError') throw e;
+        preflightReply = AUTH_STATE_UNAVAILABLE_MESSAGE;
+      }
+    }
     // Bound-actor prompt contract: temporal grounding + any /system override
     // (rec.customSystemPrompt). Actors get no memory/skills block. Absolute-time
     // temporal block (an actor has no prev-turn gap).
@@ -6227,6 +6331,7 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
       // Phase 3 web/API parity: oneShot loop mode + the self-fence provenance.
       oneShot: oneShot === true, actorType: kind, backing: rec.backing, tabOrigin, origin: apiOrigin,
       ...(actorSurface ? { actorSurface } : {}),
+      ...(preflightReply ? { preflightReply } : {}),
       inbound: inbound === true,
     }, { signal: controller.signal, onEvent });
     if (!(r.ok || r.started)) {
@@ -6509,11 +6614,11 @@ const actorMessaging = makeActorMessaging({
     actorSessionId, message, actorTabId, instanceId, kind, correlationId,
     parentToolUseId, parentSessionId, rootSessionId, name, oneShot, turnLease,
   }) => {
-    // Advance the origin-lock epoch before ANY await. The claimed actor lease
-    // already belongs to this turn; a delayed judge from the previous turn must
-    // become stale before site-client/session/contributor storage can yield.
+    // Invalidate old judges synchronously, then wait for their serialized
+    // transitions to drain before this turn builds a tool context.
     landingStopReports.delete(actorSessionId);
     beginLandingTurn(actorSessionId);
+    await originStates.serialize(actorSessionId, () => undefined);
     // DESIGN-19 mint-time injection: if this web/API actor's origin has a stored
     // site client, prepend its dossier — the tool-authored staleness header
     // OUTSIDE the fence, the dossier body wrapUntrusted-fenced (every byte is
@@ -7193,7 +7298,8 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     const siteActorSessionId = (origin && chatId) ? siteActorBindings.resolve(chatId, origin) : null;
     return {
       ok: true,
-      learned: origin ? learnedOrigins.snapshot().has(origin) : false,
+      learned: origin ? [...learnedOrigins.snapshot().keys()]
+        .some((host) => learnedOriginCovers(host, origin)) : false,
       keyed: origin ? keyedOrigins.has(origin) : false,
       ownedTabId: actorSessionId ? (webActorTabBindings.tabFor(actorSessionId) ?? null) : null,
       originState: actorSessionId ? (originStates.read(actorSessionId) ?? null) : null,

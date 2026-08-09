@@ -200,7 +200,12 @@ export {
 // actor above). Two pure cores: which origins the user has an identity on, and
 // what happens when a tab LANDS somewhere. Exported here because the enforcement
 // points that will consume them live outside this module (background/).
-export { classifyOriginSensitivity, sameOrigin, LEARNED_REASONS } from './actor/origin-sensitivity.js';
+export {
+  classifyOriginSensitivity,
+  learnedOriginCovers,
+  sameOrigin,
+  LEARNED_REASONS,
+} from './actor/origin-sensitivity.js';
 export {
   decideNumericTabAuthority, numericTabAuthorityRefusal,
   NUMERIC_TAB_SENSITIVE_CODE, NUMERIC_TAB_POLICY_UNAVAILABLE_CODE,
@@ -215,9 +220,14 @@ export { decideLanding, mayHoldCredentials, EXCURSION_BUDGET, EXCURSION_MS, MAX_
 export {
   makeJudgeLanding, makeCredentialScope, makeSiteClientOriginGuard,
   makeSiteClientOriginAuthorizer, makeFixedSiteClientOriginGuard, makeSignInOriginAuthorizer,
+  makeSignInExcursionAuthorizer, makeSignInExcursionRevoker,
   authorizeSiteClientRelayOrigin, mayAddressSiteClientOrigin,
   mayUseSiteClientOrigin, hasDurableSiteClientState,
 } from './actor/origin-lock.js';
+export {
+  AUTH_WAITING_FOR_USER_CODE, AUTH_WAITING_FOR_USER_MESSAGE,
+  AUTH_BOUNDARY_STOPPED_MESSAGE, AUTH_STATE_UNAVAILABLE_MESSAGE,
+} from './actor/auth-wait.js';
 // …and the three pieces the SW needs to make the lock live: where the state
 // lives (cached + serialized + persisted), which origins are dedicated identity
 // providers (the one narrow exemption), and what the orchestrator is told when

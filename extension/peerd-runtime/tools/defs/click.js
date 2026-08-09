@@ -25,7 +25,7 @@
 
 import { browserDocumentIdentity, resolveTargetTab, scriptingTarget } from './dom-helpers.js';
 import { summarizeMutations } from '../../dom/index.js';
-import { browserDocumentRefusalFrom } from '../browser-automation-policy.js';
+import { browserDocumentRefusalFrom, formSubmissionRefusalFrom } from '../browser-automation-policy.js';
 
 /**
  * Harness-injected ctx extras (ref registry + CDP pool). Not on the
@@ -49,6 +49,8 @@ export const clickTool = {
     'get good selectors from read_page or query_dom. Dispatches a full',
     'pointerdown / mousedown / mouseup / click sequence (not just el.click())',
     'so framework event handlers fire. Scrolls the element into view first.',
+    'Native forms that submit to another origin are left for the user to',
+    'review and submit manually.',
     'Optional `nth` (0-indexed) targets one match when the selector is',
     'ambiguous. By default acts on the active tab.',
   ].join(' '),
@@ -119,7 +121,7 @@ export const clickTool = {
         try {
           const r = await debuggerPool.clickBackendNode(
             tab.id, entry.backendDOMNodeId, browserDocumentIdentity(tab));
-          if (!r.ok) return browserDocumentRefusalFrom(r) ?? {
+          if (!r.ok) return formSubmissionRefusalFrom(r) ?? browserDocumentRefusalFrom(r) ?? {
             ok: false,
             error: r.error ?? 'ref_click_failed',
             ...(r.outcomeKind ? { outcomeKind: r.outcomeKind } : {}),
@@ -151,14 +153,15 @@ export const clickTool = {
           const results = await scripting.executeScript({
             target: scriptingTarget(tab),
             func: clickInjected,
-            args: [null, 0, entry.walkId, expectedCount],
+            args: [null, 0, entry.walkId, expectedCount, null],
           });
           scriptResult = results[0]?.result;
         } catch (e) {
           return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKind: 'pre-effect-failure' };
         }
         if (!scriptResult) return { ok: false, error: 'script_returned_nothing' };
-        if (!scriptResult.ok) return { ok: false, error: scriptResult.error ?? 'ref_click_failed' };
+        if (!scriptResult.ok) return formSubmissionRefusalFrom(scriptResult)
+          ?? { ok: false, error: scriptResult.error ?? 'ref_click_failed' };
         return {
           ok: true,
           content: JSON.stringify({
@@ -197,7 +200,7 @@ export const clickTool = {
       const results = await scripting.executeScript({
         target: scriptingTarget(tab),
         func: clickInjected,
-        args: [args.selector, nth, null, expectedCount],
+        args: [args.selector, nth, null, expectedCount, null],
       });
       scriptResult = results[0]?.result;
     } catch (e) {
@@ -208,7 +211,8 @@ export const clickTool = {
       return { ok: false, error: 'script_returned_nothing' };
     }
     if (!scriptResult.ok) {
-      return { ok: false, error: scriptResult.error ?? 'click_failed' };
+      return formSubmissionRefusalFrom(scriptResult)
+        ?? { ok: false, error: scriptResult.error ?? 'click_failed' };
     }
     return {
       ok: true,
@@ -228,13 +232,14 @@ export const clickTool = {
  * @param {number} nth
  * @param {number | null} [walkId]
  * @param {number | null} [expectedCount]
+ * @param {string | null} [allowedCrossOriginFormOrigin]
  */
 // why: exported for the Bun tests to exercise the REAL body's walk-ref
 // cardinality guard (mocked scriptResults would hide an omission — #103
 // review lesson). Same precedent as domWalkInjected; `export` is not part
 // of Function.prototype.toString, so executeScript serialization is
 // unchanged.
-export function clickInjected(selector, nth, walkId, expectedCount) {
+export function clickInjected(selector, nth, walkId, expectedCount, allowedCrossOriginFormOrigin) {
   'use strict';
   /** @type {HTMLElement | null} */
   let el;
@@ -294,6 +299,44 @@ export function clickInjected(selector, nth, walkId, expectedCount) {
     matchedCount = nodes.length;
   }
   try {
+    // why: a native submitter can move every live form value without placing
+    // either the destination or payload in the click tool arguments. Resolve
+    // the exact submitter and its override at the effect point, before any
+    // focus or event can activate page or browser submission behavior.
+    const directSubmitter = typeof el.closest === 'function' ? el.closest('button,input') : null;
+    const activationLabel = !directSubmitter && typeof el.closest === 'function'
+      ? el.closest('label')
+      : null;
+    const submitter = directSubmitter
+      || /** @type {HTMLLabelElement | null} */ (activationLabel)?.control
+      || null;
+    const submitterTag = submitter?.tagName?.toLowerCase() ?? '';
+    const submitterType = /** @type {HTMLButtonElement | HTMLInputElement | null} */ (submitter)?.type?.toLowerCase() ?? '';
+    const isSubmitter = (submitterTag === 'button' && submitterType === 'submit')
+      || (submitterTag === 'input' && (submitterType === 'submit' || submitterType === 'image'));
+    const form = isSubmitter
+      ? /** @type {HTMLButtonElement | HTMLInputElement} */ (submitter).form
+      : null;
+    if (form) {
+      const getAttribute = Element.prototype.getAttribute;
+      const submitterMethod = getAttribute.call(submitter, 'formmethod');
+      const method = (submitterMethod || getAttribute.call(form, 'method') || 'get').toLowerCase();
+      if (method !== 'dialog') {
+        try {
+          const submitterAction = getAttribute.call(submitter, 'formaction');
+          const formAction = getAttribute.call(form, 'action');
+          const action = submitterAction !== null ? submitterAction : formAction;
+          const actionOrigin = action
+            ? new URL(action, document.baseURI).origin
+            : document.location.origin;
+          if (actionOrigin !== document.location.origin && actionOrigin !== allowedCrossOriginFormOrigin) {
+            return { ok: false, error: 'cross_origin_form_submission_blocked' };
+          }
+        } catch {
+          return { ok: false, error: 'cross_origin_form_submission_blocked' };
+        }
+      }
+    }
     // Scroll the element to the centre of the viewport. Many sites
     // (including Gmail and Google Docs) only register a click as a
     // real interaction if the target is visible at click time.

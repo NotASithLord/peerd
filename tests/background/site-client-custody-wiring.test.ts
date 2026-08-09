@@ -16,12 +16,28 @@ describe('site-client custody service-worker wiring', () => {
     const contextStart = source.indexOf('const buildToolContext');
     const contextEnd = source.indexOf('// ── Tool dispatcher', contextStart);
     const context = source.slice(contextStart, contextEnd > contextStart ? contextEnd : undefined);
+    const lockFactory = source.slice(source.indexOf('const originLockFor'), contextStart);
 
     expect(context).toContain('makeFixedSiteClientOriginGuard(ownedOrigin, { isKnownIdp: isKnownIdpHost })');
     expect(context).toContain('resCtx.idpTransitOnly = isKnownIdpHost(ownedOrigin)');
     expect(context.indexOf('async () => { throw new EgressDeniedError'))
       .toBeLessThan(context.indexOf('withDpopCredentials(webFetch, () => ownedOrigin'));
     expect(context).toContain('resCtx.authorizeSignInOrigin = lock?.authorizeSignInOrigin');
+    expect(context).toContain('resCtx.authorizeSignInExcursion = lock?.authorizeSignInExcursion');
+    expect(context).toContain('resCtx.revokeSignInExcursion = lock?.revokeSignInExcursion');
+    expect(context).toContain('resCtx.authWaitingForUser = authVerdict?.action === \'wait\'');
+    expect(lockFactory).toContain('authorizeSignInExcursionUnserialized = makeSignInExcursionAuthorizer({');
+    expect(lockFactory).toContain('revokeSignInExcursionUnserialized = makeSignInExcursionRevoker({');
+    expect(lockFactory).toMatch(/makeSignInExcursionAuthorizer\(\{[\s\S]*?saveState:[\s\S]*?isKnownIdp,/);
+    expect(lockFactory).toMatch(/makeSignInExcursionRevoker\(\{[\s\S]*?saveState:[\s\S]*?isKnownIdp,/);
+    expect(lockFactory).toContain('if (!isCurrentTurn())');
+    expect(lockFactory).toContain('isCurrent: isCurrentTurn');
+    expect(lockFactory).toContain('terminateUnreadableSignIn');
+    expect(lockFactory).not.toContain('originStates.forget(actorSessionId)');
+    expect(source).not.toContain("judgeLanding('chrome://unreadable-actor-tab')");
+    expect(source).toContain('preflightReply = AUTH_BOUNDARY_STOPPED_MESSAGE');
+    expect(source).toContain('preflightReply = AUTH_STATE_UNAVAILABLE_MESSAGE');
+    expect(lockFactory.match(/originStates\.serialize\(/g)?.length).toBeGreaterThanOrEqual(4);
     expect(context).toContain('hasDurableSiteClientState(durableOriginState)');
     expect(context).toContain('lock.authorizeSiteClientOrigin(() => liveSiteClientLandingFor(sessionId))');
     expect(context.indexOf('hasDurableSiteClientState(durableOriginState)'))

@@ -1539,6 +1539,21 @@ export const STATES = [
         });
         rec.check('the browser probe seeded the production learned-origin policy',
           seeded?.learned === true, JSON.stringify(seeded));
+        const alternatePort = await rpc(ctx.page, {
+          type: 'debug/originLock', origin: 'https://acct.peerd.test:9443',
+        });
+        const descendant = await rpc(ctx.page, {
+          type: 'debug/originLock', origin: 'https://child.acct.peerd.test',
+        });
+        const sibling = await rpc(ctx.page, {
+          type: 'debug/originLock', origin: 'https://other.peerd.test',
+        });
+        rec.check('Chrome applies a learned host across schemes and ports',
+          alternatePort?.learned === true, JSON.stringify(alternatePort));
+        rec.check('Chrome applies a learned parent host to descendants',
+          descendant?.learned === true, JSON.stringify(descendant));
+        rec.check('Chrome does not spread a learned host to siblings',
+          sibling?.learned === false, JSON.stringify(sibling));
         const loginTabId = await evalIn(ctx.page, `(async () => {
           const browser = (await import('/vendor/browser-polyfill.js')).default;
           const tab = await browser.tabs.create({ active: false, url: ${JSON.stringify(`${accountOrigin}/login`)} });
@@ -2224,6 +2239,43 @@ export const STATES = [
     },
   },
 
+  // --- visual: verified SSO names both relying site and provider ----------
+  {
+    name: 'login-confirm', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ConfirmModal } = await import('/sidepanel/components/app.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-login-confirm';
+          document.body.appendChild(host);
+          m.render(host, m(ConfirmModal, { prompt: {
+            id: 'e2e-login', kind: 'login', tool: 'login', method: 'sso',
+            provider: 'Okta', verified: true,
+            origins: ['https://app.example'], idpOrigin: 'https://acme.okta.com',
+          } }));
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => ({
+          title: document.querySelector('#e2e-login-confirm h3')?.textContent,
+          relyingSite: document.querySelector('#e2e-login-confirm .login-hero .host')?.textContent,
+          provider: document.querySelector('#e2e-login-confirm .login-destination strong')?.textContent,
+          allowDisabled: document.querySelector('#e2e-login-confirm button:not(.secondary)')?.disabled,
+        }))()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('verified SSO consent names both exact origins before approval',
+          rendered?.title === 'Approve sign-in'
+            && rendered?.relyingSite === 'app.example'
+            && rendered?.provider === 'acme.okta.com'
+            && rendered?.allowDisabled === false,
+          JSON.stringify(rendered));
+        await rec.visual('login-confirm');
+      } finally {
+        await evalIn(ctx.page, `document.querySelector('#e2e-login-confirm')?.remove()`);
+      }
+    },
+  },
+
   // --- visual: persisted runnable site-client confirmation -----------------
   {
     name: 'site-client-confirm', kind: 'visual', phase: 'post-unlock',
@@ -2807,6 +2859,56 @@ export const STATES = [
     },
   },
   {
+    name: 'options-learned-sites', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      let priorEntries = null;
+      let page;
+      try {
+        const prior = await rpc(ctx.page, { type: 'learned/list' });
+        if (!prior?.ok || !Array.isArray(prior.origins)) {
+          throw new Error(`could not snapshot learned hosts: ${prior?.error ?? 'unknown error'}`);
+        }
+        priorEntries = prior.origins;
+        await rpc(ctx.page, { type: 'learned/clear' });
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } });
+        await rpc(ctx.page, {
+          type: 'debug/originLock',
+          origin: 'https://accounts.acme.test:8443',
+          seedReason: 'password-field',
+        });
+        await rpc(ctx.page, {
+          type: 'debug/originLock',
+          origin: 'http://portal.globex.test:9080',
+          seedReason: 'confirmed-write',
+        });
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } });
+
+        page = await openWidePage(ctx, 'options/options.html#!/learned-sites');
+        await waitFor(() => evalIn(page, `(() => {
+          const text = document.body.innerText;
+          return text.includes('accounts.acme.test')
+            && text.includes('portal.globex.test')
+            && text.includes('every port and its subdomains');
+        })()`), { budgetMs: 15_000, pollMs: 80 });
+        await rec.visualPage('options-learned-sites', page);
+      } finally {
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
+        if (priorEntries) {
+          await rpc(ctx.page, { type: 'learned/clear' }).catch(() => {});
+          await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } }).catch(() => {});
+          for (const { host, reason } of priorEntries) {
+            await rpc(ctx.page, {
+              type: 'debug/originLock', origin: `https://${host}`, seedReason: reason,
+            }).catch(() => {});
+          }
+          await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
+        }
+        try { page?.close(); } catch { /* */ }
+      }
+    },
+  },
+  {
     name: 'options-contributor-metrics', kind: 'visual', phase: 'post-unlock',
     responder: null,
     async run(ctx, rec) {
@@ -2944,6 +3046,196 @@ export const STATES = [
         const visualReady = await waitFor(pinVisualState, { budgetMs: 5000 });
         if (!visualReady) throw new Error('VM failure controls did not settle');
         await rec.visualPage('vm-tab-failed', page, { beforeShot: pinVisualState });
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'notebook-remote-restricted', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const notebookId = 'e2e-remote-restricted';
+      const page = await openWidePage(
+        ctx, `engine-tabs/notebook-tab/index.html#${notebookId}`,
+        { ready: '#notebook-app:not([hidden])' },
+      );
+      try {
+        const remoteSource = `
+          export const probe = async () => {
+            const attempts = {};
+            const tryCall = async (name, fn) => {
+              try { await fn(); attempts[name] = 'unexpected success'; }
+              catch (error) { attempts[name] = String(error && error.message || error); }
+            };
+            for (const envelope of [
+              { type: 'actor-request', rid: 'forged-actor', args: { task: 'leak' } },
+              { type: 'fetch-request', rid: 'forged-fetch', url: 'https://sink.example/', method: 'GET' },
+              { type: 'opfs-request', rid: 'forged-opfs', op: 'write', args: { path: 'canary.txt', content: 'changed' } },
+              { type: 'distributed-request', rid: 'forged-dweb', method: 'peers' },
+            ]) postMessage(envelope);
+            await tryCall('egress', () => peerd.egress.fetch('https://sink.example/'));
+            await tryCall('opfs', () => peerd.self.writeFile('canary.txt', 'changed'));
+            await tryCall('subagent', () => peerd.runtime.runAgent({ task: 'leak' }));
+            await tryCall('dweb', () => peerd.distributed.peers());
+            return attempts;
+          };
+        `;
+        const injected = await evalIn(page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          const original = browser.runtime.sendMessage.bind(browser.runtime);
+          globalThis.__remoteRestrictedCalls = [];
+          browser.runtime.sendMessage = (message) => {
+            globalThis.__remoteRestrictedCalls.push(message?.type ?? 'unknown');
+            if (message?.type === 'sw/web-fetch') {
+              return Promise.resolve({
+                ok: true, status: 200,
+                bodyB64: btoa(${JSON.stringify(remoteSource)}),
+              });
+            }
+            return original(message);
+          };
+          return true;
+        })()`, true);
+        rec.check('the Notebook remote-fetch test seam is installed', injected === true);
+
+        const outcome = await evalIn(ctx.page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          const tabs = await browser.tabs.query({});
+          const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
+          if (!tab?.id) return { error: 'Notebook tab not found' };
+          await browser.tabs.sendMessage(tab.id, {
+            type: 'js/write-file', notebookId: ${JSON.stringify(notebookId)},
+            path: 'canary.txt', content: 'unchanged',
+          });
+          const run = await browser.tabs.sendMessage(tab.id, {
+            type: 'js/eval', notebookId: ${JSON.stringify(notebookId)},
+            code: "import { probe } from 'https://modules.example/probe.js'; return probe();",
+            timeoutMs: 10_000,
+          });
+          const canary = await browser.tabs.sendMessage(tab.id, {
+            type: 'js/read-file', notebookId: ${JSON.stringify(notebookId)}, path: 'canary.txt',
+          });
+          return { run, canary };
+        })()`, true);
+        const calls = await evalIn(page, 'globalThis.__remoteRestrictedCalls ?? []');
+        const view = await evalIn(page, `(() => ({
+          status: document.getElementById('run-status')?.textContent ?? '',
+          output: document.getElementById('console-output')?.textContent ?? '',
+        }))()`);
+        rec.check('the visible Notebook carries remote provenance',
+          outcome?.run?.result?.usedRemoteModules === true, JSON.stringify(outcome));
+        rec.check('remote code keeps only compute in the visible Notebook',
+          ['egress', 'opfs', 'subagent', 'dweb'].every((key) =>
+            String(outcome?.run?.result?.value?.[key] ?? '').includes('remote_module_capability_blocked')),
+          JSON.stringify(outcome?.run?.result?.value));
+        rec.check('direct forged relays never leave the Notebook host',
+          Array.isArray(calls) && calls.filter((type) => type === 'sw/web-fetch').length === 1
+            && !calls.some((type) => ['actor/spawn', 'dweb/distributed/info'].includes(type)),
+          JSON.stringify(calls));
+        rec.check('remote code cannot change the Notebook file canary',
+          outcome?.canary?.content === 'unchanged', JSON.stringify(outcome?.canary));
+        rec.check('the human sees a neutral restricted status and explanation',
+          /Remote code ran with restricted access/.test(view?.status ?? '')
+            && /Remote imports run with compute only/.test(view?.output ?? ''),
+          JSON.stringify(view));
+        await rec.shotPage('restricted-result', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'notebook-stop-control', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const notebookId = 'e2e-stop-control';
+      const page = await openWidePage(
+        ctx, `engine-tabs/notebook-tab/index.html#${notebookId}`,
+        { ready: '#notebook-app:not([hidden])' },
+      );
+      try {
+        const dispatched = await evalIn(ctx.page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          const tabs = await browser.tabs.query({});
+          const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
+          if (!tab?.id) return false;
+          globalThis.__peerdE2eNotebookEvaluation = browser.tabs.sendMessage(tab.id, {
+            type: 'js/eval', notebookId: ${JSON.stringify(notebookId)},
+            runId: 'e2e-stop-control-run', code: 'while (true) {}', timeoutMs: 20_000,
+          });
+          return true;
+        })()`, true);
+        rec.check('the infinite Notebook run is dispatched', dispatched === true);
+        const started = await evalIn(page, `(async () => {
+          for (let attempt = 0; attempt < 100; attempt += 1) {
+            const button = document.getElementById('run-btn');
+            if (button?.getAttribute('aria-label') === 'Stop notebook run') {
+              button.focus();
+              return {
+                label: button.getAttribute('aria-label'),
+                text: button.textContent,
+                focused: document.activeElement === button,
+              };
+            }
+            await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+          }
+          return null;
+        })()`, true);
+        rec.check('the Notebook exposes one focused Stop control while code runs',
+          started?.label === 'Stop notebook run'
+            && /Stop notebook run/.test(started?.text ?? '')
+            && started?.focused === true,
+          JSON.stringify(started));
+        await rec.shotPage('notebook-stop-control', page);
+
+        await evalIn(page, `document.getElementById('run-btn')?.click()`);
+        const stopped = await evalIn(ctx.page,
+          'globalThis.__peerdE2eNotebookEvaluation', true);
+        const outcome = await evalIn(page, `(async () => {
+          for (let attempt = 0; attempt < 100; attempt += 1) {
+            const button = document.getElementById('run-btn');
+            if (button?.getAttribute('aria-label') === 'Run notebook.js') {
+              return {
+                idleLabel: button.getAttribute('aria-label'),
+                focused: document.activeElement === button,
+                status: document.getElementById('run-status')?.textContent ?? '',
+              };
+            }
+            await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+          }
+          return {};
+        })()`, true);
+        rec.check('Stop terminates the exact run and restores the focused Run control',
+          stopped?.result?.stopped === true
+            && outcome?.idleLabel === 'Run notebook.js'
+            && outcome?.focused === true
+            && outcome?.status === 'Notebook run stopped.',
+          JSON.stringify({ stopped, outcome }));
+
+        const importedFailure = await evalIn(ctx.page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          const tabs = await browser.tabs.query({});
+          const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
+          if (!tab?.id) return null;
+          await browser.tabs.sendMessage(tab.id, {
+            type: 'js/write-file', path: 'lib/failure.js',
+            content: 'throw new Error("imported failure canary");',
+          });
+          return browser.tabs.sendMessage(tab.id, {
+            type: 'js/eval', notebookId: ${JSON.stringify(notebookId)},
+            runId: 'e2e-imported-failure',
+            code: 'import "./lib/failure.js"; return true;', timeoutMs: 10_000,
+          });
+        })()`, true);
+        const failureView = await evalIn(page, `({
+          status: document.getElementById('run-status')?.textContent ?? '',
+          output: document.getElementById('console-output')?.textContent ?? '',
+        })`, true);
+        rec.check('Chrome maps an imported-module failure to its source without a generated URL',
+          importedFailure?.result?.error?.includes('./lib/failure.js:1')
+            && !/blob:|data:/.test(importedFailure?.result?.error ?? '')
+            && failureView?.status === 'Notebook run failed.'
+            && failureView?.output?.includes('./lib/failure.js:1')
+            && !/blob:|data:/.test(failureView?.output ?? ''),
+          JSON.stringify({ importedFailure, failureView }));
+        await rec.shotPage('notebook-imported-failure', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
   },

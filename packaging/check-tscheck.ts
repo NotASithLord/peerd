@@ -158,7 +158,7 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // route, Options surface, and rendered side-panel coverage.
 // 673 → 676: the Actor Fabric adds its pure topology model, SW live projection,
 // and rendered browser contract while replacing the checked async-task bar.
-const COVERED_FLOOR = 695;
+const COVERED_FLOOR = 699;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

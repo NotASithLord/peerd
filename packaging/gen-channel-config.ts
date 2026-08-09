@@ -27,6 +27,15 @@ const DEV_OUT = join(EXTENSION_DIR, 'shared', 'channel-config.js');
 export const dwebEnabledForTarget = (channel: ConfigChannel, browser?: Browser): boolean =>
   channel === 'preview' && browser !== 'firefox';
 
+export const remoteModuleImportsEnabledForTarget = (channel: ConfigChannel, browser?: Browser): boolean =>
+  channel === 'preview';
+
+// Firefox extension module Workers cannot load generated child module URLs.
+// The packaged target selects a single linked entry there; Chrome keeps the
+// native module graph until the shared path has equivalent field coverage.
+export const notebookModuleLoaderForTarget = (browser?: Browser): 'blob-graph' | 'single-bundle' =>
+  browser === 'firefox' ? 'single-bundle' : 'blob-graph';
+
 export const flattenDefaults = (channel: ConfigChannel, browser?: Browser): Record<string, unknown> => {
   const out: Record<string, unknown> = {};
   for (const [key, perChannel] of Object.entries(defaults)) {
@@ -72,7 +81,8 @@ export const genChannelConfigSource = (channel: ConfigChannel, browser?: Browser
 
 export const CHANNEL = ${JSON.stringify(channel)};
 export const DWEB_ENABLED = ${JSON.stringify(dwebEnabledForTarget(channel, browser))};
-export const REMOTE_MODULE_IMPORTS_ENABLED = ${JSON.stringify(channel === 'preview')};
+export const REMOTE_MODULE_IMPORTS_ENABLED = ${JSON.stringify(remoteModuleImportsEnabledForTarget(channel, browser))};
+export const NOTEBOOK_MODULE_LOADER = ${JSON.stringify(notebookModuleLoaderForTarget(browser))};
 
 export const CHANNEL_DEFAULTS = Object.freeze(${'{'}
 ${entries}

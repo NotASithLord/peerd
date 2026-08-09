@@ -46,7 +46,7 @@ to prompt injection.
 | 03 | Malicious page summarizes secrets into model context | actor-loop credential custody, model-call function strip, untrusted-data fence |
 | 04 | Malicious peer sends a hostile bundle | content address, Ed25519 signature, amplification guard, card caps |
 | 05 | Malicious MCP server or peer poisons tools | sender gate, mesh-op validation, signing consent |
-| 06 | Malicious iframe or sandboxed code escapes | Notebook realm seal, App-iframe shim, WebVM HTTP bridge |
+| 06 | Malicious iframe, remote module, or sandboxed code escapes | Notebook realm seal, remote-graph restricted profile and output fence, App-iframe shim, WebVM HTTP bridge |
 | 07 | Private-network URL attempts SSRF | `isPrivateOrLocalHost` guard and redirect fail-closed |
 | 08 | Prompt-injection benchmark versus browser-use agents | actor tool-context credential stripping, exposure and tier gates, Plan mode, denylist, fence |
 | 09 | Hostile page content steers reads, writes, or egress | content disarmament, user-generated-content confirmation, egress checks |

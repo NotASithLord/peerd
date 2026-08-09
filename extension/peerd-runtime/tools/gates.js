@@ -75,11 +75,25 @@ import { runtimeCapabilityRefusal } from '../runtime-capabilities.js';
  *   actorType?: string,
  *   backing?: 'tab' | 'api',
  *   actorSurface?: 'tools' | 'code',
+ *   authWaitingForUser?: boolean,
  *   idpTransitOnly?: boolean,
  *   actorIsolation?: import('../actor/isolation.js').ActorIsolationCapability,
  *   runtimeCapabilities?: ReturnType<typeof import('../runtime-capabilities.js').resolveRuntimeCapabilities>,
  * }} GateContext
  */
+
+/**
+ * A confirmed provider step parks the entire web actor, not only its DOM tools.
+ * The context builder rechecks the live tab before stamping this state, so a
+ * later request automatically loses the park after the tab is exactly home.
+ *
+ * @param {Tool} _tool @param {any} _args @param {GateContext} ctx
+ * @returns {Omit<GateResult, 'name'>}
+ */
+export const authWaitGate = (_tool, _args, ctx) => ctx.authWaitingForUser === true
+  ? { allowed: false, reason: 'auth_waiting_for_user' }
+  : { allowed: true, reason: 'not waiting for user sign-in' };
+
 
 /**
  * Persona / Plan-Act (Feature 03). This is the realization of the
@@ -377,6 +391,7 @@ const hostnameOf = (origin) => {
  */
 export const GATES = Object.freeze([
   { name: 'persona',      fn: personaGate },
+  { name: 'auth-wait',    fn: authWaitGate },
   { name: 'exposure',     fn: exposureGate },
   { name: 'origin',       fn: originGate },
   { name: 'confirmation', fn: confirmationGate },

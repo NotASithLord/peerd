@@ -94,6 +94,8 @@
  *   is the legitimate result — but the one-shot latch reads this to give the
  *   actor its promised recovery turn instead of short-circuiting a crash back
  *   as the raw reply (the oneShot contract: "an errored round falls through").
+ * @property {boolean} [endTurn]       return this result to the caller and end
+ *   the current model turn without another inference or tool dispatch
  * @property {any} [structured]        optional host-only structured twin of a
  *   presentation-oriented `content` string. The model loop ignores it; trusted
  *   relays may consume it without parsing human-formatted text.
@@ -108,6 +110,7 @@
  * @typedef {Object} ToolResultErr
  * @property {false} ok
  * @property {string} error
+ * @property {boolean} [endTurn]
  * @property {any} [content]  optional human-readable explanation authored
  *   alongside the machine `error` code (e.g. "User declined the outbound
  *   write."); the loop surfaces it on the failure path — see agent-loop.js.
@@ -181,6 +184,13 @@
  * @property {(origin: string, signal?: AbortSignal) => Promise<boolean>} [authorizeSignInOrigin]
  *                                     post-consent relying-site promotion for
  *                                     login; tab-backed web actors only
+ * @property {(idpOrigin: string, signal?: AbortSignal) => Promise<boolean>} [authorizeSignInExcursion]
+ *                                     arms one exact verified IdP after consent
+ * @property {(idpOrigin: string, signal?: AbortSignal) => Promise<boolean>} [revokeSignInExcursion]
+ *                                     removes a still-unused grant after failure
+ * @property {() => Promise<import('../peerd-runtime/actor/landing-rule.js').LandingVerdict | null>} [revalidateActorLanding]
+ *                                     execute-time live origin/auth check for
+ *                                     every tab-backed web-actor tool
  * @property {boolean} [idpTransitOnly] stale-session defense that causes every
  *                                     API actor tool to fail closed
  * @property {Record<string, any>} [settings]   settings snapshot at ctx-build time

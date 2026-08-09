@@ -12,7 +12,10 @@
 import { clamp } from '/shared/util.js';
 import {
   moduleImportPolicyMessage,
+  REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE,
+  REMOTE_MODULE_RESTRICTED_CODE,
 } from '/peerd-engine/index.js';
+import { wrapUntrusted } from '../prompt-wrap.js';
 import { pushValueBlock } from './value-block.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -25,6 +28,8 @@ const MAX_TIMEOUT_MS = 120_000;
  * @property {string} [errorCode]
  * @property {Array<{ level: string, text: string }>} [consoleOutput]
  * @property {unknown} [value]
+ * @property {boolean} [usedRemoteModules]
+ * @property {boolean} [stopped]
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
@@ -41,8 +46,10 @@ export const jsNotebookTool = {
     'npm/native modules. EACH CALL IS A FRESH WORKER — module state does NOT',
     'persist; write to OPFS via peerd.self.writeFile and read it back. Inside:',
     'peerd.egress.fetch (audited HTTP), peerd.self.readFile/writeFile/listFiles;',
-    'literal relative static imports work; dynamic, computed, and attributed',
-    'imports do not. No `notebook` arg → the chat\'s',
+    'literal relative static imports work across supported packaged browsers.',
+    'Literal HTTPS imports work only where the package enables them, always',
+    'under compute-only restrictions. Dynamic, computed, and attributed imports',
+    'do not. No `notebook` arg → the chat\'s',
     'current Notebook. Returns the return value, console output, and any error.',
   ].join(' '),
   schema: {
@@ -72,12 +79,15 @@ export const jsNotebookTool = {
     }
     // why: jsClient / jsRegistry ride the opaque ctx contract (not on the
     // ToolContext typedef); narrow to the surface this tool touches.
-    const jsClient = /** @type {{ eval?: (code: string, opts: { timeoutMs: number, sessionId?: string, notebookId?: string }) => Promise<EvalResult> } | undefined} */ (
+    const jsClient = /** @type {{ eval?: (code: string, opts: { timeoutMs: number, sessionId?: string, notebookId?: string, signal?: AbortSignal }) => Promise<EvalResult> } | undefined} */ (
       /** @type {any} */ (ctx).jsClient);
     const jsRegistry = /** @type {{ get: (id: string) => Promise<unknown>, list: () => Promise<Array<{ id: string, name: string }>>, setDefaultForSession: (sessionId: string, id: string) => Promise<unknown> } | undefined} */ (
       /** @type {any} */ (ctx).jsRegistry);
     if (!jsClient || typeof jsClient.eval !== 'function') {
       return { ok: false, error: 'js_not_available' };
+    }
+    if (ctx.abortSignal?.aborted) {
+      return { ok: true, content: '[STOPPED] Notebook run was stopped. Do not retry automatically.' };
     }
     const timeoutMs = clamp(args.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1000, MAX_TIMEOUT_MS);
 
@@ -106,7 +116,23 @@ export const jsNotebookTool = {
         timeoutMs,
         sessionId: ctx.session?.sessionId,
         notebookId: targetNotebookId,
+        signal: ctx.abortSignal,
       });
+      if (result.stopped) {
+        return { ok: true, content: '[STOPPED] Notebook run was stopped. Do not retry automatically.' };
+      }
+      if (result.errorCode === 'notebook_run_busy') {
+        return {
+          ok: true,
+          content: '[BUSY] This Notebook already has a run in progress. The requested code was not run. Do not retry automatically.',
+        };
+      }
+      if (result.errorCode === 'notebook_run_timeout') {
+        return {
+          ok: true,
+          content: '[TIMEOUT] Notebook run did not finish before its deadline. Reduce the work or increase timeoutMs before retrying. Do not retry the same request automatically.',
+        };
+      }
       const importPolicyMessage = moduleImportPolicyMessage(result.errorCode);
       if (importPolicyMessage) {
         return {
@@ -130,18 +156,31 @@ export const jsNotebookTool = {
  * @param {EvalResult} r
  * @returns {string}
  */
-const formatEvalResult = (code, r) => {
+export const formatEvalResult = (code, r) => {
   const lines = [];
   const oneLineCode = code.length > 200 ? `${code.slice(0, 200)}…` : code;
   lines.push(`> ${oneLineCode.replace(/\n/g, '\n  ')}`);
   lines.push(`[${r.durationMs}ms]`);
-  if (r.error) lines.push('[ERROR]', r.error);
+  const body = [];
+  if (r.error) body.push('[ERROR]', r.error);
   if (r.consoleOutput && r.consoleOutput.length) {
-    lines.push('[CONSOLE]');
+    body.push('[CONSOLE]');
     for (const { level, text } of r.consoleOutput) {
-      lines.push(`  ${level === 'info' ? '' : `[${level}] `}${text}`);
+      body.push(`  ${level === 'info' ? '' : `[${level}] `}${text}`);
     }
   }
-  pushValueBlock(lines, r.value);
+  pushValueBlock(body, r.value);
+  if (r.usedRemoteModules && body.length) {
+    lines.push(wrapUntrusted({
+      origin: 'notebook (remote modules)',
+      tool: 'js_notebook',
+      body: body.join('\n'),
+    }));
+  } else {
+    lines.push(...body);
+  }
+  if (r.usedRemoteModules) {
+    lines.push(`[${REMOTE_MODULE_RESTRICTED_CODE}] ${REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE}`);
+  }
   return lines.join('\n');
 };

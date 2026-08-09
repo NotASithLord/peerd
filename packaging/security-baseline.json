@@ -67,7 +67,8 @@
       ],
       "sandbox": {
         "pages": [
-          "engine-tabs/app-tab/runner.html"
+          "engine-tabs/app-tab/runner.html",
+          "engine-tabs/notebook-tab/worker-host.html"
         ]
       },
       "side_panel": {
@@ -216,7 +217,8 @@
       ],
       "sandbox": {
         "pages": [
-          "engine-tabs/app-tab/runner.html"
+          "engine-tabs/app-tab/runner.html",
+          "engine-tabs/notebook-tab/worker-host.html"
         ]
       },
       "side_panel": {
@@ -367,7 +369,8 @@
       ],
       "sandbox": {
         "pages": [
-          "engine-tabs/app-tab/runner.html"
+          "engine-tabs/app-tab/runner.html",
+          "engine-tabs/notebook-tab/worker-host.html"
         ]
       },
       "side_panel": {

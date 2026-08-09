@@ -7,9 +7,10 @@
 //
 // WHY THIS LIST IS SHORT AND WHY IT MUST STAY SHORT. Saying "this is an IdP" is
 // the ONE way a bound actor is allowed off the origin it owns. Everything the
-// excursion rule then bounds — budget, deadline, recorded opener, lifetime cap
-// (landing-rule.js) — is bounding a corridor that this file decided to open. So
-// every entry here is a small hole, and a generous list is a large one. The
+// landing rule then bounds is exact to the origin this file recognizes. The
+// actor parks without DOM, fetch, or credential authority while the user owns
+// that leg. Every entry still defines where a confirmed sign-in may send the
+// user's tab, so a generous list would enlarge a sensitive transition. The
 // classifier next door fails OPEN because a miss there declines to add a
 // protection; this file fails CLOSED because a false positive here REMOVES one.
 //
@@ -21,10 +22,9 @@
 //
 //   github.com, gitlab.com, facebook.com — these are full products that ALSO
 //   speak OAuth. Admitting them would mean a bound actor sent to "sign in with
-//   GitHub" gets a budgeted corridor onto the whole of github.com — issues,
-//   pull requests, settings — under the opener exemption, on a site the user is
-//   logged into. That is a strictly worse position than the one the excursion
-//   exists to avoid.
+//   GitHub" may park the user's tab on the whole of github.com: issues, pull
+//   requests, and settings on a site where the user is logged in. That is not a
+//   dedicated authentication surface and must not qualify for the exception.
 //
 // WHAT THE EXCLUSION COSTS, stated plainly rather than buried: a bound actor
 // that hits "sign in with GitHub" ENDS. The user sees a helper that stopped, not
@@ -89,7 +89,7 @@ const hostIsKnownIdp = (host) => {
  * Does this web URL use a host dedicated to authentication?
  *
  * Unlike `isKnownIdp`, this ignores scheme and port because browser cookies do.
- * It is for sensitivity and custody only. It must never open an auth corridor.
+ * It is for sensitivity and custody only. It must never stamp a sign-in grant.
  *
  * @param {unknown} input
  * @returns {boolean}
@@ -105,8 +105,8 @@ export const isKnownIdpHost = (input) => {
  * Is this landing a known identity provider?
  *
  * https ONLY. A sign-in over cleartext is either a downgrade attack or a site
- * whose credentials are already lost; either way it is not something to open a
- * corridor for.
+ * whose credentials are already lost; either way it is not eligible for a
+ * sign-in grant.
  *
  * @param {unknown} input   a URL (the tab's live location)
  * @returns {boolean}
@@ -139,12 +139,12 @@ export const knownIdpSeeds = () => Object.freeze({
  * (a per-customer `acme.okta.com` is a subdomain of `okta.com`); exact origins
  * contribute their hostname.
  *
- * why here and not derived at the consumer: this list is the sign-in corridor's
+ * why here and not derived at the consumer: this list is the sign-in flow's
  * NETWORK-layer carve-out — an entry keeps an identity provider reachable
  * inside an agent-driven tab that the denylist otherwise blocks. Deriving it
  * next to the registry keeps ONE membership decision feeding every layer: a
- * registry edit moves the excursion rule and the carve-out together, and the
- * corridor test (denylist × registry) pins that they cannot drift apart.
+ * registry edit moves the exact grant rule and the carve-out together, and the
+ * cross-layer test pins that they cannot drift apart.
  *
  * NOTE the deliberate widening this consumer accepts: `isKnownIdp` refuses
  * http and non-default ports; a domain grant cannot express either refinement.

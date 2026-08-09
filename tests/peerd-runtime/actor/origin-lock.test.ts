@@ -9,8 +9,11 @@
 import { describe, test, expect } from 'bun:test';
 import {
   makeJudgeLanding,
+  makeSignInExcursionAuthorizer,
+  makeSignInExcursionRevoker,
   makeSignInOriginAuthorizer,
 } from '../../../extension/peerd-runtime/actor/origin-lock.js';
+import { isKnownIdp } from '../../../extension/peerd-runtime/actor/idp-registry.js';
 
 const harness = (state: any, deps: any = {}) => {
   const saved: any[] = [];
@@ -35,6 +38,30 @@ describe('the lock applies only where a state says it should', () => {
       expect(v).toBeNull();
       expect(stops).toEqual([]);
     });
+  });
+
+  test('a turn invalidated during persistence cannot stop the next turn', async () => {
+    const state: any = {
+      mode: 'bound',
+      ownedOrigin: 'https://app.test',
+      excursion: {
+        returnTo: 'https://app.test', idpOrigin: 'https://idp.test', deadline: 9_000, authorized: true,
+      },
+    };
+    const stops: any[] = [];
+    let current = true;
+    const judge = makeJudgeLanding({
+      getState: () => state,
+      saveState: async (patch) => {
+        Object.assign(state, patch);
+        current = false;
+      },
+      onStop: (event) => { stops.push(event); },
+      isCurrent: () => current,
+      now: () => 1_000,
+    });
+    expect(await judge('https://elsewhere.test')).toBeNull();
+    expect(stops).toEqual([]);
   });
 });
 
@@ -107,19 +134,28 @@ describe('excursions — the state that must survive', () => {
     isKnownIdp: (value: string) => new URL(value).hostname === 'idp.test',
   };
 
-  test('opening one persists it AND increments the lifetime counter', async () => {
-    const state: any = { mode: 'bound', ownedOrigin: 'https://app.test', excursionsUsed: 0 };
+  const grant = { returnTo: 'https://app.test', idpOrigin: 'https://idp.test', deadline: 9e9 };
+  const excursion = { ...grant, authorized: true };
+
+  test('activating a grant persists wait, consumes the grant, and increments once', async () => {
+    const state: any = {
+      mode: 'bound', ownedOrigin: 'https://app.test', excursionsUsed: 0, authGrant: grant,
+    };
     const { judge, saved } = harness(state, idp);
-    await judge('https://idp.test/authorize');
-    expect(saved[0].excursion).toBeTruthy();
+    expect((await judge('https://idp.test/authorize'))?.action).toBe('wait');
+    expect(saved[0].excursion).toEqual(excursion);
+    expect(saved[0].authGrant).toBeNull();
     expect(saved[0].excursionsUsed).toBe(1);
+    await judge('https://idp.test/login');
+    expect(saved[1].excursionsUsed).toBeUndefined();
   });
 
-  test('the IdP being sensitive does not break a bound sign-in excursion', async () => {
-    const state: any = { mode: 'bound', ownedOrigin: 'https://app.test', excursionsUsed: 0 };
+  test('wait persists without calling onStop', async () => {
+    const state: any = {
+      mode: 'bound', ownedOrigin: 'https://app.test', excursionsUsed: 1, excursion,
+    };
     const { judge, stops } = harness(state, idp);
-    expect((await judge('https://idp.test/authorize'))?.action).toBe('continue');
-    expect((await judge('https://idp.test/login'))?.action).toBe('continue');
+    expect((await judge('https://idp.test/login'))?.action).toBe('wait');
     expect(stops).toEqual([]);
   });
 
@@ -130,13 +166,23 @@ describe('excursions — the state that must survive', () => {
     // unbounded per task.
     const state: any = {
       mode: 'bound', ownedOrigin: 'https://app.test', excursionsUsed: 1,
-      excursion: { returnTo: 'https://app.test', openedAt: 'https://idp.test', lastLanding: 'https://idp.test', budget: 2, deadline: 9e9 },
+      excursion,
     };
     const { judge, saved } = harness(state, idp);
     await judge('https://app.test/back');
     expect(saved[0].excursion).toBeNull();          // cleared, explicitly
     expect(saved[0].excursionsUsed).toBeUndefined(); // untouched
     expect(state.excursionsUsed).toBe(1);
+  });
+
+  test('a wrong origin clears durable corridor state before stopping', async () => {
+    const state: any = {
+      mode: 'bound', ownedOrigin: 'https://app.test', authGrant: grant,
+    };
+    const { judge, saved, stops } = harness(state, idp);
+    expect((await judge('https://evil.test'))?.action).toBe('end');
+    expect(saved[0]).toEqual({ authGrant: null, excursion: null });
+    expect(stops).toHaveLength(1);
   });
 
   test('the excursion is always ASSIGNED, never coalesced', async () => {
@@ -183,6 +229,108 @@ describe('provisional origins — the shell half', () => {
     await judge('about:blank');
     expect(state.provisional).toBe(true);
     expect((await judge('https://www.reddit.com/'))?.action).toBe('continue');
+  });
+});
+
+describe('confirmed sign-in excursion grants', () => {
+  const IDP = 'https://accounts.google.com';
+  const build = (over: any = {}) => {
+    let state: any = over.state ?? { mode: 'bound', ownedOrigin: 'https://app.test', excursionsUsed: 0 };
+    const saved: any[] = [];
+    const common = {
+      getState: () => state,
+      getLiveLanding: over.getLiveLanding ?? (async () => ({ status: 'live' as const, url: 'https://app.test/login' })),
+      saveState: (patch: any) => { saved.push(patch); Object.assign(state, patch); },
+      isKnownIdp: (origin: string) => new URL(origin).origin === IDP,
+      isCurrent: over.isCurrent ?? (() => true),
+      now: () => 1_000,
+    };
+    return {
+      authorize: makeSignInExcursionAuthorizer(common),
+      revoke: makeSignInExcursionRevoker(common),
+      saved,
+      getState: () => state,
+      setState: (next: any) => { state = next; },
+    };
+  };
+
+  test('stamps an exact durable grant only from the live owned origin', async () => {
+    const h = build();
+    expect(await h.authorize(`${IDP}/oauth?x=1`)).toBe(true);
+    expect(h.saved).toEqual([{
+      authGrant: { returnTo: 'https://app.test', idpOrigin: IDP, deadline: 181_000 },
+    }]);
+  });
+
+  test('forged provider, wrong live origin, bad state, and lifetime exhaustion refuse', async () => {
+    expect(await build().authorize('https://accounts.google.com.evil.test')).toBe(false);
+    expect(await build({
+      getLiveLanding: async () => ({ status: 'live' as const, url: 'https://evil.test' }),
+    }).authorize(IDP)).toBe(false);
+    expect(await build({ state: { mode: 'roaming' } }).authorize(IDP)).toBe(false);
+    expect(await build({
+      state: { mode: 'bound', ownedOrigin: 'https://app.test', excursionsUsed: 2 },
+    }).authorize(IDP)).toBe(false);
+  });
+
+  test('the production classifier rejects a known provider on a non-default port', async () => {
+    const h = build();
+    const authorize = makeSignInExcursionAuthorizer({
+      getState: h.getState,
+      getLiveLanding: async () => ({ status: 'live', url: 'https://app.test/login' }),
+      saveState: () => { throw new Error('must not save'); },
+      isKnownIdp,
+      isCurrent: () => true,
+      now: () => 1_000,
+    });
+    expect(await authorize('https://accounts.google.com:8443/login')).toBe(false);
+  });
+
+  test('state is re-read and abort/current guards apply after the live lookup', async () => {
+    let release!: () => void;
+    const wait = new Promise<void>((resolve) => { release = resolve; });
+    const h = build({
+      getLiveLanding: async () => { await wait; return { status: 'live' as const, url: 'https://app.test' }; },
+    });
+    const controller = new AbortController();
+    const pending = h.authorize(IDP, controller.signal);
+    h.setState({ mode: 'bound', ownedOrigin: 'https://other.test' });
+    controller.abort();
+    release();
+    expect(await pending).toBe(false);
+    expect(h.saved).toEqual([]);
+  });
+
+  test('the narrow revoker clears only the matching pending grant while home', async () => {
+    const h = build();
+    expect(await h.authorize(IDP)).toBe(true);
+    expect(await h.revoke(IDP)).toBe(true);
+    expect(h.saved.at(-1)).toEqual({ authGrant: null });
+
+    const wrong = build({
+      state: {
+        mode: 'bound', ownedOrigin: 'https://app.test',
+        authGrant: { returnTo: 'https://app.test', idpOrigin: IDP, deadline: 9e9 },
+      },
+    });
+    expect(await wrong.revoke('https://login.microsoftonline.com')).toBe(false);
+    expect(wrong.saved).toEqual([]);
+  });
+
+  test('the revoker refuses an active excursion, stale turn, and aborted call', async () => {
+    const active = build({
+      state: {
+        mode: 'bound', ownedOrigin: 'https://app.test',
+        authGrant: { returnTo: 'https://app.test', idpOrigin: IDP, deadline: 9e9 },
+        excursion: { returnTo: 'https://app.test', idpOrigin: IDP, deadline: 9e9, authorized: true },
+      },
+    });
+    expect(await active.revoke(IDP)).toBe(false);
+    const stale = build({ isCurrent: () => false });
+    expect(await stale.revoke(IDP)).toBe(false);
+    const controller = new AbortController();
+    controller.abort();
+    expect(await build().revoke(IDP, controller.signal)).toBe(false);
   });
 });
 

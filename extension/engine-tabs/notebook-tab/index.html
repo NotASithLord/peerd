@@ -17,8 +17,9 @@
     nor any realm that somehow escaped the seal can open a connection-class
     request to ANY host, ours included. Store and web builds refuse remote
     URL imports without requesting the module source. Preview resolves permitted
-    URL imports through the audited SW relay and re-blobs them, so the native
-    loader never receives a third-party script URL.
+    URL imports through the audited SW relay. Chrome uses the resolved module
+    graph directly. Firefox links it into one strict script and runs it in the
+    opaque sandboxed worker host below, whose CSP also has connect-src 'none'.
     The SW keeps its own (manifest) CSP with https:, so webFetch still works.
   -->
   <meta http-equiv="Content-Security-Policy" content="connect-src 'none'">
@@ -28,6 +29,8 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <iframe id="worker-host" sandbox="allow-scripts" hidden
+          title="Notebook worker host"></iframe>
   <div id="notebook-boot" class="boot-card">
     <div class="boot-spinner" aria-hidden="true"></div>
     <h2>Starting Notebook…</h2>
@@ -57,7 +60,8 @@
         </div>
       </details>
       <button class="export-btn" id="export-btn" title="Download this Notebook as a .peerd file">Export ⤓</button>
-      <button class="run-btn" id="run-btn" title="Runs notebook.js (Cmd-Enter / Ctrl-Enter)">Run notebook.js ▶</button>
+      <button class="run-btn" id="run-btn" aria-label="Run notebook.js"
+              title="Runs notebook.js (Cmd-Enter / Ctrl-Enter)">Run notebook.js ▶</button>
     </header>
 
     <!-- peerd-engine/editor mounts here: file tree + CodeMirror. -->
@@ -67,7 +71,7 @@
     <div id="pane-resizer" role="separator" aria-orientation="horizontal" tabindex="0"
          title="Drag to resize (↑/↓ to nudge)" aria-label="Resize editor and output"></div>
 
-    <div id="output-pane">
+    <div id="output-pane" role="region" aria-label="Notebook output">
       <div id="console-output"></div>
     </div>
     <p id="run-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>

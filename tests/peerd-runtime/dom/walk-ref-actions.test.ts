@@ -10,7 +10,14 @@ import { snapshotTool } from '../../../extension/peerd-runtime/tools/defs/snapsh
 import { clickTool, clickInjected } from '../../../extension/peerd-runtime/tools/defs/click.js';
 import { typeTool, typeInjected } from '../../../extension/peerd-runtime/tools/defs/type.js';
 import { createRefRegistry } from '../../../extension/peerd-runtime/dom/ref-registry.js';
+import {
+  FORM_SUBMISSION_CODES,
+  crossOriginFormSubmissionRefusalResult,
+  formSubmissionRefusalFrom,
+} from '../../../extension/peerd-runtime/tools/browser-automation-policy.js';
 import { browserProbeResult } from '../../helpers/browser-scripting.ts';
+
+const FORM_REFUSAL_COPY = 'This form submits to another site. peerd did not click, type, or submit. Review and complete the form in the open tab, then submit it yourself if you want to continue. Do not retry with another click, selector, type submit, or page code.';
 
 const WALK_RESULT = {
   ok: true,
@@ -94,7 +101,7 @@ describe('click/type — walk-ref dispatch', () => {
     expect(r.content).toContain('"matchedCount": 1');
     // The click injection carried [selector=null, nth=0, walkId=1,
     // expectedCount=null] — the guard slot is always forwarded.
-    expect(injections[1].args).toEqual([null, 0, 1, null]);
+    expect(injections[1].args).toEqual([null, 0, 1, null, null]);
   });
 
   test('type {ref} resolves a walk ref via scripting with the walkId', async () => {
@@ -142,8 +149,8 @@ describe('click/type — walk-ref dispatch', () => {
     const r = await clickTool.execute({ selector: '.delete-row', expectedCount: 3 }, ctx);
     expect(r.ok).toBe(true);
     if (!r.ok) throw new Error('expected ok result');
-    // [selector, nth, walkId=null, expectedCount]
-    expect(injections[0].args).toEqual(['.delete-row', 0, null, 3]);
+    // [selector, nth, walkId=null, expectedCount, allowedCrossOriginFormOrigin=null]
+    expect(injections[0].args).toEqual(['.delete-row', 0, null, 3, null]);
     expect(r.content).toContain('"matchedCount": 3');
   });
 
@@ -190,7 +197,7 @@ describe('click/type — walk-ref dispatch', () => {
     if (!r.ok) throw new Error('expected ok result');
     expect(r.content).toContain('"matchedCount": 1');
     // [selector=null, nth=0, walkId=1, expectedCount=1]
-    expect(injections[1].args).toEqual([null, 0, 1, 1]);
+    expect(injections[1].args).toEqual([null, 0, 1, 1, null]);
   });
 
   test('type {ref, expectedCount} forwards the guard on the walk-ref injection', async () => {
@@ -219,6 +226,91 @@ describe('click/type — walk-ref dispatch', () => {
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error('expected error result');
     expect(r.error).toContain('matched_count_mismatch');
+  });
+});
+
+describe('cross-origin form submission refusal: fixed policy receipt', () => {
+  test('the receipt is terminal, content-free, and says the effect did not run', () => {
+    const r = crossOriginFormSubmissionRefusalResult();
+    expect(r).toEqual({
+      ok: false,
+      error: FORM_SUBMISSION_CODES.CROSS_ORIGIN,
+      content: FORM_REFUSAL_COPY,
+      structured: {
+        code: FORM_SUBMISSION_CODES.CROSS_ORIGIN,
+        reason: 'cross_origin_form_submission',
+        outcome: 'not_run',
+        performed: false,
+        retryable: false,
+      },
+      outcomeKind: 'pre-effect-failure',
+      endTurn: true,
+    });
+    expect(JSON.stringify(r)).not.toContain('evil.example');
+  });
+
+  test('only the exact host-authored code is promoted to the terminal receipt', () => {
+    expect(formSubmissionRefusalFrom({
+      error: FORM_SUBMISSION_CODES.CROSS_ORIGIN,
+      content: 'attacker-controlled page text',
+    })).toEqual(crossOriginFormSubmissionRefusalResult());
+    expect(formSubmissionRefusalFrom({ error: 'click_failed' })).toBeNull();
+    expect(formSubmissionRefusalFrom(null)).toBeNull();
+  });
+});
+
+describe('cross-origin form submission refusal: scripting/CDP parity', () => {
+  const expectTerminalFormRefusal = (r: any) => {
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe(FORM_SUBMISSION_CODES.CROSS_ORIGIN);
+    expect(r.content).toBe(FORM_REFUSAL_COPY);
+    expect(r.endTurn).toBe(true);
+    expect(r.outcomeKind).toBe('pre-effect-failure');
+    expect(r.structured).toMatchObject({
+      code: FORM_SUBMISSION_CODES.CROSS_ORIGIN,
+      outcome: 'not_run',
+      performed: false,
+      retryable: false,
+    });
+  };
+
+  test('the scripting click path promotes the page guard code to the fixed terminal receipt', async () => {
+    const { ctx } = makeCtx((req: any) => req.func?.name === 'clickInjected'
+      ? [{ result: { ok: false, error: FORM_SUBMISSION_CODES.CROSS_ORIGIN, content: 'hostile page bytes' } }]
+      : [{ result: WALK_RESULT }]);
+    await snapshotTool.execute({}, ctx);
+    expectTerminalFormRefusal(await clickTool.execute({ ref: '@e1' }, ctx));
+  });
+
+  test('the scripting type path promotes the page guard code to the same fixed terminal receipt', async () => {
+    const { ctx } = makeCtx(() => [{
+      result: { ok: false, error: FORM_SUBMISSION_CODES.CROSS_ORIGIN, content: 'hostile page bytes' },
+    }]);
+    expectTerminalFormRefusal(await typeTool.execute({
+      selector: 'form input[name="query"]', text: 'copied page data', submit: true,
+    }, ctx));
+  });
+
+  test('the CDP click path promotes the debugger guard code to the fixed terminal receipt', async () => {
+    const { ctx } = makeCtx(() => [{ result: WALK_RESULT }]);
+    ctx.debuggerPool = {
+      clickBackendNode: async () => ({
+        ok: false, error: FORM_SUBMISSION_CODES.CROSS_ORIGIN, outcomeKind: 'pre-effect-failure',
+      }),
+    };
+    ctx.domRefs.setSnapshot(7, [{ ref: '@e1', backendDOMNodeId: 99, role: 'button', name: 'Send' }]);
+    expectTerminalFormRefusal(await clickTool.execute({ ref: '@e1' }, ctx));
+  });
+
+  test('the CDP type path promotes the debugger guard code to the same fixed terminal receipt', async () => {
+    const { ctx } = makeCtx(() => [{ result: WALK_RESULT }]);
+    ctx.debuggerPool = {
+      setValueBackendNode: async () => ({
+        ok: false, error: FORM_SUBMISSION_CODES.CROSS_ORIGIN, outcomeKind: 'pre-effect-failure',
+      }),
+    };
+    ctx.domRefs.setSnapshot(7, [{ ref: '@e2', backendDOMNodeId: 100, role: 'textbox', name: 'Query' }]);
+    expectTerminalFormRefusal(await typeTool.execute({ ref: '@e2', text: 'copied page data', submit: true }, ctx));
   });
 });
 

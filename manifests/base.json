@@ -45,7 +45,7 @@
   },
 
   "sandbox": {
-    "pages": ["engine-tabs/app-tab/runner.html"]
+    "pages": ["engine-tabs/app-tab/runner.html", "engine-tabs/notebook-tab/worker-host.html"]
   },
 
   "cross_origin_embedder_policy": { "value": "require-corp" },

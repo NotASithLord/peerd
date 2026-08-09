@@ -45,8 +45,8 @@ The Store package refuses direct HTTP and HTTPS JavaScript imports in Script
 and Notebook without requesting the module source. A generated package constant
 disables the path in both execution hosts, the resolver fails closed when the
 constant is absent or false, and artifact verification checks both Store
-packages. Preview is a separate distribution and keeps audited literal static
-remote imports. Dynamic imports are refused in every package.
+packages. Chrome Preview is a separate distribution and keeps audited literal
+static remote imports. Dynamic imports are refused in every package.
 
 This does not establish that Store cannot execute network-derived code. The
 open fetched-data execution policy covers data that a run later gives to local

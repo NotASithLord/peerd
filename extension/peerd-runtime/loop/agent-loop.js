@@ -243,6 +243,9 @@ export const stripCrossModelThinking = (messages, model) => messages.map((msg) =
  *   canonical design-01 rationale): the wall-clock + active-tab bytes relocated OUT
  *   of the cached system block. Prepended as a leading `user`-role <context> message
  *   each step, then never persisted. Absent / empty → nothing injected.
+ * @param {string} [ctx.preflightReply]
+ *   Trusted host reply that ends the turn before model inference. Used when a
+ *   bound actor is parked for a user-controlled sign-in step.
  * @returns {AsyncGenerator<LoopEvent>}
  */
 export async function* runUserTurn(ctx) {
@@ -365,6 +368,23 @@ export async function* runUserTurn(ctx) {
     if (session.messages.length === 1) {
       appendAudit({ type: 'session_started', sessionId }).catch(() => {});
     }
+  }
+
+  // A privileged host preflight can park an actor before any model inference.
+  // Persist the fixed reply through the normal transcript path so the user and
+  // the next turn see one truthful state without spending tokens or inviting a
+  // text-only model claim while sign-in is user-controlled.
+  if (typeof ctx.preflightReply === 'string' && ctx.preflightReply) {
+    /** @type {InternalMessage} */
+    const reply = {
+      role: 'assistant', content: ctx.preflightReply,
+      id: uuidv7(now), when: now(), model: session.model, provider: session.provider,
+      streaming: false, stopReason: 'end_turn',
+    };
+    session = await sessions.appendMessage(sessionId, reply);
+    yield { type: 'state', session };
+    yield { type: 'stop', sessionId, messageId: reply.id, stopReason: 'end_turn' };
+    return;
   }
 
   // 2. Seed the model contract. Main turns refresh both pieces at each step:
@@ -990,6 +1010,8 @@ export async function* runUserTurn(ctx) {
     // (a notebook eval's ok:true + in-band [ERROR] — the evalError marker).
     // Such a round must NOT short-circuit as "clean"; track it per round.
     let roundHadEvalError = false;
+    /** @type {{ block: ToolResultBlock, result: ToolResult } | null} */
+    let turnEndingResult = null;
     // partitionToolBatch groups CONSECUTIVE safe calls into concurrent
     // waves and leaves everything else as single sequential waves, in the
     // model's emitted order — a safe call is never hoisted past an unsafe
@@ -1019,6 +1041,9 @@ export async function* runUserTurn(ctx) {
           yield { type: 'tool-result', sessionId, toolUseId: tu.id, result: dispatchResult };
           if (/** @type {{ evalError?: boolean }} */ (dispatchResult).evalError === true) roundHadEvalError = true;
           blocksById.set(tu.id, block);
+          if (dispatchResult.endTurn === true && !turnEndingResult) {
+            turnEndingResult = { block, result: dispatchResult };
+          }
         }
         // Persist in the model's emitted order for stable transcripts
         // (Anthropic pairs by tool_use_id, not position; the UI and the
@@ -1037,9 +1062,14 @@ export async function* runUserTurn(ctx) {
           yield { type: 'tool-result', sessionId, toolUseId: tu.id, result: dispatchResult };
           if (/** @type {{ evalError?: boolean }} */ (dispatchResult).evalError === true) roundHadEvalError = true;
           toolResults.push(block);
+          if (dispatchResult.endTurn === true) {
+            turnEndingResult = { block, result: dispatchResult };
+            break;
+          }
         }
-        if (abortedMidBatch) break;
+        if (abortedMidBatch || turnEndingResult) break;
       }
+      if (turnEndingResult) break;
     }
     // why the extra wasAborted(): the per-wave checks run BEFORE each dispatch,
     // so an abort landing DURING the batch's FINAL dispatch is seen by neither —
@@ -1078,6 +1108,26 @@ export async function* runUserTurn(ctx) {
     };
     session = await sessions.appendMessage(sessionId, resultMessage);
     yield { type: 'state', session };
+
+    // A host policy can hand the interaction to the user and close this turn.
+    // Sign-in uses this after confirmation or an IdP landing so no later model
+    // inference can issue another tool while the browser is user-controlled.
+    if (turnEndingResult) {
+      const replyText = typeof turnEndingResult.block.content === 'string'
+        ? turnEndingResult.block.content
+        : JSON.stringify(turnEndingResult.block.content);
+      /** @type {InternalMessage} */
+      const endingReply = {
+        role: 'assistant', content: replyText || '(the interaction is waiting for the user)',
+        id: uuidv7(now), when: now(),
+        model: session.model, provider: session.provider,
+        streaming: false, stopReason: 'end_turn',
+      };
+      session = await sessions.appendMessage(sessionId, endingReply);
+      yield { type: 'state', session };
+      yield { type: 'stop', sessionId, messageId: endingReply.id, stopReason: 'end_turn' };
+      return;
+    }
 
     // One-shot turn (DESIGN-17 `oneShot`, actor delegations): the caller asserted
     // a single round suffices, so hand the tool result(s) straight back WITHOUT a

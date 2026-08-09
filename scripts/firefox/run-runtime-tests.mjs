@@ -41,6 +41,9 @@ const PREVIEW_EXTENSION_ORIGIN = `moz-extension://${PREVIEW_TEST_UUID}`;
 const FIXTURE_PATH = '/__firefox-runtime-fixture';
 const WORKER_PROBE_PATH = '/__firefox-worker-startup-probe';
 const MODULE_IMPORT_PROBE_PATH = '/__firefox-module-import-probe.js';
+const REMOTE_MODULE_ROOT_PATH = '/__firefox-remote-module.js';
+const REMOTE_MODULE_CHILD_PATH = '/__firefox-remote-child.js';
+const REMOTE_MODULE_SLOW_PATH = '/__firefox-remote-slow.js';
 const DNR_PUBLIC_HOST = 'guard.peerd.test';
 const DNR_FRAME_HOST = 'frame.peerd.test';
 const DNR_FIXTURE_PATH = '/__firefox-dnr-fixture';
@@ -359,6 +362,8 @@ const startProviderServer = async () => {
   const connections = [];
   const tlsErrors = [];
   let workerStartupProbes = 0;
+  let remoteModuleRequests = 0;
+  let slowModuleRequests = 0;
   let lifetimeActorResponses = 0;
   let lifetimeActorResponseAt = 0;
   let lifetimeActorAborts = 0;
@@ -391,6 +396,31 @@ const startProviderServer = async () => {
   const providerRequestHandler = (request, response) => {
     const host = String(request.headers.host ?? '').split(':')[0].toLowerCase();
     const requestUrl = new URL(request.url ?? '/', `https://${host || 'localhost'}`);
+    if (host === DNR_PUBLIC_HOST && request.method === 'GET'
+        && requestUrl.pathname === REMOTE_MODULE_SLOW_PATH) {
+      slowModuleRequests += 1;
+      const timer = setTimeout(() => {
+        response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' });
+        response.end('export const slow = true;');
+      }, 2_000);
+      response.once('close', () => {
+        clearTimeout(timer);
+      });
+      return;
+    }
+    if (host === DNR_PUBLIC_HOST && request.method === 'GET'
+        && [REMOTE_MODULE_ROOT_PATH, REMOTE_MODULE_CHILD_PATH].includes(requestUrl.pathname)) {
+      remoteModuleRequests += 1;
+      response.writeHead(200, {
+        'content-type': 'text/javascript; charset=utf-8',
+        'cache-control': 'no-store',
+        'access-control-allow-origin': '*',
+      });
+      response.end(requestUrl.pathname === REMOTE_MODULE_ROOT_PATH
+        ? `import { child } from './${REMOTE_MODULE_CHILD_PATH.slice(1)}'; export const remoteValue = child + 1;`
+        : 'export const child = 41;');
+      return;
+    }
     if ([DNR_PUBLIC_HOST, DNR_FRAME_HOST].includes(host) && request.method === 'GET'
         && requestUrl.pathname === DNR_SERVICE_WORKER_FIXTURE_PATH) {
       response.writeHead(200, {
@@ -881,6 +911,8 @@ const startProviderServer = async () => {
       return routeId;
     },
     get workerStartupProbes() { return workerStartupProbes; },
+    get remoteModuleRequests() { return remoteModuleRequests; },
+    get slowModuleRequests() { return slowModuleRequests; },
     get lifetimeActorResponses() { return lifetimeActorResponses; },
     get lifetimeActorResponseAt() { return lifetimeActorResponseAt; },
     get lifetimeActorAborts() { return lifetimeActorAborts; },
@@ -1142,11 +1174,28 @@ const runNumericTabAuthoritySmoke = async (driver, providerServer) => {
         const lock = await browser.runtime.sendMessage({
           type: 'debug/originLock', origin: fixtureOrigin, seedReason: 'password-field',
         });
+        const alternatePort = await browser.runtime.sendMessage({
+          type: 'debug/originLock', origin: 'https://${DNR_PUBLIC_HOST}:9443',
+        });
+        const descendant = await browser.runtime.sendMessage({
+          type: 'debug/originLock', origin: 'https://child.${DNR_PUBLIC_HOST}',
+        });
+        const sibling = await browser.runtime.sendMessage({
+          type: 'debug/originLock', origin: 'https://other.test',
+        });
         const tab = await browser.tabs.create({ url: fixtureUrl, active: false });
         for (let attempt = 0; attempt < 200; attempt += 1) {
           const live = await browser.tabs.get(tab.id).catch(() => null);
           if (live?.url === fixtureUrl) {
-            return { settingsOk: settings?.ok === true, lock, tabId: tab.id, url: live.url };
+            return {
+              settingsOk: settings?.ok === true,
+              lock,
+              alternatePort,
+              descendant,
+              sibling,
+              tabId: tab.id,
+              url: live.url,
+            };
           }
           await new Promise((resolveWait) => setTimeout(resolveWait, 25));
         }
@@ -1160,6 +1209,12 @@ const runNumericTabAuthoritySmoke = async (driver, providerServer) => {
       && initialized?.url === fixtureUrl,
     'Firefox prepares a live tab whose origin has a learned sensitive signal',
     JSON.stringify(initialized));
+    assert(initialized?.alternatePort?.learned === true,
+      'Firefox applies a learned host across schemes and ports', JSON.stringify(initialized));
+    assert(initialized?.descendant?.learned === true,
+      'Firefox applies a learned parent host to descendants', JSON.stringify(initialized));
+    assert(initialized?.sibling?.learned === false,
+      'Firefox does not spread a learned host to siblings', JSON.stringify(initialized));
 
     providerServer.setScenario({ mode: 'numeric-tab-authority', actorTarget: String(fixtureTabId) });
     const started = await driver.executeAsync(`
@@ -3014,6 +3069,503 @@ return 'REACHED';`;
   }
 };
 
+const runLocalModuleGraphSmoke = async (driver) => {
+  console.log('Firefox Notebook module graph smoke: link local modules into one sealed worker entry');
+  const notebookId = 'firefox-local-module-graph';
+  const notebookUrl = `${EXTENSION_ORIGIN}/engine-tabs/notebook-tab/index.html#${notebookId}`;
+  let notebookTabId = null;
+  try {
+    const opened = await driver.executeAsync(`
+      const [url] = arguments;
+      const done = arguments[arguments.length - 1];
+      browser.tabs.create({ url, active: false })
+        .then((tab) => done({ ok: true, tabId: tab.id }),
+          (error) => done({ ok: false, error: error?.message || String(error) }));
+    `, [notebookUrl]);
+    assert(opened?.ok === true && Number.isInteger(opened.tabId),
+      'the local-module Notebook host opens', JSON.stringify(opened));
+    notebookTabId = opened.tabId;
+    const ready = await waitFor(() => driver.executeAsync(`
+      const [tabId, id] = arguments;
+      const done = arguments[arguments.length - 1];
+      Promise.all([
+        browser.tabs.get(tabId),
+        browser.tabs.sendMessage(tabId, { type: 'js/list-files', notebookId: id }),
+      ]).then(([tab, reply]) => done(tab.status === 'complete' && reply?.ok === true),
+        () => done(false));
+    `, [notebookTabId, notebookId]), { budgetMs: 30_000, pollMs: 200 });
+    assert(ready === true, 'the local-module Notebook host is ready for RPC');
+    await driver.navigate(notebookUrl);
+    const workerMatrix = await driver.executeAsync(`
+      const done = arguments[arguments.length - 1];
+      const probe = (options) => new Promise((resolve) => {
+        const url = URL.createObjectURL(new Blob([
+          "postMessage({ type: 'probe-ready' });",
+        ], { type: 'application/javascript' }));
+        let worker;
+        try { worker = options ? new Worker(url, options) : new Worker(url); }
+        catch (error) {
+          URL.revokeObjectURL(url);
+          resolve({ state: 'constructor-error', detail: error?.message || String(error) });
+          return;
+        }
+        const timer = setTimeout(() => {
+          worker.terminate(); URL.revokeObjectURL(url); resolve({ state: 'timeout' });
+        }, 5_000);
+        worker.addEventListener('message', () => {
+          clearTimeout(timer); worker.terminate(); URL.revokeObjectURL(url); resolve({ state: 'ready' });
+        }, { once: true });
+        worker.addEventListener('error', (event) => {
+          clearTimeout(timer); worker.terminate(); URL.revokeObjectURL(url);
+          resolve({ state: 'error', detail: event.message || '' });
+        }, { once: true });
+      });
+      Promise.all([probe(null), probe({ type: 'module' })])
+        .then(([classic, module]) => done({ classic, module }),
+          (error) => done({ error: error?.message || String(error) }));
+    `);
+    assert(workerMatrix?.classic?.state === 'error' && workerMatrix?.module?.state === 'error',
+      'Firefox MV3 refuses generated Worker roots in a privileged extension page',
+      JSON.stringify(workerMatrix));
+    await driver.navigate(`${EXTENSION_ORIGIN}/sidepanel/sidepanel.html`);
+
+    const write = async (path, content) => driver.executeAsync(`
+      const [tabId, id, modulePath, source] = arguments;
+      const done = arguments[arguments.length - 1];
+      browser.tabs.sendMessage(tabId, {
+        type: 'js/write-file', notebookId: id, path: modulePath, content: source,
+      }).then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
+    `, [notebookTabId, notebookId, path, content]);
+    assert((await write('lib/value.js', 'export const value = 42;'))?.ok === true,
+      'Firefox writes the shared local dependency');
+    assert((await write('lib/index.js', "export { value } from './value.js';"))?.ok === true,
+      'Firefox writes the local re-export');
+    assert((await write('lib/module-semantics.js', `
+      await Promise.resolve();
+      export const sourceUrl = import.meta.url;
+      export const tlaValue = 43;
+    `))?.ok === true, 'Firefox writes the module-semantics fixture');
+    assert((await write('lib/failure.js', `
+      /*__peerd_module:00000000-0000-4000-8000-000000000000:module:%__*/
+      throw new Error('imported-source-path-probe');
+    `))?.ok === true,
+      'Firefox writes the imported failure fixture');
+
+    const run = async (source) => driver.executeAsync(`
+      const [tabId, id, code] = arguments;
+      const done = arguments[arguments.length - 1];
+      browser.tabs.sendMessage(tabId, {
+        type: 'js/eval', notebookId: id, code, timeoutMs: 20_000,
+      }).then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
+    `, [notebookTabId, notebookId, source]);
+    const inline = await run("return 'INLINE-OK';");
+    assert(inline?.ok === true && inline.result?.error == null
+      && inline.result?.value === 'INLINE-OK',
+    'the Firefox Notebook runs an inline worker entry before the import graph probe',
+    JSON.stringify(inline));
+    const failedInline = await run("throw new Error('source-path-probe');");
+    assert(failedInline?.ok === true
+      && /source-path-probe/.test(failedInline.result?.error ?? '')
+      && /notebook\.js:1(?::|\b)/.test(failedInline.result?.error ?? '')
+      && !/blob:|data:/.test(failedInline.result?.error ?? ''),
+    'Firefox maps worker failures to the Notebook source without generated URLs',
+    JSON.stringify(failedInline));
+    const graph = await run(`import { value } from './lib/index.js';
+return value;`);
+    assert(graph?.ok === true && graph.result?.error == null
+      && graph.result?.value === 42,
+    'current Firefox runs a nested local import and re-export',
+    JSON.stringify(graph));
+    const moduleSemantics = await run(`import { sourceUrl, tlaValue } from './lib/module-semantics.js';
+return { sourceUrl, tlaValue };`);
+    assert(moduleSemantics?.ok === true && moduleSemantics.result?.error == null
+      && moduleSemantics.result?.value?.tlaValue === 43
+      && moduleSemantics.result?.value?.sourceUrl === './lib/module-semantics.js',
+    'Firefox preserves imported top-level await and stable import.meta.url',
+    JSON.stringify(moduleSemantics));
+    const importedFailure = await run("import './lib/failure.js'; return false;");
+    assert(importedFailure?.ok === true
+      && /imported-source-path-probe/.test(importedFailure.result?.error ?? '')
+      && /\.\/lib\/failure\.js/.test(importedFailure.result?.error ?? '')
+      && !/blob:|data:/.test(importedFailure.result?.error ?? ''),
+    'Firefox maps imported-module failures to their source file',
+    JSON.stringify(importedFailure));
+    const stringCompilation = await run(`
+      const probes = [
+        () => eval('1'),
+        () => Function('return 1')(),
+        () => (async () => {}).constructor('return 1')(),
+        () => (function* () {}).constructor('return 1')(),
+      ];
+      return probes.map((probe) => {
+        try { probe(); return 'unexpected success'; }
+        catch (error) { return error.name; }
+      });
+    `);
+    assert(stringCompilation?.ok === true && stringCompilation.result?.error == null
+      && stringCompilation.result?.value?.length === 4
+      && stringCompilation.result.value.every((value) => value !== 'unexpected success'),
+    'Firefox blocks eval and function-constructor string compilation',
+    JSON.stringify(stringCompilation));
+    const wasm = await run(`
+      const bytes = new Uint8Array([0,97,115,109,1,0,0,0]);
+      const module = await WebAssembly.compile(bytes);
+      return module instanceof WebAssembly.Module;
+    `);
+    assert(wasm?.ok === true && wasm.result?.error == null && wasm.result?.value === true,
+      'Firefox keeps WebAssembly compilation without enabling JavaScript string compilation',
+      JSON.stringify(wasm));
+
+    const immediateStop = await driver.executeAsync(`
+      const [tabId, id] = arguments;
+      const done = arguments[arguments.length - 1];
+      const runId = 'firefox-immediate-stop-probe';
+      const evaluation = browser.tabs.sendMessage(tabId, {
+        type: 'js/eval', notebookId: id, runId,
+        code: 'while (true) {}', timeoutMs: 20_000,
+      });
+      const abort = browser.tabs.sendMessage(tabId, {
+        type: 'js/abort', notebookId: id, runId,
+      });
+      Promise.all([evaluation, abort]).then(([runResult, abortResult]) =>
+        done({ runResult, abortResult }),
+      (error) => done({ error: error?.message || String(error) }));
+    `, [notebookTabId, notebookId]);
+    assert(immediateStop?.abortResult?.stopped === true
+      && immediateStop?.runResult?.result?.stopped === true,
+    'an immediate Firefox abort cannot race ahead of run registration',
+    JSON.stringify(immediateStop));
+
+    const stopped = await driver.executeAsync(`
+      const [tabId, id] = arguments;
+      const done = arguments[arguments.length - 1];
+      const runId = 'firefox-stop-probe';
+      const evaluation = browser.tabs.sendMessage(tabId, {
+        type: 'js/eval', notebookId: id, runId,
+        code: 'while (true) {}', timeoutMs: 20_000,
+      });
+      setTimeout(() => {
+        browser.tabs.sendMessage(tabId, {
+          type: 'js/abort', notebookId: id, runId,
+        }).then((abort) => evaluation.then((run) => done({ abort, run })),
+          (error) => done({ error: error?.message || String(error) }));
+      }, 250);
+    `, [notebookTabId, notebookId]);
+    assert(stopped?.abort?.ok === true && stopped.abort.stopped === true
+      && stopped?.run?.ok === true && stopped.run.result?.stopped === true
+      && stopped.run.result?.error == null,
+    'Firefox Stop terminates the exact infinite run with a structured stopped result',
+    JSON.stringify(stopped));
+
+    assert((await write('cycle-a.js', "import './cycle-b.js'; export const a = 1;"))?.ok === true
+      && (await write('cycle-b.js', "import './cycle-a.js'; export const b = 2;"))?.ok === true,
+    'Firefox writes the cyclic graph fixture');
+    const cycle = await run("import './cycle-a.js'; return 'unreachable';");
+    assert(cycle?.ok === true && /circular import/.test(cycle.result?.error ?? ''),
+      'Firefox preserves Chrome resolver semantics by refusing a cycle before execution',
+      JSON.stringify(cycle));
+
+    const recovered = await run("return 'RECOVERED';");
+    assert(recovered?.ok === true && recovered.result?.error == null
+      && recovered.result?.value === 'RECOVERED',
+    'the same Firefox Notebook recovers after a graph failure', JSON.stringify(recovered));
+    const originalHandle = await driver.windowHandle();
+    let notebookHandle = null;
+    for (const handle of await driver.windowHandles()) {
+      await driver.switchToWindow(handle);
+      if ((await driver.execute('return location.href;')) === notebookUrl) {
+        notebookHandle = handle;
+        break;
+      }
+    }
+    assert(notebookHandle !== null, 'WebDriver finds the visible Notebook tab');
+    const linkingStop = await driver.executeAsync(`
+      const [id] = arguments;
+      const done = arguments[arguments.length - 1];
+      (async () => {
+        const tab = await browser.tabs.getCurrent();
+        const values = Array.from({ length: 180_000 }, (_, index) => String(index)).join(',');
+        await browser.tabs.sendMessage(tab.id, {
+          type: 'js/write-file', notebookId: id, path: 'lib/linker-load.js',
+          content: 'export const values = [' + values + '];',
+        });
+        const runId = 'firefox-linker-stop-probe';
+        const startedAt = Date.now();
+        const evaluation = browser.tabs.sendMessage(tab.id, {
+          type: 'js/eval', notebookId: id, runId,
+          code: "import { values } from './lib/linker-load.js'; return values.length;",
+          timeoutMs: 20_000,
+        });
+        let sawLinking = false;
+        for (let attempt = 0; attempt < 400; attempt += 1) {
+          if (document.getElementById('run-status')?.textContent === 'Linking notebook imports.') {
+            sawLinking = true;
+            break;
+          }
+          await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+        }
+        const abort = await browser.tabs.sendMessage(tab.id, {
+          type: 'js/abort', notebookId: id, runId,
+        });
+        done({
+          sawLinking, abort, run: await evaluation,
+          elapsedMs: Date.now() - startedAt,
+        });
+      })().catch((error) => done({ error: error?.message || String(error) }));
+    `, [notebookId]);
+    assert(linkingStop?.sawLinking === true
+      && linkingStop?.abort?.stopped === true
+      && linkingStop?.run?.result?.stopped === true
+      && linkingStop.elapsedMs < 3_000,
+    'Stop terminates the disposable Firefox compiler during module linking',
+    JSON.stringify(linkingStop));
+    const control = await driver.executeAsync(`
+      const [id] = arguments;
+      const done = arguments[arguments.length - 1];
+      (async () => {
+        const tab = await browser.tabs.getCurrent();
+        const runId = 'firefox-control-stop-probe';
+        const evaluation = browser.tabs.sendMessage(tab.id, {
+          type: 'js/eval', notebookId: id, runId,
+          code: 'while (true) {}', timeoutMs: 20_000,
+        });
+        let running = null;
+        for (let attempt = 0; attempt < 50; attempt += 1) {
+          const button = document.getElementById('run-btn');
+          if (button?.getAttribute('aria-label') === 'Stop notebook run') {
+            button.focus();
+            const concurrent = await browser.tabs.sendMessage(tab.id, {
+              type: 'js/eval', notebookId: id, runId: 'firefox-concurrent-probe',
+              code: "return 'MUST-NOT-REPLACE';", timeoutMs: 20_000,
+            });
+            const notebookFile = await browser.tabs.sendMessage(tab.id, {
+              type: 'js/read-file', notebookId: id, path: 'notebook.js',
+            });
+            running = {
+              label: button.getAttribute('aria-label'),
+              text: button.textContent,
+              focused: document.activeElement === button,
+              concurrent,
+              notebookFile,
+            };
+            button.click();
+            break;
+          }
+          await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+        }
+        const stoppedRun = await evaluation;
+        let idle = null;
+        for (let attempt = 0; attempt < 50; attempt += 1) {
+          const button = document.getElementById('run-btn');
+          if (button?.getAttribute('aria-label') === 'Run notebook.js') {
+            idle = {
+              label: button.getAttribute('aria-label'),
+              focused: document.activeElement === button,
+            };
+            break;
+          }
+          await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+        }
+        const recoveredRun = await browser.tabs.sendMessage(tab.id, {
+          type: 'js/eval', notebookId: id, runId: 'firefox-control-recovery',
+          code: "return 'CONTROL-RECOVERED';", timeoutMs: 20_000,
+        });
+        done({ running, idle, stoppedRun, recoveredRun });
+      })().catch((error) => done({ error: error?.message || String(error) }));
+    `, [notebookId]);
+    assert(control?.running?.label === 'Stop notebook run'
+      && /Stop notebook run/.test(control.running.text ?? '')
+      && control.running.focused === true
+      && control.running.concurrent?.result?.errorCode === 'notebook_run_busy'
+      && control.running.notebookFile?.content === 'while (true) {}'
+      && control?.idle?.label === 'Run notebook.js'
+      && control.idle.focused === true
+      && control?.stoppedRun?.result?.stopped === true
+      && control?.recoveredRun?.result?.value === 'CONTROL-RECOVERED',
+    'the accessible Run control becomes Stop, keeps focus, terminates, and recovers',
+    JSON.stringify(control));
+    const visible = await driver.execute(`
+      return {
+        status: document.getElementById('run-status')?.textContent ?? '',
+        output: document.getElementById('console-output')?.textContent ?? '',
+      };
+    `);
+    await driver.switchToWindow(originalHandle);
+    assert(visible?.status === 'Notebook run complete.' && !/blob:|data:/.test(visible?.output ?? ''),
+      'visible recovery completes without exposing generated module URLs', JSON.stringify(visible));
+  } finally {
+    if (notebookTabId != null) {
+      await driver.executeAsync(`
+        const [tabId] = arguments;
+        const done = arguments[arguments.length - 1];
+        browser.tabs.remove(tabId).then(() => done(true), () => done(false));
+      `, [notebookTabId]).catch(() => {});
+    }
+  }
+};
+
+const runPreviewRemoteModuleSmoke = async (driver, providerServer) => {
+  console.log('Firefox Preview remote module smoke: audited nested graph under compute-only policy');
+  const notebookId = 'firefox-preview-remote-graph';
+  await driver.setWindowRect({ width: 1280, height: 900, x: 0, y: 0 });
+  await driver.navigate(`${PREVIEW_EXTENSION_ORIGIN}/engine-tabs/notebook-tab/index.html#${notebookId}`);
+  const mounted = await waitFor(() => driver.execute(
+    "return document.readyState === 'complete' && document.querySelector('#notebook-app:not([hidden])') !== null;",
+  ), { budgetMs: 30_000 });
+  assert(mounted === true, 'Firefox Preview Notebook host mounts for the remote-module probe');
+
+  const remoteUrl = `https://${DNR_PUBLIC_HOST}:${providerServer.tlsPort}${REMOTE_MODULE_ROOT_PATH}`;
+  const remoteCode = `import { remoteValue } from ${JSON.stringify(remoteUrl)};
+let fileBlocked = false;
+let networkBlocked = false;
+let subagentBlocked = false;
+let dwebBlocked = false;
+let providerBlocked = false;
+let pageBlocked = false;
+let siteBlocked = false;
+try { await peerd.self.writeFile('remote.txt', 'no'); } catch { fileBlocked = true; }
+try { await peerd.egress.fetch('https://example.com'); } catch { networkBlocked = true; }
+try { await peerd.runtime.runAgent({ task: 'no' }); } catch { subagentBlocked = true; }
+try { await peerd.distributed.peers(); } catch { dwebBlocked = true; }
+try { await peerd.provider.call({ prompt: 'no' }); } catch { providerBlocked = true; }
+try { await peerd.page.goto('https://example.com'); } catch { pageBlocked = true; }
+try { await peerd.site.fetch('/private'); } catch { siteBlocked = true; }
+for (const envelope of [
+  { type: 'actor-request', rid: 'forged-actor', args: { task: 'leak' } },
+  { type: 'fetch-request', rid: 'forged-fetch', url: 'https://example.com', method: 'GET' },
+  { type: 'opfs-request', rid: 'forged-opfs', op: 'write', args: { path: 'remote.txt', content: 'no' } },
+  { type: 'distributed-request', rid: 'forged-dweb', method: 'peers' },
+  { type: 'provider-request', rid: 'forged-provider', args: { prompt: 'leak' } },
+]) postMessage(envelope);
+return {
+  remoteValue, fileBlocked, networkBlocked, subagentBlocked, dwebBlocked,
+  providerBlocked, pageBlocked, siteBlocked,
+};`;
+  const outcome = await driver.executeAsync(`
+    const [id, code] = arguments;
+    const done = arguments[arguments.length - 1];
+    (async () => {
+      const browser = (await import('/vendor/browser-polyfill.js')).default;
+      const config = await import('/shared/channel-config.js');
+      const tab = await browser.tabs.getCurrent();
+      const original = browser.runtime.sendMessage.bind(browser.runtime);
+      const calls = [];
+      browser.runtime.sendMessage = (message) => {
+        calls.push(message?.type ?? 'unknown');
+        return original(message);
+      };
+      const run = await browser.tabs.sendMessage(tab.id, {
+        type: 'js/eval', notebookId: id,
+        code,
+        timeoutMs: 20_000,
+      });
+      done({
+        remoteModulesEnabled: config.REMOTE_MODULE_IMPORTS_ENABLED,
+        errorCode: run?.result?.errorCode ?? null,
+        resultError: run?.result?.error ?? null,
+        value: run?.result?.value ?? null,
+        usedRemoteModules: run?.result?.usedRemoteModules === true,
+        durationMs: run?.result?.durationMs ?? null,
+        status: document.getElementById('run-status')?.textContent ?? '',
+        output: document.getElementById('console-output')?.textContent ?? '',
+        calls,
+      });
+    })().catch((error) => done({ error: error?.message || String(error) }));
+  `, [notebookId, remoteCode]);
+  assert(outcome?.remoteModulesEnabled === true,
+    'Firefox Preview packages the single-entry remote module loader', JSON.stringify(outcome));
+  assert(outcome?.resultError == null && outcome?.errorCode == null
+    && outcome?.usedRemoteModules === true
+    && outcome?.value?.remoteValue === 42
+    && outcome?.value?.fileBlocked === true
+    && outcome?.value?.networkBlocked === true
+    && outcome?.value?.subagentBlocked === true
+    && outcome?.value?.dwebBlocked === true
+    && outcome?.value?.providerBlocked === true
+    && outcome?.value?.pageBlocked === true
+    && outcome?.value?.siteBlocked === true,
+  'Firefox Preview runs the nested graph with every host capability blocked', JSON.stringify(outcome));
+  assert(Array.isArray(outcome?.calls)
+    && outcome.calls.filter((type) => type === 'sw/web-fetch').length === 2
+    && !outcome.calls.some((type) => [
+      'actor/spawn', 'dweb/distributed/info', 'provider/call', 'page/call', 'site/call',
+    ].includes(type)),
+  'forged remote bridge envelopes do not leave the Firefox Notebook host',
+  JSON.stringify(outcome?.calls));
+  assert(providerServer.remoteModuleRequests === 2,
+    'the audited host fetches exactly the root and nested remote modules',
+    String(providerServer.remoteModuleRequests));
+  assert(outcome.status === 'Remote code ran with restricted access.'
+    && /Remote imports run with compute only/.test(outcome.output)
+    && !/blob:|data:/.test(outcome.output),
+  'Firefox Preview shows the compute-only receipt without generated URLs', JSON.stringify(outcome));
+
+  const slowUrl = `https://${DNR_PUBLIC_HOST}:${providerServer.tlsPort}${REMOTE_MODULE_SLOW_PATH}`;
+  const stoppedFetch = await driver.executeAsync(`
+    const [id, url] = arguments;
+    const done = arguments[arguments.length - 1];
+    (async () => {
+      const browser = (await import('/vendor/browser-polyfill.js')).default;
+      const tab = await browser.tabs.getCurrent();
+      const runId = 'firefox-remote-fetch-stop';
+      const startedAt = Date.now();
+      const evaluation = browser.tabs.sendMessage(tab.id, {
+        type: 'js/eval', notebookId: id, runId,
+        code: 'import ' + JSON.stringify(url) + '; return false;', timeoutMs: 20_000,
+      });
+      await new Promise((resolveWait) => setTimeout(resolveWait, 150));
+      const abort = await browser.tabs.sendMessage(tab.id, {
+        type: 'js/abort', notebookId: id, runId,
+      });
+      const run = await evaluation;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 300));
+      done({
+        abort, run, elapsedMs: Date.now() - startedAt,
+        status: document.getElementById('run-status')?.textContent ?? '',
+        output: document.getElementById('console-output')?.textContent ?? '',
+      });
+    })().catch((error) => done({ error: error?.message || String(error) }));
+  `, [notebookId, slowUrl]);
+  assert(stoppedFetch?.abort?.stopped === true
+    && stoppedFetch?.run?.result?.stopped === true
+    && stoppedFetch.elapsedMs < 3_000
+    && providerServer.slowModuleRequests === 1
+    && stoppedFetch.status === 'Notebook run stopped.'
+    && !stoppedFetch.output.includes(REMOTE_MODULE_SLOW_PATH),
+  'Stop cancels the Firefox host fetch operation without late resolver output',
+  JSON.stringify({ stoppedFetch, requests: providerServer.slowModuleRequests }));
+  const timedOutFetch = await driver.executeAsync(`
+    const [id, url] = arguments;
+    const done = arguments[arguments.length - 1];
+    (async () => {
+      const browser = (await import('/vendor/browser-polyfill.js')).default;
+      const tab = await browser.tabs.getCurrent();
+      const startedAt = Date.now();
+      const run = await browser.tabs.sendMessage(tab.id, {
+        type: 'js/eval', notebookId: id, runId: 'firefox-remote-fetch-timeout',
+        code: 'import ' + JSON.stringify(url) + '; return false;', timeoutMs: 400,
+      });
+      await new Promise((resolveWait) => setTimeout(resolveWait, 300));
+      done({
+        run, elapsedMs: Date.now() - startedAt,
+        status: document.getElementById('run-status')?.textContent ?? '',
+        output: document.getElementById('console-output')?.textContent ?? '',
+      });
+    })().catch((error) => done({ error: error?.message || String(error) }));
+  `, [notebookId, slowUrl]);
+  assert(/timed out/.test(timedOutFetch?.run?.result?.error ?? '')
+    && timedOutFetch?.run?.result?.errorCode === 'notebook_run_timeout'
+    && timedOutFetch?.run?.result?.stopped !== true
+    && timedOutFetch.elapsedMs < 3_000
+    && timedOutFetch.status === 'Notebook run timed out.'
+    && providerServer.slowModuleRequests === 2
+    && !timedOutFetch.output.includes(REMOTE_MODULE_SLOW_PATH),
+  'the Firefox import deadline cancels host work and recovers without late output',
+  JSON.stringify({ timedOutFetch, requests: providerServer.slowModuleRequests }));
+  writeFileSync(join(OUTPUT, 'preview-notebook-remote-restricted.png'),
+    Buffer.from(await driver.screenshot(), 'base64'));
+};
+
 const serviceWorkerProbeUrl = (providerServer, {
   action, target, token, host = DNR_PUBLIC_HOST,
 }) => {
@@ -3872,8 +4424,20 @@ const main = async () => {
     assert(unsupportedVoiceNudge === false,
       'Firefox hides voice setup when no transcription engine can run');
 
+    if (process.env.FIREFOX_RUNTIME_ONLY === 'notebook-modules') {
+      await runModuleImportPolicySmoke(driver, server);
+      await runLocalModuleGraphSmoke(driver);
+      const installedPreviewId = await driver.installAddon(resolve(previewArtifact));
+      assert(installedPreviewId === PREVIEW_ADDON_ID,
+        'the targeted Notebook run installs the Firefox Preview package');
+      await runPreviewRemoteModuleSmoke(driver, providerServer);
+      console.log('Firefox Notebook module smoke OK');
+      return;
+    }
+
     await runPrivateNetworkDnrSmoke(driver, providerServer);
     await runModuleImportPolicySmoke(driver, server);
+    await runLocalModuleGraphSmoke(driver);
     await runBoundActorSmoke(driver, providerServer);
     await runNumericTabAuthoritySmoke(driver, providerServer);
     await runActorLifetimeSmoke({ providerServer });
@@ -4046,6 +4610,7 @@ const main = async () => {
       && previewPosture?.dwebAvailable === false,
     'installed Firefox Preview omits the dweb surface until it has a mesh host',
     JSON.stringify(previewPosture));
+    await runPreviewRemoteModuleSmoke(driver, providerServer);
 
     await driver.setWindowRect({ width: 400, height: 900, x: 0, y: 0 });
 

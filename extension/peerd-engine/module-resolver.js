@@ -18,8 +18,9 @@
 // Remote (https:) specifiers do NOT ride the worker's native loader: their
 // source is fetched HOST-SIDE via the injected `fetchRemote` (the host's
 // audited sw/web-fetch relay — denylist + SSRF + audit), recursively
-// transformed with the module's own URL as the base, and re-blobbed exactly
-// like a local file — so no third-party byte ever bypasses peerd-egress.
+// transformed with the module's own URL as the base. Chrome receives generated
+// module URLs. Firefox's host linker consumes the same resolved cache and emits
+// one script, so no third-party byte ever bypasses peerd-egress.
 // Bare specifiers (`lodash`) still pass through untouched and fail in the
 // worker's loader: a script wanting a library names a full URL and owns
 // that choice, or the dependency gets vendored.
@@ -357,6 +358,13 @@ const rewriteModuleSource = async (code, fromPath, deps, cache, visited, parseOp
       const sub = await buildModule(path, deps, cache, new Set(visited));
       staticReplacements.push({ match, replacement: JSON.stringify(sub.blobUrl) });
     } else if (path.startsWith(TOOLBOX_SPECIFIER_PREFIX)) {
+      // Remote code must not read locally stored toolbox modules. Resolution
+      // happens before the worker capability profile exists, so this edge is
+      // denied here at the graph boundary rather than relying on runtime caps.
+      if (isRemoteSpecifier(fromPath)) {
+        throw new RemoteImportBlockedError(path,
+          'remote modules cannot import local toolbox modules');
+      }
       // toolbox module → resolved like a local file (recursion + cycle
       // detection), keyed in the cache by its full specifier.
       const sub = await buildModule(path, deps, cache, new Set(visited));

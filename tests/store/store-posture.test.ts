@@ -150,7 +150,7 @@ describe('store feature flags', () => {
       .toContain('export const REMOTE_MODULE_IMPORTS_ENABLED = true');
   });
 
-  test('Firefox preview disables facilities that require the offscreen host', () => {
+  test('Firefox preview disables unavailable dweb facilities and keeps remote modules', () => {
     const source = genChannelConfigSource('preview', 'firefox');
     expect(source).toContain('export const DWEB_ENABLED = false');
     expect(source).toContain('export const REMOTE_MODULE_IMPORTS_ENABLED = true');
@@ -158,6 +158,8 @@ describe('store feature flags', () => {
     expect(source).not.toContain('dwebAgentEnabled:');
     expect(genChannelConfigSource('preview', 'chrome'))
       .toContain('export const DWEB_ENABLED = true');
+    expect(genChannelConfigSource('preview', 'chrome'))
+      .toContain('export const REMOTE_MODULE_IMPORTS_ENABLED = true');
   });
 
   test('remote skill install is off for V1', async () => {
