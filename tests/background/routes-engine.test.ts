@@ -12,7 +12,10 @@ const baseDeps = (over: any = {}) => ({
   auditLog: { append: async () => {} },
   pushState: () => {},
   browser: {
-    runtime: { getContexts: async () => [], sendMessage: async () => ({ ok: true }) },
+    runtime: {
+      getContexts: async () => [], sendMessage: async () => ({ ok: true }),
+      getURL: (path: string) => `moz-extension://peerd/${path}`,
+    },
     storage: { local: { get: async () => ({}), set: async () => {} } },
   },
   // #53: engine's sw/web-fetch now delegates to the vm-net vmHttpFetch factory
@@ -51,11 +54,62 @@ const baseDeps = (over: any = {}) => ({
   withDwebPublication: async (operation: (isCurrent: () => boolean) => Promise<any>) => operation(() => true),
   withAppLifecycle: async (_appId: string, operation: () => Promise<any>) => operation(),
   listOffscreenContexts,
+  isOffscreenSender: (sender: any) => sender?.url === 'moz-extension://peerd/offscreen/offscreen.html',
+  assertOpfsWritable: async () => {},
   // The SW always injects the extract post-step (a passthrough when extract is
   // absent — that contract is pinned in tests/shared/fetch-extract.test.ts).
   applyWebExtract: async (resp: any) => resp,
   awaitDenylistPolicy: async () => {},
   ...over,
+});
+
+describe('lifecycle/assert-opfs-writable', () => {
+  test('the Firefox Notebook host reaches the authoritative write posture', async () => {
+    let checks = 0;
+    const routes = makeEngineRoutes(baseDeps({
+      assertOpfsWritable: async () => { checks += 1; },
+    }));
+    const result = await (routes['lifecycle/assert-opfs-writable'] as any)(
+      {}, { url: 'moz-extension://peerd/engine-tabs/notebook-tab/index.html#nb-1' });
+    expect(result).toEqual({ ok: true });
+    expect(checks).toBe(1);
+  });
+
+  test('the offscreen host reaches the same posture', async () => {
+    let checks = 0;
+    const routes = makeEngineRoutes(baseDeps({
+      assertOpfsWritable: async () => { checks += 1; },
+    }));
+    const result = await (routes['lifecycle/assert-opfs-writable'] as any)(
+      {}, { url: 'moz-extension://peerd/offscreen/offscreen.html' });
+    expect(result).toEqual({ ok: true });
+    expect(checks).toBe(1);
+  });
+
+  test('blocked posture returns the precise refusal without mutating', async () => {
+    const routes = makeEngineRoutes(baseDeps({
+      assertOpfsWritable: async () => {
+        throw new Error("store 'opfs-workspaces' is read-only. No data was changed. Diagnostic: opfs-v2.");
+      },
+    }));
+    const result = await (routes['lifecycle/assert-opfs-writable'] as any)(
+      {}, { url: 'moz-extension://peerd/engine-tabs/notebook-tab/index.html#nb-1' });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("'opfs-workspaces'");
+    expect(result.error).toContain('No data was changed');
+    expect(result.error).toContain('opfs-v2');
+  });
+
+  test('an unrelated extension page cannot probe the posture', async () => {
+    let checks = 0;
+    const routes = makeEngineRoutes(baseDeps({
+      assertOpfsWritable: async () => { checks += 1; },
+    }));
+    const result = await (routes['lifecycle/assert-opfs-writable'] as any)(
+      {}, { url: 'moz-extension://peerd/sidepanel/sidepanel.html' });
+    expect(result).toEqual({ ok: false, error: 'unauthorized OPFS posture request' });
+    expect(checks).toBe(0);
+  });
 });
 
 describe('sw/web-fetch', () => {
@@ -543,6 +597,29 @@ describe('import/apply', () => {
     expect((await r['import/apply']({ envelope: {} })).ok).toBe(true);
     expect(received['index.html']).toBeInstanceOf(Uint8Array);
     expect(Array.from(received['model.custom'])).toEqual(Array.from(raw));
+  });
+  test('a blocked Notebook import refuses before metadata or OPFS mutation', async () => {
+    let creates = 0;
+    let writes = 0;
+    const r = makeEngineRoutes(baseDeps({
+      openEnvelope: async () => ({
+        kind: 'notebook', name: 'Imported', entry: 'notebook.js', meta: { tags: [] },
+        files: { 'notebook.js': new TextEncoder().encode('return 1;') },
+      }),
+      jsRegistry: {
+        get: async () => null,
+        create: async () => { creates += 1; return { id: 'nNew' }; },
+      },
+      opfsHelpers: () => ({ write: async () => { writes += 1; } }),
+      assertOpfsWritable: async () => {
+        throw new Error("store 'opfs-workspaces' is read-only. No data was changed.");
+      },
+    }));
+    const result = await r['import/apply']({ envelope: {} });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("'opfs-workspaces'");
+    expect(creates).toBe(0);
+    expect(writes).toBe(0);
   });
   test('unexpected error rethrown (not swallowed)', async () => {
     const r = makeEngineRoutes(baseDeps({ openEnvelope: async () => { throw new Error('weird'); } }));

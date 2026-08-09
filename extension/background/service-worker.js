@@ -393,7 +393,7 @@ import {
   createAppRegistry,
   appFileCheckpointContent,
   // artifact export/import (.peerd envelopes — DESIGN-10)
-  opfsHelpers,
+  opfsHelpers as rawOpfsHelpers,
   // design 06: the resolver transform, injected into the toolbox write-time
   // parse check (functional core — the check itself lives in peerd-runtime).
   buildModule,
@@ -1008,7 +1008,19 @@ const runCache = createRunCacheStore();
 // — the `script` tool's workspace:true root). Wired into session/archive,
 // the terminal session-lifecycle event. OPFS is reachable from the SW
 // (peerd-engine/opfs.js header); nuke() already swallows a missing subtree.
-const nukeSessionWorkspace = (/** @type {string} */ sid) => opfsHelpers(['peerd-workspace', sid]).nuke();
+const assertOpfsWritable = async () => {
+  const generation = await lifecycleArmed;
+  if (!generation) {
+    throw new Error(
+      'Workspace files are read-only because storage safety checks did not complete. No data was changed.',
+    );
+  }
+  storeWriteGuard.assertWritable('opfs-workspaces');
+};
+const opfsHelpers = (/** @type {string[]} */ rootPath) =>
+  rawOpfsHelpers(rootPath, { beforeMutation: assertOpfsWritable });
+const nukeSessionWorkspace = (/** @type {string} */ sid) =>
+  opfsHelpers(['peerd-workspace', sid]).nuke();
 
 // design js-superpower/06 — the TOOLBOX: durable agent-authored ES modules
 // (peerd:toolbox/<name>), its OWN IDB DB. A distinct trust class from skills
@@ -7327,7 +7339,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
-    listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy,
+    listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
   }),
   ...systemMessageRoutes,
   // denylistNetGuard: an edit changes what the network backstop blocks, so the

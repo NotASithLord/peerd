@@ -26,6 +26,77 @@ const deferred = () => {
 };
 
 describe('offscreen job-runner — durable workspace (workspaceSessionId)', () => {
+  it('the host refuses worker and actor-lane mutation bypasses while reads remain available', async () => {
+    let writes = 0;
+    let deletes = 0;
+    let checks = 0;
+    const fake = {
+      read: async () => 'existing',
+      list: async () => [{ path: '/existing.txt', size: 8 }],
+      write: async () => { writes += 1; },
+      delete: async () => { deletes += 1; },
+      nuke: async () => {},
+    };
+    const result = await runJob(
+      {
+        code: [
+          "postMessage({ type: 'opfs-request', rid: 'forged-write', op: 'write', args: { path: 'forged.txt', content: 'no' } });",
+          'const out = [];',
+          "try { await peerd.self.writeFile('blocked.txt', 'no'); } catch (e) { out.push('write:' + e.message); }",
+          "try { await peerd.self.deleteFile('existing.txt'); } catch (e) { out.push('delete:' + e.message); }",
+          "out.push('read:' + await peerd.self.readFile('existing.txt'));",
+          "out.push('list:' + (await peerd.self.listFiles()).length);",
+          "return out.join('|');",
+        ].join('\n'),
+        workspaceSessionId: wsid,
+        actors: true,
+        ownerSessionId: wsid,
+      },
+      {
+        sendToSW: async (type) => {
+          if (type !== 'lifecycle/assert-opfs-writable') return { ok: true };
+          checks += 1;
+          return {
+            ok: false,
+            error: "store 'opfs-workspaces' is read-only. No data was changed.",
+          };
+        },
+        opfsForRoot: /** @type {any} */ (() => fake),
+      },
+    );
+    expect(result.error).toBe(null);
+    expect(String(result.value)).toContain("write:store 'opfs-workspaces' is read-only");
+    expect(String(result.value)).toContain("delete:store 'opfs-workspaces' is read-only");
+    expect(String(result.value)).toContain('read:existing');
+    expect(String(result.value)).toContain('list:1');
+    expect(checks).toBe(3);
+    expect(writes).toBe(0);
+    expect(deletes).toBe(0);
+  });
+
+  it('ephemeral scratch stays writable without consulting durable workspace posture', async () => {
+    let writes = 0;
+    let checks = 0;
+    const fake = {
+      read: async () => '', list: async () => [], delete: async () => {},
+      write: async () => { writes += 1; }, nuke: async () => {},
+    };
+    const result = await runJob(
+      { code: "await peerd.self.writeFile('scratch.txt', 'ok'); return 'done';" },
+      {
+        sendToSW: async (type) => {
+          if (type === 'lifecycle/assert-opfs-writable') checks += 1;
+          return { ok: false, error: 'blocked' };
+        },
+        opfsForRoot: /** @type {any} */ (() => fake),
+      },
+    );
+    expect(result.error).toBe(null);
+    expect(result.value).toBe('done');
+    expect(writes).toBe(1);
+    expect(checks).toBe(0);
+  });
+
   it('a second workspace run sees the first run\'s file (mount + skip-nuke)', async () => {
     await nukeWorkspace();
     const w1 = await runJob(

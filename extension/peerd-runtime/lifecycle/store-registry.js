@@ -136,7 +136,9 @@ export const STORE_REGISTRY = Object.freeze([
   }),
   // Workspace METADATA outlives sessions, but it points at OPFS roots that
   // exist only in this browser profile's origin storage. The bytes
-  // themselves are OPFS — outside both adapters.
+  // themselves are OPFS, outside both adapters. Notebook tabs and the
+  // offscreen job host therefore check the service worker's live posture at
+  // their OPFS mutation boundary; reads open roots without creating them.
   Object.freeze({
     store: 'opfs-workspaces', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false, deviceBound: true,
     physical: Object.freeze({ selfHosted: ['opfs'] }),
