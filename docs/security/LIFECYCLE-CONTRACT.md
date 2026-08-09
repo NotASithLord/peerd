@@ -30,9 +30,13 @@ After an interruption:
   intent under a fresh ID across the owning root chat. The intent comparison
   includes the normalized external target, so moving the call to a sibling
   actor does not create fresh authority and an unrelated target does not cause
-  a false match. Autonomous goal continuations also stop while that root chat
-  has an unresolved uncertain action. A new user turn must verify or
-  deliberately resolve the uncertainty.
+  a false match. When bounded logs compact an unresolved action, its owner,
+  target, and intent remain in compact replay evidence. That evidence is saved
+  before the full record is deleted. If unresolved compact evidence itself
+  exceeds its bound, a persistent marker forces later conditional and
+  non-idempotent actions through exact-target confirmation and stops autonomous
+  continuations. A new user turn must verify or deliberately resolve the
+  uncertainty.
 - Engine catalog records and stored files remain available after host loss.
   peerd does not automatically recreate the lost process or restore transient
   grants.

@@ -5,7 +5,10 @@
 
 import { describe, test, expect, beforeEach } from 'bun:test';
 import { makeDispatchTracker, makeFailClosedTracker } from '../../../extension/peerd-runtime/lifecycle/dispatch-tracking.js';
-import { createOperationLog, OPERATION_LOG_MAX_TERMINAL } from '../../../extension/peerd-runtime/lifecycle/operation-log.js';
+import {
+  createOperationLog, OPERATION_LOG_MAX_TERMINAL, OPERATION_LOG_MAX_UNKNOWN,
+  OPERATION_LOG_KEY, TOMBSTONES_KEY, TOMBSTONES_MAX, UNKNOWN_INTENT_OVERFLOW_KEY,
+} from '../../../extension/peerd-runtime/lifecycle/operation-log.js';
 import { makeLifecycleBoot } from '../../../extension/peerd-runtime/lifecycle/boot.js';
 import { OPERATION_STATES } from '../../../extension/peerd-runtime/lifecycle/operation-state.js';
 import { confirmationSatisfies } from '../../../extension/peerd-runtime/lifecycle/confirmation.js';
@@ -391,6 +394,128 @@ describe('replay identity survives compaction (tombstones)', () => {
       { id: 'tu-pay', name: 'submit_form', args: {} }, baseCtx(tracker) as any);
     expect(calls.count).toBe(0); // the tombstone refused it
     expect((replay as { error: string }).error).toStartWith('completed:');
+  }, 15_000);
+
+  test('the production tombstone adapter fails closed when replay identity is unreadable', async () => {
+    const storage = makeStorage();
+    const realGet = storage.get;
+    storage.get = async (key: string) => {
+      if (key === 'peerd.lifecycle.tombstones') throw new Error('store unreadable');
+      return realGet(key);
+    };
+    const tracker = makeDispatchTracker({
+      operationLog: createOperationLog({ storage }),
+      generationId: () => 'gen-2-y', retryClassFor: retryClassForTool,
+    });
+    const calls = spyTool('submit_form', 'mutate_external');
+    const result = await dispatchToolCall(
+      { id: 'tu-pay', name: 'submit_form', args: {} }, baseCtx(tracker) as any);
+    expect(calls.count).toBe(0);
+    expect((result as { error: string }).error).toContain('store unreadable');
+    expect((result as { error: string }).error).toContain('must not run untracked');
+  });
+
+  test('fresh-id semantic replay stays guarded after global unknown-log pressure', async () => {
+    const storage = makeStorage();
+    let t = 0;
+    const log = createOperationLog({ storage, now: () => ++t });
+    const tracker = makeDispatchTracker({
+      operationLog: log, generationId: () => 'gen-1-x', retryClassFor: retryClassForTool,
+    });
+    const tool = { name: 'submit_form', sideEffect: 'mutate_external' };
+    const args = { amount: 5, account: 'acct-1' };
+    const first = await tracker.beginTracking({
+      callId: 'victim', tool, sessionId: 'actor-a', ownerSessionId: 'root-victim',
+      target: 'https://example.com/pay', args, turnId: 'turn-1', userInitiated: true,
+    });
+    expect(first && 'handle' in first).toBe(true);
+    await tracker.settleTracking((first as { handle: any }).handle, {
+      ok: false, error: 'network timeout',
+    });
+    for (let i = 0; i < OPERATION_LOG_MAX_UNKNOWN; i += 1) {
+      const id = `pressure-${i}`;
+      await log.begin({
+        operationId: id, sessionId: `other-${i}`, toolName: 'submit_form',
+        retryClass: 'E', generationId: 'gen-1-x', intentKey: `other-intent-${i}`,
+      });
+      await log.transition(id, S.RUNNING);
+      await log.transition(id, S.OUTCOME_UNKNOWN, { dispatched: true });
+    }
+    expect(await log.get('actor-a:victim')).toBeUndefined();
+
+    const confirmation = await tracker.requiresIntentConfirmation({
+      tool, sessionId: 'actor-b', ownerSessionId: 'root-victim',
+      target: 'https://example.com/pay', args, userInitiated: true,
+    });
+    expect(confirmation).toMatchObject({
+      required: true, ownerSessionId: 'root-victim', target: 'https://example.com/pay',
+    });
+    const replay = await tracker.beginTracking({
+      callId: 'fresh-id', tool, sessionId: 'actor-b', ownerSessionId: 'root-victim',
+      target: 'https://example.com/pay', args, turnId: 'turn-2', userInitiated: true,
+    });
+    expect((replay as { refuse: { error: string } }).refuse.error)
+      .toStartWith('outcome_unknown:');
+  }, 15_000);
+
+  test('overflow beyond the tombstone cap forces confirmation instead of forgetting intent', async () => {
+    const storage = makeStorage();
+    const tombstones = Object.fromEntries(Array.from({ length: TOMBSTONES_MAX }, (_, i) => [
+      `old-unknown-${i}`,
+      {
+        terminalState: S.OUTCOME_UNKNOWN, retryClass: 'E', completedAt: i,
+        operationId: `old-unknown-${i}`, sessionId: `old-session-${i}`,
+        ownerSessionId: `old-root-${i}`, toolName: 'submit_form',
+        target: `https://old.example/${i}`, intentKey: `old-intent-${i}`, createdAt: i,
+      },
+    ]));
+    const operations = Object.fromEntries(Array.from(
+      { length: OPERATION_LOG_MAX_UNKNOWN + 1 }, (_, i) => {
+        const operationId = `active-unknown-${i}`;
+        return [operationId, {
+          operationId, sessionId: `active-session-${i}`, toolName: 'submit_form',
+          retryClass: 'E', createdAt: TOMBSTONES_MAX + i, attempt: 1,
+          state: S.OUTCOME_UNKNOWN, generationId: 'gen-old', dispatched: true,
+          intentKey: `active-intent-${i}`,
+        }];
+      }));
+    await storage.set(TOMBSTONES_KEY, tombstones);
+    await storage.set(OPERATION_LOG_KEY, operations);
+
+    const log = createOperationLog({ storage, now: () => 20_000 });
+    // Any persist compacts the extra active unknown. Exact tombstones are
+    // already full, so one unknown identity must cross the second bound.
+    await log.begin({
+      operationId: 'trigger', sessionId: 'trigger-session', toolName: 'submit_form',
+      retryClass: 'E', generationId: 'gen-live',
+    });
+    expect(await log.unknownIntentOverflowed()).toBe(true);
+    expect((storage.map.get(UNKNOWN_INTENT_OVERFLOW_KEY) as any)).toMatchObject({
+      incomplete: true, droppedCount: 1,
+    });
+    expect(Object.keys(storage.map.get(TOMBSTONES_KEY) as Record<string, unknown>))
+      .toHaveLength(TOMBSTONES_MAX);
+
+    const tracker = makeDispatchTracker({
+      operationLog: log, generationId: () => 'gen-live', retryClassFor: retryClassForTool,
+    });
+    const tool = { name: 'submit_form', sideEffect: 'mutate_external' };
+    const args = { amount: 99 };
+    const confirmation = await tracker.requiresIntentConfirmation({
+      tool, sessionId: 'fresh-session', ownerSessionId: 'fresh-root',
+      target: 'https://new.example/pay', args, userInitiated: true,
+    });
+    expect(confirmation).toMatchObject({
+      required: true, overflow: true, ownerSessionId: 'fresh-root',
+      target: 'https://new.example/pay',
+    });
+    const replay = await tracker.beginTracking({
+      callId: 'fresh-call', tool, sessionId: 'fresh-session',
+      ownerSessionId: 'fresh-root', target: 'https://new.example/pay', args,
+      turnId: 'synthetic-turn', userInitiated: false,
+    });
+    expect((replay as { refuse: { error: string } }).refuse.error)
+      .toContain('cannot be proven distinct from compacted unresolved actions');
   }, 15_000);
 });
 

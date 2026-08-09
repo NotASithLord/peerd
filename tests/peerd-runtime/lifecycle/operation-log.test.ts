@@ -5,7 +5,7 @@ import { describe, test, expect } from 'bun:test';
 import {
   createOperationLog, OperationNotFoundError, OperationExistsError,
   RetryRefusedError, OPERATION_LOG_KEY, OPERATION_LOG_MAX_TERMINAL,
-  OPERATION_LOG_MAX_UNKNOWN,
+  OPERATION_LOG_MAX_UNKNOWN, TOMBSTONES_KEY,
 } from '../../../extension/peerd-runtime/lifecycle/operation-log.js';
 import {
   OPERATION_STATES, IllegalTransitionError, UnknownOutcomeUnresolvedError,
@@ -278,6 +278,61 @@ describe('bounded growth', () => {
     expect(unknowns.length).toBe(OPERATION_LOG_MAX_UNKNOWN);
     expect(stored['unk-0']).toBeUndefined();
     expect(stored[`unk-${OPERATION_LOG_MAX_UNKNOWN + 2}`]).toBeDefined();
+  });
+
+  test('compacted unknowns retain the semantic identity used by replay guards', async () => {
+    const { adapter } = makeStorage();
+    let t = 0;
+    const log = createOperationLog({ storage: adapter, now: () => ++t });
+    for (let i = 0; i < OPERATION_LOG_MAX_UNKNOWN + 1; i += 1) {
+      const id = `unk-${i}`;
+      await log.begin({
+        ...beginInput, operationId: id, ownerSessionId: `root-${i}`,
+        intentKey: `intent-${i}`, target: `https://example.com/${i}`,
+      });
+      await log.transition(id, S.RUNNING);
+      await log.transition(id, S.OUTCOME_UNKNOWN, { dispatched: true });
+    }
+    expect(await log.get('unk-0')).toBeUndefined();
+    const unknowns = await log.listOutcomeUnknown();
+    expect(unknowns).toHaveLength(OPERATION_LOG_MAX_UNKNOWN + 1);
+    expect(unknowns.find((record) => record.operationId === 'unk-0')).toMatchObject({
+      sessionId: 'sess-1', ownerSessionId: 'root-0', toolName: 'submit_form',
+      intentKey: 'intent-0', target: 'https://example.com/0',
+      state: S.OUTCOME_UNKNOWN, dispatched: true,
+    });
+  });
+
+  test('prune evidence is durable before the destructive main-map write', async () => {
+    const durable = new Map<string, unknown>();
+    let failMainWrite = false;
+    const events: string[] = [];
+    const storage = {
+      get: async (key: string) => structuredClone(durable.get(key)),
+      set: async (key: string, value: unknown) => {
+        events.push(key);
+        if (failMainWrite && key === OPERATION_LOG_KEY) throw new Error('worker died');
+        durable.set(key, structuredClone(value));
+      },
+    };
+    let t = 0;
+    const log = createOperationLog({ storage, now: () => ++t });
+    for (let i = 0; i < OPERATION_LOG_MAX_TERMINAL; i += 1) {
+      const id = `old-${i}`;
+      await log.begin({ ...beginInput, operationId: id });
+      await log.transition(id, S.RUNNING);
+      await log.transition(id, S.COMPLETED);
+    }
+    await log.begin({ ...beginInput, operationId: 'new' });
+    await log.transition('new', S.RUNNING);
+    events.length = 0;
+    failMainWrite = true;
+    await expect(log.transition('new', S.COMPLETED)).rejects.toThrow('worker died');
+    expect(events.slice(0, 2)).toEqual([TOMBSTONES_KEY, OPERATION_LOG_KEY]);
+    const tombstones = durable.get(TOMBSTONES_KEY) as Record<string, unknown>;
+    const operations = durable.get(OPERATION_LOG_KEY) as Record<string, unknown>;
+    expect(tombstones['old-0']).toBeDefined();
+    expect(operations['old-0']).toBeDefined();
   });
 
   test('outcome_unknown records are not pruned by the terminal cap — the uncertainty outlives ordinary history', async () => {

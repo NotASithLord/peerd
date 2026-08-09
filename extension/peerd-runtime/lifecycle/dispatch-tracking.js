@@ -289,7 +289,6 @@ export const makeDispatchTracker = ({
     if (retryClass !== RETRY_CLASSES.SIDE_EFFECT
         && retryClass !== RETRY_CLASSES.CONDITIONAL_ACTION) return false;
     const intentKey = await idempotencyKeyFor(tool.name ?? 'tool', args);
-    const unknowns = await operationLog.listOutcomeUnknown();
     const executionSessionId = sessionId || 'unknown-session';
     const scope = {
       ownerSessionId: ownerSessionId
@@ -297,6 +296,14 @@ export const makeDispatchTracker = ({
       target: target || `tool:${tool.name ?? 'unknown-tool'}`,
       intentKey,
     };
+    // If compact exact identity itself overflowed, absence is no longer proof
+    // that this intent is new. Force the same exact-target human confirmation
+    // used for a known match. Synthetic turns skip this advisory path and are
+    // refused by beginTracking below.
+    if (await operationLog.unknownIntentOverflowed?.()) {
+      return { required: true, ...scope, overflow: true };
+    }
+    const unknowns = await operationLog.listOutcomeUnknown();
     const prior = await findUnknownIntent(unknowns, scope);
     return prior ? { required: true, ...scope } : false;
   };
@@ -532,28 +539,33 @@ export const makeDispatchTracker = ({
         || retryClass === RETRY_CLASSES.CONDITIONAL_ACTION) {
       try {
         intentKey = await idempotencyKeyFor(tool.name ?? 'tool', args);
-        const unknowns = await operationLog.listOutcomeUnknown();
         const scope = {
           ownerSessionId: intentOwnerSessionId,
           target: intentTarget,
           intentKey,
         };
+        const replayIdentityIncomplete = await operationLog.unknownIntentOverflowed?.() === true;
+        const unknowns = replayIdentityIncomplete
+          ? [] : await operationLog.listOutcomeUnknown();
         const prior = await findUnknownIntent(unknowns, scope, operationId);
         const exactRepeatApproval = confirmed === true
           && confirmedIntent !== false
           && confirmedIntent?.intentKey === intentKey
           && confirmedIntent?.ownerSessionId === intentOwnerSessionId
           && confirmedIntent?.target === intentTarget;
-        if (prior && !exactRepeatApproval) {
+        if ((prior || replayIdentityIncomplete) && !exactRepeatApproval) {
           const verdict = decideRecovery({ retryClass, dispatched: true });
           return {
             refuse: {
-              error: `outcome_unknown: ${tool.name ?? 'this action'} matches an `
-                + 'earlier dispatch whose result is unknown. Verify the external '
+              error: `outcome_unknown: ${tool.name ?? 'this action'} ${prior
+                ? 'matches an earlier dispatch whose result is unknown'
+                : 'cannot be proven distinct from compacted unresolved actions'}. Verify the external `
                 + 'state before repeating it. The repeat needs a new user '
                 + 'confirmation; a continuation is not authority.',
               recovery: describeRecovery(verdict, {
-                retryClass, operationId: prior.operationId, toolName: prior.toolName,
+                retryClass,
+                operationId: prior?.operationId ?? operationId,
+                toolName: prior?.toolName ?? tool.name,
               }).agent,
             },
           };

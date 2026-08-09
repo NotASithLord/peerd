@@ -562,9 +562,11 @@ export const dispatchToolCall = async (call, ctx) => {
         note: ugcRuleId
           ? UGC_CONFIRM_NOTE
           : (lifecycleRepeatConfirm
-            ? (ctx.session?.kind === 'actor' || ctx.session?.kind === 'spawned'
-              ? 'An actor in this chat wants to repeat an action whose earlier outcome is unknown. Verify the target before approving.'
-              : 'A matching earlier action has an unknown outcome. Verify the target before approving this repeat.')
+            ? ('overflow' in lifecycleRepeatConfirm && lifecycleRepeatConfirm.overflow === true
+              ? 'Stored unresolved-action evidence exceeded its local bound. Peerd cannot prove this action is new. Verify the exact target before approving.'
+              : (ctx.session?.kind === 'actor' || ctx.session?.kind === 'spawned'
+                ? 'An actor in this chat wants to repeat an action whose earlier outcome is unknown. Verify the target before approving.'
+                : 'A matching earlier action has an unknown outcome. Verify the target before approving this repeat.'))
             : undefined),
         sessionId: ctx.session?.sessionId ?? null,
         dispatchId: call.id ?? null,

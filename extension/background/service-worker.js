@@ -4636,6 +4636,10 @@ goalRunner = makeGoalRunner({
     // could inspect the old nonterminal record, see no outcome_unknown yet,
     // and start the exact continuation this guard exists to stop.
     await lifecycleArmed;
+    // Exact compact intent can exceed its own bounded store only under extreme
+    // unresolved pressure. The persistent sentinel means no root can prove it
+    // is clear, so autonomous work stops globally until a human directs it.
+    if (await lifecycleBoot.operationLog.unknownIntentOverflowed?.()) return true;
     const unknowns = await lifecycleBoot.operationLog.listOutcomeUnknown();
     for (const record of unknowns) {
       if (await resolveLifecycleRootSession(record.sessionId) === sid) return true;
