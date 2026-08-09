@@ -29,6 +29,7 @@ const MAX_TIMEOUT_MS = 120_000;
  * @property {Array<{ level: string, text: string }>} [consoleOutput]
  * @property {unknown} [value]
  * @property {boolean} [usedRemoteModules]
+ * @property {boolean} [stopped]
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
@@ -45,8 +46,10 @@ export const jsNotebookTool = {
     'npm/native modules. EACH CALL IS A FRESH WORKER — module state does NOT',
     'persist; write to OPFS via peerd.self.writeFile and read it back. Inside:',
     'peerd.egress.fetch (audited HTTP), peerd.self.readFile/writeFile/listFiles;',
-    'literal relative static imports work; dynamic, computed, and attributed',
-    'imports do not. No `notebook` arg → the chat\'s',
+    'literal relative static imports work across supported packaged browsers.',
+    'Literal HTTPS imports work only where the package enables them, always',
+    'under compute-only restrictions. Dynamic, computed, and attributed imports',
+    'do not. No `notebook` arg → the chat\'s',
     'current Notebook. Returns the return value, console output, and any error.',
   ].join(' '),
   schema: {
@@ -76,12 +79,15 @@ export const jsNotebookTool = {
     }
     // why: jsClient / jsRegistry ride the opaque ctx contract (not on the
     // ToolContext typedef); narrow to the surface this tool touches.
-    const jsClient = /** @type {{ eval?: (code: string, opts: { timeoutMs: number, sessionId?: string, notebookId?: string }) => Promise<EvalResult> } | undefined} */ (
+    const jsClient = /** @type {{ eval?: (code: string, opts: { timeoutMs: number, sessionId?: string, notebookId?: string, signal?: AbortSignal }) => Promise<EvalResult> } | undefined} */ (
       /** @type {any} */ (ctx).jsClient);
     const jsRegistry = /** @type {{ get: (id: string) => Promise<unknown>, list: () => Promise<Array<{ id: string, name: string }>>, setDefaultForSession: (sessionId: string, id: string) => Promise<unknown> } | undefined} */ (
       /** @type {any} */ (ctx).jsRegistry);
     if (!jsClient || typeof jsClient.eval !== 'function') {
       return { ok: false, error: 'js_not_available' };
+    }
+    if (ctx.abortSignal?.aborted) {
+      return { ok: true, content: '[STOPPED] Notebook run was stopped. Do not retry automatically.' };
     }
     const timeoutMs = clamp(args.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1000, MAX_TIMEOUT_MS);
 
@@ -110,7 +116,23 @@ export const jsNotebookTool = {
         timeoutMs,
         sessionId: ctx.session?.sessionId,
         notebookId: targetNotebookId,
+        signal: ctx.abortSignal,
       });
+      if (result.stopped) {
+        return { ok: true, content: '[STOPPED] Notebook run was stopped. Do not retry automatically.' };
+      }
+      if (result.errorCode === 'notebook_run_busy') {
+        return {
+          ok: true,
+          content: '[BUSY] This Notebook already has a run in progress. The requested code was not run. Do not retry automatically.',
+        };
+      }
+      if (result.errorCode === 'notebook_run_timeout') {
+        return {
+          ok: true,
+          content: '[TIMEOUT] Notebook run did not finish before its deadline. Reduce the work or increase timeoutMs before retrying. Do not retry the same request automatically.',
+        };
+      }
       const importPolicyMessage = moduleImportPolicyMessage(result.errorCode);
       if (importPolicyMessage) {
         return {

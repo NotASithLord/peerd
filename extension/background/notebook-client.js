@@ -60,8 +60,8 @@ export const createJsClient = ({ registry, tracker }) => {
     return queue.enqueue(`resolve:${opts.sessionId}`, () => resolveId(opts));
   };
 
-  /** @param {string} notebookId @param {{ type: string, [k: string]: unknown }} message */
-  const callTab = async (notebookId, message) => {
+  /** @param {string} notebookId @param {{ type: string, [k: string]: unknown }} message @param {AbortSignal} [abortSignal] */
+  const callTab = async (notebookId, message, abortSignal) => {
     // background: agent-driven Notebook tabs never steal focus (DESIGN-12,
     // 2026-06-18). sandbox_create already dropped a "go there" card; an auto-create
     // here opens quietly too. ensureTab early-returns for a live tab.
@@ -81,13 +81,24 @@ export const createJsClient = ({ registry, tracker }) => {
     });
     /** @type {JsTabReply} */
     let response;
+    const onAbort = () => {
+      browser.tabs.sendMessage(tabId, {
+        type: 'js/abort', notebookId, runId: message.runId,
+      }).catch(() => {});
+    };
+    // why dispatch first: an already-aborted signal must not let js/abort race
+    // ahead of the exact js/eval it terminates in the receiving tab.
+    const messagePromise = browser.tabs.sendMessage(tabId, { ...message, notebookId });
+    if (abortSignal?.aborted) onAbort();
+    else abortSignal?.addEventListener('abort', onAbort, { once: true });
     try {
       response = /** @type {JsTabReply} */ (await Promise.race([
-        browser.tabs.sendMessage(tabId, { ...message, notebookId }),
+        messagePromise,
         timeoutPromise,
       ]));
     } finally {
       clearTimeout(timeoutId);
+      abortSignal?.removeEventListener('abort', onAbort);
     }
     if (!response || response.ok !== true) {
       const err = new Error(response?.error ?? 'js call returned no response');
@@ -104,14 +115,16 @@ export const createJsClient = ({ registry, tracker }) => {
   return {
     resolveId,
 
-    /** @param {string} code @param {{ sessionId?: string, notebookId?: string, timeoutMs?: number }} [opts] */
+    /** @param {string} code @param {{ sessionId?: string, notebookId?: string, timeoutMs?: number, signal?: AbortSignal }} [opts] */
     eval: async (code, opts = {}) => {
       const id = await resolveIdQueued(opts);
+      const runId = crypto.randomUUID();
       const response = await callTab(id, {
         type: 'js/eval',
+        runId,
         code,
         timeoutMs: opts.timeoutMs,
-      });
+      }, opts.signal);
       return response.result;
     },
 

@@ -16,11 +16,9 @@
 //      worker loader, dead in module workers, sealed anyway), and the
 //      nested Worker / SharedWorker constructors — a nested worker is a
 //      FRESH realm with un-sealed natives, so it must not exist at all.
-//   3. The seal runs as the worker entry's FIRST static import (notebook-tab.js
-//      emits `import "<seal blob>"` ahead of the agent's imports). Module
-//      graphs evaluate depth-first in declaration order, so the seal
-//      executes before any agent module's top-level body — closing the
-//      old gap where statically-imported agent code ran pre-stub.
+//   3. The seal is the worker graph's first edge. Chrome evaluates that import
+//      first. Firefox's single-entry linker emits the seal body first. Both
+//      execute it before any agent module body, closing the old pre-seal gap.
 //
 // What this still is NOT: the outermost fence. The host page's CSP
 // (notebook-tab/index.html, connect-src 'none') backstops the seal in the
@@ -32,12 +30,12 @@
 // realm itself, not deferred to the page CSP.
 // Module loads are NOT an open channel. Store and web builds refuse remote
 // URL imports without requesting the module source. Preview's HOST resolver
-// fetches permitted module source through the audited data relay and hands the
-// worker a same-realm blob, so the native loader still sees no third-party URL.
+// fetches permitted module source through the audited data relay. The worker
+// receives only host-resolved code, never a third-party network URL.
 // import() itself is syntax, not a global, so there is nothing to seal here.
 //
-// One implementation, three callers: realm-seal.js (the worker entry's
-// first static import — the production path), the bun unit tests (mock
+// One implementation, three callers: realm-seal.js (the worker graph's
+// first edge, linked into Firefox's single script), the bun unit tests (mock
 // globals), and the in-browser tests (real worker realms). All import
 // applyRealmSeal from here, so production and tests cannot drift.
 /**

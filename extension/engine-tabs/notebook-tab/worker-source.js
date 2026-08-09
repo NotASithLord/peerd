@@ -2,7 +2,7 @@
 // notebook-tab/worker-source.js — builds the sealed Notebook worker's source.
 //
 // SECURITY-CRITICAL + host-agnostic. This is the ONE place the worker realm is
-// assembled: the realm seal as the FIRST import, the peerd.* capability surface,
+// assembled: the realm seal as the FIRST graph edge, the peerd.* capability surface,
 // the postMessage bridges (fetch / opfs / actor / display), and the entry
 // IIFE. BOTH hosts use it — the visible Notebook tab (notebook-tab.js) and the
 // headless offscreen job runner (offscreen/job-runner.js) — so the seal +
@@ -20,12 +20,11 @@ import {
   remoteModuleCapabilityBlockedMessage,
 } from '/peerd-engine/index.js';
 
-// why absolute URLs: the worker entry is a blob; its FIRST static import must be
-// the realm seal (ES module graphs evaluate depth-first in declaration order, so
-// this guarantees the seal runs before any agent module body). peerd:std loads
-// AFTER the seal and is pure. Both resolve against import.meta.url so they work
-// on the extension origin AND the http origin the in-browser harness serves from.
-const SEAL_MODULE_URL = new URL('./realm-seal.js', import.meta.url).href;
+// why absolute URLs: Chrome loads this graph natively. Firefox's package-selected
+// linker consumes the same URLs as trusted virtual entries and emits the seal
+// body before any agent module body. peerd:std loads after the seal and is pure.
+// The URLs work on the extension origin and the HTTP in-browser harness.
+export const SEAL_MODULE_URL = new URL('./realm-seal.js', import.meta.url).href;
 const STD_MODULE_URL = new URL('./notebook-std.js', import.meta.url).href;
 const WASI_MODULE_URL = new URL('./notebook-wasi.js', import.meta.url).href;
 
@@ -499,28 +498,39 @@ __PEERD_BODY__})()
 /**
  * Map a worker error (a stack whose frames point into the entry blob URL) back
  * to user-code coordinates: `blob:…:<L>:<C>` → `<entryPath>:<L - bodyLine + 1>:<C>`.
- * Frames outside the body (the injected preamble) and other modules' blob URLs
- * are left untouched. Pure — shared by the Notebook tab and the headless
+ * Frames outside the body (the injected preamble) are left untouched. Resolved
+ * child-module blob URLs are mapped to their source names when the caller
+ * supplies the graph cache. This pure helper is shared by the Notebook tab and the headless
  * job runner so both surfaces report the same mapped location.
  *
  * @param {string | null | undefined} raw
  * @param {string} blobUrl      the entry worker's own blob URL
  * @param {number} bodyLine     from buildWorkerSource
  * @param {string} [entryPath]
+ * @param {Map<string, { blobUrl: string }>} [moduleCache]
  * @returns {string | null | undefined}
  */
-export const mapWorkerError = (raw, blobUrl, bodyLine, entryPath = 'notebook.js') => {
+export const mapWorkerError = (
+  raw, blobUrl, bodyLine, entryPath = 'notebook.js', moduleCache,
+) => {
   if (typeof raw !== 'string' || !raw || !blobUrl) return raw;
   const parts = raw.split(`${blobUrl}:`);
-  if (parts.length === 1) return raw;
-  let out = parts[0];
-  for (let i = 1; i < parts.length; i += 1) {
-    const seg = parts[i];
-    const m = /^(\d+):(\d+)/.exec(seg);
-    const userLine = m ? Number(m[1]) - bodyLine + 1 : 0;
-    out += (m && userLine >= 1)
-      ? `${entryPath}:${userLine}:${m[2]}${seg.slice(m[0].length)}`
-      : `${blobUrl}:${seg}`;
+  let out = raw;
+  if (parts.length > 1) {
+    out = parts[0];
+    for (let i = 1; i < parts.length; i += 1) {
+      const seg = parts[i];
+      const m = /^(\d+):(\d+)/.exec(seg);
+      const userLine = m ? Number(m[1]) - bodyLine + 1 : 0;
+      out += (m && userLine >= 1)
+        ? `${entryPath}:${userLine}:${m[2]}${seg.slice(m[0].length)}`
+        : `${blobUrl}:${seg}`;
+    }
+  }
+  for (const [path, entry] of moduleCache ?? []) {
+    if (!entry.blobUrl || entry.blobUrl === blobUrl) continue;
+    const sourceName = /^(?:https?:|peerd:|\/)/.test(path) ? path : `./${path}`;
+    out = out.split(`${entry.blobUrl}:`).join(`${sourceName}:`);
   }
   return out;
 };

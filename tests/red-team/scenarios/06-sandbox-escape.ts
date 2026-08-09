@@ -271,7 +271,9 @@ export const scenario: Scenario = {
       'tests/peerd-engine/module-resolver-toolbox.test.ts (remote-to-local toolbox refusal)',
       'tests/engine-tabs/notebook-tab/worker-caps-profile.test.ts (remote whole-run profile)',
       'tests/peerd-runtime/tools/remote-import-policy.test.ts (remote output fence)',
+      'tests/peerd-engine/single-module-linker.test.ts (seal-first graph with no child loads)',
       'extension/tests/unit/red-team/sandbox-escape.test.js (in-browser red-team framing)',
+      'scripts/firefox/run-runtime-tests.mjs (opaque worker host, string-compilation refusal, cancellable compiler and fetch, local and remote graph parity)',
       'scripts/cdp/states.mjs actor-command-sender-pin (live engine-tab forgery)',
       'scripts/cdp/states.mjs notebook-remote-restricted (live visible-Notebook host wall)',
     ].join('; ');
