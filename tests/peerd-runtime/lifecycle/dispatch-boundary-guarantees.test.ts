@@ -8,11 +8,13 @@ import { makeDispatchTracker, makeFailClosedTracker } from '../../../extension/p
 import {
   createOperationLog, OPERATION_LOG_MAX_TERMINAL, OPERATION_LOG_MAX_UNKNOWN,
   OPERATION_LOG_KEY, TOMBSTONES_KEY, TOMBSTONES_MAX, UNKNOWN_INTENT_OVERFLOW_KEY,
+  CLASS_F_REPLAY_FILTER_KEY,
 } from '../../../extension/peerd-runtime/lifecycle/operation-log.js';
 import { makeLifecycleBoot } from '../../../extension/peerd-runtime/lifecycle/boot.js';
 import { OPERATION_STATES } from '../../../extension/peerd-runtime/lifecycle/operation-state.js';
 import { confirmationSatisfies } from '../../../extension/peerd-runtime/lifecycle/confirmation.js';
 import { retryClassForTool } from '../../../extension/peerd-runtime/lifecycle/tool-retry-class.js';
+import { decideRecovery } from '../../../extension/peerd-runtime/lifecycle/retry-class.js';
 import { registerTool, clearTools } from '../../../extension/peerd-runtime/tools/registry.js';
 import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/dispatcher.js';
 import { fromOpenAiStream } from '../../../extension/peerd-provider/format/from-openai.js';
@@ -396,6 +398,119 @@ describe('replay identity survives compaction (tombstones)', () => {
     expect((replay as { error: string }).error).toStartWith('completed:');
   }, 15_000);
 
+  test('an interrupted Class F call stays lost after compaction while a fresh call can replace it', async () => {
+    const { storage } = makeLog();
+    let t = 0;
+    const agedLog = createOperationLog({ storage, now: () => ++t });
+    await agedLog.begin({
+      operationId: 'sess-1:resource-old', sessionId: 'sess-1',
+      toolName: 'sandbox_create', retryClass: 'F', generationId: 'gen-1-x',
+    });
+    await agedLog.settle('sess-1:resource-old', decideRecovery({
+      retryClass: 'F', dispatched: false,
+    }));
+    for (let i = 0; i < OPERATION_LOG_MAX_TERMINAL + 2; i += 1) {
+      const id = `resource-pressure-${i}`;
+      await agedLog.begin({
+        operationId: id, sessionId: 's2', toolName: 't', retryClass: 'B',
+        generationId: 'gen-1-x',
+      });
+      await agedLog.settle(id, decideRecovery({ retryClass: 'B', dispatched: false }));
+    }
+    expect(await agedLog.get('sess-1:resource-old')).toBeUndefined();
+
+    const tracker = makeDispatchTracker({
+      operationLog: agedLog, generationId: () => 'gen-2-y',
+      retryClassFor: (tool) => tool.retryClass as any,
+    });
+    const tool = { name: 'sandbox_create', retryClass: 'F' };
+    const stale = await tracker.beginTracking({
+      callId: 'resource-old', tool, sessionId: 'sess-1', args: {},
+    });
+    expect((stale as { refuse: { error: string } }).refuse.error)
+      .toStartWith('resource_lost:');
+    expect((stale as { refuse: { error: string } }).refuse.error)
+      .toContain('record ending interrupted');
+    expect((stale as { refuse: { recovery: Record<string, unknown> } }).refuse.recovery)
+      .toMatchObject({
+        category: 'resource_lost', autoRetry: false,
+        retryRequires: ['rederive-grants'], verificationRequired: false,
+        keepIdempotencyKey: false,
+        reason: 'compacted Class F record ended interrupted',
+      });
+    expect((stale as { refuse: { recovery: { retryRequires: string[] } } })
+      .refuse.recovery.retryRequires).toContain('rederive-grants');
+
+    const fresh = await tracker.beginTracking({
+      callId: 'resource-fresh', tool, sessionId: 'sess-1', args: {},
+    });
+    expect(fresh && 'handle' in fresh).toBe(true);
+    expect((fresh as { handle: { operationId: string } }).handle.operationId)
+      .toBe('sess-1:resource-fresh');
+  }, 15_000);
+
+  test('Class F replay stays blocked after exact tombstones exceed their cap', async () => {
+    const storage = makeStorage();
+    const tombstones = Object.fromEntries(Array.from({ length: TOMBSTONES_MAX }, (_, i) => [
+      i === 0 ? 'sess-1:resource-evicted' : `old-resource-${i}`,
+      { terminalState: S.INTERRUPTED, retryClass: 'F', completedAt: i },
+    ]));
+    await storage.set(TOMBSTONES_KEY, tombstones);
+    const operations = Object.fromEntries(Array.from({ length: OPERATION_LOG_MAX_TERMINAL + 1 }, (_, i) => {
+      const operationId = i === 0 ? 'pressure-resource' : `pressure-${i}`;
+      return [operationId, {
+        operationId, sessionId: 'pressure-session',
+        toolName: i === 0 ? 'sandbox_create' : 'readish',
+        retryClass: i === 0 ? 'F' : 'B', createdAt: i, attempt: 1,
+        state: S.COMPLETED, generationId: 'gen-1-x', dispatched: true,
+      }];
+    }));
+    await storage.set(OPERATION_LOG_KEY, operations);
+    const log = createOperationLog({ storage, now: () => 20_000 });
+    await log.begin({
+      operationId: 'compaction-trigger', sessionId: 'pressure-session',
+      toolName: 'readish', retryClass: 'B', generationId: 'gen-2-y',
+    });
+    expect((storage.map.get(CLASS_F_REPLAY_FILTER_KEY) as { version: number }).version)
+      .toBe(1);
+    expect((storage.map.get(TOMBSTONES_KEY) as Record<string, unknown>)
+      ['sess-1:resource-evicted']).toBeUndefined();
+
+    const tracker = makeDispatchTracker({
+      operationLog: log, generationId: () => 'gen-2-y',
+      retryClassFor: (tool) => tool.retryClass as any,
+    });
+    const tool = { name: 'sandbox_create', retryClass: 'F' };
+    const stale = await tracker.beginTracking({
+      callId: 'resource-evicted', tool, sessionId: 'sess-1', args: {},
+    });
+    expect((stale as { refuse: { error: string } }).refuse.error)
+      .toStartWith('resource_lost:');
+    expect((stale as { refuse: { error: string } }).refuse.error)
+      .toContain('may match an older compacted resource request');
+    expect((stale as { refuse: { error: string } }).refuse.error)
+      .toContain('issue a fresh call');
+    expect((stale as { refuse: { recovery: Record<string, unknown> } }).refuse.recovery)
+      .toMatchObject({
+        category: 'resource_lost', autoRetry: false,
+        retryRequires: ['rederive-grants'], verificationRequired: false,
+        keepIdempotencyKey: false,
+        reason: 'call id may match an older compacted Class F request',
+      });
+
+    const unrelated = await tracker.beginTracking({
+      callId: 'resource-evicted',
+      tool: { name: 'submit_form', retryClass: 'E' },
+      sessionId: 'sess-1', args: {},
+    });
+    expect(unrelated && 'handle' in unrelated).toBe(true);
+
+    const fresh = await tracker.beginTracking({
+      callId: 'resource-overflow-fresh', tool, sessionId: 'sess-1', args: {},
+    });
+    expect(fresh && 'handle' in fresh).toBe(true);
+  });
+
   test('the production tombstone adapter fails closed when replay identity is unreadable', async () => {
     const storage = makeStorage();
     const realGet = storage.get;
@@ -413,6 +528,28 @@ describe('replay identity survives compaction (tombstones)', () => {
     expect(calls.count).toBe(0);
     expect((result as { error: string }).error).toContain('store unreadable');
     expect((result as { error: string }).error).toContain('must not run untracked');
+  });
+
+  test('an unreadable Class F replay filter refuses resource creation', async () => {
+    const storage = makeStorage();
+    const realGet = storage.get;
+    storage.get = async (key: string) => {
+      if (key === CLASS_F_REPLAY_FILTER_KEY) throw new Error('resource replay store unreadable');
+      return realGet(key);
+    };
+    const tracker = makeDispatchTracker({
+      operationLog: createOperationLog({ storage }), generationId: () => 'gen-2-y',
+      retryClassFor: (tool) => tool.retryClass as any,
+    });
+    const result = await tracker.beginTracking({
+      callId: 'resource-new', sessionId: 'sess-1', args: {},
+      tool: { name: 'sandbox_create', retryClass: 'F' },
+    });
+    expect((result as { refuse: { error: string } }).refuse.error)
+      .toContain('resource replay store unreadable');
+    expect(await createOperationLog({ storage: {
+      get: realGet, set: storage.set,
+    } }).get('sess-1:resource-new')).toBeUndefined();
   });
 
   test('fresh-id semantic replay stays guarded after global unknown-log pressure', async () => {

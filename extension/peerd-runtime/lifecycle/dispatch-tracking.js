@@ -575,7 +575,7 @@ export const makeDispatchTracker = ({
           `intent replay check failed (${error instanceof Error ? error.message : String(error)})`);
       }
     }
-    // Tombstone check (D/E only — the only classes that mint them): a call
+    // Tombstone check for D/E/F, the classes that mint them: a call
     // id whose FULL record was pruned still carries compact replay
     // identity; re-presenting it is refused exactly as the record would
     // have.
@@ -587,24 +587,53 @@ export const makeDispatchTracker = ({
     // be assuming "no" with no evidence, which is the replay the guard
     // exists to prevent.
     if (retryClass === RETRY_CLASSES.SIDE_EFFECT
-        || retryClass === RETRY_CLASSES.CONDITIONAL_ACTION) {
-      const tombstone = await Promise.resolve(operationLog.getTombstone?.(operationId))
+        || retryClass === RETRY_CLASSES.CONDITIONAL_ACTION
+        || retryClass === RETRY_CLASSES.RESOURCE) {
+      const tombstone = await Promise.resolve(operationLog.getTombstone?.(operationId, retryClass))
         .catch((error) => {
           throw new TombstoneUnreadableError(
             error instanceof Error ? error.message : String(error));
         });
       if (tombstone) {
+        const approximateResourceReplay = retryClass === RETRY_CLASSES.RESOURCE
+          && tombstone.approximateReplay === true;
+        const compactResourceRecovery = retryClass === RETRY_CLASSES.RESOURCE
+          && tombstone.terminalState !== OPERATION_STATES.COMPLETED
+          ? describeRecovery(decideRecovery({
+            retryClass: RETRY_CLASSES.RESOURCE, dispatched: false,
+          }), {
+            retryClass: RETRY_CLASSES.RESOURCE,
+            operationId,
+            toolName: tool.name,
+          }).agent
+          : null;
+        const resourceRecovery = compactResourceRecovery
+          ? {
+            ...compactResourceRecovery,
+            reason: approximateResourceReplay
+              ? 'call id may match an older compacted Class F request'
+              : `compacted Class F record ended ${tombstone.terminalState}`,
+          }
+          : null;
         return {
           refuse: {
             error: tombstone.terminalState === OPERATION_STATES.COMPLETED
               ? `completed: ${tool.name ?? 'this action'} already completed on a `
                 + 'previous dispatch of this same call (compacted record) — not '
                 + 're-executing. Issue a NEW operation if a repeat is intended.'
+              : retryClass === RETRY_CLASSES.RESOURCE
+                ? approximateResourceReplay
+                  ? `resource_lost: ${tool.name ?? 'this resource'} may match an `
+                    + 'older compacted resource request. This call id cannot be '
+                    + 'safely reused. Re-derive grants and issue a fresh call.'
+                  : `resource_lost: ${tool.name ?? 'this resource'} has a compacted `
+                    + `record ending ${tombstone.terminalState}. Do not recreate it `
+                    + 'automatically. Re-derive grants and issue a fresh call.'
               : `outcome_unknown: a previous dispatch of this same call ended `
                 + `${tombstone.terminalState} and its full record was compacted. `
                 + 'Verify the external state before repeating it. Not re-executing '
                 + 'automatically.',
-            recovery: {
+            recovery: resourceRecovery ?? {
               category: 'verify_before_retry',
               state: /** @type {import('./operation-state.js').OperationState} */ (
                 tombstone.terminalState),

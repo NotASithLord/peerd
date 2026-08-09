@@ -44,15 +44,25 @@ export const OPERATION_LOG_MAX_TERMINAL = 500;
 export const OPERATION_LOG_MAX_UNKNOWN = 200;
 
 // Replay tombstones — compact identity that OUTLIVES the full record. why:
-// pruning a completed Class D/E record would otherwise age its replay
+// pruning a completed Class D/E/F record would otherwise age its replay
 // protection out (the same call id re-presented after 500 later operations
-// would read as new and re-execute the side effect), and pruning an
+// would read as new and re-execute the side effect or recreate a resource
+// under stale grants), and pruning an
 // unresolved outcome_unknown would silently forget that an external effect
 // may have occurred. A tombstone is four small fields; thousands are
-// cheaper than one duplicate payment. Only D/E mint them — A/B/C
-// duplicates are invisible or idempotent by classification.
+// cheaper than one duplicate payment or stale-authority resource recreation.
+// D/E/F mint them. A/B/C duplicates are invisible or idempotent by
+// classification.
 export const TOMBSTONES_KEY = 'peerd.lifecycle.tombstones';
 export const TOMBSTONES_MAX = 5000;
+// Fixed-size append-only replay memory for Class F tombstones evicted from the
+// exact map. A Bloom filter can refuse a fresh call by false positive, but it
+// never forgets an inserted stale call id. That is the safe direction when an
+// old resource description could otherwise recreate authority after compaction.
+export const CLASS_F_REPLAY_FILTER_KEY = 'peerd.lifecycle.classFReplayFilter';
+const CLASS_F_REPLAY_FILTER_WORDS = 2048;
+const CLASS_F_REPLAY_FILTER_BITS = CLASS_F_REPLAY_FILTER_WORDS * 32;
+const CLASS_F_REPLAY_FILTER_HASHES = 4;
 // The §14-honest overflow accumulator: when unresolved unknowns are
 // compacted past their cap, the DISCARD ITSELF is recorded (count, oldest,
 // affected sessions) and surfaced by the next boot — a documented compaction
@@ -76,10 +86,27 @@ export const UNKNOWN_INTENT_OVERFLOW_KEY = 'peerd.lifecycle.unknownIntentOverflo
  * @property {string} [target]
  * @property {string} [intentKey]
  * @property {number} [createdAt]
+ * @property {boolean} [approximateReplay]
  */
 
 /** @param {unknown} v */
-const isConservativeClass = (v) => v === 'D' || v === 'E';
+const needsReplayTombstone = (v) => v === 'D' || v === 'E' || v === 'F';
+
+/** @param {string} value */
+const classFReplayFilterIndexes = (value) => {
+  let first = 2166136261;
+  let second = 0x9e3779b9;
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    first = Math.imul(first ^ code, 16777619) >>> 0;
+    second = Math.imul(second ^ code, 2246822519) >>> 0;
+    second = (second ^ (second >>> 13)) >>> 0;
+  }
+  second = (second | 1) >>> 0;
+  return Array.from({ length: CLASS_F_REPLAY_FILTER_HASHES }, (_, index) =>
+    ((first + Math.imul(index, second)
+      + Math.imul(index * index, 0x9e3779b1)) >>> 0) % CLASS_F_REPLAY_FILTER_BITS);
+};
 
 const PRUNABLE_STATES = Object.freeze(
   /** @type {ReadonlySet<import('./operation-state.js').OperationState>} */ (new Set([
@@ -155,9 +182,44 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
     return clean;
   };
 
+  /** @returns {Promise<number[]>} */
+  const loadClassFReplayFilter = async () => {
+    const raw = await storage.get(CLASS_F_REPLAY_FILTER_KEY);
+    if (raw == null) return Array(CLASS_F_REPLAY_FILTER_WORDS).fill(0);
+    const record = raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? /** @type {{ version?: unknown, words?: unknown }} */ (raw) : null;
+    if (record?.version !== 1 || !Array.isArray(record.words)
+        || record.words.length !== CLASS_F_REPLAY_FILTER_WORDS
+        || record.words.some((word) => !Number.isInteger(word)
+          || word < 0 || word > 0xffffffff)) {
+      throw new TypeError('Class F replay filter is malformed');
+    }
+    return record.words;
+  };
+
+  /** @param {string[]} operationIds */
+  const rememberEvictedClassF = async (operationIds) => {
+    if (operationIds.length === 0) return;
+    const words = await loadClassFReplayFilter();
+    for (const operationId of operationIds) {
+      for (const bitIndex of classFReplayFilterIndexes(operationId)) {
+        const wordIndex = bitIndex >>> 5;
+        words[wordIndex] = (words[wordIndex] | (1 << (bitIndex & 31))) >>> 0;
+      }
+    }
+    await storage.set(CLASS_F_REPLAY_FILTER_KEY, { version: 1, words });
+  };
+
+  /** @param {string} operationId */
+  const wasEvictedClassF = async (operationId) => {
+    const words = await loadClassFReplayFilter();
+    return classFReplayFilterIndexes(operationId).every((bitIndex) =>
+      (words[bitIndex >>> 5] & (1 << (bitIndex & 31))) !== 0);
+  };
+
   /** @param {import('./reconcile.js').OperationRecord[]} pruned */
   const mintTombstones = async (pruned) => {
-    const candidates = pruned.filter((r) => isConservativeClass(r.retryClass));
+    const candidates = pruned.filter((r) => needsReplayTombstone(r.retryClass));
     if (candidates.length === 0) return;
     // why reads and writes are allowed to reject: pruning must stop before the
     // full record is deleted when compact replay evidence cannot be made
@@ -197,6 +259,10 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
       const evicted = keys.slice(0, keys.length - TOMBSTONES_MAX);
       const evictedUnknownCount = evicted.filter((key) =>
         tombs[key].terminalState === OPERATION_STATES.OUTCOME_UNKNOWN).length;
+      const evictedClassF = evicted.filter((key) => tombs[key].retryClass === 'F');
+      // Persist bounded Class F replay memory BEFORE deleting exact identity.
+      // A death between these writes leaves redundant evidence, never a gap.
+      await rememberEvictedClassF(evictedClassF);
       if (evictedUnknownCount > 0) {
         // Persist the conservative marker BEFORE deleting exact evidence. A
         // death between these writes leaves redundant safety, never a gap.
@@ -277,16 +343,25 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
    * tracker BEFORE begin(), so a call id whose full record aged out still
    * refuses re-execution.
    * @param {string} operationId
+   * @param {unknown} [retryClass]
    */
-  const getTombstone = async (operationId) => {
+  const getTombstone = async (operationId, retryClass) => {
     // Propagate read failures so the dispatch tracker can fail closed. Returning
     // "missing" on an unreadable replay store would turn uncertainty into
     // permission to execute.
     const raw = await storage.get(TOMBSTONES_KEY);
     const tombs = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
     const entry = /** @type {Record<string, unknown>} */ (tombs)[operationId];
-    return entry && typeof entry === 'object'
-      ? /** @type {ReplayTombstone} */ (entry)
+    if (entry && typeof entry === 'object') return /** @type {ReplayTombstone} */ (entry);
+    return normalizeRetryClass(retryClass) === RETRY_CLASSES.RESOURCE
+      && await wasEvictedClassF(operationId)
+      ? {
+        terminalState: OPERATION_STATES.INTERRUPTED,
+        retryClass: RETRY_CLASSES.RESOURCE,
+        completedAt: 0,
+        operationId,
+        approximateReplay: true,
+      }
       : undefined;
   };
 
