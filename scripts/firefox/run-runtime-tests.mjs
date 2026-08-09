@@ -44,6 +44,7 @@ const MODULE_IMPORT_PROBE_PATH = '/__firefox-module-import-probe.js';
 const REMOTE_MODULE_ROOT_PATH = '/__firefox-remote-module.js';
 const REMOTE_MODULE_CHILD_PATH = '/__firefox-remote-child.js';
 const REMOTE_MODULE_SLOW_PATH = '/__firefox-remote-slow.js';
+const REMOTE_MODULE_SLOW_STATUS_PATH = '/__firefox-remote-slow-status.json';
 const DNR_PUBLIC_HOST = 'guard.peerd.test';
 const DNR_FRAME_HOST = 'frame.peerd.test';
 const DNR_FIXTURE_PATH = '/__firefox-dnr-fixture';
@@ -396,6 +397,15 @@ const startProviderServer = async () => {
   const providerRequestHandler = (request, response) => {
     const host = String(request.headers.host ?? '').split(':')[0].toLowerCase();
     const requestUrl = new URL(request.url ?? '/', `https://${host || 'localhost'}`);
+    if (host === DNR_PUBLIC_HOST && request.method === 'GET'
+        && requestUrl.pathname === REMOTE_MODULE_SLOW_STATUS_PATH) {
+      response.writeHead(200, {
+        'content-type': 'application/json',
+        'cache-control': 'no-store',
+      });
+      response.end(JSON.stringify({ requests: slowModuleRequests }));
+      return;
+    }
     if (host === DNR_PUBLIC_HOST && request.method === 'GET'
         && requestUrl.pathname === REMOTE_MODULE_SLOW_PATH) {
       slowModuleRequests += 1;
@@ -3506,32 +3516,51 @@ return {
   'Firefox Preview shows the compute-only receipt without generated URLs', JSON.stringify(outcome));
 
   const slowUrl = `https://${DNR_PUBLIC_HOST}:${providerServer.tlsPort}${REMOTE_MODULE_SLOW_PATH}`;
+  const slowStatusUrl = `https://${DNR_PUBLIC_HOST}:${providerServer.tlsPort}${REMOTE_MODULE_SLOW_STATUS_PATH}`;
+  // why poll the fixture: a fixed pre-abort sleep raced the resolver on slow
+  // runners. The abort could land before the slow fetch was even issued (the
+  // fixture saw 0 requests, not the in-flight cancel this pins). The fixture's
+  // status endpoint is the arrival signal, read through the same audited
+  // sw/web-fetch relay the resolver uses, so the abort is only sent once the
+  // slow request is on the wire. elapsedMs measures abort to settled, the
+  // prompt-stop property.
   const stoppedFetch = await driver.executeAsync(`
-    const [id, url] = arguments;
+    const [id, url, statusUrl] = arguments;
     const done = arguments[arguments.length - 1];
     (async () => {
       const browser = (await import('/vendor/browser-polyfill.js')).default;
       const tab = await browser.tabs.getCurrent();
       const runId = 'firefox-remote-fetch-stop';
-      const startedAt = Date.now();
       const evaluation = browser.tabs.sendMessage(tab.id, {
         type: 'js/eval', notebookId: id, runId,
         code: 'import ' + JSON.stringify(url) + '; return false;', timeoutMs: 20_000,
       });
-      await new Promise((resolveWait) => setTimeout(resolveWait, 150));
+      let sawRequest = false;
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        try {
+          const statusResponse = await browser.runtime.sendMessage({
+            type: 'sw/web-fetch', url: statusUrl, noCache: true,
+          });
+          const body = statusResponse?.bodyB64 ? JSON.parse(atob(statusResponse.bodyB64)) : null;
+          if ((body?.requests ?? 0) > 0) { sawRequest = true; break; }
+        } catch { /* fixture not reachable yet; keep polling */ }
+        await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      }
+      const abortSentAt = Date.now();
       const abort = await browser.tabs.sendMessage(tab.id, {
         type: 'js/abort', notebookId: id, runId,
       });
       const run = await evaluation;
       await new Promise((resolveWait) => setTimeout(resolveWait, 300));
       done({
-        abort, run, elapsedMs: Date.now() - startedAt,
+        sawRequest, abort, run, elapsedMs: Date.now() - abortSentAt,
         status: document.getElementById('run-status')?.textContent ?? '',
         output: document.getElementById('console-output')?.textContent ?? '',
       });
     })().catch((error) => done({ error: error?.message || String(error) }));
-  `, [notebookId, slowUrl]);
-  assert(stoppedFetch?.abort?.stopped === true
+  `, [notebookId, slowUrl, slowStatusUrl]);
+  assert(stoppedFetch?.sawRequest === true
+    && stoppedFetch?.abort?.stopped === true
     && stoppedFetch?.run?.result?.stopped === true
     && stoppedFetch.elapsedMs < 3_000
     && providerServer.slowModuleRequests === 1
