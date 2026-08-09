@@ -25,6 +25,9 @@ interface Over {
   activeTab?: unknown;
   authorizeAnswer?: boolean;
   authorize?: (origin: string, signal?: AbortSignal) => Promise<boolean>;
+  excursionAnswer?: boolean;
+  authorizeExcursion?: (origin: string, signal?: AbortSignal) => Promise<boolean>;
+  revokeExcursion?: (origin: string, signal?: AbortSignal) => Promise<boolean>;
   tabsGet?: (id: number) => Promise<any>;
   abortSignal?: AbortSignal;
 }
@@ -36,6 +39,8 @@ const makeCtx = (over: Over = {}) => {
     audit: [] as any[],
     cdp: [] as any[],
     authorize: [] as string[],
+    authorizeExcursion: [] as string[],
+    revokeExcursion: [] as string[],
   };
   const origin = over.origin ?? 'https://acct.example.com';
   const ctx: any = {
@@ -68,6 +73,16 @@ const makeCtx = (over: Over = {}) => {
       calls.authorize.push(value);
       if (over.authorize) return over.authorize(value, signal);
       return over.authorizeAnswer ?? true;
+    },
+    authorizeSignInExcursion: async (value: string, signal?: AbortSignal) => {
+      calls.authorizeExcursion.push(value);
+      if (over.authorizeExcursion) return over.authorizeExcursion(value, signal);
+      return over.excursionAnswer ?? true;
+    },
+    revokeSignInExcursion: async (value: string, signal?: AbortSignal) => {
+      calls.revokeExcursion.push(value);
+      if (over.revokeExcursion) return over.revokeExcursion(value, signal);
+      return true;
     },
     audit: async (e: any) => { calls.audit.push(e); },
     domRefs: over.domRefs,
@@ -225,13 +240,17 @@ describe('login tool — SSO auto-click ONLY for a verified IdP + stable walkId'
     const { ctx, calls } = makeCtx({ descriptor: verifiedSsoDescriptor, domRefs: walkDomRefs, confirmAnswer: 'yes_once' });
     const r = await loginTool.execute({ ref: '@e1' }, ctx);
     expect(r.ok).toBe(true);
-    expect(String((r as any).content)).toContain('login initiated');
+    expect(String((r as any).content)).toContain('Finish signing in in the open tab');
     const clicks = calls.execute.filter((o) => o.func?.name === 'clickInjected');
     expect(clicks.length).toBe(1);
     // the click is by walkId (not a raw selector) with expectedCount=1
     expect(clicks[0].args).toEqual([null, 0, 5, 1]);
     // the confirm carried verified:true
     expect(calls.confirm[0].verified).toBe(true);
+    expect(calls.confirm[0].idpOrigin).toBe('https://accounts.google.com');
+    expect(calls.confirm[0].summary).toContain('https://accounts.google.com');
+    expect(calls.authorizeExcursion).toEqual(['https://accounts.google.com']);
+    expect(String((r as any).content)).toContain('Finish signing in in the open tab');
     expect(calls.audit.some((e) => e.type === 'login_initiated')).toBe(true);
   });
 
@@ -239,9 +258,11 @@ describe('login tool — SSO auto-click ONLY for a verified IdP + stable walkId'
     const { ctx, calls } = makeCtx({ descriptor: ssoDescriptor, confirmAnswer: 'yes_once' });
     const r = await loginTool.execute({ selector: '#signin' }, ctx);
     expect(r.ok).toBe(true);
-    expect(String((r as any).content)).toContain('login_ready');
+    expect(String((r as any).content)).toContain('could not verify');
     // unverified destination → the confirm must NOT vouch for it
     expect(calls.confirm[0].verified).toBe(false);
+    expect(calls.confirm[0].idpOrigin).toBe(null);
+    expect(calls.authorizeExcursion).toEqual([]);
     expect(calls.execute.filter((o) => o.func?.name === 'clickInjected').length).toBe(0);
     expect(calls.audit.some((e) => e.type === 'login_gesture_required')).toBe(true);
     expect(calls.audit.some((e) => e.type === 'login_initiated')).toBe(false);
@@ -251,10 +272,39 @@ describe('login tool — SSO auto-click ONLY for a verified IdP + stable walkId'
     const { ctx, calls } = makeCtx({ descriptor: verifiedSsoDescriptor, confirmAnswer: 'yes_once' });
     const r = await loginTool.execute({ selector: '#signin' }, ctx);
     expect(r.ok).toBe(true);
-    expect(String((r as any).content)).toContain('login_ready');
+    expect(String((r as any).content)).toContain('Finish signing in in the open tab');
     expect(calls.confirm[0].verified).toBe(true);
+    expect(calls.authorizeExcursion).toEqual(['https://accounts.google.com']);
     expect(calls.execute.filter((o) => o.func?.name === 'clickInjected').length).toBe(0);
     expect(calls.audit.some((e) => e.type === 'login_gesture_required')).toBe(true);
+  });
+
+  test('a refused exact-provider grant prevents auto-click', async () => {
+    const { ctx, calls } = makeCtx({
+      descriptor: verifiedSsoDescriptor,
+      domRefs: walkDomRefs,
+      confirmAnswer: 'yes_once',
+      excursionAnswer: false,
+    });
+    const r = await loginTool.execute({ ref: '@e1' }, ctx);
+    expect(r.ok).toBe(false);
+    expect((r as any).error).toBe('login_excursion_authority_refused');
+    expect(calls.authorizeExcursion).toEqual(['https://accounts.google.com']);
+    expect(calls.execute.filter((o) => o.func?.name === 'clickInjected')).toEqual([]);
+  });
+
+  test('a failed auto-click revokes only the exact pending provider grant', async () => {
+    const { ctx, calls } = makeCtx({
+      descriptor: verifiedSsoDescriptor,
+      domRefs: walkDomRefs,
+      confirmAnswer: 'yes_once',
+      clickResult: { ok: false, error: 'stale_ref' },
+    });
+    const r = await loginTool.execute({ ref: '@e1' }, ctx);
+    expect(r.ok).toBe(false);
+    expect((r as any).error).toContain('login_click_failed');
+    expect(calls.authorizeExcursion).toEqual(['https://accounts.google.com']);
+    expect(calls.revokeExcursion).toEqual(['https://accounts.google.com']);
   });
 });
 
@@ -343,11 +393,12 @@ describe('login tool — passkey is assisted-manual at Tier 0 (no auto-click)', 
     const { ctx, calls } = makeCtx({ descriptor: passkeyDescriptor, confirmAnswer: 'yes_session', debuggerPool, domRefs });
     const r = await loginTool.execute({ ref: '@e1', selector: '#pk' }, ctx);
     expect(r.ok).toBe(true);
-    expect(String((r as any).content)).toContain('login_ready');
+    expect(String((r as any).content)).toContain('passkey or security-key button');
     expect(cdp.length).toBe(0);              // NO trusted click
     expect(calls.execute.filter((o) => o.func?.name === 'clickInjected').length).toBe(0);  // NO synthetic click
     expect(calls.audit.some((e) => e.type === 'login_gesture_required')).toBe(true);
     expect(calls.audit.some((e) => e.type === 'login_initiated')).toBe(false);
+    expect(calls.authorizeExcursion).toEqual([]);
   });
 
   test('the origin-verified consent still fires before handing off', async () => {
@@ -356,6 +407,6 @@ describe('login tool — passkey is assisted-manual at Tier 0 (no auto-click)', 
     expect(r.ok).toBe(true);
     expect(calls.confirm.length).toBe(1);
     expect(calls.confirm[0].method).toBe('passkey');
-    expect(String((r as any).content)).toContain('Complete it yourself');
+    expect(String((r as any).content)).toContain('complete the prompt on your device');
   });
 });

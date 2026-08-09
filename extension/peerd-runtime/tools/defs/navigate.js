@@ -10,7 +10,10 @@
 // origins() returns BOTH the current tab origin and the destination
 // origin so the denylist gate fires if either is denylisted.
 
-import { isDenylistedTab, resolveTargetTab, originOfUrl } from './dom-helpers.js';
+import {
+  AUTH_WAITING_FOR_USER_CODE, AUTH_WAITING_FOR_USER_MESSAGE,
+  isDenylistedTab, resolveTargetTab, originOfUrl,
+} from './dom-helpers.js';
 import {
   BROWSER_TARGET_STAGES,
   browserNetworkGuardPostNavigationResult,
@@ -318,6 +321,15 @@ export const navigateTool = {
     if (c.judgeLanding && finalTab?.url) {
       const verdict = await c.judgeLanding(finalTab.url);
       if (verdict && verdict.action !== 'continue') {
+        if (verdict.action === 'wait') {
+          return {
+            ok: false,
+            error: AUTH_WAITING_FOR_USER_CODE,
+            content: AUTH_WAITING_FOR_USER_MESSAGE,
+            outcomeKind: 'effect-completed',
+            endTurn: true,
+          };
+        }
         return { ok: false, error: `origin_lock: ${verdict.reason ?? 'this task was stopped'}` };
       }
     }

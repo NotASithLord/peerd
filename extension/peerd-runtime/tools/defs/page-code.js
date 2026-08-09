@@ -93,6 +93,17 @@ export const pageCodeTool = {
         timeoutMs, caps: PAGE_CODE_CAPS, ownerSessionId, runId,
         signal: extras.abortSignal,
       });
+      if (result.endTurn === true) {
+        return {
+          ok: false,
+          error: 'page_code_ended_for_host_policy',
+          content: typeof result.endTurnContent === 'string' && result.endTurnContent
+            ? result.endTurnContent
+            : 'peerd stopped this page run because the tab entered a user-controlled sign-in step.',
+          endTurn: true,
+          outcomeKind: 'effect-completed',
+        };
+      }
       return {
         ok: true,
         content: formatRunResult(args.code, result),

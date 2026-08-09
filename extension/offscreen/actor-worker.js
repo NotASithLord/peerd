@@ -86,6 +86,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           sessionId: m.sessionId, userText: m.message, maxSteps: m.maxSteps,
           oneShot: m.oneShot, signal: abort.signal, reasoning: m.reasoning,
           contextWindow: m.contextWindow, inbound: m.inbound === true,
+          preflightReply: m.preflightReply,
         },
       );
       // why the worker does NOT stamp `aborted`: a Stop unwinds the loop cleanly (the

@@ -215,9 +215,14 @@ export { decideLanding, mayHoldCredentials, EXCURSION_BUDGET, EXCURSION_MS, MAX_
 export {
   makeJudgeLanding, makeCredentialScope, makeSiteClientOriginGuard,
   makeSiteClientOriginAuthorizer, makeFixedSiteClientOriginGuard, makeSignInOriginAuthorizer,
+  makeSignInExcursionAuthorizer, makeSignInExcursionRevoker,
   authorizeSiteClientRelayOrigin, mayAddressSiteClientOrigin,
   mayUseSiteClientOrigin, hasDurableSiteClientState,
 } from './actor/origin-lock.js';
+export {
+  AUTH_WAITING_FOR_USER_CODE, AUTH_WAITING_FOR_USER_MESSAGE,
+  AUTH_BOUNDARY_STOPPED_MESSAGE, AUTH_STATE_UNAVAILABLE_MESSAGE,
+} from './actor/auth-wait.js';
 // …and the three pieces the SW needs to make the lock live: where the state
 // lives (cached + serialized + persisted), which origins are dedicated identity
 // providers (the one narrow exemption), and what the orchestrator is told when

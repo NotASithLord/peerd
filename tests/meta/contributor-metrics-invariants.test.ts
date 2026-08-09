@@ -92,15 +92,18 @@ describe('Contributor Metrics source invariants', () => {
     expect(inboundWake).not.toContain('captureTurnSnapshot: true');
   });
 
-  test('a claimed web actor advances its landing epoch before any async setup', () => {
+  test('a claimed web actor advances its landing epoch in the serialized authority lane', () => {
     const start = serviceWorker.indexOf('runActorTurn: async ({');
     const end = serviceWorker.indexOf('reenter: ({ userText', start);
     const actorTurn = serviceWorker.slice(start, end);
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
-    expect(actorTurn.indexOf('beginLandingTurn(actorSessionId)')).toBeGreaterThanOrEqual(0);
-    expect(actorTurn.indexOf('beginLandingTurn(actorSessionId)'))
-      .toBeLessThan(actorTurn.indexOf('await '));
+    const epochAdvance = 'beginLandingTurn(actorSessionId)';
+    const epochBarrier = 'await originStates.serialize(actorSessionId, () => undefined)';
+    expect(actorTurn).toContain(epochAdvance);
+    expect(actorTurn).toContain(epochBarrier);
+    expect(actorTurn.indexOf(epochAdvance)).toBeLessThan(actorTurn.indexOf('let deliveredMessage'));
+    expect(actorTurn.indexOf(epochAdvance)).toBeLessThan(actorTurn.indexOf(epochBarrier));
     expect(actorTurn).toContain(
       'feedbackContextKey: contributorFeedbackContextKey(parentSessionId, parentToolUseId)',
     );

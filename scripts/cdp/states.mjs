@@ -2224,6 +2224,43 @@ export const STATES = [
     },
   },
 
+  // --- visual: verified SSO names both relying site and provider ----------
+  {
+    name: 'login-confirm', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ConfirmModal } = await import('/sidepanel/components/app.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-login-confirm';
+          document.body.appendChild(host);
+          m.render(host, m(ConfirmModal, { prompt: {
+            id: 'e2e-login', kind: 'login', tool: 'login', method: 'sso',
+            provider: 'Okta', verified: true,
+            origins: ['https://app.example'], idpOrigin: 'https://acme.okta.com',
+          } }));
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => ({
+          title: document.querySelector('#e2e-login-confirm h3')?.textContent,
+          relyingSite: document.querySelector('#e2e-login-confirm .login-hero .host')?.textContent,
+          provider: document.querySelector('#e2e-login-confirm .login-destination strong')?.textContent,
+          allowDisabled: document.querySelector('#e2e-login-confirm button:not(.secondary)')?.disabled,
+        }))()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('verified SSO consent names both exact origins before approval',
+          rendered?.title === 'Approve sign-in'
+            && rendered?.relyingSite === 'app.example'
+            && rendered?.provider === 'acme.okta.com'
+            && rendered?.allowDisabled === false,
+          JSON.stringify(rendered));
+        await rec.visual('login-confirm');
+      } finally {
+        await evalIn(ctx.page, `document.querySelector('#e2e-login-confirm')?.remove()`);
+      }
+    },
+  },
+
   // --- visual: persisted runnable site-client confirmation -----------------
   {
     name: 'site-client-confirm', kind: 'visual', phase: 'post-unlock',

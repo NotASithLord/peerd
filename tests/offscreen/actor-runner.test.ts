@@ -1,4 +1,5 @@
 import { describe, test, expect } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { abortActor, runActor } from '../../extension/offscreen/actor-runner.js';
 import { ACTOR_WORKER_PROTOCOL } from '../../extension/offscreen/actor-worker-protocol.js';
 
@@ -44,6 +45,11 @@ const job = {
 };
 
 describe('actor worker startup proof', () => {
+  test('the worker forwards the preflight reply into the actor loop', () => {
+    const source = readFileSync(new URL('../../extension/offscreen/actor-worker.js', import.meta.url), 'utf8');
+    expect(source).toContain('preflightReply: m.preflightReply');
+  });
+
   test('posts the run only after readiness and host-canary separation', async () => {
     const worker = new FakeWorker();
     worker.onPost = (message) => {
@@ -278,6 +284,41 @@ describe('actor worker startup proof', () => {
       });
     }
     expect(observed).toEqual([true, false]);
+  });
+
+  test('carries a host preflight reply into the isolated worker run', async () => {
+    const worker = new FakeWorker();
+    let observed: string | undefined;
+    worker.onPost = (message) => {
+      if (message.type === 'probe') {
+        queueMicrotask(() => worker.emit('message', { data: {
+          type: 'probe-response', protocol: ACTOR_WORKER_PROTOCOL,
+          rid: message.rid, canaryAbsent: true,
+        } }));
+      }
+      if (message.type === 'run') {
+        observed = message.preflightReply;
+        queueMicrotask(() => worker.emit('message', { data: {
+          type: 'done', result: { finalText: observed, toolCalls: 0 },
+        } }));
+      }
+    };
+    const result = await runActor({
+      ...job,
+      runId: 'preflight-reply',
+      preflightReply: 'Finish signing in in the open tab.',
+    }, {
+      workerUrl: '/worker.js',
+      createWorker: () => {
+        queueMicrotask(() => worker.emit('message', { data: {
+          type: 'ready', protocol: ACTOR_WORKER_PROTOCOL, realm: REALM,
+        } }));
+        return worker as unknown as Worker;
+      },
+      sendToSW: async () => ({ ok: true }),
+    });
+    expect(observed).toBe('Finish signing in in the open tab.');
+    expect(result).toMatchObject({ ok: true, finalText: observed });
   });
 
   test('an abort arriving before the run prevents Worker creation', async () => {

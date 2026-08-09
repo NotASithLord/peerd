@@ -203,7 +203,7 @@ export const makeRelayedToolDispatch = (requestTool) =>
  * @param {Array<{ name: string, description: string, schema: object }>} deps.tools
  * @param {((text: string) => string)} [deps.fenceActorSummary]  a web/API actor's
  *   rolling-summary self-fence (heap-split phase 3); absent for engine actors.
- * @param {{ sessionId: string, userText: string, maxSteps?: number, oneShot?: boolean, signal?: AbortSignal, reasoning?: object, contextWindow?: number, inbound?: boolean }} req
+ * @param {{ sessionId: string, userText: string, maxSteps?: number, oneShot?: boolean, signal?: AbortSignal, reasoning?: object, contextWindow?: number, inbound?: boolean, preflightReply?: string }} req
  * @returns {Promise<{ finalText: string, newMessages: any[], usage: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, stopReason: string|undefined, toolCalls: number, error?: string }>}
  */
 export const runActorLoop = async (deps, req) => {
@@ -211,7 +211,7 @@ export const runActorLoop = async (deps, req) => {
   // Defensive (phase-1 lesson): the loop fire-and-forgets audits as
   // appendAudit(...).catch(...) — a sync stub returning undefined would crash it.
   const appendAudit = (/** @type {object} */ e) => Promise.resolve(deps.appendAudit?.(e));
-  const { sessionId, userText, maxSteps, oneShot, signal, reasoning, contextWindow, inbound } = req;
+  const { sessionId, userText, maxSteps, oneShot, signal, reasoning, contextWindow, inbound, preflightReply } = req;
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   let toolCalls = 0;
   let stopReason;
@@ -249,6 +249,7 @@ export const runActorLoop = async (deps, req) => {
     // from the first clean tool round and stop (no summarize inference) — parity
     // with the bound-actor contract.
     ...(oneShot === true ? { oneShot: true } : {}),
+    ...(typeof preflightReply === 'string' ? { preflightReply } : {}),
     // A web/API actor self-fences its own untrusted-provenance rolling summary on a
     // context trim (heap-split phase 3); absent for engine actors → summary verbatim.
     ...(fenceActorSummary ? { fenceActorSummary } : {}),

@@ -22,6 +22,7 @@ type RedirectHarnessOptions = {
   cleanupFails?: boolean;
   denylist?: string[];
   landingUrl?: string;
+  landingAction?: 'continue' | 'wait' | 'end';
 };
 
 const redirectContext = ({
@@ -29,6 +30,7 @@ const redirectContext = ({
   cleanupFails = false,
   denylist = [],
   landingUrl = 'http://127.0.0.1/private?q=token#fragment',
+  landingAction = 'continue',
 }: RedirectHarnessOptions = {}) => {
   const publicUrl = 'https://example.com/start';
   const privateUrl = landingUrl;
@@ -72,7 +74,7 @@ const redirectContext = ({
     },
     judgeLanding: async (url: string) => {
       judged.push(url);
-      return { action: 'continue' };
+      return { action: url === landingUrl ? landingAction : 'continue' };
     },
   };
   if (adopt) {
@@ -83,6 +85,19 @@ const redirectContext = ({
 };
 
 describe('navigate private-network policy', () => {
+  test('a confirmed provider landing returns a stable user-wait result', async () => {
+    const landingUrl = 'https://accounts.google.com/signin';
+    const { ctx, publicUrl } = redirectContext({ landingUrl, landingAction: 'wait' });
+    const result = await navigateTool.execute({ url: publicUrl }, ctx);
+    expect(result).toEqual({
+      ok: false,
+      error: 'auth_waiting_for_user',
+      content: 'Finish signing in in the open tab. peerd is paused and cannot read or act there. When the tab returns to its site, tell peerd to continue.',
+      outcomeKind: 'effect-completed',
+      endTurn: true,
+    });
+  });
+
   test('returns a structured refusal after a redirect onto a sensitive site', async () => {
     const landingUrl = 'https://accounts.example/private?token=secret';
     const { ctx, pin, publicUrl, updates } = redirectContext({
