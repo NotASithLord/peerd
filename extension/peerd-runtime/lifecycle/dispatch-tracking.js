@@ -446,6 +446,7 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     // closes the fresh-id replay shape: after an ambiguous dispatch, a model
     // cannot express the same tool and args again inside the same turn or a
     // synthetic continuation. A genuinely new user turn is fresh authority.
+    /** @type {string | undefined} */
     let intentKey;
     if (retryClass === RETRY_CLASSES.SIDE_EFFECT
         || retryClass === RETRY_CLASSES.CONDITIONAL_ACTION) {

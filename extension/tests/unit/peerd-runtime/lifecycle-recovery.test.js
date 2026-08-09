@@ -11,7 +11,7 @@ import { describe, it, expect } from '../../framework.js';
 import {
   makeLifecycleBoot, makeDispatchTracker, retryClassForTool,
   registerTool, clearTools, dispatchToolCall,
-  OPERATION_STATES,
+  OPERATION_STATES, groupResourceLossNotices,
 } from '/peerd-runtime/index.js';
 
 const S = OPERATION_STATES;
@@ -76,6 +76,20 @@ const boot = (extra = {}) => makeLifecycleBoot({
 });
 
 describe('lifecycle recovery over real chrome.storage', () => {
+  it('groups engine losses into one bounded report for the owning chat', () => {
+    const notices = groupResourceLossNotices([
+      { kind: 'vm', id: 'vm-1', name: 'workbench', ownerSessionId: 'chat-a' },
+      { kind: 'app', id: 'app-1', name: 'preview', ownerSessionId: 'chat-a' },
+    ]);
+    expect(notices.length).toBe(1);
+    expect(notices[0].sessionId).toBe('chat-a');
+    expect(notices[0].user.includes('Linux VM "workbench"')).toBe(true);
+    expect(notices[0].user.includes('App "preview"')).toBe(true);
+    expect(notices[0].user.includes('in-memory state were lost')).toBe(true);
+    expect(notices[0].agent.includes('Linux VM "vm-1"')).toBe(true);
+    expect(notices[0].agent.includes('workbench')).toBe(false);
+  });
+
   it('a rebooted generation settles each retry class to its contract state', async () => {
     await cleanup();
     try {

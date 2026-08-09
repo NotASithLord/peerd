@@ -122,6 +122,7 @@ surface.
 | Stop during a browser action or delegated turn. | Delayed work does not execute after Stop. |
 | Close or navigate the owned tab during a wait. | The pending action fails instead of moving to the new page. |
 | Restart the service worker during a task. | Recovery reports what resumed, stopped, or may need verification. It does not silently repeat an uncertain write. |
+| Remove several running engine host tabs while the service worker is unavailable, then restart it. | Each loss is audited. The owning chat receives one passive, session-scoped report that names the resources, says what was stored, and says which runtime state was lost. Other chats receive nothing. |
 
 ## Firefox
 

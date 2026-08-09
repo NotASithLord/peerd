@@ -349,6 +349,7 @@ import {
   isKnownIdp, isKnownIdpHost, knownIdpDomains, describeLandingStop, originPhrase, isUgcHost,
   isAddressableBrowserTab,
   finalActorTurnReply, finalAssistantText,
+  groupResourceLossNotices,
   // The debug surface: the bundle assembler + the delegation-tree walk the
   // session/debugBundle route runs (pure; the SW supplies the reads).
   assembleDebugBundle, childSessionIdsOf,
@@ -7567,8 +7568,8 @@ const engineTrackersReady = (async () => {
         ...appTabTracker.listLive().map((/** @type {string} */ id) => `app:${id}`),
       ];
       const lost = await engineLiveness.sweep({ surviving });
-      const KIND_LABEL = { vm: 'Linux VM', notebook: 'Notebook', app: 'App' };
       const REGISTRY_OF = { vm: vmRegistry, notebook: jsRegistry, app: appRegistry };
+      const lostResources = [];
       for (const entry of lost) {
         auditLog.append({
           type: 'lifecycle.engine.orphan-reaped',
@@ -7578,17 +7579,15 @@ const engineTrackersReady = (async () => {
         const record = await Promise.resolve(registry?.get?.(entry.id)).catch(() => null);
         const owner = record?.ownerSessionId;
         if (!owner) continue; // no owner to tell; the audit entry stands
-        await lifecycleBoot.parkNotice(owner, {
-          recoveryRecord: {
-            operation: `${entry.kind}:${entry.id}`,
-            recoveryState: 'interrupted',
-            sideEffectStatus: 'none attempted',
-            resourceLost: true,
-          },
-          user: `The ${/** @type {any} */ (KIND_LABEL)[entry.kind] ?? entry.kind} `
-            + `"${record?.name ?? entry.id}" stopped with the browser session. `
-            + 'Your saved files remain, but live process state was lost.',
-        }).catch(() => {});
+        lostResources.push({
+          kind: entry.kind,
+          id: entry.id,
+          name: record?.name,
+          ownerSessionId: owner,
+        });
+      }
+      for (const notice of groupResourceLossNotices(lostResources)) {
+        await lifecycleBoot.parkNotice(notice.sessionId, notice).catch(() => {});
       }
       if (lost.length) {
         console.log('[sw] engine orphans reaped:',

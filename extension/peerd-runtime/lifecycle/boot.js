@@ -85,16 +85,16 @@ export const makeLifecycleBoot = ({
    * init() for reconcile notifications and by the shell for engine reaps.
    *
    * @param {string} operationSessionId
-   * @param {{ recoveryRecord: Record<string, unknown>, user: string }} notice
+   * @param {{ recoveryRecord: Record<string, unknown>, user: string, agent?: string }} notice
    */
-  const parkNotice = async (operationSessionId, { recoveryRecord, user }) => {
+  const parkNotice = async (operationSessionId, { recoveryRecord, user, agent }) => {
     const sessionId = await Promise.resolve(
       resolveNoticeSession?.(operationSessionId) ?? operationSessionId,
     ).catch(() => operationSessionId) || operationSessionId;
     await enqueueNotices(async () => {
       const pending = await loadPending();
       const list = Array.isArray(pending[sessionId]) ? pending[sessionId] : [];
-      list.push({ recoveryRecord, user, at: now() });
+      list.push({ recoveryRecord, user, ...(agent ? { agent } : {}), at: now() });
       pending[sessionId] = list.slice(-MAX_NOTICES_PER_SESSION);
       await storage.set(PENDING_NOTICES_KEY, pending).catch(() => {});
     });
@@ -205,8 +205,8 @@ export const makeLifecycleBoot = ({
       return entry;
     }).catch(() => null);
     if (!list) return '';
-    const lines = /** @type {Array<{ user: string, recoveryRecord: unknown }>} */ (list)
-      .map((n) => `- ${n.user}\n  ${JSON.stringify(n.recoveryRecord)}`);
+    const lines = /** @type {Array<{ user: string, agent?: string, recoveryRecord: unknown }>} */ (list)
+      .map((n) => `- ${n.agent ?? n.user}\n  ${JSON.stringify(n.recoveryRecord)}`);
     return '<interruption-recovery>\nA previous browser session ended while '
       + 'work was in flight. Recovered operation states:\n'
       + `${lines.join('\n')}\n`

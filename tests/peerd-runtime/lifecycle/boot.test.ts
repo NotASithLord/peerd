@@ -188,6 +188,28 @@ describe('notices — both audiences, delivered once', () => {
     expect(await b.drainNoticesFor('T')).toBe(''); // and delivered once
   });
 
+  test('a resource notice shows its friendly name only to the user', async () => {
+    const storage = makeStorage();
+    const shown: string[] = [];
+    const b = boot(storage, {
+      notify: (_sessionId: string, text: string) => { shown.push(text); },
+    });
+    await b.init();
+    await b.parkNotice('chat-a', {
+      recoveryRecord: {
+        operation: 'app:app-1', recoveryState: 'interrupted',
+        resources: [{ kind: 'app', id: 'app-1' }],
+      },
+      user: 'App "Quarterly review" is no longer running.',
+      agent: 'App "app-1" lost its host. Do not claim the runtime resumed.',
+    });
+
+    expect(shown).toEqual(['App "Quarterly review" is no longer running.']);
+    const block = await b.drainNoticesFor('chat-a');
+    expect(block).toContain('App "app-1" lost its host');
+    expect(block).not.toContain('Quarterly review');
+  });
+
   test('purgeSession preserves dispatched Class E uncertainty and replaces stale notices', async () => {
     const storage = makeStorage();
     const b = boot(storage);
