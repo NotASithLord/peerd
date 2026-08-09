@@ -481,12 +481,24 @@ export const dispatchToolCall = async (call, ctx) => {
       url: await liveTabUrl(ctx),
     })
     : null;
+  // An unresolved matching D/E intent is a special forced-confirm case. Only
+  // a user-initiated turn may open this prompt. Synthetic continuations stay
+  // nonmodal and are refused by beginTracking after the hooks run.
+  const lifecycleRepeatConfirm = verdict.allowed && !selfConfirms
+    && ctx.lifecycleUserInitiated === true
+    ? await Promise.resolve(ctx.lifecycle?.requiresIntentConfirmation?.({
+      tool,
+      sessionId: ctx.session?.sessionId ?? undefined,
+      args,
+      userInitiated: true,
+    })).catch(() => false)
+    : false;
   if (ctx.abortSignal?.aborted) return abortedResult('before_confirmation');
 
   // Whether the USER approved this exact dispatch via a confirm round-trip
   // — the lifecycle tracker turns it into a durable single-use proof.
   let userApprovedThisDispatch = false;
-  if (verdict.allowed && (verdict.confirm || ugcRuleId) && !selfConfirms) {
+  if (verdict.allowed && (verdict.confirm || ugcRuleId || lifecycleRepeatConfirm) && !selfConfirms) {
     const confirmEntry = gateResults.find((g) => g.name === 'confirmation');
     /** @type {import('/shared/tool-types.js').ConfirmAnswer | undefined} */
     let answer = 'no';
@@ -509,7 +521,11 @@ export const dispatchToolCall = async (call, ctx) => {
         // what it CAN do is tell the user the one fact they can't see, which is
         // that this page is attacker-authorable. Absent on an ordinary confirm,
         // so the card is unchanged for the common case.
-        note: ugcRuleId ? UGC_CONFIRM_NOTE : undefined,
+        note: ugcRuleId
+          ? UGC_CONFIRM_NOTE
+          : (lifecycleRepeatConfirm
+            ? 'A matching earlier action has an unknown outcome. Verify the target before approving this repeat.'
+            : undefined),
         sessionId: ctx.session?.sessionId ?? null,
       }, ctx.abortSignal);
     } catch {
@@ -524,7 +540,9 @@ export const dispatchToolCall = async (call, ctx) => {
       // renders `${gate}: ${reason}` as its tooltip (sidepanel/components/
       // message-list.js), so attributing the zone here surfaces WHICH rule
       // forced the prompt with no new UI and no new plumbing.
-      const how = ugcRuleId ? ` [ugc zone: ${ugcRuleId}]` : '';
+      const how = ugcRuleId
+        ? ` [ugc zone: ${ugcRuleId}]`
+        : (lifecycleRepeatConfirm ? ' [repeat after unknown outcome]' : '');
       confirmEntry.reason = (approved
         ? (answer === 'yes_session' ? 'approved by user (session)' : 'approved by user')
         : 'rejected by user') + how;

@@ -232,6 +232,30 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
   };
 
   /**
+   * Ask the dispatcher to force a real user confirmation before repeating
+   * unresolved intent. Synthetic continuations never prompt; beginTracking
+   * will refuse them. This is advisory only, with the enforcement repeated
+   * below after hooks have produced the final args.
+   *
+   * @param {{ tool: { name?: string, sideEffect?: string, primitive?: string,
+   *   retryClass?: unknown }, sessionId?: string, args?: unknown,
+   *   userInitiated?: boolean }} input
+   */
+  const requiresIntentConfirmation = async ({
+    tool, sessionId, args, userInitiated,
+  }) => {
+    if (userInitiated !== true) return false;
+    const retryClass = normalizeRetryClass(retryClassFor(tool));
+    if (retryClass !== RETRY_CLASSES.SIDE_EFFECT
+        && retryClass !== RETRY_CLASSES.CONDITIONAL_ACTION) return false;
+    const intentKey = await idempotencyKeyFor(tool.name ?? 'tool', args);
+    const unknowns = await operationLog.listOutcomeUnknown();
+    return unknowns.some((record) =>
+      record.sessionId === (sessionId || 'unknown-session')
+      && record.intentKey === intentKey);
+  };
+
+  /**
    * Decide what an EXISTING record for this operationId means for a fresh
    * dispatch attempt. This is the auto-replay guard.
    *
@@ -431,16 +455,14 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
         const prior = unknowns.find((record) =>
           record.sessionId === (sessionId || 'unknown-session')
           && record.intentKey === intentKey && record.operationId !== operationId);
-        const newUserTurn = userInitiated === true && typeof turnId === 'string'
-          && turnId && prior?.turnId !== turnId;
-        if (prior && !newUserTurn) {
+        if (prior && confirmed !== true) {
           const verdict = decideRecovery({ retryClass, dispatched: true });
           return {
             refuse: {
               error: `outcome_unknown: ${tool.name ?? 'this action'} matches an `
                 + 'earlier dispatch whose result is unknown. Verify the external '
-                + 'state before repeating it. A synthetic continuation is not new '
-                + 'user authority.',
+                + 'state before repeating it. The repeat needs a new user '
+                + 'confirmation; a continuation is not authority.',
               recovery: describeRecovery(verdict, {
                 retryClass, operationId: prior.operationId, toolName: prior.toolName,
               }).agent,
@@ -740,5 +762,5 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     }
   };
 
-  return { beginTracking, settleTracking };
+  return { beginTracking, settleTracking, requiresIntentConfirmation };
 };

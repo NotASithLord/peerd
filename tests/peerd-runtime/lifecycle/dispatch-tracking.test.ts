@@ -462,7 +462,7 @@ describe('the replay guard — guarantee 2', () => {
     }
   });
 
-  test('a new user turn can deliberately repeat previously unknown intent', async () => {
+  test('a new user confirmation can deliberately repeat previously unknown intent', async () => {
     const { tracker } = makeTracker();
     const first = await tracker.beginTracking({
       callId: 'c1', tool: { name: 'submit_form', retryClass: 'E' },
@@ -475,9 +475,28 @@ describe('the replay guard — guarantee 2', () => {
     const deliberate = await tracker.beginTracking({
       callId: 'c2', tool: { name: 'submit_form', retryClass: 'E' },
       sessionId: 's', args: { form: 'checkout' },
-      turnId: 'turn-2', userInitiated: true,
+      turnId: 'turn-2', userInitiated: true, confirmed: true,
     });
     expect(deliberate && 'handle' in deliberate).toBe(true);
+  });
+
+  test('a later user turn without confirmation still cannot repeat unknown intent', async () => {
+    const { tracker } = makeTracker();
+    const first = await tracker.beginTracking({
+      callId: 'c1', tool: { name: 'submit_form', retryClass: 'E' },
+      sessionId: 's', args: { form: 'checkout' },
+      turnId: 'turn-1', userInitiated: true,
+    });
+    await tracker.settleTracking((first as { handle: any }).handle, {
+      ok: false, error: 'request timed out',
+    });
+    const unapproved = await tracker.beginTracking({
+      callId: 'c2', tool: { name: 'submit_form', retryClass: 'E' },
+      sessionId: 's', args: { form: 'checkout' },
+      turnId: 'turn-2', userInitiated: true,
+    });
+    expect((unapproved as { refuse: { error: string } }).refuse.error)
+      .toContain('needs a new user confirmation');
   });
 });
 
@@ -524,6 +543,70 @@ describe('the full dispatcher path', () => {
     expect(executions).toBe(1); // the replay never reached execute()
     expect(replay.ok).toBe(false);
     expect((replay as { error: string }).error).toStartWith('outcome_unknown:');
+  });
+
+  test('a matching unknown intent forces confirmation on a later user turn', async () => {
+    const { tracker } = makeTracker();
+    let executions = 0;
+    const prompts: any[] = [];
+    registerTool({
+      name: 'pay_once', description: 'x', schema: {},
+      primitive: 'web', sideEffect: 'mutate_external', retryClass: 'E',
+      origins: () => [],
+      execute: async () => {
+        executions += 1;
+        if (executions === 1) throw new Error('connection reset');
+        return { ok: true, content: 'done' };
+      },
+    } as any);
+    await dispatchToolCall(
+      { id: 'tu-1', name: 'pay_once', args: { amount: 1 } },
+      {
+        ...baseCtx(), lifecycle: tracker,
+        lifecycleTurnId: 'turn-1', lifecycleUserInitiated: true,
+      } as any,
+    );
+    const repeat = await dispatchToolCall(
+      { id: 'tu-2', name: 'pay_once', args: { amount: 1 } },
+      {
+        ...baseCtx(), lifecycle: tracker,
+        lifecycleTurnId: 'turn-2', lifecycleUserInitiated: true,
+        confirm: async (prompt: any) => { prompts.push(prompt); return 'yes_once'; },
+      } as any,
+    );
+    expect(repeat.ok).toBe(true);
+    expect(executions).toBe(2);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0].note).toContain('unknown outcome');
+  });
+
+  test('a synthetic repeat is refused without opening a confirmation prompt', async () => {
+    const { tracker } = makeTracker();
+    let prompts = 0;
+    registerTool({
+      name: 'pay_once', description: 'x', schema: {},
+      primitive: 'web', sideEffect: 'mutate_external', retryClass: 'E',
+      origins: () => [],
+      execute: async () => { throw new Error('connection reset'); },
+    } as any);
+    await dispatchToolCall(
+      { id: 'tu-1', name: 'pay_once', args: { amount: 1 } },
+      {
+        ...baseCtx(), lifecycle: tracker,
+        lifecycleTurnId: 'turn-1', lifecycleUserInitiated: true,
+      } as any,
+    );
+    const repeat = await dispatchToolCall(
+      { id: 'tu-2', name: 'pay_once', args: { amount: 1 } },
+      {
+        ...baseCtx(), lifecycle: tracker,
+        lifecycleTurnId: 'turn-2', lifecycleUserInitiated: false,
+        confirm: async () => { prompts += 1; return 'yes_once'; },
+      } as any,
+    );
+    expect(repeat.ok).toBe(false);
+    expect(prompts).toBe(0);
+    expect((repeat as { error: string }).error).toContain('needs a new user confirmation');
   });
 
   test('without ctx.lifecycle the dispatch is unchanged (no tracking, no rewrite)', async () => {
