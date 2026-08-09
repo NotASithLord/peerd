@@ -4241,7 +4241,17 @@ const buildStateSnapshot = async () => {
 
 const pushState = async () => {
   if (!uiConnected()) return;
-  uiPorts.broadcast({ type: 'state', state: await buildStateSnapshot() });
+  const state = await buildStateSnapshot();
+  const ownerSessionId = typeof state.session?.sessionId === 'string'
+    ? state.session.sessionId : null;
+  // why: buildStateSnapshot awaits several stores. A confirmation can arrive
+  // after its pending read but before this continuation runs, while a switching
+  // panel still identifies as the previous chat and correctly rejects the live
+  // event. Refresh at the delivery boundary, apply the destination state first,
+  // then replay its prompt synchronously so that race cannot hide authority UI.
+  const pendingConfirm = confirmCoordinator.getPendingForOwner(ownerSessionId);
+  uiPorts.broadcast({ type: 'state', state: { ...state, pendingConfirm } });
+  if (pendingConfirm) uiPorts.broadcast({ type: 'confirm/request', prompt: pendingConfirm });
 };
 
 // Keepalive ports we hold references to so they're not GC'd. Recent

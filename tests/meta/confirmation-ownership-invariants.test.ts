@@ -22,4 +22,20 @@ describe('confirmation ownership wiring', () => {
     expect(serviceWorker).toContain('pendingConfirm: confirmCoordinator.getPendingForOwner(');
     expect(serviceWorker).not.toContain('confirmCoordinator.getPending()');
   });
+
+  test('state delivery refreshes and replays the destination chat prompt without an await gap', () => {
+    const start = serviceWorker.indexOf('const pushState = async () => {');
+    const end = serviceWorker.indexOf('// Keepalive ports', start);
+    const pushState = serviceWorker.slice(start, end);
+    const refresh = pushState.indexOf(
+      'const pendingConfirm = confirmCoordinator.getPendingForOwner(ownerSessionId);',
+    );
+    const stateDelivery = pushState.indexOf("uiPorts.broadcast({ type: 'state'");
+    const promptReplay = pushState.indexOf("uiPorts.broadcast({ type: 'confirm/request'");
+
+    expect(refresh).toBeGreaterThan(-1);
+    expect(stateDelivery).toBeGreaterThan(refresh);
+    expect(promptReplay).toBeGreaterThan(stateDelivery);
+    expect(pushState.slice(refresh, promptReplay)).not.toContain('await ');
+  });
 });

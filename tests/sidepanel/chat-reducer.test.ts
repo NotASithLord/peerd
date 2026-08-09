@@ -120,6 +120,22 @@ describe('reduceChat', () => {
     expect(noPending.pendingConfirm).toBe(null);
   });
 
+  test('a scoped replay resurfaces a prompt that raced with its owner chat switch', () => {
+    const viewed = withSession('chat-a');
+    const prompt = { id: 'new', sessionId: 'actor-b', ownerSessionId: 'chat-b' };
+    // The live request can arrive while the panel still identifies as chat A.
+    const rejected = reduceChat(viewed, { type: 'confirm/request', prompt });
+    expect(rejected).toBe(viewed);
+    // A snapshot captured just before the request changes the viewed chat but
+    // cannot contain it. pushState follows this message with a scoped replay.
+    const switched = reduceChat(rejected, { type: 'state', state: {
+      session: { sessionId: 'chat-b', messages: [] }, pendingConfirm: null,
+    } });
+    expect(switched.pendingConfirm).toBe(null);
+    expect(reduceChat(switched, { type: 'confirm/request', prompt }).pendingConfirm)
+      .toEqual(prompt);
+  });
+
   // DESIGN-12 critical fix: a same-session state snapshot must NOT wipe a live
   // prompt that raced in over the confirm channel.
   test('a state snapshot does NOT wipe a live pendingConfirm', () => {
