@@ -2948,6 +2948,98 @@ export const STATES = [
     },
   },
   {
+    name: 'notebook-remote-restricted', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const notebookId = 'e2e-remote-restricted';
+      const page = await openWidePage(
+        ctx, `engine-tabs/notebook-tab/index.html#${notebookId}`,
+        { ready: '#notebook-app:not([hidden])' },
+      );
+      try {
+        const remoteSource = `
+          export const probe = async () => {
+            const attempts = {};
+            const tryCall = async (name, fn) => {
+              try { await fn(); attempts[name] = 'unexpected success'; }
+              catch (error) { attempts[name] = String(error && error.message || error); }
+            };
+            for (const envelope of [
+              { type: 'actor-request', rid: 'forged-actor', args: { task: 'leak' } },
+              { type: 'fetch-request', rid: 'forged-fetch', url: 'https://sink.example/', method: 'GET' },
+              { type: 'opfs-request', rid: 'forged-opfs', op: 'write', args: { path: 'canary.txt', content: 'changed' } },
+              { type: 'distributed-request', rid: 'forged-dweb', method: 'peers' },
+            ]) postMessage(envelope);
+            await tryCall('egress', () => peerd.egress.fetch('https://sink.example/'));
+            await tryCall('opfs', () => peerd.self.writeFile('canary.txt', 'changed'));
+            await tryCall('subagent', () => peerd.runtime.runAgent({ task: 'leak' }));
+            await tryCall('dweb', () => peerd.distributed.peers());
+            return attempts;
+          };
+        `;
+        const injected = await evalIn(page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          const original = browser.runtime.sendMessage.bind(browser.runtime);
+          globalThis.__remoteRestrictedCalls = [];
+          browser.runtime.sendMessage = (message) => {
+            globalThis.__remoteRestrictedCalls.push(message?.type ?? 'unknown');
+            if (message?.type === 'sw/web-fetch') {
+              return Promise.resolve({
+                ok: true, status: 200,
+                bodyB64: btoa(${JSON.stringify(remoteSource)}),
+              });
+            }
+            return original(message);
+          };
+          return true;
+        })()`, true);
+        rec.check('the Notebook remote-fetch test seam is installed', injected === true);
+
+        const outcome = await evalIn(ctx.page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          const tabs = await browser.tabs.query({});
+          const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
+          if (!tab?.id) return { error: 'Notebook tab not found' };
+          await browser.tabs.sendMessage(tab.id, {
+            type: 'js/write-file', notebookId: ${JSON.stringify(notebookId)},
+            path: 'canary.txt', content: 'unchanged',
+          });
+          const run = await browser.tabs.sendMessage(tab.id, {
+            type: 'js/eval', notebookId: ${JSON.stringify(notebookId)},
+            code: "import { probe } from 'https://modules.example/probe.js'; return probe();",
+            timeoutMs: 10_000,
+          });
+          const canary = await browser.tabs.sendMessage(tab.id, {
+            type: 'js/read-file', notebookId: ${JSON.stringify(notebookId)}, path: 'canary.txt',
+          });
+          return { run, canary };
+        })()`, true);
+        const calls = await evalIn(page, 'globalThis.__remoteRestrictedCalls ?? []');
+        const view = await evalIn(page, `(() => ({
+          status: document.getElementById('run-status')?.textContent ?? '',
+          output: document.getElementById('console-output')?.textContent ?? '',
+        }))()`);
+        rec.check('the visible Notebook carries remote provenance',
+          outcome?.run?.result?.usedRemoteModules === true, JSON.stringify(outcome));
+        rec.check('remote code keeps only compute in the visible Notebook',
+          ['egress', 'opfs', 'subagent', 'dweb'].every((key) =>
+            String(outcome?.run?.result?.value?.[key] ?? '').includes('remote_module_capability_blocked')),
+          JSON.stringify(outcome?.run?.result?.value));
+        rec.check('direct forged relays never leave the Notebook host',
+          Array.isArray(calls) && calls.filter((type) => type === 'sw/web-fetch').length === 1
+            && !calls.some((type) => ['actor/spawn', 'dweb/distributed/info'].includes(type)),
+          JSON.stringify(calls));
+        rec.check('remote code cannot change the Notebook file canary',
+          outcome?.canary?.content === 'unchanged', JSON.stringify(outcome?.canary));
+        rec.check('the human sees a neutral restricted status and explanation',
+          /Remote code ran with restricted access/.test(view?.status ?? '')
+            && /Remote imports run with compute only/.test(view?.output ?? ''),
+          JSON.stringify(view));
+        await rec.shotPage('restricted-result', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
     name: 'notebook-tab-failed', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {

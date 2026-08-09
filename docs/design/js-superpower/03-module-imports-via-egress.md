@@ -2,13 +2,14 @@
 
 Remote module imports are a package policy, not a worker capability.
 `REMOTE_MODULE_IMPORTS_ENABLED` is generated with the channel configuration.
-Preview packages enable it. Store and web packages disable it.
+Supported Preview targets enable it. Store, web, and Firefox packages disable it.
 
 ## Supported imports
 
 Notebook and Script entry code can use literal static imports and re-exports.
 Relative files, `peerd:std`, `peerd:wasi`, and `peerd:toolbox/<name>` resolve
-through the host. Preview also accepts literal static HTTP and HTTPS imports.
+through the host where the browser loader supports them. Chrome Preview also
+accepts literal static HTTP and HTTPS imports.
 
 Dynamic imports, `peerd.self.import`, computed specifiers, import attributes,
 other URL schemes, and extension-absolute paths are refused with a stable
@@ -43,12 +44,18 @@ imports before storage. For Preview remote imports, it checks specifier policy
 and the direct graph-count limit without fetching third-party source. Remote
 availability, source syntax, and transitive dependencies are runtime checks.
 
-## Remaining trust work
+## Trust boundary
 
-The headless Script host marks remote module use as egress and fences its
-result. The visible Notebook host still needs to carry equivalent provenance
-into `js_notebook` output. The broader policy for executing code that was
-fetched as ordinary data is tracked separately.
+Both execution hosts mark the whole resolved graph as remote-derived when any
+HTTPS module is present. The worker profile removes network, file, agent,
+provider, browser, site, and dweb clients. Host relays refuse forged requests.
+A remote module cannot import a local toolbox module. Returned values, logs,
+and errors cross the untrusted-content fence before reaching the model.
+
+Firefox refuses remote imports before fetching because its worker loader cannot
+run the generated child module URLs. Native Firefox loading for local and
+remote static graphs is tracked separately. The broader policy for executing
+code fetched as ordinary data is also tracked separately.
 
 ## Authoritative sources
 

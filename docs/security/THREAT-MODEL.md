@@ -210,19 +210,25 @@ Defenses (partial): there is no npm runtime inside the extension. Third-party co
 vendored in `vendor/` with a `SOURCE.txt`. The Moonshine voice model is SHA-384
 SRI-verified and refuses to load on a null SRI
 (`peerd-runtime/voice/model-store.js`). Store and web builds refuse direct
-remote JavaScript imports without requesting the module source. Preview literal
-static remote modules cross the audited web-fetch path, have source and graph
-caps, and may carry an optional SHA-256 pin. Dynamic imports are refused in
-every package. Remote modules run inside a sealed worker. The store build strips
+remote JavaScript imports without requesting the module source. On package
+targets where Preview enables literal static remote modules, they cross the
+audited web-fetch path, have source and graph
+caps, and may carry an optional SHA-256 pin. Any remote module marks the whole
+resolved graph as untrusted compute. Runtime network and file access, agents,
+model calls, browser and site clients, and dweb are disabled for that run. A
+remote module cannot import a local toolbox module. Generated worker shims and
+independent host relay checks enforce the same profile. Returned values,
+console output, and errors are fenced as untrusted.
+Pins verify exact bytes and improve reproducibility. They do not grant trust or
+authority. Dynamic imports are refused in every package. Remote modules run
+inside a sealed worker. The store build strips
 the `debugger` permission and the dweb module, and CI verifies zero dweb traces.
 Accepted residuals: the CheerpX WebVM streams its root filesystem image from a
 third-party host over WSS, which cannot be SRI-pinned. In Preview, an unpinned
-HTTPS module can change at its publisher's discretion and inherits the execution
-lane's capabilities. Visible Notebook results also lack remote-import provenance,
-so remote-controlled output is not fenced before the Notebook actor reads it.
+HTTPS module can change at its publisher's discretion.
 The separate Store risk where code is fetched as data and then executed through
 a local JavaScript or WebAssembly surface is tracked on the issue board.
-Proven by (partial): scenario 06 for sandbox confinement of whatever the VM runs.
+Proven by: scenario 06.
 
 ---
 
@@ -315,8 +321,15 @@ at an opaque origin (the manifest sandbox omits `allow-same-origin` and
 `allow-top-navigation`) with all `chrome.*` stripped, and its inlined worker source is
 escaped against a `</script>` breakout. The WebVM's only network path is an HTTP bridge
 that refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth
-field, and confirms body-bearing verbs.
+field, and confirms body-bearing verbs. If a resolved Notebook or Script graph
+includes remote code, the entire run uses the compute-only profile. The resolver
+blocks remote access to local toolbox modules. The worker and host both refuse
+every authority-bearing relay, and the tool boundary fences all remote-controlled
+output.
 Code: `engine-tabs/notebook-tab/notebook-neutralizers.js` (`applyRealmSeal`),
+`engine-tabs/notebook-tab/worker-source.js`,
+`engine-tabs/notebook-tab/notebook-tab.js`, `offscreen/job-runner.js`,
+`peerd-runtime/tools/defs/js-notebook.js`, `peerd-runtime/tools/defs/script.js`,
 `peerd-engine/app-compose.js`, `peerd-engine/vm-net/http-bridge.js`,
 `peerd-engine/module-resolver.js`, and the manifest sandbox CSP. Red-team: scenario 06,
 with the real-realm proof in

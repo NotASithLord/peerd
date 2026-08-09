@@ -20,6 +20,8 @@ const FENCE = '<untrusted_web_content';
 const MATRIX: Array<[Record<string, unknown>, boolean, string]> = [
   [{}, false, 'script'],
   [{ usedEgress: true }, true, 'script (fetched web content)'],
+  [{ usedRemoteModules: true }, true, 'script (remote modules)'],
+  [{ usedEgress: true, usedRemoteModules: true }, true, 'script (fetched web content + remote modules)'],
   [{ usedActors: true }, true, 'script (actor replies)'],
   [{ usedWorkspace: true }, true, 'script (workspace files)'],
   [{ usedEgress: true, usedActors: true }, true, 'script (fetched web content + actor replies)'],
@@ -52,6 +54,12 @@ describe('formatRunResult — fence decision matrix', () => {
     const out = formatRunResult('x', run({ usedWorkspace: true, workspaceOverBudget: true }) as any);
     const afterFence = out.split('</untrusted_web_content>')[1];
     expect(afterFence).toContain('[WORKSPACE OVER BUDGET');
+  });
+
+  test('the remote-module recovery guidance is host-authored and outside the fence', () => {
+    const out = formatRunResult('return remoteValue', run({ usedRemoteModules: true }) as any);
+    const afterFence = out.split('</untrusted_web_content>')[1];
+    expect(afterFence).toContain('[remote_module_restricted]');
   });
 
   test('the value-spill footer names the key + read_run_cache, outside the fence', () => {
