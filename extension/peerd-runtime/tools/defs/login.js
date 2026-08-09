@@ -178,6 +178,27 @@ export const loginTool = {
     if (ans !== 'yes_once' && ans !== 'yes_session' && ans !== true) {
       return { ok: false, error: 'login_declined', content: 'User declined the sign-in.' };
     }
+    if (ctx.abortSignal?.aborted) return { ok: false, error: 'login_aborted' };
+
+    // Consent names the relying site, not the identity provider it may visit.
+    // Re-read the owned tab after consent, then bind a roaming actor to that
+    // system-derived origin. The origin lock uses this boundary to permit one
+    // bounded sign-in excursion without ever making the provider an actor home.
+    const authorizedTab = await resolveTargetTab(args, ctx);
+    if (!authorizedTab?.id) return { ok: false, error: 'login_target_gone' };
+    if (ctx.abortSignal?.aborted) return { ok: false, error: 'login_aborted' };
+    if (originOfUrl(authorizedTab.url) !== origin) {
+      return { ok: false, error: 'login_origin_changed', content: 'the page moved during the confirm; re-run login after a fresh snapshot.' };
+    }
+    const originAuthorized = await ctx.authorizeSignInOrigin?.(origin, ctx.abortSignal);
+    if (ctx.abortSignal?.aborted) return { ok: false, error: 'login_aborted' };
+    if (originAuthorized !== true) {
+      return {
+        ok: false,
+        error: 'login_origin_authority_refused',
+        content: 'The relying-site boundary could not be verified after confirmation. Re-run login from a fresh page snapshot.',
+      };
+    }
 
     // 7) INITIATE. peerd AUTO-CLICKS only when it has (a) VERIFIED the destination is
     //    a known IdP, (b) a STABLE walkId (a snapshot node the page cannot re-point —
@@ -243,6 +264,7 @@ export const loginTool = {
     if (!(v2.supported && v2.method === v.method && v2.verified === true && v2.provider === v.provider)) {
       return { ok: false, error: 'login_affordance_changed', content: 'the sign-in element changed after you approved; re-run.' };
     }
+    if (ctx.abortSignal?.aborted) return { ok: false, error: 'login_aborted' };
 
     // Click via the SAME walkId — the stable registry node the read resolved, which
     // the page cannot re-point. expectedCount=1 catches a stale/duplicated ref.

@@ -615,6 +615,25 @@ describe('withDpopCredentials — proof minted at the boundary, nowhere else', (
     expect(audits).toHaveLength(0);
   });
 
+  test('missing ownership is anonymous and does not consult credential material', async () => {
+    const { webFetch, seen } = mkFetch();
+    let secretReads = 0;
+    let keyReads = 0;
+    const audits: any[] = [];
+    const wf = withDpopCredentials(webFetch, () => undefined, {
+      getSecret: async () => { secretReads += 1; return buildOriginSecret({ key: TOKEN, scheme: 'dpop' }); },
+      getDpopKey: async () => { keyReads += 1; return null; },
+      audit: (event) => audits.push(event),
+    });
+    await wf(`${OWNED}/v1/x`, {});
+    expect(seen.init.credentials).toBe('omit');
+    expect(seen.init.headers?.Authorization).toBeUndefined();
+    expect(seen.init.headers?.DPoP).toBeUndefined();
+    expect(secretReads).toBe(0);
+    expect(keyReads).toBe(0);
+    expect(audits).toHaveLength(0);
+  });
+
   test('a host-suffix spoof of the owned origin gets nothing', async () => {
     const { wf, seen } = await mkBoundary();
     await wf('https://api.example.com.evil.test/x', {});

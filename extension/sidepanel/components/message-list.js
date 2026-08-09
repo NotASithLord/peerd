@@ -34,6 +34,18 @@ import {
 
 /** @param {string} text @returns {string|null} */
 const actorUserFailure = (text) => {
+  if (/actor_identity_provider_transit_only/i.test(text)) {
+    return 'No actor work was started. This is a sign-in service, which peerd can visit only while signing in to another site. '
+      + 'Ask peerd to work through the site you want to sign in to.';
+  }
+  if (/actor_sensitive_tab_requires_site/i.test(text)) {
+    return 'No actor work was started. This tab is on a site peerd treats as signed in. '
+      + 'To continue, ask peerd to work on that site directly.';
+  }
+  if (/actor_tab_sensitivity_unavailable/i.test(text)) {
+    return 'No actor work was started because peerd could not verify this tab. '
+      + 'Reload peerd, then try again.';
+  }
   if (/actor-provider-boundary-blocked|model request was not run/i.test(text)) {
     return ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE;
   }
@@ -984,9 +996,6 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
   // "<origin> integration" to match deliver()/ack + the prompt lore (not "web actor",
   // which wrongly implies a tab/DOM agent for a tabless fetch-only thing).
   const isApiIntegration = card?.kind === 'web' && /^https?:\/\//.test(String(who));
-  const cardLabel = isApiIntegration
-    ? `${who} integration`
-    : `${card?.kind ? `${card.kind} actor` : 'actor'}${who ? ` · ${who}` : ''}`;
   // The actor's own live state drives the status (the tool result is the async
   // "delivered" ack, not the actor outcome). No card yet → fall back to the ack.
   const status = card?.error ? 'failed'
@@ -1001,7 +1010,14 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
   const userFailure = actorUserFailure(failureText);
   const notRun = status === 'failed' && !outcomeUnknown
     && (userFailure !== null
-      || /not run|no work was started|actor isolation|isolated worker.*(did not|unavailable)/i.test(failureText));
+      || /not run|no work was started|actor isolation|isolated worker.*(did not|unavailable)|actor_(?:sensitive_tab_requires_site|identity_provider_transit_only)/i.test(failureText));
+  const idpTransitRefusal = /actor_identity_provider_transit_only/i.test(failureText);
+  const cardLabel = idpTransitRefusal
+    ? 'sign-in service'
+    : isApiIntegration
+      ? `${who} integration`
+      : `${card?.kind ? `${card.kind} actor` : 'actor'}${who ? ` · ${who}` : ''}`;
+  const presentationStatus = idpTransitRefusal && notRun ? 'not-run' : status;
   const handedOff = !card && toolUse.input?.await === true
     && /is still working; its reply will arrive as a fenced note on a later turn/i.test(resultText);
   const acceptedAsync = !card && !!toolResult && toolResult.is_error !== true
@@ -1016,13 +1032,15 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
     : 'done';
   const tooDeep = depth + 1 > MAX_NESTED_DEPTH;
   const onToggle = () => { ui.expanded = !ui.expanded; };
-  return m(`.tool-call.tool-actor.tool-${status}`, [
+  return m(`.tool-call.tool-actor.tool-${presentationStatus}`, [
     m('button.tool-call-header', {
       type: 'button', onclick: onToggle, 'aria-expanded': String(ui.expanded),
     }, [
       m('span.disclosure', ui.expanded ? '▼' : '▶'),
-      m(`span.tool-status-dot.dot-${status}`,
-        { title: status === 'failed' ? (outcomeUnknown ? 'outcome unknown' : 'failed') : status === 'pending' ? 'working' : status === 'cancelled' ? 'cancelled' : 'ok' }),
+      m(`span.tool-status-dot.dot-${presentationStatus}`,
+        presentationStatus === 'not-run'
+          ? { 'aria-hidden': 'true' }
+          : { title: status === 'failed' ? (outcomeUnknown ? 'outcome unknown' : 'failed') : status === 'pending' ? 'working' : status === 'cancelled' ? 'cancelled' : 'ok' }),
       m('span.tool-name', 'message_actor'),
       m('span.tool-args', `${cardLabel}: "${truncate(task, 40)}"`),
       m('.spacer'),

@@ -80,6 +80,7 @@ describe('persistence', () => {
     const { store } = harness({ 'https://app.test': 'confirmed-write' });
     await store.hydrate();
     expect(store.snapshot().get('https://app.test')).toBe('confirmed-write');
+    expect(store.hydrationStatus()).toEqual({ ready: true, ok: true });
   });
 
   test('a stored entry with an unknown reason is dropped on load', async () => {
@@ -98,6 +99,7 @@ describe('persistence', () => {
     });
     await store.hydrate();
     expect(store.size()).toBe(0);
+    expect(store.hydrationStatus()).toEqual({ ready: true, ok: false });
     expect(store.note('https://app.test', 'password-field')).toBe(true);
   });
 

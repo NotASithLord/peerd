@@ -68,6 +68,7 @@ import {
   // NON-EXTRACTABLE key that never leaves the SW and that nothing, including this
   // file, can export. Plus the Settings → API integrations routes.
   withDpopCredentials,
+  EgressDeniedError,
   getOrCreateDpopKey,
   makeDpopKeyStore,
   // The credential LIFECYCLE seams the Settings routes close over: mint-at-provision
@@ -335,10 +336,13 @@ import {
   // live — the state store, the judge, the synchronous credential-scope
   // narrowing, and the report a stop turns into.
   makeOriginStateStore, makeLearnedOrigins, makeJudgeLanding, makeCredentialScope,
+  makeSignInOriginAuthorizer,
   makeSiteClientOriginGuard, makeSiteClientOriginAuthorizer,
   makeFixedSiteClientOriginGuard, authorizeSiteClientRelayOrigin,
   hasDurableSiteClientState,
-  isKnownIdp, knownIdpDomains, describeLandingStop, originPhrase, isUgcHost,
+  decideNumericTabAuthority, numericTabAuthorityRefusal,
+  IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+  isKnownIdp, isKnownIdpHost, knownIdpDomains, describeLandingStop, originPhrase, isUgcHost,
   isAddressableBrowserTab,
   finalActorTurnReply, finalAssistantText,
   // The debug surface: the bundle assembler + the delegation-tree walk the
@@ -1643,7 +1647,8 @@ const refreshKeyedOrigins = async () => {
       const origin = originFromSecretName(name);
       if (origin) keyedOrigins.add(origin);
     }
-  } catch { /* locked — keep what we have; never shrink */ }
+    return true;
+  } catch { return false; /* locked or unavailable; keep what we have and never shrink */ }
 };
 refreshKeyedOrigins();
 vault.subscribe(() => { if (!vault.isLocked()) refreshKeyedOrigins(); });
@@ -1694,6 +1699,19 @@ const learnedOrigins = makeLearnedOrigins({
 });
 learnedOrigins.hydrate();
 
+// Numeric tab addressing mints bound authority, unlike the roaming landing
+// classifier. Wait for both durable inputs and refuse on an unreadable one so a
+// cold service worker cannot mistake an empty cache for an ordinary origin.
+const numericTabAuthorityFor = async (/** @type {unknown} */ liveUrl) => {
+  await learnedOrigins.hydrate();
+  const keyedReady = await refreshKeyedOrigins();
+  return decideNumericTabAuthority(liveUrl, {
+    policyReady: keyedReady && learnedOrigins.hydrationStatus().ok,
+    ...sensitivitySignals(),
+    learned: learnedOrigins.snapshot(),
+  });
+};
+
 /**
  * Record a learned signal. Canonicalizes here — ONE place — because the
  * classifier looks the origin up through the same normalizer, and a mismatch
@@ -1708,6 +1726,10 @@ const noteLearnedOrigin = (rawOrigin, reason) => {
 
 /** The sensitivity signals, in the shape the classifier takes. */
 const sensitivitySignals = () => ({
+  // Dedicated identity providers are transit-only. They are sensitive for
+  // credential and custody decisions, while landing-rule.js separately keeps
+  // the bounded relying-party sign-in corridor working.
+  isKnownIdp: isKnownIdpHost,
   // SEED 1 — #242's curated UGC registry, asked at ORIGIN level (isUgcHost, not
   // classifyUrl). #242 is path-scoped because it gates one WRITE on a page
   // strangers authored; the lock asks whether the user has an IDENTITY here,
@@ -1875,6 +1897,18 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
         getState, getLiveLanding, judgeLanding,
         ...sensitivitySignals(),
       }),
+    authorizeSignInOrigin: makeSignInOriginAuthorizer({
+      getState,
+      getLiveLanding: () => liveSiteClientLandingFor(actorSessionId),
+      saveState: (patch) => originStates.write(actorSessionId, patch),
+      isKnownIdp: isKnownIdpHost,
+      isCurrent: isCurrentTurn,
+      onBound: (origin) => auditLog.append({
+        type: 'actor_origin_bound_for_sign_in',
+        sessionId: actorSessionId,
+        details: { origin },
+      }).then(() => undefined),
+    }),
   };
 };
 
@@ -2502,17 +2536,20 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       // A stored client is durable executable knowledge keyed by origin. The API
       // actor owns exactly its fixed instance origin; a model-supplied client key
       // may not retarget it to a sibling record before the fetch relay gets a say.
-      const canUseFixedSiteClient = makeFixedSiteClientOriginGuard(ownedOrigin);
+      const canUseFixedSiteClient = makeFixedSiteClientOriginGuard(ownedOrigin, { isKnownIdp: isKnownIdpHost });
       resCtx.canUseSiteClientOrigin = canUseFixedSiteClient;
       resCtx.authorizeSiteClientOrigin = async (/** @type {string} */ targetOrigin) =>
         canUseFixedSiteClient(targetOrigin);
       // DESIGN-18 P1: session-scope cookies AND inject the vault origin:<origin> key
       // same-origin (keyless: getSecret is the SW's, closed over here, never on resCtx).
-      resCtx.webFetch = withDpopCredentials(webFetch, () => ownedOrigin, {
-        getSecret: (/** @type {string} */ name) => vault.getSecret(name),
-        getDpopKey: getDpopKeyForOrigin,
-        audit: (/** @type {any} */ e) => auditLog.append(e),
-      });
+      resCtx.webFetch = isKnownIdpHost(ownedOrigin)
+        ? async () => { throw new EgressDeniedError(ownedOrigin ?? 'identity provider', IDENTITY_PROVIDER_TRANSIT_ONLY_CODE); }
+        : withDpopCredentials(webFetch, () => ownedOrigin, {
+          getSecret: (/** @type {string} */ name) => vault.getSecret(name),
+          getDpopKey: getDpopKeyForOrigin,
+          audit: (/** @type {any} */ e) => auditLog.append(e),
+        });
+      resCtx.idpTransitOnly = isKnownIdpHost(ownedOrigin);
       // No repinActiveTab / adoptWebTab: an API actor has no tab to adopt or re-pin.
     } else if (actorType === 'web') {
       // issue 251 — THE LOCK GOES LIVE HERE, for exactly this kind: a tab-backed
@@ -2530,6 +2567,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       originStates.hydrate(sessionId, durableOriginState);
       const lock = originLockFor(sessionId);
       resCtx.judgeLanding = lock?.judgeLanding;
+      resCtx.authorizeSignInOrigin = lock?.authorizeSignInOrigin;
       // The sync gate is an early state-only refusal. The execute-time check is
       // async and re-reads + judges the ACTUAL owned tab after hooks have
       // rewritten args. A missing durable state must not be hydrated into
@@ -4763,6 +4801,7 @@ const siteFetchCallRoute = {
     }
     const pin = normalizeApiOrigin(siteOrigin);
     if (!pin) return { ok: false, error: `site_fetch_bad_origin: ${siteOrigin}` };
+    if (isKnownIdpHost(pin)) return { ok: false, error: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE };
     const resolved = resolveSiteUrl(pathOrUrl, pin);
     if ('error' in resolved) return { ok: false, error: resolved.error };
     const url = resolved.url;
@@ -4801,6 +4840,7 @@ const siteFetchCallRoute = {
       durableState: /** @type {any} */ (owner.originState),
       targetOrigin: pin,
       authorizeTabOrigin,
+      isKnownIdp: isKnownIdpHost,
     });
     if (!await reauthorizeSiteFetch()) return { ok: false, error: 'site_fetch_cross_origin' };
     const httpMethod = String(method ?? 'GET').toUpperCase();
@@ -4978,12 +5018,12 @@ hydrateRegistry(API_ACTOR_KEY, apiActorBindings);
 // automatically; formed=true that it has state/memory here. A locked vault degrades to
 // formed-only (no throw). The KEY VALUE is never read — only the secret NAMES (origins).
 const listApiIntegrations = async (/** @type {string | null | undefined} */ chatId) => {
-  const formed = chatId ? apiActorBindings.originsFor(chatId) : [];
+  const formed = (chatId ? apiActorBindings.originsFor(chatId) : []).filter((origin) => !isKnownIdpHost(origin));
   /** @type {string[]} */
   let keyed = [];
   try {
     const names = await vault.listSecretNames();
-    keyed = /** @type {string[]} */ (names.map(originFromSecretName).filter(Boolean));
+    keyed = /** @type {string[]} */ (names.map(originFromSecretName).filter((origin) => origin && !isKnownIdpHost(origin)));
   } catch { keyed = []; }   // locked → formed-only
   const formedSet = new Set(formed);
   const keyedSet = new Set(keyed);
@@ -5112,28 +5152,11 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorTyp
   return created.sessionId;
 };
 
-// issue 251 — a PER-TAB actor is minted BOUND to that tab's current origin, not
-// roaming, and this is the case the roaming default gets wrong.
-//
-// A per-tab actor exists because someone addressed a SPECIFIC open page — from
-// actor_list, or a tab the orchestrator itself opened, or the page the user is
-// looking at right now and just asked about. That page is the job. Roaming would
-// mean asking "what is this dashboard showing?" about a site you have an account
-// on gets refused on the actor's very first snapshot, with a report explaining
-// that helpers browsing the open web may not go where peerd would act as you —
-// about the page you are sitting on and explicitly asked about. Adversarial
-// review found that; the wiring comment's exemption reasoning ("the user's own
-// tab") had quietly assumed the orchestrator reads that page, but the DOM tools
-// are actor-only, so every such read goes through this actor.
-//
-// Binding is also STRICTLY TIGHTER than roaming here, not a carve-out: this
-// actor may work on that one origin and is stopped the moment the tab leaves it.
-// What it loses is permission to wander, which a tab-addressed actor never
-// needed. A tab with no nameable origin (blank, chrome://) gets no ownedOrigin,
-// so it adopts on first landing — the ordinary bound path.
-const mintWebActorForTab = async (/** @type {number} */ tabId) => {
-  const tab = await browser.tabs.get(tabId).catch(() => null);
-  const ownedOrigin = tab?.url ? normalizeApiOrigin(originOfTabUrl(/** @type {string} */ (tab.url))) : null;
+// A PER-TAB actor is bound to the exact ordinary origin observed by the numeric
+// address policy. It may work on that origin and is stopped when the tab leaves
+// it. A sensitive origin is refused before this function; working there requires
+// an explicit site handle grounded in the user's request.
+const mintWebActorForTab = async (/** @type {number} */ tabId, /** @type {string} */ ownedOrigin) => {
   return mintWebSession({
     instanceId: String(tabId),
     ownerChatId: /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId')),
@@ -5152,6 +5175,22 @@ const resolveWebActorForTab = async (/** @type {number} */ tabId) => {
   let liveHost = '';
   try { liveHost = new URL(/** @type {string} */ (tab.url)).hostname; } catch { return null; }
   if (matchesDenylist(liveHost, denylistStore.patterns())) return null;
+  // A page-controlled redirect may choose the tab's current site, but it may
+  // not turn that choice into bound authority. Classify the exact browser
+  // snapshot used below; mintWebActorForTab never rereads or substitutes it.
+  const authority = await numericTabAuthorityFor(tab.url);
+  if (!authority.allowed) {
+    auditLog.append({
+      type: 'actor_tab_authority_refused',
+      details: {
+        code: authority.code,
+        ...(authority.origin ? { origin: authority.origin } : {}),
+        ...(authority.reason ? { reason: authority.reason } : {}),
+        performed: false,
+      },
+    }).catch(() => {});
+    return { resolutionRefusal: numericTabAuthorityRefusal(authority) };
+  }
   let actorSessionId = webActorTabBindings.resolve(tabId);
   if (actorSessionId && !(await sessions.get(actorSessionId))) {
     webActorTabBindings.drop(tabId);
@@ -5168,15 +5207,13 @@ const resolveWebActorForTab = async (/** @type {number} */ tabId) => {
   // page they are no longer looking at. The binding is durable and the tab is
   // long-lived, so that state persists for as long as the tab does.
   //
-  // Addressing a tab is an authorization for THAT TAB AS IT IS NOW, so a fresh
-  // addressing re-derives the binding. This does NOT loosen the lock: the
-  // re-bind happens only here, between turns, on an explicit address. Inside a
-  // turn the actor still cannot leave its origin, which is the property that
-  // stops a hijacked page from moving it.
+  // Re-addressing may re-bind only to the ordinary origin approved above. A
+  // sensitive destination never reaches this branch and needs explicit site
+  // intent. Inside a turn the actor still cannot leave its owned origin.
   if (actorSessionId) {
     const rec = await sessions.get(actorSessionId).catch(() => null);
     const owned = /** @type {any} */ (rec)?.originState?.ownedOrigin ?? null;
-    const live = tab.url ? normalizeApiOrigin(originOfTabUrl(/** @type {string} */ (tab.url))) : null;
+    const live = authority.origin;
     if (owned && live && owned !== live) {
       webActorTabBindings.drop(tabId);
       persistWebBindings();
@@ -5184,7 +5221,9 @@ const resolveWebActorForTab = async (/** @type {number} */ tabId) => {
       actorSessionId = null;
     }
   }
-  if (!actorSessionId) actorSessionId = await mintOnce(`web:${tabId}`, () => mintWebActorForTab(tabId));
+  if (!actorSessionId) {
+    actorSessionId = await mintOnce(`web:${tabId}`, () => mintWebActorForTab(tabId, authority.origin));
+  }
   // why no `name` from the page: a tab's title/url are attacker-CONTROLLED
   // (document.title is page content). resolveActor's `name` flows UN-fenced
   // into the orchestrator's model memory — the deliver() reply lead and the
@@ -5957,6 +5996,7 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
 // the bound session vanished (SW death cleared session storage). Owner is the SENDER chat
 // threaded by the messaging layer so each chat keeps its own integration.
 const resolveApiActor = async (/** @type {string} */ origin, /** @type {string | null | undefined} */ ownerOverride) => {
+  if (isKnownIdpHost(origin)) return null;
   const ownerChatId = ownerOverride ?? /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
   if (!ownerChatId) return null;
   let actorSessionId = apiActorBindings.resolve(ownerChatId, origin);
@@ -6348,7 +6388,7 @@ const siteClientMintCustodyFor = async (/** @type {string} */ actorSessionId, /*
   if (!rec) return null;
   if (rec.backing === 'api') {
     const origin = normalizeApiOrigin(rec.instanceId ?? instanceId);
-    const guard = makeFixedSiteClientOriginGuard(origin);
+    const guard = makeFixedSiteClientOriginGuard(origin, { isKnownIdp: isKnownIdpHost });
     return origin && guard(origin)
       ? { origin, authorize: async () => guard(origin) }
       : null;
@@ -6397,13 +6437,59 @@ const actorMessaging = makeActorMessaging({
     // them; getting the order wrong would silently hand every handoff a
     // fetch-only integration that cannot log in or click.
     const siteOrigin = parseSiteHandle(instanceId);
-    if (siteOrigin) return resolveSiteActor(siteOrigin, opts.senderSessionId);
+    if (siteOrigin) {
+      if (isKnownIdpHost(siteOrigin)) {
+        auditLog.append({
+          type: 'actor_idp_authority_refused',
+          details: {
+            code: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+            origin: siteOrigin,
+            performed: false,
+          },
+        }).catch(() => {});
+        return {
+          resolutionRefusal: numericTabAuthorityRefusal({
+            allowed: false,
+            code: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+            retryable: false,
+            origin: siteOrigin,
+            reason: 'identity-provider',
+            suggestedHandle: null,
+            requiresUserIntent: false,
+          }),
+        };
+      }
+      return resolveSiteActor(siteOrigin, opts.senderSessionId);
+    }
     // DESIGN-18: an API integration is addressed by its ORIGIN (a bare host or a full
     // URL). normalizeApiOrigin canonicalizes it and REJECTS anything that isn't a public
     // dotted host — so 'web', a tabId, and engine ids (vm-/notebook-/app-, no dot) all
     // fall through to the engine branch below. The origin is the integration's identity.
     const apiOrigin = normalizeApiOrigin(instanceId);
-    if (apiOrigin) return resolveApiActor(apiOrigin, opts.senderSessionId);
+    if (apiOrigin) {
+      if (isKnownIdpHost(apiOrigin)) {
+        auditLog.append({
+          type: 'actor_idp_authority_refused',
+          details: {
+            code: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+            origin: apiOrigin,
+            performed: false,
+          },
+        }).catch(() => {});
+        return {
+          resolutionRefusal: numericTabAuthorityRefusal({
+            allowed: false,
+            code: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+            retryable: false,
+            origin: apiOrigin,
+            reason: 'identity-provider',
+            suggestedHandle: null,
+            requiresUserIntent: false,
+          }),
+        };
+      }
+      return resolveApiActor(apiOrigin, opts.senderSessionId);
+    }
     const prefix = String(instanceId).split('-')[0];
     const entry = /** @type {Record<string, { reg: any, kind: string }>} */ (ACTOR_REGISTRY_BY_PREFIX)[prefix];
     if (!entry) return null;
@@ -7092,10 +7178,19 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // the chat's web actor currently owns a tab. It grants nothing, and it is not
   // reachable by the model — routes are the side panel's surface, and the tool
   // dispatcher has no path to them.
-  'debug/originLock': async (/** @type {{ origin?: string }} */ msg = {}) => {
+  'debug/originLock': async (/** @type {{ origin?: string, seedReason?: 'password-field'|'confirmed-write' }} */ msg = {}) => {
     const origin = normalizeApiOrigin(msg.origin);
+    // Dev-mode test seam for deterministic browser probes. It can only add the
+    // same restrictive learned signals ordinary DOM/confirmation observation
+    // adds, never remove one or grant authority. The model has no route here.
+    if (settingsStore.get().devMode === true && origin
+        && (msg.seedReason === 'password-field' || msg.seedReason === 'confirmed-write')) {
+      noteLearnedOrigin(origin, msg.seedReason);
+      await learnedOrigins.settled();
+    }
     const chatId = /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
     const actorSessionId = chatId ? webActorRegistry.resolve(chatId) : null;
+    const siteActorSessionId = (origin && chatId) ? siteActorBindings.resolve(chatId, origin) : null;
     return {
       ok: true,
       learned: origin ? learnedOrigins.snapshot().has(origin) : false,
@@ -7105,10 +7200,8 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
       // The SITE actor for this origin, if the chat has formed one. Its mode is
       // the property that distinguishes a real handoff successor from a roaming
       // helper that merely happens to be on the right page.
-      siteActorState: (() => {
-        const sid = (origin && chatId) ? siteActorBindings.resolve(chatId, origin) : null;
-        return sid ? (originStates.read(sid) ?? null) : null;
-      })(),
+      siteActorState: siteActorSessionId ? (originStates.read(siteActorSessionId) ?? null) : null,
+      siteActorTabId: siteActorSessionId ? (webActorTabBindings.tabFor(siteActorSessionId) ?? null) : null,
     };
   },
   ...settingsMessageRoutes,

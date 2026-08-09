@@ -112,7 +112,7 @@ const SCHEMA_VALIDATED_KINDS = new Set(['web', 'api']);
 
 /**
  * @param {Object} deps
- * @param {(instanceId: string, opts?: { senderSessionId?: string | null }) => Promise<{ instanceId: string, kind: string, actorSessionId: string, name?: string, tabId?: number } | null>} deps.resolveActor
+ * @param {(instanceId: string, opts?: { senderSessionId?: string | null }) => Promise<{ instanceId: string, kind: string, actorSessionId: string, name?: string, tabId?: number } | { resolutionRefusal: { ok: false, error: string, content?: string, structured?: Record<string, unknown>, outcomeKind?: 'pre-effect-failure' } } | null>} deps.resolveActor
  *   Resolve an instance id to its (lazily-minted) actor. Returns null when no
  *   instance with that id exists across the three registries. `senderSessionId` is the
  *   chat that sent this message — the chat-scoped WEB actor (to:'web') is owned by it,
@@ -767,6 +767,7 @@ export const makeActorMessaging = (deps) => {
     } catch (e) {
       return { ok: false, error: `message_actor: could not resolve instance '${to}': ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
+    if (actor && 'resolutionRefusal' in actor) return actor.resolutionRefusal;
     if (!actor) {
       return { ok: false, error: `message_actor: no tab-hosted instance found for id '${to}' (use the create/list tools to find one)` };
     }

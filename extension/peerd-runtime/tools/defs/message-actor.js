@@ -25,7 +25,7 @@ const ORCHESTRATOR_AWAIT_CAP_MS = 3 * 60_000;
  * The ctx slot message_actor reads (an SW-injected extra, not on the base
  * ToolContext contract).
  * @typedef {Object} MessageActorCtx
- * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitSignal?: any, degradeToAsync?: boolean, awaitCapMs?: number }) => Promise<{ ok: boolean, content?: string, error?: string, actorDeliveryId?: string }>} [messageActor]
+ * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitSignal?: any, degradeToAsync?: boolean, awaitCapMs?: number }) => Promise<{ ok: boolean, content?: string, error?: string, structured?: Record<string, unknown>, outcomeKind?: 'pre-effect-failure', actorDeliveryId?: string }>} [messageActor]
  * @property {{ sessionId?: string, kind?: string }} [session]
  * @property {boolean} [inbound]
  * @property {string} [toolUseId]
@@ -48,7 +48,8 @@ export const messageActorTool = {
     'cheapest in-stock price for X"): the web actor is the single entry point and',
     'PICKS THE MECHANISM itself — a sessionless secure fetch, or opening + driving a',
     'tab — so don\'t pre-open a tab or pick fetch-vs-render. Other address forms, all',
-    'listed by actor_list: a tabId to act on ONE already-open page; a vm/notebook/app',
+    'listed by actor_list: a tabId to act on ONE ordinary open page (numeric ids',
+    'cannot grant authority on a site peerd treats as signed in); a vm/notebook/app',
     'instance id; "site:<origin>" (e.g. "site:https://github.com") to work on ONE site',
     'the user is logged into (drives a real tab, that site only, so it can sign in',
     'where "web" may not go); or an API integration\'s ORIGIN (a bare host like',
@@ -151,6 +152,9 @@ export const messageActorTool = {
       : {
         ok: false,
         error: res.error ?? 'message_actor failed',
+        ...(res.content ? { content: res.content } : {}),
+        ...(res.structured ? { structured: res.structured } : {}),
+        ...(res.outcomeKind ? { outcomeKind: res.outcomeKind } : {}),
         ...(res.actorDeliveryId ? { actorDeliveryId: res.actorDeliveryId } : {}),
       };
   },

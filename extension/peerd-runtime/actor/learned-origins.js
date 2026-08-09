@@ -76,6 +76,7 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) =
   /** @type {Promise<unknown>} */
   let chain = Promise.resolve();
   let ready = false;
+  let loadFailed = false;
   /** Did a signal land while the boot read was still in flight? */
   let pendingDuringHydrate = false;
   /**
@@ -108,6 +109,7 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) =
     try {
       all = await load();
     } catch (e) {
+      loadFailed = true;
       report('load failed — starting with nothing learned', e);
     }
     // MERGE, never replace, and mark ready only after. A signal can land while
@@ -271,6 +273,10 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) =
   /** Test/settings seam. */
   const size = () => learned.size;
   const settled = () => chain.then(() => undefined, () => undefined);
+  // Authority-minting callers need to distinguish an authoritative empty set
+  // from a storage failure. Ordinary roaming classification keeps its
+  // documented fail-open behavior and does not consult this status.
+  const hydrationStatus = () => Object.freeze({ ready, ok: ready && !loadFailed });
 
-  return Object.freeze({ hydrate, note, snapshot, entries, forget, clear, size, settled });
+  return Object.freeze({ hydrate, hydrationStatus, note, snapshot, entries, forget, clear, size, settled });
 };

@@ -202,6 +202,11 @@ export {
 // points that will consume them live outside this module (background/).
 export { classifyOriginSensitivity, sameOrigin, LEARNED_REASONS } from './actor/origin-sensitivity.js';
 export {
+  decideNumericTabAuthority, numericTabAuthorityRefusal,
+  NUMERIC_TAB_SENSITIVE_CODE, NUMERIC_TAB_POLICY_UNAVAILABLE_CODE,
+  IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+} from './actor/numeric-tab-authority.js';
+export {
   RUNTIME_CAPABILITY_VERSION, resolveRuntimeCapabilities, runtimeCapabilityAvailable,
   runtimeCapabilityForTool, filterByRuntimeCapabilities, runtimeCapabilityRefusal,
   runtimeCapabilityPromptBlock, RuntimeCapabilityUnavailableError, requireRuntimeCapability,
@@ -209,7 +214,7 @@ export {
 export { decideLanding, mayHoldCredentials, EXCURSION_BUDGET, EXCURSION_MS, MAX_EXCURSIONS } from './actor/landing-rule.js';
 export {
   makeJudgeLanding, makeCredentialScope, makeSiteClientOriginGuard,
-  makeSiteClientOriginAuthorizer, makeFixedSiteClientOriginGuard,
+  makeSiteClientOriginAuthorizer, makeFixedSiteClientOriginGuard, makeSignInOriginAuthorizer,
   authorizeSiteClientRelayOrigin, mayAddressSiteClientOrigin,
   mayUseSiteClientOrigin, hasDurableSiteClientState,
 } from './actor/origin-lock.js';
@@ -223,7 +228,7 @@ export { makeLearnedOrigins, MAX_LEARNED } from './actor/learned-origins.js';
 // A UGC host is by construction a site people have accounts on; that is what
 // made its content attacker-authorable in the first place.
 export { isUgcHost } from './actor/ugc-registry.js';
-export { isKnownIdp, knownIdpSeeds, knownIdpDomains } from './actor/idp-registry.js';
+export { isKnownIdp, isKnownIdpHost, knownIdpSeeds, knownIdpDomains } from './actor/idp-registry.js';
 export { describeLandingStop, originPhrase } from './actor/origin-lock-report.js';
 // DESIGN-19: site clients — per-origin derived API clients. The pure core
 // (validation, confirm-gated proposal, staleness header, fenced dossier, URL pin),

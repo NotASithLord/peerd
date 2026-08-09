@@ -89,6 +89,21 @@ export const describeLandingStop = (event) => {
     + `and its own account of the turn is not trusted. Do not assume the task was `
     + `left undone — check before repeating anything that would act twice.`;
 
+  if (reason === 'this is a sign-in service that helpers may only visit while signing in to another site') {
+    return [
+      `The web helper was stopped when the tab arrived at ${landed}.`,
+      ``,
+      `peerd recognizes ${landed} as a sign-in service. Helpers may visit it only `
+        + `during a limited sign-in flow started from the site the user is working on. `
+        + `It cannot have its own site helper.`,
+      ``,
+      unknownWork,
+      ``,
+      `Continue through the relying site already named in the user's request. If none was named, `
+        + `ask which site they want to sign in to. Do not retry this address or create a standalone helper for it.`,
+    ].join('\n');
+  }
+
   if (action === 'handoff' && handoffTo) {
     return [
       `The web helper was stopped when the tab arrived at ${handoffTo}.`,

@@ -160,6 +160,39 @@ describe('message_actor: actor isolation wall', () => {
   });
 });
 
+describe('message_actor: target-resolution policy', () => {
+  test('returns a typed refusal before actor work or mailbox persistence', async () => {
+    let persisted = 0;
+    const { messageActor, turnsRun } = harness({
+      resolveActor: async () => ({
+        resolutionRefusal: {
+          ok: false as const,
+          error: 'actor_sensitive_tab_requires_site',
+          content: 'No actor work was started.',
+          structured: { performed: false, outcomeKnown: true },
+          outcomeKind: 'pre-effect-failure' as const,
+        },
+      }),
+      mailbox: {
+        append: async () => { persisted++; },
+        remove: async () => {},
+        load: async () => [],
+      },
+    });
+    const result: any = await messageActor({
+      to: '42', message: 'read it', senderSessionId: 'chat-1', inbound: false,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'actor_sensitive_tab_requires_site',
+      outcomeKind: 'pre-effect-failure',
+      structured: { performed: false, outcomeKnown: true },
+    });
+    expect(turnsRun).toEqual([]);
+    expect(persisted).toBe(0);
+  });
+});
+
 describe('message_actor — happy path + correlation', () => {
   test('reserves the actor slot before async setup so a second delivery cannot overtake', async () => {
     const slots = makeTurnSlots();
