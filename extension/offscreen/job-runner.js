@@ -28,9 +28,13 @@
 import {
   opfsHelpers, makeFetchRemote,
   MODULE_SYNTAX_ERROR_CODE, TOOLBOX_SPECIFIER_PREFIX,
+  remoteModuleCapabilityBlockedMessage,
   UnsupportedNativeModuleImportError,
 } from '/peerd-engine/index.js';
-import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS, DEFAULT_WORKER_CAPS } from '/engine-tabs/notebook-tab/worker-source.js';
+import {
+  buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS,
+  DEFAULT_WORKER_CAPS, REMOTE_MODULE_WORKER_CAPS,
+} from '/engine-tabs/notebook-tab/worker-source.js';
 import { REMOTE_MODULE_IMPORTS_ENABLED } from '/shared/channel-config.js';
 import {
   ACTORS_BRIDGE_GUARD_MS, ACTORS_RUN_MAX_OPS,
@@ -146,7 +150,7 @@ let activeJobs = 0;
  *   DIRECT-CALLER seam (tests) — offscreen.js never forwards it from a
  *   message, so the production budget cannot be picked over the wire.
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any>, abortRun?: (runId: string, ownerSessionId?: string) => Promise<unknown>, extractMarkdown?: import('/shared/fetch-extract.js').ExtractMarkdownFn, opfsForRoot?: typeof opfsHelpers }} deps
- * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, usedEgress?: boolean, usedActors?: boolean, actorDeliveryIds?: string[], browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }>, usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<object>, codeTrace?: Array<object>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
+ * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, usedEgress?: boolean, usedRemoteModules?: boolean, usedActors?: boolean, actorDeliveryIds?: string[], browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }>, usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<object>, codeTrace?: Array<object>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
  */
 export const runJob = async (job, deps) => {
   if (activeJobs >= MAX_CONCURRENT_JOBS) {
@@ -499,14 +503,17 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
   // settled) build promise. The run phase re-registers with a worker kill
   // below; an abort landing in this gap tombstones and is honored there.
   if (runId) liveJobs.delete(runId);
-  const { source, cache, bodyLine } = built;
+  const { source, cache, bodyLine, usedRemoteModules } = built;
+  // why enforce twice: generated shims are the worker-realm wall; the host
+  // relay remains authoritative if remote code tampers with that surface.
+  const runtimeProfile = usedRemoteModules ? REMOTE_MODULE_WORKER_CAPS : profile;
   const revokeCache = () => { for (const entry of cache.values()) if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl); };
   // Resolution consumed the same budget execution uses. If it settled on the
   // edge, do not spawn a worker merely to terminate it on a zero-delay timer.
   if (remainingMs() <= 0) {
     revokeCache();
     await cleanupScratch();
-    return { value: undefined, consoleOutput: [], durationMs: timeoutMs, error: `job timed out after ${timeoutMs}ms`, usedEgress, usedWorkspace, workspaceOverBudget, codeTrace };
+    return { value: undefined, consoleOutput: [], durationMs: timeoutMs, error: `job timed out after ${timeoutMs}ms`, usedEgress, usedRemoteModules, usedWorkspace, workspaceOverBudget, codeTrace };
   }
   // The DELEGATIONS trace — one entry per actors op this run made. This is the
   // observability spine of the script surface: the orchestrator reads it back
@@ -553,7 +560,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
     URL.revokeObjectURL(blobUrl);
     revokeCache();
     await cleanupScratch();
-    return { value: undefined, consoleOutput: [], durationMs: 0, error: `worker spawn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, usedWorkspace, workspaceOverBudget, codeTrace };
+    return { value: undefined, consoleOutput: [], durationMs: 0, error: `worker spawn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, usedEgress, usedRemoteModules, usedWorkspace, workspaceOverBudget, codeTrace };
   }
 
   try {
@@ -562,7 +569,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
         abortHostOperations();
         try { worker.terminate(); } catch {}
         recordToolboxUse(false);
-        resolve({ value: undefined, consoleOutput: [], durationMs: timeoutMs, error: `job timed out after ${timeoutMs}ms`, usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+        resolve({ value: undefined, consoleOutput: [], durationMs: timeoutMs, error: `job timed out after ${timeoutMs}ms`, usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
       }, Math.ceil(remainingMs()));
       // Stop plumbing: a runId-carrying job can be terminated from the SW
       // (script tool abort). The trace survives — partial work stays visible.
@@ -571,7 +578,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           clearTimeout(timer);
           abortHostOperations();
           try { worker.terminate(); } catch {}
-          resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: 'job aborted (Stop)', usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+          resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: 'job aborted (Stop)', usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
         };
         liveJobs.set(runId, { kill, owner: ownerSessionId });
         // Stop already arrived while we were still building — honor it now.
@@ -594,9 +601,13 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           // authoritative choke point (the worker surface can't be trusted). The
           // caps profile (PR #119: the page_code worker) is the second no-spawn
           // lane, enforced the same way.
-          if (a2a || !profile.subagent) {
+          if (a2a || !runtimeProfile.subagent) {
             recordRefusedCodeOp('actor', 'spawn');
-            worker.postMessage({ type: 'actor-response', rid: m.rid, error: a2a ? 'actor spawn is disabled for a2a runs (the dweb actor does not delegate)' : 'actor spawn capability is disabled for this job' });
+            worker.postMessage({ type: 'actor-response', rid: m.rid, error: a2a
+              ? 'actor spawn is disabled for a2a runs (the dweb actor does not delegate)'
+              : usedRemoteModules
+                ? remoteModuleCapabilityBlockedMessage('subagents')
+                : 'actor spawn capability is disabled for this job' });
             return;
           }
           const a = m.args ?? {};
@@ -615,9 +626,11 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           // Relay a delegation call to the SW actors/call route. The owner ids
           // ride from TRUSTED job params; the SW re-gates every op (sender gate,
           // rate caps, oneShot sandbox-only) — the worker's word buys nothing.
-          if (!actors || typeof ownerSessionId !== 'string' || !ownerSessionId) {
+          if (usedRemoteModules || !actors || typeof ownerSessionId !== 'string' || !ownerSessionId) {
             recordRefusedCodeOp('actors', m.method);
-            worker.postMessage({ type: 'actors-response', rid: m.rid, error: 'actors capability is disabled for this run' });
+            worker.postMessage({ type: 'actors-response', rid: m.rid, error: usedRemoteModules
+              ? remoteModuleCapabilityBlockedMessage('actor messaging')
+              : 'actors capability is disabled for this run' });
             return;
           }
           usedActors = true;   // actor replies are untrusted content → fence the run's output
@@ -703,9 +716,11 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           // worker's own words buy nothing (the SW script/model-call route
           // re-verifies the owner/run and enforces the per-run quota
           // regardless; this wall just makes a seal escape buy nothing new).
-          if (!profile.provider || typeof ownerSessionId !== 'string' || !ownerSessionId || typeof runId !== 'string' || !runId) {
+          if (!runtimeProfile.provider || typeof ownerSessionId !== 'string' || !ownerSessionId || typeof runId !== 'string' || !runId) {
             recordRefusedCodeOp('provider', 'call');
-            worker.postMessage({ type: 'provider-response', rid: m.rid, error: 'provider capability is disabled for this job' });
+            worker.postMessage({ type: 'provider-response', rid: m.rid, error: usedRemoteModules
+              ? remoteModuleCapabilityBlockedMessage('model calls')
+              : 'provider capability is disabled for this job' });
             return;
           }
           usedProvider = true;   // money may move → the result line must show it
@@ -736,9 +751,11 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           // Relay the mesh call to the SW a2a/call route. Refuse if the cap is
           // off or no trusted owner — the OWNER is attached from the job params
           // (ownerSessionId), NEVER from the worker message (which is untrusted).
-          if (!a2a || typeof ownerSessionId !== 'string' || !ownerSessionId || typeof runId !== 'string' || !runId) {
+          if (usedRemoteModules || !a2a || typeof ownerSessionId !== 'string' || !ownerSessionId || typeof runId !== 'string' || !runId) {
             recordRefusedCodeOp('a2a', m.method);
-            worker.postMessage({ type: 'a2a-response', rid: m.rid, error: 'mesh capability is disabled for this run' });
+            worker.postMessage({ type: 'a2a-response', rid: m.rid, error: usedRemoteModules
+              ? remoteModuleCapabilityBlockedMessage('mesh access')
+              : 'mesh capability is disabled for this run' });
             return;
           }
           try {
@@ -760,9 +777,13 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           // peerd.egress.fetch, so the host is where we deny it — the mesh is the
           // ONLY outward edge an a2a run gets. The caps profile (PR #119: the
           // page_code worker) is the second no-egress lane, same choke point.
-          if (a2a || !profile.egress) {
+          if (a2a || !runtimeProfile.egress) {
             recordRefusedCodeOp('fetch', m.method ?? 'GET');
-            worker.postMessage({ type: 'fetch-response', rid: m.rid, ok: false, status: 0, bodyB64: null, error: a2a ? 'egress is disabled for a2a runs (the dweb actor talks only to the mesh)' : 'egress capability is disabled for this job' });
+            worker.postMessage({ type: 'fetch-response', rid: m.rid, ok: false, status: 0, bodyB64: null, error: a2a
+              ? 'egress is disabled for a2a runs (the dweb actor talks only to the mesh)'
+              : usedRemoteModules
+                ? remoteModuleCapabilityBlockedMessage('network access')
+                : 'egress capability is disabled for this job' });
             return;
           }
           usedEgress = true;   // the run touched the web → its output carries untrusted bytes
@@ -796,9 +817,11 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           // against the pinned origin (cross-origin refused) and runs it through the
           // actor's session-scoped, denylisted, audited webFetch — this relay adds
           // no authority and cannot pick the host.
-          if (!siteFetch || typeof ownerSessionId !== 'string' || !ownerSessionId || typeof runId !== 'string' || !runId) {
+          if (usedRemoteModules || !siteFetch || typeof ownerSessionId !== 'string' || !ownerSessionId || typeof runId !== 'string' || !runId) {
             recordRefusedCodeOp('site-fetch', m.method ?? 'GET');
-            worker.postMessage({ type: 'site-fetch-response', rid: m.rid, ok: false, error: 'site fetch is disabled for this run' });
+            worker.postMessage({ type: 'site-fetch-response', rid: m.rid, ok: false, error: usedRemoteModules
+              ? remoteModuleCapabilityBlockedMessage('site access')
+              : 'site fetch is disabled for this run' });
             return;
           }
           usedEgress = true;   // the run reached the web (its pinned origin) → untrusted bytes
@@ -823,9 +846,11 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           // worker message: a hostile realm cannot name another session. The SW
           // route re-derives the owned tab from its own bindings and dispatches
           // through the full gate stack, so this relay adds no authority.
-          if (!profile.page || typeof ownerSessionId !== 'string' || !ownerSessionId || typeof runId !== 'string' || !runId) {
+          if (!runtimeProfile.page || typeof ownerSessionId !== 'string' || !ownerSessionId || typeof runId !== 'string' || !runId) {
             recordRefusedCodeOp('page', m.method);
-            worker.postMessage({ type: 'page-response', rid: m.rid, error: 'page capability is disabled for this job' });
+            worker.postMessage({ type: 'page-response', rid: m.rid, error: usedRemoteModules
+              ? remoteModuleCapabilityBlockedMessage('page access')
+              : 'page capability is disabled for this job' });
             return;
           }
           usedPage = true;
@@ -861,13 +886,17 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           // Backstop wall (the in-realm surface already throws — profile above):
           // a seal-escaped realm still gets a fast refusal, never a silent hang.
           recordRefusedCodeOp('distributed', m.method ?? m.op ?? 'info');
-          worker.postMessage({ type: 'distributed-response', rid: m.rid, error: 'distributed is not available in headless runs - use a Notebook' });
+          worker.postMessage({ type: 'distributed-response', rid: m.rid, error: usedRemoteModules
+            ? remoteModuleCapabilityBlockedMessage('dweb reads')
+            : 'distributed is not available in headless runs - use a Notebook' });
           return;
         }
         if (m.type === 'opfs-request') {
-          if (!profile.opfs) {
+          if (!runtimeProfile.opfs) {
             recordRefusedCodeOp('opfs', m.op);
-            worker.postMessage({ type: 'opfs-response', rid: m.rid, error: 'opfs capability is disabled for this job' });
+            worker.postMessage({ type: 'opfs-response', rid: m.rid, error: usedRemoteModules
+              ? remoteModuleCapabilityBlockedMessage('files')
+              : 'opfs capability is disabled for this job' });
             return;
           }
           if (m.op === 'compose-module') {
@@ -883,7 +912,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
               value: undefined, consoleOutput: [], durationMs: 0,
               error: `import resolution failed: ${error.message}`,
               errorCode: error.code,
-              usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(),
+              usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(),
               usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace,
               usedProvider, providerCalls, providerTokens,
             });
@@ -942,7 +971,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           // this error; a user-code line number is actionable, a blob one isn't.
           const error = m.error ? mapWorkerError(m.error, blobUrl, bodyLine, 'job.js') : null;
           recordToolboxUse(!error);
-          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: Math.min(timeoutMs, Math.max(0, Date.now() - runStartedAt)), error, usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: Math.min(timeoutMs, Math.max(0, Date.now() - runStartedAt)), error, usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
         }
       });
 
@@ -954,7 +983,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           e.error?.stack || e.error?.message || e.message || 'worker crashed (no detail)',
           blobUrl, bodyLine, 'job.js');
         recordToolboxUse(false);
-        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}`, usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}`, usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
       });
     });
   } finally {

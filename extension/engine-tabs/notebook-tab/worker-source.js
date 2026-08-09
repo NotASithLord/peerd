@@ -14,7 +14,11 @@
 // blob-URL revocation via `cache`. The peerd:std builtin is added here so every
 // host resolves it identically.
 
-import { buildEntry } from '/peerd-engine/index.js';
+import {
+  buildEntry,
+  isRemoteSpecifier,
+  remoteModuleCapabilityBlockedMessage,
+} from '/peerd-engine/index.js';
 
 // why absolute URLs: the worker entry is a blob; its FIRST static import must be
 // the realm seal (ES module graphs evaluate depth-first in declaration order, so
@@ -53,6 +57,12 @@ export const DEFAULT_WORKER_CAPS = Object.freeze({
   page: false, egress: true, subagent: true, opfs: true, provider: false, distributed: true,
 });
 
+// A static remote dependency shares one module realm with the entry code, so
+// authority cannot be attributed safely by call stack. Restrict the whole run.
+export const REMOTE_MODULE_WORKER_CAPS = Object.freeze({
+  page: false, egress: false, subagent: false, opfs: false, provider: false, distributed: false,
+});
+
 /**
  * Build the worker-entry source string for one run.
  *
@@ -74,16 +84,23 @@ export const DEFAULT_WORKER_CAPS = Object.freeze({
  *   caps.page is the web actor's page bridge, PR #119; caps.provider is the
  *   script tool's sub-model lane, design 5; caps.distributed gates the
  *   base-network reads — off on hosts with no 'distributed-request' handler)
- * @returns {Promise<{ source: string, cache: Map<string, { blobUrl: string, source: string }>, bodyLine: number }>}
+ * @returns {Promise<{ source: string, cache: Map<string, { blobUrl: string, source: string }>, bodyLine: number, usedRemoteModules: boolean }>}
  *   bodyLine: the 1-based source line the user code's first line lands on
  *   (user line L = source line bodyLine + L - 1) — feed it to mapWorkerError.
  */
 export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false, actorsGuardMs = 250000, caps, siteFetch = '', clientSources = {} }) => {
-  const profile = { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}) };
   const { imports, body, cache } = await buildEntry(userCode, entryPath, {
     ...resolverDeps,
     builtins: NOTEBOOK_BUILTINS,
   });
+  const usedRemoteModules = [...cache.keys()].some(isRemoteSpecifier);
+  // why whole-run restriction: imported code and entry code execute in one
+  // module graph. A stack-based distinction would be forgeable and incomplete.
+  const profile = usedRemoteModules
+    ? REMOTE_MODULE_WORKER_CAPS
+    : { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}) };
+  /** @param {string} capability */
+  const capabilityBlocked = (capability) => remoteModuleCapabilityBlockedMessage(capability);
   const source = `import ${JSON.stringify(SEAL_MODULE_URL)}; // realm seal — MUST stay the first import
 ${imports}
 const NOTEBOOK_ID = ${JSON.stringify(notebookId)};
@@ -287,7 +304,7 @@ const distributedInfo = () => distributedRelay({});
 // gates; a reply/timeout comes back as a2a-response. why a 130s timeout: an ask
 // awaits a peer's reply (the SW caps it at 120s), so the worker guard must sit
 // ABOVE that, else the worker rejects a still-valid ask.
-${a2a ? (clientSources.mesh || `
+${a2a && !usedRemoteModules ? (clientSources.mesh || `
 const meshRelay = makeBridge('a2a', { timeoutMs: 130000, timeoutMessage: (p) => 'mesh.' + p.method + ' timed out' });
 const meshCall = (method, args) => meshRelay({ method, args });
 const __mesh = {
@@ -309,7 +326,7 @@ globalThis.mesh = __mesh;
 // route — the full message_actor gate chain runs per call. The guard value is
 // INTERPOLATED from the timeout tower (actors-api.js): it sits above the
 // per-ask cap by construction, and the job wall-clock sits above it.
-${actors ? (clientSources.actors || `
+${actors && !usedRemoteModules ? (clientSources.actors || `
 const actorsRelay = makeBridge('actors', { timeoutMs: ${JSON.stringify(actorsGuardMs)}, timeoutMessage: (p) => 'actors.' + p.method + ' timed out' });
 const actorsCall = (method, args) => actorsRelay({ method, args });
 const __actors = {
@@ -341,7 +358,7 @@ globalThis.peerd.provider.call = (args) => providerRelay({ args: args ?? {} }).c
 });
 `) : `
 globalThis.peerd.provider.call = () => {
-  throw new Error('peerd.provider.call is not available in this worker (no-provider capability profile).');
+  throw new Error(${JSON.stringify(usedRemoteModules ? capabilityBlocked('model calls') : 'peerd.provider.call is not available in this worker (no-provider capability profile).')});
 };
 `}
 // --- page.* (web-actor page control) proxy — capability-gated (caps.page) ---
@@ -366,7 +383,7 @@ const __page = {
 };
 globalThis.page = __page;
 globalThis.peerd.page = __page;
-`) : ''}${siteFetch ? (clientSources.site || `
+`) : ''}${siteFetch && !usedRemoteModules ? (clientSources.site || `
 // --- site.* (DESIGN-19 site client) proxy — ONE origin-pinned fetch ---
 // A site-client run's ONLY outward edge: site.fetch(path, { method, headers, body })
 // leaves the sealed realm as a site-fetch-request the host relays to the SW
@@ -390,18 +407,19 @@ globalThis.peerd.site = __site;
 // relay refuses any 'fetch-request' this realm still emits (global fetch is the
 // seal's bridge and cannot be removed here) — two walls, same refusal.
 globalThis.peerd.egress.fetch = () => {
-  throw new Error('peerd.egress.fetch is not available in this worker (no-egress capability profile).');
+  throw new Error(${JSON.stringify(usedRemoteModules ? capabilityBlocked('network access') : 'peerd.egress.fetch is not available in this worker (no-egress capability profile).')});
 };
 `}${profile.subagent ? '' : `
 // Capability profile: NO subagents.
 globalThis.peerd.runtime.runAgent = () => {
-  throw new Error('peerd.runtime.runAgent is not available in this worker (no-subagent capability profile).');
+  throw new Error(${JSON.stringify(usedRemoteModules ? capabilityBlocked('subagents') : 'peerd.runtime.runAgent is not available in this worker (no-subagent capability profile).')});
 };
 `}${profile.opfs ? '' : `
 // Capability profile: NO OPFS. Files and dynamic imports are off; the host
 // relay refuses any 'opfs-request' as the second wall.
 const noOpfs = (name) => () => {
-  throw new Error('peerd.self.' + name + ' is not available in this worker (no-opfs capability profile).');
+  throw new Error(${JSON.stringify(usedRemoteModules ? capabilityBlocked('Notebook files') : '')}
+    || ('peerd.self.' + name + ' is not available in this worker (no-opfs capability profile).'));
 };
 globalThis.peerd.self.readFile = noOpfs('readFile');
 globalThis.peerd.self.writeFile = noOpfs('writeFile');
@@ -416,7 +434,8 @@ globalThis.__peerd_dynamic_import = noOpfs('import');
 // distributed handler — an unanswered bridge call would hang the run to its
 // wall-clock for a one-word answer.
 const noDistributed = (name) => () => {
-  throw new Error('peerd.distributed.' + name + ' is not available in this worker (no-distributed capability profile).');
+  throw new Error(${JSON.stringify(usedRemoteModules ? capabilityBlocked('dweb reads') : '')}
+    || ('peerd.distributed.' + name + ' is not available in this worker (no-distributed capability profile).'));
 };
 globalThis.peerd.distributed.whoami = noDistributed('whoami');
 globalThis.peerd.distributed.status = noDistributed('status');
@@ -469,7 +488,12 @@ __PEERD_BODY__})()
   const bodyLine = source.slice(0, markerAt).split('\n').length;
   // why a function replacement: a string replacement interprets `$&`/`$1` in
   // the BODY as substitution patterns and corrupts agent code containing them.
-  return { source: source.replace('__PEERD_BODY__', () => `${body}\n`), cache, bodyLine };
+  return {
+    source: source.replace('__PEERD_BODY__', () => `${body}\n`),
+    cache,
+    bodyLine,
+    usedRemoteModules,
+  };
 };
 
 /**

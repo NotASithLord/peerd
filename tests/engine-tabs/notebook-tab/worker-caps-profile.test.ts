@@ -8,7 +8,9 @@
 // pure source assembly and belongs in the fast bun tier.
 
 import { describe, test, expect } from 'bun:test';
-import { buildWorkerSource, DEFAULT_WORKER_CAPS } from '../../../extension/engine-tabs/notebook-tab/worker-source.js';
+import {
+  buildWorkerSource, DEFAULT_WORKER_CAPS, REMOTE_MODULE_WORKER_CAPS,
+} from '../../../extension/engine-tabs/notebook-tab/worker-source.js';
 
 // A minimal resolverDeps — buildEntry only needs these to assemble the entry;
 // the user code has no imports, so readFile/makeBlobUrl are never hit.
@@ -112,5 +114,48 @@ describe('worker capability profile — the code-REPL arm (page + compute only)'
     const { source } = await build(CODE_CAPS);
     expect(source).toContain('peerd');               // the surface object is still assembled
     expect(source).toContain("makeBridge('page'");   // and the only IO it has is the page bridge
+  });
+});
+
+describe('worker capability profile for remote modules', () => {
+  const remoteDeps = {
+    ...deps,
+    remoteModulesEnabled: true,
+    fetchRemote: async (_url: string) => 'export const remoteValue = 42;',
+  };
+
+  test('a remote graph restricts the whole run regardless of requested caps', async () => {
+    const { source, usedRemoteModules } = await buildWorkerSource(
+      "import { remoteValue } from 'https://modules.example/value.js'; return remoteValue;",
+      {
+        entryPath: 'job.js', notebookId: 'job-remote', resolverDeps: remoteDeps,
+        actors: true,
+        a2a: true,
+        siteFetch: 'https://site.example',
+        caps: { page: true, egress: true, subagent: true, opfs: true, provider: true, distributed: true },
+      },
+    );
+
+    expect(usedRemoteModules).toBe(true);
+    expect(REMOTE_MODULE_WORKER_CAPS).toEqual({
+      page: false, egress: false, subagent: false,
+      opfs: false, provider: false, distributed: false,
+    });
+    expect(source).not.toContain("makeBridge('page'");
+    expect(source).not.toContain("makeBridge('provider'");
+    expect(source).not.toContain("makeBridge('actors'");
+    expect(source).not.toContain("makeBridge('a2a'");
+    expect(source).not.toContain("makeBridge('site-fetch'");
+    expect(source).toContain('remote_module_capability_blocked: network access is disabled');
+    expect(source).toContain('remote_module_capability_blocked: subagents is disabled');
+    expect(source).toContain('remote_module_capability_blocked: Notebook files is disabled');
+    expect(source).toContain('remote_module_capability_blocked: dweb reads is disabled');
+  });
+
+  test('a local graph keeps its requested capability profile', async () => {
+    const { usedRemoteModules } = await buildWorkerSource('return 42;', {
+      entryPath: 'job.js', notebookId: 'job-local', resolverDeps: deps,
+    });
+    expect(usedRemoteModules).toBe(false);
   });
 });

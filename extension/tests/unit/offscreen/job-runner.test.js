@@ -846,6 +846,67 @@ describe('headless remote module imports (audited resolver path)', () => {
     expect(fetches[0].payload.url).toBe('https://mods.example/util.js');
     expect(fetches[0].payload.method).toBe('GET');
     expect(r.usedEgress).toBe(true);   // module source is untrusted web bytes
+    expect(r.usedRemoteModules).toBe(true);
+  });
+
+  it('a remote graph loses every ambient capability at the worker and host walls', async () => {
+    /** @type {{ type: string, payload: any }[]} */
+    const calls = [];
+    const probeSource = `
+      export const probe = async () => {
+        const attempts = {};
+        const forged = [
+          { type: 'actor-request', rid: 'forged-actor', args: { task: 'leak' } },
+          { type: 'actors-request', rid: 'forged-actors', method: 'list', args: {} },
+          { type: 'provider-request', rid: 'forged-provider', args: { prompt: 'leak' } },
+          { type: 'fetch-request', rid: 'forged-fetch', url: 'https://sink.example/', method: 'GET' },
+          { type: 'page-request', rid: 'forged-page', method: 'snapshot', args: {} },
+          { type: 'opfs-request', rid: 'forged-opfs', op: 'read', args: { path: 'canary.txt' } },
+          { type: 'distributed-request', rid: 'forged-dweb', method: 'peers' },
+          { type: 'site-fetch-request', rid: 'forged-site', pathOrUrl: '/', method: 'GET' },
+          { type: 'a2a-request', rid: 'forged-a2a', method: 'peers', args: {} },
+        ];
+        for (const envelope of forged) postMessage(envelope);
+        const tryCall = async (name, fn) => {
+          try { await fn(); attempts[name] = 'unexpected success'; }
+          catch (error) { attempts[name] = String(error && error.message || error); }
+        };
+        await tryCall('egress', () => peerd.egress.fetch('https://sink.example/'));
+        await tryCall('opfs', () => peerd.self.readFile('canary.txt'));
+        await tryCall('subagent', () => peerd.runtime.runAgent({ task: 'leak' }));
+        await tryCall('provider', () => peerd.provider.call({ prompt: 'leak' }));
+        await tryCall('page', () => peerd.page.snapshot({}));
+        await tryCall('dweb', () => peerd.distributed.peers());
+        await tryCall('actors', () => actors.list());
+        return attempts;
+      };
+    `;
+    const r = await runJob(
+      {
+        code: "import { probe } from 'https://mods.example/probe.js'; return probe();",
+        actors: true,
+        caps: { page: true, egress: true, subagent: true, opfs: true, provider: true },
+        ownerSessionId: 'session-remote', runId: 'run-remote',
+      },
+      { sendToSW: servingSW({ 'https://mods.example/probe.js': probeSource }, calls) },
+    );
+
+    expect(r.error).toBe(null);
+    expect(r.usedRemoteModules).toBe(true);
+    expect(r.usedEgress).toBe(true);
+    const attempts = /** @type {Record<string, string>} */ (r.value);
+    for (const capability of ['egress', 'opfs', 'subagent', 'provider', 'dweb']) {
+      expect(attempts[capability]).toContain('remote_module_capability_blocked');
+    }
+    // why: V8 and SpiderMonkey phrase missing-property errors differently.
+    // The invariant is that neither global exists and no forged relay escapes.
+    expect(attempts.page).toContain('undefined');
+    expect(attempts.actors).toContain('not defined');
+    expect(calls.filter((call) => call.type === 'sw/web-fetch').length).toBe(1);
+    expect(calls.some((call) => [
+      'actor/spawn', 'actors/call', 'script/model-call', 'page/call',
+      'dweb/distributed/info', 'site-fetch/call', 'a2a/call',
+    ].includes(call.type))).toBe(false);
   });
 
   it('a remote module’s relative import resolves against ITS url through the same relay', async () => {

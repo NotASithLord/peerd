@@ -12,7 +12,10 @@
 import { clamp } from '/shared/util.js';
 import {
   moduleImportPolicyMessage,
+  REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE,
+  REMOTE_MODULE_RESTRICTED_CODE,
 } from '/peerd-engine/index.js';
+import { wrapUntrusted } from '../prompt-wrap.js';
 import { pushValueBlock } from './value-block.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -25,6 +28,7 @@ const MAX_TIMEOUT_MS = 120_000;
  * @property {string} [errorCode]
  * @property {Array<{ level: string, text: string }>} [consoleOutput]
  * @property {unknown} [value]
+ * @property {boolean} [usedRemoteModules]
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
@@ -130,18 +134,31 @@ export const jsNotebookTool = {
  * @param {EvalResult} r
  * @returns {string}
  */
-const formatEvalResult = (code, r) => {
+export const formatEvalResult = (code, r) => {
   const lines = [];
   const oneLineCode = code.length > 200 ? `${code.slice(0, 200)}…` : code;
   lines.push(`> ${oneLineCode.replace(/\n/g, '\n  ')}`);
   lines.push(`[${r.durationMs}ms]`);
-  if (r.error) lines.push('[ERROR]', r.error);
+  const body = [];
+  if (r.error) body.push('[ERROR]', r.error);
   if (r.consoleOutput && r.consoleOutput.length) {
-    lines.push('[CONSOLE]');
+    body.push('[CONSOLE]');
     for (const { level, text } of r.consoleOutput) {
-      lines.push(`  ${level === 'info' ? '' : `[${level}] `}${text}`);
+      body.push(`  ${level === 'info' ? '' : `[${level}] `}${text}`);
     }
   }
-  pushValueBlock(lines, r.value);
+  pushValueBlock(body, r.value);
+  if (r.usedRemoteModules && body.length) {
+    lines.push(wrapUntrusted({
+      origin: 'notebook (remote modules)',
+      tool: 'js_notebook',
+      body: body.join('\n'),
+    }));
+  } else {
+    lines.push(...body);
+  }
+  if (r.usedRemoteModules) {
+    lines.push(`[${REMOTE_MODULE_RESTRICTED_CODE}] ${REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE}`);
+  }
   return lines.join('\n');
 };

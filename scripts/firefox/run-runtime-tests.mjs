@@ -3014,6 +3014,61 @@ return 'REACHED';`;
   }
 };
 
+const runPreviewRemoteModuleSmoke = async (driver) => {
+  console.log('Firefox Preview remote module smoke: fail closed before request');
+  const notebookId = 'firefox-preview-remote-refused';
+  await driver.setWindowRect({ width: 1280, height: 900, x: 0, y: 0 });
+  await driver.navigate(`${PREVIEW_EXTENSION_ORIGIN}/engine-tabs/notebook-tab/index.html#${notebookId}`);
+  const mounted = await waitFor(() => driver.execute(
+    "return document.readyState === 'complete' && document.querySelector('#notebook-app:not([hidden])') !== null;",
+  ), { budgetMs: 30_000 });
+  assert(mounted === true, 'Firefox Preview Notebook host mounts for the remote-module probe');
+
+  const outcome = await driver.executeAsync(`
+    const [id] = arguments;
+    const done = arguments[arguments.length - 1];
+    (async () => {
+      const browser = (await import('/vendor/browser-polyfill.js')).default;
+      const config = await import('/shared/channel-config.js');
+      const original = browser.runtime.sendMessage.bind(browser.runtime);
+      const calls = [];
+      browser.runtime.sendMessage = (message) => {
+        calls.push(message?.type ?? 'unknown');
+        return original(message);
+      };
+      const tab = await browser.tabs.getCurrent();
+      const run = await browser.tabs.sendMessage(tab.id, {
+        type: 'js/eval', notebookId: id,
+        code: "import { remoteValue } from 'https://modules.example/probe.js'; return remoteValue;",
+        timeoutMs: 10_000,
+      });
+      done({
+        remoteModulesEnabled: config.REMOTE_MODULE_IMPORTS_ENABLED,
+        errorCode: run?.result?.errorCode ?? null,
+        resultError: run?.result?.error ?? null,
+        durationMs: run?.result?.durationMs ?? null,
+        callsJson: JSON.stringify(calls),
+        status: document.getElementById('run-status')?.textContent ?? '',
+        output: document.getElementById('console-output')?.textContent ?? '',
+      });
+    })().catch((error) => done({ error: error?.message || String(error) }));
+  `, [notebookId]);
+  assert(outcome?.remoteModulesEnabled === false,
+    'Firefox Preview packages remote imports as unavailable', JSON.stringify(outcome));
+  assert(outcome?.errorCode === 'remote_module_imports_unavailable'
+    && outcome?.durationMs === 0
+    && outcome?.resultError?.startsWith('import resolution failed:'),
+  'Firefox Preview refuses the remote graph before worker creation', JSON.stringify(outcome));
+  const calls = JSON.parse(outcome?.callsJson ?? '[]');
+  assert(!calls.includes('sw/web-fetch'),
+    'Firefox Preview refusal makes no module request', outcome?.callsJson);
+  assert(/does not allow remote module imports/.test(outcome.status)
+    && /inline reviewed source directly in the code you run/.test(outcome.status),
+    'Firefox Preview shows actionable import recovery', JSON.stringify(outcome));
+  writeFileSync(join(OUTPUT, 'preview-notebook-remote-refused.png'),
+    Buffer.from(await driver.screenshot(), 'base64'));
+};
+
 const serviceWorkerProbeUrl = (providerServer, {
   action, target, token, host = DNR_PUBLIC_HOST,
 }) => {
@@ -4046,6 +4101,7 @@ const main = async () => {
       && previewPosture?.dwebAvailable === false,
     'installed Firefox Preview omits the dweb surface until it has a mesh host',
     JSON.stringify(previewPosture));
+    await runPreviewRemoteModuleSmoke(driver);
 
     await driver.setWindowRect({ width: 400, height: 900, x: 0, y: 0 });
 

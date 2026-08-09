@@ -357,6 +357,13 @@ const rewriteModuleSource = async (code, fromPath, deps, cache, visited, parseOp
       const sub = await buildModule(path, deps, cache, new Set(visited));
       staticReplacements.push({ match, replacement: JSON.stringify(sub.blobUrl) });
     } else if (path.startsWith(TOOLBOX_SPECIFIER_PREFIX)) {
+      // Remote code must not read locally stored toolbox modules. Resolution
+      // happens before the worker capability profile exists, so this edge is
+      // denied here at the graph boundary rather than relying on runtime caps.
+      if (isRemoteSpecifier(fromPath)) {
+        throw new RemoteImportBlockedError(path,
+          'remote modules cannot import local toolbox modules');
+      }
       // toolbox module → resolved like a local file (recursion + cycle
       // detection), keyed in the cache by its full specifier.
       const sub = await buildModule(path, deps, cache, new Set(visited));

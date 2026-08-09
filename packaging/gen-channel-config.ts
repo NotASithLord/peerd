@@ -27,6 +27,11 @@ const DEV_OUT = join(EXTENSION_DIR, 'shared', 'channel-config.js');
 export const dwebEnabledForTarget = (channel: ConfigChannel, browser?: Browser): boolean =>
   channel === 'preview' && browser !== 'firefox';
 
+// Firefox rejects nested generated module URLs inside extension Workers. Keep
+// the target fail-closed until the Notebook resolver has a native Gecko loader.
+export const remoteModuleImportsEnabledForTarget = (channel: ConfigChannel, browser?: Browser): boolean =>
+  channel === 'preview' && browser !== 'firefox';
+
 export const flattenDefaults = (channel: ConfigChannel, browser?: Browser): Record<string, unknown> => {
   const out: Record<string, unknown> = {};
   for (const [key, perChannel] of Object.entries(defaults)) {
@@ -72,7 +77,7 @@ export const genChannelConfigSource = (channel: ConfigChannel, browser?: Browser
 
 export const CHANNEL = ${JSON.stringify(channel)};
 export const DWEB_ENABLED = ${JSON.stringify(dwebEnabledForTarget(channel, browser))};
-export const REMOTE_MODULE_IMPORTS_ENABLED = ${JSON.stringify(channel === 'preview')};
+export const REMOTE_MODULE_IMPORTS_ENABLED = ${JSON.stringify(remoteModuleImportsEnabledForTarget(channel, browser))};
 
 export const CHANNEL_DEFAULTS = Object.freeze(${'{'}
 ${entries}

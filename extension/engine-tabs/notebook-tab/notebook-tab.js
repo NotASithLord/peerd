@@ -14,6 +14,8 @@ import browser from '/vendor/browser-polyfill.js';
 import {
   createEditor, isRemoteSpecifier, makeFetchRemote,
   moduleImportPolicyMessage, MODULE_SYNTAX_ERROR_CODE,
+  REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE,
+  remoteModuleCapabilityBlockedMessage,
   TOOLBOX_SPECIFIER_PREFIX, UnsupportedNativeModuleImportError,
 } from '/peerd-engine/index.js';
 import { renderReturnValue } from './output-render.js';
@@ -147,7 +149,8 @@ const recordToolboxUse = (ok) => {
   }
 };
 
-const makeResolverDeps = () => ({
+/** @param {() => void} [onRemoteFetch] */
+const makeResolverDeps = (onRemoteFetch) => ({
   /** @param {string} path */
   readFile: (path) => editor.opfs.read(path),
   /** @param {string} source */
@@ -160,7 +163,10 @@ const makeResolverDeps = () => ({
   remoteModulesEnabled: REMOTE_MODULE_IMPORTS_ENABLED,
   ...(REMOTE_MODULE_IMPORTS_ENABLED ? {
     fetchRemote: makeFetchRemote(
-      (req) => /** @type {Promise<any>} */ (browser.runtime.sendMessage({ type: 'sw/web-fetch', ...req }))),
+      (req) => {
+        onRemoteFetch?.();
+        return /** @type {Promise<any>} */ (browser.runtime.sendMessage({ type: 'sw/web-fetch', ...req }));
+      }),
   } : {}),
   /** @param {{ type: string, path: string, blobUrl?: string, error?: string, errorCode?: string }} entry */
   log: (entry) => {
@@ -214,6 +220,7 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
   setRunStatus('Running notebook.', true);
   let source;
   let bodyLine = 1;
+  let usedRemoteModules = false;
   try {
     // The run deadline covers RESOLUTION too — a remote import graph hits the
     // network (fetchRemote), so a tarpit CDN must not hang the eval forever
@@ -221,7 +228,10 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
     /** @type {ReturnType<typeof setTimeout> | undefined} */
     let buildTimer;
     const built = await Promise.race([
-      buildWorkerSource(code, { entryPath, notebookId, resolverDeps: makeResolverDeps() }),
+      buildWorkerSource(code, {
+        entryPath, notebookId,
+        resolverDeps: makeResolverDeps(() => { usedRemoteModules = true; }),
+      }),
       /** @type {Promise<never>} */ (new Promise((_resolve, reject) => {
         buildTimer = setTimeout(
           () => reject(new Error(`import resolution timed out after ${timeoutMs}ms`)), timeoutMs);
@@ -230,6 +240,11 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
     source = built.source;
     bodyLine = built.bodyLine;
     entryCache = built.cache;
+    usedRemoteModules ||= built.usedRemoteModules;
+    if (usedRemoteModules) {
+      setRunStatus('Running remote code with restricted access.', true);
+      appendLine('log-info', `[security] ${REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE}`);
+    }
     if (entryCache.size > 0) appendLine('log-info', `[import] ${entryCache.size} module(s) resolved`);
   } catch (e) {
     const msg = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
@@ -237,11 +252,13 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
     const phase = errorCode === MODULE_SYNTAX_ERROR_CODE ? 'syntax check' : 'import resolution';
     appendLine('log-error', `${phase} failed: ${msg}`);
     const policyMessage = moduleImportPolicyMessage(errorCode);
-    setRunStatus(policyMessage ?? 'Notebook run failed.', false);
+    if (usedRemoteModules) appendLine('log-info', `[security] ${REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE}`);
+    setRunStatus(policyMessage ?? (usedRemoteModules ? 'Restricted remote code failed.' : 'Notebook run failed.'), false);
     return {
       value: undefined, consoleOutput: [], durationMs: 0,
       error: `${phase} failed: ${msg}`,
       errorCode,
+      usedRemoteModules,
     };
   }
   const blob = new Blob([source], { type: 'application/javascript' });
@@ -251,8 +268,12 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
   catch (e) {
     URL.revokeObjectURL(url);
     clearModuleCache();
-    setRunStatus('Notebook run failed.', false);
-    throw new Error(`worker spawn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
+    setRunStatus(usedRemoteModules ? 'Restricted remote code failed.' : 'Notebook run failed.', false);
+    return {
+      value: undefined, consoleOutput: [], durationMs: 0,
+      error: `worker spawn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`,
+      usedRemoteModules,
+    };
   }
 
   const oneLineCode = code.length > 200 ? `${code.slice(0, 200)}…` : code;
@@ -263,7 +284,7 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
       const timer = setTimeout(() => {
         try { worker.terminate(); } catch {}
         recordToolboxUse(false);
-        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `eval timed out after ${timeoutMs}ms` });
+        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `eval timed out after ${timeoutMs}ms`, usedRemoteModules });
       }, timeoutMs);
 
       worker.addEventListener('message', async (ev) => {
@@ -281,6 +302,13 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
           return;
         }
         if (m.type === 'actor-request') {
+          if (usedRemoteModules) {
+            worker.postMessage({
+              type: 'actor-response', rid: m.rid,
+              error: remoteModuleCapabilityBlockedMessage('subagents'),
+            });
+            return;
+          }
           // Forward to the SW orchestrator. The SW resolves the parent
           // (current chat session) + depth itself; we only pass the
           // task + tool subset + caps the Notebook code requested.
@@ -310,6 +338,14 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
           return;
         }
         if (m.type === 'fetch-request') {
+          if (usedRemoteModules) {
+            worker.postMessage({
+              type: 'fetch-response', rid: m.rid,
+              ok: false, status: 0, bodyB64: null,
+              error: remoteModuleCapabilityBlockedMessage('network access'),
+            });
+            return;
+          }
           try {
             // Design 2a: `extract` rides to the SW route (which owns the
             // extraction step — the tab never grows its own copy); `extracted`
@@ -334,6 +370,13 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
           return;
         }
         if (m.type === 'opfs-request') {
+          if (usedRemoteModules) {
+            worker.postMessage({
+              type: 'opfs-response', rid: m.rid,
+              error: remoteModuleCapabilityBlockedMessage('Notebook files'),
+            });
+            return;
+          }
           if (m.op === 'compose-module') {
             // Dynamic import is unsupported, so this host-owned event ends the
             // run. User code cannot catch it and replace it with an unrelated
@@ -347,6 +390,7 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
               value: undefined, consoleOutput: [], durationMs: 0,
               error: `import resolution failed: ${error.message}`,
               errorCode: error.code,
+              usedRemoteModules,
             });
             return;
           }
@@ -366,6 +410,13 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
           return;
         }
         if (m.type === 'distributed-request') {
+          if (usedRemoteModules) {
+            worker.postMessage({
+              type: 'distributed-response', rid: m.rid,
+              error: remoteModuleCapabilityBlockedMessage('dweb reads'),
+            });
+            return;
+          }
           // peerd.distributed.{whoami,status,peers,presence} — the READ window
           // onto the always-on base network. One SW round-trip (dweb/distributed/
           // info) returns the rosters; the worker slices per method. dweb-off /
@@ -395,6 +446,7 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
             value: m.value, consoleOutput: m.consoleOutput,
             durationMs: m.durationMs, error,
             errorCode: undefined,
+            usedRemoteModules,
           });
           return;
         }
@@ -421,12 +473,15 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
         resolve({
           value: undefined, consoleOutput: [], durationMs: 0,
           error: `worker error: ${detail}${loc}`, errorCode: undefined,
+          usedRemoteModules,
         });
       });
     }).then((result) => {
       setRunStatus(
         moduleImportPolicyMessage(result.errorCode)
-          ?? (result.error ? 'Notebook run failed.' : 'Notebook run complete.'),
+          ?? (usedRemoteModules
+            ? (result.error ? 'Restricted remote code failed.' : 'Remote code ran with restricted access.')
+            : (result.error ? 'Notebook run failed.' : 'Notebook run complete.')),
         false,
       );
       return result;

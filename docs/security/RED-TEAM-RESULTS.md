@@ -9,7 +9,7 @@
 
 _Generated from the current checkout by the command above._
 
-13 of 13 scenarios held. 199 of 199 individual hostile probes blocked.
+13 of 13 scenarios held. 201 of 201 individual hostile probes blocked.
 
 | # | Attack | Adversary | Asset | Invariant | Result |
 |---|--------|-----------|-------|-----------|--------|
@@ -144,10 +144,10 @@ _Generated from the current checkout by the command above._
 
 - Adversary: malicious sandboxed code
 - Asset: the host origin, the network, and other sandbox instances
-- Claim checked: Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; an App cannot break out of its iframe or impersonate the service worker to issue actor commands; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.
+- Claim checked: Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; a remote module restricts its whole run to compute only and all remote-controlled output is fenced; an App cannot break out of its iframe or impersonate the service worker to issue actor commands; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.
 - Threat-model invariant: INV-6
-- Defenses exercised: applyRealmSeal (raw-channel block + native deletion + bridge pin), resolveRelativePath (OPFS ".." collapse), composeApp + stripMetaRefresh (App iframe breakout/navigation defense), isServiceWorkerSender (actor-command source pin), normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)
-- Verified in the browser by: `extension/tests/unit/engine-tabs/notebook-tab/notebook-seal.test.js (real worker realm); extension/tests/unit/offscreen/job-runner.test.js (a2a run denied egress + delegation); extension/tests/unit/red-team/sandbox-escape.test.js (in-browser red-team framing); scripts/cdp/states.mjs actor-command-sender-pin (live engine-tab forgery)`
+- Defenses exercised: applyRealmSeal (raw-channel block + native deletion + bridge pin), resolveRelativePath (OPFS ".." collapse), buildWorkerSource + formatEvalResult (remote graph capability collapse + output fence), composeApp + stripMetaRefresh (App iframe breakout/navigation defense), isServiceWorkerSender (actor-command source pin), normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)
+- Verified in the browser by: `extension/tests/unit/engine-tabs/notebook-tab/notebook-seal.test.js (real worker realm); extension/tests/unit/offscreen/job-runner.test.js (a2a run denied egress + delegation); tests/peerd-engine/module-resolver-toolbox.test.ts (remote-to-local toolbox refusal); tests/engine-tabs/notebook-tab/worker-caps-profile.test.ts (remote whole-run profile); tests/peerd-runtime/tools/remote-import-policy.test.ts (remote output fence); extension/tests/unit/red-team/sandbox-escape.test.js (in-browser red-team framing); scripts/cdp/states.mjs actor-command-sender-pin (live engine-tab forgery); scripts/cdp/states.mjs notebook-remote-restricted (live visible-Notebook host wall)`
 
 | Probe (adversary action) | Result | Evidence |
 |--------------------------|--------|----------|
@@ -165,6 +165,8 @@ _Generated from the current checkout by the command above._
 | unseat the fetch bridge (assign/delete/defineProperty) | blocked | defineProperty on the non-configurable slot threw; bridge unchanged |
 | reassign XMLHttpRequest to a working native | blocked | NotebookEgressBlockedError: XMLHttpRequest is disabled in the peerd Notebook |
 | traverse OPFS out of the instance root via ../ imports | blocked | all '..' collapsed (e.g. "../../../../../../etc/passwd": "etc/passwd") |
+| inherit ambient capabilities through a remote module | blocked | the entire graph uses the compute-only profile |
+| break the model trust fence through remote return, console, or error text | blocked | host status stays outside a neutralized untrusted envelope |
 | embed </script> in an inlined App worker to break out of the shim | blocked | worker source `<` escaped to \u003c, no executable breakout tag |
 | meta-refresh the App frame to an attacker URL | blocked | meta http-equiv=refresh stripped from the app HTML |
 | replay a broadcast actor command from a first-party engine tab | blocked | exact service-worker source accepted; same-extension tab provenance rejected |

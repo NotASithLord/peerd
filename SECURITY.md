@@ -118,11 +118,15 @@ states both plainly rather than counting them as defenses.
 - **Sandboxed execution.** WebVM uses CheerpX. Notebook and headless script
   execution use sealed workers. Apps use opaque-origin sandboxed iframes and
   currently run only on Chrome. Store and web builds refuse direct remote
-  JavaScript imports without requesting the module source. Preview permits
-  audited literal static remote imports. Dynamic imports are refused in every
-  package.
-  Pins are optional there, imported code inherits the run's capabilities, and
-  visible Notebook output is not yet fenced before its actor reads it. The
+  JavaScript imports without requesting the module source. Preview targets may
+  permit audited literal static remote imports where the browser loader supports
+  them. Dynamic imports are refused in every package.
+  Any remote module restricts the whole run to compute only. Runtime network
+  and file access, agents, model calls, browser and site access, and dweb are
+  disabled by both worker shims and host relay checks. A remote module cannot
+  import a local toolbox module. Returned values,
+  console output, and errors are fenced as untrusted. Optional pins verify the
+  bytes for reproducibility but do not make the code trusted. The
   sealed worker protects the extension process. It does not make remote code a
   trusted dependency. The broader network-derived code contract for Store is
   tracked separately.
