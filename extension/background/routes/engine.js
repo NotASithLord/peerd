@@ -19,7 +19,7 @@ export const makeEngineRoutes = (deps) => {
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
-    listOffscreenContexts, scriptRuns, isOffscreenSender,
+    listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy,
   } = deps;
 
   /** @type {Map<string, AbortController>} */
@@ -52,6 +52,13 @@ export const makeEngineRoutes = (deps) => {
       if (typeof url !== 'string' || url.length === 0) {
         return { ok: false, error: 'url-required' };
       }
+      // why: the denylist seed hydrates ASYNC at SW boot, and webFetch's sync
+      // readiness check refuses a request that merely raced a cold start (the
+      // packaged-page probe hit exactly this in CI). Waiting for the one-time
+      // hydration here turns the race into a short delay; a genuinely failed
+      // load still rejects, so the boundary stays fail-closed.
+      try { await awaitDenylistPolicy?.(); }
+      catch (e) { return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }; }
       /** @type {AbortController | null} */
       let runController = null;
       /** @type {AbortSignal | null} */

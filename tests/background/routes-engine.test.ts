@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'bun:test';
 import { makeEngineRoutes } from '../../extension/background/routes/engine.js';
 import { listOffscreenContexts } from '../../extension/background/offscreen-contexts.js';
+import { requireDenylistPolicy } from '../../extension/background/denylist-store.js';
 
 class ArtifactTooLargeError extends Error {}
 class EnvelopeFormatError extends Error {}
@@ -78,6 +79,39 @@ describe('sw/web-fetch', () => {
     const res = await r['sw/web-fetch']({ url: 'https://x' });
     expect(res.ok).toBe(false);
     expect(res.error).toContain('body too large');
+  });
+
+  // The denylist seed hydrates async at SW boot. A fetch racing a cold start
+  // must WAIT for the one-time load (not refuse), and a genuinely failed load
+  // must still refuse before any egress. The injected gate mirrors the SW's
+  // composition exactly: requireDenylistPolicy(await denylistReady).
+  test('a fetch racing seed hydration waits for the load instead of refusing', async () => {
+    const order: string[] = [];
+    let releaseHydration: (value: { ok: boolean }) => void = () => {};
+    const denylistReady = new Promise<{ ok: boolean }>((resolve) => { releaseHydration = resolve; });
+    const r = makeEngineRoutes(baseDeps({
+      awaitDenylistPolicy: async () => { requireDenylistPolicy(await denylistReady); },
+      vmHttpFetch: async () => { order.push('fetch'); return { ok: true, status: 200, headers: {}, bodyB64: btoa('hello') }; },
+    }));
+    const pending = r['sw/web-fetch']({ url: 'https://x' });
+    await Promise.resolve();
+    order.push('hydrated');
+    releaseHydration({ ok: true });
+    const res = await pending;
+    expect(res.ok).toBe(true);
+    expect(order).toEqual(['hydrated', 'fetch']);
+  });
+  test('a failed seed hydration refuses the fetch before any egress', async () => {
+    let fetched = false;
+    const r = makeEngineRoutes(baseDeps({
+      awaitDenylistPolicy: async () => { requireDenylistPolicy(await Promise.resolve({ ok: false })); },
+      vmHttpFetch: async () => { fetched = true; return { ok: true }; },
+    }));
+    expect(await r['sw/web-fetch']({ url: 'https://x' })).toEqual({
+      ok: false,
+      error: 'The sensitive-origin policy is unavailable. Tool execution is paused.',
+    });
+    expect(fetched).toBe(false);
   });
 
   // Design 02, 2a: the Notebook tab's code-mode bridge widened this route with

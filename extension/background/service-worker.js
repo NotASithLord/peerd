@@ -1148,6 +1148,12 @@ const denylistReady = loadDenylist()
       error: `denylist_hydration_failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   });
+// why: sw/web-fetch (Notebook module fetches, VM egress) can arrive while the
+// seed is still hydrating on a cold SW start. This gate lets the engine route
+// await the one-time load instead of refusing a request that merely raced
+// boot; the sync check inside webFetch's getDenylist stays as the last-resort
+// chokepoint for every other direct caller.
+const awaitDenylistPolicy = async () => { requireDenylistPolicy(await denylistReady); };
 
 // ── the denylist's NETWORK-level backstop ──────────────────────────────────
 //
@@ -7279,7 +7285,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
-    listOffscreenContexts, scriptRuns, isOffscreenSender,
+    listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy,
   }),
   ...systemMessageRoutes,
   // denylistNetGuard: an edit changes what the network backstop blocks, so the
