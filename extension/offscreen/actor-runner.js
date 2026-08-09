@@ -59,7 +59,7 @@ export const abortActor = (runId) => {
 
 /**
  * Run one BOUND-actor turn in a dedicated Worker.
- * @param {{ runId?: string, relayToken?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabOrigin?: string, origin?: string, inbound?: boolean }} job
+ * @param {{ runId?: string, relayToken?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabOrigin?: string, origin?: string, inbound?: boolean, preflightReply?: string }} job
  * @param {{ workerUrl: string, sendToSW: (type: string, payload: object) => Promise<any>, createWorker?: (url: string) => Worker, startupMs?: number }} deps
  * @returns {Promise<{ ok: boolean, started?: boolean, phase?: string, code?: string, finalText?: string, newMessages?: any[], usage?: object, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean, outcomeKnown?: boolean }>}
  */
@@ -160,7 +160,7 @@ export const runActor = async (job, {
             priorMessages: job.priorMessages ?? [],
             maxSteps: job.maxSteps, maxOutputTokens: job.maxOutputTokens, reasoning: job.reasoning, contextWindow: job.contextWindow,
             oneShot: job.oneShot, actorType: job.actorType, backing: job.backing, tabOrigin: job.tabOrigin, origin: job.origin,
-            inbound: job.inbound === true,
+            inbound: job.inbound === true, preflightReply: job.preflightReply,
           });
           return;
         }

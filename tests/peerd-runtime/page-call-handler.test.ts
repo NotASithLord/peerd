@@ -72,6 +72,18 @@ describe('page-call handler — gated dispatch on the owned tab', () => {
 });
 
 describe('page-call handler — failures surface as the worker sees them', () => {
+  test('a terminal inner policy result survives the page bridge', async () => {
+    const { handle } = harness({
+      ok: false, error: 'auth_waiting_for_user', content: 'Finish signing in.', endTurn: true,
+    });
+    expect(await handle({ method: 'snapshot', sessionId: 's1', tabId: 42 })).toEqual({
+      ok: false,
+      error: 'auth_waiting_for_user: Finish signing in.',
+      endTurn: true,
+      endTurnContent: 'Finish signing in.',
+    });
+  });
+
   test('a pre-aborted run never builds context or dispatches', async () => {
     const controller = new AbortController();
     controller.abort();

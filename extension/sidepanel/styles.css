@@ -2633,6 +2633,23 @@ button.tool-call-header:focus-visible {
   margin: 10px 0 12px;
 }
 .login-method .mic { color: var(--accent-ink); display: grid; place-items: center; flex: none; }
+.login-destination {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -4px 0 12px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.login-destination strong {
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: right;
+  word-break: break-all;
+}
 .login-reassure {
   display: flex;
   gap: 8px;

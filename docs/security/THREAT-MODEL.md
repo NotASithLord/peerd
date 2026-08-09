@@ -465,13 +465,13 @@ reads GROUND TRUTH off the page and runs a pure, deterministic classifier, so th
 method and provider the confirm names come from the page rather than a model argument
 that could spoof the consent; the provider shown is a CANONICAL single-word title-cased
 label, never the raw captured phrase. SSO for a provider outside the identity-provider
-corridor (github/gitlab/facebook/unknown) is refused GRACEFULLY — no click, no actor
-kill — and a password affordance is refused because Tier 0 holds no credentials.
+registry is refused without a click or actor stop. A password affordance is refused
+because Tier 0 holds no credentials.
 
 **The auto-click rule.** peerd AUTO-CLICKS a login only when it has (a) VERIFIED the
 destination is a known IdP (an href/formAction host that passes `isKnownIdp`), (b)
-pinned a STABLE `walkId` (a snapshot registry node the page cannot re-point — a raw
-selector or a CDP-only backend ref is NOT stable across the up-to-120s confirm), and
+pinned a STABLE `walkId` (a snapshot registry node the page cannot re-point; a raw
+selector or a CDP-only backend ref is not stable across confirmation), and
 (c) RE-VERIFIED, AFTER the consent, that the live origin is unchanged and a re-read via
 the SAME walkId re-classifies to the identical verdict (method/provider/verified) —
 aborting on any change (`login_origin_changed` / `login_affordance_changed` /
@@ -494,13 +494,24 @@ work and out of scope here. Residual, stated plainly: destination verification i
 BEST-EFFORT — it proves the element's declared navigation target (its href, or, for a
 SUBMIT control only, its form action) is a known IdP, but a script `onclick` can still do
 something other than that declared target. So an auto-click carries the residual that a
-verified-looking button runs a different handler; this is bounded by the origin lock
-(a cross-origin hop off the corridor ends the actor) and by the fact that peerd only
-auto-clicks — never fills a credential — so the worst case is a same-origin action on the
-origin the user already consented to interact with, not a credential leak.
+verified-looking button runs a different handler. This is bounded by the exact-origin
+grant and landing wait, and by the fact that peerd only auto-clicks and never fills a
+credential. The worst case is a same-origin action on the origin the user already
+consented to interact with, not a credential leak.
+
+**The identity-provider grant.** Confirmation alone does not give the actor general
+sign-in authority. Only confirmed SSO with a verified destination can stamp a durable,
+one-shot grant for that exact IdP origin. Unverified SSO and passkey flows do not stamp
+one. The grant is consumed when the tab first lands on that exact known IdP. The actor
+then waits and has no tool or credential authority there. It can continue on a
+later request only after the same tab returns to the exact relying-site origin. A wrong provider, third origin,
+expired or replayed authorization, malformed state, or legacy excursion state stops the
+actor. The grant and active excursion survive a service-worker restart without widening
+their authority.
 Code: `peerd-runtime/tools/defs/login.js`, `peerd-runtime/tools/login-affordance.js`,
-`peerd-runtime/tools/exposure.js`, `peerd-runtime/actor/idp-registry.js`. Red-team:
-scenario 11.
+`peerd-runtime/tools/exposure.js`, `peerd-runtime/actor/idp-registry.js`,
+`peerd-runtime/actor/origin-lock.js`, and `peerd-runtime/actor/landing-rule.js`.
+Red-team: scenarios 10 and 11.
 
 <a id="inv-15"></a>
 ### INV-15. A proof-of-possession credential cannot be exfiltrated
@@ -682,9 +693,12 @@ choose the origin that receives bound authority.
 A dedicated identity-provider origin is a third category: transit-only. It is
 sensitive for session and durable-client custody, but it cannot receive a
 roaming, numeric-tab, or standalone `site:` actor. A bound relying-party actor
-may enter it only through the existing opener-pinned, budgeted, time-limited
-sign-in excursion. This keeps real sign-in working without treating the user's
-identity provider as an ordinary destination.
+may enter it only after a confirmed verified SSO action creates a one-shot grant
+for that exact known IdP origin. Landing consumes the grant and parks the actor.
+While parked, the actor has no tool or credential authority at the IdP.
+Returning to the exact relying-site origin clears the excursion so a later request can continue.
+Any other origin or invalid durable state stops the actor. This keeps real sign-in
+working without treating the user's identity provider as an ordinary destination.
 
 The resolver classifies the same canonical origin it passes to the mint
 function. The mint function does not read the tab again or replace that origin.
@@ -931,8 +945,8 @@ evaluating peerd should know. Each cites where it lives in the code.
 - R16. The identity-provider list is the one place a bound actor may leave its origin,
   and it is deliberately short — a host qualifies only if signing in is essentially all
   it does. github.com, gitlab.com and facebook.com are excluded despite speaking OAuth,
-  because admitting them would hand a bound actor a budgeted corridor onto the whole
-  site. The cost is a real one: a bound actor sent through "sign in with GitHub" ENDS.
+  because admitting them would make the whole product origin eligible for a sign-in
+  grant. The cost is a real one: a bound actor sent through "sign in with GitHub" ENDS.
   That is the safe failure, but it is a failure, and whether it happens often enough to
   change the trade is a question for use rather than for this document.
   (`peerd-runtime/actor/idp-registry.js`.)
@@ -945,19 +959,6 @@ evaluating peerd should know. Each cites where it lives in the code.
   trust, so a hijacked page gets one attempt at persuading it to open a helper somewhere
   the user never asked about. (`peerd-runtime/actor/origin-lock-report.js`.)
 
-- R19. Learning is unauthenticated, page-controlled input (#268). A hostile page that
-  renders one password field classifies ITSELF as credentialed, and the landing rule
-  then hands off to a successor bound to the attacker's own origin. R17 already records
-  that the attacker names the successor; what this adds is the CAPABILITY difference —
-  the successor is bound, so it may open an auth excursion onto a real IdP host, which
-  the roaming actor it replaced could not. Two things bound it today: a signal is
-  credited to the origin the probe reports rather than to the caller's tab record
-  (#278), so a page can only mark the document it controls; and Settings → Learned
-  sites shows what was inferred and removes it (#262). Moving the probe to the DOM
-  chokepoint (#267) deliberately widened the trigger from one tool to all of them,
-  which widens this too — the trade is stated in that commit: unfixed #267 let a
-  hijacked actor KEEP authority on a real credentialed site, while this direction costs
-  availability and fills the learned cap faster.
 - R20. Type-the-scrape-into-a-form exfil is invisible to the tripwire (#269). The
   scanner inspects tool ARGUMENTS for URL-shaped payloads. Typing a scraped blob into a
   form field and clicking submit moves the same bytes with no URL in any argument: the
@@ -974,14 +975,6 @@ evaluating peerd should know. Each cites where it lives in the code.
   and passes the rest through verbatim. The scanner is already a pure function over
   strings, so the cheapest close is to run it over those values too — it is listed here
   because it is not done, not because it is hard.
-- R22. The auth excursion is scoped to TIME, not to the sign-in it was opened for
-  (#273). Inside a live excursion the only refusals are the deadline, a sensitive
-  landing that is not the opener, and budget exhaustion — and budget is spent on an
-  ORIGIN CHANGE, so one hop onto an attacker origin buys read/click/type across every
-  path of it for the rest of the window. The opener is recorded but only used to exempt
-  itself; the return-to is never enforced. Whether an excursion should be bounded by
-  the flow that opened it rather than by a clock is the open question
-  (`actor/landing-rule.js`).
 - R23. The password probe is top-frame and light-DOM only (#277). A site whose sign-in
   lives in an iframe — an embedded IdP or payment widget, or a plain `<iframe
   src=/login>` — or inside a shadow root is invisible to the learned signal

@@ -32,7 +32,7 @@ import {
   type Scenario, type Probe, blocked, leaked, summarize,
 } from '../harness.ts';
 import { readFileSync } from 'node:fs';
-import { decideLanding, mayHoldCredentials, MAX_EXCURSIONS } from '../../../extension/peerd-runtime/actor/landing-rule.js';
+import { decideLanding, mayHoldCredentials } from '../../../extension/peerd-runtime/actor/landing-rule.js';
 import { classifyOriginSensitivity } from '../../../extension/peerd-runtime/actor/origin-sensitivity.js';
 import { decideNumericTabAuthority } from '../../../extension/peerd-runtime/actor/numeric-tab-authority.js';
 import { describeLandingStop } from '../../../extension/peerd-runtime/actor/origin-lock-report.js';
@@ -211,15 +211,102 @@ const CORPUS: Case[] = [
     },
   },
   {
-    vector: 'sign-in corridor used to reach a SECOND site the user is signed in to',
-    seeks: 'turn an authorized auth excursion into a window onto mail or a bank',
-    defense: 'excursion rule (a sensitive hop that is not the opener ends it)',
+    vector: 'redirect a bound actor onto a known identity provider without a confirmed sign-in grant',
+    seeks: 'turn an ordinary redirect into identity-provider authority',
+    defense: 'an IdP landing requires an exact live host-stamped grant',
+    check: () => {
+      const v = decideLanding({
+        mode: 'bound', ownedOrigin: 'https://app.test',
+        landing: 'https://accounts.google.com/o/oauth2/v2/auth',
+        landingIsSensitive: true, landingIsIdp: true, now: 1000,
+      } as any);
+      return { denied: v.action === 'end' && /not authorized/.test(v.reason), evidence: `verdict=${v.action}` };
+    },
+  },
+  {
+    vector: 'reuse a grant for a different identity provider',
+    seeks: 'widen one confirmed provider into authority over another provider',
+    defense: 'the grant names one exact IdP origin',
+    check: () => {
+      const v = decideLanding({
+        mode: 'bound', ownedOrigin: 'https://app.test',
+        authGrant: { returnTo: 'https://app.test', idpOrigin: 'https://accounts.google.com', deadline: 9000 },
+        landing: 'https://login.microsoftonline.com/',
+        landingIsSensitive: true, landingIsIdp: true, now: 1000,
+      } as any);
+      return { denied: v.action === 'end', evidence: `verdict=${v.action}` };
+    },
+  },
+  {
+    vector: 'replay a consumed grant alongside its active excursion',
+    seeks: 'reuse one confirmation to create another authorization',
+    defense: 'pending and active authorization cannot coexist',
+    check: () => {
+      const corridor = { returnTo: 'https://app.test', idpOrigin: 'https://accounts.google.com', deadline: 9000 };
+      const v = decideLanding({
+        mode: 'bound', ownedOrigin: 'https://app.test', authGrant: corridor,
+        excursion: { ...corridor, authorized: true },
+        landing: 'https://accounts.google.com/', landingIsSensitive: true,
+        landingIsIdp: true, now: 1000,
+      } as any);
+      return { denied: v.action === 'end', evidence: `verdict=${v.action}` };
+    },
+  },
+  {
+    vector: 'restore a legacy budget-only excursion after restart',
+    seeks: 'turn old persisted state into current identity-provider authority',
+    defense: 'active state requires the host-stamped authorized marker and exact fields',
     check: () => {
       const v = decideLanding({
         mode: 'bound', ownedOrigin: 'https://app.test',
         excursion: {
           returnTo: 'https://app.test', openedAt: 'https://accounts.google.com',
-          lastLanding: 'https://accounts.google.com', budget: 3, deadline: 9e9,
+          lastLanding: 'https://accounts.google.com', budget: 3, deadline: 9000,
+        },
+        landing: 'https://accounts.google.com/', landingIsSensitive: true,
+        landingIsIdp: true, now: 1000,
+      } as any);
+      return { denied: v.action === 'end', evidence: `verdict=${v.action}` };
+    },
+  },
+  {
+    vector: 'use an expired sign-in grant',
+    seeks: 'retain identity-provider authority after the confirmed ceremony is stale',
+    defense: 'expired durable state fails closed',
+    check: () => {
+      const v = decideLanding({
+        mode: 'bound', ownedOrigin: 'https://app.test',
+        authGrant: { returnTo: 'https://app.test', idpOrigin: 'https://accounts.google.com', deadline: 999 },
+        landing: 'https://accounts.google.com/', landingIsSensitive: true,
+        landingIsIdp: true, now: 1000,
+      } as any);
+      return { denied: v.action === 'end', evidence: `verdict=${v.action}` };
+    },
+  },
+  {
+    vector: 'remove a provider from the known-IdP registry after a grant was stamped',
+    seeks: 'keep authority after the provider no longer satisfies policy',
+    defense: 'the exact grant target must still classify as a known IdP at landing',
+    check: () => {
+      const v = decideLanding({
+        mode: 'bound', ownedOrigin: 'https://app.test',
+        authGrant: { returnTo: 'https://app.test', idpOrigin: 'https://accounts.google.com', deadline: 9000 },
+        landing: 'https://accounts.google.com/', landingIsSensitive: true,
+        landingIsIdp: false, now: 1000,
+      } as any);
+      return { denied: v.action === 'end', evidence: `verdict=${v.action}` };
+    },
+  },
+  {
+    vector: 'move an active sign-in excursion to a third origin',
+    seeks: 'use the confirmed IdP leg as general cross-origin browser authority',
+    defense: 'an active excursion admits only the exact IdP and exact home origins',
+    check: () => {
+      const v = decideLanding({
+        mode: 'bound', ownedOrigin: 'https://app.test',
+        excursion: {
+          returnTo: 'https://app.test', idpOrigin: 'https://accounts.google.com',
+          deadline: 9000, authorized: true,
         },
         landing: 'https://bank.test/', landingIsSensitive: sensitive('https://bank.test'),
         now: 1000,
@@ -228,22 +315,8 @@ const CORPUS: Case[] = [
     },
   },
   {
-    vector: 'looping home -> IdP -> home to refresh the excursion budget forever',
-    seeks: 'an unbounded corridor off the owned origin, bounded only per leg',
-    defense: 'excursion LIFETIME cap (a discharge clears the corridor, not the count)',
-    check: () => {
-      const v = decideLanding({
-        mode: 'bound', ownedOrigin: 'https://app.test',
-        landing: 'https://accounts.google.com/o/oauth2/v2/auth',
-        landingIsSensitive: true, landingIsIdp: true,
-        excursionsUsed: MAX_EXCURSIONS, now: 1000,
-      } as any);
-      return { denied: v.action === 'end', evidence: `verdict=${v.action} after ${MAX_EXCURSIONS} excursions` };
-    },
-  },
-  {
     vector: 'a full product that also speaks OAuth, presented as an identity provider',
-    seeks: 'a budgeted corridor onto the whole of github.com under the opener exemption',
+    seeks: 'an identity-provider grant onto the whole of github.com',
     defense: 'IdP registry (membership requires that signing in is essentially all the host does)',
     check: () => {
       const posing = ['https://github.com/login/oauth/authorize', 'https://www.facebook.com/dialog/oauth'];
@@ -335,16 +408,41 @@ const CORPUS: Case[] = [
     },
   },
   {
-    vector: '[guard] a genuine sign-in at a dedicated identity provider',
-    seeks: 'n/a — this must NOT be blocked',
-    defense: 'the one bounded exception actually opens',
+    vector: '[guard] a confirmed sign-in lands at its exact identity provider',
+    seeks: 'n/a, the user must be able to complete this ceremony',
+    defense: 'the one-shot grant is consumed and the actor waits without IdP credential scope',
+    check: () => {
+      const idpOrigin = 'https://accounts.google.com';
+      const v = decideLanding({
+        mode: 'bound', ownedOrigin: 'https://app.test',
+        authGrant: { returnTo: 'https://app.test', idpOrigin, deadline: 9000 },
+        landing: `${idpOrigin}/o/oauth2/v2/auth?client_id=x`,
+        landingIsSensitive: true, landingIsIdp: true, now: 1000,
+      } as any);
+      const held = mayHoldCredentials({
+        mode: 'bound', ownedOrigin: 'https://app.test', origin: idpOrigin,
+        originIsSensitive: true, excursion: v.excursion,
+      } as any);
+      return {
+        denied: v.action === 'wait' && !!v.excursion && !v.authGrant && held === false,
+        evidence: `verdict=${v.action} grant=${!!v.authGrant} scope=${held}`,
+      };
+    },
+  },
+  {
+    vector: '[guard] the user completes sign-in and the tab returns to exact home',
+    seeks: 'n/a, the relying-site actor must resume',
+    defense: 'exact home clears the excursion and resumes the actor',
     check: () => {
       const v = decideLanding({
         mode: 'bound', ownedOrigin: 'https://app.test',
-        landing: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=x',
-        landingIsSensitive: true, landingIsIdp: true, excursionsUsed: 0, now: 1000,
+        excursion: {
+          returnTo: 'https://app.test', idpOrigin: 'https://accounts.google.com',
+          deadline: 9000, authorized: true,
+        },
+        landing: 'https://app.test/account', landingIsSensitive: true, now: 1000,
       } as any);
-      return { denied: v.action === 'continue' && !!v.excursion, evidence: `verdict=${v.action} corridor=${!!v.excursion}` };
+      return { denied: v.action === 'continue' && !v.excursion, evidence: `verdict=${v.action} corridor=${!!v.excursion}` };
     },
   },
   {
@@ -378,10 +476,10 @@ const CORPUS: Case[] = [
 
 export const scenario: Scenario = {
   id: '10-origin-retasking',
-  title: 'Retasking or minting a web actor through a moved tab (issues #251, #263, and #265)',
+  title: 'Retasking or minting a web actor through a moved tab',
   adversary: 'malicious webpage, open redirect, or a hostile link on a trusted host',
   asset: "the user's live browser session on the sites they are signed in to",
-  claim: 'A numeric tab id cannot turn a page-selected redirect destination into bound authority. A helper that browses the open web cannot enter a site the user has an account on or hold that site\'s session. A helper bound to one site cannot be moved off it except through a bounded sign-in corridor toward a dedicated identity provider. When a helper is stopped or numeric addressing is refused, what reaches the orchestrator names origins only. Ordinary browsing, genuine sign-ins, and apex-to-www redirects are unaffected.',
+  claim: 'A numeric tab id cannot turn a page-selected redirect destination into bound authority. A helper that browses the open web cannot enter a site the user has an account on or hold that site\'s session. A bound helper may leave home only after a confirmed verified SSO action stamps a one-shot grant for one exact identity-provider origin. It waits without page or credential authority at that provider. A later request can continue only after exact home. Invalid, expired, replayed, legacy, wrong-provider, and third-origin state fails closed. Stop reports expose origins only.',
   threatModelRef: 'INV-19',
   tier: 'unit',
   async run() {
@@ -397,7 +495,9 @@ export const scenario: Scenario = {
       'numeric tab ids identify locations, not signed-in-site authority',
       'numeric refusal preserves an existing actor binding and origin lock',
       'origin lock: bound may not leave its owned origin',
-      'excursion rule: opener-scoped, budgeted, lifetime-capped',
+      'confirmed verified SSO stamps one exact one-shot IdP grant',
+      'the actor waits at the IdP without credential scope',
+      'exact home resumes; wrong, expired, replayed, and legacy state fails closed',
       'IdP registry: dedicated auth hosts only, anchored matching',
       'identity providers are transit-only, never standalone actor destinations',
       'credential scope narrowed synchronously',

@@ -215,6 +215,30 @@ describe('the probe fails closed when a live web document cannot be verified', (
     expect(await resolveTargetTab({}, ctx)).toBeNull();
     expect(calls).toEqual([]);
   });
+
+  test('a sign-in wait refuses every DOM operation before the provider is probed', async () => {
+    const calls: number[] = [];
+    const ctx: any = baseCtx({
+      judgeLanding: async () => ({ action: 'wait' }),
+      scripting: scriptingSaying({
+        has: false, origin: 'https://accounts.google.com', href: 'https://accounts.google.com/signin',
+      }, { calls }),
+    });
+    await expect(resolveTargetTab({}, ctx)).rejects.toThrow('auth_waiting_for_user: Finish signing in in the open tab.');
+    expect(calls).toEqual([]);
+  });
+
+  test('a live document that moved into a sign-in wait is not returned to the caller', async () => {
+    const ctx: any = baseCtx({
+      scripting: scriptingSaying({
+        has: false, origin: 'https://accounts.google.com', href: 'https://accounts.google.com/signin',
+      }),
+      judgeLanding: async (url: string) => url.startsWith('https://accounts.google.com/')
+        ? { action: 'wait' }
+        : { action: 'continue' },
+    });
+    await expect(resolveTargetTab({}, ctx)).rejects.toThrow('auth_waiting_for_user: Finish signing in in the open tab.');
+  });
 });
 
 describe('the probe cannot hang a tool call', () => {

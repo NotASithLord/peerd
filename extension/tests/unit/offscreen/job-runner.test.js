@@ -213,6 +213,24 @@ throw new Error('unrelated failure');`,
     expect(result.browserPolicies).toEqual([policy]);
   });
 
+  it('terminates a page job when an inner host policy ends the actor turn', async () => {
+    const result = await runJob(
+      {
+        code: 'await page.snapshot(); return "must not continue";',
+        caps: { page: true }, ownerSessionId: 'web-auth-wait', runId: 'page-auth-wait',
+      },
+      {
+        sendToSW: async () => ({
+          ok: false, error: 'auth_waiting_for_user', endTurn: true,
+          endTurnContent: 'Finish signing in in the open tab.',
+        }),
+      },
+    );
+    expect(result.endTurn).toBe(true);
+    expect(result.endTurnContent).toBe('Finish signing in in the open tab.');
+    expect(result.value).toBe(undefined);
+  });
+
   it('aborts SW relays before releasing a settled job\'s relay lease', async () => {
     /** @type {(() => void) | undefined} */
     let releaseAbort;

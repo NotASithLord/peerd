@@ -366,6 +366,8 @@ const confirmationDialogAttrs = (answer, state) => {
  * @property {boolean} [verified]   login only: the DESTINATION was proven a known
  *   IdP (an href/formAction host passing isKnownIdp). false for a recognized-name-
  *   only sso — the card must then NOT vouch for where the button leads.
+ * @property {string | null} [idpOrigin] login only: the exact system-derived IdP
+ *   origin authorized by a verified SSO confirmation.
  */
 // Exported so the full-page home renders the SAME permission prompt (DESIGN-12
 // full equality) — a confirm broadcast must be answerable on whichever surface
@@ -400,6 +402,12 @@ export const ConfirmModal = {
       // button leads to a known IdP. Soften the copy — keep the origin hero, but do
       // not vouch for the destination.
       const unverified = prompt.method === 'sso' && prompt.verified === false;
+      const idpOrigin = prompt.method === 'sso' && prompt.verified === true
+        ? String(prompt.idpOrigin ?? '')
+        : '';
+      let idpHost = '';
+      try { idpHost = new URL(idpOrigin).host; } catch { /* malformed means no approvable verified destination */ }
+      const missingVerifiedDestination = prompt.method === 'sso' && prompt.verified === true && !idpHost;
       return m('.peerd-modal-backdrop', [
         m('.peerd-modal.confirm-modal.login-modal', confirmationDialogAttrs(answer, dialogState), [
           m('h3#peerd-confirm-title', 'Approve sign-in'),
@@ -418,6 +426,10 @@ export const ConfirmModal = {
                 ? `Continue with ${provider || 'your provider'} — peerd could not verify where this leads`
                 : `Continue with ${provider || 'your provider'}`,
           ]),
+          idpHost ? m('.login-destination', [
+            m('span', 'Provider page'),
+            m('strong', idpHost),
+          ]) : null,
           m('.login-reassure', [
             m('.ok', icon('check', 15)),
             m('span', unverified
@@ -426,7 +438,11 @@ export const ConfirmModal = {
           ]),
           m('.peerd-modal-actions', [
             m('button.secondary', { type: 'button', 'data-confirm-reject': '', onclick: () => answer('no') }, 'Cancel'),
-            m('button', { type: 'button', disabled: blankOrigin, onclick: () => { if (!blankOrigin) answer('yes_once'); } }, 'Allow sign-in'),
+            m('button', {
+              type: 'button',
+              disabled: blankOrigin || missingVerifiedDestination,
+              onclick: () => { if (!blankOrigin && !missingVerifiedDestination) answer('yes_once'); },
+            }, 'Allow sign-in'),
           ]),
         ]),
       ]);

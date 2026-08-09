@@ -66,6 +66,23 @@ describe('page_code — the code-REPL action tool', () => {
     expect(out.content).not.toContain('protected_child_navigation');
   });
 
+  test('propagates a terminal inner page policy to the outer actor turn', async () => {
+    const { ctx } = ctxWith({
+      jsOffscreenClient: {
+        execHeadless: async () => ({
+          ...RESULT, endTurn: true, endTurnContent: 'Finish signing in in the open tab.',
+        }),
+      },
+    });
+    expect(await pageCodeTool.execute({ code: 'await page.goto("https://idp.test")' }, ctx as any)).toEqual({
+      ok: false,
+      error: 'page_code_ended_for_host_policy',
+      content: 'Finish signing in in the open tab.',
+      endTurn: true,
+      outcomeKind: 'effect-completed',
+    });
+  });
+
   test('is a web-primitive, write-effect tool that names no static origins', () => {
     expect(pageCodeTool.name).toBe('page_code');
     expect(pageCodeTool.primitive).toBe('web');

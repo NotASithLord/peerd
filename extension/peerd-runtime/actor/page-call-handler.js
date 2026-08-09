@@ -18,8 +18,8 @@
 import { pageCallToToolCall, shapePageResult } from './page-api.js';
 
 /**
- * @typedef {{ ok: true, value: any, images?: Array<{ data: string, mediaType: string }>, browserPolicies?: any[] } | { ok: false, error: string, browserPolicies?: any[] }} PageCallOutcome
- * @typedef {{ ok?: boolean, error?: string, content?: string, images?: Array<{ data: string, mediaType: string }>, structured?: Record<string, any> }} ToolResult
+ * @typedef {{ ok: true, value: any, images?: Array<{ data: string, mediaType: string }>, browserPolicies?: any[], endTurn?: boolean, endTurnContent?: string } | { ok: false, error: string, browserPolicies?: any[], endTurn?: boolean, endTurnContent?: string }} PageCallOutcome
+ * @typedef {{ ok?: boolean, error?: string, content?: string, endTurn?: boolean, images?: Array<{ data: string, mediaType: string }>, structured?: Record<string, any> }} ToolResult
  */
 
 /**
@@ -118,6 +118,9 @@ export const makePageCallHandler = ({ dispatchToolCall, buildActorContext }) => 
     ? structured.browserPolicies
     : structured.browserPolicy ? [structured.browserPolicy] : [];
   const policyFields = browserPolicies.length ? { browserPolicies } : {};
+  const terminalFields = result.endTurn === true
+    ? { endTurn: true, endTurnContent: typeof result.content === 'string' ? result.content : '' }
+    : {};
 
   // Shape the result. A gated failure (denylist / confirm decline / count
   // mismatch) lands here as a thrown PageApiError → the worker's awaited page.*
@@ -128,9 +131,10 @@ export const makePageCallHandler = ({ dispatchToolCall, buildActorContext }) => 
       value: shapePageResult(req.method, result),
       ...(Array.isArray(result.images) && result.images.length ? { images: result.images.slice(-1) } : {}),
       ...policyFields,
+      ...terminalFields,
     };
   } catch (e) {
-    return { ok: false, error: errMessage(e), ...policyFields };
+    return { ok: false, error: errMessage(e), ...policyFields, ...terminalFields };
   }
 };
 

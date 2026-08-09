@@ -10,7 +10,7 @@
 // got there, because the rule genuinely cannot tell and must not need to.
 
 import { describe, test, expect } from 'bun:test';
-import { decideLanding, EXCURSION_BUDGET, EXCURSION_MS, MAX_EXCURSIONS } from '../../../extension/peerd-runtime/actor/landing-rule.js';
+import { decideLanding, MAX_EXCURSIONS } from '../../../extension/peerd-runtime/actor/landing-rule.js';
 
 const OWNED = 'https://app.test';
 const bound = (over: any = {}) => decideLanding({ mode: 'bound', ownedOrigin: OWNED, landingIsSensitive: false, now: 1_000, ...over });
@@ -116,91 +116,91 @@ describe('fail-closed on a bad mode', () => {
   });
 });
 
-describe('auth excursions — the OAuth solve', () => {
+describe('auth excursions are confirmed, exact, and user-controlled', () => {
   const IDP = 'https://accounts.google.com';
-  const inFlight = (over: any = {}) => ({ returnTo: OWNED, openedAt: IDP, lastLanding: IDP, budget: 2, deadline: 99_999, ...over });
+  const grant = (over: any = {}) => ({ returnTo: OWNED, idpOrigin: IDP, deadline: 99_999, ...over });
+  const inFlight = (over: any = {}) => ({
+    returnTo: OWNED, idpOrigin: IDP, deadline: 99_999, authorized: true, ...over,
+  });
 
-  test('landing on a known IdP opens a bounded excursion instead of ending', () => {
-    const v = bound({ landing: IDP, landingIsSensitive: true, landingIsIdp: true });
-    expect(v.action).toBe('continue');
-    expect(v.excursion).toEqual({
-      returnTo: OWNED, openedAt: IDP, lastLanding: IDP,
-      budget: EXCURSION_BUDGET, deadline: 1_000 + EXCURSION_MS,
+  test('a matching live grant is consumed into an authorized wait', () => {
+    const v = bound({
+      landing: `${IDP}/authorize`, landingIsSensitive: true,
+      landingIsIdp: true, authGrant: grant(),
     });
+    expect(v.action).toBe('wait');
+    expect(v.authGrant).toBeUndefined();
+    expect(v.excursion).toEqual(inFlight());
   });
 
-  test('an in-flight excursion spends budget when it actually MOVES', () => {
-    const v = bound({ landing: 'https://idp-step2.test', excursion: inFlight() });
+  test('an IdP without a grant has a dedicated not-authorized reason', () => {
+    const v = bound({ landing: IDP, landingIsIdp: true });
+    expect(v.action).toBe('end');
+    expect(v.reason).toBe('this sign-in was not authorized, so this task was stopped');
+  });
+
+  test('the actor waits at the exact provider and cannot act there', () => {
+    const v = bound({
+      landing: `${IDP}/signin/step2`, landingIsSensitive: true,
+      landingIsIdp: true, excursion: inFlight(),
+    });
+    expect(v.action).toBe('wait');
+    expect(v.excursion).toEqual(inFlight());
+  });
+
+  test('home resumes and clears the active excursion', () => {
+    const v = bound({ landing: OWNED, excursion: inFlight() });
     expect(v.action).toBe('continue');
-    expect(v.excursion?.budget).toBe(1);
+    expect(v.excursion).toBeUndefined();
   });
 
-  test('repeated calls on the SAME page do not spend budget', () => {
-    // This function runs per tool call (resolveTargetTab is on every DOM tool),
-    // not per navigation. A single-page login — snapshot, type, click, snapshot
-    // — would otherwise burn the budget standing still and end the actor
-    // mid-sign-in. The budget is denominated in navigations, so it must only
-    // decrement on one.
-    const v = bound({ landing: IDP, landingIsSensitive: true, excursion: inFlight() });
-    expect(v.excursion?.budget).toBe(2);
+  test('blank carries valid state and a home safety read preserves a grant', () => {
+    const pending = grant();
+    expect(bound({ landing: OWNED, authGrant: pending }).authGrant).toEqual(pending);
+    expect(bound({ landing: 'about:blank', authGrant: pending }).authGrant).toEqual(pending);
+    expect(bound({ landing: 'about:blank', excursion: inFlight() }).excursion).toEqual(inFlight());
   });
 
-  test('an exhausted budget ends the actor on the next move', () => {
-    const v = bound({ landing: 'https://idp-step9.test', excursion: inFlight({ budget: 0 }) });
+  test('wrong provider, third origin, expiry, and replay fail closed', () => {
+    expect(bound({
+      landing: 'https://login.microsoftonline.com', landingIsIdp: true, authGrant: grant(),
+    }).action).toBe('end');
+    expect(bound({ landing: 'https://evil.test', excursion: inFlight() }).action).toBe('end');
+    expect(bound({ landing: OWNED, authGrant: grant({ deadline: 999 }), now: 1_000 }).action).toBe('end');
+    expect(bound({ landing: OWNED, excursion: inFlight({ deadline: 999 }), now: 1_000 }).action).toBe('end');
+    expect(bound({ landing: IDP, landingIsIdp: true }).action).toBe('end');
+  });
+
+  test('legacy and malformed persisted state fails closed', () => {
+    for (const excursion of [
+      { returnTo: OWNED, openedAt: IDP, lastLanding: IDP, budget: 2, deadline: 99_999 },
+      { returnTo: OWNED, idpOrigin: IDP, deadline: 99_999 },
+      { returnTo: 'https://other.test', idpOrigin: IDP, deadline: 99_999, authorized: true },
+      { returnTo: OWNED, idpOrigin: 'not-an-origin', deadline: 99_999, authorized: true },
+      { returnTo: OWNED, idpOrigin: `${IDP}/login`, deadline: 99_999, authorized: true },
+    ]) {
+      expect(bound({ landing: IDP, landingIsIdp: true, excursion }).action).toBe('end');
+    }
+    expect(bound({ landing: OWNED, authGrant: false }).action).toBe('end');
+    expect(bound({ landing: IDP, landingIsIdp: true, authGrant: grant({ idpOrigin: `${IDP}/login` }) }).action).toBe('end');
+    expect(bound({ landing: OWNED, authGrant: grant(), excursion: inFlight() }).action).toBe('end');
+  });
+
+  test('a grant target removed from the IdP registry fails closed', () => {
+    const v = bound({ landing: IDP, landingIsIdp: false, authGrant: grant() });
     expect(v.action).toBe('end');
+    expect(v.reason).toBe('this sign-in was not authorized, so this task was stopped');
   });
 
-  test('an expired deadline ends the actor even with budget left', () => {
-    const v = bound({ landing: 'https://idp.test', excursion: inFlight({ budget: 9, deadline: 500 }), now: 1_000 });
-    expect(v.action).toBe('end');
-  });
-
-  test('returning to the owned origin discharges it — the only good ending', () => {
-    const v = bound({ landing: OWNED, excursion: inFlight({ budget: 1 }) });
-    expect(v.action).toBe('continue');
-    expect(v.excursion).toBeUndefined();          // cleared, not carried
-  });
-
-  test('a blank read mid-excursion carries it through rather than discharging it', () => {
-    // Absence of the field means "cleared" to the caller, so a tab caught
-    // mid-load must not silently end a sign-in in progress.
-    const ex = inFlight();
-    expect(bound({ landing: 'about:blank', excursion: ex }).excursion).toEqual(ex);
-  });
-
-  test('an open corridor is NOT a window onto other credentialed sites', () => {
-    // The bound path ignoring landingIsSensitive was the design gap: a docs-site
-    // actor could be bounced onto an IdP, then walked to mail or a bank for four
-    // free hops. A roaming actor — which holds nothing — gets a hard handoff on
-    // its first sensitive landing, so the actor that DOES carry authority must
-    // not get a softer rule.
-    const v = bound({ landing: 'https://bank.test/transfer', landingIsSensitive: true, excursion: inFlight() });
-    expect(v.action).toBe('end');
-  });
-
-  test('...but the IdP that opened it stays reachable, because an IdP is credentialed by nature', () => {
-    // Which is why the exemption is keyed on openedAt rather than a blanket
-    // "refuse every sensitive hop" that would break every real sign-in.
-    const v = bound({ landing: `${IDP}/signin/step2`, landingIsSensitive: true, excursion: inFlight() });
-    expect(v.action).toBe('continue');
-  });
-
-  test('the lifetime cap survives discharge, so the corridor cannot be refreshed', () => {
-    // Discharging at home clears the corridor, so a per-leg budget alone lets a
-    // hostile page loop home → IdP → hops → home forever, buying a fresh budget
-    // and deadline every two navigations. Bounded per leg, unbounded per task.
-    const v = bound({ landing: IDP, landingIsSensitive: true, landingIsIdp: true, excursionsUsed: MAX_EXCURSIONS });
-    expect(v.action).toBe('end');
-  });
-
-  test('an excursion cannot be opened toward a NON-IdP', () => {
-    // Otherwise "off-origin" would be self-authorizing and the lock would be
-    // a suggestion.
-    expect(bound({ landing: 'https://evil.test', landingIsIdp: false }).action).toBe('end');
+  test('the lifetime cap is checked only when a grant activates', () => {
+    expect(bound({ landing: OWNED, authGrant: grant(), excursionsUsed: MAX_EXCURSIONS }).action).toBe('continue');
+    expect(bound({
+      landing: IDP, landingIsIdp: true, authGrant: grant(), excursionsUsed: MAX_EXCURSIONS,
+    }).action).toBe('end');
   });
 
   test('a roaming actor cannot turn a sign-in service into a standalone destination', () => {
-    const v = roaming({ landing: 'https://accounts.google.com', landingIsSensitive: true, landingIsIdp: true });
+    const v = roaming({ landing: IDP, landingIsSensitive: true, landingIsIdp: true });
     expect(v.action).toBe('end');
     expect(v.handoffTo).toBeUndefined();
     expect(v.excursion).toBeUndefined();

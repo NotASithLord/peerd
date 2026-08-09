@@ -38,6 +38,7 @@ import './unit/peerd-runtime/sessions-store.test.js';
 import './unit/peerd-runtime/agent-loop.test.js';
 import './unit/peerd-runtime/actor-spawn.test.js';
 import './unit/peerd-runtime/idp-sign-in-flow.test.js';
+import './unit/sidepanel/login-confirm.test.js';
 import './unit/peerd-runtime/turn-driver-credentials.test.js';
 import './unit/peerd-runtime/dispatcher.test.js';
 import './unit/peerd-runtime/introspection-tools.test.js';
