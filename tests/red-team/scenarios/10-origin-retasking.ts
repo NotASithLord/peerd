@@ -155,6 +155,53 @@ const CORPUS: Case[] = [
     },
   },
   {
+    vector: 'change scheme and port after a host is learned sensitive',
+    seeks: 'recover roaming authority through another spelling of the same cookie host',
+    defense: 'learned sensitivity is keyed by hostname rather than origin',
+    check: () => {
+      const verdict = classifyOriginSensitivity('http://bank.test:9443/transfer', {
+        learned: new Map([['bank.test', 'password-field']]),
+      });
+      return {
+        denied: verdict.sensitive && verdict.reason === 'password-field'
+          && verdict.origin === 'http://bank.test:9443',
+        evidence: `sensitive=${verdict.sensitive} reason=${verdict.reason ?? 'none'} origin=${verdict.origin ?? 'none'}`,
+      };
+    },
+  },
+  {
+    vector: 'move from a learned parent host onto a cookie-sharing descendant',
+    seeks: 'recover roaming authority where a Domain cookie may still authenticate the user',
+    defense: 'a learned parent hostname covers boundary-checked descendants',
+    check: () => {
+      const verdict = classifyOriginSensitivity('https://pay.bank.test/transfer', {
+        learned: new Map([['bank.test', 'confirmed-write']]),
+      });
+      return {
+        denied: verdict.sensitive && verdict.reason === 'confirmed-write',
+        evidence: `sensitive=${verdict.sensitive} reason=${verdict.reason ?? 'none'}`,
+      };
+    },
+  },
+  {
+    vector: 'learn a hostile child host, then visit its parent, sibling, or suffix lookalike',
+    seeks: 'poison unrelated account surfaces into persistent false handoffs',
+    defense: 'child marks do not widen upward or sideways and suffix matching is label-bound',
+    check: () => {
+      const learned = new Map([['login.bank.test', 'password-field' as const]]);
+      const candidates = [
+        'https://bank.test',
+        'https://pay.bank.test',
+        'https://login.bank.test.evil.test',
+      ];
+      const verdicts = candidates.map((url) => classifyOriginSensitivity(url, { learned }).sensitive);
+      return {
+        denied: verdicts.every((sensitiveVerdict) => sensitiveVerdict === false),
+        evidence: `sensitive=${verdicts.join(',')}`,
+      };
+    },
+  },
+  {
     vector: 'numerically address a sensitive tab already owned by a legitimate site actor',
     seeks: 'erase the existing binding and its live origin lock during refusal',
     defense: 'numeric refusal is read-only with respect to existing actor custody',
@@ -492,6 +539,8 @@ export const scenario: Scenario = {
     });
     return summarize(probes, [
       'origin lock: roaming may not enter a credentialed origin',
+      'learned sensitivity follows cookie host scope across scheme, port, and descendants',
+      'learned child hosts cannot poison parents, siblings, or suffix lookalikes',
       'numeric tab ids identify locations, not signed-in-site authority',
       'numeric refusal preserves an existing actor binding and origin lock',
       'origin lock: bound may not leave its owned origin',

@@ -125,6 +125,18 @@ describe('the report is useful, not just safe', () => {
     expect(text).toMatch(/should be guessed at|from what the user asked/i);
   });
 
+  test('a learned-scope handoff does not claim exact identity and forbids spelling retries', () => {
+    const text = describeLandingStop({
+      action: 'handoff', reason: 'r', from: null,
+      to: 'http://bank.test:9443/x', handoffTo: 'http://bank.test:9443',
+    });
+    expect(text).toContain("may share the user's browser session");
+    expect(text).toContain('Do not evade this stop by changing the address');
+    expect(text).toContain("comes from the user's request");
+    expect(text).toContain('site:http://bank.test:9443');
+    expect(text).not.toContain('has an identity on');
+  });
+
   test('an end says both origins and refuses to guess who moved the tab', () => {
     const text = describeLandingStop({
       action: 'end',
