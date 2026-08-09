@@ -346,7 +346,7 @@ import {
   hasDurableSiteClientState,
   decideNumericTabAuthority, numericTabAuthorityRefusal,
   IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
-  isKnownIdp, isKnownIdpHost, knownIdpDomains, describeLandingStop, originPhrase, isUgcHost,
+  isKnownIdp, isKnownIdpHost, knownIdpDomains, describeLandingStop, landingStopCard, originPhrase, isUgcHost,
   isAddressableBrowserTab,
   finalActorTurnReply, finalAssistantText,
   // The debug surface: the bundle assembler + the delegation-tree walk the
@@ -1769,6 +1769,14 @@ const sensitivitySignals = () => ({
 const landingStopReports = new Map();
 
 /**
+ * The same stop, shaped for the transcript CARD (§4c) - landingStopCard's
+ * output, held beside the prose report and consumed at the same moment. Same
+ * authorship rule: every field is ours, none is the actor's.
+ * @type {Map<string, ReturnType<typeof landingStopCard>>}
+ */
+const landingStopCards = new Map();
+
+/**
  * A monotonic token per actor TURN, and the reason it has to exist.
  *
  * Aborting an offscreen actor run unwinds the worker but does NOT cancel the
@@ -1810,7 +1818,10 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
         // anything. It still records the landing in the audit trail below — the
         // observation was real even when the turn it belonged to is gone.
         const current = isCurrentTurn();
-        if (current) landingStopReports.set(actorSessionId, describeLandingStop(/** @type {any} */ (event)));
+        if (current) {
+          landingStopReports.set(actorSessionId, describeLandingStop(/** @type {any} */ (event)));
+          landingStopCards.set(actorSessionId, landingStopCard(/** @type {any} */ (event)));
+        }
         // RELEASE THE TAB. Without this the stop is self-sealing and the actor is
         // dead for good, which adversarial review demonstrated end to end:
         //
@@ -3922,6 +3933,22 @@ const {
 // panel and resolves when the panel posts back 'confirm/answer'.
 // Exercised whenever the Plan/Act decideAction policy marks an action as
 // needing confirmation.
+// A confirm that settles ITSELF (timeout, abort/Stop, closed panel) is
+// invisible today - the modal just vanishes, or never existed. Keep the last
+// few self-settles per session so the transcript can say what happened, even
+// to a panel that opens later (UI redesign §4e). SW memory only: the prompts
+// themselves have the same lifetime, so this is the right blast radius.
+/** @type {Map<string, Array<{ id: string, at: number, answer: string, cause: string, via: string|null }>>} */
+const confirmSettleNotes = new Map();
+const CONFIRM_SETTLE_NOTES_CAP = 20;
+/** @param {string|null} sessionId @param {{ id: string, answer: string, cause: string, via: string|null }} note */
+const recordConfirmSettle = (sessionId, note) => {
+  if (!sessionId) return;
+  const list = confirmSettleNotes.get(sessionId) ?? [];
+  list.push({ ...note, at: Date.now() });
+  confirmSettleNotes.set(sessionId, list.slice(-CONFIRM_SETTLE_NOTES_CAP));
+};
+
 const confirmCoordinator = makeConfirmCoordinator({
   notifySidePanel: (prompt) => {
     if (!uiConnected()) return;
@@ -3934,8 +3961,16 @@ const confirmCoordinator = makeConfirmCoordinator({
   // Dismiss the modal on EVERY open surface when a prompt settles for ANY
   // reason — answer, 120s timeout, or session reset (DESIGN-12). Without this a
   // timed-out/reset prompt lingers, and a later click "approves" an action that
-  // was already auto-denied.
-  onSettled: (id) => { try { uiPorts.broadcast({ type: 'confirm/resolved', id }); } catch { /* port closing */ } },
+  // was already auto-denied. The outcome rides along so surfaces can render the
+  // settle as a transcript line; self-settles are also recorded for late joiners.
+  onSettled: (id, outcome) => {
+    if (outcome.cause !== 'answer') {
+      recordConfirmSettle(outcome.sessionId, {
+        id, answer: outcome.answer, cause: outcome.cause, via: outcome.via,
+      });
+    }
+    try { uiPorts.broadcast({ type: 'confirm/resolved', id, outcome }); } catch { /* port closing */ }
+  },
   // Raise an action badge while a confirm is pending so a waiting agent is
   // visible even if the panel is hidden; cleared at zero.
   onPendingChange: (count) => {
@@ -4018,6 +4053,22 @@ const confirmAction = async (prompt, signal) => {
   if (sid) {
     try { ephemeral = (await sessions.get(sid))?.kind === 'actor'; } catch { ephemeral = false; }
   }
+  // The CHAT a settle line must land in (§4e): an actor-raised confirm carries
+  // the ACTOR session id (the ephemeral check above depends on that), but the
+  // transcript that renders settle notes is the ROOT chat's - walk up exactly
+  // like recovery notices do (resolveNoticeSession), bounded against a corrupt
+  // chain. Without this every helper confirm's outcome is recorded under a
+  // session no surface ever views, and all of §4e silently no-ops for the most
+  // frequent prompt class.
+  let chatSessionId = sid;
+  if (ephemeral && chatSessionId) {
+    for (let hops = 0; hops < 8; hops += 1) {
+      const record = /** @type {{ parentSessionId?: string } | null | undefined} */ (
+        await sessions.get(/** @type {string} */ (chatSessionId)).catch(() => null));
+      if (!record?.parentSessionId) break;
+      chatSessionId = record.parentSessionId;
+    }
+  }
   if (signal?.aborted) return 'no';
   if (!ephemeral && sid && sessionConfirmGrants.get(sid)?.has(grantKey)) {
     return 'yes_session';
@@ -4029,9 +4080,20 @@ const confirmAction = async (prompt, signal) => {
   // they see on a GitHub issue, twice per comment — a control that looks like
   // the way to stop the prompting and silently isn't. The downgrade itself is
   // correct and stays; what was wrong was offering the choice.
-  const answer = await confirmCoordinator.confirm(/** @type {any} */ (
-    downgradesActorConfirm(prompt.tool, ephemeral, 'yes_session') ? { ...prompt, ephemeral: true } : prompt
-  ), signal);
+  // No surface to ask → the coordinator will fail-closed WITHOUT minting an id
+  // or broadcasting anything, so nothing else can ever tell the user this
+  // happened. Record it here - the badge they didn't see is not a record (§4e).
+  if (!uiConnected()) {
+    recordConfirmSettle(chatSessionId, {
+      id: crypto.randomUUID(), answer: 'no', cause: 'unreachable', via: null,
+    });
+  }
+  const outboundPrompt = {
+    ...prompt,
+    ...(chatSessionId ? { chatSessionId } : {}),
+    ...(downgradesActorConfirm(prompt.tool, ephemeral, 'yes_session') ? { ephemeral: true } : {}),
+  };
+  const answer = await confirmCoordinator.confirm(/** @type {any} */ (outboundPrompt), signal);
   if (answer === 'yes_session' && sid && !ephemeral) {
     if (!sessionConfirmGrants.has(sid)) sessionConfirmGrants.set(sid, new Set());
     (/** @type {Set<string>} */ (sessionConfirmGrants.get(sid))).add(grantKey);
@@ -4175,6 +4237,10 @@ const buildStateSnapshot = async () => {
     },
     settings: { ...settingsStore.get() },
     pendingConfirm: null,
+    // Self-settled confirms for THIS chat (timeout / stop / closed panel) - the
+    // panel folds these into its transcript notes so a settle that happened
+    // while no surface was open is still tellable (§4e).
+    confirmSettleNotes: sessionId ? (confirmSettleNotes.get(/** @type {string} */ (sessionId)) ?? []) : [],
     // Live actor projections are part of the fresh snapshot, not a lucky stream
     // of events seen only by panels that were already open. Every row is scoped
     // to this viewed root before it crosses the UI boundary.
@@ -6633,6 +6699,7 @@ const actorMessaging = makeActorMessaging({
     // Invalidate old judges synchronously, then wait for their serialized
     // transitions to drain before this turn builds a tool context.
     landingStopReports.delete(actorSessionId);
+    landingStopCards.delete(actorSessionId);
     beginLandingTurn(actorSessionId);
     await originStates.serialize(actorSessionId, () => undefined);
     // DESIGN-19 mint-time injection: if this web/API actor's origin has a stored
@@ -6702,6 +6769,8 @@ const actorMessaging = makeActorMessaging({
     const actorSurface = contributorDecision?.resolved;
     /** @type {string | null} */
     let landingStopSnapshot = null;
+    /** @type {ReturnType<typeof landingStopCard> | null} */
+    let landingStopCardSnapshot = null;
     const captureLandingStop = () => {
       // The next queued turn clears this report at its own start. Consume it
       // while this turn still owns the actor slot.
@@ -6710,6 +6779,11 @@ const actorMessaging = makeActorMessaging({
         landingStopReports.delete(actorSessionId);
         landingStopSnapshot = report;
       }
+      const card = landingStopCards.get(actorSessionId);
+      if (card) {
+        landingStopCards.delete(actorSessionId);
+        landingStopCardSnapshot = card;
+      }
     };
     /**
      * If the origin lock stopped this actor mid-turn, its own reply is not the
@@ -6717,14 +6791,19 @@ const actorMessaging = makeActorMessaging({
      * actor may still have emitted text, and text written after the moment we
      * decided it was somewhere it shouldn't be is exactly what must not reach the
      * orchestrator. `stopped:true` marks the delivery failed, so the reply arrives
-     * as "this did not work, here is why" rather than as a result.
-     * @param {{ result: string, stopped?: boolean }} reply
-     * @returns {{ result: string, stopped?: boolean }}
+     * as "this did not work, here is why" rather than as a result. The card
+     * rides beside the prose so the transcript renders the slotted version (§4c).
+     * @param {{ result: string, stopped?: boolean, landingStop?: object }} reply
+     * @returns {{ result: string, stopped?: boolean, landingStop?: object }}
      */
     const withLandingStop = (reply) => {
       const report = landingStopSnapshot;
       if (!report) return reply;
-      return { result: report, stopped: true };
+      return {
+        result: report,
+        stopped: true,
+        ...(landingStopCardSnapshot ? { landingStop: landingStopCardSnapshot } : {}),
+      };
     };
     /**
      * Record only fixed enums/counters after the actor session has settled.

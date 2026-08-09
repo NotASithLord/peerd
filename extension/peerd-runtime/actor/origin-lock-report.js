@@ -236,3 +236,112 @@ export const describeLandingStop = (event) => {
       : []),
   ].join('\n');
 };
+
+// ── The transcript card model (UI redesign §4c) ──────────────────────────────
+//
+// The SAME event, shaped for the side panel: the prose above is the
+// orchestrator's copy and is unchanged; this is the shorter, slotted rendering
+// the transcript shows the USER. Kept here - not in the panel - because every
+// string that crosses out of a stopped actor's world must be authored in this
+// file, under this file's rule: nothing here is written by the actor, the
+// page, or the model.
+
+// The user-register version of `unknownWork` (§3g): it must OCCUPY the slot a
+// step list would have wanted, not trail as a caveat.
+const CARD_UNKNOWN = 'How far it got. It stopped at a boundary and doesn’t '
+  + 'trust its own account of what happened before that - so check before '
+  + 'repeating anything that would act twice.';
+
+const SIGN_IN_REASONS = new Set([
+  ...AUTH_STOP_EXPLANATIONS.keys(),
+  'this is a sign-in service that helpers may only visit while signing in to another site',
+]);
+const NO_ADDRESS_REASONS = new Set([
+  'this page has no address peerd can pin work to',
+  'the tab moved to a page peerd cannot verify, so this task was stopped',
+]);
+const LEFT_SITE_REASON = 'this helper works only on one site, and the tab left it';
+const INTERNAL_REASON = 'this helper is in an unknown state, so it was stopped';
+
+/**
+ * @typedef {object} LandingStopCard
+ * @property {'HANDOFF'|'SIGN-IN'|'LEFT SITE'|'NO ADDRESS'|'INTERNAL'|null} group
+ * @property {string} headline    composed here; may embed origins, never paths
+ * @property {string} reason      the landing rule's verbatim one-liner
+ * @property {string} whatIsNotKnown
+ * @property {'notice'|'error'} tone   INTERNAL is a genuine bug and must not
+ *   look routine - it alone takes the error treatment (§4b)
+ * @property {{ label: string, composerText: string } | null} action  fills the
+ *   composer with the user's likely next message; grants nothing, calls no
+ *   tool, and is absent wherever there is no honest next step to offer
+ */
+
+/**
+ * Shape a landing-stop event into the transcript card.
+ *
+ * @param {LandingStopEvent} event
+ * @returns {LandingStopCard}
+ */
+export const landingStopCard = (event) => {
+  const { action, reason, from, to, handoffTo } = event ?? /** @type {any} */ ({});
+  const landed = originPhrase(action === 'handoff' ? (handoffTo ?? to) : to);
+  const owned = from ? originPhrase(from) : null;
+
+  if (action === 'handoff') {
+    return {
+      group: 'HANDOFF',
+      headline: `The web helper was stopped when the tab arrived at ${landed}`,
+      reason: reason || '',
+      whatIsNotKnown: CARD_UNKNOWN,
+      tone: 'notice',
+      // The cheap route the handoff report already recommends first: a
+      // sessionless read needs no authority at all.
+      action: { label: 'Try reading it without signing in', composerText: `Try reading ${landed} without signing in.` },
+    };
+  }
+  if (SIGN_IN_REASONS.has(reason)) {
+    return {
+      group: 'SIGN-IN',
+      headline: owned
+        ? `The web helper was signing in for ${owned} when the tab arrived at ${landed}`
+        : `The web helper stopped during sign-in when the tab arrived at ${landed}`,
+      reason: reason || '',
+      whatIsNotKnown: CARD_UNKNOWN,
+      tone: 'notice',
+      // No action on any sign-in stop: the honest next step is the user's own
+      // hands (finish the sign-in themselves), not a message we can type.
+      action: null,
+    };
+  }
+  if (reason === INTERNAL_REASON) {
+    return {
+      group: 'INTERNAL',
+      headline: 'The web helper was stopped.',
+      reason,
+      whatIsNotKnown: CARD_UNKNOWN,
+      tone: 'error',
+      action: null,
+    };
+  }
+  const group = NO_ADDRESS_REASONS.has(reason) ? 'NO ADDRESS'
+    : reason === LEFT_SITE_REASON ? 'LEFT SITE'
+    : null;
+  return {
+    group,
+    headline: owned
+      ? `The web helper was working on ${owned} and the tab moved to ${landed}`
+      : `The web helper stopped: the tab is now on ${landed}`,
+    reason: reason || '',
+    whatIsNotKnown: CARD_UNKNOWN,
+    tone: 'notice',
+    // NO action on any generic stop - deliberately, against the design mock's
+    // "Continue on <host>" button. The landing is the one address a hostile
+    // page fully controls, and a button here turns a page-chosen destination
+    // into a one-click trusted user instruction - the exact laundering this
+    // file's report already forbids ("use a different destination only when it
+    // comes from the user's request"). The report's conditional message_actor
+    // line survives for the orchestrator; the card offers nothing. Only the
+    // handoff keeps an action, because a sessionless read spends no authority.
+    action: null,
+  };
+};

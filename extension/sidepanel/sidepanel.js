@@ -55,7 +55,11 @@ const handlePortMessage = (raw) => {
   }
   // Everything else folds through the shared pure reducer (DESIGN-12) so home
   // and the side panel stay byte-identical projections of the SW session.
-  const next = reduceChat(currentState, msg);
+  // §4e: a confirm settle carries WHICH surface answered; the reducer needs to
+  // know which surface it is folding FOR, so the answering surface doesn't
+  // transcript-line its own click.
+  const folded = msg.type === 'confirm/resolved' ? { ...msg, confirmSurface: 'sidepanel' } : msg;
+  const next = reduceChat(currentState, folded);
   if (next === currentState) return; // guarded bail / live complement — nothing changed
   currentState = next;
   // Side-panel-only: the voice manager doesn't survive the panel, so re-enable
@@ -213,7 +217,7 @@ if (!root) throw new Error('sidepanel: #app missing from HTML');
  * @param {string} answer
  */
 const confirmAnswer = (id, answer) => {
-  send({ type: 'confirm/answer', id, answer });
+  send({ type: 'confirm/answer', id, answer, surface: 'sidepanel' });
   currentState = { ...currentState, pendingConfirm: null };
   m.redraw();
 };
@@ -263,7 +267,19 @@ const openAgentTab = async (tabId, windowId) => {
   const focused = await focusBrowserTab(browser, tabId, windowId);
   if (!focused) console.warn('[sidepanel] focus tab failed');
 };
-const uiActions = { loadActor, confirmAnswer, dismissNotice, requestDebugger, openAgentTab };
+
+// A card action types the user's likely next message INTO the composer (§4c) -
+// it never sends. The nonce makes each click a fresh one-shot for the InputBar
+// to consume; the user edits or discards like any draft.
+let prefillNonce = 0;
+/** @param {string} text */
+const prefillComposer = (text) => {
+  if (typeof text !== 'string' || !text.trim()) return;
+  prefillNonce += 1;
+  currentState = { ...currentState, composerPrefill: { text, nonce: prefillNonce } };
+  m.redraw();
+};
+const uiActions = { loadActor, confirmAnswer, dismissNotice, requestDebugger, openAgentTab, prefillComposer };
 
 // ---- brand hand-off: is the options tab the active one? -------------------
 //

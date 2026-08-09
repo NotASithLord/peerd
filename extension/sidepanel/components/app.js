@@ -287,6 +287,24 @@ const ACTION_CLASS_LABEL = {
   external: 'a side-effecting',
 };
 
+// The session button says WHAT a standing grant covers (UI redesign §4d): the
+// noun comes from the action class the prompt already carries, and the scope
+// line mirrors confirm-grant-key.js - origin present → the grant is bound to
+// that origin; absent → it really does cover any site this chat touches. A
+// user who reads "for session" as "for this site" approves once and stops
+// being asked everywhere; the label was the only place to catch that.
+/** @type {Readonly<Record<string, string>>} */
+const ACTION_CLASS_GRANT_NOUN = Object.freeze({
+  workspace_write: 'writes',
+  shell: 'code runs',
+  external: 'actions',
+});
+/** @param {ConfirmPrompt} prompt */
+const sessionGrantNoun = (prompt) => (prompt.actionClass ? ACTION_CLASS_GRANT_NOUN[prompt.actionClass] : undefined)
+  ?? (prompt.kind === 'web_write' ? 'writes' : 'actions');
+/** @param {string[]} origins */
+const sessionGrantScope = (origins) => `this chat, ${origins.length ? 'this site' : 'any site'}`;
+
 /** @type {Readonly<Record<string, string>>} */
 const SITE_AUTH_LABEL = Object.freeze({
   session: 'a signed-in browser session was observed',
@@ -379,15 +397,54 @@ const confirmationDialogAttrs = (answer, state) => {
  *   only sso — the card must then NOT vouch for where the button leads.
  * @property {string | null} [idpOrigin] login only: the exact system-derived IdP
  *   origin authorized by a verified SSO confirmation.
+ * @property {number} [raisedAt]  when the coordinator raised the prompt - the
+ *   90s hint times against this so replayed prompts share the real deadline.
+ */
+
+/**
+ * @typedef {Object} ConfirmModalState
+ * @property {HTMLElement | null} [returnFocus]
+ * @property {string} [hintPromptId]
+ * @property {boolean} [showTimeoutHint]
+ * @property {ReturnType<typeof setTimeout>} [timeoutHintTimer]
  */
 // Exported so the full-page home renders the SAME permission prompt (DESIGN-12
 // full equality) — a confirm broadcast must be answerable on whichever surface
 // is open, not just the side panel.
+// The 90-second hint (§4e): a quiet line before the 120s auto-deny - NOT a
+// countdown, which would turn a security decision into a timed exam. Timed
+// from raisedAt so a late-joining surface (replay) hints on the same clock.
+// why armed per PROMPT ID, not oninit: the modal is mounted unkeyed and the
+// reducer overwrites pendingConfirm in place, so a second prompt can replace
+// the first without a remount - it must get its own timer on its own clock,
+// never inherit the previous prompt's.
+/** @param {ConfirmModalState} state @param {ConfirmPrompt} prompt */
+const armTimeoutHint = (state, prompt) => {
+  if (state.hintPromptId === prompt.id) return;
+  state.hintPromptId = prompt.id;
+  if (state.timeoutHintTimer) clearTimeout(state.timeoutHintTimer);
+  const raisedAt = typeof prompt.raisedAt === 'number' ? prompt.raisedAt : Date.now();
+  const delay = Math.max(0, raisedAt + 90_000 - Date.now());
+  state.showTimeoutHint = delay === 0;
+  state.timeoutHintTimer = setTimeout(() => {
+    state.showTimeoutHint = true;
+    m.redraw();
+  }, delay);
+};
+
 export const ConfirmModal = {
-  /** @param {{ attrs: { prompt: ConfirmPrompt, uiActions?: UiActions }, state: { returnFocus?: HTMLElement | null } }} vnode */
+  /** @param {{ state: ConfirmModalState }} vnode */
+  onremove(vnode) {
+    if (vnode.state.timeoutHintTimer) clearTimeout(vnode.state.timeoutHintTimer);
+  },
+  /** @param {{ attrs: { prompt: ConfirmPrompt, uiActions?: UiActions }, state: ConfirmModalState }} vnode */
   view: (vnode) => {
     const { prompt, uiActions } = vnode.attrs;
-    const dialogState = /** @type {{ returnFocus?: HTMLElement | null }} */ (vnode.state);
+    const dialogState = /** @type {ConfirmModalState} */ (vnode.state);
+    armTimeoutHint(dialogState, prompt);
+    const timeoutHint = dialogState.showTimeoutHint
+      ? m('p.muted.confirm-timeout-hint', { role: 'status' }, 'No answer counts as Reject.')
+      : null;
     /** @param {string} a */
     const answer = (a) => uiActions?.confirmAnswer?.(prompt.id, a);
     const origins = Array.isArray(prompt.origins) ? prompt.origins.filter(Boolean) : [];
@@ -447,6 +504,7 @@ export const ConfirmModal = {
               ? `peerd never sees your password and could not confirm this button’s destination — only continue if you trust ${host}. You finish signing in yourself.`
               : `peerd never sees your password. You finish signing in yourself — with your device${provider ? ` or ${provider}` : ''}.`),
           ]),
+          timeoutHint,
           m('.peerd-modal-actions', [
             m('button.secondary', { type: 'button', 'data-confirm-reject': '', onclick: () => answer('no') }, 'Cancel'),
             m('button', {
@@ -546,6 +604,17 @@ export const ConfirmModal = {
         origins.length
           ? m('p.muted', { style: 'font-size:12px;' }, `On: ${origins.join(', ')}`)
           : null,
+        // The absence is explained, not offered (§4d): when a helper raised the
+        // prompt the session button is correctly hidden - but hidden SILENTLY,
+        // the user cannot tell a missing option from a missing feature.
+        // "content", not the design's "pages": ephemeral covers EVERY actor
+        // kind - a Notebook or VM helper is steered by instance output, not
+        // pages - and the sentence must stay true for all of them.
+        prompt.ephemeral
+          ? m('p.muted.confirm-ephemeral-note',
+              'A helper asked for this, and a helper can be steered by the content it reads - so this one can only be approved a single time.')
+          : null,
+        timeoutHint,
         m('.peerd-modal-actions', [
           m('button.secondary', { type: 'button', 'data-confirm-reject': '', onclick: () => answer('no') }, 'Reject'),
           // why prompt.ephemeral hides it rather than disabling it: an actor's
@@ -554,10 +623,17 @@ export const ConfirmModal = {
           // grant would silence the next prompt). Offering the button anyway
           // gives the user a control that reads as "stop asking me" and does
           // nothing — worse than not offering it, because they stop looking for
-          // another way out.
+          // another way out. The quiet line above the actions says WHY it is
+          // missing. a2a keeps the legacy label: its grant is peer-scoped and
+          // the body copy explains it by that name.
           isMemory || isSiteClient || prompt.ephemeral
             ? null
-            : m('button.secondary', { type: 'button', onclick: () => answer('yes_session') }, 'Allow for session'),
+            : prompt.tool === 'a2a_contact' || prompt.tool === 'a2a_reply'
+              ? m('button.secondary', { type: 'button', onclick: () => answer('yes_session') }, 'Allow for session')
+              : m('button.secondary.confirm-session-grant', { type: 'button', onclick: () => answer('yes_session') }, [
+                  `Allow all ${sessionGrantNoun(prompt)}`,
+                  m('span.confirm-grant-scope', sessionGrantScope(origins)),
+                ]),
           m('button', { type: 'button', onclick: () => answer('yes_once') },
             isMemory ? 'Save' : isSiteClient ? (p.op === 'delete' ? 'Delete client' : 'Save client') : 'Allow once'),
         ]),

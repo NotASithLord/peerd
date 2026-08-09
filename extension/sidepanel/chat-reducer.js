@@ -99,6 +99,8 @@
  * @property {ReadonlyArray<{ id: number, text?: string, action?: any }>} notices
  * @property {any} agentTab
  * @property {ReadonlyArray<any>} agentTabEvents
+ * @property {ReadonlyArray<{ id: string, sessionId: string|null, text: string, at: number }>} confirmEvents
+ * @property {{ text: string, nonce: number } | null} [composerPrefill]
  * @property {Readonly<Record<string, { stdout: string, stderr: string }>>} vmStreams
  * @property {{ byToolUse: Record<string, string>, sessions: Record<string, SpawnedSession> }} spawned
  * @property {Readonly<Record<string, { sessionId?: string, kind?: string, instanceId?: string, name?: string, fromIndex?: number, messages?: any[], streaming?: boolean, error?: string|null, aborted?: boolean, outcomeKnown?: boolean, cost?: any }>>} actors
@@ -187,6 +189,14 @@ export const INITIAL_STATE = Object.freeze({
   // continues (DECISIONS #26 / the owner's call — replaces the old bright sticky
   // card). Each: { key, sessionId, tabId, windowId, kind, name, label, anchorId }.
   agentTabEvents: Object.freeze([]),
+  // Self-settled / other-surface confirm outcomes as quiet transcript rows
+  // (§4e) - [{ id, sessionId, text, at }]. Live entries fold in from
+  // confirm/resolved outcomes; entries that happened while no surface was open
+  // arrive via the snapshot's confirmSettleNotes. Deduped by prompt id.
+  confirmEvents: Object.freeze([]),
+  // A card action's one-shot composer prefill (§4c) - { text, nonce } | null,
+  // surface-local (set by uiActions.prefillComposer, consumed by InputBar).
+  composerPrefill: null,
   // Streaming stdout/stderr per in-flight vm_boot, keyed by toolUseId.
   vmStreams: Object.freeze({}),
   // Actor transcripts for inline rendering under actor_create tool
@@ -204,6 +214,37 @@ export const INITIAL_STATE = Object.freeze({
   // view. goal/state pushes set/clear each entry.
   goalRuns: Object.freeze({}),
 });
+
+// One quiet sentence per confirm settle (§4e - the four undrawn states). The
+// wording is fixed, not composed: these are the shipped strings the redesign
+// specifies, one per way a prompt can end without this surface's click.
+/** @param {{ cause?: string, answer?: string, via?: string|null }} outcome
+ *  @returns {string|null} */
+const confirmSettleText = ({ cause, answer, via }) => {
+  if (cause === 'timeout') return 'Not approved - no answer in two minutes.';
+  if (cause === 'unreachable') return 'Not approved - peerd wasn’t open to ask.';
+  if (cause === 'stop' || cause === 'abort') return 'Not approved - you stopped the turn.';
+  if (cause === 'answer') {
+    const verdict = answer === 'no' ? 'Not approved'
+      : answer === 'yes_session' ? 'Approved for this chat' : 'Approved once';
+    return `${verdict}, from the ${via === 'home' ? 'home tab' : 'side panel'}.`;
+  }
+  return null;
+};
+
+// Append one settle line, deduped by prompt id (a live broadcast and a later
+// snapshot replay must not double-report the same settle). Kept ordered by
+// time - a snapshot can replay an OLD settle after newer live ones, and an
+// out-of-order append would render it as the freshest row. The cap is well
+// above the SW's per-session note cap so eviction here can't resurrect
+// still-snapshotted notes as fresh.
+/**
+ * @param {ReadonlyArray<{ id: string, sessionId: string|null, text: string, at: number }>} events
+ * @param {{ id: string, sessionId: string|null, text: string, at: number }} event
+ */
+const appendConfirmEvent = (events, event) => (events.some((e) => e.id === event.id)
+  ? events
+  : [...events, event].sort((a, b) => a.at - b.at).slice(-100));
 
 // The turn a tool_use belongs to: find the assistant message carrying it (by tool_use
 // id), then walk back to the nearest non-synthetic, non-toolResult-only user message —
@@ -604,7 +645,20 @@ export const reduceChat = (state, msg) => {
               ? reconcileSpawned(state.spawned, msg.state.spawned)
               : state.spawned,
           };
+      // Confirm settles that happened while NO surface was open (timeout /
+      // stop / closed panel) arrive only here, as snapshot notes - fold them
+      // into the transcript lines, deduped against any live broadcasts seen.
+      const settleNotes = Array.isArray(msg.state?.confirmSettleNotes) ? msg.state.confirmSettleNotes : [];
+      const snapshotSid = msg.state?.session?.sessionId ?? null;
+      // Events keep their sessionId and render filtered by it, so a chat
+      // switch needs no pruning - the cap bounds growth.
+      let confirmEvents = state.confirmEvents;
+      for (const note of settleNotes) {
+        const text = confirmSettleText(note);
+        if (text) confirmEvents = appendConfirmEvent(confirmEvents, { id: note.id, sessionId: snapshotSid, text, at: note.at ?? Date.now() });
+      }
       return { ...state, ...msg.state, ...pruneProjections, pendingConfirm: state.pendingConfirm,
+        confirmEvents,
         lastError: keepSpendError ? 'spend-limit-reached' : null, rateLimit: null, cost: { ...state.cost,
         session: msg.state?.session?.cost ?? state.cost.session,
         limitUsd: msg.state?.settings?.spendLimitUsd ?? state.cost.limitUsd,
@@ -658,9 +712,32 @@ export const reduceChat = (state, msg) => {
       return { ...applyError(state, msg), rateLimit: null };
     case 'confirm/request':
       return { ...state, pendingConfirm: msg.prompt };
-    case 'confirm/resolved':
-      // Answered on another surface (DESIGN-12) — dismiss the same prompt.
-      return state.pendingConfirm?.id === msg.id ? { ...state, pendingConfirm: null } : state;
+    case 'confirm/resolved': {
+      // Dismiss the same prompt when displayed (DESIGN-12), and record the
+      // outcome line (§4e) whether or not THIS prompt was the one on screen -
+      // with many pending prompts a settle for an undisplayed one must still
+      // reach the transcript. The one suppression: the surface that ANSWERED
+      // (outcome.via === the surface this fold is for) - its own click is its
+      // own feedback.
+      const outcome = /** @type {{ cause?: string, answer?: string, via?: string|null, sessionId?: string|null } | undefined} */ (msg.outcome);
+      const mine = outcome?.cause === 'answer' && outcome?.via != null
+        && outcome.via === /** @type {{ confirmSurface?: string }} */ (msg).confirmSurface;
+      const text = outcome && !mine ? confirmSettleText(outcome) : null;
+      const matches = state.pendingConfirm?.id === msg.id;
+      if (!matches && !text) return state;
+      return {
+        ...state,
+        pendingConfirm: matches ? null : state.pendingConfirm,
+        confirmEvents: text
+          ? appendConfirmEvent(state.confirmEvents, {
+              id: /** @type {string} */ (msg.id),
+              sessionId: outcome?.sessionId ?? state.session.sessionId,
+              text,
+              at: Date.now(),
+            })
+          : state.confirmEvents,
+      };
+    }
     case 'turn/system-note':
       return { ...state, notices: [...state.notices,
         { id: Date.now() + Math.random(), text: msg.text, action: msg.action ?? null }].slice(-3) };

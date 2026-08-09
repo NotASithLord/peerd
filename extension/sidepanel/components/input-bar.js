@@ -64,9 +64,17 @@ import { CostChip } from './cost-meter.js';
  * @property {string|null} attachError
  * @property {HTMLInputElement|null} fileInputEl
  * @property {string|null} [sendAccent]
+ * @property {(() => void)|null} [resizeListener]
  */
 
 const CHAT_INPUT_TARGET = 'chat-input';
+
+// The last composerPrefill nonce adopted (§4c). MODULE-level, not component
+// state: the surface never clears composerPrefill, and InputBar unmounts on
+// ordinary navigation (chats list, home view switches) - a marker on vnode
+// state would die with it and the remounted bar would re-adopt the stale
+// prefill over whatever chat's saved draft is now in view.
+let consumedPrefillNonce = 0;
 
 // The five brand custom props (sidepanel :root — same palette as
 // shared/brand.css). The send disc draws ONE of these at random per
@@ -124,6 +132,16 @@ const fileToBase64 = (file) => new Promise((resolve, reject) => {
   r.onerror = () => reject(r.error ?? new Error(`could not read ${file.name}`));
   r.readAsDataURL(file);
 });
+
+// Grow the textarea to fit its content on every redraw. why: a textarea
+// never grows on its own - without this the box stays at its two-row
+// minimum and any longer draft hides behind an inner scrollbar. The
+// CSS min/max-height still bound it; past the max the box scrolls.
+/** @param {HTMLTextAreaElement} el */
+const autosize = (el) => {
+  el.style.height = 'auto';
+  el.style.height = `${el.scrollHeight}px`;
+};
 
 // Reset the palette to closed/empty.
 /** @param {InputBarState} ui */
@@ -237,6 +255,17 @@ export const InputBar = {
       ui.attachments = [];
       ui.attachError = null;
       ui._sid = sid;
+    }
+    // §4c one-shot prefill: a card action typed the user's likely next message
+    // into the draft. Nonce-guarded so one click adopts once - after that it is
+    // an ordinary draft the user edits, sends, or deletes. It never sends.
+    const prefill = state.composerPrefill;
+    if (prefill && prefill.nonce !== consumedPrefillNonce) {
+      consumedPrefillNonce = prefill.nonce;
+      ui.value = prefill.text;
+      ui.transcriptBaseline = prefill.text;
+      saveDraft(sid, prefill.text);
+      requestAnimationFrame(() => ui.el?.focus());
     }
     const hasKey = state.providers?.hasKey;
     // Attachments are Anthropic-only (image/document content blocks).
@@ -520,7 +549,23 @@ export const InputBar = {
             'aria-expanded': paletteOpen ? 'true' : 'false',
             'aria-controls': paletteOpen ? 'composer-palette' : undefined,
             'aria-activedescendant': activeDesc,
-            oncreate: (/** @type {{ dom: HTMLTextAreaElement }} */ vnode) => { ui.el = vnode.dom; },
+            oncreate: (/** @type {{ dom: HTMLTextAreaElement }} */ vnode) => {
+              ui.el = vnode.dom;
+              autosize(vnode.dom);
+              // why a window listener: resizing the panel re-wraps the draft,
+              // which changes its content height - and Mithril does not
+              // redraw on resize, so no onupdate would fire.
+              ui.resizeListener = () => autosize(vnode.dom);
+              window.addEventListener('resize', ui.resizeListener);
+            },
+            onremove: () => {
+              if (ui.resizeListener) window.removeEventListener('resize', ui.resizeListener);
+              ui.resizeListener = null;
+            },
+            // why onupdate: every path that changes the value redraws
+            // (typing, voice chunks, palette commits, chat switches), so
+            // resizing here keeps the height in step with all of them.
+            onupdate: (/** @type {{ dom: HTMLTextAreaElement }} */ vnode) => autosize(vnode.dom),
             onkeydown: onKeydown,
             onkeyup: refreshTrigger,
             onclick: refreshTrigger,

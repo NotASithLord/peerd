@@ -236,10 +236,11 @@ export const makeVaultRoutes = (deps) => {
     // --- confirmation ---
     // The side panel posts the user's answer to a pending confirm prompt;
     // we resolve the waiting Promise so the dispatcher proceeds (or blocks).
-    'confirm/answer': async ({ id, answer }) => {
+    'confirm/answer': async ({ id, answer, surface }) => {
       // resolve → settle → onSettled broadcasts confirm/resolved to every surface
-      // (DESIGN-12), so no explicit broadcast is needed here.
-      confirmCoordinator.resolve(id, answer);
+      // (DESIGN-12), so no explicit broadcast is needed here. `surface` rides the
+      // outcome so the surface that did NOT answer can say who decided (§4e).
+      confirmCoordinator.resolve(id, answer, typeof surface === 'string' ? surface : null);
       return { ok: true };
     },
   };

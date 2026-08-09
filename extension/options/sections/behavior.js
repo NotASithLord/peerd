@@ -47,6 +47,7 @@ export const BehaviorSection = {
     const toggleRow = ({ id, label, on, busyKey, summary, why, apply, badge = null, children = null }) => {
       const busy = !!ui[busyKey];
       return settingsRow({
+        id,
         label,
         pill: busy ? '…' : on ? 'ON' : 'OFF',
         badge,
@@ -95,6 +96,7 @@ export const BehaviorSection = {
       }),
 
       settingsRow({
+        id: 'web-writes',
         label: 'Confirm before sending data out',
         pill: ui.webWriteBusy ? '…' : webWritesOn ? 'ON' : 'OFF',
         summary: ui.webWriteBusy ? 'Saving…' : webWritesOn
@@ -163,6 +165,7 @@ export const BehaviorSection = {
           apply: () => send({ type: 'settings/update', patch: { advancedAutomationEnabled: !aaOn } }),
         })
         : settingsRow({
+          id: 'advanced-automation',
           label: 'Advanced automation',
           pill: 'N/A',
           summary: 'Not available in this browser — Firefox has no Chrome debugger API.',
@@ -197,6 +200,7 @@ export const BehaviorSection = {
 
     const behaviorRows = [
       settingsRow({
+        id: 'front-door',
         label: 'Toolbar button',
         summary: frontDoor === 'panel'
           ? 'Opens the chat in the side panel, next to the page you’re on.'
@@ -391,6 +395,7 @@ export const BehaviorSection = {
       }),
 
       settingsRow({
+        id: 'surface',
         label: 'Web actor: action surface',
         badge: 'MODE',
         summary: surface === 'code'

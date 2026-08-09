@@ -170,3 +170,58 @@ describe('confirm coordinator — declineSession (turn aborted: Stop / steer)', 
     expect(await p).toBe('yes_once');
   });
 });
+
+describe('confirm coordinator - settle outcomes (§4e)', () => {
+  test('a user answer carries cause answer + the answering surface', async () => {
+    const outcomes: any[] = [];
+    let pushed: any = null;
+    const c = makeConfirmCoordinator({
+      notifySidePanel: (p) => { pushed = p; },
+      onSettled: (_id, outcome) => outcomes.push(outcome),
+    });
+    const p = c.confirm({ tool: 'click', origins: [], sideEffect: 'write', sessionId: 's1' } as any);
+    c.resolve(pushed.id, 'yes_once' as any, 'home');
+    expect(await p).toBe('yes_once');
+    expect(outcomes).toEqual([{ answer: 'yes_once', cause: 'answer', via: 'home', sessionId: 's1' }]);
+  });
+
+  test('the deadline settle is cause timeout', async () => {
+    const outcomes: any[] = [];
+    const c = makeConfirmCoordinator({
+      notifySidePanel: () => {},
+      timeoutMs: 10,
+      onSettled: (_id, outcome) => outcomes.push(outcome),
+    });
+    const p = c.confirm({ tool: 'click', origins: [], sideEffect: 'write', sessionId: 's1' } as any);
+    expect(await p).toBe('no');
+    expect(outcomes[0]?.cause).toBe('timeout');
+    expect(outcomes[0]?.via).toBe(null);
+  });
+
+  test('declineSession (Stop) is cause stop; an operation abort is cause abort', async () => {
+    const outcomes: any[] = [];
+    const controller = new AbortController();
+    const c = makeConfirmCoordinator({
+      notifySidePanel: () => {},
+      onSettled: (_id, outcome) => outcomes.push(outcome),
+    });
+    const p1 = c.confirm({ tool: 'click', origins: [], sideEffect: 'write', sessionId: 's1' } as any);
+    c.declineSession('s1');
+    expect(await p1).toBe('no');
+    const p2 = c.confirm({ tool: 'click', origins: [], sideEffect: 'write', sessionId: 's2' } as any, controller.signal);
+    controller.abort();
+    expect(await p2).toBe('no');
+    expect(outcomes.map((o) => o.cause)).toEqual(['stop', 'abort']);
+  });
+
+  test('the prompt is stamped raisedAt so a surface can time the 90s hint', async () => {
+    let pushed: any = null;
+    const c = makeConfirmCoordinator({ notifySidePanel: (p) => { pushed = p; } });
+    const before = Date.now();
+    const p = c.confirm({ tool: 'click', origins: [], sideEffect: 'write', sessionId: 's1' } as any);
+    expect(typeof pushed.raisedAt).toBe('number');
+    expect(pushed.raisedAt).toBeGreaterThanOrEqual(before);
+    c.resolve(pushed.id, 'no' as any);
+    expect(await p).toBe('no');
+  });
+});
