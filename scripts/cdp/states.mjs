@@ -2291,6 +2291,45 @@ export const STATES = [
     },
   },
 
+  // --- rendered: unknown-outcome approval names its immutable claim --------
+  {
+    name: 'unknown-outcome-confirm', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ConfirmModal } = await import('/sidepanel/components/app.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-unknown-outcome-confirm';
+          document.body.appendChild(host);
+          m.render(host, m(ConfirmModal, { prompt: {
+            id: 'e2e-unknown-outcome', tool: 'submit_payment',
+            actionClass: 'external', sideEffect: 'mutate_external',
+            lifecycleTarget: 'https://payments.example',
+            note: 'A matching earlier action has an unknown outcome. Verify the target before approving this repeat.',
+            summary: 'submit_payment({ orderId: "order-7" })', origins: [],
+          } }));
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => {
+          const claim = document.querySelector('#e2e-unknown-outcome-confirm [aria-label="Unknown-outcome repeat approval"]');
+          return claim ? {
+            labels: [...claim.querySelectorAll('span')].map((node) => node.textContent),
+            values: [...claim.querySelectorAll('code')].map((node) => node.textContent),
+          } : null;
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('unknown-outcome consent shows the exact bound target and action',
+          JSON.stringify(rendered?.labels) === JSON.stringify(['Exact target', 'Action'])
+            && JSON.stringify(rendered?.values)
+              === JSON.stringify(['https://payments.example', 'submit_payment']),
+          JSON.stringify(rendered));
+        await rec.shot('unknown-outcome-confirm');
+      } finally {
+        await evalIn(ctx.page, `document.querySelector('#e2e-unknown-outcome-confirm')?.remove()`);
+      }
+    },
+  },
+
   // --- visual: persisted runnable site-client confirmation -----------------
   {
     name: 'site-client-confirm', kind: 'visual', phase: 'post-unlock',

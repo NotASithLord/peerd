@@ -2587,6 +2587,22 @@ button.tool-call-header:focus-visible {
   white-space: pre-wrap;
   word-break: break-word;
 }
+.lifecycle-confirm-target {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(127, 127, 127, 0.12);
+  font-size: 12px;
+}
+.lifecycle-confirm-target span { color: var(--fg-muted); }
+.lifecycle-confirm-target code {
+  overflow-wrap: anywhere;
+  color: var(--fg);
+}
 .confirm-modal .peerd-modal-actions { flex-wrap: wrap; }
 
 /* --- login consent card (the `login` tool, kind:'login') --------------

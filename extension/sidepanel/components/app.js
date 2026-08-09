@@ -354,6 +354,8 @@ const confirmationDialogAttrs = (answer, state) => {
  * @property {string} [note]   why this call is being confirmed when the reason
  *   is something other than the ordinary Plan/Act policy, such as a UGC-zone
  *   override or a repeat after an unknown outcome. Plain prose, rendered verbatim.
+ * @property {string} [lifecycleTarget] immutable target bound to an
+ *   unknown-outcome repeat approval; never derived from the current live tab
  * @property {boolean} [ephemeral]  this answer cannot become a standing grant —
  *   DESIGN-17 downgrades an actor's yes_session to yes_once. Set by the SW so
  *   the card does not offer a button that would do nothing.
@@ -383,6 +385,10 @@ export const ConfirmModal = {
     /** @param {string} a */
     const answer = (a) => uiActions?.confirmAnswer?.(prompt, a);
     const origins = Array.isArray(prompt.origins) ? prompt.origins.filter(Boolean) : [];
+    const lifecycleTarget = typeof prompt.lifecycleTarget === 'string'
+      && prompt.lifecycleTarget.length > 0
+      ? prompt.lifecycleTarget
+      : null;
 
     // Login consent — its own render path, because a sign-in is the highest-stakes
     // confirm we show and it needs a distinctive, obvious card. The real origin is
@@ -532,6 +538,16 @@ export const ConfirmModal = {
               // it always has.
               prompt.note
                 ? m('p.muted', { style: 'margin:0 0 8px;' }, prompt.note)
+                : null,
+              lifecycleTarget
+                ? m('.lifecycle-confirm-target', {
+                    'aria-label': 'Unknown-outcome repeat approval',
+                  }, [
+                    m('span', 'Exact target'),
+                    m('code', lifecycleTarget),
+                    m('span', 'Action'),
+                    m('code', prompt.tool || 'unknown tool'),
+                  ])
                 : null,
               m('pre.confirm-summary', prompt.summary ?? prompt.tool),
             ],

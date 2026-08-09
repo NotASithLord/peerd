@@ -640,12 +640,18 @@ describe('the full dispatcher path', () => {
 
   test('a matching unknown intent forces an honestly attributed actor confirmation', async () => {
     const { tracker } = makeTracker();
+    const beginTracking = tracker.beginTracking;
+    let boundApprovalClaim: any = null;
+    tracker.beginTracking = async (input: any) => {
+      boundApprovalClaim = input.confirmedIntent ?? boundApprovalClaim;
+      return beginTracking(input);
+    };
     let executions = 0;
     const prompts: any[] = [];
     registerTool({
       name: 'pay_once', description: 'x', schema: {},
       primitive: 'web', sideEffect: 'mutate_external', retryClass: 'E',
-      origins: () => [],
+      origins: () => ['https://payments.example/checkout'],
       execute: async () => {
         executions += 1;
         if (executions === 1) throw new Error('connection reset');
@@ -673,6 +679,8 @@ describe('the full dispatcher path', () => {
     expect(prompts).toHaveLength(1);
     expect(prompts[0].note).toContain('An actor in this chat');
     expect(prompts[0].note).toContain('outcome is unknown');
+    expect(prompts[0].lifecycleTarget).toBe('https://payments.example');
+    expect(prompts[0].lifecycleTarget).toBe(boundApprovalClaim.target);
   });
 
   test('a self-confirming tool can resolve unknown intent without losing its detailed consent', async () => {

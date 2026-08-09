@@ -250,6 +250,9 @@
  *   above the call summary. why a free-form line and not a code: the user is
  *   the audience, and the only thing that makes a confirm worth showing is that
  *   it explains itself.
+ * @property {string} [lifecycleTarget] immutable target from an unknown-outcome
+ *                                    approval claim; the confirmation UI shows
+ *                                    this exact value rather than a mutable live URL
  * @property {string | null} [sessionId]   exact execution session; lets the
  *                                    coordinator decline a turn's pending
  *                                    confirms when it is aborted

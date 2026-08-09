@@ -548,6 +548,12 @@ export const dispatchToolCall = async (call, ctx) => {
         // of this pre-dispatch UI payload so a later policy stop stays URL-free.
         origins: [],
         summary: summarizeCall(call.name, args),
+        // The repeat approval is bound to this immutable lifecycle claim, not
+        // the tab's mutable live URL. Show the exact value the tracker will
+        // consume so the user can verify what they are authorizing.
+        lifecycleTarget: lifecycleRepeatConfirm
+          ? lifecycleRepeatConfirm.target
+          : undefined,
         // why the note and not a longer summary: summarizeCall truncates every
         // string arg to 40 chars, so the card can't show the payload anyway —
         // what it CAN do is tell the user the one fact they can't see, which is
