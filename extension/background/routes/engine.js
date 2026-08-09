@@ -7,6 +7,34 @@
 // stable collaborators. Bodies verbatim, deps injected, imports none.
 
 /**
+ * Await work through the same cancellation boundary as the operation it gates.
+ * The underlying one-time hydration may still finish for other callers, but a
+ * stopped or expired run no longer waits for it or proceeds to egress.
+ * @template T
+ * @param {() => Promise<T>} start
+ * @param {AbortSignal | null} signal
+ * @returns {Promise<T>}
+ */
+const awaitWithinSignal = (start, signal) => {
+  if (!signal) return Promise.resolve().then(start);
+  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener('abort', onAbort);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve().then(start).then((value) => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(value);
+    }, (error) => {
+      signal.removeEventListener('abort', onAbort);
+      reject(error);
+    });
+  });
+};
+
+/**
  * @param {Record<string, any>} deps
  * @returns {Record<string, (msg?: any, sender?: any) => Promise<any>>}
  */
@@ -21,6 +49,9 @@ export const makeEngineRoutes = (deps) => {
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
     listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy,
   } = deps;
+  if (typeof awaitDenylistPolicy !== 'function') {
+    throw new TypeError('makeEngineRoutes: awaitDenylistPolicy is required');
+  }
 
   /** @type {Map<string, AbortController>} */
   const notebookFetchControllers = new Map();
@@ -52,13 +83,6 @@ export const makeEngineRoutes = (deps) => {
       if (typeof url !== 'string' || url.length === 0) {
         return { ok: false, error: 'url-required' };
       }
-      // why: the denylist seed hydrates ASYNC at SW boot, and webFetch's sync
-      // readiness check refuses a request that merely raced a cold start (the
-      // packaged-page probe hit exactly this in CI). Waiting for the one-time
-      // hydration here turns the race into a short delay; a genuinely failed
-      // load still rejects, so the boundary stays fail-closed.
-      try { await awaitDenylistPolicy?.(); }
-      catch (e) { return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }; }
       /** @type {AbortController | null} */
       let runController = null;
       /** @type {AbortSignal | null} */
@@ -106,6 +130,15 @@ export const makeEngineRoutes = (deps) => {
       // vmHttpFetch layers the IDB GET cache + optional git-auth on top; noCache
       // (module-source fetches) bypasses that cache so every run is re-audited.
       try {
+        // why: hydration is part of the egress operation, not a preflight outside
+        // it. Admit the run and arm Stop/deadline first, then await policy through
+        // that signal. A stopped or expired run cannot reach vmHttpFetch even if
+        // the shared hydration later succeeds.
+        await awaitWithinSignal(
+          awaitDenylistPolicy,
+          runController?.signal ?? null,
+        );
+        if (runController?.signal.aborted) return { ok: false, error: 'aborted' };
         const resp = await vmHttpFetch({
           url, method, headers, body, gitAuth, noCache: noCache === true,
           ...(runController ? { signal: runController.signal } : {}),
@@ -116,8 +149,10 @@ export const makeEngineRoutes = (deps) => {
         return await applyWebExtract(resp, extract, url);
       } catch (e) {
         const ev = /** @type {{ name?: string, message?: string }} */ (e);
-        return { ok: false, error: ev?.name === 'EgressDeniedError'
-          ? `denylisted: ${ev.message}` : (ev?.message ?? String(e)) };
+        return { ok: false, error: ev?.name === 'AbortError'
+          ? 'aborted'
+          : ev?.name === 'EgressDeniedError'
+            ? `denylisted: ${ev.message}` : (ev?.message ?? String(e)) };
       } finally {
         if (deadlineTimer) clearTimeout(deadlineTimer);
         if (sourceSignal && onAbort) sourceSignal.removeEventListener('abort', onAbort);

@@ -54,10 +54,15 @@ const baseDeps = (over: any = {}) => ({
   // The SW always injects the extract post-step (a passthrough when extract is
   // absent — that contract is pinned in tests/shared/fetch-extract.test.ts).
   applyWebExtract: async (resp: any) => resp,
+  awaitDenylistPolicy: async () => {},
   ...over,
 });
 
 describe('sw/web-fetch', () => {
+  test('denylist hydration is a required route dependency', () => {
+    expect(() => makeEngineRoutes(baseDeps({ awaitDenylistPolicy: undefined })))
+      .toThrow('awaitDenylistPolicy is required');
+  });
   test('rejects empty url', async () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['sw/web-fetch']({ url: '' })).toEqual({ ok: false, error: 'url-required' });
@@ -109,7 +114,7 @@ describe('sw/web-fetch', () => {
     }));
     expect(await r['sw/web-fetch']({ url: 'https://x' })).toEqual({
       ok: false,
-      error: 'The sensitive-origin policy is unavailable. Tool execution is paused.',
+      error: 'The sensitive-origin policy is unavailable. Network access is blocked.',
     });
     expect(fetched).toBe(false);
   });
@@ -191,10 +196,60 @@ describe('sw/web-fetch', () => {
       url: 'https://example.com', runId: 'run-1', ownerSessionId: 'owner-1',
       deadlineAt: Date.now() + 10_000,
     }, { url: 'offscreen' });
-    await Promise.resolve();
+    for (let attempt = 0; attempt < 10 && !seenSignal; attempt += 1) await Promise.resolve();
+    expect(seenSignal).toBeDefined();
     controller.abort();
     expect(await pending).toEqual({ ok: false, error: 'aborted' });
     expect(seenSignal?.aborted).toBe(true);
+  });
+
+  test('Stop during unresolved denylist hydration admits then exits without egress', async () => {
+    const controller = new AbortController();
+    let hydrationStarted = false;
+    let fetched = false;
+    let admissions = 0;
+    const routes = makeEngineRoutes(baseDeps({
+      awaitDenylistPolicy: () => {
+        hydrationStarted = true;
+        return new Promise(() => {});
+      },
+      vmHttpFetch: async () => { fetched = true; return { ok: true }; },
+      isOffscreenSender: (sender: any) => sender?.url === 'offscreen',
+      scriptRuns: {
+        ownerFor: () => 'owner-1', allows: () => true,
+        admitOp: () => { admissions += 1; return true; },
+        signalFor: () => controller.signal,
+      },
+    }));
+    const pending = (routes['sw/web-fetch'] as any)({
+      url: 'https://example.com', runId: 'run-1', ownerSessionId: 'owner-1',
+      deadlineAt: Date.now() + 10_000,
+    }, { url: 'offscreen' });
+    await Promise.resolve();
+    expect(hydrationStarted).toBe(true);
+    expect(admissions).toBe(1);
+    controller.abort();
+    expect(await pending).toEqual({ ok: false, error: 'aborted' });
+    expect(fetched).toBe(false);
+  });
+
+  test('deadline during unresolved denylist hydration exits without egress', async () => {
+    let fetched = false;
+    const routes = makeEngineRoutes(baseDeps({
+      awaitDenylistPolicy: () => new Promise(() => {}),
+      vmHttpFetch: async () => { fetched = true; return { ok: true }; },
+      isOffscreenSender: (sender: any) => sender?.url === 'offscreen',
+      scriptRuns: {
+        ownerFor: () => 'owner-1', allows: () => true, admitOp: () => true,
+        signalFor: () => new AbortController().signal,
+      },
+    }));
+    const result = await (routes['sw/web-fetch'] as any)({
+      url: 'https://example.com', runId: 'run-1', ownerSessionId: 'owner-1',
+      deadlineAt: Date.now() + 10,
+    }, { url: 'offscreen' });
+    expect(result).toEqual({ ok: false, error: 'aborted' });
+    expect(fetched).toBe(false);
   });
 
   test('a Notebook can cancel only its own token-bound module fetch', async () => {
@@ -220,7 +275,8 @@ describe('sw/web-fetch', () => {
       url: 'https://modules.example/a.js', noCache: true,
       abortToken: 'token-1', notebookId: 'n1',
     }, sender);
-    await Promise.resolve();
+    for (let attempt = 0; attempt < 10 && !seenSignal; attempt += 1) await Promise.resolve();
+    expect(seenSignal).toBeDefined();
     expect(await (routes['sw/web-fetch-abort'] as any)(
       { abortToken: 'token-1', notebookId: 'n2' }, {
         tab: { id: 99, url: 'moz-extension://test/engine-tabs/notebook-tab/index.html#n2' },

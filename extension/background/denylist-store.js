@@ -16,7 +16,7 @@
 
 export class DenylistPolicyUnavailableError extends Error {
   constructor() {
-    super('The sensitive-origin policy is unavailable. Tool execution is paused.');
+    super('The sensitive-origin policy is unavailable. Network access is blocked.');
     this.name = 'DenylistPolicyUnavailableError';
   }
 }

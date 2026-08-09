@@ -399,7 +399,10 @@ const startProviderServer = async () => {
     const requestUrl = new URL(request.url ?? '/', `https://${host || 'localhost'}`);
     if (host === DNR_PUBLIC_HOST && request.method === 'GET'
         && requestUrl.pathname === REMOTE_MODULE_SLOW_STATUS_PATH) {
-      response.writeHead(200, { 'content-type': 'application/json' });
+      response.writeHead(200, {
+        'content-type': 'application/json',
+        'cache-control': 'no-store',
+      });
       response.end(JSON.stringify({ requests: slowModuleRequests }));
       return;
     }
@@ -3556,7 +3559,8 @@ return {
       });
     })().catch((error) => done({ error: error?.message || String(error) }));
   `, [notebookId, slowUrl, slowStatusUrl]);
-  assert(stoppedFetch?.abort?.stopped === true
+  assert(stoppedFetch?.sawRequest === true
+    && stoppedFetch?.abort?.stopped === true
     && stoppedFetch?.run?.result?.stopped === true
     && stoppedFetch.elapsedMs < 3_000
     && providerServer.slowModuleRequests === 1
