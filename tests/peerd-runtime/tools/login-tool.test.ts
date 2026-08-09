@@ -23,6 +23,10 @@ interface Over {
   inbound?: boolean;
   origin?: string;
   activeTab?: unknown;
+  authorizeAnswer?: boolean;
+  authorize?: (origin: string, signal?: AbortSignal) => Promise<boolean>;
+  tabsGet?: (id: number) => Promise<any>;
+  abortSignal?: AbortSignal;
 }
 
 const makeCtx = (over: Over = {}) => {
@@ -31,12 +35,13 @@ const makeCtx = (over: Over = {}) => {
     confirm: [] as any[],
     audit: [] as any[],
     cdp: [] as any[],
+    authorize: [] as string[],
   };
   const origin = over.origin ?? 'https://acct.example.com';
   const ctx: any = {
     session: { sessionId: 's1' },
     activeTab: over.activeTab ?? { id: 1, url: `${origin}/login`, origin },
-    tabs: { get: async (id: number) => ({ id, url: `${origin}/login` }) },
+    tabs: { get: over.tabsGet ?? (async (id: number) => ({ id, url: `${origin}/login` })) },
     denylist: [],
     scripting: {
       executeScript: async (opts: any) => {
@@ -59,11 +64,17 @@ const makeCtx = (over: Over = {}) => {
       },
     },
     confirm: async (p: any) => { calls.confirm.push(p); return over.confirmAnswer ?? 'no'; },
+    authorizeSignInOrigin: async (value: string, signal?: AbortSignal) => {
+      calls.authorize.push(value);
+      if (over.authorize) return over.authorize(value, signal);
+      return over.authorizeAnswer ?? true;
+    },
     audit: async (e: any) => { calls.audit.push(e); },
     domRefs: over.domRefs,
     debuggerPool: over.debuggerPool,
     settings: over.settings,
     inbound: over.inbound,
+    abortSignal: over.abortSignal,
     _calls: calls,
   };
   return { ctx, calls };
@@ -144,6 +155,63 @@ describe('login tool — the confirm is UNCONDITIONAL', () => {
     expect((r as any).error).toBe('login_declined');
     expect(calls.execute.filter((o) => o.func?.name === 'clickInjected').length).toBe(0);
     expect(calls.audit.length).toBe(0);
+    expect(calls.authorize.length).toBe(0);
+  });
+
+  test('confirmation binds the actor to the live relying-site origin', async () => {
+    const { ctx, calls } = makeCtx({ descriptor: ssoDescriptor, confirmAnswer: 'yes_once' });
+    const r = await loginTool.execute({ selector: '#signin' }, ctx);
+    expect(r.ok).toBe(true);
+    expect(calls.authorize).toEqual(['https://acct.example.com']);
+  });
+
+  test('a refused relying-site boundary performs no click', async () => {
+    const { ctx, calls } = makeCtx({
+      descriptor: verifiedSsoDescriptor,
+      domRefs: walkDomRefs,
+      confirmAnswer: 'yes_once',
+      authorizeAnswer: false,
+    });
+    const r = await loginTool.execute({ ref: '@e1' }, ctx);
+    expect(r.ok).toBe(false);
+    expect((r as any).error).toBe('login_origin_authority_refused');
+    expect(calls.execute.filter((o) => o.func?.name === 'clickInjected').length).toBe(0);
+  });
+
+  test('Stop during the post-confirm tab read cannot authorize or click', async () => {
+    const controller = new AbortController();
+    let tabReads = 0;
+    const { ctx, calls } = makeCtx({
+      descriptor: verifiedSsoDescriptor,
+      domRefs: walkDomRefs,
+      confirmAnswer: 'yes_once',
+      abortSignal: controller.signal,
+      tabsGet: async (id) => {
+        tabReads += 1;
+        if (tabReads === 2) controller.abort();
+        return { id, url: 'https://acct.example.com/login' };
+      },
+    });
+    const r = await loginTool.execute({ ref: '@e1' }, ctx);
+    expect(r.ok).toBe(false);
+    expect((r as any).error).toBe('login_aborted');
+    expect(calls.authorize).toEqual([]);
+    expect(calls.execute.filter((o) => o.func?.name === 'clickInjected').length).toBe(0);
+  });
+
+  test('Stop during origin authorization cannot click', async () => {
+    const controller = new AbortController();
+    const { ctx, calls } = makeCtx({
+      descriptor: verifiedSsoDescriptor,
+      domRefs: walkDomRefs,
+      confirmAnswer: 'yes_once',
+      abortSignal: controller.signal,
+      authorize: async () => { controller.abort(); return false; },
+    });
+    const r = await loginTool.execute({ ref: '@e1' }, ctx);
+    expect(r.ok).toBe(false);
+    expect((r as any).error).toBe('login_aborted');
+    expect(calls.execute.filter((o) => o.func?.name === 'clickInjected').length).toBe(0);
   });
 });
 
@@ -216,6 +284,7 @@ describe('login tool — post-confirm re-verification aborts on any change', () 
         },
       },
       confirm: async (p: any) => { calls.confirm.push(p); return 'yes_once'; },
+      authorizeSignInOrigin: async () => true,
       audit: async (e: any) => { calls.audit.push(e); },
       domRefs: walkDomRefs,
     };
@@ -249,6 +318,7 @@ describe('login tool — post-confirm re-verification aborts on any change', () 
         },
       },
       confirm: async (p: any) => { calls.confirm.push(p); return 'yes_once'; },
+      authorizeSignInOrigin: async () => true,
       audit: async (e: any) => { calls.audit.push(e); },
       domRefs: walkDomRefs,
     };

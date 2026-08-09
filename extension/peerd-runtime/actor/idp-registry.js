@@ -76,6 +76,31 @@ const IDP_SUFFIXES = Object.freeze([
   'jumpcloud.com',
 ]);
 
+/** @param {string} host */
+const hostIsKnownIdp = (host) => {
+  const normalized = host.toLowerCase().replace(/\.$/, '');
+  for (const origin of IDP_ORIGINS) {
+    if (new URL(origin).hostname === normalized) return true;
+  }
+  return IDP_SUFFIXES.some((suffix) => normalized === suffix || normalized.endsWith(`.${suffix}`));
+};
+
+/**
+ * Does this web URL use a host dedicated to authentication?
+ *
+ * Unlike `isKnownIdp`, this ignores scheme and port because browser cookies do.
+ * It is for sensitivity and custody only. It must never open an auth corridor.
+ *
+ * @param {unknown} input
+ * @returns {boolean}
+ */
+export const isKnownIdpHost = (input) => {
+  let u;
+  try { u = new URL(String(input ?? '')); } catch { return false; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  return hostIsKnownIdp(u.hostname);
+};
+
 /**
  * Is this landing a known identity provider?
  *
@@ -91,13 +116,14 @@ export const isKnownIdp = (input) => {
   try { u = new URL(String(input ?? '')); } catch { return false; }
   if (u.protocol !== 'https:') return false;
   const host = u.hostname.toLowerCase();
+  if (host.endsWith('.')) return false;
   // Compare on the canonical origin, so a default port, uppercase host or
-  // trailing dot can't slip past the exact set by spelling.
+  // host spelling cannot slip past the exact set.
   const origin = `https://${host}${u.port && u.port !== '443' ? `:${u.port}` : ''}`;
   if (IDP_ORIGINS.has(origin)) return true;
   // A non-default port on a vendor domain is not the vendor's login box.
   if (u.port && u.port !== '443') return false;
-  return IDP_SUFFIXES.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
+  return hostIsKnownIdp(host);
 };
 
 /** Exported for tests and for the settings surface that will eventually show it. */

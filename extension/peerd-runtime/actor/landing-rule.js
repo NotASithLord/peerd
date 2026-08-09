@@ -199,6 +199,16 @@ export const decideLanding = (state) => {
   }
 
   if (mode === 'roaming') {
+    // Dedicated sign-in origins are corridors, not destinations. Handoff would
+    // invite the orchestrator to mint a standalone site actor with authority
+    // over the user's identity provider. Only a bound relying-party actor may
+    // enter one, through the limited excursion below.
+    if (kind === 'named' && landingIsIdp) {
+      return {
+        action: 'end',
+        reason: 'this is a sign-in service that helpers may only visit while signing in to another site',
+      };
+    }
     // An unnameable host is never classified sensitive (the classifier refuses
     // it too), so roaming treats it as ordinary — consistent, and roaming holds
     // nothing to lose either way.

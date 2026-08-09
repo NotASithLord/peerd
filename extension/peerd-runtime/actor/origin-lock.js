@@ -49,6 +49,7 @@
 
 import { decideLanding, mayHoldCredentials } from './landing-rule.js';
 import { classifyOriginSensitivity, sameOrigin } from './origin-sensitivity.js';
+import { normalizeApiOrigin } from './web-actor.js';
 
 /**
  * @typedef {object} ActorOriginState
@@ -74,6 +75,7 @@ import { classifyOriginSensitivity, sameOrigin } from './origin-sensitivity.js';
  *   environment_changed report the orchestrator sees.
  * @param {(origin: string) => boolean} [deps.isUgcZone]
  * @param {(origin: string) => boolean} [deps.hasVaultSecret]
+ * @param {(origin: string) => boolean} [deps.isKnownIdp]
  * @param {() => ReadonlySet<string> | ReadonlyMap<string, any>} [deps.getLearned]
  * @param {(origin: string) => boolean} [deps.isIdp]
  * @param {() => number} [deps.now]
@@ -82,7 +84,7 @@ import { classifyOriginSensitivity, sameOrigin } from './origin-sensitivity.js';
 export const makeJudgeLanding = (deps) => {
   const {
     getState, saveState, onStop,
-    isUgcZone, hasVaultSecret, getLearned, isIdp, now = Date.now,
+    isUgcZone, hasVaultSecret, isKnownIdp, getLearned, isIdp, now = Date.now,
   } = deps;
 
   return async (url) => {
@@ -95,7 +97,7 @@ export const makeJudgeLanding = (deps) => {
     if (!state) return null;
 
     const sensitivity = classifyOriginSensitivity(url, {
-      isUgcZone, hasVaultSecret, learned: getLearned?.(),
+      isKnownIdp, isUgcZone, hasVaultSecret, learned: getLearned?.(),
     });
 
     const verdict = decideLanding({
@@ -184,11 +186,12 @@ export const makeJudgeLanding = (deps) => {
  * @param {() => string | undefined} deps.getOrigin  the live scope, normally `ctx.activeTab?.origin`
  * @param {(origin: string) => boolean} [deps.isUgcZone]
  * @param {(origin: string) => boolean} [deps.hasVaultSecret]
+ * @param {(origin: string) => boolean} [deps.isKnownIdp]
  * @param {() => ReadonlySet<string> | ReadonlyMap<string, any>} [deps.getLearned]
  * @returns {() => string | undefined}
  */
 export const makeCredentialScope = (deps) => {
-  const { getState, getOrigin, isUgcZone, hasVaultSecret, getLearned } = deps;
+  const { getState, getOrigin, isKnownIdp, isUgcZone, hasVaultSecret, getLearned } = deps;
   return () => {
     const origin = getOrigin();
     if (!origin) return undefined;
@@ -198,7 +201,7 @@ export const makeCredentialScope = (deps) => {
     // scope so a non-locked actor behaves exactly as it did before #251.
     if (!state) return origin;
     const sensitivity = classifyOriginSensitivity(origin, {
-      isUgcZone, hasVaultSecret, learned: getLearned?.(),
+      isKnownIdp, isUgcZone, hasVaultSecret, learned: getLearned?.(),
     });
     return mayHoldCredentials({
       mode: state.mode,
@@ -211,6 +214,53 @@ export const makeCredentialScope = (deps) => {
       : undefined;
   };
 };
+
+/**
+ * Turn a user-confirmed sign-in on a relying site into a bound actor.
+ *
+ * The login tool supplies the origin it read before consent. This authorizer
+ * independently reads the actor's owned tab after consent, so neither model
+ * bytes nor a stale tool-context snapshot can choose the boundary. Dedicated
+ * identity-provider hosts are transit only and can never become the owner.
+ *
+ * @param {object} deps
+ * @param {() => ActorOriginState | null} deps.getState
+ * @param {() => Promise<{ status: 'none' | 'unreadable' } | { status: 'live', url: string }>} deps.getLiveLanding
+ * @param {(patch: Partial<ActorOriginState>) => void | Promise<void>} deps.saveState
+ * @param {(origin: string) => boolean} [deps.isKnownIdp]
+ * @param {() => boolean} [deps.isCurrent]
+ * @param {(origin: string) => void | Promise<void>} [deps.onBound]
+ * @returns {(origin: string, signal?: AbortSignal) => Promise<boolean>}
+ */
+export const makeSignInOriginAuthorizer = ({
+  getState, getLiveLanding, saveState, isKnownIdp, isCurrent = () => true, onBound,
+}) =>
+  async (origin, signal) => {
+    if (signal?.aborted) return false;
+    const requested = normalizeApiOrigin(origin);
+    if (!requested || !requested.startsWith('https://') || isKnownIdp?.(requested) === true) return false;
+
+    const landing = await getLiveLanding()
+      .catch(() => ({ status: /** @type {'unreadable'} */ ('unreadable') }));
+    if (signal?.aborted) return false;
+    if (landing.status !== 'live' || !sameOrigin(landing.url, requested)) return false;
+
+    if (signal?.aborted || !isCurrent()) return false;
+    const state = getState();
+    if (!state) return false;
+    if (state.mode === 'bound') return sameOrigin(state.ownedOrigin, requested);
+    if (state.mode !== 'roaming') return false;
+
+    const durableWrite = saveState({
+      mode: 'bound',
+      ownedOrigin: requested,
+      provisional: false,
+      excursion: null,
+    });
+    await durableWrite;
+    try { await onBound?.(requested); } catch { /* audit is best-effort */ }
+    return true;
+  };
 
 /**
  * May this web actor touch the durable SITE CLIENT keyed by `targetOrigin`?
@@ -293,14 +343,21 @@ export const mayUseSiteClientOrigin = ({
  * relay one canonical comparison instead of two open-coded approximations.
  *
  * @param {string | null | undefined} ownedOrigin
+ * @param {object} [deps]
+ * @param {(origin: string) => boolean} [deps.isKnownIdp]
  * @returns {(targetOrigin: string) => boolean}
  */
-export const makeFixedSiteClientOriginGuard = (ownedOrigin) =>
-  (targetOrigin) => mayUseSiteClientOrigin({
-    state: { mode: 'bound', ownedOrigin: ownedOrigin ?? null },
-    targetOrigin,
-    tabStatus: 'none',
-  });
+export const makeFixedSiteClientOriginGuard = (ownedOrigin, { isKnownIdp } = {}) =>
+  (targetOrigin) => {
+    try {
+      if (isKnownIdp?.(ownedOrigin ?? '') === true || isKnownIdp?.(targetOrigin) === true) return false;
+    } catch { return false; }
+    return mayUseSiteClientOrigin({
+      state: { mode: 'bound', ownedOrigin: ownedOrigin ?? null },
+      targetOrigin,
+      tabStatus: 'none',
+    });
+  };
 
 /**
  * Build the synchronous state-only preliminary predicate carried by a
@@ -310,15 +367,16 @@ export const makeFixedSiteClientOriginGuard = (ownedOrigin) =>
  * @param {() => ActorOriginState | null} deps.getState
  * @param {(origin: string) => boolean} [deps.isUgcZone]
  * @param {(origin: string) => boolean} [deps.hasVaultSecret]
+ * @param {(origin: string) => boolean} [deps.isKnownIdp]
  * @param {() => ReadonlySet<string> | ReadonlyMap<string, any>} [deps.getLearned]
  * @returns {(origin: string) => boolean}
  */
-export const makeSiteClientOriginGuard = ({ getState, isUgcZone, hasVaultSecret, getLearned }) =>
+export const makeSiteClientOriginGuard = ({ getState, isKnownIdp, isUgcZone, hasVaultSecret, getLearned }) =>
   (origin) => mayAddressSiteClientOrigin({
     state: getState(),
     targetOrigin: origin,
     targetIsSensitive: classifyOriginSensitivity(origin, {
-      isUgcZone, hasVaultSecret, learned: getLearned?.(),
+      isKnownIdp, isUgcZone, hasVaultSecret, learned: getLearned?.(),
     }).sensitive,
   });
 
@@ -333,14 +391,15 @@ export const makeSiteClientOriginGuard = ({ getState, isUgcZone, hasVaultSecret,
  * @param {(url: string) => Promise<{ action: string } | null>} deps.judgeLanding
  * @param {(origin: string) => boolean} [deps.isUgcZone]
  * @param {(origin: string) => boolean} [deps.hasVaultSecret]
+ * @param {(origin: string) => boolean} [deps.isKnownIdp]
  * @param {() => ReadonlySet<string> | ReadonlyMap<string, any>} [deps.getLearned]
  * @returns {(origin: string) => Promise<boolean>}
  */
 export const makeSiteClientOriginAuthorizer = ({
-  getState, getLiveLanding, judgeLanding, isUgcZone, hasVaultSecret, getLearned,
+  getState, getLiveLanding, judgeLanding, isKnownIdp, isUgcZone, hasVaultSecret, getLearned,
 }) => async (origin) => {
   const targetIsSensitive = () => classifyOriginSensitivity(origin, {
-    isUgcZone, hasVaultSecret, learned: getLearned?.(),
+    isKnownIdp, isUgcZone, hasVaultSecret, learned: getLearned?.(),
   }).sensitive;
   if (!mayAddressSiteClientOrigin({
     state: getState(), targetOrigin: origin, targetIsSensitive: targetIsSensitive(),
@@ -384,12 +443,13 @@ export const makeSiteClientOriginAuthorizer = ({
  * @param {ActorOriginState | null | undefined} [input.durableState]
  * @param {string} input.targetOrigin
  * @param {(origin: string) => Promise<boolean>} [input.authorizeTabOrigin]
+ * @param {(origin: string) => boolean} [input.isKnownIdp]
  * @returns {Promise<boolean>}
  */
 export const authorizeSiteClientRelayOrigin = async ({
-  backing, instanceOrigin, durableState, targetOrigin, authorizeTabOrigin,
+  backing, instanceOrigin, durableState, targetOrigin, authorizeTabOrigin, isKnownIdp,
 }) => {
-  if (backing === 'api') return makeFixedSiteClientOriginGuard(instanceOrigin)(targetOrigin);
+  if (backing === 'api') return makeFixedSiteClientOriginGuard(instanceOrigin, { isKnownIdp })(targetOrigin);
   // Tab backing is historically represented by an absent field; only API
   // actors persist a backing value. Preserve that exact trusted record shape,
   // while refusing any unknown future spelling until it earns policy here.

@@ -140,6 +140,20 @@ describe('the report is useful, not just safe', () => {
     expect(text).toMatch(/user driving the tab/i);
   });
 
+  test('an IdP stop never suggests a standalone site helper', () => {
+    const text = describeLandingStop({
+      action: 'end',
+      reason: 'this is a sign-in service that helpers may only visit while signing in to another site',
+      from: null,
+      to: 'https://accounts.google.com/o/oauth2?state=secret',
+    });
+    expect(text).toContain('sign-in service');
+    expect(text).toContain("relying site already named in the user's request");
+    expect(text).toContain('If none was named');
+    expect(text).not.toContain('site:https://accounts.google.com');
+    expect(text).not.toContain('state=secret');
+  });
+
   test('an end with no owned origin still reads as a sentence', () => {
     const text = describeLandingStop({ action: 'end', reason: 'r', from: null, to: 'https://x.test/y' });
     expect(text).toContain('https://x.test');

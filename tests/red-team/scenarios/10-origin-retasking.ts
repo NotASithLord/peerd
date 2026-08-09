@@ -1,4 +1,4 @@
-// Scenario 10: retasking or minting a web actor through a moved tab (#251, #263).
+// Scenario 10: retasking or minting a web actor through a moved tab (#251, #263, #265).
 //
 // Scenario 09 covers the arc's other three layers and says, in its own header,
 // that this vector is deliberately absent because "its defense is issue #251,
@@ -36,7 +36,7 @@ import { decideLanding, mayHoldCredentials, MAX_EXCURSIONS } from '../../../exte
 import { classifyOriginSensitivity } from '../../../extension/peerd-runtime/actor/origin-sensitivity.js';
 import { decideNumericTabAuthority } from '../../../extension/peerd-runtime/actor/numeric-tab-authority.js';
 import { describeLandingStop } from '../../../extension/peerd-runtime/actor/origin-lock-report.js';
-import { isKnownIdp } from '../../../extension/peerd-runtime/actor/idp-registry.js';
+import { isKnownIdp, isKnownIdpHost } from '../../../extension/peerd-runtime/actor/idp-registry.js';
 
 interface Case {
   vector: string;      // what the attacker does
@@ -56,7 +56,86 @@ const numericRefusalSource = () => {
   return start >= 0 && end > start ? source.slice(start, end) : '';
 };
 
+const siteResolutionSource = () => {
+  const source = readFileSync(new URL('../../../extension/background/service-worker.js', import.meta.url), 'utf8');
+  const start = source.indexOf('const siteOrigin = parseSiteHandle(instanceId);');
+  const end = source.indexOf('// DESIGN-18', start);
+  return start >= 0 && end > start ? source.slice(start, end) : '';
+};
+
+const apiResolutionSource = () => {
+  const source = readFileSync(new URL('../../../extension/background/service-worker.js', import.meta.url), 'utf8');
+  const start = source.indexOf('const apiOrigin = normalizeApiOrigin(instanceId);');
+  const end = source.indexOf('const prefix = String(instanceId)', start);
+  return start >= 0 && end > start ? source.slice(start, end) : '';
+};
+
 const CORPUS: Case[] = [
+  {
+    vector: 'address a known identity provider by numeric tab id',
+    seeks: 'mint a standalone bound helper for the user\'s central sign-in session',
+    defense: 'identity providers are transit-only, with no successor handle',
+    check: () => {
+      const verdict = decideNumericTabAuthority('https://accounts.google.com/o/oauth2', {
+        policyReady: true,
+        isKnownIdp,
+      });
+      return {
+        denied: !verdict.allowed
+          && verdict.code === 'actor_identity_provider_transit_only'
+          && verdict.suggestedHandle === null,
+        evidence: verdict.allowed ? 'numeric authority granted' : `verdict=${verdict.code} successor=${verdict.suggestedHandle}`,
+      };
+    },
+  },
+  {
+    vector: 'address a known identity provider with an explicit site: handle',
+    seeks: 'bypass the numeric refusal and mint the same standalone authority directly',
+    defense: 'site resolution refuses IdPs before resolveSiteActor can mint',
+    check: () => {
+      const source = siteResolutionSource();
+      const check = source.indexOf('isKnownIdpHost(siteOrigin)');
+      const mint = source.indexOf('resolveSiteActor(siteOrigin');
+      return {
+        denied: check >= 0 && mint > check && source.includes('IDENTITY_PROVIDER_TRANSIT_ONLY_CODE'),
+        evidence: check >= 0 && mint > check ? 'IdP refusal precedes mint' : 'cannot prove pre-mint refusal',
+      };
+    },
+  },
+  {
+    vector: 'address a known identity provider as a bare API origin',
+    seeks: 'mint a tab-free helper with cookies, proof keys, or stored client custody',
+    defense: 'API resolution refuses IdP hosts before reconnect or mint',
+    check: () => {
+      const source = apiResolutionSource();
+      const check = source.indexOf('isKnownIdpHost(apiOrigin)');
+      const mint = source.indexOf('resolveApiActor(apiOrigin');
+      return {
+        denied: check >= 0 && mint > check && source.includes('IDENTITY_PROVIDER_TRANSIT_ONLY_CODE'),
+        evidence: check >= 0 && mint > check ? 'IdP refusal precedes API resolution' : 'cannot prove pre-mint refusal',
+      };
+    },
+  },
+  {
+    vector: 'roaming actor is redirected directly onto a known identity provider',
+    seeks: 'hold the IdP session or trigger a handoff that suggests standalone IdP authority',
+    defense: 'transit-only landing ends with no handoff and no session scope',
+    check: () => {
+      const origin = 'https://accounts.google.com';
+      const sensitivity = classifyOriginSensitivity(origin, { isKnownIdp: isKnownIdpHost });
+      const verdict = decideLanding({
+        mode: 'roaming', landing: `${origin}/o/oauth2`,
+        landingIsSensitive: sensitivity.sensitive, landingIsIdp: isKnownIdp(origin),
+      } as any);
+      const held = mayHoldCredentials({
+        mode: 'roaming', origin, originIsSensitive: sensitivity.sensitive,
+      } as any);
+      return {
+        denied: verdict.action === 'end' && !verdict.handoffTo && held === false,
+        evidence: `verdict=${verdict.action} handoff=${verdict.handoffTo ?? 'none'} scope=${held}`,
+      };
+    },
+  },
   {
     vector: 'ordinary page redirects to a learned signed-in origin before its numeric tab id is addressed',
     seeks: 'make the page-selected destination the owned origin of a new bound actor',
@@ -156,7 +235,7 @@ const CORPUS: Case[] = [
       const v = decideLanding({
         mode: 'bound', ownedOrigin: 'https://app.test',
         landing: 'https://accounts.google.com/o/oauth2/v2/auth',
-        landingIsSensitive: false, landingIsIdp: true,
+        landingIsSensitive: true, landingIsIdp: true,
         excursionsUsed: MAX_EXCURSIONS, now: 1000,
       } as any);
       return { denied: v.action === 'end', evidence: `verdict=${v.action} after ${MAX_EXCURSIONS} excursions` };
@@ -263,7 +342,7 @@ const CORPUS: Case[] = [
       const v = decideLanding({
         mode: 'bound', ownedOrigin: 'https://app.test',
         landing: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=x',
-        landingIsSensitive: false, landingIsIdp: true, excursionsUsed: 0, now: 1000,
+        landingIsSensitive: true, landingIsIdp: true, excursionsUsed: 0, now: 1000,
       } as any);
       return { denied: v.action === 'continue' && !!v.excursion, evidence: `verdict=${v.action} corridor=${!!v.excursion}` };
     },
@@ -299,7 +378,7 @@ const CORPUS: Case[] = [
 
 export const scenario: Scenario = {
   id: '10-origin-retasking',
-  title: 'Retasking or minting a web actor through a moved tab (issues #251 and #263)',
+  title: 'Retasking or minting a web actor through a moved tab (issues #251, #263, and #265)',
   adversary: 'malicious webpage, open redirect, or a hostile link on a trusted host',
   asset: "the user's live browser session on the sites they are signed in to",
   claim: 'A numeric tab id cannot turn a page-selected redirect destination into bound authority. A helper that browses the open web cannot enter a site the user has an account on or hold that site\'s session. A helper bound to one site cannot be moved off it except through a bounded sign-in corridor toward a dedicated identity provider. When a helper is stopped or numeric addressing is refused, what reaches the orchestrator names origins only. Ordinary browsing, genuine sign-ins, and apex-to-www redirects are unaffected.',
@@ -320,6 +399,7 @@ export const scenario: Scenario = {
       'origin lock: bound may not leave its owned origin',
       'excursion rule: opener-scoped, budgeted, lifetime-capped',
       'IdP registry: dedicated auth hosts only, anchored matching',
+      'identity providers are transit-only, never standalone actor destinations',
       'credential scope narrowed synchronously',
       'stop report carries origins, never attacker-controlled URLs',
     ]);

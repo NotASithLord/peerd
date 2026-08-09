@@ -657,7 +657,7 @@ Code: `peerd-runtime/actor/origin-lock.js` (`mayUseSiteClientOrigin`),
 scenario 13.
 
 <a id="inv-19"></a>
-### INV-19. A numeric tab id identifies location, not site authority
+### INV-19. Browser location does not grant site or identity-provider authority
 A numeric tab handle may bind an actor only to an ordinary origin observed by
 the browser after the durable sensitivity inputs are ready. If that tab is on a
 known signed-in origin, numeric resolution refuses before session creation,
@@ -665,6 +665,13 @@ mailbox persistence, model work, or page access. The only route to a bound actor
 for that origin is the explicit `site:<origin>` handle, used when the user's own
 request already targets the site. A redirect chosen by a page therefore cannot
 choose the origin that receives bound authority.
+
+A dedicated identity-provider origin is a third category: transit-only. It is
+sensitive for session and durable-client custody, but it cannot receive a
+roaming, numeric-tab, or standalone `site:` actor. A bound relying-party actor
+may enter it only through the existing opener-pinned, budgeted, time-limited
+sign-in excursion. This keeps real sign-in working without treating the user's
+identity provider as an ordinary destination.
 
 The resolver classifies the same canonical origin it passes to the mint
 function. The mint function does not read the tab again or replace that origin.
@@ -674,6 +681,7 @@ Refusals expose only the canonical origin and a machine-authored recovery rule.
 They never expose the path, query, title, or other page-authored text.
 
 Code: `peerd-runtime/actor/numeric-tab-authority.js`,
+`peerd-runtime/actor/idp-registry.js`, `peerd-runtime/actor/landing-rule.js`,
 `background/service-worker.js`, and `peerd-runtime/actor/actor-messaging.js`.
 Red-team: scenario 10.
 
@@ -924,17 +932,6 @@ evaluating peerd should know. Each cites where it lives in the code.
   trust, so a hijacked page gets one attempt at persuading it to open a helper somewhere
   the user never asked about. (`peerd-runtime/actor/origin-lock-report.js`.)
 
-- R18. The identity-provider registry is invisible to the sensitivity classifier
-  (#265). peerd keeps exactly one curated list of origins whose whole purpose is
-  authentication, and it is consumed only to OPEN a bound actor's excursion
-  (`actor/origin-lock.js`, `actor/landing-rule.js`) — never as a sensitivity signal.
-  The classifier's seeds are the UGC registry, a stored credential, and what was
-  learned. So the big IdP hosts classify as ORDINARY until something happens to see a
-  password field on one, which is backwards: they are the set on which a session cookie
-  is worth the most. The fix is plausibly one seed, but whether an IdP should be
-  "sensitive" or a THIRD state — enterable on an excursion, never roamable — is a
-  design call, and adding the seed naively would make the excursion mechanism refuse
-  the landings it exists to permit.
 - R19. Learning is unauthenticated, page-controlled input (#268). A hostile page that
   renders one password field classifies ITSELF as credentialed, and the landing rule
   then hands off to a successor bound to the attacker's own origin. R17 already records

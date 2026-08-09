@@ -88,6 +88,11 @@ const NUMERIC_TAB_PROMPT = 'Address the sensitive Firefox fixture by its numeric
 const NUMERIC_TAB_TOOL_ID = 'firefox-numeric-tab-authority-tool';
 const NUMERIC_TAB_FINAL_CANARY = 'firefox-numeric-tab-refused-7d12f198';
 const NUMERIC_TAB_REFUSAL_CODE = 'actor_sensitive_tab_requires_site';
+const IDP_TRANSIT_PROMPT = 'Address the identity provider as a standalone site actor.';
+const IDP_TRANSIT_TOOL_ID = 'firefox-idp-transit-tool';
+const IDP_BARE_TRANSIT_TOOL_ID = 'firefox-idp-bare-transit-tool';
+const IDP_TRANSIT_FINAL_CANARY = 'firefox-idp-transit-refused-7d12f198';
+const IDP_TRANSIT_REFUSAL_CODE = 'actor_identity_provider_transit_only';
 const DNR_MAIN_PROMPT = 'Delegate the Firefox private-network DNR proof to the web actor.';
 const DNR_ACTOR_PROMPT = 'Open the Firefox DNR public fixture and report when it is ready.';
 const DNR_NAV_TOOL_ID = 'firefox-dnr-navigate-tool';
@@ -571,6 +576,14 @@ const startProviderServer = async () => {
                     to: requestScenario.actorTarget,
                     message: 'Read the Firefox fixture.',
                     toolUseId: NUMERIC_TAB_TOOL_ID,
+                  })
+              : requestScenario.mode === 'idp-transit'
+                ? body.includes(IDP_TRANSIT_REFUSAL_CODE)
+                  ? textResponse(IDP_TRANSIT_FINAL_CANARY)
+                  : delegationResponse({
+                    to: requestScenario.actorTarget,
+                    message: 'Work directly on this sign-in service.',
+                    toolUseId: requestScenario.toolUseId ?? IDP_TRANSIT_TOOL_ID,
                   })
               : requestScenario.mode === 'broken-worker'
                 ? failureContinuation
@@ -1174,6 +1187,7 @@ const runNumericTabAuthoritySmoke = async (driver, providerServer) => {
         const toolResult = debug.bundle.session?.messages
           ?.flatMap((message) => message.toolResults ?? [])
           .find((result) => result.tool_use_id === toolId || result.toolUseId === toolId);
+        if (!toolResult) return null;
         const audit = await send({ type: 'audit/list', limit: 500 });
         return {
           ok: true,
@@ -1246,6 +1260,179 @@ const runNumericTabAuthoritySmoke = async (driver, providerServer) => {
     assert(expanded?.expanded === 'true'
       && expanded?.detail === 'No actor work was started. This tab is on a site peerd treats as signed in. To continue, ask peerd to work on that site directly.',
     'the Firefox disclosure explains the refusal without leaking page details', JSON.stringify(expanded));
+
+    const idpRecordStart = providerServer.records.length;
+    const idpHandle = 'site:https://accounts.google.com';
+    providerServer.setScenario({ mode: 'idp-transit', actorTarget: idpHandle });
+    const idpStarted = await driver.executeAsync(`
+      const done = arguments[arguments.length - 1];
+      browser.runtime.sendMessage({ type: 'agent/send', text: ${JSON.stringify(IDP_TRANSIT_PROMPT)} })
+        .then((reply) => done({ ok: reply?.ok === true, error: reply?.error ?? null }),
+          (error) => done({ ok: false, error: error?.message || String(error) }));
+    `);
+    assert(idpStarted?.ok === true, 'Firefox starts the identity-provider authority turn', JSON.stringify(idpStarted));
+    const idpProof = await waitFor(() => driver.executeAsync(`
+      const [finalCanary, refusalCode, toolId, idpHandle] = arguments;
+      const done = arguments[arguments.length - 1];
+      const send = (message) => browser.runtime.sendMessage(message);
+      (async () => {
+        const listed = await send({ type: 'session/list' });
+        const root = listed?.sessions?.slice().sort((a, b) => b.createdAt - a.createdAt)[0];
+        if (!root?.sessionId) return null;
+        const debug = await send({ type: 'session/debugBundle', sessionId: root.sessionId });
+        if (!debug?.ok || !debug.bundle) return null;
+        const finished = debug.bundle.session?.messages?.some((message) =>
+          message.role === 'assistant' && typeof message.content === 'string'
+            && message.content.includes(finalCanary));
+        if (!finished) return null;
+        const toolResult = debug.bundle.session?.messages
+          ?.flatMap((message) => message.toolResults ?? [])
+          .find((result) => result.tool_use_id === toolId || result.toolUseId === toolId);
+        const audit = await send({ type: 'audit/list', limit: 500 });
+        return {
+          refusalStored: JSON.stringify(toolResult ?? null).includes(refusalCode),
+          toolResult,
+          idpActorPresent: (debug.bundle.childSessions ?? []).some((session) =>
+            session.kind === 'actor' && session.instanceId === idpHandle),
+          audit: audit?.entries ?? [],
+        };
+      })().then(done, (error) => done({ error: error?.message || String(error) }));
+    `, [IDP_TRANSIT_FINAL_CANARY, IDP_TRANSIT_REFUSAL_CODE, IDP_TRANSIT_TOOL_ID, idpHandle]),
+    { budgetMs: 60_000, pollMs: 250 });
+    assert(idpProof?.refusalStored === true && idpProof?.idpActorPresent === false,
+      'Firefox refuses the standalone IdP handle before session creation', JSON.stringify(idpProof));
+    assert(idpProof.audit.some((entry) => entry.type === 'actor_idp_authority_refused'
+      && entry.details?.origin === 'https://accounts.google.com'
+      && entry.details?.performed === false)
+      && !idpProof.audit.some((entry) => entry.type === 'actor_minted'
+        && entry.details?.instanceId === idpHandle),
+    'Firefox audits the IdP refusal without minting authority', JSON.stringify(idpProof.audit.slice(-20)));
+    const idpRequests = providerServer.records.slice(idpRecordStart)
+      .filter((record) => record.scenario === 'idp-transit');
+    assert(idpRequests.length >= 2
+      && idpRequests.every((record) => !record.body.includes('<actor_agent>')),
+    'Firefox makes no actor model request for a standalone IdP handle');
+    const idpToolResult = JSON.stringify(idpProof.toolResult ?? {});
+    assert(!idpToolResult.includes('suggestedHandle')
+      && !idpToolResult.includes('site:https://accounts.google.com'),
+    'the Firefox refusal carries no IdP successor handle', idpToolResult);
+    const idpDisclosureReady = await waitFor(() => driver.execute(`
+      const headers = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')];
+      const header = headers.at(-1);
+      if (!header?.innerText.includes('Not run')) return null;
+      header.click();
+      return {
+        label: header.innerText,
+        args: header.querySelector('.tool-args')?.textContent ?? '',
+        cardClass: header.parentElement?.className ?? '',
+        dotClass: header.querySelector('.tool-status-dot')?.className ?? '',
+        dotAriaHidden: header.querySelector('.tool-status-dot')?.getAttribute('aria-hidden') ?? null,
+      };
+    `), { budgetMs: 10_000, pollMs: 100 });
+    const idpDisclosure = idpDisclosureReady ? await waitFor(() => driver.execute(`
+      const header = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')].at(-1);
+      const detail = header?.parentElement?.querySelector('.actor-body .error-line')?.textContent ?? '';
+      return header?.getAttribute('aria-expanded') === 'true' && detail
+        ? { expanded: 'true', detail }
+        : null;
+    `), { budgetMs: 5_000, pollMs: 100 }) : null;
+    assert(idpDisclosureReady?.label?.includes('sign-in service')
+      && !idpDisclosureReady?.label?.includes('site:')
+      && !idpDisclosureReady?.label?.includes('actor ·')
+      && idpDisclosureReady?.args === 'sign-in service: "Work directly on this sign-in service."'
+      && idpDisclosureReady?.cardClass?.includes('tool-not-run')
+      && !idpDisclosureReady?.cardClass?.includes('tool-failed')
+      && idpDisclosureReady?.dotClass?.includes('dot-not-run')
+      && !idpDisclosureReady?.dotClass?.includes('dot-failed')
+      && idpDisclosureReady?.dotAriaHidden === 'true'
+      && idpDisclosure?.detail === 'No actor work was started. This is a sign-in service, which peerd can visit only while signing in to another site. Ask peerd to work through the site you want to sign in to.',
+    'the Firefox disclosure explains transit-only IdP handling in plain language',
+    JSON.stringify(idpDisclosure));
+
+    const bareIdpRecordStart = providerServer.records.length;
+    const bareIdpHandle = 'https://accounts.google.com';
+    const priorChatId = await driver.executeAsync(`
+      const done = arguments[arguments.length - 1];
+      browser.runtime.sendMessage({ type: 'session/list' })
+        .then((reply) => done((reply?.sessions ?? []).find((session) =>
+          session.kind !== 'actor' && session.kind !== 'spawned')?.sessionId ?? null),
+        () => done(null));
+    `);
+    providerServer.setScenario({
+      mode: 'idp-transit', actorTarget: bareIdpHandle, toolUseId: IDP_BARE_TRANSIT_TOOL_ID,
+    });
+    await driver.executeAsync(`
+      const done = arguments[arguments.length - 1];
+      browser.runtime.sendMessage({ type: 'session/reset' })
+        .then((reply) => done(reply?.ok === true), () => done(false));
+    `);
+    const bareIdpStarted = await driver.executeAsync(`
+      const done = arguments[arguments.length - 1];
+      browser.runtime.sendMessage({ type: 'agent/send', text: 'Address the identity provider as a bare API integration.' })
+        .then((reply) => done({ ok: reply?.ok === true, error: reply?.error ?? null }),
+          (error) => done({ ok: false, error: error?.message || String(error) }));
+    `);
+    assert(bareIdpStarted?.ok === true, 'Firefox starts the bare-origin identity-provider authority turn', JSON.stringify(bareIdpStarted));
+    const bareIdpProof = await waitFor(() => driver.executeAsync(`
+      const [bareHandle] = arguments;
+      const done = arguments[arguments.length - 1];
+      const send = (message) => browser.runtime.sendMessage(message);
+      (async () => {
+        const listed = await send({ type: 'session/list' });
+        const root = listed?.sessions?.slice().sort((a, b) => b.createdAt - a.createdAt)[0];
+        if (!root?.sessionId) return null;
+        const debug = await send({ type: 'session/debugBundle', sessionId: root.sessionId });
+        if (!debug?.ok || !debug.bundle) return null;
+        const audit = await send({ type: 'audit/list', limit: 500 });
+        const refusals = (audit?.entries ?? []).filter((entry) =>
+          entry.type === 'actor_idp_authority_refused'
+            && entry.details?.origin === bareHandle
+            && entry.details?.performed === false);
+        if (refusals.length < 2) return null;
+        const toolResult = debug.bundle.session?.messages
+          ?.flatMap((message) => message.toolResults ?? [])
+          .find((result) => result.tool_use_id === ${JSON.stringify(IDP_BARE_TRANSIT_TOOL_ID)}
+            || result.toolUseId === ${JSON.stringify(IDP_BARE_TRANSIT_TOOL_ID)});
+        if (!toolResult) return null;
+        return {
+          refusalCount: refusals.length,
+          toolResult,
+          apiActorPresent: (debug.bundle.childSessions ?? []).some((session) =>
+            session.kind === 'actor' && session.instanceId === bareHandle),
+          audit: audit?.entries ?? [],
+        };
+      })().then(done, (error) => done({ error: error?.message || String(error) }));
+    `, [bareIdpHandle]),
+    { budgetMs: 60_000, pollMs: 250 });
+    assert(bareIdpProof?.refusalCount >= 2 && bareIdpProof?.apiActorPresent === false,
+      'Firefox refuses a bare IdP API address before session creation', JSON.stringify(bareIdpProof));
+    const bareIdpToolResult = JSON.stringify(bareIdpProof.toolResult ?? {});
+    assert(bareIdpToolResult.includes(IDP_TRANSIT_REFUSAL_CODE)
+      && bareIdpToolResult.includes('requiresRelyingSite')
+      && bareIdpToolResult.includes('relying site already named')
+      && bareIdpToolResult.includes('If none was named')
+      && !bareIdpToolResult.includes('suggestedHandle'),
+    'Firefox stores the exact bare-origin transit-only recovery result', bareIdpToolResult);
+    assert(!bareIdpProof.audit.some((entry) => entry.type === 'actor_minted'
+      && entry.details?.instanceId === bareIdpHandle),
+    'Firefox never mints bare IdP API authority', JSON.stringify(bareIdpProof.audit.slice(-20)));
+    const bareIdpRequests = providerServer.records.slice(bareIdpRecordStart)
+      .filter((record) => record.scenario === 'idp-transit');
+    const bareIdpActorRequests = bareIdpRequests.filter((record) =>
+      record.body.includes('<actor_agent>')
+        && record.body.includes('Work directly on this sign-in service.'));
+    assert(bareIdpRequests.length >= 2 && bareIdpActorRequests.length === 0,
+    'Firefox makes no IdP actor model request for a bare address',
+    JSON.stringify(bareIdpActorRequests.map((record) => record.body.slice(0, 500))));
+    assert(typeof priorChatId === 'string' && priorChatId.length > 0,
+      'Firefox retains the original chat around the isolated bare-origin check', String(priorChatId));
+    const restoredChat = await driver.executeAsync(`
+      const [sessionId] = arguments;
+      const done = arguments[arguments.length - 1];
+      browser.runtime.sendMessage({ type: 'session/switch', sessionId })
+        .then((reply) => done(reply?.ok === true), () => done(false));
+    `, [priorChatId]);
+    assert(restoredChat === true, 'Firefox restores the original chat after the bare-origin check');
   } finally {
     providerServer.setScenario({ mode: 'happy', actorTarget: 'web' });
     if (Number.isInteger(fixtureTabId)) {

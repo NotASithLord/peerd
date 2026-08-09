@@ -400,6 +400,42 @@ describe('sidepanel.message-list actor disclosures', () => {
     } finally { unmount(); }
   });
 
+  it('explains that an identity provider is transit-only without suggesting a site handle', async () => {
+    const { root, unmount } = mount([
+      {
+        role: 'assistant', id: 'a-idp', content: '',
+        toolUses: [{ id: 't-idp', name: 'message_actor', input: { to: 'site:https://accounts.google.com', message: 'inspect it' } }],
+      },
+      {
+        role: 'user', id: 'u-idp', content: '',
+        toolResults: [{
+          tool_use_id: 't-idp', is_error: true,
+          content: 'actor_identity_provider_transit_only Policy: {"origin":"https://accounts.google.com"}',
+        }],
+      },
+    ]);
+    try {
+      await flush();
+      const toggle = /** @type {HTMLButtonElement} */ (root.querySelector('.tool-actor > button.tool-call-header'));
+      expect(toggle.textContent).toContain('Not run');
+      expect(toggle.textContent).toContain('sign-in service');
+      expect(toggle.textContent.includes('site:')).toBe(false);
+      expect(toggle.textContent.includes('actor ·')).toBe(false);
+      expect(root.querySelector('.tool-args')?.textContent).toBe('sign-in service: "inspect it"');
+      const card = root.querySelector('.tool-actor');
+      expect(card?.classList.contains('tool-not-run')).toBe(true);
+      expect(card?.classList.contains('tool-failed')).toBe(false);
+      const dot = root.querySelector('.tool-actor .tool-status-dot');
+      expect(dot?.classList.contains('dot-not-run')).toBe(true);
+      expect(dot?.classList.contains('dot-failed')).toBe(false);
+      expect(dot?.getAttribute('aria-hidden')).toBe('true');
+      toggle.click();
+      await flush();
+      const detail = root.querySelector('.actor-body .error-line')?.textContent ?? '';
+      expect(detail).toBe('No actor work was started. This is a sign-in service, which peerd can visit only while signing in to another site. Ask peerd to work through the site you want to sign in to.');
+    } finally { unmount(); }
+  });
+
   it('gives a plain retry path when numeric-tab policy is unavailable', async () => {
     const { root, unmount } = mount([
       {

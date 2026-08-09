@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   decideNumericTabAuthority,
   numericTabAuthorityRefusal,
+  IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
   NUMERIC_TAB_POLICY_UNAVAILABLE_CODE,
   NUMERIC_TAB_SENSITIVE_CODE,
 } from '../../../extension/peerd-runtime/actor/numeric-tab-authority.js';
@@ -32,6 +33,26 @@ describe('numeric tab authority', () => {
       requiresUserIntent: true,
       retryable: false,
     });
+  });
+
+  test('an identity provider is refused without suggesting a standalone site actor', () => {
+    const decision = decideNumericTabAuthority('https://accounts.google.com/o/oauth2', {
+      policyReady: true,
+      isKnownIdp: (origin) => origin === 'https://accounts.google.com',
+    });
+    expect(decision).toMatchObject({
+      allowed: false,
+      code: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+      reason: 'identity-provider',
+      suggestedHandle: null,
+      requiresUserIntent: false,
+    });
+    if (decision.allowed) throw new Error('expected a refusal');
+    const refusal = numericTabAuthorityRefusal(decision);
+    expect(refusal.content).not.toContain('site:https://accounts.google.com');
+    expect(refusal.content).toContain("Continue through the relying site already named in the user's request");
+    expect(refusal.content).toContain('If none was named, ask which site');
+    expect(refusal.structured).toMatchObject({ transitOnly: true, requiresRelyingSite: true });
   });
 
   test.each([

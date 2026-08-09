@@ -12,10 +12,34 @@
 
 import { describe, test, expect } from 'bun:test';
 import { classifyOriginSensitivity, sameOrigin, LEARNED_REASONS } from '../../../extension/peerd-runtime/actor/origin-sensitivity.js';
+import { isKnownIdpHost } from '../../../extension/peerd-runtime/actor/idp-registry.js';
 
 const ugcOnly = { isUgcZone: (o: string) => o === 'https://github.com' };
 
 describe('sensitivity — the seeds', () => {
+  test.each([
+    ['https://accounts.google.com/o/oauth2'],
+    ['https://tenant.okta.com/app/login'],
+  ])('a dedicated identity provider is transit-only sensitive: %s', (url) => {
+    expect(classifyOriginSensitivity(url, { isKnownIdp: isKnownIdpHost })).toMatchObject({
+      sensitive: true,
+      reason: 'identity-provider',
+    });
+  });
+
+  test.each([
+    ['http://accounts.google.com/o/oauth2'],
+    ['https://accounts.google.com:8443/o/oauth2'],
+  ])('cookie-sharing spellings remain sensitive outside the strict corridor: %s', (url) => {
+    expect(classifyOriginSensitivity(url, { isKnownIdp: isKnownIdpHost }).sensitive).toBe(true);
+  });
+
+  test('a lookalike host stays ordinary', () => {
+    expect(classifyOriginSensitivity('https://accounts.google.com.evil.test/login', {
+      isKnownIdp: isKnownIdpHost,
+    }).sensitive).toBe(false);
+  });
+
   test('a UGC-registry origin is sensitive, attributed to the registry', () => {
     const v = classifyOriginSensitivity('https://github.com', ugcOnly);
     expect(v.sensitive).toBe(true);

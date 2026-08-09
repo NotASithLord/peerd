@@ -199,9 +199,10 @@ describe('auth excursions — the OAuth solve', () => {
     expect(bound({ landing: 'https://evil.test', landingIsIdp: false }).action).toBe('end');
   });
 
-  test('a roaming actor never needs an excursion — most SSO happens there', () => {
-    const v = roaming({ landing: 'https://accounts.google.com', landingIsSensitive: false, landingIsIdp: true });
-    expect(v.action).toBe('continue');
+  test('a roaming actor cannot turn a sign-in service into a standalone destination', () => {
+    const v = roaming({ landing: 'https://accounts.google.com', landingIsSensitive: true, landingIsIdp: true });
+    expect(v.action).toBe('end');
+    expect(v.handoffTo).toBeUndefined();
     expect(v.excursion).toBeUndefined();
   });
 });

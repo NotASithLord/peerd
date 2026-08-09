@@ -19,6 +19,11 @@ describe('service worker — API actor reconnects to durable memory before minti
     // The reconnect lookup is keyed by the origin (instanceId) + the owner chat, scoped
     // to a web/api actor.
     expect(src).toMatch(/findActorSession\(\{\s*parentSessionId:\s*ownerChatId,\s*instanceId:\s*origin,\s*actorType:\s*'web',\s*backing:\s*'api'\s*\}\)/);
+    const start = src.indexOf('const resolveApiActor = async');
+    const guard = src.indexOf('if (isKnownIdpHost(origin)) return null;', start);
+    const reconnect = src.indexOf('sessions.findActorSession', start);
+    expect(guard).toBeGreaterThan(start);
+    expect(guard).toBeLessThan(reconnect);
   });
 
   test('the reconnect re-binds the cache and PRECEDES the mintOnce fallback', () => {
@@ -36,5 +41,6 @@ describe('service worker — API actor reconnects to durable memory before minti
     expect(src).toMatch(/apiActorBindings\.originsFor\(chatId\)/);
     expect(src).toMatch(/names\.map\(originFromSecretName\)/);
     expect(src).toMatch(/catch\s*\{\s*keyed = \[\];/);
+    expect(src).toContain('.filter((origin) => !isKnownIdpHost(origin))');
   });
 });

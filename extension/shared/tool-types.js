@@ -178,6 +178,11 @@
  * @property {(origin: string) => Promise<boolean>} [authorizeSiteClientOrigin]
  *                                     final live-tab custody check; web actors
  *                                     only, fail-closed when absent
+ * @property {(origin: string, signal?: AbortSignal) => Promise<boolean>} [authorizeSignInOrigin]
+ *                                     post-consent relying-site promotion for
+ *                                     login; tab-backed web actors only
+ * @property {boolean} [idpTransitOnly] stale-session defense that causes every
+ *                                     API actor tool to fail closed
  * @property {Record<string, any>} [settings]   settings snapshot at ctx-build time
  *                                     (web tools no longer read any — tab focus is
  *                                     policy, not a setting; see DECISIONS #20)

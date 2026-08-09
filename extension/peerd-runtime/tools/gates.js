@@ -75,6 +75,7 @@ import { runtimeCapabilityRefusal } from '../runtime-capabilities.js';
  *   actorType?: string,
  *   backing?: 'tab' | 'api',
  *   actorSurface?: 'tools' | 'code',
+ *   idpTransitOnly?: boolean,
  *   actorIsolation?: import('../actor/isolation.js').ActorIsolationCapability,
  *   runtimeCapabilities?: ReturnType<typeof import('../runtime-capabilities.js').resolveRuntimeCapabilities>,
  * }} GateContext
@@ -151,6 +152,9 @@ export const actorTierGate = (tool, args, ctx) => {
       return { allowed: false, reason: `'${tool.name}' is the dweb actor's — delegate via message_actor("dweb", …)` };
     }
     return null;
+  }
+  if (ctx.idpTransitOnly === true) {
+    return { allowed: false, reason: 'identity providers are transit only; this tool was not run' };
   }
   // DESIGN-18: an API actor (actorType:'web', backing:'api') is tab-free; its
   // allow-set drops the DOM toolset (which needs a tab it never has), so a DOM tool

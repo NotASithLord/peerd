@@ -3,7 +3,7 @@
 // so most of these tests are about what must NOT match.
 
 import { describe, test, expect } from 'bun:test';
-import { isKnownIdp, knownIdpSeeds } from '../../../extension/peerd-runtime/actor/idp-registry.js';
+import { isKnownIdp, isKnownIdpHost, knownIdpSeeds } from '../../../extension/peerd-runtime/actor/idp-registry.js';
 
 describe('what counts', () => {
   test('dedicated auth hosts', () => {
@@ -86,5 +86,24 @@ describe('the seed list itself', () => {
     // A suffix entry must be a bare registrable domain — a scheme or a path in
     // here would silently never match anything.
     expect(seeds.suffixes.every((s) => /^[a-z0-9.-]+\.[a-z]{2,}$/.test(s))).toBe(true);
+  });
+});
+
+describe('host-level IdP sensitivity', () => {
+  test.each([
+    ['https://accounts.google.com:8443/o/oauth2'],
+    ['http://accounts.google.com/login'],
+    ['http://tenant.okta.com:8080/app'],
+    ['https://accounts.google.com./login'],
+  ])('matches the authentication host regardless of cookie-sharing scheme or port: %s', (url) => {
+    expect(isKnownIdpHost(url)).toBe(true);
+  });
+
+  test.each([
+    ['https://accounts.google.com.evil.test/login'],
+    ['https://evil-okta.com/login'],
+    ['data:text/html,accounts.google.com'],
+  ])('keeps host matching anchored: %s', (url) => {
+    expect(isKnownIdpHost(url)).toBe(false);
   });
 });
