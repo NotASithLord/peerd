@@ -91,10 +91,39 @@ describe('reduceChat', () => {
     expect(reduceChat(asked, { type: 'confirm/resolved', id: 'c1' }).pendingConfirm).toBe(null);
   });
 
-  // DESIGN-12 critical fix: a 'state' snapshot (which carries pendingConfirm:null)
-  // must NOT wipe a live prompt — confirm state flows on its own channel.
+  test('a confirmation is visible only in its owning root chat', () => {
+    const viewed = withSession('chat-a');
+    const prompt = { id: 'c1', sessionId: 'actor-a', ownerSessionId: 'chat-a', text: 'ok?' };
+    const asked = reduceChat(viewed, { type: 'confirm/request', prompt });
+    expect(asked.pendingConfirm).toEqual(prompt);
+
+    const foreign = withSession('chat-b');
+    expect(reduceChat(foreign, { type: 'confirm/request', prompt })).toBe(foreign);
+  });
+
+  test('a session switch clears the old prompt and adopts a pending prompt owned by the new chat', () => {
+    const asked = {
+      ...withSession('chat-a'),
+      pendingConfirm: { id: 'old', ownerSessionId: 'chat-a' },
+    };
+    const pending = { id: 'new', sessionId: 'actor-b', ownerSessionId: 'chat-b' };
+    const switched = reduceChat(asked, { type: 'state', state: {
+      session: { sessionId: 'chat-b', messages: [] },
+      pendingConfirm: pending,
+    } });
+    expect(switched.pendingConfirm).toEqual(pending);
+
+    const noPending = reduceChat(asked, { type: 'state', state: {
+      session: { sessionId: 'chat-b', messages: [] },
+      pendingConfirm: null,
+    } });
+    expect(noPending.pendingConfirm).toBe(null);
+  });
+
+  // DESIGN-12 critical fix: a same-session state snapshot must NOT wipe a live
+  // prompt that raced in over the confirm channel.
   test('a state snapshot does NOT wipe a live pendingConfirm', () => {
-    const asked = reduceChat(INITIAL_STATE, { type: 'confirm/request', prompt: { id: 'c1', text: 'ok?' } });
+    const asked = reduceChat(withSession('s1'), { type: 'confirm/request', prompt: { id: 'c1', text: 'ok?' } });
     const after = reduceChat(asked, { type: 'state', state: {
       session: { sessionId: 's1', messages: [] },
       vault: { initialized: true, locked: false },

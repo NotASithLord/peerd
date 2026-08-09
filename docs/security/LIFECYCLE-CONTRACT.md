@@ -26,9 +26,10 @@ After an interruption:
 - The lifecycle reconciler does not replay a non-idempotent tool call. If peerd
   cannot prove whether one completed, it reports `outcome_unknown` and tells the
   next model turn to verify the target before repeating it. The deterministic
-  duplicate guard recognizes the same tool-call ID. Autonomous goal
-  continuations also stop while that session has an unresolved uncertain
-  action. A new user turn must verify or deliberately resolve the uncertainty.
+  duplicate guard recognizes both the same tool-call ID and the same action
+  intent under a fresh ID within that session. Autonomous goal continuations
+  also stop while that session has an unresolved uncertain action. A new user
+  turn must verify or deliberately resolve the uncertainty.
 - Engine catalog records and stored files remain available after host loss.
   peerd does not automatically recreate the lost process or restore transient
   grants.

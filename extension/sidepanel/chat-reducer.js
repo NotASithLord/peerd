@@ -608,7 +608,8 @@ export const reduceChat = (state, msg) => {
       const notices = sessionChanged
         ? state.notices.filter((notice) => !notice.sessionId || notice.sessionId === nextSessionId)
         : state.notices;
-      return { ...state, ...msg.state, ...pruneProjections, notices, pendingConfirm: state.pendingConfirm,
+      return { ...state, ...msg.state, ...pruneProjections, notices,
+        pendingConfirm: sessionChanged ? (msg.state?.pendingConfirm ?? null) : state.pendingConfirm,
         lastError: keepSpendError ? 'spend-limit-reached' : null, rateLimit: null, cost: { ...state.cost,
         session: msg.state?.session?.cost ?? state.cost.session,
         limitUsd: msg.state?.settings?.spendLimitUsd ?? state.cost.limitUsd,
@@ -661,6 +662,11 @@ export const reduceChat = (state, msg) => {
     case 'turn/error':
       return { ...applyError(state, msg), rateLimit: null };
     case 'confirm/request':
+      // Confirmation is authority, not ambient UI. A background actor keeps
+      // running when its owner changes chats, but its prompt belongs only in the
+      // root chat that initiated it. A switch-back snapshot resurfaces it.
+      if (msg.prompt?.ownerSessionId
+        && msg.prompt.ownerSessionId !== state.session.sessionId) return state;
       return { ...state, pendingConfirm: msg.prompt };
     case 'confirm/resolved':
       // Answered on another surface (DESIGN-12) — dismiss the same prompt.

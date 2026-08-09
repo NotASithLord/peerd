@@ -524,7 +524,9 @@ export const dispatchToolCall = async (call, ctx) => {
         note: ugcRuleId
           ? UGC_CONFIRM_NOTE
           : (lifecycleRepeatConfirm
-            ? 'A matching earlier action has an unknown outcome. Verify the target before approving this repeat.'
+            ? (ctx.session?.kind === 'actor' || ctx.session?.kind === 'spawned'
+              ? 'An actor in this chat wants to repeat an action whose earlier outcome is unknown. Verify the target before approving.'
+              : 'A matching earlier action has an unknown outcome. Verify the target before approving this repeat.')
             : undefined),
         sessionId: ctx.session?.sessionId ?? null,
       }, ctx.abortSignal);

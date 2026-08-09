@@ -4059,6 +4059,13 @@ const confirmAction = async (prompt, signal) => {
   if (!ephemeral && sid && sessionConfirmGrants.get(sid)?.has(grantKey)) {
     return 'yes_session';
   }
+  // Keep execution custody and display custody separate. `sessionId` remains
+  // the exact turn that can be stopped or granted; `ownerSessionId` is the root
+  // chat where a human may see and answer the prompt. This prevents a background
+  // actor from placing an authority dialog over whichever unrelated chat happens
+  // to be open when it asks.
+  const ownerSessionId = sid ? await resolveLifecycleRootSession(sid) : null;
+  const ownedPrompt = { ...prompt, ownerSessionId };
   // ...and TELL THE PANEL, so it can stop offering a button that grants
   // nothing. why this became load-bearing with #242: before the UGC override, a
   // default-config user (confirmActions OFF) never saw an actor confirm at all,
@@ -4067,7 +4074,9 @@ const confirmAction = async (prompt, signal) => {
   // the way to stop the prompting and silently isn't. The downgrade itself is
   // correct and stays; what was wrong was offering the choice.
   const answer = await confirmCoordinator.confirm(/** @type {any} */ (
-    downgradesActorConfirm(prompt.tool, ephemeral, 'yes_session') ? { ...prompt, ephemeral: true } : prompt
+    downgradesActorConfirm(prompt.tool, ephemeral, 'yes_session')
+      ? { ...ownedPrompt, ephemeral: true }
+      : ownedPrompt
   ), signal);
   if (answer === 'yes_session' && sid && !ephemeral) {
     if (!sessionConfirmGrants.has(sid)) sessionConfirmGrants.set(sid, new Set());
@@ -4211,7 +4220,12 @@ const buildStateSnapshot = async () => {
       onboardingComplete: !!profile.onboardingComplete,
     },
     settings: { ...settingsStore.get() },
-    pendingConfirm: null,
+    // The snapshot is the switch-back and late-joiner path for confirmation
+    // state. Live confirm/request events remain the fast path; this selects only
+    // prompts owned by the chat represented by this snapshot.
+    pendingConfirm: confirmCoordinator.getPendingForOwner(
+      typeof sessionId === 'string' ? sessionId : null,
+    ),
     // Live actor projections are part of the fresh snapshot, not a lucky stream
     // of events seen only by panels that were already open. Every row is scoped
     // to this viewed root before it crosses the UI boundary.
@@ -4387,13 +4401,9 @@ browser.runtime.onConnect.addListener((port) => {
     // and replay the current-agent-tab card (it's not in the state snapshot).
     broadcastSurfaces();
     broadcastAgentTab();
-    // Replay a live pending confirm to THIS fresh surface so a late-joiner can
-    // answer it — the state snapshot deliberately doesn't carry confirm state.
-    const pendingPrompt = confirmCoordinator.getPending();
-    if (pendingPrompt) {
-      try { port.postMessage({ type: 'confirm/request', prompt: pendingPrompt }); }
-      catch { /* port closing */ }
-    }
+    // Pending confirmations ride the scoped state snapshot above. Replaying the
+    // latest global prompt here would let a background chat paint authority UI
+    // over the chat this fresh surface is actually viewing.
     // Same idea for a LIVE goal run: its goal/state events only reached ports
     // connected when they fired, and the snapshot carries no goal-run field. So
     // replay each active run to this fresh surface — otherwise a reopened panel

@@ -248,9 +248,11 @@
  *   above the call summary. why a free-form line and not a code: the user is
  *   the audience, and the only thing that makes a confirm worth showing is that
  *   it explains itself.
- * @property {string | null} [sessionId]   chat the prompt belongs to — lets the
- *                                    coordinator decline a session's pending
- *                                    confirms when its turn is aborted
+ * @property {string | null} [sessionId]   exact execution session; lets the
+ *                                    coordinator decline a turn's pending
+ *                                    confirms when it is aborted
+ * @property {string | null} [ownerSessionId] root chat whose user owns the
+ *                                    action; scopes display and replay
  */
 
 /**

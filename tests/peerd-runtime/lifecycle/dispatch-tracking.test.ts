@@ -545,7 +545,7 @@ describe('the full dispatcher path', () => {
     expect((replay as { error: string }).error).toStartWith('outcome_unknown:');
   });
 
-  test('a matching unknown intent forces confirmation on a later user turn', async () => {
+  test('a matching unknown intent forces an honestly attributed actor confirmation', async () => {
     const { tracker } = makeTracker();
     let executions = 0;
     const prompts: any[] = [];
@@ -571,13 +571,15 @@ describe('the full dispatcher path', () => {
       {
         ...baseCtx(), lifecycle: tracker,
         lifecycleTurnId: 'turn-2', lifecycleUserInitiated: true,
+        session: { ...baseCtx().session, kind: 'actor' },
         confirm: async (prompt: any) => { prompts.push(prompt); return 'yes_once'; },
       } as any,
     );
     expect(repeat.ok).toBe(true);
     expect(executions).toBe(2);
     expect(prompts).toHaveLength(1);
-    expect(prompts[0].note).toContain('unknown outcome');
+    expect(prompts[0].note).toContain('An actor in this chat');
+    expect(prompts[0].note).toContain('outcome is unknown');
   });
 
   test('a synthetic repeat is refused without opening a confirmation prompt', async () => {

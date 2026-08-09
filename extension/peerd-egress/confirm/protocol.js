@@ -70,6 +70,22 @@ export const makeConfirmCoordinator = ({
   const notifyCount = () => { try { onPendingChange(pending.size); } catch { /* best-effort */ } };
 
   /**
+   * Return the latest prompt visible in one root chat. Unscoped legacy prompts
+   * remain globally visible; new prompts carry ownerSessionId explicitly.
+   *
+   * @param {string | null | undefined} ownerSessionId
+   * @returns {ConfirmPrompt | null}
+   */
+  const getPendingForOwner = (ownerSessionId) => {
+    /** @type {ConfirmPrompt | null} */
+    let last = null;
+    for (const { prompt } of pending.values()) {
+      if (prompt.ownerSessionId == null || prompt.ownerSessionId === ownerSessionId) last = prompt;
+    }
+    return last;
+  };
+
+  /**
    * Resolve a pending prompt. Called by the SW message handler when the
    * side panel posts 'confirm/answer'.
    *
@@ -108,7 +124,18 @@ export const makeConfirmCoordinator = ({
       if (onAbort) signal?.removeEventListener('abort', onAbort);
       // onSettled inside the delete-guard → fires EXACTLY once, on the first
       // settle (answer or timeout), so every surface dismisses the modal.
-      if (pending.delete(id)) { res(answer); notifyCount(); try { onSettled(id); } catch { /* best-effort */ } }
+      if (pending.delete(id)) {
+        res(answer);
+        notifyCount();
+        try { onSettled(id); } catch { /* best-effort */ }
+        // why: the UI renders one modal. Parallel actors can queue more than one
+        // confirmation for a chat, so settling the visible prompt must reveal the
+        // next live one instead of leaving it hidden until its timeout.
+        const next = getPendingForOwner(prompt.ownerSessionId);
+        if (next) {
+          try { notifySidePanel(next); } catch { /* best-effort replay */ }
+        }
+      }
     };
     pending.set(id, { settle, prompt });
     timers.set(id, setTimeout(() => settle('no'), timeoutMs));
@@ -151,15 +178,5 @@ export const makeConfirmCoordinator = ({
     }
   };
 
-  // The most-recently-raised un-settled prompt — replayed to a surface that
-  // connects AFTER it was broadcast (DESIGN-12 late-joiner; the state snapshot
-  // does NOT carry confirm state, which flows on the confirm/* channel).
-  const getPending = () => {
-    /** @type {ConfirmPrompt | null} */
-    let last = null;
-    for (const { prompt } of pending.values()) last = prompt;
-    return last;
-  };
-
-  return { confirm, resolve, reset, declineSession, getPending };
+  return { confirm, resolve, reset, declineSession, getPendingForOwner };
 };

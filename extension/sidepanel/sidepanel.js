@@ -83,7 +83,7 @@ const handlePortDisconnect = () => {
     // that owned the prompt is gone), rate-limit banner, Stop spinner, notice,
     // or goal-run pill would linger with nothing behind it. Reset to the
     // INITIAL_STATE defaults; a revived SW replays anything genuinely still live
-    // via getPending() + the fresh state push.
+    // through the fresh owner-scoped state snapshot.
     pendingConfirm: null,
     rateLimit: null,
     streaming: false,

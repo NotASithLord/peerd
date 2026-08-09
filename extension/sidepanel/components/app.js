@@ -352,12 +352,14 @@ const confirmationDialogAttrs = (answer, state) => {
  * @property {string} [sideEffect]
  * @property {string} [summary]
  * @property {string} [note]   why this call is being confirmed when the reason
- *   is something other than the ordinary Plan/Act policy (the #242 UGC-zone
- *   rule today). Plain prose, rendered verbatim.
+ *   is something other than the ordinary Plan/Act policy, such as a UGC-zone
+ *   override or a repeat after an unknown outcome. Plain prose, rendered verbatim.
  * @property {boolean} [ephemeral]  this answer cannot become a standing grant —
  *   DESIGN-17 downgrades an actor's yes_session to yes_once. Set by the SW so
  *   the card does not offer a button that would do nothing.
  * @property {string} [tool]
+ * @property {string | null} [sessionId] exact execution session
+ * @property {string | null} [ownerSessionId] root chat that owns the prompt
  * @property {string[]} [origins]
  * @property {'passkey'|'sso'} [method]   login only: the sign-in method the
  *   `login` tool derived from the page (ground truth, not a model argument).
