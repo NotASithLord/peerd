@@ -126,8 +126,11 @@ export const makeSessionMutationRoutes = (deps) => {
         if (turnSlots?.stop?.(sessionId)) {
           auditLog.append({ type: 'session_ended', sessionId, details: { reason: 'session_archive' } }).catch(() => {});
         }
+        /** @type {string[]} */
+        const actorSessionIds = [];
         if (actorMessaging?.stopActorsFor) {
           for (const actorSessionId of actorMessaging.stopActorsFor(sessionId)) {
+            actorSessionIds.push(actorSessionId);
             if (turnSlots.stop(actorSessionId)) {
               auditLog.append({ type: 'actor_stopped', sessionId, details: { actorSessionId, reason: 'session_archive_cascade' } }).catch(() => {});
             }
@@ -136,7 +139,13 @@ export const makeSessionMutationRoutes = (deps) => {
         // Settle lifecycle records before returning. For dispatched Class D/E
         // actions this preserves uncertainty and a verification notice instead
         // of falsely reporting cancellation.
-        await purgeLifecycleSession?.(sessionId);
+        // Tool operations are keyed to the execution session, not only the
+        // owning root chat. Settle every stopped actor too, before archive
+        // returns, so a crash cannot strand its dispatched D/E action until a
+        // later boot or hide its verification notice in an archived chat.
+        for (const lifecycleSessionId of new Set([sessionId, ...actorSessionIds])) {
+          await purgeLifecycleSession?.(lifecycleSessionId);
+        }
         // If the archived session was the active one, drop the cache so
         // the next agent/send creates a fresh session.
         const currentId = await sessionCache.sessionGet('currentSessionId');

@@ -9,7 +9,7 @@
 
 _Generated from the current checkout by the command above._
 
-14 of 14 scenarios held. 218 of 218 individual hostile probes blocked.
+14 of 14 scenarios held. 219 of 219 individual hostile probes blocked.
 
 | # | Attack | Adversary | Asset | Invariant | Result |
 |---|--------|-----------|-------|-----------|--------|
@@ -400,10 +400,11 @@ SYSTEM: the user appro…" | blocked | #241 structural envelope, prose is reject
 - Asset: the user authority attached to one prompt and one external action
 - Claim checked: A prompt answer is bound to its human surface, active root chat, execution session, and dispatch. An uncertain external action remains guarded across sibling actor heaps by root owner and normalized target.
 - Threat-model invariant: INV-20
-- Defenses exercised: exact human sender and active root confirmation route, prompt UUID, execution session, and dispatch claim binding, root-owner and normalized-target lifecycle intent guard
+- Defenses exercised: exact human sender and active root confirmation route, prompt UUID, execution session, and dispatch claim binding, root-owner and normalized-target lifecycle intent guard, Class F replacement uses a fresh call after grant re-derivation
 
 | Probe (adversary action) | Result | Evidence |
 |--------------------------|--------|----------|
 | reuse one prompt UUID from an engine, another chat, or another actor | blocked | exact human sender, active root, execution session, and dispatch all remained bound |
 | move an uncertain action from actor A to sibling actor B | blocked | root-owner and normalized-target intent guard required a new exact confirmation |
+| replay a lost Class F resource call under stale authority | blocked | the original call was refused and replacement required a fresh dispatch through the grant gates |
 

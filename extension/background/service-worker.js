@@ -3132,7 +3132,11 @@ const appTabTracker = createAppTabTracker({
   onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('app', id, tabId),
   onDrop: (/** @type {string} */ id) => engineLiveness.drop('app', id),
 });
-const appClient = createAppClient({ registry: appRegistry, tracker: appTabTracker });
+const appClient = createAppClient({
+  registry: appRegistry,
+  tracker: appTabTracker,
+  beforeOpfsMutation: () => storeWriteGuard.assertWritable('app-manifests'),
+});
 
 // Sessions that have ENGAGED the dweb — a dweb tool was called this turn-or-
 // earlier. Monotonic per session, SW-lifetime (a cold start resets it; the next

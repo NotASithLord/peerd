@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { makeSessionMutationRoutes } from '../../extension/background/routes/session-mutations.js';
+import { makeLifecycleBoot } from '../../extension/peerd-runtime/lifecycle/boot.js';
 
 class SessionNotFoundError extends Error {}
 
@@ -138,8 +139,55 @@ describe('session/reset + switch + archive auto-memory seams', () => {
       },
     });
     await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 's2' });
-    expect(events).toEqual(['stop:s2', 'stop:actor-1', 'stop:actor-2', 'purge:s2']);
+    expect(events).toEqual([
+      'stop:s2', 'stop:actor-1', 'stop:actor-2',
+      'purge:s2', 'purge:actor-1', 'purge:actor-2',
+    ]);
     expect(settled).toBe(true);
+  });
+  test('archive settles dispatched actor D/E operations before returning', async () => {
+    const stored = new Map<string, unknown>();
+    const lifecycle = makeLifecycleBoot({
+      storage: {
+        get: async (key: string) => structuredClone(stored.get(key)),
+        set: async (key: string, value: unknown) => {
+          stored.set(key, structuredClone(value));
+        },
+      },
+      nonce: () => 'archive-test-generation',
+      resolveNoticeSession: async (sid: string) =>
+        (sid.startsWith('actor-') ? 's2' : sid),
+    });
+    const { generation } = await lifecycle.init();
+    for (const [sessionId, retryClass] of [['actor-d', 'D'], ['actor-e', 'E']]) {
+      const operationId = `${sessionId}:dispatch`;
+      await lifecycle.operationLog.begin({
+        operationId, sessionId, toolName: `tool-${retryClass}`,
+        retryClass, generationId: generation.id,
+      });
+      await lifecycle.operationLog.transition(operationId, 'running');
+      await lifecycle.operationLog.markDispatched(operationId);
+    }
+    const purged: string[] = [];
+    const { deps } = baseDeps({
+      turnSlots: { stop: () => true },
+      actorMessaging: { stopActorsFor: () => ['actor-d', 'actor-e'] },
+      purgeLifecycleSession: async (sid: string) => {
+        purged.push(sid);
+        await lifecycle.purgeSession(sid);
+      },
+    });
+
+    await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 's2' });
+
+    expect(purged).toEqual(['s2', 'actor-d', 'actor-e']);
+    expect((await lifecycle.operationLog.get('actor-d:dispatch'))?.state)
+      .toBe('outcome_unknown');
+    expect((await lifecycle.operationLog.get('actor-e:dispatch'))?.state)
+      .toBe('outcome_unknown');
+    const notice = await lifecycle.drainNoticesFor('s2');
+    expect(notice).toContain('tool-D');
+    expect(notice).toContain('tool-E');
   });
   test('switch unknown session → session-not-found', async () => {
     const { deps } = baseDeps();

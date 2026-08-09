@@ -143,11 +143,14 @@ export const STORE_REGISTRY = Object.freeze([
     store: 'opfs-workspaces', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false, deviceBound: true,
     physical: Object.freeze({ selfHosted: ['opfs'] }),
   }),
-  // Manifest metadata shares the `apps` blob (see engine-registries); the
-  // HTML bodies live in the self-opened peerd-app-bodies database.
+  // Manifest metadata shares the `apps` blob (see engine-registries). Current
+  // App files live in OPFS; peerd-app-bodies is a reserved legacy database.
+  // Both self-hosted byte surfaces use the app-manifests posture.
   Object.freeze({
     store: 'app-manifests', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
-    physical: Object.freeze({ idbStores: ['apps'], selfHosted: ['peerd-app-bodies'] }),
+    physical: Object.freeze({
+      idbStores: ['apps'], selfHosted: ['opfs:peerd-apps', 'peerd-app-bodies'],
+    }),
   }),
   // The did:key keypair is a vault secret — physically under the vault's
   // secret: prefix, encrypted under the DK.

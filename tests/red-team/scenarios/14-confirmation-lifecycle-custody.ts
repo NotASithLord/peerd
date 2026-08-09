@@ -90,6 +90,52 @@ const siblingActorProbe = async (): Promise<Probe> => {
       `requires=${Boolean(requires)} refused=${Boolean((replay as any)?.refuse)}`);
 };
 
+const resourceReplayProbe = async (): Promise<Probe> => {
+  const storage = new Map<string, unknown>();
+  const operationLog = createOperationLog({
+    storage: {
+      get: async (key: string) => storage.get(key),
+      set: async (key: string, value: unknown) => {
+        storage.set(key, structuredClone(value));
+      },
+    },
+  });
+  const tracker = makeDispatchTracker({
+    operationLog,
+    generationId: () => 'red-team-generation',
+    retryClassFor: (tool) => (tool as any).retryClass,
+  });
+  const tool = { name: 'sandbox_create', retryClass: 'F' };
+  await operationLog.begin({
+    operationId: 'chat-root:stale-resource', sessionId: 'chat-root',
+    toolName: tool.name, retryClass: tool.retryClass,
+    generationId: 'dead-generation',
+  });
+  await operationLog.transition('chat-root:stale-resource', 'running');
+  await operationLog.settle('chat-root:stale-resource', {
+    state: 'interrupted', autoRetry: false,
+    retryRequires: ['rederive-grants'], keepIdempotencyKey: false,
+    verificationRequired: false, recreateResource: true,
+    reason: 'resource host was lost',
+  });
+
+  const replay = await tracker.beginTracking({
+    callId: 'stale-resource', tool, sessionId: 'chat-root',
+  });
+  const replacement = await tracker.beginTracking({
+    callId: 'fresh-resource', tool, sessionId: 'chat-root',
+  });
+  const refusal = (replay as any)?.refuse;
+  const held = refusal?.error?.startsWith('resource_lost:')
+    && refusal?.recovery?.retryRequires?.includes('rederive-grants')
+    && Boolean((replacement as any)?.handle);
+  return held
+    ? blocked('replay a lost Class F resource call under stale authority',
+      'the original call was refused and replacement required a fresh dispatch through the grant gates')
+    : leaked('replay a lost Class F resource call under stale authority',
+      `refused=${Boolean(refusal)} fresh=${Boolean((replacement as any)?.handle)}`);
+};
+
 export const scenario: Scenario = {
   id: '14-confirmation-lifecycle-custody',
   title: 'Cross-chat confirmation and uncertain-action replay',
@@ -99,11 +145,14 @@ export const scenario: Scenario = {
   threatModelRef: 'INV-20',
   tier: 'unit',
   async run() {
-    const probes = await Promise.all([confirmationProbe(), siblingActorProbe()]);
+    const probes = await Promise.all([
+      confirmationProbe(), siblingActorProbe(), resourceReplayProbe(),
+    ]);
     return summarize(probes, [
       'exact human sender and active root confirmation route',
       'prompt UUID, execution session, and dispatch claim binding',
       'root-owner and normalized-target lifecycle intent guard',
+      'Class F replacement uses a fresh call after grant re-derivation',
     ]);
   },
 };
