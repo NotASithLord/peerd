@@ -125,6 +125,22 @@ describe('session/reset + switch + archive auto-memory seams', () => {
     expect(calls.cacheCleared).toBe(false); // currentId !== archived id → cache untouched
     expect(calls.extract).toEqual([['s2', 'archive']]);
   });
+  test('archive stops the root and actor turns, then awaits lifecycle settlement', async () => {
+    const events: string[] = [];
+    let settled = false;
+    const { deps } = baseDeps({
+      turnSlots: { stop: (sid: string) => { events.push(`stop:${sid}`); return true; } },
+      actorMessaging: { stopActorsFor: () => ['actor-1', 'actor-2'] },
+      purgeLifecycleSession: async (sid: string) => {
+        events.push(`purge:${sid}`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        settled = true;
+      },
+    });
+    await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 's2' });
+    expect(events).toEqual(['stop:s2', 'stop:actor-1', 'stop:actor-2', 'purge:s2']);
+    expect(settled).toBe(true);
+  });
   test('switch unknown session → session-not-found', async () => {
     const { deps } = baseDeps();
     expect(await makeSessionMutationRoutes(deps)['session/switch']({ sessionId: 'ghost' })).toEqual({ ok: false, error: 'session-not-found' });

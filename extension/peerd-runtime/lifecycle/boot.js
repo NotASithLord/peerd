@@ -14,10 +14,11 @@
 // chrome.storage in the in-browser suite.
 
 import { mintGeneration } from './generation.js';
-import { reconcileAtStartup } from './reconcile.js';
+import { buildTurnRecoveryRecord, reconcileAtStartup } from './reconcile.js';
 import { describeRecovery } from './recovery-report.js';
 import { OPERATION_STATES } from './operation-state.js';
 import { createOperationLog } from './operation-log.js';
+import { decideRecovery } from './retry-class.js';
 import { LIFECYCLE_EVENTS, lifecycleAuditEntry } from './audit-events.js';
 
 export const GENERATION_KEY = 'peerd.lifecycle.generation';
@@ -213,11 +214,11 @@ export const makeLifecycleBoot = ({
   };
 
   /**
-   * §2.5 — explicit user cancellation dominates recovery: when a session is
-   * deleted/archived, its pending notices are purged (a deleted chat's
-   * operations must not resurrect as notes elsewhere) and its nonterminal
-   * operations settle `cancelled` (the user ended the work; nothing may
-   * auto-resume it at the next boot). Best-effort per record.
+   * §2.5 explicit user cancellation dominates recovery. Pending notices from
+   * earlier recovery are removed, then each nonterminal operation is settled
+   * through the same evidence-aware decision used at startup. A dispatched
+   * Class D/E action remains outcome_unknown and gets a fresh verification
+   * notice. Archive ends future work, but cannot erase a possible past effect.
    *
    * @param {string} sessionId
    */
@@ -232,15 +233,43 @@ export const makeLifecycleBoot = ({
     }).catch(() => {});
     const open = await operationLog.listNonterminal().catch(() => []);
     for (const record of open.filter((r) => r.sessionId === sessionId)) {
-      await operationLog.settle(record.operationId, {
-        state: OPERATION_STATES.CANCELLED,
-        autoRetry: false,
-        retryRequires: [],
-        keepIdempotencyKey: false,
-        verificationRequired: false,
-        recreateResource: false,
-        reason: 'session deleted by the user; cancellation dominates recovery',
-      }).catch(() => {});
+      const verdict = decideRecovery({
+        retryClass: record.retryClass,
+        dispatched: record.dispatched,
+        evidence: record.evidence,
+        cancelRequested: true,
+      });
+      const settled = await operationLog.settle(record.operationId, verdict)
+        .then(() => true, () => false);
+      if (!settled) continue;
+      if (appendAudit) {
+        const event = verdict.state === OPERATION_STATES.OUTCOME_UNKNOWN
+          ? LIFECYCLE_EVENTS.OUTCOME_UNKNOWN
+          : (verdict.state === OPERATION_STATES.COMPLETED
+            ? LIFECYCLE_EVENTS.OPERATION_COMPLETED
+            : LIFECYCLE_EVENTS.OPERATION_INTERRUPTED);
+        await Promise.resolve(appendAudit(lifecycleAuditEntry({
+          event,
+          sessionId,
+          actorId: record.actorId,
+          operationId: record.operationId,
+          attempt: record.attempt,
+          result: verdict.state,
+          detail: { toolName: record.toolName, reason: verdict.reason },
+        }))).catch(() => {});
+      }
+      if (verdict.state === OPERATION_STATES.OUTCOME_UNKNOWN) {
+        const recoveryRecord = buildTurnRecoveryRecord(record, verdict);
+        const report = describeRecovery(verdict, {
+          retryClass: record.retryClass,
+          operationId: record.operationId,
+          toolName: record.toolName,
+        });
+        await parkNotice(sessionId, {
+          recoveryRecord: { ...recoveryRecord, ...report.agent },
+          user: report.user,
+        }).catch(() => {});
+      }
     }
   };
 

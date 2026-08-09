@@ -186,7 +186,7 @@ describe('notices — both audiences, delivered once', () => {
     expect(await b.drainNoticesFor('T')).toBe(''); // and delivered once
   });
 
-  test('purgeSession: a deleted session\'s notices vanish and its open operations settle cancelled', async () => {
+  test('purgeSession preserves dispatched Class E uncertainty and replaces stale notices', async () => {
     const storage = makeStorage();
     const b = boot(storage);
     const { generation } = await b.init();
@@ -199,11 +199,38 @@ describe('notices — both audiences, delivered once', () => {
     await b.parkNotice('sess-del', { recoveryRecord: { operationId: 'op-old' }, user: 'stale' });
 
     await b.purgeSession('sess-del');
-    expect(await b.drainNoticesFor('sess-del')).toBe('');
-    expect((await b.operationLog.get('op-open'))!.state).toBe(S.CANCELLED);
+    const notice = await b.drainNoticesFor('sess-del');
+    expect(notice).not.toContain('stale');
+    expect(notice).toContain('submit_form');
+    expect(notice).toContain('outcome_unknown');
+    expect(notice).toContain('external-verification');
+    expect((await b.operationLog.get('op-open'))!.state).toBe(S.OUTCOME_UNKNOWN);
     // A fresh boot has nothing to resurrect for the deleted session.
     const { plan } = await boot(storage).init();
     expect(plan.transitions.length).toBe(0);
+  });
+
+  test('purgeSession cancels pre-dispatch work and preserves completion evidence', async () => {
+    const storage = makeStorage();
+    const b = boot(storage);
+    const { generation } = await b.init();
+    await b.operationLog.begin({
+      operationId: 'op-before', sessionId: 'sess-del', toolName: 'submit_form',
+      retryClass: 'E', generationId: generation.id,
+    });
+    await b.operationLog.transition('op-before', S.RUNNING);
+    await b.operationLog.begin({
+      operationId: 'op-complete', sessionId: 'sess-del', toolName: 'click',
+      retryClass: 'E', generationId: generation.id,
+    });
+    await b.operationLog.transition('op-complete', S.RUNNING, {
+      dispatched: true, evidence: { kind: 'success-response' },
+    });
+
+    await b.purgeSession('sess-del');
+    expect((await b.operationLog.get('op-before'))!.state).toBe(S.CANCELLED);
+    expect((await b.operationLog.get('op-complete'))!.state).toBe(S.COMPLETED);
+    expect(await b.drainNoticesFor('sess-del')).toBe('');
   });
 
   test('a throwing resolver falls back to the operation\'s own session', async () => {
