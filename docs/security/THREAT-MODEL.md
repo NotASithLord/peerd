@@ -725,6 +725,26 @@ Code: `peerd-runtime/actor/numeric-tab-authority.js`,
 `background/service-worker.js`, and `peerd-runtime/actor/actor-messaging.js`.
 Red-team: scenario 10.
 
+<a id="inv-20"></a>
+### INV-20. Confirmation and uncertain-action authority do not cross chats or actors
+A confirmation is human authority for one live prompt. Only the browser-owned
+side panel or Home page may answer. The active root chat, exact execution
+session, and tool dispatch must match the coordinator's pending record. Other
+extension pages cannot answer, and an unrelated active chat is not sent the
+prompt identifier. Switching back replays only that chat's queued prompt.
+Stopping an execution session declines its own prompts without touching another
+session's queue.
+
+An actor heap is not an authority boundary that resets uncertainty. Operation
+IDs remain scoped to the exact execution session, but unresolved action intent
+is scoped to the owning root chat and normalized external target. Repeating the
+same uncertain action through a sibling actor therefore requires a new exact
+user confirmation. A different root chat or external target remains independent.
+
+Code: `peerd-egress/confirm/protocol.js`, `background/routes/vault.js`,
+`background/service-worker.js`, `peerd-runtime/lifecycle/dispatch-tracking.js`,
+and `peerd-runtime/tools/dispatcher.js`. Red-team: scenario 14.
+
 ### Additional invariants (not scenario-gated, enforced in code)
 
 - INV-9. Vault fails closed. A secret read or write is refused with `VaultLockedError`

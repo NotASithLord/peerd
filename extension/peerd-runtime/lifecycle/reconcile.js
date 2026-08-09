@@ -26,6 +26,7 @@ import { LIFECYCLE_EVENTS, lifecycleAuditEntry } from './audit-events.js';
  * @typedef {Object} OperationRecord
  * @property {string} operationId
  * @property {string} sessionId
+ * @property {string} [ownerSessionId] root chat that owns the intent
  * @property {string} [actorId]
  * @property {string} toolName
  * @property {unknown} retryClass

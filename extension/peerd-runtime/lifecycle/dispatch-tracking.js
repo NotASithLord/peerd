@@ -215,9 +215,15 @@ export const makeFailClosedTracker = ({ reason, retryClassFor }) => ({
  * @param {(error: string) => string | { kind: string }} [deps.classifyFailure]
  *   observability taxonomy (its native shape is { kind, label }); absent →
  *   only the transport regex decides ambiguity
+ * @param {(sessionId: string) => Promise<string>} [deps.resolveOwnerSessionId]
+ *   resolves an execution session to the root chat that owns its intent
  * @param {() => number} [deps.now]  injectable clock (confirmation proofs)
  */
-export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor, classifyFailure, now = Date.now }) => {
+export const makeDispatchTracker = ({
+  operationLog, generationId, retryClassFor, classifyFailure,
+  resolveOwnerSessionId = async (sessionId) => sessionId,
+  now = Date.now,
+}) => {
   if (!operationLog || typeof generationId !== 'function' || typeof retryClassFor !== 'function') {
     throw new TypeError('makeDispatchTracker: operationLog, generationId and retryClassFor are required');
   }
@@ -232,6 +238,40 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
   };
 
   /**
+   * Compare unresolved intent at the ROOT-CHAT boundary while retaining the
+   * execution session as the operation identity. A sibling actor is another
+   * heap, not fresh user authority, so moving the same action there must not
+   * evade the verification requirement.
+   *
+   * Legacy records have no ownerSessionId or target. Resolve their owner from
+   * the durable session lineage and treat an absent target as a conservative
+   * wildcard so an upgrade cannot silently reopen an uncertain effect.
+   *
+   * @param {import('./reconcile.js').OperationRecord} record
+   * @param {{ ownerSessionId: string, target: string, intentKey: string }} sought
+   */
+  const matchesUnknownIntent = async (record, sought) => {
+    if (record.intentKey !== sought.intentKey) return false;
+    const recordOwner = record.ownerSessionId
+      ?? await resolveOwnerSessionId(record.sessionId);
+    if (recordOwner !== sought.ownerSessionId) return false;
+    return record.target == null || record.target === sought.target;
+  };
+
+  /**
+   * @param {import('./reconcile.js').OperationRecord[]} unknowns
+   * @param {{ ownerSessionId: string, target: string, intentKey: string }} sought
+   * @param {string} [exceptOperationId]
+   */
+  const findUnknownIntent = async (unknowns, sought, exceptOperationId) => {
+    for (const record of unknowns) {
+      if (record.operationId === exceptOperationId) continue;
+      if (await matchesUnknownIntent(record, sought)) return record;
+    }
+    return undefined;
+  };
+
+  /**
    * Ask the dispatcher to force a real user confirmation before repeating
    * unresolved intent. Synthetic continuations never prompt; beginTracking
    * will refuse them. This is advisory only, with the enforcement repeated
@@ -239,10 +279,10 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
    *
    * @param {{ tool: { name?: string, sideEffect?: string, primitive?: string,
    *   retryClass?: unknown }, sessionId?: string, args?: unknown,
-   *   userInitiated?: boolean }} input
+   *   userInitiated?: boolean, ownerSessionId?: string, target?: string }} input
    */
   const requiresIntentConfirmation = async ({
-    tool, sessionId, args, userInitiated,
+    tool, sessionId, ownerSessionId, target, args, userInitiated,
   }) => {
     if (userInitiated !== true) return false;
     const retryClass = normalizeRetryClass(retryClassFor(tool));
@@ -250,9 +290,15 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
         && retryClass !== RETRY_CLASSES.CONDITIONAL_ACTION) return false;
     const intentKey = await idempotencyKeyFor(tool.name ?? 'tool', args);
     const unknowns = await operationLog.listOutcomeUnknown();
-    return unknowns.some((record) =>
-      record.sessionId === (sessionId || 'unknown-session')
-      && record.intentKey === intentKey);
+    const executionSessionId = sessionId || 'unknown-session';
+    const scope = {
+      ownerSessionId: ownerSessionId
+        || await resolveOwnerSessionId(executionSessionId),
+      target: target || `tool:${tool.name ?? 'unknown-tool'}`,
+      intentKey,
+    };
+    const prior = await findUnknownIntent(unknowns, scope);
+    return prior ? { required: true, ...scope } : false;
   };
 
   /**
@@ -413,6 +459,7 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
    * @param {string} input.callId       the tool_use id — the operation identity
    * @param {{ name?: string, sideEffect?: string, primitive?: string, retryClass?: unknown }} input.tool
    * @param {string} [input.sessionId]
+   * @param {string} [input.ownerSessionId] root chat that owns this intent
    * @param {string} [input.actorId]
    * @param {string} [input.target]
    * @param {boolean} [input.confirmed]  the user approved a confirm
@@ -424,10 +471,13 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
  *   records derive their deterministic idempotency key from these
  * @param {string} [input.turnId] one stable id for the whole model turn
  * @param {boolean} [input.userInitiated] false for synthetic continuations
+ * @param {{ intentKey?: string, ownerSessionId?: string, target?: string } | false}
+ *   [input.confirmedIntent] exact unresolved intent shown to the user
  * @returns {Promise<BeginOutcome>}
  */
   const beginTrackingInner = async ({
-    callId, tool, sessionId, actorId, target, confirmed, args, turnId, userInitiated,
+    callId, tool, sessionId, ownerSessionId, actorId, target, confirmed,
+    confirmedIntent, args, turnId, userInitiated,
   }) => {
     const retryClass = normalizeRetryClass(retryClassFor(tool));
     if (retryClass === RETRY_CLASSES.PURE_READ) return null;
@@ -442,6 +492,10 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     // sessions happen to see the same provider call id — that is a new
     // operation, not a replay.
     const operationId = sessionId ? `${sessionId}:${callId}` : callId;
+    const executionSessionId = sessionId || 'unknown-session';
+    const intentOwnerSessionId = ownerSessionId
+      || await resolveOwnerSessionId(executionSessionId);
+    const intentTarget = target || `tool:${tool.name ?? 'unknown-tool'}`;
     // D/E intent identity is independent of the provider's call id. This
     // closes the fresh-id replay shape: after an ambiguous dispatch, a model
     // cannot express the same tool and args again inside the same turn or a
@@ -453,10 +507,18 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
       try {
         intentKey = await idempotencyKeyFor(tool.name ?? 'tool', args);
         const unknowns = await operationLog.listOutcomeUnknown();
-        const prior = unknowns.find((record) =>
-          record.sessionId === (sessionId || 'unknown-session')
-          && record.intentKey === intentKey && record.operationId !== operationId);
-        if (prior && confirmed !== true) {
+        const scope = {
+          ownerSessionId: intentOwnerSessionId,
+          target: intentTarget,
+          intentKey,
+        };
+        const prior = await findUnknownIntent(unknowns, scope, operationId);
+        const exactRepeatApproval = confirmed === true
+          && confirmedIntent !== false
+          && confirmedIntent?.intentKey === intentKey
+          && confirmedIntent?.ownerSessionId === intentOwnerSessionId
+          && confirmedIntent?.target === intentTarget;
+        if (prior && !exactRepeatApproval) {
           const verdict = decideRecovery({ retryClass, dispatched: true });
           return {
             refuse: {
@@ -560,7 +622,8 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     try {
       await operationLog.begin({
         operationId,
-        sessionId: sessionId || 'unknown-session',
+        sessionId: executionSessionId,
+        ownerSessionId: intentOwnerSessionId,
         ...(actorId ? { actorId } : {}),
         toolName: tool.name ?? 'unknown-tool',
         retryClass,

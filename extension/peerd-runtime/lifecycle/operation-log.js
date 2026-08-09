@@ -247,6 +247,7 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
    * @param {Object} input
    * @param {string} input.operationId
    * @param {string} input.sessionId
+   * @param {string} [input.ownerSessionId]
    * @param {string} [input.actorId]
    * @param {string} input.toolName
    * @param {unknown} input.retryClass
@@ -272,6 +273,7 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
     const record = {
       operationId: input.operationId,
       sessionId: input.sessionId,
+      ...(input.ownerSessionId ? { ownerSessionId: input.ownerSessionId } : {}),
       ...(input.actorId ? { actorId: input.actorId } : {}),
       toolName: input.toolName,
       retryClass: normalizeRetryClass(input.retryClass),

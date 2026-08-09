@@ -592,6 +592,7 @@ const lifecycleArmed = lifecycleBoot.init()
       generationId: () => generation.id,
       retryClassFor: retryClassForTool,
       classifyFailure: /** @type {any} */ (classifyFailure),
+      resolveOwnerSessionId: resolveLifecycleRootSession,
     });
     // §11.1: independent per-store schema stamps. An incompatible stamp
     // leaves that store read-only. The check result is audited so a blocked
@@ -2131,6 +2132,9 @@ const buildToolContext = async (/** @type {any} */ {
   // record, not the chat's.
   const sessionId = overrideSessionId ?? await sessionCache.sessionGet('currentSessionId');
   const activeSession = sessionId ? await sessions.get(sessionId) : null;
+  const lifecycleOwnerSessionId = sessionId
+    ? await resolveLifecycleRootSession(sessionId)
+    : null;
   // Plan/Act permission axis (Feature 03). Per-session, persisted in the
   // session record; sessionCache is the MV3-survival fallback for the
   // pre-session-create window. See resolvePermission for the resolution
@@ -2235,6 +2239,7 @@ const buildToolContext = async (/** @type {any} */ {
     // path through this builder — main turn, actor relay, page-call — records
     // side-effecting calls durably and refuses unproven replays.
     lifecycle: lifecycleTracker,
+    lifecycleOwnerSessionId,
     ...(typeof lifecycleTurnId === 'string' && lifecycleTurnId
       ? { lifecycleTurnId } : {}),
     lifecycleUserInitiated: lifecycleUserInitiated === true,
@@ -3411,7 +3416,7 @@ const isActualOptionsSender = (/** @type {any} */ sender) => isOptionsSender(sen
 const isActualSidepanelSender = (/** @type {any} */ sender) => isSidepanelSender(sender, {
   runtimeId: browser.runtime?.id,
   extensionOrigin: browser.runtime?.getURL?.('') ?? '',
-  sidepanelUrl: browser.runtime?.getURL?.('sidepanel/index.html') ?? '',
+  sidepanelUrl: browser.runtime?.getURL?.('sidepanel/sidepanel.html') ?? '',
 });
 const isActualHomeSender = (/** @type {any} */ sender) => isHomeSender(sender, {
   runtimeId: browser.runtime?.id,
@@ -3959,11 +3964,30 @@ const {
 // panel and resolves when the panel posts back 'confirm/answer'.
 // Exercised whenever the Plan/Act decideAction policy marks an action as
 // needing confirmation.
+let confirmationUiTail = Promise.resolve();
+/**
+ * Serialize scoped confirmation pushes so resolve→next-prompt order stays
+ * deterministic. The badge remains global, but an unrelated chat never
+ * receives another owner's prompt UUID or answer controls.
+ * @param {any} prompt
+ * @param {(prompt: any) => void} deliver
+ */
+const deliverConfirmationToActiveOwner = (prompt, deliver) => {
+  confirmationUiTail = confirmationUiTail.then(async () => {
+    const activeOwner = await sessionCache.sessionGet('currentSessionId');
+    if ((activeOwner ?? null) !== (prompt?.ownerSessionId ?? null)) return;
+    deliver(prompt);
+  }).catch((error) => {
+    console.warn('[sw] scoped confirmation delivery failed', error);
+  });
+};
 const confirmCoordinator = makeConfirmCoordinator({
   notifySidePanel: (prompt) => {
     if (!uiConnected()) return;
-    try { uiPorts.broadcast({ type: 'confirm/request', prompt }); }
-    catch (e) { console.warn('[sw] confirm/request post failed', e); }
+    deliverConfirmationToActiveOwner(prompt, (ownedPrompt) => {
+      try { uiPorts.broadcast({ type: 'confirm/request', prompt: ownedPrompt }); }
+      catch (e) { console.warn('[sw] confirm/request post failed', e); }
+    });
   },
   // Hang protection: no side-panel port → the agent can't ask, so auto-deny
   // immediately rather than awaiting forever.
@@ -3972,7 +3996,11 @@ const confirmCoordinator = makeConfirmCoordinator({
   // reason — answer, 120s timeout, or session reset (DESIGN-12). Without this a
   // timed-out/reset prompt lingers, and a later click "approves" an action that
   // was already auto-denied.
-  onSettled: (id) => { try { uiPorts.broadcast({ type: 'confirm/resolved', id }); } catch { /* port closing */ } },
+  onSettled: (id, prompt) => {
+    deliverConfirmationToActiveOwner(prompt, () => {
+      try { uiPorts.broadcast({ type: 'confirm/resolved', id }); } catch { /* port closing */ }
+    });
+  },
   // Raise an action badge while a confirm is pending so a waiting agent is
   // visible even if the panel is hidden; cleared at zero.
   onPendingChange: (count) => {
@@ -7301,7 +7329,9 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     scriptModelCallRoute(msg, sender),
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
-    pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResumeAfterRecovery, resumeGoalRuns,
+    pushState, purgeVaultBlob, confirmCoordinator, sessionCache,
+    isActualSidepanelSender, isActualHomeSender,
+    maybeAutoResumeAfterRecovery, resumeGoalRuns,
     resumeSchedules,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,

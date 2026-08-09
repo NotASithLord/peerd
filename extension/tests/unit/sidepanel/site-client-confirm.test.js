@@ -123,7 +123,9 @@ describe('sidepanel site-client confirmation', () => {
       buttons.at(-1)?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
       expect(document.activeElement).toBe(buttons[0]);
       dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      expect(answers).toEqual([['site-a11y', 'no']]);
+      expect(answers.length).toBe(1);
+      expect(answers[0][0].id).toBe('site-a11y');
+      expect(answers[0][1]).toBe('no');
       // A live transcript redraw must not replace the saved opener with an
       // uninitialized lifecycle closure.
       m.redraw.sync();

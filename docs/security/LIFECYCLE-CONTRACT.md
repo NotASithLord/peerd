@@ -27,9 +27,12 @@ After an interruption:
   cannot prove whether one completed, it reports `outcome_unknown` and tells the
   next model turn to verify the target before repeating it. The deterministic
   duplicate guard recognizes both the same tool-call ID and the same action
-  intent under a fresh ID within that session. Autonomous goal continuations
-  also stop while that session has an unresolved uncertain action. A new user
-  turn must verify or deliberately resolve the uncertainty.
+  intent under a fresh ID across the owning root chat. The intent comparison
+  includes the normalized external target, so moving the call to a sibling
+  actor does not create fresh authority and an unrelated target does not cause
+  a false match. Autonomous goal continuations also stop while that root chat
+  has an unresolved uncertain action. A new user turn must verify or
+  deliberately resolve the uncertainty.
 - Engine catalog records and stored files remain available after host loss.
   peerd does not automatically recreate the lost process or restore transient
   grants.
@@ -52,6 +55,13 @@ verification notice.
 Immediate recovery notes are passive and session-scoped. A note is shown only
 while its owning chat is open, and it is removed if the user switches chats.
 The next-turn model notice remains durable and read-once.
+
+Confirmation custody follows the same split. The exact actor or chat execution
+session remains the operation owner, while only its root chat may receive and
+answer the prompt. Answers are accepted only from the side panel or Home page
+and must repeat the prompt UUID, root owner, execution session, and tool
+dispatch. A foreign chat is not sent the prompt UUID. Parallel prompts remain
+queued per owner, and cancelling an execution session declines only its prompts.
 
 Current source: `extension/peerd-runtime/lifecycle/retry-class.js`,
 `extension/peerd-runtime/lifecycle/tool-retry-class.js`,

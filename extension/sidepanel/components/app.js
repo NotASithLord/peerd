@@ -360,6 +360,7 @@ const confirmationDialogAttrs = (answer, state) => {
  * @property {string} [tool]
  * @property {string | null} [sessionId] exact execution session
  * @property {string | null} [ownerSessionId] root chat that owns the prompt
+ * @property {string | null} [dispatchId] exact tool dispatch being approved
  * @property {string[]} [origins]
  * @property {'passkey'|'sso'} [method]   login only: the sign-in method the
  *   `login` tool derived from the page (ground truth, not a model argument).
@@ -380,7 +381,7 @@ export const ConfirmModal = {
     const { prompt, uiActions } = vnode.attrs;
     const dialogState = /** @type {{ returnFocus?: HTMLElement | null }} */ (vnode.state);
     /** @param {string} a */
-    const answer = (a) => uiActions?.confirmAnswer?.(prompt.id, a);
+    const answer = (a) => uiActions?.confirmAnswer?.(prompt, a);
     const origins = Array.isArray(prompt.origins) ? prompt.origins.filter(Boolean) : [];
 
     // Login consent — its own render path, because a sign-in is the highest-stakes

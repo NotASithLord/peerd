@@ -202,6 +202,8 @@
  * @property {(name: string) => Promise<string | null>} getSecret
  * @property {(entry: { type: string, details?: Record<string, any> }) => Promise<unknown>} audit
  * @property {(prompt: ConfirmPrompt, signal?: AbortSignal) => Promise<ConfirmAnswer>} confirm
+ * @property {string | null} [lifecycleOwnerSessionId] root chat that owns
+ *                                     lifecycle intent for this execution
  * @property {Object} kv               peerd-egress kv namespace
  * @property {Object} idb              peerd-egress idb namespace
  * @property {readonly string[]} denylist   loaded denylist patterns (egress + denylist gate input)
@@ -253,6 +255,8 @@
  *                                    confirms when it is aborted
  * @property {string | null} [ownerSessionId] root chat whose user owns the
  *                                    action; scopes display and replay
+ * @property {string | null} [dispatchId] exact tool dispatch covered by the
+ *                                    answer; null for non-tool confirmations
  */
 
 /**

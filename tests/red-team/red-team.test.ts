@@ -41,6 +41,7 @@ describe('peerd red-team suite', () => {
       '11-login-orchestration',
       '12-contributor-metrics',
       '13-site-client-custody',
+      '14-confirmation-lifecycle-custody',
     ]);
   });
 
