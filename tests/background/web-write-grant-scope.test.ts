@@ -21,6 +21,12 @@ const grantPolicySrc = readFileSync(
 );
 
 describe('service worker — session grants are origin-scoped', () => {
+  test('one-shot recovery cannot use the web-write auto-approval preference', () => {
+    expect(src).toMatch(
+      /prompt\.oneShot !== true\s*&& prompt\.tool === WEB_WRITE_CONFIRM_KEY\s*&& settingsStore\.get\(\)\.confirmWebWrites === false/,
+    );
+  });
+
   test('the grant key comes from the origin-folding confirmGrantKey', () => {
     expect(src).toContain('answerWithSessionConfirmGrant({');
     expect(src).toMatch(/from '\.\/confirm-session-grants\.js'/);

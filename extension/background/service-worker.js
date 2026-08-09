@@ -4069,7 +4069,9 @@ const confirmAction = async (prompt, signal) => {
   // has turned confirmWebWrites OFF, non-GET egress is auto-approved — their
   // explicit, risk-acknowledged choice. The session-grant cache still applies
   // when it's on.
-  if (prompt.tool === WEB_WRITE_CONFIRM_KEY && settingsStore.get().confirmWebWrites === false) {
+  if (prompt.oneShot !== true
+    && prompt.tool === WEB_WRITE_CONFIRM_KEY
+    && settingsStore.get().confirmWebWrites === false) {
     return signal?.aborted ? 'no' : 'yes_once';
   }
   // R5 (origin-bound grants): "approve for this session" means this tool ON
