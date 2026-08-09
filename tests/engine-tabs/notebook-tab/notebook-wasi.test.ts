@@ -57,17 +57,17 @@ describe('runWasi', () => {
   });
 
   test('refuses a module without _start (reactor / empty)', async () => {
-    expect(runWasi(buildEmptyModule())).rejects.toThrow(WasiRunError);
-    expect(runWasi(buildEmptyModule())).rejects.toThrow(/command module/);
+    await expect(runWasi(buildEmptyModule())).rejects.toThrow(WasiRunError);
+    await expect(runWasi(buildEmptyModule())).rejects.toThrow(/command module/);
   });
 
   test('refuses a module that wants non-WASI imports, with an actionable message', async () => {
-    expect(runWasi(buildNonWasiModule())).rejects.toThrow(WasiRunError);
-    expect(runWasi(buildNonWasiModule())).rejects.toThrow(/WASI preview1/);
+    await expect(runWasi(buildNonWasiModule())).rejects.toThrow(WasiRunError);
+    await expect(runWasi(buildNonWasiModule())).rejects.toThrow(/WASI preview1/);
   });
 
   test('rejects junk bytes at compile', async () => {
-    expect(runWasi(new Uint8Array([1, 2, 3, 4]))).rejects.toThrow();
+    await expect(runWasi(new Uint8Array([1, 2, 3, 4]))).rejects.toThrow();
   });
 
   test('the shim debug logger stays OFF (no per-syscall console spam)', async () => {

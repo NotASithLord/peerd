@@ -80,9 +80,9 @@ describe('skill registry — progressive disclosure', () => {
   test('loadBody throws SkillNotFoundError for unknown / disabled skills', async () => {
     const r = make();
     await r.install(SKILL_A, { source: 'local' });
-    expect(r.loadBody('nope')).rejects.toThrow(reg.SkillNotFoundError);
+    await expect(r.loadBody('nope')).rejects.toThrow(reg.SkillNotFoundError);
     await r.setEnabled('alpha', false);
-    expect(r.loadBody('alpha')).rejects.toThrow(reg.SkillNotFoundError);
+    await expect(r.loadBody('alpha')).rejects.toThrow(reg.SkillNotFoundError);
     // Disabled skills also drop out of the prompt block.
     expect(await r.describeForPrompt()).toBe('');
   });
@@ -90,7 +90,7 @@ describe('skill registry — progressive disclosure', () => {
   test('duplicate install throws unless replace is set', async () => {
     const r = make();
     await r.install(SKILL_A, { source: 'local' });
-    expect(r.install(SKILL_A, { source: 'local' })).rejects.toThrow(reg.SkillExistsError);
+    await expect(r.install(SKILL_A, { source: 'local' })).rejects.toThrow(reg.SkillExistsError);
     await r.install(SKILL_A.replace('Use for A tasks.', 'UPDATED.'), { source: 'local', replace: true });
     const list = await r.list();
     expect(list).toHaveLength(1);

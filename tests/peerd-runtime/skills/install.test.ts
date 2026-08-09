@@ -67,7 +67,7 @@ describe('install sources go through the injected webFetch (egress)', () => {
   test('a denied webFetch surfaces as a clean install failure', async () => {
     const registry = reg.createSkillRegistry({ store: store.createSkillStore() });
     const webFetch = async () => { throw new Error('egress denied: raw.githubusercontent.com'); };
-    expect(install.installFromGit({ registry, webFetch }, { url: 'https://github.com/u/r/SKILL.md' }))
+    await expect(install.installFromGit({ registry, webFetch }, { url: 'https://github.com/u/r/SKILL.md' }))
       .rejects.toThrow(install.SkillInstallError);
   });
 
