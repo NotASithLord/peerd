@@ -11,6 +11,7 @@ import { OPERATION_STATES } from '../../../extension/peerd-runtime/lifecycle/ope
 import { classifyFailure } from '../../../extension/peerd-runtime/observability/failure-classify.js';
 import { registerTool, clearTools } from '../../../extension/peerd-runtime/tools/registry.js';
 import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/dispatcher.js';
+import { retryClassForTool } from '../../../extension/peerd-runtime/lifecycle/tool-retry-class.js';
 
 const S = OPERATION_STATES;
 
@@ -377,6 +378,33 @@ describe('the replay guard — guarantee 2', () => {
     expect(record.state).toBe(S.AWAITING_REMOTE);
     expect(record.dispatched).toBe(true);
     expect(record.generationId).toBe('gen-1-nonce');
+  });
+
+  test('every Class F override requires a new call with re-derived grants', async () => {
+    for (const toolName of ['sandbox_create', 'vm_boot', 'actor_create', 'request_review']) {
+      const { tracker, log } = makeTracker();
+      const tool = { name: toolName, sideEffect: 'read' };
+      const retryClass = retryClassForTool(tool);
+      expect(retryClass).toBe('F');
+      await log.begin({
+        operationId: `s:${toolName}`, sessionId: 's', toolName,
+        retryClass, generationId: 'gen-0-old',
+      });
+      await log.settle(`s:${toolName}`, {
+        state: S.INTERRUPTED, autoRetry: false,
+        retryRequires: ['rederive-grants'], keepIdempotencyKey: false,
+        verificationRequired: false, recreateResource: true,
+        reason: 'resource host was lost',
+      });
+      const replay = await tracker.beginTracking({
+        callId: toolName, tool: { ...tool, retryClass }, sessionId: 's',
+      });
+      const refusal = (replay as { refuse: { error: string, recovery: any } }).refuse;
+      expect(refusal.error).toStartWith('resource_lost:');
+      expect(refusal.recovery.category).toBe('resource_lost');
+      expect(refusal.recovery.retryRequires).toEqual(['rederive-grants']);
+      expect((await log.get(`s:${toolName}`))!.attempt).toBe(1);
+    }
   });
 
   test('a retried Class D killed mid-flight reconciles as outcome_unknown, not safe-to-retry', async () => {

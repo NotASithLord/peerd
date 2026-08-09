@@ -212,6 +212,15 @@ describe('newAttempt — Class B retries', () => {
     await log.transition('op-1', S.INTERRUPTED);
     await expect(log.newAttempt('op-1')).rejects.toThrow(RetryRefusedError);
   });
+
+  test('refused for Class F - replacement resources require freshly derived grants', async () => {
+    const { adapter } = makeStorage();
+    const log = createOperationLog({ storage: adapter, now: () => 1 });
+    await log.begin({ ...beginInput, retryClass: 'F' });
+    await log.transition('op-1', S.RUNNING);
+    await log.transition('op-1', S.INTERRUPTED);
+    await expect(log.newAttempt('op-1')).rejects.toThrow(RetryRefusedError);
+  });
 });
 
 describe('poisoned entries', () => {

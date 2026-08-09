@@ -397,10 +397,11 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
   });
 
   /**
-   * Class A–D retries: a fresh attempt number on the same operation.
+   * Class A-D retries: a fresh attempt number on the same operation.
    * Refused for Class E (a user-instructed repeat of a non-idempotent
    * action is a NEW operation with a fresh confirmation, never a re-drive
-   * of the old record) and for any state but `interrupted` — settled
+   * of the old record), Class F (resource grants must be re-derived on a
+   * new call), and for any state but `interrupted` - settled
    * outcomes are never re-driven.
    *
    * @param {string} operationId
@@ -417,9 +418,14 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
       throw new RetryRefusedError(operationId,
         `requires an interrupted operation; got ${record.state}`);
     }
-    if (normalizeRetryClass(record.retryClass) === RETRY_CLASSES.SIDE_EFFECT) {
+    const retryClass = normalizeRetryClass(record.retryClass);
+    if (retryClass === RETRY_CLASSES.SIDE_EFFECT) {
       throw new RetryRefusedError(operationId,
         'Class E repeats as a new operation with a fresh confirmation, never a re-drive');
+    }
+    if (retryClass === RETRY_CLASSES.RESOURCE) {
+      throw new RetryRefusedError(operationId,
+        'Class F resources require a new call with grants re-derived, never a re-drive');
     }
     const next = {
       ...record,

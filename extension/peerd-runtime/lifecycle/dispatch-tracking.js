@@ -373,15 +373,39 @@ export const makeDispatchTracker = ({
     }
 
     if (record.state === OPERATION_STATES.INTERRUPTED
+        && (retryClass === RETRY_CLASSES.RESOURCE
+          || normalizeRetryClass(record.retryClass) === RETRY_CLASSES.RESOURCE)) {
+      // Class F is a durable description plus a lost live resource, not a
+      // resumable operation. Replaying the same call id could mint a second
+      // resource under stale grants. A fresh call must re-derive authority.
+      const verdict = decideRecovery({ retryClass: RETRY_CLASSES.RESOURCE, dispatched: false });
+      const report = describeRecovery(verdict, {
+        retryClass: RETRY_CLASSES.RESOURCE,
+        operationId: record.operationId,
+        toolName: record.toolName,
+      });
+      return {
+        refuse: {
+          error: `resource_lost: ${record.toolName} was interrupted. Do not `
+            + 'continue or recreate it automatically. Re-derive grants and '
+            + 'issue a new call to create a replacement.',
+          recovery: report.agent,
+        },
+      };
+    }
+
+    if (record.state === OPERATION_STATES.INTERRUPTED
         && retryClass !== RETRY_CLASSES.SIDE_EFFECT
+        && retryClass !== RETRY_CLASSES.RESOURCE
         // The RECORD's class binds too: a call id whose recorded operation
         // was Class E re-presented under a softer classification is a
         // class-confusion replay, not a sanctioned retry — newAttempt would
         // refuse it anyway (RetryRefusedError), and that rejection must
         // surface as a REFUSAL, not bubble into the dispatcher's fail-open
         // catch and run untracked.
-        && normalizeRetryClass(record.retryClass) !== RETRY_CLASSES.SIDE_EFFECT) {
-      // A/B/C/D-undispatched interruption: the sanctioned retry — same
+        && normalizeRetryClass(record.retryClass) !== RETRY_CLASSES.SIDE_EFFECT
+        && normalizeRetryClass(record.retryClass) !== RETRY_CLASSES.RESOURCE) {
+      // A/B/C/D-undispatched interruption: the sanctioned retry - same
       // operation, fresh attempt number, re-stamped with the LIVE
       // generation. markDispatched mirrors the fresh path: the retry's
       // effect can leave peerd the instant it executes, and a record still
@@ -425,7 +449,9 @@ export const makeDispatchTracker = ({
       await operationLog.settle(record.operationId, verdict).catch(() => {});
       const fresh = await operationLog.get(record.operationId);
       if (fresh?.state === OPERATION_STATES.INTERRUPTED
-          && retryClass !== RETRY_CLASSES.SIDE_EFFECT) {
+          && retryClass !== RETRY_CLASSES.SIDE_EFFECT
+          && retryClass !== RETRY_CLASSES.RESOURCE
+          && normalizeRetryClass(fresh.retryClass) !== RETRY_CLASSES.RESOURCE) {
         // Same shape as the sanctioned-retry branch above: live generation
         // stamp + dispatched marked before the effect can leave.
         const next = await operationLog.newAttempt(record.operationId,
