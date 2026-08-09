@@ -51,9 +51,26 @@ const baseCtx = (lifecycle: unknown, extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 
+const RESOURCE_TOOL_NAMES = [
+  'sandbox_create', 'vm_boot', 'actor_create', 'request_review',
+] as const;
+
+const resourceCall = (name: typeof RESOURCE_TOOL_NAMES[number]) => ({
+  id: `tu-${name}`,
+  name,
+  args: name === 'vm_boot' ? { vm: 'vm-1' } : {},
+});
+
+const resourceCtx = (name: typeof RESOURCE_TOOL_NAMES[number], lifecycle: unknown) =>
+  name === 'vm_boot'
+    ? baseCtx(lifecycle, {
+      exposure: 'actor', actorType: 'webvm', actorInstanceId: 'vm-1',
+    })
+    : baseCtx(lifecycle);
+
 beforeEach(() => clearTools());
 
-describe('GUARANTEE 2 + fail-closed: Class D/E never execute when tracking cannot start', () => {
+describe('GUARANTEE 2 + fail-closed: Class D/E/F never execute when tracking cannot start', () => {
   test('operationLog.begin throws + Class E → refusal at the dispatcher, execute() never entered', async () => {
     const tracker = makeDispatchTracker({
       operationLog: createOperationLog({
@@ -91,6 +108,97 @@ describe('GUARANTEE 2 + fail-closed: Class D/E never execute when tracking canno
     }
   });
 
+  test('boot failed: every Class F override is refused and never executes', async () => {
+    const tracker = makeFailClosedTracker({
+      reason: 'lifecycle boot failed', retryClassFor: retryClassForTool,
+    });
+    for (const name of RESOURCE_TOOL_NAMES) {
+      const calls = spyTool(name, 'write');
+      const result = await dispatchToolCall(
+        resourceCall(name), resourceCtx(name, tracker) as any);
+      expect(calls.count, name).toBe(0);
+      expect(result.ok, name).toBe(false);
+      expect((result as { error: string }).error, name).toContain('NOT executed');
+    }
+  });
+
+  test('operation-log failure before the first durable write refuses every Class F override', async () => {
+    for (const name of RESOURCE_TOOL_NAMES) {
+      const tracker = makeDispatchTracker({
+        operationLog: createOperationLog({
+          storage: {
+            get: async () => undefined,
+            set: async () => { throw new Error('storage dead'); },
+          },
+        }),
+        generationId: () => 'gen-1-x',
+        retryClassFor: retryClassForTool,
+      });
+      const calls = spyTool(name, 'write');
+      const result = await dispatchToolCall(
+        resourceCall(name), resourceCtx(name, tracker) as any);
+      expect(calls.count, name).toBe(0);
+      expect(result.ok, name).toBe(false);
+      expect((result as { error: string }).error, name).toContain('NOT executed');
+    }
+  });
+
+  test('operation-log failure after begin but before dispatched refuses every Class F override', async () => {
+    for (const name of RESOURCE_TOOL_NAMES) {
+      let writes = 0;
+      const storage = makeStorage();
+      const persist = storage.set;
+      storage.set = async (key, value) => {
+        writes += 1;
+        if (writes > 1) throw new Error('storage died mid-begin');
+        await persist(key, value);
+      };
+      const tracker = makeDispatchTracker({
+        operationLog: createOperationLog({ storage }),
+        generationId: () => 'gen-1-x',
+        retryClassFor: retryClassForTool,
+      });
+      const calls = spyTool(name, 'write');
+      const result = await dispatchToolCall(
+        resourceCall(name), resourceCtx(name, tracker) as any);
+      expect(writes, name).toBe(2);
+      expect(calls.count, name).toBe(0);
+      expect(result.ok, name).toBe(false);
+      expect((result as { error: string }).error, name).toContain('NOT executed');
+    }
+  });
+
+  test('missing or empty call IDs refuse D, E, and every Class F override', async () => {
+    const cases = [
+      ['dweb_share', 'mutate_external'],
+      ['submit_form', 'mutate_external'],
+      ...RESOURCE_TOOL_NAMES.map((name) => [name, 'write'] as const),
+    ] as const;
+    for (const id of [undefined, ''] as const) {
+      clearTools();
+      for (const [name, sideEffect] of cases) {
+        const { log } = makeLog();
+        const tracker = makeDispatchTracker({
+          operationLog: log,
+          generationId: () => 'gen-1-x',
+          retryClassFor: retryClassForTool,
+        });
+        const calls = spyTool(name, sideEffect);
+        const call = RESOURCE_TOOL_NAMES.includes(name as any)
+          ? { ...resourceCall(name as typeof RESOURCE_TOOL_NAMES[number]), id }
+          : { id, name, args: {} };
+        const ctx = RESOURCE_TOOL_NAMES.includes(name as any)
+          ? resourceCtx(name as typeof RESOURCE_TOOL_NAMES[number], tracker)
+          : baseCtx(tracker);
+        const result = await dispatchToolCall(
+          call as any, ctx as any);
+        expect(calls.count, `${name}:${String(id)}`).toBe(0);
+        expect(result.ok, `${name}:${String(id)}`).toBe(false);
+        expect((result as { error: string }).error, name).toContain('identity is missing');
+      }
+    }
+  });
+
   test('no Class E dispatch proceeds while lifecycle arming is unresolved (the boot-window pattern)', async () => {
     // The SW's buildToolContext awaits the boot before handing out any ctx;
     // this pins that pattern: ctx construction blocks, so execute cannot be
@@ -120,7 +228,7 @@ describe('GUARANTEE 2 + fail-closed: Class D/E never execute when tracking canno
   });
 });
 
-describe('GUARANTEE 2: an UNEXPECTED beginTracking rejection still fails closed for D/E', () => {
+describe('GUARANTEE 2: an UNEXPECTED beginTracking rejection still fails closed for D/E/F', () => {
   // The tracker's own failure paths are covered above. This is the harder
   // question: the dispatcher used to swallow ANY beginTracking rejection
   // with `.catch(() => null)` and run untracked. These tests force
@@ -157,6 +265,17 @@ describe('GUARANTEE 2: an UNEXPECTED beginTracking rejection still fails closed 
     expect(calls.count).toBe(0);
     expect(result.ok).toBe(false);
     expect((result as { error: string }).error).toContain('NOT executed');
+  });
+
+  test('every Class F override refuses an unexpected tracker rejection', async () => {
+    for (const name of RESOURCE_TOOL_NAMES) {
+      const calls = spyTool(name, 'write');
+      const result = await dispatchToolCall(
+        resourceCall(name), resourceCtx(name, rejectingTracker) as any);
+      expect(calls.count, name).toBe(0);
+      expect(result.ok, name).toBe(false);
+      expect((result as { error: string }).error, name).toContain('NOT executed');
+    }
   });
 
   test('Class A/B/C keep the safe degradation — a broken tracker cannot take reads down', async () => {

@@ -147,7 +147,7 @@ class TombstoneUnreadableError extends Error {
 }
 
 /**
- * The fail-closed refusal for a Class D/E dispatch whose tracking cannot
+ * The fail-closed refusal for a Class D/E/F dispatch whose tracking cannot
  * start; A/B/C degrade to untracked (null). Shared by the live tracker's
  * storage-failure path and makeFailClosedTracker below.
  *
@@ -158,15 +158,20 @@ class TombstoneUnreadableError extends Error {
  */
 const refuseUntracked = (retryClass, toolName, reason) => {
   if (retryClass !== RETRY_CLASSES.SIDE_EFFECT
-      && retryClass !== RETRY_CLASSES.CONDITIONAL_ACTION) {
+      && retryClass !== RETRY_CLASSES.CONDITIONAL_ACTION
+      && retryClass !== RETRY_CLASSES.RESOURCE) {
     return null;
   }
+  const risk = retryClass === RETRY_CLASSES.RESOURCE
+    ? 'a long-lived resource must not run untracked: an interruption could '
+      + 'then never be reported or guarded against, and could leave an orphan'
+    : 'a non-idempotent action must not run untracked: an interruption could '
+      + 'then never be reported or guarded against';
   return {
     refuse: {
       error: `failed: ${toolName ?? 'this action'} was NOT executed — lifecycle `
-        + `tracking is unavailable (${reason}) and a non-idempotent action must `
-        + 'not run untracked: an interruption could then never be reported or '
-        + 'guarded against. Retry once storage recovers, or run a read-only '
+        + `tracking is unavailable (${reason}) and ${risk}. `
+        + 'Retry once storage recovers, or run a read-only '
         + 'alternative.',
       recovery: {
         category: 'security_degradation',
@@ -182,7 +187,7 @@ const refuseUntracked = (retryClass, toolName, reason) => {
 };
 
 /**
- * The tracker the shell arms when lifecycle BOOT itself failed: Class D/E
+ * The tracker the shell arms when lifecycle BOOT itself failed: Class D/E/F
  * dispatches are refused (fail closed — same rationale as a mid-flight
  * storage failure), everything else runs untracked as it did before the
  * lifecycle landed. settleTracking is a no-op (nothing was recorded).
@@ -402,7 +407,10 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
   }) => {
     const retryClass = normalizeRetryClass(retryClassFor(tool));
     if (retryClass === RETRY_CLASSES.PURE_READ) return null;
-    if (typeof callId !== 'string' || !callId) return null;
+    if (typeof callId !== 'string' || !callId) {
+      return refuseUntracked(retryClass, tool?.name,
+        'durable operation identity is missing');
+    }
 
     // The operation identity is SESSION-scoped. why: the replay guard must
     // fire on the same call re-driven within its own session (auto-resume
@@ -567,7 +575,8 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
       //   A/B/C — degrade to untracked execution: duplicates are invisible
       //   or idempotent, so losing the record loses nothing the contract
       //   protects, and a broken log must not brick the read/write surface.
-      //   D/E — REFUSE. An untracked non-idempotent effect is one whose
+      //   D/E/F: REFUSE. An untracked non-idempotent effect or resource is one
+      //   whose
       //   outcome could never be recovered: no record means a later
       //   interruption silently violates guarantee 1 (uncertainty would be
       //   unreportable) and guarantee 2 (nothing would stop the replay).

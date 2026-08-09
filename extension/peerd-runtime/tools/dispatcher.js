@@ -632,7 +632,7 @@ export const dispatchToolCall = async (call, ctx) => {
       //
       // So this is an INDEPENDENT fail-closed decision, deliberately not
       // routed through the tracker that just failed: classify the tool
-      // directly and refuse D/E. A/B/C keep the historical degradation —
+      // directly and refuse D/E/F. A/B/C keep the historical degradation.
       // duplicate reads are invisible and idempotent writes are safe to
       // repeat, so a broken tracker must not take the read surface down
       // with it.
@@ -641,14 +641,18 @@ export const dispatchToolCall = async (call, ctx) => {
         catch { return RETRY_CLASSES.SIDE_EFFECT; } // classification threw: assume the worst
       })();
       if (retryClass !== RETRY_CLASSES.SIDE_EFFECT
-          && retryClass !== RETRY_CLASSES.CONDITIONAL_ACTION) return null;
+          && retryClass !== RETRY_CLASSES.CONDITIONAL_ACTION
+          && retryClass !== RETRY_CLASSES.RESOURCE) return null;
       const detail = error instanceof Error ? error.message : String(error);
+      const risk = retryClass === RETRY_CLASSES.RESOURCE
+        ? 'a long-lived resource must not run untracked: an interruption could '
+          + 'then never be reported or guarded against, and could leave an orphan'
+        : 'a non-idempotent action must not run untracked: an interruption could '
+          + 'then never be reported or guarded against';
       return {
         refuse: {
           error: `failed: ${call.name} was NOT executed — lifecycle tracking `
-            + `failed unexpectedly (${detail}) and a non-idempotent action must `
-            + 'not run untracked: an interruption could then never be reported '
-            + 'or guarded against.',
+            + `failed unexpectedly (${detail}) and ${risk}.`,
           recovery: {
             category: 'security_degradation',
             state: 'failed',
