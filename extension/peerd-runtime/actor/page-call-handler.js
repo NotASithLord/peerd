@@ -18,8 +18,8 @@
 import { pageCallToToolCall, shapePageResult } from './page-api.js';
 
 /**
- * @typedef {{ ok: true, value: any, images?: Array<{ data: string, mediaType: string }>, browserPolicies?: any[], endTurn?: boolean, endTurnContent?: string } | { ok: false, error: string, browserPolicies?: any[], endTurn?: boolean, endTurnContent?: string }} PageCallOutcome
- * @typedef {{ ok?: boolean, error?: string, content?: string, endTurn?: boolean, images?: Array<{ data: string, mediaType: string }>, structured?: Record<string, any> }} ToolResult
+ * @typedef {{ ok: true, value: any, images?: Array<{ data: string, mediaType: string }>, browserPolicies?: any[], endTurn?: boolean, endTurnContent?: string, endTurnOutcomeKind?: string } | { ok: false, error: string, browserPolicies?: any[], endTurn?: boolean, endTurnContent?: string, endTurnOutcomeKind?: string }} PageCallOutcome
+ * @typedef {{ ok?: boolean, error?: string, content?: string, endTurn?: boolean, outcomeKind?: string, images?: Array<{ data: string, mediaType: string }>, structured?: Record<string, any> }} ToolResult
  */
 
 /**
@@ -119,7 +119,11 @@ export const makePageCallHandler = ({ dispatchToolCall, buildActorContext }) => 
     : structured.browserPolicy ? [structured.browserPolicy] : [];
   const policyFields = browserPolicies.length ? { browserPolicies } : {};
   const terminalFields = result.endTurn === true
-    ? { endTurn: true, endTurnContent: typeof result.content === 'string' ? result.content : '' }
+    ? {
+      endTurn: true,
+      endTurnContent: typeof result.content === 'string' ? result.content : '',
+      ...(typeof result.outcomeKind === 'string' ? { endTurnOutcomeKind: result.outcomeKind } : {}),
+    }
     : {};
 
   // Shape the result. A gated failure (denylist / confirm decline / count

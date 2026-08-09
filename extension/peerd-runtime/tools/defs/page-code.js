@@ -101,7 +101,9 @@ export const pageCodeTool = {
             ? result.endTurnContent
             : 'peerd stopped this page run because the tab entered a user-controlled sign-in step.',
           endTurn: true,
-          outcomeKind: 'effect-completed',
+          outcomeKind: result.endTurnOutcomeKind === 'pre-effect-failure'
+            ? 'pre-effect-failure'
+            : 'effect-completed',
         };
       }
       return {

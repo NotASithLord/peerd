@@ -335,7 +335,7 @@ export function loginTargetReader(selector, nth, walkId) {
         formAction = own;
       } else {
         const f = el.closest ? el.closest('form') : null;
-        if (f) formAction = f.getAttribute('action') || /** @type {{ action?: string }} */ (f).action || '';
+        if (f) formAction = Element.prototype.getAttribute.call(f, 'action') || '';
       }
     }
   } catch (e) { /* best-effort */ }

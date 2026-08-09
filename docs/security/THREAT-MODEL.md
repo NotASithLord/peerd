@@ -959,14 +959,22 @@ evaluating peerd should know. Each cites where it lives in the code.
   trust, so a hijacked page gets one attempt at persuading it to open a helper somewhere
   the user never asked about. (`peerd-runtime/actor/origin-lock-report.js`.)
 
-- R20. Type-the-scrape-into-a-form exfil is invisible to the tripwire (#269). The
-  scanner inspects tool ARGUMENTS for URL-shaped payloads. Typing a scraped blob into a
-  form field and clicking submit moves the same bytes with no URL in any argument: the
-  blob is seen in the `text` slot and discarded because it does not parse as a URL, and
-  the request that actually carries it — the form submission — is a `click`, whose args
-  are a ref or a selector. The module header already puts page-driven beacons out of
-  scope; this path is tool-driven, so it is inside the stated scope and is a gap rather
-  than an exclusion (`tools/egress-heuristics.js`).
+- R20. Direct native cross-origin form actions are blocked before activation (#269).
+  The URL tripwire cannot see a form destination or its live values in `click` or
+  `type` arguments, so the injected click and type bodies resolve the native form action
+  on the exact document and element immediately before the effect. A cross-origin action
+  is refused before click activation, value mutation, or submit events. The fixed result
+  says that nothing was submitted and directs the user to review and submit the form
+  manually. Verified login is the narrow exception because its exact identity-provider
+  destination already has fresh user consent and a one-shot excursion grant
+  (`tools/defs/click.js`, `tools/defs/type.js`, `tools/browser-automation-policy.js`).
+
+  The boundary is intentionally limited to the live native action that peerd can resolve
+  before it fires page events. Page-script beacons remain outside the tool action path.
+  A handler can change a same-origin action after an input or click event, submit through
+  JavaScript, or send data without using the form action. A same-origin endpoint can also
+  relay the body or redirect after it receives the request. Those page-driven channels
+  remain residuals. Red-team: scenario 09.
 - R21. `fetch_url` headers and body are structurally invisible to the same scanner
   (#270). The tripwire was widened to cover the web actor's own fetch, but it reads
   only the URL-shaped fields; header values and any request body are never examined,

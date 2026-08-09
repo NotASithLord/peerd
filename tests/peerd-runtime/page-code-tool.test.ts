@@ -83,6 +83,26 @@ describe('page_code — the code-REPL action tool', () => {
     });
   });
 
+  test('preserves a pre-effect form refusal through the outer actor turn', async () => {
+    const { ctx } = ctxWith({
+      jsOffscreenClient: {
+        execHeadless: async () => ({
+          ...RESULT,
+          endTurn: true,
+          endTurnContent: 'This form submits to another site. Nothing was submitted.',
+          endTurnOutcomeKind: 'pre-effect-failure',
+        }),
+      },
+    });
+    expect(await pageCodeTool.execute({ code: 'await page.click("#send")' }, ctx as any)).toEqual({
+      ok: false,
+      error: 'page_code_ended_for_host_policy',
+      content: 'This form submits to another site. Nothing was submitted.',
+      endTurn: true,
+      outcomeKind: 'pre-effect-failure',
+    });
+  });
+
   test('is a web-primitive, write-effect tool that names no static origins', () => {
     expect(pageCodeTool.name).toBe('page_code');
     expect(pageCodeTool.primitive).toBe('web');

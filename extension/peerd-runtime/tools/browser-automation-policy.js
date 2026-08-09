@@ -52,6 +52,45 @@ export const BROWSER_TARGET_CODES = Object.freeze({
   NETWORK_GUARD_UNAVAILABLE: 'browser_network_guard_unavailable',
 });
 
+export const FORM_SUBMISSION_CODES = Object.freeze({
+  CROSS_ORIGIN: 'cross_origin_form_submission_blocked',
+});
+
+/**
+ * Generic browser actors do not own authority to send a native form to a
+ * different origin. Keep the receipt content-free: the page controls the form
+ * fields and action URL, and neither belongs in a trusted error channel.
+ *
+ * @returns {import('/shared/tool-types.js').ToolResultErr & { endTurn: true, structured: Record<string, unknown> }}
+ */
+export const crossOriginFormSubmissionRefusalResult = () => ({
+  ok: false,
+  error: FORM_SUBMISSION_CODES.CROSS_ORIGIN,
+  content: 'This form submits to another site. peerd did not click, type, or submit. Review and complete the form in the open tab, then submit it yourself if you want to continue. Do not retry with another click, selector, type submit, or page code.',
+  structured: {
+    code: FORM_SUBMISSION_CODES.CROSS_ORIGIN,
+    reason: 'cross_origin_form_submission',
+    outcome: 'not_run',
+    performed: false,
+    retryable: false,
+  },
+  outcomeKind: FAILURE_OUTCOMES.PRE_EFFECT_FAILURE,
+  endTurn: true,
+});
+
+/**
+ * Convert only the exact host-authored form guard code into the shared fixed
+ * receipt. Page text is never copied into the result.
+ *
+ * @param {unknown} carrier
+ */
+export const formSubmissionRefusalFrom = (carrier) => {
+  const error = /** @type {{ error?: unknown }} */ (carrier)?.error;
+  return error === FORM_SUBMISSION_CODES.CROSS_ORIGIN
+    ? crossOriginFormSubmissionRefusalResult()
+    : null;
+};
+
 export const BROWSER_TARGET_STAGES = Object.freeze({
   PRE_NAVIGATION: /** @type {const} */ ('pre_navigation'),
   COMMITTED_ORIGIN: /** @type {const} */ ('committed_origin'),
