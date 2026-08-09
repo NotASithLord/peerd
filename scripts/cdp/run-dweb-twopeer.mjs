@@ -159,10 +159,15 @@ const main = async () => {
   // CONV=1 (implies A2A) proves a STANDING conversation: converse opens a thread,
   // say continues it, the convId survives real WebRTC end to end.
   const conv = process.env.CONV === '1';
+  // RESTORE=1: alice joins as a RESTORED identity: the page runs the full
+  // backup/adopt lifecycle first and the pass gate requires the did she meshes
+  // with to equal the pre-backup did. Persistent identity, proven on the live
+  // network, not just at the values level.
+  const restore = process.env.RESTORE === '1';
   const room = `harness-${Math.random().toString(36).slice(2, 8)}`;
-  const pageUrl = (who) => `http://localhost:${httpPort}/tests/dweb-twopeer.html`
-    + `?room=${room}&name=${who}&url=${encodeURIComponent(rendezvous)}${(a2a || conv) ? '&a2a=1' : ''}${conv ? '&conv=1' : ''}`;
-  const alice = await openPeer(cdpPort, pageUrl('alice'));
+  const pageUrl = (who, extra = '') => `http://localhost:${httpPort}/tests/dweb-twopeer.html`
+    + `?room=${room}&name=${who}&url=${encodeURIComponent(rendezvous)}${(a2a || conv) ? '&a2a=1' : ''}${conv ? '&conv=1' : ''}${extra}`;
+  const alice = await openPeer(cdpPort, pageUrl('alice', restore ? '&restore=1' : ''));
   const bob = await openPeer(cdpPort, pageUrl('bob'));
   console.log(`[twopeer] two contexts joining room "${room}"`);
 
@@ -170,16 +175,20 @@ const main = async () => {
   const reportExpr = 'window.__DWEB__?.ready ? JSON.stringify(window.__DWEB__.report()) : ""';
   let a = null; let b = null;
   const deadline = Date.now() + RESULT_BUDGET_MS;
-  // A2A mode additionally requires the live ask/reply round-trip on both peers.
-  const done = (r) => r && r.linked >= 1 && r.heard >= 1 && ((!a2a && !conv) || r.askReplied === true);
+  // A2A mode additionally requires the live ask/reply round-trip on both peers;
+  // RESTORE mode additionally requires alice's mesh did to be the restored one.
+  const done = (r, restoredRequired = false) => r && r.linked >= 1 && r.heard >= 1
+    && ((!a2a && !conv) || r.askReplied === true)
+    && (!restoredRequired || r.restored === true);
   while (Date.now() < deadline) {
     const [ja, jb] = await Promise.all([alice.evaluate(reportExpr), bob.evaluate(reportExpr)]);
     a = ja ? JSON.parse(ja) : a;
     b = jb ? JSON.parse(jb) : b;
     if (a?.error || b?.error) break;
-    if (done(a) && done(b)) {
+    if (done(a, restore) && done(b)) {
       const a2aNote = (a2a || conv) ? ` · ${conv ? 'standing conversation' : 'a2a ask/reply'} ✓ (alice⇐"${a.askReply}", bob⇐"${b.askReply}")` : '';
-      console.log(`[twopeer] ✅ PASS — alice⇄bob meshed (alice linked ${a.linked}/heard ${a.heard}, bob linked ${b.linked}/heard ${b.heard})${a2aNote}`);
+      const restoreNote = restore ? ` · restored identity ✓ (alice meshed as pre-backup did …${String(a.did).slice(-8)})` : '';
+      console.log(`[twopeer] ✅ PASS - alice⇄bob meshed (alice linked ${a.linked}/heard ${a.heard}, bob linked ${b.linked}/heard ${b.heard})${a2aNote}${restoreNote}`);
       cleanup();
       process.exit(0);
     }

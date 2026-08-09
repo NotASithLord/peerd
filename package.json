@@ -22,6 +22,7 @@
     "test:twopeer": "bun scripts/cdp/run-dweb-twopeer.mjs",
     "test:twopeer:a2a": "A2A=1 bun scripts/cdp/run-dweb-twopeer.mjs",
     "test:twopeer:conv": "CONV=1 bun scripts/cdp/run-dweb-twopeer.mjs",
+    "test:twopeer:restore": "RESTORE=1 bun scripts/cdp/run-dweb-twopeer.mjs",
     "e2e:verify": "bun scripts/cdp/run-e2e-verify.mjs",
     "test:e2e": "bun scripts/cdp/run-e2e-verify.mjs --functional",
     "test:e2e:all": "bun scripts/cdp/run-e2e-verify.mjs --functional",

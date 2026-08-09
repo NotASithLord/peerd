@@ -293,6 +293,19 @@ jobs:
             sleep 5
           done
           exit 1
+      - name: Run the two-peer RESTORED-identity join over CDP
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        # Persistent identity on the live network: alice runs the full
+        # backup/adopt lifecycle in-page and must mesh as the pre-backup did.
+        # Same flake retry as the runs above.
+        run: |
+          for attempt in 1 2 3; do
+            bun run test:twopeer:restore && exit 0
+            echo "::warning::two-peer restore attempt $attempt failed (headless-WebRTC flake) - retrying"
+            sleep 5
+          done
+          exit 1
 
   # Additive job — the multi-PROCESS dweb node test (PHASE1-TESTING §A.2),
   # previously run only by hand. Spawns a relay + N real node processes that
