@@ -22,11 +22,7 @@ import m from '/vendor/mithril/mithril.js';
 import browser from '/vendor/browser-polyfill.js';
 import { CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
 import { OptionsApp } from './components/options-app.js';
-import { makePrivateTransferClient } from './private-transfer-client.js';
-
-const privateTransferClient = makePrivateTransferClient({
-  connect: () => browser.runtime.connect({ name: 'private-transfer' }),
-});
+import { callPrivateTransfer } from './private-transfer-session.js';
 
 // null until the first snapshot lands — the shell renders a loading
 // gate rather than guessing at vault state (a flash of "set up peerd"
@@ -113,7 +109,7 @@ const foldReply = (msg, reply) => {
  */
 const send = async (msg) => {
   const reply = msg.type.startsWith('transfer/')
-    ? await privateTransferClient.call(msg)
+    ? await callPrivateTransfer(msg)
     : await browser.runtime.sendMessage(msg);
   foldReply(msg, reply);
   return reply;

@@ -62,16 +62,23 @@ const actorIsolationEvidence = (entries) => {
   };
 };
 
-// Transfer routes require the exact options-page Port. Keep the live E2E on
+// Transfer routes require the exact options-page channel. Keep the live E2E on
 // that production boundary instead of calling the generic dispatcher.
 const privateTransferRpc = (page, message) => evalIn(page, `(async () => {
-  const browser = (await import('/vendor/browser-polyfill.js')).default;
-  const { makePrivateTransferClient } = await import('/options/private-transfer-client.js');
-  globalThis.__peerdE2eTransferClient ??= makePrivateTransferClient({
-    connect: () => browser.runtime.connect({ name: 'private-transfer' }),
-  });
-  return globalThis.__peerdE2eTransferClient.call(${JSON.stringify(message)});
+  const { callPrivateTransfer } = await import('/options/private-transfer-session.js');
+  return callPrivateTransfer(${JSON.stringify(message)});
 })()`, true);
+
+// The raw CDP handle's close() disconnects the debugger but does not close the
+// tab. Navigate private-transfer fixtures away first so the next exact-client
+// assertion cannot inherit an old options document from an earlier state.
+const retirePrivateTransferPage = async (page) => {
+  await page.send('Page.navigate', { url: 'about:blank' });
+  const retired = await waitFor(() => evalIn(page, `location.href === 'about:blank'`),
+    { budgetMs: 5_000, pollMs: 50 });
+  if (!retired) throw new Error('private transfer fixture did not retire');
+  try { page.close(); } catch { /* */ }
+};
 
 // The local-first personal-data agent, end to end through the REAL stack: the
 // faked model calls script, the sealed worker builds an on-device index in OPFS
@@ -110,6 +117,7 @@ let dwebActorState = { delegates: 0, actorCalls: 0 };
 let a2aState = { delegates: 0, actorCalls: 0 };
 // heap-split phase 1: the offscreen pure-reasoning actor state.
 let reasoningState = { spawned: 0, childCalls: 0 };
+let actorChannelTargetState = { spawned: 0, childCalls: 0 };
 // heap-split phase 4: the offscreen TOOL-BEARING actor state.
 let actorToolsState = { spawned: 0, childCalls: 0 };
 // issue #324: an offscreen actor delegating FROM its granted script surface.
@@ -1023,7 +1031,7 @@ export const STATES = [
         restarted?.ok === true && restarted?.running === true && restarted?.did === incoming.did,
         JSON.stringify(restarted));
       await rec.shot('final');
-      try { transferPage.close(); } catch { /* */ }
+      await retirePrivateTransferPage(transferPage);
     },
   },
 
@@ -1037,7 +1045,7 @@ export const STATES = [
         await waitFor(() => evalIn(page, `!!document.querySelector('#exppass')`),
           { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
         await rec.visualPage('options-transfer', page);
-      } finally { try { page.close(); } catch { /* */ } }
+      } finally { await retirePrivateTransferPage(page); }
     },
   },
   {
@@ -1071,7 +1079,7 @@ export const STATES = [
         localDid = postBootstrap?.payload?.dweb?.identityRecord?.did ?? null;
         localReady = !!localDid;
       }
-      try { seedPage.close(); } catch { /* */ }
+      await retirePrivateTransferPage(seedPage);
       const incoming = await evalIn(ctx.page, `(async () => {
         const dweb = await import('/peerd-distributed/index.js');
         let value = null;
@@ -1106,8 +1114,15 @@ export const STATES = [
           input.files = transfer.files;
           input.dispatchEvent(new Event('change', { bubbles: true }));
         })()`);
-        await waitFor(() => evalIn(page, `!!document.querySelector('#imppass')`),
+        const importReady = await waitFor(() => evalIn(page, `!!document.querySelector('#imppass')`),
           { budgetMs: 15_000, pollMs: 80 });
+        if (!importReady) {
+          const importState = await evalIn(page, `(() => ({
+            alerts: [...document.querySelectorAll('[role="alert"]')].map((node) => node.textContent),
+            fileCount: document.querySelector('#peerd-backup-file')?.files?.length ?? 0,
+          }))()`);
+          throw new Error(`backup inspection did not settle: ${JSON.stringify(importState)}`);
+        }
         await evalIn(page, `(() => {
           const input = document.querySelector('#imppass');
           input.value = ${JSON.stringify(PASSPHRASE)};
@@ -1164,7 +1179,7 @@ export const STATES = [
         const identityTextReady = await waitFor(pinIdentityText, { budgetMs: 5000, pollMs: 50 });
         if (!identityTextReady) throw new Error('identity conflict text did not settle');
         await rec.visualPage('options-transfer-conflict', page, { beforeShot: pinIdentityText });
-      } finally { try { page.close(); } catch { /* */ } }
+      } finally { await retirePrivateTransferPage(page); }
     },
   },
 
@@ -4646,34 +4661,76 @@ Promise.resolve().then(async () => {
     },
   },
 
-  // --- red-team: actor host commands accept only the service worker --------
+  // --- red-team: actor jobs and relays reach only the offscreen client ------
   {
-    name: 'actor-command-sender-pin', kind: 'functional', phase: 'post-unlock',
-    responder: null,
+    name: 'actor-channel-targeting', kind: 'functional', phase: 'post-unlock',
+    responder: (_callIndex, request) => {
+      const body = request?.postData ?? '';
+      if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
+        actorChannelTargetState.childCalls += 1;
+        return { sse: sseText('TARGETED-CHILD-DONE') };
+      }
+      if (actorChannelTargetState.spawned === 0) {
+        actorChannelTargetState.spawned += 1;
+        return { sse: sseToolCall('actor_create', {
+          task: 'target-only-marker-308', tools: [], sync: true,
+        }) };
+      }
+      return { sse: sseText('TARGETED-PARENT-DONE') };
+    },
     async run(ctx, rec) {
+      actorChannelTargetState = { spawned: 0, childCalls: 0 };
       let appPage = null;
       try {
-        // why an App host page: it is a real first-party extension tab, the
-        // exact sender class the old broad extension-origin check admitted.
-        appPage = await openExtPage(ctx, 'engine-tabs/app-tab/index.html#sender-pin-probe');
+        // why an App host page: it is a real first-party extension tab and the
+        // exact sibling context that must not receive an offscreen job or relay.
+        appPage = await openExtPage(ctx, 'engine-tabs/app-tab/index.html#channel-target-probe');
         const ready = await waitFor(() => evalIn(appPage,
           `location.protocol === 'chrome-extension:' && document.readyState !== 'loading'`),
         { budgetMs: 8_000, pollMs: 60 });
         rec.check('the adversarial engine-tab sender loaded', ready === true);
-
-        const abortReply = await rpc(appPage, {
-          type: 'actor/abort', runId: 'forged-by-engine-tab',
+        await evalIn(appPage, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          globalThis.__actorChannelObservations = [];
+          const record = (kind, value) => {
+            let text = '';
+            try { text = JSON.stringify(value); } catch { text = String(value); }
+            globalThis.__actorChannelObservations.push({ kind, text });
+          };
+          browser.runtime.onMessage.addListener((message) => record('runtime-message', message));
+          browser.runtime.onConnect.addListener((port) => record('runtime-connect', { name: port.name }));
+          navigator.serviceWorker?.addEventListener('message', (event) => record('service-worker-message', event.data));
+          return true;
+        })()`, true);
+        const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
+        const sent = await rpc(ctx.page, {
+          type: 'agent/send', text: 'run the targeted actor transport probe',
         });
-        const runReply = await rpc(appPage, {
-          type: 'actor/run',
-          job: { runId: 'forged-by-engine-tab', relayToken: 'broadcast-token-is-not-authority' },
-        });
-        rec.check('an engine tab cannot forge actor/abort',
-          abortReply?.ok === false && abortReply?.error === 'unauthorized-command-sender',
-          JSON.stringify(abortReply));
-        rec.check('an engine tab cannot replay actor/run',
-          runReply?.ok === false && runReply?.error === 'unauthorized-command-sender',
-          JSON.stringify(runReply));
+        rec.check('the actor probe turn was accepted', sent?.ok === true, JSON.stringify(sent));
+        let turnView = {};
+        const settled = await waitFor(async () => {
+          turnView = await evalIn(ctx.page, `({
+            bubbles: [...document.querySelectorAll('.message-assistant .bubble')]
+              .map((bubble) => bubble.textContent.trim()),
+            busy: !!document.querySelector('form.input-bar button.stop'),
+          })`) ?? {};
+          return actorChannelTargetState.childCalls >= 1 && !turnView.busy;
+        },
+        { budgetMs: 30_000, pollMs: 100 });
+        let isolation = actorIsolationEvidence([]);
+        await waitFor(async () => {
+          const entries = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
+          isolation = actorIsolationEvidence(entries);
+          return isolation.exactProof;
+        }, { budgetMs: 5_000, pollMs: 100 });
+        rec.check('the targeted actor completed',
+          settled === true && isolation.exactProof === true,
+          JSON.stringify({ turnView, actorChannelTargetState, isolation }));
+        const observations = await evalIn(appPage, `globalThis.__actorChannelObservations`);
+        const observedText = JSON.stringify(observations ?? []);
+        rec.check('the sibling engine page saw no actor channel, job, relay, or marker',
+          !/peerd\/actor-channel|actor\/(?:open|commit|relay|run)|target-only-marker-308/.test(observedText),
+          observedText.slice(0, 2_000));
       } finally {
         try { appPage?.close(); } catch { /* */ }
       }

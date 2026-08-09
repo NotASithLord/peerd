@@ -25,7 +25,7 @@ import { applyRealmSeal } from '../../../extension/engine-tabs/notebook-tab/note
 import { resolveRelativePath } from '../../../extension/peerd-engine/module-resolver.js';
 import { composeApp, stripMetaRefresh } from '../../../extension/peerd-engine/app-compose.js';
 import { normalizeRequest, needsWebWriteConfirm } from '../../../extension/peerd-engine/vm-net/http-bridge.js';
-import { isServiceWorkerSender } from '../../../extension/shared/sender-trust.js';
+import { makeOffscreenActorChannelClient } from '../../../extension/background/offscreen-actor-channel-client.js';
 import { buildWorkerSource } from '../../../extension/engine-tabs/notebook-tab/worker-source.js';
 import { formatEvalResult } from '../../../extension/peerd-runtime/tools/defs/js-notebook.js';
 
@@ -69,7 +69,7 @@ export const scenario: Scenario = {
   title: 'Sandbox escape (Notebook worker, App iframe, WebVM)',
   adversary: 'malicious sandboxed code',
   asset: 'the host origin, the network, and other sandbox instances',
-  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; a remote module restricts its whole run to compute only and all remote-controlled output is fenced; an App cannot break out of its iframe or impersonate the service worker to issue actor commands; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
+  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; a remote module restricts its whole run to compute only and all remote-controlled output is fenced; an App cannot break out of its iframe or observe a targeted actor job; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
   threatModelRef: 'INV-6',
   tier: 'unit',
   async run() {
@@ -204,27 +204,42 @@ export const scenario: Scenario = {
         ? blocked('meta-refresh the App frame to an attacker URL', 'meta http-equiv=refresh stripped from the app HTML')
         : leaked('meta-refresh the App frame to an attacker URL', 'meta refresh survived'));
 
-      const id = 'red-team-extension';
-      const origin = `chrome-extension://${id}/`;
-      const trust = {
-        runtimeId: id,
-        extensionOrigin: origin,
-        serviceWorkerUrl: `${origin}background/service-worker.js`,
-      };
-      const engineTabDenied = !isServiceWorkerSender({
-        id,
-        url: `${origin}engine-tabs/app-tab/index.html`,
-        tab: { id: 42 },
-      }, trust);
-      const exactWorkerAccepted = isServiceWorkerSender({
-        id,
-        url: trust.serviceWorkerUrl,
-      }, trust);
-      probes.push(engineTabDenied && exactWorkerAccepted
-        ? blocked('replay a broadcast actor command from a first-party engine tab',
-          'exact service-worker source accepted; same-extension tab provenance rejected')
-        : leaked('replay a broadcast actor command from a first-party engine tab',
-          `engineTabDenied=${engineTabDenied} exactWorkerAccepted=${exactWorkerAccepted}`));
+      let publicOffer: any = null;
+      let privateJob: any = null;
+      const client = makeOffscreenActorChannelClient({
+        ensureOffscreen: async () => {},
+        findOffscreenClient: async () => ({
+          postMessage: (offer: any, transfer: Transferable[]) => {
+            publicOffer = offer;
+            const port = transfer[0] as MessagePort;
+            port.onmessage = (event) => {
+              const message = event.data;
+              if (message.type === 'actor/open') {
+                privateJob = message.job;
+                port.postMessage({ ...offer, type: 'actor/accepted' });
+              } else if (message.type === 'actor/commit') {
+                port.postMessage({
+                  ...offer, type: 'actor/result',
+                  result: { ok: true, started: true, finalText: 'done' },
+                });
+                setTimeout(() => port.close(), 0);
+              }
+            };
+            port.start();
+            port.postMessage({ ...offer, type: 'channel/ready' });
+          },
+        }),
+      });
+      const actorResult = await client.run({ runId: 'red-team-run', message: 'private-marker' }, {
+        relay: async () => ({ ok: true }),
+      });
+      const offerIsNonsecret = !JSON.stringify(publicOffer).includes('private-marker');
+      const endpointReceivedJob = privateJob?.message === 'private-marker';
+      probes.push(offerIsNonsecret && endpointReceivedJob && actorResult?.ok
+        ? blocked('observe an actor job from a first-party engine tab',
+          'the targeted channel offer carries no job or authority; the job moves only over the transferred endpoint')
+        : leaked('observe an actor job from a first-party engine tab',
+          `offerIsNonsecret=${offerIsNonsecret} endpointReceivedJob=${endpointReceivedJob}`));
     }
 
     // 8) WebVM HTTP bridge: the guest cannot pick a dangerous scheme, inject
@@ -260,7 +275,7 @@ export const scenario: Scenario = {
       'resolveRelativePath (OPFS ".." collapse)',
       'buildWorkerSource + formatEvalResult (remote graph capability collapse + output fence)',
       'composeApp + stripMetaRefresh (App iframe breakout/navigation defense)',
-      'isServiceWorkerSender (actor-command source pin)',
+      'makeOffscreenActorChannelClient (exact-client channel transfer)',
       'normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)',
     ]);
     // The pure seal runs here; the real-worker-realm proof (and the a2a run's
@@ -274,7 +289,7 @@ export const scenario: Scenario = {
       'tests/peerd-engine/single-module-linker.test.ts (seal-first graph with no child loads)',
       'extension/tests/unit/red-team/sandbox-escape.test.js (in-browser red-team framing)',
       'scripts/firefox/run-runtime-tests.mjs (opaque worker host, string-compilation refusal, cancellable compiler and fetch, local and remote graph parity)',
-      'scripts/cdp/states.mjs actor-command-sender-pin (live engine-tab forgery)',
+      'scripts/cdp/states.mjs actor-channel-targeting (live sibling-observer probe)',
       'scripts/cdp/states.mjs notebook-remote-restricted (live visible-Notebook host wall)',
     ].join('; ');
     return result;

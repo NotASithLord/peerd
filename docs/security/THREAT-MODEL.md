@@ -96,7 +96,10 @@ holds both untrusted input and dangerous capability. Enforcement lives in
   turn before any target action.
 - B2. An actor loop and the network or the key. Model and tool calls leave the
   worker only through privileged, gated relays. The host adds live provider
-  functions only at the model-call boundary and re-checks every tool call.
+  functions only at the model-call boundary and re-checks every tool call. On
+  Chrome, the service worker transfers a standard MessageChannel endpoint to the
+  exact offscreen WindowClient. The job and relays never use extension-wide
+  runtime messaging. Firefox binds the same relays to its private in-process host.
 - B3. The extension and the open web. All outbound bytes pass through
   `peerd-egress/fetch/`: `safeFetch` (exact-origin provider allowlist, carries the
   key) or `webFetch` (SSRF and private-network block plus denylist, keyless).
@@ -111,6 +114,11 @@ holds both untrusted input and dangerous capability. Enforcement lives in
   (`manifests/`, generated `extension/manifest.json`).
 - B7. The user and the agent. Side-effecting actions pass through a confirm gate.
   The vault requires an explicit unlock. Skills and imports require a click.
+  Backup and restore plaintext uses an exact options-page transport. Chrome
+  transfers a MessageChannel to one WindowClient. Firefox accepts a private
+  background Port only from the exact options sender. The ordinary runtime
+  message dispatcher never carries passphrases or backup payloads
+  (`background/private-transfer-port.js`, `options/private-transfer-session.js`).
 
 Out of the model entirely (see section 7): a compromised OS or browser, a
 malicious separate extension, and physical device access.
@@ -272,7 +280,8 @@ relay because `makeRelayedCallModel` drops them. Every untrusted summary re-ente
 orchestrator wrapped as data (`makeActorSummaryFence` and `wrapUntrusted`) with a
 delimiter the content cannot forge (`neutralizeFence`).
 Code: `peerd-runtime/actor/actor-worker-core.js`,
-`background/offscreen-actor-client.js`, `background/direct-actor-host.js`,
+`background/offscreen-actor-client.js`, `background/offscreen-actor-channel-client.js`,
+`background/direct-actor-host.js`, `offscreen/actor-channel-host.js`,
 `offscreen/actor-runner.js`, `offscreen/actor-worker-protocol.js`, and
 `tools/prompt-wrap.js`. The browser custody test proves an actor cannot enter the
 privileged turn driver. The installed-XPI Firefox smoke proves the packaged extension

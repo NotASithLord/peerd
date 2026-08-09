@@ -93,11 +93,12 @@ export const isOffscreenSender = (sender, { runtimeId, extensionOrigin, offscree
 /**
  * Is this sender specifically the extension SERVICE WORKER?
  *
- * why: runtime.sendMessage is broadcast to extension contexts. An engine tab
- * is first-party but hosts agent-authored/untrusted state, so it must not mint
- * a headless job or actor run by replaying an observed command. Command
- * receivers in the offscreen document use this exact source-script pin; relay
- * replies travel in the opposite direction and use isOffscreenSender.
+ * why: runtime.sendMessage reaches extension contexts broadly. An engine tab is
+ * first-party but hosts agent-authored or untrusted state, so exact source pins
+ * remain necessary for the headless jobs that still use runtime messaging.
+ * Chrome actor runs and private backup transfers use targeted MessageChannels.
+ * Firefox actor relays stay inside its background page, while its backup Port
+ * still requires an exact options-page sender.
  *
  * @param {{ id?: string, url?: string, tab?: unknown, documentId?: string } | null | undefined} sender
  * @param {{ runtimeId?: string, extensionOrigin?: string, serviceWorkerUrl?: string }} [trust]
