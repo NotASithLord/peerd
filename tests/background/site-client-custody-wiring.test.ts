@@ -17,7 +17,11 @@ describe('site-client custody service-worker wiring', () => {
     const contextEnd = source.indexOf('// ── Tool dispatcher', contextStart);
     const context = source.slice(contextStart, contextEnd > contextStart ? contextEnd : undefined);
 
-    expect(context).toContain('makeFixedSiteClientOriginGuard(ownedOrigin)');
+    expect(context).toContain('makeFixedSiteClientOriginGuard(ownedOrigin, { isKnownIdp: isKnownIdpHost })');
+    expect(context).toContain('resCtx.idpTransitOnly = isKnownIdpHost(ownedOrigin)');
+    expect(context.indexOf('async () => { throw new EgressDeniedError'))
+      .toBeLessThan(context.indexOf('withDpopCredentials(webFetch, () => ownedOrigin'));
+    expect(context).toContain('resCtx.authorizeSignInOrigin = lock?.authorizeSignInOrigin');
     expect(context).toContain('hasDurableSiteClientState(durableOriginState)');
     expect(context).toContain('lock.authorizeSiteClientOrigin(() => liveSiteClientLandingFor(sessionId))');
     expect(context.indexOf('hasDurableSiteClientState(durableOriginState)'))
@@ -42,6 +46,8 @@ describe('site-client custody service-worker wiring', () => {
     expect(route.lastIndexOf('await reauthorizeSiteFetch()')).toBeLessThan(fetch);
     expect(route).toContain('liveSiteClientLandingFor(ownerSessionId)');
     expect(route).toContain('durableState: /** @type {any} */ (owner.originState)');
+    expect(route).toContain('isKnownIdp: isKnownIdpHost');
+    expect(route).toContain('if (isKnownIdpHost(pin))');
     expect(route).toContain("const relayBacking = owner.backing === undefined ? 'tab' : owner.backing");
     expect(route).not.toContain("owner.backing ?? 'tab'");
   });
@@ -53,6 +59,7 @@ describe('site-client custody service-worker wiring', () => {
     );
     expect(mint).toContain('hasDurableSiteClientState(rec.originState)');
     expect(mint).toContain('lock.authorizeSiteClientOrigin(getLiveLanding)');
+    expect(mint).toContain('makeFixedSiteClientOriginGuard(origin, { isKnownIdp: isKnownIdpHost })');
     expect(mint).toContain('const meta = await siteClientStore.getMeta(custody.origin)');
     expect(mint).toContain('meta && await custody.authorize() === true');
     expect(mint.indexOf('meta && await custody.authorize() === true'))

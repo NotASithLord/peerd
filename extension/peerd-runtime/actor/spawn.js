@@ -147,6 +147,7 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   siteClients:        ['site_client_run', 'site_client_read', 'site_client_write'],
   canUseSiteClientOrigin: ['site_client_run', 'site_client_read', 'site_client_write'],
   authorizeSiteClientOrigin: ['site_client_run', 'site_client_read', 'site_client_write'],
+  authorizeSignInOrigin: ['login'],
   siteCapture:        ['site_capture'],
   // design js-superpower/06 — the toolbox store + the write-time parse check.
   // Stripped from any child/actor whose grants lack the toolbox tools, so a

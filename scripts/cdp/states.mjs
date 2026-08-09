@@ -182,6 +182,8 @@ let numericTabAuthorityState = {
 };
 let numericTabAuthorityRequestBodies = [];
 let numericTabAuthorityRedirectUrl = '';
+let idpTransitState = { addressed: 0, siteRefusal: '', bareRefusal: '', actorCalls: 0 };
+let idpTransitRequestBodies = [];
 let networkGuardActorTurn = 0;
 let networkGuardDelegated = false;
 let networkGuardActorReady = false;
@@ -1621,6 +1623,103 @@ export const STATES = [
         }
         server.close();
       }
+    },
+  },
+
+  // --- functional: issue 265, identity providers are transit-only ----------
+  {
+    name: 'idp-transit-authority', kind: 'functional', phase: 'post-unlock',
+    responder: (_callIndex, request) => {
+      const body = (request && request.postData) || '';
+      idpTransitRequestBodies.push(body);
+      if (body.includes('<actor_agent>')) {
+        idpTransitState.actorCalls++;
+        return { sse: sseText('IDP-STANDALONE-ACTOR-SHOULD-NOT-RUN') };
+      }
+      if (idpTransitState.addressed === 0) {
+        idpTransitState.addressed = 1;
+        return { sse: sseToolCall('message_actor', {
+          to: 'site:https://accounts.google.com',
+          message: 'Work directly on this sign-in service',
+        }) };
+      }
+      const latestToolResult = toolResultsIn(body).at(-1) ?? '';
+      if (latestToolResult) {
+        if (idpTransitState.addressed === 1) {
+          idpTransitState.siteRefusal = latestToolResult;
+          idpTransitState.addressed = 2;
+          return { sse: sseToolCall('message_actor', {
+            to: 'https://accounts.google.com',
+            message: 'Use this sign-in service as an API integration',
+          }) };
+        }
+        idpTransitState.bareRefusal = latestToolResult;
+        return { sse: sseText('The sign-in service was kept transit-only.') };
+      }
+      return { sse: sseText('Waiting for the identity-provider boundary result.') };
+    },
+    async run(ctx, rec) {
+      idpTransitState = { addressed: 0, siteRefusal: '', bareRefusal: '', actorCalls: 0 };
+      idpTransitRequestBodies = [];
+      const sent = await rpc(ctx.page, {
+        type: 'agent/send',
+        text: 'Test direct identity-provider actor authority.',
+      });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      await waitFor(() => idpTransitState.siteRefusal && idpTransitState.bareRefusal,
+        { budgetMs: 60_000, pollMs: 100 });
+      const refusalBody = idpTransitState.bareRefusal;
+      rec.check('site and bare-origin addressing returned the transit-only refusal',
+        [idpTransitState.siteRefusal, idpTransitState.bareRefusal].every((result) =>
+          result.includes('actor_identity_provider_transit_only')
+            && result.includes('requiresRelyingSite')
+            && result.includes('suggestedHandle') === false),
+        refusalBody.slice(0, 900));
+      rec.check('the recovery routes through the relying site, not an IdP helper',
+        refusalBody.includes('relying site already named')
+          && refusalBody.includes('If none was named'),
+        refusalBody.slice(0, 900));
+      rec.check('no IdP actor model turn started',
+        idpTransitState.actorCalls === 0
+          && idpTransitRequestBodies.every((body) => !body.includes('<actor_agent>')),
+        `actor calls: ${idpTransitState.actorCalls}`);
+      const audits = await auditEntries(ctx);
+      rec.check('the refusal was audited before actor mint',
+        audits.filter((entry) => entry.type === 'actor_idp_authority_refused'
+          && entry.details?.origin === 'https://accounts.google.com'
+          && entry.details?.performed === false).length >= 2
+          && !audits.some((entry) => entry.type === 'actor_minted'
+            && ['site:https://accounts.google.com', 'https://accounts.google.com'].includes(entry.details?.instanceId)),
+        JSON.stringify(audits.slice(-20)));
+      const disclosureReady = await waitFor(() => evalIn(ctx.page, `(() => {
+        const headers = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')];
+        const header = headers.at(-1);
+        if (!header?.innerText.includes('Not run')) return null;
+        header.click();
+        return {
+          label: header.innerText,
+          cardClass: header.parentElement?.className ?? '',
+          dotClass: header.querySelector('.tool-status-dot')?.className ?? '',
+        };
+      })()`), { budgetMs: 5_000, pollMs: 50 });
+      const disclosure = disclosureReady ? await waitFor(() => evalIn(ctx.page, `(() => {
+        const header = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')].at(-1);
+        const detail = header?.parentElement?.querySelector('.actor-body .error-line')?.textContent ?? '';
+        return header?.getAttribute('aria-expanded') === 'true' && detail
+          ? { expanded: 'true', detail }
+          : null;
+      })()`), { budgetMs: 5_000, pollMs: 50 }) : null;
+      rec.check('the human sees a plain transit-only explanation',
+        disclosureReady?.label.includes('sign-in service')
+          && !disclosureReady?.label.includes('accounts.google.com')
+          && disclosureReady?.cardClass.includes('tool-not-run')
+          && disclosureReady?.dotClass.includes('dot-not-run')
+          && disclosure?.expanded === 'true'
+          && disclosure?.detail.includes('sign-in service')
+          && disclosure?.detail.includes('site you want to sign in to')
+          && !disclosure?.detail.includes('Policy'),
+        JSON.stringify(disclosure));
+      await rec.shot('final');
     },
   },
 

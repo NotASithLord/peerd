@@ -1269,6 +1269,9 @@ button.icon.is-active {
 .tool-call.tool-failed .actor-body .error-line {
   color: var(--fg);
 }
+.tool-call.tool-not-run .actor-body .error-line {
+  color: var(--fg);
+}
 .tool-call.tool-pending { opacity: 0.85; }
 
 .tool-call-header {
@@ -1332,6 +1335,7 @@ button.tool-call-header:focus-visible {
   justify-content: center;
 }
 .tool-status-dot.dot-failed  { background: var(--danger); }
+.tool-status-dot.dot-not-run { background: var(--fg-muted); }
 .tool-status-dot.dot-pending {
   background: var(--ok);
   animation: peerd-dot-pulse 0.85s ease-out infinite;

@@ -68,6 +68,7 @@ import {
   // NON-EXTRACTABLE key that never leaves the SW and that nothing, including this
   // file, can export. Plus the Settings → API integrations routes.
   withDpopCredentials,
+  EgressDeniedError,
   getOrCreateDpopKey,
   makeDpopKeyStore,
   // The credential LIFECYCLE seams the Settings routes close over: mint-at-provision
@@ -335,11 +336,13 @@ import {
   // live — the state store, the judge, the synchronous credential-scope
   // narrowing, and the report a stop turns into.
   makeOriginStateStore, makeLearnedOrigins, makeJudgeLanding, makeCredentialScope,
+  makeSignInOriginAuthorizer,
   makeSiteClientOriginGuard, makeSiteClientOriginAuthorizer,
   makeFixedSiteClientOriginGuard, authorizeSiteClientRelayOrigin,
   hasDurableSiteClientState,
   decideNumericTabAuthority, numericTabAuthorityRefusal,
-  isKnownIdp, knownIdpDomains, describeLandingStop, originPhrase, isUgcHost,
+  IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+  isKnownIdp, isKnownIdpHost, knownIdpDomains, describeLandingStop, originPhrase, isUgcHost,
   isAddressableBrowserTab,
   finalActorTurnReply, finalAssistantText,
   // The debug surface: the bundle assembler + the delegation-tree walk the
@@ -1723,6 +1726,10 @@ const noteLearnedOrigin = (rawOrigin, reason) => {
 
 /** The sensitivity signals, in the shape the classifier takes. */
 const sensitivitySignals = () => ({
+  // Dedicated identity providers are transit-only. They are sensitive for
+  // credential and custody decisions, while landing-rule.js separately keeps
+  // the bounded relying-party sign-in corridor working.
+  isKnownIdp: isKnownIdpHost,
   // SEED 1 — #242's curated UGC registry, asked at ORIGIN level (isUgcHost, not
   // classifyUrl). #242 is path-scoped because it gates one WRITE on a page
   // strangers authored; the lock asks whether the user has an IDENTITY here,
@@ -1890,6 +1897,18 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
         getState, getLiveLanding, judgeLanding,
         ...sensitivitySignals(),
       }),
+    authorizeSignInOrigin: makeSignInOriginAuthorizer({
+      getState,
+      getLiveLanding: () => liveSiteClientLandingFor(actorSessionId),
+      saveState: (patch) => originStates.write(actorSessionId, patch),
+      isKnownIdp: isKnownIdpHost,
+      isCurrent: isCurrentTurn,
+      onBound: (origin) => auditLog.append({
+        type: 'actor_origin_bound_for_sign_in',
+        sessionId: actorSessionId,
+        details: { origin },
+      }).then(() => undefined),
+    }),
   };
 };
 
@@ -2517,17 +2536,20 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       // A stored client is durable executable knowledge keyed by origin. The API
       // actor owns exactly its fixed instance origin; a model-supplied client key
       // may not retarget it to a sibling record before the fetch relay gets a say.
-      const canUseFixedSiteClient = makeFixedSiteClientOriginGuard(ownedOrigin);
+      const canUseFixedSiteClient = makeFixedSiteClientOriginGuard(ownedOrigin, { isKnownIdp: isKnownIdpHost });
       resCtx.canUseSiteClientOrigin = canUseFixedSiteClient;
       resCtx.authorizeSiteClientOrigin = async (/** @type {string} */ targetOrigin) =>
         canUseFixedSiteClient(targetOrigin);
       // DESIGN-18 P1: session-scope cookies AND inject the vault origin:<origin> key
       // same-origin (keyless: getSecret is the SW's, closed over here, never on resCtx).
-      resCtx.webFetch = withDpopCredentials(webFetch, () => ownedOrigin, {
-        getSecret: (/** @type {string} */ name) => vault.getSecret(name),
-        getDpopKey: getDpopKeyForOrigin,
-        audit: (/** @type {any} */ e) => auditLog.append(e),
-      });
+      resCtx.webFetch = isKnownIdpHost(ownedOrigin)
+        ? async () => { throw new EgressDeniedError(ownedOrigin ?? 'identity provider', IDENTITY_PROVIDER_TRANSIT_ONLY_CODE); }
+        : withDpopCredentials(webFetch, () => ownedOrigin, {
+          getSecret: (/** @type {string} */ name) => vault.getSecret(name),
+          getDpopKey: getDpopKeyForOrigin,
+          audit: (/** @type {any} */ e) => auditLog.append(e),
+        });
+      resCtx.idpTransitOnly = isKnownIdpHost(ownedOrigin);
       // No repinActiveTab / adoptWebTab: an API actor has no tab to adopt or re-pin.
     } else if (actorType === 'web') {
       // issue 251 — THE LOCK GOES LIVE HERE, for exactly this kind: a tab-backed
@@ -2545,6 +2567,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       originStates.hydrate(sessionId, durableOriginState);
       const lock = originLockFor(sessionId);
       resCtx.judgeLanding = lock?.judgeLanding;
+      resCtx.authorizeSignInOrigin = lock?.authorizeSignInOrigin;
       // The sync gate is an early state-only refusal. The execute-time check is
       // async and re-reads + judges the ACTUAL owned tab after hooks have
       // rewritten args. A missing durable state must not be hydrated into
@@ -4778,6 +4801,7 @@ const siteFetchCallRoute = {
     }
     const pin = normalizeApiOrigin(siteOrigin);
     if (!pin) return { ok: false, error: `site_fetch_bad_origin: ${siteOrigin}` };
+    if (isKnownIdpHost(pin)) return { ok: false, error: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE };
     const resolved = resolveSiteUrl(pathOrUrl, pin);
     if ('error' in resolved) return { ok: false, error: resolved.error };
     const url = resolved.url;
@@ -4816,6 +4840,7 @@ const siteFetchCallRoute = {
       durableState: /** @type {any} */ (owner.originState),
       targetOrigin: pin,
       authorizeTabOrigin,
+      isKnownIdp: isKnownIdpHost,
     });
     if (!await reauthorizeSiteFetch()) return { ok: false, error: 'site_fetch_cross_origin' };
     const httpMethod = String(method ?? 'GET').toUpperCase();
@@ -4993,12 +5018,12 @@ hydrateRegistry(API_ACTOR_KEY, apiActorBindings);
 // automatically; formed=true that it has state/memory here. A locked vault degrades to
 // formed-only (no throw). The KEY VALUE is never read — only the secret NAMES (origins).
 const listApiIntegrations = async (/** @type {string | null | undefined} */ chatId) => {
-  const formed = chatId ? apiActorBindings.originsFor(chatId) : [];
+  const formed = (chatId ? apiActorBindings.originsFor(chatId) : []).filter((origin) => !isKnownIdpHost(origin));
   /** @type {string[]} */
   let keyed = [];
   try {
     const names = await vault.listSecretNames();
-    keyed = /** @type {string[]} */ (names.map(originFromSecretName).filter(Boolean));
+    keyed = /** @type {string[]} */ (names.map(originFromSecretName).filter((origin) => origin && !isKnownIdpHost(origin)));
   } catch { keyed = []; }   // locked → formed-only
   const formedSet = new Set(formed);
   const keyedSet = new Set(keyed);
@@ -5971,6 +5996,7 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
 // the bound session vanished (SW death cleared session storage). Owner is the SENDER chat
 // threaded by the messaging layer so each chat keeps its own integration.
 const resolveApiActor = async (/** @type {string} */ origin, /** @type {string | null | undefined} */ ownerOverride) => {
+  if (isKnownIdpHost(origin)) return null;
   const ownerChatId = ownerOverride ?? /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
   if (!ownerChatId) return null;
   let actorSessionId = apiActorBindings.resolve(ownerChatId, origin);
@@ -6362,7 +6388,7 @@ const siteClientMintCustodyFor = async (/** @type {string} */ actorSessionId, /*
   if (!rec) return null;
   if (rec.backing === 'api') {
     const origin = normalizeApiOrigin(rec.instanceId ?? instanceId);
-    const guard = makeFixedSiteClientOriginGuard(origin);
+    const guard = makeFixedSiteClientOriginGuard(origin, { isKnownIdp: isKnownIdpHost });
     return origin && guard(origin)
       ? { origin, authorize: async () => guard(origin) }
       : null;
@@ -6411,13 +6437,59 @@ const actorMessaging = makeActorMessaging({
     // them; getting the order wrong would silently hand every handoff a
     // fetch-only integration that cannot log in or click.
     const siteOrigin = parseSiteHandle(instanceId);
-    if (siteOrigin) return resolveSiteActor(siteOrigin, opts.senderSessionId);
+    if (siteOrigin) {
+      if (isKnownIdpHost(siteOrigin)) {
+        auditLog.append({
+          type: 'actor_idp_authority_refused',
+          details: {
+            code: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+            origin: siteOrigin,
+            performed: false,
+          },
+        }).catch(() => {});
+        return {
+          resolutionRefusal: numericTabAuthorityRefusal({
+            allowed: false,
+            code: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+            retryable: false,
+            origin: siteOrigin,
+            reason: 'identity-provider',
+            suggestedHandle: null,
+            requiresUserIntent: false,
+          }),
+        };
+      }
+      return resolveSiteActor(siteOrigin, opts.senderSessionId);
+    }
     // DESIGN-18: an API integration is addressed by its ORIGIN (a bare host or a full
     // URL). normalizeApiOrigin canonicalizes it and REJECTS anything that isn't a public
     // dotted host — so 'web', a tabId, and engine ids (vm-/notebook-/app-, no dot) all
     // fall through to the engine branch below. The origin is the integration's identity.
     const apiOrigin = normalizeApiOrigin(instanceId);
-    if (apiOrigin) return resolveApiActor(apiOrigin, opts.senderSessionId);
+    if (apiOrigin) {
+      if (isKnownIdpHost(apiOrigin)) {
+        auditLog.append({
+          type: 'actor_idp_authority_refused',
+          details: {
+            code: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+            origin: apiOrigin,
+            performed: false,
+          },
+        }).catch(() => {});
+        return {
+          resolutionRefusal: numericTabAuthorityRefusal({
+            allowed: false,
+            code: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+            retryable: false,
+            origin: apiOrigin,
+            reason: 'identity-provider',
+            suggestedHandle: null,
+            requiresUserIntent: false,
+          }),
+        };
+      }
+      return resolveApiActor(apiOrigin, opts.senderSessionId);
+    }
     const prefix = String(instanceId).split('-')[0];
     const entry = /** @type {Record<string, { reg: any, kind: string }>} */ (ACTOR_REGISTRY_BY_PREFIX)[prefix];
     if (!entry) return null;

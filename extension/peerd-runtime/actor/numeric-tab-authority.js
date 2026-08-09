@@ -7,6 +7,7 @@ import { normalizeApiOrigin, siteHandleFor } from './web-actor.js';
 
 export const NUMERIC_TAB_SENSITIVE_CODE = 'actor_sensitive_tab_requires_site';
 export const NUMERIC_TAB_POLICY_UNAVAILABLE_CODE = 'actor_tab_sensitivity_unavailable';
+export const IDENTITY_PROVIDER_TRANSIT_ONLY_CODE = 'actor_identity_provider_transit_only';
 
 /** @typedef {import('./origin-sensitivity.js').SensitivityReason} SensitivityReason */
 /**
@@ -32,7 +33,7 @@ export const NUMERIC_TAB_POLICY_UNAVAILABLE_CODE = 'actor_tab_sensitivity_unavai
  * they cannot be established.
  *
  * @param {unknown} liveUrl
- * @param {{ policyReady?: boolean, isUgcZone?: (origin: string) => boolean, hasVaultSecret?: (origin: string) => boolean, learned?: ReadonlySet<string>|ReadonlyMap<string, import('./origin-sensitivity.js').SensitivityReason> }} deps
+ * @param {{ policyReady?: boolean, isKnownIdp?: (origin: string) => boolean, isUgcZone?: (origin: string) => boolean, hasVaultSecret?: (origin: string) => boolean, learned?: ReadonlySet<string>|ReadonlyMap<string, import('./origin-sensitivity.js').SensitivityReason> }} deps
  * @returns {Readonly<NumericTabAuthorityDecision>}
  */
 export const decideNumericTabAuthority = (liveUrl, deps = {}) => {
@@ -50,14 +51,15 @@ export const decideNumericTabAuthority = (liveUrl, deps = {}) => {
   }
   const sensitivity = classifyOriginSensitivity(origin, deps);
   if (sensitivity.sensitive) {
+    const identityProvider = sensitivity.reason === 'identity-provider';
     return Object.freeze({
       allowed: false,
-      code: NUMERIC_TAB_SENSITIVE_CODE,
+      code: identityProvider ? IDENTITY_PROVIDER_TRANSIT_ONLY_CODE : NUMERIC_TAB_SENSITIVE_CODE,
       retryable: false,
       origin,
       reason: sensitivity.reason ?? null,
-      suggestedHandle: siteHandleFor(origin),
-      requiresUserIntent: true,
+      suggestedHandle: identityProvider ? null : siteHandleFor(origin),
+      requiresUserIntent: identityProvider ? false : true,
     });
   }
   return Object.freeze({ allowed: true, origin });
@@ -68,6 +70,27 @@ export const decideNumericTabAuthority = (liveUrl, deps = {}) => {
  * @param {Readonly<NumericTabAuthorityRefusalDecision>} decision
  */
 export const numericTabAuthorityRefusal = (decision) => {
+  if (decision?.code === IDENTITY_PROVIDER_TRANSIT_ONLY_CODE) {
+    const policy = {
+      code: decision.code,
+      performed: false,
+      outcomeKnown: true,
+      retryable: false,
+      origin: decision.origin,
+      transitOnly: true,
+      requiresRelyingSite: true,
+    };
+    return {
+      ok: /** @type {const} */ (false),
+      error: decision.code,
+      content: 'No actor work was started. This address is a sign-in service, which peerd helpers may visit only while signing in to another site. '
+        + "Continue through the relying site already named in the user's request. If none was named, ask which site they want to sign in to. "
+        + 'Do not retry this address or create a standalone helper for it.\n'
+        + `Policy: ${JSON.stringify(policy)}`,
+      structured: policy,
+      outcomeKind: /** @type {const} */ ('pre-effect-failure'),
+    };
+  }
   if (decision?.code === NUMERIC_TAB_SENSITIVE_CODE) {
     const policy = {
       code: decision.code,

@@ -7,7 +7,10 @@
 // nothing on the second call.
 
 import { describe, test, expect } from 'bun:test';
-import { makeJudgeLanding } from '../../../extension/peerd-runtime/actor/origin-lock.js';
+import {
+  makeJudgeLanding,
+  makeSignInOriginAuthorizer,
+} from '../../../extension/peerd-runtime/actor/origin-lock.js';
 
 const harness = (state: any, deps: any = {}) => {
   const saved: any[] = [];
@@ -58,6 +61,16 @@ describe('roaming', () => {
     await judge('https://bank.test/transfer');
     expect(Object.keys(stops[0]).sort()).toEqual(['action', 'from', 'handoffTo', 'reason', 'to']);
   });
+
+  test('an identity provider ends without suggesting a standalone successor', async () => {
+    const isIdp = (origin: string) => origin.startsWith('https://idp.test');
+    const { judge, stops } = harness({ mode: 'roaming' }, {
+      isIdp,
+      isKnownIdp: isIdp,
+    });
+    expect((await judge('https://idp.test/login'))?.action).toBe('end');
+    expect(stops[0].handoffTo).toBeUndefined();
+  });
 });
 
 describe('bound — persistence is the point', () => {
@@ -86,7 +99,10 @@ describe('bound — persistence is the point', () => {
 });
 
 describe('excursions — the state that must survive', () => {
-  const idp = { isIdp: (u: string) => u.startsWith('https://idp.test') };
+  const idp = {
+    isIdp: (u: string) => u.startsWith('https://idp.test'),
+    isKnownIdp: (u: string) => u.startsWith('https://idp.test'),
+  };
 
   test('opening one persists it AND increments the lifetime counter', async () => {
     const state: any = { mode: 'bound', ownedOrigin: 'https://app.test', excursionsUsed: 0 };
@@ -94,6 +110,14 @@ describe('excursions — the state that must survive', () => {
     await judge('https://idp.test/authorize');
     expect(saved[0].excursion).toBeTruthy();
     expect(saved[0].excursionsUsed).toBe(1);
+  });
+
+  test('the IdP being sensitive does not break a bound sign-in excursion', async () => {
+    const state: any = { mode: 'bound', ownedOrigin: 'https://app.test', excursionsUsed: 0 };
+    const { judge, stops } = harness(state, idp);
+    expect((await judge('https://idp.test/authorize'))?.action).toBe('continue');
+    expect((await judge('https://idp.test/login'))?.action).toBe('continue');
+    expect(stops).toEqual([]);
   });
 
   test('a discharge CLEARS the corridor but NOT the counter', async () => {
@@ -156,5 +180,101 @@ describe('provisional origins — the shell half', () => {
     await judge('about:blank');
     expect(state.provisional).toBe(true);
     expect((await judge('https://www.reddit.com/'))?.action).toBe('continue');
+  });
+});
+
+describe('confirmed sign-in promotion', () => {
+  const build = (over: any = {}) => {
+    let state: any = over.state ?? { mode: 'roaming' };
+    const saved: any[] = [];
+    const bound: string[] = [];
+    const authorize = makeSignInOriginAuthorizer({
+      getState: () => state,
+      getLiveLanding: over.getLiveLanding ?? (async () => ({ status: 'live', url: 'https://app.test/login' })),
+      saveState: (patch) => { saved.push(patch); Object.assign(state, patch); },
+      isKnownIdp: (origin) => new URL(origin).hostname.replace(/\.$/, '') === 'accounts.google.com',
+      isCurrent: over.isCurrent ?? (() => true),
+      onBound: (origin) => { bound.push(origin); },
+    });
+    return { authorize, saved, bound, setState: (next: any) => { state = next; } };
+  };
+
+  test('a live roaming relying site becomes the exact bound origin', async () => {
+    const { authorize, saved, bound } = build();
+    expect(await authorize('HTTPS://APP.TEST:443/login')).toBe(true);
+    expect(saved).toEqual([{
+      mode: 'bound', ownedOrigin: 'https://app.test', provisional: false, excursion: null,
+    }]);
+    expect(bound).toEqual(['https://app.test']);
+  });
+
+  test('an existing same-origin bound actor is idempotent', async () => {
+    const { authorize, saved, bound } = build({ state: { mode: 'bound', ownedOrigin: 'https://app.test' } });
+    expect(await authorize('https://app.test')).toBe(true);
+    expect(saved).toEqual([]);
+    expect(bound).toEqual([]);
+  });
+
+  test('identity-provider, insecure, mismatched, unreadable, and stale turns refuse', async () => {
+    for (const origin of [
+      'https://accounts.google.com',
+      'https://accounts.google.com:8443',
+      'https://accounts.google.com.',
+      'http://app.test',
+    ]) {
+      const { authorize, saved } = build();
+      expect(await authorize(origin)).toBe(false);
+      expect(saved).toEqual([]);
+    }
+    for (const getLiveLanding of [
+      async () => ({ status: 'none' as const }),
+      async () => ({ status: 'unreadable' as const }),
+      async () => ({ status: 'live' as const, url: 'https://other.test' }),
+    ]) {
+      const { authorize, saved } = build({ getLiveLanding });
+      expect(await authorize('https://app.test')).toBe(false);
+      expect(saved).toEqual([]);
+    }
+    const stale = build({ isCurrent: () => false });
+    expect(await stale.authorize('https://app.test')).toBe(false);
+    expect(stale.saved).toEqual([]);
+  });
+
+  test('state is re-read after the live tab lookup', async () => {
+    let release!: () => void;
+    const wait = new Promise<void>((resolve) => { release = resolve; });
+    const h = build({ getLiveLanding: async () => { await wait; return { status: 'live', url: 'https://app.test' }; } });
+    const pending = h.authorize('https://app.test');
+    h.setState({ mode: 'bound', ownedOrigin: 'https://other.test' });
+    release();
+    expect(await pending).toBe(false);
+    expect(h.saved).toEqual([]);
+  });
+
+  test('cancellation during the live lookup cannot persist authority', async () => {
+    let release!: () => void;
+    const wait = new Promise<void>((resolve) => { release = resolve; });
+    const controller = new AbortController();
+    const h = build({ getLiveLanding: async () => { await wait; return { status: 'live', url: 'https://app.test' }; } });
+    const pending = h.authorize('https://app.test', controller.signal);
+    controller.abort();
+    release();
+    expect(await pending).toBe(false);
+    expect(h.saved).toEqual([]);
+    expect(h.bound).toEqual([]);
+  });
+
+  test('an audit failure cannot turn a completed promotion into a tool failure', async () => {
+    const state: any = { mode: 'roaming' };
+    const saved: any[] = [];
+    const authorize = makeSignInOriginAuthorizer({
+      getState: () => state,
+      getLiveLanding: async () => ({ status: 'live', url: 'https://app.test' }),
+      saveState: (patch) => { saved.push(patch); Object.assign(state, patch); },
+      onBound: async () => { throw new Error('audit unavailable'); },
+    });
+    expect(await authorize('https://app.test')).toBe(true);
+    expect(saved.length).toBe(1);
+    expect(state.ownedOrigin).toBe('https://app.test');
   });
 });

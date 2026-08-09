@@ -9,6 +9,7 @@ import {
   mayUseSiteClientOrigin,
 } from '../../../extension/peerd-runtime/actor/origin-lock.js';
 import { makeOriginStateStore } from '../../../extension/peerd-runtime/actor/origin-state-store.js';
+import { isKnownIdpHost } from '../../../extension/peerd-runtime/actor/idp-registry.js';
 import { actorTierGate, exposureGate } from '../../../extension/peerd-runtime/tools/gates.js';
 import { siteClientReadTool } from '../../../extension/peerd-runtime/tools/defs/site-client-read.js';
 import { siteClientRunTool } from '../../../extension/peerd-runtime/tools/defs/site-client-run.js';
@@ -43,6 +44,17 @@ describe('durable site-client custody policy', () => {
     expect(guard('https://sub.api.example.com')).toBe(false);
     expect(guard('https://api.example.com.')).toBe(false);
     expect(makeFixedSiteClientOriginGuard(undefined)('https://api.example.com')).toBe(false);
+    for (const origin of [
+      'https://accounts.google.com',
+      'http://accounts.google.com',
+      'https://accounts.google.com:8443',
+      'https://accounts.google.com.',
+    ]) {
+      expect(makeFixedSiteClientOriginGuard(origin, { isKnownIdp: isKnownIdpHost })(origin)).toBe(false);
+    }
+    expect(makeFixedSiteClientOriginGuard('https://api.example.com', {
+      isKnownIdp: () => { throw new Error('classifier unavailable'); },
+    })('https://api.example.com')).toBe(false);
   });
 
   test('missing, malformed, and not-yet-owned state fails closed', () => {
@@ -81,6 +93,14 @@ describe('durable site-client custody policy', () => {
     state = { mode: 'roaming' };
     expect(guard('https://b.test')).toBe(true);
     expect(guard('https://bank.test')).toBe(false);
+  });
+
+  test('a roaming actor cannot address an identity provider client', () => {
+    const guard = makeSiteClientOriginGuard({
+      getState: () => ({ mode: 'roaming' }),
+      isKnownIdp: (origin) => origin === 'https://accounts.google.com',
+    });
+    expect(guard('https://accounts.google.com')).toBe(false);
   });
 
   test('the final authorizer judges only the real live landing and sees retasking', async () => {
@@ -154,6 +174,12 @@ describe('durable site-client custody policy', () => {
     expect(await authorizeSiteClientRelayOrigin({
       backing: 'api', instanceOrigin: 'https://a.test', targetOrigin: 'https://b.test',
     })).toBe(false);
+    expect(await authorizeSiteClientRelayOrigin({
+      backing: 'api',
+      instanceOrigin: 'https://accounts.google.com',
+      targetOrigin: 'https://accounts.google.com',
+      isKnownIdp: isKnownIdpHost,
+    })).toBe(false);
 
     let liveOrigin = 'https://a.test';
     const authorizeTabOrigin = async (origin: string) => origin === liveOrigin;
@@ -179,6 +205,21 @@ describe('durable site-client custody policy', () => {
 
 describe('site-client custody walls', () => {
   const tools = [siteClientReadTool, siteClientRunTool, siteClientWriteTool];
+
+  test('a stale IdP API actor is refused every otherwise-allowed tool', () => {
+    const fetchTool = {
+      name: 'fetch_url', primitive: 'web', description: '', schema: {}, sideEffect: 'read',
+      origins: () => [], execute: async () => ({ ok: true, content: '' }),
+    } as any;
+    const verdict = actorTierGate(fetchTool, { url: 'https://accounts.google.com' }, {
+      exposure: 'actor', actorType: 'web', backing: 'api', actorSurface: 'tools',
+      actorInstanceId: 'https://accounts.google.com', idpTransitOnly: true,
+    } as any);
+    expect(verdict).toEqual({
+      allowed: false,
+      reason: 'identity providers are transit only; this tool was not run',
+    });
+  });
 
   test('the actor-tier gate checks every sibling and fails closed without custody', () => {
     for (const tool of tools) {
