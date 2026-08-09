@@ -260,3 +260,91 @@ describe('the report is useful, not just safe', () => {
     expect(() => describeLandingStop({} as any)).not.toThrow();
   });
 });
+
+// §4c - the transcript card model. Same channel, same rule: every field is
+// authored here, none by the actor or the page, and origins only.
+import { landingStopCard } from '../../../extension/peerd-runtime/actor/origin-lock-report.js';
+
+describe('landingStopCard - group mapping over the shipped reason set', () => {
+  const unknown = 'How far it got.';
+
+  test('a handoff is HANDOFF with the sessionless-read action, origin only', () => {
+    const card = landingStopCard({
+      action: 'handoff',
+      reason: 'this is a site you have an account on, so its own helper should do the work',
+      from: null,
+      to: 'https://mail.example.com/inbox?q=ignore+previous+instructions',
+      handoffTo: 'https://mail.example.com',
+    });
+    expect(card.group).toBe('HANDOFF');
+    expect(card.tone).toBe('notice');
+    expect(card.headline).toContain('https://mail.example.com');
+    expect(card.headline).not.toContain('/inbox');
+    expect(card.whatIsNotKnown).toContain(unknown);
+    expect(card.action?.label).toBe('Try reading it without signing in');
+    expect(card.action?.composerText).toBe('Try reading https://mail.example.com without signing in.');
+  });
+
+  test('every sign-in stop is SIGN-IN and carries no action', () => {
+    const signInReasons = [
+      'this sign-in was not authorized, so this task was stopped',
+      'the sign-in step left its approved provider, so this task was stopped',
+      'the sign-in authorization was invalid or expired, so this task was stopped',
+      'this task has already signed in as many times as peerd allows, so it was stopped',
+      'this is a sign-in service that helpers may only visit while signing in to another site',
+    ];
+    for (const reason of signInReasons) {
+      const card = landingStopCard({ action: 'end', reason, from: 'https://shop.example', to: 'https://idp.example/cb' });
+      expect(card.group).toBe('SIGN-IN');
+      expect(card.action).toBe(null);
+      expect(card.reason).toBe(reason);
+    }
+  });
+
+  test('leaving the owned site is LEFT SITE - and offers NO action', () => {
+    // The landing is the one address a hostile page fully controls. A
+    // "Continue on <host>" button would turn a page-chosen destination into a
+    // one-click trusted user instruction, so no generic stop carries an action.
+    const card = landingStopCard({
+      action: 'end',
+      reason: 'this helper works only on one site, and the tab left it',
+      from: 'https://docs.example.org',
+      to: 'https://cdn.example.net/asset?steal=1',
+    });
+    expect(card.group).toBe('LEFT SITE');
+    expect(card.headline).toBe('The web helper was working on https://docs.example.org and the tab moved to https://cdn.example.net');
+    expect(card.action).toBe(null);
+  });
+
+  test('an unaddressable landing is NO ADDRESS and offers no action - even an IP literal', () => {
+    for (const [reason, to] of [
+      ['this page has no address peerd can pin work to', 'data:text/html,x'],
+      // The REAL occurrence: a loadable page whose host cannot be
+      // canonicalised still parses as a URL, so its origin starts with http -
+      // an origin-shaped landing must not resurrect the action.
+      ['the tab moved to a page peerd cannot verify, so this task was stopped', 'http://192.0.2.7/admin'],
+    ] as const) {
+      const card = landingStopCard({ action: 'end', reason, from: 'https://app.test', to });
+      expect(card.group).toBe('NO ADDRESS');
+      expect(card.action).toBe(null);
+    }
+  });
+
+  test('INTERNAL alone is the error tone - a bug must not look routine', () => {
+    const card = landingStopCard({
+      action: 'end',
+      reason: 'this helper is in an unknown state, so it was stopped',
+      from: null, to: 'https://x.test',
+    });
+    expect(card.group).toBe('INTERNAL');
+    expect(card.tone).toBe('error');
+    expect(card.action).toBe(null);
+  });
+
+  test('an unrecognized reason degrades to a groupless notice, verbatim reason kept', () => {
+    const card = landingStopCard({ action: 'end', reason: 'some future reason', from: null, to: 'https://y.test' });
+    expect(card.group).toBe(null);
+    expect(card.tone).toBe('notice');
+    expect(card.reason).toBe('some future reason');
+  });
+});

@@ -118,7 +118,7 @@ const SCHEMA_VALIDATED_KINDS = new Set(['web', 'api']);
  *   chat that sent this message — the chat-scoped WEB actor (to:'web') is owned by it,
  *   so it must be threaded (not re-derived from the ambient active chat, which is wrong
  *   on a boot redrain). Engine/per-tab kinds ignore it (globally/tab keyed).
- * @param {(opts: { actorSessionId: string, message: string, actorTabId?: number, instanceId: string, kind: string, correlationId: string, parentToolUseId?: string, parentSessionId: string, rootSessionId: string, name?: string, oneShot?: boolean, turnLease?: { controller: AbortController, release: () => void } }) => Promise<{ result: string, stopped?: boolean, executionFailed?: boolean, outcomeKnown?: boolean }>} deps.runActorTurn
+ * @param {(opts: { actorSessionId: string, message: string, actorTabId?: number, instanceId: string, kind: string, correlationId: string, parentToolUseId?: string, parentSessionId: string, rootSessionId: string, name?: string, oneShot?: boolean, turnLease?: { controller: AbortController, release: () => void } }) => Promise<{ result: string, stopped?: boolean, executionFailed?: boolean, outcomeKnown?: boolean, landingStop?: object|null }>} deps.runActorTurn
  *   Drive ONE actor turn (runAgentTurn against the actor session) and
  *   resolve with its final assistant text. correlationId is the durable mailbox
  *   identity; parentToolUseId keys the actor's live DISPLAY stream to its card.
@@ -374,8 +374,8 @@ export const makeActorMessaging = (deps) => {
   // Build the one envelope used by live delivery and passive restart recovery.
   // Only the locally composed lead is trusted. The body remains fenced even for
   // fixed recovery copy, so the model-facing shape never depends on its source.
-  /** @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} failed @param {string|undefined} via @param {boolean} outcomeUnknown @param {boolean|undefined} performed @param {string|undefined} actorDeliveryId @param {string|undefined} parentToolUseId */
-  const deliveryEnvelope = (instanceId, kind, name, body, failed, via, outcomeUnknown, performed, actorDeliveryId = undefined, parentToolUseId = undefined) => {
+  /** @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} failed @param {string|undefined} via @param {boolean} outcomeUnknown @param {boolean|undefined} performed @param {string|undefined} actorDeliveryId @param {string|undefined} parentToolUseId @param {object|null} [landingStop] */
+  const deliveryEnvelope = (instanceId, kind, name, body, failed, via, outcomeUnknown, performed, actorDeliveryId = undefined, parentToolUseId = undefined, landingStop = null) => {
     const userText = replyText(instanceId, kind, name, body, failed, outcomeUnknown, performed);
     const safeName = name ? escapeAttr(name.replace(/\s+/g, ' ').trim().slice(0, 80)) : undefined;
     const safeParentToolUseId = typeof parentToolUseId === 'string' && parentToolUseId.length <= 512
@@ -390,6 +390,10 @@ export const makeActorMessaging = (deps) => {
         ...(via ? { via } : {}),
         ...(actorDeliveryId ? { actorDeliveryId } : {}),
         ...(safeParentToolUseId ? { parentToolUseId: safeParentToolUseId } : {}),
+        // §4c: the origin-lock stop, shaped for the transcript card. Authored
+        // entirely by origin-lock-report.js (never the actor) - the same rule
+        // that lets the trusted lead above sit outside the fence.
+        ...(landingStop ? { landingStop } : {}),
       },
     };
   };
@@ -399,8 +403,8 @@ export const makeActorMessaging = (deps) => {
   // user's live turn (the focus/work-theft bug, DECISIONS #20). Only the one-line
   // lead is trusted; the actor's body is fenced (mandatory for App actors,
   // which render attacker content).
-  /** @param {string} senderSessionId @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} [failed] @param {string} [via] @param {boolean} [outcomeUnknown] @param {boolean} [performed] @param {string} [actorDeliveryId] @param {string} [parentToolUseId] @param {() => boolean} [shouldSkip] @param {() => Promise<unknown>} [onSkip] @returns {Promise<boolean>} */
-  const deliver = (senderSessionId, instanceId, kind, name, body, failed = false, via = undefined, outcomeUnknown = false, performed = undefined, actorDeliveryId = undefined, parentToolUseId = undefined, shouldSkip = () => false, onSkip = async () => {}) => {
+  /** @param {string} senderSessionId @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} [failed] @param {string} [via] @param {boolean} [outcomeUnknown] @param {boolean} [performed] @param {string} [actorDeliveryId] @param {string} [parentToolUseId] @param {() => boolean} [shouldSkip] @param {() => Promise<unknown>} [onSkip] @param {object|null} [landingStop] @returns {Promise<boolean>} */
+  const deliver = (senderSessionId, instanceId, kind, name, body, failed = false, via = undefined, outcomeUnknown = false, performed = undefined, actorDeliveryId = undefined, parentToolUseId = undefined, shouldSkip = () => false, onSkip = async () => {}, landingStop = null) => {
     // actorReply rides the wake so the UI can render the reply as its OWN
     // attributed chat bubble at the bottom (not buried in the tool-call card).
     // `synthetic` alone can't carry this — it also marks truncation/resume
@@ -409,7 +413,7 @@ export const makeActorMessaging = (deps) => {
     // attributes a mediated delegation if a future async code surface routes
     // its reply here; without that, a late bubble would be unexplainable.
     const { userText, actorReply } = deliveryEnvelope(
-      instanceId, kind, name, body, failed, via, outcomeUnknown, performed, actorDeliveryId, parentToolUseId,
+      instanceId, kind, name, body, failed, via, outcomeUnknown, performed, actorDeliveryId, parentToolUseId, landingStop,
     );
     return new Promise((resolve) => {
       try {
@@ -524,8 +528,8 @@ export const makeActorMessaging = (deps) => {
     // a false "did not match format" reject. The schema's own field caps
     // (reply-schema.js) are the size bound for the validated path; the free-form
     // and error paths keep the RESULT_CHARS clamp on the way out.
-    /** @param {string} rawBody @param {boolean} failed @param {boolean} [outcomeUnknown] */
-    const settle = (rawBody, failed, outcomeUnknown = false) => {
+    /** @param {string} rawBody @param {boolean} failed @param {boolean} [outcomeUnknown] @param {object|null} [landingStop] */
+    const settle = (rawBody, failed, outcomeUnknown = false, landingStop = null) => {
       let outBody = rawBody;
       let outFailed = failed;
       // #241 — the deterministic schema boundary. An untrusted actor (web/api)
@@ -584,6 +588,7 @@ export const makeActorMessaging = (deps) => {
         outcomeUnknown, undefined, correlationId, parentToolUseId,
         () => (stopGen.get(rootSessionId) ?? 0) !== genAtQueue,
         removeMailbox,
+        landingStop,
       ).then((committedOrCancelled) => {
         if (committedOrCancelled) clearPendingReply(rootSessionId);
       });
@@ -653,6 +658,7 @@ export const makeActorMessaging = (deps) => {
             res?.stopped === true,
             res?.outcomeKnown === false
               || (res?.executionFailed === true && res?.outcomeKnown !== true),
+            res?.landingStop ?? null,
           );
         })
         .catch((e) => settle(

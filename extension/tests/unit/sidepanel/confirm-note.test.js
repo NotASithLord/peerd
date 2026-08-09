@@ -66,7 +66,11 @@ describe('sidepanel.confirm note (issue 242)', () => {
     const { root, unmount } = mount({ ...base, note: NOTE });
     try {
       const labels = [...root.querySelectorAll('.peerd-modal-actions button')].map((b) => b.textContent);
-      expect(labels).toEqual(['Reject', 'Allow for session', 'Allow once']);
+      // §4d: the session button says what it grants - the noun from the action
+      // class (page_write has no dedicated noun → 'actions') and the true scope
+      // (no origins on this prompt → the grant really is origin-blind).
+      // textContent concatenates the verb and the scope line without a space.
+      expect(labels).toEqual(['Reject', 'Allow all actionsthis chat, any site', 'Allow once']);
     } finally { unmount(); }
   });
 

@@ -109,6 +109,7 @@ const actorOutcomeUnknownFailure = (_text) =>
  * @property {string} [peerName]
  * @property {number} [depth]
  * @property {TabEvent[]} [tabEvents]
+ * @property {{ id: string, sessionId: string|null, text: string, at: number }[]} [confirmEvents]
  * @property {UiActions} [uiActions]
  * @property {string} [sessionId]
  * @property {((msg: Record<string, any>) => Promise<any>)} [send]
@@ -146,7 +147,7 @@ const CONTRIBUTOR_FEEDBACK_ENABLED = CHANNEL === 'preview' || CHANNEL === 'dev';
  * @param {TranscriptArgs} args
  * @returns {any[]}
  */
-const renderTranscript = ({ messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth = 0, tabEvents = [], uiActions, send, sessionId, busy = false }) => {
+const renderTranscript = ({ messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth = 0, tabEvents = [], confirmEvents = [], uiActions, send, sessionId, busy = false }) => {
   const groups = groupMessages(messages ?? []);
   // Feedback belongs to the completed answer for a human turn, not every
   // intermediate assistant step before a tool call. The live answer becomes
@@ -188,7 +189,7 @@ const renderTranscript = ({ messages, vmStreams, spawned, actors, scriptOps, loa
     out.push(g.type === 'user'
       ? m(UserMessage, { key: g.message.id, message: g.message })
       : g.type === 'actor-reply'
-        ? m(ActorReplyMessage, { key: g.message.id, message: g.message })
+        ? m(ActorReplyMessage, { key: g.message.id, message: g.message, uiActions })
         : m(AssistantMessage, {
             key: g.message.id, message: g.message, toolResults: g.toolResults,
             vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth,
@@ -200,6 +201,12 @@ const renderTranscript = ({ messages, vmStreams, spawned, actors, scriptOps, loa
   if (depth === 0) {
     flush(curTurn, true);
     for (const ev of tabEvents) flush(ev.turnId, true);
+    // Confirm settles trail last (§4e): a settle happens at the live turn's
+    // edge, so the tail is its honest anchor - newest of the capped few wins
+    // the fresh treatment.
+    confirmEvents.forEach((ev, i) => out.push(m(ConfirmSettledNotice, {
+      key: `confirm-${ev.id}`, ev, fresh: i === confirmEvents.length - 1,
+    })));
   }
   return out;
 };
@@ -355,11 +362,11 @@ export const MessageList = {
   },
 
   /** @param {{ attrs: TranscriptArgs, state: any }} vnode */
-  view: ({ attrs: { messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, tabEvents, uiActions, send, sessionId, busy }, state }) =>
+  view: ({ attrs: { messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, tabEvents, confirmEvents, uiActions, send, sessionId, busy }, state }) =>
     m('.message-list', [
       renderTranscript({
         messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName,
-        depth: 0, tabEvents, uiActions, send, sessionId, busy,
+        depth: 0, tabEvents, confirmEvents, uiActions, send, sessionId, busy,
       }),
       state.recoveryAnnouncement
         ? m('span.sr-only.actor-recovery-announcement.message-list-announcement', {
@@ -399,6 +406,20 @@ const AgentTabNotice = {
       }, 'Go ↗'),
     ]);
   },
+};
+
+// One quiet row per confirm that settled without this surface's click (§4e) -
+// timeout, Stop, closed panel, or answered elsewhere. Same visual family as
+// the tab notice above: informational, never a control, role=status so a live
+// settle is announced without stealing focus.
+const ConfirmSettledNotice = {
+  /** @param {{ attrs: { ev: { id: string, text: string }, fresh: boolean } }} vnode */
+  view: ({ attrs: { ev, fresh } }) => m(`.agent-tab-notice.confirm-settled-notice${fresh ? '.agent-tab-notice--fresh' : ''}`, {
+    role: 'status',
+  }, [
+    m('span.agent-tab-notice-icon', { 'aria-hidden': 'true' }, '▣'),
+    m('span.agent-tab-notice-copy', m('span.agent-tab-notice-text', ev.text)),
+  ]),
 };
 
 /**
@@ -486,6 +507,39 @@ const UserMessage = {
   },
 };
 
+/** @typedef {{ group: string|null, headline: string, reason: string, whatIsNotKnown: string, tone: string, action: { label: string, composerText: string } | null }} LandingStopCardModel */
+
+// The origin-lock stop card (§4c): four slots in 3g's fixed order - where it
+// stopped, why (the landing rule's verbatim one-liner), what isn't known, and
+// what's next. Monochrome: eight of the nine stops are the boundary doing its
+// job on ordinary web behaviour, so red would cry wolf - INTERNAL alone (a
+// genuine bug) takes the error treatment. The one action fills the composer
+// and grants nothing: it types the user's likely next message, calls no tool,
+// and never resumes the stopped helper.
+const LandingStopCard = {
+  /** @param {{ attrs: { card: LandingStopCardModel, uiActions?: UiActions } }} vnode */
+  view: ({ attrs: { card, uiActions } }) => m('.message.message-actor-reply.failed', [
+    m('.landing-stop-card', { class: card.tone === 'error' ? 'is-error' : '' }, [
+      m('.landing-stop-chips', [
+        m('span.landing-stop-chip', 'STOPPED'),
+        card.group ? m('span.landing-stop-group', card.group) : null,
+      ]),
+      m('.landing-stop-headline', card.headline),
+      card.reason ? m('.landing-stop-reason', card.reason) : null,
+      m('.landing-stop-unknown', [
+        m('.landing-stop-unknown-label', 'WHAT PEERD DOESN’T KNOW'),
+        m('.landing-stop-unknown-text', card.whatIsNotKnown),
+      ]),
+      card.action ? m('button.landing-stop-action', {
+        type: 'button',
+        // why prefill, not send: the card must never spend authority - the
+        // user reads the typed message and decides to send it themselves.
+        onclick: () => uiActions?.prefillComposer?.(card.action?.composerText),
+      }, card.action.label) : null,
+    ]),
+  ]),
+};
+
 // An actor's reply, surfaced as its OWN bubble at its place in the transcript
 // (the trickle-up: delegated work comes BACK as a visible message, not buried
 // in the message_actor card above). Attribution mirrors renderActorCard's
@@ -493,9 +547,14 @@ const UserMessage = {
 // still receives the full fenced text). The trusted lead line duplicates the
 // attribution label, so it's dropped from the bubble.
 const ActorReplyMessage = {
-  /** @param {{ attrs: { message: ChatMessage } }} vnode */
-  view: ({ attrs: { message } }) => {
+  /** @param {{ attrs: { message: ChatMessage, uiActions?: UiActions } }} vnode */
+  view: ({ attrs: { message, uiActions } }) => {
     const reply = message.actorReply ?? /** @type {NonNullable<ChatMessage['actorReply']>} */ ({ kind: 'actor', instanceId: '' });
+    // §4c: an origin-lock stop renders as the slotted CARD, not the prose
+    // paragraphs - the report text stays the orchestrator's copy, byte-identical.
+    const landingStop = /** @type {LandingStopCardModel | undefined} */ (
+      /** @type {any} */ (reply).landingStop);
+    if (landingStop) return m(LandingStopCard, { card: landingStop, uiActions });
     const who = reply.name ?? (reply.instanceId !== reply.kind ? reply.instanceId : '');
     const label = (reply.kind === 'web' && /^https?:\/\//.test(String(reply.instanceId)))
       ? `${reply.instanceId} integration`

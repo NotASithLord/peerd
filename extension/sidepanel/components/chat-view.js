@@ -202,6 +202,9 @@ export const ChatView = {
             // turn they happened (and fade into the backlog as the chat continues)
             // — not a bright sticky footer. Filtered to this session.
             tabEvents: (state.agentTabEvents ?? []).filter((e) => e.sessionId === state.session?.sessionId),
+            // Confirm settles for THIS chat only - the events carry their
+            // sessionId so a background chat's timeout can't leak into view.
+            confirmEvents: (state.confirmEvents ?? []).filter((e) => e.sessionId === state.session?.sessionId),
             uiActions,
             send,
             // A model turn may be idle after acknowledging asynchronous actor

@@ -1105,6 +1105,73 @@ button.icon.is-active {
   border-left: 2px solid var(--fg-muted);
 }
 .message-actor-reply .role { font-style: italic; }
+/* The origin-lock stop card (§4c). Monochrome by design: eight of the nine
+   stops are the boundary working on ordinary web behaviour, so red would
+   report a non-event - INTERNAL alone (is-error) takes the semantic red. */
+.landing-stop-card {
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  background: var(--bg-elev);
+  padding: 11px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.landing-stop-chips { display: flex; align-items: center; gap: 7px; }
+.landing-stop-chip {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+.landing-stop-group {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+}
+.landing-stop-headline { font-size: 12.5px; font-weight: 600; line-height: 1.45; }
+.landing-stop-reason {
+  border-left: 2px solid var(--border);
+  padding-left: 9px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+}
+.landing-stop-unknown {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r1);
+  padding: 8px 9px;
+}
+.landing-stop-unknown-label {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+  margin-bottom: 5px;
+}
+.landing-stop-unknown-text { font-size: 11.5px; line-height: 1.5; color: var(--fg-muted); }
+.landing-stop-action {
+  align-self: flex-start;
+  font-size: 11.5px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r1);
+  padding: 7px 10px;
+  cursor: pointer;
+}
+.landing-stop-action:hover { background: var(--elev); }
+.landing-stop-card.is-error { border-color: var(--danger); }
+.landing-stop-card.is-error .landing-stop-headline { color: var(--danger); }
 .message.streaming .bubble::after {
   content: '▍';
   margin-left: 2px;
@@ -2513,17 +2580,21 @@ button.tool-call-header:focus-visible {
   .actor-fabric-facts > div { grid-template-columns: 58px 1fr; }
 }
 
-/* Plan/Act selector row above the input bar */
-.chat-mode-row { display: flex; align-items: center; padding: 4px 0 0; }
+/* Plan/Act selector row above the input bar. why wrap at every width:
+   a non-wrapping flex row squeezes the pills at narrow panel widths and
+   their labels break onto two lines - overflow must become a second row
+   of intact pills, never a compressed pill. */
+.chat-mode-row { display: flex; flex-wrap: wrap; align-items: center; row-gap: 6px; padding: 4px 0 0; }
 .chat-mode-row .planact-mode,
 .chat-mode-row .planact-confirm,
 .chat-mode-row .effort-dial,
 .chat-mode-row .goal-toggle {
   min-height: 28px;
   box-sizing: border-box;
+  white-space: nowrap;
 }
 @media (max-width: 370px) {
-  .chat-mode-row { flex-wrap: wrap; column-gap: 6px; row-gap: 6px; }
+  .chat-mode-row { column-gap: 6px; }
   .chat-mode-row .planact { flex: 0 0 100%; margin-right: 0; }
   .chat-mode-row .goal-toggle { margin-left: 0; }
   .chat-mode-row > .spacer { flex: 1 1 0; min-width: 0; }
@@ -2617,6 +2688,24 @@ button.tool-call-header:focus-visible {
    * existing primary-button baseline. */
   color: var(--on-accent-aa);
 }
+/* The session button's second line states the grant's true scope (§4d) -
+   smaller and muted so the verb stays the label, the scope the qualifier. */
+.confirm-session-grant { display: inline-flex; flex-direction: column; align-items: center; gap: 2px; }
+.confirm-grant-scope {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-muted);
+}
+/* Why the session grant is missing (helper-raised prompt) - a quiet line,
+   not a control; and the 90s "No answer counts as Reject" hint. Both are
+   informational, so they share the muted small voice. */
+.confirm-ephemeral-note {
+  border-left: 2px solid var(--border);
+  padding-left: 9px;
+  font-size: 12px;
+  margin: 0 0 8px;
+}
+.confirm-timeout-hint { font-size: 12px; margin: 0 0 8px; }
 
 /* --- login consent card (the `login` tool, kind:'login') --------------
  * A sign-in is the highest-stakes confirm, so it gets a distinctive card:
@@ -2986,6 +3075,10 @@ button.tool-call-header:focus-visible {
 }
 .linkish:hover { text-decoration: underline; }
 .key-msg { font-size: 12px; margin: 6px 0 0; }
+/* why: the denylist pane keeps its role=status banner mounted at all times
+   (a live region must exist before its first announcement) - empty, it
+   must cost zero pixels. */
+.key-msg:empty { margin: 0; }
 .key-msg.ok  { color: var(--ok); }
 .key-msg.err { color: var(--danger); }
 
