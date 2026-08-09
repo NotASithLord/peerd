@@ -84,16 +84,15 @@ engine tab trackers, and the engine orphan sweep in
 
 Each registered durable store has its own schema version and durability class. A
 first-run profile is stamped without being treated as corrupt. If a stamp is
-newer than the running peerd version or malformed, the live guard classifies the
-store read-only. Shared key-value and IndexedDB adapters refuse mapped writes,
-and injected guards cover the skills and App-body databases. OPFS workspace
-writes do not yet consult this guard.
+newer than the running peerd version, older than the supported schema, or
+malformed, the live guard classifies the store read-only. Shared key-value and
+IndexedDB adapters refuse mapped writes, and injected guards cover the skills
+and App-body databases. OPFS workspace writes do not yet consult this guard.
 
 The forward migration driver is pure and tested but is not called by the
 production shell yet. It supports checkpointed steps, preserves the original
-input on failure, and refuses undeclared field removal. Until that driver is
-wired to each store, peerd does not promise automatic migration from a future
-older schema stamp.
+input on failure, and refuses undeclared field removal. Until a concrete plan is
+wired for a store, an older stamp is read-only and the original data is retained.
 
 Exports identify device-bound state that cannot move to another install. A
 portable export must not silently imply that tabs, engine handles, local

@@ -534,7 +534,7 @@ export {
 export {
   DURABILITY_TIERS, STORE_REGISTRY, VERSION_STAMP_KEY,
   storeEntry, portableStores, omittedDeviceBoundStores,
-  checkStores, stampStores,
+  checkStores, stampStores, applyStoreBootPosture,
 } from './lifecycle/store-registry.js';
 // §11.5 enforced: the SW wraps its kv/idb adapters through the guard once
 // and a read-only verdict refuses writes at the shared chokepoint.

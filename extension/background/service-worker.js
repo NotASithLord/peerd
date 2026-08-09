@@ -194,9 +194,9 @@ import {
   makeWriteGuard,
   makeEngineLiveness,
   retryClassForTool,
-  checkStores,
-  stampStores,
+  applyStoreBootPosture,
   VERSION_STAMP_KEY,
+  migrationBlockedReport,
   classifyFailure,
   // hooks (pre/post-tool-use lifecycle)
   registerHook,
@@ -592,32 +592,39 @@ const lifecycleArmed = lifecycleBoot.init()
       retryClassFor: retryClassForTool,
       classifyFailure: /** @type {any} */ (classifyFailure),
     });
-    // §11.1 — independent per-store schema stamps. A newer stamp than this
-    // build supports leaves that store read-only (refuse-newer); the check
-    // result is audited so a blocked profile is diagnosable, and stamping
-    // only proceeds when every store is writable.
+    // §11.1: independent per-store schema stamps. An incompatible stamp
+    // leaves that store read-only. The check result is audited so a blocked
+    // profile is diagnosable, and stamping only proceeds when every store is
+    // writable.
     const readStamps = async () => (await kv.get(VERSION_STAMP_KEY)) ?? undefined;
-    const storesCheck = await checkStores({ read: readStamps });
-    if (storesCheck.ok) {
-      await stampStores({
-        read: readStamps,
-        write: (/** @type {any} */ map) => kv.set(VERSION_STAMP_KEY, map),
-      });
-    } else {
-      const blocked = storesCheck.stores
-        .filter((/** @type {any} */ x) => x.mode === 'read-only');
+    const storesCheck = await applyStoreBootPosture({
+      read: readStamps,
+      write: (/** @type {any} */ map) => kv.set(VERSION_STAMP_KEY, map),
       // §11.5 ENFORCED: the guard flips these surfaces' physical locations
-      // to refuse-writes at the shared adapter chokepoint. Reads keep
-      // working; the thrown StoreReadOnlyError names the store and says no
-      // data was changed.
-      storeWriteGuard.block(blocked.map((/** @type {any} */ x) => x.store));
+      // to refuse writes at the shared adapter chokepoint. Passing the full
+      // verdict gives tool failures the same reason and diagnostic as audit.
+      block: (/** @type {any} */ blocked) => storeWriteGuard.block(blocked),
+    });
+    if (!storesCheck.ok) {
+      const { blocked } = storesCheck;
       for (const s of blocked) {
+        const report = migrationBlockedReport({
+          diagnosticId: s.diagnosticId,
+          reason: s.reason,
+        });
         console.error('[sw] store schema blocked (writes refused):', s.store, s.reason);
         auditLog.append({
           type: 'lifecycle.migration.failed',
-          details: { store: s.store, reason: s.reason, diagnosticId: s.diagnosticId },
+          details: { store: s.store, ...report.agent },
         }).catch(() => {});
       }
+      const first = blocked[0];
+      const report = migrationBlockedReport({
+        diagnosticId: first?.diagnosticId,
+        reason: first?.reason,
+      });
+      postChatNote(`${report.user} Blocked store${blocked.length === 1 ? '' : 's'}: `
+        + `${blocked.map((s) => s.store).join(', ')}.`);
     }
     return generation;
   })

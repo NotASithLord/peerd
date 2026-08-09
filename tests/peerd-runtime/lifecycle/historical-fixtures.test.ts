@@ -561,13 +561,15 @@ describe('guardStore over a stamped profile', () => {
     expect(guard.diagnosticId).toBe(`store-${sessions.store}-newer-v${sessions.version + 1}`);
   });
 
-  test('checkStores routes an older stamp to migrate and keeps the rest read-write', async () => {
+  test('checkStores blocks an older stamp until a production migration plan exists', async () => {
     const check = await checkStores({
       read: async () => ({ [sessions.store]: sessions.version - 1 }),
     });
-    expect(check.ok).toBe(true);
+    expect(check.ok).toBe(false);
     const found = check.stores.find((s) => s.store === sessions.store)!;
-    expect(found.mode).toBe('migrate');
+    expect(found.mode).toBe('read-only');
+    expect(found.versionClass).toBe('migratable');
+    expect(found.diagnosticId).toContain('migration-unavailable');
     expect(found.firstRun).toBeUndefined();
     for (const other of check.stores.filter((s) => s.store !== sessions.store)) {
       expect(other.mode).toBe('read-write');
@@ -1044,12 +1046,12 @@ describe('profile-maximal-historical — checkStores over a partially stamped ma
     }
   });
 
-  test('a partial map with ONE stamp behind asks to migrate that surface only', async () => {
+  test('a partial map with one older stamp blocks that surface only', async () => {
     const sessions = storeEntry('sessions')!;
     const skewed = { ...stamps, [sessions.store]: sessions.version - 1 };
     const check = await checkStores({ read: async () => skewed });
-    expect(check.ok).toBe(true);
-    expect(check.stores.find((s) => s.store === sessions.store)!.mode).toBe('migrate');
+    expect(check.ok).toBe(false);
+    expect(check.stores.find((s) => s.store === sessions.store)!.mode).toBe('read-only');
     for (const other of check.stores.filter((s) => s.store !== sessions.store)) {
       expect(other.mode).toBe('read-write');
       // The other stamped surfaces are current, the unstamped ones firstRun —

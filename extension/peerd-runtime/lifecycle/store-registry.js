@@ -16,8 +16,8 @@
 // STRUCTURALLY untransferable — so the export must NAME what it left
 // behind rather than silently shipping a profile that is missing it.
 //
-// Pure: values + lookups only. `checkStores`/`stampStores` take their IO
-// as an injected read/write pair; nothing here touches chrome.* storage.
+// Pure policy plus an injected boot shell. Nothing here touches chrome.*
+// storage directly.
 
 import { guardStore } from './store-version.js';
 
@@ -224,17 +224,28 @@ export const checkStores = async ({ read }) => {
       found: firstRun ? entry.version : stamped,
       supported: entry.version,
     });
+    // why fail closed here: runMigration is a reusable pure engine, but a
+    // store is not migratable in production until the registry carries a
+    // concrete plan for that store. Treating "migrate" as writable before
+    // such a plan exists lets current code mutate older data in place.
+    const productionGuard = guard.mode === 'migrate'
+      ? {
+          ...guard,
+          mode: /** @type {const} */ ('read-only'),
+          reason: `schema v${String(stamped)} requires migration to v${entry.version}, `
+            + `but this build has no migration plan for ${entry.store}; original data retained`,
+          diagnosticId: `store-${entry.store}-migration-unavailable-v${String(stamped)}-to-v${entry.version}`,
+        }
+      : guard;
     return /** @type {StoreCheck} */ ({
       store: entry.store,
       stamped,
-      ...guard,
+      ...productionGuard,
       ...(firstRun ? { firstRun: true } : {}),
     });
   });
-  // why mode !== 'read-only' is the bar: 'migrate' is a healthy startup
-  // (the migration driver runs and stamps after), 'read-only' is the
-  // §11.5 refusal — newer, unsupported, or malformed — and any single one
-  // of those means this build must not mutate the profile.
+  // A migrate verdict is converted above until that store has a real plan.
+  // Any read-only verdict keeps the boot shell out of the stamping path.
   return { ok: stores.every((check) => check.mode !== 'read-only'), stores };
 };
 
@@ -277,4 +288,28 @@ export const stampStores = async ({ read, write }) => {
   // write that would still wake every storage listener.
   if (changed) await write(next);
   return stamped;
+};
+
+/**
+ * Apply the production store posture once at service-worker boot.
+ *
+ * why one shell: checking, blocking, and stamping must stay one decision. A
+ * caller must not accidentally stamp after a blocked check or forget to arm
+ * the physical write guard for an incompatible store.
+ *
+ * @param {Object} io
+ * @param {() => Promise<Record<string, number> | undefined>} io.read
+ * @param {(map: Record<string, number>) => Promise<void>} io.write
+ * @param {(stores: StoreCheck[]) => void} io.block
+ * @returns {Promise<{ ok: boolean, stores: StoreCheck[], blocked: StoreCheck[] }>}
+ */
+export const applyStoreBootPosture = async ({ read, write, block }) => {
+  const check = await checkStores({ read });
+  if (check.ok) {
+    await stampStores({ read, write });
+    return { ...check, blocked: [] };
+  }
+  const blocked = check.stores.filter((store) => store.mode === 'read-only');
+  block(blocked);
+  return { ...check, blocked };
 };

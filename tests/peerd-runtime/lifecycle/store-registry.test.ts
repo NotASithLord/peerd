@@ -7,8 +7,9 @@ import { describe, test, expect } from 'bun:test';
 import {
   DURABILITY_TIERS, STORE_REGISTRY, VERSION_STAMP_KEY,
   storeEntry, portableStores, omittedDeviceBoundStores,
-  checkStores, stampStores,
+  checkStores, stampStores, applyStoreBootPosture,
 } from '../../../extension/peerd-runtime/lifecycle/store-registry.js';
+import { makeWriteGuard, StoreReadOnlyError } from '../../../extension/peerd-runtime/lifecycle/write-guard.js';
 import { buildExport, inspectImport, EXPORT_FORMAT, EXPORT_VERSION } from '/peerd-runtime/transfer/transfer.js';
 
 /** An in-memory stand-in for the SW's kv adapter: the WHOLE stamp map. */
@@ -20,6 +21,15 @@ const stampIo = (initial?: Record<string, number>) => {
     writes,
     read: async () => (map ? { ...map } : undefined),
     write: async (next: Record<string, number>) => { map = { ...next }; writes.push({ ...next }); },
+  };
+};
+
+const makeKv = () => {
+  const map = new Map<string, unknown>();
+  return {
+    get: async (key: string) => map.get(key),
+    set: async (key: string, value: unknown) => { map.set(key, value); },
+    delete: async (key: string) => { map.delete(key); },
   };
 };
 
@@ -113,6 +123,64 @@ describe('checkStores', () => {
     expect(audit?.mode).toBe('read-only');
     expect(audit?.diagnosticId).toBe('store-audit-malformed-version');
     expect(audit?.firstRun).toBeUndefined(); // stamped, just unreadable
+  });
+
+  test('an older stamp is read-only until that store has a production migration plan', async () => {
+    const supported = storeEntry('hooks')!.version;
+    const io = stampIo({ hooks: supported - 1 });
+    const result = await checkStores(io);
+    expect(result.ok).toBe(false);
+    const hooks = result.stores.find((s) => s.store === 'hooks');
+    expect(hooks?.mode).toBe('read-only');
+    expect(hooks?.versionClass).toBe('migratable');
+    expect(hooks?.diagnosticId).toBe(
+      `store-hooks-migration-unavailable-v${supported - 1}-to-v${supported}`,
+    );
+    expect(hooks?.reason).toContain('no migration plan');
+  });
+});
+
+describe('applyStoreBootPosture', () => {
+  test('older stamps are neither mutated nor restamped and their writes are blocked', async () => {
+    const supported = storeEntry('hooks')!.version;
+    const io = stampIo({ hooks: supported - 1 });
+    const blocked: Array<{ store: string; reason?: string; diagnosticId?: string }> = [];
+
+    const result = await applyStoreBootPosture({
+      read: io.read,
+      write: io.write,
+      block: (stores) => blocked.push(...stores),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(io.writes).toEqual([]);
+    expect(io.current).toEqual({ hooks: supported - 1 });
+    expect(blocked.map((store) => store.store)).toEqual(['hooks']);
+
+    const guard = makeWriteGuard();
+    guard.block(blocked);
+    const kv = guard.wrapKv(makeKv());
+    try {
+      kv.set('hooks.user.v1', []);
+      throw new Error('should have refused the older store write');
+    } catch (error) {
+      expect(error).toBeInstanceOf(StoreReadOnlyError);
+      expect((error as StoreReadOnlyError).diagnosticId).toBe(blocked[0].diagnosticId);
+      expect((error as Error).message).toContain('no migration plan');
+    }
+  });
+
+  test('a fresh profile is stamped and does not arm the block callback', async () => {
+    const io = stampIo();
+    const blocked: string[] = [];
+    const result = await applyStoreBootPosture({
+      read: io.read,
+      write: io.write,
+      block: (stores) => blocked.push(...stores.map((store) => store.store)),
+    });
+    expect(result.ok).toBe(true);
+    expect(blocked).toEqual([]);
+    expect(io.writes).toHaveLength(1);
   });
 });
 
