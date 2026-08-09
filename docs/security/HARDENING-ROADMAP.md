@@ -22,7 +22,8 @@ relay authority to a live run and its sender. Firefox and interruption paths
 must fail closed when the required isolation host is unavailable.
 
 Current source: `extension/peerd-runtime/actor/`,
-`extension/background/offscreen-actor-client.js`, and
+`extension/background/offscreen-actor-client.js`,
+`extension/background/offscreen-actor-channel-client.js`, and
 `extension/offscreen/`.
 
 ### Browser authority

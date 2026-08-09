@@ -3338,9 +3338,14 @@ return { sourceUrl, tlaValue };`);
               type: 'js/eval', notebookId: id, runId: 'firefox-concurrent-probe',
               code: "return 'MUST-NOT-REPLACE';", timeoutMs: 20_000,
             });
-            const notebookFile = await browser.tabs.sendMessage(tab.id, {
-              type: 'js/read-file', notebookId: id, path: 'notebook.js',
-            });
+            let notebookFile = null;
+            for (let fileAttempt = 0; fileAttempt < 50; fileAttempt += 1) {
+              notebookFile = await browser.tabs.sendMessage(tab.id, {
+                type: 'js/read-file', notebookId: id, path: 'notebook.js',
+              });
+              if (notebookFile?.content === 'while (true) {}') break;
+              await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+            }
             running = {
               label: button.getAttribute('aria-label'),
               text: button.textContent,
@@ -4416,6 +4421,32 @@ const main = async () => {
       && background?.capabilities?.documentReader?.status === 'unsupported'
       && background?.capabilities?.moonshineVoiceHost?.status === 'unsupported',
     'Firefox reports offscreen-hosted facilities unavailable before use', JSON.stringify(background?.capabilities));
+
+    await driver.navigate(`${EXTENSION_ORIGIN}/options/options.html#!/transfer`);
+    const transferMounted = await waitFor(() => driver.execute(
+      "return document.readyState === 'complete' && !!document.getElementById('exppass');",
+    ), { budgetMs: 30_000 });
+    assert(transferMounted === true, 'packaged Firefox transfer page mounts');
+    const privateTransfer = await driver.executeAsync(`
+      const done = arguments[arguments.length - 1];
+      import('/options/private-transfer-session.js')
+        .then(({ callPrivateTransfer }) => callPrivateTransfer({
+          type: 'transfer/export', passphrase: ${JSON.stringify(PASSPHRASE_CANARY)},
+        }))
+        .then((reply) => done({
+          ok: reply?.ok === true,
+          format: reply?.payload?.format,
+          version: reply?.payload?.version,
+        }), (error) => done({ ok: false, error: error?.message || String(error) }));
+    `);
+    assert(privateTransfer?.ok === true
+      && privateTransfer?.format === 'peerd-export'
+      && Number.isInteger(privateTransfer?.version),
+    'Firefox backup uses the exact-options private background Port', JSON.stringify(privateTransfer));
+    await driver.navigate(`${EXTENSION_ORIGIN}/sidepanel/sidepanel.html`);
+    await waitFor(() => driver.execute(
+      "return document.readyState === 'complete' && (document.getElementById('app')?.childElementCount || 0) > 0;",
+    ), { budgetMs: 30_000 });
 
     const unsupportedVoiceNudge = await driver.execute(`
       return [...document.querySelectorAll('.onboarding-card h3')]

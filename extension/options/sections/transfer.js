@@ -1,16 +1,20 @@
 // @ts-check
 // Options → Backup & restore — the explicit migration path between
 // installs, including between peerd (store) and peerd preview, which
-// are separate extensions with isolated storage by design. Ported
-// backed by the existing transfer routes:
+// are separate extensions with isolated storage by design. Backed by the
+// existing guarded transfer routes:
 // transfer/export + transfer/inspectImport + transfer/import.
 
 import m from '/vendor/mithril/mithril.js';
 import { CHANNEL } from '/shared/channel-config.js';
 import { bundleToOtlp, EXPORT_PASSPHRASE_MIN_LENGTH } from '/peerd-runtime/index.js';
 import { EXPORT_FILE_LIMIT_BYTES } from '/peerd-engine/index.js';
+import { PrivateTransferPortError } from '../private-transfer-client.js';
 
 const MAX_BACKUP_FILE_BYTES = 32 * 1024 * 1024;
+const IMPORT_NOT_STARTED_CODES = new Set([
+  'channel-unavailable', 'channel-request-failed', 'channel-timeout', 'post-failed',
+]);
 /** @param {string | null | undefined} did */
 const displayDid = (did) => did || 'unknown';
 /** @param {any} summary */
@@ -387,12 +391,21 @@ export const TransferSection = {
             text: describeImportError(reply?.error),
           };
         }
-      } catch {
-        ui.importMsg = {
-          ok: false,
-          text: 'The connection to peerd was lost during the import, so its final state is unknown. Reopen peerd, inspect local state, then choose the backup file again.',
-        };
-        clearImportSelection(true);
+      } catch (error) {
+        if (error instanceof PrivateTransferPortError
+            && IMPORT_NOT_STARTED_CODES.has(error.code)) {
+          ui.importMsg = {
+            ok: false,
+            text: 'Restore did not start because the private connection was unavailable. Close any other peerd Settings tabs, then try again.',
+          };
+          ui.focusImportStatusOnUpdate = true;
+        } else {
+          ui.importMsg = {
+            ok: false,
+            text: 'The connection to peerd was lost during the import, so its final state is unknown. Reopen peerd, inspect local state, then choose the backup file again.',
+          };
+          clearImportSelection(true);
+        }
       } finally {
         ui.importBusy = false;
         m.redraw();

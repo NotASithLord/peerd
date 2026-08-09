@@ -1,7 +1,6 @@
-// Confidential extension Ports rely on one shipped runtime.onConnect receiver.
-// Chrome permits multiple receivers, so adding a listener anywhere outside the
-// service worker would turn offscreen or options-originated messages into a
-// broadcast. Keep that architectural boundary fail-closed in CI.
+// Firefox backup transfer uses one exact-sender background Port. Chrome uses a
+// targeted WindowClient MessageChannel because runtime Ports can have multiple
+// receivers. Keep both boundaries fail-closed in CI.
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -28,6 +27,22 @@ describe('runtime Port receiver exclusivity', () => {
         return Array.from({ length: count }, () => relative(EXTENSION_DIR, path));
       });
     expect(registrations).toEqual(['background/service-worker.js']);
+  });
+
+  test('Chrome actor jobs and relays are absent from runtime messaging', () => {
+    const serviceWorker = stripComments(readFileSync(
+      join(EXTENSION_DIR, 'background/service-worker.js'), 'utf8',
+    ));
+    const offscreen = stripComments(readFileSync(
+      join(EXTENSION_DIR, 'offscreen/offscreen.js'), 'utf8',
+    ));
+    const dispatcher = serviceWorker.slice(
+      serviceWorker.indexOf('browser.runtime.onMessage.addListener'),
+    );
+    expect(dispatcher).not.toContain('actorClient?.routes');
+    expect(offscreen).not.toMatch(/['"]actor\/(?:run|abort)['"]/);
+    expect(serviceWorker).toContain('makeOffscreenActorChannelClient');
+    expect(offscreen).toContain('bindActorChannel');
   });
 
   test('no source aliases onConnect outside the guarded registration', () => {

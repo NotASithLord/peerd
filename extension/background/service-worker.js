@@ -372,6 +372,12 @@ import { createScriptRunRegistry } from './script-runs.js';
 import { createContextSnapshots } from './context-snapshots.js';
 import { confirmGrantKey } from './confirm-grant-key.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
+import {
+  makeOffscreenActorChannelClient, selectExactActorHostClient,
+} from './offscreen-actor-channel-client.js';
+import {
+  isActorHostStartupFailure, runActorWithStartupRetry,
+} from './actor-startup-retry.js';
 import { makeDirectActorHost, makeStorageSessionKeepAlive } from './direct-actor-host.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeOffscreenDocClient } from './offscreen-doc-client.js';
@@ -443,7 +449,7 @@ import { makeDwebCustodyClient, makeRetryableCustodyReset } from './dweb-custody
 import {
   identityChangeBlockedByApps, makeDwebIdentityCustody,
 } from './dweb-identity-custody.js';
-import { makePrivateTransferPort } from './private-transfer-port.js';
+import { makePrivateTransferOpenRoute, makePrivateTransferPort } from './private-transfer-port.js';
 import { downgradesActorConfirm, a2aConsentOutcome } from './a2a-consent.js';
 import { makeVaultRoutes } from './routes/vault.js';
 import { makeProviderRoutes } from './routes/providers.js';
@@ -3559,9 +3565,25 @@ notifyActorHostKeepAliveLost = (error) => {
 // and dispatches there — the worker holds no
 // key, no engine clients, no browser extension APIs. Null only when no
 // dedicated-worker host exists.
+const actorChannelClient = offscreenAvailable ? makeOffscreenActorChannelClient({
+  ensureOffscreen,
+  findOffscreenClient: async () => {
+    const clientsApi = /** @type {any} */ (globalThis).clients;
+    if (!clientsApi?.matchAll) return null;
+    const candidates = /** @type {Array<{
+     *   url: string,
+     *   postMessage: (message: any, transfer: Transferable[]) => void,
+     * }>} */ (await clientsApi.matchAll({ type: 'window', includeUncontrolled: true }));
+    const exactUrl = browser.runtime.getURL('offscreen/offscreen.html');
+    // why: a duplicate exact-URL page makes the recipient ambiguous. Failing
+    // closed prevents a user-opened sibling from receiving an actor channel.
+    return selectExactActorHostClient(candidates, exactUrl);
+  },
+}) : null;
 const actorClient = actorIsolationAvailable(baseActorIsolation) ? makeOffscreenActorClient({
   ensureHost: offscreenAvailable ? ensureOffscreen : async () => {},
   sendMessage: directActorHost?.sendMessage ?? ((m) => browser.runtime.sendMessage(m)),
+  runOnChannel: actorChannelClient?.run,
   callModel: /** @type {any} */ (callModel),
   getSecret,
   safeFetch,
@@ -3591,12 +3613,9 @@ const actorClient = actorIsolationAvailable(baseActorIsolation) ? makeOffscreenA
   // eval harness's OM2W recorder and any
   // activity view are blind to what an actor actually did.
   broadcastOp: (/** @type {any} */ msg) => uiPorts.broadcast(msg),
-  // The relay boundary. `runtime.sendMessage` cannot address one extension
-  // context, so the actor/run job (grant token included) is broadcast to every
-  // listener, including the side panel and the engine tab pages. Pinning the
-  // three relay routes to the offscreen document is therefore what actually
-  // keeps another first-party page from dispatching as an actor; the token
-  // carries run identity and liveness on top of it.
+  // Firefox's direct host binds relays behind an unforgeable object identity.
+  // Chrome binds them to the exact offscreen WindowClient through a transferred
+  // MessageChannel and does not register these routes on runtime messaging.
   isRelaySender: directActorHost?.isRelaySender ?? isOffscreenSender,
   inboundDwebToolNames: DWEB_INBOUND_TOOL_NAMES,
   // Spend-limit preflight for the actor lane. Two tallies, because they fail in
@@ -3626,17 +3645,6 @@ const actorClient = actorIsolationAvailable(baseActorIsolation) ? makeOffscreenA
 }) : null;
 directActorHost?.bindRelayRoutes(actorClient?.routes ?? {});
 
-const ACTOR_HOST_STARTUP_CODES = new Set([
-  'actor_host_unavailable',
-  'actor_host_not_ready',
-  'actor_host_keepalive_failed',
-  'actor_worker_spawn_failed',
-  'actor_worker_start_timeout',
-  'actor_worker_crashed',
-  'actor_worker_message_error',
-  'actor_worker_protocol_error',
-]);
-
 /**
  * Run on the detected dedicated-worker host. A failure before the realm proof
  * is safe to retry once because no model call or tool relay could have begun.
@@ -3649,13 +3657,13 @@ const runActorIsolated = async (job, opts) => {
   if (!actorClient || !actorIsolationAvailable(actorIsolation)) {
     return actorIsolationRefusal(actorIsolation, { targetRead: false, targetChanged: false });
   }
-  let result = await actorClient.run(job, opts);
-  if (result?.started || result?.ok || !ACTOR_HOST_STARTUP_CODES.has(result?.code)) return result;
-  // Stop can win while the first host proof is failing. A second Worker would
-  // be safe from relays but would still be needless post-cancel execution.
-  if (opts?.signal?.aborted) return { ...result, aborted: true };
-  result = await actorClient.run(job, opts);
-  if (result?.started || result?.ok || !ACTOR_HOST_STARTUP_CODES.has(result?.code)) return result;
+  const attempt = await runActorWithStartupRetry({
+    run: () => actorClient.run(job, opts),
+    isStartupFailure: isActorHostStartupFailure,
+    signal: opts?.signal,
+  });
+  const { result } = attempt;
+  if (!attempt.exhausted) return result;
   actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, result?.error ?? 'actor worker startup failed');
   let persisted = true;
   try {
@@ -4321,7 +4329,7 @@ browser.runtime.onConnect.addListener((port) => {
   // message dispatcher.
   if (!isTrustedSender(port.sender)) { try { port.disconnect(); } catch { /* already gone */ } return; }
   if (port.name === 'private-transfer') {
-    if (!privateTransferPort || !isActualOptionsSender(port.sender)) {
+    if (offscreenAvailable || !privateTransferPort || !isActualOptionsSender(port.sender)) {
       try { port.disconnect(); } catch { /* already gone */ }
       return;
     }
@@ -7129,7 +7137,9 @@ const dwebTransfer = makeDwebTransfer({
 // Backup requests carry passwords and recovery records. They are present in
 // the normal route modules for shared business logic, but every transfer route
 // requires this non-serializable capability and the options page reaches them
-// only through its exact-sender verified Port.
+// through a MessageChannel transferred to its exact WindowClient on Chrome.
+// Firefox has no service-worker WindowClient API, so its exact options sender
+// uses the private background-page Port fallback above.
 const privateTransferAuthorization = Symbol('private-transfer');
 const makeSystemRouteSet = () => makeSystemRoutes({
   vault, auditLog, sessions, pushState, kv, memory, buildStateSnapshot, closeSidePanel,
@@ -7156,6 +7166,17 @@ privateTransferPort = makePrivateTransferPort({
     'transfer/import': systemMessageRoutes['transfer/import'],
   },
 });
+const privateTransferOpenRoute = makePrivateTransferOpenRoute({
+  isOptionsSender: isActualOptionsSender,
+  optionsUrl: browser.runtime.getURL('options/options.html'),
+  attach: (port) => privateTransferPort?.attach(port),
+  listWindowClients: async () => {
+    const clientsApi = /** @type {any} */ (globalThis).clients;
+    return clientsApi?.matchAll
+      ? clientsApi.matchAll({ type: 'window' })
+      : [];
+  },
+});
 
 // Message routes live in background/routes/*.js as import-free, deps-injected
 // factories. Each is wired with an EXPLICIT per-module deps object naming
@@ -7171,16 +7192,17 @@ privateTransferPort = makePrivateTransferPort({
 // belongs in a routes/ module too; if it needs mutable SW state, give that state
 // a store and inject it, rather than reaching for a module-level let.
 browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
+  // Nonsecret request for a MessageChannel transferred to the exact options
+  // WindowClient. Backup passphrases and payloads use only that channel.
+  'private-transfer/open': privateTransferOpenRoute,
   // The heap split: the offscreen→SW relays for the ONE agent-loop client — model-call
   // (getSecret + safeFetch added in the handler; the key never left the SW), the
   // SW-side pin+gate tool-dispatch, and the fire-and-forget loop-event (→ the actor/
   // actor card + cost meter). Serves both spawned reasoners and bound actors; a
   // reasoning child never exercises tool-dispatch. actorClient is defined above (after
   // ensureOffscreen), before this dispatcher literal — safe to spread.
-  // Chrome's offscreen document relays over runtime messaging. Firefox's
-  // direct background-page host binds these routes in-process above, so they
-  // must not be callable from any extension page.
-  ...(offscreenAvailable ? (actorClient?.routes ?? {}) : {}),
+  // Firefox binds these routes directly inside the background page. Chrome's
+  // offscreen host reaches them only through its run-specific channel closure.
   // The script tool's actors-in-code relay: live-run/owner/grant verified,
   // then every ask re-enters the existing messageActor gate chain.
   ...makeActorsRoutes({

@@ -5,6 +5,7 @@
 import m from '/vendor/mithril/mithril.js';
 import { describe, it, expect } from '../../framework.js';
 import { TransferSection } from '/options/sections/transfer.js';
+import { PrivateTransferPortError } from '/options/private-transfer-client.js';
 
 const RECORD = { did: 'did:key:zIncomingPortable' };
 const SUMMARY = Object.freeze({
@@ -147,6 +148,25 @@ describe('options.transfer — portable identity restore', () => {
       expect(root.querySelector('#restore-summary')).toBeFalsy();
       await new Promise((resolve) => requestAnimationFrame(resolve));
       expect(root.querySelector('#peerd-backup-file')).toBe(document.activeElement);
+    } finally { unmount(); }
+  });
+
+  it('keeps the inspected backup when the private restore connection never starts', async () => {
+    const { root, unmount } = await mount(() => Promise.reject(new PrivateTransferPortError(
+      'private-transfer-channel-target-missing', 'channel-request-failed',
+    )));
+    try {
+      const passphrase = /** @type {HTMLInputElement} */ (root.querySelector('#imppass'));
+      passphrase.value = 'backup-passphrase';
+      passphrase.dispatchEvent(new Event('input'));
+      await flush();
+      /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Apply import')).click();
+      await flush();
+      expect(root.querySelector('[role=alert]')?.textContent).toContain('Restore did not start');
+      expect(root.querySelector('#restore-summary')).toBeTruthy();
+      expect(/** @type {HTMLInputElement} */ (root.querySelector('#imppass')).value)
+        .toBe('backup-passphrase');
     } finally { unmount(); }
   });
 
