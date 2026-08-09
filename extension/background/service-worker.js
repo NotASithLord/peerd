@@ -140,6 +140,7 @@ import {
   createSessionStore,
   renderSystemPrompt,
   runUserTurn,
+  learnedOriginCovers,
   AUTH_BOUNDARY_STOPPED_MESSAGE,
   AUTH_STATE_UNAVAILABLE_MESSAGE,
   AUTH_WAITING_FOR_USER_MESSAGE,
@@ -1684,18 +1685,18 @@ const originStates = makeOriginStateStore({
 const learnedOrigins = makeLearnedOrigins({
   load: async () => /** @type {any} */ (await kv.get('learnedOrigins.v1')),
   save: async (all) => { await kv.set('learnedOrigins.v1', all); },
-  // Audit the FIRST time an origin is learned. why: this list silently changes
+  // Audit the FIRST time a host is learned. why: this list silently changes
   // what peerd will and won't let a helper do, so a user asking "why did it
   // refuse to open that site" deserves a record naming the signal and the moment.
-  onLearn: (origin, reason) => {
-    auditLog.append({ type: 'origin_learned_sensitive', details: { origin, reason } }).catch(() => {});
+  onLearn: (host, reason) => {
+    auditLog.append({ type: 'origin_learned_sensitive', details: { host, reason } }).catch(() => {});
   },
   // The inverse, from Settings. Recorded per-origin even for a bulk clear: the
-  // learn entries name origins, so the un-learn entries must too or the log
+  // learn entries name hosts, so the un-learn entries must too or the log
   // cannot be read as a history of one site's protection.
-  onForget: (origins) => {
-    for (const origin of origins) {
-      auditLog.append({ type: 'origin_unlearned_sensitive', details: { origin } }).catch(() => {});
+  onForget: (hosts) => {
+    for (const host of hosts) {
+      auditLog.append({ type: 'origin_unlearned_sensitive', details: { host } }).catch(() => {});
     }
   },
   onError: (message, error) => console.warn('[learned-origins]', message, error),
@@ -7297,7 +7298,8 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     const siteActorSessionId = (origin && chatId) ? siteActorBindings.resolve(chatId, origin) : null;
     return {
       ok: true,
-      learned: origin ? learnedOrigins.snapshot().has(origin) : false,
+      learned: origin ? [...learnedOrigins.snapshot().keys()]
+        .some((host) => learnedOriginCovers(host, origin)) : false,
       keyed: origin ? keyedOrigins.has(origin) : false,
       ownedTabId: actorSessionId ? (webActorTabBindings.tabFor(actorSessionId) ?? null) : null,
       originState: actorSessionId ? (originStates.read(actorSessionId) ?? null) : null,

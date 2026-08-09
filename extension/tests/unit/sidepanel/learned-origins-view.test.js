@@ -17,8 +17,8 @@ import { describe, it, expect } from '../../framework.js';
 import { LearnedOriginsView } from '/sidepanel/components/learned-origins-view.js';
 
 const ORIGINS = [
-  { origin: 'https://acme.test', reason: 'password-field' },
-  { origin: 'https://globex.test', reason: 'confirmed-write' },
+  { host: 'acme.test', reason: 'password-field' },
+  { host: 'globex.test', reason: 'confirmed-write' },
 ];
 
 /**
@@ -42,19 +42,24 @@ const mount = (reply = () => ({ ok: true, origins: ORIGINS })) => {
 /** Let the mounted component's pending promise + redraw settle. */
 const settle = () => new Promise((r) => setTimeout(r, 0)).then(() => m.redraw.sync?.() ?? m.redraw());
 
+/** Let focus restoration scheduled for the next painted frame complete. */
+const settleFocus = () => settle().then(() => new Promise(requestAnimationFrame));
+
 /** @param {HTMLElement} root @param {string} label */
 const buttons = (root, label) => [...root.querySelectorAll('button')]
   .filter((b) => (b.textContent ?? '').trim() === label);
 
 describe('sidepanel.learned-origins view', () => {
-  it('lists every learned origin with a plain-language reason', async () => {
+  it('lists every learned host with its scope and a plain-language reason', async () => {
     const { root, sent, unmount } = mount();
     try {
       await settle();
       expect(sent[0].type).toBe('learned/list');
       const text = root.textContent ?? '';
-      expect(text.includes('https://acme.test')).toBe(true);
-      expect(text.includes('https://globex.test')).toBe(true);
+      expect(text.includes('acme.test')).toBe(true);
+      expect(text.includes('globex.test')).toBe(true);
+      expect(text.includes('may share your browser session')).toBe(true);
+      expect(text.includes('every port and its subdomains')).toBe(true);
       // The reason is why the site is treated as theirs — the raw enum would
       // leave a user with no way to judge whether the guess was wrong.
       expect(text.includes('a sign-in form was on a page peerd read')).toBe(true);
@@ -77,14 +82,16 @@ describe('sidepanel.learned-origins view', () => {
     try {
       await settle();
       buttons(root, 'Remove')[0].click();
-      await settle();
-      expect((root.textContent ?? '').includes('Stop treating this as yours?')).toBe(true);
+      await settleFocus();
+      expect((root.textContent ?? '').includes('Remove this learned host?')).toBe(true);
+      expect(document.activeElement?.getAttribute('data-learned-role')).toBe('confirm');
+      expect(document.activeElement?.getAttribute('aria-label')).toBe('Confirm removal of learned host acme.test');
       // Still only the initial list call: nothing was un-learned by arming.
       expect(sent.filter((s) => s.type === 'learned/forget').length).toBe(0);
     } finally { unmount(); }
   });
 
-  it('confirming Remove sends learned/forget for THAT row’s origin', async () => {
+  it('confirming Remove sends learned/forget for that row host', async () => {
     const { root, sent, unmount } = mount();
     try {
       await settle();
@@ -94,7 +101,7 @@ describe('sidepanel.learned-origins view', () => {
       await settle();
       const forget = sent.find((s) => s.type === 'learned/forget');
       expect(!!forget).toBe(true);
-      expect(forget.origin).toBe('https://acme.test');
+      expect(forget.host).toBe('acme.test');
       // And it re-reads the list rather than trusting a local edit.
       expect(sent.filter((s) => s.type === 'learned/list').length).toBe(2);
     } finally { unmount(); }
@@ -107,8 +114,10 @@ describe('sidepanel.learned-origins view', () => {
       buttons(root, 'Remove')[0].click();
       await settle();
       buttons(root, 'Keep')[0].click();
-      await settle();
-      expect((root.textContent ?? '').includes('Stop treating this as yours?')).toBe(false);
+      await settleFocus();
+      expect((root.textContent ?? '').includes('Remove this learned host?')).toBe(false);
+      expect(document.activeElement?.getAttribute('data-learned-role')).toBe('trigger');
+      expect(document.activeElement?.getAttribute('aria-label')).toBe('Remove learned host acme.test');
       expect(sent.filter((s) => s.type === 'learned/forget').length).toBe(0);
     } finally { unmount(); }
   });
@@ -118,8 +127,10 @@ describe('sidepanel.learned-origins view', () => {
     try {
       await settle();
       buttons(root, 'Forget all')[0].click();   // arm
-      await settle();
+      await settleFocus();
       expect((root.textContent ?? '').includes('learned sites?')).toBe(true);
+      expect(document.activeElement?.getAttribute('data-learned-role')).toBe('confirm-all');
+      expect(document.activeElement?.getAttribute('aria-label')).toBe('Confirm forgetting all learned hosts');
       expect(sent.filter((s) => s.type === 'learned/clear').length).toBe(0);
       buttons(root, 'Forget all')[0].click();   // confirm
       await settle();
@@ -134,10 +145,11 @@ describe('sidepanel.learned-origins view', () => {
     // message saying it was gone.
     /** @type {string[]} */
     const sentTypes = [];
+    let listCalls = 0;
     const { root, unmount } = mount((msg) => {
       sentTypes.push(msg.type);
       return msg.type === 'learned/list'
-        ? { ok: true, origins: ORIGINS }
+        ? { ok: true, origins: (listCalls++ === 0) ? ORIGINS : ORIGINS.slice(1) }
         : { ok: false, error: 'not-learned' };
     });
     try {
@@ -145,13 +157,14 @@ describe('sidepanel.learned-origins view', () => {
       buttons(root, 'Remove')[0].click();
       await settle();
       buttons(root, 'Remove')[0].click();
-      await settle();
+      await settleFocus();
       const text = root.textContent ?? '';
       expect(text.includes('already removed somewhere else')).toBe(true);
       // It re-read the list (2 list calls: mount + after the stale reply)...
       expect(sentTypes.filter((t) => t === 'learned/list').length).toBe(2);
       // ...and the armed confirm is gone rather than left hanging.
-      expect(text.includes('Stop treating this as yours?')).toBe(false);
+      expect(text.includes('Remove this learned host?')).toBe(false);
+      expect(document.activeElement?.getAttribute('data-learned-host')).toBe('globex.test');
     } finally { unmount(); }
   });
 
@@ -171,11 +184,13 @@ describe('sidepanel.learned-origins view', () => {
       buttons(root, 'Remove')[0].click();
       await settle();
       buttons(root, 'Remove')[0].click();
-      await settle();
+      await settleFocus();
       const text = root.textContent ?? '';
       expect(text.includes('invalid-origin')).toBe(true);
+      expect(root.querySelector('[role="alert"]')?.textContent).toBe('invalid-origin');
+      expect(document.activeElement?.getAttribute('data-learned-role')).toBe('confirm');
       expect(sentTypes.filter((t) => t === 'learned/list').length).toBe(1);
-      expect(text.includes('Stop treating this as yours?')).toBe(true);
+      expect(text.includes('Remove this learned host?')).toBe(true);
     } finally { unmount(); }
   });
 
@@ -188,8 +203,10 @@ describe('sidepanel.learned-origins view', () => {
       buttons(root, 'Forget all')[0].click();
       await settle();
       buttons(root, 'Forget all')[0].click();
-      await settle();
+      await settleFocus();
       expect((root.textContent ?? '').includes('Forgot 2 learned sites.')).toBe(true);
+      expect(root.querySelector('[role="status"]')?.textContent).toBe('Forgot 2 learned sites.');
+      expect(document.activeElement?.getAttribute('data-learned-role')).toBe('heading');
     } finally { unmount(); }
   });
 

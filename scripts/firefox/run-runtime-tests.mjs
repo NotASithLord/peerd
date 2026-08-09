@@ -1142,11 +1142,28 @@ const runNumericTabAuthoritySmoke = async (driver, providerServer) => {
         const lock = await browser.runtime.sendMessage({
           type: 'debug/originLock', origin: fixtureOrigin, seedReason: 'password-field',
         });
+        const alternatePort = await browser.runtime.sendMessage({
+          type: 'debug/originLock', origin: 'https://${DNR_PUBLIC_HOST}:9443',
+        });
+        const descendant = await browser.runtime.sendMessage({
+          type: 'debug/originLock', origin: 'https://child.${DNR_PUBLIC_HOST}',
+        });
+        const sibling = await browser.runtime.sendMessage({
+          type: 'debug/originLock', origin: 'https://other.test',
+        });
         const tab = await browser.tabs.create({ url: fixtureUrl, active: false });
         for (let attempt = 0; attempt < 200; attempt += 1) {
           const live = await browser.tabs.get(tab.id).catch(() => null);
           if (live?.url === fixtureUrl) {
-            return { settingsOk: settings?.ok === true, lock, tabId: tab.id, url: live.url };
+            return {
+              settingsOk: settings?.ok === true,
+              lock,
+              alternatePort,
+              descendant,
+              sibling,
+              tabId: tab.id,
+              url: live.url,
+            };
           }
           await new Promise((resolveWait) => setTimeout(resolveWait, 25));
         }
@@ -1160,6 +1177,12 @@ const runNumericTabAuthoritySmoke = async (driver, providerServer) => {
       && initialized?.url === fixtureUrl,
     'Firefox prepares a live tab whose origin has a learned sensitive signal',
     JSON.stringify(initialized));
+    assert(initialized?.alternatePort?.learned === true,
+      'Firefox applies a learned host across schemes and ports', JSON.stringify(initialized));
+    assert(initialized?.descendant?.learned === true,
+      'Firefox applies a learned parent host to descendants', JSON.stringify(initialized));
+    assert(initialized?.sibling?.learned === false,
+      'Firefox does not spread a learned host to siblings', JSON.stringify(initialized));
 
     providerServer.setScenario({ mode: 'numeric-tab-authority', actorTarget: String(fixtureTabId) });
     const started = await driver.executeAsync(`

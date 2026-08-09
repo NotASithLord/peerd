@@ -170,12 +170,15 @@ export const describeLandingStop = (event) => {
     return [
       `The web helper was stopped when the tab arrived at ${handoffTo}.`,
       ``,
-      `peerd treats ${handoffTo} as a site the user has an identity on, and helpers `
+      `peerd protects ${handoffTo} because it may share the user's browser session, and helpers `
         + `that browse the open web are deliberately not allowed onto those — a helper `
         + `roaming the web holds no authority precisely so that a hostile page cannot `
         + `spend any. So it stopped instead of continuing.`,
       ``,
       unknownWork,
+      ``,
+      `Do not evade this stop by changing the address. Use a different destination only `
+        + `when it comes from the user's request.`,
       ``,
       // The cheap route FIRST, because it is the common case and it spends
       // nothing. Most refused work is reading something public on a site the

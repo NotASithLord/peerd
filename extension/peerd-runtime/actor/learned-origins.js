@@ -41,13 +41,15 @@
 // synchronous), durable storage is injected and write-only-behind. Nothing here
 // imports IO.
 
+import { sensitivityHost } from './origin-sensitivity.js';
+
 /** @typedef {import('./origin-sensitivity.js').SensitivityReason} SensitivityReason */
 
 /** The reasons this store may record. Mirrors LEARNED_REASONS next door. */
 const ALLOWED = new Set(['password-field', 'confirmed-write']);
 
 /**
- * How many origins we are willing to remember.
+ * How many hosts we are willing to remember.
  *
  * why a cap at all: this grows from browsing, so it grows without bound over a
  * long-lived profile, and it lives in memory on a service worker that is
@@ -62,15 +64,17 @@ export const MAX_LEARNED = 500;
  * @param {object} deps
  * @param {() => Promise<Record<string, string> | null | undefined>} deps.load
  * @param {(all: Record<string, string>) => Promise<void>} deps.save
- * @param {(origin: string, reason: SensitivityReason) => void} [deps.onLearn]
- *   fired the first time an origin is learned — the SW turns this into an audit
+ * @param {(host: string, reason: SensitivityReason) => void} [deps.onLearn]
+ *   fired the first time a host is learned. The SW turns this into an audit
  *   entry, so a user can see WHY a site started being treated as theirs.
- * @param {(origins: string[]) => void} [deps.onForget]
- *   fired when the USER un-learns origins. Audited for the same reason as
+ * @param {(hosts: string[]) => void} [deps.onForget]
+ *   fired when the USER un-learns hosts. Audited for the same reason as
  *   onLearn, and louder: this one removes a protection.
  * @param {(message: string, error: unknown) => void} [deps.onError]
  */
 export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) => {
+  // Keys are cookie hosts, not origins. hydrate() accepts the old origin-keyed
+  // shape and compacts it, so the migration needs no separate storage version.
   /** @type {Map<string, SensitivityReason>} */
   const learned = new Map();
   /** @type {Promise<unknown>} */
@@ -80,7 +84,7 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) =
   /** Did a signal land while the boot read was still in flight? */
   let pendingDuringHydrate = false;
   /**
-   * Origins the USER un-learned before the boot read landed.
+   * Hosts the USER un-learned before the boot read landed.
    *
    * why tombstones: `hydrate` MERGES (it must — see there), so without this a
    * forget that raced the boot read would be silently undone by the very next
@@ -122,9 +126,23 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) =
     // `clearedDuringHydrate` / `tombstones`: a user un-learn that raced this read
     // wins over what the read brings back. Anything else would resurrect a row
     // the user just deleted.
+    let needsRewrite = false;
     for (const [origin, reason] of Object.entries(clearedDuringHydrate ? {} : (all ?? {}))) {
-      if (ALLOWED.has(reason) && !learned.has(origin) && !tombstones.has(origin)) {
-        learned.set(origin, /** @type {SensitivityReason} */ (reason));
+      const host = sensitivityHost(origin);
+      if (ALLOWED.has(reason) && host && !learned.has(host) && !tombstones.has(host)
+          && learned.size < MAX_LEARNED) {
+        learned.set(host, /** @type {SensitivityReason} */ (reason));
+        if (origin !== host) needsRewrite = true;
+      } else if (ALLOWED.has(reason) && host && learned.has(host)) {
+        // Old exact-origin storage can contain the same cookie host once per
+        // scheme or port. Keep the first observation and compact it on save.
+        needsRewrite = true;
+      } else if (ALLOWED.has(reason) && host && !tombstones.has(host)
+          && learned.size >= MAX_LEARNED) {
+        // The durable value is not trusted to respect the write-path cap. Keep
+        // live observations, fill only the remaining slots from storage, then
+        // rewrite the oversized record so every later boot stays bounded.
+        needsRewrite = true;
       }
     }
     ready = true;
@@ -133,7 +151,7 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) =
     // If anything was noted DURING the load, its snapshot was written without
     // the restored entries. Re-save once so the durable copy matches the merged
     // set rather than the racing writer's partial view.
-    if (pendingDuringHydrate) {
+    if (pendingDuringHydrate || needsRewrite) {
       pendingDuringHydrate = false;
       const snapshot = Object.fromEntries(learned);
       chain = chain
@@ -164,13 +182,13 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) =
    * Write the current set through, behind the same serialized chain every
    * mutation shares. A snapshot is taken SYNCHRONOUSLY (before the await) so two
    * mutations in the same tick cannot save each other's half-state.
-   * @param {string[]} [removed] origins this write un-learned, for the tombstones
+   * @param {string[]} [removed] hosts this write un-learned, for the tombstones
    *   + the audit hook. Empty for `note`.
    */
   const persist = (removed = []) => {
     if (!ready) {
       pendingDuringHydrate = true;
-      for (const origin of removed) tombstones.add(origin);
+      for (const host of removed) tombstones.add(host);
     }
     const snapshot = Object.fromEntries(learned);
     chain = chain
@@ -187,27 +205,27 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) =
    * it with whatever happened most recently would make the explanation drift
    * away from the decision it explains.
    *
-   * @param {string | null | undefined} origin  MUST be canonical (URL.origin) —
-   *   the caller normalizes, because the classifier looks up by the same
-   *   normalizer and a mismatch here is a silent miss rather than an error.
+   * @param {string | null | undefined} origin  An origin, URL, or bare host.
+   *   Normalized here so every scheme and port spelling shares one record.
    * @param {SensitivityReason} reason
    * @returns {boolean} whether this call learned something new
    */
   const note = (origin, reason) => {
     if (!origin || typeof origin !== 'string') return false;
     if (!ALLOWED.has(reason)) return false;
-    if (learned.has(origin)) return false;
+    const host = sensitivityHost(origin);
+    if (!host || learned.has(host)) return false;
     // At the cap we STOP LEARNING rather than evict. Evicting would silently
     // downgrade an origin this file had already decided was the user's — the one
     // move it must never make. Refusing to learn keeps the failure on the
     // fail-open side the classifier already accounts for, and it is visible in
     // the log rather than invisible in a Map.
     if (learned.size >= MAX_LEARNED) {
-      report(`at the ${MAX_LEARNED}-origin cap — not learning ${origin}`, null);
+      report(`at the ${MAX_LEARNED}-host cap; not learning ${origin}`, null);
       return false;
     }
-    learned.set(origin, reason);
-    try { onLearn?.(origin, reason); } catch { /* best-effort */ }
+    learned.set(host, reason);
+    try { onLearn?.(host, reason); } catch { /* best-effort */ }
     persist();
     return true;
   };
@@ -221,27 +239,29 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) =
   const snapshot = () => learned;
 
   /**
-   * A serializable copy, sorted by origin — what the settings list renders.
+   * A serializable copy, sorted by host, for the settings list.
    * why a copy and not `snapshot()`: this one crosses a message boundary, and
    * handing the live Map to a caller that might hold it would let a UI bug
    * mutate the classifier's own state.
-   * @returns {Array<{ origin: string, reason: SensitivityReason }>}
+   * @returns {Array<{ host: string, reason: SensitivityReason }>}
    */
   const entries = () => [...learned.entries()]
-    .map(([origin, reason]) => ({ origin, reason }))
-    .sort((a, b) => a.origin.localeCompare(b.origin));
+    .map(([host, reason]) => ({ host, reason }))
+    .sort((a, b) => a.host.localeCompare(b.host));
 
   /**
-   * USER-INITIATED un-learn of one origin. See the header for why this exists
+   * USER-INITIATED un-learn of one host. See the header for why this exists
    * when eviction deliberately does not.
-   * @param {string | null | undefined} origin canonical (URL.origin), as `note`
+   * @param {string | null | undefined} origin an origin, URL, or bare host
    * @returns {boolean} whether anything was forgotten
    */
   const forget = (origin) => {
     if (!origin || typeof origin !== 'string') return false;
-    if (!learned.delete(origin)) return false;
-    try { onForget?.([origin]); } catch { /* best-effort */ }
-    persist([origin]);
+    const host = sensitivityHost(origin);
+    if (!host) return false;
+    if (!learned.delete(host)) return false;
+    try { onForget?.([host]); } catch { /* best-effort */ }
+    persist([host]);
     return true;
   };
 
@@ -250,7 +270,7 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) =
    * unreadable in bulk once it is long, and "start over" is the only honest
    * remedy for a profile whose marks the user no longer trusts. Re-learning
    * begins immediately from ordinary use, so this loses no capability.
-   * @returns {number} how many origins were forgotten
+   * @returns {number} how many hosts were forgotten
    */
   const clear = () => {
     // BEFORE the empty check, not after. Pre-hydrate the map can be empty while

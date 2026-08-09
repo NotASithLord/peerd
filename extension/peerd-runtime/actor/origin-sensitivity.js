@@ -75,6 +75,68 @@ const ORDINARY = Object.freeze({ sensitive: false });
 export const LEARNED_REASONS = Object.freeze(['password-field', 'confirmed-write']);
 
 /**
+ * The cookie-facing identity of a learned web origin.
+ *
+ * Cookies do not isolate ports or schemes, so neither can the learned side of
+ * the sensitivity classifier. The actor's OWNED origin remains exact elsewhere;
+ * this host key is only for deciding whether a roaming actor may enter.
+ *
+ * @param {unknown} input
+ * @returns {string | null}
+ */
+export const sensitivityHost = (input) => {
+  const origin = normalizeApiOrigin(input);
+  if (!origin) return null;
+  try { return new URL(origin).hostname; } catch { return null; }
+};
+
+/**
+ * Does a learned origin conservatively cover this landing?
+ *
+ * A mark on a parent host covers its descendants because a Domain cookie may
+ * be sent there. The reverse is deliberately false: seeing a signal on
+ * login.example.test does not prove that its cookie was scoped to example.test,
+ * and promoting that observation would let one hostile sibling mark all others.
+ *
+ * @param {unknown} learnedOrigin
+ * @param {unknown} landingOrigin
+ * @returns {boolean}
+ */
+export const learnedOriginCovers = (learnedOrigin, landingOrigin) => {
+  const learnedHost = sensitivityHost(learnedOrigin);
+  const landingHost = sensitivityHost(landingOrigin);
+  if (!learnedHost || !landingHost) return false;
+  return landingHost === learnedHost || landingHost.endsWith(`.${learnedHost}`);
+};
+
+/**
+ * Find the closest learned host that covers a landing. Closest wins so a
+ * directly observed child keeps its own explanation when its parent was also
+ * learned. The set is bounded by MAX_LEARNED, so a linear scan stays small and
+ * avoids adding a second policy index that could drift from durable state.
+ *
+ * @param {string} origin
+ * @param {ReadonlySet<string> | ReadonlyMap<string, SensitivityReason>} learned
+ * @returns {SensitivityReason | null}
+ */
+const learnedReasonFor = (origin, learned) => {
+  /** @type {SensitivityReason | null} */
+  let match = null;
+  let matchLength = -1;
+  for (const entry of learned.entries()) {
+    const learnedOrigin = entry[0];
+    if (!learnedOriginCovers(learnedOrigin, origin)) continue;
+    const host = sensitivityHost(learnedOrigin);
+    if (!host || host.length <= matchLength) continue;
+    matchLength = host.length;
+    match = learned instanceof Map
+      ? /** @type {SensitivityReason} */ (entry[1])
+      : 'password-field';
+  }
+  return match;
+};
+
+/**
  * Classify an origin.
  *
  * Order is deliberate: the SEEDS are checked before the learned set,
@@ -92,8 +154,10 @@ export const LEARNED_REASONS = Object.freeze(['password-field', 'confirmed-write
  * @param {(origin: string) => boolean} [deps.hasVaultSecret]  is there an `origin:` secret for it
  * @param {(origin: string) => boolean} [deps.isKnownIdp]  is it a dedicated sign-in origin
  * @param {ReadonlySet<string> | ReadonlyMap<string, SensitivityReason>} [deps.learned]
- *   the learned set, keyed by normalized origin. A Map carries WHICH signal
- *   fired; a Set is accepted so callers with no provenance still work.
+ *   the learned set, keyed by normalized observed origin. Matching follows the
+ *   cookie host scope: scheme and port do not isolate it, and a learned parent
+ *   covers descendant hosts. A Map carries WHICH signal fired; a Set is
+ *   accepted so callers with no provenance still work.
  * @returns {SensitivityVerdict}
  */
 export const classifyOriginSensitivity = (input, deps = {}) => {
@@ -128,14 +192,8 @@ export const classifyOriginSensitivity = (input, deps = {}) => {
 
   // LEARNED — grown from ordinary use.
   if (learned) {
-    if (learned instanceof Map) {
-      const reason = learned.get(origin);
-      if (reason) return { sensitive: true, reason, origin };
-    } else if (learned.has(origin)) {
-      // Provenance wasn't retained; report the weaker of the two rather than
-      // claiming a signal we can't substantiate.
-      return { sensitive: true, reason: 'password-field', origin };
-    }
+    const reason = learnedReasonFor(origin, learned);
+    if (reason) return { sensitive: true, reason, origin };
   }
 
   return ORDINARY;

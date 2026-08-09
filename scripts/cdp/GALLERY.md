@@ -1,6 +1,6 @@
 # peerd — visual gallery
 
-**26 states · 52 screens · baselines `linux-x64`**
+**27 states · 54 screens · baselines `linux-x64`**
 
 Every screen below is the live UI rendered through the E2E harness at a pinned
 Chrome build and viewport — the exact images the visual-regression gate compares
@@ -189,7 +189,15 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-dweb-stop-failed.light.png" alt="options-dweb-stop-failed (light)" width="380"> | <img src="baselines/linux-x64/options-dweb-stop-failed.dark.png" alt="options-dweb-stop-failed (dark)" width="380"> |
 
-### 23 · options-transfer
+### 23 · options-learned-sites
+
+`options-learned-sites`
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/options-learned-sites.light.png" alt="options-learned-sites (light)" width="380"> | <img src="baselines/linux-x64/options-learned-sites.dark.png" alt="options-learned-sites (dark)" width="380"> |
+
+### 24 · options-transfer
 
 `options-transfer`
 
@@ -197,7 +205,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-transfer.light.png" alt="options-transfer (light)" width="380"> | <img src="baselines/linux-x64/options-transfer.dark.png" alt="options-transfer (dark)" width="380"> |
 
-### 24 · options-transfer-conflict
+### 25 · options-transfer-conflict
 
 `options-transfer-conflict`
 
@@ -205,7 +213,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-transfer-conflict.light.png" alt="options-transfer-conflict (light)" width="380"> | <img src="baselines/linux-x64/options-transfer-conflict.dark.png" alt="options-transfer-conflict (dark)" width="380"> |
 
-### 25 · site-client-confirm
+### 26 · site-client-confirm
 
 `site-client-confirm`
 
@@ -213,7 +221,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/site-client-confirm.light.png" alt="site-client-confirm (light)" width="380"> | <img src="baselines/linux-x64/site-client-confirm.dark.png" alt="site-client-confirm (dark)" width="380"> |
 
-### 26 · vm-tab-failed
+### 27 · vm-tab-failed
 
 `vm-tab-failed`
 

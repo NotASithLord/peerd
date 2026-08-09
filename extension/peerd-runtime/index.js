@@ -200,7 +200,12 @@ export {
 // actor above). Two pure cores: which origins the user has an identity on, and
 // what happens when a tab LANDS somewhere. Exported here because the enforcement
 // points that will consume them live outside this module (background/).
-export { classifyOriginSensitivity, sameOrigin, LEARNED_REASONS } from './actor/origin-sensitivity.js';
+export {
+  classifyOriginSensitivity,
+  learnedOriginCovers,
+  sameOrigin,
+  LEARNED_REASONS,
+} from './actor/origin-sensitivity.js';
 export {
   decideNumericTabAuthority, numericTabAuthorityRefusal,
   NUMERIC_TAB_SENSITIVE_CODE, NUMERIC_TAB_POLICY_UNAVAILABLE_CODE,

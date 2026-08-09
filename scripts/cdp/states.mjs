@@ -1539,6 +1539,21 @@ export const STATES = [
         });
         rec.check('the browser probe seeded the production learned-origin policy',
           seeded?.learned === true, JSON.stringify(seeded));
+        const alternatePort = await rpc(ctx.page, {
+          type: 'debug/originLock', origin: 'https://acct.peerd.test:9443',
+        });
+        const descendant = await rpc(ctx.page, {
+          type: 'debug/originLock', origin: 'https://child.acct.peerd.test',
+        });
+        const sibling = await rpc(ctx.page, {
+          type: 'debug/originLock', origin: 'https://other.peerd.test',
+        });
+        rec.check('Chrome applies a learned host across schemes and ports',
+          alternatePort?.learned === true, JSON.stringify(alternatePort));
+        rec.check('Chrome applies a learned parent host to descendants',
+          descendant?.learned === true, JSON.stringify(descendant));
+        rec.check('Chrome does not spread a learned host to siblings',
+          sibling?.learned === false, JSON.stringify(sibling));
         const loginTabId = await evalIn(ctx.page, `(async () => {
           const browser = (await import('/vendor/browser-polyfill.js')).default;
           const tab = await browser.tabs.create({ active: false, url: ${JSON.stringify(`${accountOrigin}/login`)} });
@@ -2841,6 +2856,56 @@ export const STATES = [
           { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
         await rec.visualPage('options-denylist', page);
       } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'options-learned-sites', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      let priorEntries = null;
+      let page;
+      try {
+        const prior = await rpc(ctx.page, { type: 'learned/list' });
+        if (!prior?.ok || !Array.isArray(prior.origins)) {
+          throw new Error(`could not snapshot learned hosts: ${prior?.error ?? 'unknown error'}`);
+        }
+        priorEntries = prior.origins;
+        await rpc(ctx.page, { type: 'learned/clear' });
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } });
+        await rpc(ctx.page, {
+          type: 'debug/originLock',
+          origin: 'https://accounts.acme.test:8443',
+          seedReason: 'password-field',
+        });
+        await rpc(ctx.page, {
+          type: 'debug/originLock',
+          origin: 'http://portal.globex.test:9080',
+          seedReason: 'confirmed-write',
+        });
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } });
+
+        page = await openWidePage(ctx, 'options/options.html#!/learned-sites');
+        await waitFor(() => evalIn(page, `(() => {
+          const text = document.body.innerText;
+          return text.includes('accounts.acme.test')
+            && text.includes('portal.globex.test')
+            && text.includes('every port and its subdomains');
+        })()`), { budgetMs: 15_000, pollMs: 80 });
+        await rec.visualPage('options-learned-sites', page);
+      } finally {
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
+        if (priorEntries) {
+          await rpc(ctx.page, { type: 'learned/clear' }).catch(() => {});
+          await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } }).catch(() => {});
+          for (const { host, reason } of priorEntries) {
+            await rpc(ctx.page, {
+              type: 'debug/originLock', origin: `https://${host}`, seedReason: reason,
+            }).catch(() => {});
+          }
+          await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
+        }
+        try { page?.close(); } catch { /* */ }
+      }
     },
   },
   {

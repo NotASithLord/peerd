@@ -48,8 +48,8 @@ const EVENT_META = {
   // slug with no origin attached. `origin_unlearned_sensitive` is written by the
   // Settings un-learn (#262); labelling it here is harmless before that lands,
   // since unknown types already fall back to a raw-label row.
-  origin_learned_sensitive:   { label: 'site treated as yours',  level: 'info' },
-  origin_unlearned_sensitive: { label: 'site no longer yours',   level: 'warn' },
+  origin_learned_sensitive:   { label: 'host may share browser session', level: 'info' },
+  origin_unlearned_sensitive: { label: 'learned host removed', level: 'warn' },
   actor_origin_stop:          { label: 'web helper stopped',     level: 'warn' },
   browser_child_navigation_blocked:
                               { label: 'protected child navigation blocked', level: 'warn' },
@@ -132,8 +132,9 @@ const detailLine = (entry) => {
   // way denylist events show their pattern.
   if (d.id) bits.push(d.id);
   if (d.gate) bits.push(`gate=${d.gate}`);
-  // The origin leads: on an origin-lock row it IS the content ("site treated as
-  // yours" says nothing without it), and elsewhere it reads as the subject.
+  // A learned host is the content of its row. `origin` remains for older audit
+  // entries and for exact-origin events such as actor stops.
+  if (d.host) bits.push(d.host);
   if (d.origin) bits.push(d.origin);
   if (d.reason) bits.push(d.reason);
   if (d.provider) bits.push(d.provider);

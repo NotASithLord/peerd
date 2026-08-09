@@ -1,5 +1,5 @@
 // @ts-check
-// Settings → Learned sites — the origins peerd LEARNED the user has an account
+// Settings → Learned sites: the hosts peerd LEARNED may carry the user's session
 // on, and the only place one can be un-learned.
 //
 // why its own nav entry, next to the denylist rather than inside it: the two are
@@ -9,7 +9,7 @@
 // control the user cannot find is the exact problem this view exists to fix.
 //
 // The distinction the copy has to carry: un-learning does NOT make a site
-// unprotected in general. A learned origin is a guess; the curated shared-doc
+// unprotected in general. A learned host is a guess; the curated shared-doc
 // list and a stored credential are not, and those two keep protecting a site
 // whatever this list says. Otherwise a user would "clear" a row and reasonably
 // expect roaming access to a site that still refuses one.
@@ -28,7 +28,7 @@ const REASON_COPY = {
 
 /**
  * @typedef {Object} LearnedState
- * @property {Array<{ origin: string, reason: string }>|null} origins  null = loading
+ * @property {Array<{ host: string, reason: string }>|null} origins  null = loading
  * @property {{ ok: boolean, text: string }|null} note
  * @property {string|null} confirm    origin with an armed forget confirm
  * @property {boolean} confirmAll     the clear-everything confirm is armed
@@ -37,6 +37,17 @@ const REASON_COPY = {
 
 /** @typedef {(msg: object) => Promise<any>} Send */
 /** @typedef {{ state: LearnedState, attrs: { send: Send } }} LearnedVnode */
+
+/** Restore keyboard focus after Mithril has replaced an inline control. */
+const focusAfterRender = (/** @type {'heading'|'trigger'|'confirm'|'trigger-all'|'confirm-all'} */ role, /** @type {string|null} */ host = null) => {
+  requestAnimationFrame(() => {
+    const controls = [...document.querySelectorAll(`.learned-sites [data-learned-role="${role}"]`)];
+    const target = host
+      ? controls.find((element) => /** @type {HTMLElement} */ (element).dataset.learnedHost === host)
+      : controls[0];
+    /** @type {HTMLElement | undefined} */ (target)?.focus();
+  });
+};
 
 export const LearnedOriginsView = {
   /** @param {LearnedVnode} vnode */
@@ -51,7 +62,7 @@ export const LearnedOriginsView = {
 
   /** @param {LearnedVnode} vnode */
   refresh(vnode) {
-    vnode.attrs.send({ type: 'learned/list' }).then((r) => {
+    return vnode.attrs.send({ type: 'learned/list' }).then((r) => {
       vnode.state.origins = r?.ok ? (r.origins ?? []) : (vnode.state.origins ?? []);
       if (!r?.ok) vnode.state.note = { ok: false, text: r?.error ?? 'failed to load learned sites' };
       m.redraw();
@@ -65,7 +76,7 @@ export const LearnedOriginsView = {
   /**
    * One mutation round-trip: send, banner the outcome, re-fetch.
    * @param {LearnedVnode} vnode
-   * @param {object} msg
+   * @param {{ type: string, host?: string }} msg
    * @param {string | ((reply: any) => string)} okText  a function when the copy
    *   depends on the reply (Forget all reports how many it actually forgot).
    */
@@ -73,7 +84,7 @@ export const LearnedOriginsView = {
     const ui = vnode.state;
     if (ui.busy) return Promise.resolve(null);
     ui.busy = true; ui.note = null; m.redraw();
-    return vnode.attrs.send(msg).then((r) => {
+    return vnode.attrs.send(msg).then(async (r) => {
       ui.busy = false;
       // `not-learned` means THIS VIEW IS STALE — another tab, or the panel, already
       // removed the row. So it re-fetches like the success path does: an earlier
@@ -86,13 +97,21 @@ export const LearnedOriginsView = {
         : { ok: false, text: stale
           ? 'That site was already removed somewhere else — refreshed the list.'
           : r?.error ?? 'Action failed.' };
-      if (r?.ok || stale) { ui.confirm = null; ui.confirmAll = false; LearnedOriginsView.refresh(vnode); }
+      if (r?.ok || stale) {
+        ui.confirm = null;
+        ui.confirmAll = false;
+        await LearnedOriginsView.refresh(vnode);
+      }
       m.redraw();
+      if (r?.ok) focusAfterRender('heading');
+      else if (stale) focusAfterRender(ui.origins?.length ? 'trigger' : 'heading');
+      else focusAfterRender(msg.type === 'learned/clear' ? 'confirm-all' : 'confirm', /** @type {any} */ (msg).host ?? null);
       return r;
     }).catch((e) => {
       ui.busy = false;
       ui.note = { ok: false, text: /** @type {{ message?: string }} */ (e)?.message ?? 'Action failed.' };
       m.redraw();
+      focusAfterRender(msg.type === 'learned/clear' ? 'confirm-all' : 'confirm', /** @type {any} */ (msg).host ?? null);
       return null;
     });
   },
@@ -102,21 +121,25 @@ export const LearnedOriginsView = {
     const vnode = { state: ui, attrs };
     const rows = ui.origins;
 
-    return m('div', [
-      m('h3', 'Sites peerd thinks you have an account on'),
-      m('p', 'peerd learns these from ordinary use, and a helper that browses the '
-        + 'open web is not allowed onto them - it hands the work to a helper bound to '
-        + 'that one site instead. Remove a site here if the guess was wrong.'),
-      m('p.hint', 'Removing a site does not make it unprotected: a site on peerd’s '
+    return m('div.learned-sites', [
+      m('h3', { tabindex: -1, 'data-learned-role': 'heading' }, 'Hosts that may share your browser session'),
+      m('p', 'peerd learns these from ordinary use. A helper that browses the open web '
+        + 'is not allowed onto them. It hands the work to a helper bound to the exact '
+        + 'site instead. Remove a host here if the guess was wrong.'),
+      m('p.hint', 'Each entry covers this host on every port and its subdomains.'),
+      m('p.hint', 'Removing a host does not make it unprotected: a site on peerd’s '
         + 'built-in shared-document list, or one you have stored a key for, stays '
-        + 'protected either way. peerd can also learn the same site again next time '
+        + 'protected either way. peerd can also learn the same host again next time '
         + 'it reads a sign-in form there.'),
 
       // `p.key-msg.ok` / `.err` — the same banner DenylistView and HooksView use.
       // (A bare `.ok` has no rule in either stylesheet this page links, so the
       // success case rendered as ordinary body text, indistinguishable from the
       // explanatory copy above it.)
-      ui.note ? m(`p.key-msg${ui.note.ok ? '.ok' : '.err'}`, ui.note.text) : null,
+      ui.note ? m(`p.key-msg${ui.note.ok ? '.ok' : '.err'}`, {
+        role: ui.note.ok ? 'status' : 'alert',
+        'aria-live': ui.note.ok ? 'polite' : 'assertive',
+      }, ui.note.text) : null,
 
       rows === null
         ? m('p.muted', 'Loading…')
@@ -130,36 +153,49 @@ export const LearnedOriginsView = {
             // why no keys on the rows: keyed and unkeyed siblings cannot be
             // mixed — Mithril throws on the mix, and during development that
             // threw mid-redraw and stranded the whole block on "Loading…" while
-            // the SW already held two learned origins. The list is re-fetched
+            // the SW already held two learned hosts. The list is re-fetched
             // wholesale after every mutation, so keys would buy nothing here.
-            m('div', rows.map(({ origin, reason }) => m('div', {
+            m('div', rows.map(({ host, reason }) => m('div', {
               style: 'display:flex; align-items:center; gap:8px; padding:6px 0; flex-wrap:wrap;',
             }, [
               m('span', { style: 'flex:1; min-width:220px;' }, [
-                m('code', origin),
+                m('code', host),
                 m('span.hint', { style: 'display:block;' },
                   REASON_COPY[/** @type {keyof REASON_COPY} */ (reason)] ?? reason),
               ]),
-              ui.confirm === origin
+              ui.confirm === host
                 ? m('span', { style: 'display:flex; gap:6px; align-items:center;' }, [
-                  m('span.hint', 'Stop treating this as yours?'),
+                  m('span.hint', 'Remove this learned host?'),
                   m('button.secondary', {
                     type: 'button',
                     disabled: ui.busy,
+                    'data-learned-role': 'confirm',
+                    'data-learned-host': host,
+                    'aria-label': `Confirm removal of learned host ${host}`,
                     onclick: () => LearnedOriginsView.act(
-                      vnode, { type: 'learned/forget', origin }, `Removed ${origin}.`,
+                      vnode, { type: 'learned/forget', host }, `Removed ${host}.`,
                     ),
                   }, ui.busy ? '…' : 'Remove'),
                   m('button.secondary', {
                     type: 'button',
                     disabled: ui.busy,
-                    onclick: () => { ui.confirm = null; m.redraw(); },
+                    'aria-label': `Keep learned host ${host}`,
+                    onclick: () => {
+                      ui.confirm = null; m.redraw();
+                      focusAfterRender('trigger', host);
+                    },
                   }, 'Keep'),
                 ])
                 : m('button.secondary', {
                   type: 'button',
                   disabled: ui.busy,
-                  onclick: () => { ui.confirm = origin; ui.note = null; m.redraw(); },
+                  'data-learned-role': 'trigger',
+                  'data-learned-host': host,
+                  'aria-label': `Remove learned host ${host}`,
+                  onclick: () => {
+                    ui.confirm = host; ui.note = null; m.redraw();
+                    focusAfterRender('confirm', host);
+                  },
                 }, 'Remove'),
             ]))),
             m('div', { style: 'margin-top:12px;' }, [
@@ -169,6 +205,8 @@ export const LearnedOriginsView = {
                   m('button.secondary', {
                     type: 'button',
                     disabled: ui.busy,
+                    'data-learned-role': 'confirm-all',
+                    'aria-label': 'Confirm forgetting all learned hosts',
                     onclick: () => LearnedOriginsView.act(
                       vnode, { type: 'learned/clear' },
                       // Report what it actually forgot: "cleared" alone cannot be
@@ -179,13 +217,20 @@ export const LearnedOriginsView = {
                   m('button.secondary', {
                     type: 'button',
                     disabled: ui.busy,
-                    onclick: () => { ui.confirmAll = false; m.redraw(); },
+                    onclick: () => {
+                      ui.confirmAll = false; m.redraw();
+                      focusAfterRender('trigger-all');
+                    },
                   }, 'Cancel'),
                 ])
                 : m('button.secondary', {
                   type: 'button',
                   disabled: ui.busy,
-                  onclick: () => { ui.confirmAll = true; ui.note = null; m.redraw(); },
+                  'data-learned-role': 'trigger-all',
+                  onclick: () => {
+                    ui.confirmAll = true; ui.note = null; m.redraw();
+                    focusAfterRender('confirm-all');
+                  },
                 }, 'Forget all'),
             ]),
           ]),

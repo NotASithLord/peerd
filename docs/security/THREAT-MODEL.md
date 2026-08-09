@@ -941,7 +941,14 @@ evaluating peerd should know. Each cites where it lives in the code.
   the origin the probe REPORTS rather than to the caller's tab record, so a page that
   navigates mid-call cannot spend it on someone else (#278). Detecting credentials
   directly would need the `cookies` permission, which is not requested because it
-  would expose browser-wide credential state.
+  would expose browser-wide credential state. Learned signals are keyed by hostname,
+  not origin: scheme and port changes cannot route around a learned mark, and a mark
+  on a parent host also covers its descendants (#264). A mark learned on a child host
+  does not spread to its parent or siblings. Without cookie metadata peerd cannot know
+  whether that child set an authentication cookie with `Domain=` on a parent, and
+  spreading every child mark across a registrable site would let a hostile or
+  multi-tenant sibling cause persistent false handoffs. Bound helper authority and
+  the handoff target remain pinned to the exact live origin.
 - R16. The identity-provider list is the one place a bound actor may leave its origin,
   and it is deliberately short — a host qualifies only if signing in is essentially all
   it does. github.com, gitlab.com and facebook.com are excluded despite speaking OAuth,
