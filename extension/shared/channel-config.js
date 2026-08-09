@@ -48,6 +48,7 @@ export const CHANNEL_DEFAULTS = Object.freeze({
   providerFallbacks: [],
   vaultAutoLockMs: 2700000,
   auditLogMaxEntries: 20000,
+  autoUpdateEnabled: true,
   dwebEnabled: true,
   dwebAgentEnabled: false,
 });
