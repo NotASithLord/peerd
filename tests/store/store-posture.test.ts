@@ -150,10 +150,10 @@ describe('store feature flags', () => {
       .toContain('export const REMOTE_MODULE_IMPORTS_ENABLED = true');
   });
 
-  test('Firefox preview disables unavailable browser facilities', () => {
+  test('Firefox preview disables unavailable dweb facilities and keeps remote modules', () => {
     const source = genChannelConfigSource('preview', 'firefox');
     expect(source).toContain('export const DWEB_ENABLED = false');
-    expect(source).toContain('export const REMOTE_MODULE_IMPORTS_ENABLED = false');
+    expect(source).toContain('export const REMOTE_MODULE_IMPORTS_ENABLED = true');
     expect(source).not.toContain('dwebEnabled:');
     expect(source).not.toContain('dwebAgentEnabled:');
     expect(genChannelConfigSource('preview', 'chrome'))

@@ -162,6 +162,53 @@ describe('sw/web-fetch', () => {
     expect(await pending).toEqual({ ok: false, error: 'aborted' });
     expect(seenSignal?.aborted).toBe(true);
   });
+
+  test('a Notebook can cancel only its own token-bound module fetch', async () => {
+    let seenSignal: AbortSignal | undefined;
+    const notebookUrl = 'moz-extension://test/engine-tabs/notebook-tab/index.html#n1';
+    const routes = makeEngineRoutes(baseDeps({
+      browser: {
+        runtime: {
+          getURL: (path: string) => `moz-extension://test/${path}`,
+          getContexts: async () => [], sendMessage: async () => ({ ok: true }),
+        },
+        storage: { local: { get: async () => ({}), set: async () => {} } },
+      },
+      vmHttpFetch: async ({ signal }: any) => {
+        seenSignal = signal;
+        return await new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        });
+      },
+    }));
+    const sender = { tab: { id: 41, url: notebookUrl }, url: notebookUrl };
+    const pending = (routes['sw/web-fetch'] as any)({
+      url: 'https://modules.example/a.js', noCache: true,
+      abortToken: 'token-1', notebookId: 'n1',
+    }, sender);
+    await Promise.resolve();
+    expect(await (routes['sw/web-fetch-abort'] as any)(
+      { abortToken: 'token-1', notebookId: 'n2' }, {
+        tab: { id: 99, url: 'moz-extension://test/engine-tabs/notebook-tab/index.html#n2' },
+        url: 'moz-extension://test/engine-tabs/notebook-tab/index.html#n2',
+      },
+    )).toEqual({ ok: true, aborted: false });
+    expect(await (routes['sw/web-fetch-abort'] as any)(
+      { abortToken: 'token-1', notebookId: 'n1' }, sender,
+    )).toEqual({ ok: true, aborted: true });
+    expect(await pending).toEqual({ ok: false, error: 'aborted' });
+    expect(seenSignal?.aborted).toBe(true);
+
+    const deadlinePending = (routes['sw/web-fetch'] as any)({
+      url: 'https://modules.example/slow.js', noCache: true,
+      abortToken: 'token-2', notebookId: 'n1', deadlineAt: Date.now() + 10,
+    }, sender);
+    expect(await deadlinePending).toEqual({ ok: false, error: 'aborted' });
+    expect(seenSignal?.aborted).toBe(true);
+    expect(await (routes['sw/web-fetch-abort'] as any)(
+      { abortToken: 'token-2', notebookId: 'n1' }, sender,
+    )).toEqual({ ok: true, aborted: false });
+  });
 });
 
 describe('app/vm meta + apps Library', () => {

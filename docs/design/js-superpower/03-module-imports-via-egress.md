@@ -2,14 +2,14 @@
 
 Remote module imports are a package policy, not a worker capability.
 `REMOTE_MODULE_IMPORTS_ENABLED` is generated with the channel configuration.
-Supported Preview targets enable it. Store, web, and Firefox packages disable it.
+Chrome and Firefox Preview packages enable it. Store and web packages disable it.
 
 ## Supported imports
 
 Notebook and Script entry code can use literal static imports and re-exports.
 Relative files, `peerd:std`, `peerd:wasi`, and `peerd:toolbox/<name>` resolve
-through the host where the browser loader supports them. Chrome Preview also
-accepts literal static HTTP and HTTPS imports.
+through the host. Chrome and Firefox Preview also accept literal static HTTP
+and HTTPS imports.
 
 Dynamic imports, `peerd.self.import`, computed specifiers, import attributes,
 other URL schemes, and extension-absolute paths are refused with a stable
@@ -52,10 +52,12 @@ provider, browser, site, and dweb clients. Host relays refuse forged requests.
 A remote module cannot import a local toolbox module. Returned values, logs,
 and errors cross the untrusted-content fence before reaching the model.
 
-Firefox refuses remote imports before fetching because its worker loader cannot
-run the generated child module URLs. Native Firefox loading for local and
-remote static graphs is tracked separately. The broader policy for executing
-code fetched as ordinary data is also tracked separately.
+Firefox uses the same resolver and policy, then links the authorized graph into
+one strict worker script. A disposable packaged compiler Worker performs the
+link and is terminated on Stop or deadline. The code Worker runs inside a
+sandboxed, opaque-origin host with no extension APIs, no string compilation,
+and `connect-src 'none'`. Store still refuses remote imports before fetching.
+Preview enables them under the same compute-only profile as Chrome.
 
 ## Authoritative sources
 
@@ -64,6 +66,8 @@ code fetched as ordinary data is also tracked separately.
   syntax.
 - `extension/peerd-engine/module-resolver.js` enforces policy and builds static
   module graphs.
+- `extension/peerd-engine/single-module-linker.js` emits the Firefox worker
+  entry without child module loads.
 - `extension/engine-tabs/notebook-tab/notebook-tab.js` and
   `extension/offscreen/job-runner.js` wire the browser hosts.
 - `packaging/verify-store-artifact.ts`, the packaged page check, and the

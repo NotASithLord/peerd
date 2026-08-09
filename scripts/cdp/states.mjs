@@ -3142,6 +3142,104 @@ export const STATES = [
     },
   },
   {
+    name: 'notebook-stop-control', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const notebookId = 'e2e-stop-control';
+      const page = await openWidePage(
+        ctx, `engine-tabs/notebook-tab/index.html#${notebookId}`,
+        { ready: '#notebook-app:not([hidden])' },
+      );
+      try {
+        const dispatched = await evalIn(ctx.page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          const tabs = await browser.tabs.query({});
+          const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
+          if (!tab?.id) return false;
+          globalThis.__peerdE2eNotebookEvaluation = browser.tabs.sendMessage(tab.id, {
+            type: 'js/eval', notebookId: ${JSON.stringify(notebookId)},
+            runId: 'e2e-stop-control-run', code: 'while (true) {}', timeoutMs: 20_000,
+          });
+          return true;
+        })()`, true);
+        rec.check('the infinite Notebook run is dispatched', dispatched === true);
+        const started = await evalIn(page, `(async () => {
+          for (let attempt = 0; attempt < 100; attempt += 1) {
+            const button = document.getElementById('run-btn');
+            if (button?.getAttribute('aria-label') === 'Stop notebook run') {
+              button.focus();
+              return {
+                label: button.getAttribute('aria-label'),
+                text: button.textContent,
+                focused: document.activeElement === button,
+              };
+            }
+            await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+          }
+          return null;
+        })()`, true);
+        rec.check('the Notebook exposes one focused Stop control while code runs',
+          started?.label === 'Stop notebook run'
+            && /Stop notebook run/.test(started?.text ?? '')
+            && started?.focused === true,
+          JSON.stringify(started));
+        await rec.shotPage('notebook-stop-control', page);
+
+        await evalIn(page, `document.getElementById('run-btn')?.click()`);
+        const stopped = await evalIn(ctx.page,
+          'globalThis.__peerdE2eNotebookEvaluation', true);
+        const outcome = await evalIn(page, `(async () => {
+          for (let attempt = 0; attempt < 100; attempt += 1) {
+            const button = document.getElementById('run-btn');
+            if (button?.getAttribute('aria-label') === 'Run notebook.js') {
+              return {
+                idleLabel: button.getAttribute('aria-label'),
+                focused: document.activeElement === button,
+                status: document.getElementById('run-status')?.textContent ?? '',
+              };
+            }
+            await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+          }
+          return {};
+        })()`, true);
+        rec.check('Stop terminates the exact run and restores the focused Run control',
+          stopped?.result?.stopped === true
+            && outcome?.idleLabel === 'Run notebook.js'
+            && outcome?.focused === true
+            && outcome?.status === 'Notebook run stopped.',
+          JSON.stringify({ stopped, outcome }));
+
+        const importedFailure = await evalIn(ctx.page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          const tabs = await browser.tabs.query({});
+          const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
+          if (!tab?.id) return null;
+          await browser.tabs.sendMessage(tab.id, {
+            type: 'js/write-file', path: 'lib/failure.js',
+            content: 'throw new Error("imported failure canary");',
+          });
+          return browser.tabs.sendMessage(tab.id, {
+            type: 'js/eval', notebookId: ${JSON.stringify(notebookId)},
+            runId: 'e2e-imported-failure',
+            code: 'import "./lib/failure.js"; return true;', timeoutMs: 10_000,
+          });
+        })()`, true);
+        const failureView = await evalIn(page, `({
+          status: document.getElementById('run-status')?.textContent ?? '',
+          output: document.getElementById('console-output')?.textContent ?? '',
+        })`, true);
+        rec.check('Chrome maps an imported-module failure to its source without a generated URL',
+          importedFailure?.result?.error?.includes('./lib/failure.js:1')
+            && !/blob:|data:/.test(importedFailure?.result?.error ?? '')
+            && failureView?.status === 'Notebook run failed.'
+            && failureView?.output?.includes('./lib/failure.js:1')
+            && !/blob:|data:/.test(failureView?.output ?? ''),
+          JSON.stringify({ importedFailure, failureView }));
+        await rec.shotPage('notebook-imported-failure', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
     name: 'notebook-tab-failed', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {

@@ -18,8 +18,9 @@
 // Remote (https:) specifiers do NOT ride the worker's native loader: their
 // source is fetched HOST-SIDE via the injected `fetchRemote` (the host's
 // audited sw/web-fetch relay — denylist + SSRF + audit), recursively
-// transformed with the module's own URL as the base, and re-blobbed exactly
-// like a local file — so no third-party byte ever bypasses peerd-egress.
+// transformed with the module's own URL as the base. Chrome receives generated
+// module URLs. Firefox's host linker consumes the same resolved cache and emits
+// one script, so no third-party byte ever bypasses peerd-egress.
 // Bare specifiers (`lodash`) still pass through untouched and fail in the
 // worker's loader: a script wanting a library names a full URL and owns
 // that choice, or the dependency gets vendored.

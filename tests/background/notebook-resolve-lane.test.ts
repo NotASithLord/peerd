@@ -40,3 +40,11 @@ describe('notebook-client — re-inflates the OPFS not-found signal (edit_file 3
     expect(src).toMatch(/err\.name = 'NotFoundError'/);
   });
 });
+
+describe('notebook-client: Stop reaches the exact Notebook run', () => {
+  test('eval mints a run id and relays abort through js/abort', () => {
+    expect(src).toMatch(/const runId = crypto\.randomUUID\(\)/);
+    expect(src).toMatch(/type: 'js\/abort', notebookId, runId: message\.runId/);
+    expect(src).toMatch(/opts\.signal/);
+  });
+});

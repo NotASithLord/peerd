@@ -43,6 +43,7 @@ export {
   // resolver recognizes; hosts use it to spot toolbox entries in a module cache.
   TOOLBOX_SPECIFIER_PREFIX,
 } from './module-resolver.js';
+export { linkSingleModuleWorker, linkSingleModuleWorkerDetailed } from './single-module-linker.js';
 
 // --- Editor (CodeMirror + file tree + OPFS, used by Notebook & App tabs) ---
 export { createEditor } from './editor.js';
@@ -73,6 +74,7 @@ export {
   UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE,
   UNSUPPORTED_NATIVE_MODULE_IMPORT_MESSAGE,
   MODULE_SYNTAX_ERROR_CODE,
+  MODULE_LINK_ERROR_CODE,
   REMOTE_MODULE_CAPABILITY_BLOCKED_CODE,
   REMOTE_MODULE_RESTRICTED_CODE,
   REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE,
@@ -82,6 +84,7 @@ export {
   RemoteModuleImportsUnavailableError,
   UnsupportedNativeModuleImportError,
   ModuleSyntaxError,
+  ModuleLinkError,
   RemoteImportBlockedError,
   RemoteModuleCapError,
   RemoteModuleIntegrityError,

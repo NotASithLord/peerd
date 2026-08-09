@@ -56,6 +56,49 @@ describe('remote module package policy reaches the model as a tool failure', () 
     if (!result.ok) expect(result.error).toBe(policyError);
   });
 
+  test('Notebook Stop is structured and does not look like a code error to retry', async () => {
+    const controller = new AbortController();
+    const result = await jsNotebookTool.execute({ code: 'while (true) {}' }, {
+      session: { sessionId: 'session-1', kind: 'chat' },
+      abortSignal: controller.signal,
+      jsClient: {
+        eval: async (_code: string, options: { signal?: AbortSignal }) => {
+          expect(options.signal).toBe(controller.signal);
+          return { durationMs: 0, stopped: true };
+        },
+      },
+    } as any);
+    expect(result).toEqual({
+      ok: true,
+      content: '[STOPPED] Notebook run was stopped. Do not retry automatically.',
+    });
+    expect((result as any).evalError).toBeUndefined();
+  });
+
+  test('Notebook busy is a non-code result and does not invite an automatic retry', async () => {
+    const result = await jsNotebookTool.execute({ code: 'return 1;' }, {
+      session: { sessionId: 'session-1', kind: 'chat' },
+      jsClient: { eval: async () => ({ errorCode: 'notebook_run_busy' }) },
+    } as any);
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain('[BUSY]');
+    expect(result.content).toContain('was not run');
+    expect(result.content).toContain('Do not retry automatically');
+    expect((result as any).evalError).toBeUndefined();
+  });
+
+  test('Notebook timeout is a non-code result with explicit retry guidance', async () => {
+    const result = await jsNotebookTool.execute({ code: 'while (true) {}' }, {
+      session: { sessionId: 'session-1', kind: 'chat' },
+      jsClient: { eval: async () => ({ errorCode: 'notebook_run_timeout' }) },
+    } as any);
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain('[TIMEOUT]');
+    expect(result.content).toContain('increase timeoutMs');
+    expect(result.content).toContain('Do not retry the same request automatically');
+    expect((result as any).evalError).toBeUndefined();
+  });
+
   test.each([
     ['script', scriptTool],
     ['Notebook', jsNotebookTool],

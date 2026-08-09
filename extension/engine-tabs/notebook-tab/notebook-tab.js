@@ -21,9 +21,13 @@ import {
 import { renderReturnValue } from './output-render.js';
 // The sealed worker source (realm seal + peerd.* surface + bridges) is shared
 // with the headless offscreen job runner so the security surface can't diverge.
-import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS } from './worker-source.js';
+import {
+  buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS, SEAL_MODULE_URL,
+} from './worker-source.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
-import { REMOTE_MODULE_IMPORTS_ENABLED } from '/shared/channel-config.js';
+import {
+  NOTEBOOK_MODULE_LOADER, REMOTE_MODULE_IMPORTS_ENABLED,
+} from '/shared/channel-config.js';
 
 const notebookId = location.hash.slice(1).split(/[?&]/)[0];
 if (!notebookId) {
@@ -59,6 +63,7 @@ const els = {
   idChip:     byId('notebook-id-chip'),
   saveStatus: byId('save-status'),
   runStatus:  byId('run-status'),
+  workerHost: /** @type {HTMLIFrameElement} */ (byId('worker-host')),
 };
 
 els.idChip.textContent = notebookId;
@@ -130,12 +135,6 @@ const clearModuleCache = () => {
 };
 
 /** @param {string} [url] */
-const shortenBlob = (url) => {
-  if (!url) return '<no url>';
-  const m = url.match(/[^/]+$/);
-  return m ? `blob:…${m[0].slice(-8)}` : url;
-};
-
 // design 06 rot bookkeeping: when a run settles, report which toolbox modules
 // it imported and whether it succeeded (runCount/failCount on the meta the
 // agent reads via toolbox_list). Fire-and-forget — bookkeeping never fails a run.
@@ -149,10 +148,24 @@ const recordToolboxUse = (ok) => {
   }
 };
 
-/** @param {() => void} [onRemoteFetch] */
-const makeResolverDeps = (onRemoteFetch) => ({
+/** @param {AbortSignal | undefined} signal */
+const throwIfAborted = (signal) => {
+  if (!signal?.aborted) return;
+  const deadline = signal.reason === 'deadline';
+  const error = new Error(deadline ? 'Notebook run timed out' : 'Notebook run stopped');
+  error.name = deadline ? 'TimeoutError' : 'AbortError';
+  throw error;
+};
+
+/** @param {() => void} [onRemoteFetch] @param {AbortSignal} [signal] @param {number} [deadlineAt] */
+const makeResolverDeps = (onRemoteFetch, signal, deadlineAt) => ({
   /** @param {string} path */
-  readFile: (path) => editor.opfs.read(path),
+  readFile: async (path) => {
+    throwIfAborted(signal);
+    const source = await editor.opfs.read(path);
+    throwIfAborted(signal);
+    return source;
+  },
   /** @param {string} source */
   makeBlobUrl: (source) => URL.createObjectURL(
     new Blob([source], { type: 'application/javascript' }),
@@ -163,16 +176,31 @@ const makeResolverDeps = (onRemoteFetch) => ({
   remoteModulesEnabled: REMOTE_MODULE_IMPORTS_ENABLED,
   ...(REMOTE_MODULE_IMPORTS_ENABLED ? {
     fetchRemote: makeFetchRemote(
-      (req) => {
+      async (req) => {
+        throwIfAborted(signal);
         onRemoteFetch?.();
-        return /** @type {Promise<any>} */ (browser.runtime.sendMessage({ type: 'sw/web-fetch', ...req }));
+        const abortToken = crypto.randomUUID();
+        const onAbort = () => browser.runtime.sendMessage({
+          type: 'sw/web-fetch-abort', abortToken, notebookId,
+        }).catch(() => {});
+        signal?.addEventListener('abort', onAbort, { once: true });
+        try {
+          const response = await browser.runtime.sendMessage({
+            type: 'sw/web-fetch', ...req, abortToken, notebookId, deadlineAt,
+          });
+          throwIfAborted(signal);
+          return /** @type {any} */ (response);
+        } finally {
+          signal?.removeEventListener('abort', onAbort);
+        }
       }),
   } : {}),
   /** @param {{ type: string, path: string, blobUrl?: string, error?: string, errorCode?: string }} entry */
   log: (entry) => {
+    if (signal?.aborted) return;
     const label = isRemoteSpecifier(entry.path) ? entry.path : `./${entry.path}`;
     if (entry.type === 'resolved') {
-      appendLine('log-info', `[import] ${label} → ${shortenBlob(entry.blobUrl)}`);
+      appendLine('log-info', `[import] ${label}`);
     } else if (entry.type === 'resolve-failed'
       && !moduleImportPolicyMessage(entry.errorCode)) {
       appendLine('log-error', `[import] FAILED ${label}: ${entry.error}`);
@@ -186,7 +214,9 @@ const makeResolverDeps = (onRemoteFetch) => ({
   // never inject it).
   /** @param {string} name */
   readToolboxModule: async (name) => {
+    throwIfAborted(signal);
     const resp = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'toolbox/read', name }));
+    throwIfAborted(signal);
     if (!resp?.ok) throw new Error(resp?.error ?? 'toolbox read failed');
     return String(resp.body);
   },
@@ -214,46 +244,217 @@ const dimPreviousOutput = () => {
   for (const child of els.output.children) child.classList.add('nb-prev');
 };
 
-/** @param {string} code @param {number} [timeoutMs] @param {string} [entryPath] */
-const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
+let hostedWorkerSequence = 0;
+const workerHostPort = new Promise((resolve, reject) => {
+  const channel = new MessageChannel();
+  const timer = setTimeout(() => reject(new Error('Notebook worker host did not start')), 10_000);
+  channel.port1.addEventListener('message', (event) => {
+    if (event.data?.type !== 'notebook-worker-host-ready') return;
+    clearTimeout(timer);
+    resolve(channel.port1);
+  });
+  channel.port1.start();
+  els.workerHost.addEventListener('load', () => {
+    els.workerHost.contentWindow?.postMessage(
+      { type: 'notebook-worker-host-init' }, '*', [channel.port2],
+    );
+  }, { once: true });
+  els.workerHost.src = 'worker-host.html';
+});
+
+/** @param {string} source @param {string} markerNonce */
+const spawnHostedWorker = async (source, markerNonce) => {
+  const port = /** @type {MessagePort} */ (await workerHostPort);
+  const runId = `run-${hostedWorkerSequence += 1}`;
+  /** @type {Record<'message' | 'error', Array<{ listener: (event: any) => void, once: boolean }>>} */
+  const listeners = { message: [], error: [] };
+  let active = true;
+  /** @param {MessageEvent} event */
+  const onHostMessage = (event) => {
+    const message = event.data;
+    if (!active || message?.type !== 'worker-event' || message.runId !== runId) return;
+    const eventType = /** @type {'message' | 'error'} */ (message.eventType);
+    const payload = eventType === 'message'
+      ? { data: message.data, workerUrl: message.workerUrl }
+      : {
+          error: null, message: message.message, filename: message.filename,
+          lineno: message.lineno, colno: message.colno, workerUrl: message.workerUrl,
+        };
+    for (const entry of [...listeners[eventType]]) {
+      entry.listener(payload);
+      if (entry.once) listeners[eventType] = listeners[eventType].filter((item) => item !== entry);
+    }
+  };
+  port.addEventListener('message', onHostMessage);
+  port.postMessage({ type: 'run', runId, source, markerNonce });
+  return {
+    /** @param {'message' | 'error'} type @param {(event: any) => void} listener @param {{ once?: boolean }} [options] */
+    addEventListener: (type, listener, options) => {
+      listeners[type].push({ listener, once: options?.once === true });
+    },
+    /** @param {any} data */
+    postMessage: (data) => port.postMessage({ type: 'message', runId, data }),
+    terminate: () => {
+      if (!active) return;
+      active = false;
+      port.removeEventListener('message', onHostMessage);
+      port.postMessage({ type: 'terminate', runId });
+    },
+  };
+};
+
+/**
+ * @param {string} source
+ * @param {Map<string, { blobUrl: string, source: string }>} cache
+ * @param {AbortSignal | undefined} signal
+ * @param {number} deadlineAt
+ * @param {number} entryBodyLine
+ */
+const linkWorkerSource = (source, cache, signal, deadlineAt, entryBodyLine) => new Promise((resolve, reject) => {
+  const compiler = new Worker(new URL('linker-worker.js', import.meta.url), { type: 'module' });
+  let settled = false;
+  /** @param {(value: any) => void} callback @param {any} value */
+  const finish = (callback, value) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+    compiler.terminate();
+    callback(value);
+  };
+  const onAbort = () => {
+    const deadline = signal?.reason === 'deadline';
+    const error = new Error(deadline ? 'Notebook module linking timed out' : 'Notebook run stopped');
+    error.name = deadline ? 'TimeoutError' : 'AbortError';
+    finish(reject, error);
+  };
+  const remaining = Math.max(0, deadlineAt - Date.now());
+  const timer = setTimeout(() => finish(
+    reject, new Error('Notebook module linking timed out'),
+  ), remaining);
+  compiler.addEventListener('message', (event) => {
+    if (event.data?.type === 'linked') finish(resolve, {
+      source: String(event.data.source), markerNonce: String(event.data.markerNonce),
+    });
+    else if (event.data?.type === 'link-failed') {
+      const error = new Error(String(event.data.error || 'Notebook module linking failed'));
+      // @ts-ignore stable code is copied from the isolated compiler realm.
+      error.code = event.data.errorCode;
+      finish(reject, error);
+    }
+  });
+  compiler.addEventListener('error', (event) => finish(
+    reject, new Error(event.message || 'Notebook module compiler crashed'),
+  ));
+  if (signal?.aborted) onAbort();
+  else {
+    signal?.addEventListener('abort', onAbort, { once: true });
+    compiler.postMessage({
+      type: 'link', source, cache: [...cache],
+      packagedEntryUrls: [SEAL_MODULE_URL, ...Object.values(NOTEBOOK_BUILTINS)],
+      entryBodyLine,
+    });
+  }
+});
+
+const stoppedResult = () => ({
+  value: undefined, consoleOutput: [], durationMs: 0,
+  errorCode: 'notebook_run_stopped', stopped: true, usedRemoteModules: false,
+});
+
+/** @param {number} timeoutMs @param {boolean} [usedRemoteModules] */
+const timedOutResult = (timeoutMs, usedRemoteModules = false) => ({
+  value: undefined, consoleOutput: [], durationMs: 0,
+  error: `eval timed out after ${timeoutMs}ms`, errorCode: 'notebook_run_timeout',
+  usedRemoteModules,
+});
+
+/** @param {string} code @param {number} [timeoutMs] @param {string} [entryPath] @param {AbortSignal} [signal] */
+const runEvalInternal = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH, signal) => {
   dimPreviousOutput();
   setRunStatus('Running notebook.', true);
+  const deadlineAt = Date.now() + timeoutMs;
   let source;
   let bodyLine = 1;
   let usedRemoteModules = false;
+  let markerNonce = '';
+  /** @type {ReturnType<typeof buildWorkerSource> | undefined} */
+  let pendingBuild;
   try {
     // The run deadline covers RESOLUTION too — a remote import graph hits the
     // network (fetchRemote), so a tarpit CDN must not hang the eval forever
     // (the worker timer below only starts after the build).
     /** @type {ReturnType<typeof setTimeout> | undefined} */
     let buildTimer;
-    const built = await Promise.race([
-      buildWorkerSource(code, {
+    /** @type {(() => void) | undefined} */
+    let onBuildAbort;
+    const abortBuild = new Promise((_resolve, reject) => {
+      if (!signal) return;
+      onBuildAbort = () => {
+        const deadline = signal?.reason === 'deadline';
+        const error = new Error(deadline ? 'Notebook import resolution timed out' : 'Notebook run stopped');
+        error.name = deadline ? 'TimeoutError' : 'AbortError';
+        reject(error);
+      };
+      if (signal.aborted) onBuildAbort();
+      else signal.addEventListener('abort', onBuildAbort, { once: true });
+    });
+    setRunStatus('Resolving notebook imports.', true);
+    pendingBuild = buildWorkerSource(code, {
         entryPath, notebookId,
-        resolverDeps: makeResolverDeps(() => { usedRemoteModules = true; }),
-      }),
+        resolverDeps: makeResolverDeps(
+          () => { usedRemoteModules = true; }, signal, deadlineAt,
+        ),
+      });
+    const built = await Promise.race([
+      pendingBuild,
       /** @type {Promise<never>} */ (new Promise((_resolve, reject) => {
         buildTimer = setTimeout(
-          () => reject(new Error(`import resolution timed out after ${timeoutMs}ms`)), timeoutMs);
+          () => reject(new Error(`import resolution timed out after ${timeoutMs}ms`)),
+          Math.max(0, deadlineAt - Date.now()));
       })),
-    ]).finally(() => clearTimeout(buildTimer));
+      abortBuild,
+    ]).finally(() => {
+      clearTimeout(buildTimer);
+      if (onBuildAbort) signal?.removeEventListener('abort', onBuildAbort);
+    });
     source = built.source;
     bodyLine = built.bodyLine;
     entryCache = built.cache;
     usedRemoteModules ||= built.usedRemoteModules;
+    if (/** @type {string} */ (NOTEBOOK_MODULE_LOADER) === 'single-bundle') {
+      setRunStatus('Linking notebook imports.', true);
+      const linked = /** @type {{ source: string, markerNonce: string }} */ (await linkWorkerSource(
+        source, entryCache, signal, deadlineAt, bodyLine,
+      ));
+      source = linked.source;
+      markerNonce = linked.markerNonce;
+    }
     if (usedRemoteModules) {
       setRunStatus('Running remote code with restricted access.', true);
       appendLine('log-info', `[security] ${REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE}`);
     }
     if (entryCache.size > 0) appendLine('log-info', `[import] ${entryCache.size} module(s) resolved`);
   } catch (e) {
+    pendingBuild?.then((built) => {
+      for (const entry of built.cache.values()) URL.revokeObjectURL(entry.blobUrl);
+    }).catch(() => {});
+    if (/** @type {{ name?: string }} */ (e)?.name === 'AbortError') {
+      clearModuleCache();
+      setRunStatus('Notebook run stopped.', false);
+      return stoppedResult();
+    }
     const msg = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
-    const errorCode = /** @type {{ code?: string }} */ (e)?.code;
+    const errorCode = /** @type {{ name?: string, code?: string }} */ (e)?.name === 'TimeoutError'
+      ? 'notebook_run_timeout'
+      : /** @type {{ code?: string }} */ (e)?.code;
     const phase = errorCode === MODULE_SYNTAX_ERROR_CODE ? 'syntax check' : 'import resolution';
     appendLine('log-error', `${phase} failed: ${msg}`);
     const policyMessage = moduleImportPolicyMessage(errorCode);
     if (usedRemoteModules) appendLine('log-info', `[security] ${REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE}`);
-    setRunStatus(policyMessage ?? (usedRemoteModules ? 'Restricted remote code failed.' : 'Notebook run failed.'), false);
+    setRunStatus(errorCode === 'notebook_run_timeout'
+      ? 'Notebook run timed out.'
+      : policyMessage ?? (usedRemoteModules ? 'Restricted remote code failed.' : 'Notebook run failed.'), false);
     return {
       value: undefined, consoleOutput: [], durationMs: 0,
       error: `${phase} failed: ${msg}`,
@@ -264,7 +465,11 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
   const blob = new Blob([source], { type: 'application/javascript' });
   const url = URL.createObjectURL(blob);
   let worker;
-  try { worker = new Worker(url, { type: 'module' }); }
+  try {
+    worker = /** @type {string} */ (NOTEBOOK_MODULE_LOADER) === 'single-bundle'
+      ? await spawnHostedWorker(source, markerNonce)
+      : new Worker(url, { type: 'module' });
+  }
   catch (e) {
     URL.revokeObjectURL(url);
     clearModuleCache();
@@ -280,12 +485,25 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
   appendLine('log-eval', `> ${oneLineCode.replace(/\n/g, '\n  ')}`);
 
   try {
+    /** @type {(() => void) | undefined} */
+    let workerAbortListener;
     return await new Promise((resolve) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        try { worker.terminate(); } catch {}
+        recordToolboxUse(false);
+        resolve(signal?.reason === 'deadline'
+          ? timedOutResult(timeoutMs, usedRemoteModules)
+          : stoppedResult());
+      };
+      workerAbortListener = onAbort;
       const timer = setTimeout(() => {
         try { worker.terminate(); } catch {}
         recordToolboxUse(false);
-        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `eval timed out after ${timeoutMs}ms`, usedRemoteModules });
-      }, timeoutMs);
+        resolve(timedOutResult(timeoutMs, usedRemoteModules));
+      }, Math.max(0, deadlineAt - Date.now()));
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener('abort', onAbort, { once: true });
 
       worker.addEventListener('message', async (ev) => {
         // why any: a worker postMessage payload is type-erased across the
@@ -293,6 +511,18 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
         /** @type {any} */
         const m = ev.data;
         if (!m || typeof m !== 'object') return;
+        if (m.type === 'seal-failed') {
+          clearTimeout(timer);
+          try { worker.terminate(); } catch {}
+          recordToolboxUse(false);
+          appendLine('log-error', `[realm seal failed] ${m.error}`);
+          resolve({
+            value: undefined, consoleOutput: [], durationMs: 0,
+            error: `realm seal failed: ${m.error}`, errorCode: undefined,
+            usedRemoteModules,
+          });
+          return;
+        }
         if (m.type === 'log') { appendLine(`log-${m.level}`, m.text); return; }
         if (m.type === 'display') {
           // peerd.self.display(value) — render rich output mid-run (same path as
@@ -439,7 +669,10 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
           }
           // Map stack frames in the entry blob back to notebook.js:<line> so
           // the pane (and the agent's tool result) point at the user's code.
-          const error = m.error ? mapWorkerError(m.error, url, bodyLine, entryPath) : null;
+          const workerUrl = ev.workerUrl ?? url;
+          const error = m.error
+            ? mapWorkerError(m.error, workerUrl, bodyLine, entryPath, entryCache)
+            : null;
           recordToolboxUse(!error);
           if (error) appendLine('log-error', error);
           resolve({
@@ -458,13 +691,16 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
         const err = e.error;
         let detail = err?.stack || err?.message || e.message || '';
         if (!detail) detail = 'worker crashed (no detail available)';
-        detail = /** @type {string} */ (mapWorkerError(detail, url, bodyLine, entryPath));
+        const workerUrl = e.workerUrl ?? url;
+        detail = /** @type {string} */ (
+          mapWorkerError(detail, workerUrl, bodyLine, entryPath, entryCache));
         // A SYNTAX error never reaches the entry's catch — it surfaces here
         // with the blob filename + line. Map it to the user's file too.
-        const userLine = e.lineno - bodyLine + 1;
-        const loc = (e.filename === url && userLine >= 1)
-          ? ` (${entryPath}:${userLine}:${e.colno})`
-          : (e.filename ? ` (${e.filename}:${e.lineno}:${e.colno})` : '');
+        const rawLocation = e.filename ? `${e.filename}:${e.lineno}:${e.colno}` : '';
+        const mappedLocation = rawLocation
+          ? mapWorkerError(rawLocation, workerUrl, bodyLine, entryPath, entryCache)
+          : '';
+        const loc = mappedLocation ? ` (${mappedLocation})` : '';
         appendLine('log-error', `[worker crashed] ${detail}${loc}`);
         // A crash (e.g. a top-level throw in an imported module body) is a
         // failed run — record it, matching the timeout path and the headless
@@ -476,9 +712,15 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
           usedRemoteModules,
         });
       });
+    }).finally(() => {
+      if (workerAbortListener) signal?.removeEventListener('abort', workerAbortListener);
     }).then((result) => {
       setRunStatus(
-        moduleImportPolicyMessage(result.errorCode)
+        result.stopped
+          ? 'Notebook run stopped.'
+          : result.errorCode === 'notebook_run_timeout'
+            ? 'Notebook run timed out.'
+          : moduleImportPolicyMessage(result.errorCode)
           ?? (usedRemoteModules
             ? (result.error ? 'Restricted remote code failed.' : 'Remote code ran with restricted access.')
             : (result.error ? 'Notebook run failed.' : 'Notebook run complete.')),
@@ -492,12 +734,64 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
   }
 };
 
+/** @type {{ runId: string, controller: AbortController } | null} */
+let activeEval = null;
+
+/** @param {boolean} running */
+const setRunControl = (running) => {
+  els.runBtn.disabled = false;
+  els.runBtn.textContent = running ? 'Stop notebook run ■' : 'Run notebook.js ▶';
+  els.runBtn.title = running
+    ? 'Stop the current Notebook run'
+    : 'Runs notebook.js (Cmd-Enter / Ctrl-Enter)';
+  els.runBtn.setAttribute('aria-label', running ? 'Stop notebook run' : 'Run notebook.js');
+};
+
+/** @param {string} runId */
+const reserveRun = (runId) => {
+  if (activeEval) return null;
+  const controller = new AbortController();
+  activeEval = { runId, controller };
+  setRunControl(true);
+  return controller;
+};
+
+const busyResult = () => ({
+  value: undefined, consoleOutput: [], durationMs: 0,
+  error: 'Notebook already has a run in progress', errorCode: 'notebook_run_busy',
+  usedRemoteModules: false,
+});
+
+/** @param {string} code @param {number} timeoutMs @param {string} entryPath @param {string} runId @param {AbortController} controller */
+const executeReservedRun = async (code, timeoutMs, entryPath, runId, controller) => {
+  const deadlineTimer = setTimeout(() => controller.abort('deadline'), timeoutMs);
+  try { return await runEvalInternal(code, timeoutMs, entryPath, controller.signal); }
+  finally {
+    clearTimeout(deadlineTimer);
+    if (activeEval?.runId === runId) activeEval = null;
+    setRunControl(false);
+  }
+};
+
+/** @param {string} code @param {number} timeoutMs @param {string} entryPath @param {string} runId */
+const executeRun = async (code, timeoutMs, entryPath, runId) => {
+  const controller = reserveRun(runId);
+  return controller
+    ? executeReservedRun(code, timeoutMs, entryPath, runId, controller)
+    : busyResult();
+};
+
 // ---------------------------------------------------------------------------
 // Run from editor (Cmd-Enter or button) — always targets notebook.js
 // regardless of which tab is active. See git log for the rationale.
 // ---------------------------------------------------------------------------
 
 const runFromEditor = async () => {
+  if (activeEval) {
+    setRunStatus('Stopping notebook run.', true);
+    activeEval.controller.abort();
+    return;
+  }
   await editor.flushSave();
   let code;
   try { code = await editor.opfs.read(NOTEBOOK_PATH); }
@@ -507,14 +801,11 @@ const runFromEditor = async () => {
       '[notebook.js is empty — nothing to run. Switch to the notebook.js tab to write an entry.]');
     return;
   }
-  els.runBtn.disabled = true;
   try {
-    await runEval(code, 30000, NOTEBOOK_PATH);
+    await executeRun(code, 30000, NOTEBOOK_PATH, crypto.randomUUID());
     await editor.refreshTree();
   } catch (e) {
     appendLine('log-error', `run failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
-  } finally {
-    els.runBtn.disabled = false;
   }
 };
 
@@ -551,7 +842,7 @@ const exportNotebook = async () => {
 // SW → tab dispatch.
 // ---------------------------------------------------------------------------
 
-const JS_ROUTES = new Set(['js/eval', 'js/write-file', 'js/read-file', 'js/list-files']);
+const JS_ROUTES = new Set(['js/eval', 'js/abort', 'js/write-file', 'js/read-file', 'js/list-files']);
 
 // why the cast: the polyfill's OnMessageListenerCallback types the return as the
 // literal `true` (keep the channel open), so it can't model the legitimate
@@ -572,17 +863,52 @@ const onNotebookMessage = (msg, _sender, sendResponse) => {
     try {
       switch (msg.type) {
         case 'js/eval': {
+          const runId = typeof msg.runId === 'string' ? msg.runId : crypto.randomUUID();
+          const controller = reserveRun(runId);
+          if (!controller) {
+            sendResponse({ ok: true, result: busyResult() });
+            return;
+          }
           // Mirror the agent's code into notebook.js with a one-shot
           // backup of whatever the user had there.
-          if (editor.getActiveFile() !== NOTEBOOK_PATH) {
-            await editor.switchToFile(NOTEBOOK_PATH);
+          let result;
+          const deadlineTimer = setTimeout(
+            () => controller.abort('deadline'), msg.timeoutMs ?? 30000,
+          );
+          try {
+            throwIfAborted(controller.signal);
+            if (editor.getActiveFile() !== NOTEBOOK_PATH) {
+              await editor.switchToFile(NOTEBOOK_PATH);
+              throwIfAborted(controller.signal);
+            }
+            await editor.replaceActiveWith(msg.code, { backupTo: BEFORE_AGENT_PATH });
+            throwIfAborted(controller.signal);
+            result = await runEvalInternal(
+              msg.code, msg.timeoutMs ?? 30000, NOTEBOOK_PATH, controller.signal,
+            );
+          } catch (error) {
+            const name = /** @type {{ name?: string }} */ (error)?.name;
+            if (name !== 'AbortError' && name !== 'TimeoutError') throw error;
+            const timedOut = name === 'TimeoutError';
+            setRunStatus(timedOut ? 'Notebook run timed out.' : 'Notebook run stopped.', false);
+            result = timedOut
+              ? timedOutResult(msg.timeoutMs ?? 30000)
+              : stoppedResult();
+          } finally {
+            clearTimeout(deadlineTimer);
+            if (activeEval?.runId === runId) activeEval = null;
+            setRunControl(false);
           }
-          await editor.replaceActiveWith(msg.code, { backupTo: BEFORE_AGENT_PATH });
-          const result = await runEval(msg.code, msg.timeoutMs ?? 30000, NOTEBOOK_PATH);
           await editor.refreshTree();
           sendResponse({ ok: true, result });
           return;
         }
+        case 'js/abort':
+          if (activeEval && (!msg.runId || activeEval.runId === msg.runId)) {
+            activeEval.controller.abort();
+            sendResponse({ ok: true, stopped: true });
+          } else sendResponse({ ok: true, stopped: false });
+          return;
         case 'js/write-file':
           await editor.opfs.write(msg.path, msg.content);
           await editor.refreshTree();

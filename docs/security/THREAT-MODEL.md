@@ -217,8 +217,12 @@ caps, and may carry an optional SHA-256 pin. Any remote module marks the whole
 resolved graph as untrusted compute. Runtime network and file access, agents,
 model calls, browser and site clients, and dweb are disabled for that run. A
 remote module cannot import a local toolbox module. Generated worker shims and
-independent host relay checks enforce the same profile. Returned values,
-console output, and errors are fenced as untrusted.
+independent host relay checks enforce the same profile. Firefox links the
+authorized graph and realm seal in a disposable compiler Worker, then runs the
+result through a sandboxed opaque-origin host with no extension APIs, string
+compilation, or network. Stop terminates the compiler or code Worker and
+cancels the host fetch operation. Returned values, console output, and errors
+are fenced as untrusted.
 Pins verify exact bytes and improve reproducibility. They do not grant trust or
 authority. Dynamic imports are refused in every package. Remote modules run
 inside a sealed worker. The store build strips

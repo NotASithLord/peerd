@@ -108,6 +108,9 @@ export const UNSUPPORTED_NATIVE_MODULE_IMPORT_MESSAGE =
 /** Stable cross-realm code for parser failures before worker creation. */
 export const MODULE_SYNTAX_ERROR_CODE = 'module_syntax_error';
 
+/** Stable cross-realm code for a host-side static graph linker failure. */
+export const MODULE_LINK_ERROR_CODE = 'module_link_failed';
+
 /** Stable code and guidance for a capability denied to a remote-module run. */
 export const REMOTE_MODULE_CAPABILITY_BLOCKED_CODE = 'remote_module_capability_blocked';
 /** Stable status for a remote graph running under the compute-only profile. */
@@ -165,6 +168,18 @@ export class ModuleSyntaxError extends TypedError {
   constructor(detail) {
     super(`JavaScript syntax error: ${detail}`);
     this.code = MODULE_SYNTAX_ERROR_CODE;
+  }
+}
+
+/**
+ * A fully resolved static graph could not be linked into one worker entry.
+ * This is a loader failure, not an error in the executing Notebook realm.
+ */
+export class ModuleLinkError extends TypedError {
+  /** @param {string} detail */
+  constructor(detail) {
+    super(`cannot link Notebook module graph: ${detail}`);
+    this.code = MODULE_LINK_ERROR_CODE;
   }
 }
 

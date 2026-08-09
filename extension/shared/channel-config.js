@@ -14,6 +14,7 @@
 export const CHANNEL = "preview";
 export const DWEB_ENABLED = true;
 export const REMOTE_MODULE_IMPORTS_ENABLED = true;
+export const NOTEBOOK_MODULE_LOADER = "blob-graph";
 
 export const CHANNEL_DEFAULTS = Object.freeze({
   voiceEnabled: false,
