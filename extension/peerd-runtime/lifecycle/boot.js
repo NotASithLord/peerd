@@ -174,7 +174,8 @@ export const makeLifecycleBoot = ({
       const user = verdict
         && (verdict.state === OPERATION_STATES.INTERRUPTED
           || verdict.state === OPERATION_STATES.OUTCOME_UNKNOWN)
-        ? describeRecovery(verdict, { toolName: recoveryRecord.operation }).user
+        ? `Recovery for ${recoveryRecord.operation}: ${
+          describeRecovery(verdict, { toolName: recoveryRecord.operation }).user}`
         : `${recoveryRecord.operation} was settled as ${recoveryRecord.recoveryState} after an interruption.`;
       await parkNotice(notification.sessionId, { recoveryRecord, user });
     }

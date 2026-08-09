@@ -111,7 +111,7 @@ describe('notices — both audiences, delivered once', () => {
   test('audit entries append, the user notify fires, and the agent drain is read-once', async () => {
     const storage = makeStorage();
     const audits: Array<Record<string, unknown>> = [];
-    const notes: string[] = [];
+    const notes: Array<{ sessionId: string, text: string }> = [];
     const gen1 = boot(storage);
     const { generation } = await gen1.init();
     await gen1.operationLog.begin({
@@ -122,14 +122,16 @@ describe('notices — both audiences, delivered once', () => {
 
     const gen2 = boot(storage, {
       appendAudit: async (e: Record<string, unknown>) => { audits.push(e); },
-      notify: (_sid: string, text: string) => { notes.push(text); },
+      notify: (sessionId: string, text: string) => { notes.push({ sessionId, text }); },
     });
     await gen2.init();
 
     expect(audits.some((e) => e.event === 'lifecycle.generation.sw-changed')).toBe(true);
     expect(audits.some((e) => e.event === 'lifecycle.operation.outcome_unknown')).toBe(true);
     expect(notes.length).toBe(1);
-    expect(notes[0]).toContain('Check the target');
+    expect(notes[0]?.sessionId).toBe('sess-9');
+    expect(notes[0]?.text).toContain('Recovery for submit_form');
+    expect(notes[0]?.text).toContain('Check the target');
 
     const block = await gen2.drainNoticesFor('sess-9');
     expect(block).toContain('<interruption-recovery>');

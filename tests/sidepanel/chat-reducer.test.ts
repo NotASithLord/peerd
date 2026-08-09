@@ -45,6 +45,43 @@ describe('reduceChat', () => {
     expect(reduceChat(streamingOn, { type: 'turn/streaming', sessionId: 'bg', streaming: false })).toBe(streamingOn);
   });
 
+  test('a scoped system note appears only in its owning session', () => {
+    const viewed = withSession('viewed');
+    const matching = reduceChat(viewed, {
+      type: 'turn/system-note', sessionId: 'viewed', text: 'Recovery for submit_form: Check the target.',
+    });
+    expect(matching.notices).toHaveLength(1);
+    expect(matching.notices[0].text).toContain('submit_form');
+    expect(matching.notices[0].sessionId).toBe('viewed');
+
+    const switched = reduceChat(matching, {
+      type: 'state', state: { session: { sessionId: 'other', messages: [] } },
+    });
+    expect(switched.notices).toHaveLength(0);
+
+    const foreign = reduceChat(viewed, {
+      type: 'turn/system-note', sessionId: 'other', text: 'Private recovery note',
+    });
+    expect(foreign).toBe(viewed);
+    expect(foreign.notices).toHaveLength(0);
+
+    // A targeted note racing the initial state snapshot must not stick and
+    // later appear in whichever chat the surface adopts.
+    expect(reduceChat(INITIAL_STATE, {
+      type: 'turn/system-note', sessionId: 'other', text: 'Private recovery note',
+    })).toBe(INITIAL_STATE);
+  });
+
+  test('an unscoped system note remains visible for current-chat UI feedback', () => {
+    const viewed = withSession('viewed');
+    const next = reduceChat(viewed, { type: 'turn/system-note', text: 'Settings saved.' });
+    expect(next.notices[0].text).toBe('Settings saved.');
+    const switched = reduceChat(next, {
+      type: 'state', state: { session: { sessionId: 'other', messages: [] } },
+    });
+    expect(switched.notices[0].text).toBe('Settings saved.');
+  });
+
   test('confirm/request stores the prompt; confirm/resolved dismisses only the matching id', () => {
     const asked = reduceChat(INITIAL_STATE, { type: 'confirm/request', prompt: { id: 'c1', text: 'ok?' } });
     expect(asked.pendingConfirm).toEqual({ id: 'c1', text: 'ok?' });

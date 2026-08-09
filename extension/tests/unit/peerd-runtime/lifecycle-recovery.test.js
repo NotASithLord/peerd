@@ -127,6 +127,36 @@ describe('lifecycle recovery over real chrome.storage', () => {
     }
   });
 
+  it('routes an immediate recovery note to its session without tool arguments', async () => {
+    await cleanup();
+    try {
+      const gen1 = boot();
+      const { generation } = await gen1.init();
+      await gen1.operationLog.begin({
+        operationId: 'real-notice', sessionId: 'session-owner', toolName: 'submit_form',
+        retryClass: 'E', generationId: generation.id,
+      });
+      await gen1.operationLog.transition('real-notice', S.RUNNING);
+      await gen1.operationLog.markDispatched('real-notice');
+
+      /** @type {Array<{ sessionId: string, text: string }>} */
+      const notes = [];
+      await boot({
+        notify: (/** @type {string} */ sessionId, /** @type {string} */ text) => {
+          notes.push({ sessionId, text });
+        },
+      }).init();
+
+      expect(notes.length).toBe(1);
+      expect(notes[0].sessionId).toBe('session-owner');
+      expect(notes[0].text.includes('Recovery for submit_form')).toBe(true);
+      expect(notes[0].text.includes('operationId')).toBe(false);
+      expect(notes[0].text.includes('args')).toBe(false);
+    } finally {
+      await cleanup();
+    }
+  });
+
   it('the wired dispatcher refuses a cross-generation Class E replay end-to-end', async () => {
     await cleanup();
     clearTools();

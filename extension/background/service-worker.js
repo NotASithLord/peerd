@@ -568,8 +568,8 @@ const lifecycleBoot = makeLifecycleBoot({
   appendAudit: (/** @type {any} */ entry) =>
     auditLog.append({ type: entry.event, details: entry }),
   // postChatNote is declared far below — the standard late-dep deferral.
-  notify: (/** @type {string} */ _sessionId, /** @type {string} */ text) =>
-    postChatNote(`Recovered from a browser interruption: ${text}`),
+  notify: (/** @type {string} */ sessionId, /** @type {string} */ text) =>
+    postChatNote(text, null, sessionId),
   // Actor sessions may never take another turn, so their recovery notices
   // walk parentSessionId up to the root chat (bounded — a corrupt chain
   // stops at the depth cap and falls back to the child).
@@ -6927,9 +6927,20 @@ const maybeAutoResumeAfterRecovery = (/** @type {string | null | undefined} */ s
 // confirm round-trip is the same SW ↔ side panel channel memory writes
 // use — /init never silently persists.
 
-const postChatNote = (/** @type {string} */ text, /** @type {any} */ action = null) => {
+const postChatNote = (
+  /** @type {string} */ text,
+  /** @type {any} */ action = null,
+  /** @type {string | null} */ sessionId = null,
+) => {
   if (!uiConnected()) return;
-  try { uiPorts.broadcast({ type: 'turn/system-note', text, ...(action ? { action } : {}) }); }
+  try {
+    uiPorts.broadcast({
+      type: 'turn/system-note',
+      text,
+      ...(action ? { action } : {}),
+      ...(sessionId ? { sessionId } : {}),
+    });
+  }
   catch { /* panel gone */ }
 };
 
