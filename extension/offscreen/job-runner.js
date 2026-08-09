@@ -150,7 +150,7 @@ let activeJobs = 0;
  *   DIRECT-CALLER seam (tests) — offscreen.js never forwards it from a
  *   message, so the production budget cannot be picked over the wire.
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any>, abortRun?: (runId: string, ownerSessionId?: string) => Promise<unknown>, extractMarkdown?: import('/shared/fetch-extract.js').ExtractMarkdownFn, opfsForRoot?: typeof opfsHelpers }} deps
- * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, endTurn?: boolean, endTurnContent?: string, usedEgress?: boolean, usedRemoteModules?: boolean, usedActors?: boolean, actorDeliveryIds?: string[], browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }>, usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<object>, codeTrace?: Array<object>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
+ * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, endTurn?: boolean, endTurnContent?: string, endTurnOutcomeKind?: string, usedEgress?: boolean, usedRemoteModules?: boolean, usedActors?: boolean, actorDeliveryIds?: string[], browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }>, usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<object>, codeTrace?: Array<object>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
  */
 export const runJob = async (job, deps) => {
   if (activeJobs >= MAX_CONCURRENT_JOBS) {
@@ -877,6 +877,9 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
                 value: undefined, consoleOutput: [], durationMs: Math.min(timeoutMs, Math.max(0, Date.now() - runStartedAt)),
                 error: null, endTurn: true,
                 endTurnContent: typeof resp.endTurnContent === 'string' ? resp.endTurnContent : '',
+                ...(typeof resp.endTurnOutcomeKind === 'string'
+                  ? { endTurnOutcomeKind: resp.endTurnOutcomeKind }
+                  : {}),
                 usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage,
                 images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget,
                 actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens,

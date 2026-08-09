@@ -244,7 +244,9 @@ describe('login tool — SSO auto-click ONLY for a verified IdP + stable walkId'
     const clicks = calls.execute.filter((o) => o.func?.name === 'clickInjected');
     expect(clicks.length).toBe(1);
     // the click is by walkId (not a raw selector) with expectedCount=1
-    expect(clicks[0].args).toEqual([null, 0, 5, 1]);
+    // The login tool has already confirmed and armed this exact IdP excursion,
+    // so the effect-point exception is pinned to that exact origin.
+    expect(clicks[0].args).toEqual([null, 0, 5, 1, 'https://accounts.google.com']);
     // the confirm carried verified:true
     expect(calls.confirm[0].verified).toBe(true);
     expect(calls.confirm[0].idpOrigin).toBe('https://accounts.google.com');

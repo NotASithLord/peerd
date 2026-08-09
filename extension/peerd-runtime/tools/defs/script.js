@@ -45,6 +45,7 @@ const MAX_TIMEOUT_MS = 120_000;
  * @property {string} [errorCode]
  * @property {boolean} [endTurn]
  * @property {string} [endTurnContent]
+ * @property {string} [endTurnOutcomeKind]
  * @property {Array<{ level: string, text: string }>} [consoleOutput]
  * @property {unknown} [value]
  * @property {boolean} [usedEgress]   the run called peerd.egress.fetch (job-runner)

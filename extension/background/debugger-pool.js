@@ -500,6 +500,34 @@ export const createDebuggerPool = () => {
   };
 
   /**
+   * Resolve DOM action bodies in an extension-owned world. The page's main
+   * world can replace URL, closest, and form accessors; none may decide whether
+   * the host guard runs. The exact-document check also closes navigation races
+   * between the main-world bind and isolated-world creation.
+   * @param {number} tabId
+   * @param {{ frameId: string }} bound
+   * @param {ExpectedDocument} expectedDocument
+   */
+  const isolatedActionContext = async (tabId, bound, expectedDocument) => {
+    try {
+      const created = await browser.debugger.sendCommand({ tabId }, 'Page.createIsolatedWorld', {
+        frameId: bound.frameId,
+        worldName: 'peerd-browser-action',
+        grantUniveralAccess: false,
+      });
+      const contextId = created?.executionContextId;
+      if (typeof contextId === 'number'
+          && await runtimeDocumentMatches(tabId, contextId, expectedDocument)) {
+        return contextId;
+      }
+    } catch { /* the exact document or debugger session may have changed */ }
+    try {
+      await detach(tabId);
+    } catch { /* custody cleanup is best-effort on a pre-effect refusal */ }
+    throw preEffectTargetError('browser_target_unverified');
+  };
+
+  /**
    * Return read-only CDP output only when it came from the same exact document
    * bridged before the operation. Any navigation discards the result.
    * @param {number} tabId
@@ -594,11 +622,12 @@ export const createDebuggerPool = () => {
   // Reports the action's DOM effect via OBS_SETUP/COLLECT (Phase 2).
   const clickBackendNode = async (tabId, backendDOMNodeId, expectedDocument) => {
     const bound = await attachToExpectedDocument(tabId, expectedDocument);
+    const actionContextId = await isolatedActionContext(tabId, bound, expectedDocument);
     await browser.debugger.sendCommand({ tabId }, 'DOM.enable').catch(() => {});
     const resolved = await browser.debugger.sendCommand(
       { tabId }, 'DOM.resolveNode', {
         backendNodeId: backendDOMNodeId,
-        executionContextId: bound.contextId,
+        executionContextId: actionContextId,
       },
     );
     const objectId = resolved?.object?.objectId;
@@ -616,6 +645,39 @@ export const createDebuggerPool = () => {
           this.scrollIntoView({ block: 'center', inline: 'center' });
           var tag = this.tagName ? this.tagName.toLowerCase() : '';
           var text = ((this.innerText || this.value || '') + '').trim().slice(0, 80);
+          // why: native form activation carries live values that never appear
+          // in click's args. Decide on the exact node and document immediately
+          // before the effect, so action/formaction mutation cannot race a
+          // separate preflight.
+          var directSubmitter = typeof this.closest === 'function' ? this.closest('button,input') : null;
+          var activationLabel = !directSubmitter && typeof this.closest === 'function'
+            ? this.closest('label') : null;
+          var submitter = directSubmitter || (activationLabel && activationLabel.control) || null;
+          var submitterTag = submitter && submitter.tagName ? submitter.tagName.toLowerCase() : '';
+          var submitterType = submitter && submitter.type ? submitter.type.toLowerCase() : '';
+          var isSubmitter = (submitterTag === 'button' && submitterType === 'submit')
+            || (submitterTag === 'input' && (submitterType === 'submit' || submitterType === 'image'));
+          var form = isSubmitter ? submitter.form : null;
+          if (form) {
+            var getAttribute = Element.prototype.getAttribute;
+            var submitterMethod = getAttribute.call(submitter, 'formmethod');
+            var method = (submitterMethod || getAttribute.call(form, 'method') || 'get').toLowerCase();
+            if (method !== 'dialog') {
+              try {
+                var submitterAction = getAttribute.call(submitter, 'formaction');
+                var formAction = getAttribute.call(form, 'action');
+                var action = submitterAction !== null ? submitterAction : formAction;
+                var actionOrigin = action
+                  ? new URL(action, this.ownerDocument.baseURI).origin
+                  : this.ownerDocument.location.origin;
+                if (actionOrigin !== this.ownerDocument.location.origin) {
+                  return { ok: false, error: 'cross_origin_form_submission_blocked' };
+                }
+              } catch (e) {
+                return { ok: false, error: 'cross_origin_form_submission_blocked' };
+              }
+            }
+          }
           ${OBS_SETUP}
           if (typeof this.click === 'function') { this.click(); }
           else { this.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); }
@@ -638,6 +700,7 @@ export const createDebuggerPool = () => {
       if (out?.exceptionDetails) {
         return { ok: false, error: `click_failed: ${out.exceptionDetails.text ?? 'page function threw'}` };
       }
+      if (v.ok === false) return { ok: false, error: v.error ?? 'click_failed', outcomeKind: 'pre-effect-failure' };
       return { ok: true, tag: v.tag ?? '', text: v.text ?? '', mutations: v.mutations ?? null };
     } catch (e) {
       const msg = e?.message ?? String(e);
@@ -659,11 +722,12 @@ export const createDebuggerPool = () => {
   // string-interpolated — no injection surface.
   const setValueBackendNode = async (tabId, backendDOMNodeId, text, submit, expectedDocument) => {
     const bound = await attachToExpectedDocument(tabId, expectedDocument);
+    const actionContextId = await isolatedActionContext(tabId, bound, expectedDocument);
     await browser.debugger.sendCommand({ tabId }, 'DOM.enable').catch(() => {});
     const resolved = await browser.debugger.sendCommand(
       { tabId }, 'DOM.resolveNode', {
         backendNodeId: backendDOMNodeId,
-        executionContextId: bound.contextId,
+        executionContextId: actionContextId,
       },
     );
     const objectId = resolved?.object?.objectId;
@@ -679,6 +743,26 @@ export const createDebuggerPool = () => {
             return { __peerdDocumentGuard: guardTag };
           }
           this.scrollIntoView({ block: 'center' });
+          // why: refuse before setting actor-provided text or firing input
+          // handlers. The native form destination is otherwise absent from
+          // type's tool args and invisible to the egress tripwire.
+          var targetForm = submit ? this.form : null;
+          var targetFormMethod = targetForm
+            ? Element.prototype.getAttribute.call(targetForm, 'method')
+            : null;
+          if (targetForm && (targetFormMethod || 'get').toLowerCase() !== 'dialog') {
+            try {
+              var action = Element.prototype.getAttribute.call(targetForm, 'action');
+              var actionOrigin = action
+                ? new URL(action, this.ownerDocument.baseURI).origin
+                : this.ownerDocument.location.origin;
+              if (actionOrigin !== this.ownerDocument.location.origin) {
+                return { ok: false, error: 'cross_origin_form_submission_blocked' };
+              }
+            } catch (e) {
+              return { ok: false, error: 'cross_origin_form_submission_blocked' };
+            }
+          }
           if (typeof this.focus === 'function') this.focus();
           var tag = this.tagName ? this.tagName.toLowerCase() : '';
           ${OBS_SETUP}
@@ -741,7 +825,11 @@ export const createDebuggerPool = () => {
       if (out?.exceptionDetails) {
         return { ok: false, error: `type_failed: ${out.exceptionDetails.text ?? 'page function threw'}` };
       }
-      if (v.ok === false) return { ok: false, error: v.error ?? 'type_failed' };
+      if (v.ok === false) return {
+        ok: false,
+        error: v.error ?? 'type_failed',
+        ...(v.error === 'cross_origin_form_submission_blocked' ? { outcomeKind: 'pre-effect-failure' } : {}),
+      };
       return { ok: true, tag: v.tag ?? '', mutations: v.mutations ?? null };
     } catch (e) {
       const msg = e?.message ?? String(e);

@@ -12,8 +12,8 @@
 // web actor (kind:'web') is the single entry point for web work now. It READS
 // via fetch_url (sessionless / same-origin-scoped) or its drive-a-tab DOM
 // tools, SEARCHES by navigating to a search engine and reading the results,
-// and submits FORMS via its DOM tools (type/click/page_keys) — none of which
-// the orchestrator holds. The primitives (primitives.js) are intentionally NOT
+// and submits same-origin forms via its DOM tools (type/click). These
+// capabilities stay off the orchestrator. The primitives (primitives.js) are intentionally NOT
 // re-exported here; they're internal to the wrappers (fetch_url + capture + view).
 export { captureTool } from './screenshot.js';
 export { viewTool } from './view.js';

@@ -309,7 +309,10 @@ export const loginTool = {
       const results = await scripting.executeScript({
         target: scriptingTarget(tab2),
         func: clickInjected,
-        args: [null, 0, walkId, 1],
+        // The login tool already bound this exact IdP destination to a fresh
+        // user confirmation and a one-shot excursion grant. That narrower
+        // authority is the only caller allowed through the generic form guard.
+        args: [null, 0, walkId, 1, idpOrigin],
       });
       scriptResult = results[0]?.result;
     } catch (e) {

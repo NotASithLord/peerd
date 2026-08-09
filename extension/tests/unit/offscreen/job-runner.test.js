@@ -223,11 +223,13 @@ throw new Error('unrelated failure');`,
         sendToSW: async () => ({
           ok: false, error: 'auth_waiting_for_user', endTurn: true,
           endTurnContent: 'Finish signing in in the open tab.',
+          endTurnOutcomeKind: 'pre-effect-failure',
         }),
       },
     );
     expect(result.endTurn).toBe(true);
     expect(result.endTurnContent).toBe('Finish signing in in the open tab.');
+    expect(result.endTurnOutcomeKind).toBe('pre-effect-failure');
     expect(result.value).toBe(undefined);
   });
 

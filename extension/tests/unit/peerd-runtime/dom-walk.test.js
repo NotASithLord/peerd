@@ -16,6 +16,7 @@ import { domWalkInjected, createRefRegistry } from '/peerd-runtime/index.js';
 import { hasPasswordFieldInjected } from '/peerd-runtime/dom/walk-injected.js';
 import { liveDocumentLocationInjected } from '/peerd-runtime/tools/defs/dom-helpers.js';
 import { snapshotTool, clickTool, typeTool } from '/peerd-runtime/tools/defs/index.js';
+import { clickInjected } from '/peerd-runtime/tools/defs/click.js';
 import { TEST_TIME_ORIGIN } from '../../helpers/browser-scripting.js';
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
@@ -251,6 +252,202 @@ describe('snapshot → click/type over walk refs — full chain', () => {
       expect(contentOf(r)).toContain('"matchedCount": 1');
       expect(field.value).toBe('Ada Lovelace');
       expect(inputs).toBe(1);
+    });
+  });
+
+  it('allows same-origin form submission through type {submit:true}', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      const form = /** @type {HTMLFormElement} */ (host.querySelector('form'));
+      const field = /** @type {HTMLInputElement} */ (host.querySelector('#dw-name'));
+      // The fixture form's empty action resolves to this document, which is the
+      // exact same-origin case the guard must leave alone. Prevent navigation so
+      // a successful native requestSubmit remains observable inside the runner.
+      let submits = 0;
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        submits += 1;
+      });
+      const r = await typeTool.execute({ selector: '#dw-name', text: 'same origin', submit: true }, ctx);
+      expect(r.ok).toBe(true);
+      expect(field.value).toBe('same origin');
+      expect(submits).toBeGreaterThan(0);
+    });
+  });
+
+  it('blocks a cross-origin submit click before focus, click, or submission', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      const form = /** @type {HTMLFormElement} */ (host.querySelector('form'));
+      const button = /** @type {HTMLButtonElement} */ (host.querySelector('#dw-send'));
+      form.action = 'https://collector.invalid/receive';
+      button.type = 'submit';
+      button.disabled = false;
+      let focuses = 0;
+      let clicks = 0;
+      let submits = 0;
+      button.addEventListener('focus', () => { focuses += 1; });
+      button.addEventListener('click', () => { clicks += 1; });
+      form.addEventListener('submit', (event) => {
+        // Safety net for a regressed guard: fail the assertions without
+        // navigating the in-browser test runner away.
+        event.preventDefault();
+        submits += 1;
+      });
+
+      const r = await clickTool.execute({ selector: '#dw-send' }, ctx);
+      expect(r.ok).toBe(false);
+      expect(errorOf(r)).toBe('cross_origin_form_submission_blocked');
+      expect(focuses).toBe(0);
+      expect(clicks).toBe(0);
+      expect(submits).toBe(0);
+    });
+  });
+
+  it('honors a submitter formaction override when a descendant is clicked', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      const form = /** @type {HTMLFormElement} */ (host.querySelector('form'));
+      const button = /** @type {HTMLButtonElement} */ (host.querySelector('#dw-send'));
+      form.action = location.href;
+      button.type = 'submit';
+      button.disabled = false;
+      button.setAttribute('formaction', 'https://collector.invalid/override');
+      button.innerHTML = '<span id="dw-send-label">Send order</span>';
+      let clicks = 0;
+      let submits = 0;
+      button.addEventListener('click', () => { clicks += 1; });
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        submits += 1;
+      });
+
+      const r = await clickTool.execute({ selector: '#dw-send-label' }, ctx);
+      expect(r.ok).toBe(false);
+      expect(errorOf(r)).toBe('cross_origin_form_submission_blocked');
+      expect(clicks).toBe(0);
+      expect(submits).toBe(0);
+    });
+  });
+
+  it('blocks cross-origin submission activated through a label', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      const form = /** @type {HTMLFormElement} */ (host.querySelector('form'));
+      const button = /** @type {HTMLButtonElement} */ (host.querySelector('#dw-send'));
+      form.action = 'https://collector.invalid/receive';
+      button.type = 'submit';
+      button.disabled = false;
+      const label = document.createElement('label');
+      label.htmlFor = button.id;
+      label.id = 'dw-send-label-control';
+      label.textContent = 'Submit through label';
+      form.appendChild(label);
+      let clicks = 0;
+      let submits = 0;
+      button.addEventListener('click', () => { clicks += 1; });
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        submits += 1;
+      });
+
+      const r = await clickTool.execute({ selector: '#dw-send-label-control' }, ctx);
+      expect(r.ok).toBe(false);
+      expect(errorOf(r)).toBe('cross_origin_form_submission_blocked');
+      expect(clicks).toBe(0);
+      expect(submits).toBe(0);
+    });
+  });
+
+  it('blocks a label nested inside a cross-origin submit button', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      const form = /** @type {HTMLFormElement} */ (host.querySelector('form'));
+      const button = /** @type {HTMLButtonElement} */ (host.querySelector('#dw-send'));
+      form.action = 'https://collector.invalid/receive';
+      button.type = 'submit';
+      button.disabled = false;
+      button.innerHTML = '<label id="dw-nested-submit-label">Send order</label>';
+      let submits = 0;
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        submits += 1;
+      });
+
+      const r = await clickTool.execute({ selector: '#dw-nested-submit-label' }, ctx);
+      expect(r.ok).toBe(false);
+      expect(errorOf(r)).toBe('cross_origin_form_submission_blocked');
+      expect(submits).toBe(0);
+    });
+  });
+
+  it('is not bypassed by a form control named action', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      const form = /** @type {HTMLFormElement} */ (host.querySelector('form'));
+      const button = /** @type {HTMLButtonElement} */ (host.querySelector('#dw-send'));
+      form.setAttribute('action', 'https://collector.invalid/receive');
+      button.type = 'submit';
+      button.disabled = false;
+      const clobber = document.createElement('input');
+      clobber.name = 'action';
+      form.appendChild(clobber);
+      expect(form.action === /** @type {unknown} */ (clobber)).toBe(true);
+
+      const r = await clickTool.execute({ selector: '#dw-send' }, ctx);
+      expect(r.ok).toBe(false);
+      expect(errorOf(r)).toBe('cross_origin_form_submission_blocked');
+    });
+  });
+
+  it('pins the confirmed login exception to the exact live action origin', async () => {
+    await withFixture((host) => {
+      const form = /** @type {HTMLFormElement} */ (host.querySelector('form'));
+      const button = /** @type {HTMLButtonElement} */ (host.querySelector('#dw-send'));
+      button.type = 'submit';
+      button.disabled = false;
+      form.addEventListener('submit', (event) => { event.preventDefault(); });
+      form.action = 'https://accounts.example/start';
+      const allowed = clickInjected('#dw-send', 0, null, 1, 'https://accounts.example');
+      expect(allowed.ok).toBe(true);
+
+      form.action = 'https://collector.invalid/receive';
+      const refused = clickInjected('#dw-send', 0, null, 1, 'https://accounts.example');
+      expect(refused.ok).toBe(false);
+      expect(refused.error).toBe('cross_origin_form_submission_blocked');
+    });
+  });
+
+  it('blocks cross-origin type submission before value, focus, or input events', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      const form = /** @type {HTMLFormElement} */ (host.querySelector('form'));
+      const field = /** @type {HTMLInputElement} */ (host.querySelector('#dw-name'));
+      form.action = 'https://collector.invalid/receive';
+      field.value = 'unchanged';
+      let focuses = 0;
+      let inputs = 0;
+      let changes = 0;
+      let keys = 0;
+      let submits = 0;
+      field.addEventListener('focus', () => { focuses += 1; });
+      field.addEventListener('input', () => { inputs += 1; });
+      field.addEventListener('change', () => { changes += 1; });
+      field.addEventListener('keydown', () => { keys += 1; });
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        submits += 1;
+      });
+
+      const r = await typeTool.execute({ selector: '#dw-name', text: 'scraped secret', submit: true }, ctx);
+      expect(r.ok).toBe(false);
+      expect(errorOf(r)).toBe('cross_origin_form_submission_blocked');
+      expect(field.value).toBe('unchanged');
+      expect(focuses).toBe(0);
+      expect(inputs).toBe(0);
+      expect(changes).toBe(0);
+      expect(keys).toBe(0);
+      expect(submits).toBe(0);
     });
   });
 
