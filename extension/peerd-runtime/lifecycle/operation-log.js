@@ -252,6 +252,9 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
    * @param {unknown} input.retryClass
    * @param {string} input.generationId
    * @param {string} [input.idempotencyKey]
+   * @param {string} [input.intentKey]
+   * @param {string} [input.turnId]
+   * @param {boolean} [input.userInitiated]
    * @param {string} [input.target]
    * @param {string} [input.confirmationRef]
    * @param {Record<string, unknown>} [input.confirmationProof]  the consumed
@@ -278,6 +281,9 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
       generationId: input.generationId,
       dispatched: false,
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+      ...(input.intentKey ? { intentKey: input.intentKey } : {}),
+      ...(input.turnId ? { turnId: input.turnId } : {}),
+      ...(input.userInitiated === true ? { userInitiated: true } : {}),
       ...(input.target ? { target: input.target } : {}),
       ...(input.confirmationRef ? { confirmationRef: input.confirmationRef } : {}),
       ...(input.confirmationProof ? { confirmationProof: input.confirmationProof } : {}),
@@ -293,6 +299,11 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
   /** All records still in a nonterminal state — the reconciler's input. */
   const listNonterminal = async () =>
     Object.values(await load()).filter((record) => !isTerminal(record.state));
+
+  /** Unresolved external effects that autonomous work must not step past. */
+  const listOutcomeUnknown = async () =>
+    Object.values(await load())
+      .filter((record) => record.state === OPERATION_STATES.OUTCOME_UNKNOWN);
 
   /** @param {import('./reconcile.js').OperationRecord} record
    *  @param {import('./operation-state.js').OperationState} to
@@ -422,7 +433,7 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
   });
 
   return {
-    begin, get, listNonterminal, transition, markDispatched,
+    begin, get, listNonterminal, listOutcomeUnknown, transition, markDispatched,
     settle, resolveUnknown, newAttempt,
     getTombstone, drainUnknownOverflow,
   };

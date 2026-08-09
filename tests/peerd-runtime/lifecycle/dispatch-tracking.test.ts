@@ -436,6 +436,49 @@ describe('the replay guard — guarantee 2', () => {
     });
     expect((begun as { refuse: { error: string } }).refuse.error).toStartWith('outcome_unknown:');
   });
+
+  test('a fresh call id cannot repeat unknown intent in the same or a synthetic turn', async () => {
+    const { tracker } = makeTracker();
+    const first = await tracker.beginTracking({
+      callId: 'c1', tool: { name: 'submit_form', retryClass: 'E' },
+      sessionId: 's', args: { form: 'checkout', value: 1 },
+      turnId: 'turn-1', userInitiated: true,
+    });
+    await tracker.settleTracking((first as { handle: any }).handle, {
+      ok: false, error: 'request timed out',
+    });
+
+    for (const attempt of [
+      { callId: 'c2', turnId: 'turn-1', userInitiated: true },
+      { callId: 'c3', turnId: 'turn-2', userInitiated: false },
+    ]) {
+      const replay = await tracker.beginTracking({
+        ...attempt,
+        tool: { name: 'submit_form', retryClass: 'E' },
+        sessionId: 's', args: { value: 1, form: 'checkout' },
+      });
+      expect((replay as { refuse: { error: string } }).refuse.error)
+        .toStartWith('outcome_unknown:');
+    }
+  });
+
+  test('a new user turn can deliberately repeat previously unknown intent', async () => {
+    const { tracker } = makeTracker();
+    const first = await tracker.beginTracking({
+      callId: 'c1', tool: { name: 'submit_form', retryClass: 'E' },
+      sessionId: 's', args: { form: 'checkout' },
+      turnId: 'turn-1', userInitiated: true,
+    });
+    await tracker.settleTracking((first as { handle: any }).handle, {
+      ok: false, error: 'request timed out',
+    });
+    const deliberate = await tracker.beginTracking({
+      callId: 'c2', tool: { name: 'submit_form', retryClass: 'E' },
+      sessionId: 's', args: { form: 'checkout' },
+      turnId: 'turn-2', userInitiated: true,
+    });
+    expect(deliberate && 'handle' in deliberate).toBe(true);
+  });
 });
 
 describe('the full dispatcher path', () => {

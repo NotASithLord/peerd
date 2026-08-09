@@ -537,6 +537,19 @@ const vault = createVault({
 // append — so a long-lived install's audit log doesn't grow unbounded.
 const auditLog = createAuditLog({ idb, maxEntries: CHANNEL_DEFAULTS.auditLogMaxEntries });
 
+// Resolve an actor/spawned operation to the root chat whose user owns the
+// intent. The lifecycle notice path and the autonomous replay guard must use
+// the same ancestry rule or they can disagree about which goal is blocked.
+const resolveLifecycleRootSession = async (/** @type {string} */ sid) => {
+  let cursor = sid;
+  for (let hops = 0; hops < 8; hops += 1) {
+    const record = await sessions.get(cursor).catch(() => null);
+    if (!record?.parentSessionId) break;
+    cursor = record.parentSessionId;
+  }
+  return cursor;
+};
+
 // ---- Lifecycle boot (the recovery contract's imperative shell) -------------
 // Every SW start mints a new generation, settles the previous generation's
 // orphaned operation records (interrupted vs outcome_unknown by retry
@@ -560,15 +573,7 @@ const lifecycleBoot = makeLifecycleBoot({
   // Actor sessions may never take another turn, so their recovery notices
   // walk parentSessionId up to the root chat (bounded — a corrupt chain
   // stops at the depth cap and falls back to the child).
-  resolveNoticeSession: async (/** @type {string} */ sid) => {
-    let cursor = sid;
-    for (let hops = 0; hops < 8; hops += 1) {
-      const record = await sessions.get(cursor).catch(() => null);
-      if (!record?.parentSessionId) break;
-      cursor = record.parentSessionId;
-    }
-    return cursor;
-  },
+  resolveNoticeSession: resolveLifecycleRootSession,
   nonce: () => crypto.randomUUID(),
 });
 /** @type {ReturnType<typeof makeDispatchTracker> | ReturnType<typeof makeFailClosedTracker> | null} */
@@ -2076,7 +2081,11 @@ const pageActivity = createPageActivityReporter({
   scripting: browser.scripting,
 });
 
-const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, actorInstanceId, actorType, actorBacking, actorSurface } = {}) => {
+const buildToolContext = async (/** @type {any} */ {
+  sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted,
+  actorInstanceId, actorType, actorBacking, actorSurface, lifecycleTurnId,
+  lifecycleUserInitiated,
+} = {}) => {
   // SECURITY: never build a tool context against an unloaded or failed
   // denylist. Every dispatch path (main turn, direct dispatch, spawned actors)
   // routes through here, so browser and open-web tools cannot interpret an
@@ -2206,6 +2215,9 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // path through this builder — main turn, actor relay, page-call — records
     // side-effecting calls durably and refuses unproven replays.
     lifecycle: lifecycleTracker,
+    ...(typeof lifecycleTurnId === 'string' && lifecycleTurnId
+      ? { lifecycleTurnId } : {}),
+    lifecycleUserInitiated: lifecycleUserInitiated === true,
     // DESIGN-17: the message_actor sender gate's untrusted-ORIGIN signal. A
     // synthetic turn (goal continuation / async wake / actor reply-wake) is
     // "inbound" — refused — UNLESS it is an explicit first-party continuation
@@ -4547,6 +4559,17 @@ goalRunner = makeGoalRunner({
   // so check-offs show; '' when no list yet (todo/core.js formatTodoBlock).
   getTodoBlock: async (/** @type {string} */ sid) =>
     formatTodoBlock(/** @type {any} */ (await sessions.get(sid))?.todos),
+  hasUnresolvedSideEffects: async (/** @type {string} */ sid) => {
+    // Reconciliation must commit before this query. Otherwise a resumed goal
+    // could inspect the old nonterminal record, see no outcome_unknown yet,
+    // and start the exact continuation this guard exists to stop.
+    await lifecycleArmed;
+    const unknowns = await lifecycleBoot.operationLog.listOutcomeUnknown();
+    for (const record of unknowns) {
+      if (await resolveLifecycleRootSession(record.sessionId) === sid) return true;
+    }
+    return false;
+  },
 });
 
 // ---------------------------------------------------------------------------

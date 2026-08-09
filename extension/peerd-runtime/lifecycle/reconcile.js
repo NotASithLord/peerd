@@ -33,6 +33,9 @@ import { LIFECYCLE_EVENTS, lifecycleAuditEntry } from './audit-events.js';
  * @property {number} attempt
  * @property {import('./operation-state.js').OperationState} state
  * @property {string} [idempotencyKey]
+ * @property {string} [intentKey]
+ * @property {string} [turnId]
+ * @property {boolean} [userInitiated]
  * @property {string} [target]
  * @property {string} [confirmationRef]
  * @property {Record<string, unknown>} [confirmationProof]  consumed

@@ -143,6 +143,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // durable actor-host health loads. Sampling that sentinel would falsely tell
   // the model actors are unavailable and can consume a mailbox wake for good.
   await waitForActorIsolation();
+  const lifecycleTurnId = crypto.randomUUID();
 
   // Lazy session create — bind the chat to whatever provider/model the user
   // has configured (no provider is assumed on a fresh install; see
@@ -435,9 +436,13 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     ? {
       exposure: EXPOSURE_ACTOR, sessionId, activeTabId, synthetic, trusted,
       actorInstanceId, actorType, actorBacking,
+      lifecycleTurnId, lifecycleUserInitiated: synthetic !== true,
       ...(actorSurface ? { actorSurface } : {}),
     }
-    : { exposure: 'main', sessionId, activeTabId, synthetic, trusted });
+    : {
+      exposure: 'main', sessionId, activeTabId, synthetic, trusted,
+      lifecycleTurnId, lifecycleUserInitiated: synthetic !== true,
+    });
   // why: thread THIS turn's abort signal onto the tool ctx so a tool that can
   // block IN-BAND unwinds on Stop / the turn timeout instead of parking the
   // turn — message_actor with await:true (which resolves the actor's reply into

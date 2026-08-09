@@ -391,11 +391,15 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
    *   proof is minted, CONSUMED, and persisted on the record (§8.3: the
    *   durable forensic chain shows what was approved, under which
    *   generation, and that the approval covers exactly one dispatch)
-   * @param {Record<string, unknown>} [input.args]  post-hook args; C/D
-   *   records derive their deterministic idempotency key from these
-   * @returns {Promise<BeginOutcome>}
-   */
-  const beginTrackingInner = async ({ callId, tool, sessionId, actorId, target, confirmed, args }) => {
+ * @param {Record<string, unknown>} [input.args]  post-hook args; C/D
+ *   records derive their deterministic idempotency key from these
+ * @param {string} [input.turnId] one stable id for the whole model turn
+ * @param {boolean} [input.userInitiated] false for synthetic continuations
+ * @returns {Promise<BeginOutcome>}
+ */
+  const beginTrackingInner = async ({
+    callId, tool, sessionId, actorId, target, confirmed, args, turnId, userInitiated,
+  }) => {
     const retryClass = normalizeRetryClass(retryClassFor(tool));
     if (retryClass === RETRY_CLASSES.PURE_READ) return null;
     if (typeof callId !== 'string' || !callId) return null;
@@ -406,6 +410,40 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     // sessions happen to see the same provider call id — that is a new
     // operation, not a replay.
     const operationId = sessionId ? `${sessionId}:${callId}` : callId;
+    // D/E intent identity is independent of the provider's call id. This
+    // closes the fresh-id replay shape: after an ambiguous dispatch, a model
+    // cannot express the same tool and args again inside the same turn or a
+    // synthetic continuation. A genuinely new user turn is fresh authority.
+    let intentKey;
+    if (retryClass === RETRY_CLASSES.SIDE_EFFECT
+        || retryClass === RETRY_CLASSES.CONDITIONAL_ACTION) {
+      try {
+        intentKey = await idempotencyKeyFor(tool.name ?? 'tool', args);
+        const unknowns = await operationLog.listOutcomeUnknown();
+        const prior = unknowns.find((record) =>
+          record.sessionId === (sessionId || 'unknown-session')
+          && record.intentKey === intentKey && record.operationId !== operationId);
+        const newUserTurn = userInitiated === true && typeof turnId === 'string'
+          && turnId && prior?.turnId !== turnId;
+        if (prior && !newUserTurn) {
+          const verdict = decideRecovery({ retryClass, dispatched: true });
+          return {
+            refuse: {
+              error: `outcome_unknown: ${tool.name ?? 'this action'} matches an `
+                + 'earlier dispatch whose result is unknown. Verify the external '
+                + 'state before repeating it. A synthetic continuation is not new '
+                + 'user authority.',
+              recovery: describeRecovery(verdict, {
+                retryClass, operationId: prior.operationId, toolName: prior.toolName,
+              }).agent,
+            },
+          };
+        }
+      } catch (error) {
+        return refuseUntracked(retryClass, tool.name,
+          `intent replay check failed (${error instanceof Error ? error.message : String(error)})`);
+      }
+    }
     // Tombstone check (D/E only — the only classes that mint them): a call
     // id whose FULL record was pruned still carries compact replay
     // identity; re-presenting it is refused exactly as the record would
@@ -455,7 +493,7 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     // richness, never the dispatch's safety.
     const idempotencyKey = (retryClass === RETRY_CLASSES.IDEMPOTENT_WRITE
       || retryClass === RETRY_CLASSES.CONDITIONAL_ACTION)
-      ? await idempotencyKeyFor(tool.name ?? 'tool', args).catch(() => undefined)
+      ? (intentKey ?? await idempotencyKeyFor(tool.name ?? 'tool', args).catch(() => undefined))
       : undefined;
     // An approved confirmation becomes a single-use proof, consumed BEFORE
     // dispatch and persisted on the record: generation-bound (a restart
@@ -498,6 +536,9 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
         generationId: generationId(),
         ...(target ? { target } : {}),
         ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(intentKey ? { intentKey } : {}),
+        ...(typeof turnId === 'string' && turnId ? { turnId } : {}),
+        ...(userInitiated === true ? { userInitiated: true } : {}),
         ...(confirmationProof ? {
           confirmationRef: `${operationId}:confirm`,
           confirmationProof,

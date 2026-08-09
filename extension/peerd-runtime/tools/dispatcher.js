@@ -280,6 +280,8 @@ const liveTabUrl = async (ctx) => {
  *     end: (tabId: number) => unknown,
  *   } | null,
  *   lifecycle?: ReturnType<import('../lifecycle/dispatch-tracking.js').makeDispatchTracker> | null,
+ *   lifecycleTurnId?: string,
+ *   lifecycleUserInitiated?: boolean,
  *   consumeBrowserChildPolicyNotice?: (tabId: number) => Array<{ reason: string, outcome: string, child: string, retryable: boolean }>,
  *   waitForBrowserChildPolicyNotice?: (tabId: number, timeoutMs: number) => Promise<boolean>,
  *   hasPendingBrowserChildPolicy?: (tabId: number) => boolean,
@@ -619,6 +621,8 @@ export const dispatchToolCall = async (call, ctx) => {
       // Post-hook args: Class C/D records derive their deterministic
       // idempotency key from these.
       args,
+      turnId: ctx.lifecycleTurnId,
+      userInitiated: ctx.lifecycleUserInitiated,
     }).catch((error) => {
       // beginTracking is a TOTAL function (see its wrapper) — reaching this
       // catch means something violated that contract. The old behavior here
