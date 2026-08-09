@@ -159,15 +159,22 @@ const normalizeFileMap = (fileMap, entry, declaredKinds = {}) => {
   return { files, fileKinds, totalBytes };
 };
 
-/** @param {string} appId */
-const opfsForApp = (appId) => opfsHelpers(['peerd-apps', appId]);
+/** @param {string} appId @param {() => void | Promise<void>} [beforeMutation] */
+const opfsForApp = (appId, beforeMutation = () => {}) =>
+  opfsHelpers(['peerd-apps', appId], { beforeMutation });
 
 /**
  * @param {Object} deps
  * @param {ReturnType<typeof import('/peerd-engine/index.js').createAppRegistry>} deps.registry
  * @param {ReturnType<typeof import('./app-tab-tracker.js').createAppTabTracker>} deps.tracker
+ * @param {() => void | Promise<void>} [deps.beforeOpfsMutation]
  */
-export const createAppClient = ({ registry, tracker }) => {
+export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => {} }) => {
+  // why injected: App files are a self-hosted durable surface. The lifecycle
+  // schema guard must run at the physical OPFS boundary, including callers of
+  // the exposed helper, without making the engine module import runtime policy.
+  const guardedOpfsForApp = (/** @type {string} */ appId) =>
+    opfsForApp(appId, beforeOpfsMutation);
   /** @type {Map<string, Promise<unknown>>} */
   const mutationTails = new Map();
 
@@ -343,11 +350,11 @@ export const createAppClient = ({ registry, tracker }) => {
     });
 
     try {
-      const opfs = opfsForApp(record.id);
+      const opfs = guardedOpfsForApp(record.id);
       for (const { path, stored } of normalized.files) await opfs.write(path, stored);
       if (sessionId) await registry.setDefaultForSession(sessionId, record.id);
     } catch (error) {
-      try { await opfsForApp(record.id).nuke(); } catch { /* best effort before catalog rollback */ }
+      try { await guardedOpfsForApp(record.id).nuke(); } catch { /* best effort before catalog rollback */ }
       await registry.delete(record.id);
       throw error;
     }
@@ -366,7 +373,7 @@ export const createAppClient = ({ registry, tracker }) => {
     const updated = await withMutation(id, async () => {
       const rec = await registry.get(id);
       if (!rec) return null;
-      const opfs = opfsForApp(id);
+      const opfs = guardedOpfsForApp(id);
       /** @type {Map<string, { path: string, stored: string | Uint8Array<ArrayBuffer>, size: number, kind: 'text' | 'binary' }>} */
       const replacementMap = new Map();
       if (typeof html === 'string') {
@@ -428,7 +435,7 @@ export const createAppClient = ({ registry, tracker }) => {
       if (path === rec.entryFile && replacement.kind === 'binary') {
         throw new AppFileContentError(`entryFile must be text: ${path}`);
       }
-      const rollbackBytes = await writeReplacements(opfsForApp(id), [replacement]);
+      const rollbackBytes = await writeReplacements(guardedOpfsForApp(id), [replacement]);
       try {
         const updated = await registry.update(id, {
           fileKinds: { ...(rec.fileKinds ?? {}), [path]: replacement.kind },
@@ -448,7 +455,7 @@ export const createAppClient = ({ registry, tracker }) => {
     const id = await resolveId({ sessionId, appId });
     const rec = await registry.get(id);
     if (!rec) throw new Error(`app not found: ${id}`);
-    const bytes = await opfsForApp(id).readBytes(path);
+    const bytes = await guardedOpfsForApp(id).readBytes(path);
     if (isBinaryAppFile(path, bytes, rec.fileKinds?.[path])) throw new AppBinaryFileError(path);
     return new TextDecoder().decode(bytes);
   };
@@ -457,7 +464,7 @@ export const createAppClient = ({ registry, tracker }) => {
   const readFileBytes = async ({ appId, path, sessionId }) => {
     validateAppPath(path);
     const id = await resolveId({ sessionId, appId });
-    return opfsForApp(id).readBytes(path);
+    return guardedOpfsForApp(id).readBytes(path);
   };
 
   /**
@@ -470,7 +477,7 @@ export const createAppClient = ({ registry, tracker }) => {
     const id = await resolveId({ appId });
     const normalized = normalizeFileMap(files, entryFile, fileKinds);
     return withMutation(id, async () => {
-      const opfs = opfsForApp(id);
+      const opfs = guardedOpfsForApp(id);
       const oldRecord = await registry.get(id);
       if (!oldRecord) throw new Error(`app not found: ${id}`);
       /** @type {Record<string, Uint8Array<ArrayBuffer>>} */
@@ -518,7 +525,7 @@ export const createAppClient = ({ registry, tracker }) => {
   /** @param {{ appId?: string, sessionId?: string }} args */
   const listFiles = async ({ appId, sessionId }) => {
     const id = await resolveId({ sessionId, appId });
-    return opfsForApp(id).list();
+    return guardedOpfsForApp(id).list();
   };
 
   /**
@@ -531,7 +538,7 @@ export const createAppClient = ({ registry, tracker }) => {
     return withMutation(id, async () => {
       const record = await registry.get(id);
       if (!record) throw new Error(`app not found: ${id}`);
-      const opfs = opfsForApp(id);
+      const opfs = guardedOpfsForApp(id);
       const listed = await opfs.list();
       if (listed.length > MAX_APP_FILES) {
         throw new AppFileLimitError(`App has too many files: ${listed.length} > ${MAX_APP_FILES}`);
@@ -583,7 +590,7 @@ export const createAppClient = ({ registry, tracker }) => {
       const rec = await registry.get(id);
       if (!rec) throw new Error(`app not found: ${id}`);
       if (path === rec.entryFile) throw new Error(`refusing to delete entry file: ${path}`);
-      const opfs = opfsForApp(id);
+      const opfs = guardedOpfsForApp(id);
       const backup = await opfs.readBytes(path);
       await opfs.delete(path);
       const nextKinds = { ...(rec.fileKinds ?? {}) };
@@ -618,10 +625,15 @@ export const createAppClient = ({ registry, tracker }) => {
   const deleteApp = async (appId) => {
     const rec = await registry.get(appId);
     if (!rec) return false;
+    // Preflight before closing the live tab. The OPFS helper repeats this at
+    // the physical mutation boundary, but an early refusal avoids visible UX
+    // damage and prevents a caught nuke refusal from falling through to the
+    // metadata delete.
+    await beforeOpfsMutation();
     await tracker.closeTab(appId);
     await withMutation(appId, async () => {
       await new Promise((r) => setTimeout(r, 100));
-      try { await opfsForApp(appId).nuke(); }
+      try { await guardedOpfsForApp(appId).nuke(); }
       catch (e) { console.warn('[app-client] OPFS nuke failed', e); }
       await registry.delete(appId);
     });
@@ -647,7 +659,7 @@ export const createAppClient = ({ registry, tracker }) => {
     const allApps = await registry.list();
     for (const app of allApps) {
       try {
-        const opfs = opfsForApp(app.id);
+        const opfs = guardedOpfsForApp(app.id);
         const files = await opfs.list();
         for (const f of files) {
           const path = f.path.replace(/^\/+/, '');
@@ -681,6 +693,6 @@ export const createAppClient = ({ registry, tracker }) => {
     open,
     delete: deleteApp,
     search,
-    opfsForApp,
+    opfsForApp: guardedOpfsForApp,
   };
 };

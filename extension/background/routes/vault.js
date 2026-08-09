@@ -15,13 +15,14 @@
 
 /**
  * @param {Record<string, any>} deps
- * @returns {Record<string, (msg?: any) => Promise<any>>}
+ * @returns {Record<string, (msg?: any, sender?: unknown) => Promise<any>>}
  */
 export const makeVaultRoutes = (deps) => {
   const {
     vault, auditLog, kv, idb, base64ToBytes,
     ensureOffscreen, maybeStartBaseNetwork, pushState, purgeVaultBlob,
-    confirmCoordinator, sessionCache, maybeAutoResumeAfterRecovery, resumeGoalRuns, resumeSchedules,
+    confirmCoordinator, sessionCache, isActualSidepanelSender, isActualHomeSender,
+    maybeAutoResumeAfterRecovery, resumeGoalRuns, resumeSchedules,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,
     VaultLockedError,
@@ -236,10 +237,26 @@ export const makeVaultRoutes = (deps) => {
     // --- confirmation ---
     // The side panel posts the user's answer to a pending confirm prompt;
     // we resolve the waiting Promise so the dispatcher proceeds (or blocks).
-    'confirm/answer': async ({ id, answer }) => {
-      // resolve → settle → onSettled broadcasts confirm/resolved to every surface
-      // (DESIGN-12), so no explicit broadcast is needed here.
-      confirmCoordinator.resolve(id, answer);
+    'confirm/answer': async ({
+      id, answer, ownerSessionId, sessionId, dispatchId,
+    }, sender) => {
+      // A confirmation is a HUMAN authority route. Exact page provenance keeps
+      // engine tabs and other first-party extension contexts from answering,
+      // while the active-root check prevents a stale/background chat card from
+      // granting authority after the user switches away.
+      if (!isActualSidepanelSender?.(sender) && !isActualHomeSender?.(sender)) {
+        return { ok: false, error: 'confirm-answer-unauthorized-sender' };
+      }
+      const activeOwnerSessionId = await sessionCache.sessionGet('currentSessionId');
+      if ((activeOwnerSessionId ?? null) !== (ownerSessionId ?? null)) {
+        return { ok: false, error: 'confirm-answer-foreign-owner' };
+      }
+      // resolve → settle → onSettled dismisses the prompt on the active
+      // owner surface (DESIGN-12), so no explicit broadcast is needed here.
+      const resolved = confirmCoordinator.resolve({
+        id, ownerSessionId, sessionId, dispatchId,
+      }, answer);
+      if (!resolved) return { ok: false, error: 'confirm-answer-stale-or-foreign' };
       return { ok: true };
     },
   };

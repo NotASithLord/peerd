@@ -1,8 +1,8 @@
 // @ts-check
 // The store write guard — §11.5's "refuse to mutate" made universal.
 //
-// checkStores can mark a durable surface read-only (a NEWER schema stamp
-// than this build supports). Detection alone is a log line; this module is
+// checkStores can mark a durable surface read-only when its schema is not
+// writable by this build. Detection alone is a log line; this module is
 // the enforcement: the SW wraps its kv and idb adapters through the guard
 // ONCE at construction, and every store built on those adapters — sessions,
 // vault, memory, hooks, audit, dpop, engine registries — inherits the
@@ -12,22 +12,25 @@
 //
 // Physical mapping lives on STORE_REGISTRY entries (store-registry.js
 // `physical`): registry store name → kv keys/prefixes + idb object stores.
-// Two surfaces open their OWN IndexedDB databases and cannot be guarded
+// Two surfaces open their OWN IndexedDB databases and are not reached
 // through the injected adapters — skills (peerd-skills) and App bodies
-// (peerd-app-bodies); the registry marks them selfHosted and their
-// enforcement rides those modules (documented gap, THREAT-MODEL follow-up).
+// (peerd-app-bodies). The registry marks them selfHosted and their modules
+// call this guard at the mutation boundary. OPFS hosts do the same.
 //
 // Pure factory; the wrappers close over the mutable blocked set.
 
 import { STORE_REGISTRY } from './store-registry.js';
 
 export class StoreReadOnlyError extends Error {
-  /** @param {string} store @param {string} target */
-  constructor(store, target) {
-    super(`store '${store}' is read-only (newer schema than this peerd supports); `
-      + `refusing write to ${target}. Upgrade peerd or restore a compatible backup — no data was changed.`);
+  /** @param {string} store @param {string} target
+   * @param {{ reason?: string, diagnosticId?: string }} [detail] */
+  constructor(store, target, detail = {}) {
+    super(`store '${store}' is read-only; refusing write to ${target}. `
+      + `No data was changed.${detail.reason ? ` ${detail.reason}.` : ''}`
+      + `${detail.diagnosticId ? ` Diagnostic: ${detail.diagnosticId}.` : ''}`);
     this.name = 'StoreReadOnlyError';
     this.store = store;
+    this.diagnosticId = detail.diagnosticId;
   }
 }
 
@@ -42,17 +45,26 @@ export const makeWriteGuard = () => {
   /** @type {Set<string>} every blocked registry store, by NAME — the
    *  assertWritable gate for self-hosted stores keys on this. */
   const blockedNames = new Set();
+  /** @type {Map<string, { reason?: string, diagnosticId?: string }>} */
+  const blockedDetails = new Map();
 
   /**
    * Block the named registry stores. Unknown names are ignored (the check
    * that produced them is the authority); calling again is additive.
-   * @param {string[]} storeNames
+   * @param {Array<string | { store: string, reason?: string, diagnosticId?: string }>} stores
    */
-  const block = (storeNames) => {
-    for (const name of Array.isArray(storeNames) ? storeNames : []) {
+  const block = (stores) => {
+    for (const input of Array.isArray(stores) ? stores : []) {
+      const name = typeof input === 'string' ? input : input?.store;
       const entry = STORE_REGISTRY.find((s) => s.store === name);
       if (!entry) continue; // unknown names are ignored — the check is the authority
       blockedNames.add(name);
+      if (input && typeof input === 'object') {
+        blockedDetails.set(name, {
+          ...(input.reason ? { reason: input.reason } : {}),
+          ...(input.diagnosticId ? { diagnosticId: input.diagnosticId } : {}),
+        });
+      }
       const physical = /** @type {{ kvKeys?: string[], kvPrefixes?: string[],
         idbStores?: string[] } | undefined} */ (
         /** @type {any} */ (entry)?.physical);
@@ -63,6 +75,10 @@ export const makeWriteGuard = () => {
       for (const os of physical.idbStores ?? []) blockedIdbStores.set(os, name);
     }
   };
+
+  /** @param {string} store @param {string} target */
+  const readOnlyError = (store, target) =>
+    new StoreReadOnlyError(store, target, blockedDetails.get(store));
 
   /** @param {string} key @returns {string | undefined} blocking store name */
   const kvBlockedBy = (key) => {
@@ -83,13 +99,13 @@ export const makeWriteGuard = () => {
     ...kv,
     set: (/** @type {string} */ key, /** @type {unknown} */ value) => {
       const store = kvBlockedBy(key);
-      if (store) throw new StoreReadOnlyError(store, `kv:${key}`);
+      if (store) throw readOnlyError(store, `kv:${key}`);
       return kv.set(key, value);
     },
     ...(typeof kv.delete === 'function' ? {
       delete: (/** @type {string} */ key) => {
         const store = kvBlockedBy(key);
-        if (store) throw new StoreReadOnlyError(store, `kv:${key}`);
+        if (store) throw readOnlyError(store, `kv:${key}`);
         return /** @type {Function} */ (kv.delete)(key);
       },
     } : {}),
@@ -112,7 +128,7 @@ export const makeWriteGuard = () => {
       if (typeof original !== 'function') continue;
       wrapped[verb] = (/** @type {string} */ objectStore, /** @type {any[]} */ ...rest) => {
         const store = blockedIdbStores.get(objectStore);
-        if (store) throw new StoreReadOnlyError(store, `idb:${objectStore}`);
+        if (store) throw readOnlyError(store, `idb:${objectStore}`);
         return original(objectStore, ...rest);
       };
     }
@@ -128,7 +144,7 @@ export const makeWriteGuard = () => {
     ...adapter,
     set: (/** @type {string} */ key, /** @type {unknown} */ value) => {
       const store = blockedIdbStores.get(objectStore);
-      if (store) throw new StoreReadOnlyError(store, `idb:${objectStore}/${key}`);
+      if (store) throw readOnlyError(store, `idb:${objectStore}/${key}`);
       return adapter.set(key, value);
     },
   });
@@ -143,7 +159,7 @@ export const makeWriteGuard = () => {
    */
   const assertWritable = (storeName) => {
     if (blockedNames.has(storeName)) {
-      throw new StoreReadOnlyError(storeName, `self-hosted:${storeName}`);
+      throw readOnlyError(storeName, `self-hosted:${storeName}`);
     }
   };
 

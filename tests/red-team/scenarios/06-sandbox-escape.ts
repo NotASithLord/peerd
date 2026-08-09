@@ -23,6 +23,7 @@ import {
 } from '../harness.ts';
 import { applyRealmSeal } from '../../../extension/engine-tabs/notebook-tab/notebook-neutralizers.js';
 import { resolveRelativePath } from '../../../extension/peerd-engine/module-resolver.js';
+import { opfsHelpers } from '../../../extension/peerd-engine/opfs.js';
 import { composeApp, stripMetaRefresh } from '../../../extension/peerd-engine/app-compose.js';
 import { normalizeRequest, needsWebWriteConfirm } from '../../../extension/peerd-engine/vm-net/http-bridge.js';
 import { makeOffscreenActorChannelClient } from '../../../extension/background/offscreen-actor-channel-client.js';
@@ -69,7 +70,7 @@ export const scenario: Scenario = {
   title: 'Sandbox escape (Notebook worker, App iframe, WebVM)',
   adversary: 'malicious sandboxed code',
   asset: 'the host origin, the network, and other sandbox instances',
-  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; a remote module restricts its whole run to compute only and all remote-controlled output is fenced; an App cannot break out of its iframe or observe a targeted actor job; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
+  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; OPFS mutation is checked before any root handle is opened; a remote module restricts its whole run to compute only and all remote-controlled output is fenced; an App cannot break out of its iframe or observe a targeted actor job; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
   threatModelRef: 'INV-6',
   tier: 'unit',
   async run() {
@@ -92,6 +93,24 @@ export const scenario: Scenario = {
     for (const c of rawChannels) {
       const r = throwsEgress(c.fn);
       probes.push(r.ok ? blocked(c.label, r.detail) : leaked(c.label, r.detail));
+    }
+
+    // A forged worker relay still lands at the host helper. A blocked schema
+    // posture must stop every mutator before OPFS is touched.
+    {
+      let rootReads = 0;
+      const opfs = opfsHelpers(['peerd-workspace', 'red-team'], {
+        getDirectory: async () => { rootReads += 1; return {} as any; },
+        beforeMutation: () => { throw new Error('workspace read-only'); },
+      });
+      const outcomes = await Promise.allSettled([
+        opfs.write('forged.txt', 'no'), opfs.delete('forged.txt'), opfs.nuke(),
+      ]);
+      const stoppedBeforeRoot = rootReads === 0
+        && outcomes.every((outcome) => outcome.status === 'rejected');
+      probes.push(stoppedBeforeRoot
+        ? blocked('forge an OPFS mutation while workspace storage is read-only', 'all mutators refused before opening the origin root')
+        : leaked('forge an OPFS mutation while workspace storage is read-only', `rootReads=${rootReads}`));
     }
 
     // 2) Mint a fresh un-sealed realm to recover natives: refused.
@@ -273,6 +292,7 @@ export const scenario: Scenario = {
     const result = summarize(probes, [
       'applyRealmSeal (raw-channel block + native deletion + bridge pin)',
       'resolveRelativePath (OPFS ".." collapse)',
+      'opfsHelpers (host-side mutation posture before root access)',
       'buildWorkerSource + formatEvalResult (remote graph capability collapse + output fence)',
       'composeApp + stripMetaRefresh (App iframe breakout/navigation defense)',
       'makeOffscreenActorChannelClient (exact-client channel transfer)',
@@ -283,6 +303,7 @@ export const scenario: Scenario = {
     result.verifiedBy = [
       'extension/tests/unit/engine-tabs/notebook-tab/notebook-seal.test.js (real worker realm)',
       'extension/tests/unit/offscreen/job-runner.test.js (a2a run denied egress + delegation)',
+      'extension/tests/unit/offscreen/job-runner-workspace.test.js (worker and actor-lane OPFS posture bypass refusal)',
       'tests/peerd-engine/module-resolver-toolbox.test.ts (remote-to-local toolbox refusal)',
       'tests/engine-tabs/notebook-tab/worker-caps-profile.test.ts (remote whole-run profile)',
       'tests/peerd-runtime/tools/remote-import-policy.test.ts (remote output fence)',

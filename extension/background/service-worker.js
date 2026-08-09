@@ -42,6 +42,7 @@ import { ACTOR_WORKER_PROTOCOL } from '/offscreen/actor-worker-protocol.js';
 import { makeActorIsolationStateStore } from './actor-isolation-state.js';
 import { actorDeliveryIdsFromMessage, makeActorRecoveryGate } from './actor-recovery-gate.js';
 import { createActorLiveProjection } from './actor-live-projection.js';
+import { answerWithSessionConfirmGrant } from './confirm-session-grants.js';
 
 import {
   // vault
@@ -194,9 +195,9 @@ import {
   makeWriteGuard,
   makeEngineLiveness,
   retryClassForTool,
-  checkStores,
-  stampStores,
+  applyStoreBootPosture,
   VERSION_STAMP_KEY,
+  migrationBlockedReport,
   classifyFailure,
   // hooks (pre/post-tool-use lifecycle)
   registerHook,
@@ -349,6 +350,7 @@ import {
   isKnownIdp, isKnownIdpHost, knownIdpDomains, describeLandingStop, originPhrase, isUgcHost,
   isAddressableBrowserTab,
   finalActorTurnReply, finalAssistantText,
+  groupResourceLossNotices,
   // The debug surface: the bundle assembler + the delegation-tree walk the
   // session/debugBundle route runs (pure; the SW supplies the reads).
   assembleDebugBundle, childSessionIdsOf,
@@ -370,7 +372,6 @@ import { createJsTabTracker } from './notebook-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
 import { createScriptRunRegistry } from './script-runs.js';
 import { createContextSnapshots } from './context-snapshots.js';
-import { confirmGrantKey } from './confirm-grant-key.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import {
   makeOffscreenActorChannelClient, selectExactActorHostClient,
@@ -392,7 +393,7 @@ import {
   createAppRegistry,
   appFileCheckpointContent,
   // artifact export/import (.peerd envelopes — DESIGN-10)
-  opfsHelpers,
+  opfsHelpers as rawOpfsHelpers,
   // design 06: the resolver transform, injected into the toolbox write-time
   // parse check (functional core — the check itself lives in peerd-runtime).
   buildModule,
@@ -537,6 +538,19 @@ const vault = createVault({
 // append — so a long-lived install's audit log doesn't grow unbounded.
 const auditLog = createAuditLog({ idb, maxEntries: CHANNEL_DEFAULTS.auditLogMaxEntries });
 
+// Resolve an actor/spawned operation to the root chat whose user owns the
+// intent. The lifecycle notice path and the autonomous replay guard must use
+// the same ancestry rule or they can disagree about which goal is blocked.
+const resolveLifecycleRootSession = async (/** @type {string} */ sid) => {
+  let cursor = sid;
+  for (let hops = 0; hops < 8; hops += 1) {
+    const record = await sessions.get(cursor).catch(() => null);
+    if (!record?.parentSessionId) break;
+    cursor = record.parentSessionId;
+  }
+  return cursor;
+};
+
 // ---- Lifecycle boot (the recovery contract's imperative shell) -------------
 // Every SW start mints a new generation, settles the previous generation's
 // orphaned operation records (interrupted vs outcome_unknown by retry
@@ -555,20 +569,12 @@ const lifecycleBoot = makeLifecycleBoot({
   appendAudit: (/** @type {any} */ entry) =>
     auditLog.append({ type: entry.event, details: entry }),
   // postChatNote is declared far below — the standard late-dep deferral.
-  notify: (/** @type {string} */ _sessionId, /** @type {string} */ text) =>
-    postChatNote(`Recovered from a browser interruption: ${text}`),
+  notify: (/** @type {string} */ sessionId, /** @type {string} */ text) =>
+    postChatNote(text, null, sessionId),
   // Actor sessions may never take another turn, so their recovery notices
   // walk parentSessionId up to the root chat (bounded — a corrupt chain
   // stops at the depth cap and falls back to the child).
-  resolveNoticeSession: async (/** @type {string} */ sid) => {
-    let cursor = sid;
-    for (let hops = 0; hops < 8; hops += 1) {
-      const record = await sessions.get(cursor).catch(() => null);
-      if (!record?.parentSessionId) break;
-      cursor = record.parentSessionId;
-    }
-    return cursor;
-  },
+  resolveNoticeSession: resolveLifecycleRootSession,
   nonce: () => crypto.randomUUID(),
 });
 /** @type {ReturnType<typeof makeDispatchTracker> | ReturnType<typeof makeFailClosedTracker> | null} */
@@ -586,33 +592,41 @@ const lifecycleArmed = lifecycleBoot.init()
       generationId: () => generation.id,
       retryClassFor: retryClassForTool,
       classifyFailure: /** @type {any} */ (classifyFailure),
+      resolveOwnerSessionId: resolveLifecycleRootSession,
     });
-    // §11.1 — independent per-store schema stamps. A newer stamp than this
-    // build supports leaves that store read-only (refuse-newer); the check
-    // result is audited so a blocked profile is diagnosable, and stamping
-    // only proceeds when every store is writable.
+    // §11.1: independent per-store schema stamps. An incompatible stamp
+    // leaves that store read-only. The check result is audited so a blocked
+    // profile is diagnosable, and stamping only proceeds when every store is
+    // writable.
     const readStamps = async () => (await kv.get(VERSION_STAMP_KEY)) ?? undefined;
-    const storesCheck = await checkStores({ read: readStamps });
-    if (storesCheck.ok) {
-      await stampStores({
-        read: readStamps,
-        write: (/** @type {any} */ map) => kv.set(VERSION_STAMP_KEY, map),
-      });
-    } else {
-      const blocked = storesCheck.stores
-        .filter((/** @type {any} */ x) => x.mode === 'read-only');
+    const storesCheck = await applyStoreBootPosture({
+      read: readStamps,
+      write: (/** @type {any} */ map) => kv.set(VERSION_STAMP_KEY, map),
       // §11.5 ENFORCED: the guard flips these surfaces' physical locations
-      // to refuse-writes at the shared adapter chokepoint. Reads keep
-      // working; the thrown StoreReadOnlyError names the store and says no
-      // data was changed.
-      storeWriteGuard.block(blocked.map((/** @type {any} */ x) => x.store));
+      // to refuse writes at the shared adapter chokepoint. Passing the full
+      // verdict gives tool failures the same reason and diagnostic as audit.
+      block: (/** @type {any} */ blocked) => storeWriteGuard.block(blocked),
+    });
+    if (!storesCheck.ok) {
+      const { blocked } = storesCheck;
       for (const s of blocked) {
+        const report = migrationBlockedReport({
+          diagnosticId: s.diagnosticId,
+          reason: s.reason,
+        });
         console.error('[sw] store schema blocked (writes refused):', s.store, s.reason);
         auditLog.append({
           type: 'lifecycle.migration.failed',
-          details: { store: s.store, reason: s.reason, diagnosticId: s.diagnosticId },
+          details: { store: s.store, ...report.agent },
         }).catch(() => {});
       }
+      const first = blocked[0];
+      const report = migrationBlockedReport({
+        diagnosticId: first?.diagnosticId,
+        reason: first?.reason,
+      });
+      postChatNote(`${report.user} Blocked store${blocked.length === 1 ? '' : 's'}: `
+        + `${blocked.map((s) => s.store).join(', ')}.`);
     }
     return generation;
   })
@@ -995,7 +1009,19 @@ const runCache = createRunCacheStore();
 // — the `script` tool's workspace:true root). Wired into session/archive,
 // the terminal session-lifecycle event. OPFS is reachable from the SW
 // (peerd-engine/opfs.js header); nuke() already swallows a missing subtree.
-const nukeSessionWorkspace = (/** @type {string} */ sid) => opfsHelpers(['peerd-workspace', sid]).nuke();
+const assertOpfsWritable = async () => {
+  const generation = await lifecycleArmed;
+  if (!generation) {
+    throw new Error(
+      'Workspace files are read-only because storage safety checks did not complete. No data was changed.',
+    );
+  }
+  storeWriteGuard.assertWritable('opfs-workspaces');
+};
+const opfsHelpers = (/** @type {string[]} */ rootPath) =>
+  rawOpfsHelpers(rootPath, { beforeMutation: assertOpfsWritable });
+const nukeSessionWorkspace = (/** @type {string} */ sid) =>
+  opfsHelpers(['peerd-workspace', sid]).nuke();
 
 // design js-superpower/06 — the TOOLBOX: durable agent-authored ES modules
 // (peerd:toolbox/<name>), its OWN IDB DB. A distinct trust class from skills
@@ -2076,7 +2102,11 @@ const pageActivity = createPageActivityReporter({
   scripting: browser.scripting,
 });
 
-const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, actorInstanceId, actorType, actorBacking, actorSurface } = {}) => {
+const buildToolContext = async (/** @type {any} */ {
+  sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted,
+  actorInstanceId, actorType, actorBacking, actorSurface, lifecycleTurnId,
+  lifecycleUserInitiated,
+} = {}) => {
   // SECURITY: never build a tool context against an unloaded or failed
   // denylist. Every dispatch path (main turn, direct dispatch, spawned actors)
   // routes through here, so browser and open-web tools cannot interpret an
@@ -2102,6 +2132,9 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // record, not the chat's.
   const sessionId = overrideSessionId ?? await sessionCache.sessionGet('currentSessionId');
   const activeSession = sessionId ? await sessions.get(sessionId) : null;
+  const lifecycleOwnerSessionId = sessionId
+    ? await resolveLifecycleRootSession(sessionId)
+    : null;
   // Plan/Act permission axis (Feature 03). Per-session, persisted in the
   // session record; sessionCache is the MV3-survival fallback for the
   // pre-session-create window. See resolvePermission for the resolution
@@ -2206,6 +2239,10 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // path through this builder — main turn, actor relay, page-call — records
     // side-effecting calls durably and refuses unproven replays.
     lifecycle: lifecycleTracker,
+    lifecycleOwnerSessionId,
+    ...(typeof lifecycleTurnId === 'string' && lifecycleTurnId
+      ? { lifecycleTurnId } : {}),
+    lifecycleUserInitiated: lifecycleUserInitiated === true,
     // DESIGN-17: the message_actor sender gate's untrusted-ORIGIN signal. A
     // synthetic turn (goal continuation / async wake / actor reply-wake) is
     // "inbound" — refused — UNLESS it is an explicit first-party continuation
@@ -3095,7 +3132,11 @@ const appTabTracker = createAppTabTracker({
   onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('app', id, tabId),
   onDrop: (/** @type {string} */ id) => engineLiveness.drop('app', id),
 });
-const appClient = createAppClient({ registry: appRegistry, tracker: appTabTracker });
+const appClient = createAppClient({
+  registry: appRegistry,
+  tracker: appTabTracker,
+  beforeOpfsMutation: () => storeWriteGuard.assertWritable('app-manifests'),
+});
 
 // Sessions that have ENGAGED the dweb — a dweb tool was called this turn-or-
 // earlier. Monotonic per session, SW-lifetime (a cold start resets it; the next
@@ -3379,7 +3420,7 @@ const isActualOptionsSender = (/** @type {any} */ sender) => isOptionsSender(sen
 const isActualSidepanelSender = (/** @type {any} */ sender) => isSidepanelSender(sender, {
   runtimeId: browser.runtime?.id,
   extensionOrigin: browser.runtime?.getURL?.('') ?? '',
-  sidepanelUrl: browser.runtime?.getURL?.('sidepanel/index.html') ?? '',
+  sidepanelUrl: browser.runtime?.getURL?.('sidepanel/sidepanel.html') ?? '',
 });
 const isActualHomeSender = (/** @type {any} */ sender) => isHomeSender(sender, {
   runtimeId: browser.runtime?.id,
@@ -3927,11 +3968,30 @@ const {
 // panel and resolves when the panel posts back 'confirm/answer'.
 // Exercised whenever the Plan/Act decideAction policy marks an action as
 // needing confirmation.
+let confirmationUiTail = Promise.resolve();
+/**
+ * Serialize scoped confirmation pushes so resolve→next-prompt order stays
+ * deterministic. The badge remains global, but an unrelated chat never
+ * receives another owner's prompt UUID or answer controls.
+ * @param {any} prompt
+ * @param {(prompt: any) => void} deliver
+ */
+const deliverConfirmationToActiveOwner = (prompt, deliver) => {
+  confirmationUiTail = confirmationUiTail.then(async () => {
+    const activeOwner = await sessionCache.sessionGet('currentSessionId');
+    if ((activeOwner ?? null) !== (prompt?.ownerSessionId ?? null)) return;
+    deliver(prompt);
+  }).catch((error) => {
+    console.warn('[sw] scoped confirmation delivery failed', error);
+  });
+};
 const confirmCoordinator = makeConfirmCoordinator({
   notifySidePanel: (prompt) => {
     if (!uiConnected()) return;
-    try { uiPorts.broadcast({ type: 'confirm/request', prompt }); }
-    catch (e) { console.warn('[sw] confirm/request post failed', e); }
+    deliverConfirmationToActiveOwner(prompt, (ownedPrompt) => {
+      try { uiPorts.broadcast({ type: 'confirm/request', prompt: ownedPrompt }); }
+      catch (e) { console.warn('[sw] confirm/request post failed', e); }
+    });
   },
   // Hang protection: no side-panel port → the agent can't ask, so auto-deny
   // immediately rather than awaiting forever.
@@ -3940,7 +4000,11 @@ const confirmCoordinator = makeConfirmCoordinator({
   // reason — answer, 120s timeout, or session reset (DESIGN-12). Without this a
   // timed-out/reset prompt lingers, and a later click "approves" an action that
   // was already auto-denied.
-  onSettled: (id) => { try { uiPorts.broadcast({ type: 'confirm/resolved', id }); } catch { /* port closing */ } },
+  onSettled: (id, prompt) => {
+    deliverConfirmationToActiveOwner(prompt, () => {
+      try { uiPorts.broadcast({ type: 'confirm/resolved', id }); } catch { /* port closing */ }
+    });
+  },
   // Raise an action badge while a confirm is pending so a waiting agent is
   // visible even if the panel is hidden; cleared at zero.
   onPendingChange: (count) => {
@@ -3969,7 +4033,7 @@ const sessionConfirmGrants = new Map();
  * prior "yes for session" doesn't re-prompt, then falls back to the
  * round-trip. Records new session grants.
  *
- * @param {{ tool: string, sessionId?: string|null, origins?: string[] }} prompt
+ * @param {{ tool: string, sessionId?: string|null, origins?: string[], oneShot?: boolean }} prompt
  * @param {AbortSignal} [signal]
  * @returns {Promise<'yes_once'|'yes_session'|'no'>}
  */
@@ -4005,7 +4069,9 @@ const confirmAction = async (prompt, signal) => {
   // has turned confirmWebWrites OFF, non-GET egress is auto-approved — their
   // explicit, risk-acknowledged choice. The session-grant cache still applies
   // when it's on.
-  if (prompt.tool === WEB_WRITE_CONFIRM_KEY && settingsStore.get().confirmWebWrites === false) {
+  if (prompt.oneShot !== true
+    && prompt.tool === WEB_WRITE_CONFIRM_KEY
+    && settingsStore.get().confirmWebWrites === false) {
     return signal?.aborted ? 'no' : 'yes_once';
   }
   // R5 (origin-bound grants): "approve for this session" means this tool ON
@@ -4013,7 +4079,6 @@ const confirmAction = async (prompt, signal) => {
   // origin for DOM tools, the target host for web writes), and the grant key
   // folds it in. Approving `click` on site A no longer covers site B. Tools
   // with no origin surface keep the bare tool key (confirm-grant-key.js).
-  const grantKey = confirmGrantKey(prompt);
   // DESIGN-17: an ACTOR never accumulates a STANDING grant — its confirms are
   // strictly PER-TURN (an actor can be steered by untrusted instance output
   // across turns, so a once-granted "yes for session" must not silence the next
@@ -4024,23 +4089,33 @@ const confirmAction = async (prompt, signal) => {
     try { ephemeral = (await sessions.get(sid))?.kind === 'actor'; } catch { ephemeral = false; }
   }
   if (signal?.aborted) return 'no';
-  if (!ephemeral && sid && sessionConfirmGrants.get(sid)?.has(grantKey)) {
-    return 'yes_session';
-  }
-  // ...and TELL THE PANEL, so it can stop offering a button that grants
-  // nothing. why this became load-bearing with #242: before the UGC override, a
-  // default-config user (confirmActions OFF) never saw an actor confirm at all,
-  // so the dead "Allow for session" was unreachable. Now it is the second thing
-  // they see on a GitHub issue, twice per comment — a control that looks like
-  // the way to stop the prompting and silently isn't. The downgrade itself is
-  // correct and stays; what was wrong was offering the choice.
-  const answer = await confirmCoordinator.confirm(/** @type {any} */ (
-    downgradesActorConfirm(prompt.tool, ephemeral, 'yes_session') ? { ...prompt, ephemeral: true } : prompt
-  ), signal);
-  if (answer === 'yes_session' && sid && !ephemeral) {
-    if (!sessionConfirmGrants.has(sid)) sessionConfirmGrants.set(sid, new Set());
-    (/** @type {Set<string>} */ (sessionConfirmGrants.get(sid))).add(grantKey);
-  }
+  const answer = await answerWithSessionConfirmGrant({
+    prompt,
+    sessionId: sid,
+    ephemeral,
+    grants: sessionConfirmGrants,
+    request: async () => {
+      // Keep execution custody and display custody separate. `sessionId` remains
+      // the exact turn that can be stopped or granted; `ownerSessionId` is the root
+      // chat where a human may see and answer the prompt. This prevents a background
+      // actor from placing an authority dialog over whichever unrelated chat happens
+      // to be open when it asks.
+      const ownerSessionId = sid ? await resolveLifecycleRootSession(sid) : null;
+      const ownedPrompt = { ...prompt, ownerSessionId };
+      // ...and TELL THE PANEL, so it can stop offering a button that grants
+      // nothing. why this became load-bearing with #242: before the UGC override, a
+      // default-config user (confirmActions OFF) never saw an actor confirm at all,
+      // so the dead "Allow for session" was unreachable. Now it is the second thing
+      // they see on a GitHub issue, twice per comment. A control that looks like
+      // the way to stop the prompting and silently isn't. The downgrade itself is
+      // correct and stays; what was wrong was offering the choice.
+      return confirmCoordinator.confirm(/** @type {any} */ (
+        downgradesActorConfirm(prompt.tool, ephemeral, 'yes_session')
+          ? { ...ownedPrompt, ephemeral: true }
+          : ownedPrompt
+      ), signal);
+    },
+  });
   // Ephemeral: an actor's yes_session approves THIS call only (no standing grant),
   // EXCEPT a2a_contact — the sanctioned exception (an explicit first-contact
   // allowlist decision, the peer did shown to the user), whose raw answer survives
@@ -4179,7 +4254,12 @@ const buildStateSnapshot = async () => {
       onboardingComplete: !!profile.onboardingComplete,
     },
     settings: { ...settingsStore.get() },
-    pendingConfirm: null,
+    // The snapshot is the switch-back and late-joiner path for confirmation
+    // state. Live confirm/request events remain the fast path; this selects only
+    // prompts owned by the chat represented by this snapshot.
+    pendingConfirm: confirmCoordinator.getPendingForOwner(
+      typeof sessionId === 'string' ? sessionId : null,
+    ),
     // Live actor projections are part of the fresh snapshot, not a lucky stream
     // of events seen only by panels that were already open. Every row is scoped
     // to this viewed root before it crosses the UI boundary.
@@ -4195,7 +4275,17 @@ const buildStateSnapshot = async () => {
 
 const pushState = async () => {
   if (!uiConnected()) return;
-  uiPorts.broadcast({ type: 'state', state: await buildStateSnapshot() });
+  const state = await buildStateSnapshot();
+  const ownerSessionId = typeof state.session?.sessionId === 'string'
+    ? state.session.sessionId : null;
+  // why: buildStateSnapshot awaits several stores. A confirmation can arrive
+  // after its pending read but before this continuation runs, while a switching
+  // panel still identifies as the previous chat and correctly rejects the live
+  // event. Refresh at the delivery boundary, apply the destination state first,
+  // then replay its prompt synchronously so that race cannot hide authority UI.
+  const pendingConfirm = confirmCoordinator.getPendingForOwner(ownerSessionId);
+  uiPorts.broadcast({ type: 'state', state: { ...state, pendingConfirm } });
+  if (pendingConfirm) uiPorts.broadcast({ type: 'confirm/request', prompt: pendingConfirm });
 };
 
 // Keepalive ports we hold references to so they're not GC'd. Recent
@@ -4355,13 +4445,9 @@ browser.runtime.onConnect.addListener((port) => {
     // and replay the current-agent-tab card (it's not in the state snapshot).
     broadcastSurfaces();
     broadcastAgentTab();
-    // Replay a live pending confirm to THIS fresh surface so a late-joiner can
-    // answer it — the state snapshot deliberately doesn't carry confirm state.
-    const pendingPrompt = confirmCoordinator.getPending();
-    if (pendingPrompt) {
-      try { port.postMessage({ type: 'confirm/request', prompt: pendingPrompt }); }
-      catch { /* port closing */ }
-    }
+    // Pending confirmations ride the scoped state snapshot above. Replaying the
+    // latest global prompt here would let a background chat paint authority UI
+    // over the chat this fresh surface is actually viewing.
     // Same idea for a LIVE goal run: its goal/state events only reached ports
     // connected when they fired, and the snapshot carries no goal-run field. So
     // replay each active run to this fresh surface — otherwise a reopened panel
@@ -4547,6 +4633,21 @@ goalRunner = makeGoalRunner({
   // so check-offs show; '' when no list yet (todo/core.js formatTodoBlock).
   getTodoBlock: async (/** @type {string} */ sid) =>
     formatTodoBlock(/** @type {any} */ (await sessions.get(sid))?.todos),
+  hasUnresolvedSideEffects: async (/** @type {string} */ sid) => {
+    // Reconciliation must commit before this query. Otherwise a resumed goal
+    // could inspect the old nonterminal record, see no outcome_unknown yet,
+    // and start the exact continuation this guard exists to stop.
+    await lifecycleArmed;
+    // Exact compact intent can exceed its own bounded store only under extreme
+    // unresolved pressure. The persistent sentinel means no root can prove it
+    // is clear, so autonomous work stops globally until a human directs it.
+    if (await lifecycleBoot.operationLog.unknownIntentOverflowed?.()) return true;
+    const unknowns = await lifecycleBoot.operationLog.listOutcomeUnknown();
+    for (const record of unknowns) {
+      if (await resolveLifecycleRootSession(record.sessionId) === sid) return true;
+    }
+    return false;
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -6897,9 +6998,20 @@ const maybeAutoResumeAfterRecovery = (/** @type {string | null | undefined} */ s
 // confirm round-trip is the same SW ↔ side panel channel memory writes
 // use — /init never silently persists.
 
-const postChatNote = (/** @type {string} */ text, /** @type {any} */ action = null) => {
+const postChatNote = (
+  /** @type {string} */ text,
+  /** @type {any} */ action = null,
+  /** @type {string | null} */ sessionId = null,
+) => {
   if (!uiConnected()) return;
-  try { uiPorts.broadcast({ type: 'turn/system-note', text, ...(action ? { action } : {}) }); }
+  try {
+    uiPorts.broadcast({
+      type: 'turn/system-note',
+      text,
+      ...(action ? { action } : {}),
+      ...(sessionId ? { sessionId } : {}),
+    });
+  }
   catch { /* panel gone */ }
 };
 
@@ -7227,7 +7339,9 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     scriptModelCallRoute(msg, sender),
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
-    pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResumeAfterRecovery, resumeGoalRuns,
+    pushState, purgeVaultBlob, confirmCoordinator, sessionCache,
+    isActualSidepanelSender, isActualHomeSender,
+    maybeAutoResumeAfterRecovery, resumeGoalRuns,
     resumeSchedules,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,
@@ -7285,7 +7399,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
-    listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy,
+    listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
   }),
   ...systemMessageRoutes,
   // denylistNetGuard: an edit changes what the network backstop blocks, so the
@@ -7526,8 +7640,8 @@ const engineTrackersReady = (async () => {
         ...appTabTracker.listLive().map((/** @type {string} */ id) => `app:${id}`),
       ];
       const lost = await engineLiveness.sweep({ surviving });
-      const KIND_LABEL = { vm: 'Linux VM', notebook: 'Notebook', app: 'App' };
       const REGISTRY_OF = { vm: vmRegistry, notebook: jsRegistry, app: appRegistry };
+      const lostResources = [];
       for (const entry of lost) {
         auditLog.append({
           type: 'lifecycle.engine.orphan-reaped',
@@ -7537,17 +7651,15 @@ const engineTrackersReady = (async () => {
         const record = await Promise.resolve(registry?.get?.(entry.id)).catch(() => null);
         const owner = record?.ownerSessionId;
         if (!owner) continue; // no owner to tell; the audit entry stands
-        await lifecycleBoot.parkNotice(owner, {
-          recoveryRecord: {
-            operation: `${entry.kind}:${entry.id}`,
-            recoveryState: 'interrupted',
-            sideEffectStatus: 'none attempted',
-            resourceLost: true,
-          },
-          user: `The ${/** @type {any} */ (KIND_LABEL)[entry.kind] ?? entry.kind} `
-            + `"${record?.name ?? entry.id}" stopped with the browser session. `
-            + 'Your saved files remain, but live process state was lost.',
-        }).catch(() => {});
+        lostResources.push({
+          kind: entry.kind,
+          id: entry.id,
+          name: record?.name,
+          ownerSessionId: owner,
+        });
+      }
+      for (const notice of groupResourceLossNotices(lostResources)) {
+        await lifecycleBoot.parkNotice(notice.sessionId, notice).catch(() => {});
       }
       if (lost.length) {
         console.log('[sw] engine orphans reaped:',

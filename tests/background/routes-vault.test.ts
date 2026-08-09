@@ -40,9 +40,18 @@ const makeDeps = (vaultOver: Record<string, any> = {}) => {
     maybeStartBaseNetwork: (r: string) => { calls.maybeStart.push(r); },
     pushState: () => { calls.pushState.push(1); },
     purgeVaultBlob: async () => {},
-    sessionCache: { sessionGet: async () => null },
+    sessionCache: { sessionGet: async () => 'chat-a' },
     maybeAutoResumeAfterRecovery: () => {},
-    confirmCoordinator: { resolve: (id: string, answer: string) => { calls.resolve = [id, answer]; } },
+    isActualSidepanelSender: (sender: any) => sender?.surface === 'sidepanel',
+    isActualHomeSender: (sender: any) => sender?.surface === 'home',
+    confirmCoordinator: {
+      resolve: (claim: Record<string, unknown>, answer: string) => {
+        calls.resolve = [claim, answer];
+        return claim.ownerSessionId === 'chat-a'
+          && claim.sessionId === 'actor-a'
+          && claim.dispatchId === 'tu-a';
+      },
+    },
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError, VaultLockedError,
   };
@@ -89,8 +98,28 @@ describe('vault routes — success paths', () => {
 
   test('confirm/answer: relays to the coordinator', async () => {
     const { r, calls } = routes();
-    expect(await r['confirm/answer']({ id: 'x', answer: 'yes_once' })).toEqual({ ok: true });
-    expect(calls.resolve).toEqual(['x', 'yes_once']);
+    const message = {
+      id: 'x', answer: 'yes_once', ownerSessionId: 'chat-a',
+      sessionId: 'actor-a', dispatchId: 'tu-a',
+    };
+    expect(await r['confirm/answer'](message, { surface: 'sidepanel' })).toEqual({ ok: true });
+    expect(calls.resolve).toEqual([{
+      id: 'x', ownerSessionId: 'chat-a', sessionId: 'actor-a', dispatchId: 'tu-a',
+    }, 'yes_once']);
+  });
+
+  test('confirm/answer: a foreign chat UUID or non-human surface cannot grant authority', async () => {
+    const { r, calls } = routes();
+    const base = {
+      id: 'leaked', answer: 'yes_once', sessionId: 'actor-a', dispatchId: 'tu-a',
+    };
+    expect(await r['confirm/answer'](
+      { ...base, ownerSessionId: 'chat-a' }, { surface: 'engine' },
+    )).toEqual({ ok: false, error: 'confirm-answer-unauthorized-sender' });
+    expect(await r['confirm/answer'](
+      { ...base, ownerSessionId: 'chat-b' }, { surface: 'home' },
+    )).toEqual({ ok: false, error: 'confirm-answer-foreign-owner' });
+    expect(calls.resolve).toBeUndefined();
   });
 });
 

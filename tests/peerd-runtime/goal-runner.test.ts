@@ -278,6 +278,58 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
 });
 
 describe('makeGoalRunner — outcome hardening (no runaway on failure)', () => {
+  it('halts before a synthetic continuation when a side effect needs verification', async () => {
+    const calls: TurnArgs[] = [];
+    const ends: any[] = [];
+    let checks = 0;
+    const runner = makeGoalRunner({
+      runTurn: async (a: TurnArgs) => { calls.push(a); },
+      hasUnresolvedSideEffects: async () => { checks += 1; return true; },
+      onRunEnd: (sid, info) => ends.push({ sid, ...info }),
+      maxIterations: 10,
+    });
+    await runner.start({ sessionId: 's', goal: 'submit it' });
+    await settle(() => !runner.isActive('s'));
+
+    expect(calls).toHaveLength(1);
+    expect(checks).toBe(1);
+    expect(ends).toHaveLength(1);
+    expect(ends[0]).toMatchObject({
+      sid: 's',
+      phase: 'halted',
+      reason: 'an earlier action needs verification before autonomous work can continue',
+    });
+  });
+
+  it('fails closed when the unresolved-effect check is unavailable', async () => {
+    const calls: TurnArgs[] = [];
+    const runner = makeGoalRunner({
+      runTurn: async (a: TurnArgs) => { calls.push(a); },
+      hasUnresolvedSideEffects: async () => { throw new Error('storage unavailable'); },
+      maxIterations: 10,
+    });
+    await runner.start({ sessionId: 's', goal: 'submit it' });
+    await settle(() => !runner.isActive('s'));
+    expect(calls).toHaveLength(1);
+  });
+
+  it('does not resume a persisted autonomous run past unresolved effects', async () => {
+    const kv = makeKv();
+    kv.store.set(GOAL_RUNS_KEY, {
+      s: { goal: 'submit it', iteration: 1, startedAt: 1 },
+    });
+    const calls: TurnArgs[] = [];
+    const runner = makeGoalRunner({
+      runTurn: async (a: TurnArgs) => { calls.push(a); },
+      hasUnresolvedSideEffects: async () => true,
+      kv,
+    });
+    expect(await runner.resume()).toEqual({ resumed: 1 });
+    await settle(() => !runner.isActive('s'));
+    expect(calls).toHaveLength(0);
+    expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
+  });
+
   it('stops after ONE turn when the turn reports failure (not the whole cap)', async () => {
     const calls: TurnArgs[] = [];
     const runner = makeGoalRunner({

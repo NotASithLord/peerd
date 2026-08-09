@@ -174,6 +174,8 @@ const injectStyle = () => {
  * @param {(dirty: boolean, path: string) => void} [config.onDirtyChange]
  * @param {(path: string, content: string) => Promise<void>} [config.writeFile]
  * @param {(path: string) => Promise<void>} [config.deleteFile]
+ * @param {() => void | Promise<void>} [config.beforeOpfsMutation]
+ * @param {(action: 'create' | 'delete', path: string, error: unknown) => void} [config.onMutationError]
  * @param {string} [config.initialFile]         -- file to open first (default: pinnedFile)
  * @param {(path: string) => boolean} [config.isReadOnlyFile]
  * @param {(path: string) => void} [config.onReadOnlyFile]
@@ -193,6 +195,8 @@ export const createEditor = async (config) => {
     onDirtyChange,
     writeFile,
     deleteFile: deleteFileOverride,
+    beforeOpfsMutation,
+    onMutationError,
     initialFile,
     isReadOnlyFile = () => false,
     onReadOnlyFile,
@@ -225,7 +229,7 @@ export const createEditor = async (config) => {
   const host = /** @type {HTMLElement} */ (mountEl.querySelector('.pe-host'));
 
   // --- OPFS helpers ---
-  const opfs = opfsHelpers(opfsBase);
+  const opfs = opfsHelpers(opfsBase, { beforeMutation: beforeOpfsMutation });
   const { read: opfsRead, write: opfsWrite, delete: opfsDelete, list: opfsList } = opfs;
   const persistFile = writeFile ?? opfsWrite;
   const removeFile = deleteFileOverride ?? opfsDelete;
@@ -593,7 +597,8 @@ export const createEditor = async (config) => {
     if (fileList.includes(name)) { await switchToFile(name); return; }
     try { await persistFile(name, ''); }
     catch (e) {
-      alert(`Couldn't create ${name}: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
+      if (onMutationError) onMutationError('create', name, e);
+      else alert(`Couldn't create ${name}: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
       return;
     }
     await refreshTree();
@@ -635,7 +640,8 @@ export const createEditor = async (config) => {
         queueSave();
       }
       restoreTreeFocus = false;
-      alert(`Delete failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
+      if (onMutationError) onMutationError('delete', path, e);
+      else alert(`Delete failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
       return;
     }
     if (deletedActiveFile) {

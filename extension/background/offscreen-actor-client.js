@@ -360,6 +360,8 @@ export const makeOffscreenActorClient = ({
           }
           const base = await buildToolContext({
             sessionId: actorSessionId,
+            lifecycleTurnId: grant.runId,
+            lifecycleUserInitiated: !grant.inbound,
             ...(grant.inbound ? { synthetic: true, trusted: false } : {}),
           });
           if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
@@ -401,6 +403,8 @@ export const makeOffscreenActorClient = ({
         const base = await buildToolContext({
           exposure: EXPOSURE_ACTOR, sessionId: actorSessionId, activeTabId,
           actorInstanceId: rec.instanceId, actorType: rec.actorType, actorBacking: rec.backing,
+          lifecycleTurnId: grant.runId,
+          lifecycleUserInitiated: !grant.inbound,
           ...(grant.actorSurface ? { actorSurface: grant.actorSurface } : {}),
           ...(grant.inbound ? { synthetic: true, trusted: false } : {}),
         });

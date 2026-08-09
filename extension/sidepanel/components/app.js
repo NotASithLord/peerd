@@ -352,12 +352,19 @@ const confirmationDialogAttrs = (answer, state) => {
  * @property {string} [sideEffect]
  * @property {string} [summary]
  * @property {string} [note]   why this call is being confirmed when the reason
- *   is something other than the ordinary Plan/Act policy (the #242 UGC-zone
- *   rule today). Plain prose, rendered verbatim.
+ *   is something other than the ordinary Plan/Act policy, such as a UGC-zone
+ *   override or a repeat after an unknown outcome. Plain prose, rendered verbatim.
+ * @property {string} [lifecycleTarget] immutable target bound to an
+ *   unknown-outcome repeat approval; never derived from the current live tab
+ * @property {boolean} [oneShot] this approval cannot read or create a standing
+ *   session grant; used for exact unknown-outcome repeats
  * @property {boolean} [ephemeral]  this answer cannot become a standing grant —
  *   DESIGN-17 downgrades an actor's yes_session to yes_once. Set by the SW so
  *   the card does not offer a button that would do nothing.
  * @property {string} [tool]
+ * @property {string | null} [sessionId] exact execution session
+ * @property {string | null} [ownerSessionId] root chat that owns the prompt
+ * @property {string | null} [dispatchId] exact tool dispatch being approved
  * @property {string[]} [origins]
  * @property {'passkey'|'sso'} [method]   login only: the sign-in method the
  *   `login` tool derived from the page (ground truth, not a model argument).
@@ -378,8 +385,12 @@ export const ConfirmModal = {
     const { prompt, uiActions } = vnode.attrs;
     const dialogState = /** @type {{ returnFocus?: HTMLElement | null }} */ (vnode.state);
     /** @param {string} a */
-    const answer = (a) => uiActions?.confirmAnswer?.(prompt.id, a);
+    const answer = (a) => uiActions?.confirmAnswer?.(prompt, a);
     const origins = Array.isArray(prompt.origins) ? prompt.origins.filter(Boolean) : [];
+    const lifecycleTarget = typeof prompt.lifecycleTarget === 'string'
+      && prompt.lifecycleTarget.length > 0
+      ? prompt.lifecycleTarget
+      : null;
 
     // Login consent — its own render path, because a sign-in is the highest-stakes
     // confirm we show and it needs a distinctive, obvious card. The real origin is
@@ -530,6 +541,16 @@ export const ConfirmModal = {
               prompt.note
                 ? m('p.muted', { style: 'margin:0 0 8px;' }, prompt.note)
                 : null,
+              lifecycleTarget
+                ? m('.lifecycle-confirm-target', {
+                    'aria-label': 'Unknown-outcome repeat approval',
+                  }, [
+                    m('span', 'Exact target'),
+                    m('code', lifecycleTarget),
+                    m('span', 'Action'),
+                    m('code', prompt.tool || 'unknown tool'),
+                  ])
+                : null,
               m('pre.confirm-summary', prompt.summary ?? prompt.tool),
             ],
         origins.length
@@ -544,10 +565,14 @@ export const ConfirmModal = {
           // gives the user a control that reads as "stop asking me" and does
           // nothing — worse than not offering it, because they stop looking for
           // another way out.
-          isMemory || isSiteClient || prompt.ephemeral
+          isMemory || isSiteClient || prompt.ephemeral || prompt.oneShot
             ? null
             : m('button.secondary', { type: 'button', onclick: () => answer('yes_session') }, 'Allow for session'),
-          m('button', { type: 'button', onclick: () => answer('yes_once') },
+          m('button', {
+            type: 'button',
+            class: prompt.oneShot ? 'lifecycle-confirm-allow' : '',
+            onclick: () => answer('yes_once'),
+          },
             isMemory ? 'Save' : isSiteClient ? (p.op === 'delete' ? 'Delete client' : 'Save client') : 'Allow once'),
         ]),
       ]),

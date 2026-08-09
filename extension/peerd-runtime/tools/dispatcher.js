@@ -51,6 +51,25 @@ const safeOrigins = (tool, args, ctx) => {
   catch { return []; }
 };
 
+/**
+ * Stable external target for lifecycle intent. Tools normally return origins,
+ * but normalize defensively so equivalent URL spellings cannot split the
+ * sibling-actor replay guard. Non-URL capability addresses remain exact.
+ *
+ * @param {Tool} tool @param {any} args @param {ToolContext} ctx
+ * @returns {string}
+ */
+const lifecycleTarget = (tool, args, ctx) => {
+  const raw = safeOrigins(tool, args, ctx).find((value) =>
+    typeof value === 'string' && value.trim().length > 0);
+  if (!raw) return `tool:${tool.name ?? 'unknown-tool'}`;
+  const trimmed = raw.trim();
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.origin === 'null' ? parsed.href : parsed.origin;
+  } catch { return trimmed; }
+};
+
 const EXPOSED_ERROR_CODE = /^[a-z][a-z0-9_]{0,79}$/;
 const EXPOSED_ERROR_CONTENT_MAX_CHARS = 6000;
 const EXPOSED_ERROR_DETAILS_MAX_CHARS = 8000;
@@ -280,6 +299,8 @@ const liveTabUrl = async (ctx) => {
  *     end: (tabId: number) => unknown,
  *   } | null,
  *   lifecycle?: ReturnType<import('../lifecycle/dispatch-tracking.js').makeDispatchTracker> | null,
+ *   lifecycleTurnId?: string,
+ *   lifecycleUserInitiated?: boolean,
  *   consumeBrowserChildPolicyNotice?: (tabId: number) => Array<{ reason: string, outcome: string, child: string, retryable: boolean }>,
  *   waitForBrowserChildPolicyNotice?: (tabId: number, timeoutMs: number) => Promise<boolean>,
  *   hasPendingBrowserChildPolicy?: (tabId: number) => boolean,
@@ -448,9 +469,12 @@ export const dispatchToolCall = async (call, ctx) => {
   // confirmation inside execute(), security surfaces that can't be toggled
   // off and that render the actual diff/dossier. The site-client tool performs
   // its final live-origin authorization BEFORE that prompt, which a generic
-  // dispatcher confirmation cannot do. Skip the generic prompt for both so the
-  // user is neither asked twice nor prompted for an origin the actor no longer
-  // owns. Plan mode was already enforced by the persona gate above.
+  // dispatcher confirmation cannot do. Skip the ordinary generic prompt for
+  // both so the user is neither asked twice nor prompted for an origin the
+  // actor no longer owns. The rare repeat-after-unknown prompt still runs here:
+  // lifecycle tracking must receive that authority before execute(), then the
+  // tool's detailed proposal remains the final consent surface. Plan mode was
+  // already enforced by the persona gate above.
   const selfConfirms = tool.primitive === 'memory' || tool.name === 'site_client_write';
   const permMode = normalizeMode(ctx.permission?.mode);
   const permConfirm = ctx.permission?.confirmActions ?? DEFAULT_CONFIRM_ACTIONS;
@@ -479,12 +503,34 @@ export const dispatchToolCall = async (call, ctx) => {
       url: await liveTabUrl(ctx),
     })
     : null;
+  // An unresolved matching D/E intent is a special forced-confirm case. Only
+  // a user-initiated turn may open this prompt. Synthetic continuations stay
+  // nonmodal and are refused by beginTracking after the hooks run.
+  const preHookLifecycleTarget = lifecycleTarget(tool, args, ctx);
+  const lifecycleRepeatCandidate = verdict.allowed
+    && ctx.lifecycleUserInitiated === true
+    ? await Promise.resolve(ctx.lifecycle?.requiresIntentConfirmation?.({
+      tool,
+      sessionId: ctx.session?.sessionId ?? undefined,
+      ownerSessionId: ctx.lifecycleOwnerSessionId ?? undefined,
+      target: preHookLifecycleTarget,
+      args,
+      userInitiated: true,
+    })).catch(() => false)
+    : false;
+  const lifecycleRepeatConfirm = lifecycleRepeatCandidate
+    && typeof lifecycleRepeatCandidate === 'object'
+    && lifecycleRepeatCandidate.required === true
+    ? lifecycleRepeatCandidate
+    : false;
   if (ctx.abortSignal?.aborted) return abortedResult('before_confirmation');
 
   // Whether the USER approved this exact dispatch via a confirm round-trip
   // — the lifecycle tracker turns it into a durable single-use proof.
   let userApprovedThisDispatch = false;
-  if (verdict.allowed && (verdict.confirm || ugcRuleId) && !selfConfirms) {
+  const needsDispatcherConfirmation = lifecycleRepeatConfirm
+    || (!selfConfirms && (verdict.confirm || ugcRuleId));
+  if (verdict.allowed && needsDispatcherConfirmation) {
     const confirmEntry = gateResults.find((g) => g.name === 'confirmation');
     /** @type {import('/shared/tool-types.js').ConfirmAnswer | undefined} */
     let answer = 'no';
@@ -502,13 +548,32 @@ export const dispatchToolCall = async (call, ctx) => {
         // of this pre-dispatch UI payload so a later policy stop stays URL-free.
         origins: [],
         summary: summarizeCall(call.name, args),
+        // The repeat approval is bound to this immutable lifecycle claim, not
+        // the tab's mutable live URL. Show the exact value the tracker will
+        // consume so the user can verify what they are authorizing.
+        lifecycleTarget: lifecycleRepeatConfirm
+          ? lifecycleRepeatConfirm.target
+          : undefined,
+        // Unknown-outcome recovery is an approval of this exact repeat, not a
+        // reusable tool grant. The SW independently bypasses and refuses to
+        // create session grants when this flag is present.
+        oneShot: lifecycleRepeatConfirm ? true : undefined,
         // why the note and not a longer summary: summarizeCall truncates every
         // string arg to 40 chars, so the card can't show the payload anyway —
         // what it CAN do is tell the user the one fact they can't see, which is
         // that this page is attacker-authorable. Absent on an ordinary confirm,
         // so the card is unchanged for the common case.
-        note: ugcRuleId ? UGC_CONFIRM_NOTE : undefined,
+        note: ugcRuleId
+          ? UGC_CONFIRM_NOTE
+          : (lifecycleRepeatConfirm
+            ? ('overflow' in lifecycleRepeatConfirm && lifecycleRepeatConfirm.overflow === true
+              ? 'Stored unresolved-action evidence exceeded its local bound. Peerd cannot prove this action is new. Verify the exact target before approving.'
+              : (ctx.session?.kind === 'actor' || ctx.session?.kind === 'spawned'
+                ? 'An actor in this chat wants to repeat an action whose earlier outcome is unknown. Verify the target before approving.'
+                : 'A matching earlier action has an unknown outcome. Verify the target before approving this repeat.'))
+            : undefined),
         sessionId: ctx.session?.sessionId ?? null,
+        dispatchId: call.id ?? null,
       }, ctx.abortSignal);
     } catch {
       answer = 'no';  // fail closed — a broken confirm channel blocks the action
@@ -522,7 +587,9 @@ export const dispatchToolCall = async (call, ctx) => {
       // renders `${gate}: ${reason}` as its tooltip (sidepanel/components/
       // message-list.js), so attributing the zone here surfaces WHICH rule
       // forced the prompt with no new UI and no new plumbing.
-      const how = ugcRuleId ? ` [ugc zone: ${ugcRuleId}]` : '';
+      const how = ugcRuleId
+        ? ` [ugc zone: ${ugcRuleId}]`
+        : (lifecycleRepeatConfirm ? ' [repeat after unknown outcome]' : '');
       confirmEntry.reason = (approved
         ? (answer === 'yes_session' ? 'approved by user (session)' : 'approved by user')
         : 'rejected by user') + how;
@@ -610,15 +677,19 @@ export const dispatchToolCall = async (call, ctx) => {
       callId: call.id,
       tool,
       sessionId: ctx.session?.sessionId ?? undefined,
+      ownerSessionId: ctx.lifecycleOwnerSessionId ?? undefined,
       actorId: /** @type {{ actorInstanceId?: string }} */ (ctx).actorInstanceId,
-      target: safeOrigins(tool, args, ctx)[0],
+      target: lifecycleTarget(tool, args, ctx),
       // The user's approval, if a confirm round-trip ran above — the
       // tracker mints + consumes the single-use, generation-bound proof
       // and persists it on the durable record (§8.3).
       confirmed: userApprovedThisDispatch,
+      confirmedIntent: lifecycleRepeatConfirm,
       // Post-hook args: Class C/D records derive their deterministic
       // idempotency key from these.
       args,
+      turnId: ctx.lifecycleTurnId,
+      userInitiated: ctx.lifecycleUserInitiated,
     }).catch((error) => {
       // beginTracking is a TOTAL function (see its wrapper) — reaching this
       // catch means something violated that contract. The old behavior here
@@ -628,7 +699,7 @@ export const dispatchToolCall = async (call, ctx) => {
       //
       // So this is an INDEPENDENT fail-closed decision, deliberately not
       // routed through the tracker that just failed: classify the tool
-      // directly and refuse D/E. A/B/C keep the historical degradation —
+      // directly and refuse D/E/F. A/B/C keep the historical degradation.
       // duplicate reads are invisible and idempotent writes are safe to
       // repeat, so a broken tracker must not take the read surface down
       // with it.
@@ -637,14 +708,18 @@ export const dispatchToolCall = async (call, ctx) => {
         catch { return RETRY_CLASSES.SIDE_EFFECT; } // classification threw: assume the worst
       })();
       if (retryClass !== RETRY_CLASSES.SIDE_EFFECT
-          && retryClass !== RETRY_CLASSES.CONDITIONAL_ACTION) return null;
+          && retryClass !== RETRY_CLASSES.CONDITIONAL_ACTION
+          && retryClass !== RETRY_CLASSES.RESOURCE) return null;
       const detail = error instanceof Error ? error.message : String(error);
+      const risk = retryClass === RETRY_CLASSES.RESOURCE
+        ? 'a long-lived resource must not run untracked: an interruption could '
+          + 'then never be reported or guarded against, and could leave an orphan'
+        : 'a non-idempotent action must not run untracked: an interruption could '
+          + 'then never be reported or guarded against';
       return {
         refuse: {
           error: `failed: ${call.name} was NOT executed — lifecycle tracking `
-            + `failed unexpectedly (${detail}) and a non-idempotent action must `
-            + 'not run untracked: an interruption could then never be reported '
-            + 'or guarded against.',
+            + `failed unexpectedly (${detail}) and ${risk}.`,
           recovery: {
             category: 'security_degradation',
             state: 'failed',
@@ -708,7 +783,25 @@ export const dispatchToolCall = async (call, ctx) => {
   // outbound messages by it. The UI maps each in-flight tool_use card
   // to its own stream entry; without an id the chunks have no anchor
   // and the renderer drops them.
-  const execCtx = { ...ctx, toolUseId: call.id };
+  const executeConfirm = /** @type {((prompt: Record<string, any>, signal?: AbortSignal) => Promise<import('/shared/tool-types.js').ConfirmAnswer>) | undefined} */ (
+    ctx.confirm
+  );
+  const execCtx = {
+    ...ctx,
+    toolUseId: call.id,
+    // Tools with their own mandatory consent surface call ctx.confirm from
+    // execute(). Bind those prompts to this exact model dispatch too; a prompt
+    // UUID and session are not enough evidence that the answer covers this
+    // particular tool_use.
+    ...(executeConfirm ? {
+      /** @param {Record<string, any>} prompt @param {AbortSignal} [signal] */
+      confirm: (prompt, signal) => executeConfirm({
+        ...prompt,
+        sessionId: prompt?.sessionId ?? ctx.session?.sessionId ?? null,
+        dispatchId: call.id ?? null,
+      }, signal),
+    } : {}),
+  };
 
   // ---- In-page activity indicator ----------------------------------------
   // why here and not in each tab tool: this is the one place every page-acting

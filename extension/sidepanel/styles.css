@@ -47,6 +47,7 @@
   --accent:     var(--p);
   --accent-ink: #0089ac;
   --on-accent:  var(--w);
+  --on-accent-aa: #0B0D0E;
   --danger:     var(--er);
   --danger-ink: #d23b3b;
   --warn:       var(--am);
@@ -2587,7 +2588,30 @@ button.tool-call-header:focus-visible {
   white-space: pre-wrap;
   word-break: break-word;
 }
+.lifecycle-confirm-target {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(127, 127, 127, 0.12);
+  font-size: 12px;
+}
+.lifecycle-confirm-target span { color: var(--fg-muted); }
+.lifecycle-confirm-target code {
+  overflow-wrap: anywhere;
+  color: var(--fg);
+}
 .confirm-modal .peerd-modal-actions { flex-wrap: wrap; }
+.lifecycle-confirm-allow {
+  /* why: this is the safety-critical approval after an unknown outcome. The
+   * ordinary light-theme white-on-cyan button is only 2.24:1; fixed dark ink
+   * keeps this decision at 8.32:1 in both color schemes without moving every
+   * existing primary-button baseline. */
+  color: var(--on-accent-aa);
+}
 
 /* --- login consent card (the `login` tool, kind:'login') --------------
  * A sign-in is the highest-stakes confirm, so it gets a distinctive card:

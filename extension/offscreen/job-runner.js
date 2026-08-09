@@ -276,6 +276,13 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
   // only where the root points differs, and only the SW ever picks it.
   const usedWorkspace = typeof workspaceSessionId === 'string' && workspaceSessionId.length > 0;
   const opfs = opfsForRoot(usedWorkspace ? ['peerd-workspace', workspaceSessionId] : ['peerd-jobs', jobId]);
+  const assertWorkspaceWritable = async () => {
+    if (!usedWorkspace) return;
+    const response = await sendToSW('lifecycle/assert-opfs-writable', {});
+    if (response?.ok === true) return;
+    throw new Error(response?.error
+      ?? 'Workspace files are read-only because their storage format cannot be updated safely. No data was changed.');
+  };
   // Worker termination does not cancel async work already running in THIS host
   // document. Every OPFS operation therefore shares a host-owned signal and is
   // tracked until settlement. Stop/timeout/done aborts the signal first; the
@@ -940,6 +947,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
               let value;
               if (m.op === 'read') value = await opfs.read(m.args.path, { signal: hostOpsAbort.signal });
               else if (m.op === 'write') {
+                await assertWorkspaceWritable();
                 // Workspace write hygiene, enforced at the RELAY (the host choke
                 // point — an in-realm check alone could be unseated): the same
                 // per-file ceiling js_write_file applies tool-side, so worker
@@ -962,9 +970,13 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
                 }
                 await opfs.write(m.args.path, m.args.content, { signal: hostOpsAbort.signal }); value = null;
               }
-              // delete stays legal even when the workspace is over budget — it is
-              // the ONE in-band way back under it (the over-budget nudge names it).
-              else if (m.op === 'delete') { await opfs.delete(m.args.path, { signal: hostOpsAbort.signal }); value = null; }
+              // Delete stays legal when the workspace is only over budget. A
+              // blocked lifecycle posture still refuses every mutation.
+              else if (m.op === 'delete') {
+                await assertWorkspaceWritable();
+                await opfs.delete(m.args.path, { signal: hostOpsAbort.signal });
+                value = null;
+              }
               else if (m.op === 'list') value = await opfs.list({ signal: hostOpsAbort.signal });
               else throw new Error(`unknown opfs op: ${m.op}`);
               return value;

@@ -25,6 +25,7 @@
     "e2e:verify": "bun scripts/cdp/run-e2e-verify.mjs",
     "test:e2e": "bun scripts/cdp/run-e2e-verify.mjs --functional",
     "test:e2e:all": "bun scripts/cdp/run-e2e-verify.mjs --functional",
+    "test:e2e:lifecycle": "bun scripts/cdp/run-lifecycle-faults.mjs",
     "test:e2e:goal": "bun scripts/cdp/run-e2e-verify.mjs --only=goal",
     "test:e2e:stop": "bun scripts/cdp/run-e2e-verify.mjs --only=stop",
     "test:e2e:error": "bun scripts/cdp/run-e2e-verify.mjs --only=error",
@@ -82,6 +83,7 @@
     "eslint": "10.4.1",
     "fake-indexeddb": "^6.2.5",
     "globals": "^17.6.0",
+    "puppeteer-core": "^25.5.0",
     "typescript": "^6.0.3",
     "web-ext": "10.3.0"
   },

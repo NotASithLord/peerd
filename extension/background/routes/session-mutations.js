@@ -120,6 +120,32 @@ export const makeSessionMutationRoutes = (deps) => {
         // keep running on a put-away session. Awaited: durably forget the run so
         // it can't resurrect on the next unlock (#60).
         await haltGoalRun?.(sessionId);
+        // Archive is also Stop. End the root turn and every delegated actor
+        // before cleaning up durable state so no hidden work can continue on
+        // a put-away chat.
+        if (turnSlots?.stop?.(sessionId)) {
+          auditLog.append({ type: 'session_ended', sessionId, details: { reason: 'session_archive' } }).catch(() => {});
+        }
+        /** @type {string[]} */
+        const actorSessionIds = [];
+        if (actorMessaging?.stopActorsFor) {
+          for (const actorSessionId of actorMessaging.stopActorsFor(sessionId)) {
+            actorSessionIds.push(actorSessionId);
+            if (turnSlots.stop(actorSessionId)) {
+              auditLog.append({ type: 'actor_stopped', sessionId, details: { actorSessionId, reason: 'session_archive_cascade' } }).catch(() => {});
+            }
+          }
+        }
+        // Settle lifecycle records before returning. For dispatched Class D/E
+        // actions this preserves uncertainty and a verification notice instead
+        // of falsely reporting cancellation.
+        // Tool operations are keyed to the execution session, not only the
+        // owning root chat. Settle every stopped actor too, before archive
+        // returns, so a crash cannot strand its dispatched D/E action until a
+        // later boot or hide its verification notice in an archived chat.
+        for (const lifecycleSessionId of new Set([sessionId, ...actorSessionIds])) {
+          await purgeLifecycleSession?.(lifecycleSessionId);
+        }
         // If the archived session was the active one, drop the cache so
         // the next agent/send creates a fresh session.
         const currentId = await sessionCache.sessionGet('currentSessionId');
@@ -140,12 +166,6 @@ export const makeSessionMutationRoutes = (deps) => {
         // Fire-and-forget + guarded: workspace bytes are agent scratch,
         // best-effort cleanup must never fail the archive.
         Promise.resolve(nukeSessionWorkspace?.(sessionId)).catch(() => {});
-        // Lifecycle §2.5: the user's archive dominates recovery — purge the
-        // session's pending recovery notices (a put-away chat's operations
-        // must not resurrect as notes elsewhere) and settle its nonterminal
-        // operations cancelled so no future boot reconciles them back.
-        // Fire-and-forget: best-effort cleanup never fails the archive.
-        Promise.resolve(purgeLifecycleSession?.(sessionId)).catch(() => {});
         return { ok: true };
       } catch (e) {
         if (e instanceof SessionNotFoundError) return { ok: false, error: 'session-not-found' };

@@ -523,18 +523,13 @@ export {
 // override table, then the sideEffect/primitive taxonomy, failing closed
 // to E. The inventory test asserts totality over the live tool set.
 export { retryClassForTool, RETRY_CLASS_OVERRIDES } from './lifecycle/tool-retry-class.js';
-// §9: engine-resource recovery decisions — tab revalidation, notebook
-// output labelling, VM reboot plans, App sandbox recreation.
-export {
-  revalidateDrivenTab, TAB_DISPOSITIONS,
-  notebookCellState, NOTEBOOK_CELL_STATES,
-  vmRecoveryPlan, appSandboxRebuild,
-} from './lifecycle/resource-recovery.js';
+// §9: passive, bounded reports for engine resources the live boot sweep lost.
+export { groupResourceLossNotices } from './lifecycle/resource-recovery.js';
 // §11.1/§12: independent per-store schema versions + durability tiers.
 export {
   DURABILITY_TIERS, STORE_REGISTRY, VERSION_STAMP_KEY,
   storeEntry, portableStores, omittedDeviceBoundStores,
-  checkStores, stampStores,
+  checkStores, stampStores, applyStoreBootPosture,
 } from './lifecycle/store-registry.js';
 // §11.5 enforced: the SW wraps its kv/idb adapters through the guard once
 // and a read-only verdict refuses writes at the shared chokepoint.

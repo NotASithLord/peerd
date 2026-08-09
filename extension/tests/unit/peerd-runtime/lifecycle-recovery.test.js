@@ -11,7 +11,7 @@ import { describe, it, expect } from '../../framework.js';
 import {
   makeLifecycleBoot, makeDispatchTracker, retryClassForTool,
   registerTool, clearTools, dispatchToolCall,
-  OPERATION_STATES,
+  OPERATION_STATES, groupResourceLossNotices,
 } from '/peerd-runtime/index.js';
 
 const S = OPERATION_STATES;
@@ -76,6 +76,20 @@ const boot = (extra = {}) => makeLifecycleBoot({
 });
 
 describe('lifecycle recovery over real chrome.storage', () => {
+  it('groups engine losses into one bounded report for the owning chat', () => {
+    const notices = groupResourceLossNotices([
+      { kind: 'vm', id: 'vm-1', name: 'workbench', ownerSessionId: 'chat-a' },
+      { kind: 'app', id: 'app-1', name: 'preview', ownerSessionId: 'chat-a' },
+    ]);
+    expect(notices.length).toBe(1);
+    expect(notices[0].sessionId).toBe('chat-a');
+    expect(notices[0].user.includes('Linux VM "workbench"')).toBe(true);
+    expect(notices[0].user.includes('App "preview"')).toBe(true);
+    expect(notices[0].user.includes('in-memory state were lost')).toBe(true);
+    expect(notices[0].agent.includes('Linux VM "vm-1"')).toBe(true);
+    expect(notices[0].agent.includes('workbench')).toBe(false);
+  });
+
   it('a rebooted generation settles each retry class to its contract state', async () => {
     await cleanup();
     try {
@@ -122,6 +136,36 @@ describe('lifecycle recovery over real chrome.storage', () => {
       const second = await boot().init();
       expect(second.generation.seq).toBe(first.generation.seq + 1);
       expect(second.generation.id === first.generation.id).toBe(false);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('routes an immediate recovery note to its session without tool arguments', async () => {
+    await cleanup();
+    try {
+      const gen1 = boot();
+      const { generation } = await gen1.init();
+      await gen1.operationLog.begin({
+        operationId: 'real-notice', sessionId: 'session-owner', toolName: 'submit_form',
+        retryClass: 'E', generationId: generation.id,
+      });
+      await gen1.operationLog.transition('real-notice', S.RUNNING);
+      await gen1.operationLog.markDispatched('real-notice');
+
+      /** @type {Array<{ sessionId: string, text: string }>} */
+      const notes = [];
+      await boot({
+        notify: (/** @type {string} */ sessionId, /** @type {string} */ text) => {
+          notes.push({ sessionId, text });
+        },
+      }).init();
+
+      expect(notes.length).toBe(1);
+      expect(notes[0].sessionId).toBe('session-owner');
+      expect(notes[0].text.includes('Recovery for submit_form')).toBe(true);
+      expect(notes[0].text.includes('operationId')).toBe(false);
+      expect(notes[0].text.includes('args')).toBe(false);
     } finally {
       await cleanup();
     }

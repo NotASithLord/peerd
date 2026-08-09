@@ -70,6 +70,30 @@ describe('sidepanel.confirm note (issue 242)', () => {
     } finally { unmount(); }
   });
 
+  it('shows the exact target and action bound to an unknown-outcome approval', () => {
+    const target = 'https://payments.example';
+    const { root, unmount } = mount({
+      ...base,
+      note: 'A matching earlier action has an unknown outcome. Verify the target before approving this repeat.',
+      lifecycleTarget: target,
+      oneShot: true,
+      tool: 'submit_payment',
+      summary: 'submit_payment({ orderId: "order-7" })',
+    });
+    try {
+      const claim = /** @type {HTMLElement} */ (
+        root.querySelector('[aria-label="Unknown-outcome repeat approval"]')
+      );
+      const values = [...claim.querySelectorAll('code')].map((node) => node.textContent);
+      expect(values).toEqual([target, 'submit_payment']);
+      expect(claim.textContent.includes('Exact target')).toBe(true);
+      expect(claim.textContent.includes('Action')).toBe(true);
+      const buttons = [...root.querySelectorAll('.peerd-modal-actions button')];
+      expect(buttons.map((button) => button.textContent)).toEqual(['Reject', 'Allow once']);
+      expect(buttons[1].classList.contains('lifecycle-confirm-allow')).toBe(true);
+    } finally { unmount(); }
+  });
+
   it('an EPHEMERAL prompt drops "Allow for session" — a button that grants nothing', () => {
     // DESIGN-17 downgrades an actor's yes_session to yes_once server-side, so on
     // an actor confirm that button never created a standing grant. Before #242 a

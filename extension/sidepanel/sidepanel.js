@@ -83,7 +83,7 @@ const handlePortDisconnect = () => {
     // that owned the prompt is gone), rate-limit banner, Stop spinner, notice,
     // or goal-run pill would linger with nothing behind it. Reset to the
     // INITIAL_STATE defaults; a revived SW replays anything genuinely still live
-    // via getPending() + the fresh state push.
+    // through the fresh owner-scoped state snapshot.
     pendingConfirm: null,
     rateLimit: null,
     streaming: false,
@@ -209,11 +209,17 @@ if (!root) throw new Error('sidepanel: #app missing from HTML');
 // (which resolves the dispatcher's waiting Promise) and clear the prompt
 // locally so the modal dismisses immediately.
 /**
- * @param {string} id
+ * @param {{ id: string, ownerSessionId?: string|null, sessionId?: string|null,
+ *   dispatchId?: string|null }} prompt
  * @param {string} answer
  */
-const confirmAnswer = (id, answer) => {
-  send({ type: 'confirm/answer', id, answer });
+const confirmAnswer = (prompt, answer) => {
+  send({
+    type: 'confirm/answer', id: prompt.id, answer,
+    ownerSessionId: prompt.ownerSessionId ?? null,
+    sessionId: prompt.sessionId ?? null,
+    dispatchId: prompt.dispatchId ?? null,
+  });
   currentState = { ...currentState, pendingConfirm: null };
   m.redraw();
 };

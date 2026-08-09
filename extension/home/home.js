@@ -190,11 +190,17 @@ const loadActor = (sessionId) => {
   }).catch(() => { actorFetchInFlight.delete(sessionId); });
 };
 /**
- * @param {string} id
+ * @param {{ id: string, ownerSessionId?: string|null, sessionId?: string|null,
+ *   dispatchId?: string|null }} prompt
  * @param {string} answer
  */
-const confirmAnswer = (id, answer) => {
-  send({ type: 'confirm/answer', id, answer });
+const confirmAnswer = (prompt, answer) => {
+  send({
+    type: 'confirm/answer', id: prompt.id, answer,
+    ownerSessionId: prompt.ownerSessionId ?? null,
+    sessionId: prompt.sessionId ?? null,
+    dispatchId: prompt.dispatchId ?? null,
+  });
   currentState = { ...currentState, pendingConfirm: null };
   m.redraw();
 };

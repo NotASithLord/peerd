@@ -317,6 +317,16 @@ jobs:
         # smoke, goal mode, stop, error — against ONE Chrome (env-independent;
         # visual states are excluded here as their baselines are per-machine).
         run: bun run test:e2e:all
+      - name: Exercise the MV3 lifecycle fault boundary
+        env:
+          CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
+        run: bun run test:e2e:lifecycle
+      - name: Upload MV3 lifecycle diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: chrome-lifecycle-diagnostics
+          path: artifacts/chrome-lifecycle/
 
   # The VISUAL lane: render the side panel, compare against the committed
   # baselines, go red when the UI moved. NOT in required checks until it has a

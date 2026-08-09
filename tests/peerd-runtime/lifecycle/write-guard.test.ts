@@ -69,7 +69,7 @@ describe('kv enforcement', () => {
     } catch (e) {
       expect((e as StoreReadOnlyError).name).toBe('StoreReadOnlyError');
       expect((e as Error).message).toContain("'hooks'");
-      expect((e as Error).message).toContain('no data was changed');
+      expect((e as Error).message.toLowerCase()).toContain('no data was changed');
     }
   });
 });
@@ -107,5 +107,24 @@ describe('bookkeeping', () => {
     guard.block(['hooks', 'no-such-store']);
     guard.block(['memory']);
     expect(guard.blockedStores().sort()).toEqual(['hooks', 'memory']);
+  });
+
+  test('a structured block carries its reason and diagnostic into write refusal', () => {
+    const guard = makeWriteGuard();
+    const kv = guard.wrapKv(makeKv());
+    guard.block([{
+      store: 'hooks',
+      reason: 'schema v0 requires migration, but this build has no migration plan',
+      diagnosticId: 'store-hooks-migration-unavailable-v0-to-v1',
+    }]);
+    try {
+      kv.set('hooks.user.v1', []);
+      throw new Error('should have thrown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(StoreReadOnlyError);
+      expect((error as StoreReadOnlyError).diagnosticId)
+        .toBe('store-hooks-migration-unavailable-v0-to-v1');
+      expect((error as Error).message).toContain('no migration plan');
+    }
   });
 });

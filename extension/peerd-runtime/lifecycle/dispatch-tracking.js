@@ -147,7 +147,7 @@ class TombstoneUnreadableError extends Error {
 }
 
 /**
- * The fail-closed refusal for a Class D/E dispatch whose tracking cannot
+ * The fail-closed refusal for a Class D/E/F dispatch whose tracking cannot
  * start; A/B/C degrade to untracked (null). Shared by the live tracker's
  * storage-failure path and makeFailClosedTracker below.
  *
@@ -158,15 +158,20 @@ class TombstoneUnreadableError extends Error {
  */
 const refuseUntracked = (retryClass, toolName, reason) => {
   if (retryClass !== RETRY_CLASSES.SIDE_EFFECT
-      && retryClass !== RETRY_CLASSES.CONDITIONAL_ACTION) {
+      && retryClass !== RETRY_CLASSES.CONDITIONAL_ACTION
+      && retryClass !== RETRY_CLASSES.RESOURCE) {
     return null;
   }
+  const risk = retryClass === RETRY_CLASSES.RESOURCE
+    ? 'a long-lived resource must not run untracked: an interruption could '
+      + 'then never be reported or guarded against, and could leave an orphan'
+    : 'a non-idempotent action must not run untracked: an interruption could '
+      + 'then never be reported or guarded against';
   return {
     refuse: {
       error: `failed: ${toolName ?? 'this action'} was NOT executed — lifecycle `
-        + `tracking is unavailable (${reason}) and a non-idempotent action must `
-        + 'not run untracked: an interruption could then never be reported or '
-        + 'guarded against. Retry once storage recovers, or run a read-only '
+        + `tracking is unavailable (${reason}) and ${risk}. `
+        + 'Retry once storage recovers, or run a read-only '
         + 'alternative.',
       recovery: {
         category: 'security_degradation',
@@ -182,7 +187,7 @@ const refuseUntracked = (retryClass, toolName, reason) => {
 };
 
 /**
- * The tracker the shell arms when lifecycle BOOT itself failed: Class D/E
+ * The tracker the shell arms when lifecycle BOOT itself failed: Class D/E/F
  * dispatches are refused (fail closed — same rationale as a mid-flight
  * storage failure), everything else runs untracked as it did before the
  * lifecycle landed. settleTracking is a no-op (nothing was recorded).
@@ -210,9 +215,15 @@ export const makeFailClosedTracker = ({ reason, retryClassFor }) => ({
  * @param {(error: string) => string | { kind: string }} [deps.classifyFailure]
  *   observability taxonomy (its native shape is { kind, label }); absent →
  *   only the transport regex decides ambiguity
+ * @param {(sessionId: string) => Promise<string>} [deps.resolveOwnerSessionId]
+ *   resolves an execution session to the root chat that owns its intent
  * @param {() => number} [deps.now]  injectable clock (confirmation proofs)
  */
-export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor, classifyFailure, now = Date.now }) => {
+export const makeDispatchTracker = ({
+  operationLog, generationId, retryClassFor, classifyFailure,
+  resolveOwnerSessionId = async (sessionId) => sessionId,
+  now = Date.now,
+}) => {
   if (!operationLog || typeof generationId !== 'function' || typeof retryClassFor !== 'function') {
     throw new TypeError('makeDispatchTracker: operationLog, generationId and retryClassFor are required');
   }
@@ -224,6 +235,77 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
       if (typeof out === 'string') return out;
       return out?.kind ?? 'internal';
     } catch { return 'internal'; }
+  };
+
+  /**
+   * Compare unresolved intent at the ROOT-CHAT boundary while retaining the
+   * execution session as the operation identity. A sibling actor is another
+   * heap, not fresh user authority, so moving the same action there must not
+   * evade the verification requirement.
+   *
+   * Legacy records have no ownerSessionId or target. Resolve their owner from
+   * the durable session lineage and treat an absent target as a conservative
+   * wildcard so an upgrade cannot silently reopen an uncertain effect.
+   *
+   * @param {import('./reconcile.js').OperationRecord} record
+   * @param {{ ownerSessionId: string, target: string, intentKey: string }} sought
+   */
+  const matchesUnknownIntent = async (record, sought) => {
+    if (record.intentKey !== sought.intentKey) return false;
+    const recordOwner = record.ownerSessionId
+      ?? await resolveOwnerSessionId(record.sessionId);
+    if (recordOwner !== sought.ownerSessionId) return false;
+    return record.target == null || record.target === sought.target;
+  };
+
+  /**
+   * @param {import('./reconcile.js').OperationRecord[]} unknowns
+   * @param {{ ownerSessionId: string, target: string, intentKey: string }} sought
+   * @param {string} [exceptOperationId]
+   */
+  const findUnknownIntent = async (unknowns, sought, exceptOperationId) => {
+    for (const record of unknowns) {
+      if (record.operationId === exceptOperationId) continue;
+      if (await matchesUnknownIntent(record, sought)) return record;
+    }
+    return undefined;
+  };
+
+  /**
+   * Ask the dispatcher to force a real user confirmation before repeating
+   * unresolved intent. Synthetic continuations never prompt; beginTracking
+   * will refuse them. This is advisory only, with the enforcement repeated
+   * below after hooks have produced the final args.
+   *
+   * @param {{ tool: { name?: string, sideEffect?: string, primitive?: string,
+   *   retryClass?: unknown }, sessionId?: string, args?: unknown,
+   *   userInitiated?: boolean, ownerSessionId?: string, target?: string }} input
+   */
+  const requiresIntentConfirmation = async ({
+    tool, sessionId, ownerSessionId, target, args, userInitiated,
+  }) => {
+    if (userInitiated !== true) return false;
+    const retryClass = normalizeRetryClass(retryClassFor(tool));
+    if (retryClass !== RETRY_CLASSES.SIDE_EFFECT
+        && retryClass !== RETRY_CLASSES.CONDITIONAL_ACTION) return false;
+    const intentKey = await idempotencyKeyFor(tool.name ?? 'tool', args);
+    const executionSessionId = sessionId || 'unknown-session';
+    const scope = {
+      ownerSessionId: ownerSessionId
+        || await resolveOwnerSessionId(executionSessionId),
+      target: target || `tool:${tool.name ?? 'unknown-tool'}`,
+      intentKey,
+    };
+    // If compact exact identity itself overflowed, absence is no longer proof
+    // that this intent is new. Force the same exact-target human confirmation
+    // used for a known match. Synthetic turns skip this advisory path and are
+    // refused by beginTracking below.
+    if (await operationLog.unknownIntentOverflowed?.()) {
+      return { required: true, ...scope, overflow: true };
+    }
+    const unknowns = await operationLog.listOutcomeUnknown();
+    const prior = await findUnknownIntent(unknowns, scope);
+    return prior ? { required: true, ...scope } : false;
   };
 
   /**
@@ -298,15 +380,39 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     }
 
     if (record.state === OPERATION_STATES.INTERRUPTED
+        && (retryClass === RETRY_CLASSES.RESOURCE
+          || normalizeRetryClass(record.retryClass) === RETRY_CLASSES.RESOURCE)) {
+      // Class F is a durable description plus a lost live resource, not a
+      // resumable operation. Replaying the same call id could mint a second
+      // resource under stale grants. A fresh call must re-derive authority.
+      const verdict = decideRecovery({ retryClass: RETRY_CLASSES.RESOURCE, dispatched: false });
+      const report = describeRecovery(verdict, {
+        retryClass: RETRY_CLASSES.RESOURCE,
+        operationId: record.operationId,
+        toolName: record.toolName,
+      });
+      return {
+        refuse: {
+          error: `resource_lost: ${record.toolName} was interrupted. Do not `
+            + 'continue or recreate it automatically. Re-derive grants and '
+            + 'issue a new call to create a replacement.',
+          recovery: report.agent,
+        },
+      };
+    }
+
+    if (record.state === OPERATION_STATES.INTERRUPTED
         && retryClass !== RETRY_CLASSES.SIDE_EFFECT
+        && retryClass !== RETRY_CLASSES.RESOURCE
         // The RECORD's class binds too: a call id whose recorded operation
         // was Class E re-presented under a softer classification is a
         // class-confusion replay, not a sanctioned retry — newAttempt would
         // refuse it anyway (RetryRefusedError), and that rejection must
         // surface as a REFUSAL, not bubble into the dispatcher's fail-open
         // catch and run untracked.
-        && normalizeRetryClass(record.retryClass) !== RETRY_CLASSES.SIDE_EFFECT) {
-      // A/B/C/D-undispatched interruption: the sanctioned retry — same
+        && normalizeRetryClass(record.retryClass) !== RETRY_CLASSES.SIDE_EFFECT
+        && normalizeRetryClass(record.retryClass) !== RETRY_CLASSES.RESOURCE) {
+      // A/B/C/D-undispatched interruption: the sanctioned retry - same
       // operation, fresh attempt number, re-stamped with the LIVE
       // generation. markDispatched mirrors the fresh path: the retry's
       // effect can leave peerd the instant it executes, and a record still
@@ -350,7 +456,9 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
       await operationLog.settle(record.operationId, verdict).catch(() => {});
       const fresh = await operationLog.get(record.operationId);
       if (fresh?.state === OPERATION_STATES.INTERRUPTED
-          && retryClass !== RETRY_CLASSES.SIDE_EFFECT) {
+          && retryClass !== RETRY_CLASSES.SIDE_EFFECT
+          && retryClass !== RETRY_CLASSES.RESOURCE
+          && normalizeRetryClass(fresh.retryClass) !== RETRY_CLASSES.RESOURCE) {
         // Same shape as the sanctioned-retry branch above: live generation
         // stamp + dispatched marked before the effect can leave.
         const next = await operationLog.newAttempt(record.operationId,
@@ -384,6 +492,7 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
    * @param {string} input.callId       the tool_use id — the operation identity
    * @param {{ name?: string, sideEffect?: string, primitive?: string, retryClass?: unknown }} input.tool
    * @param {string} [input.sessionId]
+   * @param {string} [input.ownerSessionId] root chat that owns this intent
    * @param {string} [input.actorId]
    * @param {string} [input.target]
    * @param {boolean} [input.confirmed]  the user approved a confirm
@@ -391,14 +500,24 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
    *   proof is minted, CONSUMED, and persisted on the record (§8.3: the
    *   durable forensic chain shows what was approved, under which
    *   generation, and that the approval covers exactly one dispatch)
-   * @param {Record<string, unknown>} [input.args]  post-hook args; C/D
-   *   records derive their deterministic idempotency key from these
-   * @returns {Promise<BeginOutcome>}
-   */
-  const beginTrackingInner = async ({ callId, tool, sessionId, actorId, target, confirmed, args }) => {
+ * @param {Record<string, unknown>} [input.args]  post-hook args; C/D
+ *   records derive their deterministic idempotency key from these
+ * @param {string} [input.turnId] one stable id for the whole model turn
+ * @param {boolean} [input.userInitiated] false for synthetic continuations
+ * @param {{ intentKey?: string, ownerSessionId?: string, target?: string } | false}
+ *   [input.confirmedIntent] exact unresolved intent shown to the user
+ * @returns {Promise<BeginOutcome>}
+ */
+  const beginTrackingInner = async ({
+    callId, tool, sessionId, ownerSessionId, actorId, target, confirmed,
+    confirmedIntent, args, turnId, userInitiated,
+  }) => {
     const retryClass = normalizeRetryClass(retryClassFor(tool));
     if (retryClass === RETRY_CLASSES.PURE_READ) return null;
-    if (typeof callId !== 'string' || !callId) return null;
+    if (typeof callId !== 'string' || !callId) {
+      return refuseUntracked(retryClass, tool?.name,
+        'durable operation identity is missing');
+    }
 
     // The operation identity is SESSION-scoped. why: the replay guard must
     // fire on the same call re-driven within its own session (auto-resume
@@ -406,7 +525,57 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     // sessions happen to see the same provider call id — that is a new
     // operation, not a replay.
     const operationId = sessionId ? `${sessionId}:${callId}` : callId;
-    // Tombstone check (D/E only — the only classes that mint them): a call
+    const executionSessionId = sessionId || 'unknown-session';
+    const intentOwnerSessionId = ownerSessionId
+      || await resolveOwnerSessionId(executionSessionId);
+    const intentTarget = target || `tool:${tool.name ?? 'unknown-tool'}`;
+    // D/E intent identity is independent of the provider's call id. This
+    // closes the fresh-id replay shape: after an ambiguous dispatch, a model
+    // cannot express the same tool and args again inside the same turn or a
+    // synthetic continuation. A genuinely new user turn is fresh authority.
+    /** @type {string | undefined} */
+    let intentKey;
+    if (retryClass === RETRY_CLASSES.SIDE_EFFECT
+        || retryClass === RETRY_CLASSES.CONDITIONAL_ACTION) {
+      try {
+        intentKey = await idempotencyKeyFor(tool.name ?? 'tool', args);
+        const scope = {
+          ownerSessionId: intentOwnerSessionId,
+          target: intentTarget,
+          intentKey,
+        };
+        const replayIdentityIncomplete = await operationLog.unknownIntentOverflowed?.() === true;
+        const unknowns = replayIdentityIncomplete
+          ? [] : await operationLog.listOutcomeUnknown();
+        const prior = await findUnknownIntent(unknowns, scope, operationId);
+        const exactRepeatApproval = confirmed === true
+          && confirmedIntent !== false
+          && confirmedIntent?.intentKey === intentKey
+          && confirmedIntent?.ownerSessionId === intentOwnerSessionId
+          && confirmedIntent?.target === intentTarget;
+        if ((prior || replayIdentityIncomplete) && !exactRepeatApproval) {
+          const verdict = decideRecovery({ retryClass, dispatched: true });
+          return {
+            refuse: {
+              error: `outcome_unknown: ${tool.name ?? 'this action'} ${prior
+                ? 'matches an earlier dispatch whose result is unknown'
+                : 'cannot be proven distinct from compacted unresolved actions'}. Verify the external `
+                + 'state before repeating it. The repeat needs a new user '
+                + 'confirmation; a continuation is not authority.',
+              recovery: describeRecovery(verdict, {
+                retryClass,
+                operationId: prior?.operationId ?? operationId,
+                toolName: prior?.toolName ?? tool.name,
+              }).agent,
+            },
+          };
+        }
+      } catch (error) {
+        return refuseUntracked(retryClass, tool.name,
+          `intent replay check failed (${error instanceof Error ? error.message : String(error)})`);
+      }
+    }
+    // Tombstone check for D/E/F, the classes that mint them: a call
     // id whose FULL record was pruned still carries compact replay
     // identity; re-presenting it is refused exactly as the record would
     // have.
@@ -418,24 +587,53 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     // be assuming "no" with no evidence, which is the replay the guard
     // exists to prevent.
     if (retryClass === RETRY_CLASSES.SIDE_EFFECT
-        || retryClass === RETRY_CLASSES.CONDITIONAL_ACTION) {
-      const tombstone = await Promise.resolve(operationLog.getTombstone?.(operationId))
+        || retryClass === RETRY_CLASSES.CONDITIONAL_ACTION
+        || retryClass === RETRY_CLASSES.RESOURCE) {
+      const tombstone = await Promise.resolve(operationLog.getTombstone?.(operationId, retryClass))
         .catch((error) => {
           throw new TombstoneUnreadableError(
             error instanceof Error ? error.message : String(error));
         });
       if (tombstone) {
+        const approximateResourceReplay = retryClass === RETRY_CLASSES.RESOURCE
+          && tombstone.approximateReplay === true;
+        const compactResourceRecovery = retryClass === RETRY_CLASSES.RESOURCE
+          && tombstone.terminalState !== OPERATION_STATES.COMPLETED
+          ? describeRecovery(decideRecovery({
+            retryClass: RETRY_CLASSES.RESOURCE, dispatched: false,
+          }), {
+            retryClass: RETRY_CLASSES.RESOURCE,
+            operationId,
+            toolName: tool.name,
+          }).agent
+          : null;
+        const resourceRecovery = compactResourceRecovery
+          ? {
+            ...compactResourceRecovery,
+            reason: approximateResourceReplay
+              ? 'call id may match an older compacted Class F request'
+              : `compacted Class F record ended ${tombstone.terminalState}`,
+          }
+          : null;
         return {
           refuse: {
             error: tombstone.terminalState === OPERATION_STATES.COMPLETED
               ? `completed: ${tool.name ?? 'this action'} already completed on a `
                 + 'previous dispatch of this same call (compacted record) — not '
                 + 're-executing. Issue a NEW operation if a repeat is intended.'
+              : retryClass === RETRY_CLASSES.RESOURCE
+                ? approximateResourceReplay
+                  ? `resource_lost: ${tool.name ?? 'this resource'} may match an `
+                    + 'older compacted resource request. This call id cannot be '
+                    + 'safely reused. Re-derive grants and issue a fresh call.'
+                  : `resource_lost: ${tool.name ?? 'this resource'} has a compacted `
+                    + `record ending ${tombstone.terminalState}. Do not recreate it `
+                    + 'automatically. Re-derive grants and issue a fresh call.'
               : `outcome_unknown: a previous dispatch of this same call ended `
                 + `${tombstone.terminalState} and its full record was compacted. `
                 + 'Verify the external state before repeating it. Not re-executing '
                 + 'automatically.',
-            recovery: {
+            recovery: resourceRecovery ?? {
               category: 'verify_before_retry',
               state: /** @type {import('./operation-state.js').OperationState} */ (
                 tombstone.terminalState),
@@ -455,7 +653,7 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     // richness, never the dispatch's safety.
     const idempotencyKey = (retryClass === RETRY_CLASSES.IDEMPOTENT_WRITE
       || retryClass === RETRY_CLASSES.CONDITIONAL_ACTION)
-      ? await idempotencyKeyFor(tool.name ?? 'tool', args).catch(() => undefined)
+      ? (intentKey ?? await idempotencyKeyFor(tool.name ?? 'tool', args).catch(() => undefined))
       : undefined;
     // An approved confirmation becomes a single-use proof, consumed BEFORE
     // dispatch and persisted on the record: generation-bound (a restart
@@ -491,13 +689,17 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     try {
       await operationLog.begin({
         operationId,
-        sessionId: sessionId || 'unknown-session',
+        sessionId: executionSessionId,
+        ownerSessionId: intentOwnerSessionId,
         ...(actorId ? { actorId } : {}),
         toolName: tool.name ?? 'unknown-tool',
         retryClass,
         generationId: generationId(),
         ...(target ? { target } : {}),
         ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(intentKey ? { intentKey } : {}),
+        ...(typeof turnId === 'string' && turnId ? { turnId } : {}),
+        ...(userInitiated === true ? { userInitiated: true } : {}),
         ...(confirmationProof ? {
           confirmationRef: `${operationId}:confirm`,
           confirmationProof,
@@ -526,7 +728,8 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
       //   A/B/C — degrade to untracked execution: duplicates are invisible
       //   or idempotent, so losing the record loses nothing the contract
       //   protects, and a broken log must not brick the read/write surface.
-      //   D/E — REFUSE. An untracked non-idempotent effect is one whose
+      //   D/E/F: REFUSE. An untracked non-idempotent effect or resource is one
+      //   whose
       //   outcome could never be recovered: no record means a later
       //   interruption silently violates guarantee 1 (uncertainty would be
       //   unreportable) and guarantee 2 (nothing would stop the replay).
@@ -690,5 +893,5 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     }
   };
 
-  return { beginTracking, settleTracking };
+  return { beginTracking, settleTracking, requiresIntentConfirmation };
 };
