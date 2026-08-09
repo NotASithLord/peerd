@@ -18,6 +18,11 @@
 
 import { generateIdentity, joinRoom } from '/peerd-distributed/index.js';
 import { createBaseNetwork } from '/peerd-distributed/base-network.js';
+// restore=1 mode: run the full persistent-identity lifecycle before joining.
+// Deep imports are fine here (tests/ is exempt from the no-deep-import rule,
+// same as the a2a-dispatch import below).
+import { loadIdentityMaterial, identityFromMaterial } from '/peerd-distributed/identity/keypair.js';
+import { buildIdentityRecord, adoptIdentityRecord } from '/peerd-distributed/identity/recovery-record.js';
 // The PRODUCTION a2a ask/reply correlation core — driven here over the REAL mesh
 // direct channel so the live two-peer round-trip exercises the same code the
 // dweb actor's a2a_run uses (envelope tag + request/reply, the did-bound resolve).
@@ -33,6 +38,14 @@ const roomId = params.get('room') ?? 'harness';
 const url = params.get('url') ?? 'ws://localhost:8799/rendezvous';
 const name = params.get('name') ?? 'peer';
 const a2aOn = params.get('a2a') === '1';   // add the live ask/reply beat on top of gossip
+// restore=1: this peer joins the mesh AS A RESTORED IDENTITY. It simulates the
+// whole portable-identity lifecycle in-page (install A mints and exports a
+// recovery record; a fresh install B adopts it and loads the identity exactly
+// the way the offscreen mesh host does), then joins the live mesh with the
+// result. The driver asserts the joined did equals the pre-backup did: the
+// proof that a restored identity keeps its PLACE IN THE NETWORK, not just its
+// key material.
+const restoreOn = params.get('restore') === '1';
 
 // The gossip topic the two peers exchange a hello on — proves the application
 // layer (gossip flood + dedup) works over the live mesh, not just that a data
@@ -52,6 +65,10 @@ let base = null;
 let myDid = null;
 /** @type {any} */
 let error = null;
+// restore mode: the did minted on "install A" before backup. A green run
+// requires the joined did to equal it.
+/** @type {string | null} */
+let restoredFromDid = null;
 // a2a live round-trip state (only when a2aOn): did we send an ask and get the
 // peer's reply back, over the real mesh, via the production correlation core?
 let askReplied = false;
@@ -70,9 +87,47 @@ const render = () => {
   ].filter(Boolean).join('\n');
 };
 
+// The vault-secret shape both the transfer helper and the mesh host program
+// against, reduced to a Map for the in-page lifecycle simulation.
+const fakeSecretStore = () => {
+  /** @type {Map<string, string>} */
+  const secrets = new Map();
+  return {
+    getSecret: async (/** @type {string} */ secretName) => secrets.get(secretName) ?? null,
+    setSecret: async (/** @type {string} */ secretName, /** @type {string} */ value) => { secrets.set(secretName, value); },
+  };
+};
+const IDENTITY_SECRET = 'distributed/identity/v1';
+const RESTORE_PASSPHRASE = 'twopeer-harness-restore-passphrase';
+
+// The persistent-identity lifecycle, end to end, yielding the identity the
+// mesh will join with: install A mints via the production first-run path and
+// exports a recovery record; install B (a fresh empty store) adopts it,
+// persists the material under the identity secret, and loads it back through
+// loadIdentityMaterial + identityFromMaterial, byte-for-byte the composition
+// offscreen/dweb-base.js runs at mesh start.
+const restoreIdentity = async () => {
+  const installA = fakeSecretStore();
+  const original = await loadIdentityMaterial(installA);
+  restoredFromDid = original.did;
+  const record = await buildIdentityRecord({
+    material: { seed: original.seed, pub: original.pub },
+    wrappers: [{ kind: 'passphrase', passphrase: RESTORE_PASSPHRASE }],
+  });
+  const outcome = await adoptIdentityRecord({
+    record, passphrase: RESTORE_PASSPHRASE, existingMaterial: null,
+  });
+  if (!outcome.adopted || typeof outcome.material !== 'string') {
+    throw new Error(`restore failed before join: ${outcome.reason}`);
+  }
+  const installB = fakeSecretStore();
+  await installB.setSecret(IDENTITY_SECRET, outcome.material);
+  return identityFromMaterial(await loadIdentityMaterial(installB));
+};
+
 const boot = async () => {
   try {
-    const identity = await generateIdentity();
+    const identity = restoreOn ? await restoreIdentity() : await generateIdentity();
     myDid = identity.did;
     render();
 
@@ -175,6 +230,10 @@ const boot = async () => {
           heard: heardFrom.size,
           askReplied,
           askReply,
+          // restore mode: true only when the mesh identity IS the pre-backup
+          // did. The driver requires it for the restore-mode pass gate.
+          restored: restoreOn ? (restoredFromDid !== null && myDid === restoredFromDid) : null,
+          restoredFrom: restoredFromDid,
           peers: snap.peers.map((/** @type {any} */ p) => ({ did: p.did, name: p.name, linked: p.linked, path: p.path })),
           error,
         };
