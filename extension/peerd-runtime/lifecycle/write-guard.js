@@ -12,10 +12,10 @@
 //
 // Physical mapping lives on STORE_REGISTRY entries (store-registry.js
 // `physical`): registry store name → kv keys/prefixes + idb object stores.
-// Two surfaces open their OWN IndexedDB databases and cannot be guarded
+// Two surfaces open their OWN IndexedDB databases and are not reached
 // through the injected adapters — skills (peerd-skills) and App bodies
-// (peerd-app-bodies); the registry marks them selfHosted and their
-// enforcement rides those modules (documented gap, THREAT-MODEL follow-up).
+// (peerd-app-bodies). The registry marks them selfHosted and their modules
+// call this guard at the mutation boundary. OPFS hosts do the same.
 //
 // Pure factory; the wrappers close over the mutable blocked set.
 

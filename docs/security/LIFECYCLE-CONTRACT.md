@@ -90,7 +90,9 @@ first-run profile is stamped without being treated as corrupt. If a stamp is
 newer than the running peerd version, older than the supported schema, or
 malformed, the live guard classifies the store read-only. Shared key-value and
 IndexedDB adapters refuse mapped writes, and injected guards cover the skills
-and App-body databases. OPFS workspace writes do not yet consult this guard.
+and App-body databases. Notebook tabs and durable headless workspaces consult
+the same live guard before every OPFS mutation. Reads do not create missing
+workspace roots and remain available while writes are blocked.
 
 The forward migration driver is pure and tested but is not called by the
 production shell yet. It supports checkpointed steps, preserves the original

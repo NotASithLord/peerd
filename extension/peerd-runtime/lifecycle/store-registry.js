@@ -58,8 +58,8 @@ export const DURABILITY_TIERS = Object.freeze({
  *   (write-guard.js) maps a read-only verdict onto these locations.
  *   kvKeys/kvPrefixes: chrome.storage.local via the egress kv adapter;
  *   idbStores: object stores in the `peerd` IndexedDB; selfHosted: whole
- *   DATABASES a module opens itself, which the guard cannot reach through
- *   the injected adapters (documented enforcement gap).
+ *   DATABASES or roots a module opens itself. Those modules receive the live
+ *   guard explicitly because adapter wrapping cannot reach their writes.
  */
 
 /**
