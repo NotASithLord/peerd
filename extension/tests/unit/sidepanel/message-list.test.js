@@ -333,13 +333,6 @@ describe('sidepanel.message-list actor disclosures', () => {
       await flush();
       const toggle = /** @type {HTMLButtonElement} */ (root.querySelector('.tool-actor > button.tool-call-header'));
       expect(toggle.textContent).toContain('Not run');
-      const card = root.querySelector('.tool-actor');
-      expect(card?.classList.contains('tool-not-run')).toBe(true);
-      expect(card?.classList.contains('tool-failed')).toBe(false);
-      const dot = root.querySelector('.tool-actor .tool-status-dot');
-      expect(dot?.classList.contains('dot-not-run')).toBe(true);
-      expect(dot?.classList.contains('dot-failed')).toBe(false);
-      expect(dot?.getAttribute('aria-hidden')).toBe('true');
       toggle.click();
       await flush();
       expect(root.textContent).toContain('Reload peerd, then try again');

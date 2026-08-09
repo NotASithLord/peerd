@@ -1017,7 +1017,7 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
     : isApiIntegration
       ? `${who} integration`
       : `${card?.kind ? `${card.kind} actor` : 'actor'}${who ? ` · ${who}` : ''}`;
-  const presentationStatus = notRun ? 'not-run' : status;
+  const presentationStatus = idpTransitRefusal && notRun ? 'not-run' : status;
   const handedOff = !card && toolUse.input?.await === true
     && /is still working; its reply will arrive as a fenced note on a later turn/i.test(resultText);
   const acceptedAsync = !card && !!toolResult && toolResult.is_error !== true
