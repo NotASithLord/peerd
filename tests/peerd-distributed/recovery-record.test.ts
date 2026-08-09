@@ -48,7 +48,7 @@ describe('buildIdentityRecord / openIdentityRecord', () => {
       material, wrappers: [{ kind: 'passphrase', passphrase: 'pw' }],
     });
     const forged = { ...record, did: other.did };
-    expect(openIdentityRecord(forged, { passphrase: 'pw' })).rejects.toThrow(/does not match/);
+    await expect(openIdentityRecord(forged, { passphrase: 'pw' })).rejects.toThrow(/does not match/);
   });
 
   test('a seed paired with another public key is refused before adoption', async () => {
@@ -63,7 +63,7 @@ describe('buildIdentityRecord / openIdentityRecord', () => {
       wrappers: [await makePassphraseWrapper(capsuleKey, 'pw')],
       updatedAt: 1,
     };
-    expect(openIdentityRecord(record, { passphrase: 'pw' })).rejects.toThrow(/valid keypair/);
+    await expect(openIdentityRecord(record, { passphrase: 'pw' })).rejects.toThrow(/valid keypair/);
   });
 
   test('unknown wrapper kinds are skipped, not fatal (forward compat)', async () => {

@@ -25,9 +25,9 @@ describe('capsule', () => {
     const material = await mintKeypairMaterial();
     const capK = await generateCapsuleKey();
     const capsule = await sealCapsule(material, capK);
-    expect(openCapsule(capsule, await generateCapsuleKey())).rejects.toThrow();
+    await expect(openCapsule(capsule, await generateCapsuleKey())).rejects.toThrow();
     const tampered = `${capsule.slice(0, -4)}AAAA`;
-    expect(openCapsule(tampered, capK)).rejects.toThrow();
+    await expect(openCapsule(tampered, capK)).rejects.toThrow();
   });
 });
 
@@ -47,13 +47,13 @@ describe('credential wrappers', () => {
     const capK = await generateCapsuleKey();
     const wrapper = await makePassphraseWrapper(capK, 'right');
     // AES-KW integrity check rejects a wrong KEK deterministically.
-    expect(openPassphraseWrapper(wrapper, 'wrong')).rejects.toThrow();
+    await expect(openPassphraseWrapper(wrapper, 'wrong')).rejects.toThrow();
   });
 
   test('untrusted KDF work factors are refused before crypto', async () => {
     const capK = await generateCapsuleKey();
     const wrapper = await makePassphraseWrapper(capK, 'right');
-    expect(openPassphraseWrapper({
+    await expect(openPassphraseWrapper({
       ...wrapper,
       kdf: { ...wrapper.kdf!, iters: 999_999_999 },
     }, 'right')).rejects.toThrow(/unsupported-kdf/);
