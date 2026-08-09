@@ -83,6 +83,7 @@
     "eslint": "10.4.1",
     "fake-indexeddb": "^6.2.5",
     "globals": "^17.6.0",
+    "puppeteer-core": "^25.5.0",
     "typescript": "^6.0.3",
     "web-ext": "10.3.0"
   },

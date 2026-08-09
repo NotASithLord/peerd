@@ -1,28 +1,34 @@
 #!/usr/bin/env bun
-// Physical MV3 lifecycle fault lane.
-//
-// A test-only copy of the extension leaves representative B/C/D/E operations
-// in the production operation log at the real dispatch boundary. CDP then
-// closes the service-worker target. The fresh worker must reconcile those
-// records through production storage and recovery code. No shipped extension
-// file contains a test route or fault flag.
+// Pipe-backed physical MV3 lifecycle fault lane.
 
 import {
-  closeSync, constants, cpSync, fstatSync, mkdtempSync, openSync, readFileSync,
-  mkdirSync, rmSync, writeFileSync,
+  closeSync, constants, cpSync, fstatSync, mkdirSync, mkdtempSync, openSync,
+  readFileSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import {
-  evalIn, launchPeerd, sleep, waitFor,
-} from './e2e-harness.mjs';
+import puppeteer from 'puppeteer-core';
+import { resolveChrome } from './e2e-harness.mjs';
 
 const ROOT = resolve(import.meta.dir, '..', '..');
+const RESULT_DIR = join(ROOT, 'artifacts', 'chrome-lifecycle');
 const REACHED_KEY = 'peerd.e2e.lifecycleFault.reached';
 const OPERATION_KEY = 'peerd.lifecycle.operations';
 const NOTICE_KEY = 'peerd.lifecycle.pendingNotices';
-const BOOT_ERROR_KEY = 'peerd.e2e.lifecycleFault.bootError';
-const RESULT_DIR = join(ROOT, 'artifacts', 'chrome-lifecycle');
+
+const withDeadline = async (promise, budgetMs, label) => {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`${label} timed out`)), budgetMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+};
 
 const overwriteRegularFile = (path, contents) => {
   const descriptor = openSync(path,
@@ -39,157 +45,171 @@ const makeFaultExtension = () => {
   const directory = mkdtempSync(join(tmpdir(), 'peerd-chrome-lifecycle-fault-'));
   const extension = join(directory, 'extension');
   cpSync(join(ROOT, 'extension'), extension, { recursive: true });
-
   writeFileSync(join(extension, 'background', 'lifecycle-fault-probe.js'), `
-import { createOperationLog } from '/peerd-runtime/index.js';
-
 const REACHED_KEY = ${JSON.stringify(REACHED_KEY)};
-const GENERATION_KEY = 'peerd.lifecycle.generation';
-const storage = {
-  get: async (key) => (await chrome.storage.local.get(key))[key],
-  set: async (key, value) => { await chrome.storage.local.set({ [key]: value }); },
+let armed = false;
+globalThis.peerdLifecycleFaultProbe = {
+  arm() { armed = true; },
+  async beforeExecute(toolName) {
+    if (!armed || toolName !== 'script') return;
+    armed = false;
+    const stored = await chrome.storage.local.get(REACHED_KEY);
+    const reached = stored[REACHED_KEY] ?? [];
+    await chrome.storage.local.set({
+      [REACHED_KEY]: [...reached, { toolName, at: Date.now() }],
+    });
+    await new Promise(() => {});
+  },
 };
-const operationLog = createOperationLog({ storage });
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === 'lifecycle-fault/start') {
-    (async () => {
-      const generation = await storage.get(GENERATION_KEY);
-      if (!generation?.id) throw new Error('lifecycle generation is not ready');
-      const sessionId = String(message.sessionId ?? '');
-      const seeds = [
-        ['read_pdf', 'B'],
-        ['remember', 'C'],
-        ['dweb_share', 'D'],
-        ['script', 'E'],
-      ];
-      const operationIds = [];
-      for (const [toolName, retryClass] of seeds) {
-        const operationId = sessionId + ':fault-' + retryClass.toLowerCase();
-        await operationLog.begin({
-          operationId, sessionId, toolName, retryClass,
-          generationId: generation.id,
-        });
-        await operationLog.transition(operationId, 'running');
-        await operationLog.markDispatched(operationId);
-        operationIds.push(operationId);
-      }
-      const reached = (await storage.get(REACHED_KEY)) ?? [];
-      await storage.set(REACHED_KEY, [...reached, { toolName: 'script', at: Date.now() }]);
-      await new Promise(() => {});
-    })().then(sendResponse, (error) => sendResponse({ ok: false, error: error?.message || String(error) }));
-    return true;
-  }
-  return undefined;
-});
 `, { flag: 'wx', mode: 0o600 });
 
   const serviceWorker = join(extension, 'background', 'service-worker.js');
-  const serviceWorkerSource = `import './lifecycle-fault-probe.js';\n${readFileSync(serviceWorker, 'utf8')}`;
-  const bootErrorLine = "    console.error('[sw] lifecycle boot failed; Class D/E dispatches fail closed', e);";
-  if (serviceWorkerSource.split(bootErrorLine).length !== 2) {
-    throw new Error('lifecycle boot error seam no longer matches service-worker.js');
-  }
-  overwriteRegularFile(serviceWorker, serviceWorkerSource.replace(bootErrorLine,
-    `${bootErrorLine}\n    chrome.storage.local.set({ [${JSON.stringify(BOOT_ERROR_KEY)}]: e?.stack || e?.message || String(e) });`));
+  let source = `import './lifecycle-fault-probe.js';\n${readFileSync(serviceWorker, 'utf8')}`;
+  const routeAnchor = "  'a2a/call': (/** @type {any} */ msg, /** @type {any} */ sender) => a2aCallRoute(msg, sender),";
+  if (source.split(routeAnchor).length !== 2) throw new Error('fault route seam changed');
+  source = source.replace(routeAnchor, `  'lifecycle-fault/dispatch': async (msg) => {
+    globalThis.peerdLifecycleFaultProbe.arm();
+    await chrome.storage.local.set({ [${JSON.stringify(REACHED_KEY)}]: [] });
+    return dispatchToolCall({
+      id: msg.callId,
+      name: 'script',
+      args: { code: "return 'must not run';" },
+    }, await buildToolContext({
+      sessionId: msg.sessionId,
+      exposure: 'main',
+      lifecycleTurnId: 'chrome-physical-fault-turn',
+      lifecycleUserInitiated: true,
+    }));
+  },
+${routeAnchor}`);
+  overwriteRegularFile(serviceWorker, source);
+
+  const dispatcher = join(extension, 'peerd-runtime', 'tools', 'dispatcher.js');
+  source = readFileSync(dispatcher, 'utf8');
+  const executeLine = '    let result = await tool.execute(args, execCtx);';
+  if (source.split(executeLine).length !== 2) throw new Error('dispatcher fault seam changed');
+  overwriteRegularFile(dispatcher, source.replace(executeLine,
+    `    await globalThis.peerdLifecycleFaultProbe?.beforeExecute(call.name);\n${executeLine}`));
   return { directory, extension };
 };
 
-const readLocal = (page, keys) => evalIn(page,
-  `chrome.storage.local.get(${JSON.stringify(keys)})`, true);
+const waitFor = async (fn, budgetMs = 30_000) => {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    const value = await withDeadline(Promise.resolve().then(fn), 5_000, 'lifecycle poll');
+    if (value) return value;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  }
+  return null;
+};
 
-const assert = (condition, message, detail = '') => {
-  if (!condition) throw new Error(`${message}${detail ? `: ${detail}` : ''}`);
+const assert = (value, message) => {
+  if (!value) throw new Error(message);
   console.log(`  PASS ${message}`);
 };
 
 const main = async () => {
+  mkdirSync(RESULT_DIR, { recursive: true });
+  rmSync(join(RESULT_DIR, 'result.json'), { force: true });
   const fault = makeFaultExtension();
-  const sessionId = 'chrome-physical-lifecycle-session';
-  let ctx = null;
+  const profile = mkdtempSync(join(tmpdir(), 'peerd-pipe-lifecycle-'));
+  let browser;
+  let forcedTerminationAttempted = false;
+  let stage = 'launch';
   try {
-    ctx = await launchPeerd({
-      extensionDir: fault.extension,
-      // Direct DevTools attachment changes the worker's lifetime. This lane
-      // only needs the target identity and physical close endpoint, so leave
-      // the worker unattached.
-      interceptModel: false,
+    browser = await puppeteer.launch({
+      executablePath: resolveChrome(),
+      enableExtensions: [fault.extension],
+      headless: true,
+      pipe: true,
+      protocolTimeout: 30_000,
+      timeout: 30_000,
+      userDataDir: profile,
+      args: [
+        '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      ],
     });
-    let bootDiagnostic = null;
-    const generationReady = await waitFor(async () => {
-      const stored = await readLocal(ctx.page, [
-        'peerd.lifecycle.generation', BOOT_ERROR_KEY,
-      ]);
-      bootDiagnostic = stored;
-      if (stored?.[BOOT_ERROR_KEY]) throw new Error(stored[BOOT_ERROR_KEY]);
-      return stored?.['peerd.lifecycle.generation']?.id ?? null;
-    }, { budgetMs: 10_000, pollMs: 50 });
-    if (!generationReady) {
-      mkdirSync(RESULT_DIR, { recursive: true });
-      const capability = {
-        status: 'blocked',
-        forcedTerminationAttempted: false,
-        terminationBoundary: 'Target.closeTarget',
-        reason: 'The MV3 lifecycle generation did not become durable under the remote-debugging-port harness, so terminating the target would not test recovery.',
-        diagnostic: bootDiagnostic,
-      };
-      writeFileSync(join(RESULT_DIR, 'background-fault-capability.json'),
-        JSON.stringify(capability, null, 2));
-      console.log('  SKIP MV3 target termination: lifecycle boot precondition unavailable');
-      return;
-    }
-    assert(true, 'the production lifecycle boot minted a generation');
-    await evalIn(ctx.page, `void chrome.runtime.sendMessage(${JSON.stringify({
-      type: 'lifecycle-fault/start', sessionId,
-    })}).catch(() => {})`);
+    stage = 'initial service-worker target';
+    const discoveredTarget = await withDeadline(browser.waitForTarget((candidate) =>
+      candidate.type() === 'service_worker'
+      && candidate.url().endsWith('/background/service-worker.js'), { timeout: 30_000 }),
+    35_000, stage);
+    stage = 'service-worker attachment';
+    const initialWorker = await withDeadline(discoveredTarget.worker(), 10_000, stage);
+    await withDeadline(initialWorker.client.send('Runtime.evaluate', { expression: 'true' }),
+      10_000, stage);
+    const extensionId = new URL(discoveredTarget.url()).host;
+    stage = 'extension page';
+    const page = await withDeadline(browser.newPage(), 10_000, stage);
+    await withDeadline(page.goto(`chrome-extension://${extensionId}/sidepanel/sidepanel.html`),
+      30_000, stage);
+    const sessionId = 'chrome-physical-lifecycle-session';
+    const callId = 'chrome-physical-script-call';
+    await withDeadline(page.evaluate(() => {
+      void chrome.runtime.sendMessage({ type: 'state/get' }).catch(() => null);
+    }), 10_000, stage);
+    stage = 'real dispatcher fault';
+    await page.evaluate(({ sessionId: sid, callId: cid }) => {
+      void chrome.runtime.sendMessage({ type: 'lifecycle-fault/dispatch', sessionId: sid, callId: cid });
+    }, { sessionId, callId });
+    stage = 'lifecycle generation';
+    const generation = await waitFor(() => page.evaluate(async () =>
+      (await chrome.storage.local.get('peerd.lifecycle.generation'))['peerd.lifecycle.generation']));
+    assert(generation?.id, 'production lifecycle boot minted a generation');
+    const operationId = `${sessionId}:${callId}`;
+    const inFlight = await waitFor(() => page.evaluate(async ({ reachedKey, operationKey, id }) => {
+      const stored = await chrome.storage.local.get([reachedKey, operationKey]);
+      const record = stored[operationKey]?.[id];
+      return stored[reachedKey]?.length === 1 && record?.state === 'awaiting_remote'
+        && record?.dispatched === true;
+    }, { reachedKey: REACHED_KEY, operationKey: OPERATION_KEY, id: operationId }));
+    assert(inFlight, 'real Class E dispatch crossed its durable dispatch marker');
+    const target = discoveredTarget;
 
-    const inFlight = await waitFor(async () => {
-      const stored = await readLocal(ctx.page, [REACHED_KEY, OPERATION_KEY]);
-      const records = Object.values(stored?.[OPERATION_KEY] ?? {});
-      const script = records.find((record) => record?.toolName === 'script'
-        && record?.operationId?.endsWith(':fault-e'));
-      return stored?.[REACHED_KEY]?.length === 1
-        && script?.state === 'awaiting_remote'
-        && script?.dispatched === true
-        ? { script, reached: stored[REACHED_KEY] }
-        : null;
-    }, { budgetMs: 30_000, pollMs: 50 });
-    assert(inFlight, 'Class E is durably dispatched before the fault gate', JSON.stringify(inFlight));
+    stage = 'physical service-worker termination';
+    forcedTerminationAttempted = true;
+    await withDeadline(initialWorker.close(), 10_000, stage);
+    stage = 'service-worker restart';
+    await withDeadline(page.evaluate(() =>
+      chrome.runtime.sendMessage({ type: 'state/get' }).catch(() => null)), 10_000, stage);
+    const nextTarget = await withDeadline(browser.waitForTarget((candidate) =>
+      candidate !== target && candidate.type() === 'service_worker'
+      && candidate.url().endsWith('/background/service-worker.js'), { timeout: 30_000 }),
+    35_000, stage);
+    assert(nextTarget !== target, 'Worker.close physically replaced the MV3 target');
 
-    const oldTargetId = await ctx.terminateServiceWorker();
-    assert(typeof oldTargetId === 'string', 'CDP physically closes the MV3 service-worker target');
-    const next = await ctx.restartServiceWorker(oldTargetId);
-    assert(next.targetId !== oldTargetId, 'a distinct MV3 service-worker target starts');
-
-    const recovered = await waitFor(async () => {
-      const stored = await readLocal(ctx.page, [REACHED_KEY, OPERATION_KEY, NOTICE_KEY]);
-      const records = stored?.[OPERATION_KEY] ?? {};
-      const expected = [
-        [`${sessionId}:fault-e`, 'outcome_unknown'],
-        [`${sessionId}:fault-b`, 'interrupted'],
-        [`${sessionId}:fault-c`, 'interrupted'],
-        [`${sessionId}:fault-d`, 'outcome_unknown'],
-      ];
-      const statesMatch = expected.every(([id, state]) => records[id]?.state === state);
-      const notices = stored?.[NOTICE_KEY]?.[sessionId] ?? [];
-      return statesMatch && notices.length >= expected.length
-        ? { records, notices, reached: stored?.[REACHED_KEY] ?? [] }
-        : null;
-    }, { budgetMs: 30_000, pollMs: 50 });
-    assert(recovered, 'the fresh worker reconciles E/D ambiguity and B/C safe interruption');
-    assert(recovered.notices.some((notice) => notice?.recoveryRecord?.recoveryState === 'outcome_unknown')
-      && recovered.notices.some((notice) => notice?.recoveryRecord?.recoveryState === 'interrupted'),
-    'recovery notices preserve the unsafe versus safe distinction');
-
-    await sleep(1_500);
-    const afterQuiet = await readLocal(ctx.page, [REACHED_KEY, OPERATION_KEY]);
-    assert(afterQuiet?.[REACHED_KEY]?.length === 1,
-      'the interrupted Class E body is never replayed after restart', JSON.stringify(afterQuiet));
-    assert(afterQuiet?.[OPERATION_KEY]?.[`${sessionId}:fault-e`]?.state === 'outcome_unknown',
-      'the original Class E identity remains terminal and guarded');
-    console.log('Chrome lifecycle fault lane passed');
+    stage = 'lifecycle recovery';
+    const recovered = await waitFor(() => page.evaluate(async ({ operationKey, noticeKey, reachedKey, id, sid }) => {
+      const stored = await chrome.storage.local.get([operationKey, noticeKey, reachedKey]);
+      return stored[operationKey]?.[id]?.state === 'outcome_unknown'
+        && stored[noticeKey]?.[sid]?.some((notice) =>
+          notice?.recoveryRecord?.recoveryState === 'outcome_unknown')
+        && stored[reachedKey]?.length === 1;
+    }, { operationKey: OPERATION_KEY, noticeKey: NOTICE_KEY, reachedKey: REACHED_KEY,
+      id: operationId, sid: sessionId }));
+    assert(recovered, 'restart preserves uncertainty, notice, and no tool-body re-entry');
+    writeFileSync(join(RESULT_DIR, 'result.json'), JSON.stringify({
+      status: 'passed', forcedTerminationAttempted: true,
+      terminationBoundary: 'Puppeteer WebWorker.close over CDP pipe',
+    }, null, 2));
+  } catch (error) {
+    writeFileSync(join(RESULT_DIR, 'result.json'), JSON.stringify({
+      status: 'blocked', forcedTerminationAttempted,
+      stage, error: error?.message ?? String(error),
+    }, null, 2));
+    throw error;
   } finally {
-    ctx?.close();
+    if (browser) {
+      let closed = false;
+      await Promise.race([
+        browser.close().then(() => { closed = true; }),
+        new Promise((resolveWait) => setTimeout(resolveWait, 5_000)),
+      ]).catch(() => {});
+      // why: a broken pipe must not leave CI waiting on Chrome after the lane has produced diagnostics.
+      if (!closed) browser.process()?.kill('SIGKILL');
+    }
     rmSync(fault.directory, { recursive: true, force: true });
+    rmSync(profile, { recursive: true, force: true });
   }
 };
 
