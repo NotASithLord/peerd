@@ -170,7 +170,9 @@ export const runActor = async (job, {
         }
         if (m.type === 'model-request') {
           try {
-            const resp = await sendToSW('actor/model-call', { relayToken, args: m.args });
+            const resp = await sendToSW('actor/model-call', {
+              ...(relayToken ? { relayToken } : {}), args: m.args,
+            });
             if (resp?.ok) w.postMessage({ type: 'model-response', rid: m.rid, events: resp.events ?? [] });
             else w.postMessage({ type: 'model-error', rid: m.rid, error: resp?.error ?? 'model call failed' });
           } catch (e) { w.postMessage({ type: 'model-error', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }); }
@@ -185,12 +187,19 @@ export const runActor = async (job, {
             // worker's call args) and returns the ToolResult. The relay grant keys
             // the actor ctx it builds — the session is no longer sent at all, so
             // neither this runner nor any other first-party page can name one.
-            const reply = await sendToSW('actor/tool-dispatch', { relayToken, call: m.call });
+            const reply = await sendToSW('actor/tool-dispatch', {
+              ...(relayToken ? { relayToken } : {}), call: m.call,
+            });
             w.postMessage({ type: 'tool-response', rid: m.rid, reply });
           } catch (e) { w.postMessage({ type: 'tool-response', rid: m.rid, reply: { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) } }); }
           return;
         }
-        if (m.type === 'loop-event') { sendToSW('actor/loop-event', { relayToken, event: m.event }).catch(() => {}); return; }
+        if (m.type === 'loop-event') {
+          sendToSW('actor/loop-event', {
+            ...(relayToken ? { relayToken } : {}), event: m.event,
+          }).catch(() => {});
+          return;
+        }
         if (m.type === 'done') {
           const r = m.result ?? {};
           // No `aborted` here: a Stop-cascade is stamped at the SW client (which alone

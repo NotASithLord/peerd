@@ -27,6 +27,8 @@ import { runJob, abortJob } from './job-runner.js';
 // The heap split: EVERY offscreen agent loop — ephemeral spawned reasoners AND
 // bound actors (VM/Notebook/App/web) — runs in a dedicated Worker via this ONE host.
 import { runActor, abortActor } from './actor-runner.js';
+import { bindActorChannel } from './actor-channel-host.js';
+import { ACTOR_CHANNEL_OFFER, ACTOR_CHANNEL_PROTOCOL } from '/shared/actor-channel-protocol.js';
 // PDF text extraction (the read_pdf runner tool): pdf.js needs a Worker, which
 // the SW can't host. Self-registers a 'pdf/extract' message handler.
 import './pdf-extract.js';
@@ -136,6 +138,24 @@ setInterval(() => {
 }, TICK_MS);
 
 connect();
+
+// Chrome actor jobs arrive over a standard MessageChannel transferred by the
+// service worker directly to this exact offscreen WindowClient. This avoids
+// runtime messaging and runtime Port fan-out to other extension frames.
+navigator.serviceWorker?.addEventListener('message', (event) => {
+  const source = /** @type {{ scriptURL?: string } | null} */ (event.source);
+  if (!event.isTrusted
+      || source?.scriptURL !== browser.runtime.getURL('background/service-worker.js')
+      || event.data?.type !== ACTOR_CHANNEL_OFFER
+      || event.data?.protocol !== ACTOR_CHANNEL_PROTOCOL
+      || typeof event.data?.channelId !== 'string'
+      || event.ports?.length !== 1) return;
+  bindActorChannel({
+    port: event.ports[0], channelId: event.data.channelId,
+    run: runActor, abort: abortActor,
+    workerUrl: browser.runtime.getURL('offscreen/actor-worker.js'),
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Voice: lazy-loaded Moonshine transcriber.
@@ -397,33 +417,6 @@ const onJobAbort = (msg, sender, sendResponse) => {
   return true;
 };
 browser.runtime.onMessage.addListener(/** @type {any} */ (onJobAbort));
-
-// --- the heap split: every offscreen agent loop (spawned reasoners + bound actors) ---
-// Runs a reasoning (tools:[]) OR bound-actor (VM/Notebook/App/web) loop in a dedicated
-// Worker (its own heap), relaying its model call — AND, for a tool-bearing actor, every
-// tool call — back to the SW (which holds the key and pins + gates + dispatches). Same
-// command trust posture as onJobMessage: the exact service-worker source only.
-/**
- * @param {any} msg
- * @param {import('webextension-polyfill').Runtime.MessageSender} sender
- * @param {(response: any) => void} sendResponse
- */
-const onActorMessage = (msg, sender, sendResponse) => {
-  if (msg?.type !== 'actor/run' && msg?.type !== 'actor/abort') return undefined;
-  if (!isServiceWorkerSender(sender)) { sendResponse({ ok: false, error: 'unauthorized-command-sender' }); return true; }
-  if (msg.type === 'actor/abort') { abortActor(msg.runId); sendResponse({ ok: true }); return true; }
-  runActor(
-    msg.job ?? {},
-    {
-      workerUrl: browser.runtime.getURL('offscreen/actor-worker.js'),
-      sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }),
-    },
-  )
-    .then((result) => sendResponse(result))
-    .catch((e) => sendResponse({ ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }));
-  return true;
-};
-browser.runtime.onMessage.addListener(/** @type {any} */ (onActorMessage));
 
 // Local WebGPU inference (FEATURE-LOCAL-WEBGPU B). The SW's local-webgpu adapter
 // drives this: status/probe/init/teardown are request→response; generate STREAMS

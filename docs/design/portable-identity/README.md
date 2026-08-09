@@ -24,8 +24,9 @@ The code is the specification:
 - Fail-loud export, targeted custody RPC, authenticated same-did import,
   serialized custody reads and changes, and a two-step keep/replace decision
   when the local did differs or its stored material is unreadable.
-- An exact-options backup Port, guarded transfer routes, and a static
-  single-receiver check keep backup passwords off broadcast messaging.
+- A targeted Chrome MessageChannel, an exact-sender Firefox backup Port,
+  guarded transfer routes, and a static receiver check keep backup passwords
+  off broadcast messaging.
 - Structural exclusion of raw identity and device-key secrets from the generic
   encrypted-secrets section.
 

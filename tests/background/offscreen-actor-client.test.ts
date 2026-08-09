@@ -70,6 +70,27 @@ const clientWithRelay = (over: any = {}) => {
 };
 
 describe('run() — Stop-cascade aborted stamping', () => {
+  test('channel transport binds a relay without serializing its grant', async () => {
+    let sentJob: any = null;
+    let relayResult: any = null;
+    const client = makeOffscreenActorClient(baseDeps({
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'web', backing: 'api' }) },
+      dispatchToolCall: async () => ({ ok: true, content: 'ran' }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        sentJob = job;
+        relayResult = await relay('actor/tool-dispatch', { call: { name: 'fetch_url', args: {} } });
+        return { ok: true, started: true, finalText: 'done' };
+      },
+    }));
+    const result = await client.run({
+      actorSessionId: 'actor-channel', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'm',
+    } as any);
+    expect(sentJob.relayToken).toBeUndefined();
+    expect(relayResult).toEqual({ ok: true, result: { ok: true, content: 'ran' } });
+    expect(result.finalText).toBe('done');
+  });
+
   test('stamps aborted when the signal fired and the turn produced NO reply', async () => {
     // The worker can unwind an abort CLEANLY (empty reply, no error) → looks ok at the
     // result shape. signal.aborted here is the authoritative proof a Stop hit this run.
@@ -521,9 +542,9 @@ describe('relay grant — routes refuse anything without a live token', () => {
   });
 });
 
-// The sender pin. `runtime.sendMessage` from the SW cannot address one context, so
-// the actor/run job — grant token included — is broadcast to the side panel and to
-// every engine tab page. A page that keeps the token must still get nowhere.
+// Firefox's private background host still uses a token to bind each relay to a
+// live run. Even there, a token-bearing call from a different extension page
+// must get nowhere. Chrome closes the grant over a targeted MessageChannel.
 describe('relay sender pin — a leaked token is useless from any other page', () => {
   const dispatchDeps = {
     sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
