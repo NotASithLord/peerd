@@ -683,6 +683,11 @@ describe('uncertainty is never silently discarded (overflow evidence)', () => {
     const block = await boot2.drainNoticesFor('sess-9');
     expect(block).toContain('compacted');
     expect(block).toContain('Verify');
+    expect(block).toContain('"category":"verify_before_retry"');
+    expect(block).toContain('"autoRetry":false');
+    expect(block).toContain('"retryRequires":["external-verification","user-instruction"]');
+    expect(block).toContain('"verificationRequired":true');
+    expect(block).toContain('compacted unresolved evidence');
   });
 });
 

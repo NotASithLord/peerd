@@ -158,6 +158,12 @@ export const makeLifecycleBoot = ({
             operation: 'outcome_unknown_overflow',
             droppedCount: overflow.droppedCount,
             recoveryState: 'compacted',
+            category: 'verify_before_retry',
+            autoRetry: false,
+            retryRequires: ['external-verification', 'user-instruction'],
+            verificationRequired: true,
+            keepIdempotencyKey: false,
+            reason: 'exact unresolved operation identity was compacted to bound storage',
           },
           user: `${overflow.droppedCount} unresolved operation record(s) with `
             + 'uncertain outcomes were compacted to bound storage. Verify the '
@@ -210,8 +216,8 @@ export const makeLifecycleBoot = ({
     return '<interruption-recovery>\nA previous browser session ended while '
       + 'work was in flight. Recovered operation states:\n'
       + `${lines.join('\n')}\n`
-      + 'Do not repeat any operation marked outcome_unknown without verifying '
-      + 'the external state first.\n</interruption-recovery>';
+      + 'Do not repeat operations marked outcome_unknown or compacted unresolved '
+      + 'evidence without verifying the external state first.\n</interruption-recovery>';
   };
 
   /**
