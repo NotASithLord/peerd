@@ -82,9 +82,13 @@ export const makeSettingsRoutes = (deps) => {
         onSettingsChanging?.({ dwebEnabled: false });
       }
       await settingsStore.reset(known);
-      if (resetsDweb) {
-        await onSettingsChanged?.({ dwebEnabled: settingsStore.get().dwebEnabled });
-      }
+      const changed = {
+        ...(resetsDweb ? { dwebEnabled: settingsStore.get().dwebEnabled } : {}),
+        ...(known.includes('autoUpdateEnabled')
+          ? { autoUpdateEnabled: settingsStore.get().autoUpdateEnabled }
+          : {}),
+      };
+      if (Object.keys(changed).length > 0) await onSettingsChanged?.(changed);
       pushState();
       return { ok: true, settings: { ...settingsStore.get() } };
     },

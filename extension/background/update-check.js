@@ -17,15 +17,15 @@
 //   disconnects (onQuiet), or the browser applies it at its next restart.
 //   Firefox - has no requestUpdateCheck API at all, so we read the gecko
 //   update feed directly (it is served with open CORS) and surface an
-//   "update available" notice whose action opens the XPI; Firefox's own
-//   daily add-on poll still auto-applies it regardless.
+//   "update available" notice whose action opens the XPI. We never register
+//   an onUpdateAvailable listener there, so Firefox's own update lifecycle
+//   remains untouched.
 //   Dev (load-unpacked) and store packages carry no self-hosted update_url:
-//   start() registers NOTHING there. That gate is load-bearing on Firefox,
-//   where the mere PRESENCE of an onUpdateAvailable listener defers every
-//   downloaded add-on update until reload()/browser restart (presence-based,
-//   unlike Chrome's unload-based deferral) - a listener on the store package
-//   would break AMO's automatic updates. The store artifact also omits the
-//   autoUpdateEnabled key entirely (store updates belong to the store).
+//   start() registers NOTHING there. The Chrome-only listener gate is
+//   load-bearing: on Firefox the mere PRESENCE of an onUpdateAvailable
+//   listener defers downloaded add-on updates until reload()/browser restart.
+//   The store artifact also omits the autoUpdateEnabled key entirely (store
+//   updates belong to the store).
 //
 // why fetchFn is injected, not a bare fetch: the feed read is the same class
 // of chassis-internal DATA fetch as the voice model download (a hardcoded,
@@ -41,12 +41,20 @@ export const UPDATE_CHECK_SESSION_KEY = 'updateCheck.v1';
 // own cadence anyway; this is a floor, not a schedule. Only a COMPLETED
 // check starts the window (an offline boot must not burn it).
 export const MIN_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const RETRY_BASE_MS = 15_000;
+const RETRY_MAX_MS = 120_000;
+const RETRY_LIMIT = 8;
 
 // The only hosts an update_link may point at. The browsers' own update
 // pipelines are protected by package signing (CRX key, AMO signature); this
 // link instead becomes a trusted-UI "Install update" button, so a compromised
 // feed must not be able to aim it at an arbitrary https URL.
-export const ALLOWED_UPDATE_LINK_HOSTS = Object.freeze(['github.com', 'peerd.ai']);
+export const ALLOWED_UPDATE_LINK_HOSTS = Object.freeze(['github.com']);
+
+// The notice is trusted product UI, so host allowlisting alone is too broad:
+// github.com can host unrelated files and login pages. Accept only the
+// repository's versioned Firefox preview release asset.
+const FIREFOX_RELEASE_PATH = /^\/NotASithLord\/peerd\/releases\/download\/v(\d+(?:\.\d+)*)\/peerd-preview-firefox\.xpi$/;
 
 // Release versions are plain dotted numerics; anything else in a feed is
 // junk and must not reach compareVersions or the notice copy.
@@ -96,7 +104,10 @@ export const latestGeckoUpdate = (feedJson, geckoId) => {
     let url;
     try { url = new URL(updateLink); } catch { continue; }
     if (url.protocol !== 'https:') continue;
-    if (!ALLOWED_UPDATE_LINK_HOSTS.includes(url.hostname)) continue;
+    const releaseVersion = FIREFOX_RELEASE_PATH.exec(url.pathname)?.[1];
+    if (!ALLOWED_UPDATE_LINK_HOSTS.includes(url.hostname)
+        || url.username || url.password || url.search || url.hash
+        || releaseVersion !== version) continue;
     if (!best || compareVersions(version, best.version) > 0) {
       best = { version, updateLink };
     }
@@ -116,7 +127,7 @@ export const latestGeckoUpdate = (feedJson, geckoId) => {
  * @typedef {{
  *   lastCheckAt?: number,
  *   notifiedVersion?: string,
- *   pendingNotice?: { version: string, text: string, url: string },
+ *   pendingNotice?: { version: string, url: string },
  * }} UpdateSessionState
  */
 
@@ -125,7 +136,10 @@ export const latestGeckoUpdate = (feedJson, geckoId) => {
  *   runtime: {
  *     getManifest: () => UpdateManifest,
  *     requestUpdateCheck?: () => Promise<unknown>,
- *     onUpdateAvailable?: { addListener: (fn: (details: { version: string }) => void) => void },
+ *     onUpdateAvailable?: {
+ *       addListener: (fn: (details: { version: string }) => void) => void,
+ *       removeListener?: (fn: (details: { version: string }) => void) => void,
+ *     },
  *     reload: () => void,
  *   },
  *   fetchFn: (url: string, init?: RequestInit) => Promise<Response>,
@@ -139,6 +153,8 @@ export const latestGeckoUpdate = (feedJson, geckoId) => {
  *     set: (key: string, value: unknown) => Promise<void>,
  *   },
  *   now?: () => number,
+ *   scheduleRetry?: (fn: () => void, delayMs: number) => unknown,
+ *   cancelRetry?: (handle: unknown) => void,
  *   log?: (...args: unknown[]) => void,
  * }} deps
  *   busy is "peerd is doing work" (live turns AND goal runs between turns);
@@ -155,6 +171,8 @@ export const latestGeckoUpdate = (feedJson, geckoId) => {
 export const makeUpdateCheck = ({
   runtime, fetchFn, ready, isEnabled, busy, surfacesOpen, notify, sessionKv,
   now = () => Date.now(),
+  scheduleRetry = (fn, delayMs) => setTimeout(fn, delayMs),
+  cancelRetry = (handle) => clearTimeout(/** @type {ReturnType<typeof setTimeout>} */ (handle)),
   log = () => {},
 }) => {
   /** @type {string | null} a downloaded update waiting for a quiet moment */
@@ -163,6 +181,16 @@ export const makeUpdateCheck = ({
   let downloadNotedVersion = null;
   /** @type {Promise<unknown> | null} coalesces concurrent checkNow calls */
   let inFlightCheck = null;
+  /** @type {unknown | null} one retry at a time while a download is parked */
+  let retryHandle = null;
+  let retryAttempts = 0;
+  // A startup event can arrive before stored settings hydrate. If the durable
+  // setting is OFF, the synchronous listener still consumed Chrome's native
+  // event, so peerd must safely complete that one intercepted update to
+  // restore the no-listener outcome.
+  let mustApplyInterceptedDownload = false;
+  let listenerEligible = false;
+  let listenerRegistered = false;
 
   /** @returns {Promise<UpdateSessionState>} */
   const sessionState = async () => {
@@ -192,11 +220,47 @@ export const makeUpdateCheck = ({
   // suspends when idle, and a notice held in memory would die with it while
   // the throttle survived in storage.session.
   const postPendingNotice = () => withSession((state) => {
+    if (!isEnabled()) return null;
     const notice = state.pendingNotice;
     if (!notice || state.notifiedVersion === notice.version) return null;
-    if (!notify(notice.text, { kind: 'open-url', label: 'Install update', url: notice.url })) return null;
+    const currentVersion = runtime.getManifest().version;
+    const validated = latestGeckoUpdate({
+      addons: { notice: { updates: [{ version: notice.version, update_link: notice.url }] } },
+    }, 'notice');
+    if (!validated || compareVersions(validated.version, currentVersion) <= 0) {
+      const { pendingNotice: _dropped, ...rest } = state;
+      return rest;
+    }
+    const text = `peerd v${validated.version} is available (you have v${currentVersion}). `
+      + 'Firefox installs preview updates on its own daily check, or install it now.';
+    if (!notify(text, { kind: 'open-url', label: 'Install update', url: validated.updateLink })) return null;
     return { ...state, notifiedVersion: notice.version };
   });
+
+  const clearRetry = () => {
+    if (retryHandle !== null) cancelRetry(retryHandle);
+    retryHandle = null;
+    retryAttempts = 0;
+  };
+
+  const retryLater = () => {
+    if (retryHandle !== null || retryAttempts >= RETRY_LIMIT) return;
+    const delayMs = Math.min(RETRY_BASE_MS * (2 ** retryAttempts), RETRY_MAX_MS);
+    retryAttempts += 1;
+    retryHandle = scheduleRetry(() => {
+      retryHandle = null;
+      void maybeApplyPendingDownload().catch(() => {});
+    }, delayMs);
+  };
+
+  /** @param {string} version @param {boolean} retry */
+  const noteDeferred = (version, retry) => {
+    if (downloadNotedVersion !== version
+        && notify(`peerd v${version} is downloaded - it installs when peerd goes quiet or the browser restarts.`)) {
+      downloadNotedVersion = version;
+    }
+    if (retry) retryLater();
+  };
 
   // A downloaded update is parked; apply it only when nothing is live.
   // Reloading restarts the whole extension - open panels close, engine tabs
@@ -204,31 +268,26 @@ export const makeUpdateCheck = ({
   // re-locks - so every surface and every unit of work blocks it.
   const maybeApplyPendingDownload = async () => {
     const version = pendingDownloadedVersion;
-    if (!version || !isEnabled()) return;
-    if (busy() || await surfacesOpen()) {
-      if (downloadNotedVersion !== version
-          && notify(`peerd v${version} is downloaded - it installs when peerd goes quiet or the browser restarts.`)) {
-        downloadNotedVersion = version;
-      }
-      return;
-    }
+    if (!version || (!isEnabled() && !mustApplyInterceptedDownload)) { clearRetry(); return; }
+    if (busy()) { noteDeferred(version, true); return; }
+    const open = await surfacesOpen();
+    // Work can start while the asynchronous window-client scan is pending.
+    // Recheck every synchronous gate in the same task immediately before the
+    // reload, so no turn or settings transition can slip through the await.
+    if (!isEnabled() && !mustApplyInterceptedDownload) { clearRetry(); return; }
+    if (busy() || open) { noteDeferred(version, busy()); return; }
+    clearRetry();
     log('[update] applying downloaded update', version);
+    pendingDownloadedVersion = null;
+    mustApplyInterceptedDownload = false;
     runtime.reload();
   };
 
   // The browser downloaded an update (our request or its own poll).
   const onUpdateDownloaded = async (/** @type {string} */ version) => {
     await ready; // stored settings may say OFF; never act on the channel default
-    if (!isEnabled()) {
-      // Firefox defers a downloaded update whenever ANY onUpdateAvailable
-      // listener exists, so "disabled" must restore the no-listener default
-      // there: apply immediately, live work and all - exactly what Firefox
-      // does on its own. Chrome's no-listener default (install at the next
-      // SW unload / browser restart) is preserved by doing nothing.
-      if (typeof runtime.requestUpdateCheck !== 'function') runtime.reload();
-      return;
-    }
     pendingDownloadedVersion = version;
+    if (!isEnabled()) mustApplyInterceptedDownload = true;
     await maybeApplyPendingDownload();
   };
 
@@ -262,17 +321,16 @@ export const makeUpdateCheck = ({
       if (!response.ok) { log('[update] feed fetch failed', response.status); return false; }
       feed = await response.json();
     } catch (error) { log('[update] feed fetch failed', error); return false; }
+    if (!isEnabled()) return false;
     const latest = latestGeckoUpdate(feed, gecko.id);
     if (!latest || compareVersions(latest.version, manifest.version) <= 0) return true;
-    await withSession((state) => ({
-      ...state,
-      pendingNotice: {
-        version: latest.version,
-        text: `peerd v${latest.version} is available (you have v${manifest.version}). `
-          + 'Firefox installs preview updates on its own daily check, or install it now.',
-        url: latest.updateLink,
-      },
-    }));
+    await withSession((state) => (isEnabled() ? {
+        ...state,
+        pendingNotice: {
+          version: latest.version,
+          url: latest.updateLink,
+        },
+      } : null));
     await postPendingNotice();
     return true;
   };
@@ -309,25 +367,55 @@ export const makeUpdateCheck = ({
     return inFlightCheck;
   };
 
+  /** @param {{ version: string }} details */
+  const onUpdateDownloadedListener = (details) => {
+    void onUpdateDownloaded(details?.version ?? '').catch(() => {});
+  };
+
+  const syncEnabled = () => {
+    const events = runtime.onUpdateAvailable;
+    if (!listenerEligible || !events) return;
+    if (isEnabled() && !listenerRegistered) {
+      events.addListener(onUpdateDownloadedListener);
+      listenerRegistered = true;
+      if (pendingDownloadedVersion) void maybeApplyPendingDownload().catch(() => {});
+    } else if (!isEnabled() && listenerRegistered) {
+      events.removeListener?.(onUpdateDownloadedListener);
+      listenerRegistered = false;
+      if (pendingDownloadedVersion) {
+        mustApplyInterceptedDownload = true;
+        void maybeApplyPendingDownload().catch(() => {});
+      } else {
+        clearRetry();
+      }
+    }
+  };
+
   return {
     /**
-     * Register the update-downloaded listener - ONLY on a self-hosted
-     * (preview) manifest, and synchronously at SW boot (a downloaded update
-     * can be the very event that wakes the worker). Store/dev packages must
-     * not register: on Firefox a listener's mere presence defers every
-     * add-on update until reload()/browser restart.
+     * Register the update-downloaded listener only for self-hosted Chrome.
+     * Firefox needs no keepalive workaround and must never register this
+     * listener because its presence changes the browser's update lifecycle.
+     * Registration remains synchronous on Chrome because a downloaded update
+     * can be the event that wakes the worker.
      */
     start() {
       const manifest = runtime.getManifest();
-      const selfHosted = (Boolean(manifest.update_url) && typeof runtime.requestUpdateCheck === 'function')
-        || Boolean(manifest.browser_specific_settings?.gecko?.update_url);
-      if (!selfHosted) return;
-      runtime.onUpdateAvailable?.addListener((details) => {
-        void onUpdateDownloaded(details?.version ?? '').catch(() => {});
-      });
+      const selfHostedChrome = Boolean(manifest.update_url)
+        && typeof runtime.requestUpdateCheck === 'function';
+      if (!selfHostedChrome) return;
+      listenerEligible = true;
+      // Event listeners that wake an MV3 worker must exist during top-level
+      // evaluation. The handler waits for stored settings; syncEnabled removes
+      // it after hydration when OFF and safely finishes an event intercepted
+      // during that short startup window.
+      runtime.onUpdateAvailable?.addListener(onUpdateDownloadedListener);
+      listenerRegistered = Boolean(runtime.onUpdateAvailable);
+      void ready.then(syncEnabled).catch(() => {});
     },
 
     checkNow,
+    syncEnabled,
 
     /**
      * A UI surface connected: replay an undelivered "update available"

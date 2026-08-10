@@ -271,12 +271,12 @@ export const BehaviorSection = {
 
       ...(autoUpdateAvailable ? [toggleRow({
         id: 'auto-update',
-        label: 'Auto-update',
+        label: 'Preview update check',
         on: auOn,
         busyKey: 'autoUpdateBusy',
         badge: 'PREVIEW',
         summary: auOn
-          ? 'Checks for a new preview build at startup and installs it when nothing is running.'
+          ? 'Checks at startup and applies or offers a newer preview build.'
           : 'Preview updates wait for the browser’s own periodic check.',
         why: auOn
           ? 'On. At startup peerd asks the browser for a newer preview build from the release feed. In Chrome the update installs immediately when no chat is mid-turn and no peerd surface is open; otherwise it applies on the next browser restart. In Firefox, which gives extensions no way to trigger their own update, peerd shows an “update available” notice with an install link, and Firefox’s own daily add-on check still installs it on its own.'

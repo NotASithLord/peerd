@@ -4395,6 +4395,10 @@ browser.tabs.onRemoved.addListener((tabId) => {
   // ...and drop it out of the network backstop's tab scope. Tab ids remain
   // unique within one browser session, but closed tabs no longer need rules.
   denylistNetGuard.sync();
+  // A downloaded preview update may have been waiting only for this engine
+  // host to close. The update module re-checks every other surface and active
+  // turn before it can reload.
+  updateCheck.onQuiet();
 });
 
 // Invalidate a tab's DOM-nav refs when it starts navigating. The backend DOM
@@ -5646,6 +5650,7 @@ const onSettingsChanged = async (/** @type {any} */ patch) => {
   // behavior the moment it changes (key PRESENCE = the user just touched it —
   // normalizeSettingsPatch only emits keys the caller actually sent).
   if (patch?.frontDoorView) syncFrontDoorBehavior();
+  if (Object.hasOwn(patch ?? {}, 'autoUpdateEnabled')) updateCheck.syncEnabled();
 };
 
 const mintDwebActor = async () => {
@@ -7547,10 +7552,10 @@ void dwebSettingsGate.stopWhenDisabled(stopBaseNetwork).catch((error) => {
 // update_url poll at boot and reload when a downloaded update can apply
 // without destroying live work. Firefox: read the gecko feed and offer the
 // XPI in a notice. Dev/store manifests carry no self-hosted update_url, so
-// start() registers nothing there (load-bearing on Firefox - a mere
-// onUpdateAvailable listener defers AMO's automatic updates). start() runs
-// synchronously at boot - a downloaded update can be the event that wakes
-// this worker.
+// start() registers the downloaded-update listener only on Chrome. Firefox
+// keeps its native update lifecycle because a listener there would defer
+// automatic updates. start() runs synchronously at boot because a downloaded
+// Chrome update can be the event that wakes this worker.
 const updateCheck = makeUpdateCheck({
   runtime: browser.runtime,
   // why a bare fetch: a chassis-internal DATA fetch of the manifest's own
@@ -7571,10 +7576,11 @@ const updateCheck = makeUpdateCheck({
   // permission pages). The offscreen doc is excluded: the keepalive keeps
   // it open always, and counting it would block the reload forever.
   surfacesOpen: async () => {
-    if (uiConnected()) return true;
-    if (vmTabTracker.listLive().length > 0
+    const knownSurfaceOpen = () => uiConnected()
+      || vmTabTracker.listLive().length > 0
         || jsTabTracker.listLive().length > 0
-        || appTabTracker.listLive().length > 0) return true;
+        || appTabTracker.listLive().length > 0;
+    if (knownSurfaceOpen()) return true;
     try {
       // why the cast: tsconfig lib is DOM (one program checks SW, pages and
       // tests alike), so the ServiceWorkerGlobalScope clients API isn't on
@@ -7584,7 +7590,10 @@ const updateCheck = makeUpdateCheck({
       const windowClients = await swScope.clients?.matchAll?.({ type: 'window' });
       if (windowClients?.some((c) => !c.url.includes('/offscreen/'))) return true;
     } catch { /* not a SW context (Firefox event page) - covered above */ }
-    return false;
+    // A port or engine tab may have appeared while clients.matchAll() was in
+    // flight. This final synchronous read and the caller's busy recheck close
+    // that race before runtime.reload().
+    return knownSurfaceOpen();
   },
   notify: (text, action) => {
     if (!uiConnected()) return false;
