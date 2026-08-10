@@ -10,11 +10,14 @@
 [![Manifest V3](https://img.shields.io/badge/Manifest%20V3-Chrome%20%26%20Firefox-informational.svg)](#install)
 [![Security policy](https://img.shields.io/badge/security-policy-blue.svg)](SECURITY.md)
 
-# The first and only web-native AI agent harness
+# The first web-native AI agent harness
 
-peerd runs general-purpose agents entirely inside Chrome and Firefox. It works
-with your tabs, signed-in sessions, web apps, and local compute. You choose a
-supported cloud or local model.
+**Agent platforms are building browsers into the harness. peerd builds the
+harness into the browser.**
+
+It runs general-purpose agents entirely inside Chrome and Firefox, with your
+tabs, signed-in sessions, web apps, and local compute. You choose a supported
+cloud or local model.
 
 No Peerd account, hosted browser, or tool-server connection is required. Current
 builds send no product telemetry to Peerd.
