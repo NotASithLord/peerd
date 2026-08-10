@@ -42,6 +42,16 @@ const sidePanelApi = () =>
     /** @type {unknown} */ (browser)
   ).sidePanel;
 
+// Rail-action icon from the mono-stroke sprite inlined in home.html (the side
+// panel's icon language; same helper shape as sidepanel/components/app.js).
+// why: the old unicode glyphs (🔔/🔒/⚙) rendered as color emoji on most
+// platforms, breaking the monochrome-surface brand rule; the drawn symbols
+// inherit currentColor and render identically everywhere.
+/** @param {string} name */
+const railIcon = (name) =>
+  m('svg.ic', { width: 16, height: 16, viewBox: '0 0 24 24', 'aria-hidden': 'true' },
+    m('use', { href: `#ic-${name}` }));
+
 // Live, SW-fed state (was a one-shot snapshot). Starts at INITIAL_STATE; the
 // first 'state' push over the port corrects the vault/session truth.
 /** @type {any} */
@@ -575,7 +585,7 @@ const NotificationsBell = () => {
           'aria-expanded': String(open),
           onclick: () => { open = !open; if (open) peerNotifications.markAllSeen(); },
         }, [
-          m('span.home-action-icon', { 'aria-hidden': 'true' }, '🔔'),
+          m('span.home-action-icon', { 'aria-hidden': 'true' }, railIcon('bell')),
           m('span.home-action-label', 'Notifications'),
           unseen ? m('span.notif-badge', String(unseen > 9 ? '9+' : unseen)) : null,
         ]),
@@ -670,8 +680,11 @@ const HomeApp = {
     // the first-run "meet your peer" funnel gates the experience right here —
     // before any navigation — and lifts itself when the SW's onboardingComplete
     // latch flips on the next state push. It deliberately does NOT live in the
-    // side panel (you reach the panel by popping it from an onboarded home), so
-    // it can never surprise-trigger after you've started using home.
+    // side panel, and the panel is a front door of its own, so the SW closes
+    // the latch for any install that already has chat history
+    // (background/onboarding-reconcile.js). Net: the funnel only ever greets a
+    // genuinely fresh install; a panel-first user who clicks Home mid-use lands
+    // on home, never on a surprise re-onboarding.
     if (needsOnboarding(currentState)) {
       return m('.options-gate', m(OnboardingView, { state: currentState, send }));
     }
@@ -720,13 +733,13 @@ const HomeApp = {
       m('button.home-nav-item.home-rail-action.home-rail-lock', {
         'aria-label': 'Lock', onclick: () => send({ type: 'vault/lock' }),
       }, [
-        m('span.home-action-icon', { 'aria-hidden': 'true' }, '🔒'),
+        m('span.home-action-icon', { 'aria-hidden': 'true' }, railIcon('lock')),
         m('span.home-action-label', 'Lock'),
       ]),
       m('button.home-nav-item.home-rail-action.home-rail-settings', {
         'aria-label': 'Settings', onclick: () => openOptions(),
       }, [
-        m('span.home-action-icon', { 'aria-hidden': 'true' }, '⚙'),
+        m('span.home-action-icon', { 'aria-hidden': 'true' }, railIcon('set')),
         m('span.home-action-label', 'Settings'),
       ]),
     ]);

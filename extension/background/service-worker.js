@@ -436,6 +436,7 @@ import { makeStartupPopupNetworkGuard } from './startup-popup-network-guard.js';
 import { makeSessionState } from './session-state.js';
 import { makeLocalModelState } from './local-model-state.js';
 import { makeProfileState } from './profile-state.js';
+import { makeOnboardingReconcile } from './onboarding-reconcile.js';
 import { makeModelCatalog } from './model-catalog.js';
 import { makeTabAffordances } from './tab-affordances.js';
 import { makeMintOnce } from './mint-once.js';
@@ -1061,6 +1062,10 @@ const contacts = createContactsStore({ idb });
 // pushState doesn't re-read IDB on every push and onboarding/complete can reach
 // it via deps. profileState.get() ensures+caches; completeOnboarding refreshes.
 const profileState = makeProfileState({ profiles });
+// First-run reconcile: an install with chat history is onboarded, whatever
+// the latch says. The panel front door never gates first-run, so history
+// can predate the funnel (background/onboarding-reconcile.js has the story).
+const reconcileOnboardingLatch = makeOnboardingReconcile({ profileState, sessions });
 
 // The per-chat model picker's catalog assembly (background/model-catalog.js).
 // localModelAvailable is a thunk because localModelState is created later.
@@ -4193,11 +4198,14 @@ const buildStateSnapshot = async () => {
   // Unlocked path.
   const session = sessionId ? (await sessions.get(/** @type {any} */ (sessionId))) ?? null : null;
   const permission = await resolvePermission(session);
-  // Default profile — the side panel gates first-run onboarding on
-  // onboardingComplete and labels assistant transcript rows with
+  // Default profile: the home page gates first-run onboarding on
+  // onboardingComplete and the transcript labels assistant rows with
   // peerName. Only surfaced when unlocked: the locked push deliberately
-  // omits it so the panel's "assume complete" default holds at the gate
-  // and onboarding can never flash before a real unlock.
+  // omits it so the surfaces' "assume complete" default holds at the gate
+  // and onboarding can never flash before a real unlock. Reconcile FIRST
+  // so the same push that would re-show the funnel to an established
+  // install carries the closed latch instead.
+  await reconcileOnboardingLatch();
   const profile = await profileState.get();
   // why: providers block drives the Settings UI (provider selector + key
   // field), so it reflects the SELECTED provider (settings), and hasKey

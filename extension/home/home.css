@@ -71,8 +71,20 @@
   font-weight: 700;
   line-height: 1;
 }
-.home-rail-action { display: flex; align-items: center; gap: 8px; }
-.home-action-icon { flex: none; }
+/* why flex-start: .home-nav-item's space-between (label left, count right)
+   read as icon-far-left / label-far-right on these icon+label rows, and only
+   on the DIRECT rail children (the bell sits inside .notif, so its button
+   never stretched and its label hugged the icon). One rule for all three
+   rows: icon, then label, left-hugged; the notif badge keeps its own
+   margin-left:auto to sit at the right edge. */
+.home-rail-action,
+.notif-bell { display: flex; align-items: center; justify-content: flex-start; gap: 8px; }
+/* The bell button sits inside .notif (for its dropdown), so the rail's
+   stretch never reaches it; match the direct-child rows' width explicitly.
+   Declared BEFORE the narrow-rail media block so its 44px/center wins there. */
+.notif-bell { width: 100%; }
+.home-action-icon { flex: none; display: inline-flex; }
+.home-action-icon .ic { display: block; }
 
 /* ---- content area ------------------------------------------------------- */
 .home-content {
@@ -758,7 +770,9 @@
 
 /* peerd notifications — rail bell (count + dropdown) and an in-chat banner. */
 .notif { position: relative; }
-.notif-bell { display: flex; align-items: center; gap: 8px; }
+/* .notif-bell's layout lives with .home-rail-action near the top of this file
+   (one rule for all three rail action rows), BEFORE the narrow-rail media
+   block so that block's 44px/center override keeps winning. */
 .notif-badge {
   margin-left: auto;
   background: var(--accent); color: var(--accent-fg, #fff);
