@@ -14,6 +14,19 @@
   <link rel="stylesheet" href="./home.css">
 </head>
 <body>
+  <!-- Icon sprite: the SUBSET of the side panel's mono-stroke set this page
+       uses (same symbols, copied verbatim: 24-unit grid, 2px stroke, round
+       caps, currentColor). <use href="#ic-..."> only resolves same-document,
+       so home carries its own copy. why drawn symbols, not unicode glyphs:
+       the bell/padlock render as COLOR emoji on most platforms, off-brand on
+       a monochrome surface, and drift per-OS; a drawn stroke inherits
+       currentColor and renders identically everywhere. Lives outside #app so
+       Mithril re-renders never touch it. -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+    <symbol id="ic-bell" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.6 1.9H4.4z"></path><path d="M10 21.2h4"></path></symbol>
+    <symbol id="ic-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9.5" rx="2.2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></symbol>
+    <symbol id="ic-set" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 8h7M16 8h3M12 16h7M5 16h3"></path><circle cx="14" cy="8" r="2.1"></circle><circle cx="10" cy="16" r="2.1"></circle></symbol>
+  </defs></svg>
   <!-- Mithril mounts here (a single named slot, never document.body). -->
   <div id="app"></div>
   <script type="module" src="./home.js"></script>
