@@ -68,6 +68,19 @@ const boundedProbe = async (operation) => {
 };
 
 /**
+ * Preserve the difference between an exhaustive negative and a boundary walk
+ * that spent its budget. A positive is definitive even if discovery capped
+ * elsewhere; an incomplete negative remains unknown.
+ * @param {any} value
+ * @returns {boolean | null}
+ */
+export const passwordFieldSignalFromProbe = (value) => {
+  if (value?.has === true) return true;
+  if (value?.capped === true) return null;
+  return value?.has === false ? false : null;
+};
+
+/**
  * Read only the current document location. The injection result also carries
  * the browser-issued documentId used to bind every later scripting operation
  * to this exact document.
@@ -124,7 +137,7 @@ const probeLiveDocument = async (tab, ctx) => {
         func: hasPasswordFieldInjected,
       }));
       const passwordValue = passwordProbe?.[0]?.result;
-      if (typeof passwordValue?.has === 'boolean') hasPasswordField = passwordValue.has;
+      hasPasswordField = passwordFieldSignalFromProbe(passwordValue);
     } catch {
       // A navigation destroys the pinned document. The later tool call carries
       // the same documentId and will fail instead of retargeting the new page.

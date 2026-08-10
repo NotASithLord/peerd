@@ -26,8 +26,8 @@
 // rather than to make the seed list exhaustive, which it never could be.
 //
 // WHAT IS NOT HERE. The store (peerd-egress), the observation points that feed
-// it (the DOM walk, the confirm path), and the enforcement (gates,
-// resolveTargetTab) all live elsewhere. This file only answers the question.
+// it (the live DOM-tool probe chokepoint, the confirm path), and the enforcement
+// (gates, resolveTargetTab) all live elsewhere. This file only answers the question.
 
 import { normalizeApiOrigin } from './web-actor.js';
 
@@ -58,9 +58,9 @@ const ORDINARY = Object.freeze({ sensitive: false });
  * same reasoning that kept `webNavigation` out — see the SW's tabs.onUpdated
  * comment). These two are observable from data we already collect.
  *
- *   password-field   A password input was seen in the DOM walk on this origin.
- *                    Nothing else on the web means "this site has accounts"
- *                    as reliably, and we already walk the DOM for the snapshot.
+ *   password-field   A password input was seen by the standalone exact-document
+ *                    probe every DOM tool passes through. Nothing else on the
+ *                    web means "this site has accounts" as reliably.
  *   confirmed-write  The user approved a web:write on this origin. They
  *                    affirmed acting there under their own name.
  *

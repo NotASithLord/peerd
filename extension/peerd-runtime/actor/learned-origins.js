@@ -9,10 +9,10 @@
 //
 // THE TWO SIGNALS, and why these and not the obvious one:
 //
-//   password-field   A password input was on a page the actor walked. Nothing
-//                    else on the web says "this site has accounts" as plainly,
-//                    and the DOM walk already visits every element — so this
-//                    costs one boolean, not a new observation.
+//   password-field   A password input was seen by the standalone exact-document
+//                    probe at the DOM-tool chokepoint. Nothing else on the web
+//                    says "this site has accounts" as plainly; only its boolean
+//                    result reaches this store.
 //   confirmed-write  The user approved a `web:write` to this origin. They
 //                    affirmed acting there under their own name; we are only
 //                    remembering that they did.

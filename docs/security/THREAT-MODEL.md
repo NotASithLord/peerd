@@ -1023,13 +1023,17 @@ evaluating peerd should know. Each cites where it lives in the code.
   and passes the rest through verbatim. The scanner is already a pure function over
   strings, so the cheapest close is to run it over those values too — it is listed here
   because it is not done, not because it is hard.
-- R23. The password probe is top-frame and light-DOM only (#277). A site whose sign-in
-  lives in an iframe — an embedded IdP or payment widget, or a plain `<iframe
-  src=/login>` — or inside a shadow root is invisible to the learned signal
-  permanently, however often peerd walks it. This is the one residual that pulls
-  AGAINST another: widening the probe widens both directions at once, and #257 exists
-  because false positives on this signal have their own cost. It wants a deliberate
-  call, not a wider selector (`dom/walk-injected.js`).
+- R23. The password probe follows attributable DOM boundaries (#277). It now walks
+  open shadow roots and frames whose current origin exactly matches the top document,
+  plus declared inherited `about:blank` and `srcdoc` documents. Closed shadow roots
+  remain unobservable. Cross-origin frames are deliberately excluded: an embedded IdP
+  or payment widget belongs to its own origin, and treating its password field as
+  evidence about the relying party would recreate the false-positive cost from #257.
+  The original full light-DOM query remains intact; only discovery of additional roots
+  is bounded, and an exhausted negative stays unknown at the policy boundary. Fields
+  beyond that budget can therefore still fail open.
+  `autocomplete="new-password"` is matched as a token, including sectioned and WebAuthn
+  forms (`dom/walk-injected.js`; `tests/unit/peerd-runtime/dom-walk.test.js`).
 - R24. Chunked exfil defeats the minimum-blob threshold (#279). The tripwire is a pure
   per-call function over one call's slots, and the dispatcher hands it no history, so a
   payload split below the threshold passes as many times as an attacker cares to
