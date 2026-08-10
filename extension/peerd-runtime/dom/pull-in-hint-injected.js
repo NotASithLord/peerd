@@ -37,7 +37,7 @@ export function pullInHintInjected(shortcut, iconUrl) {
     var doc = document;
     if (doc.getElementById('peerd-pull-hint')) return;      // idempotent
 
-    var FG = '#e8edf2', SUB = '#8b95a1';
+    var FG = '#F3F3EF', SUB = '#ABABA6';
     // The five wordmark colors (letterform variant), p e e r d.
     var BRAND = [['p', '#22C6F5'], ['e', '#F2555A'], ['e', '#F7A823'], ['r', '#2BD46E'], ['d', '#D957EF']];
     var MONO = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
@@ -59,8 +59,8 @@ export function pullInHintInjected(shortcut, iconUrl) {
         position: 'fixed', top: '14px', right: '14px', zIndex: '2147483000',
         margin: '0', padding: '10px 13px',
         font: '12px/1.5 ' + MONO, color: FG, textAlign: 'right', whiteSpace: 'nowrap',
-        background: 'rgba(20,23,28,0.96)',
-        border: '1px solid rgba(255,255,255,0.13)',
+        background: '#151617',
+        border: '1px solid #25272A',
         borderRadius: '11px',
         boxShadow: '0 12px 36px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.05)',
         pointerEvents: 'auto', cursor: 'default', opacity: '0',
@@ -101,7 +101,7 @@ export function pullInHintInjected(shortcut, iconUrl) {
       var lead = doc.createElement('span'); lead.textContent = shortcut ? 'or click' : 'click';
       line2.appendChild(lead);
       var chip = doc.createElement('span');
-      setStyle(chip, { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '21px', height: '21px', borderRadius: '6px', background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.11)' });
+      setStyle(chip, { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '21px', height: '21px', borderRadius: '6px', background: '#1A1C1E', border: '1px solid #25272A' });
       if (iconUrl) {
         var img = doc.createElement('img');
         img.src = iconUrl; img.alt = 'peerd';
@@ -153,9 +153,9 @@ export function pullInHintInjected(shortcut, iconUrl) {
         shrink();
       };
       var glowOn = function () {
-        box.style.background = 'rgba(26,30,37,0.99)';
-        box.style.borderColor = 'rgba(255,255,255,0.28)';
-        box.style.color = '#ffffff';
+        box.style.background = '#1A1C1E';
+        box.style.borderColor = '#32353A';
+        box.style.color = '#F3F3EF';
         box.style.boxShadow = '0 16px 44px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.08)';
         box.style.transform = reduce ? 'none' : 'translateY(-1px)';
       };

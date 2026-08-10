@@ -132,7 +132,7 @@ const CSS = `
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 12px;
   line-height: 1.3;
-  color: var(--fg, #e6edf3);
+  color: var(--fg, #F3F3EF);
   background: rgba(28, 33, 40, 0.94);
   border: 1px solid rgba(230, 237, 243, 0.42);
   border-radius: 7px;
@@ -151,7 +151,7 @@ const CSS = `
   outline: none;
 }
 .peerd-pull .peerd-brand { font-size: 12.5px; }
-.peerd-pull-glyph { color: var(--fg-muted, #8b949e); opacity: 0.85; }
+.peerd-pull-glyph { color: var(--fg-muted, #ABABA6); opacity: 0.85; }
 /* Brief, auto-dismissing reminder under the button. The text TYPES IN, holds,
    then TYPES OUT behind a blinking block cursor that tracks the caret — the same
    terminal feel as the wordmark's manifest intro (sidepanel/styles.css wmType /
@@ -172,7 +172,7 @@ const CSS = `
   font-size: 11px;
   line-height: 1.5;
   white-space: nowrap;
-  color: var(--fg-muted, #8b949e);
+  color: var(--fg-muted, #ABABA6);
   background: rgba(28, 33, 40, 0.94);
   border: 1px solid rgba(230, 237, 243, 0.22);
   border-radius: 6px;
@@ -200,7 +200,7 @@ const CSS = `
   height: 1em;
   margin-left: 1px;
   vertical-align: -0.1em;
-  background: var(--fg, #e6edf3);
+  background: var(--fg, #F3F3EF);
   animation: peerdHintBlink 1s steps(1, end) infinite;
 }
 @keyframes peerdHintBox    { to { opacity: 0.97; } }

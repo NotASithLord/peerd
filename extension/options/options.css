@@ -177,11 +177,11 @@
   background: var(--fg);
   color: var(--bg);
 }
-.transfer-section button.secondary { border-color: var(--fg-muted); }
+.transfer-section button.secondary { border-color: var(--border-strong); }
 .transfer-section input[type="password"] {
   box-sizing: border-box;
   min-height: 44px;
-  border-color: var(--fg-muted);
+  border-color: var(--border-strong);
 }
 .transfer-section input[type="file"] {
   box-sizing: border-box;
@@ -191,7 +191,7 @@
 .transfer-section input[type="file"]::file-selector-button {
   min-height: 44px;
   margin-inline-end: 8px;
-  border: 1px solid var(--fg-muted);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: var(--bg);
   color: var(--fg);
@@ -250,7 +250,7 @@
   border: 1px solid var(--border); border-radius: 10px; background: var(--bg);
   transition: border-color .12s ease, box-shadow .12s ease, transform .12s ease;
 }
-.library-card:hover { border-color: var(--fg-muted); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); transform: translateY(-1px); }
+.library-card:hover { border-color: var(--border-strong); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); transform: translateY(-1px); }
 .library-head { display: flex; align-items: flex-start; gap: 9px; }
 /* The avatar is the card's one splash of brand color (hue set inline, stable
    per app id) — a saturated block with dark glyph for contrast on every hue. */
@@ -280,7 +280,7 @@
   border: 1px solid var(--border); background: transparent; color: var(--fg); cursor: pointer;
 }
 .library-btn:hover, .library-open:hover { background: var(--bg-elev); }
-.library-open { border-color: var(--fg-muted); font-weight: 600; }
+.library-open { border-color: var(--border-strong); font-weight: 600; }
 .library-btn:disabled, .library-open:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .library-actions { position: relative; display: flex; align-items: center; gap: 6px; margin-top: auto; }
@@ -314,7 +314,7 @@
   border: 1px solid var(--border); border-radius: 10px; background: var(--bg);
   transition: border-color .12s ease, box-shadow .12s ease, transform .12s ease;
 }
-.disc-card:hover { border-color: var(--fg-muted); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); transform: translateY(-1px); }
+.disc-card:hover { border-color: var(--border-strong); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); transform: translateY(-1px); }
 .disc-head { display: flex; align-items: flex-start; gap: 9px; }
 .disc-avatar {
   width: 32px; height: 32px; flex: 0 0 auto; border-radius: 8px;
@@ -329,7 +329,7 @@
 /* Primary ghost action (Install / Update / Open ↗) — the Library-open recipe. */
 .disc-open {
   font: inherit; font-size: 12.5px; line-height: 1; padding: 6px 13px; border-radius: var(--radius);
-  border: 1px solid var(--fg-muted); background: transparent; color: var(--fg); font-weight: 600; cursor: pointer;
+  border: 1px solid var(--border-strong); background: transparent; color: var(--fg); font-weight: 600; cursor: pointer;
 }
 .disc-open:hover { background: var(--bg-elev); }
 .disc-open:disabled { opacity: 0.5; cursor: not-allowed; }

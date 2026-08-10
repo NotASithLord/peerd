@@ -41,12 +41,12 @@ const STYLE = `
   flex-direction: row;
   overflow: hidden;
   --pe-accent: var(--accent, #34d399);
-  --pe-bg: var(--bg, #0d1117);
-  --pe-bg-elev: var(--bg-elev, #161b22);
-  --pe-bg-editor: var(--bg-editor, #11161d);
-  --pe-fg: var(--fg, #e6edf3);
-  --pe-fg-muted: var(--fg-muted, #9ba3ad);
-  --pe-border: var(--border, #30363d);
+  --pe-bg: var(--bg, #101112);
+  --pe-bg-elev: var(--bg-elev, #151617);
+  --pe-bg-editor: var(--bg-editor, #080909);
+  --pe-fg: var(--fg, #F3F3EF);
+  --pe-fg-muted: var(--fg-muted, #ABABA6);
+  --pe-border: var(--border, #25272A);
   --pe-fail: var(--fail, #c43030);
 }
 .pe-tree {

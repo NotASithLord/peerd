@@ -645,7 +645,7 @@ const content = (showDweb) => {
   if (activeView === 'eval') {
     loadEvalSection();
     if (evalLoadState === 'ready' && EvalSection) return m(EvalSection, { send });
-    return m('div', { style: 'padding:24px;color:#9ba3ad' },
+    return m('div', { style: 'padding:24px;color:var(--fg-muted)' },
       evalLoadState === 'unavailable' ? 'The Lab is not available in this build.' : 'Loading the Lab…');
   }
   if (activeView === 'discover' && showDweb) return m(DiscoverSection, { send });
