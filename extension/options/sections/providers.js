@@ -15,7 +15,9 @@
 
 import m from '/vendor/mithril/mithril.js';
 import {
+  KEY_PREFIX,
   OLLAMA_MODEL_TIERS,
+  checkApiKeyFormat,
   probeGpuCapability,
   recommendOllamaModel,
 } from '/peerd-provider/index.js';
@@ -147,33 +149,20 @@ export const ProvidersSection = {
     const actorExecution = state.capabilities?.actorExecution;
     const actorUnavailable = actorExecution && actorExecution.status !== 'available';
 
-    // Per-provider key prefixes — a cheap "looks like a real key" format
-    // check so a wrong paste is caught at save time instead of silently
-    // failing on the first chat. Both shipped key providers use stable
-    // sk- prefixes; absence from this map = no prefix check (fails open).
-    /** @type {Record<string, string>} */
-    const KEY_PREFIX = { anthropic: 'sk-ant-', openrouter: 'sk-or-', openai: 'sk-' };
-
-    // Save a key for ONE provider, independently of the others.
+    // Save a key for ONE provider, independently of the others. The paste
+    // sanity check is the shared checkApiKeyFormat (peerd-provider) - the
+    // onboarding provider step applies the identical rule (§5h).
     /** @param {string} name */
     const saveKey = async (name) => {
       if (ui.keyBusy[name]) return;
-      const value = (ui.keyInput[name] ?? '').trim();
       ui.keyMsg[name] = null;
-      if (value.length < 8) {
-        ui.keyMsg[name] = { ok: false, text: 'Paste a complete API key.' };
+      const check = checkApiKeyFormat(name, ui.keyInput[name]);
+      if (!check.ok) {
+        ui.keyMsg[name] = { ok: false, text: check.message };
         m.redraw();
         return;
       }
-      const prefix = KEY_PREFIX[name];
-      if (prefix && !value.startsWith(prefix)) {
-        ui.keyMsg[name] = {
-          ok: false,
-          text: `That doesn't look like this provider's API key — it should start with "${prefix}".`,
-        };
-        m.redraw();
-        return;
-      }
+      const value = check.value;
       ui.keyBusy[name] = true;
       m.redraw();
       const reply = await send({ type: 'provider/setKey', provider: name, plaintext: value });

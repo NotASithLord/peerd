@@ -85,7 +85,7 @@
  * The shared UI state folded by reduceChat. Mirrors INITIAL_STATE; fields
  * the SW pushes via the 'state' snapshot are merged in wholesale.
  * @typedef {Object} ChatState
- * @property {{ initialized: boolean, locked: boolean, unlockedAt: number, prfEnrolled: boolean, hasRecovery: boolean }} vault
+ * @property {{ initialized: boolean, locked: boolean, unlockedAt: number, prfEnrolled: boolean, hasRecovery: boolean, lockReason?: 'idle'|'manual'|null }} vault
  * @property {SessionState} session
  * @property {{ current: string, hasKey: boolean, model: string }} providers
  * @property {{ actorExecution?: { status: string, host: string|null, reason: string|null, retryable: boolean }, moonshineVoiceHost?: { status: string }, documentReader?: { status: string } }} [capabilities]

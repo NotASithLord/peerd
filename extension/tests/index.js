@@ -119,6 +119,7 @@ import './unit/sidepanel/actor-isolation.test.js';
 import './unit/sidepanel/actor-fabric.test.js';
 import './unit/sidepanel/confirm-note.test.js';
 import './unit/sidepanel/chat-reducer-confirm.test.js';
+import './unit/sidepanel/onboarding-provider-step.test.js';
 import './unit/sidepanel/site-client-confirm.test.js';
 import './unit/sidepanel/learned-origins-view.test.js';
 import './unit/options/activity-origin-events.test.js';

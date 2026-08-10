@@ -197,6 +197,15 @@ const TopBar = {
         // conversation surface. One ⚙ replaces the old ▤/⚙ pair;
         // openOptions() focuses an existing options tab via
         // runtime.openOptionsPage rather than opening duplicates.
+        // §5g: manual lock, back in the panel too - stepping away happens
+        // wherever you are, and a lock you have to open another surface to
+        // reach is a lock that doesn't get used. Same route as the Home
+        // rail's; the SW pushes locked state and the panel flips to the gate.
+        m('button.icon', {
+          'aria-label': 'Lock the vault',
+          title: 'Lock the vault',
+          onclick: () => send({ type: 'vault/lock' }),
+        }, icon('lock')),
         m('button.icon', {
           'aria-label': 'Settings',
           title: 'Settings',
@@ -206,7 +215,7 @@ const TopBar = {
         // default, or Home via the frontDoorView setting) — only Chrome's
         // native action-click toggle ever closes it — so the panel keeps its
         // own dismiss; this reuses the SW's sidepanel/close (disable+re-arm;
-        // Chrome-only, no-op on Firefox's sidebar). Lock moved to the Home rail.
+        // Chrome-only, no-op on Firefox's sidebar).
         m('button.icon', {
           'aria-label': 'Close panel',
           title: 'Close panel',

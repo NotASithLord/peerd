@@ -4225,6 +4225,9 @@ const buildStateSnapshot = async () => {
         unlockedAt: 0,
         prfEnrolled: prf.enrolled,
         hasRecovery,
+        // §5g: WHY it locked ('idle'|'manual'|null) - the unlock screen's
+        // one added sentence renders only for an idle lock.
+        lockReason: vault.lockReason?.() ?? null,
       },
       session: { sessionId: null, messages: [], permission, customSystemPrompt: null, toolManifest: null },
       providers: { current: resolveActiveProvider().name, hasKey: false, model: resolveActiveProvider().model, defaultRunnerModel: resolveActiveProvider().defaultRunnerModel },

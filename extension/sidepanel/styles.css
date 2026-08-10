@@ -267,7 +267,11 @@ html, body, #app {
 .wordmark--intro .b-d, .wordmark--enter .b-d {
   animation: wmType 1ms 780ms forwards, wmColorMagenta 1ms 1480ms forwards;
 }
-@keyframes wmType        { to { color: var(--white); } }
+/* §5c: the typed phase is a GRAY block behind the glyph - without it the
+ * white glyph types onto the transparent rail and is invisible on the light
+ * theme until colorize. The wmColor* fill that follows wins (later in the
+ * animation list) and replaces the gray with the letter's brand color. */
+@keyframes wmType        { to { color: var(--white); background-color: var(--border); } }
 @keyframes wmColorCyan   { to { background-color: var(--cyan); } }
 @keyframes wmColorRed    { to { background-color: var(--red); } }
 @keyframes wmColorAmber  { to { background-color: var(--amber); } }
@@ -575,6 +579,65 @@ html, body, #app {
 }
 .onb-dot.is-on { background: var(--fg); border-color: var(--fg); }
 .onb-dot.is-done { background: var(--fg-muted); }
+/* --- onboarding step 0: Choose a provider (§5h) ----------------------- */
+/* Radio-look rows, monochrome: selection is a filled dot + ink border,
+   never an accent. The one colored mark is the EARNED green REACHED chip
+   (var(--ok) - the same ok semantics the key-msg banner already uses). */
+.onb-provider-heading { font-size: 14px; margin: 0 0 6px; text-align: left; }
+.onb-provider-sub { font-size: 11.5px; margin: 0 0 12px; text-align: left; }
+.onb-provider-rows { display: flex; flex-direction: column; gap: 6px; }
+.onb-provider-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  background: transparent;
+  padding: 10px 11px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--fg);
+}
+.onb-provider-row.is-selected {
+  border-color: var(--fg);
+  background: var(--bg-elev);
+}
+.onb-provider-row.is-unusable { opacity: 0.55; cursor: default; }
+.onb-provider-row.is-unusable .onb-provider-radio { border-style: dashed; }
+.onb-provider-radio {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 1px solid var(--fg-muted);
+  flex: 0 0 auto;
+}
+.onb-provider-row.is-selected .onb-provider-radio {
+  border: 4px solid var(--fg);
+}
+.onb-provider-name { flex: 1; font-size: 12px; }
+.onb-provider-row.is-selected .onb-provider-name { font-weight: 600; }
+.onb-provider-chip {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--fg-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.onb-provider-chip.is-reached { color: var(--ok); }
+.onb-provider-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.onb-provider-key { display: flex; flex-direction: column; gap: 5px; margin-top: 12px; text-align: left; }
+.onb-provider-key-label { font-size: 11px; color: var(--fg-muted); }
+.onb-provider-key input { font-family: var(--font-mono); font-size: 11px; }
+.onb-provider-note {
+  font-size: 11px;
+  text-align: left;
+  margin: 10px 0 0;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  border-radius: var(--r2);
+  padding: 9px 10px;
+}
 @media (prefers-reduced-motion: reduce) {
   .onb-step.is-out, .onb-step.is-in { transition: none; animation: none; opacity: 1; transform: none; }
 
@@ -648,6 +711,52 @@ html, body, #app {
 .gate-card { text-align: center; position: relative; z-index: 1; }
 .gate-card .input-row { text-align: left; }
 .gate-card .input-row input { text-align: left; }
+/* §5c: the wordmark's colorize is the front door's ONE accent moment - every
+ * control below it is monochrome, so the gate's primary buttons trade the
+ * global cyan for the ink-on-surface invert (both themes via tokens). */
+.gate-card button:not(.secondary):not(.linklike) {
+  background: var(--fg);
+  border-color: var(--fg);
+  color: var(--bg);
+}
+/* §5d/§5f: the gate's message line - a dot + sentence. Neutral voice for
+ * conditions; red is reserved for a WRONG ANSWER (mismatch, wrong
+ * passphrase). The marked field carries the same severity on its border. */
+.gate-msg {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: center;
+  font-size: 12px;
+  margin: 8px 0 0;
+  color: var(--fg-muted);
+}
+.gate-msg-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex: 0 0 auto; }
+.gate-msg.is-wrong { color: var(--danger); }
+.gate-card .input-row input.is-error { border-color: var(--danger); }
+/* §5d: the passphrase floor, announced before it can be violated. A
+ * violation emphasizes this line - it is a told rule, not an error. */
+.passphrase-floor-hint {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--fg-muted);
+  text-align: left;
+  margin: 2px 0 0;
+}
+.passphrase-floor-hint.is-violated { color: var(--fg); font-weight: 600; }
+/* §5d: capability honesty as a callout, not a footnote. */
+.gate-callout {
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  border-radius: var(--r2);
+  padding: 8px 10px;
+  font-size: 11px;
+  text-align: left;
+}
+/* §5f: the ceremony hand-off note, shown only while the browser is asking. */
+.gate-wait-note { font-size: 11px; margin-top: 10px; }
+/* §5g: the why-it-locked sentence, idle locks only. */
+.gate-lock-note { font-size: 11.5px; margin: 0 0 14px; }
 
 /* Plan/Act permission selector (Feature 03). Mode toggle + confirm-actions
    toggle; transitions are gated by the prefers-reduced-motion block. */
@@ -904,7 +1013,11 @@ button.linklike:hover { color: var(--fg); }
 .topbar-actions { display: flex; gap: 6px; }
 @media (max-width: 420px) {
   .topbar { gap: 4px; padding-inline: 8px; }
-  .topbar-actions { gap: 4px; }
+  /* §5g made it seven icons; in the narrow single-row band (398-420px)
+     the rail earns its keep by tightening - 26px targets still clear the
+     24px floor the narrow-sidebar gate asserts. */
+  .topbar-actions { gap: 3px; }
+  .topbar-actions button.icon { width: 26px; height: 26px; }
 }
 @media (max-width: 397px) {
   .topbar { flex-wrap: wrap; }

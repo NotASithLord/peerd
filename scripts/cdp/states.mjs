@@ -5191,7 +5191,8 @@ Promise.resolve().then(async () => {
               // grows a second text line. Fitting means neither happens.
               unsqueezed: controls.every((el) => el.scrollWidth <= el.clientWidth
                 && el.getBoundingClientRect().height <= 30),
-              actionsFit: actions.length === 6 && actions.every(inside),
+              // 7 actions since the §5g top-bar Lock joined the rail.
+              actionsFit: actions.length === 7 && actions.every(inside),
               actionNames: actions.map((el) => el.getAttribute('aria-label')),
             };
           })()`));
@@ -5204,7 +5205,7 @@ Promise.resolve().then(async () => {
           widthResults.every((result) => result.pageFits && result.rowFits && result.targets
             && result.wraps && result.unsqueezed),
           JSON.stringify(widthResults));
-        rec.check('all six named top-bar actions remain reachable across the width matrix',
+        rec.check('all seven named top-bar actions remain reachable across the width matrix',
           widthResults.every((result) => result.actionsFit
             && result.actionNames.every((name) => typeof name === 'string' && name.length > 0)),
           JSON.stringify(widthResults));
