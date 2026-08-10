@@ -1395,10 +1395,10 @@ const mountTerminal = () => {
     // :root) so boot→shell reads as one continuous surface — the rainbow
     // orb is the only color in the vm-tab; amber stays favicon-only.
     theme: {
-      background: '#0a0d10',
-      foreground: '#e6edf3',
-      cursor: '#e6edf3',
-      selectionBackground: '#e6edf340',
+      background: '#080909',
+      foreground: '#F3F3EF',
+      cursor: '#F3F3EF',
+      selectionBackground: '#F3F3EF40',
     },
     fontSize: 13,
     fontFamily: 'JetBrains Mono, ui-monospace, "SF Mono", Menlo, monospace',

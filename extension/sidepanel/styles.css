@@ -34,9 +34,12 @@
   --bg:     #ffffff;   /* e0 · flush */
   --elev:   #f7f7f7;   /* e1 · card */
   --elev2:  #f0f0f0;   /* e2 · menu/popover */
+  --deepest:#ffffff;   /* inset / terminal */
   --text:   #1a1a1a;
+  --secondary: #6b6b6b;
   --muted:  #6b6b6b;
   --border: #e0e0e0;
+  --border-strong: #c8c8c8;
   --code:   rgba(0,0,0,.055);
   --selbg:  rgba(0,0,0,.10);
 
@@ -88,7 +91,7 @@
   --white:     var(--w);
   --bg-elev:   var(--elev);
   --fg:        var(--text);
-  --fg-muted:  var(--muted);
+  --fg-muted:  var(--secondary);
   --accent-fg: var(--on-accent);
   --radius:    var(--r2);
   --gap:       12px;
@@ -96,21 +99,21 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    /* Surfaces synced to peerd.ai base/panel/paper. The five brand carriers are
-     * saturated enough to render on either background, so they don't re-declare;
-     * only the grayscale surfaces + the ink variants that stop needing to darken
-     * flip here. */
-    --bg:      #0B0D0E;
-    --elev:    #15181A;
-    --elev2:   #1c2124;
-    --text:    #E8E6E1;
-    --muted:   #9a9a9a;
-    --border:  #353535;
-    --code:    rgba(255,255,255,.07);
+    /* Graphite neutrals. Brand carriers remain inherited and unchanged. */
+    --bg:      #101112;
+    --deepest: #080909;
+    --elev:    #151617;
+    --elev2:   #1A1C1E;
+    --text:    #F3F3EF;
+    --secondary: #ABABA6;
+    --muted:   #70716E;
+    --border:  #25272A;
+    --border-strong: #32353A;
+    --code:    var(--deepest);
     --selbg:   rgba(255,255,255,.16);
 
     --accent-ink: var(--p);   /* no darkening needed on dark */
-    --on-accent:  #0B0D0E;
+    --on-accent:  #080909;
     --danger-ink: var(--er);
     --warn-ink:   var(--am);
     --ok-ink:     var(--gr);
@@ -502,7 +505,7 @@ html, body, #app {
   padding: 10px;
   transition: border-color 0.15s ease;
 }
-.onb-box:focus-within { border-color: var(--fg-muted); }
+.onb-box:focus-within { border-color: var(--border-strong); }
 .onboarding-card .onb-box input,
 .onboarding-card .onb-box textarea {
   display: block;
@@ -759,7 +762,7 @@ html, body, #app {
 .goal-toggle.is-running {
   background: var(--bg-elev);
   color: var(--fg);
-  border-color: var(--fg-muted);
+  border-color: var(--border-strong);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1079,7 +1082,7 @@ button.icon.is-active {
 .task-feedback button.is-selected {
   background: var(--elev2);
   color: var(--fg);
-  border-color: var(--fg-muted);
+  border-color: var(--border-strong);
 }
 /* The user's voice — "operator cyan" (redesign EXPLORE 1a): a faint cyan tint +
    a 2px accent rail, replacing the retired legacy indigo. Cyan already means
@@ -1514,8 +1517,8 @@ button.tool-call-header:focus-visible {
 .vm-stream-stdout, .vm-stream-stderr {
   margin: 0;
   padding: 8px 10px;
-  background: #0d1117;
-  color: #e6edf3;
+  background: var(--deepest);
+  color: var(--text);
   border-radius: 4px;
   font-family: var(--font-mono);
   font-size: 11px;
@@ -1648,7 +1651,7 @@ button.tool-call-header:focus-visible {
   /* fallback accent before the first draft pick lands */
   background: var(--send-accent, var(--accent));
   /* dark glyph on a bright disc — reads on all five brand colors */
-  color: #0a0d10;
+  color: var(--deepest);
   opacity: 0;
   transform: scale(0.55) rotate(-90deg);
   pointer-events: none;
@@ -2036,7 +2039,7 @@ button.tool-call-header:focus-visible {
   color: var(--fg-muted);
   cursor: pointer;
 }
-.log-tab.is-active { color: var(--fg); border-color: var(--fg-muted); background: var(--bg-elev); }
+.log-tab.is-active { color: var(--fg); border-color: var(--border-strong); background: var(--bg-elev); }
 .log-list { display: flex; flex-direction: column; gap: 2px; }
 .log-row { display: flex; gap: 8px; padding: 6px 4px; border-bottom: 1px solid var(--border); }
 .log-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex: 0 0 auto; }
@@ -3323,7 +3326,7 @@ button.tool-call-header:focus-visible {
   background: transparent;
   cursor: pointer;
 }
-.debug-export-btn:hover { color: var(--fg); border-color: var(--fg-muted); }
+.debug-export-btn:hover { color: var(--fg); border-color: var(--border-strong); }
 .debug-menu-backdrop {
   /* click-away for the flyout: transparent, under the menu, over the page */
   position: fixed;
