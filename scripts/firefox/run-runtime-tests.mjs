@@ -4720,7 +4720,6 @@ const main = async () => {
     await runLocalModuleGraphSmoke(driver);
     await runBoundActorSmoke(driver, providerServer);
     await runNumericTabAuthoritySmoke(driver, providerServer);
-    await runBackgroundCapabilityProbe();
     await runActorLifetimeSmoke({ providerServer });
     await runActorKeepaliveLossSmoke({ providerServer });
     await runActorRecoverySmoke({ providerServer });
@@ -4892,6 +4891,12 @@ const main = async () => {
     'installed Firefox Preview omits the dweb surface until it has a mesh host',
     JSON.stringify(previewPosture));
     await runPreviewRemoteModuleSmoke(driver, providerServer);
+
+    // why LAST: this lane is a measurement, not a gate, and it stands up a
+    // second browser. Several lanes above assert on tight deadlines (the
+    // remote-module import deadline is 400ms), so anything optional belongs
+    // downstream of them where it cannot perturb their scheduling.
+    await runBackgroundCapabilityProbe();
 
     await driver.setWindowRect({ width: 400, height: 900, x: 0, y: 0 });
 
