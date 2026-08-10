@@ -9,6 +9,7 @@ const deps = {
   knownProviderNames: ['anthropic', 'openrouter', 'ollama'],
   reasoningEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] as const,
   dwebEnabled: true,
+  autoUpdateAvailable: true,
   normalizeVariant: (_v: string) => 'base',
   normalizeEngine: (v: string) => (['auto', 'web-speech', 'moonshine'].includes(v) ? v : 'auto'),
 };
@@ -127,6 +128,16 @@ describe('normalizeSettingsPatch — dweb gate', () => {
   });
   test('non-boolean dwebEnabled dropped even when build flag on', () => {
     expect(norm({ dwebEnabled: 'yes' })).toEqual({});
+  });
+});
+
+describe('normalizeSettingsPatch - auto-update gate (preview-only key)', () => {
+  test('autoUpdateEnabled honored only where the package carries the key', () => {
+    expect(norm({ autoUpdateEnabled: false })).toEqual({ autoUpdateEnabled: false });
+    expect(norm({ autoUpdateEnabled: true }, { autoUpdateAvailable: false })).toEqual({});
+  });
+  test('non-boolean autoUpdateEnabled dropped even when available', () => {
+    expect(norm({ autoUpdateEnabled: 'yes' })).toEqual({});
   });
 });
 

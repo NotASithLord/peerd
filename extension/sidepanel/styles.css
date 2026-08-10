@@ -2717,9 +2717,12 @@ button.tool-call-header:focus-visible {
   font-size: 12px;
   font-weight: 600;
   padding: 4px 8px;
+  min-height: 32px;
   white-space: nowrap;
 }
 .notice-action:hover { filter: brightness(1.08); }
+.notice-action:focus-visible,
+.notice-dismiss:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
 .notice-dismiss {
   flex: none;
   background: none;
@@ -2728,9 +2731,17 @@ button.tool-call-header:focus-visible {
   cursor: pointer;
   font-size: 14px;
   line-height: 1;
-  padding: 0 2px;
+  padding: 0;
+  min-width: 32px;
+  min-height: 32px;
 }
 .notice-dismiss:hover { color: var(--accent); }
+@media (max-width: 340px) {
+  .notice { position: relative; flex-wrap: wrap; padding-right: 42px; }
+  .notice-text { flex: 1 1 100%; }
+  .notice-action { margin-left: auto; }
+  .notice-dismiss { position: absolute; top: 4px; right: 4px; }
+}
 
 /* "peerd opened a tab" — an INLINE notice anchored in the transcript at the turn
    it happened, so it recedes into the backlog as the chat continues (replaces the

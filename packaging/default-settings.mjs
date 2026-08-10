@@ -253,6 +253,18 @@ export const defaults = {
   auditLogMaxEntries: { store: 20000, preview: 20000 },
 
   // ── preview-only keys ──────────────────────────────────────────────
+  // Self-update check at startup (background/update-check.js). Preview
+  // installs are self-hosted (update_url → the peerd.ai feeds → GitHub
+  // release artifacts), and peerd's offscreen keepalive holds the MV3 SW
+  // alive - the exact state where Chrome parks a downloaded extension
+  // update waiting for an "idle" that never comes. ON by default on
+  // preview: testers should just be current. Chrome checks + reloads when
+  // nothing is in flight; Firefox (no requestUpdateCheck API) reads the
+  // feed and offers the XPI in a notice. Store packages omit the key
+  // entirely - store updates belong to the store; dev (load-unpacked) has
+  // no update_url, so the check is a structural no-op there.
+  autoUpdateEnabled: { preview: true },
+
   // Dweb participation is ON BY DEFAULT on the dev/preview package (owner
   // call, 2026-06-13 — supersedes the earlier "opt-in even on preview",
   // spec §12). Preview ships to contributors and early testers; making

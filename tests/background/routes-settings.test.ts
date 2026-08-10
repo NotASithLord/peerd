@@ -139,6 +139,20 @@ describe('settings/reset', () => {
     await makeSettingsRoutes(deps)['settings/reset']({ keys: ['dwebEnabled'] });
     expect(events).toEqual(['invalidate', 'reset', 'changed']);
   });
+  test('resetting the preview update check re-syncs its live listener', async () => {
+    const { deps, calls } = baseDeps({
+      DEFAULT_SETTINGS: { autoUpdateEnabled: true },
+      settingsStore: {
+        get: () => ({ autoUpdateEnabled: true }),
+        stored: () => ({}),
+        update: async () => {},
+        reset: async (keys: string[]) => { calls.reset.push(keys); },
+      },
+    });
+    await makeSettingsRoutes(deps)['settings/reset']({ keys: ['autoUpdateEnabled'] });
+    expect(calls.reset).toEqual([['autoUpdateEnabled']]);
+    expect(calls.changed).toEqual([{ autoUpdateEnabled: true }]);
+  });
 });
 
 describe('transfer/export', () => {

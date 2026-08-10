@@ -2665,6 +2665,88 @@ export const STATES = [
     },
   },
 
+  // The Firefox startup check is a user-controlled install offer, never an
+  // automatic navigation. Exercise the shared NoticeBar at side-panel and
+  // full-page widths so both hosts keep the action and dismissal reachable.
+  {
+    name: 'update-notice-ui', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openExtPage(ctx, 'tests/fixtures/update-notice.html');
+      try {
+        const inspectAt = async (width) => {
+          await page.send('Emulation.setDeviceMetricsOverride', {
+            width,
+            height: 500,
+            deviceScaleFactor: 1,
+            mobile: false,
+          });
+          return waitFor(() => evalIn(page, `(() => {
+            const notice = document.querySelector('.notice');
+            const install = document.querySelector('.notice-action');
+            const dismiss = document.querySelector('.notice-dismiss');
+            if (!notice || !install || !dismiss) return null;
+            install.focus();
+            const noticeRect = notice.getBoundingClientRect();
+            const installRect = install.getBoundingClientRect();
+            const dismissRect = dismiss.getBoundingClientRect();
+            return {
+              width: innerWidth,
+              documentWidth: document.documentElement.scrollWidth,
+              text: notice.textContent ?? '',
+              install: install.textContent?.trim() ?? '',
+              dismissLabel: dismiss.getAttribute('aria-label'),
+              installFocused: document.activeElement === install,
+              installHeight: installRect.height,
+              dismissWidth: dismissRect.width,
+              dismissHeight: dismissRect.height,
+              inside: [noticeRect, installRect, dismissRect]
+                .every((rect) => rect.left >= 0 && rect.right <= innerWidth),
+            };
+          })()`), { budgetMs: 4_000, pollMs: 50 });
+        };
+
+        const narrow = await inspectAt(310);
+        rec.check('the narrow Firefox update notice keeps both controls reachable',
+          narrow?.documentWidth <= narrow?.width
+            && narrow?.inside === true
+            && narrow?.install === 'Install update'
+            && narrow?.dismissLabel === 'Dismiss notice'
+            && narrow?.installHeight >= 32
+            && narrow?.dismissWidth >= 32
+            && narrow?.dismissHeight >= 32,
+          JSON.stringify(narrow));
+        rec.check('the update action is keyboard focusable', narrow?.installFocused === true,
+          JSON.stringify(narrow));
+        await rec.shotPage('update-notice-narrow', page);
+
+        await evalIn(page, `document.querySelector('.notice-action')?.click()`);
+        const opened = await evalIn(page, `({
+          url: document.body.dataset.openedUrl,
+          target: document.body.dataset.openedTarget,
+          features: document.body.dataset.openedFeatures,
+        })`);
+        rec.check('the explicit action opens only the expected HTTPS release asset',
+          opened?.url === 'https://github.com/NotASithLord/peerd/releases/download/v0.7.0/peerd-preview-firefox.xpi'
+            && opened?.target === '_blank'
+            && opened?.features === 'noopener',
+          JSON.stringify(opened));
+
+        const wide = await inspectAt(900);
+        rec.check('the full-page notice remains compact and within its viewport',
+          wide?.documentWidth <= wide?.width && wide?.inside === true,
+          JSON.stringify(wide));
+        await rec.shotPage('update-notice-home', page);
+
+        await evalIn(page, `document.querySelector('.notice-dismiss')?.click()`);
+        const dismissed = await waitFor(() => evalIn(page,
+          `document.querySelector('[role="status"]')?.textContent === 'Notice dismissed.'`),
+        { budgetMs: 2_000, pollMs: 50 });
+        rec.check('Dismiss removes the update offer', dismissed === true);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
   // Functional + rendered coverage for the actor-execution failure posture.
   // It uses the real banner and chat components without forcing a worker crash
   // into the shared live extension state.
