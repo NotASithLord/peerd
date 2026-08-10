@@ -7,83 +7,65 @@
 
 [![CI](https://github.com/NotASithLord/peerd/actions/workflows/package-and-release.yml/badge.svg)](https://github.com/NotASithLord/peerd/actions/workflows/package-and-release.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Status: 0.x experimental](https://img.shields.io/badge/status-0.x%20experimental-orange.svg)](#status)
 [![Manifest V3](https://img.shields.io/badge/Manifest%20V3-Chrome%20%26%20Firefox-informational.svg)](#install)
 [![Security policy](https://img.shields.io/badge/security-policy-blue.svg)](SECURITY.md)
 
-# The browser-native agent harness
+# The first and only web-native AI agent harness
 
-**peerd runs general-purpose agents inside your own Chrome or Firefox.**
+peerd runs general-purpose agents entirely inside Chrome and Firefox. It works
+with your tabs, signed-in sessions, web apps, and local compute. You choose a
+supported cloud or local model.
 
-It works with the tabs, signed-in sessions, web apps, and browser-contained
-compute you already have. You choose a supported cloud or local model provider.
-No Peerd account or hosted browser is required, and current builds send no
-product telemetry to Peerd.
-
-Local agents can access your whole computer. Remote agents live in someone
-else's. peerd runs inside your browser.
+No Peerd account, hosted browser, or tool-server connection is required. Current
+builds send no product telemetry to Peerd.
 
 [Install](#install) · [peerd.ai](https://peerd.ai) ·
 [Architecture](#architecture) · [Security](SECURITY.md)
 
-## Why browser-native
+## Features
 
-Your browser already has your applications, sessions, identity, networking,
-interface, and useful local compute. It also has boundaries built for hostile
-pages.
-
-peerd uses those boundaries. Page work goes to separate actors with only the
-tools for that tab or environment. Credentials, network rules, confirmations,
-and audit stay with the extension. This defense-in-depth design assumes unsafe
-content will eventually get past a filter.
-
-## What makes peerd different
-
-- **Your browser is the workspace.** The agent works with the tabs, apps,
-  sessions, and page content already in front of you.
-- **Page work stays separate.** Web, WebVM, Notebook, App, and preview dweb
-  actors each get tools for their own environment.
-- **Site knowledge is reusable.** The web actor can build an adaptive client for
-  a site and use it again on later tasks.
-- **Compute stays in browser boundaries.** peerd can run scripts, sealed
-  JavaScript Notebooks, compiled WASI tools, browser Apps, and Linux WebVMs on
-  Chromium.
-- **You choose the model.** The live provider inventory is defined in
+- **Works in the browser you already use.** The agent can read and drive your
+  tabs, web apps, signed-in sessions, and page content.
+- **Builds reusable site clients.** The web actor can learn a site once and use
+  that client again on later tasks.
+- **Runs code inside browser boundaries.** Scripts, sealed JavaScript Notebooks,
+  compiled WASI tools, browser Apps, and Linux WebVMs give the agent local
+  compute without access to your host operating system.
+- **Delegates to separate actors.** Every page and compute environment gets its
+  own keyless actor with tools scoped to that environment.
+- **Keeps useful context.** Sessions, memory, skills, goals, review, and
+  checkpoints live in the extension.
+- **Uses the model you choose.** The live provider inventory is defined in
   [`registry.js`](extension/peerd-provider/registry.js), including BYOK cloud
   adapters and keyless local options.
-- **P2P is optional.** Preview builds add signed identity,
+- **Connects browsers directly.** Preview builds add signed identity,
   browser-to-browser discovery, dwapps, and agent-to-agent communication over
   WebRTC; store packages prune it entirely.
 
-## Status
+## Why the browser
 
-peerd is an experimental 0.x beta. Breaking changes are likely. Storage formats
-and product behavior may change. It can drive browser pages and use API keys, so
-review the security model before using it with sensitive data.
+Local agents can access your whole computer. Remote agents live in someone
+else's. The browser is the alternative: local capability behind security
+boundaries hardened over three decades.
 
-Chromium is the primary product target. Firefox support is experimental. It
-runs actors in dedicated workers and uses visible Notebooks for JavaScript
-compute. Features that need Chrome's offscreen document host are removed from
-Firefox controls and model tools before use. The Firefox preview package also
-omits dweb until Firefox has a mesh host.
+peerd uses those boundaries. Page work goes to separate actors with only the
+tools for that tab or environment. Credentials, network rules, confirmations,
+and audit stay with the extension. Its defense-in-depth design assumes unsafe
+content will eventually get past a filter.
+
+## Browser support
+
+peerd supports Chromium and Firefox. Firefox runs actors in dedicated workers
+and uses visible Notebooks for JavaScript compute. Features that need Chrome's
+offscreen document host are removed from Firefox controls and model tools before
+use. Firefox preview builds omit dweb until Firefox has a mesh host.
+
+Apps and WebVMs run on Chrome. Apps have no ambient network access. Remote
+resources, fetches, WebRTC, forms, and external document navigation are blocked.
+External HTTP and HTTPS links require user confirmation.
 
 The code is the source of truth for current behavior. Start with
 [`CLAUDE.md`](CLAUDE.md), then read the relevant module under `extension/`.
-
-## What it does
-
-- Runs an agent loop in Chrome and an experimental Firefox package.
-- Reads and drives browser tabs through per-environment actors.
-- Runs Linux WebVMs, JavaScript Notebooks, browser Apps, and, where the runtime
-  host supports them, headless scripts.
-- Supports cloud and local model providers. The live list is in
-  [`extension/peerd-provider/registry.js`](extension/peerd-provider/registry.js).
-- Stores provider secrets in a local encrypted vault.
-- Includes an optional peer-to-peer dweb in preview builds.
-
-Apps and WebVMs currently run on Chrome only. Apps have no ambient network access. Remote
-resources, fetches, WebRTC, forms, and external document navigation are blocked.
-External HTTP and HTTPS links require user confirmation.
 
 ## Security model
 
