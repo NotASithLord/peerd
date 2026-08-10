@@ -150,6 +150,7 @@ export const validatePackageJsonChange = (
   baseText: string,
   headText: string,
   dependencies: string[],
+  expectedVersions: Record<string, string> = {},
 ): string[] => {
   const base = JSON.parse(baseText) as Record<string, unknown>;
   const head = JSON.parse(headText) as Record<string, unknown>;
@@ -171,40 +172,82 @@ export const validatePackageJsonChange = (
       if (!(name in before) || !(name in after)) {
         fail(`package.json added or removed dependency ${name}`);
       }
+      const expected = expectedVersions[name]?.replace(/^v/, '');
+      if (expected !== undefined
+        && after[name] !== expected
+        && after[name] !== `^${expected}`
+        && after[name] !== `~${expected}`) {
+        fail(`package.json ${section}.${name} does not match authenticated version ${expected}`);
+      }
       changed.add(name);
     }
   }
   return [...changed].sort();
 };
 
-const ACTION_USE = /^\s*(?:-\s*)?uses:\s+(?<repository>[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?:\/[A-Za-z0-9_./-]+)?@(?<sha>[0-9a-f]{40})\s+#\s+(?<version>v?\d+\.\d+\.\d+)\s*$/;
+const ACTION_USE = /^(?<prefix>\s*(?:-\s*)?uses:\s+)(?<repository>[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?<subpath>\/[A-Za-z0-9_./-]+)?@(?<sha>[0-9a-f]{40})\s+#\s+(?<version>v?\d+\.\d+\.\d+)\s*$/;
+const DIFF_FILE = /^diff --git a\/(?<before>\S+) b\/(?<after>\S+)$/;
+const DIFF_HUNK = /^@@ -(?<oldStart>\d+)(?:,(?<oldCount>\d+))? \+(?<newStart>\d+)(?:,(?<newCount>\d+))? @@/;
 
 const parseActionsDiff = (diff: string): ActionUpdate[] => {
-  const additions: ActionUpdate[] = [];
-  let deletionCount = 0;
+  const additions: Array<{ slot: string, update: ActionUpdate }> = [];
+  const deletions: string[] = [];
+  let file = '';
+  let hunk = '';
+  let additionOrdinal = 0;
+  let deletionOrdinal = 0;
   for (const line of diff.split('\n')) {
-    if (!line || line.startsWith('diff --git ') || line.startsWith('index ')
-      || line.startsWith('--- ') || line.startsWith('+++ ') || line.startsWith('@@ ')) continue;
+    if (!line || line.startsWith('index ') || line.startsWith('--- ') || line.startsWith('+++ ')) continue;
+    if (line.startsWith('diff --git ')) {
+      const groups = DIFF_FILE.exec(line)?.groups
+        ?? fail('GitHub Actions update has an unrecognized file diff');
+      if (groups.before !== groups.after) fail('GitHub Actions update moved a workflow file');
+      file = groups.before;
+      hunk = '';
+      additionOrdinal = 0;
+      deletionOrdinal = 0;
+      continue;
+    }
+    if (line.startsWith('@@ ')) {
+      const groups = DIFF_HUNK.exec(line)?.groups
+        ?? fail('GitHub Actions update has an unrecognized diff hunk');
+      const oldCount = Number(groups.oldCount ?? '1');
+      const newCount = Number(groups.newCount ?? '1');
+      if (groups.oldStart !== groups.newStart || oldCount !== newCount) {
+        fail('GitHub Actions update relocated a uses: line');
+      }
+      hunk = `${groups.oldStart}:${oldCount}`;
+      additionOrdinal = 0;
+      deletionOrdinal = 0;
+      continue;
+    }
     if (line.startsWith('\\ No newline at end of file')) continue;
     if (line.startsWith('+') || line.startsWith('-')) {
+      if (!file || !hunk) fail('GitHub Actions update has a change outside a file hunk');
       const match = ACTION_USE.exec(line.slice(1));
       const groups = match?.groups
         ?? fail('GitHub Actions update changed more than a SHA-pinned uses: line');
+      const ordinal = line.startsWith('+') ? additionOrdinal++ : deletionOrdinal++;
+      const slot = `${file}:${hunk}:${ordinal}:${groups.prefix}${groups.repository}${groups.subpath ?? ''}`;
       if (line.startsWith('+')) {
         additions.push({
-          repository: groups.repository,
-          sha: groups.sha,
-          version: groups.version,
+          slot,
+          update: {
+            repository: groups.repository,
+            sha: groups.sha,
+            version: groups.version,
+          },
         });
       } else {
-        deletionCount += 1;
+        deletions.push(slot);
       }
     }
   }
-  if (additions.length === 0 || additions.length !== deletionCount) {
+  if (additions.length === 0
+    || !isDeepStrictEqual(additions.map(({ slot }) => slot).sort(), deletions.sort())) {
     fail('GitHub Actions update is not a one-for-one immutable SHA replacement');
   }
-  return additions;
+  return additions.map(({ update }) => update);
 };
 
 /** Verify an Actions diff consists only of one-for-one immutable SHA bumps. */
@@ -440,6 +483,7 @@ const verify = async (values: Record<string, string>): Promise<void> => {
         readAt(repo, baseSha, 'package.json'),
         readAt(repo, headSha, 'package.json'),
         dependencies,
+        Object.fromEntries(metadata.map(({ dependencyName, newVersion }) => [dependencyName, newVersion])),
       );
     }
     await verifyNpmSeasoning(metadata, minimumAgeDays);

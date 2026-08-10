@@ -35,6 +35,14 @@ on:
         description: 'Recapture the side-panel visual baselines on the CI authority and upload them as an artifact to commit'
         type: boolean
         default: false
+      security_read_only:
+        description: 'Run candidate security validation without any write-capable jobs'
+        type: boolean
+        default: false
+      security_release_sha:
+        description: 'Bind an automated security release dispatch to this exact merge commit'
+        type: string
+        default: ''
 
 # Default the workflow token to read-only; jobs that write (visual's diff
 # branch + PR comment, release's assets) elevate per-job. why: the default
@@ -329,6 +337,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
+      - run: bun install --frozen-lockfile --ignore-scripts
       # why setup-chrome: it installs the system libraries headless Chrome
       # needs. We then run against Chrome for Testing (branded Chrome ignores
       # --load-extension), which reuses those libs.
@@ -376,6 +385,14 @@ jobs:
     # instead of comparing). A distinct name means a reseed can never satisfy
     # the gating check. Otherwise this display name stays stable.
     name: "visual (render)${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines && ' (reseed baselines)' || '' }}"
+    # A prepared Dependabot head can contain a candidate Action SHA. Never let
+    # that candidate share this job's repository-write token.
+    if: >-
+      !(github.event_name == 'pull_request' &&
+        github.event.pull_request.user.login == 'dependabot[bot]') &&
+      !(github.event_name == 'workflow_dispatch' &&
+        (inputs.security_read_only ||
+          startsWith(github.ref, 'refs/tags/security-validation-pr-')))
     # PINNED, not ubuntu-latest: `latest` migrates between images, and a
     # freetype/fontconfig bump would re-rasterize every glyph in every baseline.
     runs-on: ubuntu-24.04
@@ -699,7 +716,10 @@ jobs:
 
   release:
     name: GitHub Release (preview channel)
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') &&
+      (github.event_name != 'workflow_dispatch' ||
+        (inputs.security_release_sha != '' && inputs.security_release_sha == github.sha))
     runs-on: ubuntu-latest
     # Bound the same image-validation exposure on the trusted signing path.
     timeout-minutes: 30

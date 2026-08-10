@@ -53,6 +53,15 @@ describe('Dependabot security automation policy', () => {
     expect(() => validatePackageJsonChange(base, head, ['eslint'])).toThrow('unauthenticated dependency typescript');
   });
 
+  test('binds a manifest change to the authenticated replacement version', () => {
+    const base = JSON.stringify({ devDependencies: { eslint: '^10.4.0' } });
+    const head = JSON.stringify({ devDependencies: { eslint: '^10.4.1' } });
+    expect(validatePackageJsonChange(base, head, ['eslint'], { eslint: '10.4.1' }))
+      .toEqual(['eslint']);
+    expect(() => validatePackageJsonChange(base, head, ['eslint'], { eslint: '10.4.2' }))
+      .toThrow('does not match authenticated version 10.4.2');
+  });
+
   test('accepts only one-for-one SHA-pinned Actions replacements', () => {
     const diff = [
       'diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml',
@@ -67,6 +76,7 @@ describe('Dependabot security automation policy', () => {
 
   test('rejects mutable action tags and unrelated workflow edits', () => {
     const mutable = [
+      'diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml',
       '--- a/.github/workflows/ci.yml',
       '+++ b/.github/workflows/ci.yml',
       '@@ -4 +4 @@',
@@ -74,6 +84,48 @@ describe('Dependabot security automation policy', () => {
       '+      - uses: actions/checkout@v7',
     ].join('\n');
     expect(() => validateActionsDiff(mutable)).toThrow('SHA-pinned uses: line');
+  });
+
+  test('rejects swapping the authenticated Action target or subpath', () => {
+    const swapped = [
+      'diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml',
+      '--- a/.github/workflows/ci.yml',
+      '+++ b/.github/workflows/ci.yml',
+      '@@ -4 +4 @@',
+      '-      - uses: actions/checkout/subpath@1111111111111111111111111111111111111111 # v7.0.0',
+      '+      - uses: actions/checkout/other@2222222222222222222222222222222222222222 # v7.0.1',
+    ].join('\n');
+    expect(() => validateActionsDiff(swapped)).toThrow('one-for-one immutable SHA replacement');
+  });
+
+  test('rejects relocating an authenticated Action into another workflow', () => {
+    const relocated = [
+      'diff --git a/.github/workflows/read.yml b/.github/workflows/read.yml',
+      '--- a/.github/workflows/read.yml',
+      '+++ b/.github/workflows/read.yml',
+      '@@ -4 +3,0 @@',
+      '-      - uses: actions/checkout@1111111111111111111111111111111111111111 # v7.0.0',
+      'diff --git a/.github/workflows/write.yml b/.github/workflows/write.yml',
+      '--- a/.github/workflows/write.yml',
+      '+++ b/.github/workflows/write.yml',
+      '@@ -9,0 +10 @@',
+      '+      - uses: actions/checkout@2222222222222222222222222222222222222222 # v7.0.1',
+    ].join('\n');
+    expect(() => validateActionsDiff(relocated)).toThrow('relocated a uses: line');
+  });
+
+  test('rejects reordering authenticated Actions inside one diff hunk', () => {
+    const reordered = [
+      'diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml',
+      '--- a/.github/workflows/ci.yml',
+      '+++ b/.github/workflows/ci.yml',
+      '@@ -4,2 +4,2 @@',
+      '-      - uses: actions/checkout@1111111111111111111111111111111111111111 # v7.0.0',
+      '-      - uses: oven-sh/setup-bun@2222222222222222222222222222222222222222 # v2.1.9',
+      '+      - uses: oven-sh/setup-bun@3333333333333333333333333333333333333333 # v2.2.0',
+      '+      - uses: actions/checkout@4444444444444444444444444444444444444444 # v7.0.1',
+    ].join('\n');
+    expect(() => validateActionsDiff(reordered)).toThrow('one-for-one immutable SHA replacement');
   });
 
   test('normalizes names and creates a patch release changelog section', () => {

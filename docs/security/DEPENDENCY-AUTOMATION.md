@@ -55,13 +55,22 @@ of these are true:
 8. A fresh privileged runner re-authenticates the original PR, rechecks the
    seasoning policy, and applies only the exact expected version, changelog,
    manifest, and CodeMirror hash changes without installing or executing the
-   candidate graph. It then commits the output, explicitly dispatches the full
-   correctness/package and security workflows on the new head, approves the
-   PR, and enables squash auto-merge. Branch protection remains the merge gate.
-9. After merge, the workflow requires the PR head to exactly match the
-   bot-authored release marker, verifies a one-patch version increment and main
+   candidate graph. It then commits the output, pins that exact commit with a
+   dedicated validation tag, and dispatches correctness/package and security
+   workflows in a read-only mode. Jobs whose token can write repository state
+   or upload SARIF are skipped so a candidate Action SHA never shares their
+   authority. The workflow records and waits for the two exact dispatched run
+   IDs, then rechecks the PR head and approves it. No auto-merge is left armed.
+   Once those runs pass, it starts a trusted finalizer through
+   `repository_dispatch` (the documented
+   `GITHUB_TOKEN` event exception) and performs a protected squash merge with a
+   matching-head constraint.
+9. The already-running finalizer waits for and re-authenticates that exact
+   merged PR and marker, verifies a one-patch version increment and main
    ancestry, creates the tag idempotently, and dispatches the existing signed
-   release workflow at that tag.
+   release workflow at that tag with an exact merge-SHA constraint. Starting it
+   before the merge removes any reliance on a token-triggered pull-request
+   event after the merge.
 
 Any ambiguity fails closed: the PR remains open for a person rather than being
 merged or tagged.
@@ -126,7 +135,6 @@ the repository. Apply them only after this workflow is present on `main`:
 
 - Keep Dependabot alerts and security updates enabled (already enabled at the
   time this policy was introduced).
-- Keep auto-merge enabled (already enabled).
 - Allow GitHub Actions to create pull-request approvals.
 - Keep one required approval and stale-review dismissal on `main`, but turn off
   “require review from Code Owners.” The Actions bot cannot be the repository's
