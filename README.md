@@ -12,8 +12,8 @@
 
 # The first web-native AI agent harness
 
-**Agent platforms are building browsers into the harness. peerd builds the
-harness into the browser.**
+**Agent platforms are trying to pull the browser into the harness. peerd pulls
+the harness into the browser.**
 
 It runs general-purpose agents entirely inside Chrome and Firefox, with your
 tabs, signed-in sessions, web apps, and local compute. You choose a supported
