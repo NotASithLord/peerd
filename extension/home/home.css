@@ -770,7 +770,9 @@
 
 /* peerd notifications — rail bell (count + dropdown) and an in-chat banner. */
 .notif { position: relative; }
-.notif-bell { display: flex; align-items: center; gap: 8px; }
+/* .notif-bell's layout lives with .home-rail-action near the top of this file
+   (one rule for all three rail action rows), BEFORE the narrow-rail media
+   block so that block's 44px/center override keeps winning. */
 .notif-badge {
   margin-left: auto;
   background: var(--accent); color: var(--accent-fg, #fff);
