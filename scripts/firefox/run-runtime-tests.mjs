@@ -82,6 +82,7 @@ const KEEPALIVE_LOSS_RESPONSE_DELAY_MS = 20_000;
 const KEEPALIVE_LOSS_SCREENSHOT = 'keepalive-loss.png';
 const KEEPALIVE_LOSS_LOG = 'keepalive-loss-geckodriver.log';
 const KEEPALIVE_LOSS_DIAGNOSTIC = 'keepalive-loss.json';
+const CAPABILITY_PROBE_DIAGNOSTIC = 'background-capability-probe.json';
 const RECOVERY_SEED_KEY = 'peerdFirefoxActorRecoverySeed';
 const RECOVERY_BOOT_KEY = 'peerdFirefoxActorRecoveryBoot';
 const FAILURE_FINAL_CANARY = 'firefox-actor-not-run-final-7d12f198';
@@ -1645,6 +1646,253 @@ browser.runtime.onMessage.addListener((message) =>
     env: { ...process.env, TZ: 'UTC' },
   });
   return { artifact, directory };
+};
+
+// The Firefox background-page capability probe (issue #376).
+//
+// why it exists: the dweb mesh runs in Chrome's offscreen document, and
+// Firefox has no offscreen API, so no host starts the base network there.
+// Which replacement hosts are even POSSIBLE is decided by platform facts
+// nobody has measured: whether a Firefox MV3 background page exposes
+// RTCPeerConnection at all, whether a Worker does (which would let the mesh
+// keep a keyless heap on both browsers and dissolve the host question),
+// whether crypto.subtle speaks Ed25519 there, whether the shipped CSP admits
+// wss:, and whether a page's own runtime.sendMessage reaches its own
+// listener (which sizes the dweb-base.js port).
+//
+// why it does not gate: this lane is an EXPERIMENT, not an assertion of
+// desired behavior. A missing capability is the finding, not a regression,
+// so the lane fails only when the probe itself cannot run. The measured
+// report is written to the diagnostics artifact and printed.
+const createCapabilityProbeArtifact = () => {
+  const directory = mkdtempSync(join(tmpdir(), 'peerd-firefox-capability-'));
+  const staging = join(directory, 'staging');
+  const artifact = join(directory, `peerd-${VERSION}-preview-firefox-capability.xpi`);
+  // why preview, not store: preview is the channel the dweb would ship in, so
+  // its manifest CSP is the one whose verdict on wss: actually matters.
+  cpSync(join(ROOT, 'artifacts', 'staging', 'preview-firefox'), staging, { recursive: true });
+
+  const worker = join(staging, 'background', 'firefox-capability-probe-worker.js');
+  writeFileSync(worker, `self.postMessage({
+  ok: true,
+  rtcPeerConnection: typeof RTCPeerConnection,
+  webSocket: typeof WebSocket,
+  subtle: typeof crypto === 'object' && crypto !== null ? typeof crypto.subtle : 'no-crypto',
+});
+`, { flag: 'wx', mode: 0o600 });
+
+  const probe = join(staging, 'background', 'firefox-capability-probe.js');
+  writeFileSync(probe, `const WEBRTC_BUDGET_MS = 10_000;
+const WORKER_BUDGET_MS = 8_000;
+const SIGNALING_URL = 'wss://bootstrap.peerd.ai/rendezvous';
+
+const settle = (promise, budgetMs, fallback) => Promise.race([
+  promise,
+  new Promise((resolve) => { setTimeout(() => resolve(fallback), budgetMs); }),
+]);
+
+// A full loopback offer/answer with an open data channel. peer.js throws
+// without RTCPeerConnection, so a negative answer here rules out every
+// non-document host.
+const probeWebrtc = async () => {
+  if (typeof RTCPeerConnection !== 'function') return { available: false };
+  let local = null;
+  let remote = null;
+  try {
+    local = new RTCPeerConnection({ iceServers: [] });
+    remote = new RTCPeerConnection({ iceServers: [] });
+    const channel = local.createDataChannel('peerd-capability-probe');
+    const opened = new Promise((resolve) => { channel.onopen = () => resolve(true); });
+    local.onicecandidate = (event) => {
+      if (event.candidate) remote.addIceCandidate(event.candidate).catch(() => {});
+    };
+    remote.onicecandidate = (event) => {
+      if (event.candidate) local.addIceCandidate(event.candidate).catch(() => {});
+    };
+    const offer = await local.createOffer();
+    await local.setLocalDescription(offer);
+    await remote.setRemoteDescription(offer);
+    const answer = await remote.createAnswer();
+    await remote.setLocalDescription(answer);
+    await local.setRemoteDescription(answer);
+    const dataChannelOpen = await settle(opened, WEBRTC_BUDGET_MS, false);
+    return {
+      available: true,
+      dataChannelOpen,
+      connectionState: local.connectionState ?? null,
+      iceConnectionState: local.iceConnectionState ?? null,
+    };
+  } catch (error) {
+    return { available: true, dataChannelOpen: false, error: String(error?.message ?? error) };
+  } finally {
+    try { local?.close(); } catch { /* already gone */ }
+    try { remote?.close(); } catch { /* already gone */ }
+  }
+};
+
+// If a Worker exposes RTCPeerConnection, the mesh can hold a keyless heap on
+// BOTH browsers and the host question stops being browser-specific.
+const probeWorkerScope = async () => {
+  let worker = null;
+  try {
+    worker = new Worker(
+      browser.runtime.getURL('background/firefox-capability-probe-worker.js'),
+      { type: 'module' },
+    );
+    const reported = new Promise((resolve) => {
+      worker.onmessage = (event) => resolve(event.data);
+      worker.onerror = (event) => resolve({ ok: false, reason: String(event?.message ?? 'worker error') });
+    });
+    return await settle(reported, WORKER_BUDGET_MS, { ok: false, reason: 'timeout' });
+  } catch (error) {
+    return { ok: false, reason: String(error?.message ?? error) };
+  } finally {
+    try { worker?.terminate(); } catch { /* already gone */ }
+  }
+};
+
+// keypair.js depends on Ed25519 unconditionally and slices the seed out of a
+// 48-byte PKCS#8, so the export length is part of the answer.
+const probeEd25519 = async () => {
+  try {
+    const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+    const bytes = new TextEncoder().encode('peerd firefox capability probe');
+    const signature = await crypto.subtle.sign({ name: 'Ed25519' }, pair.privateKey, bytes);
+    const verified = await crypto.subtle.verify({ name: 'Ed25519' }, pair.publicKey, signature, bytes);
+    const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', pair.privateKey));
+    return { available: true, verified, pkcs8Length: pkcs8.length };
+  } catch (error) {
+    return { available: false, error: String(error?.message ?? error) };
+  }
+};
+
+// CSP is evaluated when the socket is CONSTRUCTED, before any network
+// activity, so a synchronous SecurityError means the policy refused the
+// scheme. The socket is closed immediately; nothing is sent and the probe
+// never waits for a connection.
+const probeWebSocketCsp = () => {
+  let socket = null;
+  try {
+    socket = new WebSocket(SIGNALING_URL);
+    return { constructed: true };
+  } catch (error) {
+    return { constructed: false, name: error?.name ?? null, error: String(error?.message ?? error) };
+  } finally {
+    try { socket?.close(); } catch { /* never opened */ }
+  }
+};
+
+// dweb-base.js talks to the service worker over runtime messaging in both
+// directions. On Firefox the host and the SW would be the SAME realm, so
+// whether a page's own sendMessage reaches its own listener decides whether
+// that transport survives the port or has to become in-process calls.
+// listenerFired true is unambiguous; false only means THIS listener did not
+// see it (another extension context may have answered).
+const probeSelfMessage = async () => {
+  let listenerFired = false;
+  const listener = (message) => {
+    if (message?.type !== 'firefox-capability/self-ping') return undefined;
+    listenerFired = true;
+    return Promise.resolve({ pong: true });
+  };
+  browser.runtime.onMessage.addListener(listener);
+  let response = null;
+  let error = null;
+  try {
+    response = await settle(
+      browser.runtime.sendMessage({ type: 'firefox-capability/self-ping' }),
+      WORKER_BUDGET_MS,
+      { timedOut: true },
+    );
+  } catch (sendError) {
+    error = String(sendError?.message ?? sendError);
+  } finally {
+    browser.runtime.onMessage.removeListener(listener);
+  }
+  return { listenerFired, response, error };
+};
+
+const runCapabilityProbe = async () => {
+  const manifest = browser.runtime.getManifest();
+  const [webrtc, workerScope, ed25519, selfMessage] = await Promise.all([
+    probeWebrtc(), probeWorkerScope(), probeEd25519(), probeSelfMessage(),
+  ]);
+  return {
+    ok: true,
+    realm: {
+      hasDocument: typeof document !== 'undefined',
+      hasWindow: typeof window !== 'undefined',
+      userAgent: navigator?.userAgent ?? null,
+    },
+    manifestVersion: manifest?.manifest_version ?? null,
+    contentSecurityPolicy: manifest?.content_security_policy ?? null,
+    webrtc,
+    workerScope,
+    ed25519,
+    webSocketCsp: probeWebSocketCsp(),
+    selfMessage,
+  };
+};
+
+browser.runtime.onMessage.addListener((message) => (message?.type === 'firefox-capability/probe'
+  ? runCapabilityProbe().catch((error) => ({ ok: false, error: String(error?.message ?? error) }))
+  : undefined));
+`, { flag: 'wx', mode: 0o600 });
+
+  const serviceWorker = join(staging, 'background', 'service-worker.js');
+  const source = readFileSync(serviceWorker, 'utf8');
+  overwriteRegularFile(serviceWorker, `import './firefox-capability-probe.js';\n${source}`);
+  execFileSync('zip', ['-q', '-X', '-r', artifact, '.'], {
+    cwd: staging,
+    env: { ...process.env, TZ: 'UTC' },
+  });
+  return { artifact, directory };
+};
+
+const runBackgroundCapabilityProbe = async () => {
+  console.log('Firefox background capability probe: WebRTC, worker scope, Ed25519, CSP, self-messaging (#376)');
+  const { artifact, directory } = createCapabilityProbeArtifact();
+  let driver = null;
+  try {
+    driver = await startGeckodriver({
+      binary: geckodriverBinary,
+      firefoxBinary,
+      prefs: {
+        'extensions.webextensions.uuids': JSON.stringify({ [PREVIEW_ADDON_ID]: PREVIEW_TEST_UUID }),
+      },
+    });
+    const installedId = await driver.installAddon(resolve(artifact));
+    assert(installedId === PREVIEW_ADDON_ID,
+      'the capability probe XPI keeps the Preview add-on id', String(installedId));
+    await driver.navigate(`${PREVIEW_EXTENSION_ORIGIN}/sidepanel/sidepanel.html`);
+    const report = await driver.executeAsync(`
+      const done = arguments[arguments.length - 1];
+      browser.runtime.sendMessage({ type: 'firefox-capability/probe' })
+        .then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
+    `);
+    assert(report?.ok === true,
+      'the Firefox background capability probe returns a report', JSON.stringify(report));
+    writeFileSync(join(OUTPUT, CAPABILITY_PROBE_DIAGNOSTIC), `${JSON.stringify(report, null, 2)}\n`);
+
+    // why print rather than assert: every line here is a MEASUREMENT. The
+    // decision it feeds (which Firefox host the mesh can use) belongs to a
+    // human reading #376, not to a threshold invented here.
+    const webrtc = report.webrtc ?? {};
+    const workerScope = report.workerScope ?? {};
+    const ed25519 = report.ed25519 ?? {};
+    console.log(`  background realm: document=${report.realm?.hasDocument} window=${report.realm?.hasWindow}`);
+    console.log(`  RTCPeerConnection in background page: available=${webrtc.available} dataChannelOpen=${webrtc.dataChannelOpen}`
+      + `${webrtc.error ? ` error=${webrtc.error}` : ''}`);
+    console.log(`  RTCPeerConnection in module Worker: ${workerScope.ok === true ? workerScope.rtcPeerConnection : `unavailable (${workerScope.reason})`}`);
+    console.log(`  Ed25519 in background page: available=${ed25519.available} verified=${ed25519.verified ?? false} pkcs8=${ed25519.pkcs8Length ?? 'n/a'}`);
+    console.log(`  wss:// under the preview CSP: constructed=${report.webSocketCsp?.constructed}`
+      + `${report.webSocketCsp?.name ? ` (${report.webSocketCsp.name})` : ''}`);
+    console.log(`  self-addressed runtime.sendMessage reaches own listener: ${report.selfMessage?.listenerFired}`);
+    console.log(`  full report: artifacts/firefox-runtime/${CAPABILITY_PROBE_DIAGNOSTIC}`);
+  } finally {
+    await driver?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 };
 
 const runActorLifetimeSmoke = async ({ providerServer }) => {
@@ -4266,6 +4514,7 @@ const main = async () => {
     BROKEN_WORKER_SCREENSHOT, KEEPALIVE_LOSS_SCREENSHOT,
     KEEPALIVE_LOSS_LOG, KEEPALIVE_LOSS_DIAGNOSTIC,
     LIFETIME_FAILURE_SCREENSHOT, LIFETIME_FAILURE_LOG, LIFETIME_FAILURE_DIAGNOSTIC,
+    CAPABILITY_PROBE_DIAGNOSTIC,
   ]) {
     rmSync(join(OUTPUT, diagnostic), { force: true });
   }
@@ -4471,6 +4720,7 @@ const main = async () => {
     await runLocalModuleGraphSmoke(driver);
     await runBoundActorSmoke(driver, providerServer);
     await runNumericTabAuthoritySmoke(driver, providerServer);
+    await runBackgroundCapabilityProbe();
     await runActorLifetimeSmoke({ providerServer });
     await runActorKeepaliveLossSmoke({ providerServer });
     await runActorRecoverySmoke({ providerServer });
