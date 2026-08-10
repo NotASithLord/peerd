@@ -23,6 +23,11 @@ on:
     # surfaces — the PR-time gates only ever see what a diff touches.
     - cron: '23 6 * * 1'
   workflow_dispatch:
+    inputs:
+      security_read_only:
+        description: 'Run candidate security validation without write-scoped analyzers'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -30,11 +35,24 @@ permissions:
 jobs:
   codeql:
     name: CodeQL (javascript-typescript)
+    # Candidate Action updates are intentionally not executed with the SARIF
+    # upload token. Authenticated dependency-only heads are checked by the
+    # read-only policy, vulnerability, and repository-invariant lanes instead.
+    if: >-
+      !(github.event_name == 'pull_request' &&
+        github.event.pull_request.user.login == 'dependabot[bot]') &&
+      !(github.event_name == 'workflow_dispatch' &&
+        (inputs.security_read_only ||
+          startsWith(github.ref, 'refs/tags/security-validation-pr-')))
     runs-on: ubuntu-latest
     permissions:
       contents: read
       security-events: write   # upload the SARIF result to the Security tab
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: github/codeql-action/init@d1ba80a13dd99fba24a470575428917156a28b43 # v4.37.5
         with:
@@ -52,12 +70,16 @@ jobs:
     name: OSV scan (resolved dependency tree)
     runs-on: ubuntu-latest
     permissions:
-      # read only: this job runs a third-party CONTAINER over the repo tree and
+      # read only: this job runs a third-party scanner over the repo tree and
       # never uploads SARIF (no --format=sarif, no upload-sarif step), so granting
       # security-events: write would hand it an API scope it has no use for —
       # the same over-grant the top-level `contents: read` default exists to avoid.
       contents: read
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Scans bun.lock — the devDependency tree that builds and SIGNS the
       # artifacts. Nothing here ships inside the extension (vendor/ is pinned
@@ -66,10 +88,23 @@ jobs:
       # osv-scanner.toml holds the triaged, EXPIRING ignore list for advisories
       # that cannot move from here (web-ext pins several of them exactly). New
       # findings are not on that list and fail this job.
-      - uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
-        with:
-          scan-args: |-
-            --config=./osv-scanner.toml
+      # The upstream wrapper is SHA-pinned, but its action.yml references a
+      # mutable container tag that GitHub pulls before the first job step. Use
+      # the official release binary only after Harden Runner starts, and verify
+      # the exact asset digest published by the v2.3.8 GitHub Release.
+      - name: Run checksum-pinned OSV-Scanner v2.3.8
+        env:
+          OSV_SCANNER_SHA256: bc98e15319ed0d515e3f9235287ba53cdc5535d576d24fd573978ecfe9ab92dc
+          OSV_SCANNER_URL: https://github.com/google/osv-scanner/releases/download/v2.3.8/osv-scanner_linux_amd64
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            "$OSV_SCANNER_URL" --output "$RUNNER_TEMP/osv-scanner"
+          printf '%s  %s\n' "$OSV_SCANNER_SHA256" "$RUNNER_TEMP/osv-scanner" \
+            | sha256sum --check --strict -
+          chmod 0755 "$RUNNER_TEMP/osv-scanner"
+          "$RUNNER_TEMP/osv-scanner" scan \
+            --config=./osv-scanner.toml \
             --lockfile=./bun.lock
 
   dependency-review:
@@ -78,8 +113,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # GATING. This ran continue-on-error while the repo's Dependency graph
       # setting was off, because without it the action errors "not supported" —
@@ -95,12 +133,15 @@ jobs:
           # Mirrors the PR checklist's "no GPL / AGPL / copyleft" line — the
           # extension is Apache-2.0 and vendors only permissive code.
           deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0, LGPL-2.1, LGPL-3.0
-          comment-summary-in-pr: on-failure
 
   invariants:
     name: peerd security invariants
     runs-on: ubuntu-latest
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
