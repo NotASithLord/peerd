@@ -39,7 +39,9 @@
   --secondary: #6b6b6b;
   --muted:  #6b6b6b;
   --border: #e0e0e0;
-  --border-strong: #c8c8c8;
+  /* Preserve the established light-theme emphasis; Graphite overrides this
+   * token only in dark mode below. */
+  --border-strong: #6b6b6b;
   --code:   rgba(0,0,0,.055);
   --selbg:  rgba(0,0,0,.10);
 
