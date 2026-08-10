@@ -1,6 +1,6 @@
 # peerd — visual gallery
 
-**27 states · 54 screens · baselines `linux-x64`**
+**29 states · 58 screens · baselines `linux-x64`**
 
 Every screen below is the live UI rendered through the E2E harness at a pinned
 Chrome build and viewport — the exact images the visual-regression gate compares
@@ -213,7 +213,23 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-transfer-conflict.light.png" alt="options-transfer-conflict (light)" width="380"> | <img src="baselines/linux-x64/options-transfer-conflict.dark.png" alt="options-transfer-conflict (dark)" width="380"> |
 
-### 26 · site-client-confirm
+### 26 · sidepanel-confirm
+
+`sidepanel-confirm`
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/sidepanel-confirm.light.png" alt="sidepanel-confirm (light)" width="380"> | <img src="baselines/linux-x64/sidepanel-confirm.dark.png" alt="sidepanel-confirm (dark)" width="380"> |
+
+### 27 · sidepanel-stop-card
+
+`sidepanel-stop-card`
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/sidepanel-stop-card.light.png" alt="sidepanel-stop-card (light)" width="380"> | <img src="baselines/linux-x64/sidepanel-stop-card.dark.png" alt="sidepanel-stop-card (dark)" width="380"> |
+
+### 28 · site-client-confirm
 
 `site-client-confirm`
 
@@ -221,7 +237,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/site-client-confirm.light.png" alt="site-client-confirm (light)" width="380"> | <img src="baselines/linux-x64/site-client-confirm.dark.png" alt="site-client-confirm (dark)" width="380"> |
 
-### 27 · vm-tab-failed
+### 29 · vm-tab-failed
 
 `vm-tab-failed`
 
