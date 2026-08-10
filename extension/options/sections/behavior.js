@@ -188,6 +188,13 @@ export const BehaviorSection = {
     const fallbacks = Array.isArray(s.providerFallbacks) ? s.providerFallbacks : [];
     const otherProviders = listProviders().map((p) => p.name).filter((n) => n !== activeProvider);
 
+    // Preview-only key: absent from store packages' CHANNEL_DEFAULTS, so the
+    // row simply doesn't render there. Presence, not typeof: a crafted
+    // transfer import can store a non-boolean verbatim, and that must not
+    // hide the row on a preview build (the toggle itself heals the value).
+    const autoUpdateAvailable = Object.hasOwn(s, 'autoUpdateEnabled');
+    const auOn = s.autoUpdateEnabled === true;
+
     const behaviorRows = [
       settingsRow({
         label: 'Toolbar button',
@@ -261,6 +268,21 @@ export const BehaviorSection = {
           : 'Off. A turn cut off mid-flight stays frozen until you resend. Turn this on to have peerd pick an interrupted turn back up automatically when you reopen the chat.',
         apply: () => send({ type: 'settings/update', patch: { autoResumeInterruptedTurns: !arOn } }),
       }),
+
+      ...(autoUpdateAvailable ? [toggleRow({
+        id: 'auto-update',
+        label: 'Preview update check',
+        on: auOn,
+        busyKey: 'autoUpdateBusy',
+        badge: 'PREVIEW',
+        summary: auOn
+          ? 'Checks at startup and applies or offers a newer preview build.'
+          : 'Preview updates wait for the browser’s own periodic check.',
+        why: auOn
+          ? 'On. At startup peerd asks the browser for a newer preview build from the release feed. In Chrome the update installs immediately when no chat is mid-turn and no peerd surface is open; otherwise it applies on the next browser restart. In Firefox, which gives extensions no way to trigger their own update, peerd shows an “update available” notice with an install link, and Firefox’s own daily add-on check still installs it on its own.'
+          : 'Off. peerd stays on the installed build until the browser’s own periodic update check picks up a new preview release. Turn this on to check at startup and install right away.',
+        apply: () => send({ type: 'settings/update', patch: { autoUpdateEnabled: !auOn } }),
+      })] : []),
 
       toggleRow({
         id: 'failover',
@@ -419,7 +441,8 @@ export const BehaviorSection = {
         'frontDoorView',
         'reasoningEnabled', 'reasoningEffort', 'confirmWebWrites', 'schemaValidatedReplies',
         'advancedAutomationEnabled', 'devMode',
-        'autoResumeInterruptedTurns', 'providerFailoverEnabled', 'providerFallbacks',
+        'autoResumeInterruptedTurns', 'autoUpdateEnabled',
+        'providerFailoverEnabled', 'providerFallbacks',
         'prewalkEnabled', 'enginePrewalkEnabled', 'prewalkExecutorModel',
       ]),
     ]);

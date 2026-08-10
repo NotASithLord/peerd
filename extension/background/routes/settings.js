@@ -34,6 +34,9 @@ export const makeSettingsRoutes = (deps) => {
         knownProviderNames: listProviders().map((/** @type {{ name: string }} */ p) => p.name),
         reasoningEffortLevels: REASONING_EFFORT_LEVELS,
         dwebEnabled: DWEB_ENABLED,
+        // Preview-only key: its presence in this package's defaults IS the
+        // channel gate (no separate build flag, unlike dweb).
+        autoUpdateAvailable: Object.hasOwn(DEFAULT_SETTINGS, 'autoUpdateEnabled'),
         normalizeVariant,
         normalizeEngine,
       });
@@ -79,9 +82,13 @@ export const makeSettingsRoutes = (deps) => {
         onSettingsChanging?.({ dwebEnabled: false });
       }
       await settingsStore.reset(known);
-      if (resetsDweb) {
-        await onSettingsChanged?.({ dwebEnabled: settingsStore.get().dwebEnabled });
-      }
+      const changed = {
+        ...(resetsDweb ? { dwebEnabled: settingsStore.get().dwebEnabled } : {}),
+        ...(known.includes('autoUpdateEnabled')
+          ? { autoUpdateEnabled: settingsStore.get().autoUpdateEnabled }
+          : {}),
+      };
+      if (Object.keys(changed).length > 0) await onSettingsChanged?.(changed);
       pushState();
       return { ok: true, settings: { ...settingsStore.get() } };
     },

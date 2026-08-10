@@ -440,6 +440,7 @@ import { makeModelCatalog } from './model-catalog.js';
 import { makeTabAffordances } from './tab-affordances.js';
 import { makeMintOnce } from './mint-once.js';
 import { makeDwebInboundRateCap } from './dweb-inbound-rate-cap.js';
+import { makeUpdateCheck } from './update-check.js';
 import { makeDwebTransfer, IdentityTransferError } from './dweb-transfer.js';
 import { makeDwebShare } from './dweb-share.js';
 import { makeReseedSharedApps } from './dweb-reseed.js';
@@ -4394,6 +4395,10 @@ browser.tabs.onRemoved.addListener((tabId) => {
   // ...and drop it out of the network backstop's tab scope. Tab ids remain
   // unique within one browser session, but closed tabs no longer need rules.
   denylistNetGuard.sync();
+  // A downloaded preview update may have been waiting only for this engine
+  // host to close. The update module re-checks every other surface and active
+  // turn before it can reload.
+  updateCheck.onQuiet();
 });
 
 // Invalidate a tab's DOM-nav refs when it starts navigating. The backend DOM
@@ -4456,9 +4461,16 @@ browser.runtime.onConnect.addListener((port) => {
     for (const ev of (goalRunner?.activeStates?.() ?? [])) {
       try { port.postMessage(ev); } catch { /* port closing */ }
     }
+    // Replay an undelivered "update available" notice to this fresh surface
+    // and re-check for a newer preview build (throttled inside; declared at
+    // the boot tail - connect events only ever fire after module eval).
+    updateCheck.onUiConnect();
     port.onDisconnect.addListener(() => {
       uiPorts.remove(port);
       broadcastSurfaces();
+      // A parked downloaded update may now be able to apply (the module
+      // re-checks that everything is quiet before reloading).
+      updateCheck.onQuiet();
       // Sidebar just closed → if the user is sitting on a peerd-opened web tab,
       // surface the reminder (and start its 15s timer) right then.
       if (port.name === 'sidepanel' && !uiPorts.hasNamed('sidepanel')) {
@@ -5638,6 +5650,7 @@ const onSettingsChanged = async (/** @type {any} */ patch) => {
   // behavior the moment it changes (key PRESENCE = the user just touched it —
   // normalizeSettingsPatch only emits keys the caller actually sent).
   if (patch?.frontDoorView) syncFrontDoorBehavior();
+  if (Object.hasOwn(patch ?? {}, 'autoUpdateEnabled')) updateCheck.syncEnabled();
 };
 
 const mintDwebActor = async () => {
@@ -7534,6 +7547,75 @@ settingsReady.then(() => syncFrontDoorBehavior()).catch(() => {});
 void dwebSettingsGate.stopWhenDisabled(stopBaseNetwork).catch((error) => {
   console.warn('[sw] dweb OFF reconciliation failed; next boot will retry', error);
 });
+
+// Self-update (preview channel; background/update-check.js). Chrome: force the
+// update_url poll at boot and reload when a downloaded update can apply
+// without destroying live work. Firefox: read the gecko feed and offer the
+// XPI in a notice. Dev/store manifests carry no self-hosted update_url, so
+// start() registers the downloaded-update listener only on Chrome. Firefox
+// keeps its native update lifecycle because a listener there would defer
+// automatic updates. start() runs synchronously at boot because a downloaded
+// Chrome update can be the event that wakes this worker.
+const updateCheck = makeUpdateCheck({
+  runtime: browser.runtime,
+  // why a bare fetch: a chassis-internal DATA fetch of the manifest's own
+  // update feed - same class as the voice model download; no secret, no
+  // agent influence over the URL (see update-check.js's header).
+  fetchFn: (url, init) => fetch(url, init),
+  ready: settingsReady,
+  isEnabled: () => settingsStore.get().autoUpdateEnabled === true,
+  // "peerd is doing work": live turn slots AND goal runs - a goal run holds
+  // its slot only while an individual turn is in flight, so between
+  // iterations busySessionIds() alone reads idle mid-run.
+  busy: () => turnSlots.busySessionIds().length > 0
+    || (goalRunner?.activeStates?.().length ?? 0) > 0,
+  // "a user-facing extension page exists": UI ports, the deliberately
+  // PORTLESS engine tabs (a running WebVM / notebook / app holds real
+  // in-memory state a reload would destroy), and - on Chrome, where the SW
+  // can enumerate its window clients - any other extension page (options,
+  // permission pages). The offscreen doc is excluded: the keepalive keeps
+  // it open always, and counting it would block the reload forever.
+  surfacesOpen: async () => {
+    const knownSurfaceOpen = () => uiConnected()
+      || vmTabTracker.listLive().length > 0
+        || jsTabTracker.listLive().length > 0
+        || appTabTracker.listLive().length > 0;
+    if (knownSurfaceOpen()) return true;
+    try {
+      // why the cast: tsconfig lib is DOM (one program checks SW, pages and
+      // tests alike), so the ServiceWorkerGlobalScope clients API isn't on
+      // `self`'s type; it exists at runtime only in the Chrome SW.
+      const swScope = /** @type {{ clients?: { matchAll?: (q: { type: string }) => Promise<Array<{ url: string }>> } }} */ (
+        /** @type {unknown} */ (globalThis));
+      const windowClients = await swScope.clients?.matchAll?.({ type: 'window' });
+      if (windowClients?.some((c) => !c.url.includes('/offscreen/'))) return true;
+    } catch { /* not a SW context (Firefox event page) - covered above */ }
+    // A port or engine tab may have appeared while clients.matchAll() was in
+    // flight. This final synchronous read and the caller's busy recheck close
+    // that race before runtime.reload().
+    return knownSurfaceOpen();
+  },
+  notify: (text, action) => {
+    if (!uiConnected()) return false;
+    postChatNote(text, action ?? null);
+    return true;
+  },
+  // storage.session, not storage.local: the throttle + pending-notice state
+  // must survive SW/event-page respawns but reset with the browser session.
+  sessionKv: {
+    get: async (key) => {
+      try { return (await browser.storage?.session?.get(key))?.[key]; }
+      catch { return undefined; }
+    },
+    set: async (key, value) => {
+      try { await browser.storage?.session?.set({ [key]: value }); }
+      catch { /* best-effort - a lost throttle just means an extra check */ }
+    },
+  },
+  log: (...args) => console.log('[sw]', ...args),
+});
+updateCheck.start();
+void updateCheck.checkNow('boot').catch(() => {});
 
 // SW boot logging — we want a clear timeline of when the SW comes up
 // (cold start, extension reload, idle respawn). The console clears
