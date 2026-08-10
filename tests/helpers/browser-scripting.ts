@@ -25,10 +25,9 @@ export const browserProbeResult = (
     }];
   }
   if (request?.func === hasPasswordFieldInjected || name === 'hasPasswordFieldInjected') {
-    const parsed = new URL(url);
     return [{
       documentId,
-      result: { has: hasPassword, origin: parsed.origin, href: parsed.href },
+      result: { has: hasPassword, capped: false },
     }];
   }
   return null;

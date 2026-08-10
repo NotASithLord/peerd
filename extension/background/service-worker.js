@@ -2527,11 +2527,11 @@ const buildToolContext = async (/** @type {any} */ {
     // does NOT get the render hook (only a tab-backed web actor lazily adopts a tab).
     ...(actorType === 'web' && actorBacking !== 'api' ? { adoptWebTab: () => adoptWebTab(sessionId) } : {}),
     scripting: browser.scripting,
-    // issue 251: the snapshot tool calls this when the page it just walked had a
-    // password field. Injected rather than imported so the tool stays free of
-    // storage, and present on every context — the orchestrator's own snapshots
-    // teach the classifier exactly as well as an actor's, and there is no reason
-    // to learn less from the one the user drove themselves.
+    // issue 251: live DOM tools call this when their exact-document probe finds a
+    // password field. Injected rather than imported so the tools stay free of
+    // storage, and present on every context. The orchestrator's own probes teach
+    // the classifier exactly as well as an actor's, and there is no reason to
+    // learn less from the one the user drove themselves.
     noteLearnedOrigin,
     // DESIGN-18 P2: actor_list reads this for its integration rows — the chat's API integrations
     // (formed ∪ keyed). Referenced lazily (defined later, called at turn time, like
@@ -4057,7 +4057,7 @@ const confirmAction = async (prompt, signal) => {
   //
   // The signal's whole justification is "they affirmed it", so it fires exactly
   // where that is true. Origins the auto-approve path would have taught are still
-  // caught by the password-field signal on the first page walk.
+  // caught by the password-field signal on the first exact-document DOM-tool probe.
   //
   // Only on approval — a DECLINED write says the opposite, and recording it
   // would make refusing to act on a site the thing that marks it as yours.

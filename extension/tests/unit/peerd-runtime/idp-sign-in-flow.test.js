@@ -36,7 +36,9 @@ describe('identity-provider transit sign-in flow', () => {
           result: { origin: 'https://app.test', href: liveUrl, timeOrigin: 1 },
         }];
       }
-      if (options.func?.name === 'hasPasswordFieldInjected') return [{ result: { has: false } }];
+      if (options.func?.name === 'hasPasswordFieldInjected') {
+        return [{ result: { has: false, capped: false } }];
+      }
       if (options.func?.name === 'loginTargetReader') {
         return [{ result: { ok: true, descriptor: {
           tag: 'button', name: 'Sign in with Google',

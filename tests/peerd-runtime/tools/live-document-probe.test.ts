@@ -11,7 +11,10 @@
 // an exact document fails closed.
 
 import { describe, test, expect } from 'bun:test';
-import { resolveTargetTab } from '../../../extension/peerd-runtime/tools/defs/dom-helpers.js';
+import {
+  passwordFieldSignalFromProbe,
+  resolveTargetTab,
+} from '../../../extension/peerd-runtime/tools/defs/dom-helpers.js';
 
 const tabsApi = (byId: Record<number, any>) => ({
   get: async (id: number) => { if (!byId[id]) throw new Error('no tab'); return byId[id]; },
@@ -33,7 +36,10 @@ const scriptingSaying = (result: unknown, opts: { calls?: number[] } = {}) => ({
         },
       }];
     }
-    return [{ documentId: 'doc-1', result: { has: value?.has ?? false } }];
+    return [{
+      documentId: 'doc-1',
+      result: { has: value?.has ?? false, capped: value?.capped === true },
+    }];
   },
 });
 
@@ -44,6 +50,13 @@ const baseCtx = (over: Record<string, unknown> = {}) => ({
 });
 
 describe('issue 267 — every DOM tool teaches the classifier, not just snapshot', () => {
+  test('an exhausted negative remains unknown at the policy consumer', () => {
+    expect(passwordFieldSignalFromProbe({ has: false, capped: true })).toBeNull();
+    expect(passwordFieldSignalFromProbe({ has: false, capped: false })).toBe(false);
+    expect(passwordFieldSignalFromProbe({ has: true, capped: true })).toBe(true);
+    expect(passwordFieldSignalFromProbe(null)).toBeNull();
+  });
+
   test('a password field seen at the chokepoint is learned', async () => {
     const learned: Array<[string, string]> = [];
     const ctx: any = baseCtx({

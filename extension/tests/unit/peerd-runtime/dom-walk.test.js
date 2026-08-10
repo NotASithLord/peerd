@@ -100,11 +100,7 @@ const makeCtx = () => /** @type {ToolContext & { domRefs: ReturnType<typeof crea
           } }];
         }
         if (func === hasPasswordFieldInjected) {
-          return [{ documentId: 'fixture-document', result: {
-            ...result,
-            origin: 'https://example.test',
-            href: 'https://example.test/order',
-          } }];
+          return [{ documentId: 'fixture-document', result }];
         }
         return [{ documentId: 'fixture-document', result }];
       },
@@ -477,17 +473,16 @@ describe('snapshot → click/type over walk refs — full chain', () => {
   });
 });
 
-// The password-field signal (issue 251) — the ONE bit the walk reports to the
-// origin classifier, and the only input to "does the user have an account here"
-// that the DOM can supply. Both entry points are covered because they are
-// separate ES5 copies by necessity (an injected body closes over nothing), so
-// they can drift apart silently.
+// The password-field signal (issue 251): the one bit the standalone live-document
+// probe reports to the origin classifier, and the only input to "does the user
+// have an account here" that the DOM can supply. Snapshot capture does not repeat
+// the probe.
 //
 // The load-bearing case is `new-password`. Measured on the live web, the Stack
 // Exchange network ships a hidden SIGNUP modal on every page; treating that as
 // "you have an account here" locked a roaming helper out of stackoverflow.com
 // after a single ordinary read, permanently and invisibly.
-describe('dom walk — the password-field signal', () => {
+describe('live document: the password-field signal', () => {
   /**
    * A fixture with NO password field of its own, so each test controls exactly
    * what is in the document. why its own helper: the shared FIXTURE_HTML above
@@ -504,23 +499,20 @@ describe('dom walk — the password-field signal', () => {
     finally { host.remove(); }
   };
 
-  it('no password field anywhere: both entry points say false', async () => {
+  it('no password field anywhere reports false', async () => {
     await withInputs('<input type="text" name="q">', () => {
-      expect(domWalkInjected().hasPasswordField).toBe(false);
       expect(hasPasswordFieldInjected().has).toBe(false);
     });
   });
 
   it('a bare password field marks the origin', async () => {
     await withInputs('<input type="password" name="pass">', () => {
-      expect(domWalkInjected().hasPasswordField).toBe(true);
       expect(hasPasswordFieldInjected().has).toBe(true);
     });
   });
 
   it('autocomplete="current-password" marks the origin — that IS a sign-in box', async () => {
     await withInputs('<input type="password" autocomplete="current-password">', () => {
-      expect(domWalkInjected().hasPasswordField).toBe(true);
       expect(hasPasswordFieldInjected().has).toBe(true);
     });
   });
@@ -531,7 +523,6 @@ describe('dom walk — the password-field signal', () => {
     // behind a button is hidden AND is a real signal. It is the reason the signal
     // reads the document rather than the walk.
     await withInputs('<div style="display:none"><input type="password" autocomplete="current-password"></div>', () => {
-      expect(domWalkInjected().hasPasswordField).toBe(true);
       expect(hasPasswordFieldInjected().has).toBe(true);
     });
   });
@@ -545,7 +536,6 @@ describe('dom walk — the password-field signal', () => {
       + '<input type="password" name="password" autocomplete="new-password">'
       + '</form>',
       () => {
-        expect(domWalkInjected().hasPasswordField).toBe(false);
         expect(hasPasswordFieldInjected().has).toBe(false);
       },
     );
@@ -558,7 +548,7 @@ describe('dom walk — the password-field signal', () => {
     await withInputs(
       '<form><input type="text" name="email"><input type="password" autocomplete="new-password"></form>',
       () => {
-        expect(domWalkInjected().hasPasswordField).toBe(false);
+        expect(hasPasswordFieldInjected().has).toBe(false);
       },
     );
   });
@@ -568,7 +558,6 @@ describe('dom walk — the password-field signal', () => {
       '<input type="password" autocomplete="new-password">'
       + '<input type="password" autocomplete="current-password">',
       () => {
-        expect(domWalkInjected().hasPasswordField).toBe(true);
         expect(hasPasswordFieldInjected().has).toBe(true);
       },
     );
@@ -576,31 +565,147 @@ describe('dom walk — the password-field signal', () => {
 
   it('the token is matched case-insensitively', async () => {
     await withInputs('<input type="password" autocomplete="NEW-PASSWORD">', () => {
-      expect(domWalkInjected().hasPasswordField).toBe(false);
       expect(hasPasswordFieldInjected().has).toBe(false);
     });
   });
-});
 
-// ── attribution (issue 278) ─────────────────────────────────────────────────
-// The caller resolves the tab BEFORE injecting, so `tab.url` is a snapshot; the
-// probe runs later, in whatever document is committed by then. Without the probe
-// saying where it ran, a page that navigates inside that window gets its password
-// field credited to the origin the caller started on — which lets a hostile page
-// mark arbitrary third parties as "the user has an account here", and, repeated,
-// fill the 500-entry cap so nothing further is ever learned.
-describe('peerd-runtime.dom-walk · the probe reports where it ran', () => {
-  it('hasPasswordFieldInjected returns the observing origin alongside the boolean', () => {
-    const r = hasPasswordFieldInjected();
-    expect(typeof r).toBe('object');
-    expect(typeof r.has).toBe('boolean');
-    // In the test page this is the extension origin; what matters is that it is
-    // the DOCUMENT's own origin, not anything the caller passed in.
-    expect(r.origin).toBe(location.origin);
+  it('an open shadow-root sign-in field marks the owning origin', async () => {
+    await withInputs('<div id="shadow-login"></div>', (host) => {
+      const shadow = /** @type {HTMLElement} */ (host.querySelector('#shadow-login'))
+        .attachShadow({ mode: 'open' });
+      shadow.innerHTML = '<input type="password" autocomplete="current-password">';
+      expect(hasPasswordFieldInjected().has).toBe(true);
+    });
   });
 
-  it('the full walk reports it too — the dom-walk path races identically', () => {
-    const walk = domWalkInjected();
-    expect(walk.probeOrigin).toBe(location.origin);
+  it('an open shadow-root signup field keeps a compound new-password token excluded', async () => {
+    await withInputs('<div id="shadow-signup"></div>', (host) => {
+      const shadow = /** @type {HTMLElement} */ (host.querySelector('#shadow-signup'))
+        .attachShadow({ mode: 'open' });
+      shadow.innerHTML = '<input type="password" autocomplete="section-register new-password webauthn">';
+      expect(hasPasswordFieldInjected().has).toBe(false);
+    });
+  });
+
+  it('a closed shadow root remains unobservable', async () => {
+    await withInputs('<div id="closed-shadow-login"></div>', (host) => {
+      const shadow = /** @type {HTMLElement} */ (host.querySelector('#closed-shadow-login'))
+        .attachShadow({ mode: 'closed' });
+      shadow.innerHTML = '<input type="password" autocomplete="current-password">';
+      expect(hasPasswordFieldInjected().has).toBe(false);
+    });
+  });
+
+  it('preserves full light-DOM coverage beyond the boundary-discovery budget', async () => {
+    await withInputs('', (host) => {
+      const fragment = document.createDocumentFragment();
+      for (let index = 0; index < 30001; index++) fragment.appendChild(document.createElement('i'));
+      const password = document.createElement('input');
+      password.type = 'password';
+      password.autocomplete = 'current-password';
+      fragment.appendChild(password);
+      host.appendChild(fragment);
+      expect(hasPasswordFieldInjected().has).toBe(true);
+    });
+  });
+
+  it('reports boundary-discovery exhaustion instead of claiming an exhaustive negative', async () => {
+    await withInputs('', (host) => {
+      const fragment = document.createDocumentFragment();
+      for (let index = 0; index < 30001; index++) fragment.appendChild(document.createElement('i'));
+      host.appendChild(fragment);
+      expect(hasPasswordFieldInjected().capped).toBe(true);
+    });
+  });
+
+  it('keeps DOM-prefix priority when a wide sibling list exhausts the budget', async () => {
+    await withInputs('', (host) => {
+      const fragment = document.createDocumentFragment();
+      const earlyWrapper = document.createElement('div');
+      const earlyLogin = document.createElement('div');
+      earlyLogin.attachShadow({ mode: 'open' }).innerHTML =
+        '<input type="password" autocomplete="current-password">';
+      earlyWrapper.appendChild(earlyLogin);
+      fragment.appendChild(earlyWrapper);
+      for (let index = 0; index < 30001; index++) fragment.appendChild(document.createElement('i'));
+      host.appendChild(fragment);
+      const result = hasPasswordFieldInjected();
+      expect(result.has).toBe(true);
+    });
+  });
+
+  it('a same-origin frame sign-in field marks the owning origin', async () => {
+    await withInputs('<iframe id="same-origin-login"></iframe>', (host) => {
+      const frame = /** @type {HTMLIFrameElement} */ (host.querySelector('#same-origin-login'));
+      if (!frame.contentDocument?.body) throw new Error('same-origin fixture frame did not mount');
+      frame.contentDocument.body.innerHTML =
+        '<input type="password" autocomplete="current-password">';
+      expect(hasPasswordFieldInjected().has).toBe(true);
+    });
+  });
+
+  it('an exact-origin URL frame marks the owning origin', async () => {
+    await withInputs('<iframe id="url-login"></iframe>', async (host) => {
+      const frame = /** @type {HTMLIFrameElement} */ (host.querySelector('#url-login'));
+      await new Promise((resolve) => {
+        frame.addEventListener('load', resolve, { once: true });
+        frame.src = '/tests/fixtures/password-login-frame.html';
+      });
+      expect(frame.contentDocument?.location.origin).toBe(location.origin);
+      expect(hasPasswordFieldInjected().has).toBe(true);
+    });
+  });
+
+  it('a readable document reporting a different origin is not attributed', async () => {
+    await withInputs('<iframe id="relaxed-origin-login"></iframe>', (host) => {
+      const frame = /** @type {HTMLIFrameElement} */ (host.querySelector('#relaxed-origin-login'));
+      const foreignRoot = document.createElement('html');
+      foreignRoot.innerHTML = '<input type="password" autocomplete="current-password">';
+      const readableForeignDocument = {
+        documentElement: foreignRoot,
+        location: { origin: 'https://accounts.example.test', protocol: 'https:', pathname: '/' },
+        querySelectorAll: (/** @type {string} */ selector) => foreignRoot.querySelectorAll(selector),
+      };
+      Object.defineProperty(frame, 'contentDocument', { value: readableForeignDocument });
+      expect(hasPasswordFieldInjected().has).toBe(false);
+    });
+  });
+
+  it('an unexpected attributable-root failure remains an incomplete negative', async () => {
+    await withInputs('<iframe id="broken-root"></iframe>', (host) => {
+      const frame = /** @type {HTMLIFrameElement} */ (host.querySelector('#broken-root'));
+      const brokenDocument = {
+        documentElement: document.createElement('html'),
+        location: { origin: location.origin, protocol: location.protocol, pathname: '/broken' },
+        querySelectorAll: () => { throw new Error('fixture traversal failure'); },
+      };
+      Object.defineProperty(frame, 'contentDocument', { value: brokenDocument });
+      expect(hasPasswordFieldInjected()).toEqual({ has: false, capped: true });
+    });
+  });
+
+  it('an inherited about:blank URL with query and fragment remains attributable', async () => {
+    await withInputs('<iframe id="queried-blank-login"></iframe>', async (host) => {
+      const frame = /** @type {HTMLIFrameElement} */ (host.querySelector('#queried-blank-login'));
+      await new Promise((resolve) => {
+        frame.addEventListener('load', resolve, { once: true });
+        frame.src = 'about:blank?login#form';
+      });
+      if (!frame.contentDocument?.body) throw new Error('inherited fixture frame did not mount');
+      frame.contentDocument.body.innerHTML =
+        '<input type="password" autocomplete="current-password">';
+      expect(hasPasswordFieldInjected().has).toBe(true);
+    });
+  });
+
+  it('an opaque-origin frame is not attributed to the owning origin', async () => {
+    await withInputs('<iframe id="opaque-login" sandbox></iframe>', async (host) => {
+      const frame = /** @type {HTMLIFrameElement} */ (host.querySelector('#opaque-login'));
+      await new Promise((resolve) => {
+        frame.addEventListener('load', resolve, { once: true });
+        frame.srcdoc = '<input type="password" autocomplete="current-password">';
+      });
+      expect(hasPasswordFieldInjected().has).toBe(false);
+    });
   });
 });
