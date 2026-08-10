@@ -44,6 +44,17 @@ The [`lifecycle and recovery contract`](docs/security/LIFECYCLE-CONTRACT.md)
 states what happens to operations, tabs, sandboxes, and stored data when a
 worker or browser session stops unexpectedly.
 
+## Supply-chain security
+
+Dependency updates are treated as untrusted code, including updates labeled as
+security fixes. The canonical policy, automation boundary, coverage, and
+explicit exclusions live in
+[`docs/security/DEPENDENCY-AUTOMATION.md`](docs/security/DEPENDENCY-AUTOMATION.md).
+Its enforcement is kept close to the mechanism: `.github/dependabot.yml` and
+`bunfig.toml` season new releases; `.github/workflows/security.yml` and
+`.github/workflows/dependabot-security-release.yml` gate changes; and
+`extension/vendor/vendor.lock.json` pins every checked-in third-party byte.
+
 ## Trust model (what peerd already defends)
 
 Understanding the boundaries helps you scope a report:

@@ -35,6 +35,10 @@ jobs:
       contents: read
       security-events: write   # upload the SARIF result to the Security tab
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: github/codeql-action/init@d1ba80a13dd99fba24a470575428917156a28b43 # v4.37.5
         with:
@@ -58,6 +62,10 @@ jobs:
       # the same over-grant the top-level `contents: read` default exists to avoid.
       contents: read
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Scans bun.lock — the devDependency tree that builds and SIGNS the
       # artifacts. Nothing here ships inside the extension (vendor/ is pinned
@@ -80,6 +88,10 @@ jobs:
       contents: read
       pull-requests: write
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # GATING. This ran continue-on-error while the repo's Dependency graph
       # setting was off, because without it the action errors "not supported" —
@@ -101,6 +113,10 @@ jobs:
     name: peerd security invariants
     runs-on: ubuntu-latest
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:

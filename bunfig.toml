@@ -5,5 +5,18 @@
 # integration and runs headless via scripts/cdp/run-inbrowser-tests.mjs).
 # Bun walks recursively for *.test.{ts,js}.
 
+[install]
+# Defense in depth for local/manual resolution. Existing bun.lock entries stay
+# reproducible; newly resolved direct and transitive versions must have been
+# public for 30 days. The security auto-merge policy independently rechecks the
+# exact replacement timestamps because Dependabot writes the lockfile remotely.
+minimumReleaseAge = 2592000
+
+[install.security]
+# Supply-chain behavior/malware signal in addition to OSV's known-CVE scan.
+# The scanner is exact-pinned in package.json and uses Socket's unauthenticated
+# public API, so CI needs no Socket account or secret.
+scanner = "@socketsecurity/bun-security-scanner"
+
 [test]
 preload = ["./tests/setup.ts"]

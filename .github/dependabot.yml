@@ -1,17 +1,39 @@
-# Keeps the SHA-pinned GitHub Actions current: every action in the workflows
-# is pinned to a full commit SHA with the version in a trailing comment
-# (see package-and-release.yml), and Dependabot understands that format —
-# its PRs bump the SHA and the comment together, so pins never rot into
-# "immutable but ancient". Actions only, deliberately: the Bun devDependency
-# tree is governed by the committed bun.lock + `bun install --frozen-lockfile`
-# in CI, and its updates are curated by hand (signing-critical deps like crx3
-# and web-ext are exact-pinned in package.json on purpose).
+# Routine dependency updates get 30 days of release seasoning. GitHub applies
+# `cooldown` only to version updates, so Dependabot security PRs remain eligible
+# immediately. The no-human merge workflow separately requires every security
+# replacement release to have completed the same 30 days of seasoning.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 30
     groups:
+      # The name is part of the fail-closed auto-merge contract in
+      # dependabot-security-release.yml. Only Dependabot security updates can
+      # enter this group; routine updates remain in the seasoned group below.
+      actions-security-patches:
+        applies-to: security-updates
+        patterns: ['*']
       actions:
+        applies-to: version-updates
+        patterns: ['*']
+
+  # Updates package.json and the committed text-based bun.lock together. This
+  # includes exact-pinned signing dependencies; they still move only through a
+  # reviewed PR and must pass the frozen-lockfile and security CI gates.
+  - package-ecosystem: bun
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 30
+    groups:
+      bun-security-patches:
+        applies-to: security-updates
+        patterns: ['*']
+      bun-dependencies:
+        applies-to: version-updates
         patterns: ['*']

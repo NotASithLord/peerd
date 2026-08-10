@@ -20,6 +20,10 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - name: Compare live feeds against the latest release
         env:
           GH_TOKEN: ${{ github.token }}

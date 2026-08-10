@@ -64,6 +64,10 @@ jobs:
     name: bun test
     runs-on: ubuntu-latest
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -78,6 +82,10 @@ jobs:
     # loop. This bounds a crafted PR asset until upstream publishes a fix.
     timeout-minutes: 15
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -151,6 +159,10 @@ jobs:
     name: in-browser tests (headless Chrome)
     runs-on: ubuntu-latest
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -174,6 +186,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -219,6 +235,10 @@ jobs:
     name: dweb two-peer (headless WebRTC)
     runs-on: ubuntu-latest
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -275,6 +295,10 @@ jobs:
     name: dweb netproc (multi-process nodes)
     runs-on: ubuntu-latest
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -297,6 +321,10 @@ jobs:
     name: e2e (side panel)
     runs-on: ubuntu-latest
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -360,6 +388,10 @@ jobs:
       VISUAL_PLATFORM: linux-x64
       TZ: UTC
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -581,6 +613,10 @@ jobs:
     name: packaged page boot
     runs-on: ubuntu-latest
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -609,6 +645,10 @@ jobs:
         channel: [store, preview]
         browser: [chrome, firefox]
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -677,6 +717,10 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -691,6 +735,19 @@ jobs:
             echo "::error::tag v$TAG_VERSION does not match package.json version $PKG_VERSION"
             exit 1
           fi
+
+      # Required once the release environment's manual reviewer is removed for
+      # verified security auto-releases: a v* tag is not sufficient authority
+      # on its own. The exact tagged commit must already be reachable from the
+      # protected main branch before this job is allowed to read signing keys.
+      - name: Require the tagged commit to belong to protected main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo '::error::release tag does not point to a commit on origin/main'
+            exit 1
+          }
 
       - name: Require signing credentials
         env:
