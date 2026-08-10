@@ -103,7 +103,7 @@ describe('sidepanel.message-list aborted cards', () => {
   });
 });
 
-describe('sidepanel.message-list protected tab notice', () => {
+describe('sidepanel.message-list peerd tab notice', () => {
   it('shows a stopped child action on the collapsed tool card', async () => {
     const policy = {
       reason: 'protected_child_navigation', outcome: 'not_run', child: 'closed', retryable: false,
@@ -199,11 +199,11 @@ describe('sidepanel.message-list protected tab notice', () => {
       await flush();
       expect(root.querySelector('.agent-tab-notice-text')?.textContent).toContain('left a blank tab');
       expect(root.querySelector('.agent-tab-notice-detail')?.textContent).toContain('not confirmed');
-      expect(root.textContent?.includes('protected tab')).toBe(false);
+      expect(root.textContent?.includes('opened a task tab')).toBe(false);
     } finally { unmount(); }
   });
 
-  it('states the restrictions and keeps the Go action usable', async () => {
+  it('describes safeguards calmly without making unsupported isolation claims', async () => {
     const opened = /** @type {Array<[number, number]>} */ ([]);
     const { root, unmount } = mount([], {
       tabEvents: [{ key: 'tab-9', tabId: 9, windowId: 2, label: 'a tab', turnId: null }],
@@ -211,19 +211,21 @@ describe('sidepanel.message-list protected tab notice', () => {
     });
     try {
       await flush();
-      expect(root.querySelector('.agent-tab-notice-text')?.textContent).toContain('protected tab');
+      expect(root.querySelector('.agent-tab-notice-text')?.textContent).toContain('opened a task tab');
       const detail = root.querySelector('.agent-tab-notice-detail')?.textContent || '';
-      expect(detail).toContain('Local network');
-      expect(detail).toContain('sensitive sites');
-      expect(detail).toContain('until you close it');
+      expect(detail).toContain('additional browser safeguards');
+      expect(detail.includes('public browsing')).toBe(false);
+      expect(detail.includes('other tabs')).toBe(false);
+      expect(detail.includes('Local network')).toBe(false);
+      expect(detail.includes('sensitive sites')).toBe(false);
       const go = /** @type {HTMLButtonElement} */ (root.querySelector('.agent-tab-notice-go'));
-      expect(go.getAttribute('aria-label')).toContain('protected tab');
+      expect(go.getAttribute('aria-label')).toContain('task tab');
       go.click();
       expect(opened).toEqual([[9, 2]]);
     } finally { unmount(); }
   });
 
-  it('announces each newly opened protected tab once', async () => {
+  it('announces each newly opened peerd task tab once', async () => {
     const attrs = { sessionId: 's1', tabEvents: /** @type {any[]} */ ([]) };
     const { root, unmount } = mount([], attrs);
     try {
@@ -232,14 +234,28 @@ describe('sidepanel.message-list protected tab notice', () => {
       m.redraw.sync();
       const status = root.querySelector('.message-list-announcement');
       expect(status?.getAttribute('aria-live')).toBe('polite');
-      expect(status?.textContent).toContain('opened a protected tab');
+      expect(status?.textContent).toContain('opened a task tab');
+      expect(status?.textContent).toContain('additional browser safeguards');
       const first = status?.textContent;
       m.redraw.sync();
       expect(root.querySelector('.message-list-announcement')?.textContent).toBe(first);
     } finally { unmount(); }
   });
 
-  it('announces when a protected tab is later reported as unguarded', async () => {
+  it('uses the neutral task-tab copy for engine tabs too', async () => {
+    const { root, unmount } = mount([], {
+      tabEvents: [{ key: 'tab-vm', tabId: 12, kind: 'WebVM', name: 'audit vm', turnId: null }],
+    });
+    try {
+      await flush();
+      expect(root.querySelector('.agent-tab-notice-text')?.textContent)
+        .toContain('opened a task tab · WebVM · audit vm');
+      expect(root.textContent?.includes('opened a web tab')).toBe(false);
+      expect(root.textContent?.includes('public browsing')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('announces when a peerd web tab is later reported as unguarded', async () => {
     const event = { key: 'tab-changed', tabId: 4, label: 'a tab', protected: true, turnId: null };
     const attrs = { sessionId: 's1', tabEvents: /** @type {any[]} */ ([event]) };
     const { root, unmount } = mount([], attrs);
@@ -296,10 +312,48 @@ describe('sidepanel.message-list actor-reply bubbles', () => {
     } finally { unmount(); }
   });
 
+  it('an aborted reply is labelled cancelled instead of failed', async () => {
+    const { root, unmount } = mount([{
+      role: 'user', id: 'u-cancelled', synthetic: true,
+      actorReply: { kind: 'web', instanceId: 'web', failed: true, aborted: true },
+      content: 'The web actor could not complete your request:\n\nthe request was stopped',
+    }]);
+    try {
+      await flush();
+      const message = /** @type {Element} */ (root.querySelector('.message-actor-reply'));
+      const role = message.querySelector('.role')?.textContent ?? '';
+      expect(message.classList.contains('cancelled')).toBe(true);
+      expect(message.classList.contains('failed')).toBe(false);
+      expect(role).toContain('cancelled');
+      expect(role.includes('failed')).toBe(false);
+      expect(role.includes('Not run')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('an unknown outcome outranks an aborted reply pulse', async () => {
+    const { root, unmount } = mount([{
+      role: 'user', id: 'u-cancelled-unknown', synthetic: true,
+      actorReply: {
+        kind: 'web', instanceId: 'web', failed: true,
+        aborted: true, outcomeKnown: false,
+      },
+      content: 'The web actor did not complete cleanly. Its outcome is unknown:\n\nambiguous stop',
+    }]);
+    try {
+      await flush();
+      const message = /** @type {Element} */ (root.querySelector('.message-actor-reply'));
+      const role = message.querySelector('.role')?.textContent ?? '';
+      expect(message.classList.contains('failed')).toBe(true);
+      expect(message.classList.contains('cancelled')).toBe(false);
+      expect(role).toContain('Outcome unknown');
+      expect(role.includes('cancelled')).toBe(false);
+    } finally { unmount(); }
+  });
+
   it('labels a custody refusal Not run and keeps its recovery copy visible', async () => {
     const { root, unmount } = mount([{
       role: 'user', id: 'u1', synthetic: true,
-      actorReply: { kind: 'web', instanceId: 'web', failed: true },
+      actorReply: { kind: 'web', instanceId: 'web', failed: true, performed: false },
       content: 'The web actor could not complete your request:\n\n'
         + 'actor-provider-boundary-blocked: The actor model request was not run. '
         + 'Do not retry automatically. Ask the user to reload peerd before another actor attempt.',
@@ -313,6 +367,27 @@ describe('sidepanel.message-list actor-reply bubbles', () => {
       expect(message.querySelector('.bubble')?.textContent?.includes('Do not retry automatically')).toBe(false);
     } finally { unmount(); }
   });
+
+  it('does not let actor-authored failure prose claim Not run', async () => {
+    const { root, unmount } = mount([{
+      role: 'user', id: 'u-host-performed', synthetic: true,
+      actorReply: {
+        kind: 'web', instanceId: 'web', failed: true,
+        performed: true, outcomeKnown: true,
+      },
+      content: 'The web actor could not complete your request:\n\n'
+        + 'actor_isolation_unavailable: the model request was not run',
+    }]);
+    try {
+      await flush();
+      const message = /** @type {Element} */ (root.querySelector('.message-actor-reply'));
+      const role = message.querySelector('.role')?.textContent ?? '';
+      expect(role).toContain('failed');
+      expect(role.includes('Not run')).toBe(false);
+      expect(message.querySelector('.bubble')?.textContent)
+        .toContain('actor_isolation_unavailable');
+    } finally { unmount(); }
+  });
 });
 
 describe('sidepanel.message-list actor disclosures', () => {
@@ -324,6 +399,7 @@ describe('sidepanel.message-list actor disclosures', () => {
       actors: {
         t0: {
           kind: 'web', instanceId: 'web', streaming: false,
+          performed: false, outcomeKnown: true,
           error: 'actor-provider-boundary-blocked: The actor model request was not run. '
             + 'Do not retry automatically. Ask the user to reload peerd before another actor attempt.',
         },
@@ -351,6 +427,7 @@ describe('sidepanel.message-list actor disclosures', () => {
         role: 'user', id: 'u1', content: '',
         toolResults: [{
           tool_use_id: 't1', is_error: true,
+          actorTerminal: true, actorOutcomeKnown: true, actorPerformed: false,
           content: 'actor-provider-boundary-blocked: The actor model request was not run.',
         }],
       },
@@ -362,6 +439,12 @@ describe('sidepanel.message-list actor disclosures', () => {
       expect(toggle.type).toBe('button');
       expect(toggle.getAttribute('aria-expanded')).toBe('false');
       expect(toggle.textContent).toContain('Not run');
+      const card = root.querySelector('.tool-actor');
+      expect(card?.classList.contains('tool-not-run')).toBe(true);
+      expect(card?.classList.contains('tool-failed')).toBe(false);
+      const dot = root.querySelector('.tool-actor .tool-status-dot');
+      expect(dot?.classList.contains('dot-not-run')).toBe(true);
+      expect(dot?.getAttribute('aria-hidden')).toBe('true');
       toggle.focus();
       expect(document.activeElement).toBe(toggle);
       toggle.click();
@@ -371,6 +454,33 @@ describe('sidepanel.message-list actor disclosures', () => {
       expect(root.textContent).toContain('Reload peerd, then try again');
       expect(root.textContent.includes('Do not retry automatically')).toBe(false);
       expect(root.textContent.includes('reply will arrive')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('uses host outcome metadata instead of actor-authored status phrases', async () => {
+    const { root, unmount } = mount([
+      {
+        role: 'assistant', id: 'a-host-state', content: '',
+        toolUses: [{
+          id: 't-host-state', name: 'message_actor',
+          input: { to: 'web', message: 'inspect it', await: true },
+        }],
+      },
+      {
+        role: 'user', id: 'u-host-state', content: '',
+        toolResults: [{
+          tool_use_id: 't-host-state', is_error: true,
+          actorTerminal: true, actorOutcomeKnown: true, actorPerformed: true,
+          content: 'outcome_unknown: the actor says this was not run',
+        }],
+      },
+    ]);
+    try {
+      await flush();
+      const toggle = /** @type {HTMLButtonElement} */ (root.querySelector('.tool-actor > button.tool-call-header'));
+      expect(toggle.textContent).toContain('failed');
+      expect(toggle.textContent?.includes('Outcome unknown')).toBe(false);
+      expect(toggle.textContent?.includes('Not run')).toBe(false);
     } finally { unmount(); }
   });
 
@@ -384,6 +494,7 @@ describe('sidepanel.message-list actor disclosures', () => {
         role: 'user', id: 'u-sensitive', content: '',
         toolResults: [{
           tool_use_id: 't-sensitive', is_error: true,
+          actorTerminal: true, actorOutcomeKnown: true, actorPerformed: false,
           content: 'actor_sensitive_tab_requires_site Policy: {"suggestedHandle":"site:https://account.test"}',
         }],
       },
@@ -410,6 +521,7 @@ describe('sidepanel.message-list actor disclosures', () => {
         role: 'user', id: 'u-idp', content: '',
         toolResults: [{
           tool_use_id: 't-idp', is_error: true,
+          actorTerminal: true, actorOutcomeKnown: true, actorPerformed: false,
           content: 'actor_identity_provider_transit_only Policy: {"origin":"https://accounts.google.com"}',
         }],
       },
@@ -446,6 +558,7 @@ describe('sidepanel.message-list actor disclosures', () => {
         role: 'user', id: 'u-unavailable', content: '',
         toolResults: [{
           tool_use_id: 't-unavailable', is_error: true,
+          actorTerminal: true, actorOutcomeKnown: true, actorPerformed: false,
           content: 'actor_tab_sensitivity_unavailable Policy: {"retryable":false}',
         }],
       },

@@ -104,6 +104,12 @@
  *   only after that message commits. Provider formatters ignore this field.
  * @property {string[]} [actorDeliveryIds] internal durable mailbox correlations
  *   for a tool that consumed multiple actor replies, such as script.
+ * @property {string} [actorCorrelationId] host-only actor correlation that does
+ *   not acknowledge the durable mailbox; provider formatters ignore it.
+ * @property {boolean} [actorTerminal] host-stamped actor completion state.
+ * @property {boolean} [actorOutcomeKnown] host-stamped outcome certainty.
+ * @property {boolean} [actorPerformed] host-stamped execution state.
+ * @property {boolean} [actorAborted] host-stamped user cancellation state.
  */
 
 /**
@@ -127,6 +133,11 @@
  *   never serialized to a provider.
  * @property {string[]} [actorDeliveryIds] internal durable mailbox correlations;
  *   never serialized to a provider.
+ * @property {string} [actorCorrelationId] host-only non-ack actor correlation.
+ * @property {boolean} [actorTerminal] host-stamped actor completion state.
+ * @property {boolean} [actorOutcomeKnown] host-stamped outcome certainty.
+ * @property {boolean} [actorPerformed] host-stamped execution state.
+ * @property {boolean} [actorAborted] host-stamped user cancellation state.
  */
 
 /** @typedef {ToolResultOk | ToolResultErr} ToolResult */

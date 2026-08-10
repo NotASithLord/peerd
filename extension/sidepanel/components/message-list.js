@@ -78,6 +78,9 @@ const actorOutcomeUnknownFailure = (_text) =>
  * @property {string} [tool_use_id]
  * @property {boolean} [is_error]
  * @property {string} [content]
+ * @property {boolean} [actorOutcomeKnown]
+ * @property {boolean} [actorPerformed]
+ * @property {boolean} [actorAborted]
  * @property {{ primitive?: string, durationMs?: number, dispatch?: string, gates: Array<{ name: string, reason: string, allowed: boolean }>, browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }> }|null} [meta]
  */
 
@@ -251,7 +254,7 @@ const freshTabAnnouncements = (state, tabEvents) => {
     state.seenTabEventStates.set(event.key, isProtected);
     announcements.push(!isProtected
       ? 'peerd left a blank tab because browser control was not confirmed. Close it before continuing. Use Go to focus it.'
-      : 'peerd opened a protected tab. Local network and sensitive sites remain blocked until you close it. Use Go to focus it.');
+      : 'peerd opened a task tab with additional browser safeguards. Use Go to focus it.');
   }
   return announcements;
 };
@@ -384,17 +387,17 @@ const AgentTabNotice = {
       m('span.agent-tab-notice-icon', { 'aria-hidden': 'true' }, '▦'),
       m('span.agent-tab-notice-copy', [
         m('span.agent-tab-notice-text', [
-          protectedTab ? 'peerd opened a protected tab · ' : 'peerd left a blank tab · ',
+          protectedTab ? 'peerd opened a task tab · ' : 'peerd left a blank tab · ',
           m('span.agent-tab-notice-label', label),
         ]),
         m('span.agent-tab-notice-detail', protectedTab
-          ? 'Local network and sensitive sites are blocked until you close it.'
+          ? 'This task tab uses additional browser safeguards.'
           : 'Browser control was not confirmed. Close this tab before continuing.'),
       ]),
       m('button.agent-tab-notice-go', {
         type: 'button',
         title: 'Go to this tab',
-        'aria-label': `Go to ${protectedTab ? 'protected' : 'blank'} tab: ${label}`,
+        'aria-label': `Go to ${protectedTab ? 'task' : 'blank'} tab: ${label}`,
         onclick: () => uiActions?.openAgentTab?.(ev.tabId, ev.windowId),
       }, 'Go ↗'),
     ]);
@@ -504,9 +507,13 @@ const ActorReplyMessage = {
     // Drop replyText()'s one-line lead ("The <kind> actor … has replied:") —
     // the role label above the bubble already says who this is.
     const body = content.includes('\n\n') ? content.slice(content.indexOf('\n\n') + 2) : content;
-    const userFailure = reply.failed === true ? actorUserFailure(body) : null;
-    const outcomeUnknown = reply.outcomeKnown === false;
-    const notRun = !outcomeUnknown && (reply.performed === false || userFailure !== null);
+    // A Stop with an explicitly unknown outcome is not a clean cancellation;
+    // verification guidance must win over the friendlier cancelled label.
+    const aborted = reply.aborted === true && reply.outcomeKnown !== false;
+    const failed = reply.failed === true && !aborted;
+    const userFailure = failed && reply.performed === false ? actorUserFailure(body) : null;
+    const outcomeUnknown = !aborted && reply.outcomeKnown === false;
+    const notRun = !outcomeUnknown && reply.performed === false;
     const displayBody = outcomeUnknown
       ? actorOutcomeUnknownFailure(body)
       : (userFailure ?? body);
@@ -514,11 +521,12 @@ const ActorReplyMessage = {
     // earlier script run — it can land minutes later, so name its origin or the
     // bubble is unexplainable to a user who never saw the fan-out happen.
     const via = /** @type {{ via?: string }} */ (reply).via;
-    return m(`.message.message-actor-reply${reply.failed ? '.failed' : ''}`, [
+    return m(`.message.message-actor-reply${aborted ? '.cancelled' : failed ? '.failed' : ''}`, [
       m('.role', [
         label,
         via === 'script' ? ' · delegated by an earlier script' : '',
-        reply.failed ? ` · ${outcomeUnknown ? 'Outcome unknown' : notRun ? 'Not run' : 'failed'}` : '',
+        aborted ? ' · cancelled'
+          : failed ? ` · ${outcomeUnknown ? 'Outcome unknown' : notRun ? 'Not run' : 'failed'}` : '',
       ]),
       m('.bubble', renderText(stripUntrustedFences(displayBody))),
       ]);
@@ -1002,22 +1010,23 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
     : card?.aborted ? 'cancelled'
     : card?.streaming ? 'pending'
     : card ? 'ok'
-    : (toolResult ? (toolResult.is_error ? 'failed' : 'ok') : (interrupted ? 'cancelled' : 'pending'));
+    : (toolResult ? (toolResult.actorAborted ? 'cancelled' : toolResult.is_error ? 'failed' : 'ok')
+      : (interrupted ? 'cancelled' : 'pending'));
   const resultText = toolResult ? formatResultContent(toolResult) : '';
   const failureText = `${card?.error ?? ''} ${resultText}`;
   const outcomeUnknown = card?.outcomeKnown === false
-    || /outcome is unknown|outcome unknown/i.test(failureText);
-  const userFailure = actorUserFailure(failureText);
+    || (!card && toolResult?.actorOutcomeKnown === false);
+  const performed = card?.performed ?? (!card ? toolResult?.actorPerformed : undefined);
+  const userFailure = performed === false ? actorUserFailure(failureText) : null;
   const notRun = status === 'failed' && !outcomeUnknown
-    && (userFailure !== null
-      || /not run|no work was started|actor isolation|isolated worker.*(did not|unavailable)|actor_(?:sensitive_tab_requires_site|identity_provider_transit_only)/i.test(failureText));
+    && performed === false;
   const idpTransitRefusal = /actor_identity_provider_transit_only/i.test(failureText);
   const cardLabel = idpTransitRefusal
     ? 'sign-in service'
     : isApiIntegration
       ? `${who} integration`
       : `${card?.kind ? `${card.kind} actor` : 'actor'}${who ? ` · ${who}` : ''}`;
-  const presentationStatus = idpTransitRefusal && notRun ? 'not-run' : status;
+  const presentationStatus = notRun ? 'not-run' : status;
   const handedOff = !card && toolUse.input?.await === true
     && /is still working; its reply will arrive as a fenced note on a later turn/i.test(resultText);
   const acceptedAsync = !card && !!toolResult && toolResult.is_error !== true

@@ -107,7 +107,36 @@ describe('message_actor — case 7: pass-through of args + ctx fields', () => {
     };
     const { ctx } = recordingCtx({ messageActor: async () => refusal });
     expect(await messageActorTool.execute({ to: '42', message: 'read it' }, ctx))
-      .toEqual(refusal);
+      .toEqual({
+        ...refusal,
+        actorTerminal: true,
+        actorOutcomeKnown: true,
+      });
+  });
+
+  test('preserves host-only actor correlation and terminal metadata', async () => {
+    const { ctx } = recordingCtx({ messageActor: async () => ({
+      ok: false, error: 'actor failed',
+      actorCorrelationId: 'correlation-1', actorTerminal: true,
+      actorOutcomeKnown: false, actorPerformed: true, actorAborted: true,
+    }) });
+    expect(await messageActorTool.execute({ to: 'web', message: 'read it', await: true }, ctx))
+      .toMatchObject({
+        ok: false, actorCorrelationId: 'correlation-1', actorTerminal: true,
+        actorOutcomeKnown: false, actorPerformed: true, actorAborted: true,
+      });
+  });
+
+  test('turns trusted Not run evidence into a typed pre-effect failure', async () => {
+    const { ctx } = recordingCtx({ messageActor: async () => ({
+      ok: false, error: 'retired helper', actorTerminal: true,
+      actorOutcomeKnown: true, actorPerformed: false,
+    }) });
+    expect(await messageActorTool.execute({ to: 'web', message: 'read it', await: true }, ctx))
+      .toMatchObject({
+        ok: false, outcomeKind: 'pre-effect-failure',
+        actorOutcomeKnown: true, actorPerformed: false,
+      });
   });
 
   test('forwards to/message from args and session/toolUseId/abortSignal from ctx', async () => {

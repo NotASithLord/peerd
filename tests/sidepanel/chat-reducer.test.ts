@@ -240,10 +240,245 @@ describe('reduceChat', () => {
     expect(done.actors['tu-1'].streaming).toBe(false);
   });
 
+  test('a durable actor reply settles a card when the live done pulse was missed', () => {
+    const viewing = withSession('chat-A');
+    const started = reduceChat(viewing, {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'tu-stale',
+      sessionId: 'actor-web', fromIndex: 0, kind: 'web', instanceId: 'web',
+    });
+    const receipt = {
+      id: 'actor-reply-1', role: 'user', synthetic: true,
+      actorReply: {
+        kind: 'web', instanceId: 'web', parentToolUseId: 'tu-stale',
+        actorDeliveryId: 'delivery-stale', failed: true, outcomeKnown: false,
+      },
+      content: 'fenced actor failure',
+    };
+    const call = {
+      id: 'assistant-call', role: 'assistant',
+      toolUses: [{ id: 'tu-stale', name: 'message_actor', input: { to: 'web' } }],
+    };
+    const accepted = {
+      id: 'tool-result', role: 'user',
+      toolResults: [{ tool_use_id: 'tu-stale', is_error: false, content: 'accepted', actorCorrelationId: 'delivery-stale' }],
+    };
+
+    const untrustedShape = reduceChat(started, {
+      type: 'turn/state', session: {
+        sessionId: 'chat-A',
+        messages: [call, accepted, { ...receipt, id: 'not-a-receipt', role: 'assistant', synthetic: false }],
+      },
+    });
+    expect(untrustedShape.actors['tu-stale'].streaming).toBe(true);
+
+    const settled = reduceChat(started, {
+      type: 'turn/state', session: { sessionId: 'chat-A', messages: [call, accepted, receipt] },
+    });
+
+    expect(settled.actors['tu-stale']).toMatchObject({
+      streaming: false, outcomeKnown: false,
+      error: 'the actor turn ended with an unknown outcome',
+    });
+  });
+
+  test('a durable failure overrides an earlier aborted pulse', () => {
+    const viewing = withSession('chat-A');
+    const started = reduceChat(viewing, {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'tu-aborted',
+      sessionId: 'actor-web', fromIndex: 0, kind: 'web', instanceId: 'web',
+    });
+    const aborted = reduceChat(started, {
+      type: 'turn/actor-done', rootSessionId: 'chat-A', parentToolUseId: 'tu-aborted',
+      ok: true, aborted: true,
+    });
+    const messages = [
+      { id: 'call', role: 'assistant', toolUses: [{
+        id: 'tu-aborted', name: 'message_actor', input: { to: 'web' },
+      }] },
+      { id: 'accepted', role: 'user', toolResults: [{
+        tool_use_id: 'tu-aborted', is_error: false, content: 'accepted', actorCorrelationId: 'delivery-aborted',
+      }] },
+      { id: 'receipt', role: 'user', synthetic: true, content: 'fenced failure', actorReply: {
+        kind: 'web', instanceId: 'web', parentToolUseId: 'tu-aborted',
+        actorDeliveryId: 'delivery-aborted', failed: true, outcomeKnown: false,
+      } },
+    ];
+
+    const settled = reduceChat(aborted, {
+      type: 'turn/state', session: { sessionId: 'chat-A', messages },
+    });
+    expect(settled.actors['tu-aborted']).toMatchObject({
+      streaming: false, aborted: false, outcomeKnown: false,
+      error: 'the actor turn ended with an unknown outcome',
+    });
+  });
+
+  test('a failed receipt is known unless the host explicitly marks it unknown', () => {
+    const viewing = withSession('chat-A');
+    const started = reduceChat(viewing, {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'tu-known-failure',
+      sessionId: 'actor-web', fromIndex: 0, kind: 'web', instanceId: 'web',
+    });
+    const messages = [
+      { id: 'call', role: 'assistant', toolUses: [{
+        id: 'tu-known-failure', name: 'message_actor', input: { to: 'web' },
+      }] },
+      { id: 'accepted', role: 'user', toolResults: [{
+        tool_use_id: 'tu-known-failure', is_error: false, content: 'accepted',
+        actorCorrelationId: 'delivery-known-failure',
+      }] },
+      { id: 'receipt', role: 'user', synthetic: true, content: 'fenced failure', actorReply: {
+        kind: 'web', instanceId: 'web', parentToolUseId: 'tu-known-failure',
+        actorDeliveryId: 'delivery-known-failure', failed: true,
+      } },
+    ];
+
+    const settled = reduceChat(started, {
+      type: 'turn/state', session: { sessionId: 'chat-A', messages },
+    });
+    expect(settled.actors['tu-known-failure']).toMatchObject({
+      streaming: false, outcomeKnown: true, error: 'the actor turn did not complete',
+    });
+  });
+
+  test('an old receipt cannot settle a newer call when a provider reuses a tool-use id', () => {
+    const viewing = withSession('chat-A');
+    const started = reduceChat(viewing, {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'reused-id',
+      sessionId: 'new-actor-turn', fromIndex: 4, kind: 'web', instanceId: 'web',
+    });
+    const oldTranscript = [
+      { id: 'old-call', role: 'assistant', toolUses: [{
+        id: 'reused-id', name: 'message_actor', input: { to: 'web' },
+      }] },
+      { id: 'old-result', role: 'user', toolResults: [{
+        tool_use_id: 'reused-id', is_error: false, content: 'accepted', actorCorrelationId: 'delivery-old',
+      }] },
+      { id: 'new-call', role: 'assistant', toolUses: [{
+        id: 'reused-id', name: 'message_actor', input: { to: 'web' },
+      }] },
+      { id: 'new-result', role: 'user', toolResults: [{
+        tool_use_id: 'reused-id', is_error: false, content: 'accepted', actorCorrelationId: 'delivery-new',
+      }] },
+      // The older actor can reply late, after the provider has reused its tool id.
+      { id: 'old-receipt', role: 'user', synthetic: true, content: 'old fenced reply', actorReply: {
+        kind: 'web', instanceId: 'web', parentToolUseId: 'reused-id',
+        actorDeliveryId: 'delivery-old', failed: false,
+      } },
+    ];
+
+    const stillLive = reduceChat(started, {
+      type: 'turn/state', session: { sessionId: 'chat-A', messages: oldTranscript },
+    });
+    expect(stillLive.actors['reused-id'].streaming).toBe(true);
+
+    const settled = reduceChat(stillLive, {
+      type: 'turn/state', session: { sessionId: 'chat-A', messages: [
+        ...oldTranscript,
+        { id: 'new-receipt', role: 'user', synthetic: true, content: 'new fenced reply', actorReply: {
+          kind: 'web', instanceId: 'web', parentToolUseId: 'reused-id',
+          actorDeliveryId: 'delivery-new', failed: false,
+        } },
+      ] },
+    });
+    expect(settled.actors['reused-id']).toMatchObject({ streaming: false, aborted: false, error: null });
+  });
+
+  test('awaited tool results settle stale cards, except the explicit async handoff', () => {
+    const viewing = withSession('chat-A');
+    const ids = [
+      'await-ok', 'await-failed', 'await-unknown', 'await-cancelled',
+      'await-cancelled-unknown', 'await-handoff',
+    ];
+    const started = ids.reduce((state, id) => reduceChat(state, {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: id,
+      sessionId: `actor-${id}`, fromIndex: 0, kind: 'web', instanceId: 'web',
+    }), viewing);
+    const messages = [
+      { id: 'await-calls', role: 'assistant', toolUses: ids.map((id) => ({
+        id, name: 'message_actor', input: { to: 'web', await: true },
+      })) },
+      { id: 'await-results', role: 'user', toolResults: [
+        { tool_use_id: 'await-ok', is_error: false, content: 'outcome_unknown: not run',
+          actorTerminal: true, actorOutcomeKnown: true, actorPerformed: true },
+        { tool_use_id: 'await-failed', is_error: true, content: 'outcome_unknown: not run',
+          actorTerminal: true, actorOutcomeKnown: true, actorPerformed: true },
+        { tool_use_id: 'await-unknown', is_error: true, content: 'canonical failure',
+          actorTerminal: true, actorOutcomeKnown: false, actorPerformed: true },
+        { tool_use_id: 'await-cancelled', is_error: true, content: 'aborted by the user',
+          actorTerminal: true, actorOutcomeKnown: true, actorAborted: true },
+        { tool_use_id: 'await-cancelled-unknown', is_error: true, content: 'aborted after dispatch',
+          actorTerminal: true, actorOutcomeKnown: false, actorPerformed: true, actorAborted: true },
+        { tool_use_id: 'await-handoff', is_error: false,
+          content: 'The actor is still working; its reply will arrive as a fenced note on a later turn.',
+          actorTerminal: false },
+      ] },
+    ];
+
+    const reconciled = reduceChat(started, {
+      type: 'turn/state', session: { sessionId: 'chat-A', messages },
+    });
+    expect(reconciled.actors['await-ok']).toMatchObject({ streaming: false, error: null, outcomeKnown: true });
+    expect(reconciled.actors['await-failed']).toMatchObject({
+      streaming: false, error: 'the actor turn did not complete', outcomeKnown: true, performed: true,
+    });
+    expect(reconciled.actors['await-unknown']).toMatchObject({
+      streaming: false, error: 'the actor turn ended with an unknown outcome', outcomeKnown: false,
+    });
+    expect(reconciled.actors['await-cancelled']).toMatchObject({
+      streaming: false, aborted: true, error: null, outcomeKnown: true,
+    });
+    expect(reconciled.actors['await-cancelled-unknown']).toMatchObject({
+      streaming: false, aborted: false,
+      error: 'the actor turn ended with an unknown outcome', outcomeKnown: false,
+    });
+    expect(reconciled.actors['await-handoff'].streaming).toBe(true);
+  });
+
+  test('a state snapshot cannot revive a card with a durable actor receipt', () => {
+    const receipt = {
+      id: 'actor-reply-2', role: 'user', synthetic: true,
+      actorReply: {
+        kind: 'web', instanceId: 'web', parentToolUseId: 'tu-a',
+        actorDeliveryId: 'delivery-a', failed: false,
+      },
+      content: 'fenced actor reply',
+    };
+    const messages = [
+      { id: 'call-a', role: 'assistant', toolUses: [{
+        id: 'tu-a', name: 'message_actor', input: { to: 'web' },
+      }] },
+      { id: 'result-a', role: 'user', toolResults: [{
+        tool_use_id: 'tu-a', is_error: false, content: 'accepted', actorCorrelationId: 'delivery-a',
+      }] },
+      receipt,
+    ];
+    const viewing = withSession('chat-A');
+    const replayed = reduceChat(viewing, {
+      type: 'state',
+      state: {
+        session: { sessionId: 'chat-A', messages },
+        actors: {
+          'tu-a': { sessionId: 'actor-a', streaming: true },
+        },
+      },
+    });
+
+    expect(replayed.actors['tu-a'].streaming).toBe(false);
+  });
+
   test('actor done: an abort renders cancelled; an ok:false failure marks failed; churn is short-circuited', () => {
     const started = reduceChat(INITIAL_STATE, { type: 'turn/actor-start', parentToolUseId: 'tu-a', sessionId: 'r', fromIndex: 0 });
     const aborted = reduceChat(started, { type: 'turn/actor-done', parentToolUseId: 'tu-a', ok: true, aborted: true });
     expect(aborted.actors['tu-a']).toMatchObject({ streaming: false, aborted: true });
+    const restarted = reduceChat(aborted, {
+      type: 'turn/actor-start', parentToolUseId: 'tu-a', sessionId: 'r-new', fromIndex: 5,
+    });
+    expect(restarted.actors['tu-a']).toMatchObject({
+      sessionId: 'r-new', streaming: true, aborted: false, error: null,
+    });
+    expect(restarted.actors['tu-a'].outcomeKnown).toBeUndefined();
+    expect(restarted.actors['tu-a'].performed).toBeUndefined();
     // A done after a card is already terminal (error folded first) is a no-op (no churn).
     const erroredThenDone = reduceChat(
       reduceChat(started, { type: 'turn/actor-error', parentToolUseId: 'tu-a', error: 'boom' }),

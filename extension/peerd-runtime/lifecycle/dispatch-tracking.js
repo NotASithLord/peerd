@@ -823,6 +823,30 @@ export const makeDispatchTracker = ({
       return null;
     }
 
+    // A typed pre-effect failure is positive proof that the effect did not
+    // occur. When the user also requested cancellation, preserve that stronger
+    // evidence instead of feeding a merely "dispatched" shape into recovery
+    // and manufacturing uncertainty for Class D/E.
+    if (typedKind === FAILURE_OUTCOMES.PRE_EFFECT_FAILURE && cancelRequested) {
+      const cancelled = decideRecovery({
+        retryClass,
+        dispatched: true,
+        cancelRequested: true,
+        evidence: { kind: 'error-response-before-effect' },
+      });
+      try { await operationLog.settle(operationId, cancelled); }
+      catch { /* durable copy deferred to the next boot's reconcile */ }
+      return {
+        error: `cancelled: ${handle.toolName} was stopped before its effect landed `
+          + `(${outcome.error ?? 'aborted'})`,
+        recovery: {
+          category: 'safe_to_retry', state: cancelled.state, autoRetry: false,
+          retryRequires: ['user-instruction'], verificationRequired: false,
+          keepIdempotencyKey: cancelled.keepIdempotencyKey, reason: cancelled.reason,
+        },
+      };
+    }
+
     const verdict = decideRecovery({ retryClass, dispatched: true, cancelRequested });
     try {
       const record = await operationLog.get(operationId);

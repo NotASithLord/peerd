@@ -225,6 +225,8 @@ describe('message_actor — happy path + correlation', () => {
     const { messageActor, reentries, turnsRun } = harness();
     const r = await messageActor({ to: 'app-1', message: 'build a todo app', senderSessionId: 'chat-1' });
     expect(r.ok).toBe(true);
+    expect(r.actorCorrelationId).toBe('correlation-1');
+    expect(r.actorTerminal).toBe(false);
     await tick();
     // The actor turn ran against the ACTOR session, with the message.
     expect(turnsRun).toHaveLength(1);
@@ -238,6 +240,41 @@ describe('message_actor — happy path + correlation', () => {
     // attributed bubble (trickle-up) instead of hiding it as plumbing.
     expect(reentries[0].actorReply).toMatchObject({ kind: 'app', instanceId: 'app-1', name: 'todo', failed: false });
     expect(typeof reentries[0].actorReply?.actorDeliveryId).toBe('string');
+  });
+
+  test('a queued delivery cannot run after its resolved actor session is retired', async () => {
+    const slots = makeTurnSlots();
+    const started: string[] = [];
+    const releases: Array<() => void> = [];
+    let current = true;
+    const { messageActor, reentries } = harness({
+      caps: { rateCap: 100, outstanding: 100 },
+      turnSlots: slots,
+      isActorSessionCurrent: async () => current,
+      runActorTurn: (opts: any) => {
+        started.push(opts.message);
+        return new Promise<{ result: string }>((resolve) => {
+          releases.push(() => resolve({ result: `${opts.message} done` }));
+        });
+      },
+    });
+
+    await messageActor({ to: 'app-1', message: 'A', senderSessionId: 'chat-1' });
+    await messageActor({ to: 'app-1', message: 'B', senderSessionId: 'chat-1' });
+    await tick();
+    expect(started).toEqual(['A']);
+
+    current = false;
+    releases[0]();
+    await tick();
+    await tick();
+
+    expect(started).toEqual(['A']);
+    const retired = reentries.find((entry) => entry.userText.includes('helper was retired'));
+    expect(retired?.actorReply).toMatchObject({
+      failed: true, outcomeKnown: true, performed: false,
+    });
+    expect(slots.isBusy('res-1')).toBe(false);
   });
 
   test('reserves the parent slot before reply reentry setup so sibling replies cannot steer-abort', async () => {
@@ -306,6 +343,22 @@ describe('message_actor — happy path + correlation', () => {
       .toBeLessThan(reentries[0].userText.indexOf('<u origin="app-1">'));
   });
 
+  test('an async abort after actor start is Outcome unknown, not cleanly cancelled', async () => {
+    const { messageActor, reentries } = harness({
+      runActorTurn: async () => ({
+        result: 'the target turn stopped without a final result',
+        stopped: true,
+        aborted: true,
+      }),
+    });
+    await messageActor({ to: 'app-1', message: 'change the target', senderSessionId: 'chat-1' });
+    await tick();
+    expect(reentries[0].actorReply).toMatchObject({
+      failed: true, aborted: true, outcomeKnown: false, performed: true,
+    });
+    expect(reentries[0].userText).toContain('Its outcome is unknown');
+  });
+
   test('an awaited post-start failure preserves non-retryable outcome metadata', async () => {
     const { messageActor } = harness({
       runActorTurn: async () => ({
@@ -329,12 +382,14 @@ describe('message_actor — happy path + correlation', () => {
         stopped: true,
         executionFailed: true,
         outcomeKnown: true,
+        performed: false,
       }),
     });
     await messageActor({ to: 'app-1', message: 'change the target', senderSessionId: 'chat-1' });
     await tick();
-    expect(reentries[0].actorReply).toMatchObject({ failed: true });
-    expect(reentries[0].actorReply?.outcomeKnown).toBeUndefined();
+    expect(reentries[0].actorReply).toMatchObject({
+      failed: true, outcomeKnown: true, performed: false,
+    });
     expect(reentries[0].userText).toContain('model request was not run');
     expect(reentries[0].userText).not.toContain('Its outcome is unknown');
   });
@@ -344,12 +399,16 @@ describe('message_actor — happy path + correlation', () => {
       runActorTurn: async () => ({
         result: ACTOR_CREDENTIAL_BOUNDARY_FAILURE,
         stopped: true,
+        performed: false,
+        outcomeKnown: true,
       }),
     });
     await messageActor({ to: 'app-1', message: 'x', senderSessionId: 'chat-1' });
     await tick();
     expect(reentries).toHaveLength(1);
-    expect(reentries[0].actorReply?.failed).toBe(true);
+    expect(reentries[0].actorReply).toMatchObject({
+      failed: true, outcomeKnown: true, performed: false,
+    });
     expect(reentries[0].userText).toContain(ACTOR_CREDENTIAL_BOUNDARY_FAILURE);
     expect(reentries[0].userText).not.toContain('stopped before it produced a reply');
   });
@@ -447,6 +506,38 @@ describe('message_actor — awaitReply (in-band reply mode)', () => {
     expect(reentries).toEqual([]);
   });
 
+  test('await treats a post-start target cancellation as Outcome unknown', async () => {
+    const { messageActor } = harness({
+      runActorTurn: async () => ({
+        result: 'the target turn was stopped', stopped: true, aborted: true,
+      }),
+    });
+    const result = await messageActor({
+      to: 'app-1', message: 'x', senderSessionId: 'chat-1', awaitReply: true,
+    });
+    expect(result).toMatchObject({
+      ok: false, actorTerminal: true, actorOutcomeKnown: false,
+      actorPerformed: true, actorAborted: true,
+    });
+  });
+
+  test('await preserves a failed-start isolation result as definite Not run', async () => {
+    const { messageActor } = harness({
+      runActorTurn: async () => ({
+        result: 'the isolated worker did not start', stopped: true,
+        isolationFailure: { performed: false, outcomeKnown: true },
+      }),
+    });
+    const result = await messageActor({
+      to: 'app-1', message: 'x', senderSessionId: 'chat-1', awaitReply: true,
+    });
+    expect(result).toMatchObject({
+      ok: false, actorTerminal: true, actorOutcomeKnown: true,
+      actorPerformed: false,
+    });
+    expect(result.actorAborted).toBeUndefined();
+  });
+
   test('await unwinds on the abort signal (Stop / turn timeout) with a failure result', async () => {
     // A hung actor turn that never replies — the exact "parked forever" case the
     // race exists to prevent. The already-aborted signal must resolve the await now.
@@ -461,6 +552,9 @@ describe('message_actor — awaitReply (in-band reply mode)', () => {
     });
     expect(r.ok).toBe(false);
     expect(r.error).toContain('aborted');
+    expect(r.actorAborted).toBe(true);
+    expect(r.actorOutcomeKnown).toBe(true);
+    expect(r.actorPerformed).toBe(false);
     // No later-turn wake fires for an awaited call, even on abort.
     await tick();
     expect(reentries.length).toBe(0);
@@ -488,6 +582,9 @@ describe('message_actor — awaitReply (in-band reply mode)', () => {
     const r = await p;
     expect(r.ok).toBe(false);
     expect(r.error).toContain('aborted');
+    expect(r.actorAborted).toBe(true);
+    expect(r.actorOutcomeKnown).toBe(false);
+    expect(r.actorPerformed).toBe(true);
     expect(stopArgs).not.toBeNull();                            // the running delegate was slot-cancelled
     await tick();
     expect(reentries.length).toBe(0);

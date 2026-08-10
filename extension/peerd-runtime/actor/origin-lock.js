@@ -61,6 +61,8 @@ import { normalizeApiOrigin } from './web-actor.js';
  * @property {import('./landing-rule.js').Excursion | null} [excursion]
  * @property {import('./landing-rule.js').AuthGrant | null} [authGrant]
  * @property {number} [excursionsUsed]
+ * @property {boolean} [retired] a stopped roaming actor whose page-influenced
+ *   transcript must never receive another turn
  */
 
 /**
@@ -223,6 +225,7 @@ export const makeCredentialScope = (deps) => {
     // "decided once in the SW" rule as judgeLanding. Hand back the unmodified
     // scope so a non-locked actor behaves exactly as it did before #251.
     if (!state) return origin;
+    if (state.retired === true) return undefined;
     const sensitivity = classifyOriginSensitivity(origin, {
       isKnownIdp, isUgcZone, hasVaultSecret, learned: getLearned?.(),
     });

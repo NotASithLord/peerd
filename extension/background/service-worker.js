@@ -328,7 +328,8 @@ import {
   createConversationRegistry,
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
   // registry (the 0-or-1-tab actor), + the self-fenced summary.
-  makeWebActorTabBindings, makeWebActorRegistry, safeWebActorSummaryOrigin, fenceWebActorSummary,
+  makeWebActorTabBindings, makeWebActorRegistry, retireStoppedRoamingWebActorDurably,
+  safeWebActorSummaryOrigin, fenceWebActorSummary,
   // PR #119: the code-REPL arm's host-side page-call handler + the pure
   // adopt-first-tab-on-goto decision.
   makePageCallHandler, resolvePageTab,
@@ -1711,6 +1712,10 @@ const originStates = makeOriginStateStore({
   save: async (sessionId, state) => { await sessions.update(sessionId, { originState: state }); },
   onError: (message, error) => console.warn('[origin-lock]', message, error),
 });
+// Immediate heap guard for turns already queued on an actor slot. The durable
+// originState.retired tombstone below survives worker eviction; this set closes
+// the smaller window before that write completes (and fails closed if it does).
+const retiredActorSessions = new Set();
 
 /**
  * The origins peerd has LEARNED the user has an account on — grown from
@@ -1837,14 +1842,14 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
   const judgeLandingUnserialized = makeJudgeLanding({
       getState,
       saveState: (patch) => originStates.write(actorSessionId, patch),
-      onStop: (event) => {
+      onStop: async (event) => {
         // A judge that outlived its turn may not stop anything and may not file
         // anything. It still records the landing in the audit trail below — the
         // observation was real even when the turn it belonged to is gone.
         const current = isCurrentTurn();
         if (current) landingStopReports.set(actorSessionId, describeLandingStop(/** @type {any} */ (event)));
-        // RELEASE THE TAB. Without this the stop is self-sealing and the actor is
-        // dead for good, which adversarial review demonstrated end to end:
+        // RELEASE THE TAB. Without this the stop is self-sealing and a bound
+        // actor is dead for good:
         //
         //   navigate is the actor's ONLY way to change its tab's URL, and it
         //   calls resolveTargetTab FIRST — which judges the tab's CURRENT url.
@@ -1853,15 +1858,33 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
         //   request in the chat — about anything at all — gets the same handoff
         //   report, forever. For a per-tab actor it outlives the chat entirely.
         //
-        // Dropping the binding puts the actor back in the genuine 0-tab state,
-        // where navigate's adopt path opens a fresh tab. That is a RECOVERY, not
-        // a loosening: the new tab starts blank and its first landing is judged
-        // like any other, so a bound actor still cannot leave its origin and a
-        // roaming one still cannot enter a credentialed site. The refused tab
-        // itself is left open and untouched — the user may well want to look at
-        // it, and closing a tab out from under someone to enforce a policy they
-        // did not see would be its own kind of wrong.
+        // A bound actor returns to a genuine 0-tab state, where navigate's adopt
+        // path opens a fresh judged tab. A roaming actor is retired below instead:
+        // it has consumed page-controlled text, so its transcript must not cross
+        // the stop into the next `to:"web"` request. The refused tab itself is
+        // left open and untouched; the user may well want to look at it.
         if (current) {
+          const st = originStates.read(actorSessionId);
+          const retiringRoamingActor = st?.mode === 'roaming';
+          // Abort the current actor turn before any fallible persistence. A
+          // storage outage must never let the loop continue issuing tools on a
+          // landing the origin policy already refused.
+          try { turnSlots.stop(actorSessionId); }
+          catch (e) { console.warn('[origin-lock] stop failed', e); }
+          // Heap retirement + registry removal happen synchronously inside the
+          // helper. Its two durable fences are attempted independently, so a
+          // tombstone failure cannot suppress the routing-cache drop (or vice
+          // versa). Queued deliveries consult the heap fence at dequeue time.
+          const retirement = retiringRoamingActor
+            ? retireStoppedRoamingWebActorDurably({
+              registry: webActorRegistry,
+              actorSessionId,
+              originState: st,
+              markRetired: (sessionId) => { retiredActorSessions.add(sessionId); },
+              writeTombstone: () => originStates.write(actorSessionId, { retired: true }),
+              persistRouting: persistWebActors,
+            })
+            : null;
           const parkedTab = webActorTabBindings.tabFor(actorSessionId);
           if (typeof parkedTab === 'number' && webActorTabBindings.drop(parkedTab)) persistWebBindings();
           // The stop hands this tab back to the user (they may want to look at
@@ -1876,7 +1899,6 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
           // usually all that was needed. Only on the FIRST landing: after that
           // the origin is settled and an actor that wandered off it should stay
           // stopped rather than quietly re-home itself somewhere new.
-          const st = originStates.read(actorSessionId);
           if (st?.provisional) {
             // The store's key is `${chatId} ${origin}` (one space; neither half
             // can contain one), so splitting on the FIRST space recovers the pair.
@@ -1892,6 +1914,15 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
             // Keep the stopped state as a tombstone for calls already queued
             // in this turn. Null means unlocked, so forgetting it here would
             // let those calls proceed after the binding was removed.
+          }
+          if (retirement) {
+            const durable = await retirement;
+            if (durable.tombstone.status === 'rejected') {
+              console.warn('[origin-lock] actor retirement tombstone failed', durable.tombstone.reason);
+            }
+            if (durable.routing.status === 'rejected') {
+              console.warn('[origin-lock] actor retirement routing write failed', durable.routing.reason);
+            }
           }
         }
         auditLog.append({
@@ -1921,9 +1952,7 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
         // leaves the loop free to try the next tool against the same tab. Only
         // ever OUR turn — see landingTurnTokens for the turn this would
         // otherwise have aborted by accident.
-        if (current) {
-          try { turnSlots.stop(actorSessionId); } catch (e) { console.warn('[origin-lock] stop failed', e); }
-        }
+        // Current turns are stopped before fallible retirement work above.
       },
       isIdp: isKnownIdp,
       isCurrent: isCurrentTurn,
@@ -4854,8 +4883,17 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
 // best-effort boot rehydrate, shared by the three actor registries below (a
 // missing/garbage stored value just starts empty). Ephemeral by design — every
 // one of these is a routing cache whose durable truth lives on the session record.
-const persistRegistry = (/** @type {string} */ key, /** @type {{ entries: () => any }} */ registry) =>
-  () => { sessionCache.sessionSet(key, registry.entries()).catch(() => {}); };
+const persistRegistry = (/** @type {string} */ key, /** @type {{ entries: () => any }} */ registry) => {
+  let lane = Promise.resolve();
+  return () => {
+    // Snapshot at mutation time, then serialize writes in that same order. An
+    // older bind write may never land after a newer retirement snapshot.
+    const snapshot = registry.entries();
+    const operation = lane.catch(() => {}).then(() => sessionCache.sessionSet(key, snapshot));
+    lane = operation.catch(() => {});
+    return operation;
+  };
+};
 // Returns the load promise (never rejects) so a caller whose state DEPENDS on
 // the rehydrated entries — the net guard's driven-tab set — can chain onto it
 // instead of guessing at the timing.
@@ -4898,7 +4936,7 @@ const webActorBindingsReady = hydrateRegistryForGuard(WEB_BINDINGS_KEY, webActor
 const webActorRegistry = makeWebActorRegistry();
 const WEB_ACTOR_KEY = 'webActorRegistry';
 const persistWebActors = persistRegistry(WEB_ACTOR_KEY, webActorRegistry);
-hydrateRegistry(WEB_ACTOR_KEY, webActorRegistry);
+const webActorRegistryReady = hydrateRegistry(WEB_ACTOR_KEY, webActorRegistry);
 
 // PR #119 — the code-REPL arm's SW route. A page.<method> call the code-surface
 // web actor makes inside its sealed worker rides here (offscreen job-runner →
@@ -5463,12 +5501,23 @@ const mintWebActor = async (/** @type {string} */ ownerChatId) => mintWebSession
 // the bound session vanished (SW death cleared session storage). The owner is the SENDER
 // chat threaded by the messaging layer, not the ambient active chat.
 const resolveWebActor = async (/** @type {string | null | undefined} */ ownerOverride) => {
+  await webActorRegistryReady;
   const ownerChatId = ownerOverride ?? /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
   if (!ownerChatId) return null;
   let actorSessionId = webActorRegistry.resolve(ownerChatId);
-  if (actorSessionId && !(await sessions.get(actorSessionId))) {
+  let actorRecord = actorSessionId ? await sessions.get(actorSessionId) : null;
+  if (actorSessionId && (retiredActorSessions.has(actorSessionId)
+      || actorRecord?.originState?.retired === true)) {
+    retiredActorSessions.add(actorSessionId);
     webActorRegistry.drop(ownerChatId);
-    persistWebActors();
+    await persistWebActors().catch((error) => {
+      console.warn('[web-actor] stale retirement routing write failed', error);
+    });
+    actorSessionId = null;
+    actorRecord = null;
+  } else if (actorSessionId && !actorRecord) {
+    webActorRegistry.drop(ownerChatId);
+    await persistWebActors();
     // issue 251: the durable state died with the record, so the heap copy is now
     // the only thing asserting an owned origin — and the id will be reused by
     // nothing, so keeping it is pure leak. Drop it with the binding.
@@ -6946,6 +6995,11 @@ const actorMessaging = makeActorMessaging({
     const session = await sessions.get(sessionId);
     return (session?.messages ?? []).some((message) =>
       actorDeliveryIdsFromMessage(message).includes(deliveryId));
+  },
+  isActorSessionCurrent: async (actorSessionId) => {
+    if (retiredActorSessions.has(actorSessionId)) return false;
+    const actor = await sessions.get(actorSessionId);
+    return !!actor && actor.originState?.retired !== true;
   },
   turnSlots,
   getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),

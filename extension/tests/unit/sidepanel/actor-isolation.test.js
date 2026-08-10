@@ -106,7 +106,11 @@ describe('sidepanel actor isolation UX', () => {
     document.body.appendChild(root);
     m.mount(root, { view: () => m(MessageList, { messages: [
       { role: 'assistant', id: 'a1', content: '', toolUses: [{ id: 't1', name: 'message_actor', input: { to: 'web', message: 'click submit' } }] },
-      { role: 'user', id: 'u1', content: '', toolResults: [{ tool_use_id: 't1', is_error: true, content: 'actor_isolation_unavailable: Actors were not run' }] },
+      { role: 'user', id: 'u1', content: '', toolResults: [{
+        tool_use_id: 't1', is_error: true,
+        actorTerminal: true, actorOutcomeKnown: true, actorPerformed: false,
+        content: 'actor_isolation_unavailable: Actors were not run',
+      }] },
     ] }) });
     try {
       await flush();

@@ -187,7 +187,9 @@ export { buildAncestry } from './actor/delegation-lineage.js';
 // DESIGN-18: the API actor is the same origin actor with NO tab; its
 // origin-keyed bindings, normalizer, and "what I learned" summary live here too.
 export {
-  makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT,
+  makeWebActorTabBindings, makeWebActorRegistry, retireStoppedRoamingWebActor,
+  retireStoppedRoamingWebActorDurably,
+  WEB_ACTOR_SUMMARY_PROMPT,
   safeWebActorSummaryOrigin, fenceWebActorSummary,
   makeApiActorBindings, normalizeApiOrigin, API_ACTOR_SUMMARY_PROMPT, fenceApiActorSummary,
   // issue 251: the SITE actor's handle — a web actor BOUND to one origin, with a

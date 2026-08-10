@@ -25,7 +25,7 @@
  * @property {string} [thinking]
  * @property {boolean} [streaming]
  * @property {boolean} [synthetic]
- * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, actorDeliveryId?: string, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }} [actorReply]
+ * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, aborted?: boolean, actorDeliveryId?: string, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }} [actorReply]
  * @property {string} [stopReason]
  * @property {string} [error]
  * @property {unknown[]} [toolResults]
@@ -101,7 +101,7 @@
  * @property {ReadonlyArray<any>} agentTabEvents
  * @property {Readonly<Record<string, { stdout: string, stderr: string }>>} vmStreams
  * @property {{ byToolUse: Record<string, string>, sessions: Record<string, SpawnedSession> }} spawned
- * @property {Readonly<Record<string, { sessionId?: string, kind?: string, instanceId?: string, name?: string, fromIndex?: number, messages?: any[], streaming?: boolean, error?: string|null, aborted?: boolean, outcomeKnown?: boolean, cost?: any }>>} actors
+ * @property {Readonly<Record<string, { sessionId?: string, kind?: string, instanceId?: string, name?: string, fromIndex?: number, messages?: any[], streaming?: boolean, error?: string|null, aborted?: boolean, outcomeKnown?: boolean, performed?: boolean, cost?: any }>>} actors
  * @property {Record<string, Array<{ seq: number, method: string, to?: string, goalPreview?: string, phase: string, ms?: number|null, failed?: boolean, cancelled?: boolean }>>} scriptOps  live delegation feed per script toolUseId
  * @property {Readonly<Record<string, unknown>>} asyncTasks
  * @property {Readonly<Record<string, { active: boolean, sessionId: string, iteration: number, maxIterations: number, goal: string, phase: string, summary: string|null }>>} goalRuns
@@ -351,6 +351,150 @@ const reconcileActorCards = (current, live) => {
 };
 
 /**
+ * Fold durable message_actor terminal evidence back into the live-only card
+ * projection so a missed turn/actor-done pulse cannot leave a permanent
+ * "working…" card.
+ *
+ * Correlation is transcript-positional and, where available, pinned by the
+ * host-authored actorDeliveryId. A provider may reuse a tool_use id in a later
+ * turn, so an old receipt must never settle the newer card with the same id.
+ * Synthetic receipts contribute metadata only; their untrusted content stays
+ * in the separately rendered, fenced actor-reply bubble.
+ * @param {Record<string, any>} actors
+ * @param {ChatMessage[]} messages
+ */
+const reconcileActorTerminals = (actors, messages) => {
+  /** @type {Map<string, any[]>} */
+  const callsById = new Map();
+  /** @type {Map<string, any>} */
+  const latestCallById = new Map();
+  /** @type {any[]} */
+  const calls = [];
+
+  for (let messageIndex = 0; messageIndex < (messages ?? []).length; messageIndex++) {
+    const message = messages[messageIndex];
+    if (message?.role === 'assistant' && Array.isArray(message.toolUses)) {
+      for (const rawToolUse of message.toolUses) {
+        const toolUse = /** @type {any} */ (rawToolUse);
+        if (toolUse?.name !== 'message_actor' || typeof toolUse.id !== 'string') continue;
+        const call = { id: toolUse.id, messageIndex, toolUse, result: null, resultIndex: -1 };
+        const occurrences = callsById.get(call.id) ?? [];
+        occurrences.push(call);
+        callsById.set(call.id, occurrences);
+        latestCallById.set(call.id, call);
+        calls.push(call);
+      }
+    }
+    if (message?.role === 'user' && Array.isArray(message.toolResults)) {
+      for (const rawResult of message.toolResults) {
+        const result = /** @type {any} */ (rawResult);
+        const call = typeof result?.tool_use_id === 'string'
+          ? latestCallById.get(result.tool_use_id) : null;
+        if (!call || messageIndex < call.messageIndex) continue;
+        call.result = result;
+        call.resultIndex = messageIndex;
+      }
+    }
+  }
+
+  // Delivery ids are minted by the host and survive in both the immediate tool
+  // result and the later synthetic receipt. Treat a duplicate as ambiguous.
+  /** @type {Map<string, any|null>} */
+  const callsByDelivery = new Map();
+  for (const call of calls) {
+    const result = call.result;
+    if (!result) continue;
+    const deliveryIds = [
+      ...(typeof result.actorCorrelationId === 'string' ? [result.actorCorrelationId] : []),
+      ...(typeof result.actorDeliveryId === 'string' ? [result.actorDeliveryId] : []),
+      ...(Array.isArray(result.actorDeliveryIds)
+        ? result.actorDeliveryIds.filter((/** @type {any} */ id) => typeof id === 'string') : []),
+    ];
+    for (const deliveryId of new Set(deliveryIds)) {
+      callsByDelivery.set(deliveryId,
+        callsByDelivery.has(deliveryId) ? null : call);
+    }
+  }
+
+  let next = actors ?? {};
+  let changed = false;
+
+  /** @param {any} call @param {{ failed: boolean, outcomeKnown?: boolean, performed?: boolean, aborted?: boolean }} terminal */
+  const settle = (call, terminal) => {
+    if (!call || latestCallById.get(call.id) !== call) return;
+    const card = next[call.id];
+    if (!card) return;
+    // Uncertainty outranks a cancellation pulse: Stop can race with a dispatched
+    // effect, and showing "cancelled" would hide that the target may have changed.
+    const aborted = terminal.aborted === true && terminal.outcomeKnown !== false;
+    const failed = terminal.failed === true && !aborted;
+    const error = failed
+      ? terminal.outcomeKnown === false
+        ? 'the actor turn ended with an unknown outcome'
+        : terminal.performed === false
+          ? 'the actor request was not run'
+          : 'the actor turn did not complete'
+      : null;
+    const patch = {
+      ...card,
+      streaming: false,
+      aborted,
+      error,
+      outcomeKnown: terminal.outcomeKnown ?? true,
+      ...(terminal.performed !== undefined ? { performed: terminal.performed } : {}),
+    };
+    if (card.streaming === patch.streaming && card.aborted === patch.aborted
+        && card.error === patch.error && card.outcomeKnown === patch.outcomeKnown
+        && (terminal.performed === undefined || card.performed === patch.performed)) return;
+    if (!changed) { next = { ...next }; changed = true; }
+    next[call.id] = patch;
+  };
+
+  // await:true returns the actor's terminal outcome in the tool result and does
+  // not append an actorReply. Read only host-stamped metadata here; content can
+  // contain actor/page prose and must not decide execution custody.
+  for (const call of latestCallById.values()) {
+    if (call.toolUse?.input?.await !== true || !call.result) continue;
+    if (call.result.actorTerminal === false) continue;
+    const failed = call.result.is_error === true;
+    const outcomeKnown = typeof call.result.actorOutcomeKnown === 'boolean'
+      ? call.result.actorOutcomeKnown : true;
+    const performed = typeof call.result.actorPerformed === 'boolean'
+      ? call.result.actorPerformed : undefined;
+    settle(call, {
+      failed, outcomeKnown, performed,
+      aborted: call.result.actorAborted === true,
+    });
+  }
+
+  for (let messageIndex = 0; messageIndex < (messages ?? []).length; messageIndex++) {
+    const message = messages[messageIndex];
+    if (message?.role !== 'user' || message.synthetic !== true) continue;
+    const reply = message?.actorReply;
+    const parentId = reply?.parentToolUseId;
+    if (!reply || typeof parentId !== 'string') continue;
+
+    let call = null;
+    if (typeof reply.actorDeliveryId === 'string') {
+      call = callsByDelivery.get(reply.actorDeliveryId) ?? null;
+    }
+    // Legacy/crash snapshots may lack the immediate result metadata. Bare-id
+    // fallback is safe only when this transcript contains exactly one such call.
+    if (!call && (callsById.get(parentId)?.length ?? 0) === 1) {
+      call = callsById.get(parentId)?.[0] ?? null;
+    }
+    if (!call || call.id !== parentId || messageIndex <= call.messageIndex) continue;
+    settle(call, {
+      failed: reply.failed === true,
+      ...(reply.outcomeKnown !== undefined ? { outcomeKnown: reply.outcomeKnown } : {}),
+      ...(reply.performed !== undefined ? { performed: reply.performed } : {}),
+      ...(reply.aborted === true ? { aborted: true } : {}),
+    });
+  }
+  return next;
+};
+
+/**
  * Keep completed child transcripts addressable from their actor_create cards
  * while overlaying the SW's live-only topology projection.
  * @param {ChatState['spawned']} current
@@ -469,7 +613,8 @@ export const reduceChat = (state, msg) => {
         rootSessionId: msg.rootSessionId, parentSessionId: msg.parentSessionId,
         task: msg.task,
         grantedTools: Array.isArray(msg.grantedTools) ? msg.grantedTools : undefined,
-        fromIndex: msg.fromIndex ?? 0, messages: [], streaming: true, error: null, cost: null,
+        fromIndex: msg.fromIndex ?? 0, messages: [], streaming: true, error: null,
+        aborted: false, outcomeKnown: undefined, performed: undefined, cost: null,
       });
     case 'turn/actor-state': {
       if (msg.rootSessionId && state.session.sessionId
@@ -591,16 +736,21 @@ export const reduceChat = (state, msg) => {
       // transcript being navigated away from. The fresh snapshot now replays its
       // live rows; within one chat we reconcile those with terminal inline cards
       // so a routine state push cannot erase activity/cost evidence.
+      const snapshotMessages = Array.isArray(msg.state?.session?.messages)
+        ? msg.state.session.messages : [];
       const pruneProjections = sessionChanged
         ? {
-            actors: msg.state?.actors ?? INITIAL_STATE.actors,
+            actors: reconcileActorTerminals(msg.state?.actors ?? INITIAL_STATE.actors, snapshotMessages),
             spawned: msg.state?.spawned ?? INITIAL_STATE.spawned,
             asyncTasks: msg.state?.asyncTasks ?? INITIAL_STATE.asyncTasks,
           }
         : {
-            actors: msg.state?.actors
-              ? reconcileActorCards(state.actors, msg.state.actors)
-              : state.actors,
+            actors: reconcileActorTerminals(
+              msg.state?.actors
+                ? reconcileActorCards(state.actors, msg.state.actors)
+                : state.actors,
+              snapshotMessages,
+            ),
             spawned: msg.state?.spawned
               ? reconcileSpawned(state.spawned, msg.state.spawned)
               : state.spawned,
@@ -624,7 +774,8 @@ export const reduceChat = (state, msg) => {
       // state.session — but this LIVE push carries only sessionId+messages, so
       // without it the card wouldn't tick until the next full 'state' snapshot.
       // undefined on non-goal turns (the card self-hides), so it's harmless.
-      return { ...state, session: { ...state.session,
+      return { ...state, actors: reconcileActorTerminals(state.actors, msg.session.messages),
+        session: { ...state.session,
         sessionId: msg.session.sessionId, messages: msg.session.messages,
         todos: msg.session.todos }, lastError: null };
     case 'turn/cost':

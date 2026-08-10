@@ -93,6 +93,17 @@ describe('the sync read is the lock\'s contract', () => {
 });
 
 describe('writes', () => {
+  test('a roaming retirement is durable and survives a fresh store hydrate', async () => {
+    const { store, saves } = harness();
+    store.hydrate('a', { mode: 'roaming' } as any);
+    await store.write('a', { retired: true });
+    expect(saves.at(-1)).toEqual({ id: 'a', state: { mode: 'roaming', retired: true } });
+
+    const restarted = makeOriginStateStore({ save: async () => {}, onError: () => {} });
+    restarted.hydrate('a', saves.at(-1)!.state);
+    expect(restarted.read('a')).toMatchObject({ mode: 'roaming', retired: true });
+  });
+
   test('authority is published to the cache only after the durable write resolves', async () => {
     let release = () => {};
     const store = makeOriginStateStore({
