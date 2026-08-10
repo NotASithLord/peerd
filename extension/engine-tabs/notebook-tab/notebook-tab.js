@@ -85,6 +85,18 @@ const appendLine = (cls, text) => {
 
 const showApp = () => { els.boot.hidden = true; els.app.hidden = false; };
 
+// The OPFS schema posture is owned by the service worker. Check it at the
+// host mutation boundary so editor actions, tab RPCs, and sealed-worker
+// relays all share one live decision. Reads never call this route.
+const assertOpfsWritable = async () => {
+  const response = /** @type {any} */ (await browser.runtime.sendMessage({
+    type: 'lifecycle/assert-opfs-writable',
+  }));
+  if (response?.ok === true) return;
+  throw new Error(response?.error
+    ?? 'Notebook files are read-only because their storage format cannot be updated safely. No data was changed.');
+};
+
 /** @param {string} text @param {boolean} busy */
 const setRunStatus = (text, busy) => {
   els.outputPane.setAttribute('aria-busy', String(busy));
@@ -1010,8 +1022,16 @@ const setupResizer = () => {
     opfsBase: ['peerd-notebooks', notebookId],
     pinnedFile: NOTEBOOK_PATH,
     hiddenFiles: HIDDEN_FILES,
+    beforeOpfsMutation: assertOpfsWritable,
     onRun: runFromEditor,
     onSaved: () => setSaveStatus('saved'),
+    onSaveError: (_path, error) => {
+      setSaveStatus('dirty');
+      appendLine('log-error', `[file] save failed: ${/** @type {{ message?: string }} */ (error)?.message ?? String(error)}`);
+    },
+    onMutationError: (action, path, error) => {
+      appendLine('log-error', `[file] ${action} failed for ${path}: ${/** @type {{ message?: string }} */ (error)?.message ?? String(error)}`);
+    },
   });
   setSaveStatus('saved');
   setTitleStatus('');

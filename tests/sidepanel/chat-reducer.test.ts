@@ -45,6 +45,43 @@ describe('reduceChat', () => {
     expect(reduceChat(streamingOn, { type: 'turn/streaming', sessionId: 'bg', streaming: false })).toBe(streamingOn);
   });
 
+  test('a scoped system note appears only in its owning session', () => {
+    const viewed = withSession('viewed');
+    const matching = reduceChat(viewed, {
+      type: 'turn/system-note', sessionId: 'viewed', text: 'Recovery for submit_form: Check the target.',
+    });
+    expect(matching.notices).toHaveLength(1);
+    expect(matching.notices[0].text).toContain('submit_form');
+    expect(matching.notices[0].sessionId).toBe('viewed');
+
+    const switched = reduceChat(matching, {
+      type: 'state', state: { session: { sessionId: 'other', messages: [] } },
+    });
+    expect(switched.notices).toHaveLength(0);
+
+    const foreign = reduceChat(viewed, {
+      type: 'turn/system-note', sessionId: 'other', text: 'Private recovery note',
+    });
+    expect(foreign).toBe(viewed);
+    expect(foreign.notices).toHaveLength(0);
+
+    // A targeted note racing the initial state snapshot must not stick and
+    // later appear in whichever chat the surface adopts.
+    expect(reduceChat(INITIAL_STATE, {
+      type: 'turn/system-note', sessionId: 'other', text: 'Private recovery note',
+    })).toBe(INITIAL_STATE);
+  });
+
+  test('an unscoped system note remains visible for current-chat UI feedback', () => {
+    const viewed = withSession('viewed');
+    const next = reduceChat(viewed, { type: 'turn/system-note', text: 'Settings saved.' });
+    expect(next.notices[0].text).toBe('Settings saved.');
+    const switched = reduceChat(next, {
+      type: 'state', state: { session: { sessionId: 'other', messages: [] } },
+    });
+    expect(switched.notices[0].text).toBe('Settings saved.');
+  });
+
   test('confirm/request stores the prompt; confirm/resolved dismisses only the matching id', () => {
     const asked = reduceChat(INITIAL_STATE, { type: 'confirm/request', prompt: { id: 'c1', text: 'ok?' } });
     expect(asked.pendingConfirm).toEqual({ id: 'c1', text: 'ok?' });
@@ -54,10 +91,55 @@ describe('reduceChat', () => {
     expect(reduceChat(asked, { type: 'confirm/resolved', id: 'c1' }).pendingConfirm).toBe(null);
   });
 
-  // DESIGN-12 critical fix: a 'state' snapshot (which carries pendingConfirm:null)
-  // must NOT wipe a live prompt — confirm state flows on its own channel.
+  test('a confirmation is visible only in its owning root chat', () => {
+    const viewed = withSession('chat-a');
+    const prompt = { id: 'c1', sessionId: 'actor-a', ownerSessionId: 'chat-a', text: 'ok?' };
+    const asked = reduceChat(viewed, { type: 'confirm/request', prompt });
+    expect(asked.pendingConfirm).toEqual(prompt);
+
+    const foreign = withSession('chat-b');
+    expect(reduceChat(foreign, { type: 'confirm/request', prompt })).toBe(foreign);
+  });
+
+  test('a session switch clears the old prompt and adopts a pending prompt owned by the new chat', () => {
+    const asked = {
+      ...withSession('chat-a'),
+      pendingConfirm: { id: 'old', ownerSessionId: 'chat-a' },
+    };
+    const pending = { id: 'new', sessionId: 'actor-b', ownerSessionId: 'chat-b' };
+    const switched = reduceChat(asked, { type: 'state', state: {
+      session: { sessionId: 'chat-b', messages: [] },
+      pendingConfirm: pending,
+    } });
+    expect(switched.pendingConfirm).toEqual(pending);
+
+    const noPending = reduceChat(asked, { type: 'state', state: {
+      session: { sessionId: 'chat-b', messages: [] },
+      pendingConfirm: null,
+    } });
+    expect(noPending.pendingConfirm).toBe(null);
+  });
+
+  test('a scoped replay resurfaces a prompt that raced with its owner chat switch', () => {
+    const viewed = withSession('chat-a');
+    const prompt = { id: 'new', sessionId: 'actor-b', ownerSessionId: 'chat-b' };
+    // The live request can arrive while the panel still identifies as chat A.
+    const rejected = reduceChat(viewed, { type: 'confirm/request', prompt });
+    expect(rejected).toBe(viewed);
+    // A snapshot captured just before the request changes the viewed chat but
+    // cannot contain it. pushState follows this message with a scoped replay.
+    const switched = reduceChat(rejected, { type: 'state', state: {
+      session: { sessionId: 'chat-b', messages: [] }, pendingConfirm: null,
+    } });
+    expect(switched.pendingConfirm).toBe(null);
+    expect(reduceChat(switched, { type: 'confirm/request', prompt }).pendingConfirm)
+      .toEqual(prompt);
+  });
+
+  // DESIGN-12 critical fix: a same-session state snapshot must NOT wipe a live
+  // prompt that raced in over the confirm channel.
   test('a state snapshot does NOT wipe a live pendingConfirm', () => {
-    const asked = reduceChat(INITIAL_STATE, { type: 'confirm/request', prompt: { id: 'c1', text: 'ok?' } });
+    const asked = reduceChat(withSession('s1'), { type: 'confirm/request', prompt: { id: 'c1', text: 'ok?' } });
     const after = reduceChat(asked, { type: 'state', state: {
       session: { sessionId: 's1', messages: [] },
       vault: { initialized: true, locked: false },

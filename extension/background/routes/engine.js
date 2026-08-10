@@ -7,6 +7,34 @@
 // stable collaborators. Bodies verbatim, deps injected, imports none.
 
 /**
+ * Await work through the same cancellation boundary as the operation it gates.
+ * The underlying one-time hydration may still finish for other callers, but a
+ * stopped or expired run no longer waits for it or proceeds to egress.
+ * @template T
+ * @param {() => Promise<T>} start
+ * @param {AbortSignal | null} signal
+ * @returns {Promise<T>}
+ */
+const awaitWithinSignal = (start, signal) => {
+  if (!signal) return Promise.resolve().then(start);
+  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener('abort', onAbort);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve().then(start).then((value) => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(value);
+    }, (error) => {
+      signal.removeEventListener('abort', onAbort);
+      reject(error);
+    });
+  });
+};
+
+/**
  * @param {Record<string, any>} deps
  * @returns {Record<string, (msg?: any, sender?: any) => Promise<any>>}
  */
@@ -19,8 +47,11 @@ export const makeEngineRoutes = (deps) => {
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
-    listOffscreenContexts, scriptRuns, isOffscreenSender,
+    listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
   } = deps;
+  if (typeof awaitDenylistPolicy !== 'function') {
+    throw new TypeError('makeEngineRoutes: awaitDenylistPolicy is required');
+  }
 
   /** @type {Map<string, AbortController>} */
   const notebookFetchControllers = new Map();
@@ -38,6 +69,27 @@ export const makeEngineRoutes = (deps) => {
   };
 
   return {
+    // Notebook tabs and the offscreen job host own the actual OPFS handles.
+    // They ask here immediately before mutation so the service worker's live
+    // schema posture remains authoritative in Chrome and Firefox alike.
+    'lifecycle/assert-opfs-writable': async (_msg, sender = undefined) => {
+      const notebookHost = browser.runtime.getURL('engine-tabs/notebook-tab/index.html');
+      const senderUrl = sender?.url ?? sender?.tab?.url;
+      const trustedHost = isOffscreenSender?.(sender)
+        || (typeof senderUrl === 'string'
+          && senderUrl.split(/[?#]/)[0] === notebookHost);
+      if (!trustedHost) return { ok: false, error: 'unauthorized OPFS posture request' };
+      try {
+        await assertOpfsWritable();
+        return { ok: true };
+      } catch (error) {
+        return {
+          ok: false,
+          error: /** @type {{ message?: string }} */ (error)?.message ?? String(error),
+        };
+      }
+    },
+
     // VM-originated HTTP egress. The VM tab's HTTP-marker dispatcher
     // calls this when it sees a wrapper script's request marker. webFetch
     // applies the denylist + audit; response body is base64-encoded back
@@ -99,6 +151,15 @@ export const makeEngineRoutes = (deps) => {
       // vmHttpFetch layers the IDB GET cache + optional git-auth on top; noCache
       // (module-source fetches) bypasses that cache so every run is re-audited.
       try {
+        // why: hydration is part of the egress operation, not a preflight outside
+        // it. Admit the run and arm Stop/deadline first, then await policy through
+        // that signal. A stopped or expired run cannot reach vmHttpFetch even if
+        // the shared hydration later succeeds.
+        await awaitWithinSignal(
+          awaitDenylistPolicy,
+          runController?.signal ?? null,
+        );
+        if (runController?.signal.aborted) return { ok: false, error: 'aborted' };
         const resp = await vmHttpFetch({
           url, method, headers, body, gitAuth, noCache: noCache === true,
           ...(runController ? { signal: runController.signal } : {}),
@@ -109,8 +170,12 @@ export const makeEngineRoutes = (deps) => {
         return await applyWebExtract(resp, extract, url);
       } catch (e) {
         const ev = /** @type {{ name?: string, message?: string }} */ (e);
-        return { ok: false, error: ev?.name === 'EgressDeniedError'
-          ? `denylisted: ${ev.message}` : (ev?.message ?? String(e)) };
+        return { ok: false, error: ev?.name === 'AbortError'
+          ? 'aborted'
+          : ev?.name === 'DenylistPolicyUnavailableError'
+            ? 'The sensitive-origin policy is unavailable. Network access is blocked.'
+          : ev?.name === 'EgressDeniedError'
+            ? `denylisted: ${ev.message}` : (ev?.message ?? String(e)) };
       } finally {
         if (deadlineTimer) clearTimeout(deadlineTimer);
         if (sourceSignal && onAbort) sourceSignal.removeEventListener('abort', onAbort);
@@ -404,6 +469,16 @@ export const makeEngineRoutes = (deps) => {
         }
         result = { ok: true, kind, id: record.id };
       } else if (kind === 'notebook') {
+        // Refuse before minting metadata. The guarded OPFS helper checks again
+        // at each file write, but a preflight avoids an empty registry record
+        // when the workspace schema is read-only.
+        try { await assertOpfsWritable(); }
+        catch (error) {
+          return {
+            ok: false,
+            error: /** @type {{ message?: string }} */ (error)?.message ?? String(error),
+          };
+        }
         const record = await jsRegistry.create({ name });
         const opfs = opfsHelpers([NOTEBOOK_OPFS_ROOT, record.id]);
         for (const [path, content] of Object.entries(textFiles())) {

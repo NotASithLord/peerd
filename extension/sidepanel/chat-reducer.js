@@ -96,7 +96,7 @@
  * @property {string|null|undefined} lastError
  * @property {boolean} streaming
  * @property {{ attempt: number|null, retryAfterMs: number|null }|null} rateLimit
- * @property {ReadonlyArray<{ id: number, text?: string, action?: any }>} notices
+ * @property {ReadonlyArray<{ id: number, text?: string, action?: any, sessionId?: string | null }>} notices
  * @property {any} agentTab
  * @property {ReadonlyArray<any>} agentTabEvents
  * @property {Readonly<Record<string, { stdout: string, stderr: string }>>} vmStreams
@@ -584,6 +584,7 @@ export const reduceChat = (state, msg) => {
       // still halted. Clear only on an ACTUAL session switch; within the same
       // session the next send clears them via turn/streaming.
       const sessionChanged = msg.state?.session?.sessionId !== state.session.sessionId;
+      const nextSessionId = msg.state?.session?.sessionId ?? null;
       const stillHalted = !sessionChanged && state.cost.limitReached;
       const keepSpendError = !sessionChanged && state.lastError === 'spend-limit-reached';
       // why prune on switch: actors/spawned/asyncTasks belong to the orchestrator
@@ -604,7 +605,11 @@ export const reduceChat = (state, msg) => {
               ? reconcileSpawned(state.spawned, msg.state.spawned)
               : state.spawned,
           };
-      return { ...state, ...msg.state, ...pruneProjections, pendingConfirm: state.pendingConfirm,
+      const notices = sessionChanged
+        ? state.notices.filter((notice) => !notice.sessionId || notice.sessionId === nextSessionId)
+        : state.notices;
+      return { ...state, ...msg.state, ...pruneProjections, notices,
+        pendingConfirm: sessionChanged ? (msg.state?.pendingConfirm ?? null) : state.pendingConfirm,
         lastError: keepSpendError ? 'spend-limit-reached' : null, rateLimit: null, cost: { ...state.cost,
         session: msg.state?.session?.cost ?? state.cost.session,
         limitUsd: msg.state?.settings?.spendLimitUsd ?? state.cost.limitUsd,
@@ -657,13 +662,23 @@ export const reduceChat = (state, msg) => {
     case 'turn/error':
       return { ...applyError(state, msg), rateLimit: null };
     case 'confirm/request':
+      // Confirmation is authority, not ambient UI. A background actor keeps
+      // running when its owner changes chats, but its prompt belongs only in the
+      // root chat that initiated it. A switch-back snapshot resurfaces it.
+      if (msg.prompt?.ownerSessionId
+        && msg.prompt.ownerSessionId !== state.session.sessionId) return state;
       return { ...state, pendingConfirm: msg.prompt };
     case 'confirm/resolved':
       // Answered on another surface (DESIGN-12) — dismiss the same prompt.
       return state.pendingConfirm?.id === msg.id ? { ...state, pendingConfirm: null } : state;
     case 'turn/system-note':
+      // Lifecycle recovery notes name their owning session. Keep legacy
+      // unscoped UI feedback visible, but never show a scoped note in a
+      // different open chat.
+      if (msg.sessionId && state.session.sessionId !== msg.sessionId) return state;
       return { ...state, notices: [...state.notices,
-        { id: Date.now() + Math.random(), text: msg.text, action: msg.action ?? null }].slice(-3) };
+        { id: Date.now() + Math.random(), text: msg.text, action: msg.action ?? null,
+          sessionId: msg.sessionId ?? null }].slice(-3) };
     case 'agent/tab': {
       // The inline "peerd opened a tab" notice: minted the first time peerd OPENS
       // a tab, then RESURFACED into the current turn whenever the agent acts on it

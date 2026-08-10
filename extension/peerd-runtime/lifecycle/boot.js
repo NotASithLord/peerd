@@ -14,10 +14,11 @@
 // chrome.storage in the in-browser suite.
 
 import { mintGeneration } from './generation.js';
-import { reconcileAtStartup } from './reconcile.js';
+import { buildTurnRecoveryRecord, reconcileAtStartup } from './reconcile.js';
 import { describeRecovery } from './recovery-report.js';
 import { OPERATION_STATES } from './operation-state.js';
 import { createOperationLog } from './operation-log.js';
+import { decideRecovery } from './retry-class.js';
 import { LIFECYCLE_EVENTS, lifecycleAuditEntry } from './audit-events.js';
 
 export const GENERATION_KEY = 'peerd.lifecycle.generation';
@@ -84,16 +85,16 @@ export const makeLifecycleBoot = ({
    * init() for reconcile notifications and by the shell for engine reaps.
    *
    * @param {string} operationSessionId
-   * @param {{ recoveryRecord: Record<string, unknown>, user: string }} notice
+   * @param {{ recoveryRecord: Record<string, unknown>, user: string, agent?: string }} notice
    */
-  const parkNotice = async (operationSessionId, { recoveryRecord, user }) => {
+  const parkNotice = async (operationSessionId, { recoveryRecord, user, agent }) => {
     const sessionId = await Promise.resolve(
       resolveNoticeSession?.(operationSessionId) ?? operationSessionId,
     ).catch(() => operationSessionId) || operationSessionId;
     await enqueueNotices(async () => {
       const pending = await loadPending();
       const list = Array.isArray(pending[sessionId]) ? pending[sessionId] : [];
-      list.push({ recoveryRecord, user, at: now() });
+      list.push({ recoveryRecord, user, ...(agent ? { agent } : {}), at: now() });
       pending[sessionId] = list.slice(-MAX_NOTICES_PER_SESSION);
       await storage.set(PENDING_NOTICES_KEY, pending).catch(() => {});
     });
@@ -157,6 +158,12 @@ export const makeLifecycleBoot = ({
             operation: 'outcome_unknown_overflow',
             droppedCount: overflow.droppedCount,
             recoveryState: 'compacted',
+            category: 'verify_before_retry',
+            autoRetry: false,
+            retryRequires: ['external-verification', 'user-instruction'],
+            verificationRequired: true,
+            keepIdempotencyKey: false,
+            reason: 'exact unresolved operation identity was compacted to bound storage',
           },
           user: `${overflow.droppedCount} unresolved operation record(s) with `
             + 'uncertain outcomes were compacted to bound storage. Verify the '
@@ -173,7 +180,8 @@ export const makeLifecycleBoot = ({
       const user = verdict
         && (verdict.state === OPERATION_STATES.INTERRUPTED
           || verdict.state === OPERATION_STATES.OUTCOME_UNKNOWN)
-        ? describeRecovery(verdict, { toolName: recoveryRecord.operation }).user
+        ? `Recovery for ${recoveryRecord.operation}: ${
+          describeRecovery(verdict, { toolName: recoveryRecord.operation }).user}`
         : `${recoveryRecord.operation} was settled as ${recoveryRecord.recoveryState} after an interruption.`;
       await parkNotice(notification.sessionId, { recoveryRecord, user });
     }
@@ -203,21 +211,21 @@ export const makeLifecycleBoot = ({
       return entry;
     }).catch(() => null);
     if (!list) return '';
-    const lines = /** @type {Array<{ user: string, recoveryRecord: unknown }>} */ (list)
-      .map((n) => `- ${n.user}\n  ${JSON.stringify(n.recoveryRecord)}`);
+    const lines = /** @type {Array<{ user: string, agent?: string, recoveryRecord: unknown }>} */ (list)
+      .map((n) => `- ${n.agent ?? n.user}\n  ${JSON.stringify(n.recoveryRecord)}`);
     return '<interruption-recovery>\nA previous browser session ended while '
       + 'work was in flight. Recovered operation states:\n'
       + `${lines.join('\n')}\n`
-      + 'Do not repeat any operation marked outcome_unknown without verifying '
-      + 'the external state first.\n</interruption-recovery>';
+      + 'Do not repeat operations marked outcome_unknown or compacted unresolved '
+      + 'evidence without verifying the external state first.\n</interruption-recovery>';
   };
 
   /**
-   * §2.5 — explicit user cancellation dominates recovery: when a session is
-   * deleted/archived, its pending notices are purged (a deleted chat's
-   * operations must not resurrect as notes elsewhere) and its nonterminal
-   * operations settle `cancelled` (the user ended the work; nothing may
-   * auto-resume it at the next boot). Best-effort per record.
+   * §2.5 explicit user cancellation dominates recovery. Pending notices from
+   * earlier recovery are removed, then each nonterminal operation is settled
+   * through the same evidence-aware decision used at startup. A dispatched
+   * Class D/E action remains outcome_unknown and gets a fresh verification
+   * notice. Archive ends future work, but cannot erase a possible past effect.
    *
    * @param {string} sessionId
    */
@@ -232,15 +240,43 @@ export const makeLifecycleBoot = ({
     }).catch(() => {});
     const open = await operationLog.listNonterminal().catch(() => []);
     for (const record of open.filter((r) => r.sessionId === sessionId)) {
-      await operationLog.settle(record.operationId, {
-        state: OPERATION_STATES.CANCELLED,
-        autoRetry: false,
-        retryRequires: [],
-        keepIdempotencyKey: false,
-        verificationRequired: false,
-        recreateResource: false,
-        reason: 'session deleted by the user; cancellation dominates recovery',
-      }).catch(() => {});
+      const verdict = decideRecovery({
+        retryClass: record.retryClass,
+        dispatched: record.dispatched,
+        evidence: record.evidence,
+        cancelRequested: true,
+      });
+      const settled = await operationLog.settle(record.operationId, verdict)
+        .then(() => true, () => false);
+      if (!settled) continue;
+      if (appendAudit) {
+        const event = verdict.state === OPERATION_STATES.OUTCOME_UNKNOWN
+          ? LIFECYCLE_EVENTS.OUTCOME_UNKNOWN
+          : (verdict.state === OPERATION_STATES.COMPLETED
+            ? LIFECYCLE_EVENTS.OPERATION_COMPLETED
+            : LIFECYCLE_EVENTS.OPERATION_INTERRUPTED);
+        await Promise.resolve(appendAudit(lifecycleAuditEntry({
+          event,
+          sessionId,
+          actorId: record.actorId,
+          operationId: record.operationId,
+          attempt: record.attempt,
+          result: verdict.state,
+          detail: { toolName: record.toolName, reason: verdict.reason },
+        }))).catch(() => {});
+      }
+      if (verdict.state === OPERATION_STATES.OUTCOME_UNKNOWN) {
+        const recoveryRecord = buildTurnRecoveryRecord(record, verdict);
+        const report = describeRecovery(verdict, {
+          retryClass: record.retryClass,
+          operationId: record.operationId,
+          toolName: record.toolName,
+        });
+        await parkNotice(sessionId, {
+          recoveryRecord: { ...recoveryRecord, ...report.agent },
+          user: report.user,
+        }).catch(() => {});
+      }
     }
   };
 

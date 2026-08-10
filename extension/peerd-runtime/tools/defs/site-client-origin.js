@@ -20,5 +20,6 @@ export const siteClientOriginRefusal = async (origin, ctx) => {
     // Fixed prose: a page-steered origin argument must not become a reflected
     // prompt in the actor result or the dispatcher audit trail.
     error: 'site_client_origin_refused: this actor does not own that site client origin',
+    outcomeKind: 'pre-effect-failure',
   };
 };

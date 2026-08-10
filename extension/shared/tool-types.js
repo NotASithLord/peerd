@@ -202,6 +202,8 @@
  * @property {(name: string) => Promise<string | null>} getSecret
  * @property {(entry: { type: string, details?: Record<string, any> }) => Promise<unknown>} audit
  * @property {(prompt: ConfirmPrompt, signal?: AbortSignal) => Promise<ConfirmAnswer>} confirm
+ * @property {string | null} [lifecycleOwnerSessionId] root chat that owns
+ *                                     lifecycle intent for this execution
  * @property {Object} kv               peerd-egress kv namespace
  * @property {Object} idb              peerd-egress idb namespace
  * @property {readonly string[]} denylist   loaded denylist patterns (egress + denylist gate input)
@@ -248,9 +250,18 @@
  *   above the call summary. why a free-form line and not a code: the user is
  *   the audience, and the only thing that makes a confirm worth showing is that
  *   it explains itself.
- * @property {string | null} [sessionId]   chat the prompt belongs to — lets the
- *                                    coordinator decline a session's pending
- *                                    confirms when its turn is aborted
+ * @property {string} [lifecycleTarget] immutable target from an unknown-outcome
+ *                                    approval claim; the confirmation UI shows
+ *                                    this exact value rather than a mutable live URL
+ * @property {boolean} [oneShot]      this approval must be answered directly
+ *                                    and cannot read or create a session grant
+ * @property {string | null} [sessionId]   exact execution session; lets the
+ *                                    coordinator decline a turn's pending
+ *                                    confirms when it is aborted
+ * @property {string | null} [ownerSessionId] root chat whose user owns the
+ *                                    action; scopes display and replay
+ * @property {string | null} [dispatchId] exact tool dispatch covered by the
+ *                                    answer; null for non-tool confirmations
  */
 
 /**

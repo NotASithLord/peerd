@@ -44,23 +44,69 @@ export const OPERATION_LOG_MAX_TERMINAL = 500;
 export const OPERATION_LOG_MAX_UNKNOWN = 200;
 
 // Replay tombstones — compact identity that OUTLIVES the full record. why:
-// pruning a completed Class D/E record would otherwise age its replay
+// pruning a completed Class D/E/F record would otherwise age its replay
 // protection out (the same call id re-presented after 500 later operations
-// would read as new and re-execute the side effect), and pruning an
+// would read as new and re-execute the side effect or recreate a resource
+// under stale grants), and pruning an
 // unresolved outcome_unknown would silently forget that an external effect
 // may have occurred. A tombstone is four small fields; thousands are
-// cheaper than one duplicate payment. Only D/E mint them — A/B/C
-// duplicates are invisible or idempotent by classification.
+// cheaper than one duplicate payment or stale-authority resource recreation.
+// D/E/F mint them. A/B/C duplicates are invisible or idempotent by
+// classification.
 export const TOMBSTONES_KEY = 'peerd.lifecycle.tombstones';
 export const TOMBSTONES_MAX = 5000;
+// Fixed-size append-only replay memory for Class F tombstones evicted from the
+// exact map. A Bloom filter can refuse a fresh call by false positive, but it
+// never forgets an inserted stale call id. That is the safe direction when an
+// old resource description could otherwise recreate authority after compaction.
+export const CLASS_F_REPLAY_FILTER_KEY = 'peerd.lifecycle.classFReplayFilter';
+const CLASS_F_REPLAY_FILTER_WORDS = 2048;
+const CLASS_F_REPLAY_FILTER_BITS = CLASS_F_REPLAY_FILTER_WORDS * 32;
+const CLASS_F_REPLAY_FILTER_HASHES = 4;
 // The §14-honest overflow accumulator: when unresolved unknowns are
 // compacted past their cap, the DISCARD ITSELF is recorded (count, oldest,
 // affected sessions) and surfaced by the next boot — a documented compaction
 // with evidence, never a silent forget.
 export const UNKNOWN_OVERFLOW_KEY = 'peerd.lifecycle.unknownOverflow';
+// Bounded fail-closed marker: if even the compact unresolved-intent evidence
+// exceeds the tombstone cap, exact matching is no longer complete. This marker
+// persists after the informational overflow notice is drained and forces later
+// D/E calls through explicit confirmation instead of treating absence as safe.
+export const UNKNOWN_INTENT_OVERFLOW_KEY = 'peerd.lifecycle.unknownIntentOverflow';
+
+/**
+ * @typedef {Object} ReplayTombstone
+ * @property {string} terminalState
+ * @property {string} retryClass
+ * @property {number} completedAt
+ * @property {string} [operationId]
+ * @property {string} [sessionId]
+ * @property {string} [ownerSessionId]
+ * @property {string} [toolName]
+ * @property {string} [target]
+ * @property {string} [intentKey]
+ * @property {number} [createdAt]
+ * @property {boolean} [approximateReplay]
+ */
 
 /** @param {unknown} v */
-const isConservativeClass = (v) => v === 'D' || v === 'E';
+const needsReplayTombstone = (v) => v === 'D' || v === 'E' || v === 'F';
+
+/** @param {string} value */
+const classFReplayFilterIndexes = (value) => {
+  let first = 2166136261;
+  let second = 0x9e3779b9;
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    first = Math.imul(first ^ code, 16777619) >>> 0;
+    second = Math.imul(second ^ code, 2246822519) >>> 0;
+    second = (second ^ (second >>> 13)) >>> 0;
+  }
+  second = (second | 1) >>> 0;
+  return Array.from({ length: CLASS_F_REPLAY_FILTER_HASHES }, (_, index) =>
+    ((first + Math.imul(index, second)
+      + Math.imul(index * index, 0x9e3779b1)) >>> 0) % CLASS_F_REPLAY_FILTER_BITS);
+};
 
 const PRUNABLE_STATES = Object.freeze(
   /** @type {ReadonlySet<import('./operation-state.js').OperationState>} */ (new Set([
@@ -136,32 +182,112 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
     return clean;
   };
 
+  /** @returns {Promise<number[]>} */
+  const loadClassFReplayFilter = async () => {
+    const raw = await storage.get(CLASS_F_REPLAY_FILTER_KEY);
+    if (raw == null) return Array(CLASS_F_REPLAY_FILTER_WORDS).fill(0);
+    const record = raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? /** @type {{ version?: unknown, words?: unknown }} */ (raw) : null;
+    if (record?.version !== 1 || !Array.isArray(record.words)
+        || record.words.length !== CLASS_F_REPLAY_FILTER_WORDS
+        || record.words.some((word) => !Number.isInteger(word)
+          || word < 0 || word > 0xffffffff)) {
+      throw new TypeError('Class F replay filter is malformed');
+    }
+    return record.words;
+  };
+
+  /** @param {string[]} operationIds */
+  const rememberEvictedClassF = async (operationIds) => {
+    if (operationIds.length === 0) return;
+    const words = await loadClassFReplayFilter();
+    for (const operationId of operationIds) {
+      for (const bitIndex of classFReplayFilterIndexes(operationId)) {
+        const wordIndex = bitIndex >>> 5;
+        words[wordIndex] = (words[wordIndex] | (1 << (bitIndex & 31))) >>> 0;
+      }
+    }
+    await storage.set(CLASS_F_REPLAY_FILTER_KEY, { version: 1, words });
+  };
+
+  /** @param {string} operationId */
+  const wasEvictedClassF = async (operationId) => {
+    const words = await loadClassFReplayFilter();
+    return classFReplayFilterIndexes(operationId).every((bitIndex) =>
+      (words[bitIndex >>> 5] & (1 << (bitIndex & 31))) !== 0);
+  };
+
   /** @param {import('./reconcile.js').OperationRecord[]} pruned */
   const mintTombstones = async (pruned) => {
-    const candidates = pruned.filter((r) => isConservativeClass(r.retryClass));
+    const candidates = pruned.filter((r) => needsReplayTombstone(r.retryClass));
     if (candidates.length === 0) return;
-    const raw = await storage.get(TOMBSTONES_KEY).catch(() => null);
-    /** @type {Record<string, { terminalState: string, retryClass: string, completedAt: number }>} */
+    // why reads and writes are allowed to reject: pruning must stop before the
+    // full record is deleted when compact replay evidence cannot be made
+    // durable. Treating an unreadable store as empty would reopen old calls.
+    const raw = await storage.get(TOMBSTONES_KEY);
+    /** @type {Record<string, ReplayTombstone>} */
     const tombs = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
     for (const record of candidates) {
       tombs[record.operationId] = {
         terminalState: record.state,
         retryClass: String(record.retryClass),
         completedAt: now(),
+        // Unknown outcomes need semantic replay identity after the full record
+        // crosses the bounded-log cap. Without it a fresh provider call id for
+        // the same intent would evade the exact-target confirmation guard.
+        ...(record.state === OPERATION_STATES.OUTCOME_UNKNOWN ? {
+          operationId: record.operationId,
+          sessionId: record.sessionId,
+          ...(record.ownerSessionId ? { ownerSessionId: record.ownerSessionId } : {}),
+          toolName: record.toolName,
+          ...(record.target ? { target: record.target } : {}),
+          ...(record.intentKey ? { intentKey: record.intentKey } : {}),
+          createdAt: record.createdAt,
+        } : {}),
       };
     }
     const keys = Object.keys(tombs);
     if (keys.length > TOMBSTONES_MAX) {
-      keys.sort((a, b) => tombs[a].completedAt - tombs[b].completedAt);
-      for (const key of keys.slice(0, keys.length - TOMBSTONES_MAX)) delete tombs[key];
+      // Resolved tombstones are evicted first. Unknown intent stays exact until
+      // unresolved evidence alone exceeds the bound.
+      keys.sort((a, b) => {
+        const aUnknown = tombs[a].terminalState === OPERATION_STATES.OUTCOME_UNKNOWN;
+        const bUnknown = tombs[b].terminalState === OPERATION_STATES.OUTCOME_UNKNOWN;
+        return Number(aUnknown) - Number(bUnknown)
+          || tombs[a].completedAt - tombs[b].completedAt;
+      });
+      const evicted = keys.slice(0, keys.length - TOMBSTONES_MAX);
+      const evictedUnknownCount = evicted.filter((key) =>
+        tombs[key].terminalState === OPERATION_STATES.OUTCOME_UNKNOWN).length;
+      const evictedClassF = evicted.filter((key) => tombs[key].retryClass === 'F');
+      // Persist bounded Class F replay memory BEFORE deleting exact identity.
+      // A death between these writes leaves redundant evidence, never a gap.
+      await rememberEvictedClassF(evictedClassF);
+      if (evictedUnknownCount > 0) {
+        // Persist the conservative marker BEFORE deleting exact evidence. A
+        // death between these writes leaves redundant safety, never a gap.
+        const rawOverflow = await storage.get(UNKNOWN_INTENT_OVERFLOW_KEY);
+        const prior = rawOverflow && typeof rawOverflow === 'object'
+          && !Array.isArray(rawOverflow)
+          ? /** @type {{ droppedCount?: number, firstDroppedAt?: number }} */ (rawOverflow)
+          : {};
+        await storage.set(UNKNOWN_INTENT_OVERFLOW_KEY, {
+          incomplete: true,
+          droppedCount: (typeof prior.droppedCount === 'number' ? prior.droppedCount : 0)
+            + evictedUnknownCount,
+          firstDroppedAt: typeof prior.firstDroppedAt === 'number'
+            ? prior.firstDroppedAt : now(),
+        });
+      }
+      for (const key of evicted) delete tombs[key];
     }
-    await storage.set(TOMBSTONES_KEY, tombs).catch(() => {});
+    await storage.set(TOMBSTONES_KEY, tombs);
   };
 
   /** @param {import('./reconcile.js').OperationRecord[]} droppedUnknowns */
   const recordUnknownOverflow = async (droppedUnknowns) => {
     if (droppedUnknowns.length === 0) return;
-    const raw = await storage.get(UNKNOWN_OVERFLOW_KEY).catch(() => null);
+    const raw = await storage.get(UNKNOWN_OVERFLOW_KEY);
     const prior = raw && typeof raw === 'object' && !Array.isArray(raw)
       ? /** @type {{ droppedCount?: number, oldestDroppedAt?: number, sessionsAffected?: string[] }} */ (raw)
       : {};
@@ -174,7 +300,7 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
         ? prior.oldestDroppedAt
         : Math.min(...droppedUnknowns.map((r) => r.createdAt)),
       sessionsAffected: [...sessions].slice(0, 32),
-    }).catch(() => {});
+    });
   };
 
   /** @param {Record<string, import('./reconcile.js').OperationRecord>} map */
@@ -203,11 +329,13 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
         delete map[record.operationId];
       }
     }
-    await storage.set(OPERATION_LOG_KEY, map);
-    // Tombstones + overflow evidence ride the same queue slot as the prune
-    // that made them necessary (persist only runs inside enqueue).
+    // Evidence lands BEFORE the destructive main-map write. Separate
+    // chrome.storage writes are not atomic: a browser death after evidence is
+    // safe (the full record remains too), while deleting first creates a replay
+    // hole if the worker dies before the tombstone write.
     await mintTombstones([...prunedTerminal, ...prunedUnknowns]);
     await recordUnknownOverflow(prunedUnknowns);
+    await storage.set(OPERATION_LOG_KEY, map);
   };
 
   /**
@@ -215,14 +343,33 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
    * tracker BEFORE begin(), so a call id whose full record aged out still
    * refuses re-execution.
    * @param {string} operationId
+   * @param {unknown} [retryClass]
    */
-  const getTombstone = async (operationId) => {
-    const raw = await storage.get(TOMBSTONES_KEY).catch(() => null);
+  const getTombstone = async (operationId, retryClass) => {
+    // Propagate read failures so the dispatch tracker can fail closed. Returning
+    // "missing" on an unreadable replay store would turn uncertainty into
+    // permission to execute.
+    const raw = await storage.get(TOMBSTONES_KEY);
     const tombs = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
     const entry = /** @type {Record<string, unknown>} */ (tombs)[operationId];
-    return entry && typeof entry === 'object'
-      ? /** @type {{ terminalState: string, retryClass: string, completedAt: number }} */ (entry)
+    if (entry && typeof entry === 'object') return /** @type {ReplayTombstone} */ (entry);
+    return normalizeRetryClass(retryClass) === RETRY_CLASSES.RESOURCE
+      && await wasEvictedClassF(operationId)
+      ? {
+        terminalState: OPERATION_STATES.INTERRUPTED,
+        retryClass: RETRY_CLASSES.RESOURCE,
+        completedAt: 0,
+        operationId,
+        approximateReplay: true,
+      }
       : undefined;
+  };
+
+  /** Whether compact unknown-intent identity exceeded its bounded store. */
+  const unknownIntentOverflowed = async () => {
+    const raw = await storage.get(UNKNOWN_INTENT_OVERFLOW_KEY);
+    return !!(raw && typeof raw === 'object' && !Array.isArray(raw)
+      && (/** @type {{ incomplete?: unknown }} */ (raw)).incomplete === true);
   };
 
   /**
@@ -247,11 +394,15 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
    * @param {Object} input
    * @param {string} input.operationId
    * @param {string} input.sessionId
+   * @param {string} [input.ownerSessionId]
    * @param {string} [input.actorId]
    * @param {string} input.toolName
    * @param {unknown} input.retryClass
    * @param {string} input.generationId
    * @param {string} [input.idempotencyKey]
+   * @param {string} [input.intentKey]
+   * @param {string} [input.turnId]
+   * @param {boolean} [input.userInitiated]
    * @param {string} [input.target]
    * @param {string} [input.confirmationRef]
    * @param {Record<string, unknown>} [input.confirmationProof]  the consumed
@@ -269,6 +420,7 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
     const record = {
       operationId: input.operationId,
       sessionId: input.sessionId,
+      ...(input.ownerSessionId ? { ownerSessionId: input.ownerSessionId } : {}),
       ...(input.actorId ? { actorId: input.actorId } : {}),
       toolName: input.toolName,
       retryClass: normalizeRetryClass(input.retryClass),
@@ -278,6 +430,9 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
       generationId: input.generationId,
       dispatched: false,
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+      ...(input.intentKey ? { intentKey: input.intentKey } : {}),
+      ...(input.turnId ? { turnId: input.turnId } : {}),
+      ...(input.userInitiated === true ? { userInitiated: true } : {}),
       ...(input.target ? { target: input.target } : {}),
       ...(input.confirmationRef ? { confirmationRef: input.confirmationRef } : {}),
       ...(input.confirmationProof ? { confirmationProof: input.confirmationProof } : {}),
@@ -293,6 +448,40 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
   /** All records still in a nonterminal state — the reconciler's input. */
   const listNonterminal = async () =>
     Object.values(await load()).filter((record) => !isTerminal(record.state));
+
+  /** Unresolved external effects that autonomous work must not step past. */
+  const listOutcomeUnknown = async () => {
+    const active = Object.values(await load())
+      .filter((record) => record.state === OPERATION_STATES.OUTCOME_UNKNOWN);
+    // Compact unknowns remain enforcement records, not merely audit receipts.
+    // Both pre-confirm discovery and the post-hook begin check consume this
+    // list, as does autonomous-goal recovery gating.
+    const raw = await storage.get(TOMBSTONES_KEY);
+    const tombs = raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? /** @type {Record<string, ReplayTombstone>} */ (raw)
+      : {};
+    const seen = new Set(active.map((record) => record.operationId));
+    const compact = Object.entries(tombs).flatMap(([operationId, entry]) => {
+      if (!entry || entry.terminalState !== OPERATION_STATES.OUTCOME_UNKNOWN
+          || seen.has(operationId) || typeof entry.sessionId !== 'string'
+          || typeof entry.intentKey !== 'string') return [];
+      return [{
+        operationId: entry.operationId || operationId,
+        sessionId: entry.sessionId,
+        ...(entry.ownerSessionId ? { ownerSessionId: entry.ownerSessionId } : {}),
+        toolName: entry.toolName || 'compacted-operation',
+        retryClass: normalizeRetryClass(entry.retryClass),
+        createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : entry.completedAt,
+        attempt: 1,
+        state: OPERATION_STATES.OUTCOME_UNKNOWN,
+        generationId: 'compacted',
+        dispatched: true,
+        ...(entry.target ? { target: entry.target } : {}),
+        intentKey: entry.intentKey,
+      }];
+    });
+    return [...active, ...compact];
+  };
 
   /** @param {import('./reconcile.js').OperationRecord} record
    *  @param {import('./operation-state.js').OperationState} to
@@ -384,10 +573,11 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
   });
 
   /**
-   * Class A–D retries: a fresh attempt number on the same operation.
+   * Class A-D retries: a fresh attempt number on the same operation.
    * Refused for Class E (a user-instructed repeat of a non-idempotent
    * action is a NEW operation with a fresh confirmation, never a re-drive
-   * of the old record) and for any state but `interrupted` — settled
+   * of the old record), Class F (resource grants must be re-derived on a
+   * new call), and for any state but `interrupted` - settled
    * outcomes are never re-driven.
    *
    * @param {string} operationId
@@ -404,9 +594,14 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
       throw new RetryRefusedError(operationId,
         `requires an interrupted operation; got ${record.state}`);
     }
-    if (normalizeRetryClass(record.retryClass) === RETRY_CLASSES.SIDE_EFFECT) {
+    const retryClass = normalizeRetryClass(record.retryClass);
+    if (retryClass === RETRY_CLASSES.SIDE_EFFECT) {
       throw new RetryRefusedError(operationId,
         'Class E repeats as a new operation with a fresh confirmation, never a re-drive');
+    }
+    if (retryClass === RETRY_CLASSES.RESOURCE) {
+      throw new RetryRefusedError(operationId,
+        'Class F resources require a new call with grants re-derived, never a re-drive');
     }
     const next = {
       ...record,
@@ -422,8 +617,8 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
   });
 
   return {
-    begin, get, listNonterminal, transition, markDispatched,
+    begin, get, listNonterminal, listOutcomeUnknown, transition, markDispatched,
     settle, resolveUnknown, newAttempt,
-    getTombstone, drainUnknownOverflow,
+    getTombstone, unknownIntentOverflowed, drainUnknownOverflow,
   };
 };

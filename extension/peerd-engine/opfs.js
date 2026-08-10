@@ -10,7 +10,8 @@
  * @param {string[]} rootPath - path components from origin root, e.g.
  *                              ['peerd-notebooks', 'notebook-abc'] or
  *                              ['peerd-apps', 'app-xyz'].
- * @param {{ getDirectory?: () => Promise<FileSystemDirectoryHandle> }} [deps]
+ * @param {{ getDirectory?: () => Promise<FileSystemDirectoryHandle>,
+ *   beforeMutation?: () => void | Promise<void> }} [deps]
  *   Test seam for the browser-owned OPFS root.
  */
 export const opfsHelpers = (rootPath, {
@@ -18,6 +19,7 @@ export const opfsHelpers = (rootPath, {
     if (!navigator.storage?.getDirectory) throw new Error('OPFS not supported in this context');
     return navigator.storage.getDirectory();
   },
+  beforeMutation = () => {},
 } = {}) => {
   /** @param {AbortSignal | undefined} signal */
   const throwIfAborted = (signal) => {
@@ -27,8 +29,8 @@ export const opfsHelpers = (rootPath, {
     throw error;
   };
 
-  /** @param {AbortSignal | undefined} signal */
-  const ensureRoot = async (signal) => {
+  /** @param {boolean} create @param {AbortSignal | undefined} signal */
+  const openRoot = async (create, signal) => {
     if (typeof getDirectory !== 'function') {
       throw new Error('OPFS not supported in this context');
     }
@@ -36,7 +38,7 @@ export const opfsHelpers = (rootPath, {
     let dir = await getDirectory();
     throwIfAborted(signal);
     for (const part of rootPath) {
-      dir = await dir.getDirectoryHandle(part, { create: true });
+      dir = await dir.getDirectoryHandle(part, { create });
       throwIfAborted(signal);
     }
     return dir;
@@ -47,7 +49,7 @@ export const opfsHelpers = (rootPath, {
    * @param {{ create?: boolean, signal?: AbortSignal }} [opts]
    */
   const walkParent = async (path, { create = false, signal } = {}) => {
-    const root = await ensureRoot(signal);
+    const root = await openRoot(create, signal);
     const parts = path.replace(/^\/+/, '').split('/').filter(Boolean);
     if (parts.length === 0) throw new Error('opfs: empty path');
     // why cast: the length guard above makes pop() non-undefined; TS can't
@@ -102,6 +104,9 @@ export const opfsHelpers = (rootPath, {
      * @param {{ signal?: AbortSignal }} [opts]
      */
     write: async (path, content, { signal } = {}) => {
+      throwIfAborted(signal);
+      await beforeMutation();
+      throwIfAborted(signal);
       const { dir, leaf } = await walkParent(path, { create: true, signal });
       throwIfAborted(signal);
       const fh = await dir.getFileHandle(leaf, { create: true });
@@ -138,6 +143,9 @@ export const opfsHelpers = (rootPath, {
      * @param {{ signal?: AbortSignal }} [opts]
      */
     delete: async (path, { signal } = {}) => {
+      throwIfAborted(signal);
+      await beforeMutation();
+      throwIfAborted(signal);
       const { dir, leaf } = await walkParent(path, { signal });
       // removeEntry has no AbortSignal. This last synchronous check is the
       // commit point: a Stop that landed during path resolution cannot delete
@@ -148,7 +156,12 @@ export const opfsHelpers = (rootPath, {
 
     /** List all files recursively from the root. @param {{ signal?: AbortSignal }} [opts] */
     list: async ({ signal } = {}) => {
-      const root = await ensureRoot(signal);
+      let root;
+      try { root = await openRoot(false, signal); }
+      catch (error) {
+        if (/** @type {{ name?: string }} */ (error)?.name === 'NotFoundError') return [];
+        throw error;
+      }
       /** @type {{ path: string, size: number }[]} */
       const out = [];
       /**
@@ -175,6 +188,7 @@ export const opfsHelpers = (rootPath, {
     /** Drop the entire subtree (used when an instance is deleted).
      * Missing trees are already gone; every other storage failure must surface. */
     nuke: async () => {
+      await beforeMutation();
       try {
         const parent = await getDirectory();
         let dir = parent;

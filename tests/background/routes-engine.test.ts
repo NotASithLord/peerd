@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'bun:test';
 import { makeEngineRoutes } from '../../extension/background/routes/engine.js';
 import { listOffscreenContexts } from '../../extension/background/offscreen-contexts.js';
+import { requireDenylistPolicy } from '../../extension/background/denylist-store.js';
 
 class ArtifactTooLargeError extends Error {}
 class EnvelopeFormatError extends Error {}
@@ -11,7 +12,10 @@ const baseDeps = (over: any = {}) => ({
   auditLog: { append: async () => {} },
   pushState: () => {},
   browser: {
-    runtime: { getContexts: async () => [], sendMessage: async () => ({ ok: true }) },
+    runtime: {
+      getContexts: async () => [], sendMessage: async () => ({ ok: true }),
+      getURL: (path: string) => `moz-extension://peerd/${path}`,
+    },
     storage: { local: { get: async () => ({}), set: async () => {} } },
   },
   // #53: engine's sw/web-fetch now delegates to the vm-net vmHttpFetch factory
@@ -50,13 +54,69 @@ const baseDeps = (over: any = {}) => ({
   withDwebPublication: async (operation: (isCurrent: () => boolean) => Promise<any>) => operation(() => true),
   withAppLifecycle: async (_appId: string, operation: () => Promise<any>) => operation(),
   listOffscreenContexts,
+  isOffscreenSender: (sender: any) => sender?.url === 'moz-extension://peerd/offscreen/offscreen.html',
+  assertOpfsWritable: async () => {},
   // The SW always injects the extract post-step (a passthrough when extract is
   // absent — that contract is pinned in tests/shared/fetch-extract.test.ts).
   applyWebExtract: async (resp: any) => resp,
+  awaitDenylistPolicy: async () => {},
   ...over,
 });
 
+describe('lifecycle/assert-opfs-writable', () => {
+  test('the Firefox Notebook host reaches the authoritative write posture', async () => {
+    let checks = 0;
+    const routes = makeEngineRoutes(baseDeps({
+      assertOpfsWritable: async () => { checks += 1; },
+    }));
+    const result = await (routes['lifecycle/assert-opfs-writable'] as any)(
+      {}, { url: 'moz-extension://peerd/engine-tabs/notebook-tab/index.html#nb-1' });
+    expect(result).toEqual({ ok: true });
+    expect(checks).toBe(1);
+  });
+
+  test('the offscreen host reaches the same posture', async () => {
+    let checks = 0;
+    const routes = makeEngineRoutes(baseDeps({
+      assertOpfsWritable: async () => { checks += 1; },
+    }));
+    const result = await (routes['lifecycle/assert-opfs-writable'] as any)(
+      {}, { url: 'moz-extension://peerd/offscreen/offscreen.html' });
+    expect(result).toEqual({ ok: true });
+    expect(checks).toBe(1);
+  });
+
+  test('blocked posture returns the precise refusal without mutating', async () => {
+    const routes = makeEngineRoutes(baseDeps({
+      assertOpfsWritable: async () => {
+        throw new Error("store 'opfs-workspaces' is read-only. No data was changed. Diagnostic: opfs-v2.");
+      },
+    }));
+    const result = await (routes['lifecycle/assert-opfs-writable'] as any)(
+      {}, { url: 'moz-extension://peerd/engine-tabs/notebook-tab/index.html#nb-1' });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("'opfs-workspaces'");
+    expect(result.error).toContain('No data was changed');
+    expect(result.error).toContain('opfs-v2');
+  });
+
+  test('an unrelated extension page cannot probe the posture', async () => {
+    let checks = 0;
+    const routes = makeEngineRoutes(baseDeps({
+      assertOpfsWritable: async () => { checks += 1; },
+    }));
+    const result = await (routes['lifecycle/assert-opfs-writable'] as any)(
+      {}, { url: 'moz-extension://peerd/sidepanel/sidepanel.html' });
+    expect(result).toEqual({ ok: false, error: 'unauthorized OPFS posture request' });
+    expect(checks).toBe(0);
+  });
+});
+
 describe('sw/web-fetch', () => {
+  test('denylist hydration is a required route dependency', () => {
+    expect(() => makeEngineRoutes(baseDeps({ awaitDenylistPolicy: undefined })))
+      .toThrow('awaitDenylistPolicy is required');
+  });
   test('rejects empty url', async () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['sw/web-fetch']({ url: '' })).toEqual({ ok: false, error: 'url-required' });
@@ -78,6 +138,39 @@ describe('sw/web-fetch', () => {
     const res = await r['sw/web-fetch']({ url: 'https://x' });
     expect(res.ok).toBe(false);
     expect(res.error).toContain('body too large');
+  });
+
+  // The denylist seed hydrates async at SW boot. A fetch racing a cold start
+  // must WAIT for the one-time load (not refuse), and a genuinely failed load
+  // must still refuse before any egress. The injected gate mirrors the SW's
+  // composition exactly: requireDenylistPolicy(await denylistReady).
+  test('a fetch racing seed hydration waits for the load instead of refusing', async () => {
+    const order: string[] = [];
+    let releaseHydration: (value: { ok: boolean }) => void = () => {};
+    const denylistReady = new Promise<{ ok: boolean }>((resolve) => { releaseHydration = resolve; });
+    const r = makeEngineRoutes(baseDeps({
+      awaitDenylistPolicy: async () => { requireDenylistPolicy(await denylistReady); },
+      vmHttpFetch: async () => { order.push('fetch'); return { ok: true, status: 200, headers: {}, bodyB64: btoa('hello') }; },
+    }));
+    const pending = r['sw/web-fetch']({ url: 'https://x' });
+    await Promise.resolve();
+    order.push('hydrated');
+    releaseHydration({ ok: true });
+    const res = await pending;
+    expect(res.ok).toBe(true);
+    expect(order).toEqual(['hydrated', 'fetch']);
+  });
+  test('a failed seed hydration refuses the fetch before any egress', async () => {
+    let fetched = false;
+    const r = makeEngineRoutes(baseDeps({
+      awaitDenylistPolicy: async () => { requireDenylistPolicy(await Promise.resolve({ ok: false })); },
+      vmHttpFetch: async () => { fetched = true; return { ok: true }; },
+    }));
+    expect(await r['sw/web-fetch']({ url: 'https://x' })).toEqual({
+      ok: false,
+      error: 'The sensitive-origin policy is unavailable. Network access is blocked.',
+    });
+    expect(fetched).toBe(false);
   });
 
   // Design 02, 2a: the Notebook tab's code-mode bridge widened this route with
@@ -157,10 +250,60 @@ describe('sw/web-fetch', () => {
       url: 'https://example.com', runId: 'run-1', ownerSessionId: 'owner-1',
       deadlineAt: Date.now() + 10_000,
     }, { url: 'offscreen' });
-    await Promise.resolve();
+    for (let attempt = 0; attempt < 10 && !seenSignal; attempt += 1) await Promise.resolve();
+    expect(seenSignal).toBeDefined();
     controller.abort();
     expect(await pending).toEqual({ ok: false, error: 'aborted' });
     expect(seenSignal?.aborted).toBe(true);
+  });
+
+  test('Stop during unresolved denylist hydration admits then exits without egress', async () => {
+    const controller = new AbortController();
+    let hydrationStarted = false;
+    let fetched = false;
+    let admissions = 0;
+    const routes = makeEngineRoutes(baseDeps({
+      awaitDenylistPolicy: () => {
+        hydrationStarted = true;
+        return new Promise(() => {});
+      },
+      vmHttpFetch: async () => { fetched = true; return { ok: true }; },
+      isOffscreenSender: (sender: any) => sender?.url === 'offscreen',
+      scriptRuns: {
+        ownerFor: () => 'owner-1', allows: () => true,
+        admitOp: () => { admissions += 1; return true; },
+        signalFor: () => controller.signal,
+      },
+    }));
+    const pending = (routes['sw/web-fetch'] as any)({
+      url: 'https://example.com', runId: 'run-1', ownerSessionId: 'owner-1',
+      deadlineAt: Date.now() + 10_000,
+    }, { url: 'offscreen' });
+    await Promise.resolve();
+    expect(hydrationStarted).toBe(true);
+    expect(admissions).toBe(1);
+    controller.abort();
+    expect(await pending).toEqual({ ok: false, error: 'aborted' });
+    expect(fetched).toBe(false);
+  });
+
+  test('deadline during unresolved denylist hydration exits without egress', async () => {
+    let fetched = false;
+    const routes = makeEngineRoutes(baseDeps({
+      awaitDenylistPolicy: () => new Promise(() => {}),
+      vmHttpFetch: async () => { fetched = true; return { ok: true }; },
+      isOffscreenSender: (sender: any) => sender?.url === 'offscreen',
+      scriptRuns: {
+        ownerFor: () => 'owner-1', allows: () => true, admitOp: () => true,
+        signalFor: () => new AbortController().signal,
+      },
+    }));
+    const result = await (routes['sw/web-fetch'] as any)({
+      url: 'https://example.com', runId: 'run-1', ownerSessionId: 'owner-1',
+      deadlineAt: Date.now() + 10,
+    }, { url: 'offscreen' });
+    expect(result).toEqual({ ok: false, error: 'aborted' });
+    expect(fetched).toBe(false);
   });
 
   test('a Notebook can cancel only its own token-bound module fetch', async () => {
@@ -186,7 +329,8 @@ describe('sw/web-fetch', () => {
       url: 'https://modules.example/a.js', noCache: true,
       abortToken: 'token-1', notebookId: 'n1',
     }, sender);
-    await Promise.resolve();
+    for (let attempt = 0; attempt < 10 && !seenSignal; attempt += 1) await Promise.resolve();
+    expect(seenSignal).toBeDefined();
     expect(await (routes['sw/web-fetch-abort'] as any)(
       { abortToken: 'token-1', notebookId: 'n2' }, {
         tab: { id: 99, url: 'moz-extension://test/engine-tabs/notebook-tab/index.html#n2' },
@@ -453,6 +597,29 @@ describe('import/apply', () => {
     expect((await r['import/apply']({ envelope: {} })).ok).toBe(true);
     expect(received['index.html']).toBeInstanceOf(Uint8Array);
     expect(Array.from(received['model.custom'])).toEqual(Array.from(raw));
+  });
+  test('a blocked Notebook import refuses before metadata or OPFS mutation', async () => {
+    let creates = 0;
+    let writes = 0;
+    const r = makeEngineRoutes(baseDeps({
+      openEnvelope: async () => ({
+        kind: 'notebook', name: 'Imported', entry: 'notebook.js', meta: { tags: [] },
+        files: { 'notebook.js': new TextEncoder().encode('return 1;') },
+      }),
+      jsRegistry: {
+        get: async () => null,
+        create: async () => { creates += 1; return { id: 'nNew' }; },
+      },
+      opfsHelpers: () => ({ write: async () => { writes += 1; } }),
+      assertOpfsWritable: async () => {
+        throw new Error("store 'opfs-workspaces' is read-only. No data was changed.");
+      },
+    }));
+    const result = await r['import/apply']({ envelope: {} });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("'opfs-workspaces'");
+    expect(creates).toBe(0);
+    expect(writes).toBe(0);
   });
   test('unexpected error rethrown (not swallowed)', async () => {
     const r = makeEngineRoutes(baseDeps({ openEnvelope: async () => { throw new Error('weird'); } }));

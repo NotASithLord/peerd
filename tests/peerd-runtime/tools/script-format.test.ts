@@ -277,6 +277,7 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
       opsFor: () => [],
     };
     const routes = makeEngineRoutes({
+      awaitDenylistPolicy: async () => {},
       vmHttpFetch: async () => { fetched = true; return { ok: true, status: 200 }; },
       applyWebExtract: async (response: any) => response,
       scriptRuns,

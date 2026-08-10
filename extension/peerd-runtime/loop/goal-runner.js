@@ -84,10 +84,16 @@ export const goalContinuationPrompt = (goal, todoBlock = '') => [
  *   Renders the session's live todo list for the continuation prompt
  *   (formatTodoBlock over session.todos, bound by the SW). Optional + best-
  *   effort: absent or throwing → the continuation goes out without the block.
+ * @param {(sessionId: string) => Promise<boolean>} [deps.hasUnresolvedSideEffects]
+ *   Stops autonomous continuations when an earlier Class D/E dispatch may
+ *   have landed. A new user turn can verify or deliberately start fresh work.
  * @param {number} [deps.maxIterations]
  * @param {() => number} [deps.now]
  */
-export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {}, kv, getTodoBlock, maxIterations = GOAL_MAX_ITERATIONS, now = Date.now }) => {
+export const makeGoalRunner = ({
+  runTurn, onEvent = () => {}, onRunEnd = () => {}, kv, getTodoBlock,
+  hasUnresolvedSideEffects, maxIterations = GOAL_MAX_ITERATIONS, now = Date.now,
+}) => {
   /** @type {Map<string, GoalRun>} */
   const runs = new Map();
 
@@ -221,6 +227,18 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {
     try {
       while (alive() && run.iteration < maxIterations) {
         const first = run.iteration === 0;
+        // A synthetic continuation is not new user authority. If an earlier
+        // side effect has an unknown outcome, stop before the model can express
+        // the same intent under a fresh tool-call id and bypass replay identity.
+        if (!first && typeof hasUnresolvedSideEffects === 'function') {
+          let unresolved = true;
+          try { unresolved = await hasUnresolvedSideEffects(sid); } catch { /* fail closed */ }
+          if (unresolved) {
+            run.halted = true;
+            run.lastError = 'an earlier action needs verification before autonomous work can continue';
+            break;
+          }
+        }
         run.iteration += 1;
         persist();  // record the iteration about to run, so a crash resumes here
         emit(sid, 'running');

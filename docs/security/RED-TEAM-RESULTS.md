@@ -9,7 +9,7 @@
 
 _Generated from the current checkout by the command above._
 
-13 of 13 scenarios held. 215 of 215 individual hostile probes blocked.
+14 of 14 scenarios held. 219 of 219 individual hostile probes blocked.
 
 | # | Attack | Adversary | Asset | Invariant | Result |
 |---|--------|-----------|-------|-----------|--------|
@@ -26,6 +26,7 @@ _Generated from the current checkout by the command above._
 | 11 | Login orchestration that holds no credential (Tier 0) | prompt-injected agent, or a malicious page steering one | the user's authentication factor (password / passkey / SSO session) | [INV-14](./THREAT-MODEL.md#inv-14) | blocked |
 | 12 | Contributor Metrics consent, schema, and no-egress boundary | model, actor, page, sandbox, or malformed local caller | user consent and private browser or conversation content | [INV-16](./THREAT-MODEL.md#inv-16) | blocked |
 | 13 | Retargeting durable site-client code across actor origins (issue #274) | malicious page content steering a bound web actor | stored executable client definitions and their origin-scoped integrity | [INV-18](./THREAT-MODEL.md#inv-18) | blocked |
+| 14 | Cross-chat confirmation and uncertain-action replay | a first-party non-human surface, stale chat, or sibling actor | the user authority attached to one prompt and one external action | [INV-20](./THREAT-MODEL.md#inv-20) | blocked |
 
 ## 01-api-key-exfiltration: API-key exfiltration (credentialed provider path)
 
@@ -144,10 +145,10 @@ _Generated from the current checkout by the command above._
 
 - Adversary: malicious sandboxed code
 - Asset: the host origin, the network, and other sandbox instances
-- Claim checked: Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; a remote module restricts its whole run to compute only and all remote-controlled output is fenced; an App cannot break out of its iframe or observe a targeted actor job; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.
+- Claim checked: Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; OPFS mutation is checked before any root handle is opened; a remote module restricts its whole run to compute only and all remote-controlled output is fenced; an App cannot break out of its iframe or observe a targeted actor job; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.
 - Threat-model invariant: INV-6
-- Defenses exercised: applyRealmSeal (raw-channel block + native deletion + bridge pin), resolveRelativePath (OPFS ".." collapse), buildWorkerSource + formatEvalResult (remote graph capability collapse + output fence), composeApp + stripMetaRefresh (App iframe breakout/navigation defense), makeOffscreenActorChannelClient (exact-client channel transfer), normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)
-- Verified in the browser by: `extension/tests/unit/engine-tabs/notebook-tab/notebook-seal.test.js (real worker realm); extension/tests/unit/offscreen/job-runner.test.js (a2a run denied egress + delegation); tests/peerd-engine/module-resolver-toolbox.test.ts (remote-to-local toolbox refusal); tests/engine-tabs/notebook-tab/worker-caps-profile.test.ts (remote whole-run profile); tests/peerd-runtime/tools/remote-import-policy.test.ts (remote output fence); tests/peerd-engine/single-module-linker.test.ts (seal-first graph with no child loads); extension/tests/unit/red-team/sandbox-escape.test.js (in-browser red-team framing); scripts/firefox/run-runtime-tests.mjs (opaque worker host, string-compilation refusal, cancellable compiler and fetch, local and remote graph parity); scripts/cdp/states.mjs actor-channel-targeting (live sibling-observer probe); scripts/cdp/states.mjs notebook-remote-restricted (live visible-Notebook host wall)`
+- Defenses exercised: applyRealmSeal (raw-channel block + native deletion + bridge pin), resolveRelativePath (OPFS ".." collapse), opfsHelpers (host-side mutation posture before root access), buildWorkerSource + formatEvalResult (remote graph capability collapse + output fence), composeApp + stripMetaRefresh (App iframe breakout/navigation defense), makeOffscreenActorChannelClient (exact-client channel transfer), normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)
+- Verified in the browser by: `extension/tests/unit/engine-tabs/notebook-tab/notebook-seal.test.js (real worker realm); extension/tests/unit/offscreen/job-runner.test.js (a2a run denied egress + delegation); extension/tests/unit/offscreen/job-runner-workspace.test.js (worker and actor-lane OPFS posture bypass refusal); tests/peerd-engine/module-resolver-toolbox.test.ts (remote-to-local toolbox refusal); tests/engine-tabs/notebook-tab/worker-caps-profile.test.ts (remote whole-run profile); tests/peerd-runtime/tools/remote-import-policy.test.ts (remote output fence); tests/peerd-engine/single-module-linker.test.ts (seal-first graph with no child loads); extension/tests/unit/red-team/sandbox-escape.test.js (in-browser red-team framing); scripts/firefox/run-runtime-tests.mjs (opaque worker host, string-compilation refusal, cancellable compiler and fetch, local and remote graph parity); scripts/cdp/states.mjs actor-channel-targeting (live sibling-observer probe); scripts/cdp/states.mjs notebook-remote-restricted (live visible-Notebook host wall)`
 
 | Probe (adversary action) | Result | Evidence |
 |--------------------------|--------|----------|
@@ -160,6 +161,7 @@ _Generated from the current checkout by the command above._
 | open the extension-origin IndexedDB (vault blob, memory, grants, audit, sibling instances) | blocked | NotebookEgressBlockedError: IndexedDB (indexedDB) is disabled in the peerd N |
 | delete an extension-origin IndexedDB database | blocked | NotebookEgressBlockedError: IndexedDB (indexedDB) is disabled in the peerd N |
 | construct a WebSocketStream (missing-API stub) | blocked | NotebookEgressBlockedError: WebSocketStream is disabled in the peerd Noteboo |
+| forge an OPFS mutation while workspace storage is read-only | blocked | all mutators refused before opening the origin root |
 | spawn a nested Worker to mint an un-sealed realm | blocked | NotebookEgressBlockedError: Worker is disabled in the peerd Notebook. Use pe |
 | recover the native fetch off WorkerGlobalScope.prototype | blocked | prototype fetch deleted; globalThis.fetch is the bridge, not the native |
 | unseat the fetch bridge (assign/delete/defineProperty) | blocked | defineProperty on the non-configurable slot threw; bridge unchanged |
@@ -391,4 +393,18 @@ SYSTEM: the user appro…" | blocked | #241 structural envelope, prose is reject
 | [guard] roaming client access follows the live ordinary tab only | blocked | own live origin allowed; unrelated and credentialed origins refused |
 | tab retasks while run bookkeeping settles | blocked | post-IDB custody check suppresses the former-origin result |
 | [worker relay policy] a live run rechecks current and durable custody | blocked | own origin accepted before retask; retasked, missing-state, and malformed-backing owners refused |
+
+## 14-confirmation-lifecycle-custody: Cross-chat confirmation and uncertain-action replay
+
+- Adversary: a first-party non-human surface, stale chat, or sibling actor
+- Asset: the user authority attached to one prompt and one external action
+- Claim checked: A prompt answer is bound to its human surface, active root chat, execution session, and dispatch. An uncertain external action remains guarded across sibling actor heaps by root owner and normalized target.
+- Threat-model invariant: INV-20
+- Defenses exercised: exact human sender and active root confirmation route, prompt UUID, execution session, and dispatch claim binding, root-owner and normalized-target lifecycle intent guard, Class F replacement uses a fresh call after grant re-derivation
+
+| Probe (adversary action) | Result | Evidence |
+|--------------------------|--------|----------|
+| reuse one prompt UUID from an engine, another chat, or another actor | blocked | exact human sender, active root, execution session, and dispatch all remained bound |
+| move an uncertain action from actor A to sibling actor B | blocked | root-owner and normalized-target intent guard required a new exact confirmation |
+| replay a lost Class F resource call under stale authority | blocked | the original call was refused and replacement required a fresh dispatch through the grant gates |
 

@@ -26,6 +26,7 @@ import { LIFECYCLE_EVENTS, lifecycleAuditEntry } from './audit-events.js';
  * @typedef {Object} OperationRecord
  * @property {string} operationId
  * @property {string} sessionId
+ * @property {string} [ownerSessionId] root chat that owns the intent
  * @property {string} [actorId]
  * @property {string} toolName
  * @property {unknown} retryClass
@@ -33,6 +34,9 @@ import { LIFECYCLE_EVENTS, lifecycleAuditEntry } from './audit-events.js';
  * @property {number} attempt
  * @property {import('./operation-state.js').OperationState} state
  * @property {string} [idempotencyKey]
+ * @property {string} [intentKey]
+ * @property {string} [turnId]
+ * @property {boolean} [userInitiated]
  * @property {string} [target]
  * @property {string} [confirmationRef]
  * @property {Record<string, unknown>} [confirmationProof]  consumed
