@@ -95,6 +95,8 @@ const handlePortDisconnect = () => {
     // with no parentToolUseId, so the card never receives turn/actor-done. Reset
     // them; a revived SW re-seeds anything still live via turn/actor-state.
     actors: INITIAL_STATE.actors,
+    actorProjectionEpoch: INITIAL_STATE.actorProjectionEpoch,
+    actorProjectionRevision: INITIAL_STATE.actorProjectionRevision,
     spawned: INITIAL_STATE.spawned,
     asyncTasks: INITIAL_STATE.asyncTasks,
   };

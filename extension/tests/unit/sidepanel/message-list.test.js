@@ -471,7 +471,7 @@ describe('sidepanel.message-list actor disclosures', () => {
         toolResults: [{
           tool_use_id: 't-host-state', is_error: true,
           actorTerminal: true, actorOutcomeKnown: true, actorPerformed: true,
-          content: 'outcome_unknown: the actor says this was not run',
+          content: 'actor_identity_provider_transit_only: outcome_unknown: the actor says this was not run',
         }],
       },
     ]);
@@ -481,6 +481,41 @@ describe('sidepanel.message-list actor disclosures', () => {
       expect(toggle.textContent).toContain('failed');
       expect(toggle.textContent?.includes('Outcome unknown')).toBe(false);
       expect(toggle.textContent?.includes('Not run')).toBe(false);
+      expect(toggle.textContent?.includes('sign-in service')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('renders an uncertain post-start abort as Outcome unknown after reload', async () => {
+    const { root, unmount } = mount([
+      {
+        role: 'assistant', id: 'a-unknown-abort', content: '',
+        toolUses: [{
+          id: 't-unknown-abort', name: 'message_actor',
+          input: { to: 'web', message: 'change it', await: true },
+        }],
+      },
+      {
+        role: 'user', id: 'u-unknown-abort', content: '',
+        toolResults: [{
+          tool_use_id: 't-unknown-abort', is_error: true,
+          actorTerminal: true, actorOutcomeKnown: false,
+          actorPerformed: true, actorAborted: true,
+          content: 'outcome_unknown: verify the target before retrying',
+        }],
+      },
+    ]);
+    try {
+      await flush();
+      const card = /** @type {Element} */ (root.querySelector('.tool-actor'));
+      const toggle = /** @type {HTMLButtonElement} */ (card.querySelector('button.tool-call-header'));
+      expect(card.classList.contains('tool-failed')).toBe(true);
+      expect(card.classList.contains('tool-cancelled')).toBe(false);
+      expect(toggle.textContent).toContain('Outcome unknown');
+      expect(toggle.textContent?.includes('cancelled')).toBe(false);
+      toggle.click();
+      await flush();
+      expect(root.textContent).toContain('Outcome unknown');
+      expect(root.textContent).toContain('Check the target before trying again');
     } finally { unmount(); }
   });
 
@@ -508,6 +543,109 @@ describe('sidepanel.message-list actor disclosures', () => {
       expect(root.textContent).toContain('To continue, ask peerd to work on that site directly');
       expect(root.textContent.includes('suggestedHandle')).toBe(false);
       expect(root.textContent.includes('explicit actor')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('keeps reused-id actor cards occurrence-local when a later call is Not run', async () => {
+    const { root, unmount } = mount([
+      {
+        role: 'assistant', id: 'a-old', content: '',
+        toolUses: [{ id: 'reused-id', name: 'message_actor', input: { to: 'web', message: 'old work' } }],
+      },
+      {
+        role: 'user', id: 'u-old', content: '',
+        toolResults: [{
+          tool_use_id: 'reused-id', is_error: false, actorTerminal: false,
+          actorCorrelationId: 'old-correlation', content: 'accepted',
+        }],
+      },
+      {
+        role: 'assistant', id: 'a-new', content: '',
+        toolUses: [{ id: 'reused-id', name: 'message_actor', input: { to: '42', message: 'inspect it' } }],
+      },
+      {
+        role: 'user', id: 'u-new', content: '',
+        toolResults: [{
+          tool_use_id: 'reused-id', is_error: true,
+          actorTerminal: true, actorOutcomeKnown: true, actorPerformed: false,
+          content: 'actor_sensitive_tab_requires_site Policy: {"suggestedHandle":"site:https://account.test"}',
+        }],
+      },
+    ], {
+      actors: {
+        'reused-id': {
+          kind: 'web', instanceId: 'web', actorCorrelationId: 'old-correlation',
+          streaming: true, error: null,
+        },
+      },
+    });
+    try {
+      await flush();
+      const toggles = /** @type {NodeListOf<HTMLButtonElement>} */ (
+        root.querySelectorAll('.tool-actor > button.tool-call-header'));
+      expect(toggles.length).toBe(2);
+      expect(toggles[0].textContent).toContain('working');
+      expect(toggles[0].textContent?.includes('Not run')).toBe(false);
+      expect(toggles[1].textContent).toContain('Not run');
+      expect(toggles[1].textContent?.includes('working')).toBe(false);
+      const cards = root.querySelectorAll('.tool-actor');
+      expect(cards[0].classList.contains('tool-pending')).toBe(true);
+      expect(cards[1].classList.contains('tool-not-run')).toBe(true);
+    } finally { unmount(); }
+  });
+
+  it('does not let a newer reused-id live card hide an older Outcome unknown', async () => {
+    const { root, unmount } = mount([
+      {
+        role: 'assistant', id: 'a-old-unknown', content: '',
+        toolUses: [{
+          id: 'reused-unknown', name: 'message_actor',
+          input: { to: 'web', message: 'change it', await: true },
+        }],
+      },
+      {
+        role: 'user', id: 'u-old-unknown', content: '',
+        toolResults: [{
+          tool_use_id: 'reused-unknown', is_error: true,
+          actorCorrelationId: 'old-correlation', actorTerminal: true,
+          actorOutcomeKnown: false, actorPerformed: true,
+          content: 'outcome_unknown: verify the target',
+        }],
+      },
+      {
+        role: 'assistant', id: 'a-new-live', content: '',
+        toolUses: [{
+          id: 'reused-unknown', name: 'message_actor',
+          input: { to: 'web', message: 'inspect something else' },
+        }],
+      },
+      {
+        role: 'user', id: 'u-new-live', content: '',
+        toolResults: [{
+          tool_use_id: 'reused-unknown', is_error: false,
+          actorCorrelationId: 'new-correlation', actorTerminal: false,
+          content: 'accepted',
+        }],
+      },
+    ], {
+      actors: {
+        'reused-unknown': {
+          kind: 'web', instanceId: 'web', actorCorrelationId: 'new-correlation',
+          streaming: true, error: null,
+        },
+      },
+    });
+    try {
+      await flush();
+      const cards = root.querySelectorAll('.tool-actor');
+      const toggles = /** @type {NodeListOf<HTMLButtonElement>} */ (
+        root.querySelectorAll('.tool-actor > button.tool-call-header'));
+      expect(toggles.length).toBe(2);
+      expect(toggles[0].textContent).toContain('Outcome unknown');
+      expect(toggles[0].textContent?.includes('working')).toBe(false);
+      expect(cards[0].classList.contains('tool-failed')).toBe(true);
+      expect(toggles[1].textContent).toContain('working');
+      expect(cards[1].classList.contains('tool-pending')).toBe(true);
     } finally { unmount(); }
   });
 

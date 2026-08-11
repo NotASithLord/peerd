@@ -2807,6 +2807,9 @@ const broadcastBoundProjection = (display, message) => {
     ...message,
     rootSessionId: display.rootSessionId,
     parentSessionId: display.parentSessionId,
+    actorCorrelationId: display.actorCorrelationId,
+    actorProjectionEpoch: actorLiveProjection.epoch(),
+    actorProjectionRevision: actorLiveProjection.revision(),
   });
 };
 
@@ -4238,10 +4241,14 @@ const buildStateSnapshot = async () => {
     try { hasKey = !!(await vault.getSecret(/** @type {string} */ (activeProv.vaultSecretName))); }
     catch { hasKey = false; }
   }
+  // Take every awaited store read before capturing the in-memory projection.
+  // Provider tool-use ids can repeat, so an older snapshot must never cross an
+  // await and arrive after a newer correlated actor-start for the same id.
+  const vaultInitialized = await vault.isInitialized();
   const liveActors = actorLiveProjection.snapshot(/** @type {string | null} */ (sessionId));
   return {
     vault: {
-      initialized: await vault.isInitialized(),
+      initialized: vaultInitialized,
       locked: false,
       unlockedAt: vault.unlockedAt(),
       prfEnrolled: prf.enrolled,
@@ -4294,6 +4301,8 @@ const buildStateSnapshot = async () => {
     // of events seen only by panels that were already open. Every row is scoped
     // to this viewed root before it crosses the UI boundary.
     actors: liveActors.actors,
+    actorProjectionEpoch: liveActors.actorProjectionEpoch,
+    actorProjectionRevision: liveActors.actorProjectionRevision,
     spawned: liveActors.spawned,
     asyncTasks: liveActors.asyncTasks,
     // Per-session truth: is THIS chat's turn in flight? Lets the panel
@@ -6452,6 +6461,8 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
       });
       if (uiConnected()) uiPorts.broadcast({
         type: 'turn/actor-start', ...display, sessionId: actorSessionId, fromIndex,
+        actorProjectionEpoch: actorLiveProjection.epoch(),
+        actorProjectionRevision: actorLiveProjection.revision(),
         grantedTools: tools.map((tool) => tool.name),
         messages: [], streaming: true, error: null, cost: null,
       });
@@ -6462,20 +6473,22 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
           if (ev.type === 'state') {
             const messages = Array.isArray(ev.session?.messages)
               ? ev.session.messages.slice(fromIndex) : [];
-            actorLiveProjection.patchBound(display, { messages });
-            broadcastBoundProjection(display, {
-              type: 'turn/actor-state', parentToolUseId: display.parentToolUseId,
-              session: ev.session, fromIndex, kind: display.kind,
-              instanceId: display.instanceId, name: display.name,
-              task: display.task, grantedTools: tools.map((tool) => tool.name),
-            });
+            if (actorLiveProjection.patchBound(display, { messages })) {
+              broadcastBoundProjection(display, {
+                type: 'turn/actor-state', parentToolUseId: display.parentToolUseId,
+                session: ev.session, fromIndex, kind: display.kind,
+                instanceId: display.instanceId, name: display.name,
+                task: display.task, grantedTools: tools.map((tool) => tool.name),
+              });
+            }
           }
           if (ev.type === 'error') {
-            actorLiveProjection.patchBound(display, { error: ev.error, streaming: false });
-            broadcastBoundProjection(display, {
-              type: 'turn/actor-error', parentToolUseId: display.parentToolUseId,
-              sessionId: actorSessionId, error: ev.error,
-            });
+            if (actorLiveProjection.patchBound(display, { error: ev.error, streaming: false })) {
+              broadcastBoundProjection(display, {
+                type: 'turn/actor-error', parentToolUseId: display.parentToolUseId,
+                sessionId: actorSessionId, error: ev.error,
+              });
+            }
           }
         } catch { /* display best-effort */ }
       }
@@ -6518,14 +6531,15 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
         details: { host: actorIsolation.host, kind, instanceId, code: r.code ?? 'unknown', performed: false },
       }).catch(() => {});
       if (display) {
-        actorLiveProjection.patchBound(display, { error, streaming: false });
-        broadcastBoundProjection(display, {
-          type: 'turn/actor-error', parentToolUseId: display.parentToolUseId, error,
-        });
-        broadcastBoundProjection(display, {
-          type: 'turn/actor-done', parentToolUseId: display.parentToolUseId,
-          sessionId: actorSessionId, ok: false, aborted: false,
-        });
+        if (actorLiveProjection.patchBound(display, { error, streaming: false })) {
+          broadcastBoundProjection(display, {
+            type: 'turn/actor-error', parentToolUseId: display.parentToolUseId, error,
+          });
+          broadcastBoundProjection(display, {
+            type: 'turn/actor-done', parentToolUseId: display.parentToolUseId,
+            sessionId: actorSessionId, ok: false, aborted: false,
+          });
+        }
       }
       return { result: error, stopped: true, isolationFailure: r };
     }
@@ -6558,11 +6572,12 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
         // that account TOKENS (the eval runner's ACTOR bucket) need the fields
         // costOf collapsed. Additive; the sidepanel reducer reads `cost` only.
         if (display) {
-          actorLiveProjection.patchBound(display, { cost });
-          broadcastBoundProjection(display, {
-            type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId,
-            cost, usage: r.usage,
-          });
+          if (actorLiveProjection.patchBound(display, { cost })) {
+            broadcastBoundProjection(display, {
+              type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId,
+              cost, usage: r.usage,
+            });
+          }
         }
       } catch { /* cost telemetry is best-effort */ }
     }
@@ -6598,19 +6613,21 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
       },
     }).catch(() => {});
     if (display) {
-      if (terminalError) {
-        actorLiveProjection.patchBound(display, {
+      const displayCurrent = terminalError
+        ? actorLiveProjection.patchBound(display, {
           error: terminalError, outcomeKnown: !outcomeUnknown, streaming: false,
-        });
-        broadcastBoundProjection(display, {
+        })
+        : actorLiveProjection.patchBound(display, {});
+      if (displayCurrent) {
+        if (terminalError) broadcastBoundProjection(display, {
           type: 'turn/actor-error', parentToolUseId: display.parentToolUseId,
           error: terminalError, outcomeKnown: !outcomeUnknown,
         });
+        broadcastBoundProjection(display, {
+          type: 'turn/actor-done', parentToolUseId: display.parentToolUseId,
+          sessionId: actorSessionId, ok: turnOk, aborted: r.aborted === true,
+        });
       }
-      broadcastBoundProjection(display, {
-        type: 'turn/actor-done', parentToolUseId: display.parentToolUseId,
-        sessionId: actorSessionId, ok: turnOk, aborted: r.aborted === true,
-      });
     }
     if (!persistOk) {
       return {
@@ -6840,7 +6857,7 @@ const actorMessaging = makeActorMessaging({
     // orchestrator keeps is still just the fenced reply (deliver()).
     const display = parentToolUseId
       ? {
-          parentToolUseId, parentSessionId, rootSessionId,
+          parentToolUseId, parentSessionId, rootSessionId, actorCorrelationId: correlationId,
           kind, instanceId, name, task: message,
         }
       : undefined;

@@ -101,7 +101,9 @@
  * @property {ReadonlyArray<any>} agentTabEvents
  * @property {Readonly<Record<string, { stdout: string, stderr: string }>>} vmStreams
  * @property {{ byToolUse: Record<string, string>, sessions: Record<string, SpawnedSession> }} spawned
- * @property {Readonly<Record<string, { sessionId?: string, kind?: string, instanceId?: string, name?: string, fromIndex?: number, messages?: any[], streaming?: boolean, error?: string|null, aborted?: boolean, outcomeKnown?: boolean, performed?: boolean, cost?: any }>>} actors
+ * @property {Readonly<Record<string, { sessionId?: string, kind?: string, instanceId?: string, name?: string, actorCorrelationId?: string, fromIndex?: number, messages?: any[], streaming?: boolean, error?: string|null, aborted?: boolean, outcomeKnown?: boolean, performed?: boolean, cost?: any }>>} actors
+ * @property {string|null} actorProjectionEpoch
+ * @property {number} actorProjectionRevision
  * @property {Record<string, Array<{ seq: number, method: string, to?: string, goalPreview?: string, phase: string, ms?: number|null, failed?: boolean, cancelled?: boolean }>>} scriptOps  live delegation feed per script toolUseId
  * @property {Readonly<Record<string, unknown>>} asyncTasks
  * @property {Readonly<Record<string, { active: boolean, sessionId: string, iteration: number, maxIterations: number, goal: string, phase: string, summary: string|null }>>} goalRuns
@@ -197,6 +199,8 @@ export const INITIAL_STATE = Object.freeze({
   // actor messaged N times shows N distinct exchanges, not its whole history.
   // { sessionId, kind, instanceId, name, fromIndex, messages, streaming, error, cost }.
   actors: Object.freeze({}),
+  actorProjectionEpoch: null,
+  actorProjectionRevision: 0,
   // In-flight async spawned (DESIGN-11), keyed by PARENT session id.
   asyncTasks: Object.freeze({}),
   // Goal mode (the mode-row Goal toggle) — active runs keyed by sessionId, so
@@ -334,6 +338,41 @@ const putActorCard = (state, parentToolUseId, patch) => {
   return { ...state, actors: { ...state.actors, [parentToolUseId]: { ...cur, ...patch } } };
 };
 
+/** @param {any} card @param {any} msg */
+const actorEventMatchesCard = (card, msg) => !(
+  typeof card?.actorCorrelationId === 'string'
+  && typeof msg?.actorCorrelationId === 'string'
+  && card.actorCorrelationId !== msg.actorCorrelationId
+);
+
+/** @param {ChatState} state @param {any} msg */
+const actorEventIsStale = (state, msg) => {
+  const incomingEpoch = typeof msg?.actorProjectionEpoch === 'string'
+    ? msg.actorProjectionEpoch : null;
+  if (state.actorProjectionEpoch && incomingEpoch
+      && state.actorProjectionEpoch !== incomingEpoch) return true;
+  return Number.isSafeInteger(msg?.actorProjectionRevision)
+    && state.actorProjectionEpoch !== null
+    && msg.actorProjectionRevision < state.actorProjectionRevision;
+};
+
+/** @param {ChatState} state @param {any} msg @returns {ChatState} */
+const stampActorProjectionRevision = (state, msg) => {
+  const incomingEpoch = typeof msg?.actorProjectionEpoch === 'string'
+    ? msg.actorProjectionEpoch : null;
+  const revision = msg?.actorProjectionRevision;
+  if (incomingEpoch && state.actorProjectionEpoch === null) {
+    return {
+      ...state,
+      actorProjectionEpoch: incomingEpoch,
+      actorProjectionRevision: Number.isSafeInteger(revision) ? revision : 0,
+    };
+  }
+  if (incomingEpoch && state.actorProjectionEpoch !== incomingEpoch) return state;
+  if (!Number.isSafeInteger(revision) || revision <= state.actorProjectionRevision) return state;
+  return { ...state, actorProjectionRevision: revision };
+};
+
 /**
  * Reconcile the SW's live-only actor snapshot with durable inline cards already
  * observed in this mounted chat. A missing live row settles an in-flight card;
@@ -419,11 +458,26 @@ const reconcileActorTerminals = (actors, messages) => {
   let next = actors ?? {};
   let changed = false;
 
-  /** @param {any} call @param {{ failed: boolean, outcomeKnown?: boolean, performed?: boolean, aborted?: boolean }} terminal */
+  /** @param {any} call @param {{ failed: boolean, outcomeKnown?: boolean, performed?: boolean, aborted?: boolean, actorCorrelationId?: string }} terminal */
   const settle = (call, terminal) => {
-    if (!call || latestCallById.get(call.id) !== call) return;
+    if (!call) return;
     const card = next[call.id];
     if (!card) return;
+    const callCorrelationIds = [
+      call.result?.actorCorrelationId,
+      call.result?.actorDeliveryId,
+      ...(Array.isArray(call.result?.actorDeliveryIds) ? call.result.actorDeliveryIds : []),
+      terminal.actorCorrelationId,
+    ].filter((id) => typeof id === 'string');
+    if (typeof card.actorCorrelationId === 'string') {
+      if (!callCorrelationIds.includes(card.actorCorrelationId)) return;
+    } else {
+      // Legacy cards without host correlation can only use the conservative
+      // latest-occurrence fallback. A correlated older call may still own the
+      // live card when a newer same-id request was refused before actor-start.
+      if (latestCallById.get(call.id) !== call) return;
+      if (terminal.performed === false) return;
+    }
     // Uncertainty outranks a cancellation pulse: Stop can race with a dispatched
     // effect, and showing "cancelled" would hide that the target may have changed.
     const aborted = terminal.aborted === true && terminal.outcomeKnown !== false;
@@ -453,7 +507,7 @@ const reconcileActorTerminals = (actors, messages) => {
   // await:true returns the actor's terminal outcome in the tool result and does
   // not append an actorReply. Read only host-stamped metadata here; content can
   // contain actor/page prose and must not decide execution custody.
-  for (const call of latestCallById.values()) {
+  for (const call of calls) {
     if (call.toolUse?.input?.await !== true || !call.result) continue;
     if (call.result.actorTerminal === false) continue;
     const failed = call.result.is_error === true;
@@ -478,6 +532,16 @@ const reconcileActorTerminals = (actors, messages) => {
     if (typeof reply.actorDeliveryId === 'string') {
       call = callsByDelivery.get(reply.actorDeliveryId) ?? null;
     }
+    // A crash can lose A's immediate acknowledgement before a provider later
+    // reuses A's tool-use id for B. The host delivery id on the current card and
+    // receipt is still sufficient ownership even though transcript occurrence
+    // lookup is ambiguous; choose a preceding call only as the lineage anchor.
+    if (!call && typeof reply.actorDeliveryId === 'string'
+        && next[parentId]?.actorCorrelationId === reply.actorDeliveryId) {
+      const preceding = (callsById.get(parentId) ?? [])
+        .filter((candidate) => candidate.messageIndex < messageIndex);
+      call = preceding.at(-1) ?? null;
+    }
     // Legacy/crash snapshots may lack the immediate result metadata. Bare-id
     // fallback is safe only when this transcript contains exactly one such call.
     if (!call && (callsById.get(parentId)?.length ?? 0) === 1) {
@@ -486,6 +550,8 @@ const reconcileActorTerminals = (actors, messages) => {
     if (!call || call.id !== parentId || messageIndex <= call.messageIndex) continue;
     settle(call, {
       failed: reply.failed === true,
+      ...(typeof reply.actorDeliveryId === 'string'
+        ? { actorCorrelationId: reply.actorDeliveryId } : {}),
       ...(reply.outcomeKnown !== undefined ? { outcomeKnown: reply.outcomeKnown } : {}),
       ...(reply.performed !== undefined ? { performed: reply.performed } : {}),
       ...(reply.aborted === true ? { aborted: true } : {}),
@@ -608,17 +674,20 @@ export const reduceChat = (state, msg) => {
     case 'turn/actor-start':
       if (msg.rootSessionId && state.session.sessionId
         && msg.rootSessionId !== state.session.sessionId) return state;
-      return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), {
+      if (actorEventIsStale(state, msg)) return state;
+      return stampActorProjectionRevision(putActorCard(state, /** @type {string} */ (msg.parentToolUseId), {
         sessionId: msg.sessionId, kind: msg.kind, instanceId: msg.instanceId, name: msg.name,
+        actorCorrelationId: msg.actorCorrelationId,
         rootSessionId: msg.rootSessionId, parentSessionId: msg.parentSessionId,
         task: msg.task,
         grantedTools: Array.isArray(msg.grantedTools) ? msg.grantedTools : undefined,
         fromIndex: msg.fromIndex ?? 0, messages: [], streaming: true, error: null,
         aborted: false, outcomeKnown: undefined, performed: undefined, cost: null,
-      });
+      }), msg);
     case 'turn/actor-state': {
       if (msg.rootSessionId && state.session.sessionId
         && msg.rootSessionId !== state.session.sessionId) return state;
+      if (actorEventIsStale(state, msg)) return state;
       // The full actor-session snapshot; slice to this card's exchange (fromIndex).
       const existing = /** @type {any} */ (state.actors)[/** @type {string} */ (msg.parentToolUseId)];
       // Self-seed when the panel connected mid-turn and missed turn/actor-start
@@ -626,41 +695,54 @@ export const reduceChat = (state, msg) => {
       // we can't place the slice, so drop.
       const fromIndex = existing?.fromIndex ?? msg.fromIndex;
       if (fromIndex == null) return state;
+      if (existing && !actorEventMatchesCard(existing, msg)) return state;
       const messages = Array.isArray(msg.session?.messages) ? msg.session.messages.slice(fromIndex) : (existing?.messages ?? []);
       const seed = existing ? {} : {
         fromIndex, kind: msg.kind, instanceId: msg.instanceId, name: msg.name,
+        actorCorrelationId: msg.actorCorrelationId,
         rootSessionId: msg.rootSessionId, parentSessionId: msg.parentSessionId,
         task: msg.task,
         grantedTools: Array.isArray(msg.grantedTools) ? msg.grantedTools : undefined,
         streaming: true, error: null, cost: null,
       };
-      return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), { ...seed, messages });
+      return stampActorProjectionRevision(
+        putActorCard(state, /** @type {string} */ (msg.parentToolUseId), { ...seed, messages }),
+        msg,
+      );
     }
-    case 'turn/actor-error':
+    case 'turn/actor-error': {
       if (msg.rootSessionId && state.session.sessionId
         && msg.rootSessionId !== state.session.sessionId) return state;
-      return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), {
+      if (actorEventIsStale(state, msg)) return state;
+      const card = /** @type {any} */ (state.actors)[/** @type {string} */ (msg.parentToolUseId)];
+      if (card && !actorEventMatchesCard(card, msg)) return state;
+      return stampActorProjectionRevision(putActorCard(state, /** @type {string} */ (msg.parentToolUseId), {
         error: msg.error,
         streaming: false,
         ...(msg.outcomeKnown === false ? { outcomeKnown: false } : {}),
-      });
+      }), msg);
+    }
     case 'turn/actor-done': {
       if (msg.rootSessionId && state.session.sessionId
         && msg.rootSessionId !== state.session.sessionId) return state;
+      if (actorEventIsStale(state, msg)) return state;
       // An ABORT (Stop cascade) → 'cancelled' card; a clean failure with no error
       // already folded → mark failed; else just stop the spinner. Short-circuit when
       // the card is already terminal (turn/actor-error folded first) to avoid churn.
       const card = /** @type {any} */ (state.actors)[/** @type {string} */ (msg.parentToolUseId)];
       if (!card || card.streaming === false) return state;
+      if (!actorEventMatchesCard(card, msg)) return state;
       /** @type {Record<string, unknown>} */
       const patch = { streaming: false };
       if (msg.aborted) patch.aborted = true;
       else if (msg.ok === false && !card.error) patch.error = 'the actor turn did not complete';
-      return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), patch);
+      return stampActorProjectionRevision(
+        putActorCard(state, /** @type {string} */ (msg.parentToolUseId), patch), msg);
     }
     case 'turn/actor-cost': {
       if (msg.rootSessionId && state.session.sessionId
         && msg.rootSessionId !== state.session.sessionId) return state;
+      if (actorEventIsStale(state, msg)) return state;
       // Phase K: the actor turn's spend, surfaced on its card (delegated work
       // isn't free — make it visible even though caps stay per-session).
       // why the guard: a cost event must only UPDATE an existing card, never
@@ -670,8 +752,9 @@ export const reduceChat = (state, msg) => {
       // turn/actor-state's seed (its `existing ? {} : …` gate) from ever applying
       // streaming/kind/name. Let turn/actor-start|state own creation.
       const id = /** @type {string} */ (msg.parentToolUseId);
-      if (!(/** @type {any} */ (state.actors)[id])) return state;
-      return putActorCard(state, id, { cost: msg.cost });
+      const card = /** @type {any} */ (state.actors)[id];
+      if (!card || !actorEventMatchesCard(card, msg)) return state;
+      return stampActorProjectionRevision(putActorCard(state, id, { cost: msg.cost }), msg);
     }
     case 'script/op': {
       // Upsert by seq: 'sent' creates the line; 'replied'/'failed'/'handed-off'
@@ -732,6 +815,18 @@ export const reduceChat = (state, msg) => {
       const nextSessionId = msg.state?.session?.sessionId ?? null;
       const stillHalted = !sessionChanged && state.cost.limitReached;
       const keepSpendError = !sessionChanged && state.lastError === 'spend-limit-reached';
+      const incomingActorEpoch = typeof msg.state?.actorProjectionEpoch === 'string'
+        ? msg.state.actorProjectionEpoch : null;
+      const incomingActorRevision = Number.isSafeInteger(msg.state?.actorProjectionRevision)
+        ? msg.state.actorProjectionRevision : null;
+      const actorEpochMismatch = state.actorProjectionEpoch !== null
+        && incomingActorEpoch !== null
+        && incomingActorEpoch !== state.actorProjectionEpoch;
+      const staleActorSnapshot = actorEpochMismatch
+        || (state.actorProjectionEpoch !== null
+          && (incomingActorEpoch === null || incomingActorEpoch === state.actorProjectionEpoch)
+          && incomingActorRevision !== null
+          && incomingActorRevision < state.actorProjectionRevision);
       // why prune on switch: actors/spawned/asyncTasks belong to the orchestrator
       // transcript being navigated away from. The fresh snapshot now replays its
       // live rows; within one chat we reconcile those with terminal inline cards
@@ -740,25 +835,44 @@ export const reduceChat = (state, msg) => {
         ? msg.state.session.messages : [];
       const pruneProjections = sessionChanged
         ? {
-            actors: reconcileActorTerminals(msg.state?.actors ?? INITIAL_STATE.actors, snapshotMessages),
-            spawned: msg.state?.spawned ?? INITIAL_STATE.spawned,
-            asyncTasks: msg.state?.asyncTasks ?? INITIAL_STATE.asyncTasks,
+            actors: reconcileActorTerminals(
+              staleActorSnapshot ? INITIAL_STATE.actors : (msg.state?.actors ?? INITIAL_STATE.actors),
+              snapshotMessages,
+            ),
+            spawned: staleActorSnapshot
+              ? INITIAL_STATE.spawned : (msg.state?.spawned ?? INITIAL_STATE.spawned),
+            asyncTasks: staleActorSnapshot
+              ? INITIAL_STATE.asyncTasks : (msg.state?.asyncTasks ?? INITIAL_STATE.asyncTasks),
           }
         : {
             actors: reconcileActorTerminals(
-              msg.state?.actors
+              msg.state?.actors && !staleActorSnapshot
                 ? reconcileActorCards(state.actors, msg.state.actors)
                 : state.actors,
               snapshotMessages,
             ),
-            spawned: msg.state?.spawned
+            spawned: msg.state?.spawned && !actorEpochMismatch
               ? reconcileSpawned(state.spawned, msg.state.spawned)
               : state.spawned,
+            asyncTasks: msg.state?.asyncTasks && !actorEpochMismatch
+              ? msg.state.asyncTasks : state.asyncTasks,
           };
       const notices = sessionChanged
         ? state.notices.filter((notice) => !notice.sessionId || notice.sessionId === nextSessionId)
         : state.notices;
+      const acceptsActorEpoch = !actorEpochMismatch;
+      const actorProjectionEpoch = acceptsActorEpoch
+        ? (incomingActorEpoch ?? state.actorProjectionEpoch)
+        : state.actorProjectionEpoch;
+      const actorProjectionRevision = acceptsActorEpoch && state.actorProjectionEpoch === null
+        && incomingActorEpoch !== null
+        ? (incomingActorRevision ?? 0)
+        : acceptsActorEpoch
+          ? Math.max(state.actorProjectionRevision, incomingActorRevision ?? 0)
+          : state.actorProjectionRevision;
       return { ...state, ...msg.state, ...pruneProjections, notices,
+        actorProjectionEpoch,
+        actorProjectionRevision,
         pendingConfirm: sessionChanged ? (msg.state?.pendingConfirm ?? null) : state.pendingConfirm,
         lastError: keepSpendError ? 'spend-limit-reached' : null, rateLimit: null, cost: { ...state.cost,
         session: msg.state?.session?.cost ?? state.cost.session,

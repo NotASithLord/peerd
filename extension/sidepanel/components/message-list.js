@@ -78,9 +78,13 @@ const actorOutcomeUnknownFailure = (_text) =>
  * @property {string} [tool_use_id]
  * @property {boolean} [is_error]
  * @property {string} [content]
+ * @property {boolean} [actorTerminal]
  * @property {boolean} [actorOutcomeKnown]
  * @property {boolean} [actorPerformed]
  * @property {boolean} [actorAborted]
+ * @property {string} [actorCorrelationId]
+ * @property {string} [actorDeliveryId]
+ * @property {string[]} [actorDeliveryIds]
  * @property {{ primitive?: string, durationMs?: number, dispatch?: string, gates: Array<{ name: string, reason: string, allowed: boolean }>, browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }> }|null} [meta]
  */
 
@@ -420,23 +424,25 @@ const AgentTabNotice = {
 const groupMessages = (messages) => {
   /** @type {Array<{ type: 'user', message: ChatMessage } | { type: 'actor-reply', message: ChatMessage } | { type: 'assistant', message: ChatMessage, toolResults: PairedTool[] }>} */
   const out = [];
-  /** @type {Map<string, ToolResult>} */
-  const resultsByToolUseId = new Map();
-  // First pass: collect tool results into a flat map.
-  // why `msg` not `m`: `m` is the Mithril alias imported at module top;
-  // reusing it as a loop var shadows it (matches the `msg` loop below).
-  for (const msg of messages) {
-    if (msg.role === 'user' && Array.isArray(msg.toolResults)) {
-      for (const tr of /** @type {ToolResult[]} */ (msg.toolResults)) {
-        if (tr?.tool_use_id) resultsByToolUseId.set(tr.tool_use_id, tr);
-      }
-    }
-  }
+  /** @type {Map<string, PairedTool[]>} */
+  const unmatchedByToolUseId = new Map();
   for (const msg of messages) {
     if (msg.role === 'user') {
+      // Pair each result with the closest preceding unmatched occurrence. Tool
+      // ids are provider-authored and can repeat on later model calls, so a
+      // transcript-global id map would attach the newest result to old calls.
+      if (Array.isArray(msg.toolResults)) {
+        for (const tr of /** @type {ToolResult[]} */ (msg.toolResults)) {
+          if (!tr?.tool_use_id) continue;
+          const unmatched = unmatchedByToolUseId.get(tr.tool_use_id);
+          const pair = unmatched?.pop();
+          if (pair) pair.toolResult = tr;
+          if (unmatched?.length === 0) unmatchedByToolUseId.delete(tr.tool_use_id);
+        }
+      }
       const isToolResultOnly = (!msg.content || msg.content === '')
         && Array.isArray(msg.toolResults) && msg.toolResults.length > 0;
-      if (isToolResultOnly) continue; // pair with prior assistant via map
+      if (isToolResultOnly) continue;
       // An actor's reply-wake is synthetic (machine-delivered) but it IS the
       // news the user is waiting on — surface it as its own attributed bubble
       // at its place in the transcript instead of burying it in the tool card.
@@ -448,10 +454,13 @@ const groupMessages = (messages) => {
       out.push({ type: 'user', message: msg });
     } else if (msg.role === 'assistant') {
       const toolUses = Array.isArray(msg.toolUses) ? /** @type {ToolUse[]} */ (msg.toolUses) : [];
-      const paired = toolUses.map((tu) => ({
-        toolUse: tu,
-        toolResult: resultsByToolUseId.get(tu.id) ?? null,
-      }));
+      const paired = /** @type {PairedTool[]} */ (toolUses.map(
+        (tu) => ({ toolUse: tu, toolResult: null })));
+      for (const pair of paired) {
+        const unmatched = unmatchedByToolUseId.get(pair.toolUse.id) ?? [];
+        unmatched.push(pair);
+        unmatchedByToolUseId.set(pair.toolUse.id, unmatched);
+      }
       out.push({ type: 'assistant', message: msg, toolResults: paired });
     }
   }
@@ -997,30 +1006,50 @@ const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, 
  *   loadActor?: (sessionId: string) => void, peerName?: string, depth: number, ui: ToolCallState }} a
  */
 const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, loadActor, peerName, depth, ui }) => {
-  const card = actors?.[toolUse.id] ?? null;
+  // A host-proven pre-effect terminal result never emitted actor-start. If an
+  // id-keyed live card exists, it belongs to an older provider occurrence and
+  // must not override this call's durable Not run result.
+  const preEffectTerminal = toolResult?.actorTerminal === true
+    && toolResult?.actorPerformed === false;
+  const keyedCard = actors?.[toolUse.id] ?? null;
+  const resultCorrelationIds = toolResult ? [
+    toolResult.actorCorrelationId,
+    toolResult.actorDeliveryId,
+    ...(Array.isArray(toolResult.actorDeliveryIds) ? toolResult.actorDeliveryIds : []),
+  ].filter((id) => typeof id === 'string') : [];
+  // Actor cards remain id-keyed for compact state, but provider tool-use ids can
+  // repeat across turns. Once a durable result exists, borrow the live card only
+  // when host correlation proves it belongs to this exact occurrence.
+  const cardMatchesResult = !toolResult || (
+    typeof keyedCard?.actorCorrelationId === 'string'
+    && resultCorrelationIds.includes(keyedCard.actorCorrelationId)
+  );
+  const card = preEffectTerminal || !cardMatchesResult ? null : keyedCard;
   const task = String(toolUse.input?.message ?? '');
   const who = card?.name ?? card?.instanceId ?? toolUse.input?.to ?? '';
   // DESIGN-18: an API actor is a web actor whose instance is an ORIGIN — label it
   // "<origin> integration" to match deliver()/ack + the prompt lore (not "web actor",
   // which wrongly implies a tab/DOM agent for a tabless fetch-only thing).
   const isApiIntegration = card?.kind === 'web' && /^https?:\/\//.test(String(who));
+  const resultText = toolResult ? formatResultContent(toolResult) : '';
+  const failureText = `${card?.error ?? ''} ${resultText}`;
+  const outcomeUnknown = card?.outcomeKnown === false
+    || (!card && toolResult?.actorOutcomeKnown === false);
   // The actor's own live state drives the status (the tool result is the async
   // "delivered" ack, not the actor outcome). No card yet → fall back to the ack.
-  const status = card?.error ? 'failed'
+  const status = outcomeUnknown ? 'failed'
+    : card?.error ? 'failed'
     : card?.aborted ? 'cancelled'
     : card?.streaming ? 'pending'
     : card ? 'ok'
     : (toolResult ? (toolResult.actorAborted ? 'cancelled' : toolResult.is_error ? 'failed' : 'ok')
       : (interrupted ? 'cancelled' : 'pending'));
-  const resultText = toolResult ? formatResultContent(toolResult) : '';
-  const failureText = `${card?.error ?? ''} ${resultText}`;
-  const outcomeUnknown = card?.outcomeKnown === false
-    || (!card && toolResult?.actorOutcomeKnown === false);
   const performed = card?.performed ?? (!card ? toolResult?.actorPerformed : undefined);
   const userFailure = performed === false ? actorUserFailure(failureText) : null;
   const notRun = status === 'failed' && !outcomeUnknown
     && performed === false;
-  const idpTransitRefusal = /actor_identity_provider_transit_only/i.test(failureText);
+  const idpTransitRefusal = preEffectTerminal
+    && /actor_identity_provider_transit_only/i.test(failureText);
   const cardLabel = idpTransitRefusal
     ? 'sign-in service'
     : isApiIntegration
@@ -1064,7 +1093,9 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
           : (userFailure ?? String(card.error)))
         : null,
       !card?.error && toolResult?.is_error
-        ? m('p.error-line', userFailure ?? resultText)
+        ? m('p.error-line', outcomeUnknown
+          ? actorOutcomeUnknownFailure(resultText)
+          : (userFailure ?? resultText))
         : null,
       card?.error || toolResult?.is_error
         ? null

@@ -8,6 +8,10 @@
 
 import { describe, test, expect } from 'bun:test';
 import { messageActorTool } from '../../../extension/peerd-runtime/tools/defs/message-actor.js';
+import {
+  decideNumericTabAuthority,
+  numericTabAuthorityRefusal,
+} from '../../../extension/peerd-runtime/actor/numeric-tab-authority.js';
 
 // Records the request object execute() passes to ctx.messageActor so the built
 // request is assertable. Typed `any` (like tests/.../fetch-url.test.ts) — the
@@ -98,19 +102,22 @@ describe('message_actor — case 6: strict boolean coercions', () => {
 
 describe('message_actor — case 7: pass-through of args + ctx fields', () => {
   test('preserves the typed pre-effect refusal and safe recovery content', async () => {
-    const refusal = {
-      ok: false as const,
-      error: 'actor_sensitive_tab_requires_site',
-      content: 'No actor work was started.',
-      structured: { performed: false, outcomeKnown: true },
-      outcomeKind: 'pre-effect-failure' as const,
-    };
+    const decision = decideNumericTabAuthority('https://account.test/inbox?secret=hidden', {
+      policyReady: true,
+      learned: new Set(['https://account.test']),
+    });
+    if (decision.allowed) throw new Error('expected a refusal');
+    const refusal = numericTabAuthorityRefusal(decision);
     const { ctx } = recordingCtx({ messageActor: async () => refusal });
     expect(await messageActorTool.execute({ to: '42', message: 'read it' }, ctx))
-      .toEqual({
-        ...refusal,
+      .toMatchObject({
+        ok: false,
+        error: 'actor_sensitive_tab_requires_site',
+        outcomeKind: 'pre-effect-failure',
+        structured: { performed: false, outcomeKnown: true },
         actorTerminal: true,
         actorOutcomeKnown: true,
+        actorPerformed: false,
       });
   });
 
