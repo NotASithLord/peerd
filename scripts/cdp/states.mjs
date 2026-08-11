@@ -2627,20 +2627,28 @@ export const STATES = [
       const branched = imported?.id ? await evalIn(ctx.page,
         `chrome.runtime.sendMessage({ type: 'apps/repository/branch', appId: ${JSON.stringify(imported.id)}, name: 'feature/visual', checkout: true })`, true) : null;
       rec.check('visual fixture exposes existing-branch switching', branched?.ok === true, JSON.stringify(branched));
-      const page = await openWidePage(ctx, 'home/home.html');
+      const page = await openWidePage(ctx, 'home/home.html#library');
       try {
-        await waitFor(() => evalIn(page,
+        const libraryReady = await waitFor(() => evalIn(page, `
+          document.querySelector('[data-home-view="library"]')?.getAttribute('aria-current') === 'page'
+            && !!document.querySelector('.library-grid')
+        `), { budgetMs: 15_000, pollMs: 80 });
+        rec.check('visual fixture opens the Library route', !!libraryReady);
+        const appReady = await waitFor(() => evalIn(page,
           `[...document.querySelectorAll('.library-name')].some((n) => n.textContent.includes('Versioned App'))`),
         { budgetMs: 20_000, pollMs: 80 });
+        rec.check('visual fixture App appears in the Library', !!appReady);
         await evalIn(page, `(() => {
           const name = [...document.querySelectorAll('.library-name')].find((n) => n.textContent.includes('Versioned App'));
           name?.closest('.library-card')?.querySelector('.library-kebab')?.click();
         })()`);
-        await waitFor(() => evalIn(page, `!![...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')`),
+        const historyActionReady = await waitFor(() => evalIn(page, `!![...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')`),
           { budgetMs: 5_000, pollMs: 50 });
+        rec.check('visual fixture exposes the History and Git action', !!historyActionReady);
         await evalIn(page, `[...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')?.click()`);
-        await waitFor(() => evalIn(page, `!!document.querySelector('.library-repository .library-commit')`),
+        const historyReady = await waitFor(() => evalIn(page, `!!document.querySelector('.library-repository .library-commit')`),
           { budgetMs: 20_000, pollMs: 80 });
+        rec.check('visual fixture renders repository history', !!historyReady);
         // Git commit IDs include the commit timestamp, so this visual fixture
         // must normalize them before capture. The surrounding branch, history,
         // controls, and layout remain production-rendered; only the inherently
