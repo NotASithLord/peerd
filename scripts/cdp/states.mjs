@@ -933,6 +933,16 @@ export const STATES = [
         await evalIn(page, `[...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')?.click()`);
         await waitFor(() => evalIn(page, `!!document.querySelector('.library-repository .library-commit')`),
           { budgetMs: 20_000, pollMs: 80 });
+        // Git commit IDs include the commit timestamp, so this visual fixture
+        // must normalize them before capture. The surrounding branch, history,
+        // controls, and layout remain production-rendered; only the inherently
+        // run-specific identifier is replaced.
+        await evalIn(page, `(() => {
+          const fixedOid = '0000000000';
+          const head = document.querySelector('.library-repository-head .muted');
+          if (head) head.textContent = head.textContent.replace(/[0-9a-f]{10}$/i, fixedOid);
+          for (const oid of document.querySelectorAll('.library-commit code')) oid.textContent = fixedOid;
+        })()`);
         await rec.visualPage('home-library-git', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
