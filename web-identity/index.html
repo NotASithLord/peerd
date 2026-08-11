@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Strict CSP: no external resources, no inline handlers, no network
+       egress. The page is a pure authenticator front-end — it must not be
+       able to exfiltrate anything even if a dependency were compromised. -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; connect-src 'none'; img-src 'none'" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Peerd identity</title>
+  <link rel="stylesheet" href="ceremony.css" />
+</head>
+<body>
+  <main class="card" aria-live="polite">
+    <h1 class="wordmark">peerd</h1>
+    <p id="prompt" class="prompt">Confirm it's you to set up Peerd on this device.</p>
+    <button id="run" class="action" type="button" disabled>Continue with a passkey</button>
+    <p id="status" class="status" role="status"></p>
+    <p class="fine">This page only verifies your passkey. It never receives your Peerd data.</p>
+  </main>
+  <script type="module" src="ceremony.js"></script>
+</body>
+</html>
