@@ -6,7 +6,9 @@
 #   - Dependabot-authored PR with GitHub-verified Dependabot commits
 #   - explicit security-only group from dependabot.yml
 #   - semver patch dependency update (minor/major fixes stay human-reviewed)
-#   - every replacement release has independently seasoned for at least 30 days
+#   - Bun replacements: patch-only resolved graph, 3 days of periodic clean
+#     GitHub/Socket observations, and no active or withdrawn malware match
+#   - Actions replacements: 30 days (no equivalent dual malware coverage)
 #   - root Bun or GitHub Actions ecosystem, no maintainer changes
 #   - manifest/lock-only Bun diff, or SHA-pinned uses:-line-only Actions diff
 #
@@ -45,6 +47,7 @@ jobs:
       !contains(github.event.pull_request.labels.*.name, 'security-autorelease')
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
     outputs:
       release-date: ${{ steps.release.outputs.release-date }}
@@ -109,6 +112,8 @@ jobs:
           GH_API_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          minimum_age_days=30
+          if [ "$ECOSYSTEM" = bun ]; then minimum_age_days=3; fi
           bun trusted/packaging/dependabot-security.ts verify \
             --repo=candidate \
             --base-sha="$BASE_SHA" \
@@ -118,7 +123,20 @@ jobs:
             --update-type="$UPDATE_TYPE" \
             --dependencies="$DEPENDENCIES" \
             --metadata="$UPDATED_DEPENDENCIES" \
-            --minimum-age-days=30
+            --minimum-age-days="$minimum_age_days"
+
+      - name: Require a continuous clean Bun malware observation window
+        if: steps.metadata.outputs.package-ecosystem == 'bun'
+        env:
+          GH_API_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          bun trusted/packaging/dependabot-security.ts verify-observations \
+            --repository="$GITHUB_REPOSITORY" \
+            --pr="$PR_NUMBER" \
+            --head-sha="$HEAD_SHA"
 
       # Lifecycle scripts are disabled. Socket and the deterministic vendoring
       # toolchain still evaluate candidate dependency bytes, which is why this
@@ -238,6 +256,8 @@ jobs:
           GH_API_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          minimum_age_days=30
+          if [ "$ECOSYSTEM" = bun ]; then minimum_age_days=3; fi
           bun trusted/packaging/dependabot-security.ts verify \
             --repo=candidate \
             --base-sha="$BASE_SHA" \
@@ -247,7 +267,7 @@ jobs:
             --update-type="$UPDATE_TYPE" \
             --dependencies="$DEPENDENCIES" \
             --metadata="$UPDATED_DEPENDENCIES" \
-            --minimum-age-days=30
+            --minimum-age-days="$minimum_age_days"
 
       - name: Download the untrusted generated patch
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -312,6 +332,7 @@ jobs:
           PREPARED_SHA: ${{ steps.commit.outputs.sha }}
           VERSION: ${{ steps.release.outputs.version }}
           VENDORED_CODEMIRROR: ${{ steps.release.outputs.vendored-codemirror }}
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
         run: |
           set -euo pipefail
           gh label create security-autorelease \
@@ -319,10 +340,14 @@ jobs:
             --color 0E8A16 \
             --description 'Verified Dependabot patch queued for automatic release' \
             --force
+          seasoning='30 days of release seasoning'
+          if [ "$ECOSYSTEM" = bun ]; then
+            seasoning='a continuous 72-hour clean GitHub and Socket observation window'
+          fi
           cat > "$RUNNER_TEMP/security-autorelease.md" <<EOF
           <!-- peerd-security-autorelease: ${PREPARED_SHA} v${VERSION} -->
           This semver-patch security update was authenticated as Dependabot-only,
-          every replacement release passed 30 days of seasoning, and the PR was
+          every replacement release passed ${seasoning}, and the PR was
           prepared as peerd v${VERSION} for a protected exact-head merge.
           Reproducible CodeMirror vendored bytes changed: ${VENDORED_CODEMIRROR}.
           EOF
@@ -418,6 +443,14 @@ jobs:
           PREPARED_SHA: ${{ steps.commit.outputs.sha }}
           PACKAGE_RUN_ID: ${{ steps.ci.outputs.package-run }}
           SECURITY_RUN_ID: ${{ steps.ci.outputs.security-run }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CANDIDATE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          GROUP: ${{ steps.metadata.outputs.dependency-group }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          DEPENDENCIES: ${{ steps.metadata.outputs.dependency-names }}
+          UPDATED_DEPENDENCIES: ${{ steps.metadata.outputs.updated-dependencies-json }}
+          GH_API_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           current_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq .head.sha)"
@@ -452,6 +485,28 @@ jobs:
           current_head="$(jq -r .head.sha <<< "$pr_json")"
           [ "$current_head" = "$PREPARED_SHA" ] \
             || { echo '::error::PR head moved while awaiting protected checks'; exit 1; }
+
+          # Re-query publication metadata and GitHub's active + withdrawn
+          # malware advisories after the exact-head Socket/OSV/security runs.
+          # This narrows the feed-change race immediately before merge.
+          minimum_age_days=30
+          if [ "$ECOSYSTEM" = bun ]; then minimum_age_days=3; fi
+          bun trusted/packaging/dependabot-security.ts verify \
+            --repo=candidate \
+            --base-sha="$BASE_SHA" \
+            --head-sha="$CANDIDATE_HEAD_SHA" \
+            --ecosystem="$ECOSYSTEM" \
+            --group="$GROUP" \
+            --update-type="$UPDATE_TYPE" \
+            --dependencies="$DEPENDENCIES" \
+            --metadata="$UPDATED_DEPENDENCIES" \
+            --minimum-age-days="$minimum_age_days"
+          if [ "$ECOSYSTEM" = bun ]; then
+            bun trusted/packaging/dependabot-security.ts verify-observations \
+              --repository="$GITHUB_REPOSITORY" \
+              --pr="$PR_NUMBER" \
+              --head-sha="$CANDIDATE_HEAD_SHA"
+          fi
 
           # Start the trusted finalizer before the merge. A GITHUB_TOKEN merge
           # does not guarantee a pull-request event, while repository_dispatch
