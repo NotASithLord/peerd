@@ -101,7 +101,15 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/home-fulltab.light.png" alt="Home (full tab) (light)" width="460"> | <img src="baselines/linux-x64/home-fulltab.dark.png" alt="Home (full tab) (dark)" width="460"> |
 
-### 12 · Settings (full tab)
+### 12 · App history and Git
+
+`home-library-git` · `full tab · 1280` — App history and remote controls in the Library.
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/home-library-git.light.png" alt="App history and Git (light)" width="460"> | <img src="baselines/linux-x64/home-library-git.dark.png" alt="App history and Git (dark)" width="460"> |
+
+### 13 · Settings (full tab)
 
 `options-fulltab` · `full tab · 1280` — The full-tab options page — providers, security, memory.
 
@@ -109,7 +117,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-fulltab.light.png" alt="Settings (full tab) (light)" width="460"> | <img src="baselines/linux-x64/options-fulltab.dark.png" alt="Settings (full tab) (dark)" width="460"> |
 
-### 13 · app-tab-failed
+### 14 · app-tab-failed
 
 `app-tab-failed`
 
@@ -117,21 +125,13 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/app-tab-failed.light.png" alt="app-tab-failed (light)" width="380"> | <img src="baselines/linux-x64/app-tab-failed.dark.png" alt="app-tab-failed (dark)" width="380"> |
 
-### 14 · eval-runner
+### 15 · eval-runner
 
 `eval-runner`
 
 | light | dark |
 | --- | --- |
 | <img src="baselines/linux-x64/eval-runner.light.png" alt="eval-runner (light)" width="380"> | <img src="baselines/linux-x64/eval-runner.dark.png" alt="eval-runner (dark)" width="380"> |
-
-### 15 · home-library-git
-
-`home-library-git`
-
-| light | dark |
-| --- | --- |
-| <img src="baselines/linux-x64/home-library-git.light.png" alt="home-library-git (light)" width="380"> | <img src="baselines/linux-x64/home-library-git.dark.png" alt="home-library-git (dark)" width="380"> |
 
 ### 16 · login-confirm
 

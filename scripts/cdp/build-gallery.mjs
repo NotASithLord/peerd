@@ -27,6 +27,7 @@ import { readdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { VISUAL_AUTHORITY, VISUAL_PLATFORM, BASELINES_ROOT } from './visual.mjs';
+import { STATES } from './states.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OUT = join(HERE, 'GALLERY.md');
@@ -48,7 +49,7 @@ const ORDER = [
   'initial-screen', 'idle-unlocked', 'completed-turn', 'multi-turn-transcript',
   'busy-thinking', 'mode-plan', 'tool-card-expanded', 'goal-running',
   'error-turn', 'sessions-list',
-  'home-fulltab', 'options-fulltab',
+  'home-fulltab', 'home-library-git', 'options-fulltab',
 ];
 const LABELS = {
   'initial-screen': ['Vault gate', 'First-run setup — the lock mark crowns the wordmark.'],
@@ -62,12 +63,40 @@ const LABELS = {
   'error-turn': ['Failed turn', 'The error banner + failure-class chip.'],
   'sessions-list': ['Chats', 'The sessions list — active row highlighted.'],
   'home-fulltab': ['Home (full tab)', 'The large in-browser view — nav rail, app library.'],
+  'home-library-git': ['App history and Git', 'App history and remote controls in the Library.'],
   'options-fulltab': ['Settings (full tab)', 'The full-tab options page — providers, security, memory.'],
 };
 // States captured at the wide (full-tab) viewport rather than the 400px panel.
-const WIDE = new Set(['home-fulltab', 'options-fulltab']);
+const WIDE = new Set(['home-fulltab', 'home-library-git', 'options-fulltab']);
 
-const present = new Set(readdirSync(dir).filter((f) => f.endsWith('.png')).map((f) => f.replace(/\.(light|dark)\.png$/, '')));
+// The state registry and committed baseline inventory are one contract. Enforce
+// it here because this command already runs in CI: an orphan baseline otherwise
+// appears in the gallery while its state silently stops running.
+const baselineFiles = readdirSync(dir).filter((file) => file.endsWith('.png'));
+const baselineThemes = new Map();
+for (const file of baselineFiles) {
+  const match = /^(.+)\.(light|dark)\.png$/.exec(file);
+  if (!match) {
+    console.error(`unexpected baseline filename: ${file}`);
+    process.exit(1);
+  }
+  if (!baselineThemes.has(match[1])) baselineThemes.set(match[1], new Set());
+  baselineThemes.get(match[1]).add(match[2]);
+}
+const visualStateNames = STATES.filter((state) => state.kind === 'visual').map((state) => state.name);
+const visualStateSet = new Set(visualStateNames);
+const duplicateStates = visualStateNames.filter((name, index) => visualStateNames.indexOf(name) !== index);
+const missingBaselines = visualStateNames.filter((name) =>
+  !baselineThemes.get(name)?.has('light') || !baselineThemes.get(name)?.has('dark'));
+const orphanBaselines = [...baselineThemes.keys()].filter((name) => !visualStateSet.has(name));
+if (duplicateStates.length || missingBaselines.length || orphanBaselines.length) {
+  if (duplicateStates.length) console.error(`duplicate visual states: ${[...new Set(duplicateStates)].join(', ')}`);
+  if (missingBaselines.length) console.error(`visual states missing light/dark baselines: ${missingBaselines.join(', ')}`);
+  if (orphanBaselines.length) console.error(`baselines without visual states: ${orphanBaselines.join(', ')}`);
+  process.exit(1);
+}
+
+const present = new Set(baselineThemes.keys());
 // why .sort() on the tail: ORDER is the curated tour, but anything NOT in it kept
 // readdirSync order — which is the filesystem's, not a defined one. A macOS dev
 // and the Linux CI authority enumerate the same directory differently, so the
