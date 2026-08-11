@@ -22,11 +22,25 @@ const createMeshFabric = () => {
   type Member = { did: string; onPeer: Set<(a: { did: string }) => void>; onDirect: Set<(a: { from: string; data: any }) => void> };
   const rooms = new Map<string, Map<string, Member>>();
   const queue: Array<() => void> = [];
-  const flush = async () => {
-    for (let i = 0; i < 80 && queue.length; i++) {
-      for (const fn of queue.splice(0)) fn();
+  // Drain until the fabric is genuinely quiescent.
+  //
+  // why not "loop while queue.length": a handler awaits real crypto (SHA-256
+  // over a surface, Ed25519 verification), so the queue is repeatedly EMPTY
+  // while the next frame is still being produced. Stopping at the first empty
+  // queue makes the drain finish early, which is only visible as a flake on a
+  // loaded machine. Instead, keep turning the event loop until several
+  // consecutive turns produce no new work.
+  const flush = async ({ idleTurns = 8, maxTurns = 4000 } = {}) => {
+    let idle = 0;
+    for (let turn = 0; turn < maxTurns && idle < idleTurns; turn++) {
+      if (queue.length === 0) {
+        idle++;
+      } else {
+        idle = 0;
+        for (const fn of queue.splice(0)) fn();
+      }
       await Promise.resolve();
-      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
     }
   };
   const meshFor = (did: string) => ({
@@ -138,12 +152,14 @@ describe('finished-marker rehearsal (Bun, in-memory mesh)', () => {
     const receivedSessions: any[] = [];
     const receivedApps: any[] = [];
     const receivedWorkspaces: any[] = [];
+    const appliedSurfaces = new Set<string>();
     let receivedMemory: any = null;
     let receivedSettings: any = null;
     const receiver = createSyncReceiver({
       coordinator: coordB, sourceDeviceDid: inputsA.deviceIdentity.did, send: sendFromB,
       applySurface: async (surface, bytes) => {
         const payload = decodeSurface(bytes);
+        appliedSurfaces.add(surface);
         if (surface === 'sessions') receivedSessions.push(...payload.sessions);
         if (surface === 'memory') receivedMemory = payload.memory;
         if (surface === 'settings') receivedSettings = payload.settings;
@@ -156,12 +172,18 @@ describe('finished-marker rehearsal (Bun, in-memory mesh)', () => {
 
     // B accepts A's offer and drives the pulls to completion.
     let result: any = null;
-    const done = receiver.restore().then((r) => { result = r; return r; });
+    void receiver.restore().then((r) => { result = r; });
     await sendFromA(inputsB.deviceIdentity.did, source.offer());
-    // Drain the mesh until the restore resolves (bounded so a real hang fails
-    // instead of spinning). maybeComplete resolves `done` mid-flush.
-    for (let i = 0; i < 100 && !result; i++) await flush();
-    await done;
+    // One quiescent drain carries the whole offer/pull/chunk/apply exchange.
+    // If the restore did not complete, say WHAT was outstanding rather than
+    // asserting on a null and leaving the next reader guessing.
+    await flush();
+    if (!result) {
+      throw new Error(
+        `restore did not complete: wanted=${JSON.stringify(receiver.wantedSurfaces())} `
+        + `applied=${JSON.stringify([...appliedSurfaces])}`,
+      );
+    }
 
     expect(result).toEqual({ ok: true, applied: expect.arrayContaining(['sessions', 'memory', 'settings', 'apps', 'workspaces']) });
     // The chat travelled; the actor session did not.
