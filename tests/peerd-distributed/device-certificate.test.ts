@@ -1,4 +1,4 @@
-// Device certificates + the revocation roster — the person-root-signed
+// Device certificates + the revocation roster: the person-root-signed
 // authority chain every self-device decision hangs off. The adversarial
 // cases here map one-to-one onto the portable-identity issue's invariants:
 // a certificate from a DIFFERENT root, a certificate for a DIFFERENT key

@@ -40,13 +40,13 @@ Four records, all Ed25519-signed by the person root, all offline-verifiable:
 
 Rosters and bindings are **snapshots**, not diffs, with a monotonically
 increasing `seq`. Add, remove, rotate, and revoke are all "sign the next
-snapshot" — the person DID never changes. Anti-rollback matches the DHT's
+snapshot": the person DID never changes. Anti-rollback matches the DHT's
 mutable-item rule: strictly higher `seq`, same person; equal `seq` is a fork,
 not an upgrade.
 
 why a roster instead of certificate expiry: a browser extension has no clock
 a verifier can trust against a peer's forged timestamp, and short-lived
-certificates would need the person root online at renewal — exactly the
+certificates would need the person root online at renewal: exactly the
 always-on infrastructure peerd does not have.
 
 ## 2. Trust model
@@ -115,14 +115,14 @@ sign; the certificate says whose device is signing.
 
 Three proofs, three jobs. The **possession MAC** gates challenge minting so a
 stranger on the topic cannot even make the sponsor allocate state. The
-**assertion** is the load-bearing "the person is present and approved, now" —
+**assertion** is the load-bearing "the person is present and approved, now"
 a bearer MAC must never be grant-sufficient. The **channel binding** welds the
 assertion to the key the grant will be sealed to, so a relay that substitutes
 its own key invalidates the assertion it is relaying.
 
 The grant's AES-GCM key is HKDF-salted with the whole transcript (challenge,
 credential, both ephemeral keys), so a recorded grant is undecryptable in any
-other exchange — the closed PR's "same request key accepts the same response
+other exchange: the closed PR's "same request key accepts the same response
 repeatedly" has no analogue.
 
 A hostile sponsor cannot substitute a different identity: it would need a
@@ -154,7 +154,7 @@ its identity.
 - Self and enrollment spaces are domain-separated.
 
 Discovery yields **candidates only**. Joining or guessing a topic establishes
-nothing — proven in `self-coordinator.test.ts`, where an intruder who shares
+nothing, proven in `self-coordinator.test.ts`, where an intruder who shares
 the room is refused for lacking a same-person certificate.
 
 ## 5. Same-device authentication sequence
@@ -176,7 +176,7 @@ the room is refused for lacking a same-person certificate.
 ```
 
 Proof bytes carry the domain tag `peerd/self-device-auth/v1`, so they can
-never verify as an envelope, DHT item, certificate, or manifest — and those
+never verify as an envelope, DHT item, certificate, or manifest, and those
 can never verify as a proof (asserted in `self-handshake.test.ts`).
 
 ## 6. State-transfer sequence
@@ -204,7 +204,7 @@ can never verify as a proof (asserted in `self-handshake.test.ts`).
 ```
 
 Surfaces apply independently, so an interrupted transfer leaves whole
-surfaces present or absent — never half-written. Pulls are idempotent, so
+surfaces present or absent: never half-written. Pulls are idempotent, so
 retry is the whole recovery story. The surface vocabulary is **closed**: a
 name outside `SYNC_SURFACES` is refused, never "applied generically".
 
@@ -259,7 +259,7 @@ Tests: eleven new files under `tests/peerd-distributed/`,
 ## 9. The hosted component, and exactly what it can observe
 
 One static page at `https://id.peerd.ai/`. It has no server, no storage, no
-database, and a CSP with `connect-src 'none'` — it cannot make a network
+database, and a CSP with `connect-src 'none'`, it cannot make a network
 request at all.
 
 Per ceremony it observes: the challenge and nonce the extension chose, the
@@ -268,12 +268,12 @@ PRF output when requested. That is the entire list.
 
 It never receives: the identity seed, the capsule or capsule key, the vault
 key, any chat, memory, App, workspace, setting, or credential. Peer sync does
-not traverse it — the sync protocol contains no URL or origin.
+not traverse it: the sync protocol contains no URL or origin.
 
 If the page were compromised, the worst it can do is refuse to run or hand
 back an authenticator result. It cannot forge an assertion (no credential
 private key; the authenticator holds it behind platform user verification),
-and a PRF output alone is not enrollment authority — the grant additionally
+and a PRF output alone is not enrollment authority: the grant additionally
 requires a fresh assertion the sponsor verifies against the root-signed
 binding.
 
@@ -286,7 +286,7 @@ Ed25519/HMAC/AES-GCM and JSON. Only custody hosting differs.
 Live interoperability is bounded by an existing platform gap, not by this
 design: `peerd-distributed/` ships **only in preview-Chrome** (the packaging
 predicate is `channel === 'preview' && browser !== 'firefox'`), and Firefox
-has no mesh host at all (issue #376 — no offscreen API, and the mesh needs a
+has no mesh host at all (issue #376: no offscreen API, and the mesh needs a
 keyless document). So today:
 
 | Direction | Status |
@@ -339,7 +339,7 @@ bun test ./tests/peerd-distributed/self-transfer.e2e.test.ts
 That rehearses the finished-marker scenario: two devices bootstrap custody
 under one person, discover each other on a derived rendezvous room, mutually
 authenticate to `self-device`, and transfer chats, memory, settings, an App,
-and a workspace — with real certificates, real challenge-response, real
+and a workspace, with real certificates, real challenge-response, real
 chunking and hashing. Only WebRTC is substituted (an in-memory mesh).
 
 The full suite for this arc:
@@ -367,7 +367,7 @@ deployed ceremony page.
    gated by tests, but hosting, TLS, and related-origin metadata belong to the
    site repository.
 4. **Preview-Chrome only** (§10).
-5. **Snapshot transfer, not ongoing sync.** Deliberate — see §14.
+5. **Snapshot transfer, not ongoing sync.** Deliberate, see §14.
 6. **Conflict behavior is keep-destination.** A session id already present on
    the receiver is skipped, not merged.
 7. **No transport-level device-key switchover yet.** Mesh envelopes, Agent

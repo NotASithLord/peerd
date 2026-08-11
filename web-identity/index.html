@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <!-- Strict CSP: no external resources, no inline handlers, no network
-       egress. The page is a pure authenticator front-end — it must not be
+       egress. The page is a pure authenticator front-end, it must not be
        able to exfiltrate anything even if a dependency were compromised. -->
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; connect-src 'none'; img-src 'none'" />

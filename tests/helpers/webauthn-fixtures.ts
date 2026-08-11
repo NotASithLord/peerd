@@ -1,5 +1,5 @@
 // Test fixtures that fabricate REAL WebAuthn assertion wire shapes with
-// WebCrypto keys — genuine signatures over genuine authenticatorData ||
+// WebCrypto keys, genuine signatures over genuine authenticatorData ||
 // H(clientDataJSON), so the verifier under test does full cryptographic
 // work, not shape checking. The ECDSA path DER-encodes signatures exactly
 // as an authenticator would (webauthn-verify.js must convert them back).

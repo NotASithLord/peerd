@@ -61,7 +61,7 @@ export const DURABILITY_TIERS = Object.freeze({
  *   person's device. `portable` gates the file box; `personPortable` gates
  *   the sync offer. Device-bound state is never either.
  * @property {string} [syncSurface] the self/sync.js SYNC_SURFACES name this
- *   store shapes into, when personPortable — the translation the sync host
+ *   store shapes into, when personPortable: the translation the sync host
  *   uses without knowing store internals.
  * @property {boolean} [deviceBound] structurally untransferable state
  * @property {{ kvKeys?: string[], kvPrefixes?: string[], idbStores?: string[],
@@ -90,11 +90,11 @@ export const DURABILITY_TIERS = Object.freeze({
  */
 export const STORE_REGISTRY = Object.freeze([
   // Conversation state: durable across service-worker generations, but its
-  // meaning dies with the SESSION it belongs to — so it stays non-portable
+  // meaning dies with the SESSION it belongs to, so it stays non-portable
   // to the FILE box (a stranger reading the JSON would read your chats).
   // It IS personPortable: a proven self-device may replicate the durable
   // conversation content (a stripped record; actor/runtime bookkeeping does
-  // not travel — self-sync-surfaces.js owns that projection).
+  // not travel, self-sync-surfaces.js owns that projection).
   Object.freeze({
     store: 'sessions', version: 1, tier: DURABILITY_TIERS.SESSION, portable: false,
     personPortable: true, syncSurface: 'sessions',
@@ -129,16 +129,16 @@ export const STORE_REGISTRY = Object.freeze([
     physical: Object.freeze({ kvKeys: ['hooks.user.v1'] }),
   }),
   // Consent is granted to THIS install by THIS user; a transplanted grant
-  // would be consent nobody gave here, so it never travels — NOT portable,
+  // would be consent nobody gave here, so it never travels: NOT portable,
   // NOT personPortable (issue invariant 13: permission grants never arrive
   // via profile sync). (The durable tool_grants object store exists in the
-  // schema but nothing writes it yet — live grants are in-memory.)
+  // schema but nothing writes it yet, live grants are in-memory.)
   Object.freeze({
     store: 'permission-grants', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
     physical: Object.freeze({ idbStores: ['tool_grants'], kvKeys: ['learnedOrigins.v1'] }),
   }),
   // Append-only local record; importing one elsewhere would misattribute
-  // history to a device that never did it — NOT personPortable either
+  // history to a device that never did it: NOT personPortable either
   // (issue invariant 14: audit provenance is not rewritten).
   Object.freeze({
     store: 'audit', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
@@ -151,7 +151,7 @@ export const STORE_REGISTRY = Object.freeze([
     physical: Object.freeze({ idbStores: ['dpop_keys'] }),
   }),
   // The per-install device key (portable-identity arc). Same custody as the
-  // did:key root — a vault secret under the device-key prefix — but UNLIKE
+  // did:key root: a vault secret under the device-key prefix, but UNLIKE
   // the root it is deviceBound: it must NEVER travel (issue invariant 9).
   // A fresh install mints its own and gets it certified during enrollment.
   Object.freeze({
@@ -166,12 +166,12 @@ export const STORE_REGISTRY = Object.freeze([
     store: 'engine-registries', version: 1, tier: DURABILITY_TIERS.SESSION, portable: false, deviceBound: true,
     physical: Object.freeze({ idbStores: ['vms', 'notebooks', 'apps'] }),
   }),
-  // OPFS handles are device-bound and must remain so — but the workspace
+  // OPFS handles are device-bound and must remain so, but the workspace
   // CONTENTS are not inherently device-bound. The `opfs-workspaces` store's
   // physical HANDLES never travel (deviceBound); the portable-identity arc
   // adds a distinct LOGICAL snapshot surface (self-sync-surfaces.js walks
   // the tree into path→bytes and re-materializes it into a fresh receiving
-  // OPFS root — never a platform handle). That logical surface is what
+  // OPFS root: never a platform handle). That logical surface is what
   // `personPortable`+`syncSurface:'workspaces'` names here; the deviceBound
   // flag still forbids the file box and the raw-handle path.
   Object.freeze({
@@ -182,7 +182,7 @@ export const STORE_REGISTRY = Object.freeze([
   // Manifest metadata shares the `apps` blob (see engine-registries). Current
   // App files live in OPFS; peerd-app-bodies is a reserved legacy database.
   // personPortable via LOGICAL App artifacts (manifest + content-addressed
-  // body/assets), never the local IDB handle — self-sync-surfaces.js shapes
+  // body/assets), never the local IDB handle, self-sync-surfaces.js shapes
   // them; the receiver re-installs into fresh local storage.
   Object.freeze({
     store: 'app-manifests', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
@@ -225,7 +225,7 @@ export const storeEntry = (name) => STORE_REGISTRY.find((entry) => entry.store =
 export const portableStores = () => STORE_REGISTRY.filter((entry) => entry.portable);
 
 /**
- * Surfaces a VERIFIED SELF-DEVICE SYNC may carry (the broader axis) —
+ * Surfaces a VERIFIED SELF-DEVICE SYNC may carry (the broader axis)
  * settings/providerEndpoints are transfer sections rather than registry
  * stores, so the sync host adds them explicitly; this returns the registry
  * stores that opt in.

@@ -1,6 +1,6 @@
 // The custody composition: a founder bootstraps the self-device world, an
 // enrolled device joins it, and both end up able to run the coordinator and
-// mutually authenticate — the whole "device key + certificate + discovery
+// mutually authenticate: the whole "device key + certificate + discovery
 // secret" chain, end to end, over a fake vault secret store.
 
 import { describe, test, expect } from 'bun:test';
@@ -56,7 +56,7 @@ describe('self-device custody', () => {
     const founder = await ensureFounderCustody({ io: desktopVault, label: 'Desktop', now: 1 });
 
     // The enrollee (Laptop) adopted the SAME person identity (grant carried
-    // the root material) — simulate by copying the identity secret across.
+    // the root material), simulate by copying the identity secret across.
     const laptopVault = fakeVault({
       'distributed/identity/v1': desktopVault.map.get('distributed/identity/v1')!,
     });

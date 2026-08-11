@@ -1,19 +1,19 @@
 // @ts-check
-// peerd-distributed/identity/device-key.js — the per-install device key.
+// peerd-distributed/identity/device-key.js: the per-install device key.
 //
-// why a second Ed25519 keypair: the person root (keypair.js) is PORTABLE —
+// why a second Ed25519 keypair: the person root (keypair.js) is PORTABLE
 // backup, recovery, and enrollment deliberately move it between installs.
 // A portable root is exactly the wrong key to prove "this specific
 // installation": every enrolled device could impersonate every other, and a
 // stolen backup would impersonate them all. The device key is the opposite
-// contract — minted fresh on this install, never exported, never enrolled
+// contract, minted fresh on this install, never exported, never enrolled
 // anywhere. Its authority comes from a person-root-signed certificate
 // (device-certificate.js), not from being carried around.
 //
 // Custody mirrors keypair.js exactly: material lives as a vault secret and
 // IO is injected. The secret name sits under the 'distributed/device-key/'
 // prefix that transfer.js structurally excludes from every export payload
-// (NON_EXPORTABLE_SECRET_PREFIXES) — the "never leaves the installation"
+// (NON_EXPORTABLE_SECRET_PREFIXES): the "never leaves the installation"
 // rule is mechanism, not caller discipline.
 
 import {
@@ -26,7 +26,7 @@ const MAX_DEVICE_ID_LENGTH = 64;
 
 /**
  * Stored shape: the keypair material plus a stable install identifier the
- * device certificate names. deviceId is minted once with the key — a fresh
+ * device certificate names. deviceId is minted once with the key: a fresh
  * key is a fresh device, so the two share one lifecycle.
  * @typedef {{ seed: string, pub: string, deviceId: string }} DeviceKeyMaterial
  */
@@ -39,7 +39,7 @@ const MAX_DEVICE_ID_LENGTH = 64;
  * @param {{
  *   getSecret: (name: string) => Promise<string | null>,
  *   setSecret: (name: string, value: string) => Promise<void>,
- * }} io — the vault's secret surface (or any same-shaped store in tests)
+ * }} io: the vault's secret surface (or any same-shaped store in tests)
  * @param {{ newDeviceId?: () => string }} [opts]
  * @returns {Promise<DeviceKeyMaterial & { did: string }>}
  */

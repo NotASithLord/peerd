@@ -1,16 +1,16 @@
 // @ts-check
-// peerd-runtime/transfer/enrollment-flow.js — the "Use my existing Peerd"
+// peerd-runtime/transfer/enrollment-flow.js: the "Use my existing Peerd"
 // flow, as a pure state machine.
 //
 // The rendered gate (sidepanel) is a thin projection of this: every step,
-// every user-facing sentence, and every branch (including the awkward ones —
+// every user-facing sentence, and every branch (including the awkward ones
 // no devices online, restore declined, transfer interrupted) is decided
 // here, so the flow is exhaustively testable without a browser and the copy
 // is reviewable in one place.
 //
 // The copy rule from the issue's §16: plain language in the primary path.
 // No DID, no "HMAC rendezvous", no "device certificate", no "recovery
-// capsule" — those belong in diagnostics, which this module exposes
+// capsule", those belong in diagnostics, which this module exposes
 // separately (`diagnostics`) for an advanced panel.
 //
 // The steps, in order:
@@ -136,7 +136,7 @@ export const initialEnrollmentState = () => ({
 });
 
 /**
- * The reducer. Returns the next state and the actions the host performs —
+ * The reducer. Returns the next state and the actions the host performs
  * pure, so the whole flow (including every refusal branch) is unit-testable.
  *
  * @param {EnrollmentState} state
@@ -158,7 +158,7 @@ export const enrollmentStep = (state, event) => {
     case 'ceremony-complete':
       return next({ step: 'enrolling' }, [{ type: 'enroll-device', assertion: event.assertion }]);
     case 'ceremony-failed':
-      // A cancelled passkey prompt is not a hard failure — back to the fork.
+      // A cancelled passkey prompt is not a hard failure, back to the fork.
       return next({
         step: event.reason === 'cancelled' ? 'choose' : 'failed',
         failure: event.reason ?? 'ceremony-failed',
@@ -172,7 +172,7 @@ export const enrollmentStep = (state, event) => {
       return next({ step: 'failed', failure: event.reason ?? 'enroll-failed' });
 
     // Discovery results. An empty roster is a legitimate outcome, NOT an
-    // error: §12 — say so clearly, keep the device enrolled, offer the
+    // error: §12, say so clearly, keep the device enrolled, offer the
     // manual fallback, never pretend recovery succeeded.
     case 'devices-found':
       if (!event.devices?.length) return next({ step: 'none-online', devices: [] });
@@ -201,7 +201,7 @@ export const enrollmentStep = (state, event) => {
     case 'surface-applied':
       return next({ appliedSurfaces: [...state.appliedSurfaces, event.surface] });
     case 'transfer-complete':
-      // Only now ask about credentials — an explicit, separate decision.
+      // Only now ask about credentials: an explicit, separate decision.
       return state.secretsOffered && state.secretsDecision === null
         ? next({ step: 'secrets' })
         : next({ step: 'done' });
@@ -224,7 +224,7 @@ export const enrollmentStep = (state, event) => {
 };
 
 /**
- * The advanced/diagnostics view — where the cryptographic vocabulary is
+ * The advanced/diagnostics view, where the cryptographic vocabulary is
  * allowed (and only here).
  * @param {EnrollmentState} state
  * @param {{ personDid?: string, deviceDid?: string, rendezvousTopic?: string }} [detail]

@@ -1,7 +1,7 @@
 // The portable-identity arc's registry reclassification: the new
 // `personPortable` / `syncSurface` axis and the exclusions that back the
 // issue's §10 + §13 invariants. These lock in WHICH surfaces a verified
-// self-device sync may carry — and, more importantly, which it must not.
+// self-device sync may carry, and, more importantly, which it must not.
 
 import { describe, test, expect } from 'bun:test';
 import {

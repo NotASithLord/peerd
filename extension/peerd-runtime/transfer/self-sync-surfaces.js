@@ -1,12 +1,12 @@
 // @ts-check
-// peerd-runtime/transfer/self-sync-surfaces.js — the runtime side of
+// peerd-runtime/transfer/self-sync-surfaces.js: the runtime side of
 // self-device state transfer: shaping durable stores INTO the logical sync
 // surfaces (self/sync.js) on the source, and materializing them on the
 // receiver.
 //
 // This is the "durable content vs device-local bookkeeping" separation the
 // issue demands, made concrete per surface. Pure functions over INJECTED IO
-// — no chrome.*, no dweb import — so every projection is Bun-testable and
+// - no chrome.*, no dweb import, so every projection is Bun-testable and
 // the file ships in store packages (it names no dweb module path; the store
 // artifact verifier greps the shipped bytes, comments included). The sync
 // host calls a shaper for a pulled surface and an applier on the receiver;
@@ -17,7 +17,7 @@
 //   settings           explicit values only (already the export shape)
 //   providerEndpoints  user-added endpoints (re-validated on apply)
 //   memory             memory.exportAll() payload (its own merge on apply)
-//   hooks              user hook records — applied DISABLED + UNTRUSTED
+//   hooks              user hook records, applied DISABLED + UNTRUSTED
 //   skills             metadata only (bodies reinstall from origin)
 //   sessions           conversation content with ALL actor/runtime
 //                      bookkeeping stripped (portableSession below)
@@ -29,7 +29,7 @@
 // why NOT import the dweb sync module here: the dweb boundary forbids core
 // code from importing that module at all, and this file ships in store
 // packages. The surface encode/decode is plain JSON over the store-safe
-// shared/bundle primitives — the SAME bytes the dweb sync module's
+// shared/bundle primitives: the SAME bytes the dweb sync module's
 // encode/decodeSurfacePayload produce, kept in lockstep by their shared
 // JSON+utf8 shape (self-sync-surfaces.test.ts round-trips it).
 
@@ -40,10 +40,10 @@ import { utf8, fromUtf8 } from '/shared/bundle/bytes.js';
 // content (the messages, model, title, cost, timestamps) and DEVICE-LOCAL
 // runtime bookkeeping (actor lineage, instance handles, origin authority,
 // live prewalk/trim state). Only the former is a person's; the latter is
-// meaningless — or dangerous — on another install (issue §10: instantiate
+// meaningless, or dangerous, on another install (issue §10: instantiate
 // fresh environments, don't transplant handles).
 
-// Fields that are DEVICE-LOCAL runtime bookkeeping — never travel.
+// Fields that are DEVICE-LOCAL runtime bookkeeping: never travel.
 const SESSION_LOCAL_FIELDS = Object.freeze([
   'grantedTools', 'spawnedTrusted', 'instanceId', 'actorType', 'backing',
   'originState', 'review', 'prewalk', 'permissionMode', 'confirmActions',
@@ -171,7 +171,7 @@ export const applyAppsSurface = async (payload, { existingHashes, installApp }) 
  * A workspace snapshot: a flat map of relative path -> base64 bytes for one
  * logical workspace (a Notebook/Pod root). The source walks the OPFS tree
  * (opfsHelpers.list/readBytes); the receiver materializes into a FRESH root
- * (opfsHelpers.write) — no platform handle ever crosses.
+ * (opfsHelpers.write): no platform handle ever crosses.
  * @param {{ workspaces: Array<{ id: string, kind: string, files: Record<string, string> }> }} args
  */
 export const shapeWorkspacesSurface = ({ workspaces }) => ({
@@ -202,7 +202,7 @@ export const applyWorkspacesSurface = async (payload, { materializeWorkspace }) 
 // ── the surface encode/decode seam the sync host uses ────────────────
 
 /**
- * Encode a shaped surface payload into transferable bytes — the exact
+ * Encode a shaped surface payload into transferable bytes: the exact
  * JSON+utf8 shape self/sync.js encodeSurfacePayload produces.
  * @param {unknown} shaped
  */

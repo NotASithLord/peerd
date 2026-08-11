@@ -1,22 +1,22 @@
 // @ts-check
-// peerd-distributed/identity/device-certificate.js — person-root-signed
+// peerd-distributed/identity/device-certificate.js, person-root-signed
 // device certificates and the revocation roster.
 //
 // The trust statement a certificate makes is deliberately minimal
 // (docs/design/portable-identity/03): "this device key is authorized to act
-// as a device belonging to this person did" — no capabilities, no scopes.
+// as a device belonging to this person did": no capabilities, no scopes.
 // Anything richer belongs in a later, separately-reviewed record.
 //
 // Two record kinds, two signature domains:
-//   certificate  peerd/device-cert/v1    — issued once per device key
-//   roster       peerd/device-roster/v1  — the person's CURRENT device set,
+//   certificate  peerd/device-cert/v1, issued once per device key
+//   roster       peerd/device-roster/v1: the person's CURRENT device set,
 //                a monotonically-sequenced snapshot whose entries can mark a
 //                device revoked without changing the person did
 //
 // why a roster and not per-cert expiry: a browser extension has no reliable
 // wall clock the verifier can trust against a peer's forged timestamp, and
 // short-lived certs would need an online issuer (the person root) at renew
-// time — exactly the always-on infrastructure peerd doesn't have. Revocation
+// time: exactly the always-on infrastructure peerd doesn't have. Revocation
 // by superseding snapshot reuses the DHT records' anti-rollback shape (seq
 // only ever rises) and stays verifiable offline.
 //
@@ -73,7 +73,7 @@ const rosterSigningBytes = (roster) =>
 
 /**
  * Issue a certificate for a device key. The signer must BE the person
- * root — the resulting personDid is taken from it, never from an argument,
+ * root: the resulting personDid is taken from it, never from an argument,
  * so a caller cannot mint a certificate naming a did it doesn't control.
  *
  * @param {Object} args
@@ -105,7 +105,7 @@ export const issueDeviceCertificate = async ({
 };
 
 /**
- * Structural validation — cheap, pure, no crypto. Returns a defect string
+ * Structural validation, cheap, pure, no crypto. Returns a defect string
  * or null. Every field an untrusted peer could inflate is bounded here
  * BEFORE any base58/signature work.
  *
@@ -131,7 +131,7 @@ export const validateDeviceCertificate = (cert) => {
 
 /**
  * Full verification: structure, the person root's signature, and (when the
- * caller knows them) the bindings that make the certificate mean anything —
+ * caller knows them) the bindings that make the certificate mean anything
  * WHICH person it must chain to and WHICH device key the wire actually
  * authenticated. A certificate that verifies in isolation but names a
  * different deviceDid than the link's proven key is an impersonation
@@ -162,7 +162,7 @@ export const verifyDeviceCertificate = async (cert, { expectedPersonDid, expecte
 
 /**
  * Build a signed roster snapshot. Like certificates, personDid comes from
- * the signer. Callers pass the FULL device set every time — a roster is a
+ * the signer. Callers pass the FULL device set every time: a roster is a
  * snapshot, not a diff, so a lost update can never resurrect a revoked
  * device.
  *
@@ -233,7 +233,7 @@ export const verifyDeviceRoster = async (roster, { expectedPersonDid } = {}) => 
 /**
  * The anti-rollback rule (same shape as DHT mutable items): a roster
  * replaces a held one only when it names the same person and carries a
- * strictly higher seq. Equal seq is NOT an upgrade — accepting an
+ * strictly higher seq. Equal seq is NOT an upgrade, accepting an
  * equal-seq variant would let an attacker who obtained one signed roster
  * fork the view.
  *

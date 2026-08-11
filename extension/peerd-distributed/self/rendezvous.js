@@ -1,5 +1,5 @@
 // @ts-check
-// peerd-distributed/self/rendezvous.js — private rendezvous topic
+// peerd-distributed/self/rendezvous.js, private rendezvous topic
 // derivation for a person's own devices.
 //
 // The problem this solves (issue: portable identity §5): the user's devices
@@ -19,15 +19,15 @@
 //     change.
 //
 // Two derivation domains, one mechanism:
-//   self     'peerd/self-rendezvous/v1'   — steady-state device meeting
-//   enroll   'peerd/enroll-rendezvous/v1' — where a NOT-YET-ENROLLED install
+//   self     'peerd/self-rendezvous/v1', steady-state device meeting
+//   enroll   'peerd/enroll-rendezvous/v1', where a NOT-YET-ENROLLED install
 //            meets an existing device. Its secret is derived from the
 //            portable passkey (self/enroll.js), because a fresh install
 //            holds nothing else; the domains keep the two spaces disjoint
 //            even if the secrets ever coincided.
 //
 // Pure derivation only. Which room to join, and that joining a topic grants
-// NOTHING (candidates still complete mutual authentication — handshake.js),
+// NOTHING (candidates still complete mutual authentication, handshake.js),
 // live with the callers.
 
 import { utf8, concat, toHex } from '/shared/bundle/bytes.js';
@@ -37,7 +37,7 @@ export const ENROLL_RENDEZVOUS_DOMAIN = 'peerd/enroll-rendezvous/v1';
 
 export const DISCOVERY_SECRET_BYTES = 32;
 // why 6 hours: rotation is about bounding how long one opaque id stays
-// linkable across observations, not about key freshness — the id derives no
+// linkable across observations, not about key freshness: the id derives no
 // key material. 4 epochs/day keeps ids short-lived while the ±1-epoch skew
 // window still tolerates hours of clock drift.
 export const RENDEZVOUS_EPOCH_MS = 6 * 60 * 60 * 1000;

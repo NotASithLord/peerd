@@ -1,7 +1,7 @@
 // The self-device coordinator over an in-memory mesh: two of a person's
 // devices discover each other on the derived rendezvous room and mutually
 // authenticate to `self`, while a same-topic INTRUDER (a peer who guessed
-// the room but has no same-person certificate) is refused — proving that
+// the room but has no same-person certificate) is refused, proving that
 // joining a rendezvous topic grants nothing (issue invariants 3 & 4).
 
 import { describe, test, expect } from 'bun:test';
@@ -33,7 +33,7 @@ const createMemoryMeshFabric = () => {
       if (!members) { members = new Map(); rooms.set(roomId, members); }
       const self: Member = { did, onPeer: new Set(), onDirect: new Set() };
       // Announce me to existing members and them to me.
-      for (const [otherDid, other] of members) {
+      for (const other of members.values()) {
         for (const cb of other.onPeer) deliver.push(() => cb({ did }));
       }
       members.set(did, self);
@@ -172,7 +172,7 @@ describe('self-device coordinator', () => {
       personDid: root.did, deviceIdentity: devices[0].identity, deviceCert: devices[0].cert,
       roster, discoverySecret, mesh: meshFor('desktop'), now: () => clock,
     });
-    // A peer appears but never answers (its mesh is isolated — no shared room bus).
+    // A peer appears but never answers (its mesh is isolated: no shared room bus).
     const isolated = createMemoryMeshFabric();
     const laptop = createSelfDeviceCoordinator({
       personDid: root.did, deviceIdentity: devices[1].identity, deviceCert: devices[1].cert,

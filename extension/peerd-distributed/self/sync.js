@@ -1,19 +1,19 @@
 // @ts-check
-// peerd-distributed/self/sync.js — the self-device state-transfer protocol.
+// peerd-distributed/self/sync.js: the self-device state-transfer protocol.
 //
 // A versioned, surface-oriented replication protocol for AUTHENTICATED
 // self-device links (handshake.js must have marked the link; hosts enforce
-// that before any frame here is answered — issue invariant 12). It never
+// that before any frame here is answered, issue invariant 12). It never
 // moves raw IndexedDB/OPFS stores; each surface is an explicit LOGICAL
 // payload the runtime shapes (peerd-runtime/transfer/self-sync.js) and the
 // receiver re-materializes.
 //
 // Wire shape, designed for interruption:
-//   SYNC_OFFER     the source's snapshot manifest — per-surface byte size +
+//   SYNC_OFFER     the source's snapshot manifest, per-surface byte size +
 //                  SHA-256, so the receiver knows exactly what a complete
 //                  transfer looks like before asking for anything.
 //   SYNC_PULL      the receiver asks for ONE surface (its choice, its
-//                  order, its retry — pulls are idempotent).
+//                  order, its retry, pulls are idempotent).
 //   SYNC_CHUNK     bounded chunks of that surface's bytes.
 //   SYNC_REFUSE    an honest per-surface refusal (consent withheld,
 //                  unknown surface, oversize).
@@ -21,10 +21,10 @@
 // The receiver verifies each surface against the offered hash before
 // applying it, applies surfaces independently (a torn transfer leaves
 // whole surfaces present or absent, never half-written), and can re-pull
-// any surface after a drop — same snapshotId, same bytes, same hash.
+// any surface after a drop: same snapshotId, same bytes, same hash.
 //
 // Secrets ride the SAME mechanics but are consent-gated at the source
-// (the runtime includes the surface only when the user approved) — the
+// (the runtime includes the surface only when the user approved), the
 // protocol itself treats them as one more named surface.
 
 import { utf8, fromUtf8, toBase64, fromBase64, toHex } from '/shared/bundle/bytes.js';
@@ -33,7 +33,7 @@ export const SYNC_PROTO = 1;
 export const SNAPSHOT_VERSION = 1;
 
 // The closed set of logical surfaces this protocol speaks. Growing it is a
-// protocol version decision, not a payload option — an unknown name in an
+// protocol version decision, not a payload option: an unknown name in an
 // offer is refused, never "applied generically" (issue invariant 18: a
 // hostile payload must not be able to invent a surface that writes
 // somewhere new).
@@ -49,7 +49,7 @@ export const SYNC_SURFACES = Object.freeze([
   'secrets',
 ]);
 
-// Per-surface byte ceilings — transport sanity, not storage policy. The
+// Per-surface byte ceilings, transport sanity, not storage policy. The
 // generous workspace cap still bounds a hostile offer to something a
 // receiving profile can hold.
 const SURFACE_BYTE_CAPS = Object.freeze({
@@ -124,7 +124,7 @@ export const buildSnapshotOffer = async ({ surfaces, snapshotId, label, now }) =
 };
 
 /**
- * Structural validation of a received offer — bounds before anything is
+ * Structural validation of a received offer, bounds before anything is
  * pulled or shown to the user.
  *
  * @param {any} manifest
@@ -199,7 +199,7 @@ export const buildSyncChunks = ({ snapshotId, surface, bytes }) => {
 
 /**
  * A pull's validity from the source's side: known snapshot, known surface,
- * present in the offer. (The self-device link check happens before this —
+ * present in the offer. (The self-device link check happens before this
  * hosts refuse non-self peers at the routing layer.)
  *
  * @param {any} pull
@@ -218,7 +218,7 @@ export const validateSyncPull = (pull, { manifest }) => {
  * The receiver's per-surface reassembly. Feed frames in any order;
  * `complete` fires exactly once with hash-verified bytes, `failed` on any
  * structural or integrity defect. A failed surface can simply be re-pulled
- * (fresh collector) — that is the whole interruption story.
+ * (fresh collector): that is the whole interruption story.
  *
  * @param {Object} args
  * @param {SurfaceEntry} args.entry  the offer's manifest row for this surface

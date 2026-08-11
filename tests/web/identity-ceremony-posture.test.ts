@@ -1,7 +1,7 @@
 // The id.peerd.ai ceremony page is the ONE hosted component in the whole
 // portable-identity arc, and PR #360 was closed over exactly the mistakes a
 // ceremony page can make. These are the static, browser-free guards that
-// keep this page a dumb, origin-bound authenticator front-end — the
+// keep this page a dumb, origin-bound authenticator front-end, the
 // invariants a live WebAuthn test can't cheaply assert on every commit.
 
 import { describe, test, expect } from 'bun:test';
@@ -40,15 +40,18 @@ describe('ceremony transport is origin-bound and one-shot (the #360 fixes)', () 
     // replyTo posts to `origin`; only the harmless "ready" ping may use '*'.
     expect(js).toMatch(/replyTo\s*=\s*\(origin,\s*message\)\s*=>\s*\{[^}]*postMessage\(message,\s*origin\)/s);
     // The only '*' postMessage is the readiness announcement, which carries
-    // no secret — assert there is exactly one '*' target in the file.
+    // no secret, assert there is exactly one '*' target in the file.
     const wildcardTargets = js.match(/postMessage\([^)]*,\s*'\*'\)/g) ?? [];
     expect(wildcardTargets.length).toBe(1);
     expect(js).toMatch(/ceremony-ready[\s\S]*?'\*'/); // and it's the ready ping
   });
 
-  test('requests are accepted ONLY from an extension origin', () => {
+  test('requests are accepted ONLY from the opener, and only an extension origin', () => {
     expect(js).toMatch(/EXTENSION_ORIGIN\s*=\s*\/\^\(chrome-extension\|moz-extension/);
     expect(js).toMatch(/if\s*\(!EXTENSION_ORIGIN\.test\(event\.origin\)\)\s*return/);
+    // The sender must be the window that opened this page, so no other tab
+    // or frame can drive a ceremony the user opened for Peerd.
+    expect(js).toMatch(/if\s*\(!window\.opener\s*\|\|\s*event\.source\s*!==\s*window\.opener\)\s*return/);
   });
 
   test('the ceremony is one-shot: a page load answers exactly one request', () => {
@@ -75,7 +78,7 @@ describe('ceremony transport is origin-bound and one-shot (the #360 fixes)', () 
     expect(js).toMatch(/if\s*\(data\.rpId\s*&&\s*data\.rpId\s*!==\s*RP_ID\)\s*return/);
   });
 
-  test('the page returns raw authenticator output only — it derives no secret', () => {
+  test('the page returns raw authenticator output only, it derives no secret', () => {
     // No key derivation / encryption in the page: the reviewer\'s core #360
     // objection was the page encrypting a PRF output to a caller key.
     for (const forbidden of ['deriveBits', 'deriveKey', 'encrypt(', 'importKey', 'HKDF']) {

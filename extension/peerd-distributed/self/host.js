@@ -1,12 +1,12 @@
 // @ts-check
-// peerd-distributed/self/host.js — the state-transfer host that rides the
+// peerd-distributed/self/host.js: the state-transfer host that rides the
 // authenticated self-device coordinator.
 //
 // The coordinator (coordinator.js) turns candidates into `self` peers. This
 // host is what those self peers actually DO: the SOURCE serves snapshot
 // surfaces on request, the RECEIVER pulls and reassembles them. Both refuse
 // any peer the coordinator has NOT marked self-device (issue invariant 12:
-// state-transfer endpoints refuse non-self peers) — the gate is
+// state-transfer endpoints refuse non-self peers): the gate is
 // `coordinator.isSelfDevice(from)`, checked on every inbound frame.
 //
 // Direction is by role, not by peer: an install acts as SOURCE (it has
@@ -16,7 +16,7 @@
 //
 // Transport is the same direct channel the handshake used, injected as
 // `send(deviceDid, frame)`. Surface bytes are injected too (collect on the
-// source, apply on the receiver) — so the whole transfer runs in Bun over
+// source, apply on the receiver), so the whole transfer runs in Bun over
 // the in-memory mesh (self-transfer.e2e.test.ts) with real hashing and
 // chunking, only the WebRTC layer faked.
 
@@ -32,7 +32,7 @@ import {
  * @param {{ isSelfDevice: (deviceDid: string) => boolean }} deps.coordinator
  * @param {(deviceDid: string, frame: any) => Promise<any> | any} deps.send
  * @param {(surface: string) => Promise<Uint8Array | null> | Uint8Array | null} deps.readSurfaceBytes
- *        the raw bytes for an offered surface (consent already applied — a
+ *        the raw bytes for an offered surface (consent already applied, a
  *        withheld surface simply isn't in the manifest)
  * @param {import('./sync.js').SnapshotManifest} deps.manifest
  * @param {(event: string, detail?: any) => void} [deps.onEvent]
@@ -44,7 +44,7 @@ export const createSyncSource = ({ coordinator, send, readSurfaceBytes, manifest
   const onFrame = async (from, frame) => {
     if (!coordinator.isSelfDevice(from)) {
       onEvent('refused_non_self', { from });
-      return; // silent drop — a non-self peer gets nothing
+      return; // silent drop: a non-self peer gets nothing
     }
     if (!frame || frame.t !== 'SYNC_PULL') return;
     const defect = validateSyncPull(frame, { manifest });
@@ -77,7 +77,7 @@ export const createSyncSource = ({ coordinator, send, readSurfaceBytes, manifest
  * @param {(deviceDid: string, frame: any) => Promise<any> | any} deps.send
  * @param {(surface: string, bytes: Uint8Array) => Promise<any>} deps.applySurface
  * @param {(surfaces: string[]) => string[]} [deps.chooseSurfaces]  the user's
- *        approval — which offered surfaces to pull (default: all)
+ *        approval, which offered surfaces to pull (default: all)
  * @param {(event: string, detail?: any) => void} [deps.onEvent]
  */
 export const createSyncReceiver = ({
@@ -148,7 +148,7 @@ export const createSyncReceiver = ({
         onEvent('surface_failed', { surface: frame.surface, defect: result.defect });
         collectors.delete(frame.surface);
         // Interruption recovery: re-pull the same surface (same snapshot,
-        // same bytes, same hash — idempotent).
+        // same bytes, same hash, idempotent).
         await pull(frame.surface);
       }
     }

@@ -1,5 +1,5 @@
 // @ts-check
-// peerd-distributed/self/coordinator.js — the self-device orchestrator.
+// peerd-distributed/self/coordinator.js: the self-device orchestrator.
 //
 // Ties the four self-device pieces together over the SAME base mesh every
 // other dwapp rides (base-network.js openRoom), on the reserved
@@ -11,12 +11,12 @@
 //              candidate; only a peer that proves a same-person certificate
 //              AND possession of its device key becomes `self-device`.
 //   sync       offer/serve state surfaces (sync.js) to authenticated self
-//              peers only — a non-self peer is refused at the routing edge.
+//              peers only: a non-self peer is refused at the routing edge.
 //
 // This module is the imperative shell around the pure protocol steps: it
 // owns the candidate table, the per-link handshake state machine, and the
 // self-device roster in memory. Transport, timers, persistence, and the
-// actual state-surface bytes are INJECTED — so the whole coordinator is
+// actual state-surface bytes are INJECTED, so the whole coordinator is
 // exercised in Bun over an in-memory mesh (self-coordinator.test.ts) with
 // no browser.
 //
@@ -40,7 +40,7 @@ const HANDSHAKE_TIMEOUT_MS = 20_000;
  *
  * The transport the coordinator drives. `openRoom` returns a handle whose
  * `direct` carries 1:1 frames and whose `presence`/onPeer announces who is
- * present — exactly base-network.js's room shape, so production passes a
+ * present: exactly base-network.js's room shape, so production passes a
  * real room and tests pass an in-memory double.
  * @typedef {{
  *   did: string,
@@ -132,7 +132,7 @@ export const createSelfDeviceCoordinator = ({
     if (data.t === 'AUTH_HELLO') return onAuthHello(from, data);
     if (data.t === 'AUTH_PROOF') return onAuthProof(from, data);
     // SYNC_* frames are handled by the injected sync host, but only for a
-    // peer that already reached `self` — the routing gate (issue invariant
+    // peer that already reached `self`: the routing gate (issue invariant
     // 12). The coordinator exposes isSelfDevice for that host to consult.
   };
 
@@ -168,7 +168,7 @@ export const createSelfDeviceCoordinator = ({
     await sendTo(from, proof);
     maybePromote(from);
     // A proof that arrived before this hello (delivery reordering) was
-    // buffered — now that peerNonce is set, it can be verified.
+    // buffered, now that peerNonce is set, it can be verified.
     if (entry.pendingProof) {
       const buffered = entry.pendingProof;
       entry.pendingProof = undefined;
@@ -288,7 +288,7 @@ export const createSelfDeviceCoordinator = ({
       }));
     },
 
-    /** The confirmed self devices — the only peers state transfer may reach. */
+    /** The confirmed self devices: the only peers state transfer may reach. */
     selfDevices() {
       return [...peers.entries()]
         .filter(([, entry]) => entry.status === 'self')

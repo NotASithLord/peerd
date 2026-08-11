@@ -1,7 +1,7 @@
 // The runtime projections for self-device sync: the durable-content vs
 // device-bookkeeping split (sessions), logical-artifact shaping (apps,
 // workspaces), and the apply-side idempotency + conflict behavior. These
-// enforce the issue's §10 exclusions at the projection layer — device-local
+// enforce the issue's §10 exclusions at the projection layer, device-local
 // state must NOT be present in the person-portable form.
 
 import { describe, test, expect } from 'bun:test';

@@ -1,4 +1,4 @@
-/* id.peerd.ai ceremony page — grayscale surface, one rainbow accent on the
+/* id.peerd.ai ceremony page, grayscale surface, one rainbow accent on the
  * wordmark (the brand rule). No external fonts; system stack only. */
 :root {
   color-scheme: light dark;
@@ -35,7 +35,7 @@ body {
   margin: 0 0 18px;
   font-weight: 700;
 }
-/* p cyan · e red · e amber · r green · d magenta — the brand mark. */
+/* p cyan · e red · e amber · r green · d magenta: the brand mark. */
 .wordmark::first-letter { color: #14b8c4; }
 .prompt { margin: 0 0 22px; }
 .action {

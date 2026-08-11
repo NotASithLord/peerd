@@ -4,7 +4,7 @@
 // arc's trust story is broken, and the failing test names which invariant.
 //
 // Invariants 1-18 from the issue, in order. A few are structural (enforced
-// by construction rather than by a runtime check) — those assert the
+// by construction rather than by a runtime check), those assert the
 // structure that makes the attack impossible, and say so.
 
 import { describe, test, expect } from 'bun:test';
@@ -20,7 +20,6 @@ import {
 import {
   buildAuthHello, evaluateAuthHello, buildAuthProof, verifyAuthProof, mintAuthNonce,
 } from '../../extension/peerd-distributed/self/handshake.js';
-import { createSelfDeviceCoordinator } from '../../extension/peerd-distributed/self/coordinator.js';
 import { createSyncSource } from '../../extension/peerd-distributed/self/host.js';
 import { buildSnapshotOffer, validateSnapshotManifest, SYNC_SURFACES, encodeSurfacePayload } from '../../extension/peerd-distributed/self/sync.js';
 import { ensureFounderCustody } from '../../extension/peerd-distributed/self/custody.js';
@@ -44,7 +43,7 @@ describe('1-2: the DID and the rendezvous topic do not reveal each other', () =>
     const person = await generateIdentity();
     const secret = mintDiscoverySecret();
     const topic = await deriveRendezvousTopic(secret, 100);
-    // Structural: the derivation module imports NO identity code — its only
+    // Structural: the derivation module imports NO identity code, its only
     // inputs are (secret, domain, epoch), so there is no function an
     // attacker holding the DID could feed it. (Comments mention "did" while
     // explaining the property, so assert on the CODE, not the prose.)
@@ -63,7 +62,7 @@ describe('1-2: the DID and the rendezvous topic do not reveal each other', () =>
     const secret = mintDiscoverySecret();
     const topic = await deriveRendezvousTopic(secret, 100);
     expect(topic).toMatch(/^[0-9a-f]{64}$/); // opaque MAC output
-    // Two different people with the same secret would collide on the topic —
+    // Two different people with the same secret would collide on the topic
     // proof the topic carries no identity information at all.
     const a = await generateIdentity();
     const b = await generateIdentity();
@@ -76,7 +75,7 @@ describe('3-6: topic ≠ trust; DID claim ≠ authentication', () => {
   test('3: joining/guessing the topic establishes NOTHING', async () => {
     // Proven end-to-end in self-coordinator.test.ts (the intruder case);
     // here: the hello evaluator ignores the room entirely when deciding
-    // trust — it evaluates the certificate chain, not membership.
+    // trust, it evaluates the certificate chain, not membership.
     const person = await generateIdentity();
     const device = await generateIdentity();
     const stranger = await generateIdentity();
@@ -154,7 +153,7 @@ describe('7-8: the hosted page holds no authority and sees no profile', () => {
     const page = readFileSync(join(import.meta.dir, '..', '..', 'web-identity', 'ceremony.js'), 'utf8');
     // Structural: the page has no network egress at all (CSP connect-src
     // 'none' + no fetch/XHR/WebSocket), so it cannot receive or forward
-    // anything, and the sync protocol is peer-to-peer by construction —
+    // anything, and the sync protocol is peer-to-peer by construction
     // no frame in sync.js names an origin or URL.
     for (const forbidden of ['fetch(', 'XMLHttpRequest', 'WebSocket']) {
       expect(page).not.toContain(forbidden);
@@ -187,7 +186,7 @@ describe('9-10: device keys stay home; the root stops signing routine traffic', 
     const founder = await ensureFounderCustody({ io, label: 'Desktop' });
     const device = await identityFromMaterial(JSON.parse(io.map.get('distributed/device-key/v1')!));
     // A proof produced by the coordinator's signer verifies under the DEVICE
-    // did, not the person did — routine traffic is device-signed.
+    // did, not the person did, routine traffic is device-signed.
     const peer = await generateIdentity();
     const selfNonce = mintAuthNonce();
     const peerNonce = mintAuthNonce();
@@ -216,7 +215,7 @@ describe('11-12: self-device status cannot be forged or bypassed', () => {
     const source = readFileSync(
       join(import.meta.dir, '..', '..', 'extension', 'peerd-distributed', 'self', 'coordinator.js'), 'utf8');
     // The ONLY writer of status:'self' is maybePromote, and it demands both
-    // verification directions — there is no setter an API could call.
+    // verification directions: there is no setter an API could call.
     const promotions = source.match(/status\s*=\s*'self'/g) ?? [];
     expect(promotions.length).toBe(1);
     expect(source).toMatch(/if\s*\(entry\.selfVerified\s*&&\s*entry\.peerVerified\)/);
@@ -308,7 +307,7 @@ describe('17-18: no silent enrollment, no payload-driven custody writes', () => 
   });
 
   test('18: a hostile sync payload cannot overwrite identity or device custody', async () => {
-    // The surface vocabulary is CLOSED — no payload can name an identity or
+    // The surface vocabulary is CLOSED: no payload can name an identity or
     // custody store, so there is no path from a sync frame to those writes.
     for (const forbidden of ['dweb-identity', 'device-key', 'vault', 'identity', 'permission-grants', 'audit']) {
       expect(SYNC_SURFACES).not.toContain(forbidden);

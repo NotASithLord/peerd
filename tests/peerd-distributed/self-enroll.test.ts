@@ -23,7 +23,7 @@ import { fabricateCredential, fabricateAssertion, toB64 } from '../helpers/webau
 const ORIGINS = ['https://id.peerd.ai'];
 
 // A person with one existing (sponsor) device, a bound passkey, and the
-// discovery secret — the state Device A is in before Device B appears.
+// discovery secret: the state Device A is in before Device B appears.
 const sponsorSetup = async () => {
   const material = await mintKeypairMaterial();
   const person = await identityFromMaterial(material);
@@ -162,14 +162,14 @@ describe('enrollment protocol', () => {
     const mitmPair = await mintEnrollmentKeyPair();
     const mitmKey = await exportEnrollmentPublicKey(mitmPair.publicKey);
     const spliced = buildEnrollProof({ assertion, ephemeralKey: mitmKey });
-    // Case 1: sponsor pins the request's key — splice detected structurally.
+    // Case 1: sponsor pins the request's key, splice detected structurally.
     expect((await evaluateEnrollProof(spliced, {
       binding: setup.binding,
       issuedChallenge: challenge.challenge,
       requestEphemeralKey: enrolleeKey,
       allowedOrigins: ORIGINS,
     })).defect).toBe('ephemeral-key-mismatch');
-    // Case 2: the relay also forged the original request around its own key —
+    // Case 2: the relay also forged the original request around its own key
     // then the recomputed ceremony challenge no longer matches the assertion.
     const verdict = await evaluateEnrollProof(spliced, {
       binding: setup.binding,
@@ -215,7 +215,7 @@ describe('enrollment protocol', () => {
     expect(replayed.ok).toBe(false);
     expect(replayed.defect).toBe('open-failed');
     // Even the ORIGINAL private key cannot open it under a different
-    // claimed challenge — the KDF salt commits to the transcript.
+    // claimed challenge: the KDF salt commits to the transcript.
     const wrongTranscript = await openEnrollmentGrant(run.grant, {
       enrolleePrivateKey: run.enrolleePair!.privateKey,
       enrolleeKey: run.enrolleeKey!,
@@ -232,7 +232,7 @@ describe('enrollment protocol', () => {
     const challenge = buildEnrollChallenge();
 
     // The attacker controls their own root + roster, but NOT the passkey
-    // binding for the enrollee's credential under their root — they can
+    // binding for the enrollee's credential under their root, they can
     // only ship the victim's binding (wrong did) or their own (wrong
     // credential set).
     const attackerMaterial = await mintKeypairMaterial();
@@ -267,7 +267,7 @@ describe('enrollment protocol', () => {
     expect(verdict1.defect).toBe('binding-person-did-mismatch');
 
     // Variant 2: attacker identity + a binding the attacker signed
-    // themselves — verifies under their did, but cannot contain the
+    // themselves, verifies under their did, but cannot contain the
     // enrollee's credential as ACTIVE unless they enrolled it… in which
     // case they'd bind THEIR identity to the user's passkey. Try an empty
     // credential set:

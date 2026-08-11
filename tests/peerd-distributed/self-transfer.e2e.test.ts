@@ -1,7 +1,7 @@
 // The finished-marker rehearsal, in Bun: two of a person's devices bootstrap
 // custody, discover + mutually authenticate over the rendezvous mesh, and
 // then transfer real state (chats, memory, settings, an App, a workspace)
-// directly device-to-device — with a non-self peer proven unable to pull
+// directly device-to-device, with a non-self peer proven unable to pull
 // anything. Only the WebRTC layer is faked (an in-memory mesh); the
 // certificates, handshake, chunking, hashing, and surface apply are the
 // production code.
@@ -194,7 +194,7 @@ describe('finished-marker rehearsal (Bun, in-memory mesh)', () => {
     });
     // An unauthenticated stranger pulls.
     await source.onFrame('did:key:zStranger', { t: 'SYNC_PULL', proto: 1, snapshotId: manifest.snapshotId, surface: 'settings' });
-    expect(sent).toEqual([]); // not one chunk, not even a refusal — silent drop
+    expect(sent).toEqual([]); // not one chunk, not even a refusal, silent drop
     void founder;
   });
 });

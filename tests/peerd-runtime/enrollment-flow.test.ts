@@ -1,4 +1,4 @@
-// The "Use my existing Peerd" flow as a state machine — the happy path, and
+// The "Use my existing Peerd" flow as a state machine: the happy path, and
 // every awkward branch the issue names: no devices online (§12), restore
 // declined, transfer interrupted, and the separate credential decision (§9).
 // Also the §16 copy rule, enforced mechanically: no cryptographic jargon in
@@ -84,7 +84,7 @@ describe('§12 offline-source behavior', () => {
     expect(retry.actions).toEqual([{ type: 'start-discovery' }]);
   });
 
-  test('an interrupted transfer never claims success — the device stays enrolled', () => {
+  test('an interrupted transfer never claims success: the device stays enrolled', () => {
     const { state } = run([
       { type: 'choose-existing' }, { type: 'ceremony-complete', assertion: {} },
       { type: 'enrolled' },

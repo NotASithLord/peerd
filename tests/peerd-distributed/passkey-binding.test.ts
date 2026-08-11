@@ -1,4 +1,4 @@
-// The passkey binding record — the root-signed statement that makes a
+// The passkey binding record: the root-signed statement that makes a
 // WebAuthn credential an enrollment authority for a did. Forgery, rollback,
 // and revocation-laundering must all fail; lifecycle changes (add / revoke /
 // rotate) must never change the did.

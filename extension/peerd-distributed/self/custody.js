@@ -1,16 +1,16 @@
 // @ts-check
-// peerd-distributed/self/custody.js — the person-side self-device custody
+// peerd-distributed/self/custody.js: the person-side self-device custody
 // composition: everything that must exist on an install for it to be a
 // certified member of the person's device set and find its siblings.
 //
-// Three durable pieces, all vault secrets (IO injected — this file never
+// Three durable pieces, all vault secrets (IO injected, this file never
 // touches the vault directly):
-//   device key         distributed/device-key/v1  (device-key.js) — minted
+//   device key         distributed/device-key/v1  (device-key.js), minted
 //                      fresh per install, NEVER exported.
-//   discovery secret   distributed/self-discovery/v1 — random 32 bytes the
+//   discovery secret   distributed/self-discovery/v1, random 32 bytes the
 //                      person's devices share, distinct from every other
 //                      secret; enrollment RECOVERS it, first-run MINTS it.
-//   certificate/roster distributed/self-records/v1 — the device's own
+//   certificate/roster distributed/self-records/v1: the device's own
 //                      root-signed certificate plus the newest roster it
 //                      holds (public records, but cached here for offline
 //                      handshakes).
@@ -25,7 +25,7 @@
 //                         via enrollment: it has the grant (discovery
 //                         secret, binding, roster) and the root (recovered
 //                         into the identity secret); it mints ITS device
-//                         key and — holding the root — self-certifies and
+//                         key and, holding the root, self-certifies and
 //                         appends itself to a new roster.
 //
 // Pure-ish: all randomness/crypto is WebCrypto, all storage is injected, so
@@ -154,7 +154,7 @@ export const ensureFounderCustody = async ({ io, buildBinding, label, now }) => 
 /**
  * ENROLLED device: the identity secret was just written by the enrollment
  * grant adoption, and the grant also carried the discovery secret + roster.
- * This mints the device key and — holding the recovered root — self-issues
+ * This mints the device key and, holding the recovered root, self-issues
  * a certificate and appends itself to a fresh roster (seq+1), which the
  * device will re-publish so its siblings learn of it.
  *
@@ -174,7 +174,7 @@ export const ensureEnrolledCustody = async ({ io, discoverySecret, priorRoster, 
     seq: (priorRoster?.seq ?? 0) + 1, now,
   });
   // Append this device to a fresh roster snapshot (seq+1). Verify the prior
-  // roster is actually this person's before extending it — a grant is
+  // roster is actually this person's before extending it: a grant is
   // sender-authenticated end to end, but defense in depth costs nothing.
   /** @type {any[]} */
   let devices = [];
@@ -201,7 +201,7 @@ export const ensureEnrolledCustody = async ({ io, discoverySecret, priorRoster, 
 };
 
 /**
- * Load the device SIGNING identity + its cached records + discovery secret —
+ * Load the device SIGNING identity + its cached records + discovery secret
  * everything the coordinator needs to run, with no root access. Returns null
  * if the install isn't a self-device member yet (no discovery secret).
  *

@@ -1,4 +1,4 @@
-// Mutual same-person authentication — the trust-tier boundary. The happy
+// Mutual same-person authentication: the trust-tier boundary. The happy
 // path runs the full four-message dance both ways; every adversarial case
 // is one of the issue's invariants: same-did claims, certs without keys,
 // keys without certs, replays, reflections, revocations, and cross-protocol
@@ -17,7 +17,7 @@ import { signEnvelope, buildEnvelope } from '../../extension/peerd-distributed/t
 
 const ROOM = 'rendezvous-topic-hex';
 
-// One person, two certified devices — the legitimate setup.
+// One person, two certified devices: the legitimate setup.
 const household = async () => {
   const person = await generateIdentity();
   const desktop = await generateIdentity();
@@ -86,7 +86,7 @@ describe('mutual self-device authentication', () => {
     expect(result.bVerifiesA).toEqual({ ok: true, defect: null });
   });
 
-  test('invariant: the same did CLAIM is not authentication — a device of a different person refuses', async () => {
+  test('invariant: the same did CLAIM is not authentication: a device of a different person refuses', async () => {
     const { person, desktop, desktopCert } = await household();
     const impostorPerson = await generateIdentity();
     const impostorDevice = await generateIdentity();
@@ -136,7 +136,7 @@ describe('mutual self-device authentication', () => {
     const { person, desktop } = await household();
     const uncertified = await generateIdentity();
     const selfSigned = await issueDeviceCertificate({
-      personIdentity: uncertified, // signs its own cert — not the person root
+      personIdentity: uncertified, // signs its own cert: not the person root
       deviceDid: uncertified.did, deviceId: 'rogue-1', now: 4,
     }).catch(() => null);
     // Issuing refuses deviceDid === personDid, so the rogue must forge:

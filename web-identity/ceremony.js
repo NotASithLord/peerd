@@ -3,7 +3,7 @@
 //
 // The whole trust contract lives in the header of README.md. In short: this
 // page is a WebAuthn front-end that talks ONLY to the exact Peerd extension
-// origin that opened it, over one-shot origin-bound postMessage — never a
+// origin that opened it, over one-shot origin-bound postMessage: never a
 // public request/response URL. It holds no secret and derives nothing.
 //
 // Message protocol (extension ⇄ page):
@@ -46,7 +46,7 @@ const bytesToB64 = (bytes) => {
 };
 
 const replyTo = (origin, message) => {
-  // Reply to the EXACT extension origin that sent the request — never '*'.
+  // Reply to the EXACT extension origin that sent the request: never '*'.
   window.opener?.postMessage(message, origin);
 };
 
@@ -84,14 +84,14 @@ const enroll = async (challenge, request) => {
       displayName: request.userDisplayName || 'Peerd identity',
     },
     challenge,
-    // Ed25519, ES256, RS256 — the same set the binding record admits.
+    // Ed25519, ES256, RS256: the same set the binding record admits.
     pubKeyCredParams: [
       { type: 'public-key', alg: -8 },
       { type: 'public-key', alg: -7 },
       { type: 'public-key', alg: -257 },
     ],
     authenticatorSelection: {
-      // Platform authenticator, discoverable, synced — the "same passkey on
+      // Platform authenticator, discoverable, synced: the "same passkey on
       // your other devices" property portable identity depends on.
       authenticatorAttachment: 'platform',
       residentKey: 'required',
@@ -144,14 +144,30 @@ const assert = async (challenge, request) => {
 };
 
 const onMessage = (event) => {
-  // Accept a request ONLY from an extension origin, and only the first one.
+  // Accept a request ONLY from the window that OPENED this page, and only
+  // from an extension origin, and only the first one.
+  //
+  // why the opener identity check and not an allowlist of extension ids:
+  // Chrome extension ids are not stable across channels and unpacked
+  // installs (there is no pinned manifest key), so the page cannot name
+  // Peerd's origin. What it CAN require is that the sender is the window
+  // that opened it, which stops any other tab or frame from driving a
+  // ceremony the user opened for Peerd.
+  //
+  // Residual risk, stated plainly: an extension can open its own copy of
+  // this page and drive it. It then still has to get the user to approve a
+  // ceremony on a page that says Peerd, and the result is not enrollment
+  // authority by itself. A grant additionally requires an assertion the
+  // sponsoring device verifies against the person-root-signed binding over
+  // the sponsor's own fresh challenge.
   if (pending) return;
+  if (!window.opener || event.source !== window.opener) return;
   if (!EXTENSION_ORIGIN.test(event.origin)) return;
   const data = event.data;
   if (!data || data.peerd !== 'ceremony-request' || typeof data.nonce !== 'string') return;
   if (data.op !== 'enroll' && data.op !== 'assert') return;
   if (typeof data.challenge !== 'string' || data.challenge.length === 0) return;
-  // The RP id the extension expects must match ours — refuse a request that
+  // The RP id the extension expects must match ours, refuse a request that
   // would mint a credential at some other relying party.
   if (data.rpId && data.rpId !== RP_ID) return;
   pending = { nonce: data.nonce, op: data.op, origin: event.origin, request: data };
@@ -159,7 +175,7 @@ const onMessage = (event) => {
     ? 'Create your portable Peerd passkey to finish setup.'
     : 'Confirm it\'s you to set up Peerd on this device.';
   runButton.disabled = false;
-  setStatus('Ready — tap Continue.');
+  setStatus('Ready, tap Continue.');
 };
 
 const boot = () => {

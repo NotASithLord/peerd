@@ -1,4 +1,4 @@
-// The pure WebAuthn assertion verifier — the offline check an existing
+// The pure WebAuthn assertion verifier: the offline check an existing
 // device runs against a new install's ceremony output. Fixtures fabricate
 // REAL signatures (P-256 DER-encoded, Ed25519 raw), so every negative case
 // proves the verifier rejects at the right layer, not that fixtures are

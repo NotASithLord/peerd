@@ -1,5 +1,5 @@
 // @ts-check
-// peerd-distributed/identity/webauthn-verify.js — pure WebAuthn assertion
+// peerd-distributed/identity/webauthn-verify.js, pure WebAuthn assertion
 // verification against a passkey-binding credential.
 //
 // why peerd verifies assertions ITSELF: in the enrollment protocol
@@ -7,11 +7,11 @@
 // server. The desktop holds the root-signed passkey binding (credential id +
 // SPKI public key) and must check, offline, that the laptop's ceremony
 // output really is a fresh, user-verified assertion by that credential at
-// the canonical relying party. There is no backend to delegate to — the
+// the canonical relying party. There is no backend to delegate to, the
 // whole point is that there isn't one.
 //
 // Scope: assertion (navigator.credentials.get) verification only. Peerd
-// never parses attestation objects — enrollment records the credential's
+// never parses attestation objects, enrollment records the credential's
 // public key via getPublicKey() SPKI at creation time on the device that
 // created it, so no CBOR/COSE surface exists here at all.
 //
@@ -42,7 +42,7 @@ const sha256 = async (bytes) => new Uint8Array(await crypto.subtle.digest('SHA-2
 
 /**
  * Parse the fixed head of authenticatorData. Extension/attested-credential
- * bytes past the head are ignored — the signature covers them, and this
+ * bytes past the head are ignored: the signature covers them, and this
  * verifier keys only on rpIdHash and the flags.
  *
  * @param {Uint8Array} authData
@@ -63,7 +63,7 @@ export const parseAuthenticatorData = (authData) => {
 
 /**
  * WebAuthn ECDSA signatures arrive ASN.1 DER-encoded; WebCrypto verifies
- * raw r||s. Bounded structural parse — returns null on anything that is
+ * raw r||s. Bounded structural parse, returns null on anything that is
  * not exactly SEQUENCE { INTEGER r, INTEGER s } with P-256-sized values.
  *
  * @param {Uint8Array} der
@@ -134,7 +134,7 @@ const importVerificationKey = (alg, spki) => {
 /**
  * Verify a WebAuthn assertion against one binding credential.
  *
- * The checks, in dependency order — each names the exact trust property it
+ * The checks, in dependency order, each names the exact trust property it
  * enforces:
  *   structure      bounded base64 fields, parseable authenticatorData
  *   credential     the assertion names the credential the caller resolved

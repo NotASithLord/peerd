@@ -1,23 +1,23 @@
 // @ts-check
-// peerd-distributed/self/enroll.js — the new-device enrollment protocol.
+// peerd-distributed/self/enroll.js: the new-device enrollment protocol.
 //
 // The exchange runs between a NEW install (the enrollee, "B") and one of
 // the person's EXISTING devices (the sponsor, "A"), over the enrollment
 // rendezvous room, after the enrollee's passkey ceremony at the canonical
 // relying party. It ends with the sponsor releasing the enrollment grant:
 // the sealed identity material, the self-device discovery secret, and the
-// person's signed records — everything a fresh install needs to become
+// person's signed records, everything a fresh install needs to become
 // this person and find their devices.
 //
 // What each proof gates (and why all three exist):
 //   possession MAC   HMAC keyed by a passkey-PRF-derived secret both ends
-//                    hold. Cheap, silent, gates challenge issuance — a
+//                    hold. Cheap, silent, gates challenge issuance, a
 //                    stranger on the topic cannot even make the sponsor
 //                    mint challenges (anti-probing, anti-DoS).
 //   assertion        a WebAuthn assertion over the sponsor's FRESH
 //                    challenge, verified against the root-signed passkey
 //                    binding (webauthn-verify.js). This is the load-bearing
-//                    "the person is present and approved, now" — the MAC
+//                    "the person is present and approved, now": the MAC
 //                    secret alone is a bearer credential and must never be
 //                    sufficient for a grant.
 //   channel binding  the ceremony challenge is H(sponsor challenge ||
@@ -27,7 +27,7 @@
 //
 // The grant seal (ECDH P-256 → HKDF-SHA256 → AES-GCM) binds its KDF salt
 // to the whole exchange (challenge, credential, both ephemeral keys), so a
-// recorded grant is undecryptable outside the exact exchange it answered —
+// recorded grant is undecryptable outside the exact exchange it answered
 // the #360 closure's "same request key accepts the same response
 // repeatedly" cannot recur here.
 //
@@ -66,7 +66,7 @@ const MAX_GRANT_CT_B64 = 64 * 1024;
 /** @param {BufferSource} bytes */
 const sha256 = async (bytes) => new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
 
-/** The PRF input WebAuthn evaluates — fixed bytes, derived from the tag. */
+/** The PRF input WebAuthn evaluates, fixed bytes, derived from the tag. */
 export const enrollPrfInput = () => utf8(ENROLL_PRF_INPUT_TAG);
 
 /**
@@ -131,7 +131,7 @@ export const buildEnrollRequest = async ({ macKey, credentialId, ephemeralKey })
 
 /**
  * Sponsor: admit or refuse an ENROLL_REQ. A bad MAC means the sender never
- * ran the passkey ceremony — refuse before minting any challenge state.
+ * ran the passkey ceremony, refuse before minting any challenge state.
  *
  * @param {any} request
  * @param {{ macKey: Uint8Array, binding: import('../identity/passkey-binding.js').PasskeyBinding }} context
@@ -174,8 +174,8 @@ export const buildEnrollChallenge = () => ({
 
 /**
  * The WebAuthn challenge for the ceremony: H(domain || sponsor challenge ||
- * enrollee ECDH key). Both sides compute it — the enrollee to run the
- * ceremony, the sponsor to verify the assertion — which is what welds the
+ * enrollee ECDH key). Both sides compute it: the enrollee to run the
+ * ceremony, the sponsor to verify the assertion, which is what welds the
  * assertion to the key the grant will be sealed to.
  *
  * @param {string} challengeB64   the sponsor's ENROLL_CHALLENGE value
@@ -205,14 +205,14 @@ export const buildEnrollProof = ({ assertion, ephemeralKey }) => ({
  * Sponsor: the grant decision. Verifies the assertion against the binding
  * record with the recomputed channel-bound challenge. The caller supplies
  * the challenge IT issued for this link (single-use bookkeeping is the
- * host's) and the ephemeral key from the original ENROLL_REQ — a proof
+ * host's) and the ephemeral key from the original ENROLL_REQ: a proof
  * whose key differs from its request's is a splice, refused here.
  *
  * @param {any} proof
  * @param {Object} context
  * @param {import('../identity/passkey-binding.js').PasskeyBinding} context.binding
- * @param {string} context.issuedChallenge  base64 — what this sponsor issued
- * @param {string} context.requestEphemeralKey  base64 — from the admitted ENROLL_REQ
+ * @param {string} context.issuedChallenge  base64, what this sponsor issued
+ * @param {string} context.requestEphemeralKey  base64, from the admitted ENROLL_REQ
  * @param {string[]} context.allowedOrigins
  * @returns {Promise<{ ok: boolean, defect: string | null }>}
  */
@@ -301,7 +301,7 @@ const deriveGrantKey = async (ownPrivateKey, peerPublicKeyB64, transcript) => {
 };
 
 /**
- * The grant payload — everything a fresh install needs to become this
+ * The grant payload, everything a fresh install needs to become this
  * person. Never includes any DEVICE private key: the enrollee mints its
  * own and (holding the root after adoption) certifies it locally.
  *
@@ -350,7 +350,7 @@ export const sealEnrollmentGrant = async ({
  *   - the material is a real keypair (seed proves control of pub) whose
  *     did we now know;
  *   - the passkey binding VERIFIES UNDER THAT DID and lists, as active,
- *     exactly the credential this enrollee authenticated with — an
+ *     exactly the credential this enrollee authenticated with, an
  *     attacker without the person root cannot forge that record around
  *     someone else's credential, so a hostile sponsor on the topic cannot
  *     hand over a substitute identity;

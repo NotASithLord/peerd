@@ -1,4 +1,4 @@
-// Private rendezvous derivation — the issue's §5 properties, each as a
+// Private rendezvous derivation: the issue's §5 properties, each as a
 // test: only secret-holders can compute a topic, topics don't correlate
 // with the did, epochs rotate, the skew window is bounded, and rotating the
 // secret changes every topic while the did stands still.
@@ -11,7 +11,7 @@ import {
 } from '../../extension/peerd-distributed/self/rendezvous.js';
 
 describe('rendezvous derivation', () => {
-  test('deterministic per (secret, epoch, domain) — two devices meet', async () => {
+  test('deterministic per (secret, epoch, domain): two devices meet', async () => {
     const secret = mintDiscoverySecret();
     const desktop = await deriveRendezvousTopic(secret, 1234);
     const laptop = await deriveRendezvousTopic(secret, 1234);
@@ -25,10 +25,10 @@ describe('rendezvous derivation', () => {
     expect(topicA).not.toBe(topicB);
   });
 
-  test('the derivation consumes ONLY the secret — no did input exists to correlate', async () => {
+  test('the derivation consumes ONLY the secret: no did input exists to correlate', async () => {
     // Structural property: the function signature admits no identity
     // material. Two "people" with the same secret bytes (impossible in
-    // practice, illustrative here) get the same topic regardless of did —
+    // practice, illustrative here) get the same topic regardless of did
     // the topic is a pure function of (secret, domain, epoch).
     const secret = new Uint8Array(DISCOVERY_SECRET_BYTES).fill(7);
     expect(await deriveRendezvousTopic(secret, 5))

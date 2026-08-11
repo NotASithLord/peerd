@@ -1,17 +1,17 @@
 // @ts-check
-// peerd-distributed/self/ceremony-client.js — the extension side of the
+// peerd-distributed/self/ceremony-client.js: the extension side of the
 // id.peerd.ai ceremony relay.
 //
 // The pure half of the transport contract (web-identity/README.md): build a
 // request bound to a fresh nonce, and decide whether an inbound window
-// message is the genuine, matching reply. Everything imperative — opening
-// the tab, holding the window handle, timeouts — is the caller's (the SW /
+// message is the genuine, matching reply. Everything imperative, opening
+// the tab, holding the window handle, timeouts, is the caller's (the SW /
 // side panel), so this decision logic is Bun-testable and adversarial cases
 // are cheap to cover.
 //
 // The rules the acceptor enforces, each closing one #360 blocker:
 //   exact origin      the reply must come from the ceremony origin we
-//                     opened — not a lookalike host, not any other tab
+//                     opened: not a lookalike host, not any other tab
 //   exact window      the reply's source must be the window handle we
 //                     opened (a second tab at the same origin is refused)
 //   nonce match       one request, one reply; a replayed or crossed reply
@@ -31,12 +31,12 @@ export const CEREMONY_URL = `${CEREMONY_ORIGIN}/`;
 const MAX_FIELD_B64 = 16 * 1024;
 const NONCE_BYTES = 16;
 
-/** @param {Uint8Array} bytes  base64url, unpadded — the WebAuthn wire form */
+/** @param {Uint8Array} bytes  base64url, unpadded: the WebAuthn wire form */
 const toBase64Url = (bytes) =>
   toBase64(bytes).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 
 /**
- * Build a ceremony request. `challenge` is the caller's fresh challenge —
+ * Build a ceremony request. `challenge` is the caller's fresh challenge
  * for enrollment-by-a-sponsor that is the CHANNEL-BOUND ceremony challenge
  * (enroll.js enrollCeremonyChallenge), never a value the page chose.
  *
@@ -85,7 +85,7 @@ export const acceptCeremonyReply = (event, {
   const refuse = (defect) => ({ ok: false, defect, result: null });
   if (!event || typeof event !== 'object') return refuse('not-an-event');
   if (event.origin !== expectedOrigin) return refuse('wrong-origin');
-  // The reply must come from the EXACT window we opened — a second tab at
+  // The reply must come from the EXACT window we opened: a second tab at
   // the same origin (an attacker-opened one) is not our ceremony.
   if (!ceremonyWindow || event.source !== ceremonyWindow) return refuse('wrong-window');
   const data = event.data;

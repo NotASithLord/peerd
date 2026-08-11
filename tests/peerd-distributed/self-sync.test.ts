@@ -1,6 +1,6 @@
 // The self-device state-transfer protocol: offer/pull/chunk mechanics,
 // hash-gated apply, interruption + idempotent re-pull, and the payload
-// hostility cases (issue invariant 18 — a malformed sync payload must not
+// hostility cases (issue invariant 18: a malformed sync payload must not
 // be able to write anywhere unexpected).
 
 import { describe, test, expect } from 'bun:test';
@@ -146,7 +146,7 @@ describe('snapshot offers', () => {
     )).toBe('unknown-snapshot');
     expect(validateSyncPull(
       buildSyncPull({ snapshotId: manifest.snapshotId, surface: 'secrets' }), { manifest },
-    )).toBe('unknown-surface'); // secrets wasn't offered — consent withheld
+    )).toBe('unknown-surface'); // secrets wasn't offered, consent withheld
   });
 
   test('the surface list is closed and secrets is an explicit, separate surface', () => {

@@ -1,5 +1,5 @@
 // @ts-check
-// peerd-distributed/self/handshake.js — mutual same-person authentication.
+// peerd-distributed/self/handshake.js, mutual same-person authentication.
 //
 // A rendezvous topic yields CANDIDATES, never trust. Before a link may be
 // treated as "one of my own devices", BOTH sides must prove, freshly:
@@ -11,12 +11,12 @@
 // Two devices merely claiming the same did are strangers (issue invariant
 // 4); a certificate without its key is paper (5); a key without a
 // certificate is anonymous (6). The mesh HELLO already proved which device
-// key is on the other end of the link — but a HELLO is not challenge-fresh,
+// key is on the other end of the link, but a HELLO is not challenge-fresh,
 // so this layer adds nonces both ways and binds every proof to:
 //
 //   protocol version + domain    (no cross-protocol replay: these bytes can
 //                                 never verify as an envelope, cert, DHT
-//                                 item, or manifest — different domain tag)
+//                                 item, or manifest, different domain tag)
 //   the room id                  (session context)
 //   both device dids, role-tagged (a reflected proof names the wrong signer)
 //   both nonces                  (fresh both ways; a recorded proof dies
@@ -61,7 +61,7 @@ export const buildAuthHello = ({ cert, nonce }) => ({
 
 /**
  * Evaluate a peer's AUTH_HELLO. The certificate must verify under MY person
- * root and must name exactly the device key the mesh link authenticated —
+ * root and must name exactly the device key the mesh link authenticated
  * a valid certificate for some OTHER key, relayed over this link, is an
  * impersonation attempt and dies here.
  *
@@ -70,7 +70,7 @@ export const buildAuthHello = ({ cert, nonce }) => ({
  * @param {string} context.personDid      MY person root did
  * @param {string} context.selfDeviceDid  MY device did
  * @param {string} context.linkDeviceDid  the did the mesh HELLO proved for
- *        this link — the only binding between "a cert arrived" and "the
+ *        this link: the only binding between "a cert arrived" and "the
  *        sender holds its key" pre-proof
  * @param {DeviceRoster | null} [context.roster]  newest local roster, if held
  * @returns {Promise<{ ok: boolean, defect: string | null, peerCert: DeviceCertificate | null }>}
@@ -101,15 +101,15 @@ export const evaluateAuthHello = async (hello, {
 
 /**
  * The bytes a device signs to prove possession. Role-tagged: `prover` is
- * always the signer, `verifier` the challenger — so a proof reflected back
+ * always the signer, `verifier` the challenger, so a proof reflected back
  * at its author names the wrong prover and cannot verify.
  *
  * @param {Object} args
  * @param {string} args.roomId          the rendezvous room this link lives in
  * @param {string} args.proverDeviceDid
  * @param {string} args.verifierDeviceDid
- * @param {string} args.proverNonce     base64 — the nonce the prover sent
- * @param {string} args.verifierNonce   base64 — the challenge being answered
+ * @param {string} args.proverNonce     base64: the nonce the prover sent
+ * @param {string} args.verifierNonce   base64: the challenge being answered
  */
 export const proofSigningBytes = ({
   roomId, proverDeviceDid, verifierDeviceDid, proverNonce, verifierNonce,

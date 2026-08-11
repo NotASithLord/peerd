@@ -30,7 +30,7 @@ The code is the specification:
 - Structural exclusion of raw identity and device-key secrets from the generic
   encrypted-secrets section.
 
-Since then, same-user device enrollment and P2P state sync landed — device
+Since then, same-user device enrollment and P2P state sync landed, device
 subkeys and certificates, passkey enrollment authority, private rotating
 rendezvous, mutual self-device authentication, and direct device-to-device
 state transfer. That arc has its own document: `06-device-enrollment.md`
