@@ -45,7 +45,7 @@ export const buildFirefoxWebVmNote = ({ bugUrl = FIREFOX_WEBVM_BUG, wecgUrl = WE
   list.className = 'ffx-links';
   for (const [label, href] of [
     ['Firefox bug 1673477 — Bugzilla', bugUrl],
-    ['WECG issue 1039 — cross-browser proposal', wecgUrl],
+    ['WECG issue 1039: cross-browser proposal', wecgUrl],
   ]) {
     const li = doc.createElement('li');
     const a = doc.createElement('a');

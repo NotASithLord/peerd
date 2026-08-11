@@ -20,10 +20,10 @@
  *   time      — temporal grounding (clock)
  *   webvm     — CheerpX Linux instance
  *   notebook  — Notebook (Web Worker + OPFS)
- *   pod       — Pod (sealed shell/WASI jobs + OPFS)
+ *   pod      : Pod (sealed shell/WASI jobs + OPFS)
  *   app       — stored-HTML App in a sandboxed iframe
  *   actor  — orchestration: a child session running the agent loop
- *   engine    — cross-kind sandbox ops (sandbox_create spans webvm/notebook/pod/app;
+ *   engine   : cross-kind sandbox ops (sandbox_create spans webvm/notebook/pod/app;
  *               its result stamps the concrete `kind` for the handle harvest)
  *   memory    — file-based AGENTS.md memory (read/confirm-gated write)
  *
@@ -95,21 +95,50 @@
  *   is the legitimate result — but the one-shot latch reads this to give the
  *   actor its promised recovery turn instead of short-circuiting a crash back
  *   as the raw reply (the oneShot contract: "an errored round falls through").
+ * @property {boolean} [endTurn]       return this result to the caller and end
+ *   the current model turn without another inference or tool dispatch
+ * @property {any} [structured]        optional host-only structured twin of a
+ *   presentation-oriented `content` string. The model loop ignores it; trusted
+ *   relays may consume it without parsing human-formatted text.
+ * @property {string} [actorDeliveryId] internal durable mailbox correlation.
+ *   Preserved into the persisted tool-result block and removed from the mailbox
+ *   only after that message commits. Provider formatters ignore this field.
+ * @property {string[]} [actorDeliveryIds] internal durable mailbox correlations
+ *   for a tool that consumed multiple actor replies, such as script.
+ * @property {string} [actorCorrelationId] host-only actor correlation that does
+ *   not acknowledge the durable mailbox; provider formatters ignore it.
+ * @property {boolean} [actorTerminal] host-stamped actor completion state.
+ * @property {boolean} [actorOutcomeKnown] host-stamped outcome certainty.
+ * @property {boolean} [actorPerformed] host-stamped execution state.
+ * @property {boolean} [actorAborted] host-stamped user cancellation state.
  */
 
 /**
  * @typedef {Object} ToolResultErr
  * @property {false} ok
  * @property {string} error
+ * @property {boolean} [endTurn]
  * @property {any} [content]  optional human-readable explanation authored
  *   alongside the machine `error` code (e.g. "User declined the outbound
  *   write."); the loop surfaces it on the failure path — see agent-loop.js.
- * @property {'transport-lost' | 'host-lost' | 'pre-effect-failure'} [outcomeKind]
+ * @property {'transport-lost' | 'host-lost' | 'pre-effect-failure' | 'effect-completed'} [outcomeKind]
  *   typed failure outcome for the lifecycle recovery contract
  *   (peerd-runtime/lifecycle/failure-taxonomy.js): a tool that KNOWS how it
  *   failed stamps this so the recovery decision is deterministic instead of
  *   string-matched. Optional — unstamped failures take the heuristic path.
+ * @property {any} [structured] optional host-side policy or recovery details;
+ *   a tool that needs model-visible structure must serialize a safe compact
+ *   form into `content` as well
  * @property {ToolMeta} [meta]
+ * @property {string} [actorDeliveryId] internal durable mailbox correlation;
+ *   never serialized to a provider.
+ * @property {string[]} [actorDeliveryIds] internal durable mailbox correlations;
+ *   never serialized to a provider.
+ * @property {string} [actorCorrelationId] host-only non-ack actor correlation.
+ * @property {boolean} [actorTerminal] host-stamped actor completion state.
+ * @property {boolean} [actorOutcomeKnown] host-stamped outcome certainty.
+ * @property {boolean} [actorPerformed] host-stamped execution state.
+ * @property {boolean} [actorAborted] host-stamped user cancellation state.
  */
 
 /** @typedef {ToolResultOk | ToolResultErr} ToolResult */
@@ -159,6 +188,23 @@
  * @property {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} [safeFetch]
  *                                     provider-allowlist fetch (locked down;
  *                                     for tools that legitimately hit a provider)
+ * @property {(origin: string) => boolean} [canUseSiteClientOrigin]
+ *                                     synchronous early custody check
+ * @property {(origin: string) => Promise<boolean>} [authorizeSiteClientOrigin]
+ *                                     final live-tab custody check; web actors
+ *                                     only, fail-closed when absent
+ * @property {(origin: string, signal?: AbortSignal) => Promise<boolean>} [authorizeSignInOrigin]
+ *                                     post-consent relying-site promotion for
+ *                                     login; tab-backed web actors only
+ * @property {(idpOrigin: string, signal?: AbortSignal) => Promise<boolean>} [authorizeSignInExcursion]
+ *                                     arms one exact verified IdP after consent
+ * @property {(idpOrigin: string, signal?: AbortSignal) => Promise<boolean>} [revokeSignInExcursion]
+ *                                     removes a still-unused grant after failure
+ * @property {() => Promise<import('../peerd-runtime/actor/landing-rule.js').LandingVerdict | null>} [revalidateActorLanding]
+ *                                     execute-time live origin/auth check for
+ *                                     every tab-backed web-actor tool
+ * @property {boolean} [idpTransitOnly] stale-session defense that causes every
+ *                                     API actor tool to fail closed
  * @property {Record<string, any>} [settings]   settings snapshot at ctx-build time
  *                                     (web tools no longer read any — tab focus is
  *                                     policy, not a setting; see DECISIONS #20)
@@ -167,12 +213,16 @@
  *                                     ctx.skills.loadBody on invocation)
  * @property {(name: string) => Promise<string | null>} getSecret
  * @property {(entry: { type: string, details?: Record<string, any> }) => Promise<unknown>} audit
- * @property {(prompt: ConfirmPrompt) => Promise<ConfirmAnswer>} confirm
+ * @property {(prompt: ConfirmPrompt, signal?: AbortSignal) => Promise<ConfirmAnswer>} confirm
+ * @property {string | null} [lifecycleOwnerSessionId] root chat that owns
+ *                                     lifecycle intent for this execution
  * @property {Object} kv               peerd-egress kv namespace
  * @property {Object} idb              peerd-egress idb namespace
  * @property {readonly string[]} denylist   loaded denylist patterns (egress + denylist gate input)
  * @property {ProviderLite} provider
  * @property {VaultLite} vault
+ * @property {AbortSignal} [abortSignal] Stop/cancel signal for this dispatch;
+ *                                     relayed code operations must preserve it
  */
 
 /**
@@ -213,9 +263,18 @@
  *   above the call summary. why a free-form line and not a code: the user is
  *   the audience, and the only thing that makes a confirm worth showing is that
  *   it explains itself.
- * @property {string | null} [sessionId]   chat the prompt belongs to — lets the
- *                                    coordinator decline a session's pending
- *                                    confirms when its turn is aborted
+ * @property {string} [lifecycleTarget] immutable target from an unknown-outcome
+ *                                    approval claim; the confirmation UI shows
+ *                                    this exact value rather than a mutable live URL
+ * @property {boolean} [oneShot]      this approval must be answered directly
+ *                                    and cannot read or create a session grant
+ * @property {string | null} [sessionId]   exact execution session; lets the
+ *                                    coordinator decline a turn's pending
+ *                                    confirms when it is aborted
+ * @property {string | null} [ownerSessionId] root chat whose user owns the
+ *                                    action; scopes display and replay
+ * @property {string | null} [dispatchId] exact tool dispatch covered by the
+ *                                    answer; null for non-tool confirmations
  */
 
 /**

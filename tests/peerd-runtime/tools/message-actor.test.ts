@@ -8,6 +8,10 @@
 
 import { describe, test, expect } from 'bun:test';
 import { messageActorTool } from '../../../extension/peerd-runtime/tools/defs/message-actor.js';
+import {
+  decideNumericTabAuthority,
+  numericTabAuthorityRefusal,
+} from '../../../extension/peerd-runtime/actor/numeric-tab-authority.js';
 
 // Records the request object execute() passes to ctx.messageActor so the built
 // request is assertable. Typed `any` (like tests/.../fetch-url.test.ts) — the
@@ -97,6 +101,51 @@ describe('message_actor — case 6: strict boolean coercions', () => {
 });
 
 describe('message_actor — case 7: pass-through of args + ctx fields', () => {
+  test('preserves the typed pre-effect refusal and safe recovery content', async () => {
+    const decision = decideNumericTabAuthority('https://account.test/inbox?secret=hidden', {
+      policyReady: true,
+      learned: new Set(['https://account.test']),
+    });
+    if (decision.allowed) throw new Error('expected a refusal');
+    const refusal = numericTabAuthorityRefusal(decision);
+    const { ctx } = recordingCtx({ messageActor: async () => refusal });
+    expect(await messageActorTool.execute({ to: '42', message: 'read it' }, ctx))
+      .toMatchObject({
+        ok: false,
+        error: 'actor_sensitive_tab_requires_site',
+        outcomeKind: 'pre-effect-failure',
+        structured: { performed: false, outcomeKnown: true },
+        actorTerminal: true,
+        actorOutcomeKnown: true,
+        actorPerformed: false,
+      });
+  });
+
+  test('preserves host-only actor correlation and terminal metadata', async () => {
+    const { ctx } = recordingCtx({ messageActor: async () => ({
+      ok: false, error: 'actor failed',
+      actorCorrelationId: 'correlation-1', actorTerminal: true,
+      actorOutcomeKnown: false, actorPerformed: true, actorAborted: true,
+    }) });
+    expect(await messageActorTool.execute({ to: 'web', message: 'read it', await: true }, ctx))
+      .toMatchObject({
+        ok: false, actorCorrelationId: 'correlation-1', actorTerminal: true,
+        actorOutcomeKnown: false, actorPerformed: true, actorAborted: true,
+      });
+  });
+
+  test('turns trusted Not run evidence into a typed pre-effect failure', async () => {
+    const { ctx } = recordingCtx({ messageActor: async () => ({
+      ok: false, error: 'retired helper', actorTerminal: true,
+      actorOutcomeKnown: true, actorPerformed: false,
+    }) });
+    expect(await messageActorTool.execute({ to: 'web', message: 'read it', await: true }, ctx))
+      .toMatchObject({
+        ok: false, outcomeKind: 'pre-effect-failure',
+        actorOutcomeKnown: true, actorPerformed: false,
+      });
+  });
+
   test('forwards to/message from args and session/toolUseId/abortSignal from ctx', async () => {
     const abortSignal = { aborted: false, addEventListener() {} };
     const { ctx, seen } = recordingCtx({

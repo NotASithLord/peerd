@@ -25,16 +25,16 @@ const mount = (entries) => {
 const settle = () => new Promise((r) => setTimeout(r, 0)).then(() => m.redraw.sync?.() ?? m.redraw());
 
 describe('options.activity — origin-lock events', () => {
-  it('labels a learned origin and names the site', async () => {
+  it('labels a learned host and names its protection scope', async () => {
     const { root, unmount } = mount([
-      { id: '1', when: 1, type: 'origin_learned_sensitive', details: { origin: 'https://bank.test', reason: 'password-field' } },
+      { id: '1', when: 1, type: 'origin_learned_sensitive', details: { host: 'bank.test', reason: 'password-field' } },
     ]);
     try {
       await settle();
       const text = root.textContent ?? '';
       expect(text.includes('origin_learned_sensitive')).toBe(false);   // no raw slug
-      expect(text.includes('site treated as yours')).toBe(true);
-      expect(text.includes('https://bank.test')).toBe(true);           // WHICH site
+      expect(text.includes('host may share browser session')).toBe(true);
+      expect(text.includes('bank.test')).toBe(true);                   // WHICH host
       expect(text.includes('password-field')).toBe(true);              // and why
     } finally { unmount(); }
   });
@@ -56,13 +56,13 @@ describe('options.activity — origin-lock events', () => {
     // Removing a protection is the noisier event - same posture as the denylist
     // rows, where disabling a built-in pattern is a warn.
     const { root, unmount } = mount([
-      { id: '3', when: 3, type: 'origin_unlearned_sensitive', details: { origin: 'https://shop.test' } },
+      { id: '3', when: 3, type: 'origin_unlearned_sensitive', details: { host: 'shop.test' } },
     ]);
     try {
       await settle();
       const text = root.textContent ?? '';
-      expect(text.includes('site no longer yours')).toBe(true);
-      expect(text.includes('https://shop.test')).toBe(true);
+      expect(text.includes('learned host removed')).toBe(true);
+      expect(text.includes('shop.test')).toBe(true);
     } finally { unmount(); }
   });
 

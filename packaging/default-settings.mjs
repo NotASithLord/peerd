@@ -78,13 +78,12 @@ export const defaults = {
   // tool action. The chat mode-row dial raises it per task.
   reasoningEffort: { store: 'medium', preview: 'medium' },
 
-  // PR #119 — the web actor's ACTION surface. 'tools' (default, both channels):
-  // the actor drives its tab via discrete click/type/navigate tool calls.
-  // 'code': the Aside-style A/B arm — the actor WRITES Playwright-shaped JS
-  // (page.goto/click/fill/…) in a sealed REPL; perception stays the a11y
-  // snapshot. Experiment knob, off by default even on preview — flipped by the
-  // eval bench to A/B the two surfaces. Unknown stored values coerce to 'tools'.
-  webActorActionSurface: { store: 'tools', preview: 'tools' },
+  // The web actor's ACTION surface. Preview/dev uses Playwright-shaped JS in a
+  // sealed worker; store remains on discrete tools while the code lane earns
+  // broad field evidence. A runtime without the offscreen worker host falls
+  // back to tools even when its package default says code. Per-user stored
+  // values still win; unknown values coerce to tools.
+  webActorActionSurface: { store: 'tools', preview: 'code' },
 
   // Empty on fresh install — NO provider is assumed. The first provider the
   // user configures auto-activates (provider/setKey for keyed providers,
@@ -254,15 +253,27 @@ export const defaults = {
   auditLogMaxEntries: { store: 20000, preview: 20000 },
 
   // ── preview-only keys ──────────────────────────────────────────────
+  // Self-update check at startup (background/update-check.js). Preview
+  // installs are self-hosted (update_url → the peerd.ai feeds → GitHub
+  // release artifacts), and peerd's offscreen keepalive holds the MV3 SW
+  // alive - the exact state where Chrome parks a downloaded extension
+  // update waiting for an "idle" that never comes. ON by default on
+  // preview: testers should just be current. Chrome checks + reloads when
+  // nothing is in flight; Firefox (no requestUpdateCheck API) reads the
+  // feed and offers the XPI in a notice. Store packages omit the key
+  // entirely - store updates belong to the store; dev (load-unpacked) has
+  // no update_url, so the check is a structural no-op there.
+  autoUpdateEnabled: { preview: true },
+
   // Dweb participation is ON BY DEFAULT on the dev/preview package (owner
   // call, 2026-06-13 — supersedes the earlier "opt-in even on preview",
   // spec §12). Preview ships to contributors and early testers; making
   // them toggle dweb on before the demo is pure friction, and the channel
   // boundary IS friction tolerance, not a safety floor (see the file
   // header) — same posture as `advancedAutomationEnabled: { preview: true }`. NOT a safety
-  // relaxation: the dweb module is preview-channel-only (the store package
-  // prunes it and sets DWEB_ENABLED=false, so this key is absent there
-  // entirely from CHANNEL_DEFAULTS), identity needs an unlocked vault, and
+  // relaxation: the dweb module ships only where the preview target has a mesh
+  // host. Other packages prune it and omit this key from CHANNEL_DEFAULTS.
+  // Identity needs an unlocked vault, and
   // NOTHING connects until the user explicitly joins a room (the bridge's
   // consent gate). On = the dweb UI is live and the commons opens without
   // a pre-step; it does not auto-connect anywhere.

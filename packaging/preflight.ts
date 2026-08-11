@@ -64,11 +64,12 @@ const main = () => {
   run('dweb boundary', 'bun', ['run', 'check:boundary']);
   run('packaged import graph (no pruned-but-imported file)', 'bun', ['run', 'check:imports']);
   // MUST follow check:imports, which is what stages the four channel×browser
-  // builds this lints. It is the only gate that judges peerd AS a Firefox
-  // extension — every executing lane is Chrome.
+  // builds this lints. This covers the static Firefox package posture; the
+  // separate firefox-runtime CI job installs the Store XPI and runs it in Gecko.
   run('firefox package lint (AMO validator; no unguarded Chrome-only API)', 'bun', ['run', 'check:firefox']);
   run('doc path references (top-level docs point at real files)', 'bun', ['run', 'check:docpaths']);
   run('source hygiene (no control bytes / tracked symlinks in source)', 'bun', ['run', 'check:hygiene']);
+  run('copy hygiene (no new em dashes / assistant authorship markers)', 'bun', ['run', 'check:copy']);
   run('vendor integrity (extension/vendor/ matches vendor.lock.json)', 'bun', ['run', 'check:vendor']);
   run('security invariants (manifest surface / dynamic code / message hosts)', 'bun', ['run', 'check:invariants']);
   // Web target: stage it fresh from source, then prove the tree is import-closed

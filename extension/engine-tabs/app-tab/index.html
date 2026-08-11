@@ -2,6 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <!-- why page-local: WebVM legitimately frames its packaged loader. Only the App parent rejects non-extension frame navigation. -->
+  <meta http-equiv="Content-Security-Policy" content="frame-src 'self'">
   <title>peerd · App</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='2' y='2' width='12' height='12' rx='2' fill='%23a78bfa'/%3E%3Crect x='4' y='4' width='8' height='2' fill='%230d1117'/%3E%3Crect x='4' y='7' width='5' height='1' fill='%230d1117'/%3E%3Crect x='4' y='9' width='6' height='1' fill='%230d1117'/%3E%3C/svg%3E">
   <!--
@@ -13,12 +15,15 @@
   <link rel="stylesheet" href="/shared/brand.css">
   <style>
     :root {
-      --bg: #0d1117;
-      --bg-elev: #161b22;
-      --bg-editor: #11161d;
-      --fg: #e6edf3;
-      --fg-muted: #9ba3ad;
-      --border: #30363d;
+      --bg: #101112;
+      --bg-elev: #151617;
+      --bg-elev2: #1A1C1E;
+      --bg-editor: #080909;
+      --fg: #F3F3EF;
+      --fg-muted: #ABABA6;
+      --muted: #70716E;
+      --border: #25272A;
+      --border-strong: #32353A;
       --accent: #a78bfa;
       --fail: #c43030;
     }
@@ -112,6 +117,26 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
     .muted { color: var(--fg-muted); margin: 0; max-width: 360px; text-align: center; padding: 0 20px; }
+    #app-notice-stack {
+      position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 70;
+      display: flex; flex-direction: column; gap: 8px;
+      pointer-events: none;
+    }
+    #app-notice-stack > * { pointer-events: auto; }
+    #app-save-status {
+      display: flex; align-items: center; gap: 12px;
+      padding: 9px 12px; border: 1px solid var(--fail); border-radius: 6px;
+      background: #111; color: var(--fg);
+      font: 12px/1.4 -apple-system, system-ui, sans-serif;
+    }
+    #app-save-status[hidden] { display: none; }
+    #app-save-message { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    #app-save-retry {
+      min-height: 28px; padding: 3px 10px;
+      border: 1px solid #666; border-radius: 4px;
+      background: #111; color: var(--fg); cursor: pointer;
+    }
+    #app-save-retry:disabled { opacity: 0.5; cursor: default; }
   </style>
 </head>
 <body class="mode-render">
@@ -121,7 +146,7 @@
   </div>
 
   <div class="frame-host">
-    <iframe id="app-frame" title="peerd app"></iframe>
+    <iframe id="app-frame" title="peerd app" sandbox="allow-scripts allow-modals allow-pointer-lock"></iframe>
   </div>
 
   <div class="edit-toolbar">
@@ -133,6 +158,13 @@
 
   <div id="editor-panel" hidden>
     <div id="editor-mount"></div>
+  </div>
+
+  <div id="app-notice-stack">
+    <div id="app-save-status" role="alert" aria-live="assertive" hidden>
+      <span id="app-save-message"></span>
+      <button id="app-save-retry" type="button">Retry save</button>
+    </div>
   </div>
 
   <button id="export-btn" title="Download this app as a .peerd file">Export ⤓</button>

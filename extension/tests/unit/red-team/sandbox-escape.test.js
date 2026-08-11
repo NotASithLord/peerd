@@ -45,11 +45,14 @@ describe('red-team: sandboxed code cannot escape a real Notebook worker realm', 
       // and minting a fresh un-sealed realm, all must throw the egress error.
       for (const channel of [
         'XMLHttpRequest', 'WebSocket', 'WebSocketStream', 'EventSource',
-        'WebTransport', 'Worker', 'SharedWorker', 'importScripts', 'sendBeacon', 'caches',
+        'WebTransport', 'Worker', 'SharedWorker', 'importScripts', 'sendBeacon',
+        'caches', 'rawOpfs',
       ]) {
         expect(results[channel].threw).toBe(true);
         expect(results[channel].name).toBe('NotebookEgressBlockedError');
       }
+      expect(results.chromeAbsent).toBe(true);
+      expect(results.browserAbsent).toBe(true);
       // The native fetch is unrecoverable off the prototype chain, and the bridge
       // slot is pinned so it can't be reassigned to an exfiltrating function.
       expect(fetchInspection.protoFetchFound).toBe(false);

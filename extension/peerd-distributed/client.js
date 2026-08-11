@@ -8,11 +8,10 @@
 // and prunes this whole module).
 //
 // Keep the surface minimal. Growing it is a deliberate act — see
-// PACKAGING.md §"Adding dweb-only code". PHASE 1 grows it with exactly
-// what the hosting PAGES need — never the SW, which cannot import this
-// module (a ServiceWorker can't dynamic-import, and must not reference the
-// module path). All of these run in a page (options / app-tab via
-// loadDweb); the SW only owns the vault + audit + app registry + tabs:
+// PACKAGING.md §"Adding dweb-only code". Chrome hosts this client in an
+// offscreen page because its service worker cannot dynamic-import; Firefox
+// has no offscreen API and loads it in its MV3 background. The background
+// still owns vault custody, audit, app registry, and tabs:
 //   identityMaterial / identityFromMaterial — mint/rehydrate the Ed25519
 //     identity page-side, vault IO injected as scoped SW round-trips;
 //   loadSeedApp — read the commons seed files for first-run install;
@@ -20,6 +19,7 @@
 //     the dwapp postMessage bridge.
 
 import { generateIdentity, loadIdentityMaterial, identityFromMaterial } from './identity/keypair.js';
+import { buildIdentityRecord, adoptIdentityRecord } from './identity/recovery-record.js';
 import { joinRoom } from './transport/rooms.js';
 import { createBaseNetwork, BASE_TOPIC } from './base-network.js';
 import { installAppBundle } from './apps/loader.js';
@@ -81,6 +81,18 @@ export const createDwebClient = () => {
     // --- Phase 1 ---------------------------------------------------------
     identityMaterial: loadIdentityMaterial,
     identityFromMaterial,
+
+    // --- portable identity (docs/design/portable-identity/) --------------
+    // Record build/open runs in the channel's dweb crypto host (Chrome
+    // offscreen page; Firefox background). The background owns the vault
+    // reads/writes on either side and passes material through the one
+    // extension-internal boundary keypair.js already documents.
+    /** @param {{ material: { seed: string, pub: string }, passphrase: string }} args */
+    identityRecordExport: async ({ material, passphrase }) =>
+      buildIdentityRecord({ material, wrappers: [{ kind: 'passphrase', passphrase }] }),
+    /** @param {{ record: any, passphrase?: string, existingMaterial?: string | null, replaceExisting?: boolean }} args */
+    identityRecordAdopt: async ({ record, passphrase, existingMaterial, replaceExisting }) =>
+      adoptIdentityRecord({ record, passphrase, existingMaterial, replaceExisting }),
     installAppBundle,
     // Host a dwapp's bridge. The app-tab passes `frame` (the iframe) and gets
     // the default iframe transport; an offscreen host can pass `transport`

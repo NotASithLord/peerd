@@ -74,21 +74,30 @@ export const makeMeshDispatch = (deps) => {
    * Send an ask DM and await the peer's ONE matching reply (or time out). The
    * shared core of ask/converse/say — the only difference between them is
    * whether a convId rides along and whether the registry records the turns.
-   * @param {string} did @param {string} message @param {string} [convId] @param {number} [timeoutMs]
+   * @param {string} did @param {string} message @param {string} [convId] @param {number} [timeoutMs] @param {AbortSignal} [signal]
    */
-  const sendAndAwait = async (did, message, convId, timeoutMs) => {
+  const sendAndAwait = async (did, message, convId, timeoutMs, signal) => {
+    if (signal?.aborted) return { ok: false, error: 'a2a: aborted before send' };
     const reqId = mkReqId();
     const env = /** @type {A2AEnvelope} */ ({ __a2a: 1, kind: 'ask', reqId, message });
     if (convId) env.convId = convId;
     const sent = await sendDm(did, env);
     if (!sent?.ok) return { ok: false, error: sent?.error ?? 'ask: could not reach the peer' };
+    if (signal?.aborted) return { ok: false, error: 'a2a: aborted after send' };
     const ms = typeof timeoutMs === 'number' ? timeoutMs : defaultTimeoutMs;
     return await new Promise((resolve) => {
-      const timer = setTimeout(() => {
+      /** @param {any} value */
+      const finish = (value) => {
+        clearTimeout(timer);
         pendingAsks.delete(reqId);
-        resolve({ ok: true, from: null, reply: null, timedOut: true });
-      }, ms);
-      pendingAsks.set(reqId, { resolve, timer, did, convId });
+        signal?.removeEventListener('abort', onAbort);
+        resolve(value);
+      };
+      const onAbort = () => finish({ ok: false, error: 'a2a: aborted while awaiting reply' });
+      const timer = setTimeout(() => finish({ ok: true, from: null, reply: null, timedOut: true }), ms);
+      pendingAsks.set(reqId, { resolve: finish, timer, did, convId });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
     });
   };
 
@@ -97,10 +106,11 @@ export const makeMeshDispatch = (deps) => {
    * cleared for first-contact (signing ops to an un-cleared did are refused
    * HERE so the gate can't be bypassed by the worker).
    * @param {string} op @param {any} args
-   * @param {{ signs?: boolean, allowed?: (did: string) => boolean }} [ctx]
+   * @param {{ signs?: boolean, allowed?: (did: string) => boolean, signal?: AbortSignal }} [ctx]
    * @returns {Promise<{ ok: boolean, error?: string } & Record<string, any>>}
    */
   const dispatch = async (op, args, ctx = {}) => {
+    if (ctx.signal?.aborted) return { ok: false, error: 'a2a: run aborted' };
     // First-contact gate: a signing op to a peer the user hasn't cleared is
     // refused. The SW resolves consent BEFORE calling dispatch and passes
     // ctx.allowed; a missing allowed fn fails CLOSED for signing ops.
@@ -118,17 +128,20 @@ export const makeMeshDispatch = (deps) => {
         return { ok: true, card: card ?? null };
       }
       case 'publishCard': {
+        if (ctx.signal?.aborted) return { ok: false, error: 'a2a: run aborted before publish' };
         const r = await publishCard(args.card);
         return r?.ok ? { ok: true, ...(r.did ? { did: r.did } : {}) } : { ok: false, error: r?.error ?? 'publishCard failed' };
       }
       case 'send': {
+        if (ctx.signal?.aborted) return { ok: false, error: 'a2a: run aborted before cast' };
         const r = await sendDm(args.did, { __a2a: 1, kind: 'tell', reqId: mkReqId(), message: args.message });
         return r?.ok ? { ok: true, ...(r.id ? { id: r.id } : {}) } : { ok: false, error: r?.error ?? 'send failed' };
       }
       case 'ask':
         // Single-shot: no convId, no registry recording — the legacy exchange.
-        return await sendAndAwait(args.did, args.message, undefined, args.timeoutMs);
+        return await sendAndAwait(args.did, args.message, undefined, args.timeoutMs, ctx.signal);
       case 'inbox': {
+        if (ctx.signal?.aborted) return { ok: false, error: 'a2a: run aborted before inbox drain' };
         const drained = inboxBuffer;
         inboxBuffer = [];
         return { ok: true, messages: drained.map((m) => ({ from: m.from, message: m.message, ts: m.ts })) };
@@ -136,7 +149,7 @@ export const makeMeshDispatch = (deps) => {
       case 'converse': {
         if (!conversations) return { ok: false, error: 'a2a: standing conversations are not available' };
         const { convId } = conversations.open(args.did, args.message);
-        const r = await sendAndAwait(args.did, args.message, convId, args.timeoutMs);
+        const r = await sendAndAwait(args.did, args.message, convId, args.timeoutMs, ctx.signal);
         if (r.ok && !r.timedOut && typeof r.reply === 'string') conversations.record(convId, 'peer', r.reply);
         return { ...r, convId };
       }
@@ -145,7 +158,7 @@ export const makeMeshDispatch = (deps) => {
         const did = conversations.didFor(args.convId);
         if (!did) return { ok: false, error: `a2a: no standing conversation ${args.convId}` };
         conversations.record(args.convId, 'self', args.message);
-        const r = await sendAndAwait(did, args.message, args.convId, args.timeoutMs);
+        const r = await sendAndAwait(did, args.message, args.convId, args.timeoutMs, ctx.signal);
         if (r.ok && !r.timedOut && typeof r.reply === 'string') conversations.record(args.convId, 'peer', r.reply);
         return { ...r, convId: args.convId };
       }

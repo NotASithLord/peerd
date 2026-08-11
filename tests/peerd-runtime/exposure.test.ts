@@ -279,11 +279,12 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     // The web actor owns page reads + DOM mutators but NOT page_eval/page_exec —
     // it ingests untrusted page text, so it must not also wield code-exec.
     expect([...WEB_ACTOR_DOM_TOOLS].sort()).toEqual([
-      'click', 'navigate', 'query_dom', 'page_keys', 'read_page', 'read_pdf',
+      'click', 'navigate', 'query_dom', 'read_page', 'read_pdf',
       'read_state', 'snapshot', 'type', 'view', 'watch_changes',
     ].sort());
     expect(WEB_ACTOR_DOM_TOOLS).not.toContain('page_eval');
     expect(WEB_ACTOR_DOM_TOOLS).not.toContain('page_exec');
+    expect(WEB_ACTOR_DOM_TOOLS).not.toContain('page_keys');
   });
 
   test('a web actor may call its DOM tools (read + mutate) + the sessionless fetch_url', () => {
@@ -319,7 +320,7 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     expect(isAllowedForActorType('read_web_cache', 'app')).toBe(false);
   });
 
-  test('DESIGN-18: an API backing (web actor, no tab) is fetch_url-ONLY', () => {
+  test('DESIGN-18: an API backing keeps only its tab-free origin surface', () => {
     // fetch_url is in; the whole DOM toolset is OUT (it needs a tab the API actor
     // never has). The gate refuses a DOM tool for backing:'api' at the gate.
     expect(isAllowedForActor('fetch_url', 'web', 'api')).toBe(true);
@@ -341,6 +342,15 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     expect(actorAllowedToolsFor('web', 'tab').size).toBe(actorAllowedTools('web').size);
     // backing is web-only — it doesn't change an engine kind's set.
     expect(actorAllowedToolsFor('webvm', 'api').size).toBe(actorAllowedTools('webvm').size);
+  });
+
+  test('a present unknown web backing fails closed instead of inheriting tab tools', () => {
+    expect(actorAllowedToolsFor('web', 'future' as any).size).toBe(0);
+    expect(isAllowedForActor('site_client_read', 'web', 'future' as any)).toBe(false);
+    expect(rt({ name: 'site_client_read' }, { origin: 'https://a.test' }, {
+      exposure: EXPOSURE_ACTOR, actorType: 'web', backing: 'future' as any,
+      canUseSiteClientOrigin: () => true,
+    })?.allowed).toBe(false);
   });
 
   test('DESIGN-18: actorTierGate refuses DOM tools for an API backing, allows fetch_url', () => {
@@ -407,23 +417,38 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     expect(actorDescriptors(all, 'web').map((t) => t.name).sort()).toEqual(['click', 'snapshot']);
   });
 
-  test('DESIGN-18: actorDescriptors is backing-aware — an API actor is advertised ONLY fetch_url', () => {
-    const all = [{ name: 'click' }, { name: 'snapshot' }, { name: 'navigate' }, { name: 'fetch_url' }, { name: 'app_update' }];
+  test('DESIGN-18: actorDescriptors advertises the API actor tab-free surface', () => {
+    const all = [
+      { name: 'click' }, { name: 'snapshot' }, { name: 'navigate' },
+      { name: 'fetch_url' }, { name: 'read_web_cache' },
+      { name: 'site_client_run' }, { name: 'site_client_read' }, { name: 'site_client_write' },
+      { name: 'site_capture' }, { name: 'app_update' },
+    ];
     // An API backing drops the DOM tools from the ADVERTISED list (matching the gate +
     // the actor's own "no DOM" lore — so the model isn't shown tools it'd only be refused).
-    expect(actorDescriptors(all, 'web', 'api').map((t) => t.name)).toEqual(['fetch_url']);
+    expect(actorDescriptors(all, 'web', 'api').map((t) => t.name)).toEqual([
+      'fetch_url', 'read_web_cache', 'site_client_run', 'site_client_read', 'site_client_write',
+    ]);
     // A tab backing (and an absent backing) keep the full web surface.
-    expect(actorDescriptors(all, 'web', 'tab').map((t) => t.name).sort()).toEqual(['click', 'fetch_url', 'navigate', 'snapshot']);
+    expect(actorDescriptors(all, 'web', 'tab').map((t) => t.name).sort()).toEqual([
+      'click', 'fetch_url', 'navigate', 'read_web_cache', 'site_capture',
+      'site_client_read', 'site_client_run', 'site_client_write', 'snapshot',
+    ]);
   });
 });
 
 describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
   const webCode = (over: object = {}) =>
-    ({ exposure: EXPOSURE_ACTOR, actorType: 'web', backing: 'tab', actorInstanceId: '42', actorSurface: 'code', ...over });
+    ({
+      exposure: EXPOSURE_ACTOR, actorType: 'web', backing: 'tab', actorInstanceId: '42', actorSurface: 'code',
+      canUseSiteClientOrigin: () => true,
+      ...over,
+    });
 
-  test('the code surface is page_code ALONE — perceive + act both go through page.*', () => {
-    expect([...actorAllowedToolsFor('web', 'tab', 'code')]).toEqual(['page_code']);
+  test('the code surface is page_code plus the one operation not mapped by page.*', () => {
+    expect([...actorAllowedToolsFor('web', 'tab', 'code')]).toEqual(['page_code', 'site_client_run']);
     expect(isAllowedForActor('page_code', 'web', 'tab', 'code')).toBe(true);
+    expect(isAllowedForActor('site_client_run', 'web', 'tab', 'code')).toBe(true);
     // Everything else — action AND direct perception — is OFF the code surface:
     // perception is page.snapshot()/page.content() INSIDE page_code, not a direct
     // tool (a direct snapshot resolves the tab from the actor's turn ctx, which a
@@ -460,15 +485,16 @@ describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
     expect(r?.reason).toContain('actor-only');
     // No other actor kind may call it — engine actors, the dweb actor, the
     // API-backed web actor, and the tools-surface web actor all refuse.
-    for (const kind of ['webvm', 'notebook', 'app', 'dweb']) {
+    for (const kind of ['webvm', 'notebook', 'pod', 'app', 'dweb']) {
       expect(isAllowedForActor('page_code', kind, undefined, undefined)).toBe(false);
     }
     expect(isAllowedForActor('page_code', 'web', 'api', 'code')).toBe(false);
     expect(isAllowedForActor('page_code', 'web', 'tab', 'tools')).toBe(false);
   });
 
-  test('the gate: a code-surface web actor may call page_code ONLY (even perception)', () => {
+  test('the gate: a code-surface web actor may call page_code and discrete site_client_run', () => {
     expect(rt({ name: 'page_code' }, { code: 'return 1' }, webCode())).toBeNull();      // allowed
+    expect(rt({ name: 'site_client_run' }, { origin: 'https://example.com', code: 'return 1' }, webCode())).toBeNull();
     // Everything else refuses — the model acts AND perceives via page.* in code.
     for (const n of ['click', 'type', 'navigate', 'query_dom', 'fetch_url', 'snapshot', 'read_page']) {
       expect(rt({ name: n }, {}, webCode())?.allowed).toBe(false);
@@ -486,10 +512,12 @@ describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
     expect(rt({ name: 'navigate' }, {}, noSurface)).toBeNull();
   });
 
-  test('actorDescriptors is surface-aware — a code actor is advertised page_code only', () => {
-    const all = [{ name: 'click' }, { name: 'navigate' }, { name: 'snapshot' }, { name: 'read_page' }, { name: 'page_code' }, { name: 'fetch_url' }];
-    expect(actorDescriptors(all, 'web', 'tab', 'code').map((t) => t.name)).toEqual(['page_code']);
-    // The tools surface keeps the discrete DOM tools + fetch_url, and never shows page_code.
-    expect(actorDescriptors(all, 'web', 'tab', 'tools').map((t) => t.name).sort()).toEqual(['click', 'fetch_url', 'navigate', 'read_page', 'snapshot']);
+  test('actorDescriptors is surface-aware — a code actor sees code plus unmapped operations', () => {
+    const all = [{ name: 'click' }, { name: 'navigate' }, { name: 'snapshot' }, { name: 'read_page' }, { name: 'page_code' }, { name: 'fetch_url' }, { name: 'site_client_run' }];
+    expect(actorDescriptors(all, 'web', 'tab', 'code').map((t) => t.name)).toEqual(['page_code', 'site_client_run']);
+    // The tools surface keeps every supplied direct web operation and never
+    // shows page_code.
+    expect(actorDescriptors(all, 'web', 'tab', 'tools').map((t) => t.name).sort())
+      .toEqual(['click', 'fetch_url', 'navigate', 'read_page', 'site_client_run', 'snapshot']);
   });
 });

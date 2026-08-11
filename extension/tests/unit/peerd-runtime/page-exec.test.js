@@ -8,6 +8,7 @@
 import { describe, it, expect } from '../../framework.js';
 import { pageExecTool } from '/peerd-runtime/tools/defs/index.js';
 import { BUILTIN_TOOLS } from '/peerd-runtime/index.js';
+import { browserProbeResult } from '../../helpers/browser-scripting.js';
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
 /** @typedef {import('/peerd-runtime/tools/defs/page-exec.js').PageExecResult} PageExecResult */
@@ -26,6 +27,11 @@ const mockCtx = (cdpResult, overrides = {}) => /** @type {ToolContext} */ (/** @
   tabs: {
     get: async (/** @type {number} */ id) => ({ id, url: 'https://mail.example.com/' }),
     query: async () => [{ id: 1, url: 'https://mail.example.com/' }],
+  },
+  scripting: {
+    executeScript: async (/** @type {any} */ request) => browserProbeResult(request, {
+      url: 'https://mail.example.com/',
+    }),
   },
   debuggerPool: {
     evaluate: async () => cdpResult,
@@ -164,6 +170,23 @@ describe('page_exec — outer tool', () => {
     const r = await pageExecTool.execute({ expression: 'x' }, ctx);
     expect(r.ok).toBe(false);
     expect(errOf(r).includes('debugger_detached')).toBe(true);
+  });
+
+  it('discards all page output when the checked document changed', async () => {
+    const ctx = mockCtx(OK_RESULT, {
+      debuggerPool: {
+        evaluate: async () => {
+          const error = Object.assign(new Error('browser_target_changed'), {
+            outcomeKind: /** @type {const} */ ('pre-effect-failure'),
+          });
+          throw error;
+        },
+      },
+    });
+    const r = await pageExecTool.execute({ expression: 'x' }, ctx);
+    expect(r.ok).toBe(false);
+    expect(errOf(r)).toBe('browser_target_unverified');
+    expect(okContent(r).includes('private console text')).toBe(false);
   });
 
   it('maps cannot-attach errors when the tab is a chrome:// URL', async () => {

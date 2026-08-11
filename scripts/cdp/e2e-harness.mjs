@@ -36,6 +36,7 @@ const ROOT = resolve(__dirname, '..', '..');
 const EXT = resolve(ROOT, 'extension');
 
 export const PASSPHRASE = 'correct-horse-battery-staple';
+export const NETWORK_GUARD_CONTROLLER_PORT = 18_763;
 export const READY_BUDGET_MS = 30_000; // extension load + SW boot + page mount
 export const POLL_MS = 250;
 
@@ -72,6 +73,31 @@ export const sseToolCall = (name, args, { text = '' } = {}) => {
   };
   const openDelta = JSON.stringify({ choices: [{ delta: { role: 'assistant', content: text } }] });
   const callDelta = JSON.stringify({ choices: [{ delta: { tool_calls: [toolCall] } }] });
+  const finishDelta = JSON.stringify({
+    choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+    usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+  });
+  return [
+    `data: ${openDelta}`, `data: ${callDelta}`, `data: ${finishDelta}`,
+    'data: [DONE]', '',
+  ].join('\n\n') + '\n\n';
+};
+
+// A model can fan out several actor_create calls in one response; keep that
+// wire shape available to rendered E2E states instead of serially fabricating
+// calls that the async actor contract intentionally ends the turn after.
+export const sseToolCalls = (calls, { text = '' } = {}) => {
+  const toolCalls = calls.map(({ name, args }, index) => {
+    sseToolCallSeq += 1;
+    return {
+      index,
+      id: `call_e2e_${sseToolCallSeq}`,
+      type: 'function',
+      'function': { name, 'arguments': JSON.stringify(args) },
+    };
+  });
+  const openDelta = JSON.stringify({ choices: [{ delta: { role: 'assistant', content: text } }] });
+  const callDelta = JSON.stringify({ choices: [{ delta: { tool_calls: toolCalls } }] });
   const finishDelta = JSON.stringify({
     choices: [{ delta: {}, finish_reason: 'tool_calls' }],
     usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
@@ -137,9 +163,13 @@ const DETERMINISM_FLAGS = Object.freeze([
 
 // A side-panel-shaped frame. why: with no override, headless Chrome captured at
 // 756x413 — a landscape letterbox the side panel never has in production. The
-// panel stylesheet has NO width media queries, so the capture width IS the
-// design under test; pin it so every machine composes the same layout.
+// normal 400px capture remains the broad sidebar authority; the explicit
+// narrow metrics below exercise the intentional Firefox-width breakpoints.
 export const PANEL_METRICS = Object.freeze({ width: 400, height: 900, deviceScaleFactor: 1, mobile: false });
+// Firefox's installed sidebar screenshot has a 282px content column. The panel
+// viewport is 310px; .body contributes 14px padding on each side. Keep this as
+// the single narrow-width authority shared by the visual states.
+export const NARROW_PANEL_METRICS = Object.freeze({ width: 310, height: 900, deviceScaleFactor: 1, mobile: false });
 
 const STABLE_STYLE_ID = 'e2e-visual-stable';
 
@@ -227,10 +257,11 @@ export const WIDE_METRICS = Object.freeze({ width: 1280, height: 900, deviceScal
  *     sub-pixel translateZ toggle on the root (invisible in 2D, verified 0.00000
  *     diff) keeps frames flowing until the capture resolves.
  * @param {{ send: (m: string, p?: object) => Promise<any> }} page
+ * @param {{ bringToFront?: boolean }} [options]
  * @returns {Promise<Buffer>}
  */
-export async function capturePage(page) {
-  await page.send('Page.bringToFront').catch(() => {});
+export async function capturePage(page, { bringToFront = true } = {}) {
+  if (bringToFront) await page.send('Page.bringToFront').catch(() => {});
   let pumping = true;
   let toggle = false;
   const pump = (async () => {
@@ -287,6 +318,7 @@ export async function attach(wsUrl, onEvent) {
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   let id = 0;
   const pending = new Map();
+  const eventListeners = new Set(onEvent ? [onEvent] : []);
   const events = [];
   const reqUrl = new Map();   // requestId → url; loadingFailed carries no url of its own
   ws.onmessage = (e) => {
@@ -312,14 +344,20 @@ export async function attach(wsUrl, onEvent) {
     if (m.method === 'Network.loadingFailed' && !m.params?.canceled) {
       events.push(`NETFAIL ${m.params?.errorText || 'failed'} ${reqUrl.get(m.params?.requestId) || '(unknown url)'}`);
     }
-    if (onEvent) onEvent(m.method, m.params);
+    for (const listener of eventListeners) listener(m.method, m.params, m);
   };
-  const send = (method, params = {}) => new Promise((res, rej) => {
+  const send = (method, params = {}, sessionId) => new Promise((res, rej) => {
     const i = ++id;
     pending.set(i, (m) => (m.error ? rej(new Error(`${method}: ${m.error.message}`)) : res(m.result)));
-    ws.send(JSON.stringify({ id: i, method, params }));
+    ws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }));
   });
-  return { send, close: () => ws.close(), events };
+  return {
+    send,
+    close: () => ws.close(),
+    events,
+    on: (listener) => eventListeners.add(listener),
+    off: (listener) => eventListeners.delete(listener),
+  };
 }
 
 // Runtime.evaluate → return the value, or throw the page-side error.
@@ -333,8 +371,20 @@ export async function evalIn(conn, expression, awaitPromise = false) {
 }
 
 // Post an SW RPC from the page context and await its response.
-export function rpc(conn, message) {
-  const expr = `new Promise((res) => { try { chrome.runtime.sendMessage(${JSON.stringify(message)}, (r) => res(r ?? { ok: true, _noResponse: true })); } catch (e) { res({ ok: false, error: String(e) }); } })`;
+export function rpc(conn, message, { timeoutMs = READY_BUDGET_MS } = {}) {
+  const expr = `new Promise((res) => {
+    const timer = setTimeout(() => res({ ok: false, error: 'message-timeout' }), ${Number(timeoutMs)});
+    try {
+      chrome.runtime.sendMessage(${JSON.stringify(message)}, (r) => {
+        clearTimeout(timer);
+        const runtimeError = chrome.runtime.lastError?.message;
+        res(runtimeError ? { ok: false, error: runtimeError } : (r ?? { ok: true, _noResponse: true }));
+      });
+    } catch (e) {
+      clearTimeout(timer);
+      res({ ok: false, error: String(e) });
+    }
+  })`;
   return evalIn(conn, expr, true);
 }
 
@@ -371,7 +421,7 @@ async function findPeerdSw(port) {
   const sw = targets.find((t) => t.type === 'service_worker' && /\/background\/service-worker\.js/.test(String(t.url)));
   if (!sw) return null;
   const id = String(sw.url).match(/chrome-extension:\/\/([a-p]{32})\//)?.[1];
-  return id ? { id, wsUrl: sw.webSocketDebuggerUrl } : null;
+  return id ? { id, targetId: sw.id, wsUrl: sw.webSocketDebuggerUrl } : null;
 }
 
 // ---- the high-level launch --------------------------------------------------
@@ -387,8 +437,13 @@ async function findPeerdSw(port) {
  *     { delayMs, ...spec }                 → wait delayMs, then apply spec
  *   Default: a single assistant text turn ('e2e-smoke-ok').
  * @param {string} [opts.tagsModel]  model name returned by GET /api/tags.
+ * @param {boolean} [opts.interceptModel] attach Fetch interception to the
+ *   service worker; false for physical lifecycle tests that must not pin it.
  */
-export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', extensionDir = EXT } = {}) {
+export async function launchPeerd({
+  modelResponder, tagsModel = 'qwen3:8b', extensionDir = EXT,
+  interceptModel = true,
+} = {}) {
   // extensionDir defaults to the raw source (the dev/e2e tree); pass a packaged
   // STAGING dir to load a PRUNED build instead (check-packaged-pages.ts) — the
   // only way to observe packaged-build-only breakage like the v0.2.0 home blank.
@@ -404,6 +459,16 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
 
   const chrome = spawn(CHROME, [
     '--headless=new', '--no-first-run', '--no-default-browser-check',
+    // Browser-policy fixtures need public-looking names while their local HTTP
+    // servers stay deterministic and offline. Reserved .test names preserve the
+    // documented DNS-resolution residual without weakening localhost coverage.
+    '--host-resolver-rules=MAP orders.peerd.test 127.0.0.1, MAP acme.peerd.test 127.0.0.1, MAP acct.peerd.test 127.0.0.1, MAP guard.peerd.test 127.0.0.1',
+    // Product-boundary security tests must not pass because Chrome's separate
+    // Local Network Access feature stopped the request first.
+    '--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets,LocalNetworkAccessForWorkers',
+    '--disable-web-security',
+    '--ip-address-space-overrides=127.0.0.0/8=public',
+    `--unsafely-treat-insecure-origin-as-secure=http://orders.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT},http://acct.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT}`,
     '--disable-gpu', '--no-sandbox',
     ...DETERMINISM_FLAGS,
     `--user-data-dir=${profile}`,
@@ -431,9 +496,10 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
   // Redirect downloads browser-wide to the temp dir (headless honors this CDP
   // call where profile Preferences often don't). Best-effort: attach to the
   // browser target and leave the conn open so the setting persists for the run.
+  let browserConn = null;
   try {
     const ver = await fetch(`http://127.0.0.1:${port}/json/version`).then((r) => r.json());
-    const browserConn = await attach(ver.webSocketDebuggerUrl);
+    browserConn = await attach(ver.webSocketDebuggerUrl);
     await browserConn.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadDir });
   } catch { /* download redirect is best-effort; never block the run on it */ }
 
@@ -454,41 +520,59 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
   // single-Chrome speed path for the verify loop.
   let currentResponder = modelResponder || (() => ({ sse: sseText('e2e-smoke-ok') }));
   let modelCalls = 0;
-  const swConn = await attach(sw.wsUrl, async (method, params) => {
-    if (method !== 'Fetch.requestPaused') return;
-    const { requestId, request } = params;
-    const url = String(request.url);
-    const fulfill = (contentType, bodyStr, status = 200) => swConn.send('Fetch.fulfillRequest', {
-      requestId, responseCode: status,
-      responseHeaders: [{ name: 'content-type', value: contentType }],
-      body: Buffer.from(bodyStr).toString('base64'),
+  let remoteModuleRequests = 0;
+  const attachServiceWorker = async (target) => {
+    if (!browserConn) throw new Error('browser CDP connection unavailable');
+    const { sessionId } = await browserConn.send('Target.attachToTarget', {
+      targetId: target.targetId,
+      flatten: true,
     });
-    try {
-      if (url.includes('/v1/chat/completions')) {
-        const spec = await currentResponder(modelCalls++, request);
-        if (spec?.delayMs) await sleep(spec.delayMs);
-        if (spec?.sse != null) await fulfill('text/event-stream', spec.sse, spec.status ?? 200);
-        else if (spec?.status) await fulfill(spec.contentType ?? 'application/json', spec.body ?? '{}', spec.status);
-        else await fulfill('text/event-stream', sseText('e2e-smoke-ok'));
-      } else if (url.includes('/api/tags')) {
-        await fulfill('application/json', JSON.stringify({ models: [{ name: tagsModel, size: 1 }] }));
-      } else if (url === 'https://example.com/__peerd_pod_e2e__') {
-        // Deterministic public HTTPS target for the Pod's brokered egress
-        // evidence. It still traverses Pod Worker → tab → SW safeFetch; CDP
-        // replaces only the final internet response so CI never depends on DNS.
-        await fulfill('text/plain', 'pod-controlled-egress');
-      } else if (url.includes('11434')) {
-        await fulfill('application/json', '{}');
-      } else {
-        await swConn.send('Fetch.continueRequest', { requestId });
-      }
-    } catch { /* request may have been torn down (e.g. an aborted turn); ignore */ }
-  });
-  await swConn.send('Fetch.enable', { patterns: [
-    { urlPattern: '*11434*' },
-    { urlPattern: 'https://example.com/__peerd_pod_e2e__' },
-  ] });
-  log('Fetch interception armed on the service worker');
+    const connection = {
+      send: (method, params = {}) => browserConn.send(method, params, sessionId),
+      close: () => {
+        browserConn.off(onWorkerEvent);
+        browserConn.send('Target.detachFromTarget', { sessionId }).catch(() => {});
+      },
+    };
+    const onWorkerEvent = async (method, params, message) => {
+      if (message.sessionId !== sessionId) return;
+      if (method !== 'Fetch.requestPaused') return;
+      const { requestId, request } = params;
+      const url = String(request.url);
+      const fulfill = (contentType, bodyStr, status = 200) => connection.send('Fetch.fulfillRequest', {
+        requestId, responseCode: status,
+        responseHeaders: [{ name: 'content-type', value: contentType }],
+        body: Buffer.from(bodyStr).toString('base64'),
+      });
+      try {
+        if (url.includes('/v1/chat/completions')) {
+          const spec = await currentResponder(modelCalls++, request);
+          if (spec?.delayMs) await sleep(spec.delayMs);
+          if (spec?.sse != null) await fulfill('text/event-stream', spec.sse, spec.status ?? 200);
+          else if (spec?.status) await fulfill(spec.contentType ?? 'application/json', spec.body ?? '{}', spec.status);
+          else await fulfill('text/event-stream', sseText('e2e-smoke-ok'));
+        } else if (url.includes('/api/tags')) {
+          await fulfill('application/json', JSON.stringify({ models: [{ name: tagsModel, size: 1 }] }));
+        } else if (url === 'https://remote-module.test/store-policy-canary.js') {
+          remoteModuleRequests += 1;
+          await fulfill('application/javascript', "export const value = 'remote-canary-executed';");
+        } else if (url.includes('11434')) {
+          await fulfill('application/json', '{}');
+        } else {
+          await connection.send('Fetch.continueRequest', { requestId });
+        }
+      } catch { /* the worker or request may have been physically torn down */ }
+    };
+    browserConn.on(onWorkerEvent);
+    await connection.send('Runtime.runIfWaitingForDebugger');
+    await connection.send('Fetch.enable', { patterns: [
+      { urlPattern: '*11434*' },
+      { urlPattern: 'https://remote-module.test/*' },
+    ] });
+    return connection;
+  };
+  let swConn = interceptModel ? await attachServiceWorker(sw) : null;
+  if (interceptModel) log('Fetch interception armed on the service worker');
 
   // 3) open the side panel as a normal tab (chrome.sidePanel.open is not
   //    drivable over CDP; the same Mithril app + SW port load fine in a tab).
@@ -512,14 +596,53 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
 
   const screenshot = () => capturePage(page);
 
-  return {
+  const context = {
     sw, swConn, page, port, profile, screenshot,
-    close: () => { try { page.close(); } catch { /* */ } try { swConn.close(); } catch { /* */ } cleanup(); },
+    close: () => {
+      try { page.close(); } catch { /* */ }
+      try { swConn?.close(); } catch { /* */ }
+      try { browserConn?.close(); } catch { /* */ }
+      cleanup();
+    },
     modelCallCount: () => modelCalls,
+    remoteModuleRequestCount: () => remoteModuleRequests,
     // Swap the model behaviour + reset the per-state call counter — lets one
     // Chrome run many states back-to-back (the single-Chrome verify path).
     setModelResponder: (fn) => { currentResponder = fn || (() => ({ sse: sseText('e2e-smoke-ok') })); modelCalls = 0; },
+    // Physically close the MV3 service-worker target. This is not a reload or
+    // an in-process lifecycle simulation. The old target must disappear before
+    // the method returns, so a caller cannot mistake a rejected close for a
+    // recovery test.
+    terminateServiceWorker: async () => {
+      const oldTargetId = context.sw.targetId;
+      if (!browserConn) throw new Error('browser CDP connection unavailable');
+      const closed = await browserConn.send('Target.closeTarget', { targetId: oldTargetId });
+      if (closed?.success !== true) throw new Error('CDP refused service-worker close');
+      const gone = await waitFor(async () => {
+        const current = await findPeerdSw(port);
+        return !current || current.targetId !== oldTargetId;
+      }, { budgetMs: 8_000, pollMs: 50 });
+      if (!gone) throw new Error('MV3 service-worker target did not terminate');
+      try { swConn?.close(); } catch { /* target already closed */ }
+      return oldTargetId;
+    },
+    // Wake the extension through the surviving panel, attach to the fresh
+    // target, and restore wire-only model interception before returning.
+    restartServiceWorker: async (oldTargetId) => {
+      evalIn(page, `chrome.runtime.sendMessage({ type: 'state/get' }).catch(() => null)`, false)
+        .catch(() => {});
+      const next = await waitFor(async () => {
+        const candidate = await findPeerdSw(port);
+        return candidate && candidate.targetId !== oldTargetId ? candidate : null;
+      }, { budgetMs: READY_BUDGET_MS, pollMs: 50 });
+      if (!next) throw new Error('MV3 service worker did not restart after wake');
+      swConn = interceptModel ? await attachServiceWorker(next) : null;
+      context.sw = next;
+      context.swConn = swConn;
+      return next;
+    },
   };
+  return context;
 }
 
 /**

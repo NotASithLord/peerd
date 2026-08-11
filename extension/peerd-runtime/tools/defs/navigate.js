@@ -4,14 +4,27 @@
 // V1 semantics:
 //   - Default target is the active tab; pass tabId for a specific one.
 //   - We update the URL and wait for chrome.tabs.onUpdated(status='complete').
-//   - 30s timeout — pages that never fire 'complete' (websockets, infinite
-//     scroll bootstraps) resolve with a "navigation timed out, partial
-//     state may apply" warning; the agent can read_page to see what loaded.
+//   - A 30s timeout returns an ambiguous failure after the final target has
+//     passed the committed-page policy check.
 //
 // origins() returns BOTH the current tab origin and the destination
 // origin so the denylist gate fires if either is denylisted.
 
-import { resolveTargetTab, originOfUrl } from './dom-helpers.js';
+import {
+  AUTH_WAITING_FOR_USER_CODE, AUTH_WAITING_FOR_USER_MESSAGE,
+  isDenylistedTab, resolveTargetTab, originOfUrl,
+} from './dom-helpers.js';
+import {
+  BROWSER_TARGET_STAGES,
+  browserNetworkGuardPostNavigationResult,
+  browserTargetRefusalResult,
+  classifyBrowserAutomationTarget,
+  sensitiveSiteBrowserTargetVerdict,
+} from '../browser-automation-policy.js';
+import {
+  resetToVerifiedBlank,
+  updateAndObserveCommittedNavigation,
+} from './committed-navigation.js';
 
 const NAV_TIMEOUT_MS = 30_000;
 
@@ -20,31 +33,23 @@ const NAV_TIMEOUT_MS = 30_000;
  * @typedef {Object} BrowserTab
  * @property {number} [id]
  * @property {string} [url]
+ * @property {string} [pendingUrl]
  */
 
 /**
  * The browser.tabs surface navigate exercises.
  * @typedef {Object} TabsApi
  * @property {(tabId: number) => Promise<BrowserTab>} get
- * @property {(tabId: number, props: { url: string }) => Promise<unknown>} update
+ * @property {(tabId: number, props: { url: string }) => Promise<BrowserTab | void>} update
  * @property {{ addListener: (l: NavListener) => void, removeListener: (l: NavListener) => void }} onUpdated
  */
 
 /**
  * @callback NavListener
  * @param {number} tabId
- * @param {{ status?: string }} changeInfo
+ * @param {{ status?: string, url?: string }} changeInfo
  * @returns {void}
  */
-
-// Destination schemes navigate will load. http(s) only: Chrome BLOCKS
-// top-frame navigation to data: (and effectively blob:) URLs as an
-// anti-phishing measure, so tabs.update silently no-ops and the load
-// times out. Don't pretend to support them. (To render self-contained
-// HTML the a11y tree can read, there is no good path today — Apps are
-// sandboxed cross-origin iframes the a11y tree can't see into; use a real
-// http(s) page for DOM work.)
-const NAVIGABLE_SCHEMES = new Set(['http:', 'https:']);
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const navigateTool = {
@@ -83,29 +88,17 @@ export const navigateTool = {
   },
 
   execute: async (args, ctx) => {
-    if (!args?.url || typeof args.url !== 'string') {
-      return { ok: false, error: 'url_required' };
-    }
-    let parsed;
-    try { parsed = new URL(args.url); }
-    catch { return { ok: false, error: `invalid_url: ${args.url}` }; }
-    // Allowlist of safe destination schemes. http(s) is the norm; data:
-    // and blob: let the agent render self-contained HTML (test pages,
-    // generated previews) WITHOUT the App/sandboxed-iframe detour that the
-    // a11y tree can't see into. javascript:/file:/chrome: stay rejected —
-    // they're injection / local-fs / privileged surfaces.
-    if (!NAVIGABLE_SCHEMES.has(parsed.protocol)) {
-      // why: actionable so the agent doesn't improvise (e.g. hosting HTML
-      // in an App, whose sandboxed iframe the a11y tree can't read).
-      return {
-        ok: false,
-        error: `unsupported_scheme: ${parsed.protocol} — navigate only loads http(s). `
-          + 'Chrome blocks data:/blob: top-frame navigation. For DOM work use a real http(s) page.',
-      };
-    }
+    // why: classify before tab resolution because resolution can probe the
+    // live page. A refused destination must not create, adopt, inspect, or
+    // update any tab.
+    const requestedVerdict = classifyBrowserAutomationTarget(args?.url, {
+      stage: BROWSER_TARGET_STAGES.PRE_NAVIGATION,
+    });
+    if (!requestedVerdict.allowed) return browserTargetRefusalResult(requestedVerdict);
+    const requestedUrl = String(args.url).trim();
 
     const c = /** @type {any} */ (ctx);
-    let tab = await resolveTargetTab(args, ctx);
+    let tab = await resolveTargetTab(args, ctx, { allowRestrictedSource: true });
     // DESIGN-17 lazy tab adoption: the web ACTOR (kind:'web') may own 0 tabs — a
     // pure-fetch task never rendered. navigate IS the render decision made concrete:
     // when it owns no tab, open + adopt one now (SW-side ctx.adoptWebTab). Only the web
@@ -146,25 +139,43 @@ export const navigateTool = {
     if (!tab?.id) return { ok: false, error: 'no_target_tab' };
     const tabId = tab.id;
 
-    try {
-      await waitForNavigation(ctx, tabId, args.url);
-    } catch (e) {
-      const msg = /** @type {{ message?: string }} */ (e)?.message;
-      return {
-        ok: false,
-        error: msg ?? 'navigation_failed',
-        content: JSON.stringify({ requested: args.url, timed_out: /timed out/i.test(msg ?? '') }),
-      };
+    if (typeof c.ensureBrowserNetworkGuard === 'function') {
+      const guarded = await c.ensureBrowserNetworkGuard(tabId, requestedUrl);
+      if (!guarded.ok) return guarded;
     }
 
-    // Read the final URL — may differ after redirects.
-    // why: ctx.tabs is the opaque `Object` contract slot; narrow to get().
+    const navigationTimeoutMs = Number.isFinite(c.navigationTimeoutMs)
+      ? Math.max(1, Number(c.navigationTimeoutMs))
+      : NAV_TIMEOUT_MS;
     const tabsApi = /** @type {TabsApi} */ (ctx.tabs);
+    const navigation = await updateAndObserveCommittedNavigation(
+      tabsApi,
+      tabId,
+      requestedUrl,
+      { timeoutMs: navigationTimeoutMs },
+    );
+
+    // Read the final URL, which may differ after redirects.
+    const pin = adoptedPin ?? c.activeTab;
     /** @type {BrowserTab} */
     let finalTab;
     try { finalTab = await tabsApi.get(tabId); }
-    catch { finalTab = tab; }
-
+    catch {
+      const neutralized = await neutralizeBlockedLanding(
+        tabsApi,
+        tabId,
+        pin,
+        navigationTimeoutMs,
+      );
+      return {
+        ok: false,
+        error: 'navigation_final_url_unavailable: peerd could not verify where navigation landed.',
+        content: neutralized
+          ? 'peerd could not verify the final page. The tab was reset to a verified blank page.'
+          : 'peerd could not verify the final page or reset the tab. Browser automation remains stopped for it.',
+        outcomeKind: 'host-lost',
+      };
+    }
     // Keep the turn's activeTab pin fresh: if it points at the tab we just drove,
     // re-stamp its url/origin to where the page LANDED so the next tool's origin gate
     // sees the live origin, not the turn-start one (matters most for a freshly-adopted
@@ -195,10 +206,104 @@ export const navigateTool = {
     // tab URL against that, never against the pin. Reality here, ownership
     // there, and the two are allowed to disagree — the disagreement is exactly
     // what the lock detects on the next tool call.
-    const pin = adoptedPin ?? c.activeTab;
     if (pin && pin.id === tabId && finalTab?.url) {
       pin.url = finalTab.url;
-      pin.origin = originOfUrl(finalTab.url) ?? pin.origin;
+      pin.origin = originOfUrl(finalTab.url) ?? '';
+    }
+
+    // why: redirects are a new authority decision. Classify the committed URL
+    // before origin-lock handling, tab decoration, or any page inspection.
+    const committedVerdict = classifyBrowserAutomationTarget(finalTab?.url, {
+      stage: BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,
+    });
+    if (!committedVerdict.allowed) {
+      try { await c.siteCapture?.cancel?.({ tabId }); } catch { /* policy cleanup continues */ }
+      // Give the actor binding its existing stop signal, then independently
+      // remove the page authority. Either step may fail, so neither gates the
+      // other and no failure changes the policy verdict.
+      if (c.judgeLanding && finalTab?.url) {
+        try { await c.judgeLanding(finalTab.url); } catch { /* best-effort */ }
+      }
+      const neutralized = await neutralizeBlockedLanding(
+        tabsApi,
+        tabId,
+        pin,
+        navigationTimeoutMs,
+      );
+      const refusal = browserTargetRefusalResult(committedVerdict, { neutralized });
+      return {
+        ...refusal,
+        content: `${refusal.content} ${neutralized
+          ? 'The tab was reset to a blank page.'
+          : 'The tab could not be reset, so browser automation remains stopped for it.'}`,
+      };
+    }
+
+    // The requested public URL can redirect onto a user-denylisted origin.
+    // Reapply that policy to the browser's final URL and remove page authority
+    // before any later tool can touch the landing.
+    if (isDenylistedTab(finalTab?.url, ctx.denylist)) {
+      try { await c.siteCapture?.cancel?.({ tabId }); } catch { /* policy cleanup continues */ }
+      if (c.judgeLanding && finalTab?.url) {
+        try { await c.judgeLanding(finalTab.url); } catch { /* best-effort */ }
+      }
+      const neutralized = await neutralizeBlockedLanding(
+        tabsApi,
+        tabId,
+        pin,
+        navigationTimeoutMs,
+      );
+      const refusal = browserTargetRefusalResult(sensitiveSiteBrowserTargetVerdict(), {
+        neutralized,
+      });
+      return {
+        ...refusal,
+        content: `${refusal.content} ${neutralized
+          ? 'The tab was reset to a verified blank page.'
+          : 'The tab could not be reset, so browser automation remains stopped for it.'}`,
+      };
+    }
+
+    if (typeof c.updateBrowserNetworkGuardOrigin === 'function') {
+      const guarded = await c.updateBrowserNetworkGuardOrigin(tabId, finalTab?.url);
+      if (!guarded.ok) {
+        const neutralized = await neutralizeBlockedLanding(
+          tabsApi,
+          tabId,
+          pin,
+          navigationTimeoutMs,
+        );
+        const refusal = browserNetworkGuardPostNavigationResult(
+          guarded.structured?.reason,
+        );
+        return {
+          ...refusal,
+          structured: { ...refusal.structured, neutralized },
+          content: `${refusal.content} ${neutralized
+            ? 'The tab was reset to a verified blank page.'
+            : 'The tab could not be reset, so browser automation remains stopped for it.'}`,
+        };
+      }
+    }
+
+    // why: even a timeout or rejected update can leave the browser on a new
+    // document. The committed URL policy above always runs first. A public
+    // landing still remains an ambiguous browser effect until a correlated
+    // completion was observed.
+    if (navigation.status !== 'complete') {
+      return {
+        ok: false,
+        error: navigation.status === 'timeout'
+          ? 'navigation_timeout'
+          : `navigation_failed: ${navigation.error ?? 'tabs.update was rejected'}`,
+        content: JSON.stringify({
+          requested: requestedUrl,
+          finalUrl: finalTab?.url ?? requestedUrl,
+          tabId,
+          timed_out: navigation.status === 'timeout',
+        }),
+        outcomeKind: 'host-lost',
+      };
     }
     // issue 251 — JUDGE THE LANDING WE JUST CAUSED. resolveTargetTab judged the
     // tab's PRE-navigation URL; this is the only place in the tree that sees a
@@ -216,6 +321,15 @@ export const navigateTool = {
     if (c.judgeLanding && finalTab?.url) {
       const verdict = await c.judgeLanding(finalTab.url);
       if (verdict && verdict.action !== 'continue') {
+        if (verdict.action === 'wait') {
+          return {
+            ok: false,
+            error: AUTH_WAITING_FOR_USER_CODE,
+            content: AUTH_WAITING_FOR_USER_MESSAGE,
+            outcomeKind: 'effect-completed',
+            endTurn: true,
+          };
+        }
         return { ok: false, error: `origin_lock: ${verdict.reason ?? 'this task was stopped'}` };
       }
     }
@@ -230,8 +344,8 @@ export const navigateTool = {
     return {
       ok: true,
       content: JSON.stringify({
-        requested: args.url,
-        finalUrl: finalTab?.url ?? args.url,
+        requested: requestedUrl,
+        finalUrl: finalTab?.url ?? requestedUrl,
         tabId,
       }, null, 2),
     };
@@ -239,30 +353,25 @@ export const navigateTool = {
 };
 
 /**
- * @param {import('/shared/tool-types.js').ToolContext} ctx
+ * Reset a refused committed page without claiming success until the browser
+ * reports the blank URL. A failed or unverified cleanup leaves the pin on the
+ * known landed URL so audit, credential scope, and later gates stay truthful.
+ *
+ * @param {TabsApi} tabsApi
  * @param {number} tabId
- * @param {string} url
- * @returns {Promise<void>}
+ * @param {{ id: number, url: string, origin: string } | null | undefined} pin
+ * @param {number} timeoutMs
  */
-const waitForNavigation = (ctx, tabId, url) => new Promise((resolve, reject) => {
-  // why: ctx.tabs is the opaque `Object` contract slot; narrow to the
-  // onUpdated/update surface this navigation watcher exercises.
-  const tabsApi = /** @type {TabsApi} */ (ctx.tabs);
-  let settled = false;
-  /** @param {Error | null} err */
-  const finish = (err) => {
-    if (settled) return;
-    settled = true;
-    tabsApi.onUpdated.removeListener(listener);
-    clearTimeout(timer);
-    err ? reject(err) : resolve();
-  };
-  /** @type {NavListener} */
-  const listener = (id, info) => {
-    if (id !== tabId) return;
-    if (info.status === 'complete') finish(null);
-  };
-  tabsApi.onUpdated.addListener(listener);
-  const timer = setTimeout(() => finish(new Error('navigation timed out after 30s')), NAV_TIMEOUT_MS);
-  tabsApi.update(tabId, { url }).catch(finish);
-});
+const neutralizeBlockedLanding = async (tabsApi, tabId, pin, timeoutMs) => {
+  try {
+    const verified = await resetToVerifiedBlank(tabsApi, tabId, { timeoutMs });
+    if (!verified) return false;
+    if (pin && pin.id === tabId) {
+      pin.url = 'about:blank';
+      pin.origin = '';
+    }
+    return true;
+  } catch {
+    return false;
+  }
+};

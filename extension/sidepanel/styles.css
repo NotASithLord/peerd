@@ -34,9 +34,14 @@
   --bg:     #ffffff;   /* e0 · flush */
   --elev:   #f7f7f7;   /* e1 · card */
   --elev2:  #f0f0f0;   /* e2 · menu/popover */
+  --deepest:#ffffff;   /* inset / terminal */
   --text:   #1a1a1a;
+  --secondary: #6b6b6b;
   --muted:  #6b6b6b;
   --border: #e0e0e0;
+  /* Preserve the established light-theme emphasis; Graphite overrides this
+   * token only in dark mode below. */
+  --border-strong: #6b6b6b;
   --code:   rgba(0,0,0,.055);
   --selbg:  rgba(0,0,0,.10);
 
@@ -47,6 +52,7 @@
   --accent:     var(--p);
   --accent-ink: #0089ac;
   --on-accent:  var(--w);
+  --on-accent-aa: #0B0D0E;
   --danger:     var(--er);
   --danger-ink: #d23b3b;
   --warn:       var(--am);
@@ -87,7 +93,7 @@
   --white:     var(--w);
   --bg-elev:   var(--elev);
   --fg:        var(--text);
-  --fg-muted:  var(--muted);
+  --fg-muted:  var(--secondary);
   --accent-fg: var(--on-accent);
   --radius:    var(--r2);
   --gap:       12px;
@@ -95,21 +101,21 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    /* Surfaces synced to peerd.ai base/panel/paper. The five brand carriers are
-     * saturated enough to render on either background, so they don't re-declare;
-     * only the grayscale surfaces + the ink variants that stop needing to darken
-     * flip here. */
-    --bg:      #0B0D0E;
-    --elev:    #15181A;
-    --elev2:   #1c2124;
-    --text:    #E8E6E1;
-    --muted:   #9a9a9a;
-    --border:  #353535;
-    --code:    rgba(255,255,255,.07);
+    /* Graphite neutrals. Brand carriers remain inherited and unchanged. */
+    --bg:      #101112;
+    --deepest: #080909;
+    --elev:    #151617;
+    --elev2:   #1A1C1E;
+    --text:    #F3F3EF;
+    --secondary: #ABABA6;
+    --muted:   #70716E;
+    --border:  #25272A;
+    --border-strong: #32353A;
+    --code:    var(--deepest);
     --selbg:   rgba(255,255,255,.16);
 
     --accent-ink: var(--p);   /* no darkening needed on dark */
-    --on-accent:  #0B0D0E;
+    --on-accent:  #080909;
     --danger-ink: var(--er);
     --warn-ink:   var(--am);
     --ok-ink:     var(--gr);
@@ -122,6 +128,18 @@
 }
 
 * { box-sizing: border-box; }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 html, body, #app {
   height: 100%;
@@ -489,7 +507,7 @@ html, body, #app {
   padding: 10px;
   transition: border-color 0.15s ease;
 }
-.onb-box:focus-within { border-color: var(--fg-muted); }
+.onb-box:focus-within { border-color: var(--border-strong); }
 .onboarding-card .onb-box input,
 .onboarding-card .onb-box textarea {
   display: block;
@@ -746,7 +764,7 @@ html, body, #app {
 .goal-toggle.is-running {
   background: var(--bg-elev);
   color: var(--fg);
-  border-color: var(--fg-muted);
+  border-color: var(--border-strong);
   font-variant-numeric: tabular-nums;
 }
 
@@ -885,6 +903,15 @@ button.linklike:hover { color: var(--fg); }
 
 /* --- top bar actions --- */
 .topbar-actions { display: flex; gap: 6px; }
+@media (max-width: 420px) {
+  .topbar { gap: 4px; padding-inline: 8px; }
+  .topbar-actions { gap: 4px; }
+}
+@media (max-width: 397px) {
+  .topbar { flex-wrap: wrap; }
+  .topbar > .spacer { display: none; }
+  .topbar-actions { flex: 1 0 100%; justify-content: space-between; }
+}
 button.icon {
   display: inline-flex;
   align-items: center;
@@ -941,6 +968,45 @@ button.icon.is-active {
 }
 .error-banner button { padding: 4px 10px; font-size: 12px; }
 
+.actor-isolation-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--elev);
+  color: var(--text);
+}
+.actor-isolation-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  flex: 1;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.actor-isolation-copy strong { color: var(--fg); }
+.actor-isolation-banner.is-recovered .actor-isolation-copy strong { color: var(--fg); }
+.actor-isolation-banner.is-recovered:focus {
+  outline: 2px solid var(--fg);
+  outline-offset: -2px;
+}
+.actor-isolation-copy small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.actor-isolation-banner button {
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+.actor-isolation-banner button:focus-visible {
+  outline: 2px solid var(--fg);
+  outline-offset: 2px;
+}
+
 /* Rate-limit retry indicator — amber, calmer than the error banner. */
 .rate-limit-banner {
   display: flex;
@@ -994,6 +1060,32 @@ button.icon.is-active {
   border: 1px solid var(--border);
   white-space: pre-wrap;
   word-break: break-word;
+}
+.task-feedback {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-top: 5px;
+  color: var(--fg-muted);
+  font-size: 10px;
+}
+.task-feedback-note {
+  flex-basis: 100%;
+}
+.task-feedback button {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-muted);
+  padding: 2px 7px;
+  font-size: 10px;
+}
+.task-feedback button:hover,
+.task-feedback button.is-selected {
+  background: var(--elev2);
+  color: var(--fg);
+  border-color: var(--border-strong);
 }
 /* The user's voice — "operator cyan" (redesign EXPLORE 1a): a faint cyan tint +
    a 2px accent rail, replacing the retired legacy indigo. Cyan already means
@@ -1181,6 +1273,12 @@ button.icon.is-active {
 .tool-call.tool-failed {
   border-color: var(--danger);
 }
+.tool-call.tool-failed .actor-body .error-line {
+  color: var(--fg);
+}
+.tool-call.tool-not-run .actor-body .error-line {
+  color: var(--fg);
+}
 .tool-call.tool-pending { opacity: 0.85; }
 
 .tool-call-header {
@@ -1196,6 +1294,17 @@ button.icon.is-active {
   min-width: 0;
 }
 .tool-call-header:hover { background: rgba(127, 127, 127, 0.06); }
+button.tool-call-header {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  text-align: left;
+}
+button.tool-call-header:focus-visible {
+  outline: 2px solid var(--fg-muted);
+  outline-offset: -2px;
+}
 
 .disclosure { color: var(--fg-muted); font-size: 9px; width: 10px; flex-shrink: 0; }
 
@@ -1233,6 +1342,7 @@ button.icon.is-active {
   justify-content: center;
 }
 .tool-status-dot.dot-failed  { background: var(--danger); }
+.tool-status-dot.dot-not-run { background: var(--fg-muted); }
 .tool-status-dot.dot-pending {
   background: var(--ok);
   animation: peerd-dot-pulse 0.85s ease-out infinite;
@@ -1247,6 +1357,16 @@ button.icon.is-active {
 }
 
 .tool-name { font-weight: 600; color: var(--fg); flex-shrink: 0; }
+.policy-kind-chip {
+  flex-shrink: 0;
+  color: var(--danger-ink);
+  border: 1px solid var(--danger);
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
 .tool-args {
   color: var(--fg-muted);
   white-space: nowrap;
@@ -1256,6 +1376,17 @@ button.icon.is-active {
 }
 .tool-call-header .spacer { flex: 1; min-width: 8px; }
 .tool-duration { color: var(--fg-muted); font-size: 11px; flex-shrink: 0; }
+.actor-unknown-announcement {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .tool-pending { color: var(--accent); font-size: 11px; font-style: italic; flex-shrink: 0; }
 
 /* Expanded detail body — the §02 lineage + result live here now, so the
@@ -1372,6 +1503,7 @@ button.icon.is-active {
 .script-op-dot.dot-pending { background: var(--ok); animation: peerd-dot-pulse 1.2s ease-in-out infinite; }
 .script-op-dot.dot-ok { background: var(--ok); }
 .script-op-dot.dot-failed { background: var(--danger); }
+.script-op-dot.dot-cancelled { background: var(--fg-muted); }
 .script-op-line {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   min-width: 0;
@@ -1388,8 +1520,8 @@ button.icon.is-active {
 .vm-stream-stdout, .vm-stream-stderr {
   margin: 0;
   padding: 8px 10px;
-  background: #0d1117;
-  color: #e6edf3;
+  background: var(--deepest);
+  color: var(--text);
   border-radius: 4px;
   font-family: var(--font-mono);
   font-size: 11px;
@@ -1451,6 +1583,13 @@ button.icon.is-active {
   border-top: 1px solid var(--border);
   padding-top: 8px;
 }
+.composer-readiness-note {
+  margin: 0 2px 6px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.composer-readiness-note[role="alert"] { color: var(--danger); }
 .composer {
   display: flex;
   flex-direction: column;
@@ -1522,7 +1661,7 @@ button.icon.is-active {
   /* fallback accent before the first draft pick lands */
   background: var(--send-accent, var(--accent));
   /* dark glyph on a bright disc — reads on all five brand colors */
-  color: #0a0d10;
+  color: var(--deepest);
   opacity: 0;
   transform: scale(0.55) rotate(-90deg);
   pointer-events: none;
@@ -1865,11 +2004,21 @@ button.icon.is-active {
 .peerd-modal h3 { margin: 0 0 8px; font-size: 16px; }
 .peerd-modal ul { margin: 6px 0 14px; padding-left: 18px; font-size: 13px; }
 .peerd-modal ul li { margin-bottom: 2px; }
+.confirm-modal {
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
 .peerd-modal .peerd-modal-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 4px;
+}
+.confirm-modal .peerd-modal-actions {
+  position: sticky;
+  bottom: 0;
+  padding-top: 10px;
+  background: var(--bg);
 }
 
 /* --- first-run extras (voice onboarding) --- */
@@ -1900,7 +2049,7 @@ button.icon.is-active {
   color: var(--fg-muted);
   cursor: pointer;
 }
-.log-tab.is-active { color: var(--fg); border-color: var(--fg-muted); background: var(--bg-elev); }
+.log-tab.is-active { color: var(--fg); border-color: var(--border-strong); background: var(--bg-elev); }
 .log-list { display: flex; flex-direction: column; gap: 2px; }
 .log-row { display: flex; gap: 8px; padding: 6px 4px; border-bottom: 1px solid var(--border); }
 .log-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex: 0 0 auto; }
@@ -2120,35 +2269,273 @@ button.icon.is-active {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-/* In-flight async-actor status bar (DESIGN-11) — mirrors .goal-bar:
-   a bordered elevated card, grayscale, the brand spinner the only color. */
-.async-task-bar {
+/* Actor Fabric: the live topology of the current chat's isolated contexts.
+   Surfaces stay grayscale; the existing brand orb is the only color carrier.
+   Solid nodes are resident resource-bound actors, dashed nodes temporary
+   subactors. The line style carries meaning without relying on color. */
+.actor-fabric {
+  flex: 0 1 auto;
+  min-height: 44px;
+  max-height: min(60vh, 520px);
+  display: flex;
+  flex-direction: column;
   border: 1px solid var(--border);
   border-radius: var(--r3);
   background: var(--bg-elev);
-  padding: 8px 10px;
   font-size: 12px;
+  overflow: hidden;
 }
-.async-task-head { display: flex; align-items: center; gap: 8px; }
-.async-task-title { font-weight: 600; }
-.async-task-rows { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
-.async-task-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.async-task-name {
-  flex: 0 1 auto; min-width: 0;
-  font-family: var(--mono); font-weight: 600; font-size: 11px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.actor-fabric-toggle {
+  width: 100%;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
 }
-.async-task-status { color: var(--fg-muted); font-family: var(--mono); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
-.async-task-tail {
-  flex: 1 1 auto; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.actor-fabric-toggle:hover { background: var(--elev2); }
+.actor-fabric-toggle:focus-visible {
+  outline: 0;
+  box-shadow: inset 0 0 0 2px var(--fg);
+}
+.actor-fabric-node:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+.actor-fabric-title { font-weight: 600; white-space: nowrap; }
+.actor-fabric-working,
+.actor-fabric-disclosure {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.actor-fabric-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+.actor-fabric-node {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 9px;
+  border: 1.5px solid var(--fg-muted);
+  border-radius: var(--r2);
+  background: var(--bg-elev);
+  color: var(--fg);
+  text-align: left;
+}
+.actor-fabric-node.is-subactor { border-style: dashed; }
+.actor-fabric-node.is-selected {
+  background: var(--elev2);
+  box-shadow: inset 3px 0 0 var(--fg);
+}
+.actor-fabric-node.is-root .actor-fabric-live-dot {
+  background: transparent;
+  border: 1px solid currentColor;
+  animation: none;
+}
+.actor-fabric-node.is-settled .actor-fabric-live-dot { animation: none; opacity: .4; }
+.actor-fabric-node-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.actor-fabric-live-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+  animation: actor-fabric-breathe 1.7s ease-in-out infinite;
+}
+@keyframes actor-fabric-breathe { 50% { opacity: .25; } }
+.actor-fabric-kind {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.actor-fabric-status {
+  margin-left: auto;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.actor-fabric-name {
+  margin-top: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.actor-fabric-node-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 7px;
+  min-width: 0;
+}
+.actor-fabric-boundary-chip {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--r1);
   color: var(--fg-muted);
   font-family: var(--mono);
   font-size: 10px;
 }
+.actor-fabric-scope {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.actor-fabric-edge-legend {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 26px;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.actor-fabric-edge-line {
+  width: 34px;
+  border-top: 1px solid var(--fg-muted);
+}
+.actor-fabric-branch {
+  list-style: none;
+  margin: 0 0 0 7px;
+  padding: 0 0 0 10px;
+  border-left: 1px solid var(--fg-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.actor-fabric-branch-item { position: relative; }
+.actor-fabric-branch-item::before {
+  content: '';
+  position: absolute;
+  top: 22px;
+  left: -10px;
+  width: 10px;
+  border-top: 1px solid var(--fg-muted);
+}
+.actor-fabric-branch-item > .actor-fabric-branch { margin-top: 8px; }
+.actor-fabric-detail {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--elev2);
+}
+.actor-fabric-detail-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.actor-fabric-detail-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.actor-fabric-cost {
+  margin-left: auto;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.actor-fabric-facts { margin: 7px 0 0; }
+.actor-fabric-facts > div {
+  display: grid;
+  grid-template-columns: 66px 1fr;
+  gap: 8px;
+  margin-top: 5px;
+}
+.actor-fabric-facts dt {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.actor-fabric-facts dd { margin: 0; min-width: 0; }
+.actor-fabric-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 8px;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.actor-fabric-legend span::before {
+  content: '';
+  display: inline-block;
+  width: 14px;
+  margin-right: 5px;
+  border-top: 1.5px solid currentColor;
+  vertical-align: 3px;
+}
+.actor-fabric-legend .actor-fabric-legend-sub::before { border-top-style: dashed; }
+.actor-fabric-finished-mark {
+  width: 14px;
+  flex: 0 0 auto;
+  color: var(--fg-muted);
+  text-align: center;
+}
+.actor-fabric.is-settled .actor-fabric-working { color: var(--fg); }
+@media (prefers-reduced-motion: reduce) {
+  .actor-fabric-live-dot { animation: none; }
+}
+@media (forced-colors: active) {
+  .actor-fabric-toggle:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: -3px;
+  }
+  .actor-fabric-node.is-selected { border-left: 4px solid Highlight; }
+  .actor-fabric-node.is-selected:focus-visible {
+    outline: 2px solid CanvasText;
+    outline-offset: 2px;
+  }
+}
+@media (max-width: 420px) {
+  .actor-fabric-toggle { flex-wrap: wrap; }
+  .actor-fabric-toggle .spacer { display: none; }
+  .actor-fabric-disclosure { margin-left: auto; }
+  .actor-fabric-facts > div { grid-template-columns: 58px 1fr; }
+}
 
 /* Plan/Act selector row above the input bar */
 .chat-mode-row { display: flex; align-items: center; padding: 4px 0 0; }
+.chat-mode-row .planact-mode,
+.chat-mode-row .planact-confirm,
+.chat-mode-row .effort-dial,
+.chat-mode-row .goal-toggle {
+  min-height: 28px;
+  box-sizing: border-box;
+}
+@media (max-width: 370px) {
+  .chat-mode-row { flex-wrap: wrap; column-gap: 6px; row-gap: 6px; }
+  .chat-mode-row .planact { flex: 0 0 100%; margin-right: 0; }
+  .chat-mode-row .goal-toggle { margin-left: 0; }
+  .chat-mode-row > .spacer { flex: 1 1 0; min-width: 0; }
+}
 
 /* --- Memory pane (Context tab) ---------------------------------------- */
 .memory-pane { display: flex; flex-direction: column; gap: 10px; }
@@ -2214,7 +2601,30 @@ button.icon.is-active {
   white-space: pre-wrap;
   word-break: break-word;
 }
+.lifecycle-confirm-target {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(127, 127, 127, 0.12);
+  font-size: 12px;
+}
+.lifecycle-confirm-target span { color: var(--fg-muted); }
+.lifecycle-confirm-target code {
+  overflow-wrap: anywhere;
+  color: var(--fg);
+}
 .confirm-modal .peerd-modal-actions { flex-wrap: wrap; }
+.lifecycle-confirm-allow {
+  /* why: this is the safety-critical approval after an unknown outcome. The
+   * ordinary light-theme white-on-cyan button is only 2.24:1; fixed dark ink
+   * keeps this decision at 8.32:1 in both color schemes without moving every
+   * existing primary-button baseline. */
+  color: var(--on-accent-aa);
+}
 
 /* --- login consent card (the `login` tool, kind:'login') --------------
  * A sign-in is the highest-stakes confirm, so it gets a distinctive card:
@@ -2260,6 +2670,23 @@ button.icon.is-active {
   margin: 10px 0 12px;
 }
 .login-method .mic { color: var(--accent-ink); display: grid; place-items: center; flex: none; }
+.login-destination {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -4px 0 12px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.login-destination strong {
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: right;
+  word-break: break-all;
+}
 .login-reassure {
   display: flex;
   gap: 8px;
@@ -2303,9 +2730,12 @@ button.icon.is-active {
   font-size: 12px;
   font-weight: 600;
   padding: 4px 8px;
+  min-height: 32px;
   white-space: nowrap;
 }
 .notice-action:hover { filter: brightness(1.08); }
+.notice-action:focus-visible,
+.notice-dismiss:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
 .notice-dismiss {
   flex: none;
   background: none;
@@ -2314,9 +2744,17 @@ button.icon.is-active {
   cursor: pointer;
   font-size: 14px;
   line-height: 1;
-  padding: 0 2px;
+  padding: 0;
+  min-width: 32px;
+  min-height: 32px;
 }
 .notice-dismiss:hover { color: var(--accent); }
+@media (max-width: 340px) {
+  .notice { position: relative; flex-wrap: wrap; padding-right: 42px; }
+  .notice-text { flex: 1 1 100%; }
+  .notice-action { margin-left: auto; }
+  .notice-dismiss { position: absolute; top: 4px; right: 4px; }
+}
 
 /* "peerd opened a tab" — an INLINE notice anchored in the transcript at the turn
    it happened, so it recedes into the backlog as the chat continues (replaces the
@@ -2333,28 +2771,43 @@ button.icon.is-active {
   padding: 3px 6px;
   font-size: 11.5px;
   color: var(--fg-muted);
-  opacity: 0.72;
 }
 .agent-tab-notice-icon { flex: none; opacity: 0.7; }
+.agent-tab-notice-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
 .agent-tab-notice-text {
   min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .agent-tab-notice-label { color: var(--fg); }
-/* The "Go" affordance wears the peerd accent (cyan) — square, word, and arrow —
-   so it reads as the obvious thing to click, even on the muted notice. */
+.agent-tab-notice-detail {
+  color: var(--fg);
+  font-size: 10.5px;
+  line-height: 1.3;
+  white-space: normal;
+}
+/* The Go affordance stays monochrome so its small text and border remain clear
+   in both themes. The hit target is large enough for touch and motor access. */
 .agent-tab-notice-go {
   flex: none;
-  background: none;
-  border: 1px solid rgba(0, 183, 235, 0.5);
+  min-width: 44px;
+  min-height: 44px;
+  background: var(--elev);
+  border: 1px solid var(--fg);
   border-radius: 6px;
-  color: var(--accent);
+  color: var(--fg);
   font: inherit; font-size: 11px;
   padding: 2px 8px;
   cursor: pointer;
   white-space: nowrap;
 }
-.agent-tab-notice-go:hover { border-color: var(--accent); background: rgba(0, 183, 235, 0.12); }
+.agent-tab-notice-go:hover { background: var(--elev2); }
+.agent-tab-notice-go:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
 /* Current turn: a quiet elevated chip with a one-shot entrance — the surface
    stays monochrome (only the Go button carries the accent). Mutes to the row
    above once the user speaks again (the --fresh class drops). */
@@ -2444,10 +2897,10 @@ button.icon.is-active {
 /* Dweb preview banner (§12) — persistent, not a popup: always
    visible in the Settings → Decentralized web section, never interrupts. */
 .dweb-banner {
-  border: 1px solid var(--magenta);
+  border: 1px solid var(--border);
   border-left-width: 4px;
   border-radius: 6px;
-  background: color-mix(in srgb, var(--magenta) 10%, transparent);
+  background: var(--bg-elev);
   padding: 10px 12px;
   font-size: 13px;
   line-height: 1.5;
@@ -2503,6 +2956,30 @@ button.icon.is-active {
    ready/connected — green (.key-set) is reserved for that, never default. */
 .key-badge.key-local { color: var(--fg-muted); }
 .provider-card-form { margin-top: 10px; }
+.contributor-metrics { display: flex; flex-direction: column; gap: 10px; }
+.contributor-disclosure h3,
+.contributor-preview h3 { margin: 0 0 8px; font-size: 14px; }
+.contributor-disclosure h4 { margin: 10px 0 4px; font-size: 13px; }
+.contributor-disclosure p { margin: 0 0 9px; color: var(--fg-muted); font-size: 13px; line-height: 1.45; }
+.contributor-disclosure ul { margin: 0 0 9px; padding-left: 20px; color: var(--fg-muted); font-size: 13px; line-height: 1.45; }
+.contributor-disclosure p:last-child { margin-bottom: 0; }
+.contributor-actions { margin-top: 12px; }
+.contributor-preview-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.contributor-preview-head > div { min-width: 0; }
+.contributor-preview-head p { margin: 0; }
+.contributor-payload {
+  width: 100%;
+  min-height: 180px;
+  margin-top: 10px;
+  resize: vertical;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: var(--r3);
+  background: var(--code);
+  color: var(--fg);
+  padding: 10px;
+  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
 /* why: flex-direction:row is REQUIRED — the generic `.input-row` sets
    column, so without this the input + Save stack vertically (and centered
    by align-items). Row keeps the field and a compact Save on one line. */
@@ -2616,6 +3093,19 @@ button.icon.is-active {
   /* outline stays monochrome — color lives on the glyph + label */
   background: var(--bg);
 }
+/* The reveal animation owns `opacity`, so the global button:disabled opacity
+ * cannot visually win after the card settles. A non-animated filter keeps the
+ * actor-only starters visibly unavailable while Ask remains active. */
+.path-card:disabled {
+  filter: grayscale(1) opacity(0.5);
+  cursor: not-allowed;
+}
+.path-card.path-card--protected:disabled {
+  opacity: 1;
+  filter: none;
+  cursor: default;
+}
+.path-card:disabled:hover { background: var(--elev); }
 /* Per-tile cascade = 90ms. Step 1 (container) starts at 40ms + i*90ms. */
 .path-card:nth-child(1) { animation-delay: 40ms; }
 .path-card:nth-child(2) { animation-delay: 130ms; }
@@ -2848,7 +3338,7 @@ button.icon.is-active {
   background: transparent;
   cursor: pointer;
 }
-.debug-export-btn:hover { color: var(--fg); border-color: var(--fg-muted); }
+.debug-export-btn:hover { color: var(--fg); border-color: var(--border-strong); }
 .debug-menu-backdrop {
   /* click-away for the flyout: transparent, under the menu, over the page */
   position: fixed;

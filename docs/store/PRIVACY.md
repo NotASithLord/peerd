@@ -1,90 +1,119 @@
 # peerd Privacy Policy
 
-**Effective date:** July 12, 2026
-**Applies to:** the peerd browser extension ("peerd" on the Chrome Web
-Store and Firefox Add-ons)
+**Effective date:** August 6, 2026
 
-> **TODO before publishing:** publish this page at
-> `https://peerd.ai/privacy` and paste that URL into the store
-> dashboards.
+**Applies to:** all peerd browser extension distribution channels
 
-## The short version
+The public policy URL is `https://peerd.ai/privacy`. Confirm that the published
+copy matches this file before each store submission.
 
-peerd collects nothing. There are no servers, no accounts, no
-analytics, no telemetry, and no crash reporting. The developer never
-receives, stores, or has access to any of your data. Everything peerd
-knows lives in your browser on your device, and the only network
-requests it makes are the ones your own use of it causes: calls to the
-AI provider you configured with your own API key, requests to the
-websites you ask the assistant to work on, and one-time downloads of
-public runtime assets.
+## Summary
 
-## What stays on your device
+peerd has no account system, analytics, telemetry, or crash reporting. peerd
+does not operate a hosted agent backend. Store builds do not send extension data
+to a peerd service. Preview signaling servers process the rendezvous metadata
+needed to connect peers and may retain normal service logs.
 
-All of peerd's data is stored in the extension's local browser storage
-and never reaches the developer:
+Model requests go directly from the extension to the provider selected by the
+user. Other network requests occur only when needed for a user task, a runtime
+asset, an optional browser service, or an enabled preview feature.
 
-- **Your API key(s)** — kept in an encrypted vault, unlocked with a
-  passphrase or your device's biometrics (Touch ID / Windows Hello).
-- **Your conversations, settings, and history.**
-- **The audit log** — a local record of every network request the
-  assistant made, allowed or denied, so you can see exactly what it
-  did. It is never transmitted.
-- **Sandbox files and caches** — Linux VM disks, notebook files, and
-  the downloaded voice model.
+## Data stored on the device
 
-Voice input is transcribed locally on your device by default; audio is
-never stored.
+peerd stores local extension data such as:
 
-## What leaves your device
+- provider secrets in an encrypted vault
+- conversations, settings, and history
+- the local audit log
+- sandbox files, caches, and downloaded runtime assets
 
-1. **Calls to your AI provider.** Your messages — including page
-   content the assistant reads for a task you gave it — are sent to
-   the provider you configured, authenticated with your own key. peerd
-   only ever sends your key to the provider you chose. That provider's
-   privacy policy governs its handling of those requests.
-2. **Websites the assistant works on.** When you give the assistant a
-   task, it requests the pages needed to carry it out, the same way
-   your browser does when you visit them. A denylist (on by default)
-   blocks sensitive sites such as banks, health portals, and government
-   services; a private-network block prevents access to localhost and
-   LAN addresses; and every request, allowed or denied, is written to
-   the local audit log.
-3. **One-time public asset downloads.** Enabling local voice downloads
-   a public speech-recognition model from huggingface.co
-   (integrity-verified, then cached). Booting the Linux VM streams a
-   public Debian disk image from disks.webvm.io. These are static
-   public files; the requests carry no personal data or credentials.
-4. **Optional browser speech fallback.** If local transcription is
-   unavailable and you use the browser's built-in speech recognition
-   instead, your browser (not peerd) may send audio to its vendor's
-   speech service. peerd's default is the local transcriber.
+Vault encryption does not apply to every item in extension storage. The
+security documentation defines the current storage boundaries.
 
-Nothing else leaves your device. peerd has no backend and phones home
-to no one. The usage costs shown in the UI are computed locally from
-your own API responses.
+Voice is off by default. When enabled, the automatic engine prefers the
+browser's Web Speech service, which may send audio to the browser vendor. The
+user can select Moonshine for local transcription. peerd does not retain
+recorded audio.
 
-## What we never do
+## Data sent from the device
 
-- Collect, receive, or store your data — there is nowhere for it to go.
-- Analytics, tracking, telemetry, crash reporting, or ads.
-- Sell, share, or monetize data in any way.
+### Model providers
 
-## Deleting your data
+Messages and task context are sent to the model provider selected by the user.
+Requests use the user's provider key when required. The provider's privacy
+policy applies to that data. Depending on the task, this content may include
+personal communications, identifying information, or other sensitive material
+present in the user's prompt or page. The default denylist reduces access to
+some sensitive sites but is not a guarantee about the content of every page.
 
-Everything is retained locally until you delete it. You can clear
-conversations, caches, VM disks, and the vault from peerd's settings.
-Uninstalling the extension removes all of its stored data.
+### Websites and user-directed network requests
+
+peerd can request websites and APIs needed for a task. Direct fetch, document
+reading, and browser automation block private-network targets. Driven browser
+tabs also carry tab-scoped network rules for private targets and configured
+sensitive sites. Private-network rules also cover service-worker fetches from
+public domains visited in a driven tab. Those domains remain covered until the
+tab's custody ends. A normal tab on the same matching domain can temporarily
+lose private-network service-worker fetch access. The local Activity log records tool outcomes, direct open-web
+fetches, and policy denials. It is not a complete record of every network
+request or visited URL.
+
+### Runtime assets
+
+Some features download public runtime assets, such as a speech model or a
+WebVM disk image. Integrity and source controls are defined in the code and
+vendored dependency records.
+
+Store and web builds refuse direct JavaScript imports from HTTP and HTTPS URLs
+without requesting the module source. Preview can fetch a requested module
+through the audited web path and execute it in a sealed worker. This distinction
+does not cover code fetched as ordinary data and later passed to an execution
+surface.
+
+### Browser speech services
+
+When voice is enabled, the default automatic engine prefers the browser's Web
+Speech service. The browser may send audio to its own speech service, which is
+controlled by the browser vendor. Users can select Moonshine for local
+transcription instead.
+
+### Preview dweb
+
+Preview builds can use signaling servers for peer discovery and WebRTC when the
+dweb is enabled. Direct and agent-to-agent messages, published agent profiles,
+and shared peer-to-peer app bundles can be sent to peers. Recipients may retain
+data they receive even after the sender removes a local copy. Signaling servers
+may keep their own operational logs, but they do not control data already held
+by peers.
+
+The optional preview dweb agent currently uses one model conversation across
+messages from different peers. Until peer-scoped histories and exact reply
+grants are implemented, one peer may be able to prompt it to reveal information
+from another peer conversation. Keep the dweb agent disabled unless you accept
+this risk. Store builds omit the dweb.
+
+## What peerd does not do
+
+- sell user data
+- use extension data for advertising
+- run analytics or telemetry
+- send crash reports
+- provide extension data to a peerd-hosted agent service
+
+## Data deletion
+
+Local data remains until the user deletes it. peerd settings provide controls
+for local records and caches. Uninstalling the extension asks the browser to
+remove extension storage, subject to browser behavior.
 
 ## Children
 
 peerd is not directed at children under 13.
 
-## Changes to this policy
+## Changes
 
-Changes will be published at this URL with an updated effective date.
-Because peerd has no server, a change to this policy can never
-retroactively grant access to your data — there is nothing to access.
+Policy changes will be published at the public policy URL with an updated
+effective date.
 
 ## Contact
 

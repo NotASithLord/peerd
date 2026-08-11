@@ -30,14 +30,74 @@
 //     page_exec (works on Gmail). Same code, different channel.
 
 import browser from '/vendor/browser-polyfill.js';
+import { shapeSketch } from '/peerd-runtime/index.js';
+import {
+  createNetworkCaptureRegistry,
+  networkCaptureRequestPolicy,
+} from './network-capture-registry.js';
+import { createRuntimeContextRegistry } from './runtime-context-registry.js';
+import {
+  detachDebuggerWithCustody,
+  enableDebuggerWithCustody,
+  makeDebuggerNavigationGuard,
+} from './debugger-custody.js';
 
 const PROTOCOL_VERSION = '1.3';
+
+/**
+ * @typedef {Object} ExpectedDocument
+ * @property {string} origin
+ * @property {string} href
+ * @property {string} documentId
+ * @property {number} timeOrigin
+ */
+
+// Classic-script body injected through chrome.scripting. It deliberately has
+// no closure state: the browser serializes only this function body.
+export function exactDocumentBridgeInjected() {
+  'use strict';
+  let origin = null;
+  let href = null;
+  let timeOrigin = null;
+  try { origin = location.origin; } catch (e) { origin = null; }
+  try { href = location.href; } catch (e) { href = null; }
+  try { timeOrigin = Number.isFinite(performance.timeOrigin) ? performance.timeOrigin : null; } catch (e) { timeOrigin = null; }
+  return { origin, href, timeOrigin };
+}
+
+/** @param {string} message */
+const preEffectTargetError = (message = 'browser_target_changed') => {
+  const error = new Error(message);
+  error.outcomeKind = 'pre-effect-failure';
+  return error;
+};
+
+/** @param {unknown} value */
+const hostLostError = (value) => {
+  const message = value instanceof Error ? value.message : String(value);
+  const error = new Error(`browser_evaluate_after_dispatch: ${message}`);
+  error.outcomeKind = 'host-lost';
+  return error;
+};
+
+/** @param {unknown} expected @returns {expected is ExpectedDocument} */
+const isExpectedDocument = (expected) => {
+  const value = /** @type {Partial<ExpectedDocument> | null} */ (expected);
+  return !!value
+    && /^https?:\/\//.test(value.origin ?? '')
+    && typeof value.href === 'string'
+    && typeof value.documentId === 'string'
+    && Number.isFinite(value.timeOrigin);
+};
 
 export const createDebuggerPool = () => {
   /** @type {Set<number>} tabIds we've successfully attached to */
   const attached = new Set();
-  /** @type {Map<number, string[]>} per-tab console-event buffer */
+  /** @type {Set<number>} attached tabs whose setup or cleanup is uncertain */
+  const quarantined = new Set();
+  /** @type {Map<number, { contextId: number, lines: string[] }>} per-tab console-event buffer */
   const consoleBufs = new Map();
+  const runtimeContexts = createRuntimeContextRegistry();
   // In-flight Runtime.evaluate rejectors, per tab (issue #176). With
   // awaitPromise:true an evaluate against a page whose promise never settles
   // (hung navigation/network) — or a tab that closes / detaches mid-call —
@@ -46,6 +106,9 @@ export const createDebuggerPool = () => {
   // hung-page case.
   /** @type {Map<number, Set<(err: Error) => void>>} */
   const pendingEvals = new Map();
+  // One capture per tab. Identity-aware finish prevents a settling old stop
+  // from deleting a replacement capture on the same tab.
+  const networkCaptures = createNetworkCaptureRegistry();
   /** @param {number} tabId @param {string} why */
   const rejectPendingEvals = (tabId, why) => {
     const set = pendingEvals.get(tabId);
@@ -77,12 +140,22 @@ export const createDebuggerPool = () => {
     // Global event router. chrome.debugger.onEvent fires for ALL attached
     // tabs; we dispatch by source.tabId to the right buffer.
     browser.debugger.onEvent.addListener((source, method, params) => {
+      const tabId = source.tabId;
+      if (typeof tabId !== 'number') return;
+      if (runtimeContexts.observe(tabId, method, params)) {
+        if (method === 'Runtime.executionContextsCleared') consoleBufs.delete(tabId);
+        if (method === 'Runtime.executionContextDestroyed'
+            && consoleBufs.get(tabId)?.contextId === params?.executionContextId) {
+          consoleBufs.delete(tabId);
+        }
+        return;
+      }
       if (method !== 'Runtime.consoleAPICalled') return;
-      const buf = consoleBufs.get(source.tabId);
-      if (!buf) return;
+      const buf = consoleBufs.get(tabId);
+      if (!buf || params?.executionContextId !== buf.contextId) return;
       const level = params.type ?? 'log';
-      const text = (params.args ?? []).map(formatRemoteObject).join(' ');
-      buf.push(level === 'log' ? text : `[${level}] ${text}`);
+      const output = (params.args ?? []).map(formatRemoteObject).join(' ');
+      buf.lines.push(level === 'log' ? output : `[${level}] ${output}`);
     });
 
     // User-initiated detach (banner "Cancel" button, other extension
@@ -91,7 +164,10 @@ export const createDebuggerPool = () => {
     browser.debugger.onDetach.addListener((source, reason) => {
       console.log('[debugger-pool] detach', source.tabId, reason);
       attached.delete(source.tabId);
+      quarantined.delete(source.tabId);
       consoleBufs.delete(source.tabId);
+      runtimeContexts.release(source.tabId);
+      networkCaptures.discard(source.tabId);
       rejectPendingEvals(source.tabId, `debugger detached (${reason ?? 'unknown'}) mid-evaluate`);
     });
   };
@@ -101,7 +177,10 @@ export const createDebuggerPool = () => {
   // construction regardless of the debugger permission.
   browser.tabs.onRemoved.addListener((tabId) => {
     attached.delete(tabId);
+    quarantined.delete(tabId);
     consoleBufs.delete(tabId);
+    runtimeContexts.release(tabId);
+    networkCaptures.discard(tabId);
     rejectPendingEvals(tabId, 'the tab closed mid-evaluate');
   });
 
@@ -115,6 +194,9 @@ export const createDebuggerPool = () => {
     // docs/store/OPEN-DECISIONS.md §1. The denylist already refuses
     // sensitive origins upstream of here.
     ensureGlobalListeners();
+    if (quarantined.has(tabId)) {
+      throw new Error('debugger_cleanup_pending');
+    }
     if (attached.has(tabId)) return;
     console.log('[debugger-pool] attaching to tab', tabId);
     try {
@@ -123,14 +205,32 @@ export const createDebuggerPool = () => {
       // Common race: SW restored mid-flight, browser thinks we're
       // still attached. Forcing detach + retry is cheap.
       if (/already attached/i.test(e?.message ?? '')) {
-        try { await browser.debugger.detach({ tabId }); } catch { /* ignore */ }
+        try { await browser.debugger.detach({ tabId }); }
+        catch (cleanupError) {
+          attached.add(tabId);
+          quarantined.add(tabId);
+          throw cleanupError;
+        }
         await browser.debugger.attach({ tabId }, PROTOCOL_VERSION);
       } else {
         console.error('[debugger-pool] attach failed', e);
         throw e;
       }
     }
-    await browser.debugger.sendCommand({ tabId }, 'Runtime.enable');
+    await enableDebuggerWithCustody({
+      enable: () => browser.debugger.sendCommand({ tabId }, 'Runtime.enable'),
+      detach: () => browser.debugger.detach({ tabId }),
+      markAttached: () => { attached.add(tabId); },
+      clearAttached: () => { attached.delete(tabId); },
+      markQuarantined: () => { quarantined.add(tabId); },
+      clearQuarantined: () => { quarantined.delete(tabId); },
+    });
+    console.log('[debugger-pool] attached + Runtime enabled on', tabId);
+  };
+
+  // Focus emulation changes the page's observable focus state, so it is armed
+  // only after attachToExpectedDocument proves the exact public document.
+  const enableFocusEmulation = async (tabId) => {
     // why: the driven tab is usually BACKGROUNDED — peerd never steals focus
     // (DESIGN-12). But Gmail-class pages gate keyboard shortcuts, caret
     // placement, and focus/blur-driven behavior on document.hasFocus(), which
@@ -146,17 +246,39 @@ export const createDebuggerPool = () => {
     } catch (e) {
       console.debug('[debugger-pool] focus emulation unavailable', e?.message ?? e);
     }
-    attached.add(tabId);
-    console.log('[debugger-pool] attached + Runtime enabled on', tabId);
   };
 
   const detach = async (tabId) => {
-    if (!attached.has(tabId)) return;
-    try { await browser.debugger.detach({ tabId }); }
-    catch (e) { console.warn('[debugger-pool] detach threw', e); }
-    attached.delete(tabId);
+    networkCaptures.discard(tabId);
+    if (!attached.has(tabId)) {
+      quarantined.delete(tabId);
+      consoleBufs.delete(tabId);
+      runtimeContexts.release(tabId);
+      return;
+    }
+    try {
+      await detachDebuggerWithCustody({
+        detach: () => browser.debugger.detach({ tabId }),
+        clearCustody: () => {
+          attached.delete(tabId);
+          quarantined.delete(tabId);
+        },
+      });
+    } catch (e) {
+      console.warn('[debugger-pool] detach threw; custody retained', e);
+      throw e;
+    }
     consoleBufs.delete(tabId);
+    runtimeContexts.release(tabId);
   };
+
+  // The attachment belongs to the document proved by the scripting bridge.
+  // A navigation revokes it immediately, including a public to private hop;
+  // the next CDP call must attach and prove the new document from scratch.
+  browser.tabs.onUpdated.addListener(makeDebuggerNavigationGuard({
+    isAttached: (tabId) => attached.has(tabId),
+    detach,
+  }));
 
   // Deadline for one Runtime.evaluate (issue #176). Generous — an agent
   // script may legitimately await slow fetches/navigation — but finite, so a
@@ -164,13 +286,18 @@ export const createDebuggerPool = () => {
   // Callers can widen per-call via opts.timeoutMs (kept OUT of the CDP params).
   const EVALUATE_DEADLINE_MS = 120_000;
 
-  const evaluate = async (tabId, expression, { timeoutMs = EVALUATE_DEADLINE_MS, ...opts } = {}) => {
-    await attach(tabId);
+  const evaluate = async (tabId, expression, {
+    timeoutMs = EVALUATE_DEADLINE_MS,
+    expectedDocument = null,
+    ...opts
+  } = {}) => {
+    const identity = await attachToExpectedDocument(tabId, expectedDocument);
+    const { contextId } = identity;
     // Reset console buffer just before the call so we capture only
     // this evaluate's output. Concurrent evals on the same tab would
     // cross-pollinate; the agent loop is single-threaded per session
     // so that's fine in practice.
-    consoleBufs.set(tabId, []);
+    consoleBufs.set(tabId, { contextId, lines: [] });
     // why: wrap in an async IIFE so the agent's expression behaves like
     // a function body — top-level `await`, `return`, `let`/`const` all
     // work. Without this:
@@ -186,7 +313,15 @@ export const createDebuggerPool = () => {
     // The trailing newline before the closing brace defends against the
     // user's last line being a line-comment that would otherwise eat
     // our `})()`.
-    const wrapped = `(async () => {\n${expression}\n})()`;
+    // The exact-document guard and caller code execute in one page task. Its
+    // random tag makes the pre-effect result host-authenticated: page output or
+    // a caller-thrown error string cannot forge positive "nothing ran" proof.
+    const guardTag = crypto.randomUUID();
+    const guard = `if (location.origin !== ${JSON.stringify(expectedDocument.origin)}`
+      + ` || location.href !== ${JSON.stringify(expectedDocument.href)}`
+      + ` || performance.timeOrigin !== ${JSON.stringify(expectedDocument.timeOrigin)}) `
+      + `{ return { __peerdDocumentGuard: ${JSON.stringify(guardTag)} }; }\n`;
+    const wrapped = `(async () => {\n${guard}${expression}\n})()`;
     let result;
     try {
       // Race the CDP call against the deadline and the per-tab rejectors
@@ -221,15 +356,21 @@ export const createDebuggerPool = () => {
           // Treat the eval as a user gesture so gesture-gated APIs
           // (focus, clipboard, fullscreen) work from the script.
           userGesture: true,
+          // Bind both evaluation and console capture to the vetted main-world
+          // execution context. A replacement document receives a new context.
+          contextId,
           ...opts,
-        }).then((/** @type {any} */ r) => { cleanup(); resolve(r); }, fail);
+        }).then((/** @type {any} */ r) => { cleanup(); resolve(r); }, (error) => fail(hostLostError(error)));
       });
     } finally {
       // Always drain the buffer, even on throw, so the next call starts
       // clean. Subsequent attempts shouldn't see stale output.
-      const captured = consoleBufs.get(tabId) ?? [];
+      const captured = consoleBufs.get(tabId)?.lines ?? [];
       consoleBufs.delete(tabId);
       result = result ? { ...result, _capturedConsole: captured.join('\n') } : { _capturedConsole: captured.join('\n') };
+    }
+    if (result?.result?.value?.__peerdDocumentGuard === guardTag) {
+      throw preEffectTargetError();
     }
     return result;
   };
@@ -250,9 +391,9 @@ export const createDebuggerPool = () => {
     // window to the OS foreground on EVERY call — an agent typing its way
     // through a page repeatedly stole the user's focus out of other apps and
     // windows (the DESIGN-12 no-focus-steal rule applies to key dispatch
-    // too). Gmail-class shortcut handlers that gate on document.hasFocus()
-    // still work: attach() enables focus emulation, so the page believes
-    // it's focused while staying in the background.
+    // too). This raw primitive is no longer exposed to actors because CDP key
+    // dispatch cannot be bound to an exact document. A future caller must prove
+    // the document and enable focus emulation before restoring that surface.
     for (const ev of events) {
       const base = {
         key: ev.key,
@@ -284,6 +425,127 @@ export const createDebuggerPool = () => {
   };
 
   // --- DOM navigation: a11y snapshot + ref-resolved click/type ----------
+
+  /** @param {number} tabId */
+  const mainFrameIdentity = async (tabId) => {
+    const result = await browser.debugger.sendCommand({ tabId }, 'Page.getFrameTree');
+    const frame = result?.frameTree?.frame;
+    let origin = '';
+    try { origin = new URL(frame?.url ?? '').origin; } catch { origin = ''; }
+    let href = '';
+    try { href = new URL(frame?.url ?? '').href; } catch { href = ''; }
+    return { origin, href, loaderId: frame?.loaderId ?? null, frameId: frame?.id ?? null };
+  };
+
+  /** @param {number} tabId @param {number} contextId @param {ExpectedDocument} expected */
+  const runtimeDocumentMatches = async (tabId, contextId, expected) => {
+    const result = await browser.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+      expression: '({ origin: location.origin, href: location.href, timeOrigin: performance.timeOrigin })',
+      contextId,
+      returnByValue: true,
+    });
+    const value = result?.result?.value;
+    return value?.origin === expected.origin
+      && value?.href === expected.href
+      && value?.timeOrigin === expected.timeOrigin;
+  };
+
+  /**
+   * Attach only while the tab still hosts the expected main document. A target
+   * mismatch ends the pooled debugger session before any capability-specific
+   * command runs.
+   * @param {number} tabId
+   * @param {ExpectedDocument | null} expectedDocument
+   */
+  const attachToExpectedDocument = async (tabId, expectedDocument) => {
+    if (!isExpectedDocument(expectedDocument)) throw preEffectTargetError('browser_target_unverified');
+    let bridged;
+    try {
+      [bridged] = await browser.scripting.executeScript({
+        target: { tabId, documentIds: [expectedDocument.documentId] },
+        func: exactDocumentBridgeInjected,
+      });
+    } catch {
+      await detach(tabId);
+      throw preEffectTargetError();
+    }
+    if (bridged?.documentId !== expectedDocument.documentId
+        || bridged?.result?.origin !== expectedDocument.origin
+        || bridged?.result?.href !== expectedDocument.href
+        || bridged?.result?.timeOrigin !== expectedDocument.timeOrigin) {
+      await detach(tabId);
+      throw preEffectTargetError();
+    }
+    try { await attach(tabId); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw preEffectTargetError(`browser_debugger_before_dispatch: ${message}`);
+    }
+    const identity = await mainFrameIdentity(tabId);
+    if (identity.origin !== expectedDocument.origin
+        || identity.href !== expectedDocument.href
+        || !identity.loaderId
+        || !identity.frameId) {
+      await detach(tabId);
+      throw preEffectTargetError();
+    }
+    const contextId = runtimeContexts.selectMain(tabId, identity.frameId, expectedDocument.origin);
+    if (contextId === null
+        || !await runtimeDocumentMatches(tabId, contextId, expectedDocument)) {
+      await detach(tabId);
+      throw preEffectTargetError('browser_target_unverified');
+    }
+    await enableFocusEmulation(tabId);
+    return { ...identity, contextId };
+  };
+
+  /**
+   * Resolve DOM action bodies in an extension-owned world. The page's main
+   * world can replace URL, closest, and form accessors; none may decide whether
+   * the host guard runs. The exact-document check also closes navigation races
+   * between the main-world bind and isolated-world creation.
+   * @param {number} tabId
+   * @param {{ frameId: string }} bound
+   * @param {ExpectedDocument} expectedDocument
+   */
+  const isolatedActionContext = async (tabId, bound, expectedDocument) => {
+    try {
+      const created = await browser.debugger.sendCommand({ tabId }, 'Page.createIsolatedWorld', {
+        frameId: bound.frameId,
+        worldName: 'peerd-browser-action',
+        grantUniveralAccess: false,
+      });
+      const contextId = created?.executionContextId;
+      if (typeof contextId === 'number'
+          && await runtimeDocumentMatches(tabId, contextId, expectedDocument)) {
+        return contextId;
+      }
+    } catch { /* the exact document or debugger session may have changed */ }
+    try {
+      await detach(tabId);
+    } catch { /* custody cleanup is best-effort on a pre-effect refusal */ }
+    throw preEffectTargetError('browser_target_unverified');
+  };
+
+  /**
+   * Return read-only CDP output only when it came from the same exact document
+   * bridged before the operation. Any navigation discards the result.
+   * @param {number} tabId
+   * @param {ExpectedDocument} expectedDocument
+   * @param {{ loaderId: string, contextId: number }} bound
+   * @param {() => Promise<any>} operation
+   */
+  const readFromExpectedDocument = async (tabId, expectedDocument, bound, operation) => {
+    const result = await operation();
+    const after = await mainFrameIdentity(tabId);
+    if (after.origin !== expectedDocument.origin
+        || after.href !== expectedDocument.href
+        || after.loaderId !== bound.loaderId
+        || !await runtimeDocumentMatches(tabId, bound.contextId, expectedDocument)) {
+      throw preEffectTargetError();
+    }
+    return result;
+  };
 
   // Action-result attribution (Phase 2). Shared page-side snippets spliced
   // into the click/type callFunctionOn bodies: set up a MutationObserver
@@ -323,11 +585,13 @@ export const createDebuggerPool = () => {
   // Fetch the full accessibility tree (CDP semantic subset: role, name,
   // state, backendDOMNodeId per node). The pure serializer in
   // peerd-runtime/dom/ax-serialize.js turns this into the model's snapshot.
-  const getAxTree = async (tabId) => {
-    await attach(tabId);
-    // Accessibility must be enabled before getFullAXTree; idempotent.
-    await browser.debugger.sendCommand({ tabId }, 'Accessibility.enable').catch(() => {});
-    const res = await browser.debugger.sendCommand({ tabId }, 'Accessibility.getFullAXTree', {});
+  const getAxTree = async (tabId, expectedDocument) => {
+    const bound = await attachToExpectedDocument(tabId, expectedDocument);
+    const res = await readFromExpectedDocument(tabId, expectedDocument, bound, async () => {
+      // Accessibility must be enabled before getFullAXTree; idempotent.
+      await browser.debugger.sendCommand({ tabId }, 'Accessibility.enable').catch(() => {});
+      return browser.debugger.sendCommand({ tabId }, 'Accessibility.getFullAXTree', {});
+    });
     return res?.nodes ?? [];
   };
 
@@ -336,11 +600,18 @@ export const createDebuggerPool = () => {
   // grabs the window's foreground tab). This is what lets the `view` tool
   // capture the runner's pinned tab and gate the captured pixels to THAT tab.
   // JPEG keeps a viewport shot small enough to ship as a model vision block.
-  /** @param {number} tabId @param {{ format?: 'jpeg'|'png', quality?: number }} [opts] */
-  const captureScreenshot = async (tabId, { format = 'jpeg', quality = 70 } = {}) => {
-    await attach(tabId);
+  /** @param {number} tabId @param {{ format?: 'jpeg'|'png', quality?: number, expectedDocument?: ExpectedDocument }} [opts] */
+  const captureScreenshot = async (tabId, {
+    format = 'jpeg', quality = 70, expectedDocument,
+  } = {}) => {
+    const bound = await attachToExpectedDocument(tabId, expectedDocument ?? null);
     const params = format === 'jpeg' ? { format, quality } : { format };
-    const res = await browser.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', params);
+    const res = await readFromExpectedDocument(
+      tabId,
+      expectedDocument,
+      bound,
+      () => browser.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', params),
+    );
     return { data: res?.data ?? '', mediaType: format === 'jpeg' ? 'image/jpeg' : 'image/png' };
   };
 
@@ -349,39 +620,96 @@ export const createDebuggerPool = () => {
   // Synthetic el.click(); a real-event upgrade (DOM.getBoxModel +
   // Input.dispatchMouseEvent) is a follow-up for isTrusted-gating sites.
   // Reports the action's DOM effect via OBS_SETUP/COLLECT (Phase 2).
-  const clickBackendNode = async (tabId, backendDOMNodeId) => {
-    await attach(tabId);
+  const clickBackendNode = async (tabId, backendDOMNodeId, expectedDocument) => {
+    const bound = await attachToExpectedDocument(tabId, expectedDocument);
+    const actionContextId = await isolatedActionContext(tabId, bound, expectedDocument);
     await browser.debugger.sendCommand({ tabId }, 'DOM.enable').catch(() => {});
     const resolved = await browser.debugger.sendCommand(
-      { tabId }, 'DOM.resolveNode', { backendNodeId: backendDOMNodeId },
+      { tabId }, 'DOM.resolveNode', {
+        backendNodeId: backendDOMNodeId,
+        executionContextId: actionContextId,
+      },
     );
     const objectId = resolved?.object?.objectId;
     if (!objectId) return { ok: false, error: 'node_unresolvable' };
+    const guardTag = crypto.randomUUID();
     try {
       const out = await browser.debugger.sendCommand({ tabId }, 'Runtime.callFunctionOn', {
         objectId,
-        functionDeclaration: `async function () {
+        functionDeclaration: `async function (expectedHref, expectedTimeOrigin, guardTag) {
+          if (!this.ownerDocument || this.ownerDocument.location.href !== expectedHref
+              || !this.ownerDocument.defaultView
+              || this.ownerDocument.defaultView.performance.timeOrigin !== expectedTimeOrigin) {
+            return { __peerdDocumentGuard: guardTag };
+          }
           this.scrollIntoView({ block: 'center', inline: 'center' });
           var tag = this.tagName ? this.tagName.toLowerCase() : '';
           var text = ((this.innerText || this.value || '') + '').trim().slice(0, 80);
+          // why: native form activation carries live values that never appear
+          // in click's args. Decide on the exact node and document immediately
+          // before the effect, so action/formaction mutation cannot race a
+          // separate preflight.
+          var directSubmitter = typeof this.closest === 'function' ? this.closest('button,input') : null;
+          var activationLabel = !directSubmitter && typeof this.closest === 'function'
+            ? this.closest('label') : null;
+          var submitter = directSubmitter || (activationLabel && activationLabel.control) || null;
+          var submitterTag = submitter && submitter.tagName ? submitter.tagName.toLowerCase() : '';
+          var submitterType = submitter && submitter.type ? submitter.type.toLowerCase() : '';
+          var isSubmitter = (submitterTag === 'button' && submitterType === 'submit')
+            || (submitterTag === 'input' && (submitterType === 'submit' || submitterType === 'image'));
+          var form = isSubmitter ? submitter.form : null;
+          if (form) {
+            var getAttribute = Element.prototype.getAttribute;
+            var submitterMethod = getAttribute.call(submitter, 'formmethod');
+            var method = (submitterMethod || getAttribute.call(form, 'method') || 'get').toLowerCase();
+            if (method !== 'dialog') {
+              try {
+                var submitterAction = getAttribute.call(submitter, 'formaction');
+                var formAction = getAttribute.call(form, 'action');
+                var action = submitterAction !== null ? submitterAction : formAction;
+                var actionOrigin = action
+                  ? new URL(action, this.ownerDocument.baseURI).origin
+                  : this.ownerDocument.location.origin;
+                if (actionOrigin !== this.ownerDocument.location.origin) {
+                  return { ok: false, error: 'cross_origin_form_submission_blocked' };
+                }
+              } catch (e) {
+                return { ok: false, error: 'cross_origin_form_submission_blocked' };
+              }
+            }
+          }
           ${OBS_SETUP}
           if (typeof this.click === 'function') { this.click(); }
           else { this.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); }
           ${OBS_COLLECT}
           return { tag: tag, text: text, mutations: __m };
         }`,
+        arguments: [
+          { value: expectedDocument.href },
+          { value: expectedDocument.timeOrigin },
+          { value: guardTag },
+        ],
         awaitPromise: true,
         returnByValue: true,
         userGesture: true,
       });
       const v = out?.result?.value ?? {};
+      if (v.__peerdDocumentGuard === guardTag) {
+        return { ok: false, error: 'browser_target_changed', outcomeKind: 'pre-effect-failure' };
+      }
+      if (out?.exceptionDetails) {
+        return { ok: false, error: `click_failed: ${out.exceptionDetails.text ?? 'page function threw'}` };
+      }
+      if (v.ok === false) return { ok: false, error: v.error ?? 'click_failed', outcomeKind: 'pre-effect-failure' };
       return { ok: true, tag: v.tag ?? '', text: v.text ?? '', mutations: v.mutations ?? null };
     } catch (e) {
-      // The click likely navigated the page (execution context destroyed
-      // mid-observe). That IS the result — distinguish from a real failure.
       const msg = e?.message ?? String(e);
       if (/context was destroyed|inspected target navigated|target closed|no longer exists|cannot find context/i.test(msg)) {
-        return { ok: true, navigated: true, mutations: null };
+        return {
+          ok: false,
+          error: `click_outcome_unknown: the document changed while the action was dispatched (${msg})`,
+          outcomeKind: 'host-lost',
+        };
       }
       return { ok: false, error: `click_failed: ${msg}` };
     }
@@ -392,19 +720,49 @@ export const createDebuggerPool = () => {
   // value tracking sees the change, then fires input/change (+ optional
   // Enter / requestSubmit). Args are passed via CDP `arguments`, never
   // string-interpolated — no injection surface.
-  const setValueBackendNode = async (tabId, backendDOMNodeId, text, submit) => {
-    await attach(tabId);
+  const setValueBackendNode = async (tabId, backendDOMNodeId, text, submit, expectedDocument) => {
+    const bound = await attachToExpectedDocument(tabId, expectedDocument);
+    const actionContextId = await isolatedActionContext(tabId, bound, expectedDocument);
     await browser.debugger.sendCommand({ tabId }, 'DOM.enable').catch(() => {});
     const resolved = await browser.debugger.sendCommand(
-      { tabId }, 'DOM.resolveNode', { backendNodeId: backendDOMNodeId },
+      { tabId }, 'DOM.resolveNode', {
+        backendNodeId: backendDOMNodeId,
+        executionContextId: actionContextId,
+      },
     );
     const objectId = resolved?.object?.objectId;
     if (!objectId) return { ok: false, error: 'node_unresolvable' };
+    const guardTag = crypto.randomUUID();
     try {
       const out = await browser.debugger.sendCommand({ tabId }, 'Runtime.callFunctionOn', {
         objectId,
-        functionDeclaration: `async function (text, submit) {
+        functionDeclaration: `async function (text, submit, expectedHref, expectedTimeOrigin, guardTag) {
+          if (!this.ownerDocument || this.ownerDocument.location.href !== expectedHref
+              || !this.ownerDocument.defaultView
+              || this.ownerDocument.defaultView.performance.timeOrigin !== expectedTimeOrigin) {
+            return { __peerdDocumentGuard: guardTag };
+          }
           this.scrollIntoView({ block: 'center' });
+          // why: refuse before setting actor-provided text or firing input
+          // handlers. The native form destination is otherwise absent from
+          // type's tool args and invisible to the egress tripwire.
+          var targetForm = submit ? this.form : null;
+          var targetFormMethod = targetForm
+            ? Element.prototype.getAttribute.call(targetForm, 'method')
+            : null;
+          if (targetForm && (targetFormMethod || 'get').toLowerCase() !== 'dialog') {
+            try {
+              var action = Element.prototype.getAttribute.call(targetForm, 'action');
+              var actionOrigin = action
+                ? new URL(action, this.ownerDocument.baseURI).origin
+                : this.ownerDocument.location.origin;
+              if (actionOrigin !== this.ownerDocument.location.origin) {
+                return { ok: false, error: 'cross_origin_form_submission_blocked' };
+              }
+            } catch (e) {
+              return { ok: false, error: 'cross_origin_form_submission_blocked' };
+            }
+          }
           if (typeof this.focus === 'function') this.focus();
           var tag = this.tagName ? this.tagName.toLowerCase() : '';
           ${OBS_SETUP}
@@ -449,18 +807,38 @@ export const createDebuggerPool = () => {
           ${OBS_COLLECT}
           return { ok: true, tag: tag, mutations: __m };
         }`,
-        arguments: [{ value: String(text ?? '') }, { value: !!submit }],
+        arguments: [
+          { value: String(text ?? '') },
+          { value: !!submit },
+          { value: expectedDocument.href },
+          { value: expectedDocument.timeOrigin },
+          { value: guardTag },
+        ],
         awaitPromise: true,
         returnByValue: true,
         userGesture: true,
       });
       const v = out?.result?.value ?? {};
-      if (v.ok === false) return { ok: false, error: v.error ?? 'type_failed' };
+      if (v.__peerdDocumentGuard === guardTag) {
+        return { ok: false, error: 'browser_target_changed', outcomeKind: 'pre-effect-failure' };
+      }
+      if (out?.exceptionDetails) {
+        return { ok: false, error: `type_failed: ${out.exceptionDetails.text ?? 'page function threw'}` };
+      }
+      if (v.ok === false) return {
+        ok: false,
+        error: v.error ?? 'type_failed',
+        ...(v.error === 'cross_origin_form_submission_blocked' ? { outcomeKind: 'pre-effect-failure' } : {}),
+      };
       return { ok: true, tag: v.tag ?? '', mutations: v.mutations ?? null };
     } catch (e) {
       const msg = e?.message ?? String(e);
       if (/context was destroyed|inspected target navigated|target closed|no longer exists|cannot find context/i.test(msg)) {
-        return { ok: true, navigated: true, mutations: null };
+        return {
+          ok: false,
+          error: `type_outcome_unknown: the document changed while the action was dispatched (${msg})`,
+          outcomeKind: 'host-lost',
+        };
       }
       return { ok: false, error: `type_failed: ${msg}` };
     }
@@ -470,20 +848,36 @@ export const createDebuggerPool = () => {
   // from a ref). Runs in the page's MAIN world via CDP, where the React
   // fiber / Vue component handles live. Returns { framework, component,
   // props, state } or { framework: null }. Validated live on react.dev.
-  const readFrameworkState = async (tabId, backendDOMNodeId) => {
-    await attach(tabId);
+  const readFrameworkState = async (tabId, backendDOMNodeId, expectedDocument) => {
+    const bound = await attachToExpectedDocument(tabId, expectedDocument);
     await browser.debugger.sendCommand({ tabId }, 'DOM.enable').catch(() => {});
     const resolved = await browser.debugger.sendCommand(
-      { tabId }, 'DOM.resolveNode', { backendNodeId: backendDOMNodeId },
+      { tabId }, 'DOM.resolveNode', {
+        backendNodeId: backendDOMNodeId,
+        executionContextId: bound.contextId,
+      },
     );
     const objectId = resolved?.object?.objectId;
     if (!objectId) return { ok: false, error: 'node_unresolvable' };
+    const guardTag = crypto.randomUUID();
     const out = await browser.debugger.sendCommand({ tabId }, 'Runtime.callFunctionOn', {
       objectId,
       functionDeclaration: FRAMEWORK_STATE_FN,
+      arguments: [
+        { value: expectedDocument.href },
+        { value: expectedDocument.timeOrigin },
+        { value: guardTag },
+      ],
       returnByValue: true,
     });
-    return { ok: true, ...(out?.result?.value ?? { framework: null }) };
+    const value = out?.result?.value ?? {};
+    if (value.__peerdDocumentGuard === guardTag) {
+      return { ok: false, error: 'browser_target_changed', outcomeKind: 'pre-effect-failure' };
+    }
+    if (out?.exceptionDetails) {
+      return { ok: false, error: `read_state_failed: ${out.exceptionDetails.text ?? 'page function threw'}` };
+    }
+    return { ok: true, ...value };
   };
 
   // ── DESIGN-19 Tap A: CDP Network capture ─────────────────────────────────
@@ -493,26 +887,34 @@ export const createDebuggerPool = () => {
   // incl. workers, with real timing. CREDENTIALS ARE SANITIZED AT THIS BOUNDARY —
   // request headers are reduced to posture MARKERS (bearer/cookie presence), never
   // values; response bodies are size-capped samples. Nothing here stores a secret.
-  /** @type {Map<number, Map<string, any>>} per-tab in-flight requests by requestId */
-  const netCaptures = new Map();
   const RESP_BODY_SAMPLE = 4_000;
+  // Match the injected tap's ring-buffer posture. Long capture sessions stay
+  // bounded even on pages that poll or stream many distinct requests.
+  const NETWORK_CAPTURE_EVENT_CAP = 300;
   // Window for in-flight getResponseBody reads to land after Network.disable.
   const SETTLE_MS = 200;
 
   const onNetworkEvent = (/** @type {any} */ source, /** @type {string} */ method, /** @type {any} */ params) => {
-    const cap = netCaptures.get(source.tabId);
+    const cap = networkCaptures.get(source.tabId);
     if (!cap) return;
     if (method === 'Network.requestWillBeSent') {
       const req = params.request ?? {};
+      const requestPolicy = networkCaptureRequestPolicy(req.url, params.type);
+      if (requestPolicy === 'discard') {
+        networkCaptures.discard(source.tabId);
+        browser.debugger.sendCommand({ tabId: source.tabId }, 'Network.disable', {}).catch(() => {});
+        return;
+      }
+      if (requestPolicy === 'ignore') return;
       const h = req.headers ?? {};
       // Posture markers ONLY — never the credential value.
       const hasAuth = Object.keys(h).some((k) => k.toLowerCase() === 'authorization');
       const bearer = hasAuth && /bearer/i.test(String(h.Authorization ?? h.authorization ?? ''));
       const hasCookie = Object.keys(h).some((k) => k.toLowerCase() === 'cookie');
-      cap.set(params.requestId, {
+      networkCaptures.record(source.tabId, params.requestId, {
         method: req.method ?? 'GET', url: req.url ?? '',
         reqHeaders: { ...(bearer ? { authorization: 'Bearer' } : hasAuth ? { authorization: 'present' } : {}), ...(hasCookie ? { cookie: 'present' } : {}) },
-      });
+      }, NETWORK_CAPTURE_EVENT_CAP);
     } else if (method === 'Network.responseReceived') {
       const e = cap.get(params.requestId);
       if (e) { e.status = params.response?.status; e.contentType = params.response?.mimeType; }
@@ -522,46 +924,62 @@ export const createDebuggerPool = () => {
       if (e && /json|javascript|text/i.test(e.contentType ?? '')) {
         browser.debugger.sendCommand({ tabId: source.tabId }, 'Network.getResponseBody', { requestId: params.requestId })
           .then((/** @type {any} */ r) => {
-            if (!netCaptures.get(source.tabId)) return;   // capture stopped meanwhile
+            if (!networkCaptures.isCurrent(source.tabId, cap)) return; // capture stopped or replaced
             const raw = typeof r?.body === 'string' ? (r.base64Encoded ? '' : r.body) : '';
-            if (raw) { try { e.resSample = JSON.parse(raw.slice(0, RESP_BODY_SAMPLE * 4)); } catch { e.resSample = raw.slice(0, RESP_BODY_SAMPLE); } }
+            if (raw) {
+              try { e.resSample = shapeSketch(JSON.parse(raw.slice(0, RESP_BODY_SAMPLE * 4))); }
+              catch { e.resSample = 'string'; }
+            }
           })
           .catch(() => {});
       }
     }
   };
 
-  const startNetworkCapture = async (/** @type {number} */ tabId) => {
-    await attach(tabId);
+  const startNetworkCapture = async (/** @type {number} */ tabId, /** @type {ExpectedDocument} */ expectedDocument) => {
+    await attachToExpectedDocument(tabId, expectedDocument);
     ensureGlobalListeners();
     if (!netListenerBound) {
       netListenerBound = true;
       browser.debugger.onEvent.addListener(onNetworkEvent);
     }
-    netCaptures.set(tabId, new Map());
+    networkCaptures.begin(tabId);
     await browser.debugger.sendCommand({ tabId }, 'Network.enable', {}).catch(() => {});
   };
 
   const stopNetworkCapture = async (/** @type {number} */ tabId) => {
-    const cap = netCaptures.get(tabId);
+    const cap = networkCaptures.get(tabId);
     // why keep the map ALIVE during the settle: getResponseBody promises started on
-    // loadingFinished write their sample back only while `netCaptures.get(tabId)` is
+    // loadingFinished write their sample back only while the registry entry is
     // truthy (the onNetworkEvent guard). Deleting first would make every in-flight
     // sample bail. So: stop new events (Network.disable), give pending body reads a
     // brief window to land, snapshot, THEN delete. Endpoints survive regardless
     // (recorded on requestWillBeSent); this only recovers the shape-sketch notes.
     await browser.debugger.sendCommand({ tabId }, 'Network.disable', {}).catch(() => {});
     await new Promise((resolve) => { setTimeout(resolve, SETTLE_MS); });
-    const events = cap ? [...cap.values()] : [];
-    netCaptures.delete(tabId);
-    return events;
+    return networkCaptures.finish(tabId, cap);
+  };
+
+  // Policy cancellation must stop observing immediately and discard all bytes.
+  // Delete before Network.disable so late protocol events cannot refill state.
+  const discardNetworkCapture = async (/** @type {number} */ tabId) => {
+    const hadCapture = networkCaptures.discard(tabId);
+    if (!hadCapture) return;
+    await browser.debugger.sendCommand({ tabId }, 'Network.disable', {}).catch(() => {});
+  };
+
+  // Tab removal and debugger detach already tear down the protocol session.
+  // This synchronous hook only releases the manager's matching registry entry.
+  const releaseNetworkCapture = (/** @type {number} */ tabId) => {
+    networkCaptures.discard(tabId);
   };
 
   return {
     attach, detach, evaluate, dispatchKeys, getAxTree, captureScreenshot,
     clickBackendNode, setValueBackendNode,
     readFrameworkState,
-    startNetworkCapture, stopNetworkCapture,
+    startNetworkCapture, stopNetworkCapture, discardNetworkCapture,
+    releaseNetworkCapture,
     isAttached: (tabId) => attached.has(tabId),
   };
 };
@@ -579,8 +997,13 @@ export const createDebuggerPool = () => {
 // callFunctionOn (this-bound). The two can't share source (scripting can't
 // serialize an import; CDP needs a string), so any fix to the walk below must
 // be mirrored there.
-const FRAMEWORK_STATE_FN = `function () {
+const FRAMEWORK_STATE_FN = `function (expectedHref, expectedTimeOrigin, guardTag) {
   var el = this;
+  if (!el.ownerDocument || el.ownerDocument.location.href !== expectedHref
+      || !el.ownerDocument.defaultView
+      || el.ownerDocument.defaultView.performance.timeOrigin !== expectedTimeOrigin) {
+    return { __peerdDocumentGuard: guardTag };
+  }
   function safe(v, d) {
     d = d || 0;
     if (v == null) return v;

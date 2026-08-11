@@ -206,55 +206,6 @@ export function domWalkInjected() {
   var visited = 0;
   var capped = false;
 
-  // issue 251 — does this page have a password field? One boolean, read straight
-  // off the document rather than from the walk below.
-  //
-  // why not from the walk: it skips hidden elements and stops at a node cap, so
-  // a sign-in modal that has not been opened yet — the common shape on a site
-  // whose login lives behind a button — would be missed exactly where the signal
-  // is most wanted.
-  //
-  // why reporting a hidden field is safe: this says only that the SITE has
-  // accounts. It never carries what is IN the field; valueOf() below still masks
-  // password values, and nothing about this boolean reaches the model — it goes
-  // to the origin classifier, not into the snapshot text.
-  //
-  // Known miss: querySelector does not pierce shadow roots, so a login form
-  // inside a closed or open shadow tree is invisible here. Fail-open, same as
-  // the classifier it feeds.
-  //
-  // why `new-password` is EXCLUDED: that autocomplete token means "this field
-  // CREATES a password", i.e. a registration form — which is evidence the user
-  // does NOT have an account here, the exact opposite of what this signal is
-  // asking. Measured: the whole Stack Exchange network ships a hidden signup
-  // modal (action="/users/signup", autocomplete="new-password") in its page
-  // chrome, so reading ONE answer permanently marked stackoverflow.com,
-  // superuser.com, serverfault.com, askubuntu.com and math.stackexchange.com as
-  // sites the user has an identity on — after which a roaming helper could never
-  // drive a tab there again, with no UI to see or undo it.
-  //
-  // why not filter on VISIBILITY instead (the first thing that suggests itself):
-  // it would undo the deliberate choice above. A closed sign-in modal is hidden
-  // AND is a real signal; that case is the reason this reads the document rather
-  // than the walk. `new-password` separates the two without touching it.
-  //
-  // Checked against real pages: this clears 6/7 of the observed false positives
-  // and keeps 7/7 real sign-in pages firing (they use `current-password` or no
-  // autocomplete at all). The one origin still marked, instagram.com, is a
-  // genuine login form on its front page — a correct classification.
-  var hasPasswordField = false;
-  try {
-    var pwFields = document.querySelectorAll('input[type="password"]');
-    for (var pwIndex = 0; pwIndex < pwFields.length; pwIndex++) {
-      var pwAutocomplete = pwFields[pwIndex].getAttribute('autocomplete');
-      if (String(pwAutocomplete == null ? '' : pwAutocomplete).toLowerCase() === 'new-password') continue;
-      hasPasswordField = true;
-      break;
-    }
-  } catch (e) {
-    hasPasswordField = false;
-  }
-
   // DFS with an explicit stack (mirrors ax-serialize) so deep pages can't
   // blow the call stack. Each frame: element + the nodeId of its nearest
   // EMITTED ancestor — non-semantic wrappers don't create nodes, their
@@ -310,69 +261,122 @@ export function domWalkInjected() {
     pushChildren(el, parentNodeId);
   }
 
-  // probeOrigin: where this walk ACTUALLY ran. See hasPasswordFieldInjected —
-  // the caller's tab record is a snapshot taken before injection, so the
-  // password-field signal is only attributable if these agree.
-  var probeOrigin = null;
-  try { probeOrigin = location.origin; } catch (e) { probeOrigin = null; }
   return {
     ok: true, nodes: nodes, refElementCount: els.size, capped: capped,
-    hasPasswordField: hasPasswordField, probeOrigin: probeOrigin,
   };
 }
 
 /**
- * The same one boolean, on its own — for the CDP path, whose a11y tree cannot
- * tell a password input from any other textbox (both are role `textbox`).
+ * Origin-sensitivity signal: does this document contain evidence that the user
+ * can sign in here? One boolean reaches the classifier; no field value or DOM
+ * content reaches the model through this path.
  *
- * why a second injection rather than folding it into the tree fetch: CDP hands
- * back an accessibility tree, and the accessibility tree deliberately does not
- * distinguish these. The alternative was to let the signal exist only on the
- * DOM-walk channel, which would mean the origin lock learned less on the
- * platform where it has the MOST capability — precisely backwards.
+ * why standalone: every DOM tool runs this once at the exact-document target
+ * chokepoint. Snapshot capture deliberately does not repeat it; CDP cannot
+ * distinguish password inputs in its accessibility tree, and a second renderer
+ * wait could hang an otherwise complete read.
  *
  * Deliberately ES5 and self-contained: chrome.scripting serializes this source
- * and re-evaluates it in the page's classic-script world, so it can close over
- * nothing. See the header of dom-helpers.js. That is also why the
- * `new-password` rule is spelled out again here instead of shared — an injected
- * body closes over nothing, so the two copies must each stand alone. Keep them
- * in step; the walk copy carries the full rationale.
+ * and re-evaluates it in the page's classic-script world, so it closes over
+ * nothing. See the header of dom-helpers.js.
  *
- * @returns {{ has: boolean, origin: string | null, href: string | null }} the signal,
- *   and WHERE it was observed — the caller must drop it if that disagrees with the
- *   tab it resolved.
+ * @returns {{ has: boolean, capped: boolean }} the signal and whether boundary
+ *   discovery exhausted its budget.
  */
 export function hasPasswordFieldInjected() {
   'use strict';
-  // Reports WHERE it ran, not just what it saw. The caller resolves the tab
-  // first and reads `tab.url` from that frozen record, but this body runs later,
-  // in whatever document is committed by then — so a page that navigates in
-  // between could have its password field attributed to the origin the caller
-  // still thinks is loaded. Returning location.origin lets the caller drop a
-  // signal it cannot attribute. (`origin: null` on a throw, so an opaque or
-  // unreadable document is UNKNOWN rather than silently matching.)
-  //
-  // `location` is [Unforgeable] and this body runs in the ISOLATED world, so a
-  // hostile page can neither shadow it nor reach in and rewrite the answer: the
-  // document cannot lie about which document it is. That is what makes this
-  // usable as a live re-check of the caller's frozen tab record and not merely
-  // as a hint. href as well as origin, because the landing judge is asked about
-  // a URL and a path-scoped rule must not be handed a bare origin.
-  var origin = null;
-  var href = null;
-  try { origin = location.origin; } catch (e) { origin = null; }
-  try { href = location.href; } catch (e) { href = null; }
+  var MAX_VISITED = 30000;
+  // The caller targets the documentId minted by its preceding live-location
+  // probe, so a navigation destroys this injection instead of retargeting it.
+  // `location` is [Unforgeable] in the isolated world; this origin is needed
+  // only to decide whether a readable child frame belongs to the same site.
+  var topOrigin = null;
+  try { topOrigin = location.origin; } catch (e) { topOrigin = null; }
   try {
-    var fields = document.querySelectorAll('input[type="password"]');
-    for (var i = 0; i < fields.length; i++) {
-      var autocomplete = fields[i].getAttribute('autocomplete');
-      // A registration field is evidence the user has NO account here.
-      if (String(autocomplete == null ? '' : autocomplete).toLowerCase() !== 'new-password') {
-        return { has: true, origin: origin, href: href };
+    var isNewPasswordField = function (field) {
+      var autocomplete = String(field.getAttribute('autocomplete') || '').toLowerCase();
+      // Signup fields are evidence the user does not have an account here. Keep
+      // hidden sign-in modals, but exclude new-password wherever it appears in
+      // autocomplete's ASCII-whitespace-delimited token list.
+      return /(^|[\t\n\f\r ])new-password($|[\t\n\f\r ])/.test(autocomplete);
+    };
+    var rootHasPasswordField = function (root) {
+      var fields = root.querySelectorAll('input[type="password"]');
+      for (var fieldIndex = 0; fieldIndex < fields.length; fieldIndex++) {
+        if (!isNewPasswordField(fields[fieldIndex])) return true;
       }
+      return false;
+    };
+    var attributableFrameDocument = function (frameElement) {
+      try {
+        var frameDocument = frameElement.contentDocument;
+        if (!frameDocument || !frameDocument.documentElement) return null;
+        var frameOrigin = frameDocument.location.origin;
+        if (topOrigin && frameOrigin === topOrigin) return frameDocument;
+        var rawFrameSrc = frameElement.getAttribute('src');
+        var declaredBlank = frameDocument.location.protocol === 'about:'
+          && frameDocument.location.pathname === 'blank'
+          && (rawFrameSrc == null || rawFrameSrc.trim() === ''
+            || rawFrameSrc.trim().toLowerCase().indexOf('about:blank') === 0);
+        var declaredSrcdoc = frameDocument.location.protocol === 'about:'
+          && frameDocument.location.pathname === 'srcdoc'
+          && frameElement.hasAttribute('srcdoc');
+        return topOrigin && topOrigin !== 'null' && (declaredBlank || declaredSrcdoc)
+          ? frameDocument
+          : null;
+      } catch (e) { return null; }
+    };
+    var stack = [];
+    var visited = 0;
+    var capped = false;
+    var pushChildren = function (children) {
+      if (children && children.length) stack.push({ children: children, index: 0 });
+    };
+    var takeNext = function () {
+      while (stack.length) {
+        var frame = stack[stack.length - 1];
+        if (frame.index < frame.children.length) {
+          return frame.children[frame.index++];
+        }
+        stack.pop();
+      }
+      return null;
+    };
+
+    if (rootHasPasswordField(document)) return { has: true, capped: false };
+    if (document.documentElement) pushChildren([document.documentElement]);
+    var element = takeNext();
+    while (element && visited < MAX_VISITED) {
+      visited++;
+      var tag = element.tagName ? element.tagName.toLowerCase() : '';
+      var shadowChildren = null;
+      if (element.shadowRoot) {
+        if (rootHasPasswordField(element.shadowRoot)) {
+          return { has: true, capped: capped };
+        }
+        shadowChildren = element.shadowRoot.children;
+      }
+      var childDocumentRoot = null;
+      if (tag === 'iframe') {
+        var childDocument = attributableFrameDocument(element);
+        if (childDocument) {
+          if (rootHasPasswordField(childDocument)) {
+            return { has: true, capped: capped };
+          }
+          childDocumentRoot = childDocument.documentElement;
+        }
+      }
+      // Push later sources first. takeNext() reads the top frame, so ordinary
+      // light-DOM descendants retain true preorder priority over shadow and
+      // frame-document discovery without ever materializing a wide sibling list.
+      if (childDocumentRoot) pushChildren([childDocumentRoot]);
+      pushChildren(shadowChildren);
+      pushChildren(element.children);
+      element = takeNext();
     }
-    return { has: false, origin: origin, href: href };
+    if (element) capped = true;
+    return { has: false, capped: capped };
   } catch (e) {
-    return { has: false, origin: origin, href: href };
+    return { has: false, capped: true };
   }
 }

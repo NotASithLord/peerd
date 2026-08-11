@@ -2,6 +2,7 @@ import { describe, test, expect } from 'bun:test';
 import { createCommandStore, isValidCommandName } from '../../../extension/peerd-runtime/composer/command-store.js';
 import { localStoreSource, skillRegistrySource, mergeSources } from '../../../extension/peerd-runtime/composer/command-sources.js';
 import { applyComposer } from '../../../extension/peerd-runtime/composer/apply.js';
+import { browserProbeResult, TEST_DOCUMENT_ID } from '../../helpers/browser-scripting';
 
 // In-memory KV matching the project's KV shape (get/set/delete/list).
 const makeKV = () => {
@@ -101,7 +102,13 @@ describe('applyComposer — end-to-end command + ref expansion', () => {
       get: async (id: number) => ({ id, url: 'https://example.com/p', title: 'T' }),
       query: async () => [{ id: 1, url: 'https://example.com/p', title: 'T' }],
     },
-    scripting: { executeScript: async () => [{ result: { title: 'D', url: 'https://example.com/p', text: 'tabtext' } }] },
+    scripting: { executeScript: async (request: any) => browserProbeResult(request, {
+      url: 'https://example.com/p',
+      documentId: TEST_DOCUMENT_ID,
+    }) ?? [{
+      documentId: TEST_DOCUMENT_ID,
+      result: { title: 'D', url: 'https://example.com/p', text: 'tabtext' },
+    }] },
     appClient: { readFile: async ({ path }: any) => `FILE(${path})` },
     session: { sessionId: 's1' },
   };

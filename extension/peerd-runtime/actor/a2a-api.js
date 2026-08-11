@@ -13,11 +13,14 @@
 // mesh is the transport, did:key is the address, the fenced inbound-wake is the
 // stream).
 //
-// Pure — values in, values out, no IO, no imports. Keeping the translation pure
-// makes the semantics (validation, the ask/send split, the signing boundary)
+// Pure — values in, values out, no IO. The declarative manifest is its only
+// import. Keeping the translation pure
+// makes the semantics (validation, the call/cast split, the signing boundary)
 // unit-testable without a browser or a live mesh. The imperative shell — the
-// worker bridge, the SW route, the ask CORRELATION (send a request-tagged DM,
+// worker bridge, the SW route, the call CORRELATION (send a request-tagged DM,
 // await the matching inbound reply) — lives in separate files.
+
+import { codeClientMethod, codeClientMethods } from './capability-manifest.js';
 
 /** A failed mesh op REJECTS like a thrown call — so `await mesh.ask(...)` throws. */
 export class MeshApiError extends Error {
@@ -70,29 +73,48 @@ const MESH_METHODS = {
     shape: (c) => ({ ok: c?.ok === true, ...(c?.did ? { did: c.did } : {}) }),
     signs: true,
   },
-  // ASK — the demo primitive: send a request-tagged DM to a peer and await its
-  // ONE reply (the SW route correlates by request id + times out). Signs.
-  ask: {
+  // GenServer-shaped CALL — send a request-tagged DM and await one reply.
+  // Timeout rejects, matching local actors.call rather than creating a second
+  // request/reply convention for the remote heap.
+  call: {
     op: 'ask',
     toArgs: (a) => {
-      const did = isDid(a?.did) ? a.did : (() => { throw new MeshApiError('mesh.ask(did, message): did must be a did:key'); })();
-      const message = nonEmptyString(a?.message, 'mesh.ask(did, message): message');
+      const did = isDid(a?.did) ? a.did : (() => { throw new MeshApiError('mesh.call(did, message): did must be a did:key'); })();
+      const message = nonEmptyString(a?.message, 'mesh.call(did, message): message');
       const timeoutMs = typeof a?.timeoutMs === 'number' && a.timeoutMs > 0 ? Math.min(a.timeoutMs, 120_000) : undefined;
       return { did, message, ...(timeoutMs ? { timeoutMs } : {}) };
     },
-    shape: (c) => ({ from: c?.from ?? null, reply: c?.reply ?? null, ...(c?.timedOut ? { timedOut: true } : {}) }),
+    shape: (c) => {
+      if (c?.timedOut) throw new MeshApiError('mesh.call: timed out awaiting peer reply');
+      return { from: c?.from ?? null, reply: c?.reply ?? null };
+    },
     signs: true,
   },
-  // Fire-and-forget DM (no awaited reply) — a notification, or an out-of-band
-  // continuation the code doesn't block on. Signs.
-  send: {
+  // Genuine CAST — fire-and-forget with no reply promise beyond transport
+  // admission. This is the place where OTP's cast vocabulary is semantically
+  // honest; local actors deliberately expose no cast yet.
+  cast: {
     op: 'send',
     toArgs: (a) => {
-      const did = isDid(a?.did) ? a.did : (() => { throw new MeshApiError('mesh.send(did, message): did must be a did:key'); })();
-      const message = nonEmptyString(a?.message, 'mesh.send(did, message): message');
+      const did = isDid(a?.did) ? a.did : (() => { throw new MeshApiError('mesh.cast(did, message): did must be a did:key'); })();
+      const message = nonEmptyString(a?.message, 'mesh.cast(did, message): message');
       return { did, message };
     },
     shape: (c) => ({ sent: c?.ok === true, ...(c?.id ? { id: c.id } : {}) }),
+    signs: true,
+  },
+  // Compatibility names for existing 0.x scripts. They are accepted by the
+  // relay but omitted from generated prompt references.
+  ask: {
+    op: 'ask',
+    toArgs: (a) => MESH_METHODS.call.toArgs(a),
+    shape: (c) => ({ from: c?.from ?? null, reply: c?.reply ?? null, ...(c?.timedOut ? { timedOut: true } : {}) }),
+    signs: true,
+  },
+  send: {
+    op: 'send',
+    toArgs: (a) => MESH_METHODS.cast.toArgs(a),
+    shape: (c) => MESH_METHODS.cast.shape(c),
     signs: true,
   },
   // Drain inbound DMs received DURING this run (a code loop can poll it). Read —
@@ -136,11 +158,11 @@ const MESH_METHODS = {
 };
 
 /** The method names — drives the worker stub + the lore. */
-export const MESH_API_METHODS = Object.freeze(Object.keys(MESH_METHODS));
+export const MESH_API_METHODS = Object.freeze(codeClientMethods('mesh'));
 
 /** Names of the SIGNING ops (send/ask/publishCard) — the SW gates these. */
 export const MESH_SIGNING_METHODS = Object.freeze(
-  Object.entries(MESH_METHODS).filter(([, s]) => s.signs).map(([k]) => k),
+  codeClientMethods('mesh').filter((name) => MESH_METHODS[name]?.signs === true),
 );
 
 /** Does this method sign as the user (emit onto the mesh)? Pure. @param {string} method */
@@ -155,7 +177,10 @@ export const meshMethodSigns = (method) => MESH_METHODS[method]?.signs === true;
 export const meshCallToOp = (call) => {
   const method = call?.method;
   const spec = typeof method === 'string' ? MESH_METHODS[method] : undefined;
-  if (!spec) throw new MeshApiError(`unknown mesh method: ${String(method)}`);
+  const declared = codeClientMethod('mesh', String(method));
+  if (!spec || !declared || declared.op !== spec.op) {
+    throw new MeshApiError(`unknown mesh method: ${String(method)}`);
+  }
   return { op: spec.op, args: spec.toArgs(call?.args ?? {}), signs: spec.signs === true };
 };
 

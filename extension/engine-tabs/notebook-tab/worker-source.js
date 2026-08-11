@@ -2,7 +2,7 @@
 // notebook-tab/worker-source.js — builds the sealed Notebook worker's source.
 //
 // SECURITY-CRITICAL + host-agnostic. This is the ONE place the worker realm is
-// assembled: the realm seal as the FIRST import, the peerd.* capability surface,
+// assembled: the realm seal as the FIRST graph edge, the peerd.* capability surface,
 // the postMessage bridges (fetch / opfs / actor / display), and the entry
 // IIFE. BOTH hosts use it — the visible Notebook tab (notebook-tab.js) and the
 // headless offscreen job runner (offscreen/job-runner.js) — so the seal +
@@ -14,22 +14,24 @@
 // blob-URL revocation via `cache`. The peerd:std builtin is added here so every
 // host resolves it identically.
 
-import { buildEntry } from '/peerd-engine/index.js';
+import {
+  buildEntry,
+  isRemoteSpecifier,
+  remoteModuleCapabilityBlockedMessage,
+} from '/peerd-engine/index.js';
 
-// why absolute URLs: the worker entry is a blob; its FIRST static import must be
-// the realm seal (ES module graphs evaluate depth-first in declaration order, so
-// this guarantees the seal runs before any agent module body). peerd:std loads
-// AFTER the seal and is pure. Both resolve against import.meta.url so they work
-// on the extension origin AND the http origin the in-browser harness serves from.
-const SEAL_MODULE_URL = new URL('./realm-seal.js', import.meta.url).href;
+// why absolute URLs: Chrome loads this graph natively. Firefox's package-selected
+// linker consumes the same URLs as trusted virtual entries and emits the seal
+// body before any agent module body. peerd:std loads after the seal and is pure.
+// The URLs work on the extension origin and the HTTP in-browser harness.
+export const SEAL_MODULE_URL = new URL('./realm-seal.js', import.meta.url).href;
 const POD_SEAL_MODULE_URL = new URL('../pod-tab/pod-realm-seal.js', import.meta.url).href;
 const STD_MODULE_URL = new URL('./notebook-std.js', import.meta.url).href;
 const WASI_MODULE_URL = new URL('./notebook-wasi.js', import.meta.url).href;
 
-// The bare-specifier → URL map both hosts feed the resolver. Exported so a host's
-// own `compose-module` (dynamic-import) path resolves the builtins the same way
-// the static entry import does. Don't let it drift from buildEntry's builtins
-// below. peerd:wasi is pure compute over caller-built capabilities (its own
+// The bare-specifier → URL map both hosts feed the resolver. Do not let it
+// drift from buildEntry's builtins below. peerd:wasi is pure compute over
+// caller-built capabilities (its own
 // header has the security story), so exposing it everywhere peerd:std goes adds
 // no authority to the realm.
 export const NOTEBOOK_BUILTINS = { 'peerd:std': STD_MODULE_URL, 'peerd:wasi': WASI_MODULE_URL };
@@ -55,6 +57,12 @@ export const DEFAULT_WORKER_CAPS = Object.freeze({
   page: false, egress: true, subagent: true, opfs: true, provider: false, distributed: true,
 });
 
+// A static remote dependency shares one module realm with the entry code, so
+// authority cannot be attributed safely by call stack. Restrict the whole run.
+export const REMOTE_MODULE_WORKER_CAPS = Object.freeze({
+  page: false, egress: false, subagent: false, opfs: false, provider: false, distributed: false,
+});
+
 /**
  * Build the worker-entry source string for one run.
  *
@@ -67,6 +75,10 @@ export const DEFAULT_WORKER_CAPS = Object.freeze({
  * @param {boolean} [opts.actors] expose the `actors` delegation client (capability-gated; the host relays actors-request → SW actors/call). Off by default.
  * @param {string} [opts.siteFetch] DESIGN-19: expose the `site` client PINNED to this origin (site.fetch → the host site-fetch-request relay → SW site-fetch/call). Off by default; when set, egress/opfs/subagent/page are all off (a site-client run's ONLY outward edge is the pinned fetch).
  * @param {number} [opts.actorsGuardMs] the actors bridge guard — passed from the timeout tower (actors-api.js ACTORS_BRIDGE_GUARD_MS) so it cannot drift below the per-ask cap.
+ * @param {{ actors?: string, page?: string, mesh?: string, provider?: string, site?: string }} [opts.clientSources]
+ *   Trusted client installers generated from the runtime capability manifest.
+ *   Fallback installers below preserve direct engine tests/Notebook embedding;
+ *   production headless runs always pass the generated sources.
  * @param {{ page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean, distributed?: boolean }} [opts.caps]
  * @param {{args?:string[],stdin?:string,env?:Record<string,string>,cwd?:string}} [opts.podCommand]
  *   Pod's restricted JS command profile. It swaps in the stricter Pod seal and
@@ -76,22 +88,31 @@ export const DEFAULT_WORKER_CAPS = Object.freeze({
  *   caps.page is the web actor's page bridge, PR #119; caps.provider is the
  *   script tool's sub-model lane, design 5; caps.distributed gates the
  *   base-network reads — off on hosts with no 'distributed-request' handler)
- * @returns {Promise<{ source: string, cache: Map<string, { blobUrl: string, source: string }>, bodyLine: number }>}
+ * @returns {Promise<{ source: string, cache: Map<string, { blobUrl: string, source: string }>, bodyLine: number, usedRemoteModules: boolean }>}
  *   bodyLine: the 1-based source line the user code's first line lands on
  *   (user line L = source line bodyLine + L - 1) — feed it to mapWorkerError.
  */
-export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false, actorsGuardMs = 250000, caps, siteFetch = '', podCommand }) => {
-  const profile = { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}) };
+export const buildWorkerSource = async (userCode, {
+  entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false,
+  actorsGuardMs = 250000, caps, siteFetch = '', clientSources = {}, podCommand,
+}) => {
   const { imports, body, cache } = await buildEntry(userCode, entryPath, {
     ...resolverDeps,
     builtins: NOTEBOOK_BUILTINS,
   });
+  const usedRemoteModules = [...cache.keys()].some(isRemoteSpecifier);
+  // why whole-run restriction: imported code and entry code execute in one
+  // module graph. A stack-based distinction would be forgeable and incomplete.
+  const profile = usedRemoteModules
+    ? REMOTE_MODULE_WORKER_CAPS
+    : { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}) };
+  /** @param {string} capability */
+  const capabilityBlocked = (capability) => remoteModuleCapabilityBlockedMessage(capability);
   const source = `${podCommand
     ? `import ${JSON.stringify(POD_SEAL_MODULE_URL)};`
-    : `import ${JSON.stringify(SEAL_MODULE_URL)};`} // realm seal — MUST stay the first import
+    : `import ${JSON.stringify(SEAL_MODULE_URL)};`} // realm seal: MUST stay the first import
 ${imports}
 const NOTEBOOK_ID = ${JSON.stringify(notebookId)};
-const PEERD_BUILTINS = ${JSON.stringify(NOTEBOOK_BUILTINS)};
 const consoleOutput = [];
 
 const stringify = (v) => {
@@ -161,7 +182,11 @@ const makeBridge = (name, { timeoutMs, shape, timeoutMessage } = {}) => {
     const p = pending.get(m.rid);
     if (p) {
       pending.delete(m.rid);
-      if (m.error) p.reject(new Error(m.error));
+      if (m.error) {
+        const error = new Error(m.error);
+        if (m.errorCode) error.code = m.errorCode;
+        p.reject(error);
+      }
       else p.resolve(shape ? shape(m.result) : m.result);
     }
     return true;
@@ -260,23 +285,11 @@ globalThis.peerd = {
   },
 };
 
-// Dynamic import shim. Static imports resolve to host-realm blob URLs at build
-// time and work via the worker's module loader. Dynamic import() of a host-realm
-// blob URL fails to fetch (realm scoping), so we go through the host: it returns
-// the fully-transformed source, we wrap it in a WORKER-realm blob URL, and
-// dynamic-import that.
+// Compatibility relay for peerd.self.import. The host refuses this operation
+// with the same stable policy error as native dynamic import syntax because a
+// packaged MV3 worker cannot complete the final blob-import hop.
 globalThis.__peerd_dynamic_import = async (opfsPath) => {
-  // A BUILTIN (peerd:std) is not an OPFS file — the compose path would miss and
-  // throw "cannot resolve". Import its real URL directly, same as the static
-  // resolver does (the literal-specifier rewrite already does this at build
-  // time; this covers the non-literal peerd.self.import(name) route).
-  if (Object.prototype.hasOwnProperty.call(PEERD_BUILTINS, opfsPath)) {
-    return import(PEERD_BUILTINS[opfsPath]);
-  }
-  const source = await opfsCall('compose-module', { path: opfsPath });
-  const blob = new Blob([source], { type: 'application/javascript' });
-  const url = URL.createObjectURL(blob);
-  return import(url);
+  return opfsCall('compose-module', { path: opfsPath });
 };
 
 // --- peerd.runtime.runAgent (embedded agent) proxy ---
@@ -296,11 +309,11 @@ const distributedInfo = () => distributedRelay({});
 // --- peerd.mesh.* (agent-to-agent) proxy — capability-gated (a2a) ---
 // The code the dweb actor writes drives peers through this client; each call
 // leaves the sealed realm as an a2a-request the host relays to the SW a2a/call
-// route (consent + gated mesh op). Signing calls (ask/send/publishCard) the SW
+// route (consent + gated mesh op). Signing calls (call/cast/publishCard) the SW
 // gates; a reply/timeout comes back as a2a-response. why a 130s timeout: an ask
 // awaits a peer's reply (the SW caps it at 120s), so the worker guard must sit
 // ABOVE that, else the worker rejects a still-valid ask.
-${a2a ? `
+${a2a && !usedRemoteModules ? (clientSources.mesh || `
 const meshRelay = makeBridge('a2a', { timeoutMs: 130000, timeoutMessage: (p) => 'mesh.' + p.method + ' timed out' });
 const meshCall = (method, args) => meshRelay({ method, args });
 const __mesh = {
@@ -314,24 +327,24 @@ const __mesh = {
   say:         (convId, message, opts) => meshCall('say', { convId, message, timeoutMs: opts && opts.timeoutMs }),
 };
 globalThis.mesh = __mesh;
-` : ''}
+`) : ''}
 
-// --- actors.* (the orchestrator's OWN actors) proxy — capability-gated ---
-// The script tool's delegation client: ask/send hand a GOAL to a local actor
+// --- actors.* (the trusted caller's actors) proxy — capability-gated ---
+// The script tool's delegation client: ask hands a GOAL to a local actor
 // (vm/notebook/app instance, "web", an API origin) through the SW actors/call
 // route — the full message_actor gate chain runs per call. The guard value is
 // INTERPOLATED from the timeout tower (actors-api.js): it sits above the
 // per-ask cap by construction, and the job wall-clock sits above it.
-${actors ? `
+${actors && !usedRemoteModules ? (clientSources.actors || `
 const actorsRelay = makeBridge('actors', { timeoutMs: ${JSON.stringify(actorsGuardMs)}, timeoutMessage: (p) => 'actors.' + p.method + ' timed out' });
 const actorsCall = (method, args) => actorsRelay({ method, args });
 const __actors = {
   list: () => actorsCall('list', {}),
-  ask:  (to, goal, opts) => actorsCall('ask', { to, goal, timeoutMs: opts && opts.timeoutMs, oneShot: opts && opts.oneShot }),
-  send: (to, goal, opts) => actorsCall('send', { to, goal, oneShot: opts && opts.oneShot }),
+  call: (address, message, options) => actorsCall('call', { address, message, timeoutMs: options && options.timeoutMs, oneShot: options && options.oneShot }),
+  ask:  (address, message, options) => actorsCall('ask', { address, message, timeoutMs: options && options.timeoutMs, oneShot: options && options.oneShot }),
 };
 globalThis.actors = __actors;
-` : ''}
+`) : ''}
 
 // --- peerd.provider.call (sub-model text call) — capability-gated (caps.provider) ---
 // Design 5: a pure text transform mid-script ({ system?, prompt | messages,
@@ -343,7 +356,7 @@ globalThis.actors = __actors;
 // the RUN's wall-clock — the host terminates the worker and the SW aborts the
 // in-flight provider fetch on Stop/release, so a local timer here could only
 // orphan a paid call.
-${profile.provider ? `
+${profile.provider ? (clientSources.provider || `
 const providerRelay = makeBridge('provider');
 // Re-type quota refusals in-realm: the bridge re-raises plain Errors, so the
 // SW's structured refusal arrives as a message string — restore the name so
@@ -352,9 +365,9 @@ globalThis.peerd.provider.call = (args) => providerRelay({ args: args ?? {} }).c
   if (e && typeof e.message === 'string' && e.message.indexOf('provider quota exceeded') === 0) e.name = 'ProviderQuotaError';
   throw e;
 });
-` : `
+`) : `
 globalThis.peerd.provider.call = () => {
-  throw new Error('peerd.provider.call is not available in this worker (no-provider capability profile).');
+  throw new Error(${JSON.stringify(usedRemoteModules ? capabilityBlocked('model calls') : 'peerd.provider.call is not available in this worker (no-provider capability profile).')});
 };
 `}
 // --- page.* (web-actor page control) proxy — capability-gated (caps.page) ---
@@ -363,7 +376,7 @@ globalThis.peerd.provider.call = () => {
 // the tool-call web actor uses (denylist / confirm / audit unchanged) against
 // the ONE tab this actor owns. The host attaches the owner identity itself —
 // nothing this realm sends can choose the session or the tab.
-${profile.page ? `
+${profile.page ? (clientSources.page || `
 const pageRelay = makeBridge('page', { timeoutMs: 30000, timeoutMessage: (p) => 'page.' + p.method + ' timed out' });
 const pageCall = (method, args) => pageRelay({ method, args });
 // The Playwright-shaped API is a BARE \`page\` global (the tool description +
@@ -379,7 +392,7 @@ const __page = {
 };
 globalThis.page = __page;
 globalThis.peerd.page = __page;
-` : ''}${siteFetch ? `
+`) : ''}${siteFetch && !usedRemoteModules ? (clientSources.site || `
 // --- site.* (DESIGN-19 site client) proxy — ONE origin-pinned fetch ---
 // A site-client run's ONLY outward edge: site.fetch(path, { method, headers, body })
 // leaves the sealed realm as a site-fetch-request the host relays to the SW
@@ -398,23 +411,24 @@ const __site = {
 };
 globalThis.site = __site;
 globalThis.peerd.site = __site;
-` : ''}${profile.egress ? '' : `
+`) : ''}${profile.egress ? '' : `
 // Capability profile: NO egress. peerd.egress.fetch throws in-realm; the host
 // relay refuses any 'fetch-request' this realm still emits (global fetch is the
 // seal's bridge and cannot be removed here) — two walls, same refusal.
 globalThis.peerd.egress.fetch = () => {
-  throw new Error('peerd.egress.fetch is not available in this worker (no-egress capability profile).');
+  throw new Error(${JSON.stringify(usedRemoteModules ? capabilityBlocked('network access') : 'peerd.egress.fetch is not available in this worker (no-egress capability profile).')});
 };
 `}${profile.subagent ? '' : `
 // Capability profile: NO subagents.
 globalThis.peerd.runtime.runAgent = () => {
-  throw new Error('peerd.runtime.runAgent is not available in this worker (no-subagent capability profile).');
+  throw new Error(${JSON.stringify(usedRemoteModules ? capabilityBlocked('subagents') : 'peerd.runtime.runAgent is not available in this worker (no-subagent capability profile).')});
 };
 `}${profile.opfs ? '' : `
 // Capability profile: NO OPFS. Files and dynamic imports are off; the host
 // relay refuses any 'opfs-request' as the second wall.
 const noOpfs = (name) => () => {
-  throw new Error('peerd.self.' + name + ' is not available in this worker (no-opfs capability profile).');
+  throw new Error(${JSON.stringify(usedRemoteModules ? capabilityBlocked('Notebook files') : '')}
+    || ('peerd.self.' + name + ' is not available in this worker (no-opfs capability profile).'));
 };
 globalThis.peerd.self.readFile = noOpfs('readFile');
 globalThis.peerd.self.writeFile = noOpfs('writeFile');
@@ -429,7 +443,8 @@ globalThis.__peerd_dynamic_import = noOpfs('import');
 // distributed handler — an unanswered bridge call would hang the run to its
 // wall-clock for a one-word answer.
 const noDistributed = (name) => () => {
-  throw new Error('peerd.distributed.' + name + ' is not available in this worker (no-distributed capability profile).');
+  throw new Error(${JSON.stringify(usedRemoteModules ? capabilityBlocked('dweb reads') : '')}
+    || ('peerd.distributed.' + name + ' is not available in this worker (no-distributed capability profile).'));
 };
 globalThis.peerd.distributed.whoami = noDistributed('whoami');
 globalThis.peerd.distributed.status = noDistributed('status');
@@ -472,10 +487,19 @@ __PEERD_BODY__})()
     });
   })
   .catch((err) => {
+    const errorName = err?.name || 'Error';
+    const errorMessage = err?.message || String(err);
+    const headline = errorName + ': ' + errorMessage;
+    const stack = typeof err?.stack === 'string' ? err.stack : '';
+    // why: Firefox worker stacks can contain only frames. Keep the message in
+    // the result so a user or model can understand and repair the failed run.
+    const detail = stack.includes(errorMessage)
+      ? stack
+      : stack ? headline + '\\n' + stack : headline;
     postMessage({
       type: 'done', value: undefined, consoleOutput,
       durationMs: Math.round(performance.now() - __start),
-      error: err?.stack || (err?.name || 'Error') + ': ' + (err?.message || String(err)),
+      error: detail,
     });
   });
 `;
@@ -487,34 +511,50 @@ __PEERD_BODY__})()
   const bodyLine = source.slice(0, markerAt).split('\n').length;
   // why a function replacement: a string replacement interprets `$&`/`$1` in
   // the BODY as substitution patterns and corrupts agent code containing them.
-  return { source: source.replace('__PEERD_BODY__', () => `${body}\n`), cache, bodyLine };
+  return {
+    source: source.replace('__PEERD_BODY__', () => `${body}\n`),
+    cache,
+    bodyLine,
+    usedRemoteModules,
+  };
 };
 
 /**
  * Map a worker error (a stack whose frames point into the entry blob URL) back
  * to user-code coordinates: `blob:…:<L>:<C>` → `<entryPath>:<L - bodyLine + 1>:<C>`.
- * Frames outside the body (the injected preamble) and other modules' blob URLs
- * are left untouched. Pure — shared by the Notebook tab and the headless
+ * Frames outside the body (the injected preamble) are left untouched. Resolved
+ * child-module blob URLs are mapped to their source names when the caller
+ * supplies the graph cache. This pure helper is shared by the Notebook tab and the headless
  * job runner so both surfaces report the same mapped location.
  *
  * @param {string | null | undefined} raw
  * @param {string} blobUrl      the entry worker's own blob URL
  * @param {number} bodyLine     from buildWorkerSource
  * @param {string} [entryPath]
+ * @param {Map<string, { blobUrl: string }>} [moduleCache]
  * @returns {string | null | undefined}
  */
-export const mapWorkerError = (raw, blobUrl, bodyLine, entryPath = 'notebook.js') => {
+export const mapWorkerError = (
+  raw, blobUrl, bodyLine, entryPath = 'notebook.js', moduleCache,
+) => {
   if (typeof raw !== 'string' || !raw || !blobUrl) return raw;
   const parts = raw.split(`${blobUrl}:`);
-  if (parts.length === 1) return raw;
-  let out = parts[0];
-  for (let i = 1; i < parts.length; i += 1) {
-    const seg = parts[i];
-    const m = /^(\d+):(\d+)/.exec(seg);
-    const userLine = m ? Number(m[1]) - bodyLine + 1 : 0;
-    out += (m && userLine >= 1)
-      ? `${entryPath}:${userLine}:${m[2]}${seg.slice(m[0].length)}`
-      : `${blobUrl}:${seg}`;
+  let out = raw;
+  if (parts.length > 1) {
+    out = parts[0];
+    for (let i = 1; i < parts.length; i += 1) {
+      const seg = parts[i];
+      const m = /^(\d+):(\d+)/.exec(seg);
+      const userLine = m ? Number(m[1]) - bodyLine + 1 : 0;
+      out += (m && userLine >= 1)
+        ? `${entryPath}:${userLine}:${m[2]}${seg.slice(m[0].length)}`
+        : `${blobUrl}:${seg}`;
+    }
+  }
+  for (const [path, entry] of moduleCache ?? []) {
+    if (!entry.blobUrl || entry.blobUrl === blobUrl) continue;
+    const sourceName = /^(?:https?:|peerd:|\/)/.test(path) ? path : `./${path}`;
+    out = out.split(`${entry.blobUrl}:`).join(`${sourceName}:`);
   }
   return out;
 };

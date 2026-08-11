@@ -4,12 +4,15 @@
    gets them automatically. */
 
 :root {
-  --bg: #0d1117;
-  --bg-elev: #161b22;
-  --bg-editor: #11161d;
-  --fg: #e6edf3;
-  --fg-muted: #9ba3ad;
-  --border: #30363d;
+  --bg: #101112;
+  --bg-elev: #151617;
+  --bg-elev2: #1A1C1E;
+  --bg-editor: #080909;
+  --fg: #F3F3EF;
+  --fg-muted: #ABABA6;
+  --muted: #70716E;
+  --border: #25272A;
+  --border-strong: #32353A;
   --accent: #34d399;          /* the editor reads this via var(--accent) */
   --green: #34d399;
   --ok: #22c55e;
@@ -18,6 +21,18 @@
 }
 
 * { box-sizing: border-box; }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 html, body {
   margin: 0; padding: 0;
@@ -89,7 +104,7 @@ html, body {
   width: 18px; height: 18px;
   border-radius: 4px;
   background: var(--green);
-  color: #0d1117;
+  color: var(--bg-editor);
   font-weight: 700;
   font-size: 10px;
 }
@@ -173,7 +188,7 @@ html, body {
 .std-cheat-panel dd { margin: 0; color: var(--fg); }
 
 .run-btn {
-  background: var(--green); color: #0d1117;
+  background: var(--green); color: var(--bg-editor);
   border: 0;
   font: inherit;
   font-size: 11px; font-weight: 600;
@@ -246,7 +261,7 @@ html, body {
 }
 .log-line.log-info   { color: var(--fg); }
 .log-line.log-warn   { color: var(--warn); border-left-color: color-mix(in srgb, var(--warn) 60%, transparent); }
-.log-line.log-error  { color: var(--fail); border-left-color: color-mix(in srgb, var(--fail) 60%, transparent); }
+.log-line.log-error  { color: var(--fg); border-left-color: var(--fail); }
 .log-line.log-eval   { color: var(--green); opacity: 0.85; }
 .log-line.log-return { color: var(--ok); }
 

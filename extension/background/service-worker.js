@@ -29,9 +29,20 @@
 
 import browser from '/vendor/browser-polyfill.js';
 import { makeDispatcher, isTrustedSender } from '/shared/messaging.js';
-import { isOffscreenSender } from '/shared/sender-trust.js';
-import { CHANNEL_DEFAULTS, CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
+import {
+  isHomeSender, isOffscreenSender as senderIsOffscreen, isOptionsSender, isSidepanelSender,
+} from '/shared/sender-trust.js';
+import { loadDweb } from '/shared/dweb-loader.js';
+import { makeSiteCaptureManager } from '/background/site-capture-manager.js';
+import {
+  CHANNEL_DEFAULTS, CHANNEL, DWEB_ENABLED, REMOTE_MODULE_IMPORTS_ENABLED,
+} from '/shared/channel-config.js';
 import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
+import { ACTOR_WORKER_PROTOCOL } from '/offscreen/actor-worker-protocol.js';
+import { makeActorIsolationStateStore } from './actor-isolation-state.js';
+import { actorDeliveryIdsFromMessage, makeActorRecoveryGate } from './actor-recovery-gate.js';
+import { createActorLiveProjection } from './actor-live-projection.js';
+import { answerWithSessionConfirmGrant } from './confirm-session-grants.js';
 
 import {
   // vault
@@ -58,6 +69,7 @@ import {
   // NON-EXTRACTABLE key that never leaves the SW and that nothing, including this
   // file, can export. Plus the Settings → API integrations routes.
   withDpopCredentials,
+  EgressDeniedError,
   getOrCreateDpopKey,
   makeDpopKeyStore,
   // The credential LIFECYCLE seams the Settings routes close over: mint-at-provision
@@ -90,7 +102,7 @@ import {
   listProviders,
   // web actor model resolution: pin → local → provider default → inherit.
   // Pure; the SW resolves it when minting a web actor session.
-  resolveRunnerModel,
+  resolveRunnerTarget,
   // local WebGPU runner: the offscreen-engine bridge + the resident model id.
   setLocalGenerate, LOCAL_MODEL_ID,
   // live model inventory (Ollama /api/tags) for the model picker.
@@ -129,6 +141,10 @@ import {
   createSessionStore,
   renderSystemPrompt,
   runUserTurn,
+  learnedOriginCovers,
+  AUTH_BOUNDARY_STOPPED_MESSAGE,
+  AUTH_STATE_UNAVAILABLE_MESSAGE,
+  AUTH_WAITING_FOR_USER_MESSAGE,
   // auto-resume: detect a turn the SW reclaimed mid-flight + the synthetic
   // nudge that drives the continuation (maybeAutoResume, below).
   detectInterruptedTurn,
@@ -142,6 +158,7 @@ import {
   DOC_TEXT_MAX_CHARS,
   makeSpawnActor,
   makeRequestReview,
+  isReadOnlyTool,
   createRefRegistry,
   SessionNotFoundError,
   registerTool,
@@ -156,6 +173,9 @@ import {
   filterByDwebEnabled,
   filterByDwebActive,
   filterByGoalActive,
+  resolveRuntimeCapabilities,
+  filterByRuntimeCapabilities,
+  requireRuntimeCapability,
   makeGoalRunner,
   GOAL_MAX_ITERATIONS,
   makeScheduler,
@@ -175,9 +195,9 @@ import {
   makeWriteGuard,
   makeEngineLiveness,
   retryClassForTool,
-  checkStores,
-  stampStores,
+  applyStoreBootPosture,
   VERSION_STAMP_KEY,
+  migrationBlockedReport,
   classifyFailure,
   // hooks (pre/post-tool-use lifecycle)
   registerHook,
@@ -245,6 +265,8 @@ import {
   inspectImport,
   applyImport,
   ExportPassphraseError,
+  EXPORT_PASSPHRASE_MIN_LENGTH,
+  isCustodySecretName,
   // design js-superpower/06 — the toolbox: durable agent-authored modules
   // (peerd:toolbox/<name>; store + the write-time import-resolution check).
   createToolboxStore,
@@ -283,7 +305,18 @@ import {
   // DESIGN-17: the message_actor orchestrator + the actor capability-tier
   // helpers the actor tool context is built from (keyless strip + kind scope).
   makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW, pinActorCall, actorDescriptors, buildAncestry,
+  actorIsolationCapability, actorIsolationAvailable, actorIsolationTemporarilyUnavailable,
+  actorIsolationRefusal, actorIsolationSpawnRefusal, filterByActorIsolation, actorIsolationPromptBlock,
   actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
+  ACTORS_RUN_MAX_OPS, ACTORS_TRACE_TARGET_MAX_CHARS, ACTORS_TRACE_ERROR_MAX_CHARS,
+  canonicalCodeTraceLabel, DWEB_INBOUND_TOOL_NAMES,
+  resolveWebActorSurface, resolveWebActorSurfaceDecision,
+  browserNetworkGuardUnavailableResult, classifyBrowserAutomationTarget,
+  // Contributor Metrics: a closed local-only accumulator. This surface has no
+  // arbitrary event/property API and no network IO.
+  contributorActionForTool, contributorTurnResult,
+  contributorFeedbackContextKey, contributorFeedbackTargets,
+  makeContributorStore,
   // Design 5 — the pure core the script/model-call route runs: text-only arg
   // validation, per-run quota arithmetic, and the provider-event fold.
   validateProviderCallArgs, providerQuotaError, foldProviderEvents,
@@ -293,7 +326,8 @@ import {
   createConversationRegistry,
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
   // registry (the 0-or-1-tab actor), + the self-fenced summary.
-  makeWebActorTabBindings, makeWebActorRegistry, fenceWebActorSummary,
+  makeWebActorTabBindings, makeWebActorRegistry, retireStoppedRoamingWebActorDurably,
+  safeWebActorSummaryOrigin, fenceWebActorSummary,
   // PR #119: the code-REPL arm's host-side page-call handler + the pure
   // adopt-first-tab-on-goto decision.
   makePageCallHandler, resolvePageTab,
@@ -306,14 +340,29 @@ import {
   // live — the state store, the judge, the synchronous credential-scope
   // narrowing, and the report a stop turns into.
   makeOriginStateStore, makeLearnedOrigins, makeJudgeLanding, makeCredentialScope,
-  isKnownIdp, knownIdpDomains, describeLandingStop, originPhrase, isUgcHost,
-  finalAssistantText,
+  makeSignInOriginAuthorizer, makeSignInExcursionAuthorizer, makeSignInExcursionRevoker,
+  makeSiteClientOriginGuard, makeSiteClientOriginAuthorizer,
+  makeFixedSiteClientOriginGuard, authorizeSiteClientRelayOrigin,
+  hasDurableSiteClientState,
+  decideNumericTabAuthority, numericTabAuthorityRefusal,
+  IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+  isKnownIdp, isKnownIdpHost, knownIdpDomains, describeLandingStop, originPhrase, isUgcHost,
+  isAddressableBrowserTab,
+  finalActorTurnReply, finalAssistantText,
+  groupResourceLossNotices,
   // The debug surface: the bundle assembler + the delegation-tree walk the
   // session/debugBundle route runs (pure; the SW supplies the reads).
   assembleDebugBundle, childSessionIdsOf,
 } from '/peerd-runtime/index.js';
 
-import { flattenCategorisedDenylist, normalizeDenylistPattern, denylistSessionRuleUpdate } from '/peerd-egress/index.js';
+import {
+  flattenCategorisedDenylist,
+  normalizeDenylistPattern,
+  denylistSessionRuleUpdate,
+  PRIVATE_NETWORK_RULE_IDS,
+  DENYLIST_RESOURCE_TYPES,
+  CHROME_DNR_RESOURCE_TYPES,
+} from '/peerd-egress/index.js';
 
 import { createVmClient } from './vm-client.js';
 import { createVmTabTracker } from './vm-tab-tracker.js';
@@ -324,8 +373,14 @@ import { createPodTabTracker } from './pod-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
 import { createScriptRunRegistry } from './script-runs.js';
 import { createContextSnapshots } from './context-snapshots.js';
-import { confirmGrantKey } from './confirm-grant-key.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
+import {
+  makeOffscreenActorChannelClient, selectExactActorHostClient,
+} from './offscreen-actor-channel-client.js';
+import {
+  isActorHostStartupFailure, runActorWithStartupRetry,
+} from './actor-startup-retry.js';
+import { makeDirectActorHost, makeStorageSessionKeepAlive } from './direct-actor-host.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeOffscreenDocClient } from './offscreen-doc-client.js';
 import { makeOffscreenWebClient } from './offscreen-web-client.js';
@@ -333,13 +388,15 @@ import { makeUiPorts } from './ui-ports.js';
 import { createAppClient, APP_TAB_GROUP_TITLE } from './app-client.js';
 import { createPageActivityReporter } from './page-activity.js';
 import { createAppTabTracker } from './app-tab-tracker.js';
+import { createAppQuiescence } from './app-quiescence.js';
 import {
   createVmRegistry,
   createNotebookRegistry,
   createPodRegistry,
   createAppRegistry,
+  appFileCheckpointContent,
   // artifact export/import (.peerd envelopes — DESIGN-10)
-  opfsHelpers,
+  opfsHelpers as rawOpfsHelpers,
   // design 06: the resolver transform, injected into the toolbox write-time
   // parse check (functional core — the check itself lives in peerd-runtime).
   buildModule,
@@ -364,8 +421,9 @@ import {
   needsWebWriteConfirm,
   // §11.5: the dormant App-bodies store's write gate (self-hosted DB).
   setAppBodyWriteGate,
-  createRepositoryService,
   parseAppManifest,
+  createRepositoryService,
+  podGitRemoteOperation,
 } from '/peerd-engine/index.js';
 // MV3 ServiceWorkerGlobalScope rejects runtime import(). Keep the heavy vendor
 // statically reachable only from this host and inject it into the otherwise
@@ -375,15 +433,38 @@ import browserGit from '/vendor/isomorphic-git/index.js';
 import { createDebuggerPool } from './debugger-pool.js';
 import { normalizeSettingsPatch } from './settings-patch.js';
 import { makeSettingsStore } from './settings-store.js';
-import { makeDenylistStore } from './denylist-store.js';
+import { makeDenylistStore, requireDenylistPolicy } from './denylist-store.js';
 import { makeDenylistNetGuard } from './denylist-net-guard.js';
+import { createBrowserNetworkCustody } from './browser-network-custody.js';
+import { createBrowserOriginCustody } from './browser-origin-custody.js';
+import { makeDrivenPopupGuard, popupSourceState } from './driven-popup-guard.js';
+import {
+  classifyDrivenChildRequestTarget,
+  makeDrivenChildRequestGuard,
+  registerFirefoxDrivenChildRequestGuard,
+} from './driven-child-request-guard.js';
+import { makeStartupPopupNetworkGuard } from './startup-popup-network-guard.js';
 import { makeSessionState } from './session-state.js';
 import { makeLocalModelState } from './local-model-state.js';
 import { makeProfileState } from './profile-state.js';
+import { makeOnboardingReconcile } from './onboarding-reconcile.js';
 import { makeModelCatalog } from './model-catalog.js';
+import { resolveComposerReadiness } from './provider-readiness.js';
 import { makeTabAffordances } from './tab-affordances.js';
 import { makeMintOnce } from './mint-once.js';
 import { makeDwebInboundRateCap } from './dweb-inbound-rate-cap.js';
+import { makeUpdateCheck } from './update-check.js';
+import { makeDwebTransfer, IdentityTransferError } from './dweb-transfer.js';
+import { makeDwebShare } from './dweb-share.js';
+import { makeReseedSharedApps } from './dweb-reseed.js';
+import { createDwebPublicationFence } from './dweb-publication-fence.js';
+import { createDwebSettingsGate } from './dweb-settings-gate.js';
+import { listOffscreenContexts } from './offscreen-contexts.js';
+import { makeDwebCustodyClient, makeRetryableCustodyReset } from './dweb-custody-client.js';
+import {
+  identityChangeBlockedByApps, makeDwebIdentityCustody,
+} from './dweb-identity-custody.js';
+import { makePrivateTransferOpenRoute, makePrivateTransferPort } from './private-transfer-port.js';
 import { downgradesActorConfirm, a2aConsentOutcome } from './a2a-consent.js';
 import { makeVaultRoutes } from './routes/vault.js';
 import { makeProviderRoutes } from './routes/providers.js';
@@ -391,6 +472,7 @@ import { makeHooksRoutes } from './routes/hooks.js';
 import { makeSkillsRoutes } from './routes/skills.js';
 import { makeMemoryRoutes } from './routes/memory.js';
 import { makeContactsRoutes } from './routes/contacts.js';
+import { makeActorOverviewRoutes } from './routes/actor-overview.js';
 import { makeSessionRoutes } from './routes/sessions.js';
 import { makeEngineRoutes } from './routes/engine.js';
 import { makeSystemRoutes } from './routes/system.js';
@@ -401,6 +483,13 @@ import { makeSessionMutationRoutes } from './routes/session-mutations.js';
 import { makeLocalModelRoutes } from './routes/local-model.js';
 import { makeDwebRoutes } from './routes/dweb.js';
 import { makeToolboxRoutes } from './routes/toolbox.js';
+import { makeActorsRoutes } from './routes/actors.js';
+import { makeScriptRunControlRoutes } from './routes/script-run-control.js';
+import { makeContributorRoutes } from './routes/contributor-metrics.js';
+
+// Firefox has no offscreen document host. Keep this package fact near the
+// imports so provider selection and the later capability snapshot share it.
+const offscreenAvailable = typeof (/** @type {any} */ (browser)).offscreen?.createDocument === 'function';
 
 // ---- §11.5 universal write guard -------------------------------------------
 // EVERY store this file constructs gets its storage through these wrapped
@@ -416,6 +505,11 @@ const kv = storeWriteGuard.wrapKv(rawKv);
 const idb = storeWriteGuard.wrapIdb(rawIdb);
 const idbKV = (/** @type {string} */ store) =>
   storeWriteGuard.wrapIdbKvAdapter(store, rawIdbKV(store));
+// Separate from settings/session/vault by construction. Nothing is created
+// until the trusted Options route enables contribution and a typed settlement
+// occurs; transfer import/export has no reference to these keys.
+const contributorStore = makeContributorStore({ kv });
+const CONTRIBUTOR_METRICS_AVAILABLE = CHANNEL === 'preview' || CHANNEL === 'dev';
 // The two SELF-HOSTED databases (own IDB, unreachable through the wrapped
 // adapters) get the same verdict via injected gates: skills below at its
 // construction, App bodies here (dormant store, gate installed anyway so a
@@ -458,6 +552,19 @@ const vault = createVault({
 // append — so a long-lived install's audit log doesn't grow unbounded.
 const auditLog = createAuditLog({ idb, maxEntries: CHANNEL_DEFAULTS.auditLogMaxEntries });
 
+// Resolve an actor/spawned operation to the root chat whose user owns the
+// intent. The lifecycle notice path and the autonomous replay guard must use
+// the same ancestry rule or they can disagree about which goal is blocked.
+const resolveLifecycleRootSession = async (/** @type {string} */ sid) => {
+  let cursor = sid;
+  for (let hops = 0; hops < 8; hops += 1) {
+    const record = await sessions.get(cursor).catch(() => null);
+    if (!record?.parentSessionId) break;
+    cursor = record.parentSessionId;
+  }
+  return cursor;
+};
+
 // ---- Lifecycle boot (the recovery contract's imperative shell) -------------
 // Every SW start mints a new generation, settles the previous generation's
 // orphaned operation records (interrupted vs outcome_unknown by retry
@@ -476,20 +583,12 @@ const lifecycleBoot = makeLifecycleBoot({
   appendAudit: (/** @type {any} */ entry) =>
     auditLog.append({ type: entry.event, details: entry }),
   // postChatNote is declared far below — the standard late-dep deferral.
-  notify: (/** @type {string} */ _sessionId, /** @type {string} */ text) =>
-    postChatNote(`Recovered from a browser interruption: ${text}`),
+  notify: (/** @type {string} */ sessionId, /** @type {string} */ text) =>
+    postChatNote(text, null, sessionId),
   // Actor sessions may never take another turn, so their recovery notices
   // walk parentSessionId up to the root chat (bounded — a corrupt chain
   // stops at the depth cap and falls back to the child).
-  resolveNoticeSession: async (/** @type {string} */ sid) => {
-    let cursor = sid;
-    for (let hops = 0; hops < 8; hops += 1) {
-      const record = await sessions.get(cursor).catch(() => null);
-      if (!record?.parentSessionId) break;
-      cursor = record.parentSessionId;
-    }
-    return cursor;
-  },
+  resolveNoticeSession: resolveLifecycleRootSession,
   nonce: () => crypto.randomUUID(),
 });
 /** @type {ReturnType<typeof makeDispatchTracker> | ReturnType<typeof makeFailClosedTracker> | null} */
@@ -507,33 +606,41 @@ const lifecycleArmed = lifecycleBoot.init()
       generationId: () => generation.id,
       retryClassFor: retryClassForTool,
       classifyFailure: /** @type {any} */ (classifyFailure),
+      resolveOwnerSessionId: resolveLifecycleRootSession,
     });
-    // §11.1 — independent per-store schema stamps. A newer stamp than this
-    // build supports leaves that store read-only (refuse-newer); the check
-    // result is audited so a blocked profile is diagnosable, and stamping
-    // only proceeds when every store is writable.
+    // §11.1: independent per-store schema stamps. An incompatible stamp
+    // leaves that store read-only. The check result is audited so a blocked
+    // profile is diagnosable, and stamping only proceeds when every store is
+    // writable.
     const readStamps = async () => (await kv.get(VERSION_STAMP_KEY)) ?? undefined;
-    const storesCheck = await checkStores({ read: readStamps });
-    if (storesCheck.ok) {
-      await stampStores({
-        read: readStamps,
-        write: (/** @type {any} */ map) => kv.set(VERSION_STAMP_KEY, map),
-      });
-    } else {
-      const blocked = storesCheck.stores
-        .filter((/** @type {any} */ x) => x.mode === 'read-only');
+    const storesCheck = await applyStoreBootPosture({
+      read: readStamps,
+      write: (/** @type {any} */ map) => kv.set(VERSION_STAMP_KEY, map),
       // §11.5 ENFORCED: the guard flips these surfaces' physical locations
-      // to refuse-writes at the shared adapter chokepoint. Reads keep
-      // working; the thrown StoreReadOnlyError names the store and says no
-      // data was changed.
-      storeWriteGuard.block(blocked.map((/** @type {any} */ x) => x.store));
+      // to refuse writes at the shared adapter chokepoint. Passing the full
+      // verdict gives tool failures the same reason and diagnostic as audit.
+      block: (/** @type {any} */ blocked) => storeWriteGuard.block(blocked),
+    });
+    if (!storesCheck.ok) {
+      const { blocked } = storesCheck;
       for (const s of blocked) {
+        const report = migrationBlockedReport({
+          diagnosticId: s.diagnosticId,
+          reason: s.reason,
+        });
         console.error('[sw] store schema blocked (writes refused):', s.store, s.reason);
         auditLog.append({
           type: 'lifecycle.migration.failed',
-          details: { store: s.store, reason: s.reason, diagnosticId: s.diagnosticId },
+          details: { store: s.store, ...report.agent },
         }).catch(() => {});
       }
+      const first = blocked[0];
+      const report = migrationBlockedReport({
+        diagnosticId: first?.diagnosticId,
+        reason: first?.reason,
+      });
+      postChatNote(`${report.user} Blocked store${blocked.length === 1 ? '' : 's'}: `
+        + `${blocked.map((s) => s.store).join(', ')}.`);
     }
     return generation;
   })
@@ -618,6 +725,35 @@ const loadSettings = async () => {
   // mean "default lock", never "never lock".
   vault.setAutoLockMs(settingsStore.get().vaultAutoLockMs ?? DEFAULT_AUTO_LOCK_MS);
 };
+let settingsHydrated = false;
+let settingsHydrationFailures = 0;
+/** @type {Promise<void>|null} */
+let settingsHydrationAttempt = null;
+/** @type {() => Promise<void>|void} */
+let onSettingsHydrationRecovered = () => {};
+const ensureSettingsReady = () => {
+  if (settingsHydrated) return Promise.resolve();
+  if (settingsHydrationAttempt) return settingsHydrationAttempt;
+  const attempt = loadSettings()
+    .then(() => {
+      const recovered = settingsHydrationFailures > 0;
+      settingsHydrated = true;
+      if (recovered) queueMicrotask(() => {
+        Promise.resolve(onSettingsHydrationRecovered()).catch((error) => {
+          console.warn('[sw] settings recovery reconciliation failed', error);
+        });
+      });
+    })
+    .catch((error) => {
+      settingsHydrationFailures += 1;
+      throw error;
+    })
+    .finally(() => {
+      settingsHydrationAttempt = null;
+    });
+  settingsHydrationAttempt = attempt;
+  return attempt;
+};
 
 /**
  * Resolve the provider NEW chats should use, from settings. Falls back
@@ -627,7 +763,8 @@ const loadSettings = async () => {
  * session creation, the key-presence check, and the settings UI.
  */
 const resolveActiveProvider = () => {
-  const list = listProviders();
+  const list = listProviders().filter((provider) =>
+    provider.name !== 'local-webgpu' || offscreenAvailable);
   const fallback = list.find((p) => p.name === 'anthropic') ?? list[0];
   const chosen = list.find((p) => p.name === settingsStore.get().providerName) ?? fallback;
   return {
@@ -656,7 +793,9 @@ const resolveActiveProvider = () => {
  * case skips the vault/daemon probes entirely.
  */
 const ensureActiveProvider = async () => {
-  const list = listProviders();
+  await ensureSettingsReady();
+  const list = listProviders().filter((provider) =>
+    provider.name !== 'local-webgpu' || offscreenAvailable);
   const name = settingsStore.get().providerName;
   if (name && list.some((p) => p.name === name)) return resolveActiveProvider();
   for (const p of list) {
@@ -664,7 +803,10 @@ const ensureActiveProvider = async () => {
     if (p.keyless) {
       // Keyless usability is REAL readiness, not mere presence: a live daemon
       // (Ollama) must answer; the on-device model must be downloaded.
-      if (p.liveModels) usable = !!(await liveProviderModels(p.name));
+      if (p.liveModels) {
+        const live = await liveProviderModels(p.name);
+        usable = Array.isArray(live) && live.length > 0;
+      }
       else if (p.name === 'local-webgpu') usable = localModelState.available();
       else usable = true;
     } else {
@@ -699,7 +841,8 @@ const resolveFailoverChain = (start) => {
   if (!s.providerFailoverEnabled) return [start];
   const names = Array.isArray(s.providerFallbacks) ? s.providerFallbacks : [];
   if (names.length === 0) return [start];
-  const list = listProviders();
+  const list = listProviders().filter((provider) =>
+    provider.name !== 'local-webgpu' || offscreenAvailable);
   const fallbacks = [];
   for (const name of names) {
     const p = list.find((x) => x.name === name);
@@ -756,7 +899,13 @@ export const safeFetch = makeSafeFetch({
 // reach arbitrary HTTPS hosts. The denylist still applies as defense
 // in depth alongside the dispatcher's origin gate.
 export const webFetch = makeWebFetch({
-  getDenylist: () => denylistStore.patterns(),
+  getDenylist: () => {
+    // why here as well as buildToolContext: WebVM, Notebook, skill install,
+    // and site-fetch call this boundary directly. A missing seed must pause
+    // every open-web request, including paths that do not dispatch a tool.
+    requireDenylistPolicy(denylistPolicyReady ? { ok: true } : null);
+    return denylistStore.patterns();
+  },
   matchDenylist: (host, patterns) => matchesDenylist(host, patterns),
   audit: /** @type {any} */ (auditLog.append),
 });
@@ -820,7 +969,7 @@ const vmHttpFetch = makeVmHttpFetch({
   cachePut: (record) => idb.put(VM_HTTP_CACHE_STORE, record),
   // Deferred: confirmAction is declared further down; the wrapper closes over
   // it so resolution happens at fetch time (not module-eval), avoiding the TDZ.
-  confirm: (prompt) => confirmAction(prompt),
+  confirm: (prompt, signal) => confirmAction(prompt, signal),
   getCurrentSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
   bytesToBase64,
   audit: (e) => { auditLog.append(e).catch(() => {}); },
@@ -874,7 +1023,15 @@ const originCredentialRoutes = makeOriginCredentialRoutes({
 // 2. Layer 2 — runtime owns sessions + agent loop
 // ---------------------------------------------------------------------------
 
-const sessions = createSessionStore({ idb });
+// The actor mailbox is declared later with the actor wiring. Keep a mutable
+// post-commit seam here so an awaited actor reply is acknowledged only after
+// its parent tool-result message has reached durable session history.
+/** @type {(sessionId: string, message: import('/peerd-provider/types.js').InternalMessage) => Promise<void>} */
+let onSessionMessageAppended = async () => {};
+const sessions = createSessionStore({
+  idb,
+  onMessageAppended: (sessionId, message) => onSessionMessageAppended(sessionId, message),
+});
 
 // Memory store (V1.5). Binds the egress `idb` adapter to the
 // 'agents_memory' object store. The loader assembles the always-loaded
@@ -899,7 +1056,19 @@ const runCache = createRunCacheStore();
 // — the `script` tool's workspace:true root). Wired into session/archive,
 // the terminal session-lifecycle event. OPFS is reachable from the SW
 // (peerd-engine/opfs.js header); nuke() already swallows a missing subtree.
-const nukeSessionWorkspace = (/** @type {string} */ sid) => opfsHelpers(['peerd-workspace', sid]).nuke();
+const assertOpfsWritable = async () => {
+  const generation = await lifecycleArmed;
+  if (!generation) {
+    throw new Error(
+      'Workspace files are read-only because storage safety checks did not complete. No data was changed.',
+    );
+  }
+  storeWriteGuard.assertWritable('opfs-workspaces');
+};
+const opfsHelpers = (/** @type {string[]} */ rootPath) =>
+  rawOpfsHelpers(rootPath, { beforeMutation: assertOpfsWritable });
+const nukeSessionWorkspace = (/** @type {string} */ sid) =>
+  opfsHelpers(['peerd-workspace', sid]).nuke();
 
 // design js-superpower/06 — the TOOLBOX: durable agent-authored ES modules
 // (peerd:toolbox/<name>), its OWN IDB DB. A distinct trust class from skills
@@ -909,11 +1078,12 @@ const nukeSessionWorkspace = (/** @type {string} */ sid) => opfsHelpers(['peerd-
 // resolution hosts read bodies via the toolbox/read route.
 const toolboxStore = createToolboxStore();
 // The write-time import-resolution check: the resolver transform run against a
-// candidate body, siblings read from the store. It validates import resolution,
-// NOT JS syntax. makeBlobUrl inside is a stub — the SW has no
+// candidate body, siblings read from the store. It validates syntax and import
+// resolution. makeBlobUrl inside is a stub because the SW has no
 // URL.createObjectURL, and the check never imports the result.
 const toolboxParseCheck = makeToolboxParseCheck({
   buildModule,
+  remoteModulesEnabled: REMOTE_MODULE_IMPORTS_ENABLED,
   readSibling: async (/** @type {string} */ name) => {
     const body = await toolboxStore.getBody(name);
     if (body == null) throw new Error(`unknown toolbox module '${name}' — write it first (toolbox_write)`);
@@ -937,13 +1107,30 @@ const contacts = createContactsStore({ idb });
 // pushState doesn't re-read IDB on every push and onboarding/complete can reach
 // it via deps. profileState.get() ensures+caches; completeOnboarding refreshes.
 const profileState = makeProfileState({ profiles });
+// First-run reconcile: an install with chat history is onboarded, whatever
+// the latch says. The panel front door never gates first-run, so history
+// can predate the funnel (background/onboarding-reconcile.js has the story).
+const reconcileOnboardingLatch = makeOnboardingReconcile({ profileState, sessions });
 
 // The per-chat model picker's catalog assembly (background/model-catalog.js).
 // localModelAvailable is a thunk because localModelState is created later.
-const { liveProviderModels, liveContextWindow, buildModelOptions } = makeModelCatalog({
+let providerConfigRevision = 0;
+const onProviderConfigChanged = () => { providerConfigRevision += 1; };
+const onLiveProviderModelsChanged = () => {
+  onProviderConfigChanged();
+  if (uiConnected()) void pushState().catch(() => {});
+};
+const {
+  liveProviderModels,
+  liveProviderModelStatus,
+  invalidateLiveProviderModels,
+  liveContextWindow,
+  buildModelOptions,
+} = makeModelCatalog({
   listProviders, listProviderModels, providerModelContextWindow,
   localModelId: LOCAL_MODEL_ID, localModelAvailable: () => localModelState.available(),
   settingsStore, vault, sessions, resolveActiveProvider, getSecret, safeFetch,
+  onLiveModelsChanged: onLiveProviderModelsChanged,
 });
 
 // ---------------------------------------------------------------------------
@@ -1006,12 +1193,11 @@ const denylistStore = makeDenylistStore({
 });
 
 // why (SECURITY): the seed loads ASYNC. Until it resolves, the effective list is
-// [] — and the origin gate would allow a denylisted site (the cold-start race).
-// buildToolContext awaits denylistReady before constructing any tool context, so
-// NO tool can dispatch against an unloaded denylist. The promise RESOLVES (never
-// rejects) when the load finishes or fails — it can't hang a turn, and
-// fails-closed to [] (the seed is a bundled extension asset, so a real failure
-// is near-impossible).
+// empty and must not be treated as permission. buildToolContext awaits
+// denylistReady, the browser network floor treats a load failure as fatal, and
+// the Firefox exact-child guard holds requests until denylistPolicyReady. The
+// seed is a bundled asset, but a missing or malformed package still fails
+// closed instead of silently authorizing an empty policy.
 /**
  * The seed's OWN category map ({ banks_us: [...], health_us: [...], … }), kept
  * for the settings list to group by.
@@ -1024,29 +1210,40 @@ const denylistStore = makeDenylistStore({
  * @type {Record<string, string[]>}
  */
 let seedCategories = {};
+let denylistPolicyReady = false;
 /** Live read for the settings list — the map is replaced when the seed loads. */
 const getSeedCategories = () => seedCategories;
 const loadDenylist = async () => {
-  /** @type {any[]} */ let seed = [];
-  try {
-    const res = await fetch('/peerd-egress/denylist/default.json');
-    if (!res.ok) console.error('[sw] denylist seed fetch failed:', res.status);
-    else {
-      const json = await res.json();
-      seedCategories = (json && typeof json === 'object' && json.categories) ? json.categories : {};
-      seed = flattenCategorisedDenylist(json);
-    }
-  } catch (e) {
-    console.error('[sw] denylist load threw', e);
+  const res = await fetch('/peerd-egress/denylist/default.json');
+  if (!res.ok) throw new Error(`denylist seed fetch failed: ${res.status}`);
+  const json = await res.json();
+  const categories = (json && typeof json === 'object' && json.categories)
+    ? json.categories
+    : null;
+  const seed = flattenCategorisedDenylist(json);
+  if (!categories || seed.length === 0) {
+    throw new Error('denylist seed is empty or malformed');
   }
   await denylistStore.load(seed);
+  seedCategories = categories;
+  denylistPolicyReady = true;
   console.log('[sw] denylist loaded —', denylistStore.patterns().length, 'patterns');
-  // The backstop's rule set is derived from the list, so it has to be rebuilt
-  // the moment the list exists (a live SW restart can find tabs already driven).
-  denylistNetGuard.sync();
 };
-/** @type {Promise<void>} */
-const denylistReady = loadDenylist();
+const denylistReady = loadDenylist()
+  .then(() => ({ ok: true }))
+  .catch((error) => {
+    console.error('[sw] denylist load failed', error);
+    return {
+      ok: false,
+      error: `denylist_hydration_failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  });
+// why: sw/web-fetch (Notebook module fetches, VM egress) can arrive while the
+// seed is still hydrating on a cold SW start. This gate lets the engine route
+// await the one-time load instead of refusing a request that merely raced
+// boot; the sync check inside webFetch's getDenylist stays as the last-resort
+// chokepoint for every other direct caller.
+const awaitDenylistPolicy = async () => { requireDenylistPolicy(await denylistReady); };
 
 // ── the denylist's NETWORK-level backstop ──────────────────────────────────
 //
@@ -1055,20 +1252,61 @@ const denylistReady = loadDenylist();
 // `location =`s onto a bank reaches the bank's DOM through a tool call that
 // never named the bank, so no gate ever got a URL to refuse. Same gap in an App
 // sandbox, whose agent-authored code reaches the network without passing
-// webFetch at all. declarativeNetRequest closes it below the page: one
-// session-scoped rule, blocking denylisted domains in the tabs peerd is
-// CURRENTLY DRIVING and nowhere else. See background/denylist-net-guard.js and
+// webFetch at all. declarativeNetRequest closes it below the page with a
+// session-scoped rule set on tabs peerd is currently driving and nowhere else.
+// See background/denylist-net-guard.js and
 // peerd-egress/denylist/dnr-rules.js.
 //
 // Deliberately a BACKSTOP, not a replacement: the JS gates still produce the
 // refusal the model reads and the audit entry the user sees. Where DNR is
-// unavailable (Firefox's partial implementation) the guard is a no-op and
-// behavior is exactly what it was before.
+// unavailable or a rule update fails, browser actions fail closed before page
+// access. Current Firefox supports the portable rule shape; Chrome receives
+// its additional request-type enums below.
+const GUARDED_BROWSER_TABS_KEY = 'guardedBrowserTabIds';
+const GUARDED_BROWSER_ORIGINS_KEY = 'guardedBrowserOriginDomains';
+const browserDnr = /** @type {any} */ ((globalThis).chrome?.declarativeNetRequest);
+const startupPopupNetworkGuard = makeStartupPopupNetworkGuard(browserDnr, PRIVATE_NETWORK_RULE_IDS);
+const browserNetworkCustody = createBrowserNetworkCustody({
+  persist: (tabIds) => sessionCache.sessionSet(GUARDED_BROWSER_TABS_KEY, tabIds),
+});
+const browserOriginCustody = createBrowserOriginCustody({
+  isGuarded: (tabId) => drivenTabIds().includes(tabId),
+  allowUrl: (rawUrl) => classifyBrowserAutomationTarget(rawUrl).allowed,
+  persist: (rows) => sessionCache.sessionSet(GUARDED_BROWSER_ORIGINS_KEY, rows),
+  deferUntilHydrated: true,
+});
+const guardedBrowserTabsReady = Promise.resolve(sessionCache.sessionGet(GUARDED_BROWSER_TABS_KEY))
+  .then(async (ids) => {
+    await browserNetworkCustody.hydrate(Array.isArray(ids) ? ids : []);
+    return { ok: true };
+  })
+  .catch((error) => {
+    return {
+      ok: false,
+      error: `guarded_tabs_hydration_failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  });
+const guardedBrowserOriginsReady = guardedBrowserTabsReady.then(async (tabsResult) => {
+  if (tabsResult.ok === false) return tabsResult;
+  try {
+    const rows = await sessionCache.sessionGet(GUARDED_BROWSER_ORIGINS_KEY);
+    await browserOriginCustody.hydrate(Array.isArray(rows) ? rows : []);
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `guarded_origins_hydration_failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+});
+
 const drivenTabIds = () => {
   /** @type {Set<number>} */
   const ids = new Set();
   // Tabs a web actor owns — the ones it navigates and reads the DOM of.
   for (const [tabId] of webActorTabBindings.entries()) ids.add(tabId);
+  for (const tabId of browserNetworkCustody.tabIds()) ids.add(tabId);
+  for (const tabId of startupPopupNetworkGuard.tabIds()) ids.add(tabId);
   // Engine tabs. The WebVM's network already proxies through webFetch and the
   // Notebook worker is sealed, so App tabs are the ones with a real un-gated
   // network edge — but scoping all three keeps the rule uniform and costs a
@@ -1081,13 +1319,18 @@ const drivenTabIds = () => {
   }
   return [...ids];
 };
+
 // The IdP registry as bare domains for the allow rule — derived NEXT TO the
-// registry (knownIdpDomains) so a registry edit moves the excursion rule and
+// registry (knownIdpDomains) so a registry edit moves the exact grant rule and
 // this carve-out together. Computed once; the registry is a frozen constant.
 const idpExemptDomains = knownIdpDomains();
+const dnrResourceTypes = /** @type {any} */ (browser.runtime.getManifest())
+  .browser_specific_settings?.gecko
+  ? DENYLIST_RESOURCE_TYPES
+  : CHROME_DNR_RESOURCE_TYPES;
 
 const denylistNetGuard = makeDenylistNetGuard({
-  dnr: /** @type {any} */ (globalThis).chrome?.declarativeNetRequest,
+  dnr: browserDnr,
   // The IdP carve-out. The origin lock lets a bound actor's tab leave its owned
   // origin exactly once, for a sign-in, and several identity providers are also
   // denylist entries — an overlap both halves intend (the denylist stops the
@@ -1098,6 +1341,7 @@ const denylistNetGuard = makeDenylistNetGuard({
   // isDenylistedTab still refuses every DOM tool on such a tab.
   buildUpdate: (/** @type {any} */ input) => denylistSessionRuleUpdate({
     ...input,
+    resourceTypes: dnrResourceTypes,
     exemptDomains: idpExemptDomains,
     appTabIds: appTabTracker.listLive()
       .map((/** @type {string} */ id) => appTabTracker.getTabId(id))
@@ -1105,7 +1349,358 @@ const denylistNetGuard = makeDenylistNetGuard({
   }),
   getPatterns: () => denylistStore.patterns(),
   getTabIds: drivenTabIds,
+  getInitiatorDomains: () => browserOriginCustody.domains(),
   audit: (/** @type {any} */ entry) => { auditLog.append(entry).catch(() => {}); },
+  // Existing session rules survive an MV3 worker restart. Do not replace them
+  // from a half-hydrated tab set. The boot barrier starts reconciliation after
+  // stored custody, actor bindings, and engine trackers are all restored.
+  deferUntilStarted: true,
+});
+
+// Add a tab to the browser-network floor before any page-affecting tool runs.
+// The private-network DNR rules share the existing serialized guard, so a rule
+// update either lands before execution or the tool fails closed.
+const holdBrowserNetworkGuard = async (
+  /** @type {number} */ tabId,
+  /** @type {string | undefined} */ targetUrl,
+  /** @type {{ tabId: number, token: string } | undefined} */ requiredLease,
+) => {
+  await browserNetworkGuardReady;
+  const before = denylistNetGuard.state();
+  if (before.lastError) {
+    return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  }
+  /** @type {{ tabId: number, token: string, added: boolean }} */
+  let claim;
+  try { claim = await browserNetworkCustody.claimDurable(tabId, requiredLease); }
+  catch {
+    // The custody layer has rolled its optimistic hold back. Reconcile before
+    // returning so an unrelated sync that observed it cannot leave stale DNR
+    // scope behind, and a retry starts from one coherent snapshot.
+    await denylistNetGuard.sync();
+    return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  }
+  let originReceipt = null;
+  try {
+    originReceipt = targetUrl ? await browserOriginCustody.retain(tabId, targetUrl) : null;
+  } catch {
+    if (claim.added) await browserNetworkCustody.removeDurable(tabId).catch(() => {});
+    return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  }
+  await denylistNetGuard.sync();
+  const state = denylistNetGuard.state();
+  if (state.supported && !state.lastError
+      && browserNetworkCustody.isDurableClaimValid(claim)) return { ok: true };
+  if (!browserNetworkCustody.isDurableClaimValid(claim)) {
+    // A close can interleave after persistence but before DNR sync settles.
+    // Reconcile the removal and never authorize a reused numeric tab id.
+    await denylistNetGuard.sync();
+    return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  }
+  if (claim.added) {
+    await browserNetworkCustody.removeDurable(tabId).catch(() => {});
+  }
+  await browserOriginCustody.rollback(originReceipt).catch(() => {});
+  if (claim.added) await browserOriginCustody.close(tabId).catch(() => {});
+  await denylistNetGuard.sync();
+  return browserNetworkGuardUnavailableResult(
+    state.supported ? 'network_guard_install_failed' : 'network_guard_unsupported',
+  );
+};
+
+const acquireBrowserNetworkGuardLease = async (/** @type {number} */ tabId) => {
+  await browserNetworkGuardReady;
+  const before = denylistNetGuard.state();
+  if (before.lastError) {
+    return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  }
+  const lease = browserNetworkCustody.acquire(tabId);
+  await denylistNetGuard.sync();
+  const state = denylistNetGuard.state();
+  if (state.supported && !state.lastError
+      && browserNetworkCustody.isLeaseValid(lease)) return { ok: true, lease };
+  browserNetworkCustody.release(lease);
+  await denylistNetGuard.sync();
+  return browserNetworkGuardUnavailableResult(
+    state.supported ? 'network_guard_install_failed' : 'network_guard_unsupported',
+  );
+};
+
+const releaseBrowserNetworkGuardLease = async (
+  /** @type {{ tabId?: number, token?: string } | undefined} */ lease,
+) => {
+  if (!lease || typeof lease.tabId !== 'number' || typeof lease.token !== 'string') return;
+  await browserNetworkGuardReady;
+  if (!browserNetworkCustody.release(lease)) return;
+  browserOriginCustody.domains();
+  await denylistNetGuard.sync();
+};
+
+const updateBrowserNetworkGuardOrigin = async (
+  /** @type {number} */ tabId,
+  /** @type {string | undefined} */ rawUrl,
+) => {
+  if (!rawUrl || !drivenTabIds().includes(tabId)) {
+    return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  }
+  const originReceipt = await browserOriginCustody.retain(tabId, rawUrl).catch(() => null);
+  if (!originReceipt) return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  await denylistNetGuard.sync();
+  const state = denylistNetGuard.state();
+  if (state.supported && !state.lastError) return { ok: true };
+  await browserOriginCustody.rollback(originReceipt).catch(() => {});
+  return browserNetworkGuardUnavailableResult(
+    state.supported ? 'network_guard_install_failed' : 'network_guard_unsupported',
+  );
+};
+
+// A page-created child receives authority only from the exact peerd-owned
+// source tab reported by the browser. Unknown startup state is queued, never
+// treated as permission to touch a user-owned child.
+let browserNetworkGuardBootAuthoritative = false;
+/** @type {Map<number, { tabId: number, token: string }>} */
+const startupPopupLeases = new Map();
+let startupPopupCandidatesOpen = true;
+let startupPopupCandidateQueue = Promise.resolve();
+const adoptStartupPopupBrowserNetworkGuard = (
+  /** @type {number} */ sourceTabId,
+  /** @type {number} */ childTabId,
+) => {
+  if (!startupPopupCandidatesOpen) return Promise.resolve(false);
+  const lease = browserNetworkCustody.acquire(childTabId);
+  startupPopupLeases.set(childTabId, lease);
+  const operation = startupPopupCandidateQueue.then(async () => {
+    await Promise.all([guardedBrowserTabsReady, webActorBindingsReady]);
+    if (!browserNetworkCustody.isLeaseValid(lease)) return false;
+    const sourceOwned = browserNetworkCustody.hasDurable(sourceTabId)
+      || webActorTabBindings.has(sourceTabId);
+    if (!sourceOwned) return false;
+    const adopted = await startupPopupNetworkGuard.adopt(sourceTabId, childTabId);
+    return adopted && browserNetworkCustody.isLeaseValid(lease);
+  }, () => false);
+  const settled = operation.then(async (adopted) => {
+    if (adopted) return true;
+    if (startupPopupLeases.get(childTabId) === lease) startupPopupLeases.delete(childTabId);
+    browserNetworkCustody.release(lease);
+    await startupPopupNetworkGuard.release(childTabId);
+    return false;
+  }, async () => {
+    if (startupPopupLeases.get(childTabId) === lease) startupPopupLeases.delete(childTabId);
+    browserNetworkCustody.release(lease);
+    await startupPopupNetworkGuard.release(childTabId);
+    return false;
+  });
+  startupPopupCandidateQueue = settled.then(() => {}, () => {});
+  return settled;
+};
+const adoptPopupBrowserNetworkGuard = async (
+  /** @type {number} */ sourceTabId,
+  /** @type {number} */ childTabId,
+) => {
+  await browserNetworkGuardReady;
+  const startupLease = startupPopupLeases.get(childTabId);
+  const releaseStartupLease = () => {
+    if (!startupLease) return;
+    if (startupPopupLeases.get(childTabId) === startupLease) startupPopupLeases.delete(childTabId);
+    browserNetworkCustody.release(startupLease);
+  };
+  if (startupLease && !browserNetworkCustody.isLeaseValid(startupLease)) {
+    releaseStartupLease();
+    await startupPopupNetworkGuard.release(childTabId);
+    await denylistNetGuard.sync();
+    return { ok: true, adopted: false };
+  }
+  if (denylistNetGuard.state().lastError) {
+    releaseStartupLease();
+    await startupPopupNetworkGuard.release(childTabId);
+    await denylistNetGuard.sync();
+    return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  }
+  if (!drivenTabIds().includes(sourceTabId)) {
+    releaseStartupLease();
+    await startupPopupNetworkGuard.release(childTabId);
+    await denylistNetGuard.sync();
+    const state = denylistNetGuard.state();
+    return { ok: !state.supported || !state.lastError, adopted: false };
+  }
+  const child = await browser.tabs.get(childTabId).catch(() => null);
+  const result = await holdBrowserNetworkGuard(childTabId, child?.url, startupLease);
+  releaseStartupLease();
+  if (result.ok) startupPopupNetworkGuard.handoff(childTabId);
+  else {
+    await startupPopupNetworkGuard.release(childTabId);
+    await denylistNetGuard.sync();
+  }
+  return { ...result, adopted: result.ok };
+};
+
+const classifyPopupTarget = (/** @type {string} */ rawUrl) => {
+  const verdict = classifyBrowserAutomationTarget(rawUrl);
+  if (!verdict.allowed) return { allowed: false, reason: verdict.reason };
+  try {
+    const parsed = new URL(rawUrl);
+    return matchesDenylist(parsed.hostname, denylistStore.patterns())
+      ? { allowed: false, reason: 'sensitive_site' }
+      : { allowed: true };
+  } catch { return { allowed: false, reason: 'invalid_url' }; }
+};
+
+const drivenChildRequestGuard = makeDrivenChildRequestGuard({
+  // The synchronous Firefox stop is narrower than the async popup guard: only
+  // a live web-actor binding can mark a child. Aggregate custody also includes
+  // short operation leases and engine tabs, which are not proof that an opener
+  // belongs to the web actor and could capture an ordinary user-created tab.
+  isDrivenSource: (sourceTabId) => webActorTabBindings.has(sourceTabId),
+  classifyTarget: (rawUrl) => classifyDrivenChildRequestTarget(
+    rawUrl,
+    (hostname) => matchesDenylist(hostname, denylistStore.patterns()),
+    denylistPolicyReady,
+  ),
+  onBlocked: (event) => recordBrowserChildRequestBlocked(event),
+});
+
+/** @typedef {{ reason: string, outcome: string, child: string, retryable: boolean }} BrowserChildPolicyNotice */
+/** @type {Map<number, BrowserChildPolicyNotice[]>} */
+const browserChildPolicyNotices = new Map();
+/** @type {Map<number, Set<() => void>>} */
+const browserChildPolicyWaiters = new Map();
+const BROWSER_CHILD_POLICY_NOTICE_MAX = 32;
+const recordBrowserChildOutcome = (
+  /** @type {{ sourceTabId: number, tabId: number, reason: string, child: 'closed'|'left_blank'|'uncontained', guarded: boolean, outcome?: 'not_run'|'unverified' }} */ event,
+  /** @type {'blocked'|'failed'|'unverified'} */ outcome,
+) => {
+  const notice = {
+    reason: outcome === 'blocked'
+      ? 'protected_child_navigation'
+      : outcome === 'unverified'
+        ? 'child_navigation_unverified'
+        : 'child_navigation_failed',
+    outcome: outcome === 'blocked' && event.outcome === 'not_run' ? 'not_run' : 'unverified',
+    child: event.child,
+    retryable: false,
+  };
+  const notices = browserChildPolicyNotices.get(event.sourceTabId) ?? [];
+  // why bounded: a hostile driven page can open children in a loop. Preserve
+  // ordered receipts without allowing an unread source queue to grow forever.
+  if (notices.length < BROWSER_CHILD_POLICY_NOTICE_MAX) notices.push(notice);
+  browserChildPolicyNotices.set(event.sourceTabId, notices);
+  for (const wake of browserChildPolicyWaiters.get(event.sourceTabId) ?? []) wake();
+  auditLog.append({
+    type: outcome === 'blocked'
+      ? 'browser_child_navigation_blocked'
+      : outcome === 'unverified'
+        ? 'browser_child_navigation_unverified'
+        : 'browser_child_navigation_failed',
+    details: {
+      browserPolicy: {
+        reason: event.reason,
+        child: event.child,
+        guarded: event.guarded,
+        outcome: notice.outcome,
+      },
+    },
+  }).catch(() => {});
+  if (event.child === 'left_blank') {
+    noteAgentTab(event.tabId, {
+      label: 'blank child', opened: true, protected: event.guarded,
+    }).catch(() => {});
+  }
+};
+const recordBrowserChildRequestBlocked = (
+  /** @type {{ sourceTabId: number, tabId: number, reason: string }} */ event,
+) => {
+  const notice = {
+    reason: 'protected_child_request',
+    outcome: 'not_run',
+    child: 'guarded',
+    retryable: false,
+  };
+  const notices = browserChildPolicyNotices.get(event.sourceTabId) ?? [];
+  if (notices.length < BROWSER_CHILD_POLICY_NOTICE_MAX) notices.push(notice);
+  browserChildPolicyNotices.set(event.sourceTabId, notices);
+  for (const wake of browserChildPolicyWaiters.get(event.sourceTabId) ?? []) wake();
+  auditLog.append({
+    type: 'browser_child_request_blocked',
+    details: {
+      browserPolicy: {
+        reason: event.reason,
+        child: notice.child,
+        guarded: true,
+        outcome: notice.outcome,
+      },
+    },
+  }).catch(() => {});
+};
+const consumeBrowserChildPolicyNotice = (/** @type {number} */ tabId) => {
+  const notices = browserChildPolicyNotices.get(tabId) ?? [];
+  if (notices.length > 0) browserChildPolicyNotices.delete(tabId);
+  return notices;
+};
+const waitForBrowserChildPolicyNotice = (
+  /** @type {number} */ tabId,
+  /** @type {number} */ timeoutMs,
+) => {
+  if ((browserChildPolicyNotices.get(tabId)?.length ?? 0) > 0) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (/** @type {boolean} */ found) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const waiters = browserChildPolicyWaiters.get(tabId);
+      waiters?.delete(wake);
+      if (waiters?.size === 0) browserChildPolicyWaiters.delete(tabId);
+      resolve(found);
+    };
+    const wake = () => finish(true);
+    const timer = setTimeout(() => finish(false), Math.max(0, timeoutMs));
+    const waiters = browserChildPolicyWaiters.get(tabId) ?? new Set();
+    waiters.add(wake);
+    browserChildPolicyWaiters.set(tabId, waiters);
+  });
+};
+
+const drivenPopupGuard = makeDrivenPopupGuard({
+  adoptFromSource: adoptPopupBrowserNetworkGuard,
+  adoptUnknownFromSource: adoptStartupPopupBrowserNetworkGuard,
+  sourceState: (sourceTabId) => popupSourceState(
+    sourceTabId,
+    drivenTabIds(),
+    browserNetworkGuardBootAuthoritative,
+  ),
+  neutralize: (tabId) => browser.tabs.update(tabId, { url: 'about:blank' }),
+  close: (tabId) => browser.tabs.remove(tabId),
+  resume: (tabId, url) => browser.tabs.update(tabId, { url }),
+  classifyTarget: classifyPopupTarget,
+  onBlocked: (event) => recordBrowserChildOutcome(event, 'blocked'),
+  onFailed: (event) => recordBrowserChildOutcome(event, 'failed'),
+  onBlank: (event) => recordBrowserChildOutcome(event, 'unverified'),
+  onGuarded: ({ tabId }) => drivenChildRequestGuard.release(tabId),
+});
+browser.tabs.onCreated?.addListener((tab) => {
+  drivenPopupGuard.onCreated(tab);
+});
+browser.tabs.onUpdated?.addListener(drivenPopupGuard.onUpdated);
+browser.tabs.onRemoved?.addListener((tabId) => {
+  drivenChildRequestGuard.release(tabId);
+  drivenPopupGuard.onRemoved(tabId);
+  startupPopupNetworkGuard.release(tabId).catch(() => {});
+  browserChildPolicyNotices.delete(tabId);
+  for (const wake of browserChildPolicyWaiters.get(tabId) ?? []) wake();
+  browserChildPolicyWaiters.delete(tabId);
+});
+browser.webNavigation?.onCreatedNavigationTarget?.addListener((details) => {
+  // This event is the browser's exact source-to-child statement. Keep the
+  // synchronous marker first so Firefox can stop the first private request.
+  // tabs.onCreated is intentionally not authority here: API-created ordinary
+  // tabs can carry opener metadata without being page-created children.
+  drivenChildRequestGuard.onNavigationTarget(details);
+  drivenPopupGuard.onNavigationTarget(details);
+});
+registerFirefoxDrivenChildRequestGuard({
+  isFirefox: Boolean(browser.runtime.getManifest().browser_specific_settings?.gecko),
+  event: browser.webRequest?.onBeforeRequest,
+  listener: drivenChildRequestGuard.onBeforeRequest,
 });
 
 // ---------------------------------------------------------------------------
@@ -1123,7 +1718,7 @@ const denylistNetGuard = makeDenylistNetGuard({
 //   * the orchestrator          — drives the user's own foreground tab on the
 //                                 user's own instruction. Locking it would mean
 //                                 peerd refusing to look at the page you are on.
-//   * engine actors             — act on an instance, never a web tab. No landing.
+//   * engine actors            : act on an instance, never a web tab. No landing.
 //   * the dweb actor            — no tab either.
 //   * an API actor (backing:'api') — already bound to ONE fixed origin by
 //                                 `withApiCredentials`, which is the same
@@ -1158,7 +1753,8 @@ const refreshKeyedOrigins = async () => {
       const origin = originFromSecretName(name);
       if (origin) keyedOrigins.add(origin);
     }
-  } catch { /* locked — keep what we have; never shrink */ }
+    return true;
+  } catch { return false; /* locked or unavailable; keep what we have and never shrink */ }
 };
 refreshKeyedOrigins();
 vault.subscribe(() => { if (!vault.isLocked()) refreshKeyedOrigins(); });
@@ -1178,6 +1774,10 @@ const originStates = makeOriginStateStore({
   save: async (sessionId, state) => { await sessions.update(sessionId, { originState: state }); },
   onError: (message, error) => console.warn('[origin-lock]', message, error),
 });
+// Immediate heap guard for turns already queued on an actor slot. The durable
+// originState.retired tombstone below survives worker eviction; this set closes
+// the smaller window before that write completes (and fails closed if it does).
+const retiredActorSessions = new Set();
 
 /**
  * The origins peerd has LEARNED the user has an account on — grown from
@@ -1191,23 +1791,36 @@ const originStates = makeOriginStateStore({
 const learnedOrigins = makeLearnedOrigins({
   load: async () => /** @type {any} */ (await kv.get('learnedOrigins.v1')),
   save: async (all) => { await kv.set('learnedOrigins.v1', all); },
-  // Audit the FIRST time an origin is learned. why: this list silently changes
+  // Audit the FIRST time a host is learned. why: this list silently changes
   // what peerd will and won't let a helper do, so a user asking "why did it
   // refuse to open that site" deserves a record naming the signal and the moment.
-  onLearn: (origin, reason) => {
-    auditLog.append({ type: 'origin_learned_sensitive', details: { origin, reason } }).catch(() => {});
+  onLearn: (host, reason) => {
+    auditLog.append({ type: 'origin_learned_sensitive', details: { host, reason } }).catch(() => {});
   },
   // The inverse, from Settings. Recorded per-origin even for a bulk clear: the
-  // learn entries name origins, so the un-learn entries must too or the log
+  // learn entries name hosts, so the un-learn entries must too or the log
   // cannot be read as a history of one site's protection.
-  onForget: (origins) => {
-    for (const origin of origins) {
-      auditLog.append({ type: 'origin_unlearned_sensitive', details: { origin } }).catch(() => {});
+  onForget: (hosts) => {
+    for (const host of hosts) {
+      auditLog.append({ type: 'origin_unlearned_sensitive', details: { host } }).catch(() => {});
     }
   },
   onError: (message, error) => console.warn('[learned-origins]', message, error),
 });
 learnedOrigins.hydrate();
+
+// Numeric tab addressing mints bound authority, unlike the roaming landing
+// classifier. Wait for both durable inputs and refuse on an unreadable one so a
+// cold service worker cannot mistake an empty cache for an ordinary origin.
+const numericTabAuthorityFor = async (/** @type {unknown} */ liveUrl) => {
+  await learnedOrigins.hydrate();
+  const keyedReady = await refreshKeyedOrigins();
+  return decideNumericTabAuthority(liveUrl, {
+    policyReady: keyedReady && learnedOrigins.hydrationStatus().ok,
+    ...sensitivitySignals(),
+    learned: learnedOrigins.snapshot(),
+  });
+};
 
 /**
  * Record a learned signal. Canonicalizes here — ONE place — because the
@@ -1223,6 +1836,10 @@ const noteLearnedOrigin = (rawOrigin, reason) => {
 
 /** The sensitivity signals, in the shape the classifier takes. */
 const sensitivitySignals = () => ({
+  // Dedicated identity providers are transit-only. They are sensitive for
+  // credential and custody decisions, while landing-rule.js separately keeps
+  // the confirmed relying-party sign-in transition working.
+  isKnownIdp: isKnownIdpHost,
   // SEED 1 — #242's curated UGC registry, asked at ORIGIN level (isUgcHost, not
   // classifyUrl). #242 is path-scoped because it gates one WRITE on a page
   // strangers authored; the lock asks whether the user has an IDENTITY here,
@@ -1284,19 +1901,17 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
   // the dispatch it will judge was authorized.
   const myTurn = landingTurnTokens.get(actorSessionId) ?? null;
   const isCurrentTurn = () => myTurn === null || landingTurnTokens.get(actorSessionId) === myTurn;
-  return {
-    getState,
-    judgeLanding: makeJudgeLanding({
+  const judgeLandingUnserialized = makeJudgeLanding({
       getState,
       saveState: (patch) => originStates.write(actorSessionId, patch),
-      onStop: (event) => {
+      onStop: async (event) => {
         // A judge that outlived its turn may not stop anything and may not file
         // anything. It still records the landing in the audit trail below — the
         // observation was real even when the turn it belonged to is gone.
         const current = isCurrentTurn();
         if (current) landingStopReports.set(actorSessionId, describeLandingStop(/** @type {any} */ (event)));
-        // RELEASE THE TAB. Without this the stop is self-sealing and the actor is
-        // dead for good, which adversarial review demonstrated end to end:
+        // RELEASE THE TAB. Without this the stop is self-sealing and a bound
+        // actor is dead for good:
         //
         //   navigate is the actor's ONLY way to change its tab's URL, and it
         //   calls resolveTargetTab FIRST — which judges the tab's CURRENT url.
@@ -1305,15 +1920,33 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
         //   request in the chat — about anything at all — gets the same handoff
         //   report, forever. For a per-tab actor it outlives the chat entirely.
         //
-        // Dropping the binding puts the actor back in the genuine 0-tab state,
-        // where navigate's adopt path opens a fresh tab. That is a RECOVERY, not
-        // a loosening: the new tab starts blank and its first landing is judged
-        // like any other, so a bound actor still cannot leave its origin and a
-        // roaming one still cannot enter a credentialed site. The refused tab
-        // itself is left open and untouched — the user may well want to look at
-        // it, and closing a tab out from under someone to enforce a policy they
-        // did not see would be its own kind of wrong.
+        // A bound actor returns to a genuine 0-tab state, where navigate's adopt
+        // path opens a fresh judged tab. A roaming actor is retired below instead:
+        // it has consumed page-controlled text, so its transcript must not cross
+        // the stop into the next `to:"web"` request. The refused tab itself is
+        // left open and untouched; the user may well want to look at it.
         if (current) {
+          const st = originStates.read(actorSessionId);
+          const retiringRoamingActor = st?.mode === 'roaming';
+          // Abort the current actor turn before any fallible persistence. A
+          // storage outage must never let the loop continue issuing tools on a
+          // landing the origin policy already refused.
+          try { turnSlots.stop(actorSessionId); }
+          catch (e) { console.warn('[origin-lock] stop failed', e); }
+          // Heap retirement + registry removal happen synchronously inside the
+          // helper. Its two durable fences are attempted independently, so a
+          // tombstone failure cannot suppress the routing-cache drop (or vice
+          // versa). Queued deliveries consult the heap fence at dequeue time.
+          const retirement = retiringRoamingActor
+            ? retireStoppedRoamingWebActorDurably({
+              registry: webActorRegistry,
+              actorSessionId,
+              originState: st,
+              markRetired: (sessionId) => { retiredActorSessions.add(sessionId); },
+              writeTombstone: () => originStates.write(actorSessionId, { retired: true }),
+              persistRouting: persistWebActors,
+            })
+            : null;
           const parkedTab = webActorTabBindings.tabFor(actorSessionId);
           if (typeof parkedTab === 'number' && webActorTabBindings.drop(parkedTab)) persistWebBindings();
           // The stop hands this tab back to the user (they may want to look at
@@ -1328,7 +1961,6 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
           // usually all that was needed. Only on the FIRST landing: after that
           // the origin is settled and an actor that wandered off it should stay
           // stopped rather than quietly re-home itself somewhere new.
-          const st = originStates.read(actorSessionId);
           if (st?.provisional) {
             // The store's key is `${chatId} ${origin}` (one space; neither half
             // can contain one), so splitting on the FIRST space recovers the pair.
@@ -1341,15 +1973,23 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
               dropped = true;
             }
             if (dropped) persistSiteActors();
-            originStates.forget(actorSessionId);
+            // Keep the stopped state as a tombstone for calls already queued
+            // in this turn. Null means unlocked, so forgetting it here would
+            // let those calls proceed after the binding was removed.
+          }
+          if (retirement) {
+            const durable = await retirement;
+            if (durable.tombstone.status === 'rejected') {
+              console.warn('[origin-lock] actor retirement tombstone failed', durable.tombstone.reason);
+            }
+            if (durable.routing.status === 'rejected') {
+              console.warn('[origin-lock] actor retirement routing write failed', durable.routing.reason);
+            }
           }
         }
         auditLog.append({
           type: 'actor_origin_stop',
           sessionId: actorSessionId,
-          // The audit trail keeps the FULL landing url (unlike the report): it is
-          // local, append-only, and read by a human investigating — exactly the
-          // place the detail belongs, and the one place it can't be read by a model.
           details: {
             action: event.action,
             from: event.from,
@@ -1374,16 +2014,106 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
         // leaves the loop free to try the next tool against the same tab. Only
         // ever OUR turn — see landingTurnTokens for the turn this would
         // otherwise have aborted by accident.
-        if (current) {
-          try { turnSlots.stop(actorSessionId); } catch (e) { console.warn('[origin-lock] stop failed', e); }
-        }
+        // Current turns are stopped before fallible retirement work above.
       },
       isIdp: isKnownIdp,
+      isCurrent: isCurrentTurn,
       ...sensitivitySignals(),
-    }),
+    });
+  const judgeLanding = (/** @type {string} */ url) => originStates.serialize(
+    actorSessionId,
+    () => {
+      if (!isCurrentTurn()) {
+        const error = new Error('stale_actor_turn');
+        error.name = 'AbortError';
+        throw error;
+      }
+      return judgeLandingUnserialized(url);
+    },
+  );
+  const authorizeSignInOriginUnserialized = makeSignInOriginAuthorizer({
+    getState,
+    getLiveLanding: () => liveSiteClientLandingFor(actorSessionId),
+    saveState: (patch) => originStates.write(actorSessionId, patch),
+    isKnownIdp: isKnownIdpHost,
+    isCurrent: isCurrentTurn,
+    onBound: (origin) => auditLog.append({
+      type: 'actor_origin_bound_for_sign_in',
+      sessionId: actorSessionId,
+      details: { origin },
+    }).then(() => undefined),
+  });
+  const authorizeSignInExcursionUnserialized = makeSignInExcursionAuthorizer({
+    getState,
+    getLiveLanding: () => liveSiteClientLandingFor(actorSessionId),
+    saveState: (patch) => originStates.write(actorSessionId, patch),
+    isKnownIdp,
+    isCurrent: isCurrentTurn,
+  });
+  const revokeSignInExcursionUnserialized = makeSignInExcursionRevoker({
+    getState,
+    getLiveLanding: () => liveSiteClientLandingFor(actorSessionId),
+    saveState: (patch) => originStates.write(actorSessionId, patch),
+    isKnownIdp,
+    isCurrent: isCurrentTurn,
+  });
+  return {
+    getState,
+    judgeLanding,
     makeScope: (/** @type {() => string | undefined} */ getOrigin) =>
       makeCredentialScope({ getState, getOrigin, ...sensitivitySignals() }),
+    canUseSiteClientOrigin: makeSiteClientOriginGuard({ getState, ...sensitivitySignals() }),
+    authorizeSiteClientOrigin: (/** @type {() => Promise<{ status: 'none' | 'unreadable' } | { status: 'live', url: string }>} */ getLiveLanding) =>
+      makeSiteClientOriginAuthorizer({
+        getState, getLiveLanding, judgeLanding,
+        ...sensitivitySignals(),
+      }),
+    authorizeSignInOrigin: (/** @type {string} */ origin, /** @type {AbortSignal | undefined} */ signal) => originStates.serialize(
+      actorSessionId,
+      () => authorizeSignInOriginUnserialized(origin, signal),
+    ),
+    authorizeSignInExcursion: (/** @type {string} */ origin, /** @type {AbortSignal | undefined} */ signal) => originStates.serialize(
+      actorSessionId,
+      () => authorizeSignInExcursionUnserialized(origin, signal),
+    ),
+    revokeSignInExcursion: (/** @type {string} */ origin, /** @type {AbortSignal | undefined} */ signal) => originStates.serialize(
+      actorSessionId,
+      () => revokeSignInExcursionUnserialized(origin, signal),
+    ),
+    terminateUnreadableSignIn: () => originStates.serialize(
+      actorSessionId,
+      () => {
+        if (!isCurrentTurn()) {
+          const error = new Error('stale_actor_turn');
+          error.name = 'AbortError';
+          throw error;
+        }
+        // A bound actor with active sign-in state may not resume when its tab
+        // disappears or becomes unreadable. This reserved synthetic landing is
+        // always outside the approved corridor, so the normal terminal path
+        // clears the grant, records the stop, and ends the turn.
+        return judgeLandingUnserialized('https://unreadable.invalid/');
+      },
+    ),
   };
+};
+
+/**
+ * Read the actor's ACTUAL owned tab, distinguishing a deliberate 0-tab actor
+ * from a tab that exists but can no longer be verified.
+ * @param {string} actorSessionId
+ * @param {number} [trustedTabId]
+ * @returns {Promise<{ status: 'none' | 'unreadable' } | { status: 'live', url: string }>}
+ */
+const liveSiteClientLandingFor = async (actorSessionId, trustedTabId) => {
+  const tabId = typeof trustedTabId === 'number'
+    ? trustedTabId
+    : webActorTabBindings.tabFor(actorSessionId);
+  if (typeof tabId !== 'number') return { status: 'none' };
+  const tab = await browser.tabs.get(tabId).catch(() => null);
+  return typeof tab?.url === 'string' && tab.url
+    ? { status: 'live', url: tab.url }
+    : { status: 'unreadable' };
 };
 
 /**
@@ -1464,13 +2194,16 @@ const pageActivity = createPageActivityReporter({
   scripting: browser.scripting,
 });
 
-const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, actorInstanceId, actorType, actorBacking, actorSurface } = {}) => {
-  // SECURITY: never build a tool context against an unloaded denylist. The seed
-  // loads async; this await closes the cold-start race so the origin gate always
-  // sees the real denylist before any tool can dispatch. Resolves (never
-  // rejects) — it cannot hang the turn. Every dispatch path (main turn, direct
-  // dispatch, spawned actors) routes through here, so all are covered.
-  await denylistReady;
+const buildToolContext = async (/** @type {any} */ {
+  sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted,
+  actorInstanceId, actorType, actorBacking, actorSurface, lifecycleTurnId,
+  lifecycleUserInitiated,
+} = {}) => {
+  // SECURITY: never build a tool context against an unloaded or failed
+  // denylist. Every dispatch path (main turn, direct dispatch, spawned actors)
+  // routes through here, so browser and open-web tools cannot interpret an
+  // empty policy as permission.
+  requireDenylistPolicy(await denylistReady);
   // The lifecycle tracker must be ARMED before any ctx exists — otherwise a
   // Class D/E dispatch could race the boot into running untracked. The
   // promise settles once (subsequent awaits are free) and never rejects; a
@@ -1491,6 +2224,9 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // record, not the chat's.
   const sessionId = overrideSessionId ?? await sessionCache.sessionGet('currentSessionId');
   const activeSession = sessionId ? await sessions.get(sessionId) : null;
+  const lifecycleOwnerSessionId = sessionId
+    ? await resolveLifecycleRootSession(sessionId)
+    : null;
   // Plan/Act permission axis (Feature 03). Per-session, persisted in the
   // session record; sessionCache is the MV3-survival fallback for the
   // pre-session-create window. See resolvePermission for the resolution
@@ -1568,10 +2304,19 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // otherwise it's the live setting. Used BOTH to stamp ctx.actorSurface (gate +
   // descriptors) AND the capability strip below — the turn driver doesn't pass
   // actorSurface, so the strip can't read the raw param; it must use THIS.
+  const requestedActorSurface = actorSurface ?? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools');
   const effectiveActorSurface = (actorType === 'web' && actorBacking !== 'api')
-    ? (actorSurface ?? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools'))
+    ? resolveWebActorSurface({
+      requested: requestedActorSurface,
+      allowedTools: toolAllow,
+      headlessAvailable: offscreenAvailable,
+    })
     : undefined;
   const ctx = {
+    // One browser-neutral execution-boundary value. Descriptor filtering is
+    // model UX; this dispatch-time gate stamp is the authority backstop.
+    actorIsolation,
+    runtimeCapabilities,
     // why: the exposure gate (gates.js) reads this. 'main' is set ONLY on
     // the main agent turn; it makes the main-hidden DOM/page tools refuse
     // at dispatch, so a prompt-injected model can't reach them by name.
@@ -1586,6 +2331,10 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // path through this builder — main turn, actor relay, page-call — records
     // side-effecting calls durably and refuses unproven replays.
     lifecycle: lifecycleTracker,
+    lifecycleOwnerSessionId,
+    ...(typeof lifecycleTurnId === 'string' && lifecycleTurnId
+      ? { lifecycleTurnId } : {}),
+    lifecycleUserInitiated: lifecycleUserInitiated === true,
     // DESIGN-17: the message_actor sender gate's untrusted-ORIGIN signal. A
     // synthetic turn (goal continuation / async wake / actor reply-wake) is
     // "inbound" — refused — UNLESS it is an explicit first-party continuation
@@ -1630,10 +2379,14 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     ...(actorType === 'web'
       ? {
         // DESIGN-18: an API actor self-fences its learned memory tagged with its FIXED
-        // owned origin (actorInstanceId); a tab actor tags its current tab url.
+        // owned origin (actorInstanceId). A tab actor gets only a policy-approved
+        // public origin. A later private/denylisted location contributes no target
+        // text to the model-facing trim fence.
         fenceActorSummary: actorBacking === 'api'
           ? (/** @type {string} */ text) => fenceApiActorSummary(text, { origin: actorInstanceId })
-          : (/** @type {string} */ text) => fenceWebActorSummary(text, { tabUrl: activeTab?.url }),
+          : (/** @type {string} */ text) => fenceWebActorSummary(text, {
+            tabOrigin: safeWebActorSummaryOrigin(activeTab?.url, denylistStore.patterns()),
+          }),
       }
       : {}),
     // why: the exposure gate's SECOND check — the session's resolved tool
@@ -1755,7 +2508,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     jsClient,
     jsRegistry,
     jsTabTracker,
-    // Pod kind — shell/WASI jobs run in sealed command Workers while this
+    // Pod kind: shell/WASI jobs run in sealed command Workers while this
     // instance-pinned client and catalog own only tab lifecycle + metadata.
     podClient,
     podRegistry,
@@ -1784,24 +2537,34 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     repositories,
     appRegistry,
     appTabTracker,
+    appQuiescence,
     // why: the dweb network surface for the dweb_share/discover/install tools —
     // the SAME ops the home UI uses, reaching the offscreen base host. Injected
     // ONLY when the dweb is on (DWEB_ENABLED + the setting), so on the store build
     // (and dweb-off) ctx.dweb is null and the tools (already hidden by exposure)
     // also no-op. share reads the app's OPFS bundle like export does.
-    dweb: (DWEB_ENABLED && settingsStore.get().dwebEnabled) ? {
-      share: async (/** @type {string} */ appId) => {
-        // why one route: user Share and agent dweb_share must publish the same
-        // signed release envelope, Git provenance, changelog, monotonic seq,
-        // and registry baseline. A direct offscreen relay silently forked those
-        // semantics and made agent-published releases weaker.
-        return dwebToolRoutes['dweb/base/share-app']({ appId });
-      },
+    dweb: (DWEB_ENABLED && settingsHydrated && settingsStore.get().dwebEnabled) ? {
+      share: (/** @type {string} */ appId) => shareLocalApp(appId, undefined),
       discover: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/heard' }); },
-      install: async (/** @type {any} */ { uri, name } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name }); },
+      install: async (/** @type {any} */ { uri, name } = {}) => withDwebPublication(async (isCurrent) => {
+        if (!isCurrent() || !settingsHydrated || !settingsStore.get().dwebEnabled) {
+          return { ok: false, error: 'dweb-disabled', outcomeKind: 'pre-effect-failure' };
+        }
+        await ensureOffscreen();
+        return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name });
+      }),
       peers: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }); },
-      block: async (/** @type {any} */ { did, block = true, reason } = {}) => { await ensureOffscreen(); if (block && typeof did === 'string') { a2aRevoke(did); conversationRegistry.closeDid(did); } return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason }); },
-      setDiscovery: async (/** @type {any} */ { enabled } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/set-discovery', enabled }); },
+      block: async (/** @type {any} */ { did, block = true, reason } = {}) => withDwebPublication(async (isCurrent) => {
+        if (!isCurrent() || !settingsHydrated || !settingsStore.get().dwebEnabled) return { ok: false, error: 'dweb-disabled' };
+        await ensureOffscreen();
+        if (block && typeof did === 'string') { a2aRevoke(did); conversationRegistry.closeDid(did); }
+        return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason });
+      }),
+      setDiscovery: async (/** @type {any} */ { enabled } = {}) => withDwebPublication(async (isCurrent) => {
+        if (!isCurrent() || !settingsHydrated || !settingsStore.get().dwebEnabled) return { ok: false, error: 'dweb-disabled' };
+        await ensureOffscreen();
+        return browser.runtime.sendMessage({ type: 'dweb/base-host/set-discovery', enabled });
+      }),
     } : null,
     // why: debuggerPool exposes the CDP channel for snapshot / page_exec /
     // page_keys / read_state and the ref path of click / type. Lazy-attaches
@@ -1835,6 +2598,14 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // or, for DOM-walk pseudo-snapshot refs, to a page-side walkId.
     domRefs,
     tabs: browser.tabs,
+    ensureBrowserNetworkGuard: holdBrowserNetworkGuard,
+    updateBrowserNetworkGuardOrigin,
+    acquireBrowserNetworkGuardLease,
+    releaseBrowserNetworkGuardLease,
+    consumeBrowserChildPolicyNotice,
+    waitForBrowserChildPolicyNotice,
+    hasPendingBrowserChildPolicy: (/** @type {number} */ tabId) =>
+      drivenPopupGuard.hasPendingSource(tabId),
     // open_tab opens in the background and announces a "go there" card instead of
     // stealing focus; this is the late-bound announce (defined below).
     // noteTab updates the "current agent tab" card to whatever tab a tool just
@@ -1856,11 +2627,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // does NOT get the render hook (only a tab-backed web actor lazily adopts a tab).
     ...(actorType === 'web' && actorBacking !== 'api' ? { adoptWebTab: () => adoptWebTab(sessionId) } : {}),
     scripting: browser.scripting,
-    // issue 251: the snapshot tool calls this when the page it just walked had a
-    // password field. Injected rather than imported so the tool stays free of
-    // storage, and present on every context — the orchestrator's own snapshots
-    // teach the classifier exactly as well as an actor's, and there is no reason
-    // to learn less from the one the user drove themselves.
+    // issue 251: live DOM tools call this when their exact-document probe finds a
+    // password field. Injected rather than imported so the tools stay free of
+    // storage, and present on every context. The orchestrator's own probes teach
+    // the classifier exactly as well as an actor's, and there is no reason to
+    // learn less from the one the user drove themselves.
     noteLearnedOrigin,
     // DESIGN-18 P2: actor_list reads this for its integration rows — the chat's API integrations
     // (formed ∪ keyed). Referenced lazily (defined later, called at turn time, like
@@ -1939,12 +2710,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // narrow trust model. restrictCtxCapabilities strips every capability closure
   // (getSecret, safeFetch, webFetch, spawnActor, memory, messageActor, …)
   // that none of the actor's OWN kind tools need, so a confused/injected tool
-  // has no path to secrets/egress/spawn. The loop still gets the provider key
-  // via the turn driver's injected getSecret (off this ctx), exactly like a
-  // actor. Non-actor ctx is unchanged.
+  // has no path to secrets/egress/spawn. The loop also receives throwing
+  // credential stubs. The turn driver's provider wrapper adds live functions
+  // only at the model-call boundary. Non-actor ctx is unchanged.
   if (exposure === EXPOSURE_ACTOR) {
-    // DESIGN-18: an API actor's allow-set is fetch_url-only (backing-aware), so the
-    // strip drops the closures keyed in CAPABILITY_CONSUMERS that fetch_url doesn't use
+    // DESIGN-18: an API actor's allow-set is tab-free and origin-scoped
+    // (backing-aware), so the strip drops closures its fetch/cache/site-client
+    // tools do not use
     // (getSecret/safeFetch/adoptWebTab/engine/spawn/…). NB scripting + debuggerPool are
     // NOT in CAPABILITY_CONSUMERS (shared with the web actor's DOM tools), so they survive
     // here — the no-DOM guarantee for an API actor rests on the GATE refusing every DOM
@@ -1967,13 +2739,23 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     //   - api   → the FIXED bound origin (actorInstanceId) — no tab, never changes.
     if (actorType === 'web' && actorBacking === 'api') {
       const ownedOrigin = typeof actorInstanceId === 'string' ? actorInstanceId : undefined;
+      // A stored client is durable executable knowledge keyed by origin. The API
+      // actor owns exactly its fixed instance origin; a model-supplied client key
+      // may not retarget it to a sibling record before the fetch relay gets a say.
+      const canUseFixedSiteClient = makeFixedSiteClientOriginGuard(ownedOrigin, { isKnownIdp: isKnownIdpHost });
+      resCtx.canUseSiteClientOrigin = canUseFixedSiteClient;
+      resCtx.authorizeSiteClientOrigin = async (/** @type {string} */ targetOrigin) =>
+        canUseFixedSiteClient(targetOrigin);
       // DESIGN-18 P1: session-scope cookies AND inject the vault origin:<origin> key
       // same-origin (keyless: getSecret is the SW's, closed over here, never on resCtx).
-      resCtx.webFetch = withDpopCredentials(webFetch, () => ownedOrigin, {
-        getSecret: (/** @type {string} */ name) => vault.getSecret(name),
-        getDpopKey: getDpopKeyForOrigin,
-        audit: (/** @type {any} */ e) => auditLog.append(e),
-      });
+      resCtx.webFetch = isKnownIdpHost(ownedOrigin)
+        ? async () => { throw new EgressDeniedError(ownedOrigin ?? 'identity provider', IDENTITY_PROVIDER_TRANSIT_ONLY_CODE); }
+        : withDpopCredentials(webFetch, () => ownedOrigin, {
+          getSecret: (/** @type {string} */ name) => vault.getSecret(name),
+          getDpopKey: getDpopKeyForOrigin,
+          audit: (/** @type {any} */ e) => auditLog.append(e),
+        });
+      resCtx.idpTransitOnly = isKnownIdpHost(ownedOrigin);
       // No repinActiveTab / adoptWebTab: an API actor has no tab to adopt or re-pin.
     } else if (actorType === 'web') {
       // issue 251 — THE LOCK GOES LIVE HERE, for exactly this kind: a tab-backed
@@ -1986,9 +2768,49 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       // inside the store. Adversarial review found why that matters: a load that
       // threw fell back to `roaming`, so a transient storage error quietly
       // DEMOTED a bound actor, which for the credential scope is a widening.
-      originStates.hydrate(sessionId, /** @type {any} */ (activeSession?.originState));
+      const durableOriginState = /** @type {any} */ (activeSession?.originState);
+      const hasDurableCustody = hasDurableSiteClientState(durableOriginState);
+      originStates.hydrate(sessionId, durableOriginState);
       const lock = originLockFor(sessionId);
       resCtx.judgeLanding = lock?.judgeLanding;
+      resCtx.authorizeSignInOrigin = lock?.authorizeSignInOrigin;
+      resCtx.authorizeSignInExcursion = lock?.authorizeSignInExcursion;
+      resCtx.revokeSignInExcursion = lock?.revokeSignInExcursion;
+      // Revalidate the owned tab at execution time for EVERY actor tool, not
+      // only DOM tools. A tab can move after context construction and before a
+      // model call finishes. Without this closure, fetch/cache/site-client and
+      // delegation tools would run against the stale home snapshot. Missing or
+      // unreadable tabs terminate active auth state instead of parking forever.
+      const revalidateActorLanding = lock
+        ? async () => {
+            const live = await liveSiteClientLandingFor(sessionId);
+            if (live.status === 'live') return lock.judgeLanding(live.url);
+            const state = originStates.read(sessionId);
+            if (state?.authGrant != null || state?.excursion != null) {
+              return lock.terminateUnreadableSignIn();
+            }
+            return null;
+          }
+        : undefined;
+      resCtx.revalidateActorLanding = revalidateActorLanding;
+      if (revalidateActorLanding) {
+        try {
+          const authVerdict = await revalidateActorLanding();
+          resCtx.authWaitingForUser = authVerdict?.action === 'wait';
+        } catch {
+          resCtx.authWaitingForUser = true;
+        }
+      }
+      // The sync gate is an early state-only refusal. The execute-time check is
+      // async and re-reads + judges the ACTUAL owned tab after hooks have
+      // rewritten args. A missing durable state must not be hydrated into
+      // roaming authority for this durable artifact family.
+      resCtx.canUseSiteClientOrigin = hasDurableCustody
+        ? lock?.canUseSiteClientOrigin
+        : () => false;
+      resCtx.authorizeSiteClientOrigin = hasDurableCustody && lock
+        ? lock.authorizeSiteClientOrigin(() => liveSiteClientLandingFor(sessionId))
+        : async () => false;
       // The session-credential scope, NARROWED by the same policy. `ctx.activeTab.origin`
       // IS the scope — read live on every request — so a page that redirects itself onto
       // a credentialed origin moves the scope with no tool call in between to judge. The
@@ -2044,46 +2866,61 @@ const originOfTabUrl = (/** @type {string} */ url) => {
 // also defaults a live-event forwarder that streams the child's turn to
 // the side panel's nested transcript, keyed by the child session id.
 
-const forwardActorEvent = (/** @type {any} */ ev) => {
+// Live actor projections are SW-owned, not UI-owned. They die with the same
+// relay/controller instances they describe, while remaining replayable to a
+// panel that reconnects during that lifetime.
+const actorLiveProjection = createActorLiveProjection();
+
+/** @param {any} display @param {any} message */
+const broadcastBoundProjection = (display, message) => {
   if (!uiConnected()) return;
+  uiPorts.broadcast({
+    ...message,
+    rootSessionId: display.rootSessionId,
+    parentSessionId: display.parentSessionId,
+    actorCorrelationId: display.actorCorrelationId,
+    actorProjectionEpoch: actorLiveProjection.epoch(),
+    actorProjectionRevision: actorLiveProjection.revision(),
+  });
+};
+
+const forwardActorEvent = (/** @type {any} */ ev) => {
   const post = (/** @type {any} */ msg) => {
+    if (!uiConnected()) return;
     try { uiPorts.broadcast(msg); }
     catch (e) { console.warn('[sw] actor forward failed', e); }
   };
   // why: distinct turn/spawned-* types (not the parent's turn/*) so the
   // side panel routes them into the per-child nested store instead of
   // clobbering the active chat's transcript.
+  const topologyMessage = actorLiveProjection.foldSpawned(ev);
+  if (topologyMessage) {
+    post(topologyMessage);
+    return;
+  }
+  const rootSessionId = actorLiveProjection.rootForSpawned(ev.sessionId);
   switch (ev.type) {
-    case 'actor-start':
-      post({ type: 'turn/spawned-start', parentToolUseId: ev.parentToolUseId, parentSessionId: ev.parentSessionId, sessionId: ev.sessionId, depth: ev.depth, task: ev.task });
-      break;
-    case 'actor-stop':
-      post({ type: 'turn/spawned-done', parentToolUseId: ev.parentToolUseId, sessionId: ev.sessionId, depth: ev.depth });
-      break;
-    case 'state':
-      post({ type: 'turn/spawned-state', session: ev.session });
-      break;
     case 'delta':
-      post({ type: 'turn/spawned-delta', sessionId: ev.sessionId, messageId: ev.messageId, text: ev.text });
+      post({ type: 'turn/spawned-delta', rootSessionId, sessionId: ev.sessionId, messageId: ev.messageId, text: ev.text });
       break;
     case 'tool-use':
-      post({ type: 'turn/spawned-tool-use', sessionId: ev.sessionId, messageId: ev.messageId, toolUseId: ev.toolUseId, name: ev.name, input: ev.input });
+      post({ type: 'turn/spawned-tool-use', rootSessionId, sessionId: ev.sessionId, messageId: ev.messageId, toolUseId: ev.toolUseId, name: ev.name, input: ev.input });
       break;
     case 'tool-result':
-      post({ type: 'turn/spawned-tool-result', sessionId: ev.sessionId, toolUseId: ev.toolUseId, result: ev.result });
+      post({ type: 'turn/spawned-tool-result', rootSessionId, sessionId: ev.sessionId, toolUseId: ev.toolUseId, result: ev.result });
       break;
     case 'stop':
-      post({ type: 'turn/spawned-stop', sessionId: ev.sessionId, messageId: ev.messageId, stopReason: ev.stopReason });
+      post({ type: 'turn/spawned-stop', rootSessionId, sessionId: ev.sessionId, messageId: ev.messageId, stopReason: ev.stopReason });
       break;
     case 'error':
-      post({ type: 'turn/spawned-error', sessionId: ev.sessionId, messageId: ev.messageId, error: ev.error });
+      post({ type: 'turn/spawned-error', rootSessionId, sessionId: ev.sessionId, messageId: ev.messageId, error: ev.error });
       break;
     case 'usage':
       // why: actor/actor spend is SEPARATE from the main turn tally (the
       // main usage handler only folds its own session). Forward it so the eval
       // harness — and any future offload-cost meter — can attribute the
       // delegated work honestly instead of it looking free.
-      post({ type: 'turn/spawned-cost', sessionId: ev.sessionId, usage: ev.usage });
+      post({ type: 'turn/spawned-cost', rootSessionId, sessionId: ev.sessionId, usage: ev.usage });
       break;
     default:
       break;
@@ -2092,28 +2929,11 @@ const forwardActorEvent = (/** @type {any} */ ev) => {
 
 const spawnActorCore = makeSpawnActor({
   sessions,
-  runUserTurn,
-  callModel: /** @type {any} */ (callModel),
-  // why the closure: contextSnapshots is declared further down the module —
-  // defer the reference to call time (the postChatNote late-dep pattern).
-  recordModelCall: (/** @type {Record<string, any>} */ call) => contextSnapshots.record(call),
-  getSecret,
-  safeFetch,
   appendAudit: /** @type {any} */ (auditLog.append),
-  buildToolContext,
-  dispatchToolCall: /** @type {any} */ (dispatchToolCall),
-  // why: resolve background-tabs from CURRENT settings at call time, not
-  // boot — settings load async and can change over the SW's life. This
-  // design 01: a spawned child renders its prompt FRESH per spawn (no cross-turn
-  // cache to bust), so it embeds its own temporal grounding — without this an
-  // ephemeral child gets zero time bytes (the main path's <context> message is
-  // built only in turn-driver and never reaches a child). Caller-supplied
-  // temporalBlock still wins.
-  renderSystemPrompt: (/** @type {any} */ opts) => renderSystemPrompt({
-    temporalBlock: buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() }),
-    ...opts,
-  }),
-  getToolDescriptors: () => listTools().map((t) => ({ name: t.name, description: t.description, schema: t.schema })),
+  getToolDescriptors: () => filterByRuntimeCapabilities(
+    listTools().map((t) => ({ name: t.name, description: t.description, schema: t.schema })),
+    runtimeCapabilities,
+  ),
   // PR #134 phase 1: children run UNDER turn slots so Stop / cancel / the
   // wall-clock timeout can abort them. Lazy arrows — turnSlots is defined
   // later in this module (after the agent loop); only called at spawn time.
@@ -2121,22 +2941,22 @@ const spawnActorCore = makeSpawnActor({
     claim: (/** @type {string} */ sessionId) => turnSlots.claim(sessionId),
     stop: (/** @type {string} */ sessionId) => turnSlots.stop(sessionId),
   },
-  // Heap split: run a child's loop in a dedicated offscreen Worker instead of the
-  // in-SW loop — the SAME substrate a bound actor uses (an actor is an ephemeral
+  // Heap split: run a child's loop in a dedicated Worker. The SAME substrate a
+  // bound actor uses (an actor is an ephemeral
   // actor: tool-less = pure reasoning, tool-bearing = a narrowed-general toolset), so
   // it flows through the ONE actorClient. A LAZY arrow — actorClient is a const
-  // assigned LATER in module init (after ensureOffscreen); reading it at wiring time
-  // would see the TDZ, so we only DEREFERENCE at call time. null on Firefox / when
-  // offscreen is unavailable → the unavailable sentinel so spawn.js falls back to the
-  // in-SW loop. The key never enters the worker; the model call and every tool call
+  // assigned LATER in module init (after host detection); reading it at wiring time
+  // would see the TDZ, so we only DEREFERENCE at call time. Null means no conforming
+  // worker host exists and spawn.js refuses. The key never enters the worker; the model call and every tool call
   // relay back to SW-gated routes. Adapt the child job shape (sessionId/task/tools) to
   // the actor run shape (actorSessionId/message/tools); the 'actor/tool-dispatch' route
   // rebuilds the child's restricted ctx from the persisted grantedTools (never the
   // worker's args). Tools default to [] (a pure-reasoning child that never dispatches).
   runChildOffscreen: (/** @type {any} */ job, /** @type {any} */ opts) => actorClient
-    ? actorClient.run({
+    ? runActorIsolated({
       actorSessionId: job.sessionId, message: job.task, systemPrompt: job.systemPrompt,
       provider: job.provider, model: job.model, depth: job.depth,
+      ollamaHost: settingsStore.get().ollamaHost,
       maxSteps: job.maxSteps, maxOutputTokens: job.maxOutputTokens, budgetMs: job.budgetMs,
       tools: job.tools ?? [],
     }, opts)
@@ -2144,15 +2964,21 @@ const spawnActorCore = makeSpawnActor({
   // design 01: embed temporal grounding — the offscreen child prompt renders
   // fresh per spawn (no cache), and the main path's <context> message never
   // reaches a child, so without this an ephemeral child has zero time bytes.
-  renderSystemPromptForChild: (/** @type {string} */ task) => renderSystemPrompt({
+  renderSystemPromptForChild: (/** @type {string} */ task, /** @type {string[]} */ effectiveTools) => renderSystemPrompt({
     taskOverride: task,
+    effectiveTools,
     temporalBlock: buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() }),
   }),
 });
 
 // SW-bound spawn. Defaults the live forwarder so neither surface has to
 // wire streaming; an explicit onEvent in `req` still wins.
-const spawnActor = (/** @type {any} */ req) => spawnActorCore({ onEvent: forwardActorEvent, ...req });
+const spawnActor = async (/** @type {any} */ req) => {
+  await actorIsolationReady;
+  return actorIsolationAvailable(actorIsolation)
+    ? spawnActorCore({ onEvent: forwardActorEvent, ...req })
+    : actorIsolationSpawnRefusal(actorIsolation, req?.parentDepth);
+};
 // PR #134 phase 5: the live-children registry riding on the spawn orchestrator —
 // agent/stop and actor_cancel walk it to end whole delegation subtrees.
 const actorLifecycle = {
@@ -2191,12 +3017,14 @@ const notifyAsyncActor = (/** @type {number} */ count) => {
 // active chat's in-flight tasks. References asyncActorsOrchestrator (defined
 // just below) lazily — only ever called at a status transition, long after boot.
 const pushAsyncTasks = (/** @type {string} */ parentSessionId) => {
-  if (!uiConnected()) return;
   try {
+    const tasks = asyncActorsOrchestrator.actorTasks(parentSessionId);
+    actorLiveProjection.setAsyncTasks(parentSessionId, tasks);
+    if (!uiConnected()) return;
     uiPorts.broadcast({
       type: 'async-tasks/update',
       parentSessionId,
-      tasks: asyncActorsOrchestrator.actorTasks(parentSessionId),
+      tasks,
     });
   } catch (e) { console.warn('[sw] async-tasks push failed', e); }
 };
@@ -2208,6 +3036,8 @@ const asyncActorsOrchestrator = makeAsyncActors({
   // after boot), so deferring the references avoids a TDZ at module load.
   turnSlots: {
     runWhenIdle: (sessionId, fn) => turnSlots.runWhenIdle(sessionId, fn),
+    runWhenIdleClaimed: (sessionId, fn) => turnSlots.runWhenIdleClaimed(sessionId, fn),
+    generation: (sessionId) => turnSlots.generation(sessionId),
     isBusy: (sessionId) => turnSlots.isBusy(sessionId),
     // PR #134: actor_cancel aborts the child's live slot (children run
     // under slots now), instead of only dropping the result.
@@ -2218,7 +3048,8 @@ const asyncActorsOrchestrator = makeAsyncActors({
   // async-actor wakes are NOT trusted to delegate (a parent reacting to a
   // actor result stays attended-gated for message_actor, like today) —
   // so this reenter deliberately does not forward trusted.
-  reenter: ({ userText, sessionId, synthetic }) => runAgentTurn({ userText, sessionId, synthetic }),
+  reenter: ({ userText, sessionId, synthetic, actorReply, turnLease }) =>
+    runAgentTurn({ userText, sessionId, synthetic, actorReply, turnLease }),
   getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
   isVaultLocked: () => vault.isLocked(),
   wrapUntrusted,
@@ -2423,10 +3254,15 @@ const repositories = createRepositoryService({
   loadGit: async () => browserGit,
   webFetch,
   getSecret,
-  audit: (event) => { auditLog.append(event).catch(() => {}); },
+  audit: (/** @type {any} */ event) => { auditLog.append(event).catch(() => {}); },
 });
 const podClient = createPodClient({ registry: podRegistry, tracker: podTabTracker });
-const appClient = createAppClient({ registry: appRegistry, tracker: appTabTracker, repositories });
+const appClient = createAppClient({
+  registry: appRegistry,
+  tracker: appTabTracker,
+  beforeOpfsMutation: () => storeWriteGuard.assertWritable('app-manifests'),
+  repositories,
+});
 
 // Sessions that have ENGAGED the dweb — a dweb tool was called this turn-or-
 // earlier. Monotonic per session, SW-lifetime (a cold start resets it; the next
@@ -2457,27 +3293,58 @@ const commandSources = mergeSources([
 // a documented V1.x gap (DEV-NOTES.md). The manager already accepts any
 // scope, so adding a `notebook:<id>` adapter later is purely additive.
 const SNAPSHOT_SCOPE_APP = (/** @type {string} */ appId) => `app:${appId}`;
-// Apps now use their standard Git repository as the checkpoint substrate. The
-// turn-driver/reviewer seam stays unchanged: capture commits the turn once;
-// diffSince compares the prior commit (or an explicit OID) to the live tree.
-// `workspaceForScope` remains above as the binary-safe migration seam for a
-// future Notebook checkpoint backend, but App snapshots no longer duplicate
-// their bytes into the legacy miniature store.
+const appWorkspaceAdapter = (/** @type {string} */ appId) => {
+  return {
+    readAll: async () => {
+      const snapshot = await appClient.snapshotFiles({ appId });
+      /** @type {Record<string,string>} */
+      const out = Object.create(null);
+      for (const [path, bytes] of Object.entries(snapshot.files)) {
+        out[path] = await appFileCheckpointContent(
+          path,
+          bytes,
+          snapshot.record.fileKinds?.[path],
+        );
+      }
+      return out;
+    },
+    writeFile: async (/** @type {string} */ path, /** @type {any} */ content) => {
+      await appClient.writeFile({ appId, path, content, reload: false });
+    },
+    deleteFile: async (/** @type {string} */ path) => {
+      await appClient.deleteFile({ appId, path, reload: false });
+    },
+  };
+};
+const workspaceForScope = (/** @type {string} */ scope) => {
+  if (typeof scope === 'string' && scope.startsWith('app:')) {
+    return appWorkspaceAdapter(scope.slice('app:'.length));
+  }
+  return null; // unknown scope kind (notebook snapshots: V1.x)
+};
+// Apps use their standard Git repository as the checkpoint substrate. This
+// preserves one version lineage for automatic turn captures, manual commits,
+// review diffs, restores, and remote publication instead of duplicating App
+// bytes into the legacy snapshot store.
 const checkpointMgr = {
-  capture: async (/** @type {{ scope: string, label?: string|null }} */ { scope, label }) => {
+  capture: async (/** @type {{ scope: string, label?: string | null }} */ { scope, label }) => {
     if (typeof scope !== 'string' || !scope.startsWith('app:')) return null;
     const appId = scope.slice('app:'.length);
-    const result = await repositories.coordinate({ kind: 'app', id: appId }, async () => {
-      const status = await repositories.statusApp(appId);
-      const paths = status.changed.slice(0, 3).map((/** @type {{path:string}} */ change) => change.path);
-      const automatic = paths.length
-        ? `agent turn: update ${paths.join(', ')}${status.changed.length > paths.length ? ', …' : ''}`
-        : 'agent turn';
-      return repositories.commitApp(appId, { message: label || automatic });
-    });
+    const result = await appQuiescence.run(appId, () => repositories.coordinate(
+      { kind: 'app', id: appId },
+      async () => {
+        const status = await repositories.statusApp(appId);
+        const paths = status.changed.slice(0, 3)
+          .map((/** @type {{path:string}} */ change) => change.path);
+        const automatic = paths.length
+          ? `agent turn: update ${paths.join(', ')}${status.changed.length > paths.length ? ', …' : ''}`
+          : 'agent turn';
+        return repositories.commitApp(appId, { message: label || automatic });
+      },
+    ));
     return result?.oid ? { id: result.oid, scope } : null;
   },
-  diffSince: async (/** @type {{ scope?: string|null, ref?: string|null }} */ { scope, ref }) => {
+  diffSince: async (/** @type {{ scope?: string | null, ref?: string | null }} */ { scope, ref }) => {
     if (typeof scope !== 'string' || !scope.startsWith('app:')) return { files: [] };
     const appId = scope.slice('app:'.length);
     const status = await repositories.statusApp(appId);
@@ -2576,9 +3443,9 @@ const maybeNudgeDebuggerGrant = (/** @type {any} */ result) => {
 const domRefs = createRefRegistry();
 
 const ensureOffscreen = async () => {
-  // why: Firefox has no chrome.offscreen — its MV3 background is an event
-  // page, which doesn't need the keepalive trick (different lifetime
-  // model). Degrade quietly instead of throwing on every vault unlock:
+  // why: Firefox has no chrome.offscreen. Actor turns use a run-scoped session
+  // heartbeat in direct-actor-host.js; the other offscreen-only services
+  // remain unavailable. Degrade quietly instead of throwing on every unlock:
   // the offscreen-hosted voice transcriber is simply absent there (the
   // mic UI's capability detection already reports voice unsupported).
   if (typeof (/** @type {any} */ (browser)).offscreen?.createDocument !== 'function') {
@@ -2586,9 +3453,7 @@ const ensureOffscreen = async () => {
     return;
   }
   try {
-    const contexts = await browser.runtime.getContexts({
-      contextTypes: /** @type {any} */ (['OFFSCREEN_DOCUMENT']),
-    });
+    const contexts = await listOffscreenContexts(browser);
     if (contexts.length > 0) {
       console.log('[sw] offscreen already exists');
       return;
@@ -2632,7 +3497,186 @@ const ensureOffscreen = async () => {
 // trip — so script/read_pdf report a clean "not supported in this build" signal
 // the agent can act on, instead of dispatching a job message no context answers
 // and surfacing an opaque "headless job failed".
-const offscreenAvailable = typeof (/** @type {any} */ (browser)).offscreen?.createDocument === 'function';
+// One privileged, browser-neutral snapshot. Consumers ask about facilities,
+// not browser names, so a future native host can replace the implementation.
+const runtimeCapabilities = resolveRuntimeCapabilities({
+  offscreenDocument: offscreenAvailable,
+  dwebPackaged: DWEB_ENABLED,
+});
+const localModelHostAvailable = () => runtimeCapabilities.localWebGpuHost.status === 'available';
+// Firefox MV3 runs this module in an extension background page/event page. It
+// can host a dedicated Worker directly. Chrome runs it as a service worker,
+// where `document` is absent and the offscreen host above is required.
+const backgroundPageWorkerAvailable = !offscreenAvailable
+  && typeof document !== 'undefined'
+  && typeof Worker === 'function';
+const ACTOR_HOST_KEEPALIVE_KEY = 'peerdActorHostKeepAlive';
+const ACTOR_HOST_KEEPALIVE_MS = 10_000;
+const ACTOR_HOST_KEEPALIVE_ACK_MS = 2_000;
+let notifyActorHostKeepAliveLost = (/** @type {Error} */ _error) => {};
+const actorHostKeepAlive = backgroundPageWorkerAvailable
+  ? makeStorageSessionKeepAlive({
+    storage: browser.storage.session,
+    key: ACTOR_HOST_KEEPALIVE_KEY,
+    intervalMs: ACTOR_HOST_KEEPALIVE_MS,
+    ackTimeoutMs: ACTOR_HOST_KEEPALIVE_ACK_MS,
+    onLost: (error) => notifyActorHostKeepAliveLost(error),
+  })
+  : null;
+// why: Firefox currently has no official long-task lifetime signal for MV3
+// event pages. Mozilla Bug 1851373 documents storage.session activity plus a
+// synchronously registered change listener as the extension-side workaround.
+// The helper verifies the exact lease generation before actor work begins.
+if (actorHostKeepAlive) {
+  browser.storage.session.onChanged.addListener((changes) => {
+    actorHostKeepAlive.onChanged(changes);
+  });
+}
+const baseActorIsolation = actorIsolationCapability({
+  offscreenWorker: offscreenAvailable,
+  backgroundPageWorker: backgroundPageWorkerAvailable,
+});
+const actorIsolationState = makeActorIsolationStateStore({
+  storage: browser.storage.local,
+  protocol: ACTOR_WORKER_PROTOCOL,
+});
+let actorIsolation = actorIsolationAvailable(baseActorIsolation)
+  ? {
+    status: /** @type {const} */ ('temporarily_unavailable'),
+    host: baseActorIsolation.host,
+    reason: 'Actor isolation state is loading.',
+    retryable: false,
+  }
+  : baseActorIsolation;
+const actorIsolationReady = actorIsolationAvailable(baseActorIsolation)
+  ? actorIsolationState.load(baseActorIsolation)
+    .then((stored) => {
+      actorIsolation = /** @type {typeof baseActorIsolation} */ (stored ?? baseActorIsolation);
+      return actorIsolation;
+    })
+    .catch((error) => {
+      actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, error);
+      return actorIsolation;
+    })
+  : Promise.resolve(actorIsolation);
+// Relays that redeem an offscreen worker's authority need the exact browser-
+// owned host, not the broader "one of our extension pages" sender check.
+const isOffscreenSender = (/** @type {any} */ sender) => senderIsOffscreen(sender, {
+  runtimeId: browser.runtime?.id,
+  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
+  offscreenUrl: browser.runtime?.getURL?.(OFFSCREEN_URL) ?? '',
+});
+const isActualOptionsSender = (/** @type {any} */ sender) => isOptionsSender(sender, {
+  runtimeId: browser.runtime?.id,
+  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
+  optionsUrl: browser.runtime?.getURL?.('options/options.html') ?? '',
+});
+const isActualSidepanelSender = (/** @type {any} */ sender) => isSidepanelSender(sender, {
+  runtimeId: browser.runtime?.id,
+  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
+  sidepanelUrl: browser.runtime?.getURL?.('sidepanel/sidepanel.html') ?? '',
+});
+const isActualHomeSender = (/** @type {any} */ sender) => isHomeSender(sender, {
+  runtimeId: browser.runtime?.id,
+  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
+  homeUrl: browser.runtime?.getURL?.('home/home.html') ?? '',
+});
+
+// Root creation and recovery share one serialized custody lane. Without it,
+// base-network auto-start and two concurrent imports can all observe "missing"
+// and last-write-wins different permanent identities.
+let dwebIdentityMutationTail = Promise.resolve();
+let dwebIdentityMutationActive = false;
+let dwebStartDeferredByIdentityMutation = false;
+/** @template T @param {() => Promise<T>} operation @returns {Promise<T>} */
+const withDwebIdentityMutation = (operation) => {
+  const run = async () => {
+    dwebIdentityMutationActive = true;
+    try { return await operation(); }
+    finally {
+      dwebIdentityMutationActive = false;
+      if (dwebStartDeferredByIdentityMutation) {
+        dwebStartDeferredByIdentityMutation = false;
+        setTimeout(() => maybeStartBaseNetwork('identity-mutation-finished'), 0);
+      }
+    }
+  };
+  const result = dwebIdentityMutationTail.then(run, run);
+  dwebIdentityMutationTail = result.then(() => undefined, () => undefined);
+  return result;
+};
+
+// App network publication, version replacement, and deletion share one keyed
+// lane. The App client's own queue protects OPFS mutations; this wider lane
+// keeps a publish from committing a served hash while deletion revokes a stale
+// record snapshot.
+/** @type {Map<string, Promise<unknown>>} */
+const appLifecycleTails = new Map();
+/** @template T @param {string} appId @param {() => Promise<T>} operation @returns {Promise<T>} */
+const withAppLifecycle = async (appId, operation) => {
+  const prior = appLifecycleTails.get(appId) ?? Promise.resolve();
+  const current = prior.catch(() => {}).then(operation);
+  appLifecycleTails.set(appId, current);
+  try { return await current; }
+  finally {
+    if (appLifecycleTails.get(appId) === current) appLifecycleTails.delete(appId);
+  }
+};
+
+// Every live-App repository boundary uses this one ordering:
+// lifecycle lane -> editor flush/freeze -> repository lane -> resume/reopen.
+// The editor flush itself writes through the repository lane, so moving it
+// inside repositories.coordinate/appClient.withWriteLock would deadlock.
+const appQuiescence = createAppQuiescence({ tracker: appTabTracker, withLifecycle: withAppLifecycle });
+
+const dwebPublicationFence = createDwebPublicationFence();
+const withDwebPublication = dwebPublicationFence.run;
+const invalidateDwebPublications = dwebPublicationFence.invalidate;
+
+const reseedSharedApps = makeReseedSharedApps({
+  enabled: DWEB_ENABLED,
+  active: () => settingsHydrated && settingsStore.get().dwebEnabled,
+  locked: () => vault.isLocked(),
+  appRegistry,
+  withDwebPublication,
+  withAppLifecycle,
+  repositories,
+  sendMessage: (message) => browser.runtime.sendMessage(message),
+});
+
+const canChangeDwebIdentity = async () => {
+  const apps = await appRegistry.list();
+  // Treat legacy rows that predate shared:true conservatively when they still
+  // carry a local publisher binding. Remote installs and unshared local stubs
+  // do not prevent identity recovery.
+  return !identityChangeBlockedByApps(apps);
+};
+const dwebIdentityCustody = makeDwebIdentityCustody({
+  enabled: DWEB_ENABLED,
+  active: () => settingsHydrated && settingsStore.get().dwebEnabled,
+  vault,
+  auditLog,
+  identitySecretName: DWEB_IDENTITY_SECRET,
+  withIdentityMutation: withDwebIdentityMutation,
+  canChangeIdentity: canChangeDwebIdentity,
+});
+const dwebCustodyClient = makeDwebCustodyClient({
+  ensureOffscreen,
+  handleSecretRequest: dwebIdentityCustody.handle,
+});
+/** @type {ReturnType<typeof makePrivateTransferPort> | null} */
+let privateTransferPort = null;
+const dwebCustodyReset = makeRetryableCustodyReset({
+  enabled: DWEB_ENABLED,
+  hostAvailable: offscreenAvailable,
+  reset: async () => { await dwebCustodyClient.call('reset'); },
+});
+const ensureDwebSuspensionRecovery = dwebCustodyReset.ensure;
+void ensureDwebSuspensionRecovery().catch((error) => {
+  // A later start/share/rotation retries. Do not poison the worker lifetime if
+  // the offscreen port was still reconnecting during cold boot.
+  console.error('[sw] stale identity suspension recovery failed', error);
+});
 
 // The headless-JS client (the script tool). execHeadless ensures the offscreen
 // doc, then dispatches a 'job/run' message to job-runner.js hosted there.
@@ -2645,7 +3689,7 @@ const jsOffscreenClient = offscreenAvailable ? makeOffscreenJsClient({
 // Live actors-enabled script runs (background/script-runs.js): Stop → abort
 // pending asks + terminate the worker. Declared here (before buildToolContext
 // consumers run) and read by the actors/call route below.
-const scriptRuns = createScriptRunRegistry();
+const scriptRuns = createScriptRunRegistry({ actorOpLimit: ACTORS_RUN_MAX_OPS });
 
 // The context inspector's capture ring — "what did the model see" per
 // session, SW-memory only. Fed from the two seams that together cover
@@ -2681,21 +3725,83 @@ const rootChatSessionFor = async (sessionId) => {
   return null;
 };
 
-// The heap split: the ONE offscreen agent-loop client. It runs every non-
+// Firefox hosts the same worker runner directly from its background page. The
+// relay sender is a private object identity and these routes are never exposed
+// through runtime.onMessage on that path.
+const directActorHost = baseActorIsolation.host === 'background-page-worker'
+  ? makeDirectActorHost({
+    workerUrl: browser.runtime.getURL('offscreen/actor-worker.js'),
+    // Firefox MV3 event pages may unload while an unreturned task is pending.
+    // A small storage.session change refreshes the idle budget only while a run
+    // is active. The packaged lifetime lane proves this exact host.
+    startKeepAlive: () => actorHostKeepAlive?.start(),
+    stopKeepAlive: () => actorHostKeepAlive?.stop(),
+  })
+  : null;
+let actorHostLossPersistence = Promise.resolve();
+notifyActorHostKeepAliveLost = (error) => {
+  // Pause actor exposure before settling current runs. A later user retry must
+  // establish a fresh heartbeat and realm proof before actors become available.
+  actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, error);
+  directActorHost?.failKeepAlive(error);
+  actorHostLossPersistence = (async () => {
+    let persisted = true;
+    try {
+      await actorIsolationState.markUnavailable(
+        baseActorIsolation,
+        error,
+        'actor_host_keepalive_lost',
+      );
+    } catch { persisted = false; }
+    await auditLog.append({
+      type: 'actor_isolation_unavailable',
+      details: {
+        host: baseActorIsolation.host,
+        code: 'actor_host_keepalive_lost',
+        retryable: true,
+        persisted,
+      },
+    }).catch(() => {});
+    await pushState().catch(() => {});
+  })();
+};
+
+// The heap split: the ONE isolated agent-loop client. It runs every non-
 // orchestrator loop — an ephemeral reasoning actor (spawn.js, tools:[]) OR a
 // bound actor (VM/Notebook/App/web) — in its own dedicated Worker heap. Its
 // 'actor/tool-dispatch' route builds the actor's instance-pinned, gated ctx SW-side
 // and dispatches there — the worker holds no
-// key, no engine clients, no chrome.*. Null when offscreen is unavailable.
-const actorClient = offscreenAvailable ? makeOffscreenActorClient({
+// key, no engine clients, no browser extension APIs. Null only when no
+// dedicated-worker host exists.
+const actorChannelClient = offscreenAvailable ? makeOffscreenActorChannelClient({
   ensureOffscreen,
-  sendMessage: (m) => browser.runtime.sendMessage(m),
+  findOffscreenClient: async () => {
+    const clientsApi = /** @type {any} */ (globalThis).clients;
+    if (!clientsApi?.matchAll) return null;
+    const candidates = /** @type {Array<{
+     *   url: string,
+     *   postMessage: (message: any, transfer: Transferable[]) => void,
+     * }>} */ (await clientsApi.matchAll({ type: 'window', includeUncontrolled: true }));
+    const exactUrl = browser.runtime.getURL('offscreen/offscreen.html');
+    // why: a duplicate exact-URL page makes the recipient ambiguous. Failing
+    // closed prevents a user-opened sibling from receiving an actor channel.
+    return selectExactActorHostClient(candidates, exactUrl);
+  },
+}) : null;
+const actorClient = actorIsolationAvailable(baseActorIsolation) ? makeOffscreenActorClient({
+  ensureHost: offscreenAvailable ? ensureOffscreen : async () => {},
+  sendMessage: directActorHost?.sendMessage ?? ((m) => browser.runtime.sendMessage(m)),
+  runOnChannel: actorChannelClient?.run,
   callModel: /** @type {any} */ (callModel),
   getSecret,
   safeFetch,
   sessions,
   buildToolContext,
   dispatchToolCall: /** @type {any} */ (dispatchToolCall),
+  // Clean-context review layer 2: persisted/narrowed grants are re-checked
+  // against the live registry at dispatch time on every isolated actor host.
+  reviewToolAllowed: (/** @type {string} */ name) => isReadOnlyTool(name,
+    listTools().map((tool) => ({ name: tool.name, sideEffect: tool.sideEffect }))),
   pinActorCall,
   // Phase 4: rebuild an actor's narrowed-general tool ctx SW-side from its persisted
   // grantedTools (capability-by-need strip), the analog of the actor's kind-scoped strip.
@@ -2710,22 +3816,16 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   EXPOSURE_REVIEW,
   recordModelCall: contextSnapshots.record,
   // Announce each settled ACTOR tool dispatch on the UI ports (lazy: uiPorts is
-  // defined below, read at call time — same pattern as ownedTabFor). why: the
-  // offscreen actor heap has no turn/tool-use broadcast (that's turn-driver's,
-  // in-SW only), so without this the eval harness's OM2W recorder — and any
-  // activity view — is blind to what an actor actually did.
+  // defined below, read at call time, using the same pattern as ownedTabFor). why: the
+  // isolated actor heap has no turn/tool-use broadcast, so without this the
+  // eval harness's OM2W recorder and any
+  // activity view are blind to what an actor actually did.
   broadcastOp: (/** @type {any} */ msg) => uiPorts.broadcast(msg),
-  // The relay boundary. `runtime.sendMessage` cannot address one extension
-  // context, so the actor/run job (grant token included) is broadcast to every
-  // listener — the side panel and the engine tab pages among them. Pinning the
-  // three relay routes to the offscreen document is therefore what actually
-  // keeps another first-party page from dispatching as an actor; the token
-  // carries run identity and liveness on top of it.
-  isOffscreenSender: (/** @type {any} */ sender) => isOffscreenSender(sender, {
-    runtimeId: browser.runtime?.id,
-    extensionOrigin: browser.runtime?.getURL?.('') ?? '',
-    offscreenUrl: browser.runtime?.getURL?.(OFFSCREEN_URL) ?? '',
-  }),
+  // Firefox's direct host binds relays behind an unforgeable object identity.
+  // Chrome binds them to the exact offscreen WindowClient through a transferred
+  // MessageChannel and does not register these routes on runtime messaging.
+  isRelaySender: directActorHost?.isRelaySender ?? isOffscreenSender,
+  inboundDwebToolNames: DWEB_INBOUND_TOOL_NAMES,
   // Spend-limit preflight for the actor lane. Two tallies, because they fail in
   // different directions and each alone leaves a hole:
   //
@@ -2751,6 +3851,91 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
     return null;
   },
 }) : null;
+directActorHost?.bindRelayRoutes(actorClient?.routes ?? {});
+
+/**
+ * Run on the detected dedicated-worker host. A failure before the realm proof
+ * is safe to retry once because no model call or tool relay could have begun.
+ * Every post-proof failure is terminal for that turn.
+ * @param {any} job
+ * @param {any} [opts]
+ */
+const runActorIsolated = async (job, opts) => {
+  await actorIsolationReady;
+  if (!actorClient || !actorIsolationAvailable(actorIsolation)) {
+    return actorIsolationRefusal(actorIsolation, { targetRead: false, targetChanged: false });
+  }
+  const attempt = await runActorWithStartupRetry({
+    run: () => actorClient.run(job, opts),
+    isStartupFailure: isActorHostStartupFailure,
+    signal: opts?.signal,
+  });
+  const { result } = attempt;
+  if (!attempt.exhausted) return result;
+  actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, result?.error ?? 'actor worker startup failed');
+  let persisted = true;
+  try {
+    await actorIsolationState.markUnavailable(
+      baseActorIsolation,
+      result?.error ?? 'actor worker startup failed',
+      result?.code ?? 'unknown',
+    );
+  } catch { persisted = false; }
+  auditLog.append({
+    type: 'actor_isolation_unavailable',
+    details: { host: baseActorIsolation.host, code: result?.code ?? 'unknown', retryable: true, persisted },
+  }).catch(() => {});
+  void pushState().catch(() => {});
+  return {
+    ...actorIsolationRefusal(actorIsolation, { targetRead: false, targetChanged: false }),
+    cause: result?.error ?? null,
+  };
+};
+
+const retryActorIsolation = async () => {
+  await actorIsolationReady;
+  await actorHostLossPersistence;
+  if (!actorIsolationAvailable(baseActorIsolation)) return actorIsolationRefusal(baseActorIsolation);
+  const result = await actorClient?.run({
+    actorSessionId: '__actor_isolation_probe__',
+    message: '', systemPrompt: '', provider: '', model: '', probeOnly: true,
+  });
+  if (!result?.ok) {
+    actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, result?.error ?? 'actor worker startup failed');
+    let persisted = true;
+    try {
+      await actorIsolationState.markUnavailable(
+        baseActorIsolation,
+        result?.error ?? 'actor worker startup failed',
+        result?.code ?? 'unknown',
+      );
+    } catch { persisted = false; }
+    auditLog.append({
+      type: 'actor_isolation_retry_failed',
+      details: { host: baseActorIsolation.host, code: result?.code ?? 'unknown', performed: false, persisted },
+    }).catch(() => {});
+    await pushState();
+    return { ...actorIsolationRefusal(actorIsolation), cause: result?.error ?? null };
+  }
+  try {
+    await actorIsolationState.clear(baseActorIsolation);
+  } catch (error) {
+    actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, error);
+    auditLog.append({
+      type: 'actor_isolation_retry_failed',
+      details: { host: baseActorIsolation.host, code: 'actor_isolation_state_clear_failed', performed: false, persisted: true },
+    }).catch(() => {});
+    await pushState();
+    return { ...actorIsolationRefusal(actorIsolation), cause: actorIsolation.reason };
+  }
+  actorIsolation = baseActorIsolation;
+  auditLog.append({
+    type: 'actor_isolation_restored',
+    details: { host: actorIsolation.host, realmVerified: true, extensionApisPresent: false },
+  }).catch(() => {});
+  await pushState();
+  return { ok: true, capability: { ...actorIsolation } };
+};
 
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
 // 'pdf/extract' message to offscreen/pdf-extract.js (pdf.js in a Worker).
@@ -2818,6 +4003,24 @@ const applyWebExtract = (/** @type {any} */ resp, /** @type {unknown} */ extract
 // resolveRunnerModel; progress() is polled by Settings.
 const localModelState = makeLocalModelState();
 const localRunnerState = () => ({ available: localModelState.available(), model: LOCAL_MODEL_ID });
+/** @type {Promise<boolean>|null} */
+let localModelHydration = null;
+const hydrateLocalModelAvailability = async ({ force = false } = {}) => {
+  if (!localModelHostAvailable()) return false;
+  if (!force && localModelState.hydrated()) return localModelState.available();
+  if (localModelHydration) return localModelHydration;
+  localModelHydration = (async () => {
+    await ensureOffscreen();
+    const status = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'local-model/host/status' }));
+    if (!status) throw new Error('local model status unavailable');
+    if (localModelState.setAvailable(!!(status.available || status.downloaded))) {
+      onProviderConfigChanged();
+    }
+    return localModelState.available();
+  })();
+  try { return await localModelHydration; }
+  finally { localModelHydration = null; }
+};
 
 // genId → { tokens, waiters, done, error }: the async queue that turns the
 // offscreen's local-model/delta pushes into the adapter's async-generator.
@@ -2828,7 +4031,15 @@ const wakeLocalGen = (/** @type {any} */ s) => { const w = s.waiters.shift(); if
 browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
   if (msg?.type === 'local-model/delta') { const s = localGens.get(msg.genId); if (s) { s.tokens.push(msg.token); wakeLocalGen(s); } return undefined; }
   if (msg?.type === 'local-model/done') { const s = localGens.get(msg.genId); if (s) { s.done = true; s.error = msg.error ?? null; wakeLocalGen(s); } return undefined; }
-  if (msg?.type === 'local-model/progress') { localModelState.setProgress(msg.progress); uiPorts.broadcast({ type: 'local-model/progress', progress: msg.progress }); return undefined; }
+  if (msg?.type === 'local-model/progress') {
+    localModelState.setProgress(msg.progress);
+    if (msg.progress?.status === 'phase' && msg.progress?.phase === 'ready') {
+      if (localModelState.setAvailable(true)) onProviderConfigChanged();
+      void pushState().catch(() => {});
+    }
+    uiPorts.broadcast({ type: 'local-model/progress', progress: msg.progress });
+    return undefined;
+  }
   return undefined;
 });
 
@@ -2837,16 +4048,34 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
 // to max_new_tokens), yields tokens as they stream, throws on a reported error.
 const generateLocalForAdapter = (/** @type {any} */ opts) => {
   const genId = `lg${++localGenSeq}`;
-  /** @type {{ tokens: any[], waiters: any[], done: boolean, error: any }} */ const state = { tokens: [], waiters: [], done: false, error: null };
+  let hostError = null;
+  try {
+    requireRuntimeCapability(runtimeCapabilities.localWebGpuHost, 'localWebGpuHost');
+  } catch (error) {
+    hostError = error;
+  }
+  const hostAvailable = hostError === null;
+  /** @type {{ tokens: any[], waiters: any[], done: boolean, error: any }} */ const state = {
+    tokens: [],
+    waiters: [],
+    done: !hostAvailable,
+    error: hostError,
+  };
   localGens.set(genId, state);
-  ensureOffscreen()
-    .then(() => browser.runtime.sendMessage({ type: 'local-model/host/generate', genId, messages: opts.messages, system: opts.system, tools: opts.tools, maxTokens: 512 }))
-    .catch((e) => { state.done = true; state.error = (/** @type {{ message?: string }} */ (e))?.message ?? String(e); wakeLocalGen(state); });
+  if (hostAvailable) {
+    ensureOffscreen()
+      .then(() => browser.runtime.sendMessage({ type: 'local-model/host/generate', genId, messages: opts.messages, system: opts.system, tools: opts.tools, maxTokens: 512 }))
+      .catch((e) => { state.done = true; state.error = e; wakeLocalGen(state); });
+  }
   return (async function* () {
     try {
       for (;;) {
         if (state.tokens.length) { yield state.tokens.shift(); continue; }
-        if (state.done) { if (state.error) throw new Error(state.error); return; }
+        if (state.done) {
+          if (state.error instanceof Error) throw state.error;
+          if (state.error) throw new Error(String(state.error));
+          return;
+        }
         await new Promise((resolve) => { state.waiters.push(/** @type {any} */ (resolve)); });
       }
     } finally { localGens.delete(genId); }
@@ -2926,11 +4155,30 @@ const {
 // panel and resolves when the panel posts back 'confirm/answer'.
 // Exercised whenever the Plan/Act decideAction policy marks an action as
 // needing confirmation.
+let confirmationUiTail = Promise.resolve();
+/**
+ * Serialize scoped confirmation pushes so resolve→next-prompt order stays
+ * deterministic. The badge remains global, but an unrelated chat never
+ * receives another owner's prompt UUID or answer controls.
+ * @param {any} prompt
+ * @param {(prompt: any) => void} deliver
+ */
+const deliverConfirmationToActiveOwner = (prompt, deliver) => {
+  confirmationUiTail = confirmationUiTail.then(async () => {
+    const activeOwner = await sessionCache.sessionGet('currentSessionId');
+    if ((activeOwner ?? null) !== (prompt?.ownerSessionId ?? null)) return;
+    deliver(prompt);
+  }).catch((error) => {
+    console.warn('[sw] scoped confirmation delivery failed', error);
+  });
+};
 const confirmCoordinator = makeConfirmCoordinator({
   notifySidePanel: (prompt) => {
     if (!uiConnected()) return;
-    try { uiPorts.broadcast({ type: 'confirm/request', prompt }); }
-    catch (e) { console.warn('[sw] confirm/request post failed', e); }
+    deliverConfirmationToActiveOwner(prompt, (ownedPrompt) => {
+      try { uiPorts.broadcast({ type: 'confirm/request', prompt: ownedPrompt }); }
+      catch (e) { console.warn('[sw] confirm/request post failed', e); }
+    });
   },
   // Hang protection: no side-panel port → the agent can't ask, so auto-deny
   // immediately rather than awaiting forever.
@@ -2939,7 +4187,11 @@ const confirmCoordinator = makeConfirmCoordinator({
   // reason — answer, 120s timeout, or session reset (DESIGN-12). Without this a
   // timed-out/reset prompt lingers, and a later click "approves" an action that
   // was already auto-denied.
-  onSettled: (id) => { try { uiPorts.broadcast({ type: 'confirm/resolved', id }); } catch { /* port closing */ } },
+  onSettled: (id, prompt) => {
+    deliverConfirmationToActiveOwner(prompt, () => {
+      try { uiPorts.broadcast({ type: 'confirm/resolved', id }); } catch { /* port closing */ }
+    });
+  },
   // Raise an action badge while a confirm is pending so a waiting agent is
   // visible even if the panel is hidden; cleared at zero.
   onPendingChange: (count) => {
@@ -2968,10 +4220,12 @@ const sessionConfirmGrants = new Map();
  * prior "yes for session" doesn't re-prompt, then falls back to the
  * round-trip. Records new session grants.
  *
- * @param {{ tool: string, sessionId?: string|null, origins?: string[] }} prompt
+ * @param {{ tool: string, sessionId?: string|null, origins?: string[], oneShot?: boolean }} prompt
+ * @param {AbortSignal} [signal]
  * @returns {Promise<'yes_once'|'yes_session'|'no'>}
  */
-const confirmAction = async (prompt) => {
+const confirmAction = async (prompt, signal) => {
+  if (signal?.aborted) return 'no';
   const sid = prompt.sessionId ?? null;
   // issue 251 — the second LEARNED signal: the user AFFIRMED acting as themselves
   // on this origin, so remember that the origin is one they have an identity on.
@@ -2989,7 +4243,7 @@ const confirmAction = async (prompt) => {
   //
   // The signal's whole justification is "they affirmed it", so it fires exactly
   // where that is true. Origins the auto-approve path would have taught are still
-  // caught by the password-field signal on the first page walk.
+  // caught by the password-field signal on the first exact-document DOM-tool probe.
   //
   // Only on approval — a DECLINED write says the opposite, and recording it
   // would make refusing to act on a site the thing that marks it as yours.
@@ -3002,15 +4256,16 @@ const confirmAction = async (prompt) => {
   // has turned confirmWebWrites OFF, non-GET egress is auto-approved — their
   // explicit, risk-acknowledged choice. The session-grant cache still applies
   // when it's on.
-  if (prompt.tool === WEB_WRITE_CONFIRM_KEY && settingsStore.get().confirmWebWrites === false) {
-    return 'yes_once';
+  if (prompt.oneShot !== true
+    && prompt.tool === WEB_WRITE_CONFIRM_KEY
+    && settingsStore.get().confirmWebWrites === false) {
+    return signal?.aborted ? 'no' : 'yes_once';
   }
   // R5 (origin-bound grants): "approve for this session" means this tool ON
   // this origin — the dispatcher computes prompt.origins (the pinned tab's
   // origin for DOM tools, the target host for web writes), and the grant key
   // folds it in. Approving `click` on site A no longer covers site B. Tools
   // with no origin surface keep the bare tool key (confirm-grant-key.js).
-  const grantKey = confirmGrantKey(prompt);
   // DESIGN-17: an ACTOR never accumulates a STANDING grant — its confirms are
   // strictly PER-TURN (an actor can be steered by untrusted instance output
   // across turns, so a once-granted "yes for session" must not silence the next
@@ -3020,23 +4275,34 @@ const confirmAction = async (prompt) => {
   if (sid) {
     try { ephemeral = (await sessions.get(sid))?.kind === 'actor'; } catch { ephemeral = false; }
   }
-  if (!ephemeral && sid && sessionConfirmGrants.get(sid)?.has(grantKey)) {
-    return 'yes_session';
-  }
-  // ...and TELL THE PANEL, so it can stop offering a button that grants
-  // nothing. why this became load-bearing with #242: before the UGC override, a
-  // default-config user (confirmActions OFF) never saw an actor confirm at all,
-  // so the dead "Allow for session" was unreachable. Now it is the second thing
-  // they see on a GitHub issue, twice per comment — a control that looks like
-  // the way to stop the prompting and silently isn't. The downgrade itself is
-  // correct and stays; what was wrong was offering the choice.
-  const answer = await confirmCoordinator.confirm(/** @type {any} */ (
-    downgradesActorConfirm(prompt.tool, ephemeral, 'yes_session') ? { ...prompt, ephemeral: true } : prompt
-  ));
-  if (answer === 'yes_session' && sid && !ephemeral) {
-    if (!sessionConfirmGrants.has(sid)) sessionConfirmGrants.set(sid, new Set());
-    (/** @type {Set<string>} */ (sessionConfirmGrants.get(sid))).add(grantKey);
-  }
+  if (signal?.aborted) return 'no';
+  const answer = await answerWithSessionConfirmGrant({
+    prompt,
+    sessionId: sid,
+    ephemeral,
+    grants: sessionConfirmGrants,
+    request: async () => {
+      // Keep execution custody and display custody separate. `sessionId` remains
+      // the exact turn that can be stopped or granted; `ownerSessionId` is the root
+      // chat where a human may see and answer the prompt. This prevents a background
+      // actor from placing an authority dialog over whichever unrelated chat happens
+      // to be open when it asks.
+      const ownerSessionId = sid ? await resolveLifecycleRootSession(sid) : null;
+      const ownedPrompt = { ...prompt, ownerSessionId };
+      // ...and TELL THE PANEL, so it can stop offering a button that grants
+      // nothing. why this became load-bearing with #242: before the UGC override, a
+      // default-config user (confirmActions OFF) never saw an actor confirm at all,
+      // so the dead "Allow for session" was unreachable. Now it is the second thing
+      // they see on a GitHub issue, twice per comment. A control that looks like
+      // the way to stop the prompting and silently isn't. The downgrade itself is
+      // correct and stays; what was wrong was offering the choice.
+      return confirmCoordinator.confirm(/** @type {any} */ (
+        downgradesActorConfirm(prompt.tool, ephemeral, 'yes_session')
+          ? { ...ownedPrompt, ephemeral: true }
+          : ownedPrompt
+      ), signal);
+    },
+  });
   // Ephemeral: an actor's yes_session approves THIS call only (no standing grant),
   // EXCEPT a2a_contact — the sanctioned exception (an explicit first-contact
   // allowlist decision, the peer did shown to the user), whose raw answer survives
@@ -3076,6 +4342,24 @@ const sessionState = makeSessionState();
  * derived from the vault, never the secret itself.
  */
 const buildStateSnapshot = async () => {
+  // A cold MV3 worker can resume the vault and accept a UI port before the
+  // asynchronous chrome.storage settings read finishes. The snapshot must not
+  // observe channel defaults in that window: if the user selected a keyless
+  // provider (Ollama / Local WebGPU), the default Anthropic projection reports
+  // hasKey:false and strands the already-open composer until some unrelated
+  // mutation happens to push state again (issue #384).
+  //
+  let settingsAvailable = true;
+  try { await ensureSettingsReady(); }
+  catch {
+    // A transient storage failure must not turn channel defaults into a
+    // confirmed provider choice for the rest of this worker's lifetime. The
+    // full hydration gate retries storage AND reapplies boot-time consumers
+    // such as the vault lock policy; a raw store load would leave those stale.
+    try { await ensureSettingsReady(); }
+    catch { settingsAvailable = false; }
+  }
+  await actorIsolationReady;
   const sessionId = await sessionCache.sessionGet('currentSessionId');
   // prfEnrolled is cheap to read (one kv.get) and the side panel uses it
   // (permission resolved per-path below — needs the session record.)
@@ -3099,34 +4383,83 @@ const buildStateSnapshot = async () => {
         hasRecovery,
       },
       session: { sessionId: null, messages: [], permission, customSystemPrompt: null, toolManifest: null },
-      providers: { current: resolveActiveProvider().name, hasKey: false, model: resolveActiveProvider().model, defaultRunnerModel: resolveActiveProvider().defaultRunnerModel },
+      providers: {
+        current: resolveActiveProvider().name,
+        hasKey: false,
+        model: resolveActiveProvider().model,
+        defaultRunnerModel: resolveActiveProvider().defaultRunnerModel,
+        configRevision: providerConfigRevision,
+      },
+      composer: {
+        provider: resolveActiveProvider().name,
+        model: resolveActiveProvider().model,
+        keyless: false,
+        credentialReady: false,
+        localReady: false,
+        canSend: false,
+        reason: 'vault-locked',
+      },
+      capabilities: { actorExecution: { ...actorIsolation }, ...runtimeCapabilities },
       settings: { ...settingsStore.get() },
       pendingConfirm: null,
       streaming: false,
+      actors: {},
+      spawned: { byToolUse: {}, sessions: {} },
+      asyncTasks: {},
     };
   }
   // Unlocked path.
   const session = sessionId ? (await sessions.get(/** @type {any} */ (sessionId))) ?? null : null;
   const permission = await resolvePermission(session);
-  // Default profile — the side panel gates first-run onboarding on
-  // onboardingComplete and labels assistant transcript rows with
+  // Default profile: the home page gates first-run onboarding on
+  // onboardingComplete and the transcript labels assistant rows with
   // peerName. Only surfaced when unlocked: the locked push deliberately
-  // omits it so the panel's "assume complete" default holds at the gate
-  // and onboarding can never flash before a real unlock.
+  // omits it so the surfaces' "assume complete" default holds at the gate
+  // and onboarding can never flash before a real unlock. Reconcile FIRST
+  // so the same push that would re-show the funnel to an established
+  // install carries the closed latch instead.
+  await reconcileOnboardingLatch();
   const profile = await profileState.get();
-  // why: providers block drives the Settings UI (provider selector + key
-  // field), so it reflects the SELECTED provider (settings), and hasKey
-  // is checked against THAT provider's vault secret. Keyless providers
-  // (Ollama) are always "ready" — there is no key to have.
+  // providers remains the Settings/default-for-NEW-chats projection. Composer
+  // readiness is separate because an existing chat stays bound to the provider
+  // recorded on its session even after the user changes that future default.
   const activeProv = resolveActiveProvider();
-  let hasKey = activeProv.keyless;
-  if (!hasKey) {
-    try { hasKey = !!(await vault.getSecret(/** @type {string} */ (activeProv.vaultSecretName))); }
-    catch { hasKey = false; }
+  const composerProvider = session?.provider ?? activeProv.name;
+  const composerModel = session?.model ?? activeProv.model;
+  if (activeProv.name === 'local-webgpu' || composerProvider === 'local-webgpu') {
+    await hydrateLocalModelAvailability().catch(() => false);
   }
+  const providerRows = listProviders();
+  const ollamaModels = liveProviderModelStatus('ollama');
+  const defaultReadiness = await resolveComposerReadiness({
+    provider: activeProv.name,
+    model: activeProv.model,
+    providers: providerRows,
+    getSecret: (name) => vault.getSecret(name),
+    localModelAvailable: localModelState.available(),
+    ollamaModels,
+    settingsAvailable,
+  });
+  const composer = composerProvider === activeProv.name && composerModel === activeProv.model
+    ? Object.freeze({ ...defaultReadiness, model: composerModel })
+    : await resolveComposerReadiness({
+        provider: composerProvider,
+        model: composerModel,
+        providers: providerRows,
+        getSecret: (name) => vault.getSecret(name),
+        localModelAvailable: localModelState.available(),
+        ollamaModels,
+        settingsAvailable,
+       });
+  const hasKey = settingsAvailable && defaultReadiness.credentialReady;
+  // Take every awaited store read before capturing the in-memory projection.
+  // Provider tool-use ids can repeat, so an older snapshot must never cross an
+  // await and arrive after a newer correlated actor-start for the same id.
+  const vaultInitialized = await vault.isInitialized();
+  const liveActors = actorLiveProjection.snapshot(/** @type {string | null} */ (sessionId));
   return {
     vault: {
-      initialized: await vault.isInitialized(),
+      initialized: vaultInitialized,
       locked: false,
       unlockedAt: vault.unlockedAt(),
       prfEnrolled: prf.enrolled,
@@ -3157,18 +4490,34 @@ const buildStateSnapshot = async () => {
       current: activeProv.name,
       hasKey,
       model: activeProv.model,
+      configRevision: providerConfigRevision,
       // why: the web actor's fast default for this provider — the Settings
       // "Web actor model" field shows it as the blank placeholder so "blank"
       // honestly reads as e.g. claude-haiku-4-5, not "inherit".
       defaultRunnerModel: activeProv.defaultRunnerModel,
     },
+    composer,
+    capabilities: { actorExecution: { ...actorIsolation }, ...runtimeCapabilities },
     profile: {
       id: profile.id,
       peerName: profile.peerName,
       onboardingComplete: !!profile.onboardingComplete,
     },
     settings: { ...settingsStore.get() },
-    pendingConfirm: null,
+    // The snapshot is the switch-back and late-joiner path for confirmation
+    // state. Live confirm/request events remain the fast path; this selects only
+    // prompts owned by the chat represented by this snapshot.
+    pendingConfirm: confirmCoordinator.getPendingForOwner(
+      typeof sessionId === 'string' ? sessionId : null,
+    ),
+    // Live actor projections are part of the fresh snapshot, not a lucky stream
+    // of events seen only by panels that were already open. Every row is scoped
+    // to this viewed root before it crosses the UI boundary.
+    actors: liveActors.actors,
+    actorProjectionEpoch: liveActors.actorProjectionEpoch,
+    actorProjectionRevision: liveActors.actorProjectionRevision,
+    spawned: liveActors.spawned,
+    asyncTasks: liveActors.asyncTasks,
     // Per-session truth: is THIS chat's turn in flight? Lets the panel
     // re-arm its spinner/Stop affordances when the user switches back
     // to a conversation that kept streaming in the background.
@@ -3176,9 +4525,26 @@ const buildStateSnapshot = async () => {
   };
 };
 
+let statePushGeneration = 0;
 const pushState = async () => {
   if (!uiConnected()) return;
-  uiPorts.broadcast({ type: 'state', state: await buildStateSnapshot() });
+  const generation = ++statePushGeneration;
+  const state = await buildStateSnapshot();
+  // Snapshot assembly crosses vault/session/profile stores. A newer mutation can
+  // start and finish its push while an older build is still awaiting IO. Never
+  // let that older projection arrive last and strand every live surface on
+  // internally inconsistent provider/settings state.
+  if (generation !== statePushGeneration || !uiConnected()) return;
+  const ownerSessionId = typeof state.session?.sessionId === 'string'
+    ? state.session.sessionId : null;
+  // why: buildStateSnapshot awaits several stores. A confirmation can arrive
+  // after its pending read but before this continuation runs, while a switching
+  // panel still identifies as the previous chat and correctly rejects the live
+  // event. Refresh at the delivery boundary, apply the destination state first,
+  // then replay its prompt synchronously so that race cannot hide authority UI.
+  const pendingConfirm = confirmCoordinator.getPendingForOwner(ownerSessionId);
+  uiPorts.broadcast({ type: 'state', state: { ...state, pendingConfirm } });
+  if (pendingConfirm) uiPorts.broadcast({ type: 'confirm/request', prompt: pendingConfirm });
 };
 
 // Keepalive ports we hold references to so they're not GC'd. Recent
@@ -3230,15 +4596,37 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
     denylistNetGuard.sync();
     return false;
   }
-  if (msg?.type === 'pod/tab-ready') {
-    if (typeof msg.podId !== 'string' || sender?.tab?.id == null) return false;
-    // Only the Pod tab already pinned during create/adopt may resolve the ready
-    // promise. Without this check any extension page could claim an arbitrary
-    // Pod id and redirect later host RPCs to itself.
-    if (podTabTracker.getTabId(msg.podId) !== sender.tab.id) return false;
-    podTabTracker.onTabReady(msg.podId, sender.tab.id);
-    denylistNetGuard.sync();
-    return false;
+  if (msg?.type === 'app/tab-ready') {
+    if (typeof msg.appId !== 'string' || sender?.tab?.id == null) return false;
+    appTabTracker.onTabPending(msg.appId, sender.tab.id);
+    // Firefox currently has no proven manifest-sandbox host (its generated
+    // manifest intentionally omits Chrome's top-level `sandbox` key). Do not
+    // infer enforcement from its partial DNR API accepting a rule.
+    if (typeof browser.runtime.getBrowserInfo === 'function') {
+      appTabTracker.onTabFailed(msg.appId, new Error('Apps are not available in Firefox yet.'));
+      setTimeout(() => browser.tabs.remove(sender.tab.id).catch(() => {}), 250);
+      return Promise.resolve({
+        ok: false,
+        error: 'Apps are not available in Firefox yet. Use Chrome for isolated Apps.',
+      });
+    }
+    // App code is not delivered until its tab-scoped all-remote DNR rule is
+    // LIVE. CSP closes resource/connect paths, while DNR closes self-navigation
+    // that CSP cannot reliably govern. Unsupported/failing DNR therefore means
+    // the App host fails closed (not a best-effort degradation like denylist).
+    return denylistNetGuard.sync().then(() => {
+      const net = denylistNetGuard.state();
+      if (!net.supported || net.lastError) {
+        appTabTracker.onTabFailed(msg.appId, new Error('App network isolation is unavailable.'));
+        setTimeout(() => browser.tabs.remove(sender.tab.id).catch(() => {}), 250);
+        return {
+          ok: false,
+          error: 'Apps are unavailable because this browser cannot enforce their network isolation.',
+        };
+      }
+      appTabTracker.onTabReady(msg.appId, sender.tab.id);
+      return { ok: true };
+    });
   }
   if (msg?.type === 'pod/tab-adopt') {
     if (typeof msg.podId !== 'string' || sender?.tab?.id == null) return false;
@@ -3327,20 +4715,37 @@ browser.tabs.onRemoved.addListener((tabId) => {
   // its next op (the clients ensureTab internally); the binding persists.
   // Drop any DOM-nav refs for the closed tab.
   domRefs.clear(tabId);
-  // ...and drop it out of the network backstop's tab scope. Tab ids are REUSED
-  // within a browser session, so a stale entry would silently apply the block
-  // to whatever unrelated tab inherits the id.
+  browserOriginCustody.close(tabId).catch(() => {});
+  browserNetworkCustody.close(tabId).catch(() => {});
+  // ...and drop it out of the network backstop's tab scope. Tab ids remain
+  // unique within one browser session, but closed tabs no longer need rules.
   denylistNetGuard.sync();
+  // A downloaded preview update may have been waiting only for this engine
+  // host to close. The update module re-checks every other surface and active
+  // turn before it can reload.
+  updateCheck.onQuiet();
 });
 
-// Invalidate a tab's DOM-nav refs when it starts navigating — the
-// backendDOMNodeIds belong to the old document. why: tabs.onUpdated
-// (status 'loading') instead of a new webNavigation permission — full
-// navigations are covered, and an SPA route change that slips through
-// still fails safe (DOM.resolveNode can't find the node → tool errors →
-// the model re-snapshots).
+// Invalidate a tab's DOM-nav refs when it starts navigating. The backend DOM
+// node ids belong to the old document. tabs.onUpdated covers full navigations;
+// an SPA route change that slips through still fails safe when DOM.resolveNode
+// cannot find the node and the model has to take a new snapshot.
 browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading') domRefs.clear(tabId);
+  if (typeof changeInfo.url === 'string' && drivenTabIds().includes(tabId)) {
+    browserOriginCustody.retain(tabId, changeInfo.url, { keepOnPersistFailure: true })
+      .then((originReceipt) => {
+        if (originReceipt) denylistNetGuard.recover();
+        return denylistNetGuard.sync();
+      })
+      .catch(async (error) => {
+        // Keep the volatile domain in the rule projection so the live page and
+        // its worker remain contained. Future tools stay closed until a later
+        // retain successfully persists the complete snapshot.
+        denylistNetGuard.fail(error);
+        await denylistNetGuard.sync();
+      });
+  }
 });
 
 browser.runtime.onConnect.addListener((port) => {
@@ -3349,6 +4754,14 @@ browser.runtime.onConnect.addListener((port) => {
   // so an untrusted connector must never get it. Same boundary as the
   // message dispatcher.
   if (!isTrustedSender(port.sender)) { try { port.disconnect(); } catch { /* already gone */ } return; }
+  if (port.name === 'private-transfer') {
+    if (offscreenAvailable || !privateTransferPort || !isActualOptionsSender(port.sender)) {
+      try { port.disconnect(); } catch { /* already gone */ }
+      return;
+    }
+    privateTransferPort.attach(/** @type {any} */ (port));
+    return;
+  }
   if (port.name === 'sidepanel' || port.name === 'home' || port.name === 'eval') {
     // The side panel and the full-page home are equal live surfaces (DESIGN-12);
     // the 'eval' surface (the Lab section + the standalone eval page) also needs
@@ -3362,13 +4775,9 @@ browser.runtime.onConnect.addListener((port) => {
     // and replay the current-agent-tab card (it's not in the state snapshot).
     broadcastSurfaces();
     broadcastAgentTab();
-    // Replay a live pending confirm to THIS fresh surface so a late-joiner can
-    // answer it — the state snapshot deliberately doesn't carry confirm state.
-    const pendingPrompt = confirmCoordinator.getPending();
-    if (pendingPrompt) {
-      try { port.postMessage({ type: 'confirm/request', prompt: pendingPrompt }); }
-      catch { /* port closing */ }
-    }
+    // Pending confirmations ride the scoped state snapshot above. Replaying the
+    // latest global prompt here would let a background chat paint authority UI
+    // over the chat this fresh surface is actually viewing.
     // Same idea for a LIVE goal run: its goal/state events only reached ports
     // connected when they fired, and the snapshot carries no goal-run field. So
     // replay each active run to this fresh surface — otherwise a reopened panel
@@ -3377,9 +4786,16 @@ browser.runtime.onConnect.addListener((port) => {
     for (const ev of (goalRunner?.activeStates?.() ?? [])) {
       try { port.postMessage(ev); } catch { /* port closing */ }
     }
+    // Replay an undelivered "update available" notice to this fresh surface
+    // and re-check for a newer preview build (throttled inside; declared at
+    // the boot tail - connect events only ever fire after module eval).
+    updateCheck.onUiConnect();
     port.onDisconnect.addListener(() => {
       uiPorts.remove(port);
       broadcastSurfaces();
+      // A parked downloaded update may now be able to apply (the module
+      // re-checks that everything is quiet before reloading).
+      updateCheck.onQuiet();
       // Sidebar just closed → if the user is sitting on a peerd-opened web tab,
       // surface the reminder (and start its 15s timer) right then.
       if (port.name === 'sidepanel' && !uiPorts.hasNamed('sidepanel')) {
@@ -3415,6 +4831,13 @@ browser.runtime.onConnect.addListener((port) => {
       keepalivePorts.delete(/** @type {any} */ (port));
     });
     return;
+  }
+  if (port.name === 'dweb-custody') {
+    if (!isOffscreenSender(port.sender)) {
+      try { port.disconnect(); } catch { /* already disconnected */ }
+      return;
+    }
+    dwebCustodyClient.attach(/** @type {any} */ (port));
   }
 });
 
@@ -3477,9 +4900,9 @@ const prewalk = makePrewalkController({
   now: Date.now,
 });
 
-const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
+const turnDriver = makeTurnDriver({
   vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
-  sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser, originOfTabUrl,
+  sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser,
   skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
   filterByDwebActive, filterByDwebEnabled,
   filterDescriptorsByManifest, mainAgentDescriptors, listTools, settingsStore, DWEB_ENABLED,
@@ -3489,6 +4912,7 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   resolveFailoverChain, shouldFailover, callModel, runUserTurn, getSecret,
   safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
   contextWindowFor, liveContextWindow, currentAppScope, checkpointMgr, detectInterruptedTurn,
+  getDenylist: () => denylistStore.patterns(),
   // Lifecycle recovery notices → the next turn's <context> message (read-once).
   drainRecoveryNotices: (/** @type {string} */ sid) => lifecycleBoot.drainNoticesFor(sid),
   recordModelCall: contextSnapshots.record,
@@ -3496,11 +4920,22 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   // plus the engine-actor reconcile (VM/Notebook/App swap after their first turn).
   reconcilePrewalk: prewalk.reconcile, maybePrewalkSwap: prewalk.maybeSwap,
   reconcileEngineActor: prewalk.reconcileEngineActor,
+  getActorIsolation: () => actorIsolation,
+  waitForActorIsolation: () => actorIsolationReady,
+  getRuntimeCapabilities: () => runtimeCapabilities,
   // postChatNote is declared just below this call — defer the reference so it
   // resolves at call-time (the same late-declared-dep pattern the orchestrator
   // wiring above uses, see the note at the postChatNote site).
   postChatNote: (/** @type {any} */ text, /** @type {any} */ action) => postChatNote(text, action),
 });
+const runAgentTurn = async (/** @type {any} */ args) => {
+  await ensureSettingsReady();
+  return turnDriver.runAgentTurn(args);
+};
+const maybeAutoResume = async (/** @type {string|null|undefined} */ sessionId) => {
+  await ensureSettingsReady();
+  return turnDriver.maybeAutoResume(sessionId);
+};
 
 // Build the goal runner now that runAgentTurn exists. Each goal turn is a
 // normal runAgentTurn on the MAIN session (turn 1 = the goal, later turns =
@@ -3543,6 +4978,21 @@ goalRunner = makeGoalRunner({
   // so check-offs show; '' when no list yet (todo/core.js formatTodoBlock).
   getTodoBlock: async (/** @type {string} */ sid) =>
     formatTodoBlock(/** @type {any} */ (await sessions.get(sid))?.todos),
+  hasUnresolvedSideEffects: async (/** @type {string} */ sid) => {
+    // Reconciliation must commit before this query. Otherwise a resumed goal
+    // could inspect the old nonterminal record, see no outcome_unknown yet,
+    // and start the exact continuation this guard exists to stop.
+    await lifecycleArmed;
+    // Exact compact intent can exceed its own bounded store only under extreme
+    // unresolved pressure. The persistent sentinel means no root can prove it
+    // is clear, so autonomous work stops globally until a human directs it.
+    if (await lifecycleBoot.operationLog.unknownIntentOverflowed?.()) return true;
+    const unknowns = await lifecycleBoot.operationLog.listOutcomeUnknown();
+    for (const record of unknowns) {
+      if (await resolveLifecycleRootSession(record.sessionId) === sid) return true;
+    }
+    return false;
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -3588,11 +5038,9 @@ const notifyRoutineFired = () => {
 // turn. trusted:true — a routine is USER-authored first-party work, same posture
 // as goal mode; untrusted CONTENT it later pulls is still fenced behind actors.
 const fireRoutine = async (/** @type {any} */ routine) => {
-  // why settingsStore.load() first: a cold-unlock catch-up can reach here before
-  // loadSettings() (un-awaited at boot) has hydrated, so ensureActiveProvider
-  // would pick the channel-default provider instead of the user's. load() is
-  // idempotent — same guard the maybeAutoResume path uses.
-  await settingsStore.load().catch(() => {});
+  // Scheduled work must never select a provider from channel defaults while a
+  // cold worker is still loading the user's durable choice.
+  await ensureSettingsReady();
   const ap = await ensureActiveProvider();
   // why explicit ACT + confirm-off (NOT resolvePermission(null)): a routine runs
   // UNATTENDED with the panel closed. Inheriting the foreground chat's mode would
@@ -3738,8 +5186,17 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
 // best-effort boot rehydrate, shared by the three actor registries below (a
 // missing/garbage stored value just starts empty). Ephemeral by design — every
 // one of these is a routing cache whose durable truth lives on the session record.
-const persistRegistry = (/** @type {string} */ key, /** @type {{ entries: () => any }} */ registry) =>
-  () => { sessionCache.sessionSet(key, registry.entries()).catch(() => {}); };
+const persistRegistry = (/** @type {string} */ key, /** @type {{ entries: () => any }} */ registry) => {
+  let lane = Promise.resolve();
+  return () => {
+    // Snapshot at mutation time, then serialize writes in that same order. An
+    // older bind write may never land after a newer retirement snapshot.
+    const snapshot = registry.entries();
+    const operation = lane.catch(() => {}).then(() => sessionCache.sessionSet(key, snapshot));
+    lane = operation.catch(() => {});
+    return operation;
+  };
+};
 // Returns the load promise (never rejects) so a caller whose state DEPENDS on
 // the rehydrated entries — the net guard's driven-tab set — can chain onto it
 // instead of guessing at the timing.
@@ -3747,6 +5204,18 @@ const hydrateRegistry = (/** @type {string} */ key, /** @type {{ load: (e: any) 
   Promise.resolve(sessionCache.sessionGet(key))
     .then((e) => { if (Array.isArray(e)) registry.load(/** @type {any} */ (e)); })
     .catch(() => {});
+const hydrateRegistryForGuard = (
+  /** @type {string} */ key,
+  /** @type {{ load: (e: any) => void }} */ registry,
+) => Promise.resolve(sessionCache.sessionGet(key))
+  .then((entries) => {
+    if (Array.isArray(entries)) registry.load(/** @type {any} */ (entries));
+    return { ok: true };
+  })
+  .catch((error) => ({
+    ok: false,
+    error: `web_bindings_hydration_failed: ${error instanceof Error ? error.message : String(error)}`,
+  }));
 
 const webActorTabBindings = makeWebActorTabBindings();
 const WEB_BINDINGS_KEY = 'webActorTabBindings';
@@ -3760,8 +5229,7 @@ const persistWebBindings = () => { persistWebBindingsOnly(); denylistNetGuard.sy
 // Rehydration restores bindings without going through persistWebBindings (an
 // SW restart finds tabs still being driven), so the guard is told once the load
 // lands — not before, or it would re-derive the same empty set it started with.
-hydrateRegistry(WEB_BINDINGS_KEY, webActorTabBindings)
-  .then(() => denylistNetGuard.sync());
+const webActorBindingsReady = hydrateRegistryForGuard(WEB_BINDINGS_KEY, webActorTabBindings);
 
 // The chat→web-actor registry — the 0-or-1-tab web actor (addressed by `to:'web'`,
 // the SINGLE entry point for web work). Separate from webActorTabBindings because
@@ -3771,7 +5239,7 @@ hydrateRegistry(WEB_BINDINGS_KEY, webActorTabBindings)
 const webActorRegistry = makeWebActorRegistry();
 const WEB_ACTOR_KEY = 'webActorRegistry';
 const persistWebActors = persistRegistry(WEB_ACTOR_KEY, webActorRegistry);
-hydrateRegistry(WEB_ACTOR_KEY, webActorRegistry);
+const webActorRegistryReady = hydrateRegistry(WEB_ACTOR_KEY, webActorRegistry);
 
 // PR #119 — the code-REPL arm's SW route. A page.<method> call the code-surface
 // web actor makes inside its sealed worker rides here (offscreen job-runner →
@@ -3792,7 +5260,7 @@ const pageCallHandler = makePageCallHandler({
   dispatchToolCall: /** @type {any} */ (dispatchToolCall),
   buildActorContext: ({ sessionId, tabId }) => buildToolContext({
     sessionId, activeTabId: tabId,
-    exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: String(tabId), actorBacking: 'tab',
+    exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: typeof tabId === 'number' ? String(tabId) : 'web', actorBacking: 'tab',
     // FORCE the tools surface for the INNER mapped-tool dispatch: the actor's own
     // surface is 'code' (that's how it got here), but navigate/click/type must be
     // ALLOWED for the page.* translation — else the setting would refuse them.
@@ -3800,13 +5268,21 @@ const pageCallHandler = makePageCallHandler({
   }),
 });
 const pageCallRoute = {
-  /** @param {{ method?: string, args?: object, ownerSessionId?: string }} msg */
-  'page/call': async ({ method, ownerSessionId, args } = {}) => {
+  /** @param {{ method?: string, args?: object, ownerSessionId?: string, runId?: string }} msg @param {any} sender */
+  'page/call': async ({ method, ownerSessionId, args, runId } = {}, sender = undefined) => {
+    if (!isOffscreenSender(sender)) return { ok: false, error: 'page_call_unauthorized_relay' };
     if (vault.isLocked()) return { ok: false, error: 'locked' };
     if (typeof ownerSessionId !== 'string' || !ownerSessionId) return { ok: false, error: 'page_call_no_owner' };
+    if (typeof runId !== 'string' || scriptRuns.ownerFor(runId) !== ownerSessionId
+      || scriptRuns.allows(runId, 'page') !== true || scriptRuns.admitOp(runId, 'page') !== true) {
+      return { ok: false, error: 'page_call_unknown_finished_foreign_or_over_limit_run' };
+    }
+    const runSignal = scriptRuns.signalFor(runId);
+    if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
     // The owner MUST be a live tab-backed web actor — the page surface is not a
     // general worker capability. (findActorSession/get by id; reject otherwise.)
     const owner = await sessions.get(ownerSessionId).catch(() => null);
+    if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
     if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web' || owner.backing === 'api') {
       return { ok: false, error: 'page_call_not_web_actor' };
     }
@@ -3818,15 +5294,19 @@ const pageCallRoute = {
     // actionable "open a page first" message. See resolvePageTab.
     const decision = resolvePageTab(webActorTabBindings.tabFor(ownerSessionId), /** @type {string} */ (method));
     if (decision.action === 'refuse') return { ok: false, error: decision.error };
+    /** @type {number | undefined} */
     let tabId;
     if (decision.action === 'adopt') {
-      const adopted = await adoptWebTab(ownerSessionId).catch(() => null);
+      if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
+      const adopted = await adoptWebTab(ownerSessionId, runSignal ?? undefined).catch(() => null);
+      if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
       if (typeof adopted?.tabId !== 'number') return { ok: false, error: 'page_call_tab_open_failed' };
       tabId = adopted.tabId;
     } else {
       tabId = decision.tabId;
     }
-    const outcome = await pageCallHandler({ method: /** @type {string} */ (method), args, sessionId: ownerSessionId, tabId });
+    if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
+    const outcome = await pageCallHandler({ method: /** @type {string} */ (method), args, sessionId: ownerSessionId, tabId, signal: runSignal ?? undefined });
     // Announce the settled op on the UI ports — pure observability, ZERO added
     // authority (the gated dispatch already ran; consumers see method/ok only).
     // why: a page_code call is ONE tool_use whose real page actions happen in
@@ -3836,8 +5316,7 @@ const pageCallRoute = {
     // [navigate, answer] and a judge can't see the work.
     uiPorts.broadcast({
       type: 'page/op', sessionId: ownerSessionId, tabId,
-      method: /** @type {string} */ (method), args: args ?? {}, ok: outcome?.ok === true,
-      ...(outcome?.ok === false ? { error: String(outcome.error ?? '').slice(0, 200) } : {}),
+      method: canonicalCodeTraceLabel('page', method).method, ok: outcome?.ok === true,
     });
     return outcome;
   },
@@ -3856,16 +5335,24 @@ const pageCallRoute = {
 //     same-origin, keyless — identical authority to fetch_url), so this relay adds
 //     nothing the live actor doesn't already have for its own origin.
 const siteFetchCallRoute = {
-  /** @param {{ ownerSessionId?: string, siteOrigin?: string, pathOrUrl?: string, method?: string, headers?: Record<string,string>, body?: unknown }} msg */
-  'site-fetch/call': async ({ ownerSessionId, siteOrigin, pathOrUrl, method, headers, body } = {}) => {
+  /** @param {{ ownerSessionId?: string, siteOrigin?: string, pathOrUrl?: string, method?: string, headers?: Record<string,string>, body?: unknown, runId?: string }} msg @param {any} sender */
+  'site-fetch/call': async ({ ownerSessionId, siteOrigin, pathOrUrl, method, headers, body, runId } = {}, sender = undefined) => {
+    if (!isOffscreenSender(sender)) return { ok: false, error: 'site_fetch_unauthorized_relay' };
     if (vault.isLocked()) return { ok: false, error: 'locked' };
     if (typeof ownerSessionId !== 'string' || !ownerSessionId) return { ok: false, error: 'site_fetch_no_owner' };
+    if (typeof runId !== 'string' || scriptRuns.ownerFor(runId) !== ownerSessionId
+      || scriptRuns.allows(runId, 'site') !== true || scriptRuns.admitOp(runId, 'site') !== true) {
+      return { ok: false, error: 'site_fetch_unknown_finished_foreign_or_over_limit_run' };
+    }
+    const runSignal = scriptRuns.signalFor(runId);
+    if (runSignal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
     const owner = await sessions.get(ownerSessionId).catch(() => null);
     if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web') {
       return { ok: false, error: 'site_fetch_not_web_actor' };
     }
     const pin = normalizeApiOrigin(siteOrigin);
     if (!pin) return { ok: false, error: `site_fetch_bad_origin: ${siteOrigin}` };
+    if (isKnownIdpHost(pin)) return { ok: false, error: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE };
     const resolved = resolveSiteUrl(pathOrUrl, pin);
     if ('error' in resolved) return { ok: false, error: resolved.error };
     const url = resolved.url;
@@ -3876,6 +5363,37 @@ const siteFetchCallRoute = {
       const hit = matchesDenylist(host, denylistStore.patterns());
       if (hit) return { ok: false, error: `denylisted: ${host} matches '${hit}'` };
     }
+    // Recheck durable-client custody at EVERY worker bridge operation. The
+    // tool boundary already refuses before loading the module, but a run may
+    // outlive an origin-state change and this relay is also a privileged entry
+    // point in its own right. API actors own their fixed instance origin;
+    // tab-backed actors consume the same live origin-state predicate as the
+    // direct tools. Do this before a write confirmation so a forged relay can't
+    // manufacture a prompt for an origin its owner never held.
+    /** @type {ReturnType<typeof originLockFor>} */
+    let tabOriginLock = null;
+    // Legacy tab actors omit `backing`; an explicit null/unknown value is
+    // malformed persisted authority, not another spelling of that legacy.
+    const relayBacking = owner.backing === undefined ? 'tab' : owner.backing;
+    const ownedApiOrigin = owner.backing === 'api' && typeof owner.instanceId === 'string'
+      ? normalizeApiOrigin(owner.instanceId)
+      : null;
+    if (relayBacking === 'tab' && hasDurableSiteClientState(owner.originState)) {
+      originStates.hydrate(ownerSessionId, /** @type {any} */ (owner.originState));
+      tabOriginLock = originLockFor(ownerSessionId);
+    }
+    const authorizeTabOrigin = tabOriginLock?.authorizeSiteClientOrigin(
+      () => liveSiteClientLandingFor(ownerSessionId),
+    );
+    const reauthorizeSiteFetch = () => authorizeSiteClientRelayOrigin({
+      backing: relayBacking,
+      instanceOrigin: ownedApiOrigin,
+      durableState: /** @type {any} */ (owner.originState),
+      targetOrigin: pin,
+      authorizeTabOrigin,
+      isKnownIdp: isKnownIdpHost,
+    });
+    if (!await reauthorizeSiteFetch()) return { ok: false, error: 'site_fetch_cross_origin' };
     const httpMethod = String(method ?? 'GET').toUpperCase();
     // Anti-exfil: a non-GET can transmit in-context data. Confirm by default via
     // the SHARED web:write key (one approval governs fetch_url + call_api + this).
@@ -3884,8 +5402,9 @@ const siteFetchCallRoute = {
         tool: 'web:write', kind: 'web_write', origins: [pin],
         summary: `Allow a ${httpMethod} request to ${host} from a site client? This can send data out of the browser.`,
         sessionId: ownerSessionId,
-      }));
+      }), runSignal ?? undefined);
       if (ans !== 'yes_once' && ans !== 'yes_session') return { ok: false, error: 'declined: user declined the site-client write.' };
+      if (runSignal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
     }
     // The actor's SESSION-SCOPED / origin-pinned webFetch — same wrappers
     // buildToolContext hands the web/API actor. Cookies ride only same-origin to
@@ -3932,11 +5451,9 @@ const siteFetchCallRoute = {
       // named site_client_* as uncovered, and a relay that quietly kept the
       // wider scope would have made that note the only thing standing between a
       // hijacked actor and the user's session.
-      originStates.hydrate(ownerSessionId, /** @type {any} */ (owner.originState));
-      const lock = originLockFor(ownerSessionId);
       scopedFetch = withSessionScopedCredentials(
         webFetch,
-        lock ? lock.makeScope(() => tabOrigin) : () => tabOrigin,
+        tabOriginLock ? tabOriginLock.makeScope(() => tabOrigin) : () => tabOrigin,
       );
     }
     // Strip tool-supplied credential headers (a laundered injection forging one) —
@@ -3954,8 +5471,12 @@ const siteFetchCallRoute = {
       reqBody = JSON.stringify(reqBody);
       if (!safeHeaders['Content-Type'] && !safeHeaders['content-type']) safeHeaders['Content-Type'] = 'application/json';
     }
+    // Consent, tab reads, and request shaping all happened after the first
+    // check. Re-read custody with no further await before starting network IO.
+    if (!await reauthorizeSiteFetch()) return { ok: false, error: 'site_fetch_cross_origin' };
+    if (runSignal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
     try {
-      const res = await scopedFetch(url, { method: httpMethod, headers: safeHeaders, body: /** @type {string|undefined} */ (reqBody) });
+      const res = await scopedFetch(url, { method: httpMethod, headers: safeHeaders, body: /** @type {string|undefined} */ (reqBody), ...(runSignal ? { signal: runSignal } : {}) });
       const ct = res.headers.get('content-type') ?? '';
       const text = (await res.text()).slice(0, 200_000);   // hard cap on relayed bytes
       let json = null;
@@ -3969,6 +5490,13 @@ const siteFetchCallRoute = {
     }
   },
 };
+
+// A headless Worker may settle while one of its fire-and-forget bridge calls is
+// still awaiting consent. The offscreen host invokes this control route before
+// releasing its bounded relay lease, so the run signal dismisses confirmations
+// and cancels admitted work first. Exact offscreen sender + owner binding make a
+// run id insufficient to cancel another session's work.
+const scriptRunControlRoute = makeScriptRunControlRoutes({ scriptRuns, isOffscreenSender });
 
 // DESIGN-19 — the options-surface routes for stored site clients: list (metas
 // only — no module bodies) + delete. The dossier/module are NOT secrets (they hold
@@ -3997,35 +5525,26 @@ const siteClientRoutes = {
 // (advancedAutomationOn — the SAME gate every other CDP path uses), else the
 // chrome.scripting MAIN-world fetch/XHR wrap (all channels, no new permission).
 // Returns a redacted, templatized endpoint inventory via the pure digester.
-const siteCaptureManager = {
-  /** @param {{ tabId: number, origins: string[] }} o */
-  start: async ({ tabId }) => {
-    if (advancedAutomationOn() && debuggerPool.startNetworkCapture) {
-      await debuggerPool.startNetworkCapture(tabId);
-      return { tap: 'cdp' };
-    }
-    await browser.scripting.executeScript({
-      target: { tabId }, world: 'MAIN', func: installFetchTapInjected,
-    });
-    return { tap: 'tap' };
-  },
-  /** @param {{ tabId: number, origins: string[] }} o */
-  stop: async ({ tabId, origins }) => {
-    /** @type {any[]} */
-    let events = [];
-    let deriver = 'capture-tap';
-    if (advancedAutomationOn() && debuggerPool.stopNetworkCapture && debuggerPool.isAttached?.(tabId)) {
-      events = await debuggerPool.stopNetworkCapture(tabId);
-      deriver = 'capture-cdp';
-    } else {
-      const [res] = await browser.scripting.executeScript({
-        target: { tabId }, world: 'MAIN', func: drainFetchTapInjected,
-      });
-      events = /** @type {any} */ (res?.result)?.events ?? [];
-    }
-    return digestCapture(events, { origins, deriver: /** @type {any} */ (deriver) });
-  },
-};
+const siteCaptureManager = makeSiteCaptureManager({
+  advancedAutomationOn,
+  debuggerPool,
+  scripting: browser.scripting,
+  installFetchTapInjected,
+  drainFetchTapInjected,
+  digestCapture,
+});
+
+// The tab has already destroyed both capture backends. Release the host-side
+// ownership record too, since tab ids can be reused within a browser session.
+browser.tabs.onRemoved.addListener((tabId) => { siteCaptureManager.release(tabId); });
+// A capture is document-bound, while tabs.onUpdated is the earliest host-side
+// signal that the tab has begun replacing that document. Discard immediately;
+// a later stop reports the cancellation instead of digesting stale traffic.
+browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (!siteCaptureManager.has(tabId)) return;
+  if (changeInfo?.status !== 'loading' && typeof changeInfo?.url !== 'string') return;
+  siteCaptureManager.cancel({ tabId, reason: 'page_changed' }).catch(() => {});
+});
 
 // DESIGN-18 — API actors. An API integration is a `web` actor (backing:'api') with NO
 // tab: it owns ONE FIXED origin and reaches it fetch-only. Keyed by (ownerChatId,
@@ -4050,12 +5569,12 @@ hydrateRegistry(API_ACTOR_KEY, apiActorBindings);
 // automatically; formed=true that it has state/memory here. A locked vault degrades to
 // formed-only (no throw). The KEY VALUE is never read — only the secret NAMES (origins).
 const listApiIntegrations = async (/** @type {string | null | undefined} */ chatId) => {
-  const formed = chatId ? apiActorBindings.originsFor(chatId) : [];
+  const formed = (chatId ? apiActorBindings.originsFor(chatId) : []).filter((origin) => !isKnownIdpHost(origin));
   /** @type {string[]} */
   let keyed = [];
   try {
     const names = await vault.listSecretNames();
-    keyed = /** @type {string[]} */ (names.map(originFromSecretName).filter(Boolean));
+    keyed = /** @type {string[]} */ (names.map(originFromSecretName).filter((origin) => origin && !isKnownIdpHost(origin)));
   } catch { keyed = []; }   // locked → formed-only
   const formedSet = new Set(formed);
   const keyedSet = new Set(keyed);
@@ -4065,7 +5584,10 @@ const listApiIntegrations = async (/** @type {string | null | undefined} */ chat
 
 // DESIGN-17 P1 — the DURABLE MESSAGE MAILBOX. An in-flight engine message→reply
 // correlation persists here, so an SW death between accept and deliver() doesn't
-// silently drop the reply-wake; redrain() re-queues it on boot. chrome.storage.
+// silently drop the reply-wake. The queued to started transition is the durable
+// no-replay boundary. Recovery never executes stored work: queued entries become
+// Not run notices, while started and legacy entries become Outcome unknown.
+// chrome.storage.
 // session (not local): a pending message only makes sense within ONE browser
 // session — a full browser restart drops the orchestrator turn anyway, so a stale
 // resurrection would be wrong. The blob is keyed by correlationId for O(1) removal.
@@ -4074,18 +5596,26 @@ const ACTOR_MAILBOX_KEY = 'actorMailbox';
 // otherwise clobber. A promise chain makes each update see the prior one's write.
 let mailboxChain = Promise.resolve();
 const mailboxUpdate = (/** @type {(m: Record<string, any>) => Record<string, any>} */ mutate) => {
-  mailboxChain = mailboxChain.then(async () => {
+  const operation = mailboxChain.catch(() => {}).then(async () => {
     const cur = await sessionCache.sessionGet(ACTOR_MAILBOX_KEY);
     const base = (cur && typeof cur === 'object') ? /** @type {Record<string, any>} */ (cur) : {};
     await sessionCache.sessionSet(ACTOR_MAILBOX_KEY, mutate(base));
-    // why log (not swallow): a persist failure silently degrades a message to
-    // heap-only (P0) durability — surface it so a lost-wake-after-restart is at
-    // least explicable in the SW console rather than a mystery.
-  }).catch((e) => console.warn('[actor] mailbox persist failed — message is heap-only this SW lifetime', e));
-  return mailboxChain;
+  });
+  // Keep the serialization lane usable after a failure, but return the original
+  // rejecting operation to the caller. message_actor then reports Not run and
+  // starts no actor side effect.
+  mailboxChain = operation.catch((e) => console.warn('[actor] mailbox persist failed: request not run', e));
+  return operation;
 };
 const actorMailbox = {
   append: (/** @type {{ id: string }} */ e) => mailboxUpdate((m) => ({ ...m, [e.id]: e })),
+  markStarted: (/** @type {string} */ id) => mailboxUpdate((m) => {
+    const entry = m[id];
+    if (!entry || typeof entry !== 'object' || (entry.state !== undefined && entry.state !== 'queued')) {
+      throw new Error('actor mailbox entry is missing or not queued');
+    }
+    return { ...m, [id]: { ...entry, state: 'started', startedAt: Date.now() } };
+  }),
   remove: (/** @type {string} */ id) => mailboxUpdate((m) => { const n = { ...m }; delete n[id]; return n; }),
   // Carry the storage KEY as the entry id so redrain can PRUNE a malformed/legacy
   // value (one missing its own id) under its real key — else it would skip forever
@@ -4096,6 +5626,11 @@ const actorMailbox = {
     return Object.entries(/** @type {Record<string, any>} */ (m))
       .map(([k, v]) => (v && typeof v === 'object') ? { ...v, id: v.id ?? k } : { id: k });
   },
+};
+
+onSessionMessageAppended = async (_sessionId, message) => {
+  const deliveryIds = actorDeliveryIdsFromMessage(message);
+  await Promise.all(deliveryIds.map((id) => actorMailbox.remove(id)));
 };
 
 // Lazily mint a web actor for a tab (the analog of mintActor). No registry
@@ -4111,6 +5646,8 @@ const actorMailbox = {
 // to the read DOM tools (+ fetch_url, a read), so the gate refuses click/type for it.
 /** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void, backing?: 'tab' | 'api', actorType?: 'web' | 'dweb', ownedOrigin?: string, provisionalOrigin?: boolean }} o */
 const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorType = 'web', ownedOrigin, provisionalOrigin }) => {
+  await ensureSettingsReady();
+  await hydrateLocalModelAvailability().catch(() => false);
   const ownerChat = ownerChatId ? await sessions.get(ownerChatId) : null;
   const perm = await resolvePermission(/** @type {any} */ (ownerChat));
   // why: the web actor is peerd's page reader/operator — a narrow, high-frequency,
@@ -4120,9 +5657,16 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorTyp
   // default (Haiku) → inherit the chat model (''). Engine actors (webvm/notebook/
   // app, via mintActor) are UNCHANGED — they reason about code/shell and keep the
   // chat model.
-  const actorProviderName = ownerChat?.provider ?? resolveActiveProvider().name;
-  const runnerProvider = listProviders().find((p) => p.name === actorProviderName);
-  const webActorModel = resolveRunnerModel({ settings: settingsStore.get(), provider: runnerProvider, localRunner: localRunnerState() });
+  const ownerProviderName = ownerChat?.provider ?? resolveActiveProvider().name;
+  const runnerProvider = listProviders().find((p) => p.name === ownerProviderName);
+  const runnerTarget = resolveRunnerTarget({
+    settings: settingsStore.get(),
+    providerName: ownerProviderName,
+    provider: runnerProvider,
+    localRunner: localRunnerState(),
+  });
+  const actorProviderName = runnerTarget.provider || ownerProviderName;
+  const webActorModel = runnerTarget.model;
   const created = await sessions.create({
     kind: 'actor',
     ...(ownerChatId ? { parentSessionId: ownerChatId } : {}),
@@ -4168,28 +5712,11 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorTyp
   return created.sessionId;
 };
 
-// issue 251 — a PER-TAB actor is minted BOUND to that tab's current origin, not
-// roaming, and this is the case the roaming default gets wrong.
-//
-// A per-tab actor exists because someone addressed a SPECIFIC open page — from
-// actor_list, or a tab the orchestrator itself opened, or the page the user is
-// looking at right now and just asked about. That page is the job. Roaming would
-// mean asking "what is this dashboard showing?" about a site you have an account
-// on gets refused on the actor's very first snapshot, with a report explaining
-// that helpers browsing the open web may not go where peerd would act as you —
-// about the page you are sitting on and explicitly asked about. Adversarial
-// review found that; the wiring comment's exemption reasoning ("the user's own
-// tab") had quietly assumed the orchestrator reads that page, but the DOM tools
-// are actor-only, so every such read goes through this actor.
-//
-// Binding is also STRICTLY TIGHTER than roaming here, not a carve-out: this
-// actor may work on that one origin and is stopped the moment the tab leaves it.
-// What it loses is permission to wander, which a tab-addressed actor never
-// needed. A tab with no nameable origin (blank, chrome://) gets no ownedOrigin,
-// so it adopts on first landing — the ordinary bound path.
-const mintWebActorForTab = async (/** @type {number} */ tabId) => {
-  const tab = await browser.tabs.get(tabId).catch(() => null);
-  const ownedOrigin = tab?.url ? normalizeApiOrigin(originOfTabUrl(/** @type {string} */ (tab.url))) : null;
+// A PER-TAB actor is bound to the exact ordinary origin observed by the numeric
+// address policy. It may work on that origin and is stopped when the tab leaves
+// it. A sensitive origin is refused before this function; working there requires
+// an explicit site handle grounded in the user's request.
+const mintWebActorForTab = async (/** @type {number} */ tabId, /** @type {string} */ ownedOrigin) => {
   return mintWebSession({
     instanceId: String(tabId),
     ownerChatId: /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId')),
@@ -4204,7 +5731,26 @@ const mintWebActorForTab = async (/** @type {number} */ tabId) => {
 // (SW death cleared session storage) so a live tab is always reachable.
 const resolveWebActorForTab = async (/** @type {number} */ tabId) => {
   const tab = await browser.tabs.get(tabId).catch(() => null);
-  if (!tab) return null;
+  if (!tab || !isAddressableBrowserTab(tab.url)) return null;
+  let liveHost = '';
+  try { liveHost = new URL(/** @type {string} */ (tab.url)).hostname; } catch { return null; }
+  if (matchesDenylist(liveHost, denylistStore.patterns())) return null;
+  // A page-controlled redirect may choose the tab's current site, but it may
+  // not turn that choice into bound authority. Classify the exact browser
+  // snapshot used below; mintWebActorForTab never rereads or substitutes it.
+  const authority = await numericTabAuthorityFor(tab.url);
+  if (!authority.allowed) {
+    auditLog.append({
+      type: 'actor_tab_authority_refused',
+      details: {
+        code: authority.code,
+        ...(authority.origin ? { origin: authority.origin } : {}),
+        ...(authority.reason ? { reason: authority.reason } : {}),
+        performed: false,
+      },
+    }).catch(() => {});
+    return { resolutionRefusal: numericTabAuthorityRefusal(authority) };
+  }
   let actorSessionId = webActorTabBindings.resolve(tabId);
   if (actorSessionId && !(await sessions.get(actorSessionId))) {
     webActorTabBindings.drop(tabId);
@@ -4221,15 +5767,13 @@ const resolveWebActorForTab = async (/** @type {number} */ tabId) => {
   // page they are no longer looking at. The binding is durable and the tab is
   // long-lived, so that state persists for as long as the tab does.
   //
-  // Addressing a tab is an authorization for THAT TAB AS IT IS NOW, so a fresh
-  // addressing re-derives the binding. This does NOT loosen the lock: the
-  // re-bind happens only here, between turns, on an explicit address. Inside a
-  // turn the actor still cannot leave its origin, which is the property that
-  // stops a hijacked page from moving it.
+  // Re-addressing may re-bind only to the ordinary origin approved above. A
+  // sensitive destination never reaches this branch and needs explicit site
+  // intent. Inside a turn the actor still cannot leave its owned origin.
   if (actorSessionId) {
     const rec = await sessions.get(actorSessionId).catch(() => null);
     const owned = /** @type {any} */ (rec)?.originState?.ownedOrigin ?? null;
-    const live = tab.url ? normalizeApiOrigin(originOfTabUrl(/** @type {string} */ (tab.url))) : null;
+    const live = authority.origin;
     if (owned && live && owned !== live) {
       webActorTabBindings.drop(tabId);
       persistWebBindings();
@@ -4237,7 +5781,9 @@ const resolveWebActorForTab = async (/** @type {number} */ tabId) => {
       actorSessionId = null;
     }
   }
-  if (!actorSessionId) actorSessionId = await mintOnce(`web:${tabId}`, () => mintWebActorForTab(tabId));
+  if (!actorSessionId) {
+    actorSessionId = await mintOnce(`web:${tabId}`, () => mintWebActorForTab(tabId, authority.origin));
+  }
   // why no `name` from the page: a tab's title/url are attacker-CONTROLLED
   // (document.title is page content). resolveActor's `name` flows UN-fenced
   // into the orchestrator's model memory — the deliver() reply lead and the
@@ -4265,16 +5811,25 @@ const mintWebActor = async (/** @type {string} */ ownerChatId) => mintWebSession
 // undefined in the 0-tab state, where buildToolContext leaves activeTab unset so fetch_url
 // works and the DOM tools fail closed (the pin) until navigate adopts a tab. Re-mints when
 // the bound session vanished (SW death cleared session storage). The owner is the SENDER
-// chat (threaded by the messaging layer), NOT the ambient active chat — equal on the live
-// path (the sender gate proves it), but on a boot redrain the focused chat may differ, so
-// resolving by sender is what re-attaches a redrained message to its real actor.
+// chat threaded by the messaging layer, not the ambient active chat.
 const resolveWebActor = async (/** @type {string | null | undefined} */ ownerOverride) => {
+  await webActorRegistryReady;
   const ownerChatId = ownerOverride ?? /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
   if (!ownerChatId) return null;
   let actorSessionId = webActorRegistry.resolve(ownerChatId);
-  if (actorSessionId && !(await sessions.get(actorSessionId))) {
+  let actorRecord = actorSessionId ? await sessions.get(actorSessionId) : null;
+  if (actorSessionId && (retiredActorSessions.has(actorSessionId)
+      || actorRecord?.originState?.retired === true)) {
+    retiredActorSessions.add(actorSessionId);
     webActorRegistry.drop(ownerChatId);
-    persistWebActors();
+    await persistWebActors().catch((error) => {
+      console.warn('[web-actor] stale retirement routing write failed', error);
+    });
+    actorSessionId = null;
+    actorRecord = null;
+  } else if (actorSessionId && !actorRecord) {
+    webActorRegistry.drop(ownerChatId);
+    await persistWebActors();
     // issue 251: the durable state died with the record, so the heap copy is now
     // the only thing asserting an owned origin — and the id will be reused by
     // nothing, so keeping it is pure leak. Drop it with the binding.
@@ -4387,7 +5942,7 @@ const bindDwebActor = (/** @type {string} */ sessionId) => {
   sessionCache.sessionSet(DWEB_ACTOR_KEY, sessionId).catch(() => {});
 };
 const dwebAgentOn = () => DWEB_ENABLED
-  && !!settingsStore.get().dwebEnabled && !!settingsStore.get().dwebAgentEnabled;
+  && settingsHydrated && !!settingsStore.get().dwebEnabled && !!settingsStore.get().dwebAgentEnabled;
 
 // Agent-inbox room membership. IDEMPOTENT: maybeStartBaseNetwork fires on every
 // unlock/resume, and each raw join op ref-counts the room (dweb-base ensureRoom)
@@ -4396,8 +5951,11 @@ const dwebAgentOn = () => DWEB_ENABLED
 let dwebAgentRoomJoined = false;
 const joinDwebAgentInbox = async () => {
   if (!dwebAgentOn() || dwebAgentRoomJoined) return;
-  const r = /** @type {any} */ (await browser.runtime.sendMessage({
-    type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, op: 'join', name: 'peerd agent',
+  const r = /** @type {any} */ (await withDwebPublication(async (isCurrent) => {
+    if (!isCurrent() || !dwebAgentOn() || dwebAgentRoomJoined) return null;
+    return browser.runtime.sendMessage({
+      type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, op: 'join', name: 'peerd agent',
+    });
   }).catch(() => null));
   if (r?.ok) { dwebAgentRoomJoined = true; console.log('[sw] dweb agent inbox joined'); }
 };
@@ -4407,11 +5965,44 @@ const leaveDwebAgentInbox = async () => {
   await browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, op: 'leave' }).catch(() => {});
   console.log('[sw] dweb agent inbox left');
 };
+// The base host tore down (master OFF) → every room closed, incl. the inbox, so
+// clear the SW-side membership flag for a clean re-join on the next start.
+const onBaseNetworkStopped = () => { dwebAgentRoomJoined = false; };
+
+const stopBaseNetwork = () => withDwebPublication(async () => {
+  // Never create an offscreen document to stop it. A surviving document can
+  // outlive this worker, so durable OFF always reconciles it explicitly.
+  const contexts = await listOffscreenContexts(browser);
+  if (contexts.length) {
+    const stopped = /** @type {any} */ (await browser.runtime.sendMessage({
+      type: 'dweb/base-host/stop',
+    }));
+    if (!stopped?.ok) throw new Error(stopped?.error ?? 'dweb-stop-failed');
+  }
+  onBaseNetworkStopped();
+  return { ok: true, running: false };
+});
+
+const disableDweb = async () => {
+  invalidateDwebPublications();
+  await settingsStore.update({ dwebEnabled: false });
+  return stopBaseNetwork();
+};
+
+const onSettingsChanging = (/** @type {any} */ patch) => {
+  if (patch?.dwebEnabled === false) invalidateDwebPublications();
+};
 // React to the toggle: joining/leaving the inbox when the user flips the agent
 // on/off, so a disable withdraws presence instead of lingering until SW restart.
 // Named onSettingsChanged so it wires to the settings route by shorthand (the
 // deps-wiring meta-test forbids key:value mis-wires).
-const onSettingsChanged = (/** @type {any} */ patch) => {
+const onSettingsChanged = async (/** @type {any} */ patch) => {
+  if (Object.hasOwn(patch ?? {}, 'vaultAutoLockMs')) {
+    vault.setAutoLockMs(settingsStore.get().vaultAutoLockMs ?? DEFAULT_AUTO_LOCK_MS);
+  }
+  if (Object.hasOwn(patch ?? {}, 'ollamaHost')) invalidateLiveProviderModels('ollama');
+  if (patch?.dwebEnabled === false) await stopBaseNetwork();
+  else if (patch?.dwebEnabled === true) maybeStartBaseNetwork('settings-enabled');
   if (dwebAgentOn()) joinDwebAgentInbox().catch(() => {});
   else leaveDwebAgentInbox().catch(() => {});
   // Watch mode: react to the TRANSITION, not the state. why: this fires on EVERY
@@ -4424,10 +6015,9 @@ const onSettingsChanged = (/** @type {any} */ patch) => {
   // behavior the moment it changes (key PRESENCE = the user just touched it —
   // normalizeSettingsPatch only emits keys the caller actually sent).
   if (patch?.frontDoorView) syncFrontDoorBehavior();
+  if (Object.hasOwn(patch ?? {}, 'autoUpdateEnabled')) updateCheck.syncEnabled();
 };
-// The base host tore down (master OFF) → every room closed, incl. the inbox, so
-// clear the SW-side membership flag for a clean re-join on the next start.
-const onBaseNetworkStopped = () => { dwebAgentRoomJoined = false; };
+
 const mintDwebActor = async () => {
   // A GLOBAL actor has no owner chat to inherit a provider from, and the sync
   // resolveActiveProvider mintWebSession falls back to returns 'anthropic'
@@ -4504,9 +6094,9 @@ const a2aRevoke = (/** @type {string} */ did) => {
 // user is shown the exact target and deliberately clears it, like adding a
 // contact; it lives in chrome.storage.session (cleared on browser restart) and is
 // revocable via dweb_block. Already-cleared → silent; else pop the confirm.
-const a2aResolveConsent = async (/** @type {string} */ target, /** @type {string} */ sessionId, /** @type {string} */ op = 'message') => {
+const a2aResolveConsent = async (/** @type {string} */ target, /** @type {string} */ sessionId, /** @type {string} */ op = 'message', /** @type {AbortSignal | undefined} */ signal = undefined) => {
   if (a2aApprovedDids.has(target)) return true;
-  const answer = await confirmAction({ tool: 'a2a_contact', sessionId, origins: [target] });
+  const answer = await confirmAction({ tool: 'a2a_contact', sessionId, origins: [target] }, signal);
   // "Allow for session" adds the peer to the revocable allowlist (silent after —
   // the intended contact-add); "Allow once" authorizes THIS call only and is NOT
   // persisted, so a one-time click can't become a standing signing grant. The
@@ -4516,16 +6106,52 @@ const a2aResolveConsent = async (/** @type {string} */ target, /** @type {string
   auditLog.append({ type: 'a2a_consent', details: { target, op, approved: ok, standing: persist } }).catch(() => {});
   return ok;
 };
-const meshHostRoom = (/** @type {object} */ payload) =>
-  browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, ...payload });
+const meshHostRoom = (/** @type {object} */ payload, /** @type {() => boolean} */ guard = () => true) => withDwebPublication(async (isCurrent) => {
+  if (!isCurrent() || !dwebAgentOn() || guard() !== true) {
+    return { ok: false, error: 'dweb-disabled-or-revoked' };
+  }
+  return browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, ...payload });
+});
 // Standing peer conversations (conversation-registry.js): the SW-side thread
 // store, sibling to meshDispatch's pending-ask map. converse/say open + extend
 // threads; an inbound turn carrying a known convId continues one (waking the
 // actor with prior turns as context) and the actor's answer goes BACK to the
 // peer under PER-CONVERSATION reply consent.
 const conversationRegistry = createConversationRegistry();
+/** @type {Map<string, Promise<void>>} */
+const dwebConversationTails = new Map();
+/**
+ * Preserve causal reply/consent order within one standing conversation. The
+ * dweb actor has its own global turn slot, but that slot ends before human
+ * consent and mesh send; without this second lane a later same-thread reply can
+ * overtake while the first is waiting for the user.
+ * @param {string} convId
+ * @param {() => Promise<void>} operation
+ */
+const runDwebConversationOrdered = (convId, operation) => {
+  const previous = dwebConversationTails.get(convId) ?? Promise.resolve();
+  const result = previous.then(operation, operation);
+  const tail = result.then(() => undefined, () => undefined);
+  dwebConversationTails.set(convId, tail);
+  tail.finally(() => {
+    if (dwebConversationTails.get(convId) === tail) dwebConversationTails.delete(convId);
+  });
+  return result;
+};
 const meshDispatch = makeMeshDispatch({
-  sendDm: async (to, env) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'dm', to, data: env }).catch(() => null)); return { ok: r?.ok === true, id: r?.id, error: r?.error }; },
+  sendDm: async (to, env) => {
+    // A standing reply's thread ownership is checked INSIDE the one existing
+    // publication fence. dweb_block uses that same lane, so block-before-send
+    // fails closed and send-before-block is an honestly completed publication.
+    const replyConvId = env?.kind === 'reply' && typeof env?.convId === 'string'
+      ? env.convId
+      : null;
+    const guard = replyConvId
+      ? () => conversationRegistry.ownedBy(replyConvId, to)
+      : () => true;
+    const r = /** @type {any} */ (await meshHostRoom({ op: 'dm', to, data: env }, guard).catch(() => null));
+    return { ok: r?.ok === true, id: r?.id, error: r?.error };
+  },
   listPeers: async () => { const r = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }).catch(() => null)); return Array.isArray(r?.peers) ? r.peers.map((/** @type {any} */ p) => ({ did: p.did, name: p.name })) : []; },
   fetchCard: async (did) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'card-get', did }).catch(() => null)); return r?.ok ? (r.card ?? null) : null; },
   publishCard: async (card) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'card-set', card }).catch(() => null)); return { ok: r?.ok === true, did: r?.did, error: r?.error }; },
@@ -4546,119 +6172,6 @@ const resolveReplyConsent = async (/** @type {string} */ convId, /** @type {stri
   if (answer === 'yes_session') conversationRegistry.grantReplyConsent(convId);
   auditLog.append({ type: 'a2a_reply_consent', details: { did, convId, approved: granted, standing: answer === 'yes_session' } }).catch(() => {});
   return granted;
-};
-
-// The actors/call route — invoked by the offscreen relay for each `actors.*`
-// call an actors-enabled `script` run makes. ownerSessionId / ownerToolUseId /
-// runId are TRUSTED (job params, minted by the script tool SW-side); the
-// worker's own words buy nothing. Every delegation runs the FULL messageActor
-// gate chain (sender gate, rate caps, duplicate-intent, oneShot sandbox-only,
-// audit) — this route adds only translation, the per-ask timeout, the Stop
-// chain, and the live per-op feed the side panel renders on the script card.
-const actorsCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, seq?: number }} */ msg) => {
-  const pushOp = (/** @type {string} */ phase, /** @type {object} */ extra = {}) => {
-    try {
-      uiPorts.broadcast({
-        type: 'script/op',
-        sessionId: msg.ownerSessionId, toolUseId: msg.ownerToolUseId ?? null,
-        seq: msg.seq ?? 0, method: msg.method ?? '?', phase, ...extra,
-      });
-    } catch { /* panel closed — the trace in the result still records it */ }
-  };
-  try {
-    const owner = msg.ownerSessionId ? await sessions.get(msg.ownerSessionId) : null;
-    // v1 is the ORCHESTRATOR's surface only: a top-level chat session. An
-    // actor must never delegate (the recursion rule message_actor already
-    // enforces), and an actor's channel is its own message_actor grant.
-    if (!owner || owner.kind === 'actor' || owner.kind === 'spawned') {
-      return { ok: false, error: 'actors: only a chat session holds the script delegation surface' };
-    }
-    // why no inbound re-check HERE: the inbound (untrusted-origin) wall for this
-    // path is enforced at the trusted MINT — script.js refuses to expose the
-    // `actors` surface at all when ctx.inbound === true (folded SW-side by the
-    // turn driver), so an inbound turn never reaches this route with an actors
-    // op. inbound is a per-TURN property the untrusted worker cannot be trusted
-    // to echo, so the mint is the only sound enforcement point; do NOT accept an
-    // inbound flag off the relay message here.
-    const { op, args } = actorsCallToOp({ method: msg.method, args: msg.args });
-    if (op === 'list') {
-      // The roster through the normal tool gates — actor_list with the owner's
-      // main ctx, so exposure/manifest rules apply exactly as a direct call.
-      const listCtx = await buildToolContext({ exposure: 'main', sessionId: msg.ownerSessionId });
-      const r = await dispatchToolCall({ id: `${msg.runId ?? 'script'}-list-${msg.seq ?? 0}`, name: 'actor_list', args: {} }, /** @type {any} */ (listCtx));
-      return r?.ok
-        ? { ok: true, value: shapeActorsResult('list', { ok: true, roster: /** @type {any} */ (r).content }) }
-        : { ok: false, error: /** @type {any} */ (r)?.error ?? 'actor_list failed' };
-    }
-    const target = /** @type {{ to: string, goal: string, timeoutMs?: number, oneShot?: boolean }} */ (args);
-    // The UI preview: a chained goal can carry actor/web-derived bytes, so
-    // collapse whitespace (no line-shaping) and cap — it renders as plain
-    // text (Mithril escapes), same posture as the sanitized actor names.
-    const goalPreview = target.goal.replace(/\s+/g, ' ').slice(0, 60);
-    pushOp('sent', { to: target.to, goalPreview });
-    // The SW-side op mirror: survives an offscreen crash, so the script tool's
-    // failure path can still show the chain of events (script-runs.js).
-    const mirror = (/** @type {Record<string, unknown>} */ opRecord) => {
-      if (typeof msg.runId === 'string') scriptRuns.recordOp(msg.runId, { seq: msg.seq ?? 0, method: msg.method, to: target.to, ...opRecord });
-    };
-    if (op === 'send') {
-      const r = await actorMessaging.messageActor({
-        to: target.to, message: target.goal, senderSessionId: msg.ownerSessionId,
-        toolUseId: msg.ownerToolUseId, oneShot: target.oneShot === true, via: 'script',
-      });
-      pushOp(r.ok ? 'handed-off' : 'failed', r.ok ? {} : { error: 'refused' });
-      mirror({ ok: r.ok === true, ms: 0, ...(r.ok ? {} : { error: r.error }) });
-      return r.ok
-        ? { ok: true, value: shapeActorsResult('send', { ok: true }) }
-        : { ok: false, error: r.error ?? 'send failed' };
-    }
-    // ask — awaitReply, raced against the per-ask timeout AND the run's Stop
-    // signal (script-runs.js). Either abort cancels the underlying actor turn.
-    const askTimeoutMs = target.timeoutMs ?? ACTORS_ASK_DEFAULT_TIMEOUT_MS;
-    const runSignal = typeof msg.runId === 'string' ? scriptRuns.signalFor(msg.runId) : null;
-    const askController = new AbortController();
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; askController.abort(); }, askTimeoutMs);
-    const onRunAbort = () => askController.abort();
-    if (runSignal) {
-      if (runSignal.aborted) askController.abort();
-      else runSignal.addEventListener('abort', onRunAbort, { once: true });
-    }
-    try {
-      const t0 = Date.now();
-      const r = await actorMessaging.messageActor({
-        to: target.to, message: target.goal, senderSessionId: msg.ownerSessionId,
-        toolUseId: msg.ownerToolUseId, oneShot: target.oneShot === true, via: 'script',
-        // bareReply: the reply resolves into CODE — the fence is re-applied at
-        // the script-result boundary (the one model-facing seam), so the raw
-        // body is what plumbing composes with (no fence markup in goals).
-        awaitReply: true, bareReply: true, awaitSignal: askController.signal,
-      });
-      const ms = Date.now() - t0;
-      // The timeout / Stop-abort / system-refusal / actor-failure fork is the
-      // pure askOutcome (actors-api.js) — provable without this route.
-      const outcome = askOutcome(/** @type {any} */ (r), {
-        timedOut, aborted: !timedOut && askController.signal.aborted,
-        timeoutMs: askTimeoutMs, to: target.to,
-      });
-      if (!outcome.ok) {
-        pushOp('failed', { ms, error: timedOut ? 'timeout' : 'refused' });
-        mirror({ ok: false, ms, error: outcome.error });
-        return { ok: false, error: outcome.error };
-      }
-      pushOp('replied', { ms, ...(outcome.failed ? { failed: true } : {}) });
-      mirror({ ok: true, ms, ...(outcome.failed ? { actorFailed: true } : {}) });
-      return { ok: true, value: shapeActorsResult('ask', { ok: true, reply: outcome.reply, failed: outcome.failed }) };
-    } finally {
-      clearTimeout(timer);
-      if (runSignal) { try { runSignal.removeEventListener?.('abort', onRunAbort); } catch { /* stub */ } }
-    }
-  } catch (e) {
-    // A throw after pushOp('sent') would otherwise leave the live-feed line
-    // pulsing 'working…' forever — settle it, then report.
-    pushOp('failed', { error: 'error' });
-    return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
-  }
 };
 
 // Design 5's session cost fold, SERIALIZED per session. why a chain: the
@@ -4690,8 +6203,14 @@ const foldSessionCost = (/** @type {string} */ sessionId, /** @type {any} */ usa
 // owner check, text-only arg validation, the per-run quota, the session
 // provider PIN + model gate, the spend-limit preflight, the cost fold, and the
 // Stop chain (the run's abort signal cancels an in-flight provider fetch).
-const scriptModelCallRoute = async (/** @type {{ ownerSessionId?: string, runId?: string, args?: unknown }} */ msg) => {
+const scriptModelCallRoute = async (
+  /** @type {{ ownerSessionId?: string, runId?: string, args?: unknown }} */ msg,
+  /** @type {unknown} */ sender,
+) => {
   try {
+    if (!isOffscreenSender(sender)) {
+      return { ok: false, error: 'provider: unauthorized relay' };
+    }
     const owner = msg.ownerSessionId ? await sessions.get(msg.ownerSessionId) : null;
     // Same posture as actors/call: v1 is the ORCHESTRATOR's surface only. An
     // actor or spawned owner is refused even if a job param leaked — the
@@ -4702,7 +6221,9 @@ const scriptModelCallRoute = async (/** @type {{ ownerSessionId?: string, runId?
     // The LIVE-RUN check: the runId must be registered (script-runs.js) and
     // bound to this owner — a call from a dead or foreign run is refused.
     const runId = typeof msg.runId === 'string' ? msg.runId : '';
-    if (!runId || scriptRuns.ownerFor(runId) !== msg.ownerSessionId) {
+    if (!runId
+      || scriptRuns.ownerFor(runId) !== msg.ownerSessionId
+      || scriptRuns.allows(runId, 'provider') !== true) {
       return { ok: false, error: 'provider: unknown or finished run' };
     }
     /** @type {ReturnType<typeof validateProviderCallArgs>} */
@@ -4825,10 +6346,18 @@ const scriptModelCallRoute = async (/** @type {{ ownerSessionId?: string, runId?
 // The a2a/call route — invoked by the offscreen relay for each mesh call the
 // a2a_run worker makes. ownerSessionId is TRUSTED (job param); we verify it is
 // THE dweb actor before touching the mesh, translate + gate + dispatch.
-const a2aCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessionId?: string }} */ msg) => {
+const a2aCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessionId?: string, runId?: string }} */ msg, /** @type {any} */ sender = undefined) => {
   try {
+    if (!isOffscreenSender(sender)) return { ok: false, error: 'a2a: unauthorized relay' };
     if (!dwebAgentOn()) return { ok: false, error: 'a2a: the dweb agent is off' };
+    if (typeof msg.runId !== 'string' || scriptRuns.ownerFor(msg.runId) !== msg.ownerSessionId
+      || scriptRuns.allows(msg.runId, 'a2a') !== true || scriptRuns.admitOp(msg.runId, 'a2a') !== true) {
+      return { ok: false, error: 'a2a: unknown, finished, foreign, or over-limit run' };
+    }
+    const runSignal = scriptRuns.signalFor(msg.runId);
+    if (runSignal?.aborted) return { ok: false, error: 'a2a: run aborted' };
     const owner = msg.ownerSessionId ? await sessions.get(msg.ownerSessionId) : null;
+    if (runSignal?.aborted) return { ok: false, error: 'a2a: run aborted' };
     if (!owner || owner.kind !== 'actor' || owner.actorType !== 'dweb') {
       return { ok: false, error: 'a2a: not the dweb actor' };
     }
@@ -4851,16 +6380,25 @@ const a2aCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessi
           : /** @type {{ did?: string }} */ (args).did;
       if (!consentTarget) return { ok: false, error: `a2a: ${op} has no consent target` };
       if (!a2aApprovedDids.has(consentTarget)) {
-        const approved = await a2aResolveConsent(consentTarget, msg.ownerSessionId ?? '', op);
+        const approved = await a2aResolveConsent(consentTarget, msg.ownerSessionId ?? '', op, runSignal ?? undefined);
+        if (runSignal?.aborted) return { ok: false, error: 'a2a: run aborted' };
         if (!approved) return { ok: false, error: `a2a: the user declined ${op} to ${consentTarget}` };
       }
     }
-    const opResult = await meshDispatch.dispatch(op, args, { signs, allowed: (did) => a2aApprovedDids.has(did) });
+    if (runSignal?.aborted) return { ok: false, error: 'a2a: run aborted' };
+    const opResult = await meshDispatch.dispatch(op, args, { signs, allowed: (did) => a2aApprovedDids.has(did), signal: runSignal ?? undefined });
     return { ok: true, value: shapeMeshResult(msg.method ?? '', opResult) };
   } catch (e) {
     return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
   }
 };
+
+// Assigned after the durable mailbox is wired. Runtime messages cannot arrive
+// until module evaluation finishes, and the fail-closed default prevents an
+// automatic peer wake from racing incomplete boot wiring.
+/** @type {(key: string, action: () => Promise<any>|any) => Promise<boolean>} */
+let runWhenActorRecoveryReady = async () => false;
+let dwebRecoveryWakeSequence = 0;
 
 const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?: number }} */ evt) => {
   if (!dwebAgentOn() || vault.isLocked()) return;           // opt-out or locked → drop
@@ -4882,96 +6420,149 @@ const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?:
   // Cap the wire convId (a peer controls it; an unbounded key is a memory sink).
   const rawConvId = typeof deliver?.convId === 'string' ? deliver.convId : null;
   const convId = rawConvId && rawConvId.length <= 128 ? rawConvId : null;
-  // ADOPT BEFORE the gate, and only record the peer turn when the thread is
-  // OURS to extend. adopt() binds convId→did (rejecting a foreign did), so a
-  // fresh thread is owned by this sender and record() extends it; a convId
-  // owned by ANOTHER did is refused here — record() has no did check of its
-  // own, so this is where the bearer-token invariant is enforced for inbound.
+  // ADOPT BEFORE lane admission so every event for an owned thread reserves the
+  // same mailbox synchronously. The peer turn itself is recorded only when that
+  // lane entry starts: then earlier self replies are visible to later prompts,
+  // while later peer arrivals cannot contaminate an earlier one.
   let ownsThread = false;
   if (convId && deliver) {
     conversationRegistry.adopt(convId, did);
     ownsThread = conversationRegistry.ownedBy(convId, did);
-    if (ownsThread) conversationRegistry.record(convId, 'peer', deliver.message);
   }
   // Reply back only on an OWNED ask thread — computed AFTER adopt so a peer's
   // first converse turn (a fresh thread) can still be answered.
   const canReplyToPeer = ownsThread && deliver?.kind === 'ask';
   const body = typeof evt?.data === 'string' ? evt.data : JSON.stringify(evt?.data ?? null);
   auditLog.append({ type: 'dweb_agent_inbound', details: { did, chars: body.length, ...(convId ? { convId } : {}) } }).catch(() => {});
-  (async () => {
-    const actor = await resolveDwebActor();
-    if (!actor) return;
-    const fenced = wrapUntrusted({ origin: did, tool: 'mesh_inbound', body: body.slice(0, 16 * 1024) });
-    // On a standing thread, hand the actor the recent turns (fenced — they carry
-    // peer bytes) so it answers in context, and steer it to reply to the PEER.
-    // Thread context only for a thread WE own (ownsThread) — a foreign convId
-    // must not pull another peer's turns into this wake.
-    const priorTurns = ownsThread ? conversationRegistry.turnsFor(/** @type {string} */ (convId)).slice(0, -1) : [];
-    const threadContext = priorTurns.length
-      ? `\n\nEarlier turns in this conversation (oldest first):\n${wrapUntrusted({ origin: did, tool: 'mesh_thread', body: priorTurns.map((t) => `${t.role === 'self' ? 'you' : 'peer'}: ${t.message}`).join('\n') })}`
-      : '';
-    const wake = canReplyToPeer
-      ? `A mesh peer is having an ongoing conversation with your agent (their did is in the fence origin). Read their latest message and the thread, then END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph reply to send back to the PEER.${threadContext}\n\n${fenced}`
-      : `A mesh peer sent your agent a direct message (their did is in the fence origin). Observe it, update your ledger, block if abusive, and END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph note for the user.\n\n${fenced}`;
-    turnSlots.runWhenIdle(actor.actorSessionId, () => {
-      (async () => {
-        const before = ((await sessions.get(actor.actorSessionId))?.messages ?? []).length;
-        // HEAP ISOLATION: the inbound wake feeds LIVE untrusted peer bytes to the
-        // actor's reasoning, so it MUST run in the offscreen keyless worker like
-        // every other actor turn — never in-SW alongside the vault DK. Mirror the
-        // message_actor path: offscreen first, fall back to the in-SW driver only
-        // where offscreen is unavailable (Firefox). runActorTurnOffscreen claims
-        // the slot itself; we're already inside runWhenIdle, so no double-claim.
-        const off = await runActorTurnOffscreen({
-          actorSessionId: actor.actorSessionId, message: wake,
-          instanceId: 'dweb', kind: 'dweb', oneShot: false, display: null,
+  const recoveryKey = `dweb-inbound:${++dwebRecoveryWakeSequence}`;
+  const runInboundWake = async () => {
+    // why this await lives INSIDE the conversation lane: same-thread arrivals
+    // reserve their causal order synchronously at ingress. A slower isolation or
+    // actor-resolution await for message A therefore cannot let message B enter
+    // the consent/send phase first.
+    await actorIsolationReady;
+    if (!dwebAgentOn() || vault.isLocked()) return;
+    if (!actorIsolationAvailable(actorIsolation)) {
+      auditLog.append({
+        type: 'dweb_agent_inbound_dropped',
+        details: { did, reason: 'actor_isolation_unavailable', performed: false },
+      }).catch(() => {});
+      return;
+    }
+    await runWhenActorRecoveryReady(recoveryKey, async () => {
+      if (!dwebAgentOn() || vault.isLocked()) return;
+      // This is the first operation after the recovery gate. If recovery queued
+      // multiple same-thread events, its ordered flush preserves this mailbox
+      // sequence too. Snapshot completed earlier turns, then append THIS peer
+      // turn, so later prompts include earlier self replies but not future peers.
+      /** @type {Array<{ role: 'peer'|'self', message: string, ts: number }>} */
+      let priorTurnsForWake = [];
+      if (ownsThread && convId && deliver) {
+        if (!conversationRegistry.ownedBy(convId, did)) return;
+        priorTurnsForWake = conversationRegistry.turnsFor(convId);
+        conversationRegistry.record(convId, 'peer', deliver.message);
+      }
+      const actor = await resolveDwebActor();
+      if (!actor || !dwebAgentOn() || vault.isLocked()) return;
+      const fenced = wrapUntrusted({ origin: did, tool: 'mesh_inbound', body: body.slice(0, 16 * 1024) });
+      // On a standing thread, hand the actor the recent turns. They are fenced because they carry
+      // peer bytes) so it answers in context, and steer it to reply to the PEER.
+      // Include thread context only for a thread WE own (ownsThread). A foreign convId
+      // must not pull another peer's turns into this wake.
+      const threadContext = priorTurnsForWake.length
+        ? `\n\nEarlier turns in this conversation (oldest first):\n${wrapUntrusted({ origin: did, tool: 'mesh_thread', body: priorTurnsForWake.map((t) => `${t.role === 'self' ? 'you' : 'peer'}: ${t.message}`).join('\n') })}`
+        : '';
+      const wake = canReplyToPeer
+        ? `A mesh peer is having an ongoing conversation with your agent (their did is in the fence origin). Read their latest message and the thread, then END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph reply to send back to the PEER.${threadContext}\n\n${fenced}`
+        : `A mesh peer sent your agent a direct message (their did is in the fence origin). Observe it, update your ledger, block if abusive, and END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph note for the user.\n\n${fenced}`;
+      await new Promise((resolve) => {
+        turnSlots.runWhenIdleClaimed(actor.actorSessionId, (turnLease) => {
+          (async () => {
+            const before = ((await sessions.get(actor.actorSessionId))?.messages ?? []).length;
+            // HEAP ISOLATION: the inbound wake feeds live untrusted peer bytes to the
+            // actor's reasoning, so it must run in a dedicated keyless worker. A host
+            // failure drops the wake after audit; it never moves those bytes into the
+            // privileged background heap.
+            const off = await runActorTurnOffscreen({
+              actorSessionId: actor.actorSessionId, message: wake,
+              instanceId: 'dweb', kind: 'dweb', oneShot: false, display: null,
+              // SW-stamped once at the remote-message ingress. Every offscreen relay
+              // preserves this monotonic bit and rebuilds synthetic/untrusted ctx from it.
+              inbound: true,
+              turnLease,
+            });
+            if (off?.stopped) return;
+            // Read the immutable pre-release snapshot. A second peer wake may append
+            // as soon as the lease is released; a session re-read would then mix turns.
+            const settledMessages = off?.turnSnapshot?.messages ?? [];
+            const note = off?.result ?? finalAssistantText(/** @type {any} */ ({ messages: settledMessages.slice(before) })) ?? '';
+            // Trickle up ONLY the notable: the lore's stay-quiet default is enforced
+            // here by the NO_REPORT convention; silence costs the user nothing.
+            if (!note.trim() || note.includes(DWEB_AGENT_NO_REPORT)) return;
+            // STANDING CONVERSATION: the actor's answer goes BACK to the peer, gated
+            // by per-conversation reply consent (the owner's chosen gate for this new
+            // outbound edge). Revocation wins every await: dweb_block deletes the
+            // thread, so ownership is rechecked after consent and at publication.
+            if (canReplyToPeer) {
+              const cid = /** @type {string} */ (convId);
+              const consented = await resolveReplyConsent(cid, did, actor.actorSessionId);
+              if (consented && dwebAgentOn() && conversationRegistry.ownedBy(cid, did)) {
+                const sent = await meshDispatch.reply(did, /** @type {any} */ (deliver).reqId, note, cid);
+                if (sent?.ok === true) {
+                  conversationRegistry.record(cid, 'self', note);
+                  auditLog.append({ type: 'a2a_reply_sent', details: { did, convId } }).catch(() => {});
+                  return;
+                }
+                auditLog.append({
+                  type: 'a2a_reply_failed',
+                  details: { did, convId, error: sent?.error ?? 'mesh send failed', performed: false },
+                }).catch(() => {});
+              }
+            }
+            const active = /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
+            if (!active) return;
+            const lead = 'Your dweb agent flagged inbound mesh activity:';
+            const userText = `${lead}\n\n${wrapUntrusted({ origin: 'dweb', tool: 'message_actor', body: note })}`;
+            const parentStopGeneration = turnSlots.generation(active);
+            // Claim the ACTIVE chat at dequeue. NEVER steer-abort the user's live turn
+            // (DECISIONS #20 work-theft; the deliver() path guards the same way). The
+            // note is a fenced, untrusted-derived summary, so trusted:false. A mesh
+            // event must not hand the orchestrator delegation authority.
+            turnSlots.runWhenIdleClaimed(active, (parentLease) => {
+              // Stop may land while this wake is queued behind the user's live
+              // turn. The claimed lease is new, so its signal alone cannot carry
+              // that earlier Stop; the per-session epoch makes the cancellation
+              // durable across dequeue and prevents post-Stop resurrection.
+              if (turnSlots.generation(active) !== parentStopGeneration) {
+                parentLease.release();
+                return;
+              }
+              runAgentTurn({
+                sessionId: active, userText, synthetic: true, trusted: false,
+                actorReply: { kind: 'dweb', instanceId: 'dweb', failed: false },
+                turnLease: parentLease,
+              })
+                .catch((e) => console.warn('[sw] dweb agent trickle-up failed', e))
+                .finally(() => parentLease.release());
+            });
+          })()
+            .catch((e) => console.warn('[sw] dweb agent inbound wake failed', e))
+            // runActorTurnOffscreen normally releases it; this idempotent backstop
+            // covers setup failures before the driver receives the reservation.
+            .finally(() => { turnLease.release(); resolve(undefined); });
         });
-        if (!off) {
-          // INBOUND: synthetic + NOT trusted — the sender gate refuses any delegation
-          // from this turn; the tier gate holds it to the dweb toolset.
-          await runAgentTurn({ sessionId: actor.actorSessionId, userText: wake, synthetic: true, trusted: false });
-        }
-        const s = await sessions.get(actor.actorSessionId);
-        const note = off?.result ?? finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) })) ?? '';
-        // Trickle up ONLY the notable: the lore's stay-quiet default is enforced
-        // here by the NO_REPORT convention — silence costs the user nothing.
-        if (!note.trim() || note.includes(DWEB_AGENT_NO_REPORT)) return;
-        // STANDING CONVERSATION: the actor's answer goes BACK to the peer, gated
-        // by per-conversation reply consent (the owner's chosen gate for this new
-        // outbound edge). On grant, record the self turn and send the mesh reply;
-        // a decline falls through to the user note so the answer isn't lost.
-        if (canReplyToPeer) {
-          const cid = /** @type {string} */ (convId);
-          const consented = await resolveReplyConsent(cid, did, actor.actorSessionId);
-          if (consented) {
-            conversationRegistry.record(cid, 'self', note);
-            meshDispatch.reply(did, /** @type {any} */ (deliver).reqId, note, cid);
-            auditLog.append({ type: 'a2a_reply_sent', details: { did, convId } }).catch(() => {});
-            return;
-          }
-        }
-        const active = /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
-        if (!active) return;
-        const lead = 'Your dweb agent flagged inbound mesh activity:';
-        const userText = `${lead}\n\n${wrapUntrusted({ origin: 'dweb', tool: 'message_actor', body: note })}`;
-        // runWhenIdle on the ACTIVE chat — NEVER steer-abort the user's live turn
-        // (DECISIONS #20 work-theft; the deliver() path guards the same way). The
-        // note is a fenced, untrusted-derived summary, so trusted:false — a mesh
-        // event must not hand the orchestrator delegation authority.
-        turnSlots.runWhenIdle(active, () => {
-          runAgentTurn({
-            sessionId: active, userText, synthetic: true, trusted: false,
-            actorReply: { kind: 'dweb', instanceId: 'dweb', failed: false },
-          }).catch((e) => console.warn('[sw] dweb agent trickle-up failed', e));
-        });
-      })().catch((e) => console.warn('[sw] dweb agent inbound wake failed', e));
+      });
     });
-  })().catch(() => {});
+  };
+  const run = ownsThread && convId
+    ? runDwebConversationOrdered(convId, runInboundWake)
+    : runInboundWake();
+  void run.catch((e) => console.warn('[sw] dweb conversation lane failed', e));
 };
 
 browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
   if (msg?.type === 'dweb/base-room/event' && msg.roomId === DWEB_AGENT_ROOM && msg.event === 'direct') {
-    handleDwebAgentInbound(msg.data ?? {});
+    void handleDwebAgentInbound(msg.data ?? {});
   }
   return false;   // never claims the message — the dwapp bridge path is untouched
 });
@@ -4979,8 +6570,9 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
 // Resolve (+ lazy-mint) the API actor a chat owns for `origin`. The integration
 // AUTO-FORMS on first address (the same lazy-mint shape as the web actor). Re-mints when
 // the bound session vanished (SW death cleared session storage). Owner is the SENDER chat
-// (threaded by the messaging layer) so a boot redrain re-attaches to the right integration.
+// threaded by the messaging layer so each chat keeps its own integration.
 const resolveApiActor = async (/** @type {string} */ origin, /** @type {string | null | undefined} */ ownerOverride) => {
+  if (isKnownIdpHost(origin)) return null;
   const ownerChatId = ownerOverride ?? /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
   if (!ownerChatId) return null;
   let actorSessionId = apiActorBindings.resolve(ownerChatId, origin);
@@ -5017,16 +6609,31 @@ const resolveApiActor = async (/** @type {string} */ origin, /** @type {string |
 // webActorTabBindings (so the next turn pins it, and `to:'<tabId>'` reaches the SAME
 // actor), and tracks it as an agent-tab card. Returns the new tab so navigate can
 // re-pin ctx.activeTab for the rest of THIS turn.
-const adoptWebTab = async (/** @type {string} */ actorSessionId) => {
-  const created = await browser.tabs.create({ active: false });
+const adoptWebTab = async (/** @type {string} */ actorSessionId, /** @type {AbortSignal | undefined} */ signal = undefined) => {
+  if (signal?.aborted) throw new Error('adopt_web_tab: aborted');
+  // `chrome.tabs.create({ active:false })` opens chrome://newtab/, which is a
+  // browser-owned page and must stay outside automation authority. Create the
+  // documented neutral document explicitly so navigate can move only this
+  // internally minted blank tab onto its first public page.
+  const created = await browser.tabs.create({ active: false, url: 'about:blank' });
   const tabId = created?.id;
   if (typeof tabId !== 'number') throw new Error('adopt_web_tab: no tab id');
+  if (signal?.aborted) {
+    await browser.tabs.remove(tabId).catch(() => {});
+    throw new Error('adopt_web_tab: aborted');
+  }
   webActorTabBindings.bind(tabId, actorSessionId);
   persistWebBindings();
   // AWAIT the network backstop before handing the tab back: the caller's very
   // next act is to navigate it. persistWebBindings already kicked the sync off;
   // this only waits for its turn in the queue, and it never rejects.
   await denylistNetGuard.sync();
+  if (signal?.aborted) {
+    webActorTabBindings.drop(tabId);
+    persistWebBindings();
+    await browser.tabs.remove(tabId).catch(() => {});
+    throw new Error('adopt_web_tab: aborted');
+  }
   noteAgentTab(tabId, { kind: 'web', opened: true }).catch(() => {});
   return { tabId, windowId: created?.windowId };
 };
@@ -5045,53 +6652,100 @@ browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
   pageActivity.release(tabId).catch(() => {});
 });
 
-// Heap-split phase 2: run an ENGINE actor's loop (vm/notebook/app) in its own
-// offscreen Worker heap. Renders the actor prompt + descriptors SW-side (the
+// Heap-split phase 2: run an actor loop in its own dedicated Worker heap.
+// Renders the actor prompt + descriptors in the privileged host (the
 // worker never assembles them), seeds the worker with the actor's prior history
 // (statefulness), forwards loop events to the card, and persists the turn back.
-// Returns the runActorTurn reply shape, or null to FALL BACK to the in-SW turn
-// (offscreen unavailable / never started). The worker holds no key, no engine
-// clients, no chrome.* — its model call + every tool call relay to SW-gated routes.
-const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, message, instanceId, kind, actorTabId, oneShot, display }) => {
-  if (!actorClient) return null;
+// Returns the runActorTurn reply shape. It never falls back to the background
+// heap: unavailable or failed isolation is a visible stopped turn.
+const runActorTurnOffscreen = async (/** @type {any} */ {
+  actorSessionId, message, instanceId, kind, actorTabId, oneShot, display,
+  inbound, actorSurface: latchedActorSurface, onBeforeRelease, turnLease,
+}) => {
+  await actorIsolationReady;
+  if (!actorClient || !actorIsolationAvailable(actorIsolation)) {
+    const refusal = actorIsolationRefusal(actorIsolation, { targetRead: false, targetChanged: false });
+    if (turnLease) turnLease.release();
+    return { result: refusal.error, stopped: true, isolationFailure: refusal };
+  }
   const loaded = await sessions.get(actorSessionId);
-  if (!loaded) return null;
-  // Engine-actor prewalk swap on the OFFSCREEN path. reconcileEngineActor is ALSO
-  // wired into the in-SW turn-driver, but a Chrome engine actor runs HERE and
-  // returns before that path is reached — so without this the swap NEVER fires on
-  // the primary platform. why here: the worker is seeded from rec.provider/rec.model
+  if (!loaded) {
+    if (turnLease) turnLease.release();
+    return { result: 'the actor session no longer exists.', stopped: true };
+  }
+  // Engine-actor prewalk swap on the isolated path. The background turn driver
+  // refuses actor sessions, so this is the one place an engine actor can swap.
+  // why here: the worker is seeded from rec.provider/rec.model
   // below, so the swap must land (and persist) before we read them; costOf + the
   // card then also read the executor model. No-op for a non-engine / unarmed actor
   // (returns the record unchanged when there's no prewalk).
   let rec = loaded;
   try { rec = (await prewalk.reconcileEngineActor(rec)) ?? rec; }
   catch (e) { console.warn('[actor] engine prewalk reconcile failed', e); }
-  const { controller, release } = turnSlots.claim(actorSessionId);
+  const { controller, release } = turnLease ?? turnSlots.claim(actorSessionId);
   try {
-    // Prompt PARITY with the in-SW actor turn: temporal grounding + any /system
-    // override (rec.customSystemPrompt). Actors get no memory/skills block (same
-    // as turn-driver). Absolute-time temporal block (an actor has no prev-turn gap).
+    let preflightReply;
+    if (kind === 'web' && rec.backing !== 'api') {
+      originStates.hydrate(actorSessionId, rec.originState);
+      const lock = originLockFor(actorSessionId);
+      try {
+        const live = await liveSiteClientLandingFor(actorSessionId, actorTabId);
+        const state = originStates.read(actorSessionId);
+        const verdict = live.status === 'live'
+          ? await lock?.judgeLanding(live.url)
+          : (state?.authGrant != null || state?.excursion != null)
+            ? await lock?.terminateUnreadableSignIn()
+            : null;
+        if (verdict?.action === 'wait') preflightReply = AUTH_WAITING_FOR_USER_MESSAGE;
+        else if (verdict && verdict.action !== 'continue') {
+          preflightReply = AUTH_BOUNDARY_STOPPED_MESSAGE;
+        }
+      } catch (e) {
+        if ((/** @type {{ name?: string }} */ (e))?.name === 'AbortError') throw e;
+        preflightReply = AUTH_STATE_UNAVAILABLE_MESSAGE;
+      }
+    }
+    // Bound-actor prompt contract: temporal grounding + any /system override
+    // (rec.customSystemPrompt). Actors get no memory/skills block. Absolute-time
+    // temporal block (an actor has no prev-turn gap).
     const temporalBlock = buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() });
     // PR #119 surface parity: the OFFSCREEN actor path must thread the web
     // actor's action surface exactly like the in-SW path — same setting-derived
     // value buildToolContext falls back to. Without it a code-surface actor is
     // advertised the TOOLS descriptors (no page_code) and taught the tools
     // lore, so the whole code arm silently degrades on the offscreen heap.
-    const actorSurface = (kind === 'web' && rec.backing !== 'api')
-      ? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools')
-      : undefined;
+    const actorToolAllow = resolveManifestAllow(rec.toolManifest);
+    const actorSurface = latchedActorSurface ?? ((kind === 'web' && rec.backing !== 'api')
+      ? resolveWebActorSurface({
+        requested: settingsStore.get().webActorActionSurface,
+        allowedTools: actorToolAllow,
+        headlessAvailable: offscreenAvailable,
+      })
+      : undefined);
     // #241 parity, and it is the load-bearing one: on Chrome EVERY actor turn
     // runs through this path, so a schemaReply stamped only in buildToolContext
     // would arm the validator while the actor was never told the format — every
     // web reply dropped. Read from the SAME setting, at the same moment, as the
     // getter injected into actorMessaging below.
     const schemaReply = settingsStore.get().schemaValidatedReplies === true;
+    const advertisedTools = filterByRuntimeCapabilities(
+      filterDescriptorsByManifest(
+        actorDescriptors(listTools(), kind, rec.backing, actorSurface),
+        actorToolAllow,
+      ),
+      runtimeCapabilities,
+    );
+    const inboundAllowed = new Set(DWEB_INBOUND_TOOL_NAMES);
+    const tools = (inbound === true && kind === 'dweb'
+      ? advertisedTools.filter((tool) => inboundAllowed.has(tool.name))
+      : advertisedTools)
+      .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
     const systemPrompt = await renderSystemPrompt({
       actorType: kind, backing: rec.backing, instanceId, actorSurface, schemaReply,
       temporalBlock, customSystemPrompt: rec.customSystemPrompt,
+      effectiveTools: tools.map((tool) => tool.name),
+      inbound: inbound === true,
     });
-    const tools = actorDescriptors(listTools(), kind, rec.backing, actorSurface)
-      .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
     // Reasoning + dynamic context-window PARITY (extended thinking + trim scaling).
     const reasoning = {
       enabled: settingsStore.get().reasoningEnabled,
@@ -5106,41 +6760,96 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     // Minimal card display: mount on start, mirror the worker's state snapshots,
     // settle on done. fromIndex = the actor's length BEFORE this turn.
     const fromIndex = (rec.messages ?? []).length;
-    if (display && uiConnected()) {
-      uiPorts.broadcast({ type: 'turn/actor-start', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, fromIndex, kind: display.kind, instanceId: display.instanceId, name: display.name });
+    if (display) {
+      actorLiveProjection.startBound({
+        ...display, sessionId: actorSessionId, fromIndex,
+        grantedTools: tools.map((tool) => tool.name),
+        messages: [], streaming: true, error: null, cost: null,
+      });
+      if (uiConnected()) uiPorts.broadcast({
+        type: 'turn/actor-start', ...display, sessionId: actorSessionId, fromIndex,
+        actorProjectionEpoch: actorLiveProjection.epoch(),
+        actorProjectionRevision: actorLiveProjection.revision(),
+        grantedTools: tools.map((tool) => tool.name),
+        messages: [], streaming: true, error: null, cost: null,
+      });
     }
-    const onEvent = (display && uiConnected())
+    const onEvent = display
       ? (/** @type {any} */ ev) => {
         try {
-          if (ev.type === 'state') uiPorts.broadcast({ type: 'turn/actor-state', parentToolUseId: display.parentToolUseId, session: ev.session, fromIndex, kind: display.kind, instanceId: display.instanceId, name: display.name });
+          if (ev.type === 'state') {
+            const messages = Array.isArray(ev.session?.messages)
+              ? ev.session.messages.slice(fromIndex) : [];
+            if (actorLiveProjection.patchBound(display, { messages })) {
+              broadcastBoundProjection(display, {
+                type: 'turn/actor-state', parentToolUseId: display.parentToolUseId,
+                session: ev.session, fromIndex, kind: display.kind,
+                instanceId: display.instanceId, name: display.name,
+                task: display.task, grantedTools: tools.map((tool) => tool.name),
+              });
+            }
+          }
+          if (ev.type === 'error') {
+            if (actorLiveProjection.patchBound(display, { error: ev.error, streaming: false })) {
+              broadcastBoundProjection(display, {
+                type: 'turn/actor-error', parentToolUseId: display.parentToolUseId,
+                sessionId: actorSessionId, error: ev.error,
+              });
+            }
+          }
         } catch { /* display best-effort */ }
       }
       : undefined;
     // Phase 3: the WEB/API actor self-fence provenance (the worker rebuilds
     // ctx.fenceActorSummary from it — the SW's closure can't cross postMessage). A
-    // tab actor tags its turn-START tab url (the body-wrap is what matters; a tag
-    // that lags a mid-turn navigate is cosmetic); an API actor tags its FIXED origin.
-    let tabUrl;
+    // tab actor gets only a policy-approved turn-start origin; a private,
+    // metadata, or denylisted live tab contributes no location. An API actor
+    // tags its FIXED origin.
+    let tabOrigin;
     let apiOrigin;
     if (kind === 'web') {
       if (rec.backing === 'api') {
         apiOrigin = instanceId;
       } else {
         const ownedTab = actorTabId ?? webActorTabBindings.tabFor(actorSessionId);
-        if (ownedTab != null) tabUrl = (await browser.tabs.get(ownedTab).catch(() => null))?.url;
+        if (ownedTab != null) {
+          const liveUrl = (await browser.tabs.get(ownedTab).catch(() => null))?.url;
+          tabOrigin = safeWebActorSummaryOrigin(liveUrl, denylistStore.patterns());
+        }
       }
     }
-    const r = await actorClient.run({
+    const r = await runActorIsolated({
       actorSessionId, message, systemPrompt,
       provider: rec.provider, model: rec.model, depth: rec.depth,
-      // maxSteps omitted → the worker's runUserTurn uses its OWN default (parity
-      // with the in-SW path, not a hardcoded fifth of it). Seed the actor's prior
-      // history for statefulness.
+      ollamaHost: settingsStore.get().ollamaHost,
+      // maxSteps omitted → the worker's runUserTurn uses its OWN default, not a
+      // hardcoded fifth of it. Seed the actor's prior history for statefulness.
       tools, priorMessages: rec.messages ?? [], reasoning, contextWindow,
       // Phase 3 web/API parity: oneShot loop mode + the self-fence provenance.
-      oneShot: oneShot === true, actorType: kind, backing: rec.backing, tabUrl, origin: apiOrigin,
+      oneShot: oneShot === true, actorType: kind, backing: rec.backing, tabOrigin, origin: apiOrigin,
+      ...(actorSurface ? { actorSurface } : {}),
+      ...(preflightReply ? { preflightReply } : {}),
+      inbound: inbound === true,
     }, { signal: controller.signal, onEvent });
-    if (!(r.ok || r.started)) return null; // never started → caller falls back to in-SW
+    if (!(r.ok || r.started)) {
+      const error = r.error ?? 'the isolated actor worker did not start';
+      auditLog.append({
+        type: 'actor_isolation_failure',
+        details: { host: actorIsolation.host, kind, instanceId, code: r.code ?? 'unknown', performed: false },
+      }).catch(() => {});
+      if (display) {
+        if (actorLiveProjection.patchBound(display, { error, streaming: false })) {
+          broadcastBoundProjection(display, {
+            type: 'turn/actor-error', parentToolUseId: display.parentToolUseId, error,
+          });
+          broadcastBoundProjection(display, {
+            type: 'turn/actor-done', parentToolUseId: display.parentToolUseId,
+            sessionId: actorSessionId, ok: false, aborted: false,
+          });
+        }
+      }
+      return { result: error, stopped: true, isolationFailure: r };
+    }
     // Persist THIS turn's FULL transcript (user + assistant rounds + tool_use/
     // tool_result), not a lossy user+finalText pair — so a long-lived actor keeps
     // its tool-round memory across turns, matching the in-SW path.
@@ -5165,19 +6874,107 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
       try {
         const localProvider = !!listProviders().find((/** @type {any} */ p) => p.name === rec.provider)?.keyless;
         const cost = costOf(/** @type {any} */ (rec.model), /** @type {any} */ (r.usage), /** @type {any} */ (settingsStore.get().pricingOverrides), { localProvider });
-        foldSessionCost(actorSessionId, r.usage, /** @type {any} */ (cost)?.cost ?? 0);
+        await foldSessionCost(actorSessionId, r.usage, /** @type {any} */ (cost)?.cost ?? 0);
         // usage rides along RAW: costOf returns only { cost: USD } — consumers
         // that account TOKENS (the eval runner's ACTOR bucket) need the fields
         // costOf collapsed. Additive; the sidepanel reducer reads `cost` only.
-        if (display && uiConnected()) {
-          uiPorts.broadcast({ type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId, cost, usage: r.usage });
+        if (display) {
+          if (actorLiveProjection.patchBound(display, { cost })) {
+            broadcastBoundProjection(display, {
+              type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId,
+              cost, usage: r.usage,
+            });
+          }
         }
       } catch { /* cost telemetry is best-effort */ }
     }
-    auditLog.append({ type: 'actor_ran_offscreen', details: { heapSplit: true, kind, instanceId, ok: r.ok === true, aborted: r.aborted === true, persistOk } }).catch(() => {});
-    if (display && uiConnected()) uiPorts.broadcast({ type: 'turn/actor-done', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, ok: r.ok === true, aborted: r.aborted === true });
-    return r.finalText ? { result: r.finalText } : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
+    const fresh = finalActorTurnReply(/** @type {any} */ ({ messages: newMessages }));
+    const persistedAssistantError = [...newMessages].reverse()
+      .find((entry) => entry?.role === 'assistant' && typeof entry?.error === 'string')?.error ?? null;
+    const executionError = r.ok === true || r.aborted === true
+      ? null
+      : (r.error ?? 'the isolated actor turn failed before it produced a reply');
+    const terminalError = !persistOk
+      ? 'the actor ran, but its response could not be saved reliably; the outcome is unknown and must not be retried automatically.'
+      : (persistedAssistantError ?? executionError);
+    const outcomeUnknown = terminalError != null
+      && (!persistOk || r.outcomeKnown !== true);
+    // A graceful host-stamped failure before any actor tool crossed the
+    // privileged relay is a definite pre-effect refusal. Preserve that custody
+    // fact through the live card and durable reply instead of defaulting it to
+    // "performed" in actor-messaging.
+    const performed = terminalError != null ? outcomeUnknown : undefined;
+    const turnOk = persistOk && persistedAssistantError == null && r.ok === true && r.aborted !== true;
+    // This immutable settlement snapshot is captured while the actor still owns
+    // its slot. A queued turn may append immediately after release, so metrics
+    // must never re-read the session later and accidentally attribute turn B to A.
+    const turnSnapshot = {
+      messages: [...(rec.messages ?? []), ...newMessages],
+      usage: { ...normalizeTally(r.usage) },
+    };
+    auditLog.append({
+      type: 'actor_ran_isolated',
+      details: {
+        host: actorIsolation.host, workerType: 'dedicated', realmVerified: true,
+        extensionApisPresent: false, actorSessionId, kind, instanceId,
+        ok: turnOk, aborted: r.aborted === true, persistOk,
+        ...(terminalError && r.aborted !== true ? {
+          performed,
+          outcomeKnown: !outcomeUnknown,
+        } : {}),
+      },
+    }).catch(() => {});
+    if (display) {
+      const displayCurrent = terminalError
+        ? actorLiveProjection.patchBound(display, {
+          error: terminalError, outcomeKnown: !outcomeUnknown, performed, streaming: false,
+        })
+        : actorLiveProjection.patchBound(display, {});
+      if (displayCurrent) {
+        if (terminalError) broadcastBoundProjection(display, {
+          type: 'turn/actor-error', parentToolUseId: display.parentToolUseId,
+          error: terminalError, outcomeKnown: !outcomeUnknown, performed,
+        });
+        broadcastBoundProjection(display, {
+          type: 'turn/actor-done', parentToolUseId: display.parentToolUseId,
+          sessionId: actorSessionId, ok: turnOk, aborted: r.aborted === true,
+        });
+      }
+    }
+    if (!persistOk) {
+      return {
+        result: terminalError,
+        stopped: true,
+        executionFailed: true,
+        outcomeKnown: false,
+        persistenceFailure: { performed: true, outcomeKnown: false, retryable: false },
+        turnSnapshot,
+      };
+    }
+    if (terminalError) {
+      return {
+        result: terminalError,
+        stopped: true,
+        executionFailed: true,
+        outcomeKnown: !outcomeUnknown,
+        performed,
+        executionFailure: r,
+        turnSnapshot,
+      };
+    }
+    if (r.aborted === true) {
+      return { result: fresh.result, stopped: true, aborted: true, turnSnapshot };
+    }
+    return { ...fresh, turnSnapshot };
   } finally {
+    // The origin lock writes its stop report asynchronously during page work.
+    // Consume it before releasing, because release synchronously starts the next
+    // queued turn and that turn clears the per-session report at its own start.
+    if (typeof onBeforeRelease === 'function') {
+      try { await onBeforeRelease(); }
+      catch (error) { console.warn('[actor] pre-release snapshot skipped', error); }
+    }
+    actorLiveProjection.finishBound(display);
     release();
     // The turn is over, so the pill comes down — leaving it up through the idle
     // gap would say "peerd is working" while nothing is happening, which is the
@@ -5195,20 +6992,35 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
 // note the actor already had).
 const siteClientInjected = new Set();
 
-// Resolve the ORIGIN a web/API actor is bound to, for the site-client lookup: an
-// API actor owns its FIXED origin (the session record's instanceId/origin), a tab
-// actor owns its tab's LIVE origin. Returns a normalized origin or null.
-const resolveActorOrigin = async (/** @type {string} */ actorSessionId, /** @type {string} */ instanceId, /** @type {number|undefined} */ actorTabId) => {
+// Resolve and authorize the origin whose DOSSIER may be injected at actor mint.
+// The returned closure repeats the same live check after IDB; choosing an origin
+// once is not a durable grant while the tab can move.
+const siteClientMintCustodyFor = async (/** @type {string} */ actorSessionId, /** @type {string} */ instanceId, /** @type {number|undefined} */ actorTabId) => {
   const rec = await sessions.get(actorSessionId).catch(() => null);
-  if (rec?.backing === 'api') {
-    // The API actor's owned origin is its instanceId (mintApiActor sets it).
-    return normalizeApiOrigin(rec.instanceId ?? instanceId);
+  if (!rec) return null;
+  if (rec.backing === 'api') {
+    const origin = normalizeApiOrigin(rec.instanceId ?? instanceId);
+    const guard = makeFixedSiteClientOriginGuard(origin, { isKnownIdp: isKnownIdpHost });
+    return origin && guard(origin)
+      ? { origin, authorize: async () => guard(origin) }
+      : null;
   }
-  // A tab actor: the live origin of its owned tab.
-  const tabId = typeof actorTabId === 'number' ? actorTabId : webActorTabBindings.tabFor(actorSessionId);
-  if (typeof tabId !== 'number') return null;
-  const t = await browser.tabs.get(tabId).catch(() => null);
-  return t?.url ? normalizeApiOrigin(originOfTabUrl(/** @type {string} */ (t.url))) : null;
+  if (rec.backing !== undefined && rec.backing !== 'tab') return null;
+  if (!hasDurableSiteClientState(rec.originState)) return null;
+  originStates.hydrate(actorSessionId, /** @type {any} */ (rec.originState));
+  const lock = originLockFor(actorSessionId);
+  if (!lock) return null;
+  const getLiveLanding = () => liveSiteClientLandingFor(actorSessionId, actorTabId);
+  const authorizeOrigin = lock.authorizeSiteClientOrigin(getLiveLanding);
+  let origin = rec.originState?.mode === 'bound'
+    ? normalizeApiOrigin(rec.originState.ownedOrigin)
+    : null;
+  if (!origin && rec.originState?.mode === 'roaming') {
+    const landing = await getLiveLanding();
+    if (landing.status === 'live') origin = normalizeApiOrigin(landing.url);
+  }
+  if (!origin || await authorizeOrigin(origin) !== true) return null;
+  return { origin, authorize: () => authorizeOrigin(origin) };
 };
 
 const actorMessaging = makeActorMessaging({
@@ -5216,8 +7028,8 @@ const actorMessaging = makeActorMessaging({
     // The chat's WEB ACTOR — the 0-or-1-tab entry point for page-driving / session web
     // work, addressed by the literal 'web'. It decides fetch-vs-render itself: a
     // pure-fetch task never opens a tab; navigate adopts one on the render path. Owned by
-    // the SENDER chat (opts.senderSessionId), not the ambient active chat — so a boot
-    // redrain re-attaches to the right actor. (A numeric tabId, below, targets the
+    // the SENDER chat (opts.senderSessionId), not the ambient active chat. A numeric
+    // tabId below targets the
     // actor owning that SPECIFIC existing tab — e.g. one the orchestrator open_tab'd.)
     if (String(instanceId) === 'web') return resolveWebActor(opts.senderSessionId);
     // The DWEB ACTOR — the global mesh operator, addressed by the literal 'dweb'.
@@ -5237,13 +7049,59 @@ const actorMessaging = makeActorMessaging({
     // them; getting the order wrong would silently hand every handoff a
     // fetch-only integration that cannot log in or click.
     const siteOrigin = parseSiteHandle(instanceId);
-    if (siteOrigin) return resolveSiteActor(siteOrigin, opts.senderSessionId);
+    if (siteOrigin) {
+      if (isKnownIdpHost(siteOrigin)) {
+        auditLog.append({
+          type: 'actor_idp_authority_refused',
+          details: {
+            code: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+            origin: siteOrigin,
+            performed: false,
+          },
+        }).catch(() => {});
+        return {
+          resolutionRefusal: numericTabAuthorityRefusal({
+            allowed: false,
+            code: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+            retryable: false,
+            origin: siteOrigin,
+            reason: 'identity-provider',
+            suggestedHandle: null,
+            requiresUserIntent: false,
+          }),
+        };
+      }
+      return resolveSiteActor(siteOrigin, opts.senderSessionId);
+    }
     // DESIGN-18: an API integration is addressed by its ORIGIN (a bare host or a full
     // URL). normalizeApiOrigin canonicalizes it and REJECTS anything that isn't a public
     // dotted host — so 'web', a tabId, and engine ids (vm-/notebook-/app-, no dot) all
     // fall through to the engine branch below. The origin is the integration's identity.
     const apiOrigin = normalizeApiOrigin(instanceId);
-    if (apiOrigin) return resolveApiActor(apiOrigin, opts.senderSessionId);
+    if (apiOrigin) {
+      if (isKnownIdpHost(apiOrigin)) {
+        auditLog.append({
+          type: 'actor_idp_authority_refused',
+          details: {
+            code: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+            origin: apiOrigin,
+            performed: false,
+          },
+        }).catch(() => {});
+        return {
+          resolutionRefusal: numericTabAuthorityRefusal({
+            allowed: false,
+            code: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+            retryable: false,
+            origin: apiOrigin,
+            reason: 'identity-provider',
+            suggestedHandle: null,
+            requiresUserIntent: false,
+          }),
+        };
+      }
+      return resolveApiActor(apiOrigin, opts.senderSessionId);
+    }
     const prefix = String(instanceId).split('-')[0];
     const entry = /** @type {Record<string, { reg: any, kind: string }>} */ (ACTOR_REGISTRY_BY_PREFIX)[prefix];
     if (!entry) return null;
@@ -5259,7 +7117,15 @@ const actorMessaging = makeActorMessaging({
   // actorTabId threads the WEB actor's owned tab into the turn so its DOM
   // tools (and the origin gate) target THAT tab; undefined for engine kinds, where
   // buildToolContext leaves activeTab unset (they act on their instance, not a tab).
-  runActorTurn: async ({ actorSessionId, message, actorTabId, instanceId, kind, parentToolUseId, name, oneShot }) => {
+  runActorTurn: async ({
+    actorSessionId, message, actorTabId, instanceId, kind, correlationId,
+    parentToolUseId, parentSessionId, rootSessionId, name, oneShot, turnLease,
+  }) => {
+    // Invalidate old judges synchronously, then wait for their serialized
+    // transitions to drain before this turn builds a tool context.
+    landingStopReports.delete(actorSessionId);
+    beginLandingTurn(actorSessionId);
+    await originStates.serialize(actorSessionId, () => undefined);
     // DESIGN-19 mint-time injection: if this web/API actor's origin has a stored
     // site client, prepend its dossier — the tool-authored staleness header
     // OUTSIDE the fence, the dossier body wrapUntrusted-fenced (every byte is
@@ -5269,10 +7135,12 @@ const actorMessaging = makeActorMessaging({
     let deliveredMessage = message;
     if (kind === 'web' && !siteClientInjected.has(actorSessionId)) {
       try {
-        const originForClient = await resolveActorOrigin(actorSessionId, instanceId, actorTabId);
-        if (originForClient) {
-          const meta = await siteClientStore.getMeta(originForClient).catch(() => null);
-          if (meta) {
+        const custody = await siteClientMintCustodyFor(actorSessionId, instanceId, actorTabId);
+        if (custody) {
+          const meta = await siteClientStore.getMeta(custody.origin).catch(() => null);
+          // IDB yielded after the first authorization. Dossier bytes stay out
+          // unless the same actor still owns the same origin now.
+          if (meta && await custody.authorize() === true) {
             siteClientInjected.add(actorSessionId);
             deliveredMessage = `${buildMintInjection(meta)}\n\n---\n\n${message}`;
           }
@@ -5302,27 +7170,39 @@ const actorMessaging = makeActorMessaging({
     // live-view, for an actor). Cheap: rendering only — the model-memory the
     // orchestrator keeps is still just the fenced reply (deliver()).
     const display = parentToolUseId
-      ? { parentToolUseId, kind, instanceId, name }
+      ? {
+          parentToolUseId, parentSessionId, rootSessionId, actorCorrelationId: correlationId,
+          kind, instanceId, name, task: message,
+        }
       : undefined;
-    // Count the actor's messages BEFORE the turn so we read only the reply THIS
-    // turn produced — finalAssistantText scans backward and would otherwise return a
-    // PRIOR exchange's reply when this turn was Stop-cascaded before emitting any
-    // text (the stale-reply bug). `stopped` lets the caller mark the wake failed.
-    const before = (await sessions.get(actorSessionId))?.messages?.length ?? 0;
-    // issue 251 — clear any report left over from an earlier turn BEFORE running,
-    // so a stop can only ever be attributed to the turn that caused it. A stale
-    // report surfacing on a later, unrelated message would be a lie in the one
-    // place the orchestrator is being asked to trust us.
-    //
-    // The delete alone is NOT enough, and adversarial review is the reason this
-    // sentence exists: it only clears reports written before the turn starts,
-    // while the dangerous one is written AFTER — by a navigate still inside its
-    // 30-second load wait when the previous turn was aborted, whose judge runs
-    // when it finally resolves. Opening a turn token makes that judge inert: it
-    // captured the old token at context-build time, so it can neither file a
-    // report against this turn nor abort it.
-    landingStopReports.delete(actorSessionId);
-    beginLandingTurn(actorSessionId);
+    const beforeRecord = await sessions.get(actorSessionId);
+    const before = beforeRecord?.messages?.length ?? 0;
+    const contributorStartedAt = Date.now();
+    // Snapshot the experiment decision at turn start. A Settings change while
+    // the actor is running applies to the next turn and must not relabel this
+    // one. API-backed actors are a different experiment and contribute nothing.
+    const contributorDecision = kind === 'web' && beforeRecord?.backing !== 'api'
+      ? resolveWebActorSurfaceDecision({
+        requested: settingsStore.get().webActorActionSurface,
+        allowedTools: resolveManifestAllow(beforeRecord?.toolManifest),
+        headlessAvailable: offscreenAvailable,
+      })
+      : null;
+    const contributorArm = contributorDecision && CONTRIBUTOR_METRICS_AVAILABLE
+      ? await contributorStore.arm()
+      : null;
+    const actorSurface = contributorDecision?.resolved;
+    /** @type {string | null} */
+    let landingStopSnapshot = null;
+    const captureLandingStop = () => {
+      // The next queued turn clears this report at its own start. Consume it
+      // while this turn still owns the actor slot.
+      const report = landingStopReports.get(actorSessionId);
+      if (report) {
+        landingStopReports.delete(actorSessionId);
+        landingStopSnapshot = report;
+      }
+    };
     /**
      * If the origin lock stopped this actor mid-turn, its own reply is not the
      * answer — the report is. Overriding UNCONDITIONALLY is the point: a stopped
@@ -5334,45 +7214,127 @@ const actorMessaging = makeActorMessaging({
      * @returns {{ result: string, stopped?: boolean }}
      */
     const withLandingStop = (reply) => {
-      const report = landingStopReports.get(actorSessionId);
+      const report = landingStopSnapshot;
       if (!report) return reply;
-      landingStopReports.delete(actorSessionId);
       return { result: report, stopped: true };
     };
-    // Heap-split: every BOUND actor runs its loop in its own offscreen Worker heap —
+    /**
+     * Record only fixed enums/counters after the actor session has settled.
+     * Session/tool ids exist solely in bounded local dedupe maps; the serialized
+     * contribution schema has no field through which they can exit.
+     * @param {{ result: string, stopped?: boolean }} reply
+     * @param {{ messages: any[], usage: any } | null | undefined} snapshot
+     */
+    const finishContributor = async (reply, snapshot) => {
+      const finalReply = withLandingStop(reply);
+      if (!contributorDecision || !beforeRecord || contributorArm?.enabled !== true) return finalReply;
+      try {
+        if (!snapshot) return finalReply;
+        const freshMessages = snapshot.messages.slice(before);
+        const toolUses = freshMessages.flatMap((entry) =>
+          Array.isArray((/** @type {any} */ (entry))?.toolUses)
+            ? (/** @type {any} */ (entry)).toolUses : []);
+        const base = {
+          feature: 'web_actor_surface',
+          ...contributorDecision,
+          browser: browser.runtime.getURL('').startsWith('moz-extension://') ? 'firefox' : 'chrome',
+          extensionVersion: browser.runtime.getManifest().version,
+          channel: CHANNEL,
+          provider: beforeRecord.provider,
+          model: beforeRecord.model,
+        };
+        const actions = [];
+        for (const toolUse of toolUses) {
+          const action = contributorActionForTool(toolUse?.name);
+          if (action) actions.push({ ...base, action });
+        }
+        const assistantMessages = freshMessages.filter((entry) => entry?.role === 'assistant');
+        const { outcome, failure } = contributorTurnResult({
+          assistantMessages,
+          stopped: finalReply.stopped,
+          result: finalReply.result,
+        });
+        const usage = normalizeTally(snapshot.usage);
+        const tokens = usage.inputTokens + usage.outputTokens
+          + usage.cacheReadTokens + usage.cacheWriteTokens;
+        await contributorStore.recordWebSettlement({
+          consentGeneration: contributorArm.generation,
+          operationKey: correlationId,
+          feedbackContextKey: contributorFeedbackContextKey(parentSessionId, parentToolUseId),
+          turn: {
+            ...base,
+            outcome,
+            failure,
+            durationMs: Date.now() - contributorStartedAt,
+            tokens,
+          },
+          actions,
+        });
+      } catch (error) {
+        // Contribution is optional and local; corrupt/newer state must never
+        // change the actor result or weaken the actor-isolation boundary.
+        console.warn('[contributor] local settlement skipped', error);
+      }
+      return finalReply;
+    };
+    // Heap-split: every BOUND actor runs its loop in its own dedicated Worker heap.
     // engine kinds (vm/notebook/app, phase 2) AND the web/API actor (phase 3, the
     // highest-value isolation: it ingests untrusted PAGE/response content). Its DOM
-    // tools + fetch_url run SW-side via the 'actor/tool-dispatch' relay (chrome.* is
-    // SW-only); the worker holds no key, no chrome.*. Returns the reply, or null to
-    // fall back to the in-SW turn below (offscreen unavailable / never started).
-    if (kind === 'webvm' || kind === 'notebook' || kind === 'pod' || kind === 'app' || kind === 'web' || kind === 'dweb') {
-      const off = await runActorTurnOffscreen({ actorSessionId, message: deliveredMessage, instanceId, kind, actorTabId, oneShot: oneShot === true, display });
-      if (off) return withLandingStop(off);
+    // tools + fetch_url run in the privileged host via the gated relay; the worker
+    // holds no key or extension APIs. There is no background-heap fallback.
+    if (kind === 'webvm' || kind === 'notebook' || kind === 'app' || kind === 'web' || kind === 'dweb') {
+      const off = await runActorTurnOffscreen({
+        actorSessionId,
+        message: deliveredMessage,
+        instanceId,
+        kind,
+        actorTabId,
+        oneShot: oneShot === true,
+        display,
+        inbound: false,
+        actorSurface,
+        onBeforeRelease: captureLandingStop,
+        turnLease,
+      });
+      return finishContributor(off, off.turnSnapshot);
     }
-    // oneShot: the loop synthesizes the reply from the first clean tool round and
-    // stops (no summarize inference) — finalAssistantText below reads that synthetic
-    // assistant message exactly like a normal reply, so nothing else changes here.
-    try {
-      await runAgentTurn({ sessionId: actorSessionId, userText: deliveredMessage, synthetic: false, activeTabId: actorTabId, display, oneShot: oneShot === true });
-    } finally {
-      // why here too: runActorTurnOffscreen takes the pill down in its own
-      // finally, but this is the IN-SW fallback the offscreen path returns null
-      // for (Firefox has no offscreen API). Without it the pill outlives the
-      // turn on Firefox and sits on "Thinking…" forever — peerd saying it is
-      // working while nothing is happening, the exact misreading the indicator
-      // exists to prevent. The GROUP still stays; only the pill comes down.
-      const drivenTabId = webActorTabBindings.tabFor(actorSessionId);
-      if (typeof drivenTabId === 'number') pageActivity.idle(drivenTabId).catch(() => {});
-    }
-    const s = await sessions.get(actorSessionId);
-    const fresh = finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) }));
-    return withLandingStop(fresh
-      ? { result: fresh }
-      : { result: 'the actor turn was stopped before it produced a reply.', stopped: true });
+    captureLandingStop();
+    if (turnLease) turnLease.release();
+    return finishContributor(
+      { result: `actor kind ${kind || 'unknown'} is unsupported`, stopped: true },
+      null,
+    );
   },
-  reenter: ({ userText, sessionId, synthetic, trusted, actorReply }) => runAgentTurn({ userText, sessionId, synthetic, trusted, actorReply }),
+  reenter: ({ userText, sessionId, synthetic, trusted, actorReply, turnLease }) =>
+    runAgentTurn({ userText, sessionId, synthetic, trusted, actorReply, turnLease }),
+  // Restart recovery is a receipt, not a turn. Persist it directly with a
+  // stable id so a second background loss can finish the same append without
+  // duplicating the notice or giving the model another chance to act.
+  recordRecovery: async ({ userText, sessionId, actorReply, recoveryId }) => {
+    await sessions.appendMessage(sessionId, {
+      role: 'user',
+      content: userText,
+      synthetic: true,
+      actorReply,
+      id: `actor-recovery:${sessionId}:${recoveryId}`,
+      when: Date.now(),
+    });
+    await pushState();
+    return true;
+  },
+  deliveryCommitted: async ({ sessionId, deliveryId }) => {
+    const session = await sessions.get(sessionId);
+    return (session?.messages ?? []).some((message) =>
+      actorDeliveryIdsFromMessage(message).includes(deliveryId));
+  },
+  isActorSessionCurrent: async (actorSessionId) => {
+    if (retiredActorSessions.has(actorSessionId)) return false;
+    const actor = await sessions.get(actorSessionId);
+    return !!actor && actor.originState?.retired !== true;
+  },
   turnSlots,
   getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
+  getActorIsolation: () => actorIsolation,
   // PR #134 phase 3 — the shell walk behind the trusted-lineage gate. The pure
   // walk (fail-closed rules + hop cap + cycle guard) lives in delegation-lineage
   // so it's unit-tested; here we only inject the store read. spawnedTrusted per
@@ -5399,21 +7361,30 @@ const actorMessaging = makeActorMessaging({
   mailbox: actorMailbox,
   log: (/** @type {any[]} */ ...a) => console.warn('[actor]', ...a),
 });
+// Human-feedback admission must see both the parent chat slot and any actor
+// delivery still settling for that chat. Keep these as explicit bindings so
+// route wiring remains shorthand-only and statically auditable.
+const isSessionBusy = (/** @type {string} */ sessionId) => turnSlots.isBusy(sessionId);
+const hasInFlightFor = (/** @type {string} */ sessionId) => actorMessaging.hasInFlightFor(sessionId);
+const channel = CHANNEL;
 
-// Redrain the durable mailbox ONCE per SW lifetime, the moment the vault is
-// unlocked (a re-queued actor turn needs the model key). Boots already-unlocked
-// → fires from the attemptResume chain below; booted locked → fires on the first
-// unlock via the subscription. The once-guard prevents a double-drain (entries
-// aren't cleared until their turn SETTLES, so a second drain would double-deliver).
-let mailboxRedrained = false;
-const maybeRedrainMailbox = () => {
-  if (mailboxRedrained || vault.isLocked()) return;
-  mailboxRedrained = true;
-  Promise.resolve(actorMessaging.redrain())
-    .then((r) => { if (r?.redrained) console.warn('[actor] redrained', r.redrained, 'pending message(s) after restart'); })
-    .catch((e) => console.error('[sw] actor redrain failed', e));
+// Recover the durable mailbox before any automatic model work. Stored actor work
+// is never executed here. A failed receipt stays durable and gets another passive
+// write attempt in this background lifetime; a later background boot also retries.
+const actorRecoveryGate = makeActorRecoveryGate({
+  redrain: () => actorMessaging.redrain(),
+  log: (e) => console.error('[sw] actor redrain failed', e),
+});
+runWhenActorRecoveryReady = actorRecoveryGate.runWhenReady;
+const maybeRedrainMailbox = actorRecoveryGate.recover;
+const actorRecoveryReady = actorRecoveryGate.ready;
+const maybeAutoResumeAfterRecovery = (/** @type {string | null | undefined} */ sessionId) => {
+  if (!sessionId) return Promise.resolve(false);
+  return actorRecoveryGate.runWhenReady(
+    `auto-resume:${sessionId}`,
+    () => maybeAutoResume(sessionId),
+  );
 };
-vault.subscribe(() => { maybeRedrainMailbox(); });
 
 // ---------------------------------------------------------------------------
 // 5b. /init — workspace scan → draft AGENTS.md → confirm → persist (V1.5)
@@ -5425,9 +7396,20 @@ vault.subscribe(() => { maybeRedrainMailbox(); });
 // confirm round-trip is the same SW ↔ side panel channel memory writes
 // use — /init never silently persists.
 
-const postChatNote = (/** @type {string} */ text, /** @type {any} */ action = null) => {
+const postChatNote = (
+  /** @type {string} */ text,
+  /** @type {any} */ action = null,
+  /** @type {string | null} */ sessionId = null,
+) => {
   if (!uiConnected()) return;
-  try { uiPorts.broadcast({ type: 'turn/system-note', text, ...(action ? { action } : {}) }); }
+  try {
+    uiPorts.broadcast({
+      type: 'turn/system-note',
+      text,
+      ...(action ? { action } : {}),
+      ...(sessionId ? { sessionId } : {}),
+    });
+  }
   catch { /* panel gone */ }
 };
 
@@ -5442,9 +7424,14 @@ const initOrchestrator = makeInitOrchestrator({
   memory,
   confirm: /** @type {any} */ (confirmAction),
   postChatNote,
+  getDenylist: () => denylistStore.patterns(),
 });
 const runInit = async () => {
   if (vault.isLocked()) throw new VaultLockedError();
+  // /init scans open tabs directly rather than building a tool context.
+  // Keep the same cold-start posture: no scan while sensitive-origin policy
+  // is unavailable, even though the orchestrator also classifies each tab.
+  requireDenylistPolicy(await denylistReady);
   return initOrchestrator.runInit();
 };
 
@@ -5577,7 +7564,9 @@ const haltGoalRun = (/** @type {string} */ sid) => /** @type {any} */ (goalRunne
 // §2.5: session archive/delete purges its lifecycle state — pending recovery
 // notices + nonterminal operations settle cancelled (boot.purgeSession).
 const purgeLifecycleSession = (/** @type {string} */ sid) => lifecycleBoot.purgeSession(sid);
-const resumeGoalRuns = () => /** @type {any} */ (goalRunner)?.resume();
+const resumeGoalRuns = () => actorRecoveryGate.runWhenReady(
+  'goal-resume',
+  () => /** @type {any} */ (goalRunner)?.resume());
 // Background scheduling: drive a full scheduler catch-up. The SINGLE entry point
 // for every wake (alarm, onStartup, cold boot, vault unlock) so the ordering is
 // defined in ONE place and can't drift per-caller.
@@ -5592,21 +7581,134 @@ const resumeGoalRuns = () => /** @type {any} */ (goalRunner)?.resume();
 // Sequencing resume() → load() → tick() closes that window. Both resume() and
 // load() are idempotent (skip ids already live), so calling this from every wake
 // — even one where goal runs were already resumed — is safe.
-const resumeSchedules = () => Promise.resolve(/** @type {any} */ (goalRunner)?.resume())
-  .catch(() => {})
-  .then(() => /** @type {any} */ (scheduler)?.load())
-  .then(() => /** @type {any} */ (scheduler)?.tick())
+const resumeSchedules = () => actorRecoveryGate.runWhenReady('schedules', async () => {
+    await Promise.resolve(/** @type {any} */ (goalRunner)?.resume()).catch(() => {});
+    await /** @type {any} */ (scheduler)?.load();
+    await /** @type {any} */ (scheduler)?.tick();
+  })
   .catch((e) => console.error('[sw] schedule catch-up failed', e));
 const ensureSession = ensureCurrentSession;
 
-// The tool needs the exact same handler semantics as the extension route. The
-// factory is stateless; the dispatcher constructs its own instance inline below
-// so the route-wiring invariant can audit its dependency object mechanically.
-const dwebToolRoutes = makeDwebRoutes({
-  vault, auditLog, kv, ensureOffscreen, browser,
-  appRegistry, appClient, appTabTracker, opfsHelpers, settingsStore,
-  DWEB_ENABLED, DWEB_IDENTITY_SECRET, APP_TAB_GROUP_TITLE,
-  onBaseNetworkStopped, repositories,
+const shareLocalApp = makeDwebShare({
+  enabled: DWEB_ENABLED,
+  active: () => settingsHydrated && settingsStore.get().dwebEnabled,
+  withDwebPublication,
+  withIdentityMutation: withDwebIdentityMutation,
+  withAppLifecycle,
+  // makeDwebShare already owns the lifecycle lane. Flush before its App write
+  // lock, then hold the frozen editor through commit, snapshot, publication,
+  // and durable metadata persistence.
+  withAppWriteLock: (appId, operation) => appQuiescence.runUnlocked(
+    appId,
+    () => appClient.withWriteLock(appId, operation),
+  ),
+  appRegistry,
+  repositories,
+  prepareRuntime: async () => {
+    await ensureDwebSuspensionRecovery();
+    await ensureOffscreen();
+    return browser.runtime.sendMessage({ type: 'dweb/base-host/start' });
+  },
+  sendMessage: (message) => browser.runtime.sendMessage(message),
+});
+
+const dwebTransfer = makeDwebTransfer({
+  enabled: DWEB_ENABLED,
+  offscreenAvailable,
+  vault,
+  identitySecretName: DWEB_IDENTITY_SECRET,
+  runCustodyOperation: (operation, args) => dwebCustodyClient.call(operation, args),
+  loadDweb,
+  withIdentityMutation: withDwebIdentityMutation,
+  canReplaceIdentity: canChangeDwebIdentity,
+  stopIdentityRuntime: async (leaseId) => {
+    if (!offscreenAvailable) return;
+    await ensureDwebSuspensionRecovery();
+    try {
+      await dwebCustodyClient.call('suspend', { leaseId });
+    } catch {
+      throw new IdentityTransferError('existing identity runtime could not be stopped', 'stop-failed');
+    }
+    onBaseNetworkStopped();
+  },
+  startIdentityRuntime: async (leaseId) => {
+    if (!offscreenAvailable) return;
+    const releaseLease = async () => {
+      const reply = /** @type {any} */ (await dwebCustodyClient.call('resume', { leaseId }));
+      if (!reply?.resumed) {
+        throw new IdentityTransferError('identity runtime could not resume', 'resume-failed');
+      }
+    };
+    const retryRelease = () => {
+      releaseLease()
+        .then(() => maybeStartBaseNetwork('identity-resume-retry'))
+        .catch(() => setTimeout(retryRelease, 1000));
+    };
+    try {
+      await releaseLease();
+    } catch (cause) {
+      // Retry only with the same owner token. A normal start can observe the
+      // lease but can never release it, and a lost success acknowledgement is
+      // harmless because release is idempotent once no owner remains.
+      setTimeout(retryRelease, 1000);
+      throw cause;
+    }
+    setTimeout(() => maybeStartBaseNetwork('identity-import'), 0);
+  },
+  audit: (event) => auditLog.append(event),
+});
+
+// Backup requests carry passwords and recovery records. They are present in
+// the normal route modules for shared business logic, but every transfer route
+// requires this non-serializable capability and the options page reaches them
+// through a MessageChannel transferred to its exact WindowClient on Chrome.
+// Firefox has no service-worker WindowClient API, so its exact options sender
+// uses the private background-page Port fallback above.
+const privateTransferAuthorization = Symbol('private-transfer');
+const normalizeImportedSettings = (/** @type {any} */ patch) => normalizeSettingsPatch(patch, {
+  knownProviderNames: listProviders().map((/** @type {{ name: string }} */ provider) => provider.name),
+  reasoningEffortLevels: REASONING_EFFORT_LEVELS,
+  dwebEnabled: DWEB_ENABLED,
+  autoUpdateAvailable: Object.hasOwn(DEFAULT_SETTINGS, 'autoUpdateEnabled'),
+  normalizeVariant,
+  normalizeEngine,
+});
+const makeSystemRouteSet = () => makeSystemRoutes({
+  vault, auditLog, sessions, pushState, kv, memory, buildStateSnapshot, closeSidePanel,
+  uiPorts, loadUserEndpoints, inspectImport, applyImport, settingsStore, saveUserHook,
+  CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError, dwebTransfer,
+  onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
+  retryActorIsolation, normalizeImportedSettings, onProviderConfigChanged,
+});
+const makeSettingsRouteSet = () => makeSettingsRoutes({
+  vault, auditLog, pushState, kv, memory, settingsStore,
+  normalizeSettingsPatch, normalizeVariant, normalizeEngine, listProviders,
+  REASONING_EFFORT_LEVELS, DWEB_ENABLED, DEFAULT_SETTINGS,
+  buildExport, CHANNEL, exportHooks, skillRegistry, dwebTransfer,
+  EXPORT_PASSPHRASE_MIN_LENGTH, isCustodySecretName,
+  onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
+  ensureSettingsReady,
+});
+const systemMessageRoutes = makeSystemRouteSet();
+const settingsMessageRoutes = makeSettingsRouteSet();
+privateTransferPort = makePrivateTransferPort({
+  authorization: privateTransferAuthorization,
+  handlers: {
+    'transfer/export': settingsMessageRoutes['transfer/export'],
+    'transfer/inspectImport': systemMessageRoutes['transfer/inspectImport'],
+    'transfer/import': systemMessageRoutes['transfer/import'],
+  },
+});
+const privateTransferOpenRoute = makePrivateTransferOpenRoute({
+  isOptionsSender: isActualOptionsSender,
+  optionsUrl: browser.runtime.getURL('options/options.html'),
+  attach: (port) => privateTransferPort?.attach(port),
+  listWindowClients: async () => {
+    const clientsApi = /** @type {any} */ (globalThis).clients;
+    return clientsApi?.matchAll
+      ? clientsApi.matchAll({ type: 'window' })
+      : [];
+  },
 });
 
 // Message routes live in background/routes/*.js as import-free, deps-injected
@@ -5616,43 +7718,56 @@ const dwebToolRoutes = makeDwebRoutes({
 // tests/meta/sw-routes-wiring.test.ts proves each module's deps object matches
 // what it destructures, exactly (no missing, no dead).
 //
-// ALL 103 routes now live in modules — none are inline here. The reassigned
+// Routes live in modules rather than accumulating inline here. The reassigned
 // module state that once forced routes inline lives in stores (settings-store /
 // denylist-store / session-state / local-model-state / profile-state); routes
 // reach it through a store method (always-live) handed in via deps. A new route
 // belongs in a routes/ module too; if it needs mutable SW state, give that state
 // a store and inject it, rather than reaching for a module-level let.
 browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
+  // Nonsecret request for a MessageChannel transferred to the exact options
+  // WindowClient. Backup passphrases and payloads use only that channel.
+  'private-transfer/open': privateTransferOpenRoute,
   // The heap split: the offscreen→SW relays for the ONE agent-loop client — model-call
   // (getSecret + safeFetch added in the handler; the key never left the SW), the
   // SW-side pin+gate tool-dispatch, and the fire-and-forget loop-event (→ the actor/
   // actor card + cost meter). Serves both spawned reasoners and bound actors; a
   // reasoning child never exercises tool-dispatch. actorClient is defined above (after
   // ensureOffscreen), before this dispatcher literal — safe to spread.
-  ...(actorClient?.routes ?? {}),
+  // Firefox binds these routes directly inside the background page. Chrome's
+  // offscreen host reaches them only through its run-specific channel closure.
+  // The script tool's actors-in-code relay: live-run/owner/grant verified,
+  // then every ask re-enters the existing messageActor gate chain.
+  ...makeActorsRoutes({
+    sessions, uiPorts, buildToolContext, dispatchToolCall, actorMessaging,
+    scriptRuns, actorsCallToOp, shapeActorsResult, askOutcome,
+    ACTORS_ASK_DEFAULT_TIMEOUT_MS, ACTORS_TRACE_TARGET_MAX_CHARS,
+    ACTORS_TRACE_ERROR_MAX_CHARS, resolveManifestAllow, isOffscreenSender,
+  }),
   // A2A: the sealed a2a_run worker's mesh calls relay here (owner-verified,
   // consent-gated, dispatched on the peerd-agent room).
-  'a2a/call': (/** @type {any} */ msg) => a2aCallRoute(msg),
-  // actors: the script tool's delegation surface — each actors.* call an
-  // actors-enabled headless run makes relays here (owner-verified, fully
-  // re-gated through messageActor).
-  'actors/call': (/** @type {any} */ msg) => actorsCallRoute(msg),
+  'a2a/call': (/** @type {any} */ msg, /** @type {any} */ sender) => a2aCallRoute(msg, sender),
   // provider (design 5): the script tool's sub-model surface — each
   // peerd.provider.call a provider-enabled headless run makes relays here
   // (owner/run-verified, quota-capped, the key added SW-side).
-  'script/model-call': (/** @type {any} */ msg) => scriptModelCallRoute(msg),
+  'script/model-call': (/** @type {any} */ msg, /** @type {any} */ sender) =>
+    scriptModelCallRoute(msg, sender),
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
-    pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,
+    pushState, purgeVaultBlob, confirmCoordinator, sessionCache,
+    isActualSidepanelSender, isActualHomeSender,
+    maybeAutoResumeAfterRecovery, resumeGoalRuns,
     resumeSchedules,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,
     VaultLockedError,
   }),
   ...makeProviderRoutes({
-    vault, auditLog, pushState, settingsStore, listProviders, listProviderModels, listOpenRouterModels,
+    vault, auditLog, pushState, settingsStore, listProviders, liveProviderModels, listOpenRouterModels,
     OPENROUTER_POPULAR, callModel, getSecret, safeFetch, secretNameForProvider, maskKey,
-    buildModelOptions, ProviderHttpError, ProviderKeyMissingError, VaultLockedError,
+    buildModelOptions, onProviderConfigChanged, ensureSettingsReady,
+    hydrateLocalModelAvailability,
+    ProviderHttpError, ProviderKeyMissingError, VaultLockedError,
   }),
   ...makeHooksRoutes({
     auditLog, kv, listHooks, DEFAULT_HOOKS, parseHookMarkdown, saveUserHook, removeHook, exportHooks,
@@ -5666,7 +7781,13 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     vault, auditLog, pushState, memory, memorySuggestions, runInit, postChatNote,
     USER_DOC_SCOPE, appendNoteToUserDoc, profileState, seedUserDocBody,
   }),
+  ...makeContributorRoutes({
+    contributorStore, sessions, isActualOptionsSender, isActualSidepanelSender,
+    isActualHomeSender, isSessionBusy, hasInFlightFor, actorRecoveryReady,
+    contributorFeedbackTargets, channel,
+  }),
   ...makeContactsRoutes({ vault, auditLog, contacts, appRegistry, mergeContacts }),
+  ...makeActorOverviewRoutes({ vault, sessions, turnSlots, actorLiveProjection, isActualHomeSender }),
   ...makeSessionRoutes({
     vault, auditLog, sessions, sessionCache, turnSlots, manifestLabel, buildToolContext,
     applyComposer, commandSources, prepareUserAttachmentsWithDocs, runAgentTurn, runInit,
@@ -5679,7 +7800,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     browser, originOfTabUrl, matchesDenylist, denylistStore,
     // goal mode (the mode-row Goal toggle): start an autonomous run, and halt
     // any active one when the user stops or steers with a fresh message.
-    startGoalRun, haltGoalRun, ensureSession,
+    startGoalRun, haltGoalRun, ensureSession, actorRecoveryReady,
     // DESIGN-17 P1: agent/stop cascades to this chat's in-flight actors.
     actorMessaging,
     // PR #134 phase 5: agent/stop also cascades through the live actor
@@ -5690,18 +7811,16 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   }),
   ...makeEngineRoutes({
     vault, auditLog, pushState, browser, vmHttpFetch, appRegistry, vmRegistry, jsRegistry,
-    podRegistry, podTabTracker, appClient, appTabTracker, opfsHelpers,
+    podRegistry, podTabTracker, appClient, appTabTracker, appQuiescence, opfsHelpers,
     NOTEBOOK_OPFS_ROOT, IMAGE_PIN_STORAGE_KEY,
     buildAppExport, buildNotebookExport, buildVmRecipeExport,
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
-    ensureOffscreen, settingsStore, DWEB_ENABLED, applyWebExtract, repositories, parseAppManifest, kv,
+    settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
+    listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
+    repositories, parseAppManifest, podGitRemoteOperation,
   }),
-  ...makeSystemRoutes({
-    vault, auditLog, sessions, pushState, kv, memory, buildStateSnapshot, closeSidePanel,
-    uiPorts, loadUserEndpoints, inspectImport, applyImport, settingsStore, saveUserHook,
-    CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError,
-  }),
+  ...systemMessageRoutes,
   // denylistNetGuard: an edit changes what the network backstop blocks, so the
   // rule is rebuilt on every edit — including the removal path, where a stale
   // rule would keep blocking a site the user just unblocked.
@@ -5725,38 +7844,38 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // the chat's web actor currently owns a tab. It grants nothing, and it is not
   // reachable by the model — routes are the side panel's surface, and the tool
   // dispatcher has no path to them.
-  'debug/originLock': async (/** @type {{ origin?: string }} */ msg = {}) => {
+  'debug/originLock': async (/** @type {{ origin?: string, seedReason?: 'password-field'|'confirmed-write' }} */ msg = {}) => {
     const origin = normalizeApiOrigin(msg.origin);
+    // Dev-mode test seam for deterministic browser probes. It can only add the
+    // same restrictive learned signals ordinary DOM/confirmation observation
+    // adds, never remove one or grant authority. The model has no route here.
+    if (settingsStore.get().devMode === true && origin
+        && (msg.seedReason === 'password-field' || msg.seedReason === 'confirmed-write')) {
+      noteLearnedOrigin(origin, msg.seedReason);
+      await learnedOrigins.settled();
+    }
     const chatId = /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
     const actorSessionId = chatId ? webActorRegistry.resolve(chatId) : null;
+    const siteActorSessionId = (origin && chatId) ? siteActorBindings.resolve(chatId, origin) : null;
     return {
       ok: true,
-      learned: origin ? learnedOrigins.snapshot().has(origin) : false,
+      learned: origin ? [...learnedOrigins.snapshot().keys()]
+        .some((host) => learnedOriginCovers(host, origin)) : false,
       keyed: origin ? keyedOrigins.has(origin) : false,
       ownedTabId: actorSessionId ? (webActorTabBindings.tabFor(actorSessionId) ?? null) : null,
       originState: actorSessionId ? (originStates.read(actorSessionId) ?? null) : null,
       // The SITE actor for this origin, if the chat has formed one. Its mode is
       // the property that distinguishes a real handoff successor from a roaming
       // helper that merely happens to be on the right page.
-      siteActorState: (() => {
-        const sid = (origin && chatId) ? siteActorBindings.resolve(chatId, origin) : null;
-        return sid ? (originStates.read(sid) ?? null) : null;
-      })(),
+      siteActorState: siteActorSessionId ? (originStates.read(siteActorSessionId) ?? null) : null,
+      siteActorTabId: siteActorSessionId ? (webActorTabBindings.tabFor(siteActorSessionId) ?? null) : null,
     };
   },
-  ...makeSettingsRoutes({
-    vault, auditLog, pushState, kv, memory, settingsStore,
-    normalizeSettingsPatch, normalizeVariant, normalizeEngine, listProviders,
-    REASONING_EFFORT_LEVELS, DWEB_ENABLED, DEFAULT_SETTINGS,
-    buildExport, CHANNEL, exportHooks, skillRegistry,
-    // React to the dweb-agent toggle: join/leave the inbox room so a disable
-    // withdraws mesh presence immediately (idempotent; no-op for other keys).
-    onSettingsChanged,
-  }),
+  ...settingsMessageRoutes,
   ...makeSessionMutationRoutes({
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
-    maybeAutoResume, haltGoalRun,
+    maybeAutoResumeAfterRecovery, haltGoalRun,
     // session/reset (New chat) must stop the abandoned session's live turn AND
     // cascade to its in-flight actors — same primitives agent/stop uses — so
     // background web/VM/App work doesn't keep running on the orphaned session.
@@ -5766,12 +7885,20 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     // …and the session's lifecycle state (§2.5 cancellation dominance).
     purgeLifecycleSession,
   }),
-  ...makeLocalModelRoutes({ ensureOffscreen, browser, localModelState }),
+  ...makeLocalModelRoutes({
+    ensureOffscreen,
+    browser,
+    localModelState,
+    localModelHostAvailable,
+    pushState,
+    onProviderConfigChanged,
+  }),
   ...makeDwebRoutes({
     vault, auditLog, kv, ensureOffscreen, browser,
-    appRegistry, appClient, appTabTracker, opfsHelpers, settingsStore,
-    DWEB_ENABLED, DWEB_IDENTITY_SECRET, APP_TAB_GROUP_TITLE,
-    onBaseNetworkStopped, repositories,
+    appRegistry, appClient, appTabTracker, appQuiescence, settingsStore, shareLocalApp,
+    DWEB_ENABLED, APP_TAB_GROUP_TITLE,
+    disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady,
+    repositories, isOffscreenSender,
   }),
 
   // --- git credentials (host-bound bearer tokens; same vault as API keys) ---
@@ -5796,6 +7923,9 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // refused; non-GET confirmed via the shared web:write key).
   ...(/** @type {any} */ (siteFetchCallRoute)),
 
+  // Headless settlement cancels SW-side relays before its bounded lease frees.
+  ...(/** @type {any} */ (scriptRunControlRoute)),
+
   // --- DESIGN-19: the options surface for stored site clients (list + delete) ---
   ...(/** @type {any} */ (siteClientRoutes)),
 
@@ -5813,7 +7943,97 @@ loadUserEndpoints();
 // channel defaults until load() lands), and Chrome persists the behavior
 // browser-side, so by the time a click wakes a future cold SW the native
 // open already reflects the user's real choice.
-loadSettings().then(() => syncFrontDoorBehavior()).catch(() => {});
+const settingsReady = ensureSettingsReady();
+const dwebSettingsGate = createDwebSettingsGate({
+  ready: ensureSettingsReady,
+  available: DWEB_ENABLED,
+  active: () => !!settingsStore.get().dwebEnabled,
+});
+settingsReady.then(() => syncFrontDoorBehavior()).catch(() => {});
+// A prior worker may have died after persisting OFF but before stopping the
+// offscreen host. Reconcile only after hydration so preview defaults cannot
+// hide the durable choice or briefly restart the mesh on session resume.
+void dwebSettingsGate.stopWhenDisabled(stopBaseNetwork).catch((error) => {
+  console.warn('[sw] dweb OFF reconciliation failed; next boot will retry', error);
+});
+
+// Self-update (preview channel; background/update-check.js). Chrome: force the
+// update_url poll at boot and reload when a downloaded update can apply
+// without destroying live work. Firefox: read the gecko feed and offer the
+// XPI in a notice. Dev/store manifests carry no self-hosted update_url, so
+// start() registers the downloaded-update listener only on Chrome. Firefox
+// keeps its native update lifecycle because a listener there would defer
+// automatic updates. start() runs synchronously at boot because a downloaded
+// Chrome update can be the event that wakes this worker.
+const updateCheck = makeUpdateCheck({
+  runtime: browser.runtime,
+  // why a bare fetch: a chassis-internal DATA fetch of the manifest's own
+  // update feed - same class as the voice model download; no secret, no
+  // agent influence over the URL (see update-check.js's header).
+  fetchFn: (url, init) => fetch(url, init),
+  ready: ensureSettingsReady,
+  isEnabled: () => settingsStore.get().autoUpdateEnabled === true,
+  // "peerd is doing work": live turn slots AND goal runs - a goal run holds
+  // its slot only while an individual turn is in flight, so between
+  // iterations busySessionIds() alone reads idle mid-run.
+  busy: () => turnSlots.busySessionIds().length > 0
+    || (goalRunner?.activeStates?.().length ?? 0) > 0,
+  // "a user-facing extension page exists": UI ports, the deliberately
+  // PORTLESS engine tabs (a running WebVM / notebook / app holds real
+  // in-memory state a reload would destroy), and - on Chrome, where the SW
+  // can enumerate its window clients - any other extension page (options,
+  // permission pages). The offscreen doc is excluded: the keepalive keeps
+  // it open always, and counting it would block the reload forever.
+  surfacesOpen: async () => {
+    const knownSurfaceOpen = () => uiConnected()
+      || vmTabTracker.listLive().length > 0
+        || jsTabTracker.listLive().length > 0
+        || appTabTracker.listLive().length > 0;
+    if (knownSurfaceOpen()) return true;
+    try {
+      // why the cast: tsconfig lib is DOM (one program checks SW, pages and
+      // tests alike), so the ServiceWorkerGlobalScope clients API isn't on
+      // `self`'s type; it exists at runtime only in the Chrome SW.
+      const swScope = /** @type {{ clients?: { matchAll?: (q: { type: string }) => Promise<Array<{ url: string }>> } }} */ (
+        /** @type {unknown} */ (globalThis));
+      const windowClients = await swScope.clients?.matchAll?.({ type: 'window' });
+      if (windowClients?.some((c) => !c.url.includes('/offscreen/'))) return true;
+    } catch { /* not a SW context (Firefox event page) - covered above */ }
+    // A port or engine tab may have appeared while clients.matchAll() was in
+    // flight. This final synchronous read and the caller's busy recheck close
+    // that race before runtime.reload().
+    return knownSurfaceOpen();
+  },
+  notify: (text, action) => {
+    if (!uiConnected()) return false;
+    postChatNote(text, action ?? null);
+    return true;
+  },
+  // storage.session, not storage.local: the throttle + pending-notice state
+  // must survive SW/event-page respawns but reset with the browser session.
+  sessionKv: {
+    get: async (key) => {
+      try { return (await browser.storage?.session?.get(key))?.[key]; }
+      catch { return undefined; }
+    },
+    set: async (key, value) => {
+      try { await browser.storage?.session?.set({ [key]: value }); }
+      catch { /* best-effort - a lost throttle just means an extra check */ }
+    },
+  },
+  log: (...args) => console.log('[sw]', ...args),
+});
+updateCheck.start();
+void updateCheck.checkNow('boot').catch(() => {});
+onSettingsHydrationRecovered = async () => {
+  await syncFrontDoorBehavior();
+  updateCheck.syncEnabled();
+  if (DWEB_ENABLED) {
+    if (settingsStore.get().dwebEnabled) maybeStartBaseNetwork('settings-recovered');
+    else await stopBaseNetwork();
+  }
+  if (uiConnected()) await pushState();
+};
 
 // SW boot logging — we want a clear timeline of when the SW comes up
 // (cold start, extension reload, idle respawn). The console clears
@@ -5842,21 +8062,34 @@ setInterval(() => {
 // preview + setting; on the store build maybeStart is a no-op (DWEB_ENABLED
 // false) — and this file names no dweb module, so the store verifier stays clean.
 function maybeStartBaseNetwork(/** @type {string} */ reason) {
-  if (!DWEB_ENABLED || !settingsStore.get().dwebEnabled) return;
-  console.log('[sw] dweb base network — auto-start on', reason);
-  (async () => {
-    await ensureOffscreen();
-    const r = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'dweb/base-host/start' }));
-    if (r?.ok) {
-      console.log('[sw] dweb base network ONLINE', { did: r.did, peers: r.peers, present: r.present });
-      await reconcilePendingPublications();
-      reseedSharedApps().catch((e) => console.warn('[sw] re-seed after start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
-      // The dweb AGENT's inbox: join the reserved agent room (idempotent) so
-      // inbound peer messages flow as dweb/base-room/event 'direct' events the
-      // listener consumes. Opt-in — no join, no inbox, no wakes.
-      joinDwebAgentInbox().catch((e) => console.warn('[sw] dweb agent inbox join failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
-    } else console.warn('[sw] dweb base network start returned', r);
-  })().catch((e) => console.warn('[sw] dweb base network auto-start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+  void dwebSettingsGate.startWhenEnabled(() => {
+    if (dwebIdentityMutationActive) {
+      dwebStartDeferredByIdentityMutation = true;
+      console.log('[sw] dweb base network — start deferred during identity custody mutation');
+      return;
+    }
+    console.log('[sw] dweb base network — auto-start on', reason);
+    return withDwebPublication(async (isCurrent) => {
+      if (!isCurrent() || !settingsStore.get().dwebEnabled) {
+        return { ok: false, error: 'dweb-disabled' };
+      }
+      await ensureDwebSuspensionRecovery();
+      await ensureOffscreen();
+      // The host owns its suspension lease. A normal start may race a rotation,
+      // but it cannot release that lease and will fail harmlessly until the owner
+      // resumes with the matching token.
+      return browser.runtime.sendMessage({ type: 'dweb/base-host/start' });
+    }).then((/** @type {any} */ r) => {
+      if (r?.ok && settingsStore.get().dwebEnabled) {
+        console.log('[sw] dweb base network ONLINE', { did: r.did, peers: r.peers, present: r.present });
+        reseedSharedApps().catch((e) => console.warn('[sw] re-seed after start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+        // The dweb AGENT's inbox: join the reserved agent room (idempotent) so
+        // inbound peer messages flow as dweb/base-room/event 'direct' events the
+        // listener consumes. Opt-in — no join, no inbox, no wakes.
+        joinDwebAgentInbox().catch((e) => console.warn('[sw] dweb agent inbox join failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+      } else if (r?.error !== 'dweb-disabled') console.warn('[sw] dweb base network start returned', r);
+    });
+  }).catch((e) => console.warn('[sw] dweb base network auto-start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
 }
 
 // Complete the tiny publish→catalog two-phase commit after an MV3 restart.
@@ -5892,46 +8125,6 @@ async function reconcilePendingPublications() {
 // apps only (dweb.local) — we can't re-sign a peer's card. Best-effort and async;
 // it never blocks start, and the no-downgrade rule makes a re-announce a peer
 // already has a harmless no-op.
-async function reseedSharedApps() {
-  if (!DWEB_ENABLED || !settingsStore.get().dwebEnabled || vault.isLocked()) return;
-  let mine;
-  try {
-    const apps = await appRegistry.list();
-    mine = apps.filter((a) => a.shared && a.dweb?.local && a.dweb?.slug);
-  } catch (e) {
-    console.warn('[sw] re-seed: listing apps failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e);
-    return;
-  }
-  if (!mine.length) return;
-  let seeded = 0;
-  for (const app of mine) {
-    try {
-      /** @type {Record<string, any>} */ const files = {};
-      const releaseOid = app.dweb?.git_oid;
-      const versionId = app.dweb?.version_id;
-      if (!releaseOid || !versionId) continue;
-      const committedFiles = await repositories.snapshot({ kind: 'app', id: app.id }, { at: releaseOid });
-      const decoder = new TextDecoder('utf-8', { fatal: true });
-      for (const [path, bytes] of Object.entries(committedFiles)) files[path] = decoder.decode(bytes);
-      if (!Object.keys(files).length) continue;       // nothing on disk — skip
-      const res = /** @type {any} */ (await browser.runtime.sendMessage({
-        type: 'dweb/base-host/share-app',
-        name: app.name, entry: app.entryFile, files,
-        slug: (/** @type {any} */ (app.dweb)).slug, seq: (/** @type {any} */ (app.dweb)).seq, description: (/** @type {any} */ (app.dweb)).description ?? '',
-        created: (/** @type {any} */ (app.dweb)).release_created,
-        expectedHash: versionId,
-        release: {
-          previousVersionId: (/** @type {any} */ (app.dweb)).previous_version_id ?? null,
-          gitCommitOid: (/** @type {any} */ (app.dweb)).source_git_oid ?? (/** @type {any} */ (app.dweb)).git_oid ?? null,
-          changelog: (/** @type {any} */ (app.dweb)).changelog ?? '',
-        },
-      }));
-      if (res?.ok) seeded += 1;
-    } catch (e) { console.debug('[sw] re-seed failed for', app.id, (/** @type {{ message?: string }} */ (e))?.message ?? e); }
-  }
-  if (seeded) console.log('[sw] re-seeded', seeded, 'shared app(s) after base network start');
-}
-
 // Spawn the offscreen doc immediately on SW boot. Previously this was
 // only called from vault/unlock and vault/initialize; in practice the
 // SW often boots cold (extension reload, browser restart) into a state
@@ -5940,12 +8133,15 @@ async function reseedSharedApps() {
 // window. The offscreen doc holds the keepalive port and voice host;
 // the WebVMs live in their own tabs (vm-tab/index.html).
 console.log('[sw] boot — ensuring offscreen for keepalive + voice');
-ensureOffscreen().catch((e) => console.error('[sw] boot ensureOffscreen failed', e));
+ensureOffscreen().then(async () => {
+  if (!DWEB_ENABLED) return;
+  await ensureDwebSuspensionRecovery();
+}).catch((e) => console.error('[sw] boot ensureOffscreen failed', e));
 
 // Instance registry + tracker init for all tab-hosted kinds: pull persisted
 // catalogs and re-discover live tabs (a SW restart while tabs are open
 // is common — Chrome kills the SW after 30s idle but leaves tabs alone).
-(async () => {
+const engineTrackersReady = (async () => {
   try {
     await vmRegistry.load();
     await vmTabTracker.bootstrap();
@@ -5962,7 +8158,8 @@ ensureOffscreen().catch((e) => console.error('[sw] boot ensureOffscreen failed',
     // registry catalog (files, metadata) persists; the running process is
     // gone. Reap → audit → the §14 resource-lost notice to the owner's
     // chat + the agent's next turn.
-    try {
+    void (async () => {
+      try {
       const surviving = [
         ...vmTabTracker.listLive().map((/** @type {string} */ id) => `vm:${id}`),
         ...jsTabTracker.listLive().map((/** @type {string} */ id) => `notebook:${id}`),
@@ -5970,8 +8167,8 @@ ensureOffscreen().catch((e) => console.error('[sw] boot ensureOffscreen failed',
         ...appTabTracker.listLive().map((/** @type {string} */ id) => `app:${id}`),
       ];
       const lost = await engineLiveness.sweep({ surviving });
-      const KIND_LABEL = { vm: 'Linux VM', notebook: 'Notebook', pod: 'Pod', app: 'App' };
       const REGISTRY_OF = { vm: vmRegistry, notebook: jsRegistry, pod: podRegistry, app: appRegistry };
+      const lostResources = [];
       for (const entry of lost) {
         auditLog.append({
           type: 'lifecycle.engine.orphan-reaped',
@@ -5986,39 +8183,83 @@ ensureOffscreen().catch((e) => console.error('[sw] boot ensureOffscreen failed',
         }
         const owner = record?.ownerSessionId;
         if (!owner) continue; // no owner to tell; the audit entry stands
-        await lifecycleBoot.parkNotice(owner, {
-          recoveryRecord: {
-            operation: `${entry.kind}:${entry.id}`,
-            recoveryState: 'interrupted',
-            sideEffectStatus: 'none attempted',
-            resourceLost: true,
-          },
-          user: `The ${/** @type {any} */ (KIND_LABEL)[entry.kind] ?? entry.kind} `
-            + `"${record?.name ?? entry.id}" stopped with the browser session. `
-            + 'Your saved files remain, but live process state was lost.',
-        }).catch(() => {});
+        lostResources.push({
+          kind: entry.kind,
+          id: entry.id,
+          name: record?.name,
+          ownerSessionId: owner,
+        });
+      }
+      for (const notice of groupResourceLossNotices(lostResources)) {
+        await lifecycleBoot.parkNotice(notice.sessionId, notice).catch(() => {});
       }
       if (lost.length) {
         console.log('[sw] engine orphans reaped:',
           lost.map((/** @type {any} */ l) => `${l.kind}:${l.id}`));
       }
-    } catch (e) {
-      console.warn('[sw] engine orphan sweep failed', e);
-    }
-    // An SW restart re-adopts engine tabs that never stopped running, so the
-    // network backstop's tab scope has to be rebuilt from what bootstrap found.
-    denylistNetGuard.sync();
+      } catch (e) {
+        console.warn('[sw] engine orphan sweep failed', e);
+      }
+    })();
+    return { ok: true };
   } catch (e) {
     console.error('[sw] instance init failed', e);
+    return {
+      ok: false,
+      error: `engine_tracker_hydration_failed: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 })();
+
+// One authoritative first reconcile. Existing DNR session rules remain intact
+// until every source of tab custody has rehydrated, so a worker restart cannot
+// briefly or permanently narrow protection for a live actor, App, or peerd-opened
+// tab. All queued sync calls coalesce on the state read after start().
+const browserNetworkGuardReady = Promise.all([
+  denylistReady,
+  guardedBrowserTabsReady,
+  guardedBrowserOriginsReady,
+  webActorBindingsReady,
+  engineTrackersReady,
+]).then(async (results) => {
+  let failed = results.find((result) => result?.ok === false);
+  startupPopupCandidatesOpen = false;
+  await startupPopupCandidateQueue;
+  await startupPopupNetworkGuard.seal();
+  if (!failed) {
+    for (const tabId of drivenTabIds()) {
+      const tab = await browser.tabs.get(tabId).catch(() => null);
+      if (!tab) {
+        failed = { ok: false, error: 'browser_origin_custody_hydration_failed' };
+        break;
+      }
+      if (tab.url) {
+        try { await browserOriginCustody.retain(tabId, tab.url); }
+        catch {
+          failed = { ok: false, error: 'browser_origin_custody_hydration_failed' };
+          break;
+        }
+      }
+    }
+  }
+  await denylistNetGuard.start(failed ?? { ok: true });
+  if (!failed) {
+    await denylistNetGuard.sync();
+    browserNetworkGuardBootAuthoritative = true;
+    drivenPopupGuard.onBootReady();
+  }
+});
 
 // Attempt to resume the vault from chrome.storage.session. If the SW
 // died and respawned within the same browser session, the unwrapped DK
 // is still there and we can pick up where we left off — no passphrase
 // re-entry required. Returns false (no-op) if the vault was never
 // unlocked or session storage was cleared.
-vault.attemptResume().then((resumed) => {
+vault.attemptResume().then(async (resumed) => {
+  // A passive recovery receipt must be durable before any automatic model turn
+  // can inspect this history. If storage is temporarily unavailable, keep the
+  // mailbox row, retry the receipt separately, and leave automatic work paused.
+  await maybeRedrainMailbox();
   if (resumed) {
     console.log('[sw] vault resumed from session storage');
     auditLog.append({ type: 'vault_unlocked' }).catch(() => {});
@@ -6043,23 +8284,24 @@ vault.attemptResume().then((resumed) => {
     // drive() awaits. Sequencing it ahead of maybeAutoResume guarantees the
     // goalActiveFor guard in maybeAutoResume sees the goal run and bails —
     // otherwise the two could race to drive the SAME interrupted session.
-    Promise.resolve(goalRunner?.resume())
-      .catch((e) => console.error('[sw] goal resume failed', e))
-      .then(() => settingsStore.load())
-      .then(() => sessionCache.sessionGet('currentSessionId'))
-      .then((/** @type {any} */ cur) => maybeAutoResume(cur)).catch(() => {});
+    actorRecoveryGate.runWhenReady('boot-resume', async () => {
+      await Promise.resolve(goalRunner?.resume())
+        .catch((e) => console.error('[sw] goal resume failed', e));
+      await settingsStore.load();
+      const currentSessionId = /** @type {string | null | undefined} */ (
+        await sessionCache.sessionGet('currentSessionId')
+      );
+      await maybeAutoResume(currentSessionId);
+    }).catch(() => {});
   } else {
     // Vault not resumed (locked): still rehydrate goal runs so the Goal bar is
     // restored; their next turn pauses on the locked vault and waits for unlock.
     // No auto-resume here — it needs an unlocked vault to call the model.
-    goalRunner?.resume().catch((e) => console.error('[sw] goal resume failed', e));
+    actorRecoveryGate.runWhenReady(
+      'locked-goal-resume',
+      () => goalRunner?.resume(),
+    ).catch((e) => console.error('[sw] goal resume failed', e));
   }
-  // DESIGN-17 P1: redrain any in-flight actor message→reply correlations the SW
-  // death interrupted. Once-guarded + internally gated on an unlocked vault (a
-  // re-queued actor turn needs the model key); also fires on the first vault
-  // unlock if the SW booted locked. resolveActor lazy-loads the registries, so
-  // no ordering vs goal/auto-resume above is needed (actor sessions are separate).
-  maybeRedrainMailbox();
 }).catch((e) => console.error('[sw] attemptResume failed', e));
 
 // One-time cleanup of Ralph's leftover storage. Ralph (removed 2026-06-22) wrote

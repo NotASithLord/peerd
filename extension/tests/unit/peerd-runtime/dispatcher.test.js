@@ -80,6 +80,57 @@ describe('dispatcher', () => {
     for (const g of metaOf(r).gates) expect(g.allowed).toBe(true);
   });
 
+  it('rechecks the live actor landing before any gate or tool effect', async () => {
+    clearTools();
+    let executed = false;
+    registerTool(makeTool({ execute: async () => { executed = true; return { ok: true, content: 'bad' }; } }));
+    const { ctx } = recorderCtx({
+      revalidateActorLanding: async () => ({ action: 'wait', reason: 'signing in' }),
+    });
+    const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
+    expect(r.ok).toBe(false);
+    expect(errOf(r)).toBe('auth_waiting_for_user');
+    expect(/** @type {any} */ (r).endTurn).toBe(true);
+    expect(executed).toBe(false);
+  });
+
+  it('rechecks the live actor landing again immediately before execution', async () => {
+    clearTools();
+    let checks = 0;
+    let executed = false;
+    registerTool(makeTool({ execute: async () => { executed = true; return { ok: true, content: 'bad' }; } }));
+    const { ctx } = recorderCtx({
+      revalidateActorLanding: async () => {
+        checks += 1;
+        return checks === 1
+          ? { action: 'continue', reason: 'at approved site' }
+          : { action: 'wait', reason: 'signing in' };
+      },
+    });
+    const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
+    expect(r.ok).toBe(false);
+    expect(errOf(r)).toBe('auth_waiting_for_user');
+    expect(checks).toBe(2);
+    expect(executed).toBe(false);
+  });
+
+  it('uses truthful neutral recovery for ordinary and expired boundary stops', async () => {
+    for (const reason of [
+      'this helper works only on one site, and the tab left it',
+      'the sign-in authorization was invalid or expired, so this task was stopped',
+    ]) {
+      clearTools();
+      registerTool(makeTool({}));
+      const { ctx } = recorderCtx({
+        revalidateActorLanding: async () => ({ action: 'end', reason }),
+      });
+      const r = await dispatchToolCall({ id: reason, name: 't', args: {} }, ctx);
+      const content = String(/** @type {any} */ (r).content);
+      expect(content).toContain('Review the open tab');
+      expect(content.includes('Return to the original site')).toBe(false);
+    }
+  });
+
   it('attaches primitive and durationMs to meta', async () => {
     clearTools();
     registerTool(makeTool({ primitive: 'tab' }));
@@ -103,8 +154,8 @@ describe('dispatcher', () => {
     expect(metaOf(r).durationMs).toBe(0);
     // Gates ran through origin but no further.
     const names = metaOf(r).gates.map((g) => g.name);
-    expect(names).toEqual(['persona', 'exposure', 'origin']);
-    expect(metaOf(r).gates[2].allowed).toBe(false);
+    expect(names).toEqual(['persona', 'auth-wait', 'exposure', 'origin']);
+    expect(metaOf(r).gates[3].allowed).toBe(false);
     // Wait a microtask for the fire-and-forget audit to land.
     await Promise.resolve();
     expect(audited.some((e) => e.type === 'tool_blocked' && e.details.gate === 'origin')).toBe(true);
@@ -249,9 +300,9 @@ describe('confirmation (Plan/Act permission policy)', () => {
 });
 
 describe('gate composition order', () => {
-  it('is persona → exposure → origin → confirmation → egress → audit', () => {
+  it('is persona → auth wait → exposure → origin → confirmation → egress → audit', () => {
     expect(GATES.map((g) => g.name)).toEqual([
-      'persona', 'exposure', 'origin', 'confirmation', 'egress', 'audit',
+      'persona', 'auth-wait', 'exposure', 'origin', 'confirmation', 'egress', 'audit',
     ]);
   });
 

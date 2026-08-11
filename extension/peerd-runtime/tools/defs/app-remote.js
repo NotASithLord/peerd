@@ -1,5 +1,5 @@
 // @ts-check
-// repo_remote — force-confirmed Git network operations. The actor never
+// repo_remote: force-confirmed Git network operations. The actor never
 // receives a token or raw fetch; the trusted repository service binds vault
 // credentials to the normalized remote host.
 
@@ -54,11 +54,15 @@ export const repositoryRemoteTool = {
       const tracker = kind === 'notebook' ? /** @type {any} */ (ctx).jsTabTracker
         : kind === 'pod' ? /** @type {any} */ (ctx).podTabTracker
         : null;
+      const appQuiescence = /** @type {any} */ (ctx).appQuiescence;
       const podClient = /** @type {any} */ (ctx).podClient;
       const podLive = kind === 'pod' && args.op === 'push' && tracker?.getTabId?.(id) != null;
-      const reopen = kind !== 'pod' && args.op === 'push' && tracker?.getTabId?.(id) != null;
+      const reopen = kind === 'notebook' && args.op === 'push' && tracker?.getTabId?.(id) != null;
       try {
-        if (reopen) { await tracker.closeTab(id); await new Promise((resolve) => setTimeout(resolve, 100)); }
+        if (reopen) {
+          await tracker.closeTab(id);
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
         const operation = () => repositories.coordinate(ref, async () => {
           if (args.op === 'link') return repositories.setRemote(ref, { url: args.url });
           if (args.op === 'fetch') return repositories.fetch(ref, { signal: /** @type {any} */ (ctx).abortSignal });
@@ -68,9 +72,14 @@ export const repositoryRemoteTool = {
           }
           throw new Error('unknown_repo_remote_op');
         });
-        const result = podLive
-          ? await podClient?.withWorkspaceLock?.(id, operation)
-          : await operation();
+        const result = kind === 'app' && args.op === 'push'
+          ? await appQuiescence?.run?.(id, operation, { close: true })
+          : podLive
+            ? await podClient?.withWorkspaceLock?.(id, operation)
+            : await operation();
+        if (kind === 'app' && args.op === 'push' && result === undefined) {
+          throw new Error('App editor quiesce unavailable');
+        }
         if (podLive && result === undefined) throw new Error('Pod workspace quiesce unavailable');
         if (args.op === 'push' && result?.ok !== true) {
           return { ok: false, error: `git_push_rejected: ${result?.error || 'remote rejected the update'}` };

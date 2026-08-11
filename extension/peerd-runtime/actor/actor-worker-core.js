@@ -23,7 +23,7 @@
 //     SW-side). why the SW MUST re-pin+gate: the worker's `call` args are
 //     attacker-influenceable (they derive from injected instance/page output), so
 //     the SW never trusts them — it force-pins the bound instance and runs the
-//     full gate, exactly as the in-SW actor path does.
+//     full gate, exactly as the privileged host policy requires.
 //
 // PURE / injected-IO → Bun-testable without a Worker: the imperative shell
 // (offscreen/actor-worker.js) wires self.postMessage/onmessage to these functions;
@@ -34,6 +34,7 @@
 // no chrome.*/DOM) and lives in the same module dir → intra-module import, worker-
 // portable, Bun-testable.
 import { fenceWebActorSummary, fenceApiActorSummary } from './web-actor.js';
+import { ActorCredentialBoundaryError } from '../errors.js';
 
 /**
  * The final assistant text of a session — a loop's return value. Inlined (not
@@ -137,22 +138,22 @@ export const makeRelayedCallModel = (requestModel, maxOutputTokens) =>
  * (heap-split phase 3). The loop reads `ctx.fenceActorSummary` when it TRIMS context,
  * wrapping the actor's own (100%-untrusted-provenance) rolling summary so a laundered
  * injection that survives compression re-enters as DATA, not a command. The SW builds
- * this closure over `activeTab.url` on the in-SW path; that closure can't cross
- * postMessage, so the worker rebuilds it here from the PURE fence fns.
+ * this closure over the policy-reduced active-tab origin on the in-SW path; that
+ * closure can't cross postMessage, so the worker rebuilds it here from the PURE fence fns.
  *
- * why the origin/tabUrl is turn-START, not live: it's the fence's provenance TAG only
- * (`web-actor(<url>)`); the BODY-wrap — the security function — is applied regardless,
+ * why the origin/tabOrigin is turn-START, not live: it's the fence's provenance TAG only
+ * (`web-actor(<origin>)`); the BODY-wrap, which is the security function, is applied regardless,
  * so a tag that lags a mid-turn navigate is cosmetic. An API actor's origin is FIXED
  * for its whole life, so it never lags. Returns undefined for a non-web actor (no
- * self-fence — a VM/Notebook/App actor's summary renders verbatim, as in-SW).
+ * self-fence. A VM/Notebook/App actor's summary renders verbatim, as in-SW).
  *
- * @param {{ actorType?: string, backing?: string, tabUrl?: string, origin?: string }} [o]
+ * @param {{ actorType?: string, backing?: string, tabOrigin?: string, origin?: string }} [o]
  * @returns {((text: string) => string) | undefined}
  */
-export const makeActorSummaryFence = ({ actorType, backing, tabUrl, origin } = {}) => {
+export const makeActorSummaryFence = ({ actorType, backing, tabOrigin, origin } = {}) => {
   if (actorType !== 'web') return undefined;
   if (backing === 'api') return (/** @type {string} */ text) => fenceApiActorSummary(text, { origin });
-  return (/** @type {string} */ text) => fenceWebActorSummary(text, { tabUrl });
+  return (/** @type {string} */ text) => fenceWebActorSummary(text, { tabOrigin });
 };
 
 /**
@@ -202,7 +203,7 @@ export const makeRelayedToolDispatch = (requestTool) =>
  * @param {Array<{ name: string, description: string, schema: object }>} deps.tools
  * @param {((text: string) => string)} [deps.fenceActorSummary]  a web/API actor's
  *   rolling-summary self-fence (heap-split phase 3); absent for engine actors.
- * @param {{ sessionId: string, userText: string, maxSteps?: number, oneShot?: boolean, signal?: AbortSignal, reasoning?: object, contextWindow?: number }} req
+ * @param {{ sessionId: string, userText: string, maxSteps?: number, oneShot?: boolean, signal?: AbortSignal, reasoning?: object, contextWindow?: number, inbound?: boolean, preflightReply?: string }} req
  * @returns {Promise<{ finalText: string, newMessages: any[], usage: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, stopReason: string|undefined, toolCalls: number, error?: string }>}
  */
 export const runActorLoop = async (deps, req) => {
@@ -210,7 +211,7 @@ export const runActorLoop = async (deps, req) => {
   // Defensive (phase-1 lesson): the loop fire-and-forgets audits as
   // appendAudit(...).catch(...) — a sync stub returning undefined would crash it.
   const appendAudit = (/** @type {object} */ e) => Promise.resolve(deps.appendAudit?.(e));
-  const { sessionId, userText, maxSteps, oneShot, signal, reasoning, contextWindow } = req;
+  const { sessionId, userText, maxSteps, oneShot, signal, reasoning, contextWindow, inbound, preflightReply } = req;
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   let toolCalls = 0;
   let stopReason;
@@ -228,22 +229,27 @@ export const runActorLoop = async (deps, req) => {
     // A bound actor is keyless/egress-less in its own heap: getSecret/safeFetch
     // are never consumed by its tools (they relay to the SW). Throwing stubs make
     // any accidental use fail LOUD in the worker (which has neither).
-    getSecret: async () => { throw new Error('actor worker has no secret access'); },
-    safeFetch: async () => { throw new Error('actor worker has no egress'); },
+    getSecret: async () => { throw new ActorCredentialBoundaryError('secret'); },
+    safeFetch: async () => { throw new ActorCredentialBoundaryError('provider-network'); },
     sessions,
     getSystemPrompt,
     appendAudit,
     tools,
     toolDispatch,
     persistDeltas: false,
+    // Preserve the SW's inbound provenance in the loop request as well as the
+    // relay grant. These are strict literals derived from one monotonic bit; the
+    // worker cannot turn an inbound peer wake into a trusted continuation.
+    ...(inbound === true ? { synthetic: true, trusted: false, inbound: true } : {}),
     ...(signal ? { signal } : {}),
-    // maxSteps: omit when undefined so runUserTurn uses its OWN default (parity
-    // with the in-SW actor path, which passes none). Only cap when the caller asks.
+    // maxSteps: omit when undefined so runUserTurn uses its OWN default. Only
+    // cap when the caller asks.
     ...(maxSteps != null ? { maxSteps } : {}),
     // oneShot: a message_actor delegation may ask the loop to synthesize its reply
     // from the first clean tool round and stop (no summarize inference) — parity
-    // with the in-SW path (turn-driver threads it to runAgentTurn).
+    // with the bound-actor contract.
     ...(oneShot === true ? { oneShot: true } : {}),
+    ...(typeof preflightReply === 'string' ? { preflightReply } : {}),
     // A web/API actor self-fences its own untrusted-provenance rolling summary on a
     // context trim (heap-split phase 3); absent for engine actors → summary verbatim.
     ...(fenceActorSummary ? { fenceActorSummary } : {}),

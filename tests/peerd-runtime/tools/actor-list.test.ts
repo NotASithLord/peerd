@@ -118,7 +118,7 @@ describe('actor_list — unified actor catalog', () => {
     });
     const out = parse(await actorListTool.execute({}, ctx as any));
     expect(out.count).toBe(1);                       // only the public tab
-    expect(out.denylisted_tabs_hidden).toBe(2);
+    expect(out.restricted_tabs_hidden).toBe(2);
     // the denylisted ids/origins must appear NOWHERE in the output
     const blob = JSON.stringify(out);
     expect(blob).not.toContain('chase.com');
@@ -134,7 +134,27 @@ describe('actor_list — unified actor catalog', () => {
       tabs: { query: async () => [{ id: 1, url: 'https://example.com/', title: 'x', active: true, windowId: 1 }] },
     });
     const out = parse(await actorListTool.execute({}, ctx as any));
-    expect(out.denylisted_tabs_hidden).toBeUndefined();
+    expect(out.restricted_tabs_hidden).toBeUndefined();
+  });
+
+  test('drops private-network and cloud-metadata tabs from model and code results', async () => {
+    const ctx = fullCtx({
+      vmRegistry: undefined, jsRegistry: undefined, podRegistry: undefined, appRegistry: undefined,
+      listApiIntegrations: undefined,
+      tabs: { query: async () => [
+        { id: 1, url: 'https://example.com/', title: 'Example', active: true, windowId: 1 },
+        { id: 2, url: 'http://127.0.0.1/admin', title: 'Admin', active: false, windowId: 1 },
+        { id: 3, url: 'http://169.254.169.254/latest/meta-data', title: 'Metadata', active: false, windowId: 1 },
+      ] },
+    });
+    const result: any = await actorListTool.execute({}, ctx as any);
+    const out = parse(result);
+    expect(out.count).toBe(1);
+    expect(out.restricted_tabs_hidden).toBe(2);
+    expect(result.structured.refs).toHaveLength(1);
+    const blob = JSON.stringify(result);
+    expect(blob).not.toContain('127.0.0.1');
+    expect(blob).not.toContain('169.254.169.254');
   });
 
   test('one broken source fails SOFT — others still listed, the gap surfaced', async () => {

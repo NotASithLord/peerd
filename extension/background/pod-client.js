@@ -8,9 +8,16 @@ import { createKeyedQueue } from '/peerd-engine/index.js';
 
 export const POD_TAB_GROUP_TITLE = 'peerd';
 const CALL_TIMEOUT_MS = 310_000;
+const WORKSPACE_LOCK_RENEW_MS = 10_000;
 
-/** @param {{registry:any,tracker:any,sendTabMessage?:(tabId:number,message:any)=>Promise<any>}} deps */
-export const createPodClient = ({ registry, tracker, sendTabMessage = browser.tabs.sendMessage.bind(browser.tabs) }) => {
+/** @param {{registry:any,tracker:any,sendTabMessage?:(tabId:number,message:any)=>Promise<any>,setIntervalFn?:(callback:()=>void,ms:number)=>any,clearIntervalFn?:(handle:any)=>void}} deps */
+export const createPodClient = ({
+  registry,
+  tracker,
+  sendTabMessage = browser.tabs.sendMessage.bind(browser.tabs),
+  setIntervalFn = setInterval,
+  clearIntervalFn = clearInterval,
+}) => {
   const resolveQueue = createKeyedQueue();
 
   /** @param {{sessionId?:string,podId?:string}} [options] */
@@ -45,9 +52,13 @@ export const createPodClient = ({ registry, tracker, sendTabMessage = browser.ta
     return current;
   };
 
-  /** @param {string} podId @param {Record<string,any>} message @param {{open?:boolean}} [options] */
-  const callTab = async (podId, message, { open = true } = {}) => {
+  /** @param {string} podId @param {Record<string,any>} message @param {{open?:boolean,signal?:AbortSignal}} [options] */
+  const callTab = async (podId, message, { open = true, signal } = {}) => {
     if (open) await tracker.ensureTab(podId, { active: false, groupTitle: POD_TAB_GROUP_TITLE });
+    // A foreground Stop may land while a throttled/background Pod tab is still
+    // opening. Recheck at the actual dispatch boundary so that cancellation
+    // cannot miss an as-yet unknown job and then let the command start late.
+    if (signal?.aborted) throw new Error('Pod command cancelled before dispatch');
     const tabId = tracker.getTabId(podId);
     if (tabId == null) throw new Error(`Pod ${podId} is stopped`);
     /** @type {ReturnType<typeof setTimeout>|undefined} */ let timer;
@@ -79,7 +90,7 @@ export const createPodClient = ({ registry, tracker, sendTabMessage = browser.ta
           type: 'pod/exec', jobId, command, timeoutMs: options.timeoutMs,
           background: options.background === true,
           remoteGitGrant: options.remoteGitGrant ?? null,
-        });
+        }, { signal });
         return { podId: id, ...response.job };
       } finally {
         signal?.removeEventListener('abort', onAbort);
@@ -126,9 +137,26 @@ export const createPodClient = ({ registry, tracker, sendTabMessage = browser.ta
       const id = await resolveExistingId({ podId });
       if (tracker.getTabId(id) == null) return operation();
       const token = `lock-${crypto.randomUUID()}`;
-      await callTab(id, { type: 'pod/workspace-lock', action: 'acquire', token }, { open: false });
-      try { return await operation(); }
+      // Start renewal while acquire is queued: the tab registers the token
+      // before awaiting older workspace work, so a long predecessor cannot
+      // expire a live request. If this MV3 worker is evicted, renewals stop and
+      // the tab's lease releases the orphaned hold automatically.
+      const acquiring = callTab(id, {
+        type: 'pod/workspace-lock', action: 'acquire', token,
+      }, { open: false });
+      let renewTail = Promise.resolve();
+      const renewal = setIntervalFn(() => {
+        renewTail = renewTail.then(() => callTab(id, {
+          type: 'pod/workspace-lock', action: 'renew', token,
+        }, { open: false })).then(() => undefined, () => undefined);
+      }, WORKSPACE_LOCK_RENEW_MS);
+      try {
+        await acquiring;
+        return await operation();
+      }
       finally {
+        clearIntervalFn(renewal);
+        await renewTail;
         await callTab(id, { type: 'pod/workspace-lock', action: 'release', token }, { open: false }).catch(() => {});
       }
     },

@@ -33,7 +33,7 @@ describe('learning', () => {
     const { store } = harness();
     await store.hydrate();
     expect(store.note('https://app.test', 'password-field')).toBe(true);
-    expect(store.snapshot().get('https://app.test')).toBe('password-field');
+    expect(store.snapshot().get('app.test')).toBe('password-field');
   });
 
   test('the FIRST reason sticks', async () => {
@@ -44,7 +44,7 @@ describe('learning', () => {
     await store.hydrate();
     store.note('https://app.test', 'password-field');
     expect(store.note('https://app.test', 'confirmed-write')).toBe(false);
-    expect(store.snapshot().get('https://app.test')).toBe('password-field');
+    expect(store.snapshot().get('app.test')).toBe('password-field');
   });
 
   test('onLearn fires once per origin, never on a repeat', async () => {
@@ -52,7 +52,17 @@ describe('learning', () => {
     await store.hydrate();
     store.note('https://app.test', 'password-field');
     store.note('https://app.test', 'password-field');
-    expect(learns).toEqual([['https://app.test', 'password-field']]);
+    expect(learns).toEqual([['app.test', 'password-field']]);
+  });
+
+  test('scheme and port variants share one host record and one audit event', async () => {
+    const { store, learns } = harness();
+    await store.hydrate();
+    expect(store.note('https://app.test:8443', 'password-field')).toBe(true);
+    expect(store.note('http://app.test:8080', 'confirmed-write')).toBe(false);
+    expect(store.note('app.test', 'confirmed-write')).toBe(false);
+    expect(store.entries()).toEqual([{ host: 'app.test', reason: 'password-field' }]);
+    expect(learns).toEqual([['app.test', 'password-field']]);
   });
 
   test('an unknown reason is refused', async () => {
@@ -79,7 +89,8 @@ describe('persistence', () => {
   test('a stored set is restored', async () => {
     const { store } = harness({ 'https://app.test': 'confirmed-write' });
     await store.hydrate();
-    expect(store.snapshot().get('https://app.test')).toBe('confirmed-write');
+    expect(store.snapshot().get('app.test')).toBe('confirmed-write');
+    expect(store.hydrationStatus()).toEqual({ ready: true, ok: true });
   });
 
   test('a stored entry with an unknown reason is dropped on load', async () => {
@@ -98,6 +109,7 @@ describe('persistence', () => {
     });
     await store.hydrate();
     expect(store.size()).toBe(0);
+    expect(store.hydrationStatus()).toEqual({ ready: true, ok: false });
     expect(store.note('https://app.test', 'password-field')).toBe(true);
   });
 
@@ -110,7 +122,7 @@ describe('persistence', () => {
     await store.hydrate();
     store.note('https://app.test', 'password-field');
     await store.settled();
-    expect(store.snapshot().get('https://app.test')).toBe('password-field');
+    expect(store.snapshot().get('app.test')).toBe('password-field');
   });
 
   test('each save is the WHOLE set, so a partial write cannot lose an origin', async () => {
@@ -119,7 +131,39 @@ describe('persistence', () => {
     store.note('https://a.test', 'password-field');
     store.note('https://b.test', 'confirmed-write');
     await store.settled();
-    expect(saves.at(-1)).toEqual({ 'https://a.test': 'password-field', 'https://b.test': 'confirmed-write' });
+    expect(saves.at(-1)).toEqual({ 'a.test': 'password-field', 'b.test': 'confirmed-write' });
+  });
+
+  test('legacy origin keys migrate and duplicate ports collapse on hydrate', async () => {
+    const { store, saves } = harness({
+      'https://app.test:8443': 'password-field',
+      'http://app.test:8080': 'confirmed-write',
+      'https://other.test': 'confirmed-write',
+    });
+    await store.hydrate();
+    await store.settled();
+    expect(store.entries()).toEqual([
+      { host: 'app.test', reason: 'password-field' },
+      { host: 'other.test', reason: 'confirmed-write' },
+    ]);
+    expect(saves.at(-1)).toEqual({
+      'app.test': 'password-field',
+      'other.test': 'confirmed-write',
+    });
+  });
+
+  test('oversized durable state is capped and compacted on hydrate', async () => {
+    const stored = Object.fromEntries(Array.from(
+      { length: MAX_LEARNED + 25 },
+      (_, index) => [`stored-${index}.test`, 'password-field'],
+    ));
+    const { store, saves } = harness(stored);
+    await store.hydrate();
+    await store.settled();
+    expect(store.size()).toBe(MAX_LEARNED);
+    expect(Object.keys(saves.at(-1) ?? {})).toHaveLength(MAX_LEARNED);
+    expect(saves.at(-1)?.['stored-0.test']).toBe('password-field');
+    expect(saves.at(-1)?.[`stored-${MAX_LEARNED}.test`]).toBeUndefined();
   });
 });
 
@@ -134,8 +178,18 @@ describe('the cap', () => {
     expect(store.size()).toBe(MAX_LEARNED);
     expect(store.note('https://one-too-many.test', 'password-field')).toBe(false);
     // The very first origin is still there — nothing was traded away for it.
-    expect(store.snapshot().get('https://s0.test')).toBe('password-field');
+    expect(store.snapshot().get('s0.test')).toBe('password-field');
     expect(store.size()).toBe(MAX_LEARNED);
+  });
+
+  test('port spelling cannot fill the cap', async () => {
+    const { store } = harness();
+    await store.hydrate();
+    for (let port = 1; port <= MAX_LEARNED; port += 1) {
+      store.note(`https://same.test:${port}`, 'password-field');
+    }
+    expect(store.size()).toBe(1);
+    expect(store.note('https://another.test', 'password-field')).toBe(true);
   });
 });
 
@@ -158,12 +212,12 @@ describe('the boot read races the first page walk', () => {
     await hydrating;
     await store.settled();
     // Both survive.
-    expect(store.snapshot().get('https://live.test')).toBe('password-field');
-    expect(store.snapshot().get('https://stored.test')).toBe('confirmed-write');
+    expect(store.snapshot().get('live.test')).toBe('password-field');
+    expect(store.snapshot().get('stored.test')).toBe('confirmed-write');
     // And the LAST durable write holds both, not the racing writer's view.
     expect(saves.at(-1)).toEqual({
-      'https://live.test': 'password-field',
-      'https://stored.test': 'confirmed-write',
+      'live.test': 'password-field',
+      'stored.test': 'confirmed-write',
     });
   });
 
@@ -179,7 +233,34 @@ describe('the boot read races the first page walk', () => {
     store.note('https://x.test', 'password-field');
     releaseLoad(null);
     await hydrating;
-    expect(store.snapshot().get('https://x.test')).toBe('password-field');
+    expect(store.snapshot().get('x.test')).toBe('password-field');
+  });
+
+  test('live observations survive when stored entries fill the remaining cap', async () => {
+    const stored = Object.fromEntries(Array.from(
+      { length: MAX_LEARNED },
+      (_, index) => [`stored-${index}.test`, 'confirmed-write'],
+    ));
+    let releaseLoad: (value: Record<string, string>) => void = () => {};
+    const loadGate = new Promise<Record<string, string>>((resolve) => { releaseLoad = resolve; });
+    const saves: Array<Record<string, string>> = [];
+    const store = makeLearnedOrigins({
+      load: async () => loadGate,
+      save: async (all) => { saves.push({ ...all }); },
+      onError: () => {},
+    });
+    const hydrating = store.hydrate();
+    expect(store.note('https://live-a.test', 'password-field')).toBe(true);
+    expect(store.note('https://live-b.test', 'confirmed-write')).toBe(true);
+    releaseLoad(stored);
+    await hydrating;
+    await store.settled();
+    expect(store.size()).toBe(MAX_LEARNED);
+    expect(store.snapshot().get('live-a.test')).toBe('password-field');
+    expect(store.snapshot().get('live-b.test')).toBe('confirmed-write');
+    expect(Object.keys(saves.at(-1) ?? {})).toHaveLength(MAX_LEARNED);
+    expect(saves.at(-1)?.['live-a.test']).toBe('password-field');
+    expect(saves.at(-1)?.['live-b.test']).toBe('confirmed-write');
   });
 });
 
@@ -201,7 +282,15 @@ describe('un-learning (user-initiated only)', () => {
     await store.hydrate();
     store.note('https://app.test', 'password-field');
     expect(store.forget('https://app.test')).toBe(true);
-    expect(store.snapshot().has('https://app.test')).toBe(false);
+    expect(store.snapshot().has('app.test')).toBe(false);
+  });
+
+  test('forget accepts another scheme and port spelling of the learned host', async () => {
+    const { store, forgets } = forgetHarness({ 'https://app.test:8443': 'password-field' });
+    await store.hydrate();
+    expect(store.forget('http://app.test:8080/path')).toBe(true);
+    expect(store.size()).toBe(0);
+    expect(forgets).toEqual([['app.test']]);
   });
 
   test('forget persists — the removal survives the next boot read', async () => {
@@ -218,7 +307,7 @@ describe('un-learning (user-initiated only)', () => {
     expect(store.forget('https://nope.test')).toBe(false);  // never learned
     expect(store.forget('https://app.test')).toBe(true);
     expect(store.forget('https://app.test')).toBe(false);   // already gone
-    expect(forgets).toEqual([['https://app.test']]);
+    expect(forgets).toEqual([['app.test']]);
   });
 
   test('forget ignores junk rather than throwing', async () => {
@@ -238,7 +327,7 @@ describe('un-learning (user-initiated only)', () => {
     expect(store.clear()).toBe(2);
     expect(store.size()).toBe(0);
     expect(store.clear()).toBe(0);                 // idempotent
-    expect(forgets).toEqual([['https://a.test', 'https://b.test']]);
+    expect(forgets).toEqual([['a.test', 'b.test']]);
   });
 
   // THE RACE THAT MATTERS. hydrate() MERGES (it must, so a signal landing during
@@ -258,7 +347,7 @@ describe('un-learning (user-initiated only)', () => {
     expect(store.forget('https://x.test')).toBe(true);
     releaseLoad(null);
     await hydrating;
-    expect(store.snapshot().has('https://x.test')).toBe(false);
+    expect(store.snapshot().has('x.test')).toBe(false);
   });
 
   test('a clear that races the boot read also suppresses rows this heap never saw', async () => {
@@ -284,7 +373,7 @@ describe('un-learning (user-initiated only)', () => {
     // Re-learning is expected: the signal fires again next time peerd reads a
     // sign-in form there. A lingering tombstone would silently refuse it.
     expect(store.note('https://app.test', 'password-field')).toBe(true);
-    expect(store.snapshot().get('https://app.test')).toBe('password-field');
+    expect(store.snapshot().get('app.test')).toBe('password-field');
   });
 });
 
@@ -297,8 +386,8 @@ describe('entries (the settings list)', () => {
     });
     await store.hydrate();
     expect(store.entries()).toEqual([
-      { origin: 'https://a.test', reason: 'confirmed-write' },
-      { origin: 'https://b.test', reason: 'password-field' },
+      { host: 'a.test', reason: 'confirmed-write' },
+      { host: 'b.test', reason: 'password-field' },
     ]);
     // Mutating the returned array must not touch the classifier's own state:
     // this value crosses a message boundary to the settings page.

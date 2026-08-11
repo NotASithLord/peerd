@@ -53,6 +53,8 @@ export const DiscoverSection = () => {
   let onVisible = null;    // focus/visibility re-sync handler (removed on teardown)
   /** @type {Record<string, string>} */
   const busy = {};         // dwapp_id -> 'installing' | 'installed' | <error string>
+  /** @type {Record<string, string>} */
+  const notices = {};      // committed success warnings that still need user attention
   /** @type {Record<string, string | null>} */
   const installedId = {};  // dwapp_id -> the local app id created by THIS session's install
   /** @type {string | null} */
@@ -107,6 +109,7 @@ export const DiscoverSection = () => {
     const id = app.dwapp_id;
     if (!id) return;
     busy[id] = 'installing';
+    delete notices[id];
     if (!dead) m.redraw();
     try {
       // Pass the card's version identity so the installed record can later be
@@ -114,6 +117,9 @@ export const DiscoverSection = () => {
       const r = await send({ type: 'dweb/base/install', uri: app.uri, name: app.name, dwappId: id, slug: app.slug, seq: app.seq, publisher: app.publisher });
       if (r?.ok) {
         busy[id] = 'installed';
+        if (r.warning === 'audit-write-failed') {
+          notices[id] = 'Installed, but the security audit entry could not be written.';
+        }
         installedId[id] = r.app?.id ?? r.appId ?? null;
         // Tell the Library (sibling section) to re-fetch so the freshly installed
         // app shows up there immediately — no shared store between sections, so a
@@ -139,11 +145,24 @@ export const DiscoverSection = () => {
     const id = app.dwapp_id;
     if (!id) return;
     busy[id] = 'updating';
+    delete notices[id];
     if (!dead) m.redraw();
     try {
       const r = await send({ type: 'dweb/base/update-app', appId, uri: app.uri, name: app.name, dwappId: id, slug: app.slug, seq: app.seq, publisher: app.publisher });
       if (r?.ok) {
         busy[id] = 'installed';
+        const warnings = new Set(Array.isArray(r.warnings) ? r.warnings : []);
+        if (r.warning) warnings.add(r.warning);
+        const warningMessages = [];
+        if (warnings.has('audit-write-failed')) {
+          warningMessages.push('Updated, but the security audit entry could not be written.');
+        } else if (warnings.has('previous-version-cleanup-pending')) {
+          warningMessages.push('Updated.');
+        }
+        if (warnings.has('previous-version-cleanup-pending')) {
+          warningMessages.push('Older shared bytes will be cleaned up on the next update or delete.');
+        }
+        if (warningMessages.length) notices[id] = warningMessages.join(' ');
         try { window.dispatchEvent(new CustomEvent('peerd:app-installed', { detail: { appId } })); } catch { /* no-op */ }
         loadLocal(send); // pick up the new version_id so the "update" state clears
       } else {
@@ -225,6 +244,9 @@ export const DiscoverSection = () => {
       ]),
       updatable && !failed ? m('.disc-update-badge', { title: 'A newer version is available' }, '● update available') : null,
       failed ? m('p.peerd-disc-err', { style: 'margin:0;' }, state) : null,
+      notices[id] ? m('p.muted', {
+        style: 'margin:0;', role: 'status', 'aria-live': 'polite',
+      }, notices[id]) : null,
       m('.disc-actions', [action]),
     ]);
   };

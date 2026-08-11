@@ -9,7 +9,7 @@
 
 import m from '/vendor/mithril/mithril.js';
 import { LINUX_PATH, HTML5_PATH } from '/vendor/simple-icons/brand-paths.js';
-import { manifestLabel, bundleToOtlp } from '/peerd-runtime/index.js';
+import { manifestLabel, bundleToOtlp, detectVoiceCapability } from '/peerd-runtime/index.js';
 import { openOptions } from '/shared/open-options.js';
 import { mapError, errorSettingsTarget } from '../error-display.js';
 import { MessageList } from './message-list.js';
@@ -17,8 +17,9 @@ import { InputBar } from './input-bar.js';
 import { ModeSelector, EffortDial, GoalToggle } from './mode-badge.js';
 import { GoalBar } from './goal-bar.js';
 import { TodoCard } from './todo-card.js';
-import { AsyncTasksBar } from './async-tasks-bar.js';
+import { ActorFabric } from './actor-fabric.js';
 import { ContextInspector } from './context-inspector.js';
+import { composerForState, composerUnavailableCopy } from '../provider-readiness.js';
 
 // The transfer section's Blob + anchor pattern — the panel document is a
 // normal DOM context, so a synthetic download link is all a file save takes.
@@ -42,6 +43,9 @@ const saveJsonFile = (payload, filename) => {
  * @typedef {Object} ChatViewState
  * @property {boolean} goalArmed             the Goal toggle's arm state (UI-only)
  * @property {string|null|undefined} _sid    which chat the arm state belongs to
+ * @property {boolean} hadMessages           whether this chat already mounted a transcript
+ * @property {boolean} hasObservedSession    whether initial session hydration has completed
+ * @property {Map<string|undefined, Set<string>>} seenRecoveryIdsBySession recovery announcements already heard per chat
  * @property {boolean} [debugMenuOpen]       the debug-export flyout's open state
  * @property {boolean} [inspectorOpen]       the context-inspector modal's open state
  * @property {Array<Record<string, any>>|null} [snapshots]  the inspector's fetched snapshots (null = loading)
@@ -51,7 +55,7 @@ const saveJsonFile = (payload, filename) => {
 /**
  * @typedef {{ state: ChatViewState, attrs: {
  *   state: ChatState, send: Send, voiceManager: any, uiActions?: UiActions,
- *   surface?: string, activeTabIsWeb?: boolean,
+ *   surface?: string, activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive',
  * } }} ChatViewVnode
  */
 
@@ -64,14 +68,21 @@ export const ChatView = {
     // InputBar's per-session draft swap.
     vnode.state.goalArmed = false;
     vnode.state._sid = vnode.attrs.state?.session?.sessionId;
+    vnode.state.hadMessages = (vnode.attrs.state?.session?.messages?.length ?? 0) > 0;
+    vnode.state.hasObservedSession = vnode.state._sid != null;
+    vnode.state.seenRecoveryIdsBySession = new Map();
   },
 
   /** @param {ChatViewVnode} vnode */
-  view: ({ attrs: { state, send, voiceManager, uiActions, surface, activeTabIsWeb }, state: ui }) => {
+  view: ({ attrs: { state, send, voiceManager, uiActions, surface, activeTabStatus }, state: ui }) => {
     const sid = state.session?.sessionId;
+    const messages = state.session?.messages ?? [];
+    const changedSession = sid !== ui._sid;
+    const isUserVisibleSwitch = changedSession && ui.hasObservedSession && sid != null;
     if (sid !== ui._sid) {
       ui._sid = sid;
       ui.goalArmed = false;
+      ui.hadMessages = messages.length > 0;
       // The debug surface is per-session UI: a flyout or inspector left open
       // on chat A must not survive a switch to chat B (B would silently show
       // A's snapshots).
@@ -79,28 +90,39 @@ export const ChatView = {
       ui.inspectorOpen = false;
       ui.snapshots = null;
     }
-    const messages = state.session?.messages ?? [];
-    const hasKey = state.providers?.hasKey;
+    if (sid != null) ui.hasObservedSession = true;
+    const announceOnMount = messages.length > 0
+      && (isUserVisibleSwitch || !ui.hadMessages);
+    if (messages.length > 0) ui.hadMessages = true;
+    const composer = composerForState(state);
+    const canSend = !!composer.canSend;
     // Fingerprint of the settings that shape the model-picker options. The
     // side panel gets live settings pushes (e.g. editing the OpenRouter
     // curated set in Settings while this chat stays open), so when this key
     // moves the picker re-pulls instead of showing the options it cached on
     // mount. why include each: providerName/providerModel drive the active
     // selection + custom-model append; openrouterModels is the curated list;
-    // hasKey flips which providers contribute at all.
+    // composer readiness flips which providers contribute at all. The
+    // configured-provider revision catches a second key being added while the
+    // current provider remains ready; ollamaHost prevents stale daemon models.
     const modelOptionsKey = [
       state.settings?.providerName ?? '',
       state.settings?.providerModel ?? '',
       (state.settings?.openrouterModels ?? []).join(','),
-      hasKey ? '1' : '0',
+      state.settings?.ollamaHost ?? '',
+      state.providers?.configRevision ?? 0,
+      canSend ? '1' : '0',
     ].join('|');
     const showVoiceOnboarding = !!state.settings
       && !state.settings.voiceOnboardingDismissed
       && !state.settings.voiceEnabled
       // why: only nudge once the user has gotten past the API-key
       // hurdle. Stacking onboarding cards is hostile.
-      && hasKey
-      && messages.length === 0;
+      && canSend
+      && messages.length === 0
+      && detectVoiceCapability('auto', {
+        moonshineHostAvailable: state.capabilities?.moonshineVoiceHost?.status === 'available',
+      }).engine !== null;
 
     return m('.chat-view', [
       // Inline banner on the latest error from the SW. Sticks until a
@@ -146,16 +168,27 @@ export const ChatView = {
         active: !!state.goalRuns?.[state.session?.sessionId ?? '']?.active,
       }),
 
-      // In-flight async spawned (DESIGN-11). Pinned + self-hiding: the agent
-      // can fire background spawned whose results land later as wake turns,
-      // so this shows what's still cooking. Keyed to the ACTIVE session —
-      // background chats run their own; the panel mirrors only the viewed one.
-      m(AsyncTasksBar, { tasks: state.asyncTasks?.[state.session?.sessionId ?? ''] ?? [] }),
+      // The Actor Fabric unifies the previously separate background-task bar,
+      // bound-actor cards, and spawned streams into one live topology. It is a
+      // projection only. Transcript cards remain the durable chronological
+      // receipt, and the fabric self-hides when this chat has no isolated work running.
+      m(ActorFabric, {
+        session: state.session,
+        actors: state.actors,
+        spawned: state.spawned,
+        asyncTasks: state.asyncTasks,
+      }),
 
       showVoiceOnboarding ? m(VoiceOnboardingCard, { send }) : null,
 
-      messages.length === 0 ? m(EmptyState, { hasKey, send, surface, activeTabIsWeb })
+      messages.length === 0 ? m(EmptyState, {
+        canSend, composer, send, surface, activeTabStatus,
+        actorExecution: state.capabilities?.actorExecution,
+      })
         : m(MessageList, {
+            sessionId: state.session?.sessionId,
+            announceOnMount,
+            seenRecoveryIdsBySession: ui.seenRecoveryIdsBySession,
             messages,
             vmStreams: state.vmStreams,
             // The AI peer's display name (default profile, set during
@@ -176,13 +209,21 @@ export const ChatView = {
             // — not a bright sticky footer. Filtered to this session.
             tabEvents: (state.agentTabEvents ?? []).filter((e) => e.sessionId === state.session?.sessionId),
             uiActions,
+            send,
+            // A model turn may be idle after acknowledging asynchronous actor
+            // work. That is not yet the human task's final answer; mirror the
+            // route's in-flight guard so the UI never offers a no-op verdict.
+            busy: state.streaming || Object.values(state.actors ?? {})
+              .some((card) => /** @type {any} */ (card)?.streaming === true),
           }),
 
       // Per-chat model picker, above the composer. Available at all times —
       // on a fresh chat it sets provider+model for the next send; mid-session
       // it switches the model on THIS session (model-only, same provider). The
       // component self-hides unless there are 2+ choices.
-      hasKey ? m(ModelPicker, { send, sessionId: state.session?.sessionId, optionsKey: modelOptionsKey }) : null,
+      !state.vault?.locked
+        ? m(ModelPicker, { send, sessionId: state.session?.sessionId, optionsKey: modelOptionsKey })
+        : null,
 
       // Feature 03: the Plan/Act permission selector. Lives in the chat
       // context (not the global header — the TopBar is icon-budget-bound)
@@ -197,7 +238,7 @@ export const ChatView = {
         // that silently does nothing is a lie. Fresh chats read the
         // SELECTED provider (what the session will bind to on first send).
         state.settings?.reasoningEnabled
-            && (state.session?.provider ?? state.providers?.current) === 'anthropic'
+            && composer.provider === 'anthropic'
           ? m(EffortDial, { settings: state.settings, send })
           : null,
         // Goal arming — the in-chat entry point for goal mode. Arms the NEXT
@@ -207,7 +248,7 @@ export const ChatView = {
         m(GoalToggle, {
           armed: ui.goalArmed,
           run: state.goalRuns?.[sid ?? ''] ?? null,
-          disabled: !hasKey,
+          disabled: !canSend,
           onToggle: (/** @type {boolean} */ next) => { ui.goalArmed = next; },
           onStop: () => send({ type: 'agent/stop' }),
         }),
@@ -321,6 +362,7 @@ export const ChatView = {
  * @property {string|null} selected
  * @property {boolean} locked
  * @property {string|undefined} fetchedKey
+ * @property {number} requestGeneration
  */
 
 /** @typedef {{ state: ModelPickerState, attrs: { send: Send, sessionId?: string|null, optionsKey?: string } }} ModelPickerVnode */
@@ -332,6 +374,7 @@ const ModelPicker = {
     vnode.state.selected = null;
     vnode.state.locked = false;      // mid-session: provider fixed, model-only
     vnode.state.fetchedKey = undefined;
+    vnode.state.requestGeneration = 0;
     ModelPicker.fetch(vnode);
   },
   /** @param {ModelPickerVnode} vnode */
@@ -347,9 +390,19 @@ const ModelPicker = {
   },
   /** @param {ModelPickerVnode} vnode */
   fetch(vnode) {
-    vnode.state.fetchedKey = ModelPicker.keyOf(vnode);
+    const requestedKey = ModelPicker.keyOf(vnode);
+    const requestGeneration = vnode.state.requestGeneration + 1;
+    vnode.state.requestGeneration = requestGeneration;
+    vnode.state.fetchedKey = requestedKey;
     const sessionId = vnode.attrs.sessionId ?? null;
     vnode.attrs.send({ type: 'models/options', sessionId }).then((r) => {
+      // why: options requests can resolve out of order when settings/provider
+      // pushes redraw the live panel. An older response must not overwrite the
+      // selection fetched for the newer key. That visibly put the picker on a
+      // different provider than the effort dial and the settings snapshot.
+      if (vnode.state.requestGeneration !== requestGeneration
+        || vnode.state.fetchedKey !== requestedKey
+        || ModelPicker.keyOf(vnode) !== requestedKey) return;
       if (r?.ok) {
         vnode.state.options = r.options;
         vnode.state.selected = r.selected;
@@ -422,6 +475,8 @@ const VoiceOnboardingCard = {
 // The `text` is what gets sent; clicking one fires it immediately. For now
 // these are just the prompts; later the same surface presents recipes /
 // workflows (a mix of deterministic code + agent execution).
+/** @typedef {{ type: string, label: string, text: string, blocked?: boolean }} StarterPrompt */
+/** @type {StarterPrompt[]} */
 const STARTER_PROMPTS = [
   { type: 'ask', label: 'Ask', text: 'What can you do?' },
   { type: 'web', label: 'Browse', text: 'Open Hacker News and summarize the top 5 stories.' },
@@ -437,12 +492,24 @@ const STARTER_PROMPTS = [
 // instead of the generic Hacker News demo. On the home full-tab surface (no
 // "page next to you") it always shows the Hacker News prompt. Kept a pure fn of
 // attrs so armReveal + view agree on the exact text they animate/render.
-/** @param {{ surface?: string, activeTabIsWeb?: boolean }} attrs */
-const promptsFor = (attrs) => (attrs.surface !== 'home' && attrs.activeTabIsWeb
-  ? STARTER_PROMPTS.map((p) => (p.type === 'web'
-      ? { ...p, label: 'Summarize', text: 'Summarize the current page.' }
-      : p))
-  : STARTER_PROMPTS);
+/** @param {{ surface?: string, activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive' }} attrs */
+export const promptsFor = (attrs) => {
+  if (attrs.surface === 'home') return STARTER_PROMPTS;
+  if (attrs.activeTabStatus === 'web') {
+    return STARTER_PROMPTS.map((prompt) => (prompt.type === 'web'
+      ? { ...prompt, label: 'Summarize', text: 'Summarize the current page.' }
+      : prompt));
+  }
+  const protectedCopy = attrs.activeTabStatus === 'protected_private'
+    ? 'This private-network page is protected. peerd will not read or automate it.'
+    : attrs.activeTabStatus === 'protected_sensitive'
+      ? 'This sensitive page is protected. peerd will not read or automate it.'
+      : null;
+  if (!protectedCopy) return STARTER_PROMPTS;
+  return STARTER_PROMPTS.map((prompt) => (prompt.type === 'web'
+    ? { ...prompt, label: 'Protected', text: protectedCopy, blocked: true }
+    : prompt));
+};
 
 // Action-type glyphs for the path cards. Two voices, both monochrome
 // (currentColor): conceptual paths (ask / web) are stroked LINE icons in
@@ -492,7 +559,7 @@ const PATH_ICONS = {
       'font-weight': 700, 'font-size': 10.5, fill: 'currentColor', stroke: 'none',
     }, 'JS'),
   ),
-  // pod — a compact terminal prompt: shell-oriented but deliberately not Tux,
+  // pod: a compact terminal prompt: shell-oriented but deliberately not Tux,
   // because a Pod is not Linux.
   pod: () => pathIcon(
     m('rect', { x: 3, y: 4, width: 18, height: 16, rx: 3 }),
@@ -527,15 +594,15 @@ export const PATH_TYPE = { ms: 18, start: 980, cascade: 90 };
  * @property {boolean[]} started
  */
 
-/** @typedef {{ state: EmptyState_State, attrs: { hasKey?: boolean, send: Send, surface?: string, activeTabIsWeb?: boolean } }} EmptyStateVnode */
+/** @typedef {{ state: EmptyState_State, attrs: { canSend?: boolean, composer?: any, send: Send, surface?: string, activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive', actorExecution?: { status?: string } } }} EmptyStateVnode */
 
 // Arm the one-shot type-in (step 3) for every card. Idempotent via
 // `ui.armed`, so the redraw-driven onupdate can't re-trigger it; only runs
-// once the menu is actually shown (hasKey) AND motion is allowed.
+// once the menu is actually shown (canSend) AND motion is allowed.
 /** @param {EmptyStateVnode} vnode */
 const armReveal = (vnode) => {
   const ui = vnode.state;
-  if (ui.armed || reducedMotion() || !vnode.attrs.hasKey) return;
+  if (ui.armed || reducedMotion() || !vnode.attrs.canSend) return;
   ui.armed = true;
   promptsFor(vnode.attrs).forEach((p, i) => {
     const text = p.text;
@@ -573,7 +640,7 @@ const EmptyState = {
     ui.timers = [];
     ui.armed = false;
     // Reduced motion -> full text immediately; otherwise start hidden (0),
-    // ready to type. (hasKey false means the menu isn't rendered yet, so
+    // ready to type. (canSend false means the menu isn't rendered yet, so
     // these only matter once it appears - no full-text flash on the flip.)
     const reduce = reducedMotion();
     ui.shown = STARTER_PROMPTS.map(() => (reduce ? Infinity : 0));
@@ -588,32 +655,45 @@ const EmptyState = {
   },
   /** @param {EmptyStateVnode} vnode */
   view: ({ attrs, state: ui }) => {
-    const { hasKey, send } = attrs;
+    const { canSend, composer, send } = attrs;
     // The home full-tab surface has room for a wider 3-across grid; the side
     // panel stays 2-across (its column is narrow). One flag drives both the
     // wider container and the 3-column track (CSS owns the actual widths).
     const isHome = attrs.surface === 'home';
     const prompts = promptsFor(attrs);
-    return m('.placeholder', m('.empty-state', { class: isHome ? 'empty-state--home' : '' }, [
-    m('p', 'peerd is ready.'),
-    m('p.muted', hasKey
+    return m('.placeholder', m('.empty-state', {
+      class: isHome ? 'empty-state--home' : '',
+      'data-active-tab-status': attrs.activeTabStatus ?? 'none',
+    }, [
+    m('p', canSend ? 'peerd is ready.' : 'Provider setup needed.'),
+    m('p.muted', canSend
       ? 'Ask anything — or pick a path:'
-      : 'Connect a provider in Settings to start chatting.'),
-    hasKey
+      : composerUnavailableCopy(composer)),
+    canSend
       ? m('.path-menu', { class: isHome ? 'path-menu--home' : '' }, prompts.map((p, i) => {
           const shown = ui.shown?.[i] ?? Infinity;
           const done = shown >= p.text.length;
+          const actorUnavailable = attrs.actorExecution && attrs.actorExecution.status !== 'available' && p.type !== 'ask';
+          const blocked = p.blocked === true;
           // cursor shows only once this tile has STARTED typing and isn't done
           const typing = (ui.started?.[i] ?? true) && !done;
           return m('button.path-card', {
+            class: blocked ? 'path-card--protected' : '',
             // why data-path (not an inline style): the per-type accent
             // color lives in CSS (styles.css owns the brand palette — no
             // hexes in JS). The glyph + label carry that color permanently;
             // the tile background + outline stay grey.
             'data-path': p.type,
-            title: p.text,
+            title: blocked
+              ? p.text
+              : actorUnavailable ? 'Unavailable until the isolated actor worker recovers' : p.text,
             // a11y reads the full prompt even mid-type
-            'aria-label': `${p.label}: ${p.text}`,
+            'aria-label': blocked
+              ? `${p.label}: ${p.text}`
+              : actorUnavailable
+              ? `${p.label}: unavailable while actor work is paused`
+              : `${p.label}: ${p.text}`,
+            disabled: blocked || actorUnavailable,
             // Fire-and-forget: the SW pushes turn state, which flips the
             // view out of the empty state into the live transcript.
             onclick: () => send({ type: 'agent/send', text: p.text }),

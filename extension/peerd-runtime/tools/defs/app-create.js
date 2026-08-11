@@ -1,7 +1,7 @@
 // @ts-check
 // The app arm of sandbox_create — author a new App for the user.
 // (Was the standalone app_create tool; merged into sandbox_create({kind:'app'})
-// 2026-07-05 — one kind-discriminated create tool.)
+// 2026-07-05: one kind-discriminated create tool.)
 //
 // Apps are multi-file. Pass `files` as a path → content map; the
 // agent's HTML body lives at index.html (default entry). If you only
@@ -9,12 +9,14 @@
 
 import { APP_RUNTIME_NOTE } from './code-style-note.js';
 import { oncePerSession } from './once-per-session.js';
-import { normalizeGitRemote } from '/peerd-engine/index.js';
+import { isBinaryAssetPath, MAX_MODEL_APP_FILE_BYTES } from '/peerd-engine/index.js';
+import { normalizeGitRemote } from '/peerd-engine/repository/remote.js';
+import { base64ByteLength } from '/shared/bundle/bytes.js';
 
-// Mirrors the write-layer backstop in background/app-client.js — kept aligned
-// with the dweb loader's 50M ceiling so a WASM-heavy dwapp (a game engine, a
-// physics runtime) can be authored/imported, not just a small hand-written app.
-const MAX_TOTAL_CHARS = 50_000_000;
+// Mirrors the local write-layer backstop in background/app-client.js. Dweb
+// publishing separately measures the packed bundle, including base64 overhead.
+const MAX_TOTAL_BYTES = 50_000_000;
+const MAX_FILES = 256;
 
 /**
  * Create + open an App from files/html; returns { id, name, kind, entryFile,
@@ -34,18 +36,44 @@ export const createAppSandbox = async (args, ctx) => {
     if (!gitUrl && (!files || !Object.keys(files).length)) {
       return { ok: false, error: "sandbox_create kind:'app' requires `files` (path → content map) or `html` — start with a minimal index.html shell" };
     }
-    const totalChars = Object.values(files ?? {}).reduce(
-      /** @param {number} n @param {unknown} c */
-      (n, c) => n + (typeof c === 'string' ? c.length : 0), 0,
-    );
-    if (totalChars > MAX_TOTAL_CHARS) {
-      return { ok: false, error: `app_too_large: ${totalChars} > ${MAX_TOTAL_CHARS}` };
+    const fileEntries = Object.entries(files ?? {});
+    if (fileEntries.length > MAX_FILES) {
+      return { ok: false, error: `app_has_too_many_files: ${fileEntries.length} > ${MAX_FILES}` };
+    }
+    let totalBytes = 0;
+    for (const [path, value] of fileEntries) {
+      let fileBytes;
+      if (typeof value === 'string') {
+        if (isBinaryAssetPath(path)) return { ok: false, error: `binary_asset_requires_base64: ${path}` };
+        fileBytes = new TextEncoder().encode(value).byteLength;
+      } else {
+        const base64 = value && typeof value === 'object'
+          ? /** @type {{ base64?: unknown }} */ (value).base64
+          : null;
+        if (typeof base64 !== 'string') {
+          return { ok: false, error: `invalid_app_file_content: ${path}` };
+        }
+        try { fileBytes = base64ByteLength(base64); }
+        catch { return { ok: false, error: `invalid_base64: ${path}` }; }
+      }
+      if (fileBytes > MAX_MODEL_APP_FILE_BYTES) {
+        return { ok: false, error: `app_file_too_large: ${path} is ${fileBytes} > ${MAX_MODEL_APP_FILE_BYTES} bytes` };
+      }
+      totalBytes += fileBytes;
+      if (totalBytes > MAX_TOTAL_BYTES) {
+        return { ok: false, error: `app_too_large: ${totalBytes} > ${MAX_TOTAL_BYTES} bytes` };
+      }
     }
     // why: appClient rides the opaque ctx contract (not on ToolContext); narrow
     // to the two methods this tool calls.
     const appClient = /** @type {{ create?: (opts: Record<string, any>) => Promise<{ id: string, name: string, entryFile: string }>, createFromGit?: (opts: Record<string, any>) => Promise<{record:{id:string,name:string,entryFile:string},repository:any,contract:any}>, open?: (opts: { appId: string, sessionId?: string, focus?: boolean }) => Promise<unknown> } | undefined} */ (
       /** @type {any} */ (ctx).appClient);
-    if (!appClient?.create || (gitUrl && !appClient.createFromGit)) return { ok: false, error: 'app_not_available' };
+    if (!appClient) return { ok: false, error: 'app_not_available' };
+    const createApp = appClient.create;
+    const createFromGit = appClient.createFromGit;
+    if ((!gitUrl && !createApp) || (gitUrl && !createFromGit)) {
+      return { ok: false, error: 'app_not_available' };
+    }
     // A MULTIPLAYER dwapp needs the dweb metadata SLOT, which is what the app-tab
     // checks before attaching the bridge (app-registry: "its presence is what
     // unlocks the app-tab dweb bridge"; app-tab.js attachDwebBridge gates on
@@ -64,6 +92,7 @@ export const createAppSandbox = async (args, ctx) => {
       let contract = null;
       let record;
       if (gitUrl) {
+        if (!createFromGit) return { ok: false, error: 'app_not_available' };
         let remote;
         try { remote = normalizeGitRemote(gitUrl); }
         catch (error) { return { ok: false, error: `git_clone_failed: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}` }; }
@@ -72,9 +101,10 @@ export const createAppSandbox = async (args, ctx) => {
         const answer = await confirm({
           tool: 'sandbox_create', kind: 'git_clone', sideEffect: 'write', origins: [new URL(remote.url).origin],
           summary: `Clone ${remote.url} and instantiate its peerd.json as a browser App?`,
-        });
+        }, ctx.abortSignal);
         if (answer !== 'yes_once' && answer !== 'yes_session' && answer !== true) return { ok: false, error: 'git_clone_declined' };
-        const result = await appClient.createFromGit?.({
+        if (ctx.abortSignal?.aborted) return { ok: false, error: 'git_clone_aborted' };
+        const result = await createFromGit({
           name: typeof args.name === 'string' ? args.name : new URL(remote.url).pathname.split('/').at(-1)?.replace(/\.git$/, ''),
           url: remote.url,
           ref: typeof args.gitRef === 'string' ? args.gitRef : undefined,
@@ -86,7 +116,8 @@ export const createAppSandbox = async (args, ctx) => {
         if (!result) return { ok: false, error: 'git_app_import_unavailable' };
         record = result.record; repository = result.repository; contract = result.contract;
       } else {
-        record = await appClient.create({
+        if (!createApp) return { ok: false, error: 'app_not_available' };
+        record = await createApp({
           name: args.name,
           files,
           tags,
@@ -112,7 +143,7 @@ export const createAppSandbox = async (args, ctx) => {
         // carrier — instance-handle.js reads it to label the harvested id.
         kind: 'app',
         entryFile: record.entryFile,
-        fileCount: files ? Object.keys(files).length : undefined,
+        fileCount: files ? fileEntries.length : undefined,
         ...(repository ? { repository, contract } : {}),
         opened,
         ...(openError ? { openError } : {}),

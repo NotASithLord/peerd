@@ -22,7 +22,7 @@
 //      (WebAuthn needs transient user activation); it does NOT fake a synthetic
 //      gesture when CDP is absent (page_keys' no-fake posture).
 
-import { resolveTargetTab, originOfUrl } from './dom-helpers.js';
+import { resolveTargetTab, originOfUrl, scriptingTarget } from './dom-helpers.js';
 import { classifyLoginAffordance, loginTargetReader } from '../login-affordance.js';
 import { clickInjected } from './click.js';
 import { isKnownIdp } from '../../actor/idp-registry.js';
@@ -124,7 +124,7 @@ export const loginTool = {
     let descriptor;
     try {
       const results = await scripting.executeScript({
-        target: { tabId: tab.id },
+        target: scriptingTarget(tab),
         func: loginTargetReader,
         args: [selector, nth, walkId],
       });
@@ -154,12 +154,14 @@ export const loginTool = {
     //    site_client_write) so it prompts EVEN when confirmations are globally off.
     //    The origin is system-derived (step 2) and the method/provider come from the
     //    verified classifier (step 5), so the summary cannot be spoofed by the model.
-    const confirmAny = /** @type {((p: Record<string, unknown>) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
+    const confirmAny = /** @type {((p: Record<string, unknown>, signal?: AbortSignal) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
       /** @type {unknown} */ (ctx.confirm));
     if (!confirmAny) return { ok: false, error: 'login_declined', content: 'No confirmation channel available for a sign-in.' };
     const summary = v.method === 'passkey'
       ? `Begin a passkey / security-key sign-in on ${origin}? You'll complete it with your device.`
-      : `Begin sign-in with ${v.provider} on ${origin}? You'll authenticate on ${v.provider}.`;
+      : v.verified === true && v.idpOrigin
+        ? `Begin sign-in with ${v.provider} on ${origin}? The provider page is ${v.idpOrigin}.`
+        : `Begin sign-in with ${v.provider} on ${origin}? peerd could not verify where this ${v.provider} sign-in button leads.`;
     const ans = await confirmAny({
       tool: 'login',
       kind: 'login',
@@ -172,11 +174,33 @@ export const loginTool = {
       method: v.method,
       provider: v.provider ?? null,
       verified: v.verified === true,
+      idpOrigin: v.verified === true ? (v.idpOrigin ?? null) : null,
       summary,
       sessionId: ctx.session?.sessionId ?? null,
-    });
+    }, ctx.abortSignal);
     if (ans !== 'yes_once' && ans !== 'yes_session' && ans !== true) {
       return { ok: false, error: 'login_declined', content: 'User declined the sign-in.' };
+    }
+    if (ctx.abortSignal?.aborted) return { ok: false, error: 'login_aborted' };
+
+    // Consent names the relying site, not the identity provider it may visit.
+    // Re-read the owned tab after consent, then bind a roaming actor to that
+    // system-derived origin. The origin lock uses this boundary to permit one
+    // bounded sign-in excursion without ever making the provider an actor home.
+    const authorizedTab = await resolveTargetTab(args, ctx);
+    if (!authorizedTab?.id) return { ok: false, error: 'login_target_gone' };
+    if (ctx.abortSignal?.aborted) return { ok: false, error: 'login_aborted' };
+    if (originOfUrl(authorizedTab.url) !== origin) {
+      return { ok: false, error: 'login_origin_changed', content: 'the page moved during the confirm; re-run login after a fresh snapshot.' };
+    }
+    const originAuthorized = await ctx.authorizeSignInOrigin?.(origin, ctx.abortSignal);
+    if (ctx.abortSignal?.aborted) return { ok: false, error: 'login_aborted' };
+    if (originAuthorized !== true) {
+      return {
+        ok: false,
+        error: 'login_origin_authority_refused',
+        content: 'The relying-site boundary could not be verified after confirmation. Re-run login from a fresh page snapshot.',
+      };
     }
 
     // 7) INITIATE. peerd AUTO-CLICKS only when it has (a) VERIFIED the destination is
@@ -202,22 +226,37 @@ export const loginTool = {
       if (v.method === 'passkey') {
         return {
           ok: true,
-          content: `login_ready: peerd verified the origin (${origin}) and you approved a passkey / `
-            + 'security-key sign-in. Complete it yourself now — click the passkey button and finish the '
-            + 'prompt on your device. peerd never sees your credential.',
+          endTurn: true,
+          content: 'Finish signing in in the open tab. Click the passkey or security-key button and '
+            + 'complete the prompt on your device. peerd never sees your credential. When you are done, '
+            + 'tell peerd to continue.',
         };
+      }
+      if (v.verified === true && v.idpOrigin) {
+        const armed = await ctx.authorizeSignInExcursion?.(v.idpOrigin, ctx.abortSignal);
+        if (ctx.abortSignal?.aborted) {
+          if (armed === true) await ctx.revokeSignInExcursion?.(v.idpOrigin).catch(() => false);
+          return { ok: false, error: 'login_aborted' };
+        }
+        if (armed !== true) {
+          return {
+            ok: false,
+            error: 'login_excursion_authority_refused',
+            content: 'The verified provider step could not be authorized. Finish signing in yourself, then tell peerd to continue.',
+          };
+        }
       }
       // SSO, not auto-clickable. Be non-committal about the destination when unverified
       // — peerd must NOT vouch for where the button leads.
       const provider = v.provider || 'your provider';
-      const caveat = v.verified === true
-        ? `peerd verified the origin (${origin}) and that this leads to ${provider}, and you approved. `
-        : `peerd verified the origin (${origin}) and you approved, but could NOT verify this button leads `
-          + `to ${provider} — only continue if you trust this page. `;
+      const guidance = v.verified === true
+        ? `Click the ${provider} sign-in button. peerd cannot read or act on ${v.idpOrigin}. `
+          + `When this tab returns to ${origin}, tell peerd to continue. `
+        : `Click the sign-in button only if you trust this page. peerd could not verify that it leads to ${provider}, so peerd cannot follow the destination. When you are done, tell peerd to continue. `;
       return {
         ok: true,
-        content: `login_ready: ${caveat}Complete the sign-in yourself — click the sign-in button now. `
-          + 'peerd never sees your credential.',
+        endTurn: true,
+        content: `Finish signing in in the open tab. ${guidance}peerd never sees your credential.`,
       };
     }
 
@@ -232,7 +271,7 @@ export const loginTool = {
     }
     let d2;
     try {
-      const rr = await scripting.executeScript({ target: { tabId: tab2.id }, func: loginTargetReader, args: [null, 0, walkId] });
+      const rr = await scripting.executeScript({ target: scriptingTarget(tab2), func: loginTargetReader, args: [null, 0, walkId] });
       const r2 = rr[0]?.result;
       if (!r2 || !r2.ok) return { ok: false, error: 'login_affordance_changed', content: 'the sign-in element changed after you approved; re-run.' };
       d2 = r2.descriptor;
@@ -240,8 +279,27 @@ export const loginTool = {
       return { ok: false, error: `login_affordance_changed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
     const v2 = classifyLoginAffordance(d2, { isKnownIdp });
-    if (!(v2.supported && v2.method === v.method && v2.verified === true && v2.provider === v.provider)) {
+    if (!(v2.supported && v2.method === v.method && v2.verified === true
+      && v2.provider === v.provider && v2.idpOrigin === v.idpOrigin)) {
       return { ok: false, error: 'login_affordance_changed', content: 'the sign-in element changed after you approved; re-run.' };
+    }
+    if (ctx.abortSignal?.aborted) return { ok: false, error: 'login_aborted' };
+    const idpOrigin = v2.idpOrigin;
+    if (!idpOrigin) {
+      return { ok: false, error: 'login_affordance_changed', content: 'the verified provider destination is no longer available; re-run.' };
+    }
+
+    const armed = await ctx.authorizeSignInExcursion?.(idpOrigin, ctx.abortSignal);
+    if (ctx.abortSignal?.aborted) {
+      await ctx.revokeSignInExcursion?.(idpOrigin).catch(() => false);
+      return { ok: false, error: 'login_aborted' };
+    }
+    if (armed !== true) {
+      return {
+        ok: false,
+        error: 'login_excursion_authority_refused',
+        content: 'The verified provider step could not be authorized. Re-run login from a fresh page snapshot.',
+      };
     }
 
     // Click via the SAME walkId — the stable registry node the read resolved, which
@@ -249,26 +307,40 @@ export const loginTool = {
     let scriptResult;
     try {
       const results = await scripting.executeScript({
-        target: { tabId: tab2.id },
+        target: scriptingTarget(tab2),
         func: clickInjected,
-        args: [null, 0, walkId, 1],
+        // The login tool already bound this exact IdP destination to a fresh
+        // user confirmation and a one-shot excursion grant. That narrower
+        // authority is the only caller allowed through the generic form guard.
+        args: [null, 0, walkId, 1, idpOrigin],
       });
       scriptResult = results[0]?.result;
     } catch (e) {
+      await ctx.revokeSignInExcursion?.(idpOrigin).catch(() => false);
       return { ok: false, error: `login_click_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
-    if (!scriptResult) return { ok: false, error: 'login_click_failed' };
-    if (!scriptResult.ok) return { ok: false, error: `login_click_failed: ${scriptResult.error ?? 'click_failed'}` };
+    if (!scriptResult) {
+      await ctx.revokeSignInExcursion?.(idpOrigin).catch(() => false);
+      return { ok: false, error: 'login_click_failed' };
+    }
+    if (!scriptResult.ok) {
+      await ctx.revokeSignInExcursion?.(idpOrigin).catch(() => false);
+      return { ok: false, error: `login_click_failed: ${scriptResult.error ?? 'click_failed'}` };
+    }
 
     // 8) AUDIT (best-effort — never let an audit hiccup fail the login).
-    ctx.audit({ type: 'login_initiated', details: { origin, method: v.method, provider: v.provider } }).catch(() => {});
+    ctx.audit({
+      type: 'login_initiated',
+      details: { origin, method: v.method, provider: v.provider, idpOrigin },
+    }).catch(() => {});
 
     // 9) RETURN a system-authored plain success. No untrusted page text is emitted,
     //    so no fence is needed — keep the message peerd-authored.
     return {
       ok: true,
-      content: `login initiated on ${origin} via ${v.method}${v.provider ? ` (${v.provider})` : ''}; `
-        + 'complete the authentication on the provider.',
+      endTurn: true,
+      content: `Finish signing in in the open tab. peerd is paused and cannot read or act on ${idpOrigin}. `
+        + `When this tab returns to ${origin}, tell peerd to continue. peerd never sees your credential.`,
     };
   },
 };

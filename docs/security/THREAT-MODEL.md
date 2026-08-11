@@ -31,14 +31,18 @@ will eventually be prompt-injected, and that no content filter reliably prevents
 this. peerd does not rely on filtering. Instead it separates untrusted reasoning
 from dangerous capability in three ways:
 
-1. Memory. The reasoning that reads a page runs in a separate worker heap that
-   holds no key and no network access.
+1. Memory. Reasoning that reads a page runs in a separate dedicated worker heap.
+   Chrome hosts it from an offscreen document. Firefox hosts it from the
+   extension background page. Actor work fails closed if the boundary cannot be
+   proved.
 2. Policy. Every tool call is checked at dispatch against a fixed set of gates.
 3. Chokepoints. All outbound network traffic and all signing pass through a single
    audited path.
 
-Injected text can influence a reasoning context, but the context that reads
-untrusted content does not hold the key or the network capability.
+Injected text can influence a reasoning context, but the actor loop does not
+receive live vault or provider-egress functions. Tool and model calls still pass
+through service-worker policy. An isolated host also keeps the reasoning out of
+the service-worker heap.
 
 ---
 
@@ -49,8 +53,8 @@ between them.
 
 | Surface | What runs there | Holds the key |
 |---|---|---|
-| Service worker (`background/`) | Orchestrator agent loop, tool dispatch and gates, vault, egress wrappers, all relays | Yes. The vault key and API key live only here |
-| Offscreen document (`offscreen/`) | Per-actor and per-actor worker heaps, headless `script`, voice, the dweb base network | No. Worker heaps are keyless |
+| Privileged background (`background/`) | Orchestrator agent loop, tool dispatch and gates, vault, egress wrappers, and actor relays. Firefox also starts actor workers here | Yes. Actor loops run in separate dedicated worker heaps |
+| Offscreen document (`offscreen/`, Chrome) | Hosts isolated actor workers, headless `script`, voice, and the dweb base network | No. Actor worker heaps are keyless |
 | Side panel (`sidepanel/`) | The chat UI, confirm prompts, settings | No |
 | Sandbox tabs (`engine-tabs/vm-tab/`, `engine-tabs/notebook-tab/`, `engine-tabs/app-tab/`) | WebVM (CheerpX), Notebook (sealed worker), App (opaque origin iframe) | No |
 | The mesh (`peerd-distributed/`, preview only) | WebRTC mesh, DHT, gossip, signed direct channels, A2A | No |
@@ -76,23 +80,26 @@ holds both untrusted input and dangerous capability. Enforcement lives in
 |---|---|---|
 | The user | Everything: unlocking the vault, approving confirms, installing skills and imports | (the root of trust) |
 | The orchestrator (main agent loop, in the service worker) | The conversation, planning, and delegating a plain-language goal to an actor | Hold an environment's low-level tools, read raw page bytes, or run untrusted code directly |
-| A bound actor (web, webvm, notebook, app) | Driving one tab, VM, notebook, or app. It holds only that instance's tools, keyless, in its own worker heap on Chrome | Touch another instance or kind, hold the key, or return anything to the orchestrator except a `wrapUntrusted`-fenced summary |
-| An actor | A short-lived actor spawned to break down a task. Keyless, own heap, a narrowed toolset | Escalate past its grant, hold the key, or reach another heap. Every tool call is re-checked in the service worker |
-| The dweb actor (preview, opt-in) | Monitoring inbound mesh traffic and A2A over the mesh. Keyless, own heap | Delegate on an inbound (untrusted) turn, or sign as the user without consent |
+| A bound actor (web, webvm, notebook, app) | Driving one tab, VM, notebook, or app. It holds only that instance's tools, keyless, in its own worker heap | Touch another instance or kind, hold the key, or return anything to the orchestrator except a `wrapUntrusted`-fenced summary |
+| An actor | A short-lived actor spawned to break down a task. Keyless, with a narrowed toolset and its own heap | Escalate past its grant or hold the key. Every tool call is re-checked in the privileged background |
+| The dweb actor (preview, opt-in) | Monitoring inbound mesh traffic and A2A over the mesh. Keyless, with its own heap | Delegate on an inbound (untrusted) turn, or sign as the user without consent |
 | The egress chokepoint (`safeFetch` and `webFetch`) | Every outbound byte: the allowlist for credentialed calls, or the SSRF and denylist checks for open-web calls | Be bypassed. A bare `fetch` is forbidden by lint across the project |
 
 ### 3.2 Trust boundaries
 
-- B1. Untrusted content and the orchestrator's heap. This is the most important
-  boundary. Page text, command output, file contents, and peer bytes are read only
-  inside a keyless actor or actor worker heap, and return to the orchestrator
-  only as `wrapUntrusted`-fenced data. Enforced by the heap split
+- B1. Untrusted content and the orchestrator's heap. Page text, command output,
+  file contents, and peer bytes are read in a separate keyless actor worker and
+  return only as `wrapUntrusted`-fenced data
   (`peerd-runtime/actor/actor-worker-core.js`,
-  `background/offscreen-actor-client.js`).
-- B2. An agent heap and the network or the key. Model calls and tool calls leave a
-  worker only through two service-worker-gated relays. The service worker adds
-  `getSecret` and `safeFetch` and re-checks the call. It does not trust the
-  worker's arguments.
+  `background/offscreen-actor-client.js`). A versioned readiness and realm probe
+  must pass before work starts. Missing or failed isolation refuses the actor
+  turn before any target action.
+- B2. An actor loop and the network or the key. Model and tool calls leave the
+  worker only through privileged, gated relays. The host adds live provider
+  functions only at the model-call boundary and re-checks every tool call. On
+  Chrome, the service worker transfers a standard MessageChannel endpoint to the
+  exact offscreen WindowClient. The job and relays never use extension-wide
+  runtime messaging. Firefox binds the same relays to its private in-process host.
 - B3. The extension and the open web. All outbound bytes pass through
   `peerd-egress/fetch/`: `safeFetch` (exact-origin provider allowlist, carries the
   key) or `webFetch` (SSRF and private-network block plus denylist, keyless).
@@ -107,6 +114,11 @@ holds both untrusted input and dangerous capability. Enforcement lives in
   (`manifests/`, generated `extension/manifest.json`).
 - B7. The user and the agent. Side-effecting actions pass through a confirm gate.
   The vault requires an explicit unlock. Skills and imports require a click.
+  Backup and restore plaintext uses an exact options-page transport. Chrome
+  transfers a MessageChannel to one WindowClient. Firefox accepts a private
+  background Port only from the exact options sender. The ordinary runtime
+  message dispatcher never carries passphrases or backup payloads
+  (`background/private-transfer-port.js`, `options/private-transfer-session.js`).
 
 Out of the model entirely (see section 7): a compromised OS or browser, a
 malicious separate extension, and physical device access.
@@ -117,12 +129,12 @@ malicious separate extension, and physical device access.
 
 | Asset | Where it lives | Primary protection |
 |---|---|---|
-| Model-provider API key | Encrypted in the vault, decrypted only in the service worker at request time | Vault crypto (Argon2id or WebAuthn-PRF, AES-GCM), never enters a keyless heap, egress allowlist |
+| Model-provider API key | Encrypted in the vault, decrypted only in the service worker at request time | Vault crypto (Argon2id or WebAuthn-PRF, AES-GCM), never handed to an actor loop, egress allowlist |
 | Origin-bound API keys (per integration) | Vault, injected at the egress boundary only | `origin-credentials.js`. Sent only to the exact owned https origin |
 | Proof-of-possession key (DPoP, per origin — opt-in per integration) | A non-extractable `CryptoKey` handle in IndexedDB — the key material never leaves the browser's crypto implementation and peerd never holds it as bytes | Non-extractable by construction, checked at generate and on every load (`usableDpopPrivateKey`; `exportKey` rejects for every caller, including us); usable only at the audited egress boundary, which mints a fresh per-request proof and never exposes one to the agent. Minted when the user saves a DPoP credential, retired when they remove it (INV-15) |
 | The user's session cookies (logged-in tabs) | The browser's cookie jar. peerd never reads cookies | Sensitive-origin denylist, Plan and Act mode, confirm gate |
 | User authentication factor (login) | Never held by the agent — a passkey stays on the user's device; an SSO session stays with the provider; a password is never read or filled | The agent never holds it; a login is initiated only through a gated, origin-verified, always-confirmed, affordance-verified action (`tools/defs/login.js`, Tier 0). The factor stays with the user |
-| Page content the agent reads | Transiently, inside an actor heap | The memory boundary (B1) and the untrusted-content fence |
+| Page content the agent reads | Transiently, inside an actor loop | Credential custody, actor tool gates, the untrusted-content fence, and the B1 memory boundary where an isolated host is available |
 | Durable memory (notes loaded into every future prompt) | `peerd-runtime/memory/` | User-approved writes. The digest excludes tool results (see residual risk R2) |
 | Local files (WebVM filesystem, Notebook and App OPFS) | Sandbox-local storage | Per-instance OPFS root, path-traversal collapse, realm seal |
 | Peer bundles (dwapps, data, agent cards) | Received over the mesh | Content addressing, Ed25519 signatures, size and shape caps |
@@ -142,12 +154,12 @@ Can: serve arbitrary HTML, JS, and text, plant prompt-injection payloads in cont
 the agent reads, try to induce fetches, and run script in its own origin.
 Cannot: reach the vault key, run in a privileged context, or make the agent's
 authority act outside its gates.
-Defenses: the memory boundary keeps page bytes out of the orchestrator's heap (B1).
-The web actor that reads the page is keyless (`actor/spawn.js`
-`restrictCtxCapabilities` strips `getSecret` and `safeFetch`). The credentialed
-egress path is an exact-origin allowlist (`safeFetch`). Open-web fetches are gated
-by the SSRF block and the denylist (`webFetch`). Page text is `wrapUntrusted`-fenced
-with a delimiter the page cannot forge (`tools/prompt-wrap.js`).
+Defenses: the memory boundary keeps page bytes out of the orchestrator's heap
+(B1). Every web actor loop is keyless and receives stubs in
+`actor-worker-core.js`. The credentialed egress path is an
+exact-origin allowlist (`safeFetch`). Open-web fetches are gated by the SSRF block
+and the denylist (`webFetch`). Page text is `wrapUntrusted`-fenced with a delimiter
+the page cannot forge (`tools/prompt-wrap.js`).
 Proven by: scenarios 01, 02, 03, 07, 08.
 
 ### 5.2 Malicious MCP server (mapped)
@@ -185,9 +197,10 @@ Defenses: the gate stack (`tools/gates.js`). The exposure gate hides low-level D
 and page tools from the main turn. The actor-tier gate pins each actor to its kind's
 toolset and instance and refuses actor-only tools on non-actor contexts. Plan and Act
 mode blocks writes (`permissions/policy.js`). The origin gate applies the denylist.
-Every tool call carries an append-only audit entry. The heap split means a model call
-cannot smuggle the key across the postMessage boundary (`actor-worker-core.js`
-`makeRelayedCallModel` strips every function).
+Every tool call carries an append-only audit entry. In the actor worker,
+`actor-worker-core.js` strips every function before the model request crosses the
+relay. The privileged provider wrapper overwrites worker-controlled provider,
+model, host, and credential fields at the call boundary.
 Proven by: scenarios 03, 08 (and 05 for delegation).
 
 ### 5.5 Malicious extension (out of scope, see section 7)
@@ -199,16 +212,35 @@ permission in the store Chrome build, a strict CSP) reduces peerd's own attack
 surface but does not defend against a separate malicious extension.
 
 ### 5.6 Compromised dependency (supply chain)
-Can: a subverted vendored library or a remote asset peerd loads could inject code.
+Can: a subverted vendored library, a remote asset, or an agent-selected HTTPS
+JavaScript module could inject code.
 Defenses (partial): there is no npm runtime inside the extension. Third-party code is
 vendored in `vendor/` with a `SOURCE.txt`. The Moonshine voice model is SHA-384
 SRI-verified and refuses to load on a null SRI
-(`peerd-runtime/voice/model-store.js`). The store build strips the `debugger`
-permission and the dweb module, and CI verifies zero dweb traces.
-Accepted residual (R8): the CheerpX WebVM streams its root filesystem image from a
-third-party host over WSS, which cannot be SRI-pinned. This is a live trust
-dependency for the VM's filesystem. It is named, not defended.
-Proven by (partial): scenario 06 for sandbox confinement of whatever the VM runs.
+(`peerd-runtime/voice/model-store.js`). Store and web builds refuse direct
+remote JavaScript imports without requesting the module source. On package
+targets where Preview enables literal static remote modules, they cross the
+audited web-fetch path, have source and graph
+caps, and may carry an optional SHA-256 pin. Any remote module marks the whole
+resolved graph as untrusted compute. Runtime network and file access, agents,
+model calls, browser and site clients, and dweb are disabled for that run. A
+remote module cannot import a local toolbox module. Generated worker shims and
+independent host relay checks enforce the same profile. Firefox links the
+authorized graph and realm seal in a disposable compiler Worker, then runs the
+result through a sandboxed opaque-origin host with no extension APIs, string
+compilation, or network. Stop terminates the compiler or code Worker and
+cancels the host fetch operation. Returned values, console output, and errors
+are fenced as untrusted.
+Pins verify exact bytes and improve reproducibility. They do not grant trust or
+authority. Dynamic imports are refused in every package. Remote modules run
+inside a sealed worker. The store build strips
+the `debugger` permission and the dweb module, and CI verifies zero dweb traces.
+Accepted residuals: the CheerpX WebVM streams its root filesystem image from a
+third-party host over WSS, which cannot be SRI-pinned. In Preview, an unpinned
+HTTPS module can change at its publisher's discretion.
+The separate Store risk where code is fetched as data and then executed through
+a local JavaScript or WebAssembly surface is tracked on the issue board.
+Proven by: scenario 06.
 
 ---
 
@@ -240,14 +272,22 @@ Code: `peerd-egress/denylist/denylist.js`, `fetch/web-fetch.js`,
 `fetch/origin-credentials.js` (`authOriginForRequestUrl`). Red-team: scenario 02.
 
 <a id="inv-3"></a>
-### INV-3. The heap that reads a page holds no secret and returns only fenced data
-The web, actor, and actor worker heap has `getSecret` and `safeFetch`
-unconditionally stripped (`restrictCtxCapabilities`), cannot pass a function or key
-across the model-call boundary (`makeRelayedCallModel` drops every function), and its
-untrusted summary re-enters the orchestrator wrapped as data (`makeActorSummaryFence`
-and `wrapUntrusted`) with a delimiter the content cannot forge (`neutralizeFence`).
-Code: `peerd-runtime/actor/spawn.js`, `peerd-runtime/actor/actor-worker-core.js`,
-`tools/prompt-wrap.js`. Red-team: scenario 03.
+### INV-3. Actor loops receive no live credential functions and return fenced data
+Every actor loop receives throwing `getSecret` and `safeFetch` stubs. This is
+enforced in `actor-worker-core.js`. Privileged wrappers add the live functions
+only at the model provider boundary. A worker cannot pass functions across its
+relay because `makeRelayedCallModel` drops them. Every untrusted summary re-enters the
+orchestrator wrapped as data (`makeActorSummaryFence` and `wrapUntrusted`) with a
+delimiter the content cannot forge (`neutralizeFence`).
+Code: `peerd-runtime/actor/actor-worker-core.js`,
+`background/offscreen-actor-client.js`, `background/offscreen-actor-channel-client.js`,
+`background/direct-actor-host.js`, `offscreen/actor-channel-host.js`,
+`offscreen/actor-runner.js`, `offscreen/actor-worker-protocol.js`, and
+`tools/prompt-wrap.js`. The browser custody test proves an actor cannot enter the
+privileged turn driver. The installed-XPI Firefox smoke proves the packaged extension
+starts a dedicated Worker, verifies its realm, attaches credentials only in the host,
+keeps one background heap alive past the event-page idle window, and returns one
+fenced result without replay. Red-team: scenario 03.
 
 <a id="inv-4"></a>
 ### INV-4. A tampered or re-attributed peer bundle is detectable and rejected
@@ -266,8 +306,9 @@ spawned by an inbound or injected turn is tainted for its whole subtree. Forged,
 severed, foreign-rooted, and cyclic lineages fail closed. A poisoned mesh op (bad
 method or args) is rejected, and signing as the user requires per-target consent. The
 wall covers EVERY door to delegation, not only the direct `message_actor` tool: the
-`script` tool's `actors.send`/`actors.ask` surface reaches the same `messageActor`, so
-it is refused mint on an inbound turn (`tools/defs/script.js` gates `actorsOn` on
+`script` tool's awaited `actors.ask` surface reaches the same `messageActor`
+(while `actors.list` only reads the roster), so delegation is refused mint on
+an inbound turn (`tools/defs/script.js` gates `actorsOn` on
 `ctx.inbound !== true` — the trusted turn signal folded SW-side; the untrusted worker
 never echoes it).
 Code: `peerd-runtime/actor/delegation-lineage.js` (`mayMessageActor`,
@@ -293,8 +334,15 @@ at an opaque origin (the manifest sandbox omits `allow-same-origin` and
 `allow-top-navigation`) with all `chrome.*` stripped, and its inlined worker source is
 escaped against a `</script>` breakout. The WebVM's only network path is an HTTP bridge
 that refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth
-field, and confirms body-bearing verbs.
+field, and confirms body-bearing verbs. If a resolved Notebook or Script graph
+includes remote code, the entire run uses the compute-only profile. The resolver
+blocks remote access to local toolbox modules. The worker and host both refuse
+every authority-bearing relay, and the tool boundary fences all remote-controlled
+output.
 Code: `engine-tabs/notebook-tab/notebook-neutralizers.js` (`applyRealmSeal`),
+`engine-tabs/notebook-tab/worker-source.js`,
+`engine-tabs/notebook-tab/notebook-tab.js`, `offscreen/job-runner.js`,
+`peerd-runtime/tools/defs/js-notebook.js`, `peerd-runtime/tools/defs/script.js`,
 `peerd-engine/app-compose.js`, `peerd-engine/vm-net/http-bridge.js`,
 `peerd-engine/module-resolver.js`, and the manifest sandbox CSP. Red-team: scenario 06,
 with the real-realm proof in
@@ -312,13 +360,61 @@ internal-use on real deployments — before any network call, ahead of the denyl
 and fails closed on redirects so a public host cannot pivot to an internal one. The same
 redirect refusal is applied by `read_pdf`'s byte fetch (`offscreen/pdf-extract.js`,
 `redirect:'manual'`), which previously validated only the pre-redirect host.
-Code: `peerd-egress/fetch/private-network.js`, `fetch/web-fetch.js`,
+Browser automation applies the same lexical classifier before navigation and
+to the committed document. Driven tabs also receive tab-scoped DNR rules for
+private hosts and address ranges, covering redirects, forms, frames, and
+tab-associated requests at the browser network layer. While a public HTTP or
+HTTPS page is under peerd custody, a second private-network rule set covers
+requests that the browser attributes to no tab when their initiator domain
+matches a public domain visited by the driven tab. This covers page service-worker fetches and
+Firefox worker WebSockets without applying a browser-wide rule. Chrome DNR does
+not intercept WebSockets created inside a page service worker, even with a
+matching unscoped block rule. The live regression test keeps that residual
+visible. The scope follows browser DNR
+domain matching, so it ignores scheme and port and can include subdomains. A
+user-owned tab with the same matching domain can therefore lose private-network
+service-worker fetch access while peerd drives that domain. peerd does not prompt, unregister
+the worker, or take exclusive control of the origin. Visited domains persist in
+browser-session storage and remain covered until that tab's custody ends.
+
+A page-created child is
+blanked and guarded only when `webNavigation` reports that its exact source tab
+is already under peerd custody. Firefox also synchronously cancels private,
+local, metadata, or denylisted HTTP and WebSocket requests from that exact child
+while its tab-scoped DNR rules are being installed, then releases the temporary
+listener state for that child. It does not read request bodies or act on children
+from user-owned tabs. If actor custody restores before denylist hydration, that
+exact child waits instead of treating an empty policy as permission. A protected
+child is closed after the network guard takes custody. A missing or malformed
+bundled denylist pauses tool dispatch instead of authorizing an empty policy for
+browser or open-web work. The tab rules never apply to tabs peerd is not driving.
+The no-tab companion is limited to domains visited by current driven tabs and
+private-network targets. During a service-worker restart, early adoption requires two positive
+signals for the exact source: restored durable custody or a restored web-actor
+binding, plus the complete surviving private-network DNR rule set.
+`background/startup-popup-network-guard.js` copies only those known block rules
+to the exact child, then hands it to the restored custody set. If either signal
+is absent, peerd leaves the child unchanged until its registries finish loading.
+This avoids interfering with a user popup, but leaves a short cold-start window
+for an autonomous child if the browser lost its session rules while peerd's
+later registry restore still identifies the source as driven. A page-initiated
+cross-origin redirect can also begin before the browser reports the new committed
+URL and adds its no-tab domain scope. DNS resolution and rebinding remain
+outside this client-side lexical boundary. With native local-network checks
+disabled, Chrome can also start an inherited about:blank child's immediate
+private request before the extension receives enough child identity to close it.
+Code: `shared/private-network.js`, `peerd-egress/fetch/web-fetch.js`,
+`peerd-egress/denylist/dnr-rules.js`, `background/denylist-net-guard.js`,
+`background/browser-origin-custody.js`,
+`background/driven-child-request-guard.js`, `background/startup-popup-network-guard.js`,
+`peerd-runtime/tools/browser-automation-policy.js`, and
 `offscreen/pdf-extract.js`. Red-team: scenario 07.
 
 <a id="inv-8"></a>
 ### INV-8. Injected instructions cannot reach a capability
 For a corpus of injection payloads, the authority each one seeks is denied by a real
-mechanism: exfil is denied by the keyless heap and the allowlist, navigation to a
+mechanism: exfil is denied by keyless loop custody, tool gates, and the allowlist,
+navigation to a
 sensitive site by the denylist, SSRF by the private-network guard, a low-level DOM tool
 on the main turn by the exposure gate, an actor-only tool via an actor by the tier
 gate, a cross-instance call by the instance pin, a write in Plan mode by Plan and Act
@@ -382,13 +478,13 @@ reads GROUND TRUTH off the page and runs a pure, deterministic classifier, so th
 method and provider the confirm names come from the page rather than a model argument
 that could spoof the consent; the provider shown is a CANONICAL single-word title-cased
 label, never the raw captured phrase. SSO for a provider outside the identity-provider
-corridor (github/gitlab/facebook/unknown) is refused GRACEFULLY — no click, no actor
-kill — and a password affordance is refused because Tier 0 holds no credentials.
+registry is refused without a click or actor stop. A password affordance is refused
+because Tier 0 holds no credentials.
 
 **The auto-click rule.** peerd AUTO-CLICKS a login only when it has (a) VERIFIED the
 destination is a known IdP (an href/formAction host that passes `isKnownIdp`), (b)
-pinned a STABLE `walkId` (a snapshot registry node the page cannot re-point — a raw
-selector or a CDP-only backend ref is NOT stable across the up-to-120s confirm), and
+pinned a STABLE `walkId` (a snapshot registry node the page cannot re-point; a raw
+selector or a CDP-only backend ref is not stable across confirmation), and
 (c) RE-VERIFIED, AFTER the consent, that the live origin is unchanged and a re-read via
 the SAME walkId re-classifies to the identical verdict (method/provider/verified) —
 aborting on any change (`login_origin_changed` / `login_affordance_changed` /
@@ -411,13 +507,24 @@ work and out of scope here. Residual, stated plainly: destination verification i
 BEST-EFFORT — it proves the element's declared navigation target (its href, or, for a
 SUBMIT control only, its form action) is a known IdP, but a script `onclick` can still do
 something other than that declared target. So an auto-click carries the residual that a
-verified-looking button runs a different handler; this is bounded by the origin lock
-(a cross-origin hop off the corridor ends the actor) and by the fact that peerd only
-auto-clicks — never fills a credential — so the worst case is a same-origin action on the
-origin the user already consented to interact with, not a credential leak.
+verified-looking button runs a different handler. This is bounded by the exact-origin
+grant and landing wait, and by the fact that peerd only auto-clicks and never fills a
+credential. The worst case is a same-origin action on the origin the user already
+consented to interact with, not a credential leak.
+
+**The identity-provider grant.** Confirmation alone does not give the actor general
+sign-in authority. Only confirmed SSO with a verified destination can stamp a durable,
+one-shot grant for that exact IdP origin. Unverified SSO and passkey flows do not stamp
+one. The grant is consumed when the tab first lands on that exact known IdP. The actor
+then waits and has no tool or credential authority there. It can continue on a
+later request only after the same tab returns to the exact relying-site origin. A wrong provider, third origin,
+expired or replayed authorization, malformed state, or legacy excursion state stops the
+actor. The grant and active excursion survive a service-worker restart without widening
+their authority.
 Code: `peerd-runtime/tools/defs/login.js`, `peerd-runtime/tools/login-affordance.js`,
-`peerd-runtime/tools/exposure.js`, `peerd-runtime/actor/idp-registry.js`. Red-team:
-scenario 11.
+`peerd-runtime/tools/exposure.js`, `peerd-runtime/actor/idp-registry.js`,
+`peerd-runtime/actor/origin-lock.js`, and `peerd-runtime/actor/landing-rule.js`.
+Red-team: scenarios 10 and 11.
 
 <a id="inv-15"></a>
 ### INV-15. A proof-of-possession credential cannot be exfiltrated
@@ -514,6 +621,130 @@ still non-extractable, still `exportKey`-rejecting, and still signing a proof th
 verifies against its persisted public key; the Bun tier can only prove this over a
 `Map`, which never crosses the clone boundary).
 
+<a id="inv-16"></a>
+### INV-16. Local Contributor Metrics cannot collect or transmit without consent
+Contributor Metrics is a closed local accumulator, not an event bus. Before current
+versioned consent, its turn and feedback recorders are inert and create no storage
+record. Only the exact Options document may enable, disable, or clear consent. Only
+the exact side panel and Home chat surfaces may submit binary feedback, and the
+background re-derives the final human turn and cohort instead of accepting them from
+the page.
+
+The schema accepts reviewed enums, bounded counters, and named histogram buckets.
+Unknown keys fail closed. Unknown provider and model strings collapse to `custom`, so
+a caller cannot encode a URL, prompt, identifier, or other content in a cohort field.
+Restart-safe operation and feedback tokens are consent-rotated, bounded, local-only,
+and absent from the canonical payload bytes shown in Settings. Disabling deletes the
+consent, aggregate, tokens, and pending feedback in one storage key.
+
+This stage has no uploader, endpoint, alarm, collector origin, or network primitive.
+Store and web channels register no Contributor Metrics routes or UI. A later uploader
+is a separate security boundary and cannot inherit consent if the disclosure version
+changes.
+Code: `peerd-runtime/observability/contributor-metrics.js`,
+`peerd-runtime/observability/contributor-store.js`,
+`background/routes/contributor-metrics.js`, and
+`options/sections/contributor-metrics.js`. Red-team: scenario 12.
+
+<a id="inv-17"></a>
+### INV-17. The model cannot call a facility the runtime cannot host
+The privileged background resolves host support into a browser-neutral runtime
+capability snapshot. The same snapshot removes unavailable tool descriptors,
+corrects static prompt guidance, and drives a dispatch gate that refuses forged
+hidden calls without performing work. Human controls may narrow their own
+presentation from local API probes, but they cannot grant model or dispatch
+authority. Unsupported voice setup is refused before a model download or
+microphone prompt begins. OCR and local WebGPU controls refuse before downloads.
+Artifacts without a dweb mesh host omit the dweb module, controls, defaults,
+and model tools.
+
+Code: `peerd-runtime/runtime-capabilities.js`, `peerd-runtime/tools/gates.js`,
+`peerd-runtime/loop/turn-driver.js`, `packaging/gen-channel-config.ts`.
+Red-team: scenario 08.
+
+<a id="inv-18"></a>
+### INV-18. Durable site clients remain in their actor's origin custody
+A stored site client is executable, origin-keyed knowledge, not a global actor
+library. An API actor can read, run, or change only the client for its fixed
+canonical origin. A bound tab actor can touch only the client for its durable
+owned origin; after it has a tab, that tab must still be live at the owned
+origin. A roaming actor owns no durable origin: it may touch only the exact
+ordinary origin in its live tab, never an unrelated client, a no-tab client, or
+an origin the sensitivity classifier says carries the user's identity. A
+missing guard, unreadable tab, malformed custody state, or legacy session with
+no persisted origin state fails closed.
+
+The actor-tier gate performs a synchronous preliminary custody check before
+confirmation; a denial stops there. On an allow path, each tool checks the final
+normalized target after yielding record reads, worker execution, consent, and
+result-bookkeeping steps before it can expose bytes or admit a later effect.
+Store mutations are authorized immediately before invocation; an already
+admitted IndexedDB commit cannot be retroactively canceled if custody changes
+while it settles. A tab-backed allow reads and judges the authoritative owned
+tab when one exists; an exact-origin bound actor may deliberately use its client
+before it opens a tab. These repeated checks cover both pre-tool argument
+rewrites and self-retasking pages. The sealed worker's `site-fetch/call` relay
+reauthorizes on every operation and again immediately before network IO. Capture
+may observe a common `api.` sibling, but its digest retains exact-origin
+attribution and calls it separate custody; only that origin's actor may verify
+and persist its client.
+Code: `peerd-runtime/actor/origin-lock.js` (`mayUseSiteClientOrigin`),
+`tools/gates.js`, `tools/defs/site-client-{read,run,write}.js`,
+`tools/defs/site-capture.js`, and `background/service-worker.js`. Red-team:
+scenario 13.
+
+<a id="inv-19"></a>
+### INV-19. Browser location does not grant site or identity-provider authority
+A numeric tab handle may bind an actor only to an ordinary origin observed by
+the browser after the durable sensitivity inputs are ready. If that tab is on a
+known signed-in origin, numeric resolution refuses before session creation,
+mailbox persistence, model work, or page access. The only route to a bound actor
+for that origin is the explicit `site:<origin>` handle, used when the user's own
+request already targets the site. A redirect chosen by a page therefore cannot
+choose the origin that receives bound authority.
+
+A dedicated identity-provider origin is a third category: transit-only. It is
+sensitive for session and durable-client custody, but it cannot receive a
+roaming, numeric-tab, or standalone `site:` actor. A bound relying-party actor
+may enter it only after a confirmed verified SSO action creates a one-shot grant
+for that exact known IdP origin. Landing consumes the grant and parks the actor.
+While parked, the actor has no tool or credential authority at the IdP.
+Returning to the exact relying-site origin clears the excursion so a later request can continue.
+Any other origin or invalid durable state stops the actor. This keeps real sign-in
+working without treating the user's identity provider as an ordinary destination.
+
+The resolver classifies the same canonical origin it passes to the mint
+function. The mint function does not read the tab again or replace that origin.
+If the page moves later, the existing landing lock compares the live destination
+to the ordinary origin already bound and stops the actor before page access.
+Refusals expose only the canonical origin and a machine-authored recovery rule.
+They never expose the path, query, title, or other page-authored text.
+
+Code: `peerd-runtime/actor/numeric-tab-authority.js`,
+`peerd-runtime/actor/idp-registry.js`, `peerd-runtime/actor/landing-rule.js`,
+`background/service-worker.js`, and `peerd-runtime/actor/actor-messaging.js`.
+Red-team: scenario 10.
+
+<a id="inv-20"></a>
+### INV-20. Confirmation and uncertain-action authority do not cross chats or actors
+A confirmation is human authority for one live prompt. Only the browser-owned
+side panel or Home page may answer. The active root chat, exact execution
+session, and tool dispatch must match the coordinator's pending record. Other
+extension pages cannot answer, and an unrelated active chat is not sent the
+prompt identifier. Switching back replays only that chat's queued prompt.
+Stopping an execution session declines its own prompts without touching another
+session's queue.
+
+An actor heap is not an authority boundary that resets uncertainty. Operation
+IDs remain scoped to the exact execution session, but unresolved action intent
+is scoped to the owning root chat and normalized external target. Repeating the
+same uncertain action through a sibling actor therefore requires a new exact
+user confirmation. A different root chat or external target remains independent.
+
+Code: `peerd-egress/confirm/protocol.js`, `background/routes/vault.js`,
+`background/service-worker.js`, `peerd-runtime/lifecycle/dispatch-tracking.js`,
+and `peerd-runtime/tools/dispatcher.js`. Red-team: scenario 14.
+
 ### Additional invariants (not scenario-gated, enforced in code)
 
 - INV-9. Vault fails closed. A secret read or write is refused with `VaultLockedError`
@@ -540,8 +771,9 @@ verifies against its persisted public key; the Bun tier can only prove this over
 
 ### In scope
 - Exfiltration of the vault, API key, or conversation off-device.
-- Prompt injection that bypasses the actor boundary (the keyless per-environment heap)
-  and reaches the orchestrator's tools, memory, or the key.
+- Prompt injection that bypasses actor credential custody, tool gates, the
+  untrusted-content fence, or the isolated heap where available, and reaches the
+  orchestrator's tools, memory, or key.
 - Sandbox escape (WebVM, Notebook, App iframe) reaching the host, other origins, or
   privileged extension contexts.
 - Denylist, egress-chokepoint, or SSRF-guard bypass.
@@ -569,32 +801,25 @@ verifies against its persisted public key; the Bun tier can only prove this over
 These are stated plainly. Several are deliberate tradeoffs. All are things a reader
 evaluating peerd should know. Each cites where it lives in the code.
 
-- R1. The heap split is Chrome-only. It needs the offscreen API. On Firefox — and for
-  a run that never started offscreen — the actor falls back to an in-service-worker
-  loop where the boundary is a prompt boundary rather than a memory boundary, which
-  is the pre-heap-split posture. The memory boundary is not universal.
-  (`background/service-worker.js` offscreen fallback.)
-
-  Scoped precisely, because the two fallback lanes differ:
-
-  - A SPAWNED (ephemeral) child is keyless in the same sense the offscreen worker is.
-    `restrictCtxCapabilities` strips `getSecret`/`safeFetch` from the tool context
-    unconditionally, and the loop itself is handed throwing stubs while the real
-    credentials are closed over by the SW-owned `callModel` wrapper and added at the
-    call boundary (`actor/spawn.js`, `keylessCredentials`).
-  - A BOUND actor (web, webvm, notebook, app, dweb) does NOT take that path. With no
-    offscreen client, `runActorTurnOffscreen` returns null and the turn falls through
-    to `runAgentTurn`, which comes from the turn driver and forwards the live
-    `getSecret`/`safeFetch` into the loop. So on Firefox a web actor ingesting page
-    content, and the dweb actor consuming peer bytes, still run with live credentials
-    reachable from the loop frame.
-
-  Neither lane has heap separation, which is the deeper point: the child's untrusted
-  transcript shares a realm with the vault broker and the engine clients, so a
-  memory-disclosure bug there is not fenced the way it is on Chrome. Extending the
-  stub custody to the bound-actor lane, and retiring this branch in favor of an
-  isolated Firefox host — or failing closed — is P0-1 in
-  [`HARDENING-ROADMAP.md`](HARDENING-ROADMAP.md).
+- R1. Actor isolation depends on the browser's dedicated Worker implementation.
+  Chrome starts the runner from its offscreen document. Firefox starts the same
+  runner from the extension background page. A startup handshake checks the
+  protocol, worker realm, host canary separation, and absence of extension APIs
+  before any model or tool relay. Firefox uses a run-scoped, acknowledged
+  `storage.session` heartbeat while the background page owns an active Worker.
+  A failed heartbeat pauses actor work until a manual probe succeeds. The
+  durable actor mailbox never replays stored work after a background
+  restart: queued work becomes Not run, while started and legacy work becomes
+  Outcome unknown until the target is checked. If the
+  startup proof fails twice before work starts,
+  the capability becomes visibly unavailable and actor tools fail closed. This
+  guards against missing support and startup faults. It does not protect against
+  a browser engine defect that breaks Worker isolation itself. The dedicated
+  Worker also retains standard web APIs such as `fetch`; it is a memory boundary,
+  not a sealed code sandbox. Model output is not evaluated as code in that realm,
+  and model or tool requests use the privileged relay paths.
+  (`offscreen/actor-runner.js`, `offscreen/actor-worker-protocol.js`,
+  `background/direct-actor-host.js`, `peerd-runtime/actor/isolation.js`.)
 - R2 (narrowed). Memory poisoning. The auto-memory digest excludes tool results and
   synthetic messages, but still includes raw assistant text, which can echo
   attacker-paraphrased content, and an approved note persists into every future prompt.
@@ -657,7 +882,8 @@ evaluating peerd should know. Each cites where it lives in the code.
   (`tests/peerd-runtime/system-prompt-framing.test.ts`), so a template edit that
   strips that framing fails CI. What is still not covered: whether that framing is
   actually persuasive to the model. The framing is a soft defense; the structural
-  defenses (the keyless heap, the gates) are the real story. The red-team benchmark
+  defenses (keyless loop custody, the isolated heap where available, and the gates)
+  are the real story. The red-team benchmark
   (scenario 08) tests the gates, not the prompt text.
   (`peerd-provider/system-prompt.txt`, `peerd-runtime/loop/system-prompt.js`.)
 - R11. Open-web exfil, and what is left of key extractability. The extractability half is
@@ -706,11 +932,12 @@ evaluating peerd should know. Each cites where it lives in the code.
   with no tool call, a page redirecting itself) into one check no redirect chain walks
   around. The same policy is asked synchronously inside the credential-scope getter, so
   a self-redirect onto a credentialed origin cannot be spent by `fetch_url`,
-  `read_web_cache` or `site_client_*` in the window before a DOM tool re-enters the
-  chokepoint. (`peerd-runtime/actor/landing-rule.js`, `origin-lock.js`,
+  `read_web_cache` or a site-client fetch in the window before a DOM tool re-enters
+  the chokepoint. Durable client record custody is a separate invariant (INV-18).
+  (`peerd-runtime/actor/landing-rule.js`, `origin-lock.js`,
   `tools/defs/dom-helpers.js`; driven end to end by the `origin-lock` e2e state.)
-  The #251 arc hardened the TAB actor's `site_client_*` path but left its API-actor
-  sibling: the `site-fetch/call` relay's `backing:'api'` branch pinned credentials to the
+  The #251 arc hardened the TAB actor's site-client CREDENTIAL path but left its
+  API-actor sibling: the `site-fetch/call` relay's `backing:'api'` branch pinned credentials to the
   MODEL-supplied `origin` argument, so an API actor bound to one origin could name a
   DIFFERENT origin and spend that origin's stored key + cookies — a cross-origin
   credential escalation past the "an API actor owns one origin" containment (DESIGN-18).
@@ -746,13 +973,20 @@ evaluating peerd should know. Each cites where it lives in the code.
   sites lists what was inferred and removes it (#262), and the signal is credited to
   the origin the probe REPORTS rather than to the caller's tab record, so a page that
   navigates mid-call cannot spend it on someone else (#278). Detecting credentials
-  directly would need the `cookies` permission, which is not requested for the same
-  reason `webNavigation` is not.
+  directly would need the `cookies` permission, which is not requested because it
+  would expose browser-wide credential state. Learned signals are keyed by hostname,
+  not origin: scheme and port changes cannot route around a learned mark, and a mark
+  on a parent host also covers its descendants (#264). A mark learned on a child host
+  does not spread to its parent or siblings. Without cookie metadata peerd cannot know
+  whether that child set an authentication cookie with `Domain=` on a parent, and
+  spreading every child mark across a registrable site would let a hostile or
+  multi-tenant sibling cause persistent false handoffs. Bound helper authority and
+  the handoff target remain pinned to the exact live origin.
 - R16. The identity-provider list is the one place a bound actor may leave its origin,
   and it is deliberately short — a host qualifies only if signing in is essentially all
   it does. github.com, gitlab.com and facebook.com are excluded despite speaking OAuth,
-  because admitting them would hand a bound actor a budgeted corridor onto the whole
-  site. The cost is a real one: a bound actor sent through "sign in with GitHub" ENDS.
+  because admitting them would make the whole product origin eligible for a sign-in
+  grant. The cost is a real one: a bound actor sent through "sign in with GitHub" ENDS.
   That is the safe failure, but it is a failure, and whether it happens often enough to
   change the trade is a question for use rather than for this document.
   (`peerd-runtime/actor/idp-registry.js`.)
@@ -765,38 +999,22 @@ evaluating peerd should know. Each cites where it lives in the code.
   trust, so a hijacked page gets one attempt at persuading it to open a helper somewhere
   the user never asked about. (`peerd-runtime/actor/origin-lock-report.js`.)
 
-- R18. The identity-provider registry is invisible to the sensitivity classifier
-  (#265). peerd keeps exactly one curated list of origins whose whole purpose is
-  authentication, and it is consumed only to OPEN a bound actor's excursion
-  (`actor/origin-lock.js`, `actor/landing-rule.js`) — never as a sensitivity signal.
-  The classifier's seeds are the UGC registry, a stored credential, and what was
-  learned. So the big IdP hosts classify as ORDINARY until something happens to see a
-  password field on one, which is backwards: they are the set on which a session cookie
-  is worth the most. The fix is plausibly one seed, but whether an IdP should be
-  "sensitive" or a THIRD state — enterable on an excursion, never roamable — is a
-  design call, and adding the seed naively would make the excursion mechanism refuse
-  the landings it exists to permit.
-- R19. Learning is unauthenticated, page-controlled input (#268). A hostile page that
-  renders one password field classifies ITSELF as credentialed, and the landing rule
-  then hands off to a successor bound to the attacker's own origin. R17 already records
-  that the attacker names the successor; what this adds is the CAPABILITY difference —
-  the successor is bound, so it may open an auth excursion onto a real IdP host, which
-  the roaming actor it replaced could not. Two things bound it today: a signal is
-  credited to the origin the probe reports rather than to the caller's tab record
-  (#278), so a page can only mark the document it controls; and Settings → Learned
-  sites shows what was inferred and removes it (#262). Moving the probe to the DOM
-  chokepoint (#267) deliberately widened the trigger from one tool to all of them,
-  which widens this too — the trade is stated in that commit: unfixed #267 let a
-  hijacked actor KEEP authority on a real credentialed site, while this direction costs
-  availability and fills the learned cap faster.
-- R20. Type-the-scrape-into-a-form exfil is invisible to the tripwire (#269). The
-  scanner inspects tool ARGUMENTS for URL-shaped payloads. Typing a scraped blob into a
-  form field and clicking submit moves the same bytes with no URL in any argument: the
-  blob is seen in the `text` slot and discarded because it does not parse as a URL, and
-  the request that actually carries it — the form submission — is a `click`, whose args
-  are a ref or a selector. The module header already puts page-driven beacons out of
-  scope; this path is tool-driven, so it is inside the stated scope and is a gap rather
-  than an exclusion (`tools/egress-heuristics.js`).
+- R20. Direct native cross-origin form actions are blocked before activation (#269).
+  The URL tripwire cannot see a form destination or its live values in `click` or
+  `type` arguments, so the injected click and type bodies resolve the native form action
+  on the exact document and element immediately before the effect. A cross-origin action
+  is refused before click activation, value mutation, or submit events. The fixed result
+  says that nothing was submitted and directs the user to review and submit the form
+  manually. Verified login is the narrow exception because its exact identity-provider
+  destination already has fresh user consent and a one-shot excursion grant
+  (`tools/defs/click.js`, `tools/defs/type.js`, `tools/browser-automation-policy.js`).
+
+  The boundary is intentionally limited to the live native action that peerd can resolve
+  before it fires page events. Page-script beacons remain outside the tool action path.
+  A handler can change a same-origin action after an input or click event, submit through
+  JavaScript, or send data without using the form action. A same-origin endpoint can also
+  relay the body or redirect after it receives the request. Those page-driven channels
+  remain residuals. Red-team: scenario 09.
 - R21. `fetch_url` headers and body are structurally invisible to the same scanner
   (#270). The tripwire was widened to cover the web actor's own fetch, but it reads
   only the URL-shaped fields; header values and any request body are never examined,
@@ -805,21 +1023,17 @@ evaluating peerd should know. Each cites where it lives in the code.
   and passes the rest through verbatim. The scanner is already a pure function over
   strings, so the cheapest close is to run it over those values too — it is listed here
   because it is not done, not because it is hard.
-- R22. The auth excursion is scoped to TIME, not to the sign-in it was opened for
-  (#273). Inside a live excursion the only refusals are the deadline, a sensitive
-  landing that is not the opener, and budget exhaustion — and budget is spent on an
-  ORIGIN CHANGE, so one hop onto an attacker origin buys read/click/type across every
-  path of it for the rest of the window. The opener is recorded but only used to exempt
-  itself; the return-to is never enforced. Whether an excursion should be bounded by
-  the flow that opened it rather than by a clock is the open question
-  (`actor/landing-rule.js`).
-- R23. The password probe is top-frame and light-DOM only (#277). A site whose sign-in
-  lives in an iframe — an embedded IdP or payment widget, or a plain `<iframe
-  src=/login>` — or inside a shadow root is invisible to the learned signal
-  permanently, however often peerd walks it. This is the one residual that pulls
-  AGAINST another: widening the probe widens both directions at once, and #257 exists
-  because false positives on this signal have their own cost. It wants a deliberate
-  call, not a wider selector (`dom/walk-injected.js`).
+- R23. The password probe follows attributable DOM boundaries (#277). It now walks
+  open shadow roots and frames whose current origin exactly matches the top document,
+  plus declared inherited `about:blank` and `srcdoc` documents. Closed shadow roots
+  remain unobservable. Cross-origin frames are deliberately excluded: an embedded IdP
+  or payment widget belongs to its own origin, and treating its password field as
+  evidence about the relying party would recreate the false-positive cost from #257.
+  The original full light-DOM query remains intact; only discovery of additional roots
+  is bounded, and an exhausted negative stays unknown at the policy boundary. Fields
+  beyond that budget can therefore still fail open.
+  `autocomplete="new-password"` is matched as a token, including sectioned and WebAuthn
+  forms (`dom/walk-injected.js`; `tests/unit/peerd-runtime/dom-walk.test.js`).
 - R24. Chunked exfil defeats the minimum-blob threshold (#279). The tripwire is a pure
   per-call function over one call's slots, and the dispatcher hands it no history, so a
   payload split below the threshold passes as many times as an attacker cares to

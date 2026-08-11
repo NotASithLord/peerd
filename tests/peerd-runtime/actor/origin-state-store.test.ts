@@ -4,6 +4,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { makeOriginStateStore } from '../../../extension/peerd-runtime/actor/origin-state-store.js';
+import { makeJudgeLanding } from '../../../extension/peerd-runtime/actor/origin-lock.js';
 
 const harness = () => {
   const saves: Array<{ id: string; state: any }> = [];
@@ -25,8 +26,11 @@ describe('hydration', () => {
 
   test('the durable state is adopted verbatim', () => {
     const { store } = harness();
-    store.hydrate('a', { mode: 'bound', ownedOrigin: 'https://app.test', excursionsUsed: 2 } as any);
-    expect(store.read('a')).toEqual({ mode: 'bound', ownedOrigin: 'https://app.test', excursionsUsed: 2 } as any);
+    const authGrant = { returnTo: 'https://app.test', idpOrigin: 'https://idp.test', deadline: 99 };
+    store.hydrate('a', { mode: 'bound', ownedOrigin: 'https://app.test', excursionsUsed: 2, authGrant } as any);
+    expect(store.read('a')).toEqual({
+      mode: 'bound', ownedOrigin: 'https://app.test', excursionsUsed: 2, authGrant,
+    } as any);
   });
 
   test('a stored record with an UNRECOGNIZED mode is passed through, not repaired', () => {
@@ -47,13 +51,13 @@ describe('hydration', () => {
     expect(store.read('a')!.mode).toBe('bound');
   });
 
-  test('the cache WINS over a later re-seed with a staler record', () => {
+  test('the cache WINS over a later re-seed with a staler record', async () => {
     // Verdicts write the cache; the record catches up. A re-seed that overwrote
     // the cache would roll back a decision already acted on — e.g. restoring a
     // spent excursion budget on the next context build.
     const { store } = harness();
     store.hydrate('a', { mode: 'bound', ownedOrigin: null } as any);
-    store.write('a', { ownedOrigin: 'https://app.test' });
+    await store.write('a', { ownedOrigin: 'https://app.test' });
     store.hydrate('a', { mode: 'bound', ownedOrigin: null } as any);   // stale record
     expect(store.read('a')!.ownedOrigin).toBe('https://app.test');
   });
@@ -89,14 +93,30 @@ describe('the sync read is the lock\'s contract', () => {
 });
 
 describe('writes', () => {
-  test('the cache updates BEFORE the durable write resolves', async () => {
-    const { store } = harness();
+  test('a roaming retirement is durable and survives a fresh store hydrate', async () => {
+    const { store, saves } = harness();
+    store.hydrate('a', { mode: 'roaming' } as any);
+    await store.write('a', { retired: true });
+    expect(saves.at(-1)).toEqual({ id: 'a', state: { mode: 'roaming', retired: true } });
+
+    const restarted = makeOriginStateStore({ save: async () => {}, onError: () => {} });
+    restarted.hydrate('a', saves.at(-1)!.state);
+    expect(restarted.read('a')).toMatchObject({ mode: 'roaming', retired: true });
+  });
+
+  test('authority is published to the cache only after the durable write resolves', async () => {
+    let release = () => {};
+    const store = makeOriginStateStore({
+      save: () => new Promise((resolve) => { release = resolve; }),
+      onError: () => {},
+    });
     store.hydrate('a', { mode: 'bound', ownedOrigin: null } as any);
     const pending = store.write('a', { ownedOrigin: 'https://app.test' });
-    // Not awaited: the next sync getState must already see it, because the very
-    // next tool call may judge against it.
-    expect(store.read('a')!.ownedOrigin).toBe('https://app.test');
+    await Promise.resolve();
+    expect(store.read('a')!.ownedOrigin).toBe(null);
+    release();
     await pending;
+    expect(store.read('a')!.ownedOrigin).toBe('https://app.test');
   });
 
   test('a no-op patch does not touch storage', async () => {
@@ -121,15 +141,30 @@ describe('writes', () => {
   });
 
   test('an excursion is compared structurally, not by reference', async () => {
-    const excursion = { returnTo: 'https://app.test', openedAt: 'https://idp.test', lastLanding: 'https://idp.test', budget: 3, deadline: 99 };
+    const excursion = { returnTo: 'https://app.test', idpOrigin: 'https://idp.test', deadline: 99, authorized: true as const };
     const { store, saves } = harness();
     store.hydrate('a', { mode: 'bound', ownedOrigin: 'https://app.test', excursion } as any);
     await store.write('a', { excursion: { ...excursion } });         // same values, new object
     await store.settled();
     expect(saves).toEqual([]);
-    await store.write('a', { excursion: { ...excursion, budget: 2 } });  // budget actually spent
+    await store.write('a', { excursion: { ...excursion, deadline: 100 } });
     await store.settled();
     expect(saves).toHaveLength(1);
+  });
+
+  test('an auth grant is compared structurally and survives restart hydration', async () => {
+    const authGrant = { returnTo: 'https://app.test', idpOrigin: 'https://idp.test', deadline: 99 };
+    const { store, saves } = harness();
+    store.hydrate('a', { mode: 'bound', ownedOrigin: 'https://app.test', authGrant } as any);
+    await store.write('a', { authGrant: { ...authGrant } });
+    expect(saves).toEqual([]);
+    await store.write('a', { authGrant: { ...authGrant, deadline: 100 } });
+    await store.settled();
+    expect(saves).toHaveLength(1);
+
+    const restarted = makeOriginStateStore({ save: async () => {}, onError: () => {} });
+    restarted.hydrate('a', saves[0]!.state);
+    expect(restarted.read('a')!.authGrant).toEqual({ ...authGrant, deadline: 100 });
   });
 
   test('concurrent writes do not lose an increment', async () => {
@@ -162,15 +197,15 @@ describe('writes', () => {
     expect(store.read('ghost')).toBeNull();
   });
 
-  test('a save that throws leaves the heap state correct and does not reject', async () => {
+  test('a save that throws rejects and leaves the heap state unchanged', async () => {
     const store = makeOriginStateStore({
       save: async () => { throw new Error('quota'); },
       onError: () => {},
     });
     store.hydrate('a', { mode: 'bound', ownedOrigin: null } as any);
-    await store.write('a', { ownedOrigin: 'https://app.test' });
+    await expect(store.write('a', { ownedOrigin: 'https://app.test' })).rejects.toThrow('origin_state_persistence_failed');
     await store.settled();
-    expect(store.read('a')!.ownedOrigin).toBe('https://app.test');
+    expect(store.read('a')!.ownedOrigin).toBe(null);
   });
 
   test('one failed save does not poison later ones', async () => {
@@ -187,11 +222,90 @@ describe('writes', () => {
       onError: () => {},
     });
     store.hydrate('a', { mode: 'bound', ownedOrigin: null } as any);
-    await store.write('a', { ownedOrigin: 'https://one.test' });
+    await expect(store.write('a', { ownedOrigin: 'https://one.test' })).rejects.toThrow('origin_state_persistence_failed');
     await store.write('a', { ownedOrigin: 'https://two.test' });
     await store.settled();
     expect(saved).toHaveLength(1);
     expect(saved[0].ownedOrigin).toBe('https://two.test');
+  });
+});
+
+describe('serialized authority decisions', () => {
+  const judgeFor = (store: ReturnType<typeof makeOriginStateStore>) => makeJudgeLanding({
+    getState: () => store.read('a'),
+    saveState: (patch) => store.write('a', patch),
+    onStop: () => {},
+    isIdp: (url) => new URL(url).origin === 'https://idp.test',
+    now: () => 1_000,
+  });
+
+  test('a queued consume cannot resurrect a grant cleared by its predecessor', async () => {
+    const { store } = harness();
+    store.hydrate('a', {
+      mode: 'bound', ownedOrigin: 'https://app.test', excursionsUsed: 0,
+      authGrant: { returnTo: 'https://app.test', idpOrigin: 'https://idp.test', deadline: 9_000 },
+    } as any);
+    const judge = judgeFor(store);
+    const clear = store.serialize('a', () => store.write('a', { authGrant: null }));
+    const staleConsume = store.serialize('a', () => judge('https://idp.test/login'));
+    await Promise.all([clear, staleConsume]);
+    expect(store.read('a')!.authGrant).toBeNull();
+    expect(store.read('a')!.excursion ?? null).toBeNull();
+  });
+
+  test('a later wait cannot overwrite a home discharge', async () => {
+    const { store } = harness();
+    store.hydrate('a', {
+      mode: 'bound', ownedOrigin: 'https://app.test', excursionsUsed: 1,
+      excursion: {
+        returnTo: 'https://app.test', idpOrigin: 'https://idp.test', deadline: 9_000, authorized: true,
+      },
+    } as any);
+    const judge = judgeFor(store);
+    await Promise.all([
+      store.serialize('a', () => judge('https://app.test/home')),
+      store.serialize('a', () => judge('https://idp.test/login')),
+    ]);
+    expect(store.read('a')!.excursion ?? null).toBeNull();
+  });
+
+  test('an already-running old judge cannot stop a newly stamped turn', async () => {
+    let releaseSave = () => {};
+    let saveStarted = () => {};
+    const started = new Promise<void>((resolve) => { saveStarted = resolve; });
+    const store = makeOriginStateStore({
+      save: () => new Promise<void>((resolve) => {
+        releaseSave = resolve;
+        saveStarted();
+      }),
+      onError: () => {},
+    });
+    store.hydrate('a', {
+      mode: 'bound', ownedOrigin: 'https://app.test',
+      excursion: {
+        returnTo: 'https://app.test', idpOrigin: 'https://idp.test', deadline: 9_000, authorized: true,
+      },
+    } as any);
+    let turnToken = 1;
+    const oldToken = turnToken;
+    const stops: any[] = [];
+    const oldJudge = makeJudgeLanding({
+      getState: () => store.read('a'),
+      saveState: (patch) => store.write('a', patch),
+      onStop: (event) => { stops.push(event); },
+      isCurrent: () => turnToken === oldToken,
+      now: () => 1_000,
+    });
+
+    const oldDecision = store.serialize('a', () => oldJudge('https://elsewhere.test'));
+    await started;
+    // This mirrors runActorTurn: stamp T2 before awaiting the policy lane.
+    turnToken = 2;
+    const newTurnBarrier = store.serialize('a', () => undefined);
+    releaseSave();
+    await Promise.all([oldDecision, newTurnBarrier]);
+
+    expect(stops).toEqual([]);
   });
 });
 

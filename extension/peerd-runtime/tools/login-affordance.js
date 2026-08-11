@@ -37,7 +37,7 @@
  *   hasPasswordFieldInForm?: boolean }} LoginTargetDescriptor
  */
 /**
- * @typedef {{ method: 'passkey'|'sso'|'password'|'unknown', provider?: string,
+ * @typedef {{ method: 'passkey'|'sso'|'password'|'unknown', provider?: string, idpOrigin?: string,
  *   supported: boolean, verified: boolean, reason: string }} LoginAffordanceVerdict
  *
  * `verified` — the DESTINATION is proven to be a known IdP (an href/formAction host
@@ -46,15 +46,15 @@
  * verified:true (WebAuthn is origin-bound by the browser); password/unknown false.
  */
 
-// SSO providers whose sign-in peerd's origin lock will actually corridor to — the
+// SSO providers whose sign-in peerd's origin lock may grant access to: the
 // dedicated identity providers and the big consumer IdPs. Mirrors the SPIRIT of
 // idp-registry.js: membership means "signing in there is essentially all it does",
 // so a bound actor sent through it lands on an auth surface, not a full product.
 // The href path defers to isKnownIdp (deps) directly; this NAME set is the fallback
 // for a "Sign in with X" affordance that exposes no IdP href to check.
-// why every name here maps to a host isKnownIdp accepts (asserted by the corridor-
-// subset test): a "recognized name" must correspond to a real corridor IdP, so the
-// ambiguous consumer names whose "Sign in with X" lands OFF the corridor are kept out
+// why every name here maps to a host isKnownIdp accepts (asserted by the registry-
+// subset test): a "recognized name" must correspond to a dedicated IdP, so the
+// ambiguous consumer names whose "Sign in with X" lands elsewhere are kept out
 // ('amazon' → the retail site, not signin.aws.amazon.com; 'ping' → ambiguous). Keep the
 // unambiguous forms ('aws', 'pingidentity').
 export const SUPPORTED_SSO_PROVIDERS = Object.freeze(new Set([
@@ -64,8 +64,8 @@ export const SUPPORTED_SSO_PROVIDERS = Object.freeze(new Set([
 ]));
 
 // The deliberate EXCLUSIONS — full products that ALSO speak OAuth. idp-registry.js
-// keeps these out for a reason (admitting them hands a bound actor a budgeted
-// corridor onto the WHOLE site the user is logged into), and this set makes the
+// keeps these out for a reason (admitting them makes the WHOLE product origin
+// eligible for a sign-in grant), and this set makes the
 // refusal explicit and defensive: even if one crept into the supported set above,
 // it is refused here. why by name: an affordance labelled "Sign in with GitHub"
 // gives us a provider word, not a dedicated-IdP origin to check.
@@ -121,14 +121,18 @@ const providerKey = (provider) => {
 const titleCase = (key) => (typeof key === 'string' && key ? key.charAt(0).toUpperCase() + key.slice(1) : '');
 
 /**
- * Best-effort host from an href, for the isKnownIdp corridor check. Pure — a
- * malformed href yields ''.
+ * Best-effort HTTPS destination from an href. Pure; malformed or insecure
+ * destinations are not eligible for a sign-in grant.
  * @param {string | undefined} href
- * @returns {string}
+ * @returns {{ host: string, origin: string } | null}
  */
-const hostFromHref = (href) => {
-  if (typeof href !== 'string' || !href) return '';
-  try { return new URL(href).hostname.toLowerCase(); } catch { return ''; }
+const destinationFromHref = (href) => {
+  if (typeof href !== 'string' || !href) return null;
+  try {
+    const url = new URL(href);
+    if (url.protocol !== 'https:') return null;
+    return { host: url.hostname.toLowerCase(), origin: url.origin };
+  } catch { return null; }
 };
 
 /**
@@ -149,8 +153,10 @@ export const classifyLoginAffordance = (descriptor, deps) => {
   const autocompleteTokens = typeof d.autocomplete === 'string'
     ? d.autocomplete.toLowerCase().split(/\s+/).filter(Boolean)
     : [];
-  const hrefHost = hostFromHref(d.href);
-  const formActionHost = hostFromHref(d.formAction);
+  const hrefDestination = destinationFromHref(d.href);
+  const formActionDestination = destinationFromHref(d.formAction);
+  const hrefHost = hrefDestination?.host ?? '';
+  const formActionHost = formActionDestination?.host ?? '';
   const hrefIsIdp = hrefHost ? isKnownIdp(`https://${hrefHost}`) : false;
   const formActionIsIdp = formActionHost ? isKnownIdp(`https://${formActionHost}`) : false;
 
@@ -174,14 +180,19 @@ export const classifyLoginAffordance = (descriptor, deps) => {
     // VERIFIED — where does it actually LEAD? Proven only when an href or form-action
     // host passes isKnownIdp. This is what gates an AUTO-CLICK: a recognized NAME with
     // an unverifiable (or missing) destination is supported-but-unverified.
-    const destHosts = [hrefHost, formActionHost].filter(Boolean);
-    const verified = destHosts.some((h) => isKnownIdp(`https://${h}`));
+    const verifiedDestination = [hrefDestination, formActionDestination]
+      .find((destination) => destination && isKnownIdp(destination.origin));
+    const verified = !!verifiedDestination;
     // Supported when the destination is a proven IdP OR the provider word is a
     // recognized IdP — but NEVER for the explicit exclusions, even if a future edit
     // adds one to the supported set (defense in depth).
     const supported = (verified || SUPPORTED_SSO_PROVIDERS.has(key)) && !EXCLUDED_SSO_PROVIDERS.has(key);
     if (supported && verified) {
-      return { method: 'sso', provider, supported: true, verified: true, reason: 'sign in to a verified identity provider' };
+      return {
+        method: 'sso', provider, supported: true, verified: true,
+        idpOrigin: verifiedDestination?.origin,
+        reason: 'sign in to a verified identity provider',
+      };
     }
     if (supported) {
       // Recognized name, unverified destination — assisted-manual, not an auto-click.
@@ -194,15 +205,15 @@ export const classifyLoginAffordance = (descriptor, deps) => {
       };
     }
     // why refuse gracefully instead of clicking: idp-registry.js deliberately
-    // EXCLUDES github/gitlab/facebook, and the landing rule ENDS a bound actor
-    // that hops to a non-IdP sensitive origin. Clicking here would kill the actor;
+    // EXCLUDES github/gitlab/facebook, and no exact provider grant can be issued
+    // for them. Clicking here would end the actor when the tab leaves home;
     // returning an unsupported verdict lets it (and the user) learn why.
     return {
       method: 'sso',
       provider,
       supported: false,
       verified: false,
-      reason: "SSO provider outside peerd's login corridor (the origin lock would end the actor)",
+      reason: "SSO provider outside peerd's identity-provider registry (the origin lock would end the actor)",
     };
   }
 
@@ -298,8 +309,9 @@ export function loginTargetReader(selector, nth, walkId) {
     hasPasswordFieldInForm = !!(scope.querySelector && scope.querySelector('input[type="password"]'));
   } catch (e) { /* best-effort */ }
 
-  // An href for the corridor check: the element's own href, or the nearest anchor.
-  let href = attr('href');
+  // An href for the provider check: the element's own href, or the nearest anchor.
+  const ownHref = /** @type {{ href?: string }} */ (el).href;
+  let href = typeof ownHref === 'string' && ownHref ? ownHref : attr('href');
   if (!href && el.closest) {
     const a = /** @type {HTMLAnchorElement | null} */ (el.closest('a[href]'));
     if (a) href = a.href || a.getAttribute('href') || '';
@@ -323,7 +335,7 @@ export function loginTargetReader(selector, nth, walkId) {
         formAction = own;
       } else {
         const f = el.closest ? el.closest('form') : null;
-        if (f) formAction = f.getAttribute('action') || /** @type {{ action?: string }} */ (f).action || '';
+        if (f) formAction = Element.prototype.getAttribute.call(f, 'action') || '';
       }
     }
   } catch (e) { /* best-effort */ }

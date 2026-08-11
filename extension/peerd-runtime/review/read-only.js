@@ -17,8 +17,8 @@
 //      defense-in-depth predicate the dispatcher wrapper consults so even a
 //      hallucinated/renamed write tool is refused at call time.
 //
-// Pure functions only. The dispatcher wrapper that USES assertReadOnly
-// lives in orchestrator.js (the imperative shell).
+// Pure functions only. The service worker injects isReadOnlyTool into the
+// isolated actor dispatch shell, covering both Chrome and Firefox hosts.
 
 // why: actor_create is read-classified nowhere — it's a 'write'
 // sideEffect — but we name it explicitly too, so a future re-tagging can't
@@ -56,7 +56,7 @@ const ALWAYS_DENIED = Object.freeze(new Set(['actor_create', 'request_review']))
 // review.test.ts against the REAL pipeline). Some of them are worth a second
 // look on their own merits — `inspect` (storage/audit/denylist/provider config),
 // `read_memory` (the user's durable notes), `app_search` (returns App body-HTML
-// snippets, which #159 tiered `app_read_file` actor-only to contain), and
+// snippets, now fenced at its tool seam), and
 // `capture` (active-tab screenshot; redacted to a sentinel before the model sees
 // it, but the tab origin still lands) all give a CODE REVIEWER more private reach
 // than reviewing a diff plausibly needs. Narrowing them is a deliberate product
@@ -67,10 +67,10 @@ const REVIEWER_TOOLS = Object.freeze(new Set([
   'todo_add', 'todo_check', 'todo_init',
   // #160 — the instance READS. Actor-only for every other ctx (tools/exposure.js
   // REVIEW_INSTANCE_READS + the gate's positively-scoped exemption); granted here
-  // so a review of App/Notebook code can open the files AROUND the diff instead of
+  // so a review of App/Notebook/Pod code can open the files AROUND the diff instead of
   // guessing from it. Reads only — the writes stay actor-only, and the reviewer
   // still holds no outward closure.
-  'js_read_file', 'app_read_file', 'app_list_files',
+  'js_read_file', 'pod_read', 'app_read_file', 'app_list_files',
 ]));
 
 /** Exported for the invariant tests (and so the grant is greppable). */

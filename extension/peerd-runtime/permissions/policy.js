@@ -93,7 +93,7 @@ export const ACTION_CLASSES = Object.freeze({
   // do anything within its runtime.
   SHELL: /** @type {const} */ ('shell'),
   // Acts on the user's LIVE web session or the outside world: DOM
-  // mutations on real pages (click/type/navigate/page_keys), tab opens,
+  // mutations on real pages (click/type/navigate), tab opens,
   // form submits, downloads, cross-origin fetch, deletes. The dangerous
   // bucket.
   EXTERNAL: /** @type {const} */ ('external'),

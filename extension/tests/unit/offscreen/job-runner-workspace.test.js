@@ -9,7 +9,7 @@
 // the subtree (what session teardown does) actually empties the workspace.
 
 import { describe, it, expect } from '../../framework.js';
-import { runJob } from '/offscreen/job-runner.js';
+import { runJob, abortJob } from '/offscreen/job-runner.js';
 import { opfsHelpers } from '/peerd-engine/index.js';
 
 const noSW = { sendToSW: async () => ({ ok: true }) };
@@ -18,7 +18,85 @@ const noSW = { sendToSW: async () => ({ ok: true }) };
 const wsid = `ws-test-${Date.now().toString(36)}`;
 const nukeWorkspace = () => opfsHelpers(['peerd-workspace', wsid]).nuke();
 
+const deferred = () => {
+  /** @type {(value?: unknown) => void} */
+  let resolve = () => {};
+  const promise = new Promise((r) => { resolve = r; });
+  return { promise, resolve };
+};
+
 describe('offscreen job-runner — durable workspace (workspaceSessionId)', () => {
+  it('the host refuses worker and actor-lane mutation bypasses while reads remain available', async () => {
+    let writes = 0;
+    let deletes = 0;
+    let checks = 0;
+    const fake = {
+      read: async () => 'existing',
+      list: async () => [{ path: '/existing.txt', size: 8 }],
+      write: async () => { writes += 1; },
+      delete: async () => { deletes += 1; },
+      nuke: async () => {},
+    };
+    const result = await runJob(
+      {
+        code: [
+          "postMessage({ type: 'opfs-request', rid: 'forged-write', op: 'write', args: { path: 'forged.txt', content: 'no' } });",
+          'const out = [];',
+          "try { await peerd.self.writeFile('blocked.txt', 'no'); } catch (e) { out.push('write:' + e.message); }",
+          "try { await peerd.self.deleteFile('existing.txt'); } catch (e) { out.push('delete:' + e.message); }",
+          "out.push('read:' + await peerd.self.readFile('existing.txt'));",
+          "out.push('list:' + (await peerd.self.listFiles()).length);",
+          "return out.join('|');",
+        ].join('\n'),
+        workspaceSessionId: wsid,
+        actors: true,
+        ownerSessionId: wsid,
+      },
+      {
+        sendToSW: async (type) => {
+          if (type !== 'lifecycle/assert-opfs-writable') return { ok: true };
+          checks += 1;
+          return {
+            ok: false,
+            error: "store 'opfs-workspaces' is read-only. No data was changed.",
+          };
+        },
+        opfsForRoot: /** @type {any} */ (() => fake),
+      },
+    );
+    expect(result.error).toBe(null);
+    expect(String(result.value)).toContain("write:store 'opfs-workspaces' is read-only");
+    expect(String(result.value)).toContain("delete:store 'opfs-workspaces' is read-only");
+    expect(String(result.value)).toContain('read:existing');
+    expect(String(result.value)).toContain('list:1');
+    expect(checks).toBe(3);
+    expect(writes).toBe(0);
+    expect(deletes).toBe(0);
+  });
+
+  it('ephemeral scratch stays writable without consulting durable workspace posture', async () => {
+    let writes = 0;
+    let checks = 0;
+    const fake = {
+      read: async () => '', list: async () => [], delete: async () => {},
+      write: async () => { writes += 1; }, nuke: async () => {},
+    };
+    const result = await runJob(
+      { code: "await peerd.self.writeFile('scratch.txt', 'ok'); return 'done';" },
+      {
+        sendToSW: async (type) => {
+          if (type === 'lifecycle/assert-opfs-writable') checks += 1;
+          return { ok: false, error: 'blocked' };
+        },
+        opfsForRoot: /** @type {any} */ (() => fake),
+      },
+    );
+    expect(result.error).toBe(null);
+    expect(result.value).toBe('done');
+    expect(writes).toBe(1);
+    expect(checks).toBe(0);
+  });
+
   it('a second workspace run sees the first run\'s file (mount + skip-nuke)', async () => {
     await nukeWorkspace();
     const w1 = await runJob(
@@ -151,5 +229,105 @@ describe('offscreen job-runner — durable workspace (workspaceSessionId)', () =
     expect(r.value).toBe('gone');
     // leave no residue behind the test run
     await nukeWorkspace();
+  });
+
+  it('Stop aborts and drains a pending WORKSPACE write before the run returns', async () => {
+    const started = deferred();
+    const maySettle = deferred();
+    let signalSeen = false;
+    let writeSettled = false;
+    const fake = {
+      list: async () => [],
+      write: async (/** @type {string} */ _path, /** @type {unknown} */ _content, /** @type {{ signal: AbortSignal }} */ { signal }) => {
+        signalSeen = signal instanceof AbortSignal;
+        started.resolve();
+        await maySettle.promise;
+        writeSettled = true;
+        if (signal.aborted) throw new DOMException('aborted', 'AbortError');
+      },
+      read: async () => '', delete: async () => {}, nuke: async () => {},
+    };
+    const runId = `workspace-stop-${Date.now().toString(36)}`;
+    const pending = runJob(
+      {
+        code: 'await peerd.self.writeFile("late.txt", "must-not-commit"); return "bad";',
+        workspaceSessionId: wsid, runId, ownerSessionId: wsid, timeoutMs: 5000,
+      },
+      { ...noSW, opfsForRoot: /** @type {any} */ (() => fake) },
+    );
+    await started.promise;
+    abortJob(runId, wsid);
+    await Promise.resolve();
+    expect(signalSeen).toBe(true);
+    expect(writeSettled).toBe(false);
+    maySettle.resolve();
+    const result = await pending;
+    expect(writeSettled).toBe(true);
+    expect(String(result.error)).toContain('job aborted');
+  });
+
+  it('ephemeral cleanup waits for an aborted host write before nuking scratch', async () => {
+    const started = deferred();
+    const maySettle = deferred();
+    /** @type {string[]} */
+    const order = [];
+    const fake = {
+      write: async (/** @type {string} */ _path, /** @type {unknown} */ _content, /** @type {{ signal: AbortSignal }} */ { signal }) => {
+        started.resolve();
+        await maySettle.promise;
+        order.push('write-settled');
+        if (signal.aborted) throw new DOMException('aborted', 'AbortError');
+      },
+      read: async () => '', list: async () => [], delete: async () => {},
+      nuke: async () => { order.push('nuke'); },
+    };
+    const runId = `ephemeral-stop-${Date.now().toString(36)}`;
+    const pending = runJob(
+      {
+        code: 'await peerd.self.writeFile("late.txt", "must-not-survive"); return "bad";',
+        runId, ownerSessionId: 'chat-ephemeral', timeoutMs: 5000,
+      },
+      { ...noSW, opfsForRoot: /** @type {any} */ (() => fake) },
+    );
+    await started.promise;
+    abortJob(runId, 'chat-ephemeral');
+    await Promise.resolve();
+    expect(order.length).toBe(0);
+    maySettle.resolve();
+    await pending;
+    expect(order).toEqual(['write-settled', 'nuke']);
+  });
+
+  it('Stop during delete path resolution reaches the host commit check', async () => {
+    const started = deferred();
+    const mayCommit = deferred();
+    let removed = false;
+    let sawAbortedCommit = false;
+    const fake = {
+      list: async () => [], write: async () => {}, read: async () => '', nuke: async () => {},
+      delete: async (/** @type {string} */ _path, /** @type {{ signal: AbortSignal }} */ { signal }) => {
+        started.resolve();
+        await mayCommit.promise;
+        if (signal.aborted) {
+          sawAbortedCommit = true;
+          throw new DOMException('aborted', 'AbortError');
+        }
+        removed = true;
+      },
+    };
+    const runId = `delete-stop-${Date.now().toString(36)}`;
+    const pending = runJob(
+      {
+        code: 'await peerd.self.deleteFile("keep.txt"); return "bad";',
+        workspaceSessionId: wsid, runId, ownerSessionId: wsid, timeoutMs: 5000,
+      },
+      { ...noSW, opfsForRoot: /** @type {any} */ (() => fake) },
+    );
+    await started.promise;
+    abortJob(runId, wsid);
+    mayCommit.resolve();
+    await pending;
+    expect(sawAbortedCommit).toBe(true);
+    expect(removed).toBe(false);
   });
 });

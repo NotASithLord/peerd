@@ -1,0 +1,316 @@
+#!/usr/bin/env bun
+// Pipe-backed physical MV3 lifecycle fault lane.
+
+import {
+  closeSync, constants, cpSync, fstatSync, mkdirSync, mkdtempSync, openSync,
+  readFileSync, rmSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import puppeteer from 'puppeteer-core';
+import { resolveChrome } from './e2e-harness.mjs';
+
+const ROOT = resolve(import.meta.dir, '..', '..');
+const RESULT_DIR = join(ROOT, 'artifacts', 'chrome-lifecycle');
+const REACHED_KEY = 'peerd.e2e.lifecycleFault.reached';
+const OPERATION_KEY = 'peerd.lifecycle.operations';
+const NOTICE_KEY = 'peerd.lifecycle.pendingNotices';
+const BOOT_ERROR_KEY = 'peerd.e2e.lifecycleFault.bootError';
+const STABILITY_WINDOW_MS = 1_500;
+
+const withDeadline = async (promise, budgetMs, label) => {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`${label} timed out`)), budgetMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const overwriteRegularFile = (path, contents) => {
+  const descriptor = openSync(path,
+    constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW);
+  try {
+    if (!fstatSync(descriptor).isFile()) throw new Error(`refusing to overwrite non-file: ${path}`);
+    writeFileSync(descriptor, contents);
+  } finally {
+    closeSync(descriptor);
+  }
+};
+
+const makeFaultExtension = () => {
+  const directory = mkdtempSync(join(tmpdir(), 'peerd-chrome-lifecycle-fault-'));
+  const extension = join(directory, 'extension');
+  cpSync(join(ROOT, 'extension'), extension, { recursive: true });
+  writeFileSync(join(extension, 'background', 'lifecycle-fault-probe.js'), `
+const REACHED_KEY = ${JSON.stringify(REACHED_KEY)};
+globalThis.peerdLifecycleFaultProbe = {
+  async beforeExecute(toolName) {
+    if (toolName !== 'script') return;
+    const stored = await chrome.storage.local.get(REACHED_KEY);
+    const reached = stored[REACHED_KEY] ?? [];
+    await chrome.storage.local.set({
+      [REACHED_KEY]: [...reached, { toolName, at: Date.now() }],
+    });
+    await new Promise(() => {});
+  },
+};
+`, { flag: 'wx', mode: 0o600 });
+
+  const serviceWorker = join(extension, 'background', 'service-worker.js');
+  let source = `import './lifecycle-fault-probe.js';\n${readFileSync(serviceWorker, 'utf8')}`;
+  const routeAnchor = "  'a2a/call': (/** @type {any} */ msg, /** @type {any} */ sender) => a2aCallRoute(msg, sender),";
+  if (source.split(routeAnchor).length !== 2) throw new Error('fault route seam changed');
+  source = source.replace(routeAnchor, `  'lifecycle-fault/dispatch': async (msg) => {
+    await chrome.storage.local.set({ [${JSON.stringify(REACHED_KEY)}]: [] });
+    await lifecycleArmed;
+    const generation = (await chrome.storage.local.get('peerd.lifecycle.generation'))['peerd.lifecycle.generation'];
+    if (!generation?.id) throw new Error('lifecycle generation is not ready');
+    for (const [toolName, retryClass] of [
+      ['fetch_url', 'B'], ['remember', 'C'], ['dweb_share', 'D'],
+    ]) {
+      const operationId = msg.sessionId + ':chrome-fault-' + retryClass.toLowerCase();
+      await lifecycleBoot.operationLog.begin({
+        operationId, sessionId: msg.sessionId, toolName, retryClass,
+        generationId: generation.id,
+      });
+      await lifecycleBoot.operationLog.transition(operationId, 'running');
+      await lifecycleBoot.operationLog.markDispatched(operationId);
+    }
+    void dispatchToolCall({
+      id: msg.callId,
+      name: 'script',
+      args: { code: "return 'must not run';" },
+    }, await buildToolContext({
+      sessionId: msg.sessionId,
+      exposure: 'main',
+      lifecycleTurnId: 'chrome-physical-fault-turn',
+      lifecycleUserInitiated: true,
+    })).catch(() => {});
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const reached = (await chrome.storage.local.get(${JSON.stringify(REACHED_KEY)}))[${JSON.stringify(REACHED_KEY)}];
+      if (reached?.length === 1) return { started: true };
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    throw new Error('fault probe did not reach the tool body');
+  },
+${routeAnchor}`);
+  const bootErrorLine = "    console.error('[sw] lifecycle boot failed; Class D/E dispatches fail closed', e);";
+  if (source.split(bootErrorLine).length !== 2) throw new Error('lifecycle boot error seam changed');
+  source = source.replace(bootErrorLine,
+    `${bootErrorLine}\n    chrome.storage.local.set({ [${JSON.stringify(BOOT_ERROR_KEY)}]: e?.stack || e?.message || String(e) });`);
+  overwriteRegularFile(serviceWorker, source);
+
+  const dispatcher = join(extension, 'peerd-runtime', 'tools', 'dispatcher.js');
+  source = readFileSync(dispatcher, 'utf8');
+  const executeLine = '    let result = await tool.execute(args, execCtx);';
+  if (source.split(executeLine).length !== 2) throw new Error('dispatcher fault seam changed');
+  overwriteRegularFile(dispatcher, source.replace(executeLine,
+    `    await globalThis.peerdLifecycleFaultProbe?.beforeExecute(call.name);\n${executeLine}`));
+  return { directory, extension };
+};
+
+const waitFor = async (fn, budgetMs = 30_000) => {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    const value = await withDeadline(Promise.resolve().then(fn), 5_000, 'lifecycle poll');
+    if (value) return value;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  }
+  return null;
+};
+
+const assert = (value, message) => {
+  if (!value) throw new Error(message);
+  console.log(`  PASS ${message}`);
+};
+
+const main = async () => {
+  mkdirSync(RESULT_DIR, { recursive: true });
+  rmSync(join(RESULT_DIR, 'result.json'), { force: true });
+  const fault = makeFaultExtension();
+  const profile = mkdtempSync(join(tmpdir(), 'peerd-pipe-lifecycle-'));
+  let browser;
+  let forcedTerminationAttempted = false;
+  let stage = 'launch';
+  const launchBrowser = () => puppeteer.launch({
+    executablePath: resolveChrome(),
+    enableExtensions: [fault.extension],
+    headless: true,
+    pipe: true,
+    protocolTimeout: 30_000,
+    timeout: 30_000,
+    userDataDir: profile,
+    args: [
+      '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+    ],
+  });
+  try {
+    browser = await launchBrowser();
+    stage = 'initial service-worker target';
+    const discoveredTarget = await withDeadline(browser.waitForTarget((candidate) =>
+      candidate.type() === 'service_worker'
+      && candidate.url().endsWith('/background/service-worker.js'), { timeout: 30_000 }),
+    35_000, stage);
+    const extensionId = new URL(discoveredTarget.url()).host;
+    stage = 'extension page';
+    let page = await withDeadline(browser.newPage(), 10_000, stage);
+    await withDeadline(page.goto(`chrome-extension://${extensionId}/sidepanel/sidepanel.html`),
+      30_000, stage);
+    const sessionId = 'chrome-physical-lifecycle-session';
+    const callId = 'chrome-physical-script-call';
+    await withDeadline(page.evaluate(() => {
+      void chrome.runtime.sendMessage({ type: 'state/get' }).catch(() => null);
+    }), 10_000, stage);
+    stage = 'real dispatcher fault';
+    await page.evaluate(({ sessionId: sid, callId: cid }) => {
+      void chrome.runtime.sendMessage({ type: 'lifecycle-fault/dispatch', sessionId: sid, callId: cid });
+    }, { sessionId, callId });
+    stage = 'lifecycle generation';
+    let bootError = null;
+    const generation = await waitFor(() => page.evaluate(async (bootErrorKey) => {
+      void chrome.runtime.sendMessage({ type: 'state/get' }).catch(() => null);
+      const stored = await chrome.storage.local.get(['peerd.lifecycle.generation', bootErrorKey]);
+      const observed = {
+        generation: stored['peerd.lifecycle.generation'], bootError: stored[bootErrorKey] ?? null,
+      };
+      return observed.generation?.id || observed.bootError ? observed : null;
+    }, BOOT_ERROR_KEY).then((observed) => {
+      if (!observed) return null;
+      bootError = observed.bootError;
+      return observed.generation?.id ? observed.generation : null;
+    }));
+    if (!generation?.id) throw new Error(`production lifecycle boot did not mint a generation${bootError ? `: ${bootError}` : ''}`);
+    assert(true, 'production lifecycle boot minted a generation');
+    const operationId = `${sessionId}:${callId}`;
+    const inFlight = await waitFor(() => page.evaluate(async ({ reachedKey, operationKey, id }) => {
+      const stored = await chrome.storage.local.get([reachedKey, operationKey]);
+      const record = stored[operationKey]?.[id];
+      return stored[reachedKey]?.length === 1 && record?.state === 'awaiting_remote'
+        && record?.dispatched === true;
+    }, { reachedKey: REACHED_KEY, operationKey: OPERATION_KEY, id: operationId }));
+    assert(inFlight, 'real Class E dispatch crossed its durable dispatch marker');
+
+    stage = 'physical browser termination';
+    forcedTerminationAttempted = true;
+    const browserProcess = browser.process();
+    if (!browserProcess) throw new Error('Chrome process is unavailable');
+    const browserExited = new Promise((resolveExit) => {
+      if (browserProcess.exitCode !== null) resolveExit(undefined);
+      else browserProcess.once('exit', resolveExit);
+    });
+    browserProcess.kill('SIGKILL');
+    await withDeadline(browserExited, 10_000, stage);
+    browser = null;
+    stage = 'service-worker restart';
+    browser = await launchBrowser();
+    const restartedTarget = await withDeadline(browser.waitForTarget((candidate) =>
+      candidate.type() === 'service_worker'
+      && candidate.url().endsWith('/background/service-worker.js'), { timeout: 30_000 }),
+    35_000, stage);
+    page = await withDeadline(browser.newPage(), 10_000, stage);
+    await withDeadline(page.goto(`chrome-extension://${extensionId}/sidepanel/sidepanel.html`),
+      30_000, stage);
+    const restarted = await waitFor(async () => {
+      await page.evaluate(() => {
+        void chrome.runtime.sendMessage({ type: 'state/get' }).catch(() => null);
+        return true;
+      }).catch(() => null);
+      const stored = await page.evaluate(async (bootErrorKey) => {
+        const values = await chrome.storage.local.get(['peerd.lifecycle.generation', bootErrorKey]);
+        return {
+          generation: values['peerd.lifecycle.generation'],
+          bootError: values[bootErrorKey] ?? null,
+        };
+      }, BOOT_ERROR_KEY);
+      if (stored.bootError) throw new Error(`restarted lifecycle boot failed: ${stored.bootError}`);
+      return stored.generation?.id !== generation.id ? stored.generation : null;
+    }, 35_000);
+    if (!restarted) throw new Error('service-worker restart did not mint a new generation');
+    assert(restartedTarget.url().includes(extensionId),
+      'a browser crash and profile restart replaced the MV3 worker');
+
+    stage = 'lifecycle recovery';
+    let lastRecoveryState = null;
+    const recovered = await waitFor(async () => {
+      await page.evaluate(() => {
+        void chrome.runtime.sendMessage({ type: 'state/get' }).catch(() => null);
+      }).catch(() => null);
+      lastRecoveryState = await page.evaluate(async ({ operationKey, noticeKey, reachedKey, id, sid }) => {
+      const stored = await chrome.storage.local.get([operationKey, noticeKey, reachedKey]);
+      const expected = {
+        [sid + ':chrome-fault-b']: 'interrupted',
+        [sid + ':chrome-fault-c']: 'interrupted',
+        [sid + ':chrome-fault-d']: 'outcome_unknown',
+        [id]: 'outcome_unknown',
+      };
+      const statesMatch = Object.entries(expected).every(([operationId, state]) =>
+        stored[operationKey]?.[operationId]?.state === state);
+      const notices = stored[noticeKey]?.[sid] ?? [];
+      return {
+        pass: statesMatch
+        && notices.some((notice) => notice?.recoveryRecord?.recoveryState === 'interrupted')
+        && notices.some((notice) => notice?.recoveryRecord?.recoveryState === 'outcome_unknown')
+        && stored[reachedKey]?.length === 1,
+        operations: stored[operationKey] ?? {}, notices, reached: stored[reachedKey] ?? [],
+      };
+      }, { operationKey: OPERATION_KEY, noticeKey: NOTICE_KEY, reachedKey: REACHED_KEY,
+        id: operationId, sid: sessionId });
+      return lastRecoveryState.pass ? lastRecoveryState : null;
+    });
+    if (!recovered) throw new Error(`restart did not reconcile B/C/D/E: ${JSON.stringify(lastRecoveryState)}`);
+    assert(true, 'restart reconciles B/C safely and preserves D/E uncertainty');
+    await new Promise((resolveWait) => setTimeout(resolveWait, STABILITY_WINDOW_MS));
+    const stable = await page.evaluate(async ({ operationKey, reachedKey, id, sid }) => {
+      const stored = await chrome.storage.local.get([operationKey, reachedKey]);
+      return stored[reachedKey]?.length === 1
+        && stored[operationKey]?.[sid + ':chrome-fault-b']?.state === 'interrupted'
+        && stored[operationKey]?.[sid + ':chrome-fault-c']?.state === 'interrupted'
+        && stored[operationKey]?.[sid + ':chrome-fault-d']?.state === 'outcome_unknown'
+        && stored[operationKey]?.[id]?.state === 'outcome_unknown';
+    }, { operationKey: OPERATION_KEY, reachedKey: REACHED_KEY, id: operationId, sid: sessionId });
+    assert(stable, 'the stability window observes no delayed tool-body replay');
+    const nextGeneration = restarted;
+    assert(nextGeneration.id !== generation.id,
+      'the restarted worker minted a distinct lifecycle generation');
+    writeFileSync(join(RESULT_DIR, 'result.json'), JSON.stringify({
+      status: 'passed', forcedTerminationAttempted: true,
+      terminationBoundary: 'SIGKILL Chrome and relaunch the same profile over CDP pipe',
+      initialGenerationId: generation.id,
+      recoveredGenerationId: nextGeneration.id,
+      operationIds: [
+        `${sessionId}:chrome-fault-b`, `${sessionId}:chrome-fault-c`,
+        `${sessionId}:chrome-fault-d`, operationId,
+      ],
+    }, null, 2));
+  } catch (error) {
+    writeFileSync(join(RESULT_DIR, 'result.json'), JSON.stringify({
+      status: 'blocked', forcedTerminationAttempted,
+      stage, error: error?.message ?? String(error),
+    }, null, 2));
+    throw error;
+  } finally {
+    if (browser) {
+      let closed = false;
+      await Promise.race([
+        browser.close().then(() => { closed = true; }),
+        new Promise((resolveWait) => setTimeout(resolveWait, 5_000)),
+      ]).catch(() => {});
+      // why: a broken pipe must not leave CI waiting on Chrome after the lane has produced diagnostics.
+      if (!closed) browser.process()?.kill('SIGKILL');
+    }
+    rmSync(fault.directory, { recursive: true, force: true });
+    rmSync(profile, { recursive: true, force: true });
+  }
+};
+
+main().catch((error) => {
+  console.error('Chrome lifecycle fault lane failed:', error?.stack || error);
+  process.exit(1);
+});

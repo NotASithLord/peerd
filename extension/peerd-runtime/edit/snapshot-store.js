@@ -91,7 +91,7 @@ export const createSnapshotStore = (io, now = Date.now) => {
   const capture = async ({ scope, files, label = null, parentId = null, meta = {}, id }) => {
     if (typeof scope !== 'string' || !scope) throw new TypeError('scope required');
     /** @type {Record<string,string>} */
-    const fileHashes = {};
+    const fileHashes = Object.create(null);
     for (const [path, content] of Object.entries(files ?? {})) {
       fileHashes[path] = await putBlob(typeof content === 'string' ? content : String(content));
     }
@@ -126,7 +126,7 @@ export const createSnapshotStore = (io, now = Date.now) => {
     const cp = await getCheckpoint(id);
     if (!cp) return null;
     /** @type {Record<string,string>} */
-    const out = {};
+    const out = Object.create(null);
     for (const [path, hash] of Object.entries(cp.files)) {
       const content = await getBlob(hash);
       // A missing blob would mean a corrupted store; surface it loudly

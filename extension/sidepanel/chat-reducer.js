@@ -25,7 +25,7 @@
  * @property {string} [thinking]
  * @property {boolean} [streaming]
  * @property {boolean} [synthetic]
- * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean }} [actorReply]
+ * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, aborted?: boolean, actorDeliveryId?: string, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }} [actorReply]
  * @property {string} [stopReason]
  * @property {string} [error]
  * @property {unknown[]} [toolResults]
@@ -41,6 +41,11 @@
  * @property {string} [kind]
  * @property {number} [depth]
  * @property {string} [task]
+ * @property {string} [parentSessionId]
+ * @property {string} [rootSessionId]
+ * @property {string[]} [grantedTools]
+ * @property {boolean} [running]
+ * @property {any} [cost]
  */
 
 /**
@@ -82,7 +87,9 @@
  * @typedef {Object} ChatState
  * @property {{ initialized: boolean, locked: boolean, unlockedAt: number, prfEnrolled: boolean, hasRecovery: boolean }} vault
  * @property {SessionState} session
- * @property {{ current: string, hasKey: boolean, model: string }} providers
+ * @property {{ current: string, hasKey: boolean, model: string, configRevision?: number }} providers
+ * @property {{ provider: string, model: string, keyless: boolean, credentialReady: boolean, localReady: boolean, ollamaReady?: boolean, canSend: boolean, reason: string|null }} [composer]
+ * @property {{ actorExecution?: { status: string, host: string|null, reason: string|null, retryable: boolean }, moonshineVoiceHost?: { status: string }, documentReader?: { status: string } }} [capabilities]
  * @property {{ id: string, peerName: string, onboardingComplete: boolean }} profile
  * @property {SettingsState} settings
  * @property {any} pendingConfirm
@@ -90,13 +97,15 @@
  * @property {string|null|undefined} lastError
  * @property {boolean} streaming
  * @property {{ attempt: number|null, retryAfterMs: number|null }|null} rateLimit
- * @property {ReadonlyArray<{ id: number, text?: string, action?: any }>} notices
+ * @property {ReadonlyArray<{ id: number, text?: string, action?: any, sessionId?: string | null }>} notices
  * @property {any} agentTab
  * @property {ReadonlyArray<any>} agentTabEvents
  * @property {Readonly<Record<string, { stdout: string, stderr: string }>>} vmStreams
  * @property {{ byToolUse: Record<string, string>, sessions: Record<string, SpawnedSession> }} spawned
- * @property {Readonly<Record<string, { sessionId?: string, kind?: string, instanceId?: string, name?: string, fromIndex?: number, messages?: any[], streaming?: boolean, error?: string|null, aborted?: boolean, cost?: any }>>} actors
- * @property {Record<string, Array<{ seq: number, method: string, to?: string, goalPreview?: string, phase: string, ms?: number|null, failed?: boolean }>>} scriptOps  live delegation feed per script toolUseId
+ * @property {Readonly<Record<string, { sessionId?: string, kind?: string, instanceId?: string, name?: string, actorCorrelationId?: string, fromIndex?: number, messages?: any[], streaming?: boolean, error?: string|null, aborted?: boolean, outcomeKnown?: boolean, performed?: boolean, cost?: any }>>} actors
+ * @property {string|null} actorProjectionEpoch
+ * @property {number} actorProjectionRevision
+ * @property {Record<string, Array<{ seq: number, method: string, to?: string, goalPreview?: string, phase: string, ms?: number|null, failed?: boolean, cancelled?: boolean }>>} scriptOps  live delegation feed per script toolUseId
  * @property {Readonly<Record<string, unknown>>} asyncTasks
  * @property {Readonly<Record<string, { active: boolean, sessionId: string, iteration: number, maxIterations: number, goal: string, phase: string, summary: string|null }>>} goalRuns
  */
@@ -191,6 +200,8 @@ export const INITIAL_STATE = Object.freeze({
   // actor messaged N times shows N distinct exchanges, not its whole history.
   // { sessionId, kind, instanceId, name, fromIndex, messages, streaming, error, cost }.
   actors: Object.freeze({}),
+  actorProjectionEpoch: null,
+  actorProjectionRevision: 0,
   // In-flight async spawned (DESIGN-11), keyed by PARENT session id.
   asyncTasks: Object.freeze({}),
   // Goal mode (the mode-row Goal toggle) — active runs keyed by sessionId, so
@@ -287,11 +298,19 @@ const applyError = (state, { sessionId, messageId, error }) => {
  * @param {SpawnedSession} session
  * @returns {ChatState}
  */
-export const putSpawnedSession = (state, session) => ({
-  ...state,
-  spawned: { ...state.spawned,
-    sessions: { ...state.spawned.sessions, [session.sessionId]: session } },
-});
+export const putSpawnedSession = (state, session) => {
+  const existing = state.spawned.sessions[session.sessionId];
+  return {
+    ...state,
+    spawned: { ...state.spawned,
+      // why merge: a turn/spawned-state snapshot is the durable session shape,
+      // but the live projection adds parent/running/grantedTools from the start
+      // event. Replacing the record made the Actor Fabric forget its boundary
+      // exactly when the first transcript snapshot arrived.
+      sessions: { ...state.spawned.sessions,
+        [session.sessionId]: { ...(existing ?? {}), ...session } } },
+  };
+};
 
 /**
  * @param {ChatState} state
@@ -318,6 +337,247 @@ const putActorCard = (state, parentToolUseId, patch) => {
   if (!parentToolUseId) return state;
   const cur = /** @type {any} */ (state.actors)[parentToolUseId] ?? {};
   return { ...state, actors: { ...state.actors, [parentToolUseId]: { ...cur, ...patch } } };
+};
+
+/** @param {any} card @param {any} msg */
+const actorEventMatchesCard = (card, msg) => !(
+  typeof card?.actorCorrelationId === 'string'
+  && typeof msg?.actorCorrelationId === 'string'
+  && card.actorCorrelationId !== msg.actorCorrelationId
+);
+
+/** @param {ChatState} state @param {any} msg */
+const actorEventIsStale = (state, msg) => {
+  const incomingEpoch = typeof msg?.actorProjectionEpoch === 'string'
+    ? msg.actorProjectionEpoch : null;
+  if (state.actorProjectionEpoch && incomingEpoch
+      && state.actorProjectionEpoch !== incomingEpoch) return true;
+  return Number.isSafeInteger(msg?.actorProjectionRevision)
+    && state.actorProjectionEpoch !== null
+    && msg.actorProjectionRevision < state.actorProjectionRevision;
+};
+
+/** @param {ChatState} state @param {any} msg @returns {ChatState} */
+const stampActorProjectionRevision = (state, msg) => {
+  const incomingEpoch = typeof msg?.actorProjectionEpoch === 'string'
+    ? msg.actorProjectionEpoch : null;
+  const revision = msg?.actorProjectionRevision;
+  if (incomingEpoch && state.actorProjectionEpoch === null) {
+    return {
+      ...state,
+      actorProjectionEpoch: incomingEpoch,
+      actorProjectionRevision: Number.isSafeInteger(revision) ? revision : 0,
+    };
+  }
+  if (incomingEpoch && state.actorProjectionEpoch !== incomingEpoch) return state;
+  if (!Number.isSafeInteger(revision) || revision <= state.actorProjectionRevision) return state;
+  return { ...state, actorProjectionRevision: revision };
+};
+
+/**
+ * Reconcile the SW's live-only actor snapshot with durable inline cards already
+ * observed in this mounted chat. A missing live row settles an in-flight card;
+ * terminal activity/cost remains inspectable in the transcript.
+ * @param {Record<string, any>} current
+ * @param {Record<string, any>} live
+ */
+const reconcileActorCards = (current, live) => {
+  const settled = Object.fromEntries(Object.entries(current ?? {}).map(([id, card]) => [
+    id, card?.streaming === true && !Object.hasOwn(live ?? {}, id)
+      ? { ...card, streaming: false }
+      : card,
+  ]));
+  return { ...settled, ...(live ?? {}) };
+};
+
+/**
+ * Fold durable message_actor terminal evidence back into the live-only card
+ * projection so a missed turn/actor-done pulse cannot leave a permanent
+ * "working…" card.
+ *
+ * Correlation is transcript-positional and, where available, pinned by the
+ * host-authored actorDeliveryId. A provider may reuse a tool_use id in a later
+ * turn, so an old receipt must never settle the newer card with the same id.
+ * Synthetic receipts contribute metadata only; their untrusted content stays
+ * in the separately rendered, fenced actor-reply bubble.
+ * @param {Record<string, any>} actors
+ * @param {ChatMessage[]} messages
+ */
+const reconcileActorTerminals = (actors, messages) => {
+  /** @type {Map<string, any[]>} */
+  const callsById = new Map();
+  /** @type {Map<string, any>} */
+  const latestCallById = new Map();
+  /** @type {any[]} */
+  const calls = [];
+
+  for (let messageIndex = 0; messageIndex < (messages ?? []).length; messageIndex++) {
+    const message = messages[messageIndex];
+    if (message?.role === 'assistant' && Array.isArray(message.toolUses)) {
+      for (const rawToolUse of message.toolUses) {
+        const toolUse = /** @type {any} */ (rawToolUse);
+        if (toolUse?.name !== 'message_actor' || typeof toolUse.id !== 'string') continue;
+        const call = { id: toolUse.id, messageIndex, toolUse, result: null, resultIndex: -1 };
+        const occurrences = callsById.get(call.id) ?? [];
+        occurrences.push(call);
+        callsById.set(call.id, occurrences);
+        latestCallById.set(call.id, call);
+        calls.push(call);
+      }
+    }
+    if (message?.role === 'user' && Array.isArray(message.toolResults)) {
+      for (const rawResult of message.toolResults) {
+        const result = /** @type {any} */ (rawResult);
+        const call = typeof result?.tool_use_id === 'string'
+          ? latestCallById.get(result.tool_use_id) : null;
+        if (!call || messageIndex < call.messageIndex) continue;
+        call.result = result;
+        call.resultIndex = messageIndex;
+      }
+    }
+  }
+
+  // Delivery ids are minted by the host and survive in both the immediate tool
+  // result and the later synthetic receipt. Treat a duplicate as ambiguous.
+  /** @type {Map<string, any|null>} */
+  const callsByDelivery = new Map();
+  for (const call of calls) {
+    const result = call.result;
+    if (!result) continue;
+    const deliveryIds = [
+      ...(typeof result.actorCorrelationId === 'string' ? [result.actorCorrelationId] : []),
+      ...(typeof result.actorDeliveryId === 'string' ? [result.actorDeliveryId] : []),
+      ...(Array.isArray(result.actorDeliveryIds)
+        ? result.actorDeliveryIds.filter((/** @type {any} */ id) => typeof id === 'string') : []),
+    ];
+    for (const deliveryId of new Set(deliveryIds)) {
+      callsByDelivery.set(deliveryId,
+        callsByDelivery.has(deliveryId) ? null : call);
+    }
+  }
+
+  let next = actors ?? {};
+  let changed = false;
+
+  /** @param {any} call @param {{ failed: boolean, outcomeKnown?: boolean, performed?: boolean, aborted?: boolean, actorCorrelationId?: string }} terminal */
+  const settle = (call, terminal) => {
+    if (!call) return;
+    const card = next[call.id];
+    if (!card) return;
+    const callCorrelationIds = [
+      call.result?.actorCorrelationId,
+      call.result?.actorDeliveryId,
+      ...(Array.isArray(call.result?.actorDeliveryIds) ? call.result.actorDeliveryIds : []),
+      terminal.actorCorrelationId,
+    ].filter((id) => typeof id === 'string');
+    if (typeof card.actorCorrelationId === 'string') {
+      if (!callCorrelationIds.includes(card.actorCorrelationId)) return;
+    } else {
+      // Legacy cards without host correlation can only use the conservative
+      // latest-occurrence fallback. A correlated older call may still own the
+      // live card when a newer same-id request was refused before actor-start.
+      if (latestCallById.get(call.id) !== call) return;
+      if (terminal.performed === false) return;
+    }
+    // Uncertainty outranks a cancellation pulse: Stop can race with a dispatched
+    // effect, and showing "cancelled" would hide that the target may have changed.
+    const aborted = terminal.aborted === true && terminal.outcomeKnown !== false;
+    const failed = terminal.failed === true && !aborted;
+    const error = failed
+      ? terminal.outcomeKnown === false
+        ? 'the actor turn ended with an unknown outcome'
+        : terminal.performed === false
+          ? 'the actor request was not run'
+          : 'the actor turn did not complete'
+      : null;
+    const patch = {
+      ...card,
+      streaming: false,
+      aborted,
+      error,
+      outcomeKnown: terminal.outcomeKnown ?? true,
+      ...(terminal.performed !== undefined ? { performed: terminal.performed } : {}),
+    };
+    if (card.streaming === patch.streaming && card.aborted === patch.aborted
+        && card.error === patch.error && card.outcomeKnown === patch.outcomeKnown
+        && (terminal.performed === undefined || card.performed === patch.performed)) return;
+    if (!changed) { next = { ...next }; changed = true; }
+    next[call.id] = patch;
+  };
+
+  // await:true returns the actor's terminal outcome in the tool result and does
+  // not append an actorReply. Read only host-stamped metadata here; content can
+  // contain actor/page prose and must not decide execution custody.
+  for (const call of calls) {
+    if (call.toolUse?.input?.await !== true || !call.result) continue;
+    if (call.result.actorTerminal === false) continue;
+    const failed = call.result.is_error === true;
+    const outcomeKnown = typeof call.result.actorOutcomeKnown === 'boolean'
+      ? call.result.actorOutcomeKnown : true;
+    const performed = typeof call.result.actorPerformed === 'boolean'
+      ? call.result.actorPerformed : undefined;
+    settle(call, {
+      failed, outcomeKnown, performed,
+      aborted: call.result.actorAborted === true,
+    });
+  }
+
+  for (let messageIndex = 0; messageIndex < (messages ?? []).length; messageIndex++) {
+    const message = messages[messageIndex];
+    if (message?.role !== 'user' || message.synthetic !== true) continue;
+    const reply = message?.actorReply;
+    const parentId = reply?.parentToolUseId;
+    if (!reply || typeof parentId !== 'string') continue;
+
+    let call = null;
+    if (typeof reply.actorDeliveryId === 'string') {
+      call = callsByDelivery.get(reply.actorDeliveryId) ?? null;
+    }
+    // A crash can lose A's immediate acknowledgement before a provider later
+    // reuses A's tool-use id for B. The host delivery id on the current card and
+    // receipt is still sufficient ownership even though transcript occurrence
+    // lookup is ambiguous; choose a preceding call only as the lineage anchor.
+    if (!call && typeof reply.actorDeliveryId === 'string'
+        && next[parentId]?.actorCorrelationId === reply.actorDeliveryId) {
+      const preceding = (callsById.get(parentId) ?? [])
+        .filter((candidate) => candidate.messageIndex < messageIndex);
+      call = preceding.at(-1) ?? null;
+    }
+    // Legacy/crash snapshots may lack the immediate result metadata. Bare-id
+    // fallback is safe only when this transcript contains exactly one such call.
+    if (!call && (callsById.get(parentId)?.length ?? 0) === 1) {
+      call = callsById.get(parentId)?.[0] ?? null;
+    }
+    if (!call || call.id !== parentId || messageIndex <= call.messageIndex) continue;
+    settle(call, {
+      failed: reply.failed === true,
+      ...(typeof reply.actorDeliveryId === 'string'
+        ? { actorCorrelationId: reply.actorDeliveryId } : {}),
+      ...(reply.outcomeKnown !== undefined ? { outcomeKnown: reply.outcomeKnown } : {}),
+      ...(reply.performed !== undefined ? { performed: reply.performed } : {}),
+      ...(reply.aborted === true ? { aborted: true } : {}),
+    });
+  }
+  return next;
+};
+
+/**
+ * Keep completed child transcripts addressable from their actor_create cards
+ * while overlaying the SW's live-only topology projection.
+ * @param {ChatState['spawned']} current
+ * @param {ChatState['spawned']} live
+ */
+const reconcileSpawned = (current, live) => {
+  const liveSessions = live?.sessions ?? {};
+  const settled = Object.fromEntries(Object.entries(current?.sessions ?? {}).map(([id, session]) => [
+    id, session?.running === true && !Object.hasOwn(liveSessions, id)
+      ? { ...session, running: false }
+      : session,
+  ]));
+  return {
+    byToolUse: { ...(current?.byToolUse ?? {}), ...(live?.byToolUse ?? {}) },
+    sessions: { ...settled, ...liveSessions },
+  };
 };
 
 /**
@@ -354,6 +614,8 @@ export const reduceChat = (state, msg) => {
       return { ...state, goalRuns: next };
     }
     case 'turn/spawned-start': {
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
       // why these casts: an actor-start message always carries a string
       // sessionId (and parentToolUseId when present) by contract — the
       // permissive ReducerMsg types them optional, so name the invariant.
@@ -362,40 +624,71 @@ export const reduceChat = (state, msg) => {
         byToolUse: msg.parentToolUseId
           ? { ...state.spawned.byToolUse, [msg.parentToolUseId]: sid }
           : state.spawned.byToolUse,
-        // Seed an empty shell so an expanded card shows "running…" before
-        // the first state push lands.
-        sessions: state.spawned.sessions[sid]
-          ? state.spawned.sessions
-          : { ...state.spawned.sessions,
-              [sid]: { sessionId: sid, kind: 'spawned', depth: msg.depth, task: msg.task, messages: [] } } } };
+        // Merge the trusted live metadata over any durable shell. Reconnects
+        // can hydrate the transcript first; start still owns lineage/grants.
+        sessions: { ...state.spawned.sessions,
+          [sid]: {
+            ...(state.spawned.sessions[sid] ?? {}),
+            sessionId: sid, kind: 'spawned', depth: msg.depth,
+            task: msg.task, parentSessionId: msg.parentSessionId,
+            rootSessionId: typeof msg.rootSessionId === 'string' ? msg.rootSessionId : undefined,
+            grantedTools: Array.isArray(msg.grantedTools) ? msg.grantedTools : undefined,
+            running: true,
+            messages: state.spawned.sessions[sid]?.messages ?? [],
+          } } } };
     }
     case 'turn/spawned-state':
-      return putSpawnedSession(state, msg.session);
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
+      return putSpawnedSession(state, { ...msg.session, running: true });
     case 'turn/spawned-delta':
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
       return patchActorMessages(state, /** @type {string} */ (msg.sessionId), (mm) =>
         mm.id === msg.messageId ? { ...mm, content: (mm.content ?? '') + msg.text } : mm);
     case 'turn/spawned-stop':
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
       return patchActorMessages(state, /** @type {string} */ (msg.sessionId), (mm) =>
         mm.id === msg.messageId ? { ...mm, streaming: false, stopReason: msg.stopReason } : mm);
     case 'turn/spawned-error':
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
       return patchActorMessages(state, /** @type {string} */ (msg.sessionId), (mm) =>
         mm.id === msg.messageId ? { ...mm, streaming: false, error: msg.error } : mm);
+    case 'turn/spawned-done': {
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
+      const sid = /** @type {string} */ (msg.sessionId);
+      const session = state.spawned.sessions[sid];
+      return session ? putSpawnedSession(state, { ...session, running: false }) : state;
+    }
     case 'turn/spawned-tool-use':
     case 'turn/spawned-tool-result':
-    case 'turn/spawned-done':
       // The turn/spawned-state pushes carry the authoritative message array;
       // these are live complements we don't fold separately.
       return state;
     // DESIGN-17 P1 glass pane — the actor DISPLAY stream (parallel to spawned,
     // keyed by the message_actor tool_use id). Each event carries parentToolUseId
-    // so there is no viewed-session guard: an actor card renders regardless of
-    // which chat is in view (it belongs to the orchestrator's transcript).
+    // Root stamps make the display stream safe even while another chat works in
+    // the background. A fresh state snapshot replays cards on switch-back.
     case 'turn/actor-start':
-      return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), {
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
+      if (actorEventIsStale(state, msg)) return state;
+      return stampActorProjectionRevision(putActorCard(state, /** @type {string} */ (msg.parentToolUseId), {
         sessionId: msg.sessionId, kind: msg.kind, instanceId: msg.instanceId, name: msg.name,
-        fromIndex: msg.fromIndex ?? 0, messages: [], streaming: true, error: null, cost: null,
-      });
+        actorCorrelationId: msg.actorCorrelationId,
+        rootSessionId: msg.rootSessionId, parentSessionId: msg.parentSessionId,
+        task: msg.task,
+        grantedTools: Array.isArray(msg.grantedTools) ? msg.grantedTools : undefined,
+        fromIndex: msg.fromIndex ?? 0, messages: [], streaming: true, error: null,
+        aborted: false, outcomeKnown: undefined, performed: undefined, cost: null,
+      }), msg);
     case 'turn/actor-state': {
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
+      if (actorEventIsStale(state, msg)) return state;
       // The full actor-session snapshot; slice to this card's exchange (fromIndex).
       const existing = /** @type {any} */ (state.actors)[/** @type {string} */ (msg.parentToolUseId)];
       // Self-seed when the panel connected mid-turn and missed turn/actor-start
@@ -403,25 +696,55 @@ export const reduceChat = (state, msg) => {
       // we can't place the slice, so drop.
       const fromIndex = existing?.fromIndex ?? msg.fromIndex;
       if (fromIndex == null) return state;
+      if (existing && !actorEventMatchesCard(existing, msg)) return state;
       const messages = Array.isArray(msg.session?.messages) ? msg.session.messages.slice(fromIndex) : (existing?.messages ?? []);
-      const seed = existing ? {} : { fromIndex, kind: msg.kind, instanceId: msg.instanceId, name: msg.name, streaming: true, error: null, cost: null };
-      return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), { ...seed, messages });
+      const seed = existing ? {} : {
+        fromIndex, kind: msg.kind, instanceId: msg.instanceId, name: msg.name,
+        actorCorrelationId: msg.actorCorrelationId,
+        rootSessionId: msg.rootSessionId, parentSessionId: msg.parentSessionId,
+        task: msg.task,
+        grantedTools: Array.isArray(msg.grantedTools) ? msg.grantedTools : undefined,
+        streaming: true, error: null, cost: null,
+      };
+      return stampActorProjectionRevision(
+        putActorCard(state, /** @type {string} */ (msg.parentToolUseId), { ...seed, messages }),
+        msg,
+      );
     }
-    case 'turn/actor-error':
-      return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), { error: msg.error, streaming: false });
+    case 'turn/actor-error': {
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
+      if (actorEventIsStale(state, msg)) return state;
+      const card = /** @type {any} */ (state.actors)[/** @type {string} */ (msg.parentToolUseId)];
+      if (card && !actorEventMatchesCard(card, msg)) return state;
+      return stampActorProjectionRevision(putActorCard(state, /** @type {string} */ (msg.parentToolUseId), {
+        error: msg.error,
+        streaming: false,
+        ...(typeof msg.outcomeKnown === 'boolean' ? { outcomeKnown: msg.outcomeKnown } : {}),
+        ...(typeof msg.performed === 'boolean' ? { performed: msg.performed } : {}),
+      }), msg);
+    }
     case 'turn/actor-done': {
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
+      if (actorEventIsStale(state, msg)) return state;
       // An ABORT (Stop cascade) → 'cancelled' card; a clean failure with no error
       // already folded → mark failed; else just stop the spinner. Short-circuit when
       // the card is already terminal (turn/actor-error folded first) to avoid churn.
       const card = /** @type {any} */ (state.actors)[/** @type {string} */ (msg.parentToolUseId)];
       if (!card || card.streaming === false) return state;
+      if (!actorEventMatchesCard(card, msg)) return state;
       /** @type {Record<string, unknown>} */
       const patch = { streaming: false };
       if (msg.aborted) patch.aborted = true;
       else if (msg.ok === false && !card.error) patch.error = 'the actor turn did not complete';
-      return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), patch);
+      return stampActorProjectionRevision(
+        putActorCard(state, /** @type {string} */ (msg.parentToolUseId), patch), msg);
     }
     case 'turn/actor-cost': {
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
+      if (actorEventIsStale(state, msg)) return state;
       // Phase K: the actor turn's spend, surfaced on its card (delegated work
       // isn't free — make it visible even though caps stay per-session).
       // why the guard: a cost event must only UPDATE an existing card, never
@@ -431,8 +754,9 @@ export const reduceChat = (state, msg) => {
       // turn/actor-state's seed (its `existing ? {} : …` gate) from ever applying
       // streaming/kind/name. Let turn/actor-start|state own creation.
       const id = /** @type {string} */ (msg.parentToolUseId);
-      if (!(/** @type {any} */ (state.actors)[id])) return state;
-      return putActorCard(state, id, { cost: msg.cost });
+      const card = /** @type {any} */ (state.actors)[id];
+      if (!card || !actorEventMatchesCard(card, msg)) return state;
+      return stampActorProjectionRevision(putActorCard(state, id, { cost: msg.cost }), msg);
     }
     case 'script/op': {
       // Upsert by seq: 'sent' creates the line; 'replied'/'failed'/'handed-off'
@@ -447,7 +771,9 @@ export const reduceChat = (state, msg) => {
       const entry = {
         seq: msg.seq, method: msg.method, to: msg.to ?? list[idx]?.to,
         goalPreview: msg.goalPreview ?? list[idx]?.goalPreview,
-        phase: msg.phase, ms: msg.ms ?? null, failed: msg.failed === true || msg.error != null,
+        phase: msg.phase, ms: msg.ms ?? null,
+        cancelled: msg.cancelled === true || msg.phase === 'cancelled',
+        failed: msg.phase === 'cancelled' ? false : msg.failed === true || msg.error != null,
       };
       if (idx >= 0) list[idx] = { ...list[idx], ...entry };
       else list.push(entry);
@@ -463,6 +789,9 @@ export const reduceChat = (state, msg) => {
       return { ...state, scriptOps: ops };
     }
     case 'async-tasks/update':
+      if (state.session.sessionId
+        && msg.parentSessionId !== state.session.sessionId
+        && !state.spawned.sessions[/** @type {string} */ (msg.parentSessionId)]) return state;
       return { ...state, asyncTasks: { ...state.asyncTasks,
         [/** @type {string} */ (msg.parentSessionId)]: msg.tasks } };
     case 'state': {
@@ -485,18 +814,68 @@ export const reduceChat = (state, msg) => {
       // still halted. Clear only on an ACTUAL session switch; within the same
       // session the next send clears them via turn/streaming.
       const sessionChanged = msg.state?.session?.sessionId !== state.session.sessionId;
+      const nextSessionId = msg.state?.session?.sessionId ?? null;
       const stillHalted = !sessionChanged && state.cost.limitReached;
       const keepSpendError = !sessionChanged && state.lastError === 'spend-limit-reached';
-      // why prune on switch: actors/spawned/asyncTasks are keyed by tool_use id
-      // and belong to the orchestrator transcript being navigated AWAY from — the
-      // state snapshot never carries them, so without this they survive into the
-      // new chat (never rendering — renderActorCard matches by viewed tool_use id —
-      // but accumulating for the panel's lifetime). A still-live one re-seeds via
-      // turn/actor-state on switch-back. Only on an ACTUAL switch, not every push.
+      const incomingActorEpoch = typeof msg.state?.actorProjectionEpoch === 'string'
+        ? msg.state.actorProjectionEpoch : null;
+      const incomingActorRevision = Number.isSafeInteger(msg.state?.actorProjectionRevision)
+        ? msg.state.actorProjectionRevision : null;
+      const actorEpochMismatch = state.actorProjectionEpoch !== null
+        && incomingActorEpoch !== null
+        && incomingActorEpoch !== state.actorProjectionEpoch;
+      const staleActorSnapshot = actorEpochMismatch
+        || (state.actorProjectionEpoch !== null
+          && (incomingActorEpoch === null || incomingActorEpoch === state.actorProjectionEpoch)
+          && incomingActorRevision !== null
+          && incomingActorRevision < state.actorProjectionRevision);
+      // why prune on switch: actors/spawned/asyncTasks belong to the orchestrator
+      // transcript being navigated away from. The fresh snapshot now replays its
+      // live rows; within one chat we reconcile those with terminal inline cards
+      // so a routine state push cannot erase activity/cost evidence.
+      const snapshotMessages = Array.isArray(msg.state?.session?.messages)
+        ? msg.state.session.messages : [];
       const pruneProjections = sessionChanged
-        ? { actors: INITIAL_STATE.actors, spawned: INITIAL_STATE.spawned, asyncTasks: INITIAL_STATE.asyncTasks }
-        : {};
-      return { ...state, ...msg.state, ...pruneProjections, pendingConfirm: state.pendingConfirm,
+        ? {
+            actors: reconcileActorTerminals(
+              staleActorSnapshot ? INITIAL_STATE.actors : (msg.state?.actors ?? INITIAL_STATE.actors),
+              snapshotMessages,
+            ),
+            spawned: staleActorSnapshot
+              ? INITIAL_STATE.spawned : (msg.state?.spawned ?? INITIAL_STATE.spawned),
+            asyncTasks: staleActorSnapshot
+              ? INITIAL_STATE.asyncTasks : (msg.state?.asyncTasks ?? INITIAL_STATE.asyncTasks),
+          }
+        : {
+            actors: reconcileActorTerminals(
+              msg.state?.actors && !staleActorSnapshot
+                ? reconcileActorCards(state.actors, msg.state.actors)
+                : state.actors,
+              snapshotMessages,
+            ),
+            spawned: msg.state?.spawned && !actorEpochMismatch
+              ? reconcileSpawned(state.spawned, msg.state.spawned)
+              : state.spawned,
+            asyncTasks: msg.state?.asyncTasks && !actorEpochMismatch
+              ? msg.state.asyncTasks : state.asyncTasks,
+          };
+      const notices = sessionChanged
+        ? state.notices.filter((notice) => !notice.sessionId || notice.sessionId === nextSessionId)
+        : state.notices;
+      const acceptsActorEpoch = !actorEpochMismatch;
+      const actorProjectionEpoch = acceptsActorEpoch
+        ? (incomingActorEpoch ?? state.actorProjectionEpoch)
+        : state.actorProjectionEpoch;
+      const actorProjectionRevision = acceptsActorEpoch && state.actorProjectionEpoch === null
+        && incomingActorEpoch !== null
+        ? (incomingActorRevision ?? 0)
+        : acceptsActorEpoch
+          ? Math.max(state.actorProjectionRevision, incomingActorRevision ?? 0)
+          : state.actorProjectionRevision;
+      return { ...state, ...msg.state, ...pruneProjections, notices,
+        actorProjectionEpoch,
+        actorProjectionRevision,
+        pendingConfirm: sessionChanged ? (msg.state?.pendingConfirm ?? null) : state.pendingConfirm,
         lastError: keepSpendError ? 'spend-limit-reached' : null, rateLimit: null, cost: { ...state.cost,
         session: msg.state?.session?.cost ?? state.cost.session,
         limitUsd: msg.state?.settings?.spendLimitUsd ?? state.cost.limitUsd,
@@ -511,7 +890,8 @@ export const reduceChat = (state, msg) => {
       // state.session — but this LIVE push carries only sessionId+messages, so
       // without it the card wouldn't tick until the next full 'state' snapshot.
       // undefined on non-goal turns (the card self-hides), so it's harmless.
-      return { ...state, session: { ...state.session,
+      return { ...state, actors: reconcileActorTerminals(state.actors, msg.session.messages),
+        session: { ...state.session,
         sessionId: msg.session.sessionId, messages: msg.session.messages,
         todos: msg.session.todos }, lastError: null };
     case 'turn/cost':
@@ -549,13 +929,23 @@ export const reduceChat = (state, msg) => {
     case 'turn/error':
       return { ...applyError(state, msg), rateLimit: null };
     case 'confirm/request':
+      // Confirmation is authority, not ambient UI. A background actor keeps
+      // running when its owner changes chats, but its prompt belongs only in the
+      // root chat that initiated it. A switch-back snapshot resurfaces it.
+      if (msg.prompt?.ownerSessionId
+        && msg.prompt.ownerSessionId !== state.session.sessionId) return state;
       return { ...state, pendingConfirm: msg.prompt };
     case 'confirm/resolved':
       // Answered on another surface (DESIGN-12) — dismiss the same prompt.
       return state.pendingConfirm?.id === msg.id ? { ...state, pendingConfirm: null } : state;
     case 'turn/system-note':
+      // Lifecycle recovery notes name their owning session. Keep legacy
+      // unscoped UI feedback visible, but never show a scoped note in a
+      // different open chat.
+      if (msg.sessionId && state.session.sessionId !== msg.sessionId) return state;
       return { ...state, notices: [...state.notices,
-        { id: Date.now() + Math.random(), text: msg.text, action: msg.action ?? null }].slice(-3) };
+        { id: Date.now() + Math.random(), text: msg.text, action: msg.action ?? null,
+          sessionId: msg.sessionId ?? null }].slice(-3) };
     case 'agent/tab': {
       // The inline "peerd opened a tab" notice: minted the first time peerd OPENS
       // a tab, then RESURFACED into the current turn whenever the agent acts on it
@@ -588,9 +978,16 @@ export const reduceChat = (state, msg) => {
       const idx = state.agentTabEvents.findIndex((e) => e.sessionId === sid && e.tabId === tab.tabId);
       if (idx >= 0) {
         // Already announced → resurface into the current turn (no-op if it's
-        // already anchored there).
-        if (state.agentTabEvents[idx].turnId === turnId) return { ...state, agentTab: tab };
-        const events = state.agentTabEvents.map((e, i) => (i === idx ? { ...e, turnId } : e));
+        // already anchored there). The custody state can change independently
+        // of the turn anchor, so refresh it even when the notice stays put.
+        const protectedTab = tab.protected !== false;
+        if (state.agentTabEvents[idx].turnId === turnId
+          && state.agentTabEvents[idx].protected === protectedTab) {
+          return { ...state, agentTab: tab };
+        }
+        const events = state.agentTabEvents.map((e, i) => (i === idx
+          ? { ...e, turnId, protected: protectedTab }
+          : e));
         return { ...state, agentTab: tab, agentTabEvents: events };
       }
       // A NEW tab → mint a notice ONLY if peerd opened it (not when the agent
@@ -600,7 +997,7 @@ export const reduceChat = (state, msg) => {
         key: `${sid ?? 's'}:${tab.tabId}`,
         sessionId: sid, tabId: tab.tabId, windowId: tab.windowId ?? null,
         kind: tab.kind ?? null, name: tab.name ?? null, label: tab.label ?? null,
-        turnId,
+        protected: tab.protected !== false, turnId,
       };
       return { ...state, agentTab: tab, agentTabEvents: [...state.agentTabEvents, ev].slice(-50) };
     }

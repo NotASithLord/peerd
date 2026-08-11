@@ -133,6 +133,26 @@ describe('checkpoint manager — diffSince (feature-08 review adapter)', () => {
     expect(diff.files).toEqual([{ path: 'a.txt', status: 'modified', before: 'v1', after: 'v3' }]);
   });
 
+  test('prototype-looking paths remain visible to checkpoint review', async () => {
+    const initial: Record<string, string> = Object.fromEntries([
+      ['__proto__', 'old-prototype'],
+      ['constructor', 'old-constructor'],
+    ]);
+    const { mgr, ws } = await setup(initial);
+    ws.files.delete('__proto__');
+    ws.files.set('constructor', 'new-constructor');
+    ws.files.set('toString', 'added');
+    const diff = await mgr.diffSince({ scope: 'app:a' });
+    const byPath = Object.fromEntries(diff.files.map((file: any) => [file.path, file]));
+    expect(byPath['__proto__']).toEqual({
+      path: '__proto__', status: 'deleted', before: 'old-prototype',
+    });
+    expect(byPath.constructor).toEqual({
+      path: 'constructor', status: 'modified', before: 'old-constructor', after: 'new-constructor',
+    });
+    expect(byPath.toString).toEqual({ path: 'toString', status: 'added', after: 'added' });
+  });
+
   test('no checkpoint / unknown scope → empty changeset, not an error', async () => {
     const io = memIO();
     const store = createSnapshotStore(io);

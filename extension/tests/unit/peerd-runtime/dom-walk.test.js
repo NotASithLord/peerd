@@ -14,7 +14,10 @@
 import { describe, it, expect } from '../../framework.js';
 import { domWalkInjected, createRefRegistry } from '/peerd-runtime/index.js';
 import { hasPasswordFieldInjected } from '/peerd-runtime/dom/walk-injected.js';
+import { liveDocumentLocationInjected } from '/peerd-runtime/tools/defs/dom-helpers.js';
 import { snapshotTool, clickTool, typeTool } from '/peerd-runtime/tools/defs/index.js';
+import { clickInjected } from '/peerd-runtime/tools/defs/click.js';
+import { TEST_TIME_ORIGIN } from '../../helpers/browser-scripting.js';
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
 /** @typedef {import('/shared/tool-types.js').ToolResult} ToolResult */
@@ -84,7 +87,23 @@ const makeCtx = () => /** @type {ToolContext & { domRefs: ReturnType<typeof crea
     },
     scripting: {
       /** @param {{ func: (...a: any[]) => any, args?: any[] }} arg */
-      executeScript: async ({ func, args }) => [{ result: func(...(args ?? [])) }],
+      executeScript: async ({ func, args }) => {
+        const result = func(...(args ?? []));
+        // The harness itself is served from loopback, while this fixture models
+        // a public tab. Keep the live-location probe consistent with the mocked
+        // tabs API without changing the real DOM behavior under test.
+        if (func === liveDocumentLocationInjected) {
+          return [{ documentId: 'fixture-document', result: {
+            origin: 'https://example.test',
+            href: 'https://example.test/order',
+            timeOrigin: TEST_TIME_ORIGIN,
+          } }];
+        }
+        if (func === hasPasswordFieldInjected) {
+          return [{ documentId: 'fixture-document', result }];
+        }
+        return [{ documentId: 'fixture-document', result }];
+      },
     },
     domRefs: createRefRegistry(),
     // no debuggerPool — the Firefox / advanced-automation-off shape
@@ -232,6 +251,202 @@ describe('snapshot → click/type over walk refs — full chain', () => {
     });
   });
 
+  it('allows same-origin form submission through type {submit:true}', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      const form = /** @type {HTMLFormElement} */ (host.querySelector('form'));
+      const field = /** @type {HTMLInputElement} */ (host.querySelector('#dw-name'));
+      // The fixture form's empty action resolves to this document, which is the
+      // exact same-origin case the guard must leave alone. Prevent navigation so
+      // a successful native requestSubmit remains observable inside the runner.
+      let submits = 0;
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        submits += 1;
+      });
+      const r = await typeTool.execute({ selector: '#dw-name', text: 'same origin', submit: true }, ctx);
+      expect(r.ok).toBe(true);
+      expect(field.value).toBe('same origin');
+      expect(submits).toBeGreaterThan(0);
+    });
+  });
+
+  it('blocks a cross-origin submit click before focus, click, or submission', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      const form = /** @type {HTMLFormElement} */ (host.querySelector('form'));
+      const button = /** @type {HTMLButtonElement} */ (host.querySelector('#dw-send'));
+      form.action = 'https://collector.invalid/receive';
+      button.type = 'submit';
+      button.disabled = false;
+      let focuses = 0;
+      let clicks = 0;
+      let submits = 0;
+      button.addEventListener('focus', () => { focuses += 1; });
+      button.addEventListener('click', () => { clicks += 1; });
+      form.addEventListener('submit', (event) => {
+        // Safety net for a regressed guard: fail the assertions without
+        // navigating the in-browser test runner away.
+        event.preventDefault();
+        submits += 1;
+      });
+
+      const r = await clickTool.execute({ selector: '#dw-send' }, ctx);
+      expect(r.ok).toBe(false);
+      expect(errorOf(r)).toBe('cross_origin_form_submission_blocked');
+      expect(focuses).toBe(0);
+      expect(clicks).toBe(0);
+      expect(submits).toBe(0);
+    });
+  });
+
+  it('honors a submitter formaction override when a descendant is clicked', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      const form = /** @type {HTMLFormElement} */ (host.querySelector('form'));
+      const button = /** @type {HTMLButtonElement} */ (host.querySelector('#dw-send'));
+      form.action = location.href;
+      button.type = 'submit';
+      button.disabled = false;
+      button.setAttribute('formaction', 'https://collector.invalid/override');
+      button.innerHTML = '<span id="dw-send-label">Send order</span>';
+      let clicks = 0;
+      let submits = 0;
+      button.addEventListener('click', () => { clicks += 1; });
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        submits += 1;
+      });
+
+      const r = await clickTool.execute({ selector: '#dw-send-label' }, ctx);
+      expect(r.ok).toBe(false);
+      expect(errorOf(r)).toBe('cross_origin_form_submission_blocked');
+      expect(clicks).toBe(0);
+      expect(submits).toBe(0);
+    });
+  });
+
+  it('blocks cross-origin submission activated through a label', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      const form = /** @type {HTMLFormElement} */ (host.querySelector('form'));
+      const button = /** @type {HTMLButtonElement} */ (host.querySelector('#dw-send'));
+      form.action = 'https://collector.invalid/receive';
+      button.type = 'submit';
+      button.disabled = false;
+      const label = document.createElement('label');
+      label.htmlFor = button.id;
+      label.id = 'dw-send-label-control';
+      label.textContent = 'Submit through label';
+      form.appendChild(label);
+      let clicks = 0;
+      let submits = 0;
+      button.addEventListener('click', () => { clicks += 1; });
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        submits += 1;
+      });
+
+      const r = await clickTool.execute({ selector: '#dw-send-label-control' }, ctx);
+      expect(r.ok).toBe(false);
+      expect(errorOf(r)).toBe('cross_origin_form_submission_blocked');
+      expect(clicks).toBe(0);
+      expect(submits).toBe(0);
+    });
+  });
+
+  it('blocks a label nested inside a cross-origin submit button', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      const form = /** @type {HTMLFormElement} */ (host.querySelector('form'));
+      const button = /** @type {HTMLButtonElement} */ (host.querySelector('#dw-send'));
+      form.action = 'https://collector.invalid/receive';
+      button.type = 'submit';
+      button.disabled = false;
+      button.innerHTML = '<label id="dw-nested-submit-label">Send order</label>';
+      let submits = 0;
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        submits += 1;
+      });
+
+      const r = await clickTool.execute({ selector: '#dw-nested-submit-label' }, ctx);
+      expect(r.ok).toBe(false);
+      expect(errorOf(r)).toBe('cross_origin_form_submission_blocked');
+      expect(submits).toBe(0);
+    });
+  });
+
+  it('is not bypassed by a form control named action', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      const form = /** @type {HTMLFormElement} */ (host.querySelector('form'));
+      const button = /** @type {HTMLButtonElement} */ (host.querySelector('#dw-send'));
+      form.setAttribute('action', 'https://collector.invalid/receive');
+      button.type = 'submit';
+      button.disabled = false;
+      const clobber = document.createElement('input');
+      clobber.name = 'action';
+      form.appendChild(clobber);
+      expect(form.action === /** @type {unknown} */ (clobber)).toBe(true);
+
+      const r = await clickTool.execute({ selector: '#dw-send' }, ctx);
+      expect(r.ok).toBe(false);
+      expect(errorOf(r)).toBe('cross_origin_form_submission_blocked');
+    });
+  });
+
+  it('pins the confirmed login exception to the exact live action origin', async () => {
+    await withFixture((host) => {
+      const form = /** @type {HTMLFormElement} */ (host.querySelector('form'));
+      const button = /** @type {HTMLButtonElement} */ (host.querySelector('#dw-send'));
+      button.type = 'submit';
+      button.disabled = false;
+      form.addEventListener('submit', (event) => { event.preventDefault(); });
+      form.action = 'https://accounts.example/start';
+      const allowed = clickInjected('#dw-send', 0, null, 1, 'https://accounts.example');
+      expect(allowed.ok).toBe(true);
+
+      form.action = 'https://collector.invalid/receive';
+      const refused = clickInjected('#dw-send', 0, null, 1, 'https://accounts.example');
+      expect(refused.ok).toBe(false);
+      expect(refused.error).toBe('cross_origin_form_submission_blocked');
+    });
+  });
+
+  it('blocks cross-origin type submission before value, focus, or input events', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      const form = /** @type {HTMLFormElement} */ (host.querySelector('form'));
+      const field = /** @type {HTMLInputElement} */ (host.querySelector('#dw-name'));
+      form.action = 'https://collector.invalid/receive';
+      field.value = 'unchanged';
+      let focuses = 0;
+      let inputs = 0;
+      let changes = 0;
+      let keys = 0;
+      let submits = 0;
+      field.addEventListener('focus', () => { focuses += 1; });
+      field.addEventListener('input', () => { inputs += 1; });
+      field.addEventListener('change', () => { changes += 1; });
+      field.addEventListener('keydown', () => { keys += 1; });
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        submits += 1;
+      });
+
+      const r = await typeTool.execute({ selector: '#dw-name', text: 'scraped secret', submit: true }, ctx);
+      expect(r.ok).toBe(false);
+      expect(errorOf(r)).toBe('cross_origin_form_submission_blocked');
+      expect(field.value).toBe('unchanged');
+      expect(focuses).toBe(0);
+      expect(inputs).toBe(0);
+      expect(changes).toBe(0);
+      expect(keys).toBe(0);
+      expect(submits).toBe(0);
+    });
+  });
+
   it('a removed element makes its walk ref STALE, not a mis-click', async () => {
     await withFixture(async (host) => {
       const ctx = makeCtx();
@@ -258,17 +473,16 @@ describe('snapshot → click/type over walk refs — full chain', () => {
   });
 });
 
-// The password-field signal (issue 251) — the ONE bit the walk reports to the
-// origin classifier, and the only input to "does the user have an account here"
-// that the DOM can supply. Both entry points are covered because they are
-// separate ES5 copies by necessity (an injected body closes over nothing), so
-// they can drift apart silently.
+// The password-field signal (issue 251): the one bit the standalone live-document
+// probe reports to the origin classifier, and the only input to "does the user
+// have an account here" that the DOM can supply. Snapshot capture does not repeat
+// the probe.
 //
 // The load-bearing case is `new-password`. Measured on the live web, the Stack
 // Exchange network ships a hidden SIGNUP modal on every page; treating that as
 // "you have an account here" locked a roaming helper out of stackoverflow.com
 // after a single ordinary read, permanently and invisibly.
-describe('dom walk — the password-field signal', () => {
+describe('live document: the password-field signal', () => {
   /**
    * A fixture with NO password field of its own, so each test controls exactly
    * what is in the document. why its own helper: the shared FIXTURE_HTML above
@@ -285,23 +499,20 @@ describe('dom walk — the password-field signal', () => {
     finally { host.remove(); }
   };
 
-  it('no password field anywhere: both entry points say false', async () => {
+  it('no password field anywhere reports false', async () => {
     await withInputs('<input type="text" name="q">', () => {
-      expect(domWalkInjected().hasPasswordField).toBe(false);
       expect(hasPasswordFieldInjected().has).toBe(false);
     });
   });
 
   it('a bare password field marks the origin', async () => {
     await withInputs('<input type="password" name="pass">', () => {
-      expect(domWalkInjected().hasPasswordField).toBe(true);
       expect(hasPasswordFieldInjected().has).toBe(true);
     });
   });
 
   it('autocomplete="current-password" marks the origin — that IS a sign-in box', async () => {
     await withInputs('<input type="password" autocomplete="current-password">', () => {
-      expect(domWalkInjected().hasPasswordField).toBe(true);
       expect(hasPasswordFieldInjected().has).toBe(true);
     });
   });
@@ -312,7 +523,6 @@ describe('dom walk — the password-field signal', () => {
     // behind a button is hidden AND is a real signal. It is the reason the signal
     // reads the document rather than the walk.
     await withInputs('<div style="display:none"><input type="password" autocomplete="current-password"></div>', () => {
-      expect(domWalkInjected().hasPasswordField).toBe(true);
       expect(hasPasswordFieldInjected().has).toBe(true);
     });
   });
@@ -326,7 +536,6 @@ describe('dom walk — the password-field signal', () => {
       + '<input type="password" name="password" autocomplete="new-password">'
       + '</form>',
       () => {
-        expect(domWalkInjected().hasPasswordField).toBe(false);
         expect(hasPasswordFieldInjected().has).toBe(false);
       },
     );
@@ -339,7 +548,7 @@ describe('dom walk — the password-field signal', () => {
     await withInputs(
       '<form><input type="text" name="email"><input type="password" autocomplete="new-password"></form>',
       () => {
-        expect(domWalkInjected().hasPasswordField).toBe(false);
+        expect(hasPasswordFieldInjected().has).toBe(false);
       },
     );
   });
@@ -349,7 +558,6 @@ describe('dom walk — the password-field signal', () => {
       '<input type="password" autocomplete="new-password">'
       + '<input type="password" autocomplete="current-password">',
       () => {
-        expect(domWalkInjected().hasPasswordField).toBe(true);
         expect(hasPasswordFieldInjected().has).toBe(true);
       },
     );
@@ -357,31 +565,147 @@ describe('dom walk — the password-field signal', () => {
 
   it('the token is matched case-insensitively', async () => {
     await withInputs('<input type="password" autocomplete="NEW-PASSWORD">', () => {
-      expect(domWalkInjected().hasPasswordField).toBe(false);
       expect(hasPasswordFieldInjected().has).toBe(false);
     });
   });
-});
 
-// ── attribution (issue 278) ─────────────────────────────────────────────────
-// The caller resolves the tab BEFORE injecting, so `tab.url` is a snapshot; the
-// probe runs later, in whatever document is committed by then. Without the probe
-// saying where it ran, a page that navigates inside that window gets its password
-// field credited to the origin the caller started on — which lets a hostile page
-// mark arbitrary third parties as "the user has an account here", and, repeated,
-// fill the 500-entry cap so nothing further is ever learned.
-describe('peerd-runtime.dom-walk · the probe reports where it ran', () => {
-  it('hasPasswordFieldInjected returns the observing origin alongside the boolean', () => {
-    const r = hasPasswordFieldInjected();
-    expect(typeof r).toBe('object');
-    expect(typeof r.has).toBe('boolean');
-    // In the test page this is the extension origin; what matters is that it is
-    // the DOCUMENT's own origin, not anything the caller passed in.
-    expect(r.origin).toBe(location.origin);
+  it('an open shadow-root sign-in field marks the owning origin', async () => {
+    await withInputs('<div id="shadow-login"></div>', (host) => {
+      const shadow = /** @type {HTMLElement} */ (host.querySelector('#shadow-login'))
+        .attachShadow({ mode: 'open' });
+      shadow.innerHTML = '<input type="password" autocomplete="current-password">';
+      expect(hasPasswordFieldInjected().has).toBe(true);
+    });
   });
 
-  it('the full walk reports it too — the dom-walk path races identically', () => {
-    const walk = domWalkInjected();
-    expect(walk.probeOrigin).toBe(location.origin);
+  it('an open shadow-root signup field keeps a compound new-password token excluded', async () => {
+    await withInputs('<div id="shadow-signup"></div>', (host) => {
+      const shadow = /** @type {HTMLElement} */ (host.querySelector('#shadow-signup'))
+        .attachShadow({ mode: 'open' });
+      shadow.innerHTML = '<input type="password" autocomplete="section-register new-password webauthn">';
+      expect(hasPasswordFieldInjected().has).toBe(false);
+    });
+  });
+
+  it('a closed shadow root remains unobservable', async () => {
+    await withInputs('<div id="closed-shadow-login"></div>', (host) => {
+      const shadow = /** @type {HTMLElement} */ (host.querySelector('#closed-shadow-login'))
+        .attachShadow({ mode: 'closed' });
+      shadow.innerHTML = '<input type="password" autocomplete="current-password">';
+      expect(hasPasswordFieldInjected().has).toBe(false);
+    });
+  });
+
+  it('preserves full light-DOM coverage beyond the boundary-discovery budget', async () => {
+    await withInputs('', (host) => {
+      const fragment = document.createDocumentFragment();
+      for (let index = 0; index < 30001; index++) fragment.appendChild(document.createElement('i'));
+      const password = document.createElement('input');
+      password.type = 'password';
+      password.autocomplete = 'current-password';
+      fragment.appendChild(password);
+      host.appendChild(fragment);
+      expect(hasPasswordFieldInjected().has).toBe(true);
+    });
+  });
+
+  it('reports boundary-discovery exhaustion instead of claiming an exhaustive negative', async () => {
+    await withInputs('', (host) => {
+      const fragment = document.createDocumentFragment();
+      for (let index = 0; index < 30001; index++) fragment.appendChild(document.createElement('i'));
+      host.appendChild(fragment);
+      expect(hasPasswordFieldInjected().capped).toBe(true);
+    });
+  });
+
+  it('keeps DOM-prefix priority when a wide sibling list exhausts the budget', async () => {
+    await withInputs('', (host) => {
+      const fragment = document.createDocumentFragment();
+      const earlyWrapper = document.createElement('div');
+      const earlyLogin = document.createElement('div');
+      earlyLogin.attachShadow({ mode: 'open' }).innerHTML =
+        '<input type="password" autocomplete="current-password">';
+      earlyWrapper.appendChild(earlyLogin);
+      fragment.appendChild(earlyWrapper);
+      for (let index = 0; index < 30001; index++) fragment.appendChild(document.createElement('i'));
+      host.appendChild(fragment);
+      const result = hasPasswordFieldInjected();
+      expect(result.has).toBe(true);
+    });
+  });
+
+  it('a same-origin frame sign-in field marks the owning origin', async () => {
+    await withInputs('<iframe id="same-origin-login"></iframe>', (host) => {
+      const frame = /** @type {HTMLIFrameElement} */ (host.querySelector('#same-origin-login'));
+      if (!frame.contentDocument?.body) throw new Error('same-origin fixture frame did not mount');
+      frame.contentDocument.body.innerHTML =
+        '<input type="password" autocomplete="current-password">';
+      expect(hasPasswordFieldInjected().has).toBe(true);
+    });
+  });
+
+  it('an exact-origin URL frame marks the owning origin', async () => {
+    await withInputs('<iframe id="url-login"></iframe>', async (host) => {
+      const frame = /** @type {HTMLIFrameElement} */ (host.querySelector('#url-login'));
+      await new Promise((resolve) => {
+        frame.addEventListener('load', resolve, { once: true });
+        frame.src = '/tests/fixtures/password-login-frame.html';
+      });
+      expect(frame.contentDocument?.location.origin).toBe(location.origin);
+      expect(hasPasswordFieldInjected().has).toBe(true);
+    });
+  });
+
+  it('a readable document reporting a different origin is not attributed', async () => {
+    await withInputs('<iframe id="relaxed-origin-login"></iframe>', (host) => {
+      const frame = /** @type {HTMLIFrameElement} */ (host.querySelector('#relaxed-origin-login'));
+      const foreignRoot = document.createElement('html');
+      foreignRoot.innerHTML = '<input type="password" autocomplete="current-password">';
+      const readableForeignDocument = {
+        documentElement: foreignRoot,
+        location: { origin: 'https://accounts.example.test', protocol: 'https:', pathname: '/' },
+        querySelectorAll: (/** @type {string} */ selector) => foreignRoot.querySelectorAll(selector),
+      };
+      Object.defineProperty(frame, 'contentDocument', { value: readableForeignDocument });
+      expect(hasPasswordFieldInjected().has).toBe(false);
+    });
+  });
+
+  it('an unexpected attributable-root failure remains an incomplete negative', async () => {
+    await withInputs('<iframe id="broken-root"></iframe>', (host) => {
+      const frame = /** @type {HTMLIFrameElement} */ (host.querySelector('#broken-root'));
+      const brokenDocument = {
+        documentElement: document.createElement('html'),
+        location: { origin: location.origin, protocol: location.protocol, pathname: '/broken' },
+        querySelectorAll: () => { throw new Error('fixture traversal failure'); },
+      };
+      Object.defineProperty(frame, 'contentDocument', { value: brokenDocument });
+      expect(hasPasswordFieldInjected()).toEqual({ has: false, capped: true });
+    });
+  });
+
+  it('an inherited about:blank URL with query and fragment remains attributable', async () => {
+    await withInputs('<iframe id="queried-blank-login"></iframe>', async (host) => {
+      const frame = /** @type {HTMLIFrameElement} */ (host.querySelector('#queried-blank-login'));
+      await new Promise((resolve) => {
+        frame.addEventListener('load', resolve, { once: true });
+        frame.src = 'about:blank?login#form';
+      });
+      if (!frame.contentDocument?.body) throw new Error('inherited fixture frame did not mount');
+      frame.contentDocument.body.innerHTML =
+        '<input type="password" autocomplete="current-password">';
+      expect(hasPasswordFieldInjected().has).toBe(true);
+    });
+  });
+
+  it('an opaque-origin frame is not attributed to the owning origin', async () => {
+    await withInputs('<iframe id="opaque-login" sandbox></iframe>', async (host) => {
+      const frame = /** @type {HTMLIFrameElement} */ (host.querySelector('#opaque-login'));
+      await new Promise((resolve) => {
+        frame.addEventListener('load', resolve, { once: true });
+        frame.srcdoc = '<input type="password" autocomplete="current-password">';
+      });
+      expect(hasPasswordFieldInjected().has).toBe(false);
+    });
   });
 });

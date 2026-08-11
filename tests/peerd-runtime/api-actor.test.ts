@@ -1,5 +1,5 @@
 // DESIGN-18: the API actor — a web actor (actorType:'web') with NO tab, owning ONE
-// fixed origin (fetch_url only). These pin the PURE core: the origin normalizer (the
+// fixed origin (tab-free fetch/cache/site-client tools). These pin the PURE core: the origin normalizer (the
 // addressing + same-origin-lock anchor), the (chat, origin)→session binding store
 // (parallel to the tab store, but origin-keyed because an API origin never moves),
 // the self-fence on the actor's own learned memory, and the "what I learned" prompt.

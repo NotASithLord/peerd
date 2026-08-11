@@ -143,7 +143,7 @@ const CodeStream = {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     const cs = getComputedStyle(document.documentElement);
-    const fg = (cs.getPropertyValue('--fg') || '#e8e6e1').trim();
+    const fg = (cs.getPropertyValue('--fg') || '#F3F3EF').trim();
     const mono = (cs.getPropertyValue('--font-mono') || 'monospace').trim();
     const reduce = !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
     const ROW = 24;                         // vertical spacing between typer rows

@@ -25,7 +25,7 @@ describe('buildFirefoxWebVmNote', () => {
     expect(text).toContain('not a peerd');
   });
 
-  it('links BOTH open threads — the Firefox bug and the WECG standards issue', () => {
+  it('links BOTH open threads: the Firefox bug and the WECG standards issue', () => {
     const note = buildFirefoxWebVmNote();
     const hrefs = [...note.querySelectorAll('a')].map((a) => a.getAttribute('href'));
     expect(hrefs.length).toBe(2);

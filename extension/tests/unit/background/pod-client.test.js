@@ -145,4 +145,58 @@ describe('Pod client', () => {
     expect(messages.map((message) => message.type)).toEqual(['pod/exec', 'pod/cancel']);
     expect(messages[1].jobId).toBe(messages[0].jobId);
   });
+
+  it('does not dispatch a foreground command stopped while its Pod tab is opening', async () => {
+    /** @type {()=>void} */ let finishOpening = () => {};
+    const opening = new Promise((resolve) => { finishOpening = () => resolve(7); });
+    /** @type {any[]} */ const messages = [];
+    const client = createPodClient({
+      registry: { get: async () => ({ id: 'pod-1' }) },
+      tracker: { getTabId: () => 7, ensureTab: async () => opening },
+      sendTabMessage: async (_tabId, message) => {
+        messages.push(message);
+        return { ok: true, job: { id: message.jobId, state: 'completed', exitCode: 0 } };
+      },
+    });
+    const controller = new AbortController();
+    const running = client.exec('echo too-late', { podId: 'pod-1', signal: controller.signal });
+    await tick();
+    controller.abort();
+    finishOpening();
+    let message = '';
+    try { await running; }
+    catch (error) { message = /** @type {{message?:string}} */ (error)?.message ?? ''; }
+    expect(message).toContain('cancelled before dispatch');
+    expect(messages.some((entry) => entry.type === 'pod/exec')).toBe(false);
+  });
+
+  it('renews a live external workspace lease and releases it after the operation', async () => {
+    /** @type {any[]} */ const messages = [];
+    /** @type {()=>void} */ let heartbeat = () => {};
+    let cleared = false;
+    const client = createPodClient({
+      registry: { get: async () => ({ id: 'pod-1' }) },
+      tracker: { getTabId: () => 7 },
+      sendTabMessage: async (_tabId, message) => {
+        messages.push(message);
+        return { ok: true, ...(message.action === 'acquire' ? { leaseMs: 30_000 } : {}) };
+      },
+      setIntervalFn: (/** @type {()=>void} */ callback) => { heartbeat = callback; return 123; },
+      clearIntervalFn: (id) => { expect(id).toBe(123); cleared = true; },
+    });
+    /** @type {()=>void} */ let finish = () => {};
+    const gate = new Promise((resolve) => { finish = () => resolve(undefined); });
+    const running = client.withWorkspaceLock('pod-1', async () => {
+      heartbeat();
+      await gate;
+      return 'done';
+    });
+    await tick();
+    expect(messages.map((message) => message.action)).toEqual(['acquire', 'renew']);
+    finish();
+    expect(await running).toBe('done');
+    expect(cleared).toBe(true);
+    expect(messages.map((message) => message.action)).toEqual(['acquire', 'renew', 'release']);
+    expect(new Set(messages.map((message) => message.token)).size).toBe(1);
+  });
 });

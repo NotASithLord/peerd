@@ -19,7 +19,11 @@
 
 import { createServer } from 'node:http';
 import { createSocket } from 'node:dgram';
-import { rpc, evalIn, waitFor, sseText, sseToolCall, openExtPage, openWidePage, attach, setEmulatedTheme, WIDE_METRICS, sleep, PASSPHRASE } from './e2e-harness.mjs';
+import {
+  rpc, evalIn, waitFor, sseText, sseToolCall, sseToolCalls, openExtPage, openWidePage, attach,
+  sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
+  NETWORK_GUARD_CONTROLLER_PORT,
+} from './e2e-harness.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -39,6 +43,42 @@ const probe = (ctx) => evalIn(ctx.page, `(() => {
 })()`);
 
 const SMOKE_TEXT = 'e2e-smoke-ok';
+const TRANSFER_EXPORT_VERSION = 2;
+
+const auditEntries = async (ctx, limit = 800) => {
+  const audit = await rpc(ctx.page, { type: 'audit/list', limit });
+  return (audit && audit.entries) || [];
+};
+
+const actorIsolationEvidence = (entries) => {
+  const isolated = entries.filter((entry) => entry.type === 'actor_ran_isolated');
+  return {
+    isolated,
+    exactProof: isolated.length > 0 && isolated.every((entry) =>
+      entry.details?.workerType === 'dedicated'
+        && entry.details?.realmVerified === true),
+    backgroundRefused: entries.some((entry) => entry.type === 'actor_background_turn_refused'),
+    isolationFailed: entries.some((entry) => entry.type === 'actor_isolation_failure'),
+  };
+};
+
+// Transfer routes require the exact options-page channel. Keep the live E2E on
+// that production boundary instead of calling the generic dispatcher.
+const privateTransferRpc = (page, message) => evalIn(page, `(async () => {
+  const { callPrivateTransfer } = await import('/options/private-transfer-session.js');
+  return callPrivateTransfer(${JSON.stringify(message)});
+})()`, true);
+
+// The raw CDP handle's close() disconnects the debugger but does not close the
+// tab. Navigate private-transfer fixtures away first so the next exact-client
+// assertion cannot inherit an old options document from an earlier state.
+const retirePrivateTransferPage = async (page) => {
+  await page.send('Page.navigate', { url: 'about:blank' });
+  const retired = await waitFor(() => evalIn(page, `location.href === 'about:blank'`),
+    { budgetMs: 5_000, pollMs: 50 });
+  if (!retired) throw new Error('private transfer fixture did not retire');
+  try { page.close(); } catch { /* */ }
+};
 
 // The local-first personal-data agent, end to end through the REAL stack: the
 // faked model calls script, the sealed worker builds an on-device index in OPFS
@@ -71,24 +111,44 @@ let pdaToolResultBody = '';
 // real model delegates once then ends its turn (the ack says the reply lands
 // later). We mirror that: delegate once, then return plain text.
 let actorState = { delegates: 0, seen: [] };
+let actorBoundaryState = { delegates: 0 };
 let scriptFanState = { scripts: 0, seen: [] };
 let dwebActorState = { delegates: 0, actorCalls: 0 };
 let a2aState = { delegates: 0, actorCalls: 0 };
 // heap-split phase 1: the offscreen pure-reasoning actor state.
 let reasoningState = { spawned: 0, childCalls: 0 };
-let podRuntimeState = { creates: 0, podId: null, lastBody: '' };
+let actorChannelTargetState = { spawned: 0, childCalls: 0 };
 // heap-split phase 4: the offscreen TOOL-BEARING actor state.
 let actorToolsState = { spawned: 0, childCalls: 0 };
+// issue #324: an offscreen actor delegating FROM its granted script surface.
+let actorCodeDelegatesState = {
+  spawned: 0, childCalls: 0, webCalls: 0, sawComposedResult: false,
+};
 // heap-split phase 4: an offscreen actor DELEGATING to its own web actor.
 let actorDelegatesState = { spawned: 0, childCalls: 0, webCalls: 0 };
+let actorFabricHierarchyState = {
+  spawned: 0, nestedCalls: 0, siblingCalls: 0, webCalls: 0,
+};
+let actorOverviewState = { alphaSpawned: 0, betaSpawned: 0 };
 // heap-split phase 4: an offscreen actor BUILDING an app (create + delegate).
 let actorAppState = { spawned: 0, childCalls: 0, appCalls: 0, appId: null };
 let actorAppProbeUrl = '';
 let actorAppStunPort = 0;
 
+const toolResultsIn = (postData) => {
+  try {
+    const body = JSON.parse(postData);
+    return (body.messages ?? [])
+      .filter((message) => message?.role === 'tool')
+      .map((message) => typeof message.content === 'string'
+        ? message.content
+        : JSON.stringify(message.content));
+  } catch { return []; }
+};
+
 // --- harvest: the FULL personal-data flow, incl. reading a real page ---------
-// An order page served over localhost. The order lines are ANCHOR text so the
-// web actor's read_page returns the item names + prices as visible page text.
+// An order page served locally through a reserved public-looking .test name.
+// The order lines are anchor text so the web actor returns them as visible text.
 const ORDERS_HTML = [
   '<!doctype html><html><head><title>My Orders</title></head><body>',
   '<h1>My Orders</h1><ul>',
@@ -113,7 +173,7 @@ return { total: rows.reduce((a, r) => a + r.amount, 0), count: rows.length, sour
 
 // harvest sequencing (post-#61 actor flow). The orchestrator delegates the read
 // to the WEB ACTOR via message_actor; the web actor OWNS a tab, opens the fixture
-// itself (navigate — not under the SSRF guard, which is fetch_url-only) and reads
+// itself and reads
 // it (read_page). We capture the actor request that carries the read_page RESULT
 // to PROVE the actor genuinely read the live page, and sequence the actor's
 // navigate→read→report turns and the orchestrator's post-reply index→answer turns
@@ -122,7 +182,23 @@ let harvestActorSawPage = '';
 let harvestActorTurn = 0;
 let harvestOrchTurn = 0;
 let harvestDelegated = false;
+let harvestActorUsedCode = false;
 let harvestFixtureUrl = '';
+let numericTabAuthorityState = {
+  addressed: false,
+  tabId: null, refusalBody: '', actorCallsAfterAddress: 0,
+};
+let numericTabAuthorityRequestBodies = [];
+let numericTabAuthorityRedirectUrl = '';
+let idpTransitState = { addressed: 0, siteRefusal: '', bareRefusal: '', actorCalls: 0 };
+let idpTransitRequestBodies = [];
+let networkGuardActorTurn = 0;
+let networkGuardDelegated = false;
+let networkGuardActorReady = false;
+let networkGuardActorResult = '';
+let networkGuardFixtureUrl = '';
+let networkGuardActorTask = 'open';
+let networkGuardTrustedBurstComplete = false;
 
 // --- issue 251: the origin lock, end to end --------------------------------
 //
@@ -137,9 +213,8 @@ let harvestFixtureUrl = '';
 // landing check hands off. So this state exercises the learned signal and the
 // enforcement together — which is the only way to find out whether they agree.
 //
-// It is served on `*.localhost` (Chrome resolves it to loopback) because
-// `normalizeApiOrigin` refuses a bare IP literal, so a 127.0.0.1 fixture could
-// never be classified sensitive and the lock could never fire on it.
+// The harness maps reserved `*.peerd.test` names to loopback. This keeps the
+// fixture public under the product's lexical host policy while remaining local.
 const LOGIN_HTML = `<!doctype html><html><head><title>Acme — Sign in</title></head><body>
 <h1>Sign in to Acme</h1>
 <form><label>Email <input type="email" name="email"></label>
@@ -154,6 +229,10 @@ let siteReplyBody = '';
 let siteActorSawPage = '';
 let siteFixtureUrl = '';
 let siteFixtureOrigin = '';
+let siteNumericTarget = null;
+let siteNumericAddressed = false;
+let siteNumericRefusalBody = '';
+let siteNumericActorCalls = 0;
 let lockActorTurn = 0;
 let lockDelegated = false;
 let lockReportBody = '';
@@ -181,6 +260,926 @@ export const STATES = [
       rec.check('assistant turn renders the streamed text', out.assistantText === SMOKE_TEXT, JSON.stringify(out.assistantText));
       rec.check('turn reaches a terminal/idle state', out.busy === false);
       await rec.shot('final');
+    },
+  },
+
+  // --- functional: Chrome accepts and installs the private-network floor ---
+  {
+    name: 'browser-network-rules', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const result = await evalIn(ctx.page, `(async () => {
+          const rules = await import(chrome.runtime.getURL('peerd-egress/denylist/dnr-rules.js'));
+          const validations = await Promise.all(
+            rules.PRIVATE_NETWORK_REGEX_RULES.map(async ({ id, regex }) => ({
+              id,
+              ...await chrome.declarativeNetRequest.isRegexSupported({
+                regex,
+                isCaseSensitive: false,
+              }),
+            })),
+          );
+          const tab = await chrome.tabs.getCurrent();
+          const testIdOffset = 1000;
+          const candidates = rules.buildPrivateNetworkBlockRules({
+            tabIds: [tab.id],
+            resourceTypes: rules.CHROME_DNR_RESOURCE_TYPES,
+          })
+            .map((rule) => ({ ...rule, id: rule.id + testIdOffset }));
+          const testRuleIds = candidates.map((rule) => rule.id);
+          try {
+            await chrome.declarativeNetRequest.updateSessionRules({
+              removeRuleIds: testRuleIds,
+              addRules: candidates,
+            });
+            const installed = await chrome.declarativeNetRequest.getSessionRules();
+            return {
+              validations,
+              expectedRuleIds: testRuleIds,
+              privateRuleIds: installed
+                .filter((rule) => testRuleIds.includes(rule.id))
+                .map((rule) => rule.id)
+                .sort((left, right) => left - right),
+            };
+          } finally {
+            await chrome.declarativeNetRequest.updateSessionRules({
+              removeRuleIds: testRuleIds,
+            });
+          }
+        })()`, true);
+      const evaluationDetail = JSON.stringify(result);
+      rec.check('Chrome accepts every private-network request regex',
+        result?.validations?.every(({ isSupported }) => isSupported === true) === true,
+        JSON.stringify(result?.validations) ?? evaluationDetail);
+      rec.check('all private-network session rules are installed',
+        JSON.stringify(result?.privateRuleIds) === JSON.stringify(result?.expectedRuleIds), evaluationDetail);
+    },
+  },
+
+  // --- functional: private targets never receive a driven-tab request -----
+  {
+    name: 'browser-network-floor', kind: 'functional', phase: 'post-unlock',
+    responder: (_callIndex, request) => {
+      const body = request?.postData ?? '';
+      if (body.includes('<actor_agent>')) {
+        if (networkGuardActorTurn > 0) {
+          const results = toolResultsIn(body).join('\n');
+          networkGuardActorResult = results;
+          if (networkGuardActorTask === 'open' && results.includes('network-guard-controller')) {
+            networkGuardActorReady = true;
+          }
+          if (networkGuardActorTask === 'trusted-blank-burst' && results.includes('clicked')) {
+            networkGuardTrustedBurstComplete = true;
+          }
+        }
+        const turn = networkGuardActorTurn++;
+        if (body.includes('tools: page_code')) {
+          if (turn === 0) {
+            return { sse: sseToolCall('page_code', {
+              code: networkGuardActorTask === 'trusted-blank-burst'
+                ? 'await page.snapshot(); return await page.click("@e1");'
+                : `await page.goto(${JSON.stringify(networkGuardFixtureUrl)}); return await page.content();`,
+            }) };
+          }
+          return { sse: sseText('The network guard controller is ready.') };
+        }
+        if (turn === 0) return { sse: sseToolCall('navigate', { url: networkGuardFixtureUrl }) };
+        if (turn === 1) return { sse: sseToolCall('read_page', {}) };
+        return { sse: sseText('The network guard controller is ready.') };
+      }
+      if (!networkGuardDelegated) {
+        networkGuardDelegated = true;
+        return { sse: sseToolCall('message_actor', {
+          to: 'web',
+          message: networkGuardActorTask === 'trusted-blank-burst'
+            ? 'Click the only button on the current controller page.'
+            : `Open ${networkGuardFixtureUrl} and report when the controller is ready.`,
+        }) };
+      }
+      return { sse: sseText('The browser network test is delegated.') };
+    },
+    async run(ctx, rec) {
+      networkGuardActorTurn = 0;
+      networkGuardDelegated = false;
+      networkGuardActorReady = false;
+      networkGuardActorResult = '';
+      networkGuardActorTask = 'open';
+      networkGuardTrustedBurstComplete = false;
+      let probeConnections = 0;
+      let probeRequests = [];
+      let controllerRequests = 0;
+      const controllerAttempts = new Set();
+      const probeServer = createServer((req, res) => {
+        probeRequests.push(req.url ?? '/');
+        res.writeHead(204, { connection: 'close' });
+        res.end();
+      });
+      probeServer.on('connection', () => { probeConnections += 1; });
+      probeServer.on('upgrade', (req, socket) => {
+        probeRequests.push(req.url ?? '/');
+        socket.destroy();
+      });
+      const controllerServer = createServer((req, res) => {
+        controllerRequests += 1;
+        const requestUrl = new URL(req.url ?? '/', 'http://orders.peerd.test');
+        if (requestUrl.pathname === '/attempt') {
+          controllerAttempts.add(requestUrl.searchParams.get('vector') ?? '');
+          res.writeHead(204);
+          res.end();
+          return;
+        }
+        if (requestUrl.pathname === '/worker.js') {
+          res.writeHead(200, {
+            'content-type': 'application/javascript',
+            'service-worker-allowed': '/',
+            'cache-control': 'no-store',
+          });
+          res.end(`self.addEventListener('install', () => self.skipWaiting());
+            self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+            self.addEventListener('message', (event) => {
+              const { fetchUrl, socketUrl, token } = event.data || {};
+              event.waitUntil((async () => {
+                await fetch('/attempt?vector=worker-' + encodeURIComponent(token)
+                  + '-websocket-' + typeof WebSocket, { cache: 'no-store' });
+                void fetch(fetchUrl, { mode: 'no-cors', cache: 'no-store' }).catch(() => {});
+                try { void new WebSocket(socketUrl); } catch { /* reported by raw probe */ }
+              })());
+            });`);
+          return;
+        }
+        res.setHeader('content-type', 'text/html');
+        res.setHeader('connection', 'close');
+        if (requestUrl.pathname === '/redirect') {
+          const target = `http://127.0.0.1:${probePort}/probe?vector=redirect`;
+          res.writeHead(302, { location: target });
+          res.end();
+          return;
+        }
+        if (requestUrl.pathname === '/meta') {
+          const target = `http://127.0.0.1:${probePort}/probe?vector=meta`;
+          res.end(`<!doctype html><meta http-equiv="refresh" content="0;url=${target}">`);
+          return;
+        }
+        if (requestUrl.pathname === '/script') {
+          const target = `http://127.0.0.1:${probePort}/probe?vector=script`;
+          res.end(`<!doctype html><script>location.href=${JSON.stringify(target)}<\/script>`);
+          return;
+        }
+        if (requestUrl.pathname === '/cross-frame-popup') {
+          const target = `http://127.0.0.1:${probePort}/probe?vector=cross-frame-popup`;
+          res.end(`<!doctype html><script>
+            navigator.sendBeacon('/attempt?vector=cross-frame-popup');
+            const link = document.createElement('a');
+            link.href = ${JSON.stringify(target)};
+            link.target = '_blank';
+            document.body.append(link);
+            link.click();
+          <\/script>`);
+          return;
+        }
+        if (requestUrl.pathname === '/cross-frame-blank') {
+          const target = `http://127.0.0.1:${probePort}/probe?vector=cross-frame-blank`;
+          res.end(`<!doctype html><script>
+            const name = 'private-child-' + Math.random();
+            const link = document.createElement('a');
+            link.href = 'about:blank';
+            link.target = name;
+            document.body.append(link);
+            link.click();
+            const child = window.open('', name);
+            if (child) {
+              navigator.sendBeacon('/attempt?vector=cross-frame-blank');
+              child.fetch(${JSON.stringify(target)}, { mode: 'no-cors' }).catch(() => {});
+            }
+          <\/script>`);
+          return;
+        }
+        const trustedTarget = `http://127.0.0.1:${probePort}/probe?vector=trusted-click-blank`;
+        res.end(`<!doctype html><title>network-guard-controller</title>
+          <h1>network-guard-controller</h1>
+          <button id="trusted-blank-burst">Open child</button>
+          <script>
+            navigator.serviceWorker.register('/worker.js');
+            document.querySelector('#trusted-blank-burst').addEventListener('click', () => {
+              const child = window.open(${JSON.stringify(trustedTarget)}, 'trusted-private-child');
+              if (!child) return;
+              navigator.sendBeacon('/attempt?vector=trusted-click-blank');
+              child.fetch(${JSON.stringify(trustedTarget)}, { mode: 'no-cors' }).catch(() => {});
+            });
+          <\/script>`);
+      });
+      await Promise.all([
+        new Promise((resolve) => probeServer.listen(0, '127.0.0.1', resolve)),
+        new Promise((resolve, reject) => controllerServer
+          .once('error', reject)
+          .listen(NETWORK_GUARD_CONTROLLER_PORT, '127.0.0.1', resolve)),
+      ]);
+      const probePort = /** @type {{ port: number }} */ (probeServer.address()).port;
+      networkGuardFixtureUrl = `http://orders.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT}/`;
+      const resetProbe = async () => {
+        await sleep(100);
+        probeConnections = 0;
+        probeRequests = [];
+      };
+      try {
+        const fixtureTab = await evalIn(ctx.page, `(async () => {
+          const tab = await chrome.tabs.create({ active: false });
+          try {
+            const updated = await chrome.tabs.update(tab.id, {
+              url: ${JSON.stringify(networkGuardFixtureUrl)},
+            });
+            return { tab, updated };
+          } catch (error) {
+            return { tab, error: String(error) };
+          }
+        })()`, true);
+        await waitFor(() => controllerRequests > 0, { budgetMs: 5_000, pollMs: 25 });
+        rec.check('the public-looking controller fixture resolves locally',
+          controllerRequests > 0, JSON.stringify({ controllerRequests, fixtureTab }));
+        if (typeof fixtureTab?.tab?.id === 'number') {
+          await evalIn(ctx.page, `chrome.tabs.remove(${fixtureTab.tab.id})`, true).catch(() => {});
+        }
+
+        const sent = await rpc(ctx.page, {
+          type: 'agent/send',
+          text: 'Open the browser network test controller and wait.',
+        });
+        rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+        const actorReady = await waitFor(() => networkGuardActorReady, {
+          budgetMs: 30_000, pollMs: 100,
+        });
+        rec.check('the web actor loaded the public controller',
+          actorReady === true, networkGuardActorResult.slice(0, 2000));
+        const tabs = await evalIn(ctx.page, `chrome.tabs.query({}).then((items) => items.map(({ id, url, openerTabId }) => ({ id, url, openerTabId })))`, true);
+        const drivenTab = tabs.find((tab) => tab.url?.startsWith(networkGuardFixtureUrl));
+        const networkGuardDiagnostics = typeof drivenTab?.id === 'number'
+          ? null
+          : await evalIn(ctx.page, `(async () => {
+            const definitions = await import(chrome.runtime.getURL('peerd-egress/denylist/dnr-rules.js'));
+            const rules = (await chrome.declarativeNetRequest.getSessionRules())
+              .filter((rule) => definitions.PRIVATE_NETWORK_RULE_IDS.includes(rule.id));
+            const guardedTabIds = [...new Set(rules.flatMap((rule) => rule.condition?.tabIds ?? []))];
+            const matches = [];
+            for (const tabId of guardedTabIds) {
+              matches.push({
+                tabId,
+                outcome: await chrome.declarativeNetRequest.testMatchOutcome({
+                  url: ${JSON.stringify(networkGuardFixtureUrl)},
+                  type: 'main_frame',
+                  tabId,
+                }),
+              });
+            }
+            return { guardedTabIds, matches, rules };
+          })()`, true).catch((error) => ({ error: String(error) }));
+        rec.check('the controller is owned by the production web actor',
+          typeof drivenTab?.id === 'number', JSON.stringify({ tabs, networkGuardDiagnostics }));
+        if (typeof drivenTab?.id !== 'number') throw new Error('driven controller tab not found');
+        const productionRules = await evalIn(ctx.page, `(async () => {
+          const rules = await import(chrome.runtime.getURL('peerd-egress/denylist/dnr-rules.js'));
+          const installed = await chrome.declarativeNetRequest.getSessionRules();
+          return {
+            expected: rules.PRIVATE_NETWORK_RULE_IDS,
+            scoped: installed
+              .filter((rule) => rules.PRIVATE_NETWORK_RULE_IDS.includes(rule.id)
+                && rule.condition?.tabIds?.includes(${drivenTab.id}))
+              .map((rule) => rule.id)
+              .sort((left, right) => left - right),
+          };
+        })()`, true);
+        rec.check('production private-network rules are scoped to the driven tab',
+          JSON.stringify(productionRules.scoped) === JSON.stringify(productionRules.expected),
+          JSON.stringify(productionRules));
+
+        const baselineUrl = `http://127.0.0.1:${probePort}/probe?vector=user-tab`;
+        const userTab = await evalIn(ctx.page, `chrome.tabs.create({ url: ${JSON.stringify(baselineUrl)}, active: false })`, true);
+        await waitFor(() => probeRequests.length > 0, { budgetMs: 5_000, pollMs: 25 });
+        rec.check('an ordinary user tab can still reach the private probe',
+          probeRequests.length > 0 && probeConnections > 0,
+          JSON.stringify({ probeConnections, probeRequests }));
+        if (typeof userTab?.id === 'number') {
+          await evalIn(ctx.page, `chrome.tabs.remove(${userTab.id})`, true).catch(() => {});
+        }
+
+        await resetProbe();
+        networkGuardActorTask = 'trusted-blank-burst';
+        networkGuardActorTurn = 0;
+        networkGuardDelegated = false;
+        networkGuardActorResult = '';
+        networkGuardTrustedBurstComplete = false;
+        const burstTabIdsBefore = new Set((await evalIn(ctx.page,
+          'chrome.tabs.query({}).then((tabs) => tabs.map((tab) => tab.id))', true))
+          .filter((id) => typeof id === 'number'));
+        const burstSent = await rpc(ctx.page, {
+          type: 'agent/send',
+          text: 'Click the controller button once.',
+        });
+        rec.check('trusted child-burst turn accepted', !!burstSent?.ok, JSON.stringify(burstSent));
+        const burstComplete = await waitFor(() => networkGuardTrustedBurstComplete, {
+          budgetMs: 30_000, pollMs: 100,
+        });
+        await sleep(800);
+        const burstTabs = await evalIn(ctx.page, `chrome.tabs.query({}).then((tabs) =>
+          tabs.map(({ id, openerTabId, url, pendingUrl, status }) => ({ id, openerTabId, url, pendingUrl, status })))`, true);
+        const burstObserved = {
+          completed: burstComplete === true,
+          attempted: controllerAttempts.has('trusted-click-blank'),
+          connections: probeConnections,
+          requests: [...probeRequests],
+          tabs: burstTabs,
+        };
+        rec.check('the trusted click reaches its about:blank child action',
+          burstObserved.completed && burstObserved.attempted, JSON.stringify(burstObserved));
+        rec.check('Chrome immediate-child race remains visible with native local-network checks disabled',
+          burstObserved.requests.some((request) => request.includes('trusted-click-blank')),
+          JSON.stringify(burstObserved));
+        rec.check('the protected child is closed instead of left as a blank tab',
+          !burstTabs.some((tab) => !burstTabIdsBefore.has(tab.id) && tab.openerTabId === drivenTab.id),
+          JSON.stringify(burstTabs));
+        rec.check('the source actor receives the fixed child policy outcome',
+          networkGuardActorResult.includes('protected_child_navigation')
+            && networkGuardActorResult.includes('closed')
+            && !networkGuardActorResult.includes(`127.0.0.1:${probePort}`),
+          networkGuardActorResult.slice(0, 2000));
+
+        const runVector = async (vector) => {
+          await resetProbe();
+          const target = `${vector === 'websocket' ? 'ws' : 'http'}://127.0.0.1:${probePort}/probe?vector=${vector}`;
+          await evalIn(ctx.page, `(async () => chrome.scripting.executeScript({
+            target: { tabId: ${drivenTab.id} },
+            world: 'MAIN',
+            func: (kind, privateTarget, publicBase) => {
+              const frame = (url, name = '') => {
+                const node = document.createElement('iframe');
+                if (name) node.name = name;
+                node.hidden = true;
+                node.src = url;
+                document.body.append(node);
+                return node;
+              };
+              if (kind === 'fetch') fetch(privateTarget).catch(() => {});
+              if (kind === 'websocket') new WebSocket(privateTarget);
+              if (kind === 'image') {
+                const image = new Image();
+                image.src = privateTarget;
+                document.body.append(image);
+              }
+              if (kind === 'form') {
+                const name = 'private-probe-frame';
+                frame('about:blank', name);
+                const form = document.createElement('form');
+                form.method = 'post';
+                form.action = privateTarget;
+                form.target = name;
+                document.body.append(form);
+                form.submit();
+              }
+              if (['redirect', 'meta', 'script'].includes(kind)) {
+                frame(publicBase + kind);
+              }
+              if (kind === 'popup') {
+                const link = document.createElement('a');
+                link.href = privateTarget;
+                link.target = '_blank';
+                document.body.append(link);
+                link.click();
+              }
+              if (kind === 'cross-frame-popup') {
+                const crossOrigin = publicBase.replace('orders.peerd.test', 'acct.peerd.test');
+                frame(crossOrigin + 'cross-frame-popup');
+              }
+              if (kind === 'cross-frame-blank') {
+                const crossOrigin = publicBase.replace('orders.peerd.test', 'acct.peerd.test');
+                frame(crossOrigin + 'cross-frame-blank');
+              }
+              if (kind === 'location') location.href = privateTarget;
+            },
+            args: [${JSON.stringify(vector)}, ${JSON.stringify(target)}, ${JSON.stringify(networkGuardFixtureUrl)}],
+          }))()`, true);
+          await sleep(800);
+          const observed = {
+            connections: probeConnections,
+            requests: [...probeRequests],
+            attempted: controllerAttempts.has(vector),
+          };
+          if (['popup', 'cross-frame-popup', 'cross-frame-blank'].includes(vector)) {
+            const children = await evalIn(ctx.page, `chrome.tabs.query({}).then((items) => items.filter((tab) => tab.openerTabId === ${drivenTab.id}).map((tab) => tab.id))`, true);
+            for (const childId of children) {
+              await evalIn(ctx.page, `chrome.tabs.remove(${childId})`, true).catch(() => {});
+            }
+          }
+          return observed;
+        };
+
+        for (const vector of [
+          'fetch', 'websocket', 'image', 'form', 'redirect', 'meta', 'script',
+          'popup', 'cross-frame-popup', 'cross-frame-blank', 'location',
+        ]) {
+          const observed = await runVector(vector);
+          if (vector === 'cross-frame-popup') {
+            rec.check(`${vector} reaches its cross-origin action`, observed.attempted === true,
+              JSON.stringify(observed));
+          }
+          rec.check(`${vector} causes no private TCP or HTTP side effect`,
+            observed.connections === 0 && observed.requests.length === 0,
+            JSON.stringify(observed));
+        }
+
+        // A blocked top-level navigation can leave Chrome displaying its
+        // network error document. Return to the controlled fixture before the
+        // worker lane so the test exercises the page worker, not an error page.
+        await evalIn(ctx.page,
+          `chrome.tabs.update(${drivenTab.id}, { url: ${JSON.stringify(networkGuardFixtureUrl)} })`, true);
+        await waitFor(() => evalIn(ctx.page, `chrome.tabs.get(${drivenTab.id}).then((tab) =>
+          tab.status === 'complete' && tab.url === ${JSON.stringify(networkGuardFixtureUrl)})`, true), {
+          budgetMs: 5_000, pollMs: 25,
+        });
+
+        const workerRuleShape = await evalIn(ctx.page, `(async () => {
+          const policy = await import(chrome.runtime.getURL('peerd-egress/index.js'));
+          const rules = await chrome.declarativeNetRequest.getSessionRules();
+          return rules.filter((rule) => policy.PRIVATE_NETWORK_INITIATOR_RULE_IDS.includes(rule.id));
+        })()`, true);
+        rec.check('the worker fetch floor is no-tab and limited to a visited page domain',
+          workerRuleShape.length > 0 && workerRuleShape.every((rule) =>
+            JSON.stringify(rule.condition?.tabIds) === JSON.stringify([-1])
+              && JSON.stringify(rule.condition?.initiatorDomains) === JSON.stringify(['orders.peerd.test'])),
+          JSON.stringify(workerRuleShape));
+        const initiatorOutcomes = await evalIn(ctx.page, `Promise.all([
+          chrome.declarativeNetRequest.testMatchOutcome({
+            url: ${JSON.stringify(`http://127.0.0.1:${probePort}/probe?vector=dnr-match`)},
+            type: 'xmlhttprequest', tabId: -1,
+            initiator: ${JSON.stringify(new URL(networkGuardFixtureUrl).origin)},
+          }),
+          chrome.declarativeNetRequest.testMatchOutcome({
+            url: ${JSON.stringify(`http://127.0.0.1:${probePort}/probe?vector=dnr-miss`)},
+            type: 'xmlhttprequest', tabId: -1,
+            initiator: ${JSON.stringify(new URL(networkGuardFixtureUrl.replace('orders.peerd.test', 'acct.peerd.test')).origin)},
+          }),
+          chrome.declarativeNetRequest.testMatchOutcome({
+            url: ${JSON.stringify(`ws://127.0.0.1:${probePort}/probe?vector=dnr-socket-match`)},
+            type: 'websocket', tabId: -1,
+            initiator: ${JSON.stringify(new URL(networkGuardFixtureUrl).origin)},
+          }),
+        ])`, true).catch((error) => ({ error: String(error) }));
+        rec.check('Chrome matches the no-tab rule only for the custodied initiator',
+          Array.isArray(initiatorOutcomes)
+            && initiatorOutcomes[0]?.matchedRules?.length > 0
+            && initiatorOutcomes[1]?.matchedRules?.length === 0
+            && initiatorOutcomes[2]?.matchedRules?.some(({ ruleId }) => ruleId >= 100),
+          JSON.stringify(initiatorOutcomes));
+
+        const attachWorkerMonitor = async (origin) => {
+          const target = await waitFor(async () => {
+            const targets = await fetch(`http://127.0.0.1:${ctx.port}/json/list`).then((response) => response.json());
+            return targets.find((candidate) => candidate.type === 'service_worker'
+              && candidate.url === `${origin}/worker.js`);
+          }, { budgetMs: 5_000, pollMs: 25 });
+          if (!target) return null;
+          const events = [];
+          const requests = new Map();
+          const connection = await attach(target.webSocketDebuggerUrl, (method, params) => {
+            if (method === 'Network.requestWillBeSent') {
+              requests.set(params.requestId, params.request?.url ?? '');
+            }
+            if (method === 'Network.loadingFailed') {
+              events.push({
+                url: requests.get(params.requestId) ?? '',
+                blockedReason: params.blockedReason ?? '',
+                errorText: params.errorText ?? '',
+              });
+            }
+            if (method === 'Network.webSocketCreated') {
+              events.push({
+                url: params.url ?? '',
+                webSocketCreated: true,
+                initiator: params.initiator ?? null,
+              });
+            }
+          });
+          await connection.send('Network.enable');
+          return { connection, events };
+        };
+        const networkFailureFor = (monitor, token) => monitor?.events
+          .find((event) => event.url.includes(token));
+        const ordersWorkerMonitor = await attachWorkerMonitor(new URL(networkGuardFixtureUrl).origin);
+        rec.check('Chrome exposes the fixture service worker to the network test',
+          ordersWorkerMonitor !== null, JSON.stringify({ monitored: ordersWorkerMonitor !== null }));
+
+        const triggerWorker = async (tabId, token) => evalIn(ctx.page, `(async () => {
+          const [injection] = await chrome.scripting.executeScript({
+            target: { tabId: ${tabId} },
+            world: 'MAIN',
+            func: async (fetchUrl, socketUrl, workerToken) => {
+              const registration = await navigator.serviceWorker.ready;
+              registration.active.postMessage({ fetchUrl, socketUrl, token: workerToken });
+              return { secure: isSecureContext, active: !!registration.active };
+            },
+            args: [
+              ${JSON.stringify(`http://127.0.0.1:${probePort}/probe?vector=worker-fetch-${token}`)},
+              ${JSON.stringify(`ws://127.0.0.1:${probePort}/probe?vector=worker-websocket-${token}`)},
+              ${JSON.stringify(token)},
+            ],
+          });
+          return injection?.result;
+        })()`, true);
+
+        await resetProbe();
+        const guardedWorker = await triggerWorker(drivenTab.id, 'guarded');
+        await waitFor(() => [...controllerAttempts]
+          .some((value) => value === 'worker-guarded-websocket-function'), {
+          budgetMs: 5_000, pollMs: 25,
+        });
+        await sleep(500);
+        const guardedNetworkFailure = networkFailureFor(ordersWorkerMonitor, 'worker-fetch-guarded');
+        rec.check('the public fixture has an active service worker with WebSocket support',
+          guardedWorker?.secure === true && guardedWorker?.active === true
+            && controllerAttempts.has('worker-guarded-websocket-function'),
+          JSON.stringify({ guardedWorker, attempts: [...controllerAttempts] }));
+        rec.check('the custodied page worker fetch causes no private-network side effect',
+          !probeRequests.some((request) => request.includes('worker-fetch-guarded')),
+          JSON.stringify({ probeConnections, probeRequests, events: ordersWorkerMonitor?.events }));
+        rec.check('Chrome reports the custodied worker request as browser-policy blocked',
+          guardedNetworkFailure?.errorText === 'net::ERR_BLOCKED_BY_CLIENT',
+          JSON.stringify(guardedNetworkFailure));
+
+        rec.check('Chrome worker WebSocket bypass remains visible to the regression test',
+          probeRequests.some((request) => request.includes('worker-websocket-guarded')),
+          JSON.stringify({ probeConnections, probeRequests, events: ordersWorkerMonitor?.events }));
+
+        // Characterize the browser boundary directly. If even an unscoped
+        // WebSocket rule does not see this request, adding wider peerd custody
+        // cannot close the gap and would only disrupt unrelated browsing.
+        await evalIn(ctx.page, `chrome.declarativeNetRequest.updateSessionRules({
+          removeRuleIds: [4999],
+          addRules: [{
+            id: 4999,
+            priority: 10,
+            action: { type: 'block' },
+            condition: {
+              regexFilter: ${JSON.stringify('^wss?://(?:[^/]+@)?127\\.')},
+              resourceTypes: ['websocket'],
+            },
+          }],
+        })`, true);
+        await resetProbe();
+        await triggerWorker(drivenTab.id, 'unscoped-diagnostic');
+        await sleep(500);
+        rec.check('Chrome does not expose worker WebSockets to an unscoped DNR block',
+          probeRequests.some((request) => request.includes('worker-websocket-unscoped-diagnostic')),
+          JSON.stringify({ probeConnections, probeRequests, events: ordersWorkerMonitor?.events }));
+        await evalIn(ctx.page, `chrome.declarativeNetRequest.updateSessionRules({
+          removeRuleIds: [4999],
+        })`, true);
+
+        rec.check('the page-domain worker rule does not intercept the extension local provider',
+          ctx.modelCallCount() > 0,
+          JSON.stringify({ modelCalls: ctx.modelCallCount() }));
+
+        const unrelatedUrl = networkGuardFixtureUrl.replace('orders.peerd.test', 'acct.peerd.test');
+        const unrelatedTab = await evalIn(ctx.page,
+          `chrome.tabs.create({ url: ${JSON.stringify(unrelatedUrl)}, active: false })`, true);
+        await waitFor(async () => {
+          if (!Number.isInteger(unrelatedTab?.id)) return false;
+          const tab = await evalIn(ctx.page, `chrome.tabs.get(${unrelatedTab.id})`, true).catch(() => null);
+          return tab?.status === 'complete';
+        }, { budgetMs: 5_000, pollMs: 25 });
+        await resetProbe();
+        const unrelatedWorkerMonitor = await attachWorkerMonitor(new URL(unrelatedUrl).origin);
+        const unrelatedWorker = await triggerWorker(unrelatedTab.id, 'unrelated');
+        await waitFor(() => probeRequests.some((request) => request.includes('worker-fetch-unrelated'))
+          && probeRequests.some((request) => request.includes('worker-websocket-unrelated')),
+        { budgetMs: 5_000, pollMs: 25 });
+        const unrelatedNetworkFailure = networkFailureFor(unrelatedWorkerMonitor, 'worker-fetch-unrelated');
+        rec.check('a different-origin user service worker remains outside peerd DNR custody',
+          unrelatedWorker?.secure === true
+            && probeRequests.some((request) => request.includes('worker-fetch-unrelated'))
+            && probeRequests.some((request) => request.includes('worker-websocket-unrelated')),
+          JSON.stringify({ unrelatedWorker, unrelatedNetworkFailure, probeConnections, probeRequests }));
+        unrelatedWorkerMonitor?.connection.close();
+        await evalIn(ctx.page, `chrome.tabs.remove(${unrelatedTab.id})`, true).catch(() => {});
+
+        await evalIn(ctx.page,
+          `chrome.tabs.update(${drivenTab.id}, { url: ${JSON.stringify(unrelatedUrl)} })`, true);
+        const retainedScope = await waitFor(() => evalIn(ctx.page, `(async () => {
+          const policy = await import(chrome.runtime.getURL('peerd-egress/index.js'));
+          const rules = await chrome.declarativeNetRequest.getSessionRules();
+          const workerRules = rules.filter((rule) => policy.PRIVATE_NETWORK_INITIATOR_RULE_IDS.includes(rule.id));
+          return workerRules.length > 0
+            && workerRules.every((rule) =>
+              JSON.stringify(rule.condition?.initiatorDomains) === JSON.stringify(['acct.peerd.test', 'orders.peerd.test']));
+        })()`, true), { budgetMs: 5_000, pollMs: 25 });
+        rec.check('navigation retains prior worker domains and adds the committed domain',
+          retainedScope === true, JSON.stringify({ retainedScope }));
+
+        const oldOriginTab = await evalIn(ctx.page,
+          `chrome.tabs.create({ url: ${JSON.stringify(networkGuardFixtureUrl)}, active: false })`, true);
+        await sleep(500);
+        await resetProbe();
+        const retainedWorker = await triggerWorker(oldOriginTab.id, 'retained');
+        await sleep(500);
+        const retainedNetworkFailure = networkFailureFor(ordersWorkerMonitor, 'worker-fetch-retained');
+        rec.check('a previously visited worker domain remains guarded after navigation',
+          retainedWorker?.secure === true
+            && retainedNetworkFailure?.errorText === 'net::ERR_BLOCKED_BY_CLIENT'
+            && !probeRequests.some((request) => request.includes('worker-fetch-retained'))
+            && probeRequests.some((request) => request.includes('worker-websocket-retained')),
+          JSON.stringify({ retainedWorker, retainedNetworkFailure, probeConnections, probeRequests }));
+
+        await evalIn(ctx.page, `chrome.tabs.remove(${drivenTab.id})`, true).catch(() => {});
+        const releasedScope = await waitFor(() => evalIn(ctx.page, `(async () => {
+          const policy = await import(chrome.runtime.getURL('peerd-egress/index.js'));
+          const rules = await chrome.declarativeNetRequest.getSessionRules();
+          return rules.every((rule) =>
+            !policy.PRIVATE_NETWORK_INITIATOR_RULE_IDS.includes(rule.id));
+        })()`, true), { budgetMs: 5_000, pollMs: 25 });
+        rec.check('closing custody removes every visited worker-domain rule',
+          releasedScope === true, JSON.stringify({ releasedScope }));
+
+        await resetProbe();
+        const releasedWorker = await triggerWorker(oldOriginTab.id, 'released');
+        await waitFor(() => probeRequests.some((request) => request.includes('worker-fetch-released'))
+          && probeRequests.some((request) => request.includes('worker-websocket-released')),
+        { budgetMs: 5_000, pollMs: 25 });
+        rec.check('after custody closes, worker fetch and WebSocket both reach the private probe',
+          releasedWorker?.secure === true
+            && probeRequests.some((request) => request.includes('worker-fetch-released'))
+            && probeRequests.some((request) => request.includes('worker-websocket-released')),
+          JSON.stringify({ releasedWorker, probeConnections, probeRequests }));
+        await evalIn(ctx.page, `chrome.tabs.remove(${oldOriginTab.id})`, true).catch(() => {});
+        ordersWorkerMonitor?.connection.close();
+      } finally {
+        probeServer.closeAllConnections?.();
+        controllerServer.closeAllConnections?.();
+        probeServer.close();
+        controllerServer.close();
+      }
+    },
+  },
+
+  // --- functional: portable identity through the live SW + offscreen host ---
+  {
+    name: 'portable-identity', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const transferPage = await openWidePage(ctx, 'options/options.html#!/transfer', { ready: '#exppass' });
+      let exported = await privateTransferRpc(transferPage, { type: 'transfer/export', passphrase: PASSPHRASE });
+      if (!exported?.payload?.dweb?.identityRecord) {
+        // The harness initializes a new vault but does not perform the later
+        // unlock wake that normally starts the base network and mints its root.
+        // Seed through the shipped encrypted restore surface. No raw root uses
+        // the generic runtime-message dispatcher.
+        const bootstrap = await evalIn(ctx.page, `(async () => {
+          const dweb = await import('/peerd-distributed/index.js');
+          let value = null;
+          await dweb.createPersistentIdentity({
+            getSecret: async () => null,
+            setSecret: async (_name, next) => { value = next; },
+          });
+          const material = JSON.parse(value);
+          return dweb.createDwebClient().identityRecordExport({
+            material, passphrase: ${JSON.stringify(PASSPHRASE)},
+          });
+        })()`, true);
+        const seeded = await privateTransferRpc(transferPage, {
+          type: 'transfer/import', passphrase: PASSPHRASE,
+          payload: {
+            format: 'peerd-export', version: TRANSFER_EXPORT_VERSION, exportedAt: new Date(0).toISOString(), channel: 'preview',
+            settings: {}, providerEndpoints: null, secrets: null, memory: null,
+            hooks: [], skills: [], dweb: { identityRecord: bootstrap },
+          },
+        });
+        rec.check('test fixture restores only through the encrypted transfer surface',
+          seeded?.ok === true && seeded?.imported?.dwebIdentity === 1, JSON.stringify(seeded));
+        exported = await privateTransferRpc(transferPage, { type: 'transfer/export', passphrase: PASSPHRASE });
+      }
+      const record = exported?.payload?.dweb?.identityRecord;
+      const beforeDid = record?.did ?? null;
+      rec.check('preview identity exists in the unlocked vault',
+        typeof beforeDid === 'string' && beforeDid.startsWith('did:key:'), JSON.stringify(beforeDid));
+      rec.check('live export includes an encrypted identity record',
+        exported?.ok === true && typeof record?.capsule === 'string' && record?.did?.startsWith('did:key:'),
+        JSON.stringify({ ok: exported?.ok, error: exported?.error, did: record?.did }));
+
+      const inspected = await privateTransferRpc(transferPage, { type: 'transfer/inspectImport', payload: exported?.payload });
+      rec.check('pre-flight names the identity and requires its passphrase',
+        inspected?.ok === true && inspected.summary?.hasIdentityRecord === true
+          && inspected.summary?.requiresPassphrase === true && inspected.summary?.identityDid === record?.did,
+        JSON.stringify(inspected?.summary));
+
+      const wrong = await privateTransferRpc(transferPage, {
+        type: 'transfer/import', payload: exported?.payload, passphrase: `${PASSPHRASE}-wrong`,
+      });
+      rec.check('wrong identity passphrase fails closed',
+        wrong?.ok === false && wrong?.error === 'wrong-passphrase', JSON.stringify(wrong));
+
+      const restored = await privateTransferRpc(transferPage, {
+        type: 'transfer/import', payload: exported?.payload, passphrase: PASSPHRASE,
+      });
+      const after = await privateTransferRpc(transferPage, { type: 'transfer/export', passphrase: PASSPHRASE });
+      const afterDid = after?.payload?.dweb?.identityRecord?.did ?? null;
+      rec.check('same-did restore authenticates without replacing the local root',
+        restored?.ok === true && restored.imported?.dwebIdentity === 0
+          && afterDid === beforeDid,
+        JSON.stringify({ restored, beforeDid, afterDid }));
+
+      const incoming = await evalIn(ctx.page, `(async () => {
+        const dweb = await import('/peerd-distributed/index.js');
+        let value = null;
+        await dweb.createPersistentIdentity({
+          getSecret: async () => null,
+          setSecret: async (_name, next) => { value = next; },
+        });
+        const material = JSON.parse(value);
+        const record = await dweb.createDwebClient().identityRecordExport({
+          material, passphrase: ${JSON.stringify(PASSPHRASE)},
+        });
+        return { record, did: record.did };
+      })()`, true);
+      const replacementPayload = {
+        ...exported.payload,
+        settings: {}, providerEndpoints: null, secrets: null,
+        memory: null, hooks: [], skills: [],
+        dweb: { identityRecord: incoming.record },
+      };
+      const conflict = await privateTransferRpc(transferPage, {
+        type: 'transfer/import', payload: replacementPayload, passphrase: PASSPHRASE,
+      });
+      rec.check('a different live identity stops for explicit approval',
+        conflict?.ok === false && conflict?.error === 'dweb-identity-conflict'
+          && conflict.conflict?.existingDid === record.did
+          && conflict.conflict?.incomingDid === incoming.did,
+        JSON.stringify(conflict));
+
+      const replaced = await privateTransferRpc(transferPage, {
+        type: 'transfer/import', payload: replacementPayload, passphrase: PASSPHRASE,
+        replaceDwebIdentity: true,
+        approvedExistingDwebDid: conflict?.conflict?.existingDid,
+        approvedIncomingDwebDid: conflict?.conflict?.incomingDid,
+      });
+      const exportedAfterReplace = await privateTransferRpc(transferPage, {
+        type: 'transfer/export', passphrase: PASSPHRASE,
+      });
+      const storedDid = exportedAfterReplace?.payload?.dweb?.identityRecord?.did ?? null;
+      rec.check('approved replacement commits the incoming permanent identity',
+        replaced?.ok === true && replaced.identityOutcome === 'replaced'
+          && replaced.imported?.dwebIdentity === 1 && storedDid === incoming.did,
+        JSON.stringify({ replaced, storedDid, incomingDid: incoming.did }));
+
+      const restarted = await rpc(ctx.page, { type: 'dweb/base-host/start' });
+      rec.check('the peer host starts under the restored identity after lease release',
+        restarted?.ok === true && restarted?.running === true && restarted?.did === incoming.did,
+        JSON.stringify(restarted));
+      await rec.shot('final');
+      await retirePrivateTransferPage(transferPage);
+    },
+  },
+
+  // --- visual: portable identity backup + destructive restore conflict ------
+  {
+    name: 'options-transfer', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html#!/transfer');
+      try {
+        await waitFor(() => evalIn(page, `!!document.querySelector('#exppass')`),
+          { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        await rec.visualPage('options-transfer', page);
+      } finally { await retirePrivateTransferPage(page); }
+    },
+  },
+  {
+    name: 'options-transfer-conflict', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const seedPage = await openWidePage(ctx, 'options/options.html#!/transfer', { ready: '#exppass' });
+      const localExport = await privateTransferRpc(seedPage, { type: 'transfer/export', passphrase: PASSPHRASE });
+      let localDid = localExport?.payload?.dweb?.identityRecord?.did ?? null;
+      let localReady = !!localDid;
+      if (!localReady) {
+        const record = await evalIn(ctx.page, `(async () => {
+          const dweb = await import('/peerd-distributed/index.js');
+          let value = null;
+          await dweb.createPersistentIdentity({ getSecret: async () => null, setSecret: async (_name, next) => { value = next; } });
+          return dweb.createDwebClient().identityRecordExport({
+            material: JSON.parse(value), passphrase: ${JSON.stringify(PASSPHRASE)},
+          });
+        })()`, true);
+        await privateTransferRpc(seedPage, {
+          type: 'transfer/import', passphrase: PASSPHRASE,
+          payload: {
+            format: 'peerd-export', version: TRANSFER_EXPORT_VERSION, exportedAt: new Date(0).toISOString(), channel: 'preview',
+            settings: {}, providerEndpoints: null, secrets: null, memory: null,
+            hooks: [], skills: [], dweb: { identityRecord: record },
+          },
+        });
+        const postBootstrap = await privateTransferRpc(seedPage, {
+          type: 'transfer/export', passphrase: PASSPHRASE,
+        });
+        localDid = postBootstrap?.payload?.dweb?.identityRecord?.did ?? null;
+        localReady = !!localDid;
+      }
+      await retirePrivateTransferPage(seedPage);
+      const incoming = await evalIn(ctx.page, `(async () => {
+        const dweb = await import('/peerd-distributed/index.js');
+        let value = null;
+        await dweb.createPersistentIdentity({ getSecret: async () => null, setSecret: async (_name, next) => { value = next; } });
+        const material = JSON.parse(value);
+        const record = await dweb.createDwebClient().identityRecordExport({
+          material, passphrase: ${JSON.stringify(PASSPHRASE)},
+        });
+        return { material, record };
+      })()`, true);
+      const payload = {
+        format: 'peerd-export', version: TRANSFER_EXPORT_VERSION, exportedAt: new Date(0).toISOString(), channel: 'preview',
+        // why: keep the complete-value disclosure in the same visual contract
+        // as the destructive conflict. A long recognized array catches both
+        // accidental truncation and wrapping regressions before the user acts.
+        settings: {
+          openrouterModels: [
+            'review/complete-setting-value-that-must-remain-visible-without-ellipsis-or-clipping-0123456789',
+            'review/second-model-preserves-the-array-shape-and-confirms-every-value-is-inspectable',
+          ],
+        },
+        providerEndpoints: null, secrets: null, memory: null, hooks: [], skills: [],
+        dweb: { identityRecord: incoming?.record },
+      };
+      const page = await openWidePage(ctx, 'options/options.html#!/transfer', { ready: '#peerd-backup-file' });
+      try {
+        await evalIn(page, `(() => {
+          const file = new File([${JSON.stringify(JSON.stringify(payload))}], 'identity-backup.json', { type: 'application/json' });
+          const transfer = new DataTransfer();
+          transfer.items.add(file);
+          const input = document.querySelector('#peerd-backup-file');
+          input.files = transfer.files;
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+        })()`);
+        const importReady = await waitFor(() => evalIn(page, `!!document.querySelector('#imppass')`),
+          { budgetMs: 15_000, pollMs: 80 });
+        if (!importReady) {
+          const importState = await evalIn(page, `(() => ({
+            alerts: [...document.querySelectorAll('[role="alert"]')].map((node) => node.textContent),
+            fileCount: document.querySelector('#peerd-backup-file')?.files?.length ?? 0,
+          }))()`);
+          throw new Error(`backup inspection did not settle: ${JSON.stringify(importState)}`);
+        }
+        await evalIn(page, `(() => {
+          const input = document.querySelector('#imppass');
+          input.value = ${JSON.stringify(PASSPHRASE)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        await waitFor(() => evalIn(page, `[...document.querySelectorAll('button')].some((button) => button.textContent === 'Apply import' && !button.disabled)`),
+          { budgetMs: 5_000, pollMs: 50 });
+        await evalIn(page, `[...document.querySelectorAll('button')].find((button) => button.textContent === 'Apply import')?.click()`);
+        await waitFor(() => evalIn(page, `!!document.querySelector('#identity-conflict')`),
+          { budgetMs: 20_000, pollMs: 80 });
+        await evalIn(page, `[...document.querySelectorAll('button')].find((button) => button.textContent === 'Review identity replacement')?.click()`);
+        await waitFor(() => evalIn(page, `!!document.querySelector('#identity-replace-confirmation')`),
+          { budgetMs: 5_000, pollMs: 80 });
+        await evalIn(page, `document.querySelector('.import-setting-values > summary')?.click()`);
+        await waitFor(() => evalIn(page, `(() => {
+          const disclosure = document.querySelector('.import-setting-values');
+          const value = disclosure?.querySelector('code')?.textContent ?? '';
+          return disclosure?.open === true
+            && value.includes('complete-setting-value-that-must-remain-visible')
+            && value.includes('second-model-preserves-the-array-shape');
+        })()`), { budgetMs: 5_000, pollMs: 80 });
+        const state = await evalIn(page, `(() => ({
+          conflict: document.querySelector('#identity-conflict')?.textContent,
+          confirmation: document.querySelector('#identity-replace-confirmation')?.textContent,
+          danger: !!document.querySelector('button.danger'),
+          settingsDisclosureOpen: document.querySelector('.import-setting-values')?.open === true,
+        }))()`);
+        rec.check('destructive identity replacement requires a second confirmation',
+          state?.danger === true && state?.settingsDisclosureOpen === true
+            && /Existing peers will see a new identity/.test(state?.confirmation ?? ''),
+          JSON.stringify({ local: localReady, incoming: !!incoming?.record, state }));
+        await evalIn(page, `document.querySelector('#identity-replace-confirmation')?.scrollIntoView({ block: 'center' })`);
+        const pinIdentityText = () => evalIn(page, `(() => {
+          const fixedExisting = 'did:key:z6MkqSmkPkM5RvkHP9izceLBE3trfq8XZFaLvUA7dgEcon8t';
+          const fixedIncoming = 'did:key:z6MkeWmmVApVUxSNWsrKKvN21QdEpVcHLXG96hfLdrJyKfiC';
+          const replacements = [
+            [${JSON.stringify(localDid)}, fixedExisting],
+            [${JSON.stringify(incoming?.record?.did ?? null)}, fixedIncoming],
+          ].filter(([from]) => typeof from === 'string' && from.length > 0);
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          let node;
+          while ((node = walker.nextNode())) {
+            let text = node.textContent ?? '';
+            for (const [from, to] of replacements) text = text.split(from).join(to);
+            if (text !== node.textContent) node.textContent = text;
+          }
+          const rendered = document.body.textContent ?? '';
+          return rendered.includes(fixedExisting) && rendered.includes(fixedIncoming);
+        })()`);
+        // why: the encrypted identities above must be real to exercise the
+        // conflict path, but fresh keys make the rendered DIDs change on every
+        // run. Pin only their displayed, same-length text after the security
+        // flow completes so the visual gate still guards wrapping and emphasis.
+        const identityTextReady = await waitFor(pinIdentityText, { budgetMs: 5000, pollMs: 50 });
+        if (!identityTextReady) throw new Error('identity conflict text did not settle');
+        await rec.visualPage('options-transfer-conflict', page, { beforeShot: pinIdentityText });
+      } finally { await retirePrivateTransferPage(page); }
     },
   },
 
@@ -294,8 +1293,15 @@ export const STATES = [
       // request that carries the read_page RESULT (the page's own order text rides
       // back here) as the load-bearing proof it genuinely read the live page.
       if (body.includes('<actor_agent>')) {
-        if (body.includes('Coffee Mug')) harvestActorSawPage = body;
+        if (harvestActorTurn > 0) harvestActorSawPage = toolResultsIn(body).join('\n');
         const t = harvestActorTurn++;
+        if (body.includes('tools: page_code')) {
+          harvestActorUsedCode = true;
+          if (t === 0) return { sse: sseToolCall('page_code', {
+            code: `await page.goto(${JSON.stringify(harvestFixtureUrl)}); return await page.content();`,
+          }) };
+          return { sse: sseText('Order #1001 — Coffee Mug — $12.00; Order #1002 — Notebook — $8.50; Order #1003 — Pen Set — $15.00') };
+        }
         if (t === 0) return { sse: sseToolCall('navigate', { url: harvestFixtureUrl }) };
         if (t === 1) return { sse: sseToolCall('read_page', {}) };
         return { sse: sseText('Order #1001 — Coffee Mug — $12.00; Order #1002 — Notebook — $8.50; Order #1003 — Pen Set — $15.00') };
@@ -319,14 +1325,14 @@ export const STATES = [
       harvestActorTurn = 0;
       harvestOrchTurn = 0;
       harvestDelegated = false;
-      // Serve the order page over localhost; the WEB ACTOR opens + reads it ITSELF
-      // through the real actor-model path. navigate is NOT under the private-network
-      // SSRF guard (that's fetch_url-only) and localhost isn't denylisted, so the
-      // actor's own tab really loads the fixture — no out-of-band /json/new tab.
+      harvestActorUsedCode = false;
+      // The web actor opens and reads the locally served fixture through the
+      // real actor-model path. The harness maps the reserved .test host to this
+      // server, so product localhost blocking remains active.
       const server = createServer((_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(ORDERS_HTML); });
       await new Promise((r) => server.listen(0, '127.0.0.1', r));
       const fxPort = /** @type {{ port: number }} */ (server.address()).port;
-      harvestFixtureUrl = `http://127.0.0.1:${fxPort}/`;
+      harvestFixtureUrl = `http://orders.peerd.test:${fxPort}/`;
       try {
         const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Index my orders from my orders page and tell me what I spent.' });
         rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
@@ -351,12 +1357,13 @@ export const STATES = [
         }, { budgetMs: 40_000 });
 
         rec.check('the orchestrator delegated the read via message_actor', harvestDelegated === true);
-        rec.check('the web-actor sub-loop ran (navigate → read_page, ≥2 actor model calls)', harvestActorTurn >= 2, `actor turns: ${harvestActorTurn}`);
+        rec.check('the web-actor sub-loop ran (page code + report, ≥2 actor model calls)', harvestActorTurn >= 2, `actor turns: ${harvestActorTurn}`);
+        rec.check('the preview web actor used the code-first page surface', harvestActorUsedCode === true);
         // load-bearing proof: the web actor REALLY read the live page — the page's
         // own order text rode back into the actor's model request via read_page.
         rec.check('the web actor REALLY read the live page (real order data in its read result)',
           harvestActorSawPage.includes('Coffee Mug') && harvestActorSawPage.includes('12.00'),
-          harvestActorSawPage.slice(0, 220));
+          harvestActorSawPage.slice(0, 2000));
         rec.check('the harvested on-device answer renders', (out.bubbles || []).some((b) => /35\.50/.test(b)), JSON.stringify(out.bubbles));
         await rec.shot('final');
       } finally {
@@ -376,6 +1383,13 @@ export const STATES = [
       // lock refuses — so the actor must be told to do something after looking.
       if (body.includes('<actor_agent>')) {
         const t = lockActorTurn++;
+        if (body.includes('tools: page_code')) {
+          if (t === 0) return { sse: sseToolCall('page_code', {
+            code: `await page.goto(${JSON.stringify(`${lockFixtureUrl}login`)}); return await page.snapshot();`,
+          }) };
+          if (t === 1) return { sse: sseToolCall('page_code', { code: 'return await page.snapshot();' }) };
+          return { sse: sseText('LOCK-DID-NOT-FIRE: I read the signed-in page.') };
+        }
         if (t === 0) return { sse: sseToolCall('navigate', { url: `${lockFixtureUrl}login` }) };
         if (t === 1) return { sse: sseToolCall('snapshot', {}) };
         if (t === 2) return { sse: sseToolCall('snapshot', {}) };
@@ -410,10 +1424,8 @@ export const STATES = [
       });
       await new Promise((r) => server.listen(0, '127.0.0.1', r));
       const port = /** @type {{ port: number }} */ (server.address()).port;
-      // Chrome maps *.localhost to loopback (RFC 6761), and unlike a bare IP this
-      // is a host normalizeApiOrigin will canonicalize — so it can be classified.
-      lockFixtureUrl = `http://acme.localhost:${port}/`;
-      const fixtureOrigin = `http://acme.localhost:${port}`;
+      lockFixtureUrl = `http://acme.peerd.test:${port}/`;
+      const fixtureOrigin = `http://acme.peerd.test:${port}`;
       try {
         const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Look at the Acme sign-in page for me.' });
         rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
@@ -451,7 +1463,7 @@ export const STATES = [
         const reportOnly = leadAt >= 0 ? lockReportBody.slice(leadAt, leadAt + 4000) : '';
         rec.check('the report itself was located in the reply', reportOnly.length > 0);
         rec.check('the report carries the ORIGIN only — no path from the refused page',
-          reportOnly.length > 0 && !/acme\.localhost:\\?\/*\d*\/?login/.test(reportOnly) && !reportOnly.includes('/login'),
+          reportOnly.length > 0 && !/acme\.peerd\.test:\\?\/*\d*\/?login/.test(reportOnly) && !reportOnly.includes('/login'),
           reportOnly.slice(0, 600));
 
         // RECOVERY: the stop released the tab, so the same web actor still works.
@@ -472,6 +1484,275 @@ export const STATES = [
     },
   },
 
+  // --- functional: issue 263, a redirected numeric id cannot mint authority --
+  {
+    name: 'numeric-tab-authority', kind: 'functional', phase: 'post-unlock',
+    responder: (_callIndex, request) => {
+      const body = (request && request.postData) || '';
+      numericTabAuthorityRequestBodies.push(body);
+      if (body.includes('<actor_agent>')) {
+        numericTabAuthorityState.actorCallsAfterAddress++;
+        return { sse: sseText('NUMERIC-ACTOR-RAN-ON-SENSITIVE-TAB') };
+      }
+      if (!numericTabAuthorityState.addressed && Number.isInteger(numericTabAuthorityState.tabId)) {
+        numericTabAuthorityState.addressed = true;
+        return { sse: sseToolCall('message_actor', {
+          to: String(numericTabAuthorityState.tabId), message: 'Read this page',
+        }) };
+      }
+      if (numericTabAuthorityState.addressed && body.includes('actor_sensitive_tab_requires_site')) {
+        numericTabAuthorityState.refusalBody = body;
+        return { sse: sseText('The redirected numeric tab was refused before actor work.') };
+      }
+      return { sse: sseText('Waiting for the security boundary result.') };
+    },
+    async run(ctx, rec) {
+      numericTabAuthorityState = {
+        addressed: false,
+        tabId: null, refusalBody: '', actorCallsAfterAddress: 0,
+      };
+      let redirectRequests = 0;
+      let loginRequests = 0;
+      let authenticatedInboxRequests = 0;
+      const server = createServer((req, res) => {
+        const host = String(req.headers.host || '').split(':')[0];
+        if (host === 'acme.peerd.test' && req.url === '/redirect') {
+          redirectRequests++;
+          const port = /** @type {{ port: number }} */ (server.address()).port;
+          res.writeHead(302, { location: `http://acct.peerd.test:${port}/inbox` });
+          res.end();
+          return;
+        }
+        if (host === 'acct.peerd.test' && req.url === '/login') {
+          loginRequests++;
+          res.writeHead(200, {
+            'content-type': 'text/html',
+            'set-cookie': 'peerd263=authenticated; Path=/; SameSite=Lax',
+          });
+          res.end(LOGIN_HTML);
+          return;
+        }
+        if (host === 'acct.peerd.test' && req.url === '/inbox'
+            && String(req.headers.cookie || '').includes('peerd263=authenticated')) {
+          authenticatedInboxRequests++;
+          res.writeHead(200, { 'content-type': 'text/html' });
+          res.end('<!doctype html><title>Account inbox</title><p>NUMERIC-SECRET-263</p>');
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'text/html' });
+        res.end(PLAIN_HTML);
+      });
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const port = /** @type {{ port: number }} */ (server.address()).port;
+      numericTabAuthorityRedirectUrl = `http://acme.peerd.test:${port}/redirect`;
+      const accountOrigin = `http://acct.peerd.test:${port}`;
+      numericTabAuthorityRequestBodies = [];
+      try {
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } });
+        const seeded = await rpc(ctx.page, {
+          type: 'debug/originLock', origin: accountOrigin, seedReason: 'password-field',
+        });
+        rec.check('the browser probe seeded the production learned-origin policy',
+          seeded?.learned === true, JSON.stringify(seeded));
+        const alternatePort = await rpc(ctx.page, {
+          type: 'debug/originLock', origin: 'https://acct.peerd.test:9443',
+        });
+        const descendant = await rpc(ctx.page, {
+          type: 'debug/originLock', origin: 'https://child.acct.peerd.test',
+        });
+        const sibling = await rpc(ctx.page, {
+          type: 'debug/originLock', origin: 'https://other.peerd.test',
+        });
+        rec.check('Chrome applies a learned host across schemes and ports',
+          alternatePort?.learned === true, JSON.stringify(alternatePort));
+        rec.check('Chrome applies a learned parent host to descendants',
+          descendant?.learned === true, JSON.stringify(descendant));
+        rec.check('Chrome does not spread a learned host to siblings',
+          sibling?.learned === false, JSON.stringify(sibling));
+        const loginTabId = await evalIn(ctx.page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          const tab = await browser.tabs.create({ active: false, url: ${JSON.stringify(`${accountOrigin}/login`)} });
+          return tab.id;
+        })()`, true);
+        await waitFor(() => loginRequests > 0, { budgetMs: 10_000, pollMs: 50 });
+        if (Number.isInteger(loginTabId)) {
+          await evalIn(ctx.page, `(async () => {
+            const browser = (await import('/vendor/browser-polyfill.js')).default;
+            await browser.tabs.remove(${JSON.stringify(loginTabId)}).catch(() => {});
+          })()`, true);
+        }
+        numericTabAuthorityState.tabId = await evalIn(ctx.page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          const tab = await browser.tabs.create({ active: false, url: ${JSON.stringify(numericTabAuthorityRedirectUrl)} });
+          return tab.id;
+        })()`, true);
+        await waitFor(() => authenticatedInboxRequests > 0, { budgetMs: 10_000, pollMs: 50 });
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Test the redirected account tab.' });
+        rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+        await waitFor(() => numericTabAuthorityState.refusalBody.length > 0,
+          { budgetMs: 60_000, pollMs: 100 });
+        rec.check('the ordinary page issued its cross-origin redirect',
+          redirectRequests > 0, `redirect requests: ${redirectRequests}`);
+        rec.check('the destination loaded authenticated content before addressing',
+          authenticatedInboxRequests > 0, `authenticated requests: ${authenticatedInboxRequests}`);
+        rec.check('numeric addressing returned the stable pre-effect refusal',
+          numericTabAuthorityState.refusalBody.includes('actor_sensitive_tab_requires_site'),
+          numericTabAuthorityState.refusalBody.slice(0, 600));
+        rec.check('no actor model turn started after the numeric address',
+          numericTabAuthorityState.actorCallsAfterAddress === 0,
+          `actor calls: ${numericTabAuthorityState.actorCallsAfterAddress}`);
+        rec.check('the sensitive destination never entered an actor model request',
+          !numericTabAuthorityRequestBodies.some((body) => body.includes('<actor_agent>')
+            || body.includes('NUMERIC-SECRET-263')),
+          numericTabAuthorityRequestBodies.find((body) => body.includes('<actor_agent>')
+            || body.includes('NUMERIC-SECRET-263'))?.slice(0, 300));
+        rec.check('the recovery is origin-only and requires explicit user intent',
+          numericTabAuthorityState.refusalBody.includes(`site:${accountOrigin}`)
+            && numericTabAuthorityState.refusalBody.includes('requiresUserIntent')
+            && !numericTabAuthorityState.refusalBody.includes('/inbox'),
+          numericTabAuthorityState.refusalBody.slice(0, 900));
+        const audits = await auditEntries(ctx);
+        rec.check('the refusal was audited without minting a numeric actor',
+          audits.some((entry) => entry.type === 'actor_tab_authority_refused'
+            && entry.details?.performed === false)
+            && !audits.some((entry) => entry.type === 'actor_minted'
+              && entry.details?.instanceId === String(numericTabAuthorityState.tabId)),
+          JSON.stringify(audits.slice(-20)));
+        const disclosureBefore = await evalIn(ctx.page, `(() => {
+          const header = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')]
+            .find((node) => node.querySelector('.tool-name')?.textContent === 'message_actor');
+          const collapsed = header?.innerText ?? '';
+          const initiallyExpanded = header?.getAttribute('aria-expanded') ?? null;
+          header?.click();
+          return { collapsed, initiallyExpanded };
+        })()`);
+        const disclosureAfter = await waitFor(() => evalIn(ctx.page, `(() => {
+          const header = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')]
+            .find((node) => node.querySelector('.tool-name')?.textContent === 'message_actor');
+          const value = {
+            detail: header?.parentElement?.querySelector('.actor-body .error-line')?.textContent ?? '',
+            expanded: header?.getAttribute('aria-expanded') ?? null,
+          };
+          return value.expanded === 'true' && value.detail ? value : null;
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the human sees a collapsed Not run disclosure with a plain explanation',
+          disclosureBefore?.initiallyExpanded === 'false'
+            && disclosureBefore?.collapsed.includes('Not run')
+            && disclosureAfter?.expanded === 'true'
+            && disclosureAfter?.detail === 'No actor work was started. Review the request before trying again.'
+            && !disclosureAfter.detail.includes('actor_sensitive_tab_requires_site'),
+          JSON.stringify({ disclosureBefore, disclosureAfter }));
+        await rec.shot('final');
+      } finally {
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
+        if (Number.isInteger(numericTabAuthorityState.tabId)) {
+          await evalIn(ctx.page, `(async () => {
+            const browser = (await import('/vendor/browser-polyfill.js')).default;
+            await browser.tabs.remove(${JSON.stringify(numericTabAuthorityState.tabId)}).catch(() => {});
+          })()`, true).catch(() => {});
+        }
+        server.close();
+      }
+    },
+  },
+
+  // --- functional: issue 265, identity providers are transit-only ----------
+  {
+    name: 'idp-transit-authority', kind: 'functional', phase: 'post-unlock',
+    responder: (_callIndex, request) => {
+      const body = (request && request.postData) || '';
+      idpTransitRequestBodies.push(body);
+      if (body.includes('<actor_agent>')) {
+        idpTransitState.actorCalls++;
+        return { sse: sseText('IDP-STANDALONE-ACTOR-SHOULD-NOT-RUN') };
+      }
+      if (idpTransitState.addressed === 0) {
+        idpTransitState.addressed = 1;
+        return { sse: sseToolCall('message_actor', {
+          to: 'site:https://accounts.google.com',
+          message: 'Work directly on this sign-in service',
+        }) };
+      }
+      const latestToolResult = toolResultsIn(body).at(-1) ?? '';
+      if (latestToolResult) {
+        if (idpTransitState.addressed === 1) {
+          idpTransitState.siteRefusal = latestToolResult;
+          idpTransitState.addressed = 2;
+          return { sse: sseToolCall('message_actor', {
+            to: 'https://accounts.google.com',
+            message: 'Use this sign-in service as an API integration',
+          }) };
+        }
+        idpTransitState.bareRefusal = latestToolResult;
+        return { sse: sseText('The sign-in service was kept transit-only.') };
+      }
+      return { sse: sseText('Waiting for the identity-provider boundary result.') };
+    },
+    async run(ctx, rec) {
+      idpTransitState = { addressed: 0, siteRefusal: '', bareRefusal: '', actorCalls: 0 };
+      idpTransitRequestBodies = [];
+      const sent = await rpc(ctx.page, {
+        type: 'agent/send',
+        text: 'Test direct identity-provider actor authority.',
+      });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      await waitFor(() => idpTransitState.siteRefusal && idpTransitState.bareRefusal,
+        { budgetMs: 60_000, pollMs: 100 });
+      const refusalBody = idpTransitState.bareRefusal;
+      rec.check('site and bare-origin addressing returned the transit-only refusal',
+        [idpTransitState.siteRefusal, idpTransitState.bareRefusal].every((result) =>
+          result.includes('actor_identity_provider_transit_only')
+            && result.includes('requiresRelyingSite')
+            && result.includes('suggestedHandle') === false),
+        refusalBody.slice(0, 900));
+      rec.check('the recovery routes through the relying site, not an IdP helper',
+        refusalBody.includes('relying site already named')
+          && refusalBody.includes('If none was named'),
+        refusalBody.slice(0, 900));
+      rec.check('no IdP actor model turn started',
+        idpTransitState.actorCalls === 0
+          && idpTransitRequestBodies.every((body) => !body.includes('<actor_agent>')),
+        `actor calls: ${idpTransitState.actorCalls}`);
+      const audits = await auditEntries(ctx);
+      rec.check('the refusal was audited before actor mint',
+        audits.filter((entry) => entry.type === 'actor_idp_authority_refused'
+          && entry.details?.origin === 'https://accounts.google.com'
+          && entry.details?.performed === false).length >= 2
+          && !audits.some((entry) => entry.type === 'actor_minted'
+            && ['site:https://accounts.google.com', 'https://accounts.google.com'].includes(entry.details?.instanceId)),
+        JSON.stringify(audits.slice(-20)));
+      const disclosureReady = await waitFor(() => evalIn(ctx.page, `(() => {
+        const headers = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')];
+        const header = headers.at(-1);
+        if (!header?.innerText.includes('Not run')) return null;
+        header.click();
+        return {
+          label: header.innerText,
+          args: header.querySelector('.tool-args')?.textContent ?? '',
+          cardClass: header.parentElement?.className ?? '',
+          dotClass: header.querySelector('.tool-status-dot')?.className ?? '',
+        };
+      })()`), { budgetMs: 5_000, pollMs: 50 });
+      const disclosure = disclosureReady ? await waitFor(() => evalIn(ctx.page, `(() => {
+        const header = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')].at(-1);
+        const detail = header?.parentElement?.querySelector('.actor-body .error-line')?.textContent ?? '';
+        return header?.getAttribute('aria-expanded') === 'true' && detail
+          ? { expanded: 'true', detail }
+          : null;
+      })()`), { budgetMs: 5_000, pollMs: 50 }) : null;
+      rec.check('the human sees a generic host-proven Not run explanation',
+        disclosureReady?.label.includes('actor')
+          && disclosureReady?.args === 'actor: "Use this sign-in service as an API inte…"'
+          && disclosureReady?.cardClass.includes('tool-not-run')
+          && disclosureReady?.dotClass.includes('dot-not-run')
+          && disclosure?.expanded === 'true'
+          && disclosure?.detail === 'No actor work was started. Review the request before trying again.'
+          && !disclosure.detail.includes('actor_identity_provider_transit_only'),
+        JSON.stringify({ disclosureReady, disclosure }));
+      await rec.shot('final');
+    },
+  },
+
   // --- functional: issue 251 — the SITE actor the handoff points at -----------
   //
   // The origin-lock state proves a roaming actor is STOPPED and that the report
@@ -483,9 +1764,32 @@ export const STATES = [
     name: 'site-actor', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
       const body = (request && request.postData) || '';
+      if (Number.isInteger(siteNumericTarget)) {
+        if (body.includes('<actor_agent>')) {
+          siteNumericActorCalls++;
+          return { sse: sseText('SITE-NUMERIC-ACTOR-SHOULD-NOT-RUN') };
+        }
+        if (!siteNumericAddressed) {
+          siteNumericAddressed = true;
+          return { sse: sseToolCall('message_actor', {
+            to: String(siteNumericTarget), message: 'Read the bound account page',
+          }) };
+        }
+        if (body.includes('actor_sensitive_tab_requires_site')) {
+          siteNumericRefusalBody = body;
+          return { sse: sseText('The existing site actor stayed bound.') };
+        }
+        return { sse: sseText('Waiting for the preserved site binding result.') };
+      }
       if (body.includes('<actor_agent>')) {
-        if (body.includes('Members only')) siteActorSawPage = body;
+        if (siteActorTurn > 0) siteActorSawPage = toolResultsIn(body).join('\n');
         const t = siteActorTurn++;
+        if (body.includes('tools: page_code')) {
+          if (t === 0) return { sse: sseToolCall('page_code', {
+            code: `await page.goto(${JSON.stringify(`${siteFixtureUrl}account`)}); return await page.content();`,
+          }) };
+          return { sse: sseText('The account page says: Members only — balance 42.') };
+        }
         if (t === 0) return { sse: sseToolCall('navigate', { url: `${siteFixtureUrl}account` }) };
         if (t === 1) return { sse: sseToolCall('read_page', {}) };
         return { sse: sseText('The account page says: Members only — balance 42.') };
@@ -508,6 +1812,10 @@ export const STATES = [
       siteDelegated = false;
       siteReplyBody = '';
       siteActorSawPage = '';
+      siteNumericTarget = null;
+      siteNumericAddressed = false;
+      siteNumericRefusalBody = '';
+      siteNumericActorCalls = 0;
       const server = createServer((_req, res) => {
         res.writeHead(200, { 'content-type': 'text/html' });
         res.end(`<!doctype html><html><head><title>Acme account</title></head><body>
@@ -515,8 +1823,8 @@ export const STATES = [
       });
       await new Promise((r) => server.listen(0, '127.0.0.1', r));
       const port = /** @type {{ port: number }} */ (server.address()).port;
-      siteFixtureUrl = `http://acct.localhost:${port}/`;
-      siteFixtureOrigin = `http://acct.localhost:${port}`;
+      siteFixtureUrl = `http://acct.peerd.test:${port}/`;
+      siteFixtureOrigin = `http://acct.peerd.test:${port}`;
       try {
         const sent = await rpc(ctx.page, { type: 'agent/send', text: 'What is my Acme balance?' });
         rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
@@ -525,10 +1833,10 @@ export const STATES = [
 
         rec.check('the site: handle RESOLVED to a real actor that ran a turn',
           siteActorTurn >= 2, `actor turns: ${siteActorTurn}`);
-        // Load-bearing: a fetch-only API integration has NO DOM tools, so read_page
-        // returning the page's own text proves the handle reached a TAB-backed
+        // Load-bearing: a fetch-only API integration has NO page client, so page
+        // content returning the live text proves the handle reached a TAB-backed
         // helper — the distinction the whole `site:` prefix exists to make.
-        rec.check('it is TAB-backed — it really drove a page (read_page returned the live text)',
+        rec.check('it is TAB-backed — it really drove a page (page content returned the live text)',
           siteActorSawPage.includes('Members only'), siteActorSawPage.slice(0, 200));
         rec.check('the reply reached the orchestrator as a SUCCESS, not a lock stop',
           siteReplyBody.includes('you messaged has replied'), siteReplyBody.slice(0, 200));
@@ -538,8 +1846,38 @@ export const STATES = [
           !state || state.siteActorState?.mode === 'bound', JSON.stringify(state));
         rec.check('and it owns exactly that origin',
           !state || state.siteActorState?.ownedOrigin === siteFixtureOrigin, JSON.stringify(state));
+        rec.check('the site actor exposes its browser-owned tab id only to the debug probe',
+          Number.isInteger(state?.siteActorTabId), JSON.stringify(state));
+
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } });
+        const seeded = await rpc(ctx.page, {
+          type: 'debug/originLock', origin: siteFixtureOrigin, seedReason: 'password-field',
+        });
+        siteNumericTarget = seeded?.siteActorTabId;
+        const beforeNumeric = seeded?.siteActorState;
+        await waitFor(async () => !(await probe(ctx)).busy,
+          { budgetMs: 10_000, pollMs: 100 });
+        const numericSent = await rpc(ctx.page, {
+          type: 'agent/send', text: 'Test the existing account tab by numeric id.',
+        });
+        rec.check('the existing-binding numeric probe starts',
+          numericSent?.ok === true && Number.isInteger(siteNumericTarget), JSON.stringify(numericSent));
+        await waitFor(() => siteNumericRefusalBody.length > 0,
+          { budgetMs: 45_000, pollMs: 100 });
+        const afterNumeric = await rpc(ctx.page, {
+          type: 'debug/originLock', origin: siteFixtureOrigin,
+        });
+        rec.check('numeric refusal starts no actor turn against the existing site tab',
+          siteNumericActorCalls === 0, `actor calls: ${siteNumericActorCalls}`);
+        rec.check('numeric refusal preserves the existing site actor binding and origin lock',
+          afterNumeric?.siteActorTabId === siteNumericTarget
+            && afterNumeric?.siteActorState?.mode === 'bound'
+            && afterNumeric?.siteActorState?.ownedOrigin === siteFixtureOrigin
+            && JSON.stringify(afterNumeric.siteActorState) === JSON.stringify(beforeNumeric),
+          JSON.stringify({ beforeNumeric, afterNumeric }));
         await rec.shot('final');
       } finally {
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
         server.close();
       }
     },
@@ -722,11 +2060,172 @@ export const STATES = [
     },
   },
 
+  // --- functional: Contributor Metrics human consent lifecycle --------------
+  {
+    name: 'contributor-consent-lifecycle', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html#!/contributor-metrics');
+      const stored = () => evalIn(page, `(async () => {
+        const browser = (await import('/vendor/browser-polyfill.js')).default;
+        return browser.storage.local.get(['contributor_metrics.aggregate.v1']);
+      })()`, true);
+      try {
+        await waitFor(() => evalIn(page, `document.querySelector('.contributor-metrics') !== null`),
+          { budgetMs: 15_000, pollMs: 80 });
+        const before = await stored();
+        rec.check('fresh/default and prior actor/model activity create no contribution state',
+          Object.keys(before ?? {}).length === 0, JSON.stringify(before));
+
+        // A tab-hosted copy of the panel is first-party, but it is not the
+        // browser-owned side panel. Its observed feedback command must buy no
+        // consent capability and must not create aggregate state.
+        const forged = await evalIn(ctx.page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          return browser.runtime.sendMessage({ type: 'contributor/enable' });
+        })()`, true);
+        rec.check('non-Options first-party pages cannot enable contribution',
+          forged?.ok === false && forged?.error === 'trusted-options-sender-required',
+          JSON.stringify(forged));
+        rec.check('a rejected enable remains storage-inert',
+          Object.keys(await stored()).length === 0, JSON.stringify(await stored()));
+
+        await evalIn(page, `(() => [...document.querySelectorAll('button')]
+          .find((button) => button.textContent === 'Enable Contributor Metrics')?.click())()`);
+        await waitFor(() => evalIn(page, `document.querySelector('.contributor-payload') !== null`),
+          { budgetMs: 8_000, pollMs: 80 });
+        const active = await stored();
+        const record = active?.['contributor_metrics.aggregate.v1'];
+        rec.check('the exact Options button creates one atomic consent+aggregate record',
+          Object.keys(active ?? {}).length === 1
+            && record?.version === 1
+            && record?.consent?.enabled === true
+            && record?.consent?.schemaVersion === 1
+            && record?.consent?.disclosureVersion === 1
+            && record?.aggregate?.version === 1
+            && Object.keys(record?.aggregate?.rows ?? {}).length === 0,
+          JSON.stringify(active));
+
+        await evalIn(page, `(() => [...document.querySelectorAll('button')]
+          .find((button) => button.textContent === 'Disable and clear')?.click())()`);
+        await waitFor(() => evalIn(page, `document.querySelector('.contributor-payload') === null`),
+          { budgetMs: 8_000, pollMs: 80 });
+        const cleared = await stored();
+        rec.check('disable revokes consent and clears all pending local state',
+          Object.keys(cleared ?? {}).length === 0, JSON.stringify(cleared));
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
   // (A rate-limit/retry-banner state is deferred: the keyless Ollama adapter
   // doesn't retry 429 — only the keyed OpenRouter/Anthropic adapters do — so
   // exercising the retry banner needs a keyed provider wired into the harness.
   // Likewise tool-use rendering is already covered by the goal state's
   // complete_goal card; a distinct safe-tool state is a later add.)
+
+  // Functional and rendered coverage for the page-aware fresh-chat starter.
+  // A protected foreground page must produce a readable policy receipt, not a
+  // task that the host will refuse after the user clicks it.
+  {
+    name: 'protected-page-starter', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const server = createServer((_request, response) => {
+        response.writeHead(200, { 'content-type': 'text/html' });
+        response.end('<!doctype html><title>Private fixture</title><p>private fixture</p>');
+      });
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const privateUrl = `http://127.0.0.1:${/** @type {{ port: number }} */ (server.address()).port}/private`;
+      const priorActive = await evalIn(ctx.page, `(async () =>
+        (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id ?? null)()`, true);
+      let protectedTabId = null;
+      try {
+        protectedTabId = await evalIn(ctx.page, `(async () =>
+          (await chrome.tabs.create({ url: ${JSON.stringify(privateUrl)}, active: true })).id)()`, true);
+        const starter = await waitFor(() => evalIn(ctx.page, `(() => {
+          const card = [...document.querySelectorAll('button.path-card')]
+            .find((candidate) => candidate.dataset.path === 'web');
+          if (!card || !card.textContent.includes('Protected')) return null;
+          const style = getComputedStyle(card);
+          return {
+            text: card.textContent.trim(),
+            disabled: card.disabled,
+            label: card.getAttribute('aria-label') || '',
+            opacity: style.opacity,
+            filter: style.filter,
+          };
+        })()`), { budgetMs: 8_000, pollMs: 50 });
+        const diagnostics = starter ?? await evalIn(ctx.page, `(async () => ({
+          activeTabs: (await chrome.tabs.query({ active: true, currentWindow: true }))
+            .map((tab) => ({ id: tab.id, url: tab.url, pendingUrl: tab.pendingUrl })),
+          status: document.querySelector('.empty-state')?.dataset.activeTabStatus || '',
+          cards: [...document.querySelectorAll('button.path-card')]
+            .map((card) => ({ path: card.dataset.path, text: card.textContent.trim() })),
+        }))()`, true);
+        rec.check('a private foreground page replaces the summarize starter',
+          starter?.disabled === true
+            && starter?.text.includes('private-network page')
+            && !starter?.text.includes('Summarize the current page'),
+          JSON.stringify(diagnostics));
+        rec.check('the protected starter remains readable and names the policy',
+          starter?.opacity === '1'
+            && starter?.filter === 'none'
+            && starter?.label.includes('peerd will not read or automate it'),
+          JSON.stringify(diagnostics));
+        // The harness hosts the side panel in a tab. Bringing that tab to the
+        // foreground would correctly replace the private-page receipt before
+        // capture, unlike a real side panel which stays beside the active tab.
+        await rec.shotPage('protected-page-starter', ctx.page, { bringToFront: false });
+      } finally {
+        if (Number.isInteger(protectedTabId)) {
+          await evalIn(ctx.page, `chrome.tabs.remove(${JSON.stringify(protectedTabId)}).catch(() => {})`, true).catch(() => {});
+        }
+        if (Number.isInteger(priorActive)) {
+          await evalIn(ctx.page, `chrome.tabs.update(${JSON.stringify(priorActive)}, { active: true }).catch(() => {})`, true).catch(() => {});
+        }
+        await new Promise((resolve) => server.close(resolve));
+      }
+    },
+  },
+
+  // --- functional + visual artifact: protected-tab notice ------------------
+  {
+    name: 'protected-tab-notice', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex) => callIndex === 0
+      ? { sse: sseToolCall('open_tab', {}) }
+      : { sse: sseText('The protected tab is ready.') },
+    async run(ctx, rec) {
+      const before = await evalIn(ctx.page, `(async () =>
+        (await chrome.tabs.query({})).map((tab) => tab.id).filter(Number.isInteger))()`);
+      try {
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Open a protected blank tab.' });
+        rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+        const notice = await waitFor(() => evalIn(ctx.page, `(() => {
+          const row = document.querySelector('.agent-tab-notice');
+          return row ? {
+            primary: row.querySelector('.agent-tab-notice-text')?.textContent?.trim() || '',
+            detail: row.querySelector('.agent-tab-notice-detail')?.textContent?.trim() || '',
+            go: row.querySelector('.agent-tab-notice-go')?.textContent?.trim() || '',
+          } : null;
+        })()`), { budgetMs: 20_000 });
+        rec.check('the notice identifies the task tab without warning language',
+          notice?.primary?.includes('task tab')
+            && !notice.primary.includes('protected'), JSON.stringify(notice));
+        rec.check('the notice explains safeguards without unsupported isolation claims',
+          notice?.detail === 'This task tab uses additional browser safeguards.',
+          JSON.stringify(notice));
+        rec.check('the Go action remains available', notice?.go === 'Go ↗', JSON.stringify(notice));
+        await rec.shot('protected-tab-notice');
+      } finally {
+        await evalIn(ctx.page, `(async () => {
+          const before = new Set(${JSON.stringify(before)});
+          const tabs = await chrome.tabs.query({});
+          await Promise.all(tabs.filter((tab) => Number.isInteger(tab.id) && !before.has(tab.id))
+            .map((tab) => chrome.tabs.remove(tab.id).catch(() => {})));
+        })()`, true).catch(() => {});
+      }
+    },
+  },
 
   // --- visual: a completed assistant turn ------------------------------------
   {
@@ -736,6 +2235,215 @@ export const STATES = [
       await rpc(ctx.page, { type: 'agent/send', text: 'hello there' });
       await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
       await rec.visual('completed-turn');
+      const beforeCount = await evalIn(ctx.page, `document.querySelectorAll('.message').length`);
+      await evalIn(ctx.page, `[...document.querySelectorAll('.task-feedback button')]
+        .find((button) => button.textContent === 'worked')?.click()`);
+      await waitFor(() => evalIn(ctx.page,
+        `document.querySelector('.task-feedback-note')?.textContent.includes('not recorded') === true`),
+      { budgetMs: 4_000, pollMs: 50 });
+      const after = await evalIn(ctx.page, `({
+        pressed: document.querySelector('.task-feedback button[aria-pressed="true"]')?.textContent,
+        notice: document.querySelector('.task-feedback-note')?.textContent,
+        messageCount: document.querySelectorAll('.message').length,
+        freeText: document.querySelector('.task-feedback input, .task-feedback textarea') !== null,
+      })`);
+      rec.check('disabled feedback is declined honestly without mutating the transcript',
+        !after?.pressed && after?.notice?.includes('not recorded')
+          && after?.messageCount === beforeCount && after?.freeText === false,
+        JSON.stringify({ beforeCount, after }));
+    },
+  },
+
+  // --- visual: verified SSO names both relying site and provider ----------
+  {
+    name: 'login-confirm', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ConfirmModal } = await import('/sidepanel/components/app.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-login-confirm';
+          document.body.appendChild(host);
+          m.render(host, m(ConfirmModal, { prompt: {
+            id: 'e2e-login', kind: 'login', tool: 'login', method: 'sso',
+            provider: 'Okta', verified: true,
+            origins: ['https://app.example'], idpOrigin: 'https://acme.okta.com',
+          } }));
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => ({
+          title: document.querySelector('#e2e-login-confirm h3')?.textContent,
+          relyingSite: document.querySelector('#e2e-login-confirm .login-hero .host')?.textContent,
+          provider: document.querySelector('#e2e-login-confirm .login-destination strong')?.textContent,
+          allowDisabled: document.querySelector('#e2e-login-confirm button:not(.secondary)')?.disabled,
+        }))()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('verified SSO consent names both exact origins before approval',
+          rendered?.title === 'Approve sign-in'
+            && rendered?.relyingSite === 'app.example'
+            && rendered?.provider === 'acme.okta.com'
+            && rendered?.allowDisabled === false,
+          JSON.stringify(rendered));
+        await rec.visual('login-confirm');
+      } finally {
+        await evalIn(ctx.page, `document.querySelector('#e2e-login-confirm')?.remove()`);
+      }
+    },
+  },
+
+  // --- rendered: unknown-outcome approval names its immutable claim --------
+  {
+    name: 'unknown-outcome-confirm', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ConfirmModal } = await import('/sidepanel/components/app.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-unknown-outcome-confirm';
+          document.body.appendChild(host);
+          m.render(host, m(ConfirmModal, { prompt: {
+            id: 'e2e-unknown-outcome', tool: 'submit_payment',
+            actionClass: 'external', sideEffect: 'mutate_external',
+            lifecycleTarget: 'https://payments.example',
+            oneShot: true,
+            note: 'A matching earlier action has an unknown outcome. Verify the target before approving this repeat.',
+            summary: 'submit_payment({ orderId: "order-7" })', origins: [],
+          } }));
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => {
+          const claim = document.querySelector('#e2e-unknown-outcome-confirm [aria-label="Unknown-outcome repeat approval"]');
+          const button = document.querySelector('#e2e-unknown-outcome-confirm .lifecycle-confirm-allow');
+          const style = button ? getComputedStyle(button) : null;
+          return claim ? {
+            labels: [...claim.querySelectorAll('span')].map((node) => node.textContent),
+            values: [...claim.querySelectorAll('code')].map((node) => node.textContent),
+            buttons: [...document.querySelectorAll('#e2e-unknown-outcome-confirm .peerd-modal-actions button')]
+              .map((node) => node.textContent),
+            foreground: style?.color ?? null,
+            background: style?.backgroundColor ?? null,
+          } : null;
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        const channel = (value) => {
+          value /= 255;
+          return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+        };
+        const luminance = (color) => {
+          const rgb = String(color).match(/[\d.]+/g)?.slice(0, 3).map(Number) ?? [];
+          return rgb.length === 3
+            ? 0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2])
+            : Number.NaN;
+        };
+        const foreground = luminance(rendered?.foreground);
+        const background = luminance(rendered?.background);
+        const contrast = (Math.max(foreground, background) + 0.05)
+          / (Math.min(foreground, background) + 0.05);
+        rec.check('unknown-outcome consent shows the exact bound target and action',
+          JSON.stringify(rendered?.labels) === JSON.stringify(['Exact target', 'Action'])
+            && JSON.stringify(rendered?.values)
+              === JSON.stringify(['https://payments.example', 'submit_payment']),
+          JSON.stringify(rendered));
+        rec.check('unknown-outcome consent is one-shot',
+          JSON.stringify(rendered?.buttons) === JSON.stringify(['Reject', 'Allow once']),
+          JSON.stringify(rendered?.buttons));
+        rec.check('unknown-outcome approval text meets WCAG AA contrast',
+          contrast >= 4.5, `${contrast} (${rendered?.foreground} on ${rendered?.background})`);
+        await rec.shot('unknown-outcome-confirm');
+      } finally {
+        await evalIn(ctx.page, `document.querySelector('#e2e-unknown-outcome-confirm')?.remove()`);
+      }
+    },
+  },
+
+  // --- visual: persisted runnable site-client confirmation -----------------
+  {
+    name: 'site-client-confirm', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ConfirmModal } = await import('/sidepanel/components/app.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-site-client-confirm';
+          document.body.appendChild(host);
+          m.render(host, m(ConfirmModal, { prompt: {
+            id: 'e2e-site-client',
+            kind: 'site_client_write',
+            tool: 'site_client_write',
+            origins: ['https://shop.example'],
+            proposal: {
+              op: 'create',
+              body: 'return { currentOrder: async () => {\\n  const response = await site.fetch("/api/orders/current");\\n  return response.json;\\n} };',
+              bodyBytesBefore: 0,
+              bodyBytesAfter: 132,
+              dossier: {
+                origin: 'https://shop.example',
+                summary: 'Read the current order status.',
+                endpoints: [{ method: 'GET', path: '/api/orders/current' }],
+                auth: 'session',
+                deriver: 'capture-cdp',
+              },
+            },
+          } }));
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => ({
+          title: document.querySelector('#e2e-site-client-confirm h3')?.textContent,
+          code: document.querySelector('[aria-label="Proposed site-client code"]')?.textContent,
+          endpoints: document.querySelector('[aria-label="Proposed site-client endpoints"]')?.textContent,
+          buttons: [...document.querySelectorAll('#e2e-site-client-confirm button')].map((button) => button.textContent),
+        }))()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('site-client consent exposes its dossier and runnable bytes',
+          rendered?.title === 'Confirm site client'
+            && rendered?.code?.includes('/api/orders/current')
+            && rendered?.endpoints === 'GET /api/orders/current'
+            && JSON.stringify(rendered?.buttons) === JSON.stringify(['Reject', 'Save client']),
+          JSON.stringify(rendered));
+        await rec.visual('site-client-confirm');
+        const maximum = await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ConfirmModal } = await import('/sidepanel/components/app.js');
+          const host = document.querySelector('#e2e-site-client-confirm');
+          const endpoints = Array.from({ length: 60 }, (_, index) => ({
+            method: 'GET', path: '/api/' + String(index).padStart(2, '0') + '/' + 'segment'.repeat(20),
+          }));
+          m.render(host, m(ConfirmModal, { prompt: {
+            id: 'e2e-site-client-maximum', kind: 'site_client_write', tool: 'site_client_write',
+            origins: ['https://shop.example'],
+            proposal: {
+              op: 'update', prevBody: 'return { currentOrder: async () => null };',
+              body: 'return { currentOrder: async () => ({ ok: true }) };',
+              endpointDelta: { added: 60, removed: 0 },
+              dossier: {
+                origin: 'https://shop.example', summary: 'purpose '.repeat(500), endpoints,
+                auth: 'session', deriver: 'capture-cdp',
+              },
+            },
+          } }));
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+          const modal = host.querySelector('.confirm-modal');
+          const actions = host.querySelector('.peerd-modal-actions');
+          const modalRect = modal.getBoundingClientRect();
+          const actionRect = actions.getBoundingClientRect();
+          return {
+            viewport: innerHeight,
+            modalTop: modalRect.top, modalBottom: modalRect.bottom,
+            actionTop: actionRect.top, actionBottom: actionRect.bottom,
+            scrollable: modal.scrollHeight > modal.clientHeight,
+            overflow: getComputedStyle(modal).overflowY,
+            actionPosition: getComputedStyle(actions).position,
+          };
+        })()`, true);
+        rec.check('maximum site-client dossier keeps Reject and Save reachable',
+          maximum?.modalTop >= 0 && maximum?.modalBottom <= maximum?.viewport
+            && maximum?.actionTop >= maximum?.modalTop && maximum?.actionBottom <= maximum?.viewport
+            && maximum?.scrollable && maximum?.overflow === 'auto'
+            && maximum?.actionPosition === 'sticky',
+          JSON.stringify(maximum));
+      } finally {
+        await evalIn(ctx.page, `document.querySelector('#e2e-site-client-confirm')?.remove()`);
+      }
     },
   },
 
@@ -897,53 +2605,336 @@ export const STATES = [
     },
   },
 
-  // --- visual (WIDE): browser-native Git history on an App -------------------
-  // Creates through the real import→App→Git path, then opens the Library's
-  // developer panel. Import avoids opening a second tab during the visual state,
-  // while still exercising the production App client and OPFS repository init.
-  // This covers what assertions cannot see: dense log rows, remote controls,
-  // and the restore affordance in both themes.
+  // Functional rendered coverage for committed success warnings. This takes a
+  // screenshot without creating a local visual authority baseline. CI remains
+  // the only source of Linux pixel baselines.
   {
-    name: 'home-library-git', kind: 'visual', phase: 'post-unlock',
+    name: 'home-committed-warnings', kind: 'functional', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
-      const imported = await evalIn(ctx.page, `(async () => {
-        const { buildAppExport } = await import('/peerd-engine/index.js');
-        const envelope = await buildAppExport({
-          record: { name: 'Versioned App', entryFile: 'index.html', tags: ['visual-fixture'] },
-          files: { 'index.html': '<!doctype html><title>Versioned App</title><main>Hello</main>' },
-        });
-        return chrome.runtime.sendMessage({ type: 'import/apply', envelope });
-      })()`, true);
-      rec.check('visual fixture App imported with a Git repository', imported?.ok && imported?.kind === 'app', JSON.stringify(imported));
-      const branched = imported?.id ? await evalIn(ctx.page,
-        `chrome.runtime.sendMessage({ type: 'apps/repository/branch', appId: ${JSON.stringify(imported.id)}, name: 'feature/visual', checkout: true })`, true) : null;
-      rec.check('visual fixture exposes existing-branch switching', branched?.ok === true, JSON.stringify(branched));
-      const page = await openWidePage(ctx, 'home/home.html');
+      const page = await openExtPage(ctx, 'tests/fixtures/home-warning.html');
       try {
-        await waitFor(() => evalIn(page,
-          `[...document.querySelectorAll('.library-name')].some((n) => n.textContent.includes('Versioned App'))`),
-        { budgetMs: 20_000, pollMs: 80 });
-        await evalIn(page, `(() => {
-          const name = [...document.querySelectorAll('.library-name')].find((n) => n.textContent.includes('Versioned App'));
-          name?.closest('.library-card')?.querySelector('.library-kebab')?.click();
+        await page.send('Emulation.setDeviceMetricsOverride', {
+          width: 320,
+          height: 900,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
+        const ready = await waitFor(() => evalIn(page, `
+          !![...document.querySelectorAll('.library-card button')].find((button) => button.textContent === 'Update')
+          && !![...document.querySelectorAll('.disc-card button')].find((button) => button.textContent === 'Update')
+        `), { budgetMs: 8_000, pollMs: 80 });
+        rec.check('the narrow warning fixture renders both update actions', !!ready);
+
+        await evalIn(page, `
+          [...document.querySelectorAll('.disc-card button')]
+            .find((button) => button.textContent === 'Update')?.click()
+        `);
+        const discoverWarning = await waitFor(() => evalIn(page, `
+          document.querySelector('.disc-card [role="status"]')?.textContent ?? ''
+        `), { budgetMs: 4_000, pollMs: 50 });
+
+        await evalIn(page, `
+          [...document.querySelectorAll('.library-card button')]
+            .find((button) => button.textContent === 'Update')?.click()
+        `);
+        const warningLayout = await waitFor(() => evalIn(page, `(() => {
+          const statuses = [...document.querySelectorAll('.warning-fixture [role="status"]')];
+          if (statuses.length !== 2) return null;
+          return {
+            texts: statuses.map((status) => status.textContent ?? ''),
+            viewportWidth: innerWidth,
+            documentWidth: document.documentElement.scrollWidth,
+            withinViewport: statuses.every((status) => {
+              const rect = status.getBoundingClientRect();
+              return rect.left >= 0 && rect.right <= innerWidth;
+            }),
+          };
+        })()`), { budgetMs: 4_000, pollMs: 50 });
+        const warningText = warningLayout?.texts?.join(' ') ?? '';
+        rec.check('Library and Discover render both committed warning details',
+          warningText.includes('security audit entry could not be written')
+            && (warningText.match(/Older shared bytes will be cleaned up/g) ?? []).length === 2,
+          JSON.stringify({ discoverWarning, warningLayout }));
+        rec.check('combined warning statuses fit the narrow viewport',
+          warningLayout?.documentWidth <= warningLayout?.viewportWidth
+            && warningLayout?.withinViewport === true,
+          JSON.stringify(warningLayout));
+        await rec.shotPage('combined-warning-narrow', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
+  // The Firefox startup check is a user-controlled install offer, never an
+  // automatic navigation. Exercise the shared NoticeBar at side-panel and
+  // full-page widths so both hosts keep the action and dismissal reachable.
+  {
+    name: 'update-notice-ui', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openExtPage(ctx, 'tests/fixtures/update-notice.html');
+      try {
+        const inspectAt = async (width) => {
+          await page.send('Emulation.setDeviceMetricsOverride', {
+            width,
+            height: 500,
+            deviceScaleFactor: 1,
+            mobile: false,
+          });
+          return waitFor(() => evalIn(page, `(() => {
+            const notice = document.querySelector('.notice');
+            const install = document.querySelector('.notice-action');
+            const dismiss = document.querySelector('.notice-dismiss');
+            if (!notice || !install || !dismiss) return null;
+            install.focus();
+            const noticeRect = notice.getBoundingClientRect();
+            const installRect = install.getBoundingClientRect();
+            const dismissRect = dismiss.getBoundingClientRect();
+            return {
+              width: innerWidth,
+              documentWidth: document.documentElement.scrollWidth,
+              text: notice.textContent ?? '',
+              install: install.textContent?.trim() ?? '',
+              dismissLabel: dismiss.getAttribute('aria-label'),
+              installFocused: document.activeElement === install,
+              installHeight: installRect.height,
+              dismissWidth: dismissRect.width,
+              dismissHeight: dismissRect.height,
+              inside: [noticeRect, installRect, dismissRect]
+                .every((rect) => rect.left >= 0 && rect.right <= innerWidth),
+            };
+          })()`), { budgetMs: 4_000, pollMs: 50 });
+        };
+
+        const narrow = await inspectAt(310);
+        rec.check('the narrow Firefox update notice keeps both controls reachable',
+          narrow?.documentWidth <= narrow?.width
+            && narrow?.inside === true
+            && narrow?.install === 'Install update'
+            && narrow?.dismissLabel === 'Dismiss notice'
+            && narrow?.installHeight >= 32
+            && narrow?.dismissWidth >= 32
+            && narrow?.dismissHeight >= 32,
+          JSON.stringify(narrow));
+        rec.check('the update action is keyboard focusable', narrow?.installFocused === true,
+          JSON.stringify(narrow));
+        await rec.shotPage('update-notice-narrow', page);
+
+        await evalIn(page, `document.querySelector('.notice-action')?.click()`);
+        const opened = await evalIn(page, `({
+          url: document.body.dataset.openedUrl,
+          target: document.body.dataset.openedTarget,
+          features: document.body.dataset.openedFeatures,
+        })`);
+        rec.check('the explicit action opens only the expected HTTPS release asset',
+          opened?.url === 'https://github.com/NotASithLord/peerd/releases/download/v0.7.0/peerd-preview-firefox.xpi'
+            && opened?.target === '_blank'
+            && opened?.features === 'noopener',
+          JSON.stringify(opened));
+
+        const wide = await inspectAt(900);
+        rec.check('the full-page notice remains compact and within its viewport',
+          wide?.documentWidth <= wide?.width && wide?.inside === true,
+          JSON.stringify(wide));
+        await rec.shotPage('update-notice-home', page);
+
+        await evalIn(page, `document.querySelector('.notice-dismiss')?.click()`);
+        const dismissed = await waitFor(() => evalIn(page,
+          `document.querySelector('[role="status"]')?.textContent === 'Notice dismissed.'`),
+        { budgetMs: 2_000, pollMs: 50 });
+        rec.check('Dismiss removes the update offer', dismissed === true);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
+  // Functional + rendered coverage for the actor-execution failure posture.
+  // It uses the real banner and chat components without forcing a worker crash
+  // into the shared live extension state.
+  {
+    name: 'actor-isolation-ui', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openExtPage(ctx, 'tests/fixtures/actor-isolation.html');
+      try {
+        await page.send('Emulation.setDeviceMetricsOverride', {
+          width: 400,
+          height: 900,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
+        const rendered = await waitFor(() => evalIn(page, `(() => {
+          const banner = document.querySelector('.actor-isolation-banner');
+          const retry = banner?.querySelector('button');
+          const cards = [...document.querySelectorAll('button.path-card')];
+          if (!banner || !retry || cards.length !== 6) return null;
+          retry.focus();
+          const rect = retry.getBoundingClientRect();
+          return {
+            role: banner.getAttribute('role'),
+            live: banner.getAttribute('aria-live'),
+            text: banner.textContent ?? '',
+            retryFocused: document.activeElement === retry,
+            retryWidth: rect.width,
+            retryHeight: rect.height,
+            askDisabled: cards[0].disabled,
+            actorCardsDisabled: cards.slice(1).every((card) => card.disabled),
+            actorCardFilters: cards.slice(1).map((card) => getComputedStyle(card).filter),
+            actorLabels: cards.slice(1).map((card) => card.getAttribute('aria-label') ?? ''),
+          };
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+
+        rec.check('paused actor work is a polite persistent status',
+          rendered?.role === 'status'
+            && rendered?.live === 'polite'
+            && rendered?.text.includes('Actor work is paused'));
+        rec.check('the user-facing notice hides the raw worker failure',
+          !!rendered && !rendered.text.includes('fixture-private-worker-error'));
+        rec.check('retry is keyboard focusable with a 44px target',
+          rendered?.retryFocused === true
+            && rendered?.retryWidth >= 44
+            && rendered?.retryHeight >= 44,
+          JSON.stringify(rendered));
+        rec.check('Ask remains available while every actor starter is unavailable and named honestly',
+          rendered?.askDisabled === false
+            && rendered?.actorCardsDisabled === true
+            && rendered?.actorCardFilters.every((filter) => filter !== 'none')
+            && rendered?.actorLabels.every((label) => label.includes('unavailable while actor work is paused')),
+          JSON.stringify(rendered));
+        // The real starter cards have a one-time staggered reveal. Let its
+        // longest icon/label delay settle so the screenshot captures the
+        // disabled state, not an intermediate animation frame.
+        await sleep(1_200);
+        await setEmulatedTheme(page, 'light');
+        await sleep(80);
+        await rec.shotPage('paused.light', page);
+        await setEmulatedTheme(page, 'dark');
+        await sleep(80);
+        await rec.shotPage('paused.dark', page);
+
+        await evalIn(page, `document.querySelector('.actor-isolation-banner button')?.click()`);
+        const retryFailed = await waitFor(() => evalIn(page, `(() => {
+          const status = document.querySelector('.actor-isolation-banner');
+          return status?.textContent?.includes('Actor work is still paused')
+            ? { text: status.textContent ?? '', live: status.getAttribute('aria-live') }
+            : null;
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('failed retry is announced without raw worker details',
+          retryFailed?.live === 'polite'
+            && retryFailed?.text.includes('Actor execution could not be restored')
+            && !retryFailed?.text.includes('actor_worker_start_timeout'),
+          JSON.stringify(retryFailed));
+        await rec.shotPage('retry-failed.dark', page);
+
+        await evalIn(page, `document.querySelector('.actor-isolation-banner button')?.click()`);
+        const recovered = await waitFor(() => evalIn(page, `(() => {
+          const status = document.querySelector('.actor-isolation-banner.is-recovered');
+          return status ? {
+            text: status.textContent ?? '',
+            focused: document.activeElement === status,
+            retryPresent: !!status.querySelector('button'),
+          } : null;
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('successful retry moves focus to an honest recovery status',
+          recovered?.focused === true
+            && recovered?.retryPresent === false
+            && recovered?.text.includes('Actor work is ready'),
+          JSON.stringify(recovered));
+        await rec.shotPage('recovered.dark', page);
+
+        await evalIn(page, `document.querySelector('textarea')?.focus()`);
+        const recoveryDismissed = await waitFor(() => evalIn(page,
+          `!document.querySelector('.actor-isolation-banner')`),
+        { budgetMs: 2_000, pollMs: 50 });
+        rec.check('the recovery status clears after the user moves focus onward', recoveryDismissed === true);
+
+        await evalIn(page, `globalThis.actorIsolationFixtureShowUnknownOutcome()`);
+        const unknownOutcome = await waitFor(() => evalIn(page, `(() => {
+          const card = document.querySelector('.tool-actor > button.tool-call-header');
+          const reply = document.querySelector('.message-actor-reply');
+          const announcement = document.querySelector('.actor-recovery-announcement[role="status"]');
+          if (!card || !reply) return null;
+          return {
+            card: card.textContent ?? '',
+            role: reply.querySelector('.role')?.textContent ?? '',
+            body: reply.querySelector('.bubble')?.textContent ?? '',
+            liveRole: announcement?.getAttribute('role') ?? null,
+            live: announcement?.getAttribute('aria-live') ?? null,
+            atomic: announcement?.getAttribute('aria-atomic') ?? null,
+            announcement: announcement?.textContent ?? '',
+            replyLive: reply.getAttribute('aria-live'),
+          };
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('a post-start failure is labeled Outcome unknown, never Not run or done',
+          unknownOutcome?.card.includes('Outcome unknown')
+            && unknownOutcome?.role.includes('Outcome unknown')
+            && !unknownOutcome?.card.includes('Not run')
+            && !unknownOutcome?.card.includes('done'),
+          JSON.stringify(unknownOutcome));
+        rec.check('unknown-outcome recovery guidance remains visible to the user',
+          unknownOutcome?.body.includes('peerd cannot confirm whether the actor ran or completed')
+            && unknownOutcome?.body.includes('Check the target before trying again')
+            && !unknownOutcome?.body.includes('Do not retry automatically'),
+          JSON.stringify(unknownOutcome));
+        const queuedRecovery = await evalIn(page, `(() => {
+          const replies = [...document.querySelectorAll('.message-actor-reply')];
+          const reply = replies.find((node) => node.querySelector('.role')?.textContent?.includes('Not run'));
+          return reply ? {
+            role: reply.querySelector('.role')?.textContent ?? '',
+            body: reply.querySelector('.bubble')?.textContent ?? '',
+            replyLive: reply.getAttribute('aria-live'),
+            nestedStatuses: reply.querySelectorAll('[role="status"]').length,
+          } : null;
         })()`);
-        await waitFor(() => evalIn(page, `!![...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')`),
-          { budgetMs: 5_000, pollMs: 50 });
-        await evalIn(page, `[...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')?.click()`);
-        await waitFor(() => evalIn(page, `!!document.querySelector('.library-repository .library-commit')`),
-          { budgetMs: 20_000, pollMs: 80 });
-        // Git commit IDs include the commit timestamp, so this visual fixture
-        // must normalize them before capture. The surrounding branch, history,
-        // controls, and layout remain production-rendered; only the inherently
-        // run-specific identifier is replaced.
-        await evalIn(page, `(() => {
-          const fixedOid = '0000000000';
-          const head = document.querySelector('.library-repository-head .muted');
-          if (head) head.textContent = head.textContent.replace(/[0-9a-f]{10}$/i, fixedOid);
-          for (const oid of document.querySelectorAll('.library-commit code')) oid.textContent = fixedOid;
+        rec.check('a queued recovery receipt is labeled Not run, never failed or unknown',
+          queuedRecovery?.role.includes('Not run')
+            && !queuedRecovery?.role.includes('failed')
+            && !queuedRecovery?.role.includes('Outcome unknown')
+            && queuedRecovery?.body === 'No actor work was started. Review the request before trying again.',
+          JSON.stringify(queuedRecovery));
+        rec.check('recovery receipts use one transient polite atomic announcement',
+          unknownOutcome?.liveRole === 'status'
+            && unknownOutcome?.live === 'polite'
+            && unknownOutcome?.atomic === 'true'
+            && unknownOutcome?.announcement.includes('Actor outcome unknown')
+            && unknownOutcome?.announcement.includes('Actor request not run')
+            && unknownOutcome?.replyLive === null
+            && queuedRecovery?.replyLive === null
+            && queuedRecovery?.nestedStatuses === 0,
+          JSON.stringify(unknownOutcome));
+        const spawnedUnknown = await evalIn(page, `(() => {
+          const cards = [...document.querySelectorAll('.tool-actor')];
+          const card = cards.find((node) => node.querySelector('.tool-name')?.textContent === 'actor_create');
+          const header = card?.querySelector('button.tool-call-header');
+          header?.click();
+          const announcement = document.querySelector('.actor-recovery-announcement[role="status"]');
+          return {
+            label: header?.textContent ?? '',
+            permanentStatuses: card?.querySelectorAll('[role="status"]').length ?? 0,
+            live: announcement?.getAttribute('aria-live'),
+            atomic: announcement?.getAttribute('aria-atomic'),
+            liveLabel: announcement?.textContent ?? '',
+          };
         })()`);
-        await rec.visualPage('home-library-git', page);
+        const spawnedUnknownBody = await waitFor(() => evalIn(page, `(() => {
+          const cards = [...document.querySelectorAll('.tool-actor')];
+          const card = cards.find((node) => node.querySelector('.tool-name')?.textContent === 'actor_create');
+          return card?.querySelector('.actor-body')?.textContent ?? '';
+        })()`), { budgetMs: 2_000, pollMs: 50 });
+        rec.check('sync actor_create also labels the failure Outcome unknown',
+          spawnedUnknown?.label.includes('Outcome unknown')
+            && !spawnedUnknown?.label.includes('done'),
+          JSON.stringify(spawnedUnknown));
+        rec.check('sync actor_create shows only the human recovery step',
+          spawnedUnknownBody?.includes('Check the target before trying again')
+            && !spawnedUnknownBody?.includes('Do not retry automatically'),
+          JSON.stringify({ ...spawnedUnknown, body: spawnedUnknownBody }));
+        rec.check('sync actor_create uses the shared transient unknown-outcome announcement',
+          spawnedUnknown?.permanentStatuses === 0
+            && spawnedUnknown?.live === 'polite'
+            && spawnedUnknown?.atomic === 'true'
+            && spawnedUnknown?.liveLabel?.includes('Actor outcome unknown'),
+          JSON.stringify(spawnedUnknown));
+        await rec.shotPage('outcome-unknown.dark', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
@@ -958,6 +2949,33 @@ export const STATES = [
         await waitFor(() => evalIn(page, `document.querySelector('#app')?.children.length > 0`),
           { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
         await rec.visualPage('options-fulltab', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'options-voice-capabilities', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html#!/voice');
+      try {
+        const posture = await waitFor(() => evalIn(page, `(() => {
+          const voice = document.querySelector('.voice-section');
+          const ocr = document.querySelector('.ocr-section');
+          if (!voice || !ocr) return null;
+          return {
+            voice: voice.textContent,
+            ocr: ocr.textContent,
+            buttons: [...document.querySelectorAll('button')].map((button) => button.textContent),
+          };
+        })()`), { budgetMs: 15_000, pollMs: 80 });
+        rec.check('Chrome Voice and OCR settings expose only hosted facilities',
+          !posture?.voice?.includes('unavailable in this browser')
+            && !posture?.ocr?.includes('unavailable in this browser')
+            && posture?.buttons?.some((label) => label.includes('Enable voice')),
+          JSON.stringify(posture));
+        await rec.shotPage('options-voice-capabilities.light', page);
+        await setEmulatedTheme(page, 'dark');
+        await rec.shotPage('options-voice-capabilities.dark', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
@@ -1002,7 +3020,121 @@ export const STATES = [
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
+  {
+    name: 'options-learned-sites', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      let priorEntries = null;
+      let page;
+      try {
+        const prior = await rpc(ctx.page, { type: 'learned/list' });
+        if (!prior?.ok || !Array.isArray(prior.origins)) {
+          throw new Error(`could not snapshot learned hosts: ${prior?.error ?? 'unknown error'}`);
+        }
+        priorEntries = prior.origins;
+        await rpc(ctx.page, { type: 'learned/clear' });
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } });
+        await rpc(ctx.page, {
+          type: 'debug/originLock',
+          origin: 'https://accounts.acme.test:8443',
+          seedReason: 'password-field',
+        });
+        await rpc(ctx.page, {
+          type: 'debug/originLock',
+          origin: 'http://portal.globex.test:9080',
+          seedReason: 'confirmed-write',
+        });
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } });
 
+        page = await openWidePage(ctx, 'options/options.html#!/learned-sites');
+        await waitFor(() => evalIn(page, `(() => {
+          const text = document.body.innerText;
+          return text.includes('accounts.acme.test')
+            && text.includes('portal.globex.test')
+            && text.includes('every port and its subdomains');
+        })()`), { budgetMs: 15_000, pollMs: 80 });
+        await rec.visualPage('options-learned-sites', page);
+      } finally {
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
+        if (priorEntries) {
+          await rpc(ctx.page, { type: 'learned/clear' }).catch(() => {});
+          await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } }).catch(() => {});
+          for (const { host, reason } of priorEntries) {
+            await rpc(ctx.page, {
+              type: 'debug/originLock', origin: `https://${host}`, seedReason: reason,
+            }).catch(() => {});
+          }
+          await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
+        }
+        try { page?.close(); } catch { /* */ }
+      }
+    },
+  },
+  {
+    name: 'options-contributor-metrics', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html#!/contributor-metrics');
+      try {
+        await waitFor(() => evalIn(page, `document.querySelector('.contributor-metrics') !== null`),
+          { budgetMs: 15_000, pollMs: 80 });
+        // Exercise the exact human route through its real button so the capture
+        // includes both the active disclosure state and the canonical bytes.
+        await evalIn(page, `(() => {
+          const button = [...document.querySelectorAll('button')]
+            .find((entry) => entry.textContent === 'Enable Contributor Metrics');
+          button?.click();
+        })()`);
+        await waitFor(() => evalIn(page, `document.querySelector('.contributor-payload') !== null`),
+          { budgetMs: 8_000, pollMs: 80 });
+        const preview = await evalIn(page, `({
+          readOnly: document.querySelector('.contributor-payload')?.readOnly,
+          bytes: document.querySelector('.contributor-payload')?.value,
+          uploadControls: [...document.querySelectorAll('button')]
+            .some((entry) => /upload|send now/i.test(entry.textContent ?? '')),
+        })`);
+        rec.check('Contributor Metrics preview is exact, read-only, and has no upload action',
+          preview?.readOnly === true
+            && preview?.bytes === '{"schemaVersion":1,"rows":[]}'
+            && preview?.uploadControls === false,
+          JSON.stringify(preview));
+        await rec.visualPage('options-contributor-metrics', page);
+      } finally {
+        try {
+          await evalIn(page, `(() => {
+            const button = [...document.querySelectorAll('button')]
+              .find((entry) => entry.textContent === 'Disable and clear');
+            button?.click();
+          })()`);
+          await waitFor(() => evalIn(page, `document.querySelector('.contributor-payload') === null`),
+            { budgetMs: 4_000, pollMs: 80 });
+        } catch { /* best-effort fixture cleanup */ }
+        try { page.close(); } catch { /* */ }
+      }
+    },
+  },
+  {
+    name: 'options-dweb-stop-failed', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      // The failure needs a live stop error that normal E2E cannot safely force.
+      // This fixture mounts the real section and returns the real route shape.
+      const page = await openWidePage(ctx, 'tests/fixtures/options-dweb-stop-failed.html', {
+        ready: '[role="alert"]',
+      });
+      try {
+        const status = await evalIn(page, `({
+          warning: document.querySelector('[role="alert"]')?.textContent ?? '',
+          retry: [...document.querySelectorAll('button')]
+            .some((button) => button.textContent === 'Retry stopping dweb'),
+        })`);
+        rec.check('failed live stop stays visible',
+          status?.warning.includes('live network could not be stopped'), status?.warning);
+        rec.check('failed live stop remains retryable', status?.retry === true);
+        await rec.visualPage('options-dweb-stop-failed', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
   // --- visual: the STANDALONE TAB PAGES ---------------------------------------
   //
   // Coverage audit finding: every visual baseline photographed the side panel,
@@ -1022,7 +3154,7 @@ export const STATES = [
     name: 'vm-tab-failed', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
-      const page = await openWidePage(ctx, 'engine-tabs/vm-tab/index.html', { ready: '.boot-card.is-failed, #boot-stage' });
+      const page = await openWidePage(ctx, 'engine-tabs/vm-tab/index.html', { ready: '.boot-card.is-failed' });
       try {
         // The boot log stamps each line with the WALL CLOCK, so this baseline
         // would differ on every single run and the state would flap forever.
@@ -1030,12 +3162,21 @@ export const STATES = [
         // presence and position are part of what the baseline should guard, its
         // value is not. (The harness's UTC timezone override does not help: the
         // problem is the time advancing, not the zone.)
-        const pinClock = () => evalIn(page, `(() => {
+        const pinVisualState = () => evalIn(page, `(() => {
           for (const el of document.querySelectorAll('#boot-log, #boot-log *')) {
             for (const n of el.childNodes) {
               if (n.nodeType === 3) n.textContent = n.textContent.replace(/\\d{2}:\\d{2}:\\d{2}/g, '00:00:00');
             }
           }
+          const pullIn = document.querySelector('.peerd-pull');
+          if (!pullIn) return false;
+          // why: Chrome can omit a fixed backdrop-filter layer while the root
+          // compositor pump is active. The failed VM screen is uniform behind
+          // this chip, so removing only its blur preserves the intended render
+          // and keeps the control in both theme captures.
+          pullIn.style.backdropFilter = 'none';
+          pullIn.style.webkitBackdropFilter = 'none';
+          pullIn.getBoundingClientRect();
           return true;
         })()`);
 
@@ -1064,8 +3205,199 @@ export const STATES = [
           return a === await logLength();
         }, { budgetMs: 5000 });
 
-        await pinClock();
-        await rec.visualPage('vm-tab-failed', page, { beforeShot: pinClock });
+        const visualReady = await waitFor(pinVisualState, { budgetMs: 5000 });
+        if (!visualReady) throw new Error('VM failure controls did not settle');
+        await rec.visualPage('vm-tab-failed', page, { beforeShot: pinVisualState });
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'notebook-remote-restricted', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const notebookId = 'e2e-remote-restricted';
+      const page = await openWidePage(
+        ctx, `engine-tabs/notebook-tab/index.html#${notebookId}`,
+        { ready: '#notebook-app:not([hidden])' },
+      );
+      try {
+        const remoteSource = `
+          export const probe = async () => {
+            const attempts = {};
+            const tryCall = async (name, fn) => {
+              try { await fn(); attempts[name] = 'unexpected success'; }
+              catch (error) { attempts[name] = String(error && error.message || error); }
+            };
+            for (const envelope of [
+              { type: 'actor-request', rid: 'forged-actor', args: { task: 'leak' } },
+              { type: 'fetch-request', rid: 'forged-fetch', url: 'https://sink.example/', method: 'GET' },
+              { type: 'opfs-request', rid: 'forged-opfs', op: 'write', args: { path: 'canary.txt', content: 'changed' } },
+              { type: 'distributed-request', rid: 'forged-dweb', method: 'peers' },
+            ]) postMessage(envelope);
+            await tryCall('egress', () => peerd.egress.fetch('https://sink.example/'));
+            await tryCall('opfs', () => peerd.self.writeFile('canary.txt', 'changed'));
+            await tryCall('subagent', () => peerd.runtime.runAgent({ task: 'leak' }));
+            await tryCall('dweb', () => peerd.distributed.peers());
+            return attempts;
+          };
+        `;
+        const injected = await evalIn(page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          const original = browser.runtime.sendMessage.bind(browser.runtime);
+          globalThis.__remoteRestrictedCalls = [];
+          browser.runtime.sendMessage = (message) => {
+            globalThis.__remoteRestrictedCalls.push(message?.type ?? 'unknown');
+            if (message?.type === 'sw/web-fetch') {
+              return Promise.resolve({
+                ok: true, status: 200,
+                bodyB64: btoa(${JSON.stringify(remoteSource)}),
+              });
+            }
+            return original(message);
+          };
+          return true;
+        })()`, true);
+        rec.check('the Notebook remote-fetch test seam is installed', injected === true);
+
+        const outcome = await evalIn(ctx.page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          const tabs = await browser.tabs.query({});
+          const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
+          if (!tab?.id) return { error: 'Notebook tab not found' };
+          await browser.tabs.sendMessage(tab.id, {
+            type: 'js/write-file', notebookId: ${JSON.stringify(notebookId)},
+            path: 'canary.txt', content: 'unchanged',
+          });
+          const run = await browser.tabs.sendMessage(tab.id, {
+            type: 'js/eval', notebookId: ${JSON.stringify(notebookId)},
+            code: "import { probe } from 'https://modules.example/probe.js'; return probe();",
+            timeoutMs: 10_000,
+          });
+          const canary = await browser.tabs.sendMessage(tab.id, {
+            type: 'js/read-file', notebookId: ${JSON.stringify(notebookId)}, path: 'canary.txt',
+          });
+          return { run, canary };
+        })()`, true);
+        const calls = await evalIn(page, 'globalThis.__remoteRestrictedCalls ?? []');
+        const view = await evalIn(page, `(() => ({
+          status: document.getElementById('run-status')?.textContent ?? '',
+          output: document.getElementById('console-output')?.textContent ?? '',
+        }))()`);
+        rec.check('the visible Notebook carries remote provenance',
+          outcome?.run?.result?.usedRemoteModules === true, JSON.stringify(outcome));
+        rec.check('remote code keeps only compute in the visible Notebook',
+          ['egress', 'opfs', 'subagent', 'dweb'].every((key) =>
+            String(outcome?.run?.result?.value?.[key] ?? '').includes('remote_module_capability_blocked')),
+          JSON.stringify(outcome?.run?.result?.value));
+        rec.check('direct forged relays never leave the Notebook host',
+          Array.isArray(calls) && calls.filter((type) => type === 'sw/web-fetch').length === 1
+            && !calls.some((type) => ['actor/spawn', 'dweb/distributed/info'].includes(type)),
+          JSON.stringify(calls));
+        rec.check('remote code cannot change the Notebook file canary',
+          outcome?.canary?.content === 'unchanged', JSON.stringify(outcome?.canary));
+        rec.check('the human sees a neutral restricted status and explanation',
+          /Remote code ran with restricted access/.test(view?.status ?? '')
+            && /Remote imports run with compute only/.test(view?.output ?? ''),
+          JSON.stringify(view));
+        await rec.shotPage('restricted-result', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'notebook-stop-control', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const notebookId = 'e2e-stop-control';
+      const page = await openWidePage(
+        ctx, `engine-tabs/notebook-tab/index.html#${notebookId}`,
+        { ready: '#notebook-app:not([hidden])' },
+      );
+      try {
+        const dispatched = await evalIn(ctx.page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          const tabs = await browser.tabs.query({});
+          const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
+          if (!tab?.id) return false;
+          globalThis.__peerdE2eNotebookEvaluation = browser.tabs.sendMessage(tab.id, {
+            type: 'js/eval', notebookId: ${JSON.stringify(notebookId)},
+            runId: 'e2e-stop-control-run', code: 'while (true) {}', timeoutMs: 20_000,
+          });
+          return true;
+        })()`, true);
+        rec.check('the infinite Notebook run is dispatched', dispatched === true);
+        const started = await evalIn(page, `(async () => {
+          for (let attempt = 0; attempt < 100; attempt += 1) {
+            const button = document.getElementById('run-btn');
+            if (button?.getAttribute('aria-label') === 'Stop notebook run') {
+              button.focus();
+              return {
+                label: button.getAttribute('aria-label'),
+                text: button.textContent,
+                focused: document.activeElement === button,
+              };
+            }
+            await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+          }
+          return null;
+        })()`, true);
+        rec.check('the Notebook exposes one focused Stop control while code runs',
+          started?.label === 'Stop notebook run'
+            && /Stop notebook run/.test(started?.text ?? '')
+            && started?.focused === true,
+          JSON.stringify(started));
+        await rec.shotPage('notebook-stop-control', page);
+
+        await evalIn(page, `document.getElementById('run-btn')?.click()`);
+        const stopped = await evalIn(ctx.page,
+          'globalThis.__peerdE2eNotebookEvaluation', true);
+        const outcome = await evalIn(page, `(async () => {
+          for (let attempt = 0; attempt < 100; attempt += 1) {
+            const button = document.getElementById('run-btn');
+            if (button?.getAttribute('aria-label') === 'Run notebook.js') {
+              return {
+                idleLabel: button.getAttribute('aria-label'),
+                focused: document.activeElement === button,
+                status: document.getElementById('run-status')?.textContent ?? '',
+              };
+            }
+            await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+          }
+          return {};
+        })()`, true);
+        rec.check('Stop terminates the exact run and restores the focused Run control',
+          stopped?.result?.stopped === true
+            && outcome?.idleLabel === 'Run notebook.js'
+            && outcome?.focused === true
+            && outcome?.status === 'Notebook run stopped.',
+          JSON.stringify({ stopped, outcome }));
+
+        const importedFailure = await evalIn(ctx.page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          const tabs = await browser.tabs.query({});
+          const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
+          if (!tab?.id) return null;
+          await browser.tabs.sendMessage(tab.id, {
+            type: 'js/write-file', path: 'lib/failure.js',
+            content: 'throw new Error("imported failure canary");',
+          });
+          return browser.tabs.sendMessage(tab.id, {
+            type: 'js/eval', notebookId: ${JSON.stringify(notebookId)},
+            runId: 'e2e-imported-failure',
+            code: 'import "./lib/failure.js"; return true;', timeoutMs: 10_000,
+          });
+        })()`, true);
+        const failureView = await evalIn(page, `({
+          status: document.getElementById('run-status')?.textContent ?? '',
+          output: document.getElementById('console-output')?.textContent ?? '',
+        })`, true);
+        rec.check('Chrome maps an imported-module failure to its source without a generated URL',
+          importedFailure?.result?.error?.includes('./lib/failure.js:1')
+            && !/blob:|data:/.test(importedFailure?.result?.error ?? '')
+            && failureView?.status === 'Notebook run failed.'
+            && failureView?.output?.includes('./lib/failure.js:1')
+            && !/blob:|data:/.test(failureView?.output ?? ''),
+          JSON.stringify({ importedFailure, failureView }));
+        await rec.shotPage('notebook-imported-failure', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
@@ -1075,7 +3407,7 @@ export const STATES = [
     async run(ctx, rec) {
       // notebook-tab replaces <body> wholesale with its red no-id paragraph, so
       // the probe cannot look for a page id — `body > p` is what actually lands.
-      const page = await openWidePage(ctx, 'engine-tabs/notebook-tab/index.html', { ready: 'body > p, #notebook-boot' });
+      const page = await openWidePage(ctx, 'engine-tabs/notebook-tab/index.html', { ready: 'body > p' });
       try { await rec.visualPage('notebook-tab-failed', page); }
       finally { try { page.close(); } catch { /* */ } }
     },
@@ -1084,7 +3416,9 @@ export const STATES = [
     name: 'app-tab-failed', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
-      const page = await openWidePage(ctx, 'engine-tabs/app-tab/index.html', { ready: '#boot.is-failed, #boot-msg' });
+      // The message node exists in the initial loading frame. Wait for the
+      // failure class so the light capture cannot race the module startup.
+      const page = await openWidePage(ctx, 'engine-tabs/app-tab/index.html', { ready: '#boot.is-failed' });
       try { await rec.visualPage('app-tab-failed', page); }
       finally { try { page.close(); } catch { /* */ } }
     },
@@ -1112,169 +3446,9 @@ export const STATES = [
     },
   },
 
-  // --- functional + screenshot: a REAL Pod from create through persistent reopen
-  // This is the browser evidence lane for the new execution kind. It creates via
-  // the public tool, attaches to the actual background engine tab, drives the
-  // visible terminal, then closes/reopens that same persistent workspace.
-  {
-    name: 'pod-runtime', kind: 'functional', phase: 'post-unlock',
-    responder: (_callIndex, request) => {
-      const body = request?.postData || '';
-      try {
-        const payload = JSON.parse(body);
-        podRuntimeState.lastBody = JSON.stringify(payload.messages?.slice(-4) ?? payload).slice(-5000);
-      } catch { podRuntimeState.lastBody = body.slice(-5000); }
-      const id = body.match(/pod-[a-z0-9]+-[a-z0-9]+/i)?.[0] ?? null;
-      if (id) podRuntimeState.podId = id;
-      if (podRuntimeState.creates === 0) {
-        podRuntimeState.creates += 1;
-        return { sse: sseToolCall('sandbox_create', { kind: 'pod', name: 'E2E Pod', persistent: true }) };
-      }
-      return { sse: sseText('POD-CREATED') };
-    },
-    async run(ctx, rec) {
-      // Earlier full-tab visual states may leave another renderer foregrounded;
-      // keep the side panel unthrottled while its model/tool loop creates Pod.
-      await ctx.page.send('Page.bringToFront').catch(() => {});
-      podRuntimeState = { creates: 0, podId: null, lastBody: '' };
-      const createStarted = performance.now();
-      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Create a persistent Pod for the runtime verification.' });
-      rec.check('sandbox_create request accepted', sent?.ok === true, JSON.stringify(sent));
-      await waitFor(async () => {
-        const settled = await evalIn(ctx.page, `(() => {
-          const busy = !!document.querySelector('form.input-bar button.stop');
-          const text = [...document.querySelectorAll('.message-assistant .bubble')].map((node) => node.textContent).join('\\n');
-          return !busy && text.includes('POD-CREATED');
-        })()`);
-        return settled && podRuntimeState.podId;
-      }, { budgetMs: 30_000, pollMs: 80 });
-      const podEvidence = await evalIn(ctx.page, `document.body.innerText`);
-      let podId = podRuntimeState.podId;
-      if (!podId) podId = String(podEvidence).match(/pod-[a-z0-9]+-[a-z0-9]+/i)?.[0] ?? null;
-      rec.check('sandbox_create returned a durable Pod id', typeof podId === 'string', podId ?? `${String(podEvidence).slice(-800)}\nWIRE:${podRuntimeState.lastBody.slice(-1200)}`);
-      if (!podId) return;
-
-      const target = await waitFor(async () => {
-        const targets = await (await fetch(`http://127.0.0.1:${ctx.port}/json/list`)).json();
-        return targets.find((entry) => String(entry.url).includes(`/engine-tabs/pod-tab/index.html#${podId}`)) ?? null;
-      }, { budgetMs: 15_000, pollMs: 80 });
-      rec.check('Pod opened as its own visible engine tab', !!target, target?.url ?? 'missing');
-      if (!target) return;
-      let page = await attach(target.webSocketDebuggerUrl);
-      await page.send('Runtime.enable');
-      await page.send('Page.enable');
-      await page.send('Performance.enable').catch(() => {});
-      await page.send('Emulation.setDeviceMetricsOverride', WIDE_METRICS);
-      await setEmulatedTheme(page, 'light');
-      await waitFor(() => evalIn(page, `!!document.querySelector('#pod-app:not([hidden])')`), { budgetMs: 15_000, pollMs: 50 });
-
-      const readyText = await evalIn(page, `document.getElementById('terminal-output')?.textContent || ''`);
-      const coldBootMs = Number(String(readyText).match(/ready in (\d+)ms/i)?.[1] ?? NaN);
-      rec.check('Pod reports a measured cold boot', Number.isFinite(coldBootMs), `worker/editor boot=${coldBootMs}ms, create-to-ready=${Math.round(performance.now() - createStarted)}ms`);
-
-      const runTerminal = async (command, budgetMs = 20_000) => {
-        const before = await evalIn(page, `document.getElementById('terminal-output')?.children.length ?? 0`);
-        await evalIn(page, `(() => {
-          const input = document.getElementById('terminal-input');
-          input.value = ${JSON.stringify(command)};
-          document.getElementById('terminal-form').requestSubmit();
-        })()`);
-        const settled = await waitFor(() => evalIn(page, `(() => {
-          const nodes = [...document.getElementById('terminal-output').children].slice(${before});
-          return nodes.some((node) => node.classList.contains('entry-meta') && node.textContent.includes('· exit '))
-            ? nodes.map((node) => ({ className: node.className, text: node.textContent })).filter(Boolean) : null;
-        })()`), { budgetMs, pollMs: 25 });
-        return settled ?? [];
-      };
-      const joined = (rows) => rows.map((row) => row.text).join('');
-
-      const shell = await runTerminal("mkdir -p src; echo alpha > src/a.txt; cat src/a.txt | grep alpha");
-      rec.check('shell files + pipeline + redirection work', joined(shell).includes('alpha\n') && joined(shell).includes('exit 0'), joined(shell));
-      const pwd = await runTerminal('pwd');
-      const shellMs = Number(joined(pwd).match(/· (\d+)ms/)?.[1] ?? NaN);
-      rec.check('warm shell command measured', joined(pwd).includes('/\n') && Number.isFinite(shellMs), `${shellMs}ms`);
-
-      const javascript = await runTerminal("js -e 'console.log(6 * 7)'");
-      rec.check('Web-standard JavaScript runs without a Node claim', joined(javascript).includes('42\n') && joined(javascript).includes('exit 0'), joined(javascript));
-      const ambient = await runTerminal("js -e 'for (const probe of [() => fetch(\"https://example.com\"), () => navigator.storage.getDirectory()]) { try { await probe() } catch (e) { console.log(e.name) } }; console.log(typeof chrome, typeof browser)'");
-      rec.check('Pod JS has no ambient network/storage/extension authority', (joined(ambient).match(/PodEgressBlockedError/g) ?? []).length >= 2 && joined(ambient).includes('undefined undefined'), joined(ambient));
-
-      const controlled = await runTerminal('curl https://example.com/__peerd_pod_e2e__');
-      rec.check('named Pod curl crosses the controlled host bridge', joined(controlled).includes('pod-controlled-egress') && joined(controlled).includes('exit 0'), joined(controlled));
-
-      const wasi = await runTerminal('wasi-demo');
-      const wasiMs = Number(joined(wasi).match(/· (\d+)ms/)?.[1] ?? NaN);
-      rec.check('WASI Preview 1 command executes', joined(wasi).includes('hello from wasi') && joined(wasi).includes('exit 0'), `${wasiMs}ms`);
-
-      const git = await runTerminal("git init; echo tracked > tracked.txt; git add .; git commit -m first; git log -n 1", 30_000);
-      rec.check('browser-native Git init/add/commit/log works in the Pod workspace', joined(git).includes('first') && joined(git).includes('exit 0'), joined(git));
-      const denied = await runTerminal('curl http://127.0.0.1:9/private');
-      rec.check('network request is brokered and private/cleartext egress is denied', /exit [^0]/.test(joined(denied)) && /curl:/i.test(joined(denied)), joined(denied));
-
-      await evalIn(page, `(() => {
-        const input = document.getElementById('terminal-input');
-        input.value = 'sleep 10 &';
-        document.getElementById('terminal-form').requestSubmit();
-      })()`);
-      await waitFor(() => evalIn(page, `document.getElementById('pod-status')?.textContent === 'running'`), { budgetMs: 3_000, pollMs: 25 });
-      const jobs = await runTerminal('jobs');
-      const sleepingJob = joined(jobs).match(/(job-\S+)\trunning\tsleep 10 &/)?.[1] ?? null;
-      rec.check('two independent command Workers run concurrently', !!sleepingJob && joined(jobs).includes('\trunning\tjobs'), joined(jobs));
-      if (sleepingJob) {
-        const killed = await runTerminal(`kill ${sleepingJob}`);
-        rec.check('a running job can be cancelled', joined(killed).includes('exit 0'), joined(killed));
-      }
-
-      const beforeStop = await evalIn(page, `document.getElementById('terminal-output')?.children.length ?? 0`);
-      await evalIn(page, `(() => {
-        const input = document.getElementById('terminal-input');
-        input.value = 'sleep 10';
-        document.getElementById('terminal-form').requestSubmit();
-      })()`);
-      await waitFor(() => evalIn(page, `!document.getElementById('stop-button')?.hidden`), { budgetMs: 3_000, pollMs: 25 });
-      await evalIn(page, `document.getElementById('stop-button').click()`);
-      const stopped = await waitFor(() => evalIn(page, `(() => {
-        const nodes = [...document.getElementById('terminal-output').children].slice(${beforeStop});
-        return nodes.map((node) => node.textContent).join('').includes('exit 130');
-      })()`), { budgetMs: 3_000, pollMs: 25 });
-      rec.check('visible Stop terminates the foreground Pod job', stopped === true);
-
-      await runTerminal('export POD_PARENT=kept');
-      await runTerminal('export POD_PARENT=background &');
-      const isolated = await runTerminal('echo $POD_PARENT');
-      rec.check('background job cwd/environment stay isolated from the parent shell', joined(isolated).includes('kept\n'), joined(isolated));
-
-      await runTerminal('echo survives-reload > persistent.txt');
-      const metrics = await page.send('Performance.getMetrics').catch(() => ({ metrics: [] }));
-      const heapBytes = metrics.metrics?.find((entry) => entry.name === 'JSHeapUsedSize')?.value ?? null;
-      rec.check('host renderer memory sampled', typeof heapBytes === 'number', heapBytes == null ? 'unavailable' : `${(heapBytes / 1048576).toFixed(1)} MiB JS heap (host renderer; idle command Workers terminated)`);
-
-      await rec.shotPage('terminal-before-reopen', page);
-      const closed = await evalIn(ctx.page, `new Promise((resolve) => chrome.tabs.query({}, (tabs) => {
-        const tab = tabs.find((entry) => String(entry.url || '').includes('/engine-tabs/pod-tab/index.html#${podId}'));
-        if (!tab?.id) { resolve(false); return; }
-        chrome.tabs.remove(tab.id, () => resolve(true));
-      }))`, true);
-      rec.check('persistent Pod can be stopped by closing its host tab', closed === true);
-      page.close();
-      await sleep(150);
-
-      page = await openWidePage(ctx, `engine-tabs/pod-tab/index.html#${podId}`, { ready: '#pod-app:not([hidden])' });
-      const reopenedText = await evalIn(page, `document.getElementById('terminal-output')?.textContent || ''`);
-      const reopenMs = Number(String(reopenedText).match(/ready in (\d+)ms/i)?.[1] ?? NaN);
-      const persistent = await runTerminal('cat persistent.txt');
-      rec.check('persistent reopen restores the named OPFS workspace', joined(persistent).includes('survives-reload\n'), `${reopenMs}ms reopen; ${joined(persistent)}`);
-      await rec.shotPage('terminal-persistent-reopen', page);
-      page.close();
-      // The following actor states render progress through Mithril/rAF. Return
-      // foreground ownership after driving the separate engine-tab renderer.
-      await ctx.page.send('Page.bringToFront').catch(() => {});
-    },
-  },
-
-  // --- functional: the ORCHESTRATOR delegates from CODE (script + actors.ask) ----
+  // --- functional: the ORCHESTRATOR delegates from CODE (script + actors.call) ---
   // The actors-in-script surface end to end: the model writes ONE script whose
-  // code awaits actors.ask('web', …); the ask relays offscreen-worker → SW
+  // code awaits actors.call('web', …); the call relays offscreen-worker → SW
   // actors/call → messageActor(awaitReply) → a REAL web-actor turn, and the
   // reply resolves back INTO the running script, which returns a value derived
   // from it. Proves: the bridge chain, the [DELEGATIONS] trace + fencing in the
@@ -1286,12 +3460,13 @@ export const STATES = [
       const isActor = body.includes('<actor_agent>');
       scriptFanState.seen.push({
         isActor,
-        isWebActor: body.includes("You are peerd's web actor"),
-        // why GOT: (not '[DELEGATIONS]'): the prompt lore itself mentions the
-        // trace header now, so every request body contains it — the round-trip
-        // VALUE marker (built by the script FROM the actor's reply) is the
-        // discriminator that proves the reply entered the script's realm.
-        hasScriptResult: body.includes('GOT:WIDGET_PRICE_777'),
+        isWebActor: body.includes('kind: bound; type: web'),
+        // why all three: GOT proves the script shaped the value, the price
+        // proves the actor reply entered the realm, and the fence proves code
+        // could not launder that reply back into authoritative prompt text.
+        hasScriptResult: body.includes('GOT:')
+          && body.includes('WIDGET_PRICE_777')
+          && body.includes('<untrusted_web_content'),
       });
       // WEB ACTOR turn (spawned by the script's ask): answer in plain text.
       // why delayMs: the live-feed check below observes the PENDING script
@@ -1299,52 +3474,83 @@ export const STATES = [
       // than a redraw + 100ms DOM poll on a slow CI runner (flaked in CI on
       // 2026-07-05). Holding the actor's model call open guarantees the feed
       // a real lifetime — the run is slower, never racy.
-      if (isActor) return { sse: sseText('WIDGET_PRICE_777'), delayMs: 1500 };
+      if (isActor) return { sse: sseText('WIDGET_PRICE_777'), delayMs: 5000 };
       // ORCHESTRATOR sees the script result (value derived from the reply) →
       // final answer.
-      if (body.includes('GOT:WIDGET_PRICE_777')) return { sse: sseText('SCRIPT-FAN-DONE') };
+      if (body.includes('GOT:')
+        && body.includes('WIDGET_PRICE_777')
+        && body.includes('<untrusted_web_content')) return { sse: sseText('SCRIPT-FAN-DONE') };
       // ORCHESTRATOR first step: ONE script that asks the web actor and
       // returns a value computed FROM the reply (proves the reply entered
       // the script's realm, not just the chat).
       if (scriptFanState.scripts === 0) {
         scriptFanState.scripts += 1;
         return { sse: sseToolCall('script', {
-          code: "const r = await actors.ask('web', 'price of widget X?'); return 'GOT:' + r.reply + ':' + r.failed;",
+          code: "const r = await actors.call('web', 'price of widget X?'); return 'GOT:' + r.reply + ':' + r.failed;",
         }) };
       }
       return { sse: sseText('unexpected extra orchestrator step') };
     },
     async run(ctx, rec) {
       scriptFanState = { scripts: 0, seen: [] };
+      // Capture transient live-feed DOM before the turn starts. A loaded full
+      // run can finish between CDP polls even when the actor response is held;
+      // the page-side observer makes "was rendered" durable for this state.
+      await evalIn(ctx.page, `(() => {
+        globalThis.__peerdScriptFanObserver?.disconnect();
+        const state = globalThis.__peerdScriptFanE2e = {
+          opsSeen: false, finalSeen: false, cardOk: false,
+        };
+        const sample = () => {
+          state.opsSeen ||= !!document.querySelector('.tool-call .script-ops .script-op');
+          state.finalSeen ||= [...document.querySelectorAll('.message-assistant .bubble')]
+            .some((bubble) => bubble.textContent.trim() === 'SCRIPT-FAN-DONE');
+          state.cardOk ||= [...document.querySelectorAll('.tool-call.tool-ok')]
+            .some((card) => card.querySelector('.tool-name')?.textContent === 'script');
+        };
+        globalThis.__peerdScriptFanObserver = new MutationObserver(sample);
+        globalThis.__peerdScriptFanObserver.observe(document.body, { childList: true, subtree: true });
+        sample();
+      })()`);
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'script-check the widget price' });
       rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
       // The live delegation feed appears on the pending script card.
-      const opsSeen = await waitFor(
-        () => evalIn(ctx.page, `!!document.querySelector('.tool-call .script-ops .script-op')`),
-        { budgetMs: 20_000, pollMs: 100 });
+      const liveState = await waitFor(
+        () => evalIn(ctx.page, `(() => {
+          const state = globalThis.__peerdScriptFanE2e;
+          return state?.opsSeen || state?.finalSeen ? state : null;
+        })()`),
+        { budgetMs: 90_000, pollMs: 100 });
+      const opsSeen = liveState?.opsSeen === true;
       rec.check('the live delegation feed renders on the pending script card', !!opsSeen);
       if (opsSeen) await rec.shot('script-ops-live');
       let out = {};
       await waitFor(async () => {
         out = await evalIn(ctx.page, `(() => {
+          const tracked = globalThis.__peerdScriptFanE2e ?? {};
           const bubbles = [...document.querySelectorAll('.message-assistant .bubble')].map((b) => b.textContent.trim());
           const busy = !!document.querySelector('form.input-bar button.stop');
           const results = [...document.querySelectorAll('.tool-call .tool-result')].map((r) => r.textContent || '');
           const cardOk = !!document.querySelector('.tool-call.tool-ok .tool-name') &&
             [...document.querySelectorAll('.tool-call .tool-name')].some((n) => n.textContent === 'script');
-          return { bubbles, busy, results, cardOk };
+          return {
+            bubbles, busy, results,
+            finalSeen: tracked.finalSeen === true || bubbles.includes('SCRIPT-FAN-DONE'),
+            cardOk: tracked.cardOk === true || cardOk,
+          };
         })()`) || {};
-        return (out.bubbles || []).includes('SCRIPT-FAN-DONE') && !out.busy;
-      }, { budgetMs: 45_000 });
+        return out.finalSeen && !out.busy;
+      }, { budgetMs: 90_000 });
 
       const seen = scriptFanState.seen;
       const actorTurns = seen.filter((s) => s.isActor && s.isWebActor);
       const resultTurn = seen.filter((s) => !s.isActor && s.hasScriptResult);
       rec.check('the model called script exactly once', scriptFanState.scripts === 1, `scripts=${scriptFanState.scripts}`);
-      rec.check("the script's actors.ask spawned a REAL web-actor turn", actorTurns.length >= 1, `actorTurns=${actorTurns.length}`);
+      rec.check("the script's actors.call spawned a REAL web-actor turn", actorTurns.length >= 1, `actorTurns=${actorTurns.length}`);
       rec.check("the orchestrator read a result whose value was built FROM the actor's reply", resultTurn.length >= 1, `resultTurns=${resultTurn.length}`);
-      rec.check('the final orchestrator answer landed', (out.bubbles || []).includes('SCRIPT-FAN-DONE'));
+      rec.check('the final orchestrator answer landed', out.finalSeen === true);
       rec.check('the script card settled ok', out.cardOk === true);
+      await evalIn(ctx.page, `globalThis.__peerdScriptFanObserver?.disconnect()`);
       await rec.shot('script-fanout-done');
     },
   },
@@ -1364,13 +3570,16 @@ export const STATES = [
       const isActor = body.includes('<actor_agent>');
       actorState.seen.push({
         isActor,
-        isWebActor: body.includes("You are peerd's web actor"),
+        isWebActor: body.includes('kind: bound; type: web'),
         hasReplyLead: body.includes('you messaged has replied'),
         hasFence: body.includes('<untrusted_web_content'),
         hasActorText: body.includes('PRICE_IS_42'),
       });
       // ACTOR sub-loop turn: plain text, no tool call → no fetch_url → no egress.
-      if (isActor) return { sse: sseText('PRICE_IS_42') };
+      // Hold the isolated turn open long enough to inspect the live Actor Fabric
+      // at real side-panel width; without this, the fake reply can settle within
+      // one paint and only the terminal transcript receipt is observable.
+      if (isActor) return { delayMs: 3_500, sse: sseText('PRICE_IS_42') };
       // ORCHESTRATOR — the async wake turn carrying the fenced reply: final answer.
       if (body.includes('you messaged has replied')) return { sse: sseText('FINAL-ORCH-REPLY') };
       // ORCHESTRATOR — delegate ONCE; then the post-ack step ends the turn (the
@@ -1389,7 +3598,98 @@ export const STATES = [
         () => evalIn(ctx.page, `!!document.querySelector('.message-assistant .tool-call.tool-actor')`),
         { budgetMs: 15_000, pollMs: 100 });
       rec.check('an inline message_actor card mounts under the orchestrator turn', !!cardSeen);
-      if (cardSeen) await rec.shot('actor-card');
+      const fabric = await waitFor(
+        () => evalIn(ctx.page, `(() => {
+          const panel = document.querySelector('.actor-fabric');
+          const toggle = panel?.querySelector('.actor-fabric-toggle');
+          const actor = panel?.querySelector('[data-node-id^="actor:"]');
+          if (!panel || !toggle || !actor) return null;
+          const toggleRect = toggle.getBoundingClientRect();
+          const panelRect = panel.getBoundingClientRect();
+          const body = panel.querySelector('.actor-fabric-body');
+          return {
+            expanded: toggle.getAttribute('aria-expanded'),
+            actorKind: actor.getAttribute('data-node-kind'),
+            actorPressed: actor.getAttribute('aria-pressed'),
+            text: panel.textContent ?? '',
+            toggleHeight: toggleRect.height,
+            withinViewport: panelRect.left >= 0 && panelRect.right <= innerWidth,
+            contentFits: !!body && body.scrollWidth <= body.clientWidth
+              && [...body.querySelectorAll('.actor-fabric-node')].every((node) => node.scrollWidth <= node.clientWidth),
+          };
+        })()`),
+        { budgetMs: 15_000, pollMs: 100 });
+      rec.check('the live Actor Fabric mounts expanded with an inspectable bound actor',
+        fabric?.expanded === 'true'
+          && fabric?.actorKind === 'bound'
+          && fabric?.actorPressed === 'false',
+        JSON.stringify(fabric));
+      rec.check('the fabric makes exact capability + fenced handoff concrete at a glance',
+        fabric?.text.includes('one web tab ·')
+          && fabric?.text.includes('separate worker')
+          && fabric?.text.includes('fenced reply'),
+        JSON.stringify(fabric?.text));
+      rec.check('the fabric fits the panel and keeps a 44px disclosure target',
+        fabric?.withinViewport === true
+          && fabric?.contentFits === true
+          && fabric?.toggleHeight >= 44,
+        JSON.stringify(fabric));
+      if (fabric) {
+        await ctx.page.send('Page.reload', { ignoreCache: true });
+        const rehydrated = await waitFor(
+          () => evalIn(ctx.page, `(() => {
+            const panel = document.querySelector('.actor-fabric');
+            const actor = panel?.querySelector('[data-node-id^="actor:"]');
+            return panel && actor ? panel.textContent : null;
+          })()`),
+          { budgetMs: 15_000, pollMs: 50 });
+        rec.check('a freshly reconnected panel rehydrates the still-live actor fabric',
+          typeof rehydrated === 'string'
+            && rehydrated.includes('get the price of widget X')
+            && rehydrated.includes('separate worker'),
+          JSON.stringify(rehydrated));
+        await rec.shot('actor-fabric-working');
+        await evalIn(ctx.page, `(() => {
+          const actor = document.querySelector('[data-node-id^="actor:"]');
+          actor?.click();
+          actor?.focus();
+        })()`);
+        const inspected = await waitFor(() => evalIn(ctx.page, `(() => {
+          const actor = document.querySelector('[data-node-id^="actor:"]');
+          const detail = document.querySelector('.actor-fabric-detail');
+          if (!actor || !detail) return null;
+          return {
+            pressed: actor?.getAttribute('aria-pressed'),
+            detail: detail?.textContent ?? '',
+            announced: document.querySelector('.actor-fabric-announcer')?.textContent ?? '',
+          };
+        })()`), { budgetMs: 2_000, pollMs: 25 });
+        rec.check('selecting an actor reveals its authoritative access and memory boundary',
+          inspected?.pressed === 'true'
+            && inspected?.detail.includes('one web tab · page_code · site_client_run')
+            && inspected?.detail.includes('Dedicated keyless worker')
+            && inspected?.detail.includes('no key or extension APIs')
+            && inspected?.announced.includes('details shown'),
+          JSON.stringify(inspected));
+        await rec.shot('actor-fabric-inspected');
+      }
+      const settledFabric = await waitFor(
+        () => evalIn(ctx.page, `(() => {
+          const panel = document.querySelector('.actor-fabric.is-settled');
+          const focused = document.querySelector('[data-node-id^="actor:"]');
+          if (!panel || !focused) return null;
+          return {
+            text: panel.textContent ?? '',
+            focusPreserved: document.activeElement === focused,
+          };
+        })()`),
+        { budgetMs: 15_000, pollMs: 50 });
+      rec.check('settling announces completion without dropping focused actor controls',
+        settledFabric?.text.includes('all actor work finished')
+          && settledFabric?.focusPreserved === true,
+        JSON.stringify(settledFabric));
+      if (settledFabric) await rec.shot('actor-fabric-finished');
+      await evalIn(ctx.page, `document.querySelector('.input-bar textarea')?.focus()`);
       let out = {};
       await waitFor(async () => {
         out = await evalIn(ctx.page, `(() => {
@@ -1397,14 +3697,15 @@ export const STATES = [
           const cardOk = !!document.querySelector('.tool-call.tool-actor.tool-ok');
           const name = document.querySelector('.tool-actor .tool-name')?.textContent || '';
           const busy = !!document.querySelector('form.input-bar button.stop');
+          const fabricGone = !document.querySelector('.actor-fabric');
           const users = [...document.querySelectorAll('.message-user')].map((u) => u.textContent.trim());
           const replies = [...document.querySelectorAll('.message-actor-reply')].map((r) => ({
             role: r.querySelector('.role')?.textContent || '',
             body: r.querySelector('.bubble')?.textContent || '',
           }));
-          return { bubbles, cardOk, name, busy, users, replies };
+          return { bubbles, cardOk, name, busy, fabricGone, users, replies };
         })()`) || {};
-        return (out.bubbles || []).includes('FINAL-ORCH-REPLY') && !out.busy;
+        return (out.bubbles || []).includes('FINAL-ORCH-REPLY') && !out.busy && out.fabricGone;
       }, { budgetMs: 30_000 });
 
       const seen = actorState.seen;
@@ -1416,6 +3717,7 @@ export const STATES = [
       rec.check('the reply re-entered the orchestrator ASYNC as a fenced wake turn', wake.length >= 1, `wakeCalls=${wake.length}`);
       rec.check('the fenced wake carried the actor reply text (cross-process proof)', wake.some((s) => s.hasActorText));
       rec.check('the actor card flipped pending → ok after the reply landed', out.cardOk === true);
+      rec.check('the Actor Fabric self-hides when no isolated work remains', out.fabricGone === true);
       rec.check('the wake never renders as a USER bubble (only the original user message shows)',
         (out.users || []).length === 1 && (out.users[0] || '').includes('find the cheapest widget X'), JSON.stringify(out.users));
       // The trickle-up: the actor reply surfaces at the bottom of the chat as its
@@ -1428,6 +3730,78 @@ export const STATES = [
       rec.check('the orchestrator emitted the final user-visible answer', (out.bubbles || []).includes('FINAL-ORCH-REPLY'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
+    },
+  },
+
+  // The custody boundary has two audiences. The actor needs an instruction it
+  // can act on without looping; the person needs a short recovery step. Drive
+  // the live actor-error stream and prove the card never crosses those copies.
+  {
+    name: 'actor-boundary-error-card', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      if (body.includes('<actor_agent>')) {
+        const error = JSON.stringify({ error: {
+          message: 'actor-provider-boundary-blocked: The actor model request was not run. '
+            + 'Do not retry automatically. Ask the user to reload peerd before another actor attempt.',
+        } });
+        return { sse: `data: ${error}\n\n${sseText('')}` };
+      }
+      if (body.includes('could not complete your request')) return { sse: sseText('BOUNDARY-FAILURE-NOTED') };
+      if (actorBoundaryState.delegates === 0) {
+        actorBoundaryState.delegates += 1;
+        return { sse: sseToolCall('message_actor', { to: 'web', message: 'inspect the current page' }) };
+      }
+      return { sse: sseText('Delegated to the web actor.') };
+    },
+    async run(ctx, rec) {
+      actorBoundaryState = { delegates: 0 };
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'inspect this page safely' });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      const notRun = await waitFor(
+        () => evalIn(ctx.page, `!!document.querySelector('.tool-call.tool-actor.tool-not-run')`),
+        { budgetMs: 25_000, pollMs: 100 });
+      rec.check('the live actor card settles as Not run', !!notRun);
+      await evalIn(ctx.page, `document.querySelector('.tool-actor .tool-call-header')?.click()`);
+      const expanded = await waitFor(
+        () => evalIn(ctx.page, `document.querySelector('.tool-actor .tool-call-header')?.getAttribute('aria-expanded') === 'true'
+          && !!document.querySelector('.tool-actor .actor-body')`),
+        { budgetMs: 5_000, pollMs: 50 });
+      rec.check('the live actor card expands', !!expanded);
+      const out = await evalIn(ctx.page, `(() => {
+        const card = document.querySelector('.tool-call.tool-actor');
+        return {
+          label: card?.querySelector('.tool-duration')?.textContent || '',
+          body: card?.querySelector('.actor-body')?.textContent || '',
+        };
+      })()`);
+      rec.check('the live card labels the request Not run', out?.label === 'Not run', JSON.stringify(out?.label));
+      rec.check('the live card uses generic host-proven Not run guidance',
+        (out?.body || '').includes('No actor work was started. Review the request before trying again.'),
+        JSON.stringify(out?.body));
+      rec.check('the live card does not trust provider recovery tokens or instructions',
+        !/actor-provider-boundary-blocked|Reload peerd|Do not retry automatically|Ask the user/i
+          .test(out?.body || ''), JSON.stringify(out?.body));
+      const replyReady = await waitFor(
+        () => evalIn(ctx.page, `!!document.querySelector('.message-actor-reply')`),
+        { budgetMs: 25_000, pollMs: 100 });
+      rec.check('the failed actor reply is visible', !!replyReady);
+      const reply = await evalIn(ctx.page, `(() => {
+        const message = document.querySelector('.message-actor-reply');
+        return {
+          role: message?.querySelector('.role')?.textContent || '',
+          body: message?.querySelector('.bubble')?.textContent || '',
+        };
+      })()`);
+      rec.check('the failed actor reply is also labeled Not run',
+        /Not run/.test(reply?.role || ''), JSON.stringify(reply?.role));
+      rec.check('the failed actor reply uses the same generic Not run guidance',
+        (reply?.body || '') === 'No actor work was started. Review the request before trying again.'
+          && !/actor-provider-boundary-blocked|Reload peerd|Do not retry automatically|Ask the user/i
+            .test(reply?.body || ''),
+        JSON.stringify(reply?.body));
+      await waitFor(async () => { const state = await probe(ctx); return !state.busy; }, { budgetMs: 25_000 });
+      await rec.shot('not-run-expanded');
     },
   },
 
@@ -1528,7 +3902,12 @@ export const STATES = [
       const entries = (audit && audit.entries) || [];
       const a2aRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'a2a_run');
       rec.check('the dweb actor wrote + ran a mesh script (2 actor turns)', a2aState.actorCalls >= 2, `actorCalls=${a2aState.actorCalls}`);
-      rec.check('a2a_run EXECUTED — the code surface ran through the mesh bridge + SW route (tool_executed audit)', a2aRan === true, `a2aRan=${a2aRan}`);
+      rec.check(
+        'a2a_run EXECUTED — the code surface ran through the mesh bridge + SW route (tool_executed audit)',
+        a2aRan === true,
+        a2aRan ? 'a2aRan=true' : JSON.stringify(entries.filter((entry) =>
+          String(entry.type).startsWith('tool_') || JSON.stringify(entry.details || {}).includes('a2a')).slice(-12)),
+      );
       rec.check('the orchestrator settled with a final answer', (out.bubbles || []).includes('A2A-FINAL'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
@@ -1578,22 +3957,20 @@ export const STATES = [
     },
   },
 
-  // --- functional: a pure-reasoning actor runs in its OWN offscreen heap ---
+  // --- functional: a pure-reasoning actor runs in its OWN isolated heap ---
   // Heap-split phase 1. The orchestrator spawns a sync tools:[] actor; that
-  // child's loop runs in a dedicated offscreen Worker (its own heap, no key),
+  // child's loop runs in a dedicated Worker (its own heap, no key),
   // relaying its model call back to the SW. Proof: the child model call happens
   // (its prompt carries the EPHEMERAL ACTOR block), the result round-trips into
-  // the orchestrator's final answer, AND the actor_ran_offscreen audit marker
-  // is present (it fired only on the offscreen path, never the in-SW fallback).
+  // the orchestrator's final answer, AND the host-neutral actor_ran_isolated
+  // audit carries the dedicated-worker and verified-realm proof fields.
   {
     name: 'reasoning-offscreen', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
       const body = (request && request.postData) || '';
       // The CHILD's model call — its system prompt is the ephemeral-actor block.
-      // why the IDENTITY line, not just "EPHEMERAL ACTOR": the ORCHESTRATOR prompt
-      // also contains "EPHEMERAL ACTOR" (describing actor_create), so the broad
-      // match mis-classified the orchestrator's own first call as the child.
-      if (body.includes('You are an EPHEMERAL ACTOR')) { reasoningState.childCalls += 1; return { sse: sseText('REASONED-FOURTY-TWO') }; }
+      // Match the compact actor kernel's structural identity, not mutable prose.
+      if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) { reasoningState.childCalls += 1; return { sse: sseText('REASONED-FOURTY-TWO') }; }
       // ORCHESTRATOR — spawn ONE sync pure-reasoning child, then (post tool-result) answer.
       if (reasoningState.spawned === 0) {
         reasoningState.spawned += 1;
@@ -1603,6 +3980,7 @@ export const STATES = [
     },
     async run(ctx, rec) {
       reasoningState = { spawned: 0, childCalls: 0 };
+      const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'reason about the answer to life' });
       rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
       let out = {};
@@ -1615,30 +3993,25 @@ export const STATES = [
         return (out.bubbles || []).includes('FINAL-ANSWER-42') && !out.busy;
       }, { budgetMs: 30_000 });
 
-      // The offscreen PROOF: the child ran in its own worker heap (this audit
-      // type is appended ONLY on the offscreen path; the in-SW fallback appends
-      // actor_offscreen_fallback instead).
-      const audit = await rpc(ctx.page, { type: 'audit/list', limit: 500 });
-      const entries = (audit && audit.entries) || [];
-      const ranOffscreen = entries.some((e) => e.type === 'actor_ran_offscreen');
-      const fellBack = entries.some((e) => e.type === 'actor_offscreen_fallback');
+      const entries = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
+      const isolation = actorIsolationEvidence(entries);
       const actorTypes = entries.filter((e) => String(e.type).startsWith('spawned')).map((e) => e.type);
       rec.check('the child sub-loop ran (EPHEMERAL ACTOR prompt seen)', reasoningState.childCalls >= 1, `childCalls=${reasoningState.childCalls}`);
-      rec.check('the pure-reasoning child ran in its OWN offscreen heap (actor_ran_offscreen audit)', ranOffscreen === true, `offscreen=${ranOffscreen} fellBack=${fellBack} bubbles=${JSON.stringify(out.bubbles)} actorAudits=${JSON.stringify(actorTypes)}`);
-      rec.check('it did NOT silently fall back to the in-SW loop', fellBack === false);
+      rec.check('the pure-reasoning child ran in a dedicated Worker with a verified realm', isolation.exactProof === true, `isolated=${isolation.isolated.length} backgroundRefused=${isolation.backgroundRefused} isolationFailed=${isolation.isolationFailed} bubbles=${JSON.stringify(out.bubbles)} actorAudits=${JSON.stringify(actorTypes)}`);
+      rec.check('it did NOT enter the background turn driver or fail isolation', isolation.backgroundRefused === false && isolation.isolationFailed === false);
       rec.check('the child result round-tripped into the orchestrator final answer', (out.bubbles || []).includes('FINAL-ANSWER-42'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
     },
   },
 
-  // --- functional: a TOOL-BEARING actor runs in its OWN offscreen heap ---
+  // --- functional: a TOOL-BEARING actor runs in its OWN isolated heap ---
   // Heap-split phase 4. The orchestrator spawns a sync actor GRANTED script;
-  // that child's loop runs in a dedicated offscreen Worker (its own heap, no key)
+  // that child's loop runs in a dedicated Worker (its own heap, no key)
   // and RELAYS its script call back to the SW, which rebuilds the child's restricted
   // ctx from the persisted grantedTools and dispatches script in the offscreen
   // job-runner. Proof: the child looped (two model calls: emit script, then answer),
-  // the actor_ran_offscreen audit fired (offscreen path, not the in-SW fallback),
+  // the actor_ran_isolated audit carries the dedicated-worker realm proof,
   // AND a tool_executed audit for script is present (the relayed tool actually ran).
   {
     name: 'actor-tools-offscreen', kind: 'functional', phase: 'post-unlock',
@@ -1646,7 +4019,7 @@ export const STATES = [
       const body = (request && request.postData) || '';
       // The CHILD's model calls (ephemeral-actor prompt). First call emits script;
       // second call (after the tool result re-enters its heap) answers.
-      if (body.includes('You are an EPHEMERAL ACTOR')) {
+      if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
         actorToolsState.childCalls += 1;
         if (actorToolsState.childCalls === 1) return { sse: sseToolCall('script', { code: 'return 6 * 7;' }) };
         return { sse: sseText('CHILD-RAN-JS') };
@@ -1660,6 +4033,7 @@ export const STATES = [
     },
     async run(ctx, rec) {
       actorToolsState = { spawned: 0, childCalls: 0 };
+      const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'use an actor to compute six times seven' });
       rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
       let out = {};
@@ -1672,29 +4046,429 @@ export const STATES = [
         return (out.bubbles || []).includes('FINAL-WITH-CHILD') && !out.busy;
       }, { budgetMs: 30_000 });
 
-      const audit = await rpc(ctx.page, { type: 'audit/list', limit: 500 });
-      const entries = (audit && audit.entries) || [];
-      const ranOffscreen = entries.some((e) => e.type === 'actor_ran_offscreen');
-      const fellBack = entries.some((e) => e.type === 'actor_offscreen_fallback');
+      const entries = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
+      const isolation = actorIsolationEvidence(entries);
       const jsRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'script');
       rec.check('the tool-bearing child looped in its heap (script emitted, then answered) — 2 child calls', actorToolsState.childCalls >= 2, `childCalls=${actorToolsState.childCalls}`);
-      rec.check('the child ran in its OWN offscreen heap (actor_ran_offscreen audit)', ranOffscreen === true, `offscreen=${ranOffscreen} fellBack=${fellBack}`);
+      rec.check('the child ran in a dedicated Worker with a verified realm', isolation.exactProof === true, `isolated=${isolation.isolated.length}`);
       rec.check('script actually executed via the SW-gated relay (tool_executed audit)', jsRan === true, `jsRan=${jsRan}`);
-      rec.check('it did NOT fall back to the in-SW loop', fellBack === false);
+      rec.check('it did NOT enter the background turn driver or fail isolation', isolation.backgroundRefused === false && isolation.isolationFailed === false);
       rec.check('the child result round-tripped into the orchestrator final answer', (out.bubbles || []).includes('FINAL-WITH-CHILD'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
     },
   },
 
+  // --- functional: a trusted spawned actor delegates FROM CODE (#324) -------
+  // Direct message_actor already admitted this trusted lineage. This state proves
+  // the code hand has exact parity: actor heap -> script worker -> actors.call relay
+  // -> web-actor heap -> reply back into code -> child -> orchestrator.
+  {
+    name: 'actor-code-delegates-offscreen', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      if (body.includes('kind: bound; type: web')) {
+        actorCodeDelegatesState.webCalls += 1;
+        return { sse: sseText('WEB-CODE-PRICE-101') };
+      }
+      if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
+        actorCodeDelegatesState.childCalls += 1;
+        if (body.includes('CODE:')
+          && body.includes('WEB-CODE-PRICE-101')
+          && body.includes('untrusted')) {
+          actorCodeDelegatesState.sawComposedResult = true;
+        }
+        if (actorCodeDelegatesState.childCalls === 1) {
+          return { sse: sseToolCall('script', {
+            code: "const r = await actors.call('web', 'get the code-path price'); return 'CODE:' + r.reply;",
+          }) };
+        }
+        return { sse: sseText('CHILD-CODE-GOT-WEB') };
+      }
+      if (actorCodeDelegatesState.spawned === 0) {
+        actorCodeDelegatesState.spawned += 1;
+        return { sse: sseToolCall('actor_create', {
+          task: 'use one script to ask the web actor for the price and report it',
+          tools: ['script', 'message_actor'], sync: true,
+        }) };
+      }
+      return { sse: sseText('FINAL-VIA-ACTOR-CODE') };
+    },
+    async run(ctx, rec) {
+      actorCodeDelegatesState = {
+        spawned: 0, childCalls: 0, webCalls: 0, sawComposedResult: false,
+      };
+      const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'use an actor script to ask the web actor for the price' });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      let out = {};
+      await waitFor(async () => {
+        out = await evalIn(ctx.page, `(() => {
+          const bubbles = [...document.querySelectorAll('.message-assistant .bubble')].map((b) => b.textContent.trim());
+          const busy = !!document.querySelector('form.input-bar button.stop');
+          return { bubbles, busy };
+        })()`) || {};
+        return (out.bubbles || []).includes('FINAL-VIA-ACTOR-CODE') && !out.busy;
+      }, { budgetMs: 45_000 });
+
+      const entries = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
+      const isolation = actorIsolationEvidence(entries);
+      const jsRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'script');
+      rec.check('the actor script ran through the SW-gated relay', jsRan === true, `jsRan=${jsRan}`);
+      rec.check('the actor looped after code received the web reply', actorCodeDelegatesState.childCalls >= 2 && actorCodeDelegatesState.sawComposedResult, `childCalls=${actorCodeDelegatesState.childCalls} composed=${actorCodeDelegatesState.sawComposedResult}`);
+      rec.check('actors.call reached a real web-actor heap', actorCodeDelegatesState.webCalls >= 1, `webCalls=${actorCodeDelegatesState.webCalls}`);
+      rec.check('the actor stayed in a dedicated Worker with a verified realm', isolation.exactProof === true && isolation.backgroundRefused === false && isolation.isolationFailed === false, `isolated=${isolation.isolated.length} backgroundRefused=${isolation.backgroundRefused} isolationFailed=${isolation.isolationFailed}`);
+      rec.check('the composed result reached the orchestrator', (out.bubbles || []).includes('FINAL-VIA-ACTOR-CODE'));
+      rec.check('the turn settles idle', out.busy === false);
+      await rec.shot('final');
+    },
+  },
+
+  // --- functional + visual: the real nested Actor Fabric at panel width ----
+  // Two async siblings overlap; one delegates to its bound web actor. This is
+  // the defining topology (root → temporary child → resource-bound child), not
+  // a component fixture, and catches indentation/connector/overflow failures.
+  {
+    name: 'actor-fabric-hierarchy', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      if (body.includes('kind: bound; type: web')) {
+        actorFabricHierarchyState.webCalls += 1;
+        return { delayMs: 5_000, sse: sseText('NESTED-WEB-DONE') };
+      }
+      if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
+        if (body.includes('inspect price through the web actor')) {
+          actorFabricHierarchyState.nestedCalls += 1;
+          if (actorFabricHierarchyState.nestedCalls === 1) {
+            return { sse: sseToolCall('message_actor', { to: 'web', message: 'inspect the current price' }) };
+          }
+          return { sse: sseText('NESTED-CHILD-DONE') };
+        }
+        actorFabricHierarchyState.siblingCalls += 1;
+        return { delayMs: 6_000, sse: sseText('SIBLING-DONE') };
+      }
+      if (actorFabricHierarchyState.spawned === 0) {
+        actorFabricHierarchyState.spawned += 1;
+        return { sse: sseToolCall('actor_create', {
+          task: 'inspect price through the web actor', tools: ['message_actor'],
+        }) };
+      }
+      if (actorFabricHierarchyState.spawned === 1) {
+        actorFabricHierarchyState.spawned += 1;
+        return { sse: sseToolCall('actor_create', {
+          task: 'compare warranty terms independently', tools: [],
+        }) };
+      }
+      return { sse: sseText('FABRIC-MAIN-IDLE') };
+    },
+    async run(ctx, rec) {
+      actorFabricHierarchyState = {
+        spawned: 0, nestedCalls: 0, siblingCalls: 0, webCalls: 0,
+      };
+      const sent = await rpc(ctx.page, {
+        type: 'agent/send', text: 'compare price and warranty with isolated actors',
+      });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      const hierarchy = await waitFor(
+        () => evalIn(ctx.page, `(() => {
+          const panel = document.querySelector('.actor-fabric');
+          const body = panel?.querySelector('.actor-fabric-body');
+          const top = body?.querySelector(':scope > .actor-fabric-branch');
+          if (!panel || !body || !top) return null;
+          const topSubactors = [...top.children]
+            .filter((item) => item.querySelector(':scope > .actor-fabric-node.is-subactor')).length;
+          const nestedBound = body.querySelector('.actor-fabric-branch .actor-fabric-branch .actor-fabric-node.is-bound');
+          if (topSubactors < 2 || !nestedBound) return null;
+          const panelRect = panel.getBoundingClientRect();
+          return {
+            nodes: body.querySelectorAll('.actor-fabric-node').length,
+            topSubactors,
+            nestedBound: !!nestedBound,
+            text: panel.textContent ?? '',
+            contentFits: body.scrollWidth <= body.clientWidth,
+            heightCapped: panelRect.height <= Math.min(innerHeight * 0.61, 525),
+            outerScrollTop: document.querySelector('.body')?.scrollTop ?? 0,
+          };
+        })()`),
+        { budgetMs: 20_000, pollMs: 50 });
+      rec.check('the live fabric renders two sibling subactors and one nested bound actor',
+        hierarchy?.nodes >= 4
+          && hierarchy?.topSubactors >= 2
+          && hierarchy?.nestedBound === true,
+        JSON.stringify(hierarchy));
+      rec.check('the deep hierarchy fits 390px and stays height-bounded',
+        hierarchy?.contentFits === true && hierarchy?.heightCapped === true,
+        JSON.stringify(hierarchy));
+      rec.check('solid/dashed semantics and both real tasks are legible',
+        hierarchy?.text.includes('temporary subactor')
+          && hierarchy?.text.includes('web actor')
+          && hierarchy?.text.includes('inspect price through the web actor')
+          && hierarchy?.text.includes('compare warranty terms independently'),
+        JSON.stringify(hierarchy?.text));
+      if (hierarchy) await rec.shot('actor-fabric-hierarchy-default');
+
+      await evalIn(ctx.page, `document.querySelector('.actor-fabric-branch .actor-fabric-branch .actor-fabric-node.is-bound')?.click()`);
+      const inspected = await waitFor(
+        () => evalIn(ctx.page, `(() => {
+          const detail = document.querySelector('.actor-fabric-detail');
+          const body = detail?.closest('.actor-fabric-body');
+          const toggle = document.querySelector('.actor-fabric-toggle');
+          if (!detail || !body) return null;
+          const detailRect = detail.getBoundingClientRect();
+          const bodyRect = body.getBoundingClientRect();
+          const toggleRect = toggle?.getBoundingClientRect();
+          return {
+            text: detail.textContent ?? '',
+            fullyVisible: detailRect.top >= bodyRect.top - 1 && detailRect.bottom <= bodyRect.bottom + 1,
+            headerVisible: !!toggleRect && toggleRect.top >= 0 && toggleRect.bottom <= innerHeight,
+            outerScrollTop: document.querySelector('.body')?.scrollTop ?? 0,
+          };
+        })()`),
+        { budgetMs: 2_000, pollMs: 25 });
+      rec.check('the nested bound actor remains inspectable',
+        inspected?.fullyVisible === true
+          && inspected?.headerVisible === true
+          && inspected?.outerScrollTop === hierarchy?.outerScrollTop
+          && inspected?.text.includes('one web tab')
+          && inspected?.text.includes('Dedicated keyless worker'),
+        JSON.stringify(inspected));
+      if (inspected) await rec.shot('actor-fabric-hierarchy-inspected');
+
+      const finished = await waitFor(
+        () => evalIn(ctx.page, `(() => {
+          const panel = document.querySelector('.actor-fabric.is-settled');
+          const body = panel?.querySelector('.actor-fabric-body');
+          if (!panel || !body) return null;
+          return {
+            nodes: body.querySelectorAll('.actor-fabric-node').length,
+            nested: !!body.querySelector('.actor-fabric-branch .actor-fabric-branch .actor-fabric-node.is-bound'),
+            text: panel.textContent ?? '',
+          };
+        })()`),
+        { budgetMs: 25_000, pollMs: 50 });
+      rec.check('the completion receipt preserves the full work-batch topology',
+        finished?.nodes === 4
+          && finished?.nested === true
+          && finished?.text.includes('all actor work finished'),
+        JSON.stringify(finished));
+      if (finished) await rec.shot('actor-fabric-hierarchy-finished');
+      await evalIn(ctx.page, `document.querySelector('.input-bar textarea')?.focus()`);
+    },
+  },
+
+  // --- functional + visual: full-page, cross-session Actor Space -----------
+  // Two chats keep temporary actors alive at once. The home monitor must show
+  // two independent orchestrator rooms without merging their lineages, expose
+  // an inspectable physical boundary, and collapse to its permanent empty state
+  // after both workers settle.
+  {
+    name: 'actor-overview', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      if (body.includes('<actor_agent>') && body.includes('alpha isolated research')) {
+        return { delayMs: 18_000, sse: sseText('ALPHA-ACTOR-DONE') };
+      }
+      if (body.includes('ALPHA-ROOT')) {
+        if (actorOverviewState.alphaSpawned === 0) {
+          actorOverviewState.alphaSpawned = 4;
+          return { sse: sseToolCalls(Array.from({ length: 4 }, (_, index) => ({
+            name: 'actor_create',
+            args: { task: `alpha isolated research ${index + 1}`, tools: [] },
+          }))) };
+        }
+        return { sse: sseText('ALPHA-DELEGATED') };
+      }
+      if (body.includes('BETA-ROOT')) {
+        return { delayMs: 18_000, sse: sseText('BETA-ORCHESTRATOR-DONE') };
+      }
+      return { sse: sseText('overview-state-idle') };
+    },
+    async run(ctx, rec) {
+      actorOverviewState = { alphaSpawned: 0, betaSpawned: 0 };
+      // A reset leaves a deliberately sessionless composer until first send.
+      // Seed two ordinary chats before starting either long-running actor so
+      // switching between their durable ids cannot stop the other's work.
+      await rpc(ctx.page, { type: 'agent/send', text: 'Launch risk orchestration workspace' });
+      const firstState = await waitFor(async () => {
+        const state = await rpc(ctx.page, { type: 'state/get' });
+        return state?.state?.session?.sessionId && !(await probe(ctx)).busy ? state : null;
+      }, { budgetMs: 10_000, pollMs: 80 });
+      const alphaRoot = firstState?.state?.session?.sessionId;
+      await rpc(ctx.page, { type: 'session/reset' });
+      await waitFor(async () => !(await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.sessionId,
+        { budgetMs: 5_000, pollMs: 50 });
+      await rpc(ctx.page, { type: 'agent/send', text: 'Rollout options workspace' });
+      const secondState = await waitFor(async () => {
+        const state = await rpc(ctx.page, { type: 'state/get' });
+        return state?.state?.session?.sessionId && !(await probe(ctx)).busy ? state : null;
+      }, { budgetMs: 10_000, pollMs: 80 });
+      const betaRoot = secondState?.state?.session?.sessionId;
+      rec.check('two distinct orchestrator sessions exist',
+        !!alphaRoot && !!betaRoot && alphaRoot !== betaRoot,
+        `${alphaRoot} / ${betaRoot}`);
+
+      const page = await openWidePage(ctx, 'home/home.html#actors');
+      try {
+        await rpc(ctx.page, { type: 'session/switch', sessionId: alphaRoot });
+        await rpc(ctx.page, { type: 'agent/send', text: 'ALPHA-ROOT research the launch risks' });
+        const alphaLive = await waitFor(async () => {
+          const overview = await rpc(page, { type: 'actors/overview' });
+          return overview?.roots?.some((root) => root.session?.sessionId === alphaRoot
+            && Object.keys(root.topology?.spawned?.sessions ?? {}).length >= 4);
+        }, { budgetMs: 15_000, pollMs: 80 });
+        rec.check('the first chat keeps a high-fanout actor room live', !!alphaLive);
+
+        const switched = await rpc(ctx.page, { type: 'session/switch', sessionId: betaRoot });
+        rec.check('a second orchestrator can become active while the first actor works', switched?.ok === true, JSON.stringify(switched));
+        await rpc(ctx.page, { type: 'agent/send', text: 'BETA-ROOT compare the rollout options' });
+        const bothLive = await waitFor(async () => {
+          const overview = await rpc(page, { type: 'actors/overview' });
+          const alpha = (overview?.roots ?? []).find((root) => root.session?.sessionId === alphaRoot);
+          const beta = (overview?.roots ?? []).find((root) => root.session?.sessionId === betaRoot);
+          return Object.keys(alpha?.topology?.spawned?.sessions ?? {}).length >= 4
+            && beta?.busy === true
+            ? overview : null;
+        }, { budgetMs: 15_000, pollMs: 80 });
+        rec.check('the server snapshot reports both roots without cross-session merging',
+          bothLive?.roots?.length === 2,
+          JSON.stringify(bothLive?.roots?.map((root) => root.session?.sessionId)));
+
+        const rendered = await waitFor(() => evalIn(page, `(() => {
+          const space = document.querySelector('.actor-space');
+          const rooms = [...document.querySelectorAll('.actor-space-room')];
+          const nodes = [...document.querySelectorAll('.actor-space-node')];
+          const actorBadge = document.querySelector('[data-home-view="actors"] .home-nav-count');
+          if (!space || rooms.length < 2 || nodes.length < 6
+            || actorBadge?.textContent?.trim() !== '4') return null;
+          const rect = space.getBoundingClientRect();
+          const alphaRoom = rooms.find((room) => room.getAttribute('data-root-session') === ${JSON.stringify(alphaRoot)});
+          const alphaTree = alphaRoom?.querySelector('.actor-space-tree');
+          const alphaHead = alphaRoom?.querySelector('.actor-space-room-head');
+          return {
+            rooms: rooms.length,
+            roots: rooms.map((room) => room.getAttribute('data-root-session')),
+            nodes: nodes.length,
+            subactors: document.querySelectorAll('.actor-space-node.is-subactor').length,
+            orbs: document.querySelectorAll('.actor-space .peerd-spinner').length,
+            actorBadge: actorBadge.textContent.trim(),
+            navGroups: [...document.querySelectorAll('.home-nav-group-label')]
+              .map((label) => label.textContent.trim()),
+            text: space.textContent ?? '',
+            highFanoutScrolls: !!alphaTree && alphaTree.scrollHeight > alphaTree.clientHeight,
+            headerVisible: !!alphaHead && alphaHead.getBoundingClientRect().top >= 0,
+            fits: rect.left >= 0 && rect.right <= innerWidth
+              && document.documentElement.scrollWidth <= innerWidth,
+          };
+        })()`), { budgetMs: 10_000, pollMs: 80 });
+        rec.check('Actor Space renders two orchestrator rooms and both workers',
+          rendered?.rooms === 2 && rendered?.nodes >= 6 && rendered?.subactors >= 4,
+          JSON.stringify(rendered));
+        rec.check('rooms with isolated actors lead main-only orchestrators',
+          rendered?.roots?.[0] === alphaRoot, JSON.stringify(rendered?.roots));
+        rec.check('the rooms stay root-separated and use the brand orb on live contexts',
+          rendered?.roots?.includes(alphaRoot)
+            && rendered?.roots?.includes(betaRoot)
+            && rendered?.orbs >= 5,
+          JSON.stringify(rendered));
+        rec.check('the rail groups Chats and Actors under Agent and shows a live actor count',
+          rendered?.actorBadge === '4'
+            && rendered?.navGroups?.join('|') === 'Agent|Create|Network',
+          JSON.stringify(rendered));
+        rec.check('the full-screen map exposes current work, topology semantics, and fits the viewport',
+          rendered?.text.includes('alpha isolated research')
+            && rendered?.text.includes('BETA-ROOT compare the rollout options')
+            && rendered?.text.includes('solid · resource-bound actor')
+            && rendered?.text.includes('dashed · temporary subactor')
+            && rendered?.fits === true,
+          JSON.stringify(rendered));
+        rec.check('a high-fanout room scrolls internally without pushing away its header',
+          rendered?.highFanoutScrolls === true && rendered?.headerVisible === true,
+          JSON.stringify(rendered));
+        if (rendered) await rec.shotPage('actor-space-live.light', page);
+
+        await page.send('Emulation.setDeviceMetricsOverride', {
+          width: 390, height: 844, deviceScaleFactor: 1, mobile: false,
+        });
+        await sleep(100);
+        const narrow = await evalIn(page, `(() => {
+          const shell = document.querySelector('.home-shell');
+          const rail = document.querySelector('.home-rail');
+          const nav = document.querySelector('.home-nav');
+          const targets = [...document.querySelectorAll('.home-rail button')];
+          return {
+            direction: getComputedStyle(shell).flexDirection,
+            viewport: innerWidth,
+            documentWidth: document.documentElement.scrollWidth,
+            railWidth: rail.getBoundingClientRect().width,
+            navFits: nav.scrollWidth <= nav.clientWidth,
+            targetsTall: targets.every((button) => button.getBoundingClientRect().height >= 44),
+          };
+        })()`);
+        rec.check('Actor Space reflows to a compact top rail at 390 CSS pixels',
+          narrow?.direction === 'column'
+            && narrow?.documentWidth <= narrow?.viewport
+            && narrow?.railWidth <= narrow?.viewport
+            && narrow?.navFits === true
+            && narrow?.targetsTall === true,
+          JSON.stringify(narrow));
+        if (narrow) await rec.shotPage('actor-space-live-narrow.light', page);
+
+        await evalIn(page, `document.querySelector('.actor-space-node.is-subactor')?.click()`);
+        const inspected = await waitFor(() => evalIn(page, `(() => {
+          const panel = document.querySelector('.actor-space-inspector');
+          return panel ? { text: panel.textContent ?? '', pressed:
+            document.querySelector('.actor-space-node.is-subactor')?.getAttribute('aria-pressed') } : null;
+        })()`), { budgetMs: 2_000, pollMs: 40 });
+        rec.check('a worker opens an exact access and isolation inspector',
+          inspected?.pressed === 'true'
+            && inspected?.text.includes('reasoning only')
+            && inspected?.text.includes('Dedicated keyless worker'),
+          JSON.stringify(inspected));
+        await evalIn(page, `document.querySelector('.actor-space-inspector')?.scrollIntoView({ block: 'center' })`);
+        await setEmulatedTheme(page, 'dark');
+        await sleep(100);
+        if (inspected) await rec.shotPage('actor-space-inspected-narrow.dark', page);
+
+        await page.send('Emulation.setDeviceMetricsOverride', {
+          width: 320, height: 720, deviceScaleFactor: 1, mobile: false,
+        });
+        await sleep(100);
+        const zoomReflow = await evalIn(page, `({
+          viewport: innerWidth,
+          documentWidth: document.documentElement.scrollWidth,
+          railWidth: document.querySelector('.home-rail')?.getBoundingClientRect().width,
+          navFits: document.querySelector('.home-nav')?.scrollWidth
+            <= document.querySelector('.home-nav')?.clientWidth,
+        })`);
+        rec.check('Actor Space still reflows at the 320 CSS-pixel equivalent of 400% zoom',
+          zoomReflow?.documentWidth <= zoomReflow?.viewport
+            && zoomReflow?.railWidth <= zoomReflow?.viewport
+            && zoomReflow?.navFits === true,
+          JSON.stringify(zoomReflow));
+
+        const empty = await waitFor(() => evalIn(page,
+          `(() => {
+            const text = document.querySelector('.actor-space-empty')?.textContent ?? '';
+            const badge = document.querySelector('[data-home-view="actors"] .home-nav-count');
+            return text && !badge ? { text, badge: null } : null;
+          })()`),
+        { budgetMs: 28_000, pollMs: 150 });
+        rec.check('the permanent monitor settles to an honest empty state',
+          empty?.text?.includes('The instance is quiet') && empty.badge === null,
+          JSON.stringify(empty));
+        if (empty) await rec.shotPage('actor-space-empty-narrow.dark', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
   // --- functional: an offscreen actor DELEGATES to its own web actor ------
-  // Heap-split phase 4, the deepest chain — two isolated heaps stacked. The
+  // Heap-split phase 4, the deepest chain, with two isolated heaps stacked. The
   // orchestrator spawns a sync actor granted message_actor; that actor's loop
-  // runs in its OWN offscreen heap and calls message_actor({to:'web'}) — which relays
+  // runs in its OWN isolated Worker heap and calls message_actor({to:'web'}), which relays
   // to the SW, dispatches actorMessaging from the child's restricted ctx, and (because
   // the sender is an actor) AWAITS the web actor's fenced reply into the child's tool
-  // result. The web actor is ITSELF an offscreen heap (phase 3). Proof: the child looped
-  // offscreen, a web-actor sub-loop ran, message_actor executed via the relay, and the
+  // result. The web actor is ITSELF an isolated Worker heap (phase 3). Proof: the child
+  // looped in isolation, a web-actor sub-loop ran, message_actor executed via the relay, and the
   // web reply round-tripped up through the child into the orchestrator's answer. This is
   // the delegation-from-a-heap path the unit tests can only stub.
   {
@@ -1702,13 +4476,13 @@ export const STATES = [
     responder: (callIndex, request) => {
       const body = (request && request.postData) || '';
       // The WEB ACTOR's model call (its own offscreen heap).
-      if (body.includes("You are peerd's web actor")) {
+      if (body.includes('kind: bound; type: web')) {
         actorDelegatesState.webCalls += 1;
         return { sse: sseText('WEB-PRICE-99') };
       }
       // The ACTOR's model calls (ephemeral-actor prompt). First emits message_actor;
       // second (after the awaited web reply re-enters its heap) answers.
-      if (body.includes('You are an EPHEMERAL ACTOR')) {
+      if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
         actorDelegatesState.childCalls += 1;
         if (actorDelegatesState.childCalls === 1) return { sse: sseToolCall('message_actor', { to: 'web', message: 'get the price of widget X' }) };
         return { sse: sseText('CHILD-GOT-WEB') };
@@ -1722,6 +4496,7 @@ export const STATES = [
     },
     async run(ctx, rec) {
       actorDelegatesState = { spawned: 0, childCalls: 0, webCalls: 0 };
+      const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'use an actor to ask the web actor for the price' });
       rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
       let out = {};
@@ -1734,16 +4509,14 @@ export const STATES = [
         return (out.bubbles || []).includes('FINAL-VIA-ACTOR') && !out.busy;
       }, { budgetMs: 40_000 });
 
-      const audit = await rpc(ctx.page, { type: 'audit/list', limit: 800 });
-      const entries = (audit && audit.entries) || [];
-      const ranOffscreen = entries.some((e) => e.type === 'actor_ran_offscreen');
-      const fellBack = entries.some((e) => e.type === 'actor_offscreen_fallback');
+      const entries = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
+      const isolation = actorIsolationEvidence(entries);
       const msgActorRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'message_actor');
-      rec.check('the actor looped offscreen (message_actor emitted, then answered) — 2 child calls', actorDelegatesState.childCalls >= 2, `childCalls=${actorDelegatesState.childCalls}`);
-      rec.check('the actor ran in its OWN offscreen heap (actor_ran_offscreen audit)', ranOffscreen === true, `offscreen=${ranOffscreen} fellBack=${fellBack}`);
+      rec.check('the actor looped in isolation (message_actor emitted, then answered), 2 child calls', actorDelegatesState.childCalls >= 2, `childCalls=${actorDelegatesState.childCalls}`);
+      rec.check('the actor ran in a dedicated Worker with a verified realm', isolation.exactProof === true, `isolated=${isolation.isolated.length}`);
       rec.check('the actor delegated via message_actor from its heap (tool_executed audit)', msgActorRan === true, `msgActorRan=${msgActorRan}`);
       rec.check('a WEB-ACTOR sub-loop ran (its own heap) for the child delegation', actorDelegatesState.webCalls >= 1, `webCalls=${actorDelegatesState.webCalls}`);
-      rec.check('it did NOT fall back to the in-SW loop', fellBack === false);
+      rec.check('it did NOT enter the background turn driver or fail isolation', isolation.backgroundRefused === false && isolation.isolationFailed === false);
       rec.check('the web reply round-tripped up through the actor into the final answer', (out.bubbles || []).includes('FINAL-VIA-ACTOR'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
@@ -1765,27 +4538,75 @@ export const STATES = [
       if (body.includes('client-side App builder') || body.includes('Your App is a multi-file artifact')) {
         actorAppState.appCalls += 1;
         if (actorAppState.appCalls === 1) {
+          return { sse: sseToolCall('app_write_file', { path: 'asset.bin', contentBase64: 'AP/AgH8=' }) };
+        }
+        if (actorAppState.appCalls === 2) {
+          return { sse: sseToolCall('app_write_file', { path: 'empty.wasm', contentBase64: 'AGFzbQEAAAA=' }) };
+        }
+        if (actorAppState.appCalls === 3) {
+          return { sse: sseToolCall('app_write_file', { path: 'model.custom', contentBase64: 'QUJD' }) };
+        }
+        if (actorAppState.appCalls === 4) {
           const probe = JSON.stringify(actorAppProbeUrl);
+          const secureProbe = JSON.stringify(actorAppProbeUrl.replace(/^http:/, 'https:'));
           const blobPayload = `<script>try { const p = new RTCPeerConnection({iceServers:[{urls:'stun:127.0.0.1:${actorAppStunPort}'}]}); p.createDataChannel('blob'); p.createOffer().then(o => p.setLocalDescription(o)); } catch (_) {}<\/script>`;
-          const dataPayload = `<script>try { const p = new RTCPeerConnection({iceServers:[{urls:'stun:127.0.0.1:${actorAppStunPort}'}]}); p.createDataChannel('data'); p.createOffer().then(o => p.setLocalDescription(o)); } catch (_) {} setTimeout(() => { location.href = URL.createObjectURL(new Blob([${JSON.stringify(blobPayload)}], {type:'text/html'})); }, 250);<\/script>`;
+          const blobPayloadLiteral = JSON.stringify(blobPayload).replace(/</g, '\\u003c');
+          const dataPayload = `<script>try { const p = new RTCPeerConnection({iceServers:[{urls:'stun:127.0.0.1:${actorAppStunPort}'}]}); p.createDataChannel('data'); p.createOffer().then(o => p.setLocalDescription(o)); } catch (_) {} setTimeout(() => { location.href = URL.createObjectURL(new Blob([${blobPayloadLiteral}], {type:'text/html'})); }, 250);<\/script>`;
+          const dataPayloadLiteral = JSON.stringify(dataPayload).replace(/</g, '\\u003c');
           const content = `<!DOCTYPE html><body>REAL LAVA LAMP
 <img src="${actorAppProbeUrl}/image">
 <script>
-document.body.dataset.webrtc = String(typeof RTCPeerConnection);
-fetch(${probe} + '/fetch').catch(() => {});
-const worker = new Worker(URL.createObjectURL(new Blob([
-  'fetch(' + JSON.stringify(${probe} + '/worker') + ').catch(() => {})',
-], { type: 'application/javascript' })));
-setTimeout(() => { location.href = ${probe} + '/navigate'; }, 50);
-setTimeout(() => { location.href = 'data:text/html,' + encodeURIComponent(${JSON.stringify(dataPayload)}); }, 150);
-setTimeout(() => { location.href = URL.createObjectURL(new Blob([${JSON.stringify(blobPayload)}], {type:'text/html'})); }, 300);
+Promise.resolve().then(async () => {
+  parent.postMessage({ type: 'runner-ready' }, '*');
+  const bytes = window.peerd.assets.bytes('asset.bin');
+  const custom = window.peerd.assets.bytes('model.custom');
+  await WebAssembly.instantiate(window.peerd.assets.bytes('empty.wasm'));
+  const second = window.name === 'peerd-binary-reloaded' || window.name === 'peerd-binary-probed';
+  const sendProof = () => parent.postMessage({
+    type: 'e2e-binary-proof', second, bytes: Array.from(bytes), custom: Array.from(custom), wasm: true,
+  }, '*');
+  sendProof();
+  const proofTimer = setInterval(sendProof, 100);
+  setTimeout(() => clearInterval(proofTimer), 2_000);
+  document.body.dataset.webrtc = String(typeof RTCPeerConnection);
+  if (!second) {
+    window.name = 'peerd-binary-reloaded';
+    setTimeout(() => location.reload(), 250);
+    return;
+  }
+  if (window.name === 'peerd-binary-probed') return;
+  window.name = 'peerd-binary-probed';
+  fetch(${probe} + '/fetch').catch(() => {});
+  try {
+    new Worker(URL.createObjectURL(new Blob([
+      'fetch(' + JSON.stringify(${probe} + '/worker') + ').catch(() => {})',
+    ], { type: 'application/javascript' })));
+  } catch (_) {}
+  setTimeout(() => { location.href = ${probe} + '/navigate'; }, 50);
+  setTimeout(() => { location.assign(${secureProbe} + '/assign'); }, 80);
+  setTimeout(() => { location.replace(${probe} + '/replace'); }, 110);
+  setTimeout(() => {
+    const meta = document.createElement('meta');
+    meta.httpEquiv = 'refresh';
+    meta.content = '0;url=' + ${probe} + '/meta-refresh';
+    document.head.appendChild(meta);
+  }, 140);
+  setTimeout(() => {
+    const form = document.createElement('form');
+    form.action = ${probe} + '/form';
+    document.body.appendChild(form);
+    form.submit();
+  }, 170);
+  setTimeout(() => { location.href = 'data:text/html,' + encodeURIComponent(${dataPayloadLiteral}); }, 200);
+  setTimeout(() => { location.href = URL.createObjectURL(new Blob([${blobPayloadLiteral}], {type:'text/html'})); }, 250);
+}).catch((error) => parent.postMessage({ type: 'e2e-binary-error', error: String(error) }, '*'));
 </script></body>`;
           return { sse: sseToolCall('app_write_file', { path: 'index.html', content }) };
         }
         return { sse: sseText('APP-ACTOR-WROTE') };
       }
       // ACTOR (ephemeral): create, capture the app id from the result, delegate.
-      if (body.includes('You are an EPHEMERAL ACTOR')) {
+      if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
         actorAppState.childCalls += 1;
         if (actorAppState.childCalls === 1) return { sse: sseToolCall('sandbox_create', { kind: 'app', name: 'Lava', files: { 'index.html': '<!-- placeholder -->' } }) };
         if (!actorAppState.appId) { const m = body.match(/app-[a-z0-9]+-[a-z0-9]+/); if (m) actorAppState.appId = m[0]; }
@@ -1801,12 +4622,16 @@ setTimeout(() => { location.href = URL.createObjectURL(new Blob([${JSON.stringif
     },
     async run(ctx, rec) {
       actorAppState = { spawned: 0, childCalls: 0, appCalls: 0, appId: null };
-      let probeHits = 0;
+      /** @type {string[]} */
+      const probeHits = [];
+      let probeConnections = 0;
       let stunHits = 0;
-      const server = createServer((_req, res) => {
-        probeHits += 1;
+      const server = createServer((req, res) => {
+        probeHits.push(req.url ?? '');
         res.writeHead(204); res.end();
       });
+      server.on('connection', () => { probeConnections += 1; });
+      server.on('clientError', (_error, socket) => socket.destroy());
       await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
       const port = /** @type {{ port: number }} */ (server.address()).port;
       actorAppProbeUrl = `http://127.0.0.1:${port}`;
@@ -1834,24 +4659,147 @@ setTimeout(() => { location.href = URL.createObjectURL(new Blob([${JSON.stringif
       const appWriteRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'app_write_file');
       // the app id came back into the actor's heap → it could delegate to that exact app
         rec.check("the actor's sandbox_create result (the new app id) re-entered its heap", typeof actorAppState.appId === 'string' && actorAppState.appId.startsWith('app-'), `appId=${actorAppState.appId}`);
-        rec.check('the actor reached the freshly-created app actor (delegation worked)', msgActorRan === true && actorAppState.appCalls >= 1, `msgActorRan=${msgActorRan} appActorCalls=${actorAppState.appCalls}`);
-        rec.check('the app actor wrote the real file (app_write_file executed)', appWriteRan === true, `appWriteRan=${appWriteRan}`);
+        rec.check('the actor reached the freshly-created app actor (delegation worked)', msgActorRan === true && actorAppState.appCalls >= 4, `msgActorRan=${msgActorRan} appActorCalls=${actorAppState.appCalls}`);
+        rec.check('the app actor wrote text and binary files (app_write_file executed)', appWriteRan === true, `appWriteRan=${appWriteRan}`);
         rec.check('the orchestrator settled with a final answer', (out.bubbles || []).includes('FINAL-APP-BUILT'));
 
         appPage = await openExtPage(ctx, `engine-tabs/app-tab/index.html#${actorAppState.appId}`);
+        await appPage.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+          if (window === top) {
+            globalThis.__e2eBinaryProofs = [];
+            globalThis.__e2eBinaryErrors = [];
+            globalThis.__e2eAppPolicies = [];
+            globalThis.__e2eParentPolicies = [];
+            addEventListener('message', (event) => {
+              const frame = document.getElementById('app-frame');
+              if (event.source !== frame?.contentWindow) return;
+              if (event.data?.type === 'e2e-binary-proof') {
+                globalThis.__e2eBinaryProofs.push({ ...event.data, receivedAt: performance.now() });
+              }
+              if (event.data?.type === 'e2e-binary-error') globalThis.__e2eBinaryErrors.push(event.data.error);
+              if (event.data?.type === 'app-policy-blocked') globalThis.__e2eAppPolicies.push(event.data.directive);
+            });
+            addEventListener('securitypolicyviolation', (event) => {
+              globalThis.__e2eParentPolicies.push({
+                directive: event.effectiveDirective,
+                receivedAt: performance.now(),
+              });
+            });
+          }
+        ` });
+        await appPage.send('Page.reload', { ignoreCache: true });
         const rendered = await waitFor(() => evalIn(appPage, `
           document.title === 'peerd · Lava'
           && document.getElementById('boot')?.classList.contains('is-hidden')
           && !document.getElementById('boot')?.classList.contains('is-failed')
         `),
           { budgetMs: 12_000, pollMs: 200 });
+        const binaryProof = await waitFor(() => evalIn(appPage, `
+          globalThis.__e2eBinaryProofs?.find((proof) => proof.second === true
+            && proof.wasm === true
+            && JSON.stringify(proof.bytes) === '[0,255,192,128,127]'
+            && JSON.stringify(proof.custom) === '[65,66,67]') ?? null
+        `), { budgetMs: 12_000, pollMs: 100 });
         await sleep(1_200);
         rec.check('the real manifest-sandboxed App rendered', !!rendered);
-        rec.check('fetch, passive resource, Worker fetch, and self-navigation made zero network hits', probeHits === 0, `hits=${probeHits}`);
-        rec.check('the App frame stayed on the peerd runner after blocked self-navigation',
-          await evalIn(appPage, `document.querySelector('#app-frame')?.src.includes('/runner.html')`) === true);
+        rec.check('the App received exact binary bytes and instantiated WASM after a self-reload', !!binaryProof,
+          JSON.stringify(binaryProof ?? await evalIn(appPage, `globalThis.__e2eBinaryProofs ?? []`)));
+        rec.check('the App binary API reported no runtime errors',
+          (await evalIn(appPage, `(globalThis.__e2eBinaryErrors ?? []).length`)) === 0,
+          JSON.stringify(await evalIn(appPage, `globalThis.__e2eBinaryErrors ?? []`)));
+        rec.check('fetch, resources, Worker, forms, meta refresh, and HTTP(S) navigation made zero network connections',
+          probeHits.length === 0 && probeConnections === 0,
+          JSON.stringify({ hits: probeHits, connections: probeConnections, policies: await evalIn(appPage, `globalThis.__e2eAppPolicies ?? []`) }));
+        rec.check('the trusted parent CSP blocked cross-origin frame navigation before fetch',
+          (await evalIn(appPage, `globalThis.__e2eParentPolicies ?? []`))
+            .some((policy) => policy.directive === 'frame-src'),
+          JSON.stringify(await evalIn(appPage, `globalThis.__e2eParentPolicies ?? []`)));
+        rec.check('the App kept running after blocked self-navigation', await evalIn(appPage, `(() => {
+          const blockedAt = globalThis.__e2eParentPolicies
+            ?.find((policy) => policy.directive === 'frame-src')?.receivedAt;
+          return typeof blockedAt === 'number'
+            && globalThis.__e2eBinaryProofs?.some((proof) => proof.receivedAt > blockedAt);
+        })()`) === true);
         rec.check('the WebRTC fail-closed preflight allowed App delivery', !!rendered);
         rec.check('data: and blob: replacement realms cannot emit WebRTC STUN traffic', stunHits === 0, `udpHits=${stunHits}`);
+        await evalIn(appPage, `document.getElementById('mode-toggle')?.click()`);
+        const editorState = await waitFor(() => evalIn(appPage, `(() => {
+          const rows = [...document.querySelectorAll('.pe-node.is-readonly')];
+          if (rows.length < 3) return null;
+          rows[0].click();
+          return {
+            labels: rows.map((row) => row.getAttribute('aria-label')),
+            notice: document.getElementById('app-security-notice')?.textContent ?? '',
+            panelVisible: document.getElementById('editor-panel')?.hidden === false,
+          };
+        })()`), { budgetMs: 8_000, pollMs: 100 });
+        rec.check('the App editor exposes binary files as labeled read-only rows',
+          editorState?.panelVisible === true
+            && editorState.labels?.some((label) => label === 'asset.bin, binary asset, read-only')
+            && editorState.labels?.some((label) => label === 'empty.wasm, binary asset, read-only')
+            && editorState.labels?.some((label) => label === 'model.custom, binary asset, read-only'),
+          JSON.stringify(editorState));
+        rec.check('selecting a binary file explains the safe replacement paths',
+          editorState?.notice?.includes('Ask peerd to replace it') && editorState.notice.includes('import'),
+          editorState?.notice ?? '');
+        const replacementNoticeFocus = await evalIn(appPage, `(() => {
+          const rows = [...document.querySelectorAll('.pe-node.is-readonly')];
+          const dismiss = document.querySelector('#app-security-notice button');
+          dismiss?.focus();
+          rows[1]?.click();
+          return {
+            active: document.activeElement?.textContent ?? '',
+            notice: document.getElementById('app-security-notice')?.textContent ?? '',
+          };
+        })()`);
+        rec.check('replacing a binary notice preserves keyboard focus on Dismiss',
+          replacementNoticeFocus?.active === 'Dismiss'
+            && replacementNoticeFocus?.notice?.includes('empty.wasm'),
+          JSON.stringify(replacementNoticeFocus));
+        const appViewport = await evalIn(appPage, `({ width: innerWidth, height: innerHeight })`);
+        await appPage.send('Emulation.setDeviceMetricsOverride', {
+          width: 320,
+          height: 500,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
+        const stackedNotices = await evalIn(appPage, `(() => {
+          const save = document.getElementById('app-save-status');
+          const message = document.getElementById('app-save-message');
+          const security = document.getElementById('app-security-notice');
+          if (!save || !message || !security) return null;
+          message.textContent = 'Could not save assets/' + 'unbrokenfilename'.repeat(16)
+            + 'large-binary-file.wasm. Your edits are still open. Reduce the file or free browser storage, then retry.';
+          save.hidden = false;
+          const saveRect = save.getBoundingClientRect();
+          const securityRect = security.getBoundingClientRect();
+          const dismissRect = security.querySelector('button')?.getBoundingClientRect();
+          const result = {
+            gap: saveRect.top - securityRect.bottom,
+            securityTop: securityRect.top,
+            saveBottom: saveRect.bottom,
+            dismissVisible: !!dismissRect
+              && dismissRect.left >= 0
+              && dismissRect.right <= innerWidth
+              && dismissRect.top >= 0
+              && dismissRect.bottom <= innerHeight,
+          };
+          save.hidden = true;
+          return result;
+        })()`);
+        rec.check('long save errors and security notices remain separate and usable in a narrow App tab',
+          stackedNotices?.gap >= 8
+            && stackedNotices.securityTop >= 0
+            && stackedNotices.saveBottom <= 500
+            && stackedNotices.dismissVisible === true,
+          JSON.stringify(stackedNotices));
+        await appPage.send('Emulation.setDeviceMetricsOverride', {
+          width: appViewport.width,
+          height: appViewport.height,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
+        await rec.shotPage('app-editor-binary', appPage);
         await rec.shot('final');
       } finally {
         try { appPage?.close(); } catch { /* */ }
@@ -1859,6 +4807,289 @@ setTimeout(() => { location.href = URL.createObjectURL(new Blob([${JSON.stringif
         stunServer.close();
         actorAppProbeUrl = '';
         actorAppStunPort = 0;
+      }
+    },
+  },
+
+  // --- red-team: actor jobs and relays reach only the offscreen client ------
+  {
+    name: 'actor-channel-targeting', kind: 'functional', phase: 'post-unlock',
+    responder: (_callIndex, request) => {
+      const body = request?.postData ?? '';
+      if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
+        actorChannelTargetState.childCalls += 1;
+        return { sse: sseText('TARGETED-CHILD-DONE') };
+      }
+      if (actorChannelTargetState.spawned === 0) {
+        actorChannelTargetState.spawned += 1;
+        return { sse: sseToolCall('actor_create', {
+          task: 'target-only-marker-308', tools: [], sync: true,
+        }) };
+      }
+      return { sse: sseText('TARGETED-PARENT-DONE') };
+    },
+    async run(ctx, rec) {
+      actorChannelTargetState = { spawned: 0, childCalls: 0 };
+      let appPage = null;
+      try {
+        // why an App host page: it is a real first-party extension tab and the
+        // exact sibling context that must not receive an offscreen job or relay.
+        appPage = await openExtPage(ctx, 'engine-tabs/app-tab/index.html#channel-target-probe');
+        const ready = await waitFor(() => evalIn(appPage,
+          `location.protocol === 'chrome-extension:' && document.readyState !== 'loading'`),
+        { budgetMs: 8_000, pollMs: 60 });
+        rec.check('the adversarial engine-tab sender loaded', ready === true);
+        await evalIn(appPage, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          globalThis.__actorChannelObservations = [];
+          const record = (kind, value) => {
+            let text = '';
+            try { text = JSON.stringify(value); } catch { text = String(value); }
+            globalThis.__actorChannelObservations.push({ kind, text });
+          };
+          browser.runtime.onMessage.addListener((message) => record('runtime-message', message));
+          browser.runtime.onConnect.addListener((port) => record('runtime-connect', { name: port.name }));
+          navigator.serviceWorker?.addEventListener('message', (event) => record('service-worker-message', event.data));
+          return true;
+        })()`, true);
+        const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
+        const sent = await rpc(ctx.page, {
+          type: 'agent/send', text: 'run the targeted actor transport probe',
+        });
+        rec.check('the actor probe turn was accepted', sent?.ok === true, JSON.stringify(sent));
+        let turnView = {};
+        const settled = await waitFor(async () => {
+          turnView = await evalIn(ctx.page, `({
+            bubbles: [...document.querySelectorAll('.message-assistant .bubble')]
+              .map((bubble) => bubble.textContent.trim()),
+            busy: !!document.querySelector('form.input-bar button.stop'),
+          })`) ?? {};
+          return actorChannelTargetState.childCalls >= 1 && !turnView.busy;
+        },
+        { budgetMs: 30_000, pollMs: 100 });
+        let isolation = actorIsolationEvidence([]);
+        await waitFor(async () => {
+          const entries = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
+          isolation = actorIsolationEvidence(entries);
+          return isolation.exactProof;
+        }, { budgetMs: 5_000, pollMs: 100 });
+        rec.check('the targeted actor completed',
+          settled === true && isolation.exactProof === true,
+          JSON.stringify({ turnView, actorChannelTargetState, isolation }));
+        const observations = await evalIn(appPage, `globalThis.__actorChannelObservations`);
+        const observedText = JSON.stringify(observations ?? []);
+        rec.check('the sibling engine page saw no actor channel, job, relay, or marker',
+          !/peerd\/actor-channel|actor\/(?:open|commit|relay|run)|target-only-marker-308/.test(observedText),
+          observedText.slice(0, 2_000));
+      } finally {
+        try { appPage?.close(); } catch { /* */ }
+      }
+    },
+  },
+
+  // --- visual + functional: authority row at Firefox sidebar width ---------
+  // Last because the keyed Anthropic fixture intentionally changes the
+  // ephemeral E2E vault/provider inventory.
+  {
+    name: 'narrow-sidebar', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('narrow layout ready') }),
+    async run(ctx, rec) {
+      await ctx.page.send('Emulation.setDeviceMetricsOverride', NARROW_PANEL_METRICS);
+      try {
+        await sleep(80);
+        const home = await evalIn(ctx.page, `(() => {
+          const inside = (el) => {
+            const rect = el.getBoundingClientRect();
+            return rect.left >= 0 && rect.right <= innerWidth;
+          };
+          const paths = [...document.querySelectorAll('.path-card')];
+          const menu = document.querySelector('.path-menu');
+          const composer = document.querySelector('.composer');
+          const onboarding = document.querySelector('.onboarding-card');
+          return {
+            width: innerWidth,
+            contentWidth: menu ? Math.round(menu.getBoundingClientRect().width) : null,
+            paths: paths.length,
+            pathsInside: paths.length > 0 && paths.every(inside),
+            composerInside: !!composer && inside(composer),
+            onboardingInside: !onboarding || inside(onboarding),
+          };
+        })()`);
+        rec.check('the 310px viewport produces the reported 282px content column',
+          home?.width === NARROW_PANEL_METRICS.width && home?.contentWidth === 282,
+          JSON.stringify(home));
+        rec.check('home cards and composer remain inside the narrow viewport',
+          home?.paths >= 6 && home?.pathsInside && home?.composerInside && home?.onboardingInside,
+          JSON.stringify(home));
+        await rec.shot('home-narrow');
+
+        const keyed = await rpc(ctx.page, {
+          type: 'provider/setKey', provider: 'anthropic', plaintext: 'sk-e2e-narrow-sidebar-only',
+        });
+        rec.check('Anthropic fixture key stored in the ephemeral E2E vault',
+          keyed?.ok === true, JSON.stringify(keyed));
+        const selectedProvider = await rpc(ctx.page, {
+          type: 'settings/update',
+          patch: { providerName: 'anthropic', providerModel: '', reasoningEnabled: true },
+        });
+        rec.check('narrow fixture selects Anthropic deterministically',
+          selectedProvider?.ok === true, JSON.stringify(selectedProvider));
+        await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.effort-dial')`),
+          { budgetMs: 8_000, pollMs: 60 });
+        await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.model-picker-select')`),
+          { budgetMs: 8_000, pollMs: 60 });
+        await waitFor(() => evalIn(ctx.page,
+          `/^Anthropic/.test(document.querySelector('.model-picker-select')?.selectedOptions?.[0]?.textContent || '')`),
+        { budgetMs: 8_000, pollMs: 60 });
+
+        const controls = await evalIn(ctx.page, `(() => {
+          const row = document.querySelector('.chat-mode-row');
+          const plan = document.querySelector('.planact-mode');
+          const act = document.querySelectorAll('.planact-mode')[1];
+          const confirm = document.querySelector('.planact-confirm');
+          const effort = document.querySelector('.effort-dial');
+          const goal = document.querySelector('.goal-toggle');
+          const model = document.querySelector('.model-picker-select');
+          const list = [plan, act, confirm, effort, goal];
+          const inside = (el) => {
+            const rect = el.getBoundingClientRect();
+            return rect.left >= 0 && rect.right <= innerWidth;
+          };
+          const target = (el) => {
+            const rect = el.getBoundingClientRect();
+            return rect.width >= 24 && rect.height >= 24;
+          };
+          const focusVisible = list.map((el) => {
+            el.focus();
+            const style = getComputedStyle(el);
+            return document.activeElement === el && parseFloat(style.outlineWidth) >= 2;
+          });
+          return {
+            present: list.every(Boolean),
+            inside: list.every(inside),
+            targets: list.every(target),
+            untruncated: list.every((el) => el.scrollWidth <= el.clientWidth),
+            selectedModeCount: document.querySelectorAll('.planact-mode[aria-pressed="true"]').length,
+            confirmState: confirm?.getAttribute('aria-pressed'),
+            effortValue: effort?.value,
+            goalState: goal?.getAttribute('aria-pressed'),
+            wraps: !!row && getComputedStyle(row).flexWrap === 'wrap'
+              && effort.getBoundingClientRect().top > plan.getBoundingClientRect().top,
+            rowFits: !!row && row.scrollWidth <= row.clientWidth && inside(row),
+            focusVisible,
+            modelInside: !!model && inside(model),
+          };
+        })()`);
+        rec.check('all authority controls remain visible, named, and untruncated',
+          controls?.present && controls?.inside && controls?.untruncated && controls?.rowFits,
+          JSON.stringify(controls));
+        rec.check('narrow controls wrap with 24px-or-larger targets',
+          controls?.wraps && controls?.targets, JSON.stringify(controls));
+        rec.check('selected authority and effort states remain explicit',
+          controls?.selectedModeCount === 1
+            && /^(true|false)$/.test(controls?.confirmState ?? '')
+            && controls?.effortValue === 'medium'
+            && /^(true|false)$/.test(controls?.goalState ?? ''),
+          JSON.stringify(controls));
+        rec.check('focus rings and model selector survive the narrow layout',
+          controls?.focusVisible?.every(Boolean) && controls?.modelInside,
+          JSON.stringify(controls));
+
+        await evalIn(ctx.page, `document.querySelector('.planact-mode')?.focus()`);
+        const tabOrder = [];
+        for (let index = 0; index < 5; index += 1) {
+          tabOrder.push(await evalIn(ctx.page, `(() => {
+            const el = document.activeElement;
+            if (el?.matches('.planact-mode:first-child')) return 'Plan';
+            if (el?.matches('.planact-mode:nth-child(2)')) return 'Act';
+            if (el?.matches('.planact-confirm')) return 'Confirm';
+            if (el?.matches('.effort-dial')) return 'Effort';
+            if (el?.matches('.goal-toggle')) return 'Goal';
+            return el?.className || el?.tagName || '';
+          })()`));
+          if (index < 4) {
+            await ctx.page.send('Input.dispatchKeyEvent', {
+              type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9,
+            });
+            await ctx.page.send('Input.dispatchKeyEvent', {
+              type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9,
+            });
+          }
+        }
+        rec.check('native Tab order is Plan → Act → Confirm → Effort → Goal',
+          JSON.stringify(tabOrder) === JSON.stringify(['Plan', 'Act', 'Confirm', 'Effort', 'Goal']),
+          JSON.stringify(tabOrder));
+
+        const documentNode = await ctx.page.send('DOM.getDocument');
+        const axSelectors = [
+          '.planact-mode:first-child', '.planact-mode:nth-child(2)',
+          '.planact-confirm', '.effort-dial', '.goal-toggle',
+        ];
+        const axNames = [];
+        for (const selector of axSelectors) {
+          const node = await ctx.page.send('DOM.querySelector', {
+            nodeId: documentNode.root.nodeId, selector,
+          });
+          const tree = await ctx.page.send('Accessibility.getPartialAXTree', {
+            nodeId: node.nodeId, fetchRelatives: false,
+          });
+          axNames.push(tree.nodes?.[0]?.name?.value ?? '');
+        }
+        rec.check('authority controls retain explicit accessibility-tree names',
+          axNames[0] === 'PLAN' && axNames[1] === 'ACT'
+            && /^Confirm: (on|off)$/.test(axNames[2])
+            && axNames[3] === 'Reasoning effort' && /^Goal/.test(axNames[4]),
+          JSON.stringify(axNames));
+
+        const widths = [310, 340, 341, 370, 371, 397, 398, 400];
+        const widthResults = [];
+        for (const width of widths) {
+          await ctx.page.send('Emulation.setDeviceMetricsOverride', {
+            ...NARROW_PANEL_METRICS, width,
+          });
+          await sleep(40);
+          widthResults.push(await evalIn(ctx.page, `(() => {
+            const inside = (el) => {
+              const rect = el.getBoundingClientRect();
+              return rect.left >= 0 && rect.right <= innerWidth;
+            };
+            const row = document.querySelector('.chat-mode-row');
+            const controls = [...row.querySelectorAll(
+              '.planact-mode, .planact-confirm, .effort-dial, .goal-toggle')];
+            const actions = [...document.querySelectorAll('.topbar-actions button')];
+            return {
+              width: innerWidth,
+              pageFits: document.documentElement.scrollWidth <= innerWidth
+                && document.body.scrollWidth <= innerWidth,
+              rowFits: row.scrollWidth <= row.clientWidth && inside(row) && controls.every(inside),
+              targets: controls.every((el) => {
+                const rect = el.getBoundingClientRect();
+                return rect.width >= 24 && rect.height >= 24;
+              }),
+              wraps: getComputedStyle(row).flexWrap === 'wrap',
+              actionsFit: actions.length === 6 && actions.every(inside),
+              actionNames: actions.map((el) => el.getAttribute('aria-label')),
+            };
+          })()`));
+        }
+        rec.check('the authority row fits across both sides of every responsive boundary',
+          widthResults.every((result) => result.pageFits && result.rowFits && result.targets
+            && result.wraps === (result.width <= 370)),
+          JSON.stringify(widthResults));
+        rec.check('all six named top-bar actions remain reachable across the width matrix',
+          widthResults.every((result) => result.actionsFit
+            && result.actionNames.every((name) => typeof name === 'string' && name.length > 0)),
+          JSON.stringify(widthResults));
+
+        await ctx.page.send('Emulation.setDeviceMetricsOverride', NARROW_PANEL_METRICS);
+        await sleep(500);
+        const settledModel = await evalIn(ctx.page,
+          `document.querySelector('.model-picker-select')?.selectedOptions?.[0]?.textContent?.trim() || ''`);
+        rec.check('the model selection stays Anthropic after async options settle',
+          /^Anthropic/.test(settledModel), settledModel);
+        await rec.visual('narrow-sidebar');
+      } finally {
+        await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
       }
     },
   },

@@ -251,7 +251,7 @@ export const reconcileWorkspaceFiles = (before, after) => {
 
 /**
  * Run a WASI command against a snapshot of a host-provided workspace and apply
- * only its resulting changes. The adapter is an explicit byte capability — no
+ * only its resulting changes. The adapter is an explicit byte capability: no
  * OPFS handle, browser storage object, or network primitive enters WASM.
  *
  * The snapshot boundary is intentional: Preview 1 syscalls are synchronous,

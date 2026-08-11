@@ -4,7 +4,7 @@ import { wrapUntrusted } from '../prompt-wrap.js';
 /** @type {import('/shared/tool-types.js').Tool} */
 export const podStatusTool = {
   name: 'pod_status', primitive: 'pod',
-  description: 'Inspect this Pod without creating or starting one. The default job table is metadata-only. Pass jobId plus stream to page retained stdout/stderr.',
+  description: 'Inspect this Pod without creating or starting one. The default job table is metadata-only. Pass jobId plus stream and the returned next offset to page retained stdout/stderr (up to 16000 characters per call).',
   schema: { type: 'object', properties: {
     podId: { type: 'string' },
     jobId: { type: 'string' },

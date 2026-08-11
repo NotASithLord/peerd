@@ -19,7 +19,9 @@ export const makeSystemRoutes = (deps) => {
     vault, auditLog, sessions, pushState, kv, memory,
     buildStateSnapshot, closeSidePanel, uiPorts, loadUserEndpoints,
     inspectImport, applyImport, settingsStore, saveUserHook,
-    CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError,
+    CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError, dwebTransfer,
+    onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
+    retryActorIsolation, normalizeImportedSettings, onProviderConfigChanged,
   } = deps;
 
   return {
@@ -28,6 +30,7 @@ export const makeSystemRoutes = (deps) => {
     // pushed over its port, but deliberately holds no port. It fetches on
     // load and refetches on focus; sendMessage also revives a dead SW.
     'state/get': async () => ({ ok: true, state: await buildStateSnapshot() }),
+    'actor-isolation/retry': async () => retryActorIsolation(),
 
     // --- logs (human-facing audit log) ---
     // The agent can already introspect this (inspect kind:'audit_log'); this route
@@ -105,12 +108,23 @@ export const makeSystemRoutes = (deps) => {
     // Pre-flight: what would this import overwrite? The UI shows the
     // summary (and the dweb-dropped notice on store packages) BEFORE
     // the user confirms.
-    'transfer/inspectImport': async ({ payload }) => inspectImport({
-      payload, channel: CHANNEL, knownSettingKeys: Object.keys(DEFAULT_SETTINGS),
-    }),
+    'transfer/inspectImport': async ({ payload, privateTransferAuthorization: authorization }) =>
+      authorization !== privateTransferAuthorization
+        ? { ok: false, error: 'private-transfer-required' }
+        : inspectImport({
+            payload, channel: CHANNEL, knownSettingKeys: Object.keys(DEFAULT_SETTINGS),
+          }),
 
-    'transfer/import': async ({ payload, passphrase }) => {
-      if (payload?.secrets != null && vault.isLocked()) {
+    'transfer/import': async ({
+      payload, passphrase, replaceDwebIdentity = false, skipDwebIdentity = false,
+      approvedExistingDwebDid, approvedExistingDwebRevision, approvedIncomingDwebDid,
+      privateTransferAuthorization: authorization,
+    }) => {
+      if (authorization !== privateTransferAuthorization) {
+        return { ok: false, error: 'private-transfer-required' };
+      }
+      const identityImport = CHANNEL !== 'store' && payload?.dweb?.identityRecord != null;
+      if ((payload?.secrets != null || identityImport) && vault.isLocked()) {
         return { ok: false, error: 'vault-locked' };
       }
       try {
@@ -120,7 +134,22 @@ export const makeSystemRoutes = (deps) => {
           channel: CHANNEL,
           knownSettingKeys: Object.keys(DEFAULT_SETTINGS),
           io: {
-            applySettings: (/** @type {any} */ patch) => settingsStore.update(patch),
+            applySettings: async (/** @type {any} */ patch) => {
+              const normalized = normalizeImportedSettings?.(patch) ?? patch;
+              const notices = [];
+              const dropped = Object.keys(patch).filter((key) => !Object.hasOwn(normalized, key));
+              const canonicalized = Object.keys(normalized).filter((key) =>
+                Object.hasOwn(patch, key)
+                && JSON.stringify(normalized[key]) !== JSON.stringify(patch[key]));
+              if (dropped.length > 0) notices.push(`Invalid setting value(s) were skipped: ${dropped.join(', ')}.`);
+              if (canonicalized.length > 0) notices.push(`Setting value(s) were normalized before import: ${canonicalized.join(', ')}.`);
+              if (Object.keys(normalized).length > 0) {
+                onSettingsChanging?.(normalized);
+                await settingsStore.update(normalized);
+                await onSettingsChanged?.(normalized);
+              }
+              return { count: Object.keys(normalized).length, notices };
+            },
             setProviderEndpoints: async (/** @type {any} */ v) => {
               await kv.set('provider_endpoints.v1', v);
               await loadUserEndpoints();
@@ -128,15 +157,35 @@ export const makeSystemRoutes = (deps) => {
             setSecret: (/** @type {string} */ name, /** @type {string} */ value) => vault.setSecret(name, value),
             importMemory: (/** @type {any} */ p) => memory.importAll(p),
             saveHook: (/** @type {any} */ record) => saveUserHook({ kv }, record),
+            // Preview-channel identity adoption (applyImport gates on
+            // channel; the helper itself refuses when the build has no dweb).
+            adoptDwebIdentity: dwebTransfer
+              ? (/** @type {any} */ record, /** @type {string} */ pass, /** @type {any} */ options) => options?.prepareOnly
+                ? dwebTransfer.prepareRecord(record, pass, options)
+                : dwebTransfer.adoptRecord(record, pass, options)
+              : undefined,
           },
+          replaceDwebIdentity: replaceDwebIdentity === true,
+          skipDwebIdentity: skipDwebIdentity === true,
+          approvedExistingDwebDid,
+          approvedExistingDwebRevision,
+          approvedIncomingDwebDid,
         });
         if (result.ok) {
+          if ((result.imported?.secrets ?? 0) > 0) onProviderConfigChanged?.();
           auditLog.append({ type: 'settings_imported', counts: result.imported }).catch(() => {});
+          pushState();
+        } else if (result.partial) {
+          if ((result.partial?.secrets ?? 0) > 0) onProviderConfigChanged?.();
+          auditLog.append({ type: 'settings_import_partial', counts: result.partial, details: { failure: result.failure ?? result.error } }).catch(() => {});
           pushState();
         }
         return result;
       } catch (e) {
         if (e instanceof ExportPassphraseError) return { ok: false, error: 'wrong-passphrase' };
+        if ((/** @type {{ name?: string, code?: string }} */ (e))?.name === 'IdentityTransferError') {
+          return { ok: false, error: `dweb-identity-${(/** @type {{ code?: string }} */ (e)).code ?? 'transfer-failed'}` };
+        }
         throw e;
       }
     },

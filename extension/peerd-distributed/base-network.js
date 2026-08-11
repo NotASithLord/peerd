@@ -16,7 +16,13 @@ import { createPeerNode } from './peer-node.js';
 import { createPresence } from './gossip/presence.js';
 import { mutableKey, signProvider } from './dht/records.js';
 import { decodeDidKey } from './identity/did.js';
-import { assertBundleWithinLimits, buildManifest, manifestHash } from './content/manifest.js';
+import {
+  assertBundleWithinLimits,
+  assertBundlePayloadWithinLimits,
+  buildManifest,
+  manifestHash,
+  MAX_BUNDLE_BYTES,
+} from './content/manifest.js';
 import { packBundle } from './content/bundle.js';
 import { chunkBytes } from './content/chunk.js';
 import { swarmFetch } from './content/swarm.js';
@@ -40,9 +46,14 @@ const T_ON = `${BASE_TOPIC}/on`;          // PEER_ON_DWAPP — "I'm running dwap
 const subMsgTopic = (id) => `dwapp/${id}/msg`;            // a sub-protocol's gossip topic
 
 /**
- * @param {{ identity: import('./transport/mesh.js').Identity, mesh: any, meta?: () => any, dial?: any, audit?: import('./transport/mesh.js').AuditFn, now?: () => number }} opts
+ * @param {{ identity: import('./transport/mesh.js').Identity, mesh: any,
+ *   meta?: () => any, dial?: any, audit?: import('./transport/mesh.js').AuditFn,
+ *   now?: () => number, maxBundleBytes?: number }} opts
  */
-export const createBaseNetwork = async ({ identity, mesh, meta = () => ({}), dial = null, audit = null, now = Date.now }) => {
+export const createBaseNetwork = async ({
+  identity, mesh, meta = () => ({}), dial = null, audit = null,
+  now = Date.now, maxBundleBytes = MAX_BUNDLE_BYTES,
+}) => {
   dlog('base', `assembling base network for ${(identity.did || '').slice(-8)} on lobby "${BASE_TOPIC}"`);
   const node = await createPeerNode({ identity, mesh, meta, dial, audit, now });
 
@@ -143,28 +154,29 @@ export const createBaseNetwork = async ({ identity, mesh, meta = () => ({}), dia
     catch { return []; }
   };
 
-  /** @param {{ name: string, entry: string, files: Record<string, string>, release?: Record<string, any>, created?: number, expectedHash?: string }} opts */
-  const publishApp = async ({ name, entry, files, release, created, expectedHash }) => {
+  /** @param {{ name: string, entry: string, files: Record<string, string | Uint8Array>,
+   *   fileKinds?: Record<string, 'text' | 'binary'>, release?: Record<string, any>, created?: number,
+   *   expectedHash?: string }} opts */
+  const publishApp = async ({ name, entry, files, fileKinds, release, created, expectedHash }) => {
     /** @type {Record<string, Uint8Array>} */
     const bytes = Object.create(null);
-    for (const [path, text] of Object.entries(files)) bytes[path] = utf8(text);
-    const payload = packBundle({ entry, files: bytes });
-    const createdAt = Number.isSafeInteger(created) && /** @type {number} */ (created) >= 0
-      ? /** @type {number} */ (created)
-      : null;
-    // why release metadata lives HERE: this manifest is immutable,
-    // content-addressed and publisher-signed. The mutable discovery card may
-    // repeat the fields for cheap UX, but only this copy forms a retrievable
-    // release chain after a newer card replaces it.
+    for (const [path, content] of Object.entries(files)) {
+      bytes[path] = typeof content === 'string' ? utf8(content) : new Uint8Array(content);
+    }
+    const payload = packBundle({ entry, files: bytes, fileKinds });
+    const packedBytes = assertBundlePayloadWithinLimits(payload, maxBundleBytes);
+    const manifestCreated = typeof created === 'number' && Number.isFinite(created) ? created : null;
     const { manifest, hash, chunks } = await buildManifest({
-      payload, type: 'app', entry, identity,
+      payload,
+      type: 'app',
+      entry,
+      identity,
       ...(release ? { meta: { release } } : {}),
-      ...(createdAt !== null ? { now: () => createdAt } : {}),
+      ...(manifestCreated !== null ? { now: () => manifestCreated } : {}),
     });
-    // Reject base64/JSON-expanded releases before serving or advertising them.
     assertBundleWithinLimits(manifest);
     if (expectedHash && hash !== expectedHash) {
-      throw new Error('reconstructed release does not match its stored version identity');
+      throw new Error('shared App bytes changed since the recorded version');
     }
     node.content.publish({ manifest, hash, chunks });
     const uri = formatPeerdUri({ did: identity.did, hash });
@@ -174,7 +186,7 @@ export const createBaseNetwork = async ({ identity, mesh, meta = () => ({}), dia
     // share take MINUTES and delayed the discovery announce behind it. Background.
     announceProvider(uri).catch(() => {}); // the publisher is the first provider
     dlog('base', `published app "${name}" → ${uri}`);
-    return { uri, hash };
+    return { uri, hash, packedBytes, created: manifest.created };
   };
 
   // Re-seed bytes we fetched so WE become a provider too (install → seeder). The
@@ -200,6 +212,13 @@ export const createBaseNetwork = async ({ identity, mesh, meta = () => ({}), dia
   // card's head; an INSTALLED app passes its hash explicitly (its card is the
   // ORIGINAL publisher's, so we can't author a fresh version). Best-effort +
   // idempotent: an app we never shared unshares to a clean no-op.
+  /** @param {{ slug?: string | null, publisher?: string }} [opts] */
+  const unpublishMeta = async ({ slug = null, publisher = identity.did } = {}) => {
+    const id = slug ? await dwappId(publisher, slug) : null;
+    if (id) discovery.tombstone(id);
+    return { removed: !!id, dwapp_id: id };
+  };
+
   /** @param {{ slug?: string | null, publisher?: string, hash?: string | null, hashes?: string[] }} [opts] */
   const unshareApp = async ({ slug = null, publisher = identity.did, hash = null, hashes = [] } = {}) => {
     const id = slug ? await dwappId(publisher, slug) : null;
@@ -212,10 +231,16 @@ export const createBaseNetwork = async ({ identity, mesh, meta = () => ({}), dia
     for (const releaseHash of releaseHashes) if (node.content.unannounce(releaseHash)) unserved += 1;
     // tombstone (not a bare remove): also blocks a peer's cached copy from
     // re-infecting our Library on the next snapshot. Lifted if we re-share.
-    if (id) discovery.tombstone(id);
+    await unpublishMeta({ slug, publisher });
     dlog('base', `unshare ${id ? `${id.slice(0, 8)}…` : '?'} — unserved:${unserved} tombstoned:${!!id}`);
     return { unserved, removed: !!id, dwapp_id: id, hash: h };
   };
+
+  // Revoke one served version without changing discovery metadata. Share and
+  // update transactions use this after a replacement succeeds, and while
+  // rolling back bytes whose public metadata failed to publish.
+  /** @param {string} hash */
+  const unserveContent = (hash) => node.content.unannounce(hash);
 
   // Fetch a bundle. The uri NAMES its publisher (peerd://<publisher>/<hash>), who
   // is the canonical server — so try THEM ALONE first. why: swarming across every
@@ -380,6 +405,8 @@ export const createBaseNetwork = async ({ identity, mesh, meta = () => ({}), dia
     fetchApp,
     // Stop sharing/seeding a deleted app: unannounce its bytes + drop our card.
     unshareApp,
+    unpublishMeta,
+    unserveContent,
     // Plane 2: the content provider set + "install → seeder" re-seed.
     announceProvider,
     findProviders,

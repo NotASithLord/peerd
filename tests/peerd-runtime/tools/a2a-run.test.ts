@@ -8,6 +8,9 @@ import { describe, test, expect } from 'bun:test';
 import { a2aRunTool } from '../../../extension/peerd-runtime/tools/defs/a2a-run.js';
 
 const RESULT = { value: 'ok', consoleOutput: [], durationMs: 1, error: null };
+const runRegistry = () => ({
+  mintRunId: () => 'run-a2a-1', register: () => {}, release: () => {},
+});
 
 // Typed `any` (like tests/.../message-actor.test.ts) — the mock only needs the
 // slots a2a_run actually reads.
@@ -19,6 +22,7 @@ const makeCtx = (over: any = {}) => {
       execHeadless: async (_code: string, opts: any) => { seen.exec = opts; return RESULT; },
       abortHeadless: async (runId: string, owner?: string) => { seen.aborts.push({ runId, owner }); },
     },
+    scriptRuns: runRegistry(),
     ...over,
   };
   return { ctx, seen };
@@ -31,7 +35,7 @@ describe('a2a_run — Stop plumbing (#153)', () => {
     expect(r.ok).toBe(true);
     expect(seen.exec.a2a).toBe(true);
     expect(seen.exec.ownerSessionId).toBe('dweb-1');
-    expect(String(seen.exec.runId)).toMatch(/^a2arun-dweb-1-/);
+    expect(seen.exec.runId).toBe('run-a2a-1');
   });
 
   test('aborting the turn mid-run calls abortHeadless with the run id + owner', async () => {
@@ -49,6 +53,7 @@ describe('a2a_run — Stop plumbing (#153)', () => {
         },
         abortHeadless: async (runId: string, owner?: string) => { seen.aborts.push({ runId, owner }); },
       },
+      scriptRuns: runRegistry(),
     };
     await a2aRunTool.execute({ code: 'return 1;' }, ctx);
     expect(seen.aborts).toEqual([{ runId: seen.exec.runId, owner: 'dweb-1' }]);

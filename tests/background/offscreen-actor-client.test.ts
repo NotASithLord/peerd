@@ -3,6 +3,8 @@
 // 'actor/tool-dispatch' route (SW-side pin + gate + the web actor's owned-tab thread).
 import { describe, test, expect } from 'bun:test';
 import { makeOffscreenActorClient } from '../../extension/background/offscreen-actor-client.js';
+import { makeDirectActorHost } from '../../extension/background/direct-actor-host.js';
+import { DWEB_INBOUND_TOOL_NAMES } from '../../extension/peerd-runtime/actor/capability-manifest.js';
 
 // Stand-ins for the two senders that matter. The relay routes must accept only the
 // first: `runtime.sendMessage` from the SW broadcasts to EVERY extension context, so
@@ -22,8 +24,10 @@ const baseDeps = (over: any = {}) => ({
   sessions: { get: async () => null },
   buildToolContext: async () => ({}),
   dispatchToolCall: async () => ({ ok: true }),
+  reviewToolAllowed: () => true,
   pinActorCall: () => {},
   EXPOSURE_ACTOR: 'actor',
+  inboundDwebToolNames: DWEB_INBOUND_TOOL_NAMES,
   ...over,
 });
 
@@ -48,11 +52,17 @@ const clientWithRelay = (over: any = {}) => {
   }));
   return {
     client,
-    during: async (fn: (token: string) => Promise<any>, actorSessionId = 's1', onEvent?: (ev: any) => void) => {
+    during: async (
+      fn: (token: string) => Promise<any>,
+      actorSessionId = 's1',
+      onEvent?: (ev: any) => void,
+      job: Record<string, any> = {},
+      runOptions: Record<string, any> = {},
+    ) => {
       relay = fn;
       await client.run(
-        { actorSessionId, message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' } as any,
-        onEvent ? { onEvent } : undefined,
+        { actorSessionId, message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm', ...job } as any,
+        { ...(onEvent ? { onEvent } : {}), ...runOptions },
       );
       return captured;
     },
@@ -60,24 +70,49 @@ const clientWithRelay = (over: any = {}) => {
 };
 
 describe('run() — Stop-cascade aborted stamping', () => {
+  test('channel transport binds a relay without serializing its grant', async () => {
+    let sentJob: any = null;
+    let relayResult: any = null;
+    const client = makeOffscreenActorClient(baseDeps({
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'web', backing: 'api' }) },
+      dispatchToolCall: async () => ({ ok: true, content: 'ran' }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        sentJob = job;
+        relayResult = await relay('actor/tool-dispatch', { call: { name: 'fetch_url', args: {} } });
+        return { ok: true, started: true, finalText: 'done' };
+      },
+    }));
+    const result = await client.run({
+      actorSessionId: 'actor-channel', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'm',
+    } as any);
+    expect(sentJob.relayToken).toBeUndefined();
+    expect(relayResult).toEqual({ ok: true, result: { ok: true, content: 'ran' } });
+    expect(result.finalText).toBe('done');
+  });
+
   test('stamps aborted when the signal fired and the turn produced NO reply', async () => {
     // The worker can unwind an abort CLEANLY (empty reply, no error) → looks ok at the
     // result shape. signal.aborted here is the authoritative proof a Stop hit this run.
-    const client = makeOffscreenActorClient(baseDeps({
-      sendMessage: async (m: any) => (m.type === 'actor/run' ? { ok: true, started: true, finalText: '' } : { ok: true }),
-    }));
     const ac = new AbortController();
-    ac.abort();
+    const client = makeOffscreenActorClient(baseDeps({
+      sendMessage: async (m: any) => {
+        if (m.type === 'actor/run') { ac.abort(); return { ok: true, started: true, finalText: '' }; }
+        return { ok: true };
+      },
+    }));
     const r = await client.run({ actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' } as any, { signal: ac.signal });
     expect(r.aborted).toBe(true);
   });
 
   test('does NOT stamp aborted when the turn produced text just before Stop (raced)', async () => {
-    const client = makeOffscreenActorClient(baseDeps({
-      sendMessage: async (m: any) => (m.type === 'actor/run' ? { ok: true, started: true, finalText: 'a real reply' } : { ok: true }),
-    }));
     const ac = new AbortController();
-    ac.abort();
+    const client = makeOffscreenActorClient(baseDeps({
+      sendMessage: async (m: any) => {
+        if (m.type === 'actor/run') { ac.abort(); return { ok: true, started: true, finalText: 'a real reply' }; }
+        return { ok: true };
+      },
+    }));
     const r = await client.run({ actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' } as any, { signal: ac.signal });
     expect(r.aborted).toBeUndefined();
     expect(r.finalText).toBe('a real reply');
@@ -90,9 +125,278 @@ describe('run() — Stop-cascade aborted stamping', () => {
     const r = await client.run({ actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' } as any);
     expect(r.aborted).toBeUndefined();
   });
+
+  test('Stop during offscreen startup prevents actor/run from being dispatched', async () => {
+    let finishStartup: (() => void) | undefined;
+    const startup = new Promise<void>((resolve) => { finishStartup = resolve; });
+    const sent: string[] = [];
+    const ac = new AbortController();
+    const client = makeOffscreenActorClient(baseDeps({
+      ensureOffscreen: () => startup,
+      sendMessage: async (m: any) => { sent.push(m.type); return { ok: true }; },
+    }));
+    const pending = client.run(
+      { actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' } as any,
+      { signal: ac.signal },
+    );
+    ac.abort();
+    finishStartup?.();
+    const result: any = await pending;
+    expect(result).toEqual(expect.objectContaining({ ok: false, started: true, aborted: true }));
+    expect(sent).toEqual([]);
+  });
+
+  test('runner settlement aborts an already-admitted SW tool relay', async () => {
+    let relay: Promise<any> | null = null;
+    let dispatchStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { dispatchStarted = resolve; });
+    let relaySignal: AbortSignal | undefined;
+    let client: ReturnType<typeof makeOffscreenActorClient>;
+    client = makeOffscreenActorClient(baseDeps({
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
+      buildToolContext: async () => ({}),
+      dispatchToolCall: async (_call: any, ctx: any) => {
+        relaySignal = ctx.abortSignal;
+        dispatchStarted?.();
+        return await new Promise((resolve) => {
+          const finish = () => resolve({ ok: false, error: 'cancelled with actor run' });
+          if (ctx.abortSignal.aborted) finish();
+          else ctx.abortSignal.addEventListener('abort', finish, { once: true });
+        });
+      },
+      sendMessage: async (m: any) => {
+        if (m.type !== 'actor/run') return { ok: true };
+        relay = client.routes['actor/tool-dispatch']({
+          relayToken: m.job.relayToken, call: { name: 'vm_boot', args: {} },
+        }, OFFSCREEN);
+        await started;
+        return { ok: false, started: true, aborted: true, error: 'actor timed out' };
+      },
+    }));
+
+    const result: any = await client.run({
+      actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm',
+    } as any);
+    const relayResult: any = await relay;
+    expect(result.aborted).toBe(true);
+    expect(relaySignal?.aborted).toBe(true);
+    expect(relayResult).toEqual({ ok: false, error: 'aborted' });
+  });
+
+  test('runner settlement aborts an already-admitted SW model relay', async () => {
+    let relay: Promise<any> | null = null;
+    let modelStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { modelStarted = resolve; });
+    let modelSignal: AbortSignal | undefined;
+    let client: ReturnType<typeof makeOffscreenActorClient>;
+    client = makeOffscreenActorClient(baseDeps({
+      callModel: async function* ({ signal }: any) {
+        modelSignal = signal;
+        modelStarted?.();
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) resolve();
+          else signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+      },
+      sendMessage: async (m: any) => {
+        if (m.type !== 'actor/run') return { ok: true };
+        relay = client.routes['actor/model-call']({
+          relayToken: m.job.relayToken, args: { provider: 'anthropic', model: 'm' },
+        }, OFFSCREEN);
+        await started;
+        return { ok: false, started: true, aborted: true, error: 'actor timed out' };
+      },
+    }));
+
+    const result: any = await client.run({
+      actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm',
+    } as any);
+    const relayResult: any = await relay;
+    expect(result.aborted).toBe(true);
+    expect(modelSignal?.aborted).toBe(true);
+    expect(relayResult).toEqual({ ok: false, error: 'aborted' });
+  });
+
+  test('Firefox lease loss revokes a pending model relay before late bytes arrive', async () => {
+    let modelStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { modelStarted = resolve; });
+    let releaseModel: (() => void) | undefined;
+    const modelRelease = new Promise<void>((resolve) => { releaseModel = resolve; });
+    let modelSignal: AbortSignal | undefined;
+    let relayResult: Promise<any> | null = null;
+    let relayToken = '';
+    let relayAgain: ((type: string, payload: any) => Promise<any>) | null = null;
+    const workerAborts: string[] = [];
+    const host = makeDirectActorHost({
+      workerUrl: 'worker.js',
+      run: async (job: any, { sendToSW }: any) => {
+        relayToken = job.relayToken;
+        relayAgain = sendToSW;
+        relayResult = sendToSW('actor/model-call', {
+          relayToken,
+          args: { provider: 'anthropic', model: 'm' },
+        });
+        await relayResult;
+        return { ok: true, started: true, finalText: 'late response' };
+      },
+      abort: (runId: string) => { workerAborts.push(runId); },
+    });
+    const client = makeOffscreenActorClient(baseDeps({
+      ensureHost: async () => {},
+      isRelaySender: host.isRelaySender,
+      sendMessage: host.sendMessage,
+      callModel: async function* ({ signal }: any) {
+        modelSignal = signal;
+        modelStarted?.();
+        await modelRelease;
+        yield { type: 'text_delta', text: 'late provider bytes' };
+      },
+    }));
+    host.bindRelayRoutes(client.routes);
+
+    const run = client.run({
+      actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm',
+    } as any);
+    await started;
+    host.failKeepAlive(new Error('session heartbeat stopped'));
+
+    expect(await run).toEqual(expect.objectContaining({
+      ok: false,
+      started: true,
+      code: 'actor_host_keepalive_lost',
+      outcomeKnown: false,
+    }));
+    expect(workerAborts).toHaveLength(1);
+    expect(modelSignal?.aborted).toBe(true);
+    expect(relayAgain).not.toBeNull();
+    const replayResult = await (relayAgain as unknown as (type: string, payload: any) => Promise<any>)(
+      'actor/model-call', {
+      relayToken,
+      args: { provider: 'anthropic', model: 'm' },
+      });
+    expect(replayResult).toEqual({ ok: false, error: 'actor/model-call: unauthorized relay' });
+
+    releaseModel?.();
+    expect(relayResult).not.toBeNull();
+    expect(await (relayResult as unknown as Promise<any>)).toEqual({ ok: false, error: 'aborted' });
+  });
+});
+
+describe('inbound provenance — monotonic SW grant', () => {
+  test('advertises only the positive read/moderation dweb set to an inbound worker', async () => {
+    let sentJob: any = null;
+    const client = makeOffscreenActorClient(baseDeps({
+      sendMessage: async (m: any) => {
+        if (m.type === 'actor/run') sentJob = m.job;
+        return { ok: true, started: true, finalText: '' };
+      },
+    }));
+    const names = [
+      'dweb_discover', 'dweb_peers', 'dweb_block',
+      'dweb_discovery', 'dweb_guide', 'dweb_share', 'dweb_install', 'a2a_run',
+      'message_actor', 'actor_create', 'request_review', 'script',
+    ];
+    await client.run({
+      actorSessionId: 'dweb', message: 'peer bytes', systemPrompt: 's',
+      provider: 'anthropic', model: 'm', actorType: 'dweb', inbound: true,
+      tools: names.map((name) => ({ name, description: name, schema: {} })),
+    });
+    expect(sentJob.inbound).toBe(true);
+    expect(sentJob.tools.map((tool: any) => tool.name)).toEqual([
+      'dweb_discover', 'dweb_peers', 'dweb_block',
+    ]);
+  });
+
+  test('rechecks the inbound grant at dispatch and rebuilds an untrusted stripped ctx', async () => {
+    const buildOpts: any[] = [];
+    const dispatches: string[] = [];
+    let dispatchedCtx: any = null;
+    let restrictedTo: string[] = [];
+    const { client, during } = clientWithRelay({
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'dweb', instanceId: 'dweb' }) },
+      buildToolContext: async (opts: any) => {
+        buildOpts.push(opts);
+        // Simulate a ctx builder that forgot the derived bit. The live SW grant
+        // must still stamp inbound and strip the signing-worker closure.
+        return { inbound: false, synthetic: false, jsOffscreenClient: { run: true }, dweb: { peers: true } };
+      },
+      restrictCtxCapabilities: (ctx: any, allowed: Set<string>) => {
+        restrictedTo = [...allowed];
+        const narrowed = { ...ctx };
+        if (!allowed.has('a2a_run')) delete narrowed.jsOffscreenClient;
+        return narrowed;
+      },
+      dispatchToolCall: async (call: any, ctx: any) => {
+        dispatches.push(call.name);
+        dispatchedCtx = ctx;
+        return { ok: true, content: 'safe read' };
+      },
+    });
+    const out = await during(async (relayToken) => {
+      const forbidden = await client.routes['actor/tool-dispatch']({
+        relayToken, call: { name: 'a2a_run', args: { code: 'await mesh.send(...)' } },
+      }, OFFSCREEN);
+      const allowed = await client.routes['actor/tool-dispatch']({
+        relayToken, call: { name: 'dweb_peers', args: {} },
+      }, OFFSCREEN);
+      return { forbidden, allowed };
+    }, 'dweb', undefined, {
+      actorType: 'dweb', inbound: true,
+      tools: ['dweb_peers', 'a2a_run', 'dweb_share', 'dweb_install']
+        .map((name) => ({ name, description: name, schema: {} })),
+    });
+
+    expect(out.forbidden.ok).toBe(false);
+    expect(out.forbidden.error).toContain('tool_not_available_to_inbound_actor');
+    expect(out.allowed).toEqual({ ok: true, result: { ok: true, content: 'safe read' } });
+    expect(dispatches).toEqual(['dweb_peers']);
+    expect(buildOpts).toEqual([expect.objectContaining({ synthetic: true, trusted: false })]);
+    expect(dispatchedCtx).toEqual(expect.objectContaining({ synthetic: true, trusted: false, inbound: true }));
+    expect(dispatchedCtx.jsOffscreenClient).toBeUndefined();
+    expect(restrictedTo).toEqual(['dweb_peers']);
+  });
+
+  test('fails closed when an inbound ctx capability filter is not wired', async () => {
+    let dispatched = false;
+    const { client, during } = clientWithRelay({
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'dweb', instanceId: 'dweb' }) },
+      dispatchToolCall: async () => { dispatched = true; return { ok: true }; },
+    });
+    const out = await during((relayToken) => client.routes['actor/tool-dispatch']({
+      relayToken, call: { name: 'dweb_peers', args: {} },
+    }, OFFSCREEN), 'dweb', undefined, {
+      actorType: 'dweb', inbound: true,
+      tools: [{ name: 'dweb_peers', description: 'peers', schema: {} }],
+    });
+    expect(out.ok).toBe(false);
+    expect(out.error).toContain('inbound capability filter not wired');
+    expect(dispatched).toBe(false);
+  });
 });
 
 describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab thread", () => {
+  test('a bound actor tool receives the live turn AbortSignal', async () => {
+    let seenSignal: AbortSignal | undefined;
+    const controller = new AbortController();
+    const { client, during } = clientWithRelay({
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
+      buildToolContext: async () => ({}),
+      dispatchToolCall: async (_call: any, ctx: any) => {
+        seenSignal = ctx.abortSignal;
+        return { ok: true };
+      },
+    });
+    const out = await during(
+      (relayToken) => client.routes['actor/tool-dispatch']({
+        relayToken, call: { name: 'vm_boot', args: {} },
+      }, OFFSCREEN),
+      's1', undefined, {}, { signal: controller.signal },
+    );
+    expect(out.ok).toBe(true);
+    expect(seenSignal).not.toBe(controller.signal);   // host-owned run signal
+    expect(seenSignal?.aborted).toBe(true);            // settlement cancels relays
+  });
+
   test('a WEB (tab) actor threads its owned tab into buildToolContext + re-pins', async () => {
     let ctxOpts: any = null;
     let pinned: any = null;
@@ -108,6 +412,26 @@ describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab threa
     expect(ctxOpts.activeTabId).toBe(42);           // the owned tab reached the ctx
     expect(ctxOpts.actorType).toBe('web');
     expect(pinned.id).toBe('web');                  // re-pinned to the bound instance
+  });
+
+  test('a WEB actor relay keeps the surface resolved at turn start', async () => {
+    let liveSetting = 'code';
+    let ctxOpts: any = null;
+    const { client, during } = clientWithRelay({
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'web', instanceId: 'web' }) },
+      buildToolContext: async (o: any) => { ctxOpts = { ...o, liveSetting }; return {}; },
+      dispatchToolCall: async () => ({ ok: true }),
+    });
+    await during(async (relayToken) => {
+      // Settings can change while the Worker is reasoning. The SW-owned grant
+      // must carry the already-advertised surface into every relayed dispatch.
+      liveSetting = 'tools';
+      return client.routes['actor/tool-dispatch']({
+        relayToken, call: { name: 'page_code', args: { code: 'return 1' } },
+      }, OFFSCREEN);
+    }, 's1', undefined, { actorType: 'web', actorSurface: 'code' });
+    expect(ctxOpts.liveSetting).toBe('tools');
+    expect(ctxOpts.actorSurface).toBe('code');
   });
 
   test('an API actor (backing api) gets NO tab (fetch-only, no DOM)', async () => {
@@ -218,9 +542,9 @@ describe('relay grant — routes refuse anything without a live token', () => {
   });
 });
 
-// The sender pin. `runtime.sendMessage` from the SW cannot address one context, so
-// the actor/run job — grant token included — is broadcast to the side panel and to
-// every engine tab page. A page that keeps the token must still get nowhere.
+// Firefox's private background host still uses a token to bind each relay to a
+// live run. Even there, a token-bearing call from a different extension page
+// must get nowhere. Chrome closes the grant over a targeted MessageChannel.
 describe('relay sender pin — a leaked token is useless from any other page', () => {
   const dispatchDeps = {
     sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
@@ -293,6 +617,127 @@ describe('actor/model-call — spend-limit preflight', () => {
   });
 });
 
+describe('actor/model-call: trusted run metadata wins over worker args', () => {
+  test('pins provider, model, and Ollama host at the key-bearing boundary', async () => {
+    let seen: any = null;
+    const { client, during } = clientWithRelay({
+      callModel: async function* (args: any) { seen = args; yield { type: 'text', text: 'ok' }; },
+      sendMessage: undefined,
+    });
+    // The helper's job is anthropic/model m. The worker-controlled payload tries
+    // to switch all three fields; the live grant must overwrite it.
+    const out: any = await during((relayToken) => client.routes['actor/model-call']({
+      relayToken,
+      args: { provider: 'openai', model: 'expensive-unknown', ollamaHost: 'http://attacker.test' },
+    }, OFFSCREEN));
+    expect(out.ok).toBe(true);
+    expect(seen.provider).toBe('anthropic');
+    expect(seen.model).toBe('m');
+    expect(seen.ollamaHost).toBeUndefined();
+  });
+});
+
+describe('run(): relay lifetime', () => {
+  test('aborts the SW-side relay signal whenever the host settles', async () => {
+    let relaySignal: AbortSignal | null = null;
+    let client: any;
+    client = makeOffscreenActorClient(baseDeps({
+      sessions: { get: async () => ({ kind: 'spawned', grantedTools: ['script'] }) },
+      restrictCtxCapabilities: (ctx: any) => ctx,
+      buildToolContext: async () => ({}),
+      dispatchToolCall: async (_call: any, ctx: any) => {
+        relaySignal = ctx.abortSignal;
+        return { ok: true };
+      },
+      sendMessage: async (message: any) => {
+        if (message.type === 'actor/run') {
+          await client.routes['actor/tool-dispatch']({
+            relayToken: message.job.relayToken,
+            call: { name: 'script', args: {} },
+          }, OFFSCREEN);
+          return { ok: true, started: true, finalText: 'done' };
+        }
+        return { ok: true };
+      },
+    }));
+
+    await client.run({ actorSessionId: 's1', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' });
+    await Promise.resolve();
+    expect(relaySignal).not.toBeNull();
+    expect((relaySignal as unknown as AbortSignal).aborted).toBe(true);
+  });
+
+  test('a model relay suspended in preflight cannot start after its host settles', async () => {
+    let releasePreflight!: () => void;
+    const preflightGate = new Promise<void>((resolve) => { releasePreflight = resolve; });
+    let enteredPreflight!: () => void;
+    const preflightEntered = new Promise<void>((resolve) => { enteredPreflight = resolve; });
+    let routeResult: Promise<any> = Promise.resolve(null);
+    let modelCalled = false;
+    let client: any;
+    client = makeOffscreenActorClient(baseDeps({
+      spendRefusalFor: async () => {
+        enteredPreflight();
+        await preflightGate;
+        return null;
+      },
+      callModel: async function* () { modelCalled = true; yield { type: 'text', text: 'forbidden' }; },
+      sendMessage: async (message: any) => {
+        if (message.type === 'actor/run') {
+          routeResult = client.routes['actor/model-call']({
+            relayToken: message.job.relayToken,
+            args: {},
+          }, OFFSCREEN);
+          await preflightEntered;
+          return { ok: true, started: true, finalText: 'host settled' };
+        }
+        return { ok: true };
+      },
+    }));
+
+    await client.run({ actorSessionId: 's1', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' });
+    releasePreflight();
+    expect(await routeResult).toEqual({ ok: false, error: 'aborted' });
+    expect(modelCalled).toBe(false);
+  });
+
+  test('a tool relay suspended in session lookup cannot dispatch after its host settles', async () => {
+    let releaseSession!: () => void;
+    const sessionGate = new Promise<void>((resolve) => { releaseSession = resolve; });
+    let enteredSession!: () => void;
+    const sessionEntered = new Promise<void>((resolve) => { enteredSession = resolve; });
+    let routeResult: Promise<any> = Promise.resolve(null);
+    let dispatched = false;
+    let client: any;
+    client = makeOffscreenActorClient(baseDeps({
+      sessions: {
+        get: async () => {
+          enteredSession();
+          await sessionGate;
+          return { kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' };
+        },
+      },
+      dispatchToolCall: async () => { dispatched = true; return { ok: true }; },
+      sendMessage: async (message: any) => {
+        if (message.type === 'actor/run') {
+          routeResult = client.routes['actor/tool-dispatch']({
+            relayToken: message.job.relayToken,
+            call: { name: 'vm_exec', args: {} },
+          }, OFFSCREEN);
+          await sessionEntered;
+          return { ok: true, started: true, finalText: 'host settled' };
+        }
+        return { ok: true };
+      },
+    }));
+
+    await client.run({ actorSessionId: 's1', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' });
+    releaseSession();
+    expect(await routeResult).toEqual({ ok: false, error: 'aborted' });
+    expect(dispatched).toBe(false);
+  });
+});
+
 describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ctx from grantedTools", () => {
   const subDeps = (over: any = {}) => baseDeps({
     sessions: { get: async () => ({ kind: 'spawned', parentSessionId: 'p1', depth: 1, grantedTools: ['script', 'read_memory'] }) },
@@ -312,8 +757,8 @@ describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ct
   });
 
   // #160: the review exemption must fire on the LIVE relay path — the gate tests
-  // hand-build {exposure} ctxs, which is how the "stamped only on the in-SW
-  // fallback" regression stayed invisible. These pin the relay's own logic:
+  // hand-build {exposure} ctxs, which would let a missing host-side stamp stay
+  // invisible. These pin the isolated relay's own logic:
   // given a record with review:true it stamps, otherwise it doesn't. The OTHER
   // half — that create() actually persists review so a real record carries it —
   // is pinned in sessions/custom-system-prompt.test.ts (a real create→get
@@ -329,6 +774,25 @@ describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ct
     const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'js_read_file', args: {} } }, OFFSCREEN));
     expect(out.ok).toBe(true);
     expect(seenCtx.exposure).toBe('review');
+  });
+
+  test('a REVIEW child is refused at call time when the live allowlist drops a stale grant', async () => {
+    let dispatched = false;
+    const { client, during } = clientWithRelay(subDeps({
+      sessions: { get: async () => ({
+        kind: 'spawned', parentSessionId: 'p1', depth: 1,
+        grantedTools: ['app_search'], review: true,
+      }) },
+      reviewToolAllowed: () => false,
+      dispatchToolCall: async () => { dispatched = true; return { ok: true }; },
+      EXPOSURE_REVIEW: 'review',
+    }));
+    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({
+      relayToken, call: { name: 'app_search', args: { query: 'x' } },
+    }, OFFSCREEN));
+    expect(out.ok).toBe(false);
+    expect(out.error).toContain('tool_not_available_to_reviewer');
+    expect(dispatched).toBe(false);
   });
 
   test('a NON-review spawned child gets NO exposure from the relay (fail-closed)', async () => {

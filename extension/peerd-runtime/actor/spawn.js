@@ -4,20 +4,21 @@
 // An actor is NOT a fourth engine kind — it's an orchestration
 // primitive. "Who is reasoning about the next step?" is the agent loop,
 // the *r* letter. So an actor is just a session with parentage that
-// runs the SAME runUserTurn loop the top-level chat does. This file
+// runs the SAME runUserTurn loop the top-level chat does in a dedicated Worker.
+// This file
 // sets up the call args (a fresh child session, a narrowed tool subset,
 // a task-focused system prompt, an output cap) and invokes the existing
-// loop. It does NOT duplicate the loop.
+// worker host. It does NOT duplicate the loop.
 //
 // Two surfaces call in here through one orchestrator (same audit, same
 // gates, same permission inheritance):
 //   - the `actor_create` tool        (the model decomposing a task)
 //   - the `actor/spawn` SW route    (Notebook code via peerd.runtime.runAgent)
 //
-// Functional-core/imperative-shell as everywhere else: every IO surface
-// (the loop, the model, the dispatcher, the session store, the prompt
-// renderer, audit) is INJECTED. That keeps this module unit-testable in
-// Bun without resolving the extension's `/`-rooted import graph.
+// Functional-core/imperative-shell as everywhere else: the session store,
+// worker host, prompt renderer, clock, and audit are injected. That keeps this
+// module unit-testable in Bun without resolving the extension's `/`-rooted
+// import graph.
 
 // Deep imports of PURE policy modules (not module barrels) so this file
 // stays importable under the bun test runner — same pattern as
@@ -33,10 +34,9 @@ import { resolveManifestAllow } from '../tools/manifests.js';
 // goes through the web actor via message_actor, never a raw grant); filterActorSurface
 // drops the actor-only instance tier (vm_*/js_*/app_*/edit_file — writes AND the
 // fenced reads, already gate-refused for a non-actor). Both are pure.
-import { mainAgentDescriptors, filterActorSurface, REVIEW_INSTANCE_READS, EXPOSURE_REVIEW } from '../tools/exposure.js';
+import { mainAgentDescriptors, filterActorSurface, REVIEW_INSTANCE_READS } from '../tools/exposure.js';
 
 /** @typedef {import('../sessions/types.js').Session} Session */
-/** @typedef {import('/peerd-provider/format/from-anthropic.js').ProviderEvent} ProviderEvent */
 
 // Guardrail defaults (docs/ACTORS.md §guardrails). Callers may lower
 // them per spawn; they can't be raised past the loop's own MAX_STEPS
@@ -56,6 +56,19 @@ export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
 // "can't be raised past the backstop" posture as maxSteps.
 export const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 export const MAX_TIMEOUT_MS = 30 * 60_000;
+
+export class ActorPersistenceError extends Error {
+  /** @param {unknown} cause */
+  constructor(cause) {
+    super(`actor ran, but its transcript could not be saved reliably; the outcome is unknown and must not be retried automatically: ${/** @type {{ message?: string }} */ (cause)?.message ?? String(cause)}`);
+    this.name = 'ActorPersistenceError';
+    this.cause = cause;
+    this.performed = true;
+    this.outcomeKnown = false;
+    this.retryable = false;
+    this.executionFailed = true;
+  }
+}
 
 /**
  * Compute the tool subset an actor may use.
@@ -107,11 +120,9 @@ export const narrowTools = (available, { tools, allowRecursion = false, allow = 
 // crafted args) would have the vault one property access away in a SHARED heap.
 // We close it BY CONSTRUCTION: strip every capability closure that NONE of the
 // child's granted tools consume, so a narrowed child's context literally has no
-// path to secrets/egress/spawn. The heap split now runs the child's loop in its
-// OWN Worker heap (offscreen path) where it never receives these closures at all
-// — this restrict is the SW-side ctx build the tool-dispatch route reuses per
-// relayed call, AND the standalone defense for the in-SW fallback (Firefox /
-// offscreen unavailable), where the shared-heap soft spot still applies.
+// path to secrets/egress/spawn. The child loop runs in its own Worker heap where
+// it never receives these closures. This restriction is the privileged ctx build
+// the tool-dispatch route reuses for each relayed call.
 //
 // The lists below are the COMPLETE set of ctx.<cap> readers among tools
 // (grep `ctx.<cap>` over tools/**). getSecret/safeFetch have NO tool reader —
@@ -134,6 +145,11 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   // capture closure (site_capture only). Stripped from any child/actor whose
   // toolset lacks them, like every other capability-by-need closure.
   siteClients:        ['site_client_run', 'site_client_read', 'site_client_write'],
+  canUseSiteClientOrigin: ['site_client_run', 'site_client_read', 'site_client_write'],
+  authorizeSiteClientOrigin: ['site_client_run', 'site_client_read', 'site_client_write'],
+  authorizeSignInOrigin: ['login'],
+  authorizeSignInExcursion: ['login'],
+  revokeSignInExcursion: ['login'],
   siteCapture:        ['site_capture'],
   // design js-superpower/06 — the toolbox store + the write-time parse check.
   // Stripped from any child/actor whose grants lack the toolbox tools, so a
@@ -180,13 +196,15 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   repositories:       ['sandbox_create', 'js_delete', 'pod_destroy', 'repo_history', 'repo_version', 'repo_remote'],
   appRegistry:        ['app_delete', 'edit_file', 'actor_list'],
   appTabTracker:      ['actor_list', 'repo_version'],
+  appQuiescence:      ['repo_version', 'repo_remote'],
   messageActor:    ['message_actor'],
-  // The script tool's run registry (Stop plumbing for its actors surface). A
-  // narrowed child without the script grant loses it; one granted script but
-  // not message_actor keeps the registry yet loses the messageActor closure —
-  // and script's actors mint requires BOTH, so its delegation surface composes
-  // off exactly the same grant that message_actor itself needs.
-  scriptRuns:      ['script'],
+  // The sealed-code run registry (Stop + relay custody). Script's actor client
+  // additionally requires messageActor, so code delegation still composes off
+  // exactly the same grant as direct message_actor.
+  // Every sealed code lane now mints the same owner-bound live-run lease. Keep
+  // the registry exactly when one of those tools survived the grant; omitting a
+  // lane fails loudly as `*_registry_unavailable`, never as an ungated relay.
+  scriptRuns:      ['script', 'a2a_run', 'page_code', 'site_client_run'],
   // DESIGN-17: the web actor's lazy tab-open hook (SW-injected for kind:'web' only).
   // navigate reads it to open/adopt the actor's tab when it owns none; kept for the
   // web actor (which has navigate), stripped from any kind whose toolset lacks it.
@@ -231,6 +249,29 @@ export const finalAssistantText = (session) => {
 };
 
 /**
+ * Shape one completed bound-actor turn for the delivery layer. A provider
+ * error is persisted on the assistant message without reply text, so it must
+ * win over the generic stopped fallback or the caller loses the actionable
+ * refusal and may misread the turn as an ordinary Stop.
+ *
+ * @param {Session | undefined} session
+ * @returns {{ result: string, stopped?: boolean }}
+ */
+export const finalActorTurnReply = (session) => {
+  const messages = session?.messages ?? [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role === 'assistant' && typeof message.error === 'string' && message.error.length > 0) {
+      return { result: message.error, stopped: true };
+    }
+  }
+  const result = finalAssistantText(session);
+  return result
+    ? { result }
+    : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
+};
+
+/**
  * Build an actor orchestrator bound to its IO dependencies. The SW
  * calls this once at boot and injects the bound `spawnActor` into the
  * tool context (so the `actor_create` tool reaches it) and exposes it
@@ -238,18 +279,7 @@ export const finalAssistantText = (session) => {
  *
  * @param {Object} deps
  * @param {ReturnType<typeof import('../sessions/store.js').createSessionStore>} deps.sessions
- * @param {typeof import('../loop/agent-loop.js').runUserTurn} deps.runUserTurn
- * @param {(args: object) => AsyncIterable<any>} deps.callModel
- *   provider stream factory; element type is the erased ProviderEvent union
- *   (the SW binds a real provider, tests bind a mock — kept `any` so a mock
- *   stream doesn't have to reconstruct the full discriminated union)
- * @param {(name: string) => Promise<string | null>} deps.getSecret
- * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} deps.safeFetch
  * @param {(entry: object) => Promise<unknown>} deps.appendAudit
- * @param {(opts: { sessionId: string, activeTabId?: number }) => Promise<object>} deps.buildToolContext
- *   SW variant of buildToolContext that targets an explicit session id.
- * @param {(call: import('/shared/tool-types.js').ToolCall, ctx: object) => Promise<import('/shared/tool-types.js').ToolResult | { ok: boolean, content?: string, error?: string }>} deps.dispatchToolCall
- * @param {(opts: object) => Promise<string>} deps.renderSystemPrompt
  * @param {() => Array<{ name: string, description: string, schema: object }>} deps.getToolDescriptors
  *   Returns the full registered tool descriptor set (parent's tools).
  * @param {() => number} [deps.now]
@@ -259,42 +289,34 @@ export const finalAssistantText = (session) => {
  *   and actorCancel all reach it via the slot's controller. The default is a
  *   standalone stub (a fresh controller per spawn, stop() a no-op) so orchestrators
  *   that never stop children (tests, cheap-call harnesses) need no wiring.
- * @param {(call: Record<string, any>) => void} [deps.recordModelCall]
- *   The context inspector's capture hook — sees the in-SW fallback loop's model
- *   calls (the offscreen path is captured at the actor relay). Optional no-op.
  * @param {(fn: () => void, ms: number) => unknown} [deps.setTimer]
  * @param {(handle: unknown) => void} [deps.clearTimer]
  *   Injected timer pair (setTimeout/clearTimeout in the SW) so the timeout is
  *   Bun-testable without real waiting.
- * @param {((job: object, opts?: { signal?: AbortSignal, onEvent?: (ev: object) => void }) => Promise<{ ok: boolean, started?: boolean, finalText?: string, newMessages?: any[], usage?: any, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean }>) | null} [deps.runChildOffscreen]
- *   Heap split: run a child's loop in a dedicated offscreen Worker (its own heap;
+ * @param {((job: object, opts?: { signal?: AbortSignal, onEvent?: (ev: object) => void }) => Promise<{ ok: boolean, started?: boolean, code?: string, finalText?: string, newMessages?: any[], usage?: any, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean, outcomeKnown?: boolean }>) | null} [deps.runChildOffscreen]
+ *   Heap split: run a child's loop in a dedicated Worker (its own heap;
  *   key never enters it). Tool-less children only relay the model call; tool-bearing
  *   children (job.tools set) also relay each tool call to the SW-gated dispatch.
- *   null = use the in-SW loop.
- * @param {((task: string) => Promise<string> | string) | null} [deps.renderSystemPromptForChild]
- *   Render the child's system prompt SW-side for the offscreen path (the worker
+ *   null means actor execution is refused.
+ * @param {((task: string, effectiveTools: string[]) => Promise<string> | string) | null} [deps.renderSystemPromptForChild]
+ *   Render the child's system prompt in the privileged host (the worker
  *   never assembles it). Required alongside runChildOffscreen.
  */
 export const makeSpawnActor = (deps) => {
   const {
-    sessions, runUserTurn, callModel, getSecret, safeFetch,
-    appendAudit, buildToolContext, dispatchToolCall,
-    renderSystemPrompt, getToolDescriptors,
+    sessions, appendAudit, getToolDescriptors,
     now = Date.now,
     turnSlots = {
       claim: () => ({ controller: new AbortController(), release: () => {} }),
       stop: () => false,
     },
     setTimer = (/** @type {() => void} */ fn, /** @type {number} */ ms) => setTimeout(fn, ms),
-    // The context inspector's capture hook (optional no-op, same contract as
-    // the turn driver's): sees the in-SW fallback loop's model calls.
-    recordModelCall = () => {},
     clearTimer = (/** @type {unknown} */ handle) => clearTimeout(/** @type {any} */ (handle)),
     // Heap-split phase 1: run a PURE-REASONING (empty granted toolset) child in a
-    // dedicated offscreen Worker — its own heap, no key, no chrome.*, egress-less.
+    // dedicated Worker with its own heap and no key or extension APIs.
     // Tool-bearing children run here too (heap-split phase 4): their tool calls
-    // relay to the SW-gated dispatch. null → the in-SW loop (Firefox / offscreen
-    // unavailable). renderSystemPromptForChild renders the child's prompt SW-side so
+    // relay to the SW-gated dispatch. A missing host fails closed.
+    // renderSystemPromptForChild renders the child's prompt host-side so
     // the worker never assembles it.
     runChildOffscreen = null,
     renderSystemPromptForChild = null,
@@ -353,9 +375,9 @@ export const makeSpawnActor = (deps) => {
    * @param {number} [req.maxDepth]                depth ceiling (default 5)
    * @param {boolean} [req.allowRecursion]         keep actor_create in the subset
    * @param {boolean} [req.review]                 issue 160 - SW-ONLY. Set solely by the
-   *   review orchestrator (review/orchestrator.js). Re-adds the three instance
+   *   review orchestrator (review/orchestrator.js). Re-adds the four instance
    *   READS (REVIEW_INSTANCE_READS) to the grantable surface and stamps
-   *   ctx.exposure='review', which the actor-tier gate admits for those three
+   *   ctx.exposure='review', which the actor-tier gate admits for those four
    *   names only. NOT reachable from the model: actor_create builds its spawn
    *   request from an explicit field whitelist and never spreads args (pinned by
    *   a test in review.test.ts). Never accept this from a worker or tool arg.
@@ -372,12 +394,7 @@ export const makeSpawnActor = (deps) => {
    *   run (default DEFAULT_TIMEOUT_MS, clamped to MAX_TIMEOUT_MS)
    * @param {(ev: object) => void} [req.onEvent]   live forwarder for the side panel
    * @param {string} [req.parentToolUseId]         links the parent's card → child session
-   * @param {boolean} [req.persistDeltas=true]      set false for ephemeral
-   *   children (e.g. cheap-call): skips the per-streamed-delta full-record
-   *   IDB rewrite. Finalization writes still happen — the result extraction
-   *   below reads the COMPLETED session, which is the only persistence an
-   *   ephemeral child needs (a mid-run SW death orphans the await anyway).
-   * @returns {Promise<{ result: string, sessionId: string | null, toolCalls: number, durationMs: number, depth: number, usage?: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, exceeded?: true, refused?: true, timedOut?: true, stopped?: true }>}
+   * @returns {Promise<{ result: string, sessionId: string | null, toolCalls: number, durationMs: number, depth: number, usage?: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, exceeded?: true, refused?: true, timedOut?: true, stopped?: true, executionFailed?: true, outcomeKnown?: boolean }>}
    */
   const spawnActor = async (req) => {
     const {
@@ -388,7 +405,7 @@ export const makeSpawnActor = (deps) => {
       maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
       maxDepth = DEFAULT_MAX_DEPTH,
       allowRecursion = false,
-      // #160: SW-ONLY flag (the review orchestrator). Grants the three instance
+      // #160: SW-ONLY flag (the review orchestrator). Grants the four instance
       // reads + stamps the review exposure marker. Unreachable from model args.
       review = false,
       parentSessionId,
@@ -397,7 +414,6 @@ export const makeSpawnActor = (deps) => {
       timeoutMs,
       onEvent,
       parentToolUseId,
-      persistDeltas = true,
     } = req;
 
     if (typeof task !== 'string' || task.trim().length === 0) {
@@ -433,6 +449,17 @@ export const makeSpawnActor = (deps) => {
     // uses the same key + endpoint.
     const parent = await sessions.get(parentSessionId);
     const provider = parent?.provider ?? 'anthropic';
+    // Follow server-persisted parent links once, at spawn admission, so every
+    // lifecycle event carries the chat root it belongs to. The side panel must
+    // never infer a missing/foreign parent as the chat currently on screen.
+    let rootSessionId = parentSessionId;
+    let ancestor = parent;
+    const seenAncestors = new Set([parentSessionId]);
+    while (ancestor?.parentSessionId && !seenAncestors.has(ancestor.parentSessionId)) {
+      rootSessionId = ancestor.parentSessionId;
+      seenAncestors.add(rootSessionId);
+      ancestor = await sessions.get(rootSessionId);
+    }
 
     // why: read the parent's confirm setting AT THE EDGE —
     // confirmActionsFromRecord pulls the `confirmActions` boolean off the
@@ -456,7 +483,7 @@ export const makeSpawnActor = (deps) => {
     // authority the spawning agent itself lacks. Filtering the grantable universe here is
     // the fix: an actor holds ⊆ what the main agent holds, delegating web/DOM work to
     // the web actor via message_actor like the main agent does.
-    // #160: a REVIEW spawn re-adds the three instance READS that filterActorSurface
+    // #160: a REVIEW spawn re-adds the four instance READS that filterActorSurface
     // just dropped — by name, from the descriptors we already have. This is the
     // whole exemption: a positive re-add, never "skip the narrowing for review"
     // (which would restore fetch_url / read_page / site_client_run too, i.e. build
@@ -577,93 +604,7 @@ export const makeSpawnActor = (deps) => {
     // ctx and races the actor reply against it, so the timeout / cancel that
     // fires this controller also unblocks the awaiting child.
 
-    // The in-SW tool dispatcher — built LAZILY, only on the fallback path. The
-    // offscreen happy path dispatches SW-side in the actor/tool-dispatch route
-    // (rebuilding the child ctx from the persisted grantedTools), so building this
-    // here — including the awaited buildToolContext — would be wasted work AND would
-    // couple the offscreen run to a ctx build it never uses (a transient vault/settings
-    // read that throws here would fail an offscreen child before it even starts). A
-    // tools:[] actor is pure reasoning and never stands one up at all.
-    /** @returns {Promise<((call: import('/shared/tool-types.js').ToolCall) => Promise<import('/shared/tool-types.js').ToolResult>) | undefined>} */
-    const buildInSwToolDispatch = async () => {
-      if (subsetDescriptors.length === 0) return undefined;
-      const baseCtx = await buildToolContext({ sessionId: child.sessionId });
-      // why restrictCtxCapabilities: capability-by-need. buildToolContext returns
-      // the full capability surface (secrets/egress/spawn closures); we remove the
-      // ones no granted tool needs so a narrowed child has no closure path to them
-      // even if a granted tool were confused into reaching for one.
-      // abortSignal (#1/#3): the child's own abort signal, so a blocking tool
-      // (message_actor awaitReply) can race its wait against it and unwind when
-      // the wall-clock timeout / cancel fires — restrictCtxCapabilities passes
-      // through any key not in CAPABILITY_CONSUMERS, so this survives the strip.
-      // The review marker is stamped HERE, SW-side, from the trusted spawn req —
-      // never carried in from a worker or a model arg. gates.js keys the #160
-      // exemption on it (positively, and only for the three read names).
-      const childCtx = restrictCtxCapabilities({
-        ...baseCtx, audit: taggedAudit, abortSignal: controller.signal,
-        ...(review ? { exposure: EXPOSURE_REVIEW } : {}),
-      }, allowedNames);
-      return (call) => {
-        // Defense in depth: even if the model hallucinates a tool name
-        // outside its granted subset, the dispatch refuses it. The
-        // descriptor narrowing is what the model SEES; this is what it
-        // can DO.
-        if (!allowedNames.has(call.name)) {
-          return Promise.resolve({
-            ok: false,
-            error: `tool_not_available_to_actor: ${call.name}`,
-            meta: { toolName: call.name, primitive: 'unknown', gates: [], durationMs: 0 },
-          });
-        }
-        // why: dispatchToolCall's union return (a loose { ok, content?, error? }
-        // for test mocks) is the dispatcher's real ToolResult at runtime.
-        return /** @type {Promise<import('/shared/tool-types.js').ToolResult>} */ (
-          dispatchToolCall(call, childCtx));
-      };
-    };
-
-    // why no customSystemPrompt here: the parent session's /system
-    // instructions are deliberately NOT inherited — an actor gets its
-    // own task framing (taskOverride) and nothing else. The instructions
-    // are user preferences for the parent CONVERSATION; leaking them
-    // would distort the child's one-shot task and silently widen the
-    // blast radius of a session-scoped instruction. Inheritance is
-    // "absent", by design.
-    const getSystemPrompt = () => renderSystemPrompt({ taskOverride: task });
-
-    // Guardrail 5 (output cap): inject maxTokens into every model call.
-    // Also the context inspector's THIRD seam: this wrapper only feeds the
-    // in-SW fallback loop (Firefox / offscreen never started) — the
-    // offscreen path's calls are captured at the actor/model-call relay.
-    /** @param {object} modelArgs */
-    const cappedCallModel = (modelArgs) => {
-      recordModelCall({ ...modelArgs, sessionId: child.sessionId, label: `actor d${depth} (in-SW)` });
-      // The credentials are added HERE, at the call boundary, and nowhere else —
-      // the same custody shape the offscreen relay uses (actor/model-call adds
-      // getSecret + safeFetch to the worker's relayed args). See keylessCredentials
-      // below for why the loop itself is handed throwing stubs instead.
-      return callModel({ ...modelArgs, getSecret, safeFetch, maxTokens: maxOutputTokens });
-    };
-
-    // The in-SW fallback's keyless custody. This path runs a CHILD loop — whose
-    // context is untrusted by construction — in the service-worker realm, so it
-    // cannot have heap separation (that is the standing residual: on Chrome every
-    // child gets its own offscreen Worker; this branch exists for Firefox, which
-    // has no offscreen API, and for a run that never started).
-    //
-    // What it CAN have, and now does, is the same credential custody as the
-    // offscreen path: the loop is handed stubs that throw, and the real
-    // getSecret/safeFetch are closed over by cappedCallModel above. Previously the
-    // live credentials were passed straight into runUserTurn, which forwards them
-    // into every model call AND leaves them reachable from the loop's own frame —
-    // so the "keyless fallback" the docs claimed was true of the tool context
-    // (restrictCtxCapabilities strips both unconditionally) but not of the loop.
-    // Now it is true of both, and the residual is honestly just the shared heap.
-    const keylessCredentials = {
-      getSecret: async () => { throw new Error('actor loop has no secret access'); },
-      safeFetch: async () => { throw new Error('actor loop has no egress'); },
-    };
-
+    const effectiveTools = subsetDescriptors.map(({ name }) => name);
     // why: the child's model usage is yielded as 'usage' events but is NOT
     // folded into the parent/main turn tally (the main SW only accumulates its
     // OWN session's usage). That means actor spend is naturally SEPARATE from
@@ -675,7 +616,9 @@ export const makeSpawnActor = (deps) => {
     let lastStopReason;
     const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
     let start = 0;
-    let ranOffscreen = false;
+    let isolationRefused = false;
+    let executionFailed = false;
+    let outcomeKnown = true;
     // MED-3: the slot is CLAIMED, the child REGISTERED, and the wall-clock timer
     // ARMED above — three resources the finally below is the sole releaser of.
     // So the try must open HERE, before anything else that can throw. In
@@ -688,20 +631,24 @@ export const makeSpawnActor = (deps) => {
       start = now();
       // Announce the child up-front so the side panel can map the parent's
       // tool card → this session id and render live, before any loop event.
-      onEvent?.({ type: 'actor-start', parentToolUseId, parentSessionId, sessionId: child.sessionId, depth, task });
-      // Heap split: EVERY child runs its loop in a dedicated offscreen Worker — its
-      // own heap, no key, no chrome.*, no egress. A tool-LESS child (phase 1) only
+      // The UI's Actor Fabric may render before the first session snapshot.
+      // Carry the SERVER-RESOLVED grant set on the trusted lifecycle event so
+      // it never guesses an actor's authority from model-supplied arguments.
+      onEvent?.({
+        type: 'actor-start', parentToolUseId, parentSessionId, rootSessionId,
+        sessionId: child.sessionId, depth, task,
+        grantedTools: [...allowedNames],
+      });
+      // Heap split: EVERY child runs its loop in a dedicated Worker with its own
+      // heap, no key or extension APIs. A tool-LESS child (phase 1) only
       // relays its model call; a tool-BEARING child (phase 4) also relays each tool
       // call to the SW, which rebuilds the child's restricted ctx from the persisted
-      // grantedTools and dispatches there (so script and friends run from the child's
-      // own heap, keyless). Falls back to the in-SW loop when offscreen isn't wired
-      // (Firefox), when the prompt renderer is absent, or when the offscreen run
-      // HARD-fails to start (a normal completion, even error/abort, does NOT fall back
-      // — that would double-run).
+      // grantedTools and dispatches there. A missing or failed host is terminal:
+      // no child loop may run in the privileged background heap.
       const canRunOffscreen = typeof runChildOffscreen === 'function'
         && typeof renderSystemPromptForChild === 'function';
       if (canRunOffscreen) {
-        const systemPrompt = await renderSystemPromptForChild(task);
+        const systemPrompt = await renderSystemPromptForChild(task, effectiveTools);
         const r = await runChildOffscreen({
           sessionId: child.sessionId, task, systemPrompt,
           provider, model: model ?? parent?.model, depth,
@@ -710,24 +657,52 @@ export const makeSpawnActor = (deps) => {
           // it makes relays back to the SW-gated, grantedTools-checked dispatch.
           tools: subsetDescriptors,
         }, { signal: controller.signal, onEvent });
-        // Fall back to the in-SW loop ONLY when the worker never STARTED (offscreen
-        // unavailable / concurrency cap / spawn throw). A run that STARTED — even if
-        // it errored, aborted, or timed out — may have billed model calls, so
-        // re-running it in-SW would double-run; surface it as-is instead.
         if (r && (r.ok || r.started)) {
-          ranOffscreen = true;
           // Reconstruct the child transcript SW-side (the worker's heap held it) so
           // finalAssistantText + the card read a coherent session. Prefer the worker's
           // FULL transcript when it crossed back (a tool-bearing child has tool rounds
           // worth showing on the card); fall back to a user+answer pair for a tool-less
           // child or when no transcript came back. Cast: minimal role/content records.
           const newMessages = Array.isArray(r.newMessages) ? r.newMessages : [];
+          const persistMessage = async (/** @type {any} */ message) => {
+            try {
+              await sessions.appendMessage(child.sessionId, message);
+            } catch (error) {
+              taggedAudit({
+                type: 'actor_persistence_failed',
+                details: { error: /** @type {{ message?: string }} */ (error)?.message ?? String(error), performed: true, outcomeKnown: false },
+              }).catch(() => {});
+              throw new ActorPersistenceError(error);
+            }
+          };
           if (newMessages.length > 0) {
-            for (const m of newMessages) await sessions.appendMessage(child.sessionId, /** @type {any} */ (m)).catch(() => {});
+            for (const m of newMessages) await persistMessage(m);
           } else {
             const stamp = new Date(now()).toISOString();
-            await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `off-u-${now()}`, when: stamp, role: 'user', content: task })).catch(() => {});
-            await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `off-a-${now()}`, when: stamp, role: 'assistant', content: r.finalText ?? '' })).catch(() => {});
+            await persistMessage({ id: `off-u-${now()}`, when: stamp, role: 'user', content: task });
+            await persistMessage({
+              id: `off-a-${now()}`, when: stamp, role: 'assistant',
+              content: r.ok || r.aborted ? (r.finalText ?? r.error ?? '') : '',
+              ...(!r.ok && !r.aborted ? {
+                error: r.outcomeKnown === true
+                  ? (r.error ?? 'The actor model request was not run.')
+                  : `The actor worker stopped after execution began. Its outcome is unknown and must not be retried automatically. ${r.error ?? 'No failure detail was returned.'}`,
+              } : {}),
+            });
+          }
+          if (!r.ok && !r.aborted) {
+            executionFailed = true;
+            outcomeKnown = r.outcomeKnown === true;
+            // A Worker can return partial transcript bytes before its host sees
+            // the crash. Append a terminal error so those bytes cannot be
+            // mistaken for a completed result by finalActorTurnReply.
+            if (!outcomeKnown && newMessages.length > 0
+                && !newMessages.some((message) => message?.role === 'assistant' && typeof message?.error === 'string')) {
+              await persistMessage({
+                id: `off-error-${now()}`, when: new Date(now()).toISOString(), role: 'assistant', content: '',
+                error: `The actor worker stopped after execution began. Its outcome is unknown and must not be retried automatically. ${r.error ?? 'No failure detail was returned.'}`,
+              });
+            }
           }
           toolCalls = r.toolCalls ?? 0;
           lastStopReason = r.aborted ? 'aborted' : (r.stopReason ?? (r.ok ? 'end_turn' : undefined));
@@ -738,47 +713,35 @@ export const makeSpawnActor = (deps) => {
             usage.cacheWriteTokens += r.usage.cacheWriteTokens || 0;
           }
           taggedAudit(r.ok
-            ? { type: 'actor_ran_offscreen', details: { heapSplit: true } }
-            : { type: 'actor_offscreen_error', details: { heapSplit: true, error: r.error ?? 'unknown', aborted: r.aborted === true } }).catch(() => {});
+            ? { type: 'actor_ran_isolated', details: { workerType: 'dedicated', realmVerified: true } }
+            : {
+              type: 'actor_isolated_error',
+              details: {
+                error: r.error ?? 'unknown', aborted: r.aborted === true,
+                ...(!r.aborted ? {
+                  performed: !outcomeKnown,
+                  outcomeKnown,
+                } : {}),
+              },
+            }).catch(() => {});
         } else {
-          // Never started → defensive fallback to the in-SW loop, so a reasoning
-          // child never just dies on infra it couldn't even reach.
-          taggedAudit({ type: 'actor_offscreen_fallback', details: { error: r?.error ?? 'unknown' } }).catch(() => {});
+          isolationRefused = true;
+          const error = r?.error ?? 'actor isolation unavailable';
+          const stamp = new Date(now()).toISOString();
+          await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `iso-u-${now()}`, when: stamp, role: 'user', content: task })).catch(() => {});
+          await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `iso-a-${now()}`, when: stamp, role: 'assistant', content: error })).catch(() => {});
+          taggedAudit({
+            type: 'actor_isolation_failure',
+            details: { error, code: r?.code ?? 'unknown', performed: false },
+          }).catch(() => {});
         }
-      }
-      if (!ranOffscreen) {
-        // Lazily stand up the in-SW dispatcher — ONLY now, on the fallback (see
-        // buildInSwToolDispatch). The offscreen path above never reaches here.
-        const toolDispatch = await buildInSwToolDispatch();
-        for await (const ev of runUserTurn({
-          sessionId: child.sessionId,
-          userText: task,
-          callModel: cappedCallModel,
-          // Stubs, not the live credentials — cappedCallModel adds the real ones at
-          // the call boundary. See keylessCredentials above.
-          ...keylessCredentials,
-          sessions,
-          getSystemPrompt,
-          appendAudit: taggedAudit,
-          tools: subsetDescriptors,
-          toolDispatch,
-          maxSteps,
-          persistDeltas,
-          now,
-          // Phase 1: the child is abortable — Stop cascades, actorCancel, and
-          // the wall-clock timer all fire this controller.
-          signal: controller.signal,
-        })) {
-          if (ev.type === 'tool-use') toolCalls++;
-          if (ev.type === 'stop') lastStopReason = ev.stopReason;
-          if (ev.type === 'usage' && ev.usage) {
-            usage.inputTokens += ev.usage.inputTokens || 0;
-            usage.outputTokens += ev.usage.outputTokens || 0;
-            usage.cacheReadTokens += ev.usage.cacheReadTokens || 0;
-            usage.cacheWriteTokens += ev.usage.cacheWriteTokens || 0;
-          }
-          onEvent?.(ev);
-        }
+      } else {
+        isolationRefused = true;
+        const error = 'actor isolation unavailable: no dedicated worker host is wired';
+        const stamp = new Date(now()).toISOString();
+        await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `iso-u-${now()}`, when: stamp, role: 'user', content: task })).catch(() => {});
+        await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `iso-a-${now()}`, when: stamp, role: 'assistant', content: error })).catch(() => {});
+        taggedAudit({ type: 'actor_isolation_failure', details: { error, performed: false } }).catch(() => {});
       }
     } finally {
       clearTimer(timer);
@@ -786,12 +749,16 @@ export const makeSpawnActor = (deps) => {
       // Release AFTER unregistering, so a Stop racing this settle can't abort a
       // slot the registry no longer owns up to.
       release();
-      onEvent?.({ type: 'actor-stop', parentToolUseId, sessionId: child.sessionId, depth });
+      onEvent?.({
+        type: 'actor-stop', parentToolUseId, parentSessionId, rootSessionId,
+        sessionId: child.sessionId, depth,
+      });
     }
 
     const durationMs = now() - start;
     const final = await sessions.get(child.sessionId);
-    const result = finalAssistantText(final);
+    const completion = finalActorTurnReply(final);
+    const result = completion.result;
     // Guardrail 5 (step cap): a max_steps stop means the actor ran out
     // of room before finishing. Surface it so the caller (and the model)
     // knows the result may be partial.
@@ -802,14 +769,18 @@ export const makeSpawnActor = (deps) => {
     // finally's clearTimer, which must NOT relabel a complete result as partial.
     // Gate both flags on lastStopReason==='aborted' (a real abort unwind), then
     // split by cause: timer → timedOut, anything else (Stop cascade, cancel) →
-    // stopped. A non-aborted finish is neither.
+    // stopped. Persisted provider errors are also stopped so partial text never
+    // presents a failed turn as success.
     const aborted = lastStopReason === 'aborted';
     const timedOut = aborted && timerFired;
-    const stopped = aborted && !timerFired;
+    const stopped = (aborted && !timerFired) || completion.stopped === true;
 
     taggedAudit({
       type: 'actor_completed',
-      details: { toolCalls, durationMs, exceeded, timedOut, stopped, resultChars: result.length },
+      details: {
+        toolCalls, durationMs, exceeded, timedOut, stopped, resultChars: result.length,
+        ...(executionFailed ? { executionFailed: true, outcomeKnown } : {}),
+      },
     }).catch(() => {});
 
     return {
@@ -822,6 +793,8 @@ export const makeSpawnActor = (deps) => {
       ...(exceeded ? { exceeded: true } : {}),
       ...(timedOut ? { timedOut: true } : {}),
       ...(stopped ? { stopped: true } : {}),
+      ...(isolationRefused ? { refused: true } : {}),
+      ...(executionFailed ? { executionFailed: true, outcomeKnown } : {}),
     };
   };
 

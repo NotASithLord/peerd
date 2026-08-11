@@ -1,5 +1,5 @@
 // @ts-check
-// repo_history — an App/Notebook/Pod actor's read-only repository window. One call returns
+// repo_history: an App/Notebook/Pod actor's read-only repository window. One call returns
 // status + log and, when requested, a bounded diff.
 
 const MAX_PATCH_CHARS = 40_000;

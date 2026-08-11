@@ -18,6 +18,7 @@ describe('mapError', () => {
     expect(mapError('spend-limit-reached')).toMatch(/Spend limit reached/i);
     expect(mapError('provider-usage-limit')).toMatch(/Usage\/credit limit/i);
     expect(mapError('provider-usage-limit:over cap')).toMatch(/\(over cap\)/);
+    expect(mapError('actor-recovery-pending')).toMatch(/Wait a moment, then send again/i);
   });
 
   test('raw provider throw text is matched, not dumped', () => {

@@ -7,6 +7,34 @@
 // stable collaborators. Bodies verbatim, deps injected, imports none.
 
 /**
+ * Await work through the same cancellation boundary as the operation it gates.
+ * The underlying one-time hydration may still finish for other callers, but a
+ * stopped or expired run no longer waits for it or proceeds to egress.
+ * @template T
+ * @param {() => Promise<T>} start
+ * @param {AbortSignal | null} signal
+ * @returns {Promise<T>}
+ */
+const awaitWithinSignal = (start, signal) => {
+  if (!signal) return Promise.resolve().then(start);
+  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener('abort', onAbort);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve().then(start).then((value) => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(value);
+    }, (error) => {
+      signal.removeEventListener('abort', onAbort);
+      reject(error);
+    });
+  });
+};
+
+/**
  * @param {Record<string, any>} deps
  * @returns {Record<string, (msg?: any, sender?: any) => Promise<any>>}
  */
@@ -14,23 +42,36 @@ export const makeEngineRoutes = (deps) => {
   const {
     vault, auditLog, pushState, browser, vmHttpFetch,
     appRegistry, vmRegistry, jsRegistry, podRegistry, podTabTracker, appClient, appTabTracker,
+    appQuiescence,
     opfsHelpers, NOTEBOOK_OPFS_ROOT, IMAGE_PIN_STORAGE_KEY,
     buildAppExport, buildNotebookExport, buildVmRecipeExport,
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
-    ensureOffscreen, settingsStore, DWEB_ENABLED, applyWebExtract, repositories, parseAppManifest, kv,
+    settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
+    listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
+    repositories, parseAppManifest, podGitRemoteOperation,
   } = deps;
+  if (typeof awaitDenylistPolicy !== 'function') {
+    throw new TypeError('makeEngineRoutes: awaitDenylistPolicy is required');
+  }
+  if (!repositories || typeof repositories.coordinate !== 'function') {
+    throw new TypeError('makeEngineRoutes: repositories is required');
+  }
+  if (typeof parseAppManifest !== 'function') {
+    throw new TypeError('makeEngineRoutes: parseAppManifest is required');
+  }
+  if (typeof podGitRemoteOperation !== 'function') {
+    throw new TypeError('makeEngineRoutes: podGitRemoteOperation is required');
+  }
+
   /** @param {string} appId @param {() => Promise<any>} operation */
   const coordinateApp = (appId, operation) => repositories.coordinate({ kind: 'app', id: appId }, operation);
   /** @param {string} appId @param {() => Promise<any>} operation */
-  const quiesceApp = async (appId, operation) => {
-    const reopen = appTabTracker.getTabId(appId) != null;
-    if (reopen) { await appTabTracker.closeTab(appId); await new Promise((resolve) => setTimeout(resolve, 100)); }
-    try { return await coordinateApp(appId, operation); }
-    finally {
-      if (reopen) appTabTracker.ensureTab(appId, { active: false, groupTitle: 'peerd' }).catch(() => {});
-    }
-  };
+  const quiesceApp = (appId, operation) => appQuiescence.run(
+    appId,
+    () => coordinateApp(appId, operation),
+    { close: true },
+  );
 
   /** @param {unknown} value */
   const shellLine = (value) => `${String(value ?? '')}\n`;
@@ -41,7 +82,7 @@ export const makeEngineRoutes = (deps) => {
     const index = argv.indexOf(name);
     return index >= 0 ? argv[index + 1] : undefined;
   };
-  /** @type {Map<string,Set<AbortController>>} */
+  /** @type {Map<string, Set<AbortController>>} */
   const podJobControllers = new Map();
   /** @param {string} podId @param {string} jobId */
   const podJobKey = (podId, jobId) => `${podId}:${jobId}`;
@@ -53,50 +94,79 @@ export const makeEngineRoutes = (deps) => {
     const controllers = podJobControllers.get(key) ?? new Set();
     controllers.add(controller);
     podJobControllers.set(key, controllers);
-    return { controller, release: () => {
-      controllers.delete(controller);
-      if (!controllers.size) podJobControllers.delete(key);
-    } };
+    return {
+      controller,
+      release: () => {
+        controllers.delete(controller);
+        if (!controllers.size) podJobControllers.delete(key);
+      },
+    };
   };
   /** @param {unknown} podId @param {any} sender */
   const podSenderError = async (podId, sender) => {
     const record = typeof podId === 'string' ? await podRegistry.get(podId) : null;
     if (!record) return 'pod-not-found';
     const ownedTab = podTabTracker.getTabId(podId);
-    return ownedTab == null || sender?.tab?.id !== ownedTab ? 'pod-sender-not-instance-pinned' : null;
+    return ownedTab == null || sender?.tab?.id !== ownedTab
+      ? 'pod-sender-not-instance-pinned'
+      : null;
   };
   /** @param {unknown} value */
-  const canonicalUrl = (value) => { try { return new URL(String(value)).href; } catch { return null; } };
+  const canonicalUrl = (value) => {
+    try { return new URL(String(value)).href; }
+    catch { return null; }
+  };
 
   /**
-   * Git is Pod shell userland backed by the existing trusted repository service.
-   * The sender must be the tab hosting this exact Pod. Remote subcommands need a
-   * one-job grant minted either by pod_exec's explicit confirmation or by a
-   * direct command in the visible terminal; a command Worker cannot mint it.
-   * @param {any} msg @param {any} sender
+   * Pod Git stays behind an exact instance/tab pin. Agent jobs receive one
+   * structured, target-bound grant; direct terminal jobs carry the explicit
+   * `true` grant minted by their visible first-party host.
+   * @param {any} msg
+   * @param {any} sender
    */
   const runPodGit = async ({ podId, jobId, argv = [], remoteGrant = null }, sender) => {
-    if (typeof podId !== 'string' || !Array.isArray(argv)) return { ok: false, error: 'podId-and-argv-required' };
+    if (typeof podId !== 'string' || !Array.isArray(argv)) {
+      return { ok: false, error: 'podId-and-argv-required' };
+    }
     const senderError = await podSenderError(podId, sender);
     if (senderError) return { ok: false, error: senderError };
     const ref = { kind: 'pod', id: podId };
+    // Grant validation and the resulting Git operation are one repository
+    // transaction. Otherwise a concurrent remote set-url can land after the
+    // user approves target A but before push reads origin, sending to target B.
+    return repositories.coordinate(ref, async () => {
     const [command = '', ...args] = argv.map(String);
-    const remoteOp = command === 'clone' || command === 'fetch' || command === 'push'
-      ? command : command === 'remote' && (args[0] === 'add' || args[0] === 'set-url') ? 'link' : null;
+    const remoteOp = podGitRemoteOperation(argv);
     if (remoteOp && remoteGrant !== true) {
       let target = null;
-      if (remoteOp === 'clone' || remoteOp === 'link') target = args.find((arg) => /^https:\/\//i.test(arg)) ?? null;
-      else target = (await repositories.getRemote(ref))?.url ?? null;
+      if (remoteOp === 'clone' || remoteOp === 'link') {
+        target = args.find((arg) => /^https:\/\//i.test(arg)) ?? null;
+      } else {
+        target = (await repositories.getRemote(ref))?.url ?? null;
+      }
       const granted = remoteGrant && typeof remoteGrant === 'object'
         && remoteGrant.op === remoteOp
         && canonicalUrl(remoteGrant.url) !== null
         && canonicalUrl(remoteGrant.url) === canonicalUrl(target);
       if (!granted) {
-        return { ok: true, result: { stdout: '', stderr: `git ${command}: remote operation requires an exact explicit authorization\n`, exitCode: 126 } };
+        return {
+          ok: true,
+          result: {
+            stdout: '',
+            stderr: `git ${command}: remote operation requires an exact explicit authorization\n`,
+            exitCode: 126,
+          },
+        };
       }
     }
-    const abortable = remoteOp && typeof jobId === 'string' ? registerPodController(podId, jobId) : null;
+    const abortable = remoteOp && typeof jobId === 'string'
+      ? registerPodController(podId, jobId)
+      : null;
     try {
+      if (remoteOp) {
+        await awaitWithinSignal(awaitDenylistPolicy, abortable?.controller.signal ?? null);
+        if (abortable?.controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      }
       let result;
       if (command === 'init') {
         const oid = await repositories.init(ref);
@@ -132,11 +202,14 @@ export const makeEngineRoutes = (deps) => {
         const checked = await repositories.checkout(ref, { name });
         result = { stdout: shellLine(`Switched to branch '${checked.branch}'`), stderr: '', exitCode: 0 };
       } else if (command === 'clone') {
-        const positional = args.filter((arg, index) => !arg.startsWith('-') && args[index - 1] !== '-b' && args[index - 1] !== '--branch' && args[index - 1] !== '--depth');
+        const positional = args.filter((arg, index) => !arg.startsWith('-')
+          && args[index - 1] !== '-b' && args[index - 1] !== '--branch'
+          && args[index - 1] !== '--depth');
         const url = positional[0];
         if (!url) return { ok: true, result: { stdout: '', stderr: 'git clone: HTTPS URL required\n', exitCode: 2 } };
         const cloned = await repositories.clone(ref, {
-          url, ref: optionValue(args, '-b') ?? optionValue(args, '--branch'),
+          url,
+          ref: optionValue(args, '-b') ?? optionValue(args, '--branch'),
           depth: Math.min(500, Math.max(1, Number(optionValue(args, '--depth')) || 50)),
           signal: abortable?.controller.signal,
         });
@@ -146,7 +219,10 @@ export const makeEngineRoutes = (deps) => {
         result = { stdout: shellLine(`Fetched ${fetched.remote.url}`), stderr: '', exitCode: 0 };
       } else if (command === 'push') {
         const branchName = args.find((arg) => !arg.startsWith('-') && arg !== 'origin');
-        const pushed = await repositories.push(ref, { ...(branchName ? { ref: branchName } : {}), signal: abortable?.controller.signal });
+        const pushed = await repositories.push(ref, {
+          ...(branchName ? { ref: branchName } : {}),
+          signal: abortable?.controller.signal,
+        });
         result = pushed.ok
           ? { stdout: shellLine(`Pushed ${pushed.branch} to ${pushed.remote.url}`), stderr: '', exitCode: 0 }
           : { stdout: '', stderr: shellLine(pushed.error || 'push rejected'), exitCode: 1 };
@@ -166,9 +242,33 @@ export const makeEngineRoutes = (deps) => {
       return { ok: true, result };
     } catch (error) {
       const result = podGitFailure(error);
-      auditLog.append({ type: 'pod_git_command', details: { podId, command, exitCode: 1, error: /** @type {{message?:string}} */ (error)?.message ?? String(error) } }).catch(() => {});
+      auditLog.append({
+        type: 'pod_git_command',
+        details: {
+          podId, command, exitCode: 1,
+          error: /** @type {{message?:string}} */ (error)?.message ?? String(error),
+        },
+      }).catch(() => {});
       return { ok: true, result };
-    } finally { abortable?.release(); }
+    } finally {
+      abortable?.release();
+    }
+    });
+  };
+
+  /** @type {Map<string, AbortController>} */
+  const notebookFetchControllers = new Map();
+  /** @param {unknown} abortToken @param {unknown} notebookId @param {any} sender */
+  const notebookFetchKey = (abortToken, notebookId, sender) => {
+    if (typeof abortToken !== 'string' || abortToken.length > 128
+      || typeof notebookId !== 'string' || notebookId.length > 128) return null;
+    const notebookRoot = browser.runtime.getURL('engine-tabs/notebook-tab/');
+    const senderUrl = sender?.url ?? sender?.tab?.url;
+    if (!senderUrl?.startsWith(notebookRoot)) return null;
+    try {
+      if (new URL(senderUrl).hash.slice(1).split(/[?&]/)[0] !== notebookId) return null;
+    } catch { return null; }
+    return `${notebookId}:${abortToken}`;
   };
 
   return {
@@ -186,20 +286,58 @@ export const makeEngineRoutes = (deps) => {
       if (typeof url !== 'string' || !url) return { ok: false, error: 'url-required' };
       const abortable = registerPodController(podId, jobId);
       try {
+        await awaitWithinSignal(awaitDenylistPolicy, abortable?.controller.signal ?? null);
+        if (abortable?.controller.signal.aborted) return { ok: false, error: 'aborted' };
         return await vmHttpFetch({
-          url, method, headers, body, signal: abortable?.controller.signal,
-          noCache: true, maxBodyBytes: 16 * 1024 * 1024,
+          url, method, headers, body,
+          signal: abortable?.controller.signal,
+          noCache: true,
+          maxBodyBytes: 16 * 1024 * 1024,
         });
       } catch (error) {
-        return { ok: false, error: /** @type {{message?:string}} */ (error)?.message ?? String(error) };
-      } finally { abortable?.release(); }
+        const value = /** @type {{name?:string,message?:string}} */ (error);
+        return {
+          ok: false,
+          error: value?.name === 'AbortError'
+            ? 'aborted'
+            : value?.name === 'DenylistPolicyUnavailableError'
+              ? 'The sensitive-origin policy is unavailable. Network access is blocked.'
+              : value?.message ?? String(error),
+        };
+      } finally {
+        abortable?.release();
+      }
     },
     'pod/get-meta': async ({ podId }, sender) => {
       const senderError = await podSenderError(podId, sender);
       if (senderError) return { ok: false, error: senderError };
       const record = await podRegistry.get(podId);
-      return { ok: true, record: { id: record.id, name: record.name, persistent: record.persistent !== false } };
+      return {
+        ok: true,
+        record: { id: record.id, name: record.name, persistent: record.persistent !== false },
+      };
     },
+    // Notebook tabs and the offscreen job host own the actual OPFS handles.
+    // They ask here immediately before mutation so the service worker's live
+    // schema posture remains authoritative in Chrome and Firefox alike.
+    'lifecycle/assert-opfs-writable': async (_msg, sender = undefined) => {
+      const notebookHost = browser.runtime.getURL('engine-tabs/notebook-tab/index.html');
+      const senderUrl = sender?.url ?? sender?.tab?.url;
+      const trustedHost = isOffscreenSender?.(sender)
+        || (typeof senderUrl === 'string'
+          && senderUrl.split(/[?#]/)[0] === notebookHost);
+      if (!trustedHost) return { ok: false, error: 'unauthorized OPFS posture request' };
+      try {
+        await assertOpfsWritable();
+        return { ok: true };
+      } catch (error) {
+        return {
+          ok: false,
+          error: /** @type {{ message?: string }} */ (error)?.message ?? String(error),
+        };
+      }
+    },
+
     // VM-originated HTTP egress. The VM tab's HTTP-marker dispatcher
     // calls this when it sees a wrapper script's request marker. webFetch
     // applies the denylist + audit; response body is base64-encoded back
@@ -210,9 +348,49 @@ export const makeEngineRoutes = (deps) => {
     // an IO-injected factory (vm-net/vm-http-fetch.js) so it's bun-testable — it
     // layers the revalidating IDB GET cache + host-bound git-auth + body cap +
     // chunked base64 on top of webFetch's denylist/SSRF/audit chokepoint.
-    'sw/web-fetch': async ({ url, method, headers, body, gitAuth, noCache, extract }) => {
+    'sw/web-fetch': async ({ url, method, headers, body, gitAuth, noCache, extract, runId, ownerSessionId, deadlineAt, abortToken, notebookId }, sender = undefined) => {
       if (typeof url !== 'string' || url.length === 0) {
         return { ok: false, error: 'url-required' };
+      }
+      /** @type {AbortController | null} */
+      let runController = null;
+      /** @type {AbortSignal | null} */
+      let sourceSignal = null;
+      /** @type {(() => void) | null} */
+      let onAbort = null;
+      /** @type {ReturnType<typeof setTimeout> | null} */
+      let deadlineTimer = null;
+      const notebookKey = notebookFetchKey(abortToken, notebookId, sender);
+      const carriesRun = runId !== undefined || ownerSessionId !== undefined;
+      if (carriesRun) {
+        if (typeof runId !== 'string' || typeof ownerSessionId !== 'string'
+          || !isOffscreenSender?.(sender)
+          || scriptRuns?.ownerFor(runId) !== ownerSessionId
+          || scriptRuns?.allows(runId, 'egress') !== true
+          || scriptRuns?.admitOp(runId, 'egress') !== true) {
+          return { ok: false, error: 'web_fetch_unknown_finished_foreign_or_over_limit_run' };
+        }
+        sourceSignal = scriptRuns.signalFor(runId);
+        if (sourceSignal?.aborted) return { ok: false, error: 'aborted' };
+        runController = new AbortController();
+        onAbort = () => runController?.abort();
+        sourceSignal?.addEventListener('abort', onAbort, { once: true });
+        if (typeof deadlineAt === 'number' && Number.isFinite(deadlineAt)) {
+          const remaining = deadlineAt - Date.now();
+          if (remaining <= 0) runController.abort();
+          else deadlineTimer = setTimeout(() => runController?.abort(), remaining);
+        }
+      } else if (notebookKey) {
+        if (notebookFetchControllers.has(notebookKey)) {
+          return { ok: false, error: 'duplicate_notebook_fetch_token' };
+        }
+        runController = new AbortController();
+        notebookFetchControllers.set(notebookKey, runController);
+        if (typeof deadlineAt === 'number' && Number.isFinite(deadlineAt)) {
+          const remaining = deadlineAt - Date.now();
+          if (remaining <= 0) runController.abort();
+          else deadlineTimer = setTimeout(() => runController?.abort(), remaining);
+        }
       }
       // GET callers (the VM HTTP marker fast path) pass only { url } and behave
       // exactly as before; the rich VM path + the Notebook code-mode bridge pass
@@ -221,16 +399,44 @@ export const makeEngineRoutes = (deps) => {
       // vmHttpFetch layers the IDB GET cache + optional git-auth on top; noCache
       // (module-source fetches) bypasses that cache so every run is re-audited.
       try {
-        const resp = await vmHttpFetch({ url, method, headers, body, gitAuth, noCache: noCache === true });
+        // why: hydration is part of the egress operation, not a preflight outside
+        // it. Admit the run and arm Stop/deadline first, then await policy through
+        // that signal. A stopped or expired run cannot reach vmHttpFetch even if
+        // the shared hydration later succeeds.
+        await awaitWithinSignal(
+          awaitDenylistPolicy,
+          runController?.signal ?? null,
+        );
+        if (runController?.signal.aborted) return { ok: false, error: 'aborted' };
+        const resp = await vmHttpFetch({
+          url, method, headers, body, gitAuth, noCache: noCache === true,
+          ...(runController ? { signal: runController.signal } : {}),
+        });
         // Design 2a extract post-step (Notebook tab relay) — why + security
         // posture: shared/fetch-extract.js. Absent `extract` (every VM caller)
         // it is a passthrough, byte-for-byte as before.
         return await applyWebExtract(resp, extract, url);
       } catch (e) {
         const ev = /** @type {{ name?: string, message?: string }} */ (e);
-        return { ok: false, error: ev?.name === 'EgressDeniedError'
-          ? `denylisted: ${ev.message}` : (ev?.message ?? String(e)) };
+        return { ok: false, error: ev?.name === 'AbortError'
+          ? 'aborted'
+          : ev?.name === 'DenylistPolicyUnavailableError'
+            ? 'The sensitive-origin policy is unavailable. Network access is blocked.'
+          : ev?.name === 'EgressDeniedError'
+            ? `denylisted: ${ev.message}` : (ev?.message ?? String(e)) };
+      } finally {
+        if (deadlineTimer) clearTimeout(deadlineTimer);
+        if (sourceSignal && onAbort) sourceSignal.removeEventListener('abort', onAbort);
+        if (notebookKey && notebookFetchControllers.get(notebookKey) === runController) {
+          notebookFetchControllers.delete(notebookKey);
+        }
       }
+    },
+    'sw/web-fetch-abort': async ({ abortToken, notebookId }, sender = undefined) => {
+      const key = notebookFetchKey(abortToken, notebookId, sender);
+      const controller = key ? notebookFetchControllers.get(key) : null;
+      controller?.abort();
+      return { ok: true, aborted: controller != null };
     },
 
     // --- App metadata fetch -----------------------------------------------
@@ -258,7 +464,38 @@ export const makeEngineRoutes = (deps) => {
         }
         // dweb meta unlocks the app-tab bridge for dwapps (preview builds);
         // harmless null elsewhere.
-    return { ok: true, name: meta.name, entryFile: meta.entryFile, dweb: runtimeDweb };
+        return {
+          ok: true,
+          name: meta.name,
+          entryFile: meta.entryFile,
+          fileKinds: meta.fileKinds ?? {},
+          dweb: runtimeDweb,
+        };
+      } catch (e) {
+        return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+      }
+    },
+
+    // The App editor reads OPFS directly but sends every mutation through the
+    // SW client so byte caps, kind metadata, and rollback stay one contract.
+    'app/editor-write': async ({ appId, path, content }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      if (typeof path !== 'string') return { ok: false, error: 'path-required' };
+      if (typeof content !== 'string') return { ok: false, error: 'content-required' };
+      try {
+        const result = await appClient.writeFile({ appId, path, content, reload: false });
+        return { ok: true, ...result };
+      } catch (e) {
+        return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+      }
+    },
+
+    'app/editor-delete': async ({ appId, path }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      if (typeof path !== 'string') return { ok: false, error: 'path-required' };
+      try {
+        await appClient.deleteFile({ appId, path, reload: false });
+        return { ok: true };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
@@ -382,7 +619,7 @@ export const makeEngineRoutes = (deps) => {
     'apps/repository/commit': async ({ appId, message }) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
-        const result = await coordinateApp(appId, () => repositories.commitApp(appId, { message: typeof message === 'string' ? message : 'manual edit' }));
+        const result = await quiesceApp(appId, () => repositories.commitApp(appId, { message: typeof message === 'string' ? message : 'manual edit' }));
         await auditLog.append({ type: 'git_commit_created', details: { kind: 'app', appId, oid: result.oid, changed: result.changed.length } });
         return { ok: true, result };
       } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
@@ -428,7 +665,7 @@ export const makeEngineRoutes = (deps) => {
     'apps/repository/push': async ({ appId, branch }) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
-        const result = await coordinateApp(appId, async () => {
+        const result = await quiesceApp(appId, async () => {
           await repositories.commitApp(appId, { message: 'checkpoint before push' });
           return repositories.push({ kind: 'app', id: appId }, { ref: typeof branch === 'string' ? branch : undefined });
         });
@@ -440,33 +677,48 @@ export const makeEngineRoutes = (deps) => {
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
-        // why read first: deleting drops the record, but UN-SHARING a dwapp needs its
-        // name (→ slug) + dweb slot (publisher/hash) to tell the base host to stop
-        // announcing + serving the bytes. An app the user shared (or installed → we
-        // auto-seed) keeps being served by the offscreen content store until we
-        // unannounce it — that's the "I deleted it but a peer could still pull it" bug.
-        const deleted = await appClient.delete(appId, { beforeDelete: async (/** @type {any} */ record) => {
-          // Revoke every served release while the same lifecycle lock excludes
-          // share/update/write. Failure preserves the App for a clean retry.
-          const pending = (await kv.get('dweb.pendingPublications.v1')) ?? {};
-          if (!DWEB_ENABLED || !settingsStore.get().dwebEnabled || (!record.dweb && !record.shared && !pending[appId])) return;
-          try {
-          await ensureOffscreen();
-          const pendingHash = pending[appId]?.hash;
-          const unshare = await browser.runtime.sendMessage({
-            type: 'dweb/base-host/unshare-app', name: record.name,
-            slug: record.dweb?.slug ?? null, publisher: record.dweb?.publisher ?? null,
-            hash: record.dweb?.hash ?? pendingHash ?? null,
-            hashes: [...new Set([...(record.dweb?.published_hashes ?? []), ...(pendingHash ? [pendingHash] : [])])],
-          });
-          if (!unshare?.ok) throw new Error(unshare?.error ?? 'unshare rejected');
-          if (pending[appId]) { const next = { ...pending }; delete next[appId]; await kv.set('dweb.pendingPublications.v1', next); }
-          } catch (error) {
-            throw new Error(`network-unshare-failed: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}`);
+        const result = await withDwebPublication(() => withAppLifecycle(appId, async () => {
+          // Revoke the live network copy before removing the only durable record
+          // that names it. A transient host failure leaves the local App intact so
+          // the user can retry without losing the hashes needed for revocation.
+          const record = await appRegistry.get(appId);
+          if (!record) return { ok: false, error: 'app-not-found' };
+          if (DWEB_ENABLED && (record.dweb || record.shared)) {
+            try {
+              // Never create a host just to revoke. No offscreen context means
+              // no in-memory content store can still be serving these bytes.
+              const contexts = await listOffscreenContexts(browser);
+              if (contexts.length) {
+                const reply = await browser.runtime.sendMessage({
+                  type: 'dweb/base-host/unshare-app', appId, name: record.name,
+                  slug: record.dweb?.slug ?? null,
+                  publisher: record.dweb?.publisher ?? null,
+                  unpublish: record.dweb?.local === true,
+                  hash: record.dweb?.hash ?? null,
+                  hashes: [...new Set([
+                    record.dweb?.hash,
+                    record.dweb?.room_hash,
+                    ...(Array.isArray(record.dweb?.pending_unserve_hashes)
+                      ? record.dweb.pending_unserve_hashes
+                      : []),
+                    ...(Array.isArray(record.dweb?.pending_seed_unserve_hashes)
+                      ? record.dweb.pending_seed_unserve_hashes
+                      : []),
+                  ].filter((hash) => typeof hash === 'string' && hash))],
+                });
+                if (!reply?.ok) throw new Error(reply?.error ?? 'app-unshare-failed');
+              }
+            } catch {
+              return {
+                ok: false,
+                error: 'Could not stop sharing, so your local App was kept. Try again when the dweb is available.',
+              };
+            }
           }
-        } });
-        if (!deleted) return { ok: false, error: 'app-not-found' };
-        return { ok: true };
+          const deleted = await appClient.delete(appId);
+          return deleted ? { ok: true } : { ok: false, error: 'app-not-found' };
+        }));
+        return result;
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
@@ -482,29 +734,29 @@ export const makeEngineRoutes = (deps) => {
     // a FRESH id, never overwriting an existing artifact.
     'export/artifact': async ({ kind, id }) => {
       if (typeof id !== 'string' || !id) return { ok: false, error: 'id-required' };
-      // The OPFS tree, path → text — the same read surface app-tab's
-      // composer uses (opfs.list() prefixes paths with '/').
-      /** @param {string[]} rootPath */
-      const readTree = async (rootPath) => {
+      /** @param {string[]} rootPath @param {'text' | 'bytes'} mode */
+      const readTree = async (rootPath, mode) => {
         const opfs = opfsHelpers(rootPath);
-        /** @type {Record<string, string>} */
+        /** @type {Record<string, string | Uint8Array>} */
         const files = {};
         for (const f of await opfs.list()) {
           const path = f.path.replace(/^\/+/, '');
-          files[path] = await opfs.read(path);
+          files[path] = mode === 'bytes' ? await opfs.readBytes(path) : await opfs.read(path);
         }
         return files;
       };
       try {
         let record, envelope;
         if (kind === 'app') {
-          record = await appRegistry.get(id);
-          if (!record) return { ok: false, error: 'app-not-found' };
-          envelope = await buildAppExport({ record, files: await readTree(['peerd-apps', id]) });
+          const snapshot = await appClient.snapshotFiles({ appId: id });
+          record = snapshot.record;
+          // why every App file is read as bytes: artifact transfer is lossless;
+          // the persisted kind map decides which bytes are editable text.
+          envelope = await buildAppExport({ record, files: snapshot.files });
         } else if (kind === 'notebook') {
           record = await jsRegistry.get(id);
           if (!record) return { ok: false, error: 'notebook-not-found' };
-          envelope = await buildNotebookExport({ record, files: await readTree([NOTEBOOK_OPFS_ROOT, id]) });
+          envelope = await buildNotebookExport({ record, files: await readTree([NOTEBOOK_OPFS_ROOT, id], 'text') });
         } else if (kind === 'vm') {
           record = await vmRegistry.get(id);
           if (!record) return { ok: false, error: 'vm-not-found' };
@@ -551,9 +803,9 @@ export const makeEngineRoutes = (deps) => {
         }
         throw e;
       }
-      const { kind, name, entry, files, meta } = opened;
-      // OPFS trees travel as bytes; the engine kinds store text (the
-      // same contract app-tab/notebook-tab read back out).
+      const { kind, name, entry, files, fileKinds, meta } = opened;
+      // Notebook source files use the existing text contract. Apps receive the
+      // raw file map so import preserves every byte, including unknown suffixes.
       const textFiles = () => {
         /** @type {Record<string, string>} */
         const out = {};
@@ -569,7 +821,8 @@ export const makeEngineRoutes = (deps) => {
         try {
           record = await appClient.create({
             name,
-            files: textFiles(),
+            files,
+            fileKinds,
             tags: Array.isArray(meta.tags) ? meta.tags : [],
             entryFile: entry,
           });
@@ -578,6 +831,16 @@ export const makeEngineRoutes = (deps) => {
         }
         result = { ok: true, kind, id: record.id };
       } else if (kind === 'notebook') {
+        // Refuse before minting metadata. The guarded OPFS helper checks again
+        // at each file write, but a preflight avoids an empty registry record
+        // when the workspace schema is read-only.
+        try { await assertOpfsWritable(); }
+        catch (error) {
+          return {
+            ok: false,
+            error: /** @type {{ message?: string }} */ (error)?.message ?? String(error),
+          };
+        }
         const record = await jsRegistry.create({ name });
         const opfs = opfsHelpers([NOTEBOOK_OPFS_ROOT, record.id]);
         for (const [path, content] of Object.entries(textFiles())) {

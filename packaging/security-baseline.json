@@ -62,11 +62,13 @@
         "storage",
         "tabGroups",
         "tabs",
-        "unlimitedStorage"
+        "unlimitedStorage",
+        "webNavigation"
       ],
       "sandbox": {
         "pages": [
-          "engine-tabs/app-tab/runner.html"
+          "engine-tabs/app-tab/runner.html",
+          "engine-tabs/notebook-tab/worker-host.html"
         ]
       },
       "side_panel": {
@@ -92,7 +94,7 @@
       "browser_specific_settings": {
         "gecko": {
           "id": "peerd@peerd.ai",
-          "strict_min_version": "121.0",
+          "strict_min_version": "153.0",
           "data_collection_permissions": {
             "required": [
               "none"
@@ -138,7 +140,10 @@
         "scripting",
         "storage",
         "tabs",
-        "unlimitedStorage"
+        "unlimitedStorage",
+        "webNavigation",
+        "webRequest",
+        "webRequestBlocking"
       ],
       "sidebar_action": {
         "default_panel": "sidepanel/sidepanel.html",
@@ -207,11 +212,13 @@
         "storage",
         "tabGroups",
         "tabs",
-        "unlimitedStorage"
+        "unlimitedStorage",
+        "webNavigation"
       ],
       "sandbox": {
         "pages": [
-          "engine-tabs/app-tab/runner.html"
+          "engine-tabs/app-tab/runner.html",
+          "engine-tabs/notebook-tab/worker-host.html"
         ]
       },
       "side_panel": {
@@ -238,7 +245,7 @@
       "browser_specific_settings": {
         "gecko": {
           "id": "peerd-preview@peerd.ai",
-          "strict_min_version": "121.0",
+          "strict_min_version": "153.0",
           "update_url": "https://peerd.ai/updates/firefox-preview.json",
           "data_collection_permissions": {
             "required": [
@@ -257,10 +264,10 @@
         }
       },
       "content_security_policy": {
-        "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' blob: https: wss://disks.webvm.io wss://bootstrap.peerd.ai http://*:11434",
+        "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' blob: https: wss://disks.webvm.io http://*:11434",
         "sandbox": "sandbox allow-scripts allow-modals allow-pointer-lock; default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob:; style-src 'unsafe-inline'; worker-src blob:; child-src blob:; img-src data: blob:; font-src data: blob:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'; webrtc 'block';"
       },
-      "description": "Browser-native AI agent harness with the decentralized web (dweb) preview enabled — local-first, BYOK, sovereign by construction. The dweb protocol is research-grade and may change.",
+      "description": "An AI assistant that automates tasks in your browser. Local-first: your own API key, no account, no servers, no tracking.",
       "host_permissions": [
         "<all_urls>"
       ],
@@ -285,7 +292,10 @@
         "scripting",
         "storage",
         "tabs",
-        "unlimitedStorage"
+        "unlimitedStorage",
+        "webNavigation",
+        "webRequest",
+        "webRequestBlocking"
       ],
       "sidebar_action": {
         "default_panel": "sidepanel/sidepanel.html",
@@ -354,11 +364,13 @@
         "storage",
         "tabGroups",
         "tabs",
-        "unlimitedStorage"
+        "unlimitedStorage",
+        "webNavigation"
       ],
       "sandbox": {
         "pages": [
-          "engine-tabs/app-tab/runner.html"
+          "engine-tabs/app-tab/runner.html",
+          "engine-tabs/notebook-tab/worker-host.html"
         ]
       },
       "side_panel": {
@@ -394,7 +406,7 @@
       "browser_specific_settings": {
         "gecko": {
           "id": "peerd-dev@peerd.ai",
-          "strict_min_version": "121.0",
+          "strict_min_version": "153.0",
           "data_collection_permissions": {
             "required": [
               "none"
@@ -440,7 +452,10 @@
         "scripting",
         "storage",
         "tabs",
-        "unlimitedStorage"
+        "unlimitedStorage",
+        "webNavigation",
+        "webRequest",
+        "webRequestBlocking"
       ],
       "sidebar_action": {
         "default_panel": "sidepanel/sidepanel.html",
@@ -465,13 +480,13 @@
   },
   "messageHostSites": {
     "background/service-worker.js": 3,
-    "engine-tabs/app-tab/app-tab.js": 1,
+    "engine-tabs/app-tab/app-tab.js": 2,
     "engine-tabs/notebook-tab/notebook-tab.js": 1,
     "engine-tabs/pod-tab/pod-tab.js": 1,
     "engine-tabs/vm-tab/vm-tab.js": 1,
     "offscreen/doc-extract.js": 1,
     "offscreen/dweb-base.js": 1,
-    "offscreen/offscreen.js": 5,
+    "offscreen/offscreen.js": 4,
     "offscreen/web-extract.js": 1,
     "shared/peer-notifications.js": 1,
     "shared/pull-in-peerd.js": 1

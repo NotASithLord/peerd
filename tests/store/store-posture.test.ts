@@ -12,11 +12,13 @@ import { describe, test, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { generateManifest } from '../../packaging/gen-manifest.ts';
+import { genChannelConfigSource } from '../../packaging/gen-channel-config.ts';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 
 const manifest = generateManifest({ channel: 'store', browser: 'chrome', version: '0.0.0' });
 const preview = generateManifest({ channel: 'preview', browser: 'chrome', version: '0.0.0' });
 const firefox = generateManifest({ channel: 'store', browser: 'firefox', version: '0.0.0' });
+const previewFirefox = generateManifest({ channel: 'preview', browser: 'firefox', version: '0.0.0' });
 
 describe('store manifest posture', () => {
   test('store package ships WITHOUT debugger — initial CWS approval is not gated on CDP', () => {
@@ -90,6 +92,10 @@ describe('store manifest posture', () => {
       expect(csp).not.toContain("script-src 'self'");
       expect(csp).not.toContain("worker-src 'self'");
     }
+
+    const appTabHtml = readFileSync(join(EXTENSION_DIR, 'engine-tabs/app-tab/index.html'), 'utf8');
+    expect(appTabHtml).toContain('http-equiv="Content-Security-Policy"');
+    expect(appTabHtml).toContain("frame-src 'self'");
   });
 
   test('connect-src admits Ollama on the standard port, host-wildcard but PORT-SCOPED (issue #104)', () => {
@@ -128,9 +134,34 @@ describe('store manifest posture', () => {
     expect(manifest.cross_origin_embedder_policy).toBeDefined();
     expect(manifest.cross_origin_opener_policy).toBeDefined();
   });
+
+  test('Firefox preview metadata does not advertise or connect to an unavailable dweb mesh', () => {
+    expect(previewFirefox.description).not.toContain('dweb');
+    expect(previewFirefox.content_security_policy.extension_pages)
+      .not.toContain('bootstrap.peerd.ai');
+  });
 });
 
 describe('store feature flags', () => {
+  test('store disables remote module imports while preview opts in', () => {
+    expect(genChannelConfigSource('store'))
+      .toContain('export const REMOTE_MODULE_IMPORTS_ENABLED = false');
+    expect(genChannelConfigSource('preview'))
+      .toContain('export const REMOTE_MODULE_IMPORTS_ENABLED = true');
+  });
+
+  test('Firefox preview disables unavailable dweb facilities and keeps remote modules', () => {
+    const source = genChannelConfigSource('preview', 'firefox');
+    expect(source).toContain('export const DWEB_ENABLED = false');
+    expect(source).toContain('export const REMOTE_MODULE_IMPORTS_ENABLED = true');
+    expect(source).not.toContain('dwebEnabled:');
+    expect(source).not.toContain('dwebAgentEnabled:');
+    expect(genChannelConfigSource('preview', 'chrome'))
+      .toContain('export const DWEB_ENABLED = true');
+    expect(genChannelConfigSource('preview', 'chrome'))
+      .toContain('export const REMOTE_MODULE_IMPORTS_ENABLED = true');
+  });
+
   test('remote skill install is off for V1', async () => {
     const flags = await import('../../extension/shared/flags.js');
     expect(flags.REMOTE_SKILL_INSTALL).toBe(false);

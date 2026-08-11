@@ -1,5 +1,9 @@
 import { describe, test, expect } from 'bun:test';
-import { makeDenylistStore } from '../../extension/background/denylist-store.js';
+import {
+  DenylistPolicyUnavailableError,
+  makeDenylistStore,
+  requireDenylistPolicy,
+} from '../../extension/background/denylist-store.js';
 
 // The effective-list math (seed − disabled ∪ added) + the add/remove/re-enable
 // transitions used to live inline in the SW with no coverage. These pin them.
@@ -15,6 +19,14 @@ const freshStore = (kv: any = makeKv()) =>
   makeDenylistStore({ kv, key: 'denylist.user.v1', normalizePattern: normalize });
 
 describe('denylist-store — load + recompute', () => {
+  test('tool contexts require a successfully loaded policy', () => {
+    expect(requireDenylistPolicy({ ok: true })).toBeUndefined();
+    expect(() => requireDenylistPolicy({ ok: false }))
+      .toThrow(DenylistPolicyUnavailableError);
+    expect(() => requireDenylistPolicy(undefined))
+      .toThrow(DenylistPolicyUnavailableError);
+  });
+
   test('effective = seed when no overlay', async () => {
     const s = freshStore();
     await s.load(['a.com', 'b.com']);

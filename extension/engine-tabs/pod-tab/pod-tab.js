@@ -10,7 +10,9 @@
 import browser from '/vendor/browser-polyfill.js';
 import { buildModule, createEditor, opfsHelpers, podGitRemoteOperation, POD_OPFS_ROOT } from '/peerd-engine/index.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
+import { isServiceWorkerSender } from '/shared/messaging.js';
 import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS } from '../notebook-tab/worker-source.js';
+import { createExternalWorkspaceLockManager } from './external-workspace-lock.js';
 
 const podId = location.hash.slice(1).split(/[?&]/)[0];
 const validPodId = /^pod-[a-z0-9-]+$/i.test(podId);
@@ -23,12 +25,11 @@ const workspace = opfsHelpers([POD_OPFS_ROOT, podId]);
 const firefoxRuntime = typeof browser.runtime.getBrowserInfo === 'function'
   ? browser.runtime.getBrowserInfo().then((info) => info.name === 'Firefox').catch(() => false)
   : Promise.resolve(false);
-/** @typedef {{id:string,command:string,state:'running'|'completed'|'failed',stdout:string,stderr:string,stdoutTruncated?:boolean,stderrTruncated?:boolean,exitCode:number|null,startedAt:number,finishedAt?:number,durationMs?:number,timeoutMs:number,worker:Worker,children:Set<Worker>,resolve?:(value:any)=>void,timer?:ReturnType<typeof setTimeout>,remoteGitGrant:true|{op:string,url:string}|null,remoteGitGrantConsumed:boolean,background:boolean,render:boolean,editorRevision?:number,settle?:(result:any)=>void}} PodJob */
+/** @typedef {{id:string,command:string,state:'running'|'completed'|'failed',stdout:string,stderr:string,stdoutTruncated?:boolean,stderrTruncated?:boolean,exitCode:number|null,startedAt:number,finishedAt?:number,durationMs?:number,timeoutMs:number,worker:Worker,children:Set<Worker>,resolve?:(value:any)=>void,timer?:ReturnType<typeof setTimeout>,remoteGitGrant:true|{op:string,url:string}|null,remoteGitGrantConsumed:boolean,background:boolean,render:boolean,restoreTerminalFocus?:boolean,editorRevision?:number,settle?:(result:any)=>void}} PodJob */
 /** @type {Map<string, PodJob>} */ const jobs = new Map();
 let jobSequence = 0;
 let workspaceTail = Promise.resolve();
 /** @type {Map<Worker,{release:()=>void,owned:boolean,cancelled:boolean,operationTail:Promise<void>}>} */ const workspaceLocks = new Map();
-/** @type {Map<string,{release:()=>void}>} */ const externalWorkspaceLocks = new Map();
 /** @type {string|null} */ let activeForegroundJobId = null;
 let podRecord = { id: podId, name: podId, persistent: true };
 let cwd = '/';
@@ -126,27 +127,15 @@ const withWorkspace = (worker, operation) => {
   return result;
 };
 
-/** @param {string} token */
-const acquireExternalWorkspace = async (token) => {
-  if (!/^lock-[a-z0-9-]{1,80}$/i.test(token) || externalWorkspaceLocks.has(token)) {
-    throw new Error('invalid or duplicate workspace lock token');
-  }
-  const previous = workspaceTail.catch(() => {});
-  /** @type {()=>void} */ let release = () => {};
-  const held = new Promise((resolve) => { release = () => resolve(undefined); });
-  workspaceTail = previous.then(() => held);
-  await previous;
-  externalWorkspaceLocks.set(token, { release });
-};
-
-/** @param {string} token */
-const releaseExternalWorkspace = (token) => {
-  const record = externalWorkspaceLocks.get(token);
-  if (!record) return false;
-  externalWorkspaceLocks.delete(token);
-  record.release();
-  return true;
-};
+const externalWorkspaceLocks = createExternalWorkspaceLockManager({
+  appendHold: () => {
+    const previous = workspaceTail.catch(() => {});
+    /** @type {()=>void} */ let release = () => {};
+    const held = new Promise((resolve) => { release = () => resolve(undefined); });
+    workspaceTail = previous.then(() => held);
+    return { wait: previous, release };
+  },
+});
 
 /** @param {unknown} value */
 const printable = (value) => {
@@ -298,6 +287,14 @@ const answerWorkerRequest = async (worker, message, job) => {
       case 'fs-write': {
         await withWorkspace(worker, () => workspace.write(args.path, checkedFileContent(args))); reply(null); return;
       }
+      case 'fs-append': {
+        if (typeof args.content !== 'string') throw new Error('append content must be text');
+        await withWorkspace(worker, async () => {
+          const previous = await workspace.exists(args.path) ? await workspace.read(args.path) : '';
+          await workspace.write(args.path, checkedFileContent({ content: `${previous}${args.content}` }));
+        });
+        reply(null); return;
+      }
       case 'fs-list': reply(await withWorkspace(worker, () => workspace.list())); return;
       case 'fs-list-dir': reply(await withWorkspace(worker, () => workspace.listDir(args.path))); return;
       case 'fs-stat': reply(await withWorkspace(worker, () => workspace.stat(args.path))); return;
@@ -366,15 +363,17 @@ const startJob = (command, { jobId, timeoutMs = 30_000, background = false, rend
   const worker = new Worker('/engine-tabs/pod-tab/pod-job-worker.js', { type: 'module', name: `peerd-pod-${id}` });
   /** @type {(value:any)=>void} */ let resolve = () => {};
   const completion = new Promise((done) => { resolve = done; });
+  const restoreTerminalFocus = !background && source === 'user' && document.activeElement === input;
   const job = /** @type {PodJob} */ ({
     id, command, state: 'running', stdout: '', stderr: '', exitCode: null,
     startedAt: Date.now(), timeoutMs, worker, children: new Set(), resolve,
-    remoteGitGrant, remoteGitGrantConsumed: false, background, render,
+    remoteGitGrant, remoteGitGrantConsumed: false, background, render, restoreTerminalFocus,
   });
   jobs.set(id, job);
   trimJobs();
   if (!background) activeForegroundJobId = id;
   updateForegroundControls();
+  if (restoreTerminalFocus) stopButton.focus({ preventScroll: true });
   if (render) {
     append('entry-command', `${source === 'agent' ? '[agent] ' : ''}${cwd} $ ${command}\n`);
     append('entry-meta', `[${id} · running${background ? ' in background' : ''}]\n`);
@@ -401,12 +400,15 @@ const startJob = (command, { jobId, timeoutMs = 30_000, background = false, rend
     if (!job.background && typeof result?.cwd === 'string') cwd = result.cwd;
     if (!job.background && result?.env && typeof result.env === 'object') environment = result.env;
     promptLabel.textContent = `${cwd} $`;
+    const shouldRestoreTerminalFocus = job.restoreTerminalFocus === true
+      && (document.activeElement === stopButton || document.activeElement === document.body);
     if (activeForegroundJobId === id) activeForegroundJobId = null;
     updateForegroundControls();
+    if (shouldRestoreTerminalFocus) input.focus({ preventScroll: true });
     if (render) {
       append('entry-stdout', job.stdout);
       append('entry-stderr', job.stderr);
-      if (job.stdoutTruncated || job.stderrTruncated) append('entry-meta', '[output truncated; use pod_status with jobId + stream to page retained output]\n');
+      if (job.stdoutTruncated || job.stderrTruncated) append('entry-meta', '[output truncated in this terminal; redirect to a file before displaying large output, or ask the owning agent to page retained output]\n');
       append('entry-meta', `[${job.id} · exit ${job.exitCode} · ${Math.round(job.durationMs)}ms]\n`);
     }
     editor?.refreshExternalChanges?.({ ifRevision: job.editorRevision }).then((sync) => {
@@ -436,8 +438,8 @@ const startJob = (command, { jobId, timeoutMs = 30_000, background = false, rend
 
 const POD_ROUTES = new Set(['pod/exec', 'pod/status', 'pod/cancel', 'pod/read-file', 'pod/write-file', 'pod/list-files', 'pod/workspace-lock']);
 browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ message, /** @type {any} */ sender, /** @type {(value:any)=>void} */ sendResponse) => {
-  const fromBackground = sender?.id === browser.runtime.id && sender?.tab == null;
-  if (!message || !fromBackground || !POD_ROUTES.has(message.type) || message.podId !== podId) return false;
+  if (!message || !isServiceWorkerSender(sender)
+      || !POD_ROUTES.has(message.type) || message.podId !== podId) return false;
   (async () => {
     try {
       if (message.type === 'pod/exec') sendResponse({ ok: true, job: await startJob(String(message.command ?? ''), {
@@ -465,18 +467,47 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ me
       else if (message.type === 'pod/cancel') sendResponse({ ok: true, podId, ...cancelJob(String(message.jobId ?? '')) });
       else if (message.type === 'pod/read-file') sendResponse({ ok: true, content: await enqueueWorkspace(() => workspace.read(message.path)) });
       else if (message.type === 'pod/write-file') {
-        await editor.flushSave();
-        const revision = editor.getRevision();
-        await enqueueWorkspace(() => workspace.write(message.path, checkedFileContent(message)));
-        await editor.refreshExternalChanges({ ifRevision: revision });
+        const content = checkedFileContent(message);
+        let activeWrite = await editor.writeExternalActiveFile(message.path, content);
+        if (activeWrite.conflict) {
+          throw new Error(`active editor changed; read ${activeWrite.path} and retry the write`);
+        }
+        if (!activeWrite.handled) {
+          await editor.flushSave();
+          activeWrite = await editor.writeExternalActiveFile(message.path, content);
+          if (activeWrite.conflict) {
+            throw new Error(`active editor changed; read ${activeWrite.path} and retry the write`);
+          }
+        }
+        if (!activeWrite.handled) {
+          const revision = editor.getRevision();
+          const fileRevision = editor.getFileRevision(message.path);
+          await enqueueWorkspace(async () => {
+            if (editor.getFileRevision(message.path) !== fileRevision) {
+              throw new Error(`active editor changed; read ${activeWrite.path} and retry the write`);
+            }
+            await workspace.write(message.path, content);
+          });
+          const sync = await editor.refreshExternalChanges({ ifRevision: revision });
+          if (editor.getFileRevision(message.path) !== fileRevision
+              || (sync?.conflict && sync.path === activeWrite.path)) {
+            await editor.flushSave();
+            throw new Error(`active editor changed; read ${activeWrite.path} and retry the write`);
+          }
+        }
         sendResponse({ ok: true });
       }
       else if (message.type === 'pod/list-files') sendResponse({ ok: true, files: await enqueueWorkspace(() => workspace.list()) });
       else if (message.type === 'pod/workspace-lock') {
-        if (message.action === 'acquire') await acquireExternalWorkspace(String(message.token ?? ''));
-        else if (message.action === 'release') releaseExternalWorkspace(String(message.token ?? ''));
-        else throw new Error('workspace lock action must be acquire or release');
-        sendResponse({ ok: true });
+        const token = String(message.token ?? '');
+        if (message.action === 'acquire') {
+          sendResponse({ ok: true, ...(await externalWorkspaceLocks.acquire(token)) });
+        } else if (message.action === 'renew') {
+          if (!externalWorkspaceLocks.renew(token)) throw new Error('workspace lock lease not found');
+          sendResponse({ ok: true });
+        } else if (message.action === 'release') {
+          sendResponse({ ok: true, released: externalWorkspaceLocks.release(token) });
+        } else throw new Error('workspace lock action must be acquire, renew, or release');
       }
     } catch (error) { sendResponse({ ok: false, error: /** @type {{message?:string}} */ (error)?.message ?? String(error) }); }
   })();

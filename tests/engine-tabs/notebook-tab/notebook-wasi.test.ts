@@ -58,17 +58,17 @@ describe('runWasi', () => {
   });
 
   test('refuses a module without _start (reactor / empty)', async () => {
-    expect(runWasi(buildEmptyModule())).rejects.toThrow(WasiRunError);
-    expect(runWasi(buildEmptyModule())).rejects.toThrow(/command module/);
+    await expect(runWasi(buildEmptyModule())).rejects.toThrow(WasiRunError);
+    await expect(runWasi(buildEmptyModule())).rejects.toThrow(/command module/);
   });
 
   test('refuses a module that wants non-WASI imports, with an actionable message', async () => {
-    expect(runWasi(buildNonWasiModule())).rejects.toThrow(WasiRunError);
-    expect(runWasi(buildNonWasiModule())).rejects.toThrow(/WASI preview1/);
+    await expect(runWasi(buildNonWasiModule())).rejects.toThrow(WasiRunError);
+    await expect(runWasi(buildNonWasiModule())).rejects.toThrow(/WASI preview1/);
   });
 
   test('rejects junk bytes at compile', async () => {
-    expect(runWasi(new Uint8Array([1, 2, 3, 4]))).rejects.toThrow();
+    await expect(runWasi(new Uint8Array([1, 2, 3, 4]))).rejects.toThrow();
   });
 
   test('the shim debug logger stays OFF (no per-syscall console spam)', async () => {
@@ -117,7 +117,7 @@ describe('buildFileTree / readFileTree', () => {
   });
 });
 
-describe('runWasiWorkspace — Pod shared workspace adapter', () => {
+describe('runWasiWorkspace: Pod shared workspace adapter', () => {
   test('a real WASI path_open/fd_write mutation is reconciled into the host workspace', async () => {
     const files = new Map<string, Uint8Array>([
       ['kept.txt', new TextEncoder().encode('existing')],
@@ -159,7 +159,7 @@ describe('runWasiWorkspace — Pod shared workspace adapter', () => {
       readBytes: async () => { read = true; return new Uint8Array(5); },
       write: async () => {}, delete: async () => {},
     };
-    expect(runWasiWorkspace(demoModule(), { workspace, maxBytes: 4 })).rejects.toThrow(/snapshot budget/);
+    await expect(runWasiWorkspace(demoModule(), { workspace, maxBytes: 4 })).rejects.toThrow(/snapshot budget/);
     expect(read).toBe(false);
   });
 
@@ -170,8 +170,20 @@ describe('runWasiWorkspace — Pod shared workspace adapter', () => {
       readBytes: async () => { touched = true; return new Uint8Array(1); },
       write: async () => { touched = true; }, delete: async () => { touched = true; },
     };
-    expect(runWasiWorkspace(demoModule(), { workspace })).rejects.toThrow(/unsafe WASI workspace path/);
+    await expect(runWasiWorkspace(demoModule(), { workspace })).rejects.toThrow(/unsafe WASI workspace path/);
     expect(touched).toBe(false);
+  });
+
+  test('a safe in-budget snapshot reaches the read capability', async () => {
+    let read = false;
+    const workspace = {
+      list: async () => [{ path: 'safe.txt', size: 1 }],
+      readBytes: async () => { read = true; return Uint8Array.of(120); },
+      write: async () => {}, delete: async () => {},
+    };
+    const result = await runWasiWorkspace(demoModule(), { workspace, maxBytes: 4 });
+    expect(read).toBe(true);
+    expect(result.exitCode).toBe(0);
   });
 });
 

@@ -11,11 +11,38 @@
 //   - it never throws on junk, because it runs on every landing
 
 import { describe, test, expect } from 'bun:test';
-import { classifyOriginSensitivity, sameOrigin, LEARNED_REASONS } from '../../../extension/peerd-runtime/actor/origin-sensitivity.js';
+import {
+  classifyOriginSensitivity, learnedOriginCovers, sameOrigin, sensitivityHost,
+  LEARNED_REASONS,
+} from '../../../extension/peerd-runtime/actor/origin-sensitivity.js';
+import { isKnownIdpHost } from '../../../extension/peerd-runtime/actor/idp-registry.js';
 
 const ugcOnly = { isUgcZone: (o: string) => o === 'https://github.com' };
 
 describe('sensitivity — the seeds', () => {
+  test.each([
+    ['https://accounts.google.com/o/oauth2'],
+    ['https://tenant.okta.com/app/login'],
+  ])('a dedicated identity provider is transit-only sensitive: %s', (url) => {
+    expect(classifyOriginSensitivity(url, { isKnownIdp: isKnownIdpHost })).toMatchObject({
+      sensitive: true,
+      reason: 'identity-provider',
+    });
+  });
+
+  test.each([
+    ['http://accounts.google.com/o/oauth2'],
+    ['https://accounts.google.com:8443/o/oauth2'],
+  ])('cookie-sharing spellings remain sensitive outside the strict corridor: %s', (url) => {
+    expect(classifyOriginSensitivity(url, { isKnownIdp: isKnownIdpHost }).sensitive).toBe(true);
+  });
+
+  test('a lookalike host stays ordinary', () => {
+    expect(classifyOriginSensitivity('https://accounts.google.com.evil.test/login', {
+      isKnownIdp: isKnownIdpHost,
+    }).sensitive).toBe(false);
+  });
+
   test('a UGC-registry origin is sensitive, attributed to the registry', () => {
     const v = classifyOriginSensitivity('https://github.com', ugcOnly);
     expect(v.sensitive).toBe(true);
@@ -68,13 +95,66 @@ describe('sensitivity — the learned set', () => {
     expect(LEARNED_REASONS).toContain(v.reason as any);
   });
 
-  test('the learned set is keyed on the NORMALIZED origin', () => {
-    // The store writes normalized keys; a lookup that didn't normalize would
-    // silently miss and hand a roaming actor into a credentialed site.
+  test('legacy normalized-origin keys remain readable during migration', () => {
+    // Old durable records used origins. The classifier accepts that shape while
+    // hydration compacts it to a host key.
     const v = classifyOriginSensitivity('HTTPS://Bank.test:443/login', {
       learned: new Set(['https://bank.test']),
     });
     expect(v.sensitive).toBe(true);
+  });
+
+  test('a learned host covers every scheme and port on that host', () => {
+    const learned = new Map([['login.bank.test', 'password-field' as const]]);
+    for (const landing of [
+      'https://login.bank.test',
+      'https://login.bank.test:8443/account',
+      'http://login.bank.test:8080/account',
+    ]) {
+      expect(classifyOriginSensitivity(landing, { learned }).sensitive).toBe(true);
+    }
+  });
+
+  test('a learned parent covers descendant hosts', () => {
+    const learned = new Map([['bank.test', 'confirmed-write' as const]]);
+    const v = classifyOriginSensitivity('https://private.accounts.bank.test/inbox', { learned });
+    expect(v.sensitive).toBe(true);
+    expect(v.reason).toBe('confirmed-write');
+    expect(v.origin).toBe('https://private.accounts.bank.test');
+  });
+
+  test('a learned child does not poison its parent or a sibling', () => {
+    const learned = new Map([['attacker.shared.test', 'password-field' as const]]);
+    expect(classifyOriginSensitivity('https://shared.test', { learned }).sensitive).toBe(false);
+    expect(classifyOriginSensitivity('https://victim.shared.test', { learned }).sensitive).toBe(false);
+  });
+
+  test('hostname boundaries prevent suffix lookalikes from matching', () => {
+    const learned = new Map([['bank.test', 'password-field' as const]]);
+    expect(classifyOriginSensitivity('https://secure.bank.test', { learned }).sensitive).toBe(true);
+    expect(classifyOriginSensitivity('https://bank.test.evil.test', { learned }).sensitive).toBe(false);
+    expect(classifyOriginSensitivity('https://notbank.test', { learned }).sensitive).toBe(false);
+  });
+
+  test('the closest learned host supplies the reason', () => {
+    const learned = new Map([
+      ['example.test', 'password-field' as const],
+      ['accounts.example.test', 'confirmed-write' as const],
+    ]);
+    const v = classifyOriginSensitivity('https://private.accounts.example.test', { learned });
+    expect(v.reason).toBe('confirmed-write');
+  });
+});
+
+describe('learned cookie-host scope', () => {
+  test('normalization removes scheme, port, path, and host casing', () => {
+    expect(sensitivityHost('HTTP://Login.Bank.test:8080/path')).toBe('login.bank.test');
+  });
+
+  test('coverage is one-way from parent to descendant', () => {
+    expect(learnedOriginCovers('https://example.test:8443', 'http://a.example.test:8080')).toBe(true);
+    expect(learnedOriginCovers('https://a.example.test', 'https://example.test')).toBe(false);
+    expect(learnedOriginCovers('https://a.example.test', 'https://b.example.test')).toBe(false);
   });
 });
 
@@ -106,6 +186,7 @@ describe('sameOrigin', () => {
   test('different origins are different', () => {
     expect(sameOrigin('https://github.com', 'https://evil.test')).toBe(false);
     expect(sameOrigin('https://github.com', 'http://github.com')).toBe(false);   // scheme counts
+    expect(sameOrigin('https://github.com:8443', 'https://github.com:9443')).toBe(false); // port counts
   });
 
   test('an unusable origin is never "the same as" anything, including another unusable one', () => {

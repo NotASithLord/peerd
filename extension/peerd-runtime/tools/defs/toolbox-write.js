@@ -5,12 +5,10 @@
 // have authored on a turn whose context held fenced web bytes. A rejection
 // persists nothing.
 //
-// The body's imports are resolution-checked at write time (the resolver's
-// transform via ctx.toolboxParseCheck) BEFORE the user is asked — a module with
-// an unresolvable import fails the WRITE, not some future run, and the user is
-// never prompted to approve one. This is an IMPORT-RESOLUTION check, NOT a
-// syntax check: a JS syntax error does not fail the write (eval is CSP-blocked,
-// so there is no in-realm parser here).
+// The body is parsed before the user is asked. Local, builtin, and toolbox
+// imports are resolution-checked. Preview remote specifier policy and the
+// direct graph-count limit are checked without fetching third-party source, so
+// remote availability and transitive dependencies remain runtime checks.
 //
 // sideEffect 'write' so the six-gate chain treats it like any mutation; the
 // confirm here layers on top of the gates (site-client-write.js is the twin).
@@ -27,8 +25,10 @@ export const toolboxWriteTool = {
     "import { helper } from 'peerd:toolbox/<name>' (script and notebook runs",
     'only). Write a real module with `export`s; it may import peerd:std or',
     'other toolbox modules. It runs under the CALLING run\'s capabilities —',
-    'storing it grants nothing. Name: [a-z0-9-]{1,64}. Unresolvable imports',
-    'fail the write. To fix a broken module, rewrite it wholesale here.',
+    'storing it grants nothing. Name: [a-z0-9-]{1,64}. Invalid syntax and',
+    'unresolvable local, builtin, or toolbox imports fail the write. Preview',
+    'remote source and transitive dependencies are checked at runtime. To fix',
+    'a broken module, rewrite it wholesale here.',
   ].join(' '),
   schema: {
     type: 'object',
@@ -70,12 +70,8 @@ export const toolboxWriteTool = {
     }
     if (proposal.op === 'noop') return { ok: true, content: 'no change (identical to the stored module).' };
 
-    // Import-resolution check BEFORE the confirm: a module with an unresolvable
-    // import never reaches the user, and never persists (a JS syntax error is
-    // NOT caught — see makeToolboxParseCheck). The dep is part of the tool's
-    // contract — FAIL CLOSED when a ctx assembly lacks it (skipping would
-    // silently drop both the import-resolution guarantee and the '../'
-    // namespace-escape refusal that rides the same check).
+    // Parse and supported-resolution check before confirm. The dependency is
+    // part of the tool contract, so fail closed when a context lacks it.
     if (!c.toolboxParseCheck) return { ok: false, error: 'toolbox_unavailable' };
     try { await c.toolboxParseCheck(proposal.name, proposal.body); }
     catch (e) {
@@ -87,7 +83,7 @@ export const toolboxWriteTool = {
     // as runnable JS so it never reads like a prose edit. why no "review the
     // code" instruction: the confirm card renders only this summary — it must
     // not tell the user to inspect source the UI doesn't show.
-    const confirmAny = /** @type {((p: Record<string, unknown>) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
+    const confirmAny = /** @type {((p: Record<string, unknown>, signal?: AbortSignal) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
       /** @type {unknown} */ (ctx.confirm));
     if (!confirmAny) return { ok: false, error: 'declined', content: 'No confirmation channel available for a toolbox write.' };
     const ans = await confirmAny({
@@ -101,7 +97,7 @@ export const toolboxWriteTool = {
         + `${proposal.description ? ` Agent's description: ${proposal.description}` : ''}`,
       origins: [],
       sessionId: ctx.session?.sessionId ?? null,
-    });
+    }, ctx.abortSignal);
     if (ans !== 'yes_once' && ans !== 'yes_session' && ans !== true) {
       return { ok: false, error: 'toolbox_write_rejected', content: 'User declined the toolbox write.' };
     }

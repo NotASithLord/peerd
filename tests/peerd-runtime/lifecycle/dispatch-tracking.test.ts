@@ -11,6 +11,7 @@ import { OPERATION_STATES } from '../../../extension/peerd-runtime/lifecycle/ope
 import { classifyFailure } from '../../../extension/peerd-runtime/observability/failure-classify.js';
 import { registerTool, clearTools } from '../../../extension/peerd-runtime/tools/registry.js';
 import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/dispatcher.js';
+import { retryClassForTool } from '../../../extension/peerd-runtime/lifecycle/tool-retry-class.js';
 
 const S = OPERATION_STATES;
 
@@ -141,6 +142,22 @@ describe('settleTracking — §16.2 semantic failures', () => {
     expect((await log.get('s:c1'))!.state).toBe(S.OUTCOME_UNKNOWN);
   });
 
+  test('typed pre-effect proof makes an aborted Class E dispatch a clean cancellation', async () => {
+    const { tracker, log } = makeTracker();
+    const begun = await tracker.beginTracking({
+      callId: 'c1', tool: { name: 't', retryClass: 'E' }, sessionId: 's',
+    });
+    const rewrite = await tracker.settleTracking((begun as { handle: any }).handle, {
+      ok: false,
+      error: 'stopped before the actor ran',
+      aborted: true,
+      outcomeKind: 'pre-effect-failure',
+    });
+    expect((await log.get('s:c1'))!.state).toBe(S.CANCELLED);
+    expect(rewrite!.error).toStartWith('cancelled:');
+    expect(rewrite!.recovery.state).toBe(S.CANCELLED);
+  });
+
   test('an abort on a Class C write settles cancelled cleanly', async () => {
     const { tracker, log } = makeTracker();
     const begun = await tracker.beginTracking({
@@ -241,6 +258,17 @@ describe('typed failure outcomes outrank string heuristics', () => {
   test('pre-effect-failure settles failed even when the message LOOKS like a timeout', async () => {
     const { record } = await settleTyped('E', 'gateway timed out validating the payload', 'pre-effect-failure');
     expect(record!.state).toBe(S.FAILED);
+  });
+
+  test('effect-completed settles completed without rewriting the policy refusal', async () => {
+    const { rewrite, record } = await settleTyped(
+      'E',
+      'browser_private_network_blocked: navigation stopped after the page loaded',
+      'effect-completed',
+    );
+    expect(rewrite).toBeNull();
+    expect(record!.state).toBe(S.COMPLETED);
+    expect(record!.evidence).toEqual({ kind: 'success-response' });
   });
 
   test('transport-lost settles ambiguous even when the message looks definitive', async () => {
@@ -368,6 +396,33 @@ describe('the replay guard — guarantee 2', () => {
     expect(record.generationId).toBe('gen-1-nonce');
   });
 
+  test('every Class F override requires a new call with re-derived grants', async () => {
+    for (const toolName of ['sandbox_create', 'vm_boot', 'actor_create', 'request_review']) {
+      const { tracker, log } = makeTracker();
+      const tool = { name: toolName, sideEffect: 'read' };
+      const retryClass = retryClassForTool(tool);
+      expect(retryClass).toBe('F');
+      await log.begin({
+        operationId: `s:${toolName}`, sessionId: 's', toolName,
+        retryClass, generationId: 'gen-0-old',
+      });
+      await log.settle(`s:${toolName}`, {
+        state: S.INTERRUPTED, autoRetry: false,
+        retryRequires: ['rederive-grants'], keepIdempotencyKey: false,
+        verificationRequired: false, recreateResource: true,
+        reason: 'resource host was lost',
+      });
+      const replay = await tracker.beginTracking({
+        callId: toolName, tool: { ...tool, retryClass }, sessionId: 's',
+      });
+      const refusal = (replay as { refuse: { error: string, recovery: any } }).refuse;
+      expect(refusal.error).toStartWith('resource_lost:');
+      expect(refusal.recovery.category).toBe('resource_lost');
+      expect(refusal.recovery.retryRequires).toEqual(['rederive-grants']);
+      expect((await log.get(`s:${toolName}`))!.attempt).toBe(1);
+    }
+  });
+
   test('a retried Class D killed mid-flight reconciles as outcome_unknown, not safe-to-retry', async () => {
     const { tracker, log } = makeTracker();
     await log.begin({
@@ -425,6 +480,161 @@ describe('the replay guard — guarantee 2', () => {
     });
     expect((begun as { refuse: { error: string } }).refuse.error).toStartWith('outcome_unknown:');
   });
+
+  test('a fresh call id cannot repeat unknown intent in the same or a synthetic turn', async () => {
+    const { tracker } = makeTracker();
+    const first = await tracker.beginTracking({
+      callId: 'c1', tool: { name: 'submit_form', retryClass: 'E' },
+      sessionId: 's', args: { form: 'checkout', value: 1 },
+      turnId: 'turn-1', userInitiated: true,
+    });
+    await tracker.settleTracking((first as { handle: any }).handle, {
+      ok: false, error: 'request timed out',
+    });
+    for (const attempt of [
+      { callId: 'c2', turnId: 'turn-1', userInitiated: true },
+      { callId: 'c3', turnId: 'turn-2', userInitiated: false },
+    ]) {
+      const replay = await tracker.beginTracking({
+        ...attempt,
+        tool: { name: 'submit_form', retryClass: 'E' },
+        sessionId: 's', args: { value: 1, form: 'checkout' },
+      });
+      expect((replay as { refuse: { error: string } }).refuse.error)
+        .toStartWith('outcome_unknown:');
+    }
+  });
+
+  test('a new user confirmation can deliberately repeat previously unknown intent', async () => {
+    const { tracker } = makeTracker();
+    const first = await tracker.beginTracking({
+      callId: 'c1', tool: { name: 'submit_form', retryClass: 'E' },
+      sessionId: 's', args: { form: 'checkout' },
+      turnId: 'turn-1', userInitiated: true,
+    });
+    await tracker.settleTracking((first as { handle: any }).handle, {
+      ok: false, error: 'request timed out',
+    });
+    const confirmedIntent = await tracker.requiresIntentConfirmation({
+      tool: { name: 'submit_form', retryClass: 'E' },
+      sessionId: 's', ownerSessionId: 's', target: 'tool:submit_form',
+      args: { form: 'checkout' }, userInitiated: true,
+    });
+    const deliberate = await tracker.beginTracking({
+      callId: 'c2', tool: { name: 'submit_form', retryClass: 'E' },
+      sessionId: 's', args: { form: 'checkout' },
+      turnId: 'turn-2', userInitiated: true, confirmed: true,
+      confirmedIntent,
+    });
+    expect(deliberate && 'handle' in deliberate).toBe(true);
+  });
+
+  test('a sibling actor in the same root chat cannot bypass unknown intent', async () => {
+    const log = makeLog();
+    const rootFor = async (sessionId: string) =>
+      sessionId === 'actor-a' || sessionId === 'actor-b' ? 'chat-root' : sessionId;
+    const tracker = makeDispatchTracker({
+      operationLog: log,
+      generationId: () => 'gen-1-nonce',
+      retryClassFor: (tool) => (tool as { retryClass?: string }).retryClass as any ?? 'E',
+      classifyFailure,
+      resolveOwnerSessionId: rootFor,
+    });
+    const tool = { name: 'submit_form', retryClass: 'E' };
+    const args = { form: 'checkout', amount: 1 };
+    const first = await tracker.beginTracking({
+      callId: 'actor-a-call', tool, sessionId: 'actor-a',
+      ownerSessionId: 'chat-root', target: 'https://shop.example', args,
+      userInitiated: true,
+    });
+    await tracker.settleTracking((first as { handle: any }).handle, {
+      ok: false, error: 'request timed out',
+    });
+
+    const repeatClaim = await tracker.requiresIntentConfirmation({
+      tool, sessionId: 'actor-b', ownerSessionId: 'chat-root',
+      target: 'https://shop.example', args, userInitiated: true,
+    });
+    expect(repeatClaim).toMatchObject({
+      required: true, ownerSessionId: 'chat-root', target: 'https://shop.example',
+    });
+    const unapproved = await tracker.beginTracking({
+      callId: 'actor-b-call', tool, sessionId: 'actor-b',
+      ownerSessionId: 'chat-root', target: 'https://shop.example', args,
+      userInitiated: true,
+    });
+    expect(unapproved && 'refuse' in unapproved).toBe(true);
+
+    const approved = await tracker.beginTracking({
+      callId: 'actor-b-approved', tool, sessionId: 'actor-b',
+      ownerSessionId: 'chat-root', target: 'https://shop.example', args,
+      userInitiated: true, confirmed: true, confirmedIntent: repeatClaim,
+    });
+    expect(approved && 'handle' in approved).toBe(true);
+    expect((await log.get('actor-b:actor-b-approved'))?.ownerSessionId).toBe('chat-root');
+  });
+
+  test('repeat approval is bound to the exact target and intent shown', async () => {
+    const { tracker } = makeTracker();
+    const tool = { name: 'submit_form', retryClass: 'E' };
+    const first = await tracker.beginTracking({
+      callId: 'c1', tool, sessionId: 's', target: 'https://shop.example',
+      args: { form: 'checkout' }, userInitiated: true,
+    });
+    await tracker.settleTracking((first as { handle: any }).handle, {
+      ok: false, error: 'request timed out',
+    });
+    const other = await tracker.beginTracking({
+      callId: 'c-other', tool, sessionId: 's', target: 'https://shop.example',
+      args: { form: 'wire-transfer' }, userInitiated: true,
+    });
+    await tracker.settleTracking((other as { handle: any }).handle, {
+      ok: false, error: 'request timed out',
+    });
+    const claim = await tracker.requiresIntentConfirmation({
+      tool, sessionId: 's', target: 'https://shop.example',
+      args: { form: 'checkout' }, userInitiated: true,
+    });
+    const changedAfterPrompt = await tracker.beginTracking({
+      callId: 'c2', tool, sessionId: 's', target: 'https://shop.example',
+      args: { form: 'wire-transfer' }, userInitiated: true,
+      confirmed: true, confirmedIntent: claim,
+    });
+    expect(changedAfterPrompt && 'refuse' in changedAfterPrompt).toBe(true);
+
+    const otherTarget = await tracker.beginTracking({
+      callId: 'c-bank', tool, sessionId: 's', target: 'https://bank.example',
+      args: { form: 'checkout' }, userInitiated: true,
+    });
+    await tracker.settleTracking((otherTarget as { handle: any }).handle, {
+      ok: false, error: 'request timed out',
+    });
+    const retargetedAfterPrompt = await tracker.beginTracking({
+      callId: 'c3', tool, sessionId: 's', target: 'https://bank.example',
+      args: { form: 'checkout' }, userInitiated: true,
+      confirmed: true, confirmedIntent: claim,
+    });
+    expect(retargetedAfterPrompt && 'refuse' in retargetedAfterPrompt).toBe(true);
+  });
+
+  test('a later user turn without confirmation still cannot repeat unknown intent', async () => {
+    const { tracker } = makeTracker();
+    const first = await tracker.beginTracking({
+      callId: 'c1', tool: { name: 'submit_form', retryClass: 'E' },
+      sessionId: 's', args: { form: 'checkout' },
+      turnId: 'turn-1', userInitiated: true,
+    });
+    await tracker.settleTracking((first as { handle: any }).handle, {
+      ok: false, error: 'request timed out',
+    });
+    const unapproved = await tracker.beginTracking({
+      callId: 'c2', tool: { name: 'submit_form', retryClass: 'E' },
+      sessionId: 's', args: { form: 'checkout' },
+      turnId: 'turn-2', userInitiated: true,
+    });
+    expect((unapproved as { refuse: { error: string } }).refuse.error)
+      .toContain('needs a new user confirmation');
+  });
 });
 
 describe('the full dispatcher path', () => {
@@ -470,6 +680,122 @@ describe('the full dispatcher path', () => {
     expect(executions).toBe(1); // the replay never reached execute()
     expect(replay.ok).toBe(false);
     expect((replay as { error: string }).error).toStartWith('outcome_unknown:');
+  });
+
+  test('a matching unknown intent forces an honestly attributed actor confirmation', async () => {
+    const { tracker } = makeTracker();
+    const beginTracking = tracker.beginTracking;
+    let boundApprovalClaim: any = null;
+    tracker.beginTracking = async (input: any) => {
+      boundApprovalClaim = input.confirmedIntent ?? boundApprovalClaim;
+      return beginTracking(input);
+    };
+    let executions = 0;
+    const prompts: any[] = [];
+    registerTool({
+      name: 'pay_once', description: 'x', schema: {},
+      primitive: 'web', sideEffect: 'mutate_external', retryClass: 'E',
+      origins: () => ['https://payments.example/checkout'],
+      execute: async () => {
+        executions += 1;
+        if (executions === 1) throw new Error('connection reset');
+        return { ok: true, content: 'done' };
+      },
+    } as any);
+    await dispatchToolCall(
+      { id: 'tu-1', name: 'pay_once', args: { amount: 1 } },
+      {
+        ...baseCtx(), lifecycle: tracker,
+        lifecycleTurnId: 'turn-1', lifecycleUserInitiated: true,
+      } as any,
+    );
+    const repeat = await dispatchToolCall(
+      { id: 'tu-2', name: 'pay_once', args: { amount: 1 } },
+      {
+        ...baseCtx(), lifecycle: tracker,
+        lifecycleTurnId: 'turn-2', lifecycleUserInitiated: true,
+        session: { ...baseCtx().session, kind: 'actor' },
+        confirm: async (prompt: any) => { prompts.push(prompt); return 'yes_once'; },
+      } as any,
+    );
+    expect(repeat.ok).toBe(true);
+    expect(executions).toBe(2);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0].note).toContain('An actor in this chat');
+    expect(prompts[0].note).toContain('outcome is unknown');
+    expect(prompts[0].lifecycleTarget).toBe('https://payments.example');
+    expect(prompts[0].lifecycleTarget).toBe(boundApprovalClaim.target);
+    expect(prompts[0].oneShot).toBe(true);
+  });
+
+  test('a self-confirming tool can resolve unknown intent without losing its detailed consent', async () => {
+    const { tracker } = makeTracker();
+    let executions = 0;
+    const prompts: any[] = [];
+    registerTool({
+      name: 'site_client_write', description: 'x', schema: {},
+      primitive: 'web', sideEffect: 'write', retryClass: 'E',
+      origins: () => ['https://shop.example'],
+      execute: async (_args: any, ctx: any) => {
+        executions += 1;
+        const answer = await ctx.confirm({
+          tool: 'site_client_write', sideEffect: 'write',
+          origins: ['https://shop.example'], summary: 'Detailed client proposal',
+          sessionId: ctx.session?.sessionId,
+        });
+        if (answer !== 'yes_once') return { ok: false, error: 'declined' };
+        if (executions === 1) throw new Error('connection reset');
+        return { ok: true, content: 'saved' };
+      },
+    } as any);
+    const ctx = {
+      ...baseCtx(), lifecycle: tracker,
+      lifecycleTurnId: 'turn-1', lifecycleUserInitiated: true,
+      confirm: async (prompt: any) => { prompts.push(prompt); return 'yes_once'; },
+    } as any;
+    await dispatchToolCall({
+      id: 'tu-1', name: 'site_client_write', args: { origin: 'https://shop.example' },
+    }, ctx);
+    expect(prompts).toHaveLength(1);
+
+    const repeated = await dispatchToolCall({
+      id: 'tu-2', name: 'site_client_write', args: { origin: 'https://shop.example' },
+    }, { ...ctx, lifecycleTurnId: 'turn-2' });
+    expect(repeated.ok).toBe(true);
+    expect(prompts).toHaveLength(3);
+    expect(prompts[1].note).toContain('unknown outcome');
+    expect(prompts[2].summary).toBe('Detailed client proposal');
+    expect(prompts[1].dispatchId).toBe('tu-2');
+    expect(prompts[2].dispatchId).toBe('tu-2');
+  });
+
+  test('a synthetic repeat is refused without opening a confirmation prompt', async () => {
+    const { tracker } = makeTracker();
+    let prompts = 0;
+    registerTool({
+      name: 'pay_once', description: 'x', schema: {},
+      primitive: 'web', sideEffect: 'mutate_external', retryClass: 'E',
+      origins: () => [],
+      execute: async () => { throw new Error('connection reset'); },
+    } as any);
+    await dispatchToolCall(
+      { id: 'tu-1', name: 'pay_once', args: { amount: 1 } },
+      {
+        ...baseCtx(), lifecycle: tracker,
+        lifecycleTurnId: 'turn-1', lifecycleUserInitiated: true,
+      } as any,
+    );
+    const repeat = await dispatchToolCall(
+      { id: 'tu-2', name: 'pay_once', args: { amount: 1 } },
+      {
+        ...baseCtx(), lifecycle: tracker,
+        lifecycleTurnId: 'turn-2', lifecycleUserInitiated: false,
+        confirm: async () => { prompts += 1; return 'yes_once'; },
+      } as any,
+    );
+    expect(repeat.ok).toBe(false);
+    expect(prompts).toBe(0);
+    expect((repeat as { error: string }).error).toContain('needs a new user confirmation');
   });
 
   test('without ctx.lifecycle the dispatch is unchanged (no tracking, no rewrite)', async () => {

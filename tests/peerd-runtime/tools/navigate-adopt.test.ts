@@ -13,7 +13,13 @@ const makeTabs = (landedUrl = 'https://shop.com/p') => {
   let listener: any = null;
   return {
     onUpdated: { addListener: (l: any) => { listener = l; }, removeListener: () => { listener = null; } },
-    update: async (tabId: number) => { queueMicrotask(() => listener?.(tabId, { status: 'complete' })); },
+    update: async (tabId: number, props: { url: string }) => {
+      queueMicrotask(() => {
+        listener?.(tabId, { status: 'loading', url: props.url });
+        listener?.(tabId, { status: 'complete' });
+      });
+      return { id: tabId, url: landedUrl, pendingUrl: props.url };
+    },
     get: async (tabId: number) => ({ id: tabId, url: landedUrl }),
   };
 };

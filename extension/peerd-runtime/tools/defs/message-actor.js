@@ -25,7 +25,7 @@ const ORCHESTRATOR_AWAIT_CAP_MS = 3 * 60_000;
  * The ctx slot message_actor reads (an SW-injected extra, not on the base
  * ToolContext contract).
  * @typedef {Object} MessageActorCtx
- * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitSignal?: any, degradeToAsync?: boolean, awaitCapMs?: number }) => Promise<{ ok: boolean, content?: string, error?: string }>} [messageActor]
+ * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitSignal?: any, degradeToAsync?: boolean, awaitCapMs?: number }) => Promise<{ ok: boolean, content?: string, error?: string, structured?: Record<string, unknown>, outcomeKind?: 'pre-effect-failure', actorDeliveryId?: string, actorCorrelationId?: string, actorTerminal?: boolean, actorOutcomeKnown?: boolean, actorPerformed?: boolean, actorAborted?: boolean }>} [messageActor]
  * @property {{ sessionId?: string, kind?: string }} [session]
  * @property {boolean} [inbound]
  * @property {string} [toolUseId]
@@ -48,11 +48,12 @@ export const messageActorTool = {
     'cheapest in-stock price for X"): the web actor is the single entry point and',
     'PICKS THE MECHANISM itself — a sessionless secure fetch, or opening + driving a',
     'tab — so don\'t pre-open a tab or pick fetch-vs-render. Other address forms, all',
-    'listed by actor_list: a tabId to act on ONE already-open page; a vm/notebook/pod/app',
+    'listed by actor_list: a tabId to act on ONE ordinary open page (numeric ids',
+    'cannot grant authority on a site peerd treats as signed in); a vm/notebook/app',
     'instance id; "site:<origin>" (e.g. "site:https://github.com") to work on ONE site',
     'the user is logged into (drives a real tab, that site only, so it can sign in',
     'where "web" may not go); or an API integration\'s ORIGIN (a bare host like',
-    '"api.github.com" — fetch-only, keyless, origin-locked, ACCUMULATING what it',
+    '"api.github.com" (tab-free, keyless, origin-locked, ACCUMULATING what it',
     'learns across messages). An actor is minted on first message, holds that',
     'environment\'s tools, and works in its own focused context. By DEFAULT you send',
     'a goal and DON\'T wait — the reply lands as a fenced note on a LATER turn; fan',
@@ -82,7 +83,7 @@ export const messageActorTool = {
       },
       oneShot: {
         type: 'boolean',
-        description: 'Sandbox instances ONLY (a vm/notebook/pod/app id; refused for web/API/tabId/dweb). true when ONE round settles it — a concrete command or read whose raw result IS the answer — so the actor hands that result straight back, skipping its summarize turn. Default false for open-ended or multi-step work.',
+        description: 'Sandbox instances ONLY (a vm/notebook/pod/app id; refused for web/API/tabId/dweb). true when ONE round settles it: a concrete command or read whose raw result IS the answer: so the actor hands that result straight back, skipping its summarize turn. Default false for open-ended or multi-step work.',
       },
       await: {
         type: 'boolean',
@@ -139,9 +140,42 @@ export const messageActorTool = {
       degradeToAsync: args?.await === true && c.session?.kind !== 'spawned',
       awaitCapMs: ORCHESTRATOR_AWAIT_CAP_MS,
     });
-    // Narrow the orchestrator's {ok, content?, error?} into the ToolResult union.
+    // Keep the internal delivery id until the caller's tool-result message is
+    // durably appended. The session store acknowledges the mailbox only after
+    // that commit, closing the crash window without exposing the id to the model.
+    const raw = /** @type {any} */ (res);
+    const actorHostState = {
+      ...(res.actorCorrelationId ? { actorCorrelationId: res.actorCorrelationId } : {}),
+      ...(typeof res.actorTerminal === 'boolean'
+        ? { actorTerminal: res.actorTerminal }
+        : res.ok ? {} : { actorTerminal: true }),
+      ...(typeof res.actorOutcomeKnown === 'boolean'
+        ? { actorOutcomeKnown: res.actorOutcomeKnown }
+        : res.ok ? {} : { actorOutcomeKnown: raw.outcomeKnown !== false }),
+      ...(typeof res.actorPerformed === 'boolean'
+        ? { actorPerformed: res.actorPerformed }
+        : typeof raw.performed === 'boolean' ? { actorPerformed: raw.performed } : {}),
+      ...(res.actorAborted === true ? { actorAborted: true } : {}),
+    };
     return res.ok
-      ? { ok: true, content: res.content ?? 'message delivered' }
-      : { ok: false, error: res.error ?? 'message_actor failed' };
+      ? {
+        ok: true,
+        content: res.content ?? 'message delivered',
+        ...actorHostState,
+        ...(res.actorDeliveryId ? { actorDeliveryId: res.actorDeliveryId } : {}),
+      }
+      : {
+        ok: false,
+        error: res.error ?? 'message_actor failed',
+        ...(res.content ? { content: res.content } : {}),
+        ...(res.structured ? { structured: res.structured } : {}),
+        ...(res.outcomeKind
+          ? { outcomeKind: res.outcomeKind }
+          : actorHostState.actorPerformed === false
+            ? { outcomeKind: /** @type {const} */ ('pre-effect-failure') }
+            : {}),
+        ...actorHostState,
+        ...(res.actorDeliveryId ? { actorDeliveryId: res.actorDeliveryId } : {}),
+      };
   },
 };

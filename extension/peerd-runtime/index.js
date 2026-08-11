@@ -100,6 +100,27 @@ export {
 export {
   normalizeTally, addUsage, limitExceeded,
 } from './cost/accumulator.js';
+
+// Optional, local-only Contributor Metrics. A closed reducer/serializer plus
+// its injected-storage shell; there is deliberately no generic event API and
+// no network client in this issue.
+export {
+  CONTRIBUTOR_SCHEMA_VERSION, CONTRIBUTOR_DISCLOSURE_VERSION,
+  CONTRIBUTOR_LOCAL_VERSION, CONTRIBUTOR_MAX_ROWS, CONTRIBUTOR_MAX_COUNTER,
+  CONTRIBUTOR_MAX_LOCAL_DEDUPE, CONTRIBUTOR_MAX_ACTIONS_PER_SETTLEMENT,
+  CONTRIBUTOR_KNOWN_MODEL_FAMILIES,
+  ContributorSchemaError, emptyContributorLocalState, emptyContributorRow,
+  normalizeContributorProvider, normalizeContributorModelFamily,
+  normalizeContributorCohort, contributorDurationBucket, contributorTokenBucket,
+  contributorCohortKey, contributorActionForTool, contributorTurnResult,
+  recordContributorWebTurn, recordContributorWebAction,
+  adjustContributorFeedback, serializeContributorEnvelope,
+} from './observability/contributor-metrics.js';
+export { CONTRIBUTOR_LOCAL_KEY, ContributorReadOnlyError, makeContributorStore }
+  from './observability/contributor-store.js';
+export {
+  contributorFeedbackContextKey, contributorFeedbackTargets,
+} from './observability/contributor-feedback.js';
 // The per-turn imperative shell over the accumulator: fold usage events,
 // persist the session total, push the live meter, fire the hard-limit
 // halt once. All IO injected; the SW's streaming switch stays two lines.
@@ -107,7 +128,7 @@ export { makeTurnCostTracker } from './cost/turn-tracker.js';
 
 // --- spawned (orchestration over sessions; see docs/ACTORS.md) ------
 export {
-  makeSpawnActor, narrowTools, finalAssistantText,
+  makeSpawnActor, narrowTools, finalAssistantText, finalActorTurnReply,
   restrictCtxCapabilities, CAPABILITY_CONSUMERS,
   DEFAULT_MAX_DEPTH, DEFAULT_MAX_STEPS, DEFAULT_MAX_OUTPUT_TOKENS,
 } from './actor/spawn.js';
@@ -117,12 +138,30 @@ export { makeAsyncActors } from './actor/async-actors.js';
 // DESIGN-17: the message_actor orchestrator (the mailbox to a tab-hosted
 // instance's actor — the async-actors shape, specialized).
 export { makeActorMessaging } from './actor/actor-messaging.js';
+export {
+  actorIsolationCapability, actorIsolationAvailable,
+  actorIsolationTemporarilyUnavailable, actorIsolationRefusal, actorIsolationSpawnRefusal,
+  filterByActorIsolation, actorIsolationPromptBlock,
+  ACTOR_ISOLATION_HOST_OFFSCREEN, ACTOR_ISOLATION_HOST_BACKGROUND,
+  ACTOR_ISOLATION_UNAVAILABLE_TOOLS, ACTOR_ISOLATION_TEMPORARY_USER_FAILURE,
+  ACTOR_ISOLATION_UNSUPPORTED_USER_FAILURE,
+} from './actor/isolation.js';
 // A2A — the agent-to-agent code surface: the pure translation + the mesh
 // dispatch/correlation the a2a/call route runs.
 export { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';
 export {
+  CODE_CLIENT_MANIFESTS, CODE_RUN_MAX_TRACE_OPS, ACTOR_CAPABILITY_MANIFESTS,
+  DWEB_INBOUND_TOOL_NAMES, WEB_ACTOR_DOM_TOOL_NAMES, WEB_ACTOR_CODE_CLIENT_TOOL_NAMES,
+  codeClientMethods, codeClientAllows, codeClientMethod, codeClientReference, buildCodeClientSource,
+  renderCodeOpTrace, canonicalCodeTraceLabel,
+  actorCapabilityManifest, resolveWebActorSurface, resolveWebActorSurfaceDecision,
+} from './actor/capability-manifest.js';
+export {
   actorsCallToOp, shapeActorsResult, renderTraceLines, traceErrorDetails,
   askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
+  ACTORS_RUN_MAX_OPS, ACTORS_ADDRESS_MAX_CHARS, ACTORS_GOAL_MAX_CHARS,
+  ACTORS_TRACE_TARGET_MAX_CHARS, ACTORS_TRACE_ERROR_MAX_CHARS,
+  ACTORS_API_METHODS, ACTORS_API_ACCEPTED_METHODS,
 } from './actor/actors-api.js';
 export { makeMeshDispatch } from './actor/a2a-dispatch.js';
 // Design 5 — peerd.provider.call: the pure core (text-only arg validation,
@@ -145,14 +184,17 @@ export { buildAncestry } from './actor/delegation-lineage.js';
 // DESIGN-17: the WEB actor — the disposable page-driving agent (an
 // `actorType:'web'` actor that owns one tab). Pure core: the tab→session
 // bindings, the action-log rolling-summary prompt, the self-fence.
-// DESIGN-18: the API actor is the same origin actor with NO tab (fetch-only) — its
+// DESIGN-18: the API actor is the same origin actor with NO tab; its
 // origin-keyed bindings, normalizer, and "what I learned" summary live here too.
 export {
-  makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT, fenceWebActorSummary,
+  makeWebActorTabBindings, makeWebActorRegistry, retireStoppedRoamingWebActor,
+  retireStoppedRoamingWebActorDurably,
+  WEB_ACTOR_SUMMARY_PROMPT,
+  safeWebActorSummaryOrigin, fenceWebActorSummary,
   makeApiActorBindings, normalizeApiOrigin, API_ACTOR_SUMMARY_PROMPT, fenceApiActorSummary,
   // issue 251: the SITE actor's handle — a web actor BOUND to one origin, with a
   // tab. Distinct from the bare-origin API handle on purpose: that one is
-  // fetch-only and can never log in.
+  // tab-free and can never log in.
   SITE_ACTOR_PREFIX, siteHandleFor, parseSiteHandle,
 } from './actor/web-actor.js';
 // issue 251: authority segmented by origin. A web actor is ROAMING (browses
@@ -160,9 +202,34 @@ export {
 // actor above). Two pure cores: which origins the user has an identity on, and
 // what happens when a tab LANDS somewhere. Exported here because the enforcement
 // points that will consume them live outside this module (background/).
-export { classifyOriginSensitivity, sameOrigin, LEARNED_REASONS } from './actor/origin-sensitivity.js';
+export {
+  classifyOriginSensitivity,
+  learnedOriginCovers,
+  sameOrigin,
+  LEARNED_REASONS,
+} from './actor/origin-sensitivity.js';
+export {
+  decideNumericTabAuthority, numericTabAuthorityRefusal,
+  NUMERIC_TAB_SENSITIVE_CODE, NUMERIC_TAB_POLICY_UNAVAILABLE_CODE,
+  IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+} from './actor/numeric-tab-authority.js';
+export {
+  RUNTIME_CAPABILITY_VERSION, resolveRuntimeCapabilities, runtimeCapabilityAvailable,
+  runtimeCapabilityForTool, filterByRuntimeCapabilities, runtimeCapabilityRefusal,
+  runtimeCapabilityPromptBlock, RuntimeCapabilityUnavailableError, requireRuntimeCapability,
+} from './runtime-capabilities.js';
 export { decideLanding, mayHoldCredentials, EXCURSION_BUDGET, EXCURSION_MS, MAX_EXCURSIONS } from './actor/landing-rule.js';
-export { makeJudgeLanding, makeCredentialScope } from './actor/origin-lock.js';
+export {
+  makeJudgeLanding, makeCredentialScope, makeSiteClientOriginGuard,
+  makeSiteClientOriginAuthorizer, makeFixedSiteClientOriginGuard, makeSignInOriginAuthorizer,
+  makeSignInExcursionAuthorizer, makeSignInExcursionRevoker,
+  authorizeSiteClientRelayOrigin, mayAddressSiteClientOrigin,
+  mayUseSiteClientOrigin, hasDurableSiteClientState,
+} from './actor/origin-lock.js';
+export {
+  AUTH_WAITING_FOR_USER_CODE, AUTH_WAITING_FOR_USER_MESSAGE,
+  AUTH_BOUNDARY_STOPPED_MESSAGE, AUTH_STATE_UNAVAILABLE_MESSAGE,
+} from './actor/auth-wait.js';
 // …and the three pieces the SW needs to make the lock live: where the state
 // lives (cached + serialized + persisted), which origins are dedicated identity
 // providers (the one narrow exemption), and what the orchestrator is told when
@@ -173,7 +240,7 @@ export { makeLearnedOrigins, MAX_LEARNED } from './actor/learned-origins.js';
 // A UGC host is by construction a site people have accounts on; that is what
 // made its content attacker-authorable in the first place.
 export { isUgcHost } from './actor/ugc-registry.js';
-export { isKnownIdp, knownIdpSeeds, knownIdpDomains } from './actor/idp-registry.js';
+export { isKnownIdp, isKnownIdpHost, knownIdpSeeds, knownIdpDomains } from './actor/idp-registry.js';
 export { describeLandingStop, originPhrase } from './actor/origin-lock-report.js';
 // DESIGN-19: site clients — per-origin derived API clients. The pure core
 // (validation, confirm-gated proposal, staleness header, fenced dossier, URL pin),
@@ -181,7 +248,7 @@ export { describeLandingStop, originPhrase } from './actor/origin-lock-report.js
 export {
   normalizeSiteOrigin, validateDossier, buildClientWriteProposal,
   stalenessHeader, fenceDossier, buildMintInjection, resolveSiteUrl, stampRecord,
-  createSiteClientStore, digestCapture, redactHeaders,
+  createSiteClientStore, digestCapture, redactHeaders, shapeSketch,
 } from './site-clients/index.js';
 // design js-superpower/06: the toolbox — durable agent-authored ES modules
 // imported as peerd:toolbox/<name> from the own-compute lanes. Pure core
@@ -243,10 +310,10 @@ export {
   // relay so a review child's persisted flag re-stamps ctx.exposure there.
   EXPOSURE_REVIEW,
   actorAllowedTools, isAllowedForActorType, actorDescriptors, filterActorSurface,
-  // DESIGN-18: backing-aware allow-set (an API actor is fetch_url-only).
+  // DESIGN-18: backing-aware allow-set (an API actor has no DOM tools).
   actorAllowedToolsFor, isAllowedForActor,
-  // Heap-split phase 2: the per-instance pin, shared by the in-SW actor turn and
-  // the offscreen actor tool relay (one implementation on a security seam).
+  // Heap-split phase 2: the per-instance pin used by the privileged actor tool
+  // relay (one implementation on a security seam).
   pinActorCall,
 } from './tools/exposure.js';
 // Per-session tool exposure manifests (ROADMAP) — presets-as-data + the
@@ -324,10 +391,10 @@ export {
 // Explicit migration between installs and across channels. Pure shaping
 // + passphrase crypto; the SW injects all IO (vault, memory, hooks, kv).
 export {
-  EXPORT_VERSION, EXPORT_FORMAT,
+  EXPORT_VERSION, EXPORT_FORMAT, EXPORT_PASSPHRASE_MIN_LENGTH,
   buildExport, inspectImport, applyImport,
   encryptWithPassphrase, decryptWithPassphrase,
-  ExportPassphraseError,
+  ExportPassphraseError, isCustodySecretName,
 } from './transfer/transfer.js';
 
 // --- permissions (Plan/Act mode + confirm-actions toggle; Feature 03) ---
@@ -402,6 +469,15 @@ export {
   installFetchTapInjected,
   drainFetchTapInjected,
 } from './dom/index.js';
+// Browser target classification and the location-only document probe are also
+// used by the background-owned activity overlay before it injects UI.
+export {
+  browserNetworkGuardUnavailableResult,
+  browserNetworkGuardPostNavigationResult,
+  classifyBrowserAutomationTarget,
+  isAddressableBrowserTab,
+} from './tools/browser-automation-policy.js';
+export { isDenylistedTab, liveDocumentLocationInjected } from './tools/defs/dom-helpers.js';
 
 // --- lifecycle (the interruption/recovery contract's functional core) ---
 // Canonical operation states + the retry-class recovery decision, SW/actor
@@ -449,18 +525,13 @@ export {
 // override table, then the sideEffect/primitive taxonomy, failing closed
 // to E. The inventory test asserts totality over the live tool set.
 export { retryClassForTool, RETRY_CLASS_OVERRIDES } from './lifecycle/tool-retry-class.js';
-// §9: engine-resource recovery decisions — tab revalidation, notebook
-// output labelling, VM reboot plans, App sandbox recreation.
-export {
-  revalidateDrivenTab, TAB_DISPOSITIONS,
-  notebookCellState, NOTEBOOK_CELL_STATES,
-  vmRecoveryPlan, appSandboxRebuild,
-} from './lifecycle/resource-recovery.js';
+// §9: passive, bounded reports for engine resources the live boot sweep lost.
+export { groupResourceLossNotices } from './lifecycle/resource-recovery.js';
 // §11.1/§12: independent per-store schema versions + durability tiers.
 export {
   DURABILITY_TIERS, STORE_REGISTRY, VERSION_STAMP_KEY,
   storeEntry, portableStores, omittedDeviceBoundStores,
-  checkStores, stampStores,
+  checkStores, stampStores, applyStoreBootPosture,
 } from './lifecycle/store-registry.js';
 // §11.5 enforced: the SW wraps its kv/idb adapters through the guard once
 // and a read-only verdict refuses writes at the shared chokepoint.
@@ -484,6 +555,8 @@ export {
 
 // --- errors -------------------------------------------------------------
 export {
+  ActorCredentialBoundaryError,
+  ACTOR_CREDENTIAL_BOUNDARY_FAILURE, ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE,
   SessionNotFoundError,
   RuntimeContextIncompleteError,
 } from './errors.js';

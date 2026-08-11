@@ -4,12 +4,14 @@
    overlay — disk state preserved). */
 
 :root {
-  /* why: deeper black than the old #0d1117 — the boot console and xterm
-     share one phosphor-dark surface so boot→shell is a single continuous
-     terminal (the xterm theme in vm-tab.js mirrors these values). */
-  --bg: #0a0d10;
-  --fg: #e6edf3;
-  --fg-muted: #8b949e;
+  /* The boot console and xterm share Graphite's deepest inset surface so
+     boot→shell remains one continuous terminal. */
+  --bg: #080909;
+  --fg: #F3F3EF;
+  --fg-muted: #ABABA6;
+  --muted: #70716E;
+  --border: #25272A;
+  --border-strong: #32353A;
   --amber: #f59e0b;
   --fail: #c43030;
   /* why: the boot orb mirrors the side panel's thinking spinner —

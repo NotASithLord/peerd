@@ -1,7 +1,7 @@
 // @ts-check
 // peerd-engine — public surface.
 //
-// Four instance kinds. Each is a SEALED ISOLATE (a V8 realm — Notebook/Pod/App —
+// Four instance kinds. Each is a SEALED ISOLATE (a V8 realm: Notebook/Pod/App -
 // or a WASM machine in one — WebVM), HOSTED today in its own discrete tab the
 // user can see. The tab is the host + observability surface, NOT the sandbox
 // itself; "hosted in a tab," not "is a tab". Visible-by-default is a deliberate
@@ -43,6 +43,7 @@ export {
   // resolver recognizes; hosts use it to spot toolbox entries in a module cache.
   TOOLBOX_SPECIFIER_PREFIX,
 } from './module-resolver.js';
+export { linkSingleModuleWorker, linkSingleModuleWorkerDetailed } from './single-module-linker.js';
 
 // --- Editor (CodeMirror + file tree + OPFS, used by Notebook & App tabs) ---
 export { createEditor } from './editor.js';
@@ -50,13 +51,20 @@ export { createEditor } from './editor.js';
 // --- OPFS helpers (rooted; usable in any extension context) ---
 export { opfsHelpers } from './opfs.js';
 
-// --- Browser-native Git repositories (trusted engine resource, not a sandbox) ---
+// --- Browser-native Git repositories (trusted engine resource) ----------
 export { createRepositoryService } from './repository/repository-service.js';
-export { createOpfsGitFs, normalizeRepositoryPath } from './repository/opfs-fs.js';
-export { normalizeGitRemote, gitRemoteOwnsRequest, smartHttpAuthHeader } from './repository/remote.js';
-export { repositoryPaths, appRepositoryRef, notebookRepositoryRef, podRepositoryRef } from './repository/paths.js';
-export { diffRepositorySnapshots } from './repository/diff.js';
+export { normalizeGitRemote } from './repository/remote.js';
 export { buildAppManifest, parseAppManifest } from './app-manifest.js';
+
+// --- App asset classification (text composition vs byte delivery) -------
+export {
+  isBinaryAssetPath,
+  isBinaryAppFile,
+  inferAppFileKind,
+  isLosslessUtf8Text,
+  MAX_MODEL_APP_FILE_BYTES,
+  appFileCheckpointContent,
+} from './app-assets.js';
 
 // --- App composition (multi-file → single HTML body for the runner) ---
 export { composeApp, stripMetaRefresh } from './app-compose.js';
@@ -66,6 +74,22 @@ export {
   VMBootFailedError,
   VMRunTimeoutError,
   VMTabClosedError,
+  REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE,
+  REMOTE_MODULE_IMPORTS_UNAVAILABLE_MESSAGE,
+  UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE,
+  UNSUPPORTED_NATIVE_MODULE_IMPORT_MESSAGE,
+  MODULE_SYNTAX_ERROR_CODE,
+  MODULE_LINK_ERROR_CODE,
+  REMOTE_MODULE_CAPABILITY_BLOCKED_CODE,
+  REMOTE_MODULE_RESTRICTED_CODE,
+  REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE,
+  remoteModuleCapabilityBlockedMessage,
+  MODULE_IMPORT_POLICY_MESSAGES,
+  moduleImportPolicyMessage,
+  RemoteModuleImportsUnavailableError,
+  UnsupportedNativeModuleImportError,
+  ModuleSyntaxError,
+  ModuleLinkError,
   RemoteImportBlockedError,
   RemoteModuleCapError,
   RemoteModuleIntegrityError,
@@ -85,6 +109,7 @@ export {
   inspectEnvelope,
   exportFilename,
   EXPORT_LIMIT_BYTES,
+  EXPORT_FILE_LIMIT_BYTES,
 } from './export.js';
 
 // --- Per-VM command serialization (pure keyed FIFO; IO injected) ---------
@@ -162,9 +187,9 @@ export {
   PodShellSyntaxError,
   tokenizePodShell,
   parsePodShell,
-  podGitRemoteIntent,
   podGitRemoteIntents,
   podGitRemoteOperation,
+  matchPodGrep,
   expandPodWord,
   executePodShell,
 } from './pod-shell.js';

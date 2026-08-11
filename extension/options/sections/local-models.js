@@ -21,6 +21,7 @@ import { MODEL_SPECS, probeLocalModelCapability, judgeModelCapability } from '/p
 const MODELS = [MODEL_SPECS['gemma-4-e2b']].filter(Boolean);
 
 const GB = 2 ** 30;
+export const LOCAL_MODEL_POLL = { ms: 3000 };
 
 /** @param {any} status local-model/status reply */
 const dlText = (status) => {
@@ -43,24 +44,69 @@ const dlText = (status) => {
 };
 
 export const LocalModelsSection = {
-  /** @param {{ state: any, attrs: { send: Send } }} vnode */
+  /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode */
   oninit(vnode) {
     vnode.state.verdict = null;     // capability verdict (null = untested this session)
     vnode.state.testing = false;
     vnode.state.status = null;      // local-model/status reply
     vnode.state.downloading = false;
+    vnode.state.pollTimer = null;
+    vnode.state.removed = false;
+    vnode.state.readyNotified = false;
+    vnode.state.statusGeneration = 0;
     LocalModelsSection.refreshStatus(vnode);
   },
 
-  /** @param {{ state: any, attrs: { send: Send } }} vnode */
+  /** @param {{ state: any }} vnode */
+  onremove(vnode) {
+    vnode.state.removed = true;
+    if (vnode.state.pollTimer) clearTimeout(vnode.state.pollTimer);
+    vnode.state.pollTimer = null;
+  },
+
+  /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode */
+  schedulePoll(vnode) {
+    if (vnode.state.removed || vnode.state.pollTimer) return;
+    vnode.state.pollTimer = setTimeout(async () => {
+      vnode.state.pollTimer = null;
+      if (!vnode.state.removed) await LocalModelsSection.refreshStatus(vnode);
+    }, LOCAL_MODEL_POLL.ms);
+  },
+
+  /** @param {{ state: any, attrs: { state: any, send: Send, onReady?: () => void } }} vnode */
   async refreshStatus(vnode) {
-    try { vnode.state.status = await vnode.attrs.send({ type: 'local-model/status' }); }
-    catch { vnode.state.status = null; }
+    const generation = vnode.state.statusGeneration + 1;
+    vnode.state.statusGeneration = generation;
+    if (vnode.attrs.state?.capabilities?.localWebGpuHost?.status !== 'available') {
+      vnode.state.status = { ok: false, error: 'runtime_capability_unavailable' };
+      m.redraw();
+      return;
+    }
+    let status = null;
+    try { status = await vnode.attrs.send({ type: 'local-model/status' }); }
+    catch { status = null; }
+    if (vnode.state.removed || vnode.state.statusGeneration !== generation) return;
+    vnode.state.status = status;
+    const ready = !!(vnode.state.status?.available || vnode.state.status?.downloaded);
+    const loading = !!vnode.state.status?.loading;
+    const failed = vnode.state.status?.progress?.status === 'error';
+    if (ready) {
+      vnode.state.downloading = false;
+      if (!vnode.state.readyNotified) {
+        vnode.state.readyNotified = true;
+        vnode.attrs.onReady?.();
+      }
+    } else if (failed) {
+      vnode.state.downloading = false;
+    } else if (loading || vnode.state.downloading) {
+      LocalModelsSection.schedulePoll(vnode);
+    }
     m.redraw();
   },
 
-  /** @param {{ state: any }} vnode */
+  /** @param {{ state: any, attrs: { state: any } }} vnode */
   async test(vnode) {
+    if (vnode.attrs.state?.capabilities?.localWebGpuHost?.status !== 'available') return;
     vnode.state.testing = true; m.redraw();
     try {
       const cap = await probeLocalModelCapability();
@@ -71,22 +117,27 @@ export const LocalModelsSection = {
     vnode.state.testing = false; m.redraw();
   },
 
-  /** @param {{ state: any, attrs: { send: Send } }} vnode */
+  /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode */
   async download(vnode) {
+    if (vnode.attrs.state?.capabilities?.localWebGpuHost?.status !== 'available') return;
     vnode.state.downloading = true; m.redraw();
-    await vnode.attrs.send({ type: 'local-model/init' }).catch(() => {});
-    const poll = async () => {
-      await LocalModelsSection.refreshStatus(vnode);
-      if (vnode.state.status?.available || vnode.state.status?.progress?.status === 'error') {
-        vnode.state.downloading = false; m.redraw();
-      } else { setTimeout(poll, 3000); }
-    };
-    poll();
+    const reply = await vnode.attrs.send({ type: 'local-model/init' }).catch(() => null);
+    if (!reply?.ok) {
+      vnode.state.status = {
+        ok: false,
+        progress: { status: 'error', message: reply?.error ?? 'download failed' },
+      };
+      vnode.state.downloading = false;
+      m.redraw();
+      return;
+    }
+    await LocalModelsSection.refreshStatus(vnode);
   },
 
-  /** @param {{ state: any, attrs: { send: Send, logo?: any, label?: string } }} vnode */
+  /** @param {{ state: any, attrs: { state: any, send: Send, logo?: any, label?: string, onReady?: () => void } }} vnode */
   view(vnode) {
     const ui = vnode.state;
+    const hostAvailable = vnode.attrs.state?.capabilities?.localWebGpuHost?.status === 'available';
     const { logo = null, label = 'Local (WebGPU)' } = vnode.attrs;
     const spec = MODELS[0];
     const status = ui.status;
@@ -101,11 +152,13 @@ export const LocalModelsSection = {
     // reserved for "actually ready", i.e. the model is installed. Until then a
     // NEUTRAL chip: keyless, yes, but not yet usable, so it must NOT read as the
     // verified-green the API providers earn by having a working key.
-    const badge = ready
-      ? m('span.key-badge.key-set', '✓ Installed')
-      : loading
-        ? m('span.key-badge.key-local', 'Downloading…')
-        : m('span.key-badge.key-local', 'On-device — not installed');
+    const badge = !hostAvailable
+      ? m('span.key-badge.key-local', 'Unavailable')
+      : ready
+        ? m('span.key-badge.key-set', '✓ Installed')
+        : loading
+          ? m('span.key-badge.key-local', 'Downloading…')
+          : m('span.key-badge.key-local', 'On-device, not installed');
 
     const header = m('.provider-card-main', [
       logo,
@@ -114,6 +167,14 @@ export const LocalModelsSection = {
         badge,
       ]),
     ]);
+
+    if (!hostAvailable) {
+      return m('.provider-card.provider-card-local', [
+        header,
+        m('p.muted', { style: 'margin:10px 0 0;' },
+          'Local WebGPU models are unavailable in this browser. Use Ollama for local inference.'),
+      ]);
+    }
 
     if (!spec) {
       return m('.provider-card', [header, m('p.muted', { style: 'margin:10px 0 0;' }, 'No WebGPU models are bundled in this build.')]);

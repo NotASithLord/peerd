@@ -40,6 +40,14 @@ describe('roaming holds a session only where there is no identity to spend', () 
     const deps = { hasVaultSecret: (o: string) => o === 'https://bank.test' };
     expect(scopeFor({ mode: 'roaming' }, 'https://bank.test', deps)).toBeUndefined();
   });
+
+  test('a dedicated identity provider never gives a roaming helper session scope', () => {
+    expect(scopeFor(
+      { mode: 'roaming' },
+      'https://accounts.google.com',
+      { isKnownIdp: (origin: string) => origin === 'https://accounts.google.com' },
+    )).toBeUndefined();
+  });
 });
 
 describe('bound holds a session only on the origin it owns', () => {
@@ -80,6 +88,10 @@ describe('bound holds a session only on the origin it owns', () => {
 });
 
 describe('fail closed on anything unrecognizable', () => {
+  test('a retired roaming actor never receives credential scope', () => {
+    expect(scopeFor({ mode: 'roaming', retired: true }, 'https://blog.test')).toBeUndefined();
+  });
+
   test('an unknown mode withholds', () => {
     // Same reasoning as decideLanding: a record predating the field, a JSON
     // round-trip, or a typo must not fall through to a permissive default and

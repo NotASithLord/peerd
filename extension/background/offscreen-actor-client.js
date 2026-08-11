@@ -1,5 +1,5 @@
 // @ts-check
-// background/offscreen-actor-client.js — the SW-side client for EVERY offscreen
+// background/offscreen-actor-client.js: the privileged-host client for EVERY isolated
 // agent loop (the heap split): ephemeral spawned reasoners (spawn.js) AND bound
 // actors (the actor turn). One client, one set of routes (model-call + tool-dispatch
 // + loop-event); a reasoning child grants no tools, so it only ever exercises
@@ -10,14 +10,21 @@
 // there — the pin, the gate, the engine clients, the tabs, and the audit are ALL
 // SW-side. It NEVER trusts the worker's call args (they may derive from injected
 // instance/page output): it re-pins the bound instance and runs the full gate,
-// exactly as the in-SW actor turn does.
+// with the same policy on every browser host.
 //
 // Pure shell — every IO injected — so it is unit-testable without a browser.
 
+// An inbound dweb wake is reasoning over bytes chosen by a remote peer. Keep its
+// useful read/moderation surface, but do not advertise any operation that can
+// delegate, spend, sign/publish, install peer code, or change standing network
+// policy. This is a POSITIVE set so a future dweb capability lands unavailable to
+// inbound turns until somebody deliberately classifies it here.
 /**
  * @param {Object} deps
- * @param {() => Promise<void>} deps.ensureOffscreen
+ * @param {() => Promise<void>} [deps.ensureHost]
+ * @param {() => Promise<void>} [deps.ensureOffscreen] legacy Chrome host alias
  * @param {(msg: object) => Promise<any>} deps.sendMessage
+ * @param {(job: object, options: { signal?: AbortSignal, relay: (type: string, payload: any) => any|Promise<any> }) => Promise<any>} [deps.runOnChannel]
  * @param {(args: object) => AsyncIterable<any>} deps.callModel
  * @param {(name: string) => Promise<string | null>} deps.getSecret
  * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} deps.safeFetch
@@ -36,21 +43,25 @@
  * @param {string} [deps.EXPOSURE_REVIEW]  issue 160 - the review-exemption marker. A review
  *   child's session record carries `review:true` (persisted SW-side at spawn); the
  *   tool-dispatch route re-stamps ctx.exposure from it so the tier gate admits the
- *   three instance reads on the offscreen path too, not just the in-SW fallback.
+ *   three instance reads on every dedicated-worker host.
  *   Optional and fail-closed: not injected → nothing is ever stamped.
+ * @param {(name: string) => boolean} [deps.reviewToolAllowed] call-time reviewer
+ *   allowlist. Optional and fail-closed for review records, so a persisted stale
+ *   grant cannot widen the reviewer when the worker relays a call.
  * @param {() => number} [deps.now]
  * @param {(call: Record<string, any>) => void} [deps.recordModelCall]  the context
  *   inspector's capture hook — fed every delegated model call with the runMeta-derived
  *   identity (never the worker's own claim). Optional; defaults to a no-op.
  * @param {(msg: Record<string, any>) => void} [deps.broadcastOp]  announce each settled
- *   ACTOR tool dispatch on the UI ports ('actor/op' — name/args/ok, observability only).
- *   The offscreen heap emits no turn/tool-use, so this is how the eval harness's OM2W
+ *   ACTOR tool dispatch on the UI ports ('actor/op' — bounded name/ok only).
+ *   The isolated heap emits no turn/tool-use, so this is how the eval harness's OM2W
  *   recorder (and any activity view) sees what an actor did. Optional; defaults to a no-op.
- * @param {(sender: unknown) => boolean} [deps.isOffscreenSender]  is this message from the
- *   OFFSCREEN DOCUMENT? The three relay routes below refuse anything else. REQUIRED in
+ * @param {(sender: unknown) => boolean} [deps.isRelaySender]  is this message from the
+ *   exact actor host? The three relay routes below refuse anything else. REQUIRED in
  *   production and fail-CLOSED by omission (an unwired client refuses every relay), because
  *   this is the boundary, not a hint — see the grants-map note for why the token alone is
  *   not sufficient.
+ * @param {(sender: unknown) => boolean} [deps.isOffscreenSender] legacy Chrome sender alias
  * @param {() => string} [deps.mintRelayToken]  mints the per-run relay grant (below).
  *   Injected so the grant is testable without a browser; defaults to crypto.randomUUID.
  * @param {(sessionId: string) => Promise<string | null>} [deps.spendRefusalFor]  spend-limit
@@ -59,27 +70,31 @@
  *   fail-OPEN by omission (an unwired client behaves as before) — the cap is a coarse
  *   safety lever, and refusing every actor call because a dep is missing would break
  *   the lane outright.
+ * @param {readonly string[]} [deps.inboundDwebToolNames] positive inbound grant,
+ *   supplied from the runtime capability manifest; omission fails closed.
  */
 export const makeOffscreenActorClient = ({
-  ensureOffscreen, sendMessage, callModel, getSecret, safeFetch,
+  ensureHost, ensureOffscreen, sendMessage, runOnChannel, callModel, getSecret, safeFetch,
   sessions, buildToolContext, dispatchToolCall, pinActorCall, restrictCtxCapabilities, ownedTabFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW, now = Date.now,
+  reviewToolAllowed = () => false,
   recordModelCall = () => {},
   broadcastOp = (/** @type {any} */ _msg) => {},
   mintRelayToken = () => globalThis.crypto.randomUUID(),
   spendRefusalFor = undefined,
-  isOffscreenSender = () => false,
+  isRelaySender, isOffscreenSender,
+  inboundDwebToolNames = [],
 }) => {
+  const ensureActorHost = ensureHost ?? ensureOffscreen ?? (async () => {});
+  const relaySenderAllowed = isRelaySender ?? isOffscreenSender ?? (() => false);
+  const inboundDwebTools = new Set(inboundDwebToolNames);
   let seq = 0;
   /**
-   * @type {Map<string, { runId: string, actorSessionId: string }>} relay grants:
+   * @type {Map<string, { runId: string, actorSessionId: string, provider: string, model: string, ollamaHost?: string, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal }>} Firefox relay grants:
    * token → the identity of the run it was minted for.
    *
-   * why a grant and not the message's own `actorSessionId`/`runId`: these three routes
-   * ride the ONE runtime.onMessage surface, whose only guard is `isFirstPartySender` —
-   * "some extension context of ours", which is every engine tab page and the side panel,
-   * not "the offscreen doc running this actor". Trusting the payload's identity therefore
-   * let ANY first-party page dispatch a tool as an arbitrary actor session (inheriting
-   * that actor's instance pin and granted tools) or spend the user's key on a dead run.
+   * why a grant and not the message's own `actorSessionId`/`runId`: Firefox binds
+   * these routes to its private in-process actor host, but the relay still needs a
+   * run identity and liveness check that does not trust worker-controlled payloads.
    *
    * The token is minted SW-side per run, travels in the job to the offscreen runner, and
    * comes back on every relay call; identity is DERIVED from it, so the payload's claim
@@ -90,13 +105,10 @@ export const makeOffscreenActorClient = ({
    * The Worker never receives the token (the runner holds it and stamps it on outbound
    * relays), so it stays a host-side binding, not a secret the untrusted heap can leak.
    *
-   * The token is NOT a secret from other extension pages, though, and must not be treated
-   * as one: `runtime.sendMessage` has no way to address a single extension context, so the
-   * `actor/run` job — token included — is broadcast to every listener in the extension,
-   * including the engine tab pages named above. That is why every route ALSO requires
-   * `isOffscreenSender`. The sender check is the boundary; the token adds run identity and
-   * liveness on top of it. Either alone is insufficient: the sender check cannot say WHICH
-   * run is speaking, and the token cannot say who is holding it.
+   * Chrome does not serialize this token. Its service worker transfers a standard
+   * MessageChannel endpoint to the exact offscreen WindowClient and closes the live
+   * grant over that private channel. The offscreen job and its relays are never
+   * registered on extension-wide runtime messaging.
    */
   const grants = new Map();
   /** @type {Map<string, Set<AbortController>>} runId → in-flight model-call controllers */
@@ -114,37 +126,88 @@ export const makeOffscreenActorClient = ({
    * context inspector: the model-call route only carries runId + body args, so the
    * session (and a human label for WHOSE call this is) is stashed at run() time. */
   const runMeta = new Map();
-  /** @type {Map<string, AbortSignal>} sessionId → the in-flight run's abort signal.
-   * Phase 4: an actor's BLOCKING tool (message_actor awaitReply) runs SW-side via the
-   * relay and races the reply against the child's cancel; the child's signal is only
-   * visible at run() time, so stash it here for the tool-dispatch route to read. One run
-   * per session at a time (turn slots serialize), so a plain Map is enough. */
-  const signalBySession = new Map();
-
   /**
-   * @param {{ actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabUrl?: string, origin?: string }} job
+   * @param {{ actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, ollamaHost?: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, actorSurface?: 'tools'|'code', tabOrigin?: string, origin?: string, inbound?: boolean }} job
    * @param {{ signal?: AbortSignal, onEvent?: (ev: object) => void }} [opts]
    */
   const run = async (job, { signal, onEvent } = {}) => {
-    await ensureOffscreen();
+    // A cancelled turn must not create a host, mint authority, or start a Worker.
+    // why: Stop can win before an async actor reaches this client; sending abort
+    // before actor/run exists cannot cancel the Worker that actor/run then creates.
+    if (signal?.aborted) {
+      return { ok: false, started: true, phase: 'startup', code: 'actor_run_aborted', error: 'actor run aborted', aborted: true };
+    }
+    try {
+      await ensureActorHost();
+    } catch (error) {
+      return {
+        ok: false, started: false, phase: 'startup', code: 'actor_host_unavailable',
+        error: `actor host unavailable: ${/** @type {{ message?: string }} */ (error)?.message ?? String(error)}`,
+      };
+    }
+    if (signal?.aborted) {
+      return { ok: false, started: true, phase: 'startup', code: 'actor_run_aborted', error: 'actor run aborted', aborted: true };
+    }
     const runId = `aw-${now().toString(36)}-${++seq}`;
     const relayToken = mintRelayToken();
-    grants.set(relayToken, { runId, actorSessionId: job.actorSessionId });
+    // This controller is the authoritative relay lifetime. Put it in the grant
+    // itself so a route that already resolved the token can re-check authority
+    // after every await, even after run() retires the Map entry.
+    const relayController = new AbortController();
+    // Only the SW caller can stamp `inbound:true`. From here onward the bit is
+    // monotonic: the runner/Worker may echo it but can never widen its tool grant
+    // or rebuild a trusted ctx. Unknown inbound actor kinds get no tools.
+    const inbound = job.inbound === true;
+    const tools = inbound
+      ? (job.actorType === 'dweb' && Array.isArray(job.tools)
+        ? job.tools.filter((tool) => inboundDwebTools.has(tool?.name))
+        : [])
+      : job.tools;
+    const allowedTools = inbound
+      ? new Set((tools ?? []).map((tool) => tool?.name).filter((name) => typeof name === 'string'))
+      : null;
+    const grant = {
+      runId, actorSessionId: job.actorSessionId,
+      provider: job.provider, model: job.model,
+      inbound, allowedTools, relaySignal: relayController.signal,
+      ...(job.ollamaHost ? { ollamaHost: job.ollamaHost } : {}),
+      ...(job.actorSurface === 'code' || job.actorSurface === 'tools'
+        ? { actorSurface: job.actorSurface }
+        : {}),
+    };
+    // Firefox's direct in-process host uses the private token map. Chrome
+    // binds the grant directly to one transferred MessageChannel closure.
+    if (!runOnChannel) grants.set(relayToken, grant);
     if (onEvent) runOnEvent.set(runId, onEvent);
     runMeta.set(runId, {
       sessionId: job.actorSessionId,
       label: job.actorType ? `actor:${job.actorType}` : `actor d${job.depth ?? 1}`,
     });
-    const abortRun = () => {
+    const abortRelays = () => {
       abortedRuns.add(runId);   // cover a model-call that hasn't reached the route yet
+      relayController.abort();
       for (const ac of inflight.get(runId) ?? []) { try { ac.abort(); } catch { /* already */ } }
-      sendMessage({ type: 'actor/abort', runId }).catch(() => {});
+    };
+    const abortRun = () => {
+      abortRelays();
+      if (!runOnChannel) sendMessage({ type: 'actor/abort', runId }).catch(() => {});
     };
     if (signal && !signal.aborted) signal.addEventListener('abort', abortRun, { once: true });
     else if (signal?.aborted) abortRun();
-    if (signal) signalBySession.set(job.actorSessionId, signal);   // phase 4: blocking-tool cancel race
     try {
-      const result = await sendMessage({ type: 'actor/run', job: { ...job, runId, relayToken } });
+      const result = runOnChannel
+        ? await runOnChannel(
+          { ...job, inbound, tools, runId },
+          {
+            signal,
+            relay: (type, payload) => {
+              const route = /** @type {Record<string, Function>} */ (routes)[type];
+              if (!route) return { ok: false, error: `unknown actor relay: ${type}` };
+              return route(payload, undefined, grant);
+            },
+          },
+        )
+        : await sendMessage({ type: 'actor/run', job: { ...job, inbound, tools, runId, relayToken } });
       // Stop / cancel cascade: `signal.aborted` HERE is the authoritative proof a Stop
       // hit THIS run — and the one place it's reliably observable. The worker unwinds an
       // abort several ways (a rejected relay, a model-error from the SW route, or the
@@ -156,31 +219,37 @@ export const makeOffscreenActorClient = ({
       if (signal?.aborted && result && !result.finalText) result.aborted = true;
       return result;
     } finally {
+      // Settlement is a cancellation boundary for every host relay, including a
+      // runner-owned timeout/crash that never aborts the caller's turn signal.
+      // Abort BEFORE retiring the grant so a route that already resolved it sees
+      // the terminal signal and exits rather than continuing without a grant.
+      abortRelays();
       // Drop the abort listener a completed-without-Stop run left attached (a no-op if
       // it already fired under {once:true}); keeps nothing dangling on the turn signal.
       signal?.removeEventListener('abort', abortRun);
+      relayController.abort();
+      for (const ac of inflight.get(runId) ?? []) { try { ac.abort(); } catch { /* already */ } }
       // Retiring the grant is what makes it a liveness check: every relay for
       // this run is refused from here on, so a late/replayed one can't dispatch.
-      grants.delete(relayToken);
+      if (!runOnChannel) grants.delete(relayToken);
       runOnEvent.delete(runId);
       runMeta.delete(runId);
       inflight.delete(runId);
       abortedRuns.delete(runId);
-      if (signal && signalBySession.get(job.actorSessionId) === signal) signalBySession.delete(job.actorSessionId);
     }
   };
 
   /**
-   * Resolve a relay's identity: the sender must be the offscreen document AND the
-   * message must carry a live grant token. Returns null for anything else — a
-   * non-offscreen page, a missing/unknown/retired token — and every route treats
-   * that as a hard refusal, so an unauthorized caller learns nothing beyond "no".
+   * Resolve a relay's identity. Chrome passes the grant through a private channel
+   * closure. Firefox requires its private host sender identity and a live grant
+   * token. Every route treats a missing or retired grant as a hard refusal.
    * @param {{ relayToken?: unknown }} [msg]
    * @param {unknown} [sender]  the second argument makeDispatcher hands a handler
-   * @returns {{ runId: string, actorSessionId: string } | null}
+   * @returns {{ runId: string, actorSessionId: string, provider: string, model: string, ollamaHost?: string, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal } | null}
    */
-  const grantFor = (msg, sender) => {
-    if (!isOffscreenSender(sender)) return null;
+  const grantFor = (msg, sender, boundGrant = null) => {
+    if (boundGrant) return boundGrant;
+    if (!relaySenderAllowed(sender)) return null;
     const token = msg?.relayToken;
     if (typeof token !== 'string' || token.length === 0) return null;
     return grants.get(token) ?? null;
@@ -191,18 +260,18 @@ export const makeOffscreenActorClient = ({
      * @param {{ relayToken?: string, args?: object }} [msg] - the model call: key+egress added HERE.
      * @param {unknown} [sender] - must be the offscreen document (see grantFor).
      */
-    'actor/model-call': async (msg = {}, sender = undefined) => {
+    'actor/model-call': async (msg = {}, sender = undefined, boundGrant = null) => {
       // Identity from the offscreen sender + the grant, never from the message:
       // this route adds the user's key to whatever it forwards, so an
       // unauthorized caller must not be able to name a run at all.
-      const grant = grantFor(msg, sender);
+      const grant = grantFor(msg, sender, boundGrant);
       if (!grant) return { ok: false, error: 'actor/model-call: unauthorized relay' };
       const { runId } = grant;
       const args = msg.args;
       const key = runId;
       // Race guard 1: a Stop that fired BEFORE this call reached the route (the card
       // appears first) → refuse without ever making the key-bearing request.
-      if (abortedRuns.has(key)) return { ok: false, error: 'aborted' };
+      if (grant.relaySignal.aborted || abortedRuns.has(key)) return { ok: false, error: 'aborted' };
       // Spend-limit preflight, script/model-call's posture applied to the actor lane:
       // an actor's model calls spend the user's money on the OWNING chat session, so a
       // session past the hard cap must not be pushed further by its own actors. Without
@@ -212,6 +281,9 @@ export const makeOffscreenActorClient = ({
         const refusal = await spendRefusalFor(grant.actorSessionId).catch(() => null);
         if (refusal) return { ok: false, error: refusal };
       }
+      // The host may have settled while the spend lookup was in flight. A
+      // token lookup made before settlement is not continuing authority.
+      if (grant.relaySignal.aborted || abortedRuns.has(key)) return { ok: false, error: 'aborted' };
       const ac = new AbortController();
       const set = inflight.get(key) ?? new Set();
       set.add(ac); inflight.set(key, set);
@@ -220,11 +292,17 @@ export const makeOffscreenActorClient = ({
       // runMeta stash, never the worker's args (a worker must not be able to
       // relabel whose context this was).
       const meta = runMeta.get(key);
-      if (meta) recordModelCall({ ...(args ?? {}), sessionId: meta.sessionId, label: meta.label });
+      const pinnedArgs = {
+        ...(args ?? {}),
+        provider: grant.provider,
+        model: grant.model,
+        ollamaHost: grant.ollamaHost,
+      };
+      if (meta) recordModelCall({ ...pinnedArgs, sessionId: meta.sessionId, label: meta.label });
       /** @type {any[]} */
       const events = [];
       try {
-        for await (const ev of callModel({ ...(args ?? {}), getSecret, safeFetch, signal: ac.signal })) events.push(ev);
+        for await (const ev of callModel({ ...pinnedArgs, getSecret, safeFetch, signal: ac.signal })) events.push(ev);
         // Race guard 2: a Stop that fired DURING the call → honor it even if the stream
         // still fulfilled (a fake responder, or a provider that flushed before cancel),
         // so a mid-call abort never delivers a completed turn.
@@ -240,16 +318,24 @@ export const makeOffscreenActorClient = ({
      * @param {{ relayToken?: string, call?: any }} [msg] - SW-side ctx build + gate + dispatch.
      * @param {unknown} [sender] - must be the offscreen document (see grantFor).
      */
-    'actor/tool-dispatch': async (msg = {}, sender = undefined) => {
+    'actor/tool-dispatch': async (msg = {}, sender = undefined, boundGrant = null) => {
       try {
         // The session comes from the offscreen-pinned GRANT, not the message. This is
         // the route that builds an instance-pinned, tool-granting context, so a caller
         // that could name its own session would inherit any actor's pin and toolset.
-        const grant = grantFor(msg, sender);
+        const grant = grantFor(msg, sender, boundGrant);
         if (!grant) return { ok: false, error: 'actor/tool-dispatch: unauthorized relay' };
+        if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
         const { actorSessionId } = grant;
         const call = msg.call;
+        // Descriptor narrowing makes the model unlikely to ask; this check is the
+        // authority wall. The grant's set was minted from the SW-stamped inbound
+        // job, never from this relayed call or the Worker holding peer content.
+        if (grant.inbound && (typeof call?.name !== 'string' || !grant.allowedTools?.has(call.name))) {
+          return { ok: false, error: `tool_not_available_to_inbound_actor: ${call?.name}` };
+        }
         const rec = await sessions.get(actorSessionId);
+        if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
         if (!rec) return { ok: false, error: 'actor/tool-dispatch: unknown session' };
 
         // Phase 4 — a spawned child is a tool-bearing EPHEMERAL actor. Its toolset is the
@@ -261,10 +347,24 @@ export const makeOffscreenActorClient = ({
         // defense-in-depth as the actor pin.
         if (rec.kind === 'spawned') {
           if (!restrictCtxCapabilities) return { ok: false, error: 'actor/tool-dispatch: actor offscreen not wired' };
-          const granted = new Set(Array.isArray(rec.grantedTools) ? rec.grantedTools : []);
+          const persistedGrants = new Set(Array.isArray(rec.grantedTools) ? rec.grantedTools : []);
+          const granted = grant.inbound
+            ? new Set([...persistedGrants].filter((name) => grant.allowedTools?.has(name)))
+            : persistedGrants;
           if (typeof call?.name !== 'string' || !granted.has(call.name)) return { ok: false, error: `tool_not_available_to_actor: ${call?.name}` };
-          const base = await buildToolContext({ sessionId: actorSessionId });
-          const sig = signalBySession.get(/** @type {string} */ (actorSessionId));
+          // Layer 2 of the clean-context review contract: re-evaluate the live
+          // positive allowlist at call time. The record's grantedTools may be
+          // stale or corrupt; it is never sufficient authority for a reviewer.
+          if (rec.review === true && !reviewToolAllowed(call.name)) {
+            return { ok: false, error: `tool_not_available_to_reviewer: ${call.name}` };
+          }
+          const base = await buildToolContext({
+            sessionId: actorSessionId,
+            lifecycleTurnId: grant.runId,
+            lifecycleUserInitiated: !grant.inbound,
+            ...(grant.inbound ? { synthetic: true, trusted: false } : {}),
+          });
+          if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
           // Stamp the child lineage on every audit its tools emit (parity with spawn.js's taggedAudit).
           const audit = (/** @type {any} */ entry) => /** @type {any} */ (base).audit?.({ ...entry, details: { ...(entry?.details ?? {}), parentSessionId: rec.parentSessionId, actorSessionId, depth: rec.depth } });
           // #160: re-stamp the review-exemption marker from the PERSISTED record
@@ -275,10 +375,14 @@ export const makeOffscreenActorClient = ({
           // fallback path. Fail-closed: rec.review !== true, or no injected
           // EXPOSURE_REVIEW, stamps nothing.
           const ctx = restrictCtxCapabilities({
-            ...base, audit, ...(sig ? { abortSignal: sig } : {}),
+            ...base, audit, abortSignal: grant.relaySignal,
+            // Monotonic backstop: even a miswired context builder cannot erase
+            // the provenance attached to this live SW grant.
+            ...(grant.inbound ? { synthetic: true, trusted: false, inbound: true } : {}),
             ...(rec.review === true && EXPOSURE_REVIEW ? { exposure: EXPOSURE_REVIEW } : {}),
           }, granted);
           const result = await dispatchToolCall(call, ctx);
+          if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
           return { ok: true, result };
         }
 
@@ -293,24 +397,52 @@ export const makeOffscreenActorClient = ({
         const activeTabId = (rec.actorType === 'web' && rec.backing !== 'api' && ownedTabFor)
           ? ownedTabFor(/** @type {string} */ (actorSessionId))
           : undefined;
-        const ctx = await buildToolContext({
+        if (grant.inbound && !restrictCtxCapabilities) {
+          return { ok: false, error: 'actor/tool-dispatch: inbound capability filter not wired' };
+        }
+        const base = await buildToolContext({
           exposure: EXPOSURE_ACTOR, sessionId: actorSessionId, activeTabId,
           actorInstanceId: rec.instanceId, actorType: rec.actorType, actorBacking: rec.backing,
+          lifecycleTurnId: grant.runId,
+          lifecycleUserInitiated: !grant.inbound,
+          ...(grant.actorSurface ? { actorSurface: grant.actorSurface } : {}),
+          ...(grant.inbound ? { synthetic: true, trusted: false } : {}),
         });
+        if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
+        // Stop/cancel belongs to the ACTOR TURN, not only spawned children.
+        // Thread the live SW-owned signal into every bound context so a
+        // page_code/a2a_run/site_client_run tool cannot outlive the reasoning
+        // worker that invoked it.
+        const stamped = {
+          ...base,
+          abortSignal: grant.relaySignal,
+          ...(grant.inbound ? { synthetic: true, trusted: false, inbound: true } : {}),
+        };
+        // Strip the ctx's closures as well as its descriptors: an injected model
+        // cannot recover a2a_run's mesh-signing worker through a forged tool call.
+        const ctx = grant.inbound
+          ? /** @type {(ctx: any, allowedNames: Set<string>) => any} */ (restrictCtxCapabilities)(
+            stamped, /** @type {Set<string>} */ (grant.allowedTools),
+          )
+          : stamped;
         // Re-pin to the BOUND instance — the worker's call args are never trusted.
         // (A no-op for web DOM tools, whose numeric-tab pin the GATE enforces via
         // ctx.activeTab; still runs so engine/edit_file calls normalize.)
         pinActorCall(call, rec.actorType, rec.instanceId);
         const result = await dispatchToolCall(call, ctx);
-        // Announce the settled dispatch — pure observability, zero authority
-        // (the gated dispatch already ran; consumers see name/args/ok only).
+        // Announce the settled dispatch — pure, privacy-minimal observability.
+        // Arguments can contain form text, credentials, or attacker-derived
+        // bytes, so no UI port receives them.
+        if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
         // why: an OFFSCREEN actor turn emits no turn/tool-use broadcast (that
         // path is turn-driver's, in-SW only) — without this the eval harness's
         // OM2W recorder can't see the actor's page actions. Best-effort.
         try {
           broadcastOp({
             type: 'actor/op', sessionId: actorSessionId,
-            name: call?.name, args: call?.args ?? {}, ok: result?.ok !== false,
+            name: typeof call?.name === 'string' && /^[a-z0-9_-]{1,64}$/.test(call.name)
+              ? call.name : 'unknown',
+            ok: result?.ok !== false,
           });
         } catch { /* display-only */ }
         return { ok: true, result };
@@ -322,12 +454,13 @@ export const makeOffscreenActorClient = ({
      * @param {{ relayToken?: string, event?: object }} [msg]
      * @param {unknown} [sender] - must be the offscreen document (see grantFor).
      */
-    'actor/loop-event': (msg = {}, sender = undefined) => {
+    'actor/loop-event': (msg = {}, sender = undefined, boundGrant = null) => {
       // Lowest-authority of the three (it only feeds the actor card + cost meter),
       // but bound the same way: an unauthorized sender could otherwise inject
       // fabricated progress/cost events into another run's UI.
-      const grant = grantFor(msg, sender);
+      const grant = grantFor(msg, sender, boundGrant);
       if (!grant) return { ok: false, error: 'actor/loop-event: unauthorized relay' };
+      if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
       try { if (msg.event) runOnEvent.get(grant.runId)?.(msg.event); } catch { /* never break the relay */ }
       return { ok: true };
     },

@@ -45,8 +45,11 @@ export const ABORT_STEER = 'peerd:steer';
  *   claim: (sessionId: string) => { controller: AbortController, release: () => void },
  *   stop: (sessionId: string) => boolean,
  *   isBusy: (sessionId: string) => boolean,
+ *   busySessionIds: () => string[],
  *   runWhenIdle: (sessionId: string, fn: () => void) => void,
+ *   runWhenIdleClaimed: (sessionId: string, fn: (lease: { controller: AbortController, release: () => void }) => void) => void,
  *   advanceQueue: (sessionId: string) => void,
+ *   generation: (sessionId: string) => number,
  * }}
  * @param {{ onAbort?: (sessionId: string) => void, forceReleaseMs?: number }} [deps]
  *   onAbort fires whenever a session's turn is aborted (a steer-live supersede
@@ -61,6 +64,11 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
   const slots = new Map();
   /** @type {Map<string, Array<() => void>>} idle-wake queue per session */
   const idleQueues = new Map();
+  // Explicit Stop epoch per session. A direct shell wake can capture this when
+  // it queues and compare it at dequeue, so Stop also cancels work waiting
+  // behind the live turn instead of letting that wake start a fresh turn.
+  /** @type {Map<string, number>} */
+  const stopGenerations = new Map();
 
   // Run the next queued wake for a session that just went idle. The wake
   // is contracted to start a turn (re-claim the slot); when THAT turn
@@ -101,29 +109,33 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
     }, forceReleaseMs);
   };
 
+  /** @param {string} sessionId */
+  const claim = (sessionId) => {
+    // Steer-live: a second send into the SAME chat supersedes the
+    // turn already streaming there. onAbort decline-settles the superseded
+    // turn's pending confirm (if any) so it doesn't run the cancelled action.
+    const superseded = slots.get(sessionId);
+    if (superseded) { superseded.abort(ABORT_STEER); onAbort?.(sessionId); }
+    const controller = new AbortController();
+    slots.set(sessionId, controller);
+    return {
+      controller,
+      release: () => {
+        // Only clear our own claim. If a steer already replaced this
+        // controller, the newer turn owns the slot.
+        if (slots.get(sessionId) === controller) {
+          slots.delete(sessionId);
+          drainIdle(sessionId);
+        }
+      },
+    };
+  };
+
   return {
-    claim(sessionId) {
-      // Steer-live: a second send into the SAME chat supersedes the
-      // turn already streaming there. onAbort decline-settles the superseded
-      // turn's pending confirm (if any) so it doesn't run the cancelled action.
-      const superseded = slots.get(sessionId);
-      if (superseded) { superseded.abort(ABORT_STEER); onAbort?.(sessionId); }
-      const controller = new AbortController();
-      slots.set(sessionId, controller);
-      return {
-        controller,
-        release: () => {
-          // Only clear our own claim — if a steer already replaced this
-          // controller, the newer turn owns the slot.
-          if (slots.get(sessionId) === controller) {
-            slots.delete(sessionId);
-            drainIdle(sessionId);
-          }
-        },
-      };
-    },
+    claim,
 
     stop(sessionId) {
+      stopGenerations.set(sessionId, (stopGenerations.get(sessionId) ?? 0) + 1);
       const controller = slots.get(sessionId);
       if (!controller) return false;
       controller.abort(ABORT_STOP);
@@ -138,10 +150,32 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
 
     isBusy: (sessionId) => slots.has(sessionId),
 
+    // A monitor can enumerate the already-in-memory slot keys without scanning
+    // every durable chat just to ask which orchestrators are currently active.
+    busySessionIds: () => [...slots.keys()],
+
     runWhenIdle(sessionId, fn) {
       if (!slots.has(sessionId)) { fn(); return; }
       const q = idleQueues.get(sessionId) ?? [];
       q.push(fn);
+      idleQueues.set(sessionId, q);
+    },
+
+    // Actor delivery has asynchronous setup before its model driver can claim.
+    // Reserve synchronously at dequeue and pass that exact lease through setup,
+    // so a second queued message cannot see an idle slot and overtake it.
+    runWhenIdleClaimed(sessionId, fn) {
+      const startClaimed = () => {
+        const lease = claim(sessionId);
+        try { fn(lease); }
+        catch {
+          // A synchronous setup failure must not strand the reservation.
+          lease.release();
+        }
+      };
+      if (!slots.has(sessionId)) { startClaimed(); return; }
+      const q = idleQueues.get(sessionId) ?? [];
+      q.push(startClaimed);
       idleQueues.set(sessionId, q);
     },
 
@@ -152,5 +186,7 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
     // decliners drains synchronously and stops at the first wake that starts a
     // turn (its async claim then owns the slot; its release re-drains the rest).
     advanceQueue(sessionId) { drainIdle(sessionId); },
+
+    generation: (sessionId) => stopGenerations.get(sessionId) ?? 0,
   };
 };

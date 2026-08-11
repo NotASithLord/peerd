@@ -98,7 +98,7 @@ export const rememberTool = {
     // why: ctx.confirm is typed for the dispatcher's ConfirmPrompt shape, but
     // the confirm coordinator also routes memory-flavoured prompts (rendered
     // as a diff in the side panel). Narrow to that looser payload here.
-    const confirmAny = /** @type {((p: Record<string, unknown>) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
+    const confirmAny = /** @type {((p: Record<string, unknown>, signal?: AbortSignal) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
       /** @type {unknown} */ (ctx.confirm));
     try {
       const res = await memory.writeWithConfirm({
@@ -122,7 +122,7 @@ export const rememberTool = {
                 summary: `${proposal.op} memory: ${proposal.header} (+${proposal.addedLines}/−${proposal.removedLines})`,
                 origins: [],
                 sessionId: ctx.session?.sessionId ?? null,
-              });
+              }, ctx.abortSignal);
             }
           : undefined,
       });

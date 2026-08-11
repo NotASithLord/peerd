@@ -21,8 +21,10 @@
 
 import {
   ProviderHttpError, ProviderKeyMissingError, ProviderUsageLimitError, UnknownProviderError,
-} from '/peerd-provider/index.js';
-import { SessionNotFoundError } from '../errors.js';
+} from '../../peerd-provider/index.js';
+import {
+  ActorCredentialBoundaryError, ACTOR_CREDENTIAL_BOUNDARY_FAILURE, SessionNotFoundError,
+} from '../errors.js';
 // Pure policy helpers (not IO) — direct import is the gates.js precedent, and
 // keeps the actor turn setup readable. Flag-gated so they're inert when off.
 import { EXPOSURE_ACTOR, actorDescriptors, filterActorSurface, pinActorCall } from '../tools/exposure.js';
@@ -34,6 +36,55 @@ import { PREWALK_NUDGE } from './prewalk.js';
 // per-turn ephemeral <context> message (temporal + active tab) that keeps the
 // main system string byte-stable and prompt-cacheable (design 01).
 import { buildTemporalContext } from './system-prompt.js';
+import { DWEB_INBOUND_TOOL_NAMES } from '../actor/capability-manifest.js';
+import {
+  actorIsolationAvailable, actorIsolationForTurn, actorIsolationPromptBlock, actorIsolationRefusal,
+  ACTOR_ISOLATION_UNAVAILABLE_TOOLS, filterByActorIsolation,
+} from '../actor/isolation.js';
+import { classifyBrowserAutomationTarget } from '../tools/browser-automation-policy.js';
+import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
+import {
+  filterByRuntimeCapabilities, runtimeCapabilityPromptBlock, runtimeCapabilityRefusal,
+} from '../runtime-capabilities.js';
+
+/**
+ * Reduce the foreground tab to safe, minimal prompt context.
+ * @param {{ url?: string } | null | undefined} tab
+ * @param {readonly string[]} denylist
+ * @returns {{ workspace: string, activeTab: { url: string, title: string } | null, protectedTab: 'private_network'|'sensitive_site'|null }}
+ */
+export const safeForegroundTabContext = (tab, denylist = []) => {
+  const verdict = classifyBrowserAutomationTarget(tab?.url);
+  if (!verdict.allowed) {
+    const protectedTab = verdict.reason === 'private_network' || verdict.reason === 'cloud_metadata'
+      ? 'private_network'
+      : null;
+    return { workspace: '', activeTab: null, protectedTab };
+  }
+  let hostname = '';
+  try { hostname = new URL(/** @type {string} */ (tab?.url)).hostname; } catch {
+    return { workspace: '', activeTab: null, protectedTab: null };
+  }
+  if (findDenylistMatch(hostname, denylist)) {
+    return { workspace: '', activeTab: null, protectedTab: 'sensitive_site' };
+  }
+  // Origin only. Paths and titles are page-controlled and can contain reset
+  // tokens, private document names, newlines, or prompt-fence text.
+  return {
+    workspace: verdict.origin,
+    activeTab: { url: verdict.origin, title: '' },
+    protectedTab: null,
+  };
+};
+
+/**
+ * The positive inbound authority check. Kept pure/exported so
+ * the hidden-tool forgery case is pinned without constructing a whole turn.
+ * @param {{ isActor: boolean, inbound: boolean, actorType?: string, name?: string }} input
+ */
+export const inboundActorCallAllowed = ({ isActor, inbound, actorType, name }) =>
+  !(isActor && inbound && actorType === 'dweb')
+  || (typeof name === 'string' && DWEB_INBOUND_TOOL_NAMES.includes(name));
 
 // pinActorCall moved to tools/exposure.js (shared with the offscreen actor tool
 // relay, a security seam — one implementation, no drift).
@@ -41,7 +92,7 @@ import { buildTemporalContext } from './system-prompt.js';
 export const makeTurnDriver = (/** @type {any} */ deps) => {
   const {
     vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
-    sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser, originOfTabUrl,
+    sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser,
     skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
     filterByDwebActive, filterByDwebEnabled,
     filterDescriptorsByManifest, mainAgentDescriptors, listTools, settingsStore, DWEB_ENABLED,
@@ -52,6 +103,7 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
     contextWindowFor, liveContextWindow, currentAppScope,
     checkpointMgr, detectInterruptedTurn,
+    getDenylist = () => [],
     // The context inspector's capture hook (optional; a no-op default so the
     // driver never depends on the debug surface being wired).
     recordModelCall = () => {},
@@ -71,6 +123,12 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     // carried — including the do-not-repeat instruction for outcome_unknown.
     // Optional so actor/test drivers stay inert.
     drainRecoveryNotices = null,
+    // Live execution-boundary capability. Null keeps older test harnesses inert.
+    getActorIsolation = () => null,
+    // The service-worker shell hydrates durable actor-host health before a
+    // turn may snapshot it. Tests and non-browser callers stay synchronous.
+    waitForActorIsolation = async () => {},
+    getRuntimeCapabilities = () => null,
   } = deps;
 
 /**
@@ -79,8 +137,13 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
  * state pushes so the UI can incrementally update without re-rendering
  * the whole session shape).
  */
-const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, display = null, oneShot = false, actorReply = null }) => {
+const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, display = null, oneShot = false, actorReply = null, actorSurface = null, captureTurnSnapshot = false, onBeforeRelease = null, turnLease = null }) => {
   if (vault.isLocked()) throw new VaultLockedError();
+  // why before session work: a cold background page starts fail-closed while
+  // durable actor-host health loads. Sampling that sentinel would falsely tell
+  // the model actors are unavailable and can consume a mailbox wake for good.
+  await waitForActorIsolation();
+  const lifecycleTurnId = crypto.randomUUID();
 
   // Lazy session create — bind the chat to whatever provider/model the user
   // has configured (no provider is assumed on a fresh install; see
@@ -117,7 +180,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // the claim aborts that turn first (steer-live — the loop's catch-
   // AbortError path persists the partial with stopReason='aborted');
   // turns streaming in OTHER chats are untouched.
-  const { controller: abortController, release: releaseTurnSlot } = turnSlots.claim(sessionId);
+  const { controller: abortController, release: releaseTurnSlot } = turnLease ?? turnSlots.claim(sessionId);
 
   // DESIGN-17: resolve the session kind ONCE (authoritative, persisted — robust
   // even when re-driven by auto-resume). An actor turn runs the SAME wrapper
@@ -143,15 +206,48 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     } catch (e) { console.warn('[turn] prewalk reconcile failed', e); }
   }
   const isActor = turnSession?.kind === 'actor';
+  const isSpawned = turnSession?.kind === 'spawned';
+  // Defensive backstop for auto-resume and any future caller: actor sessions
+  // are driven only by the dedicated-worker host. Reaching this in-background
+  // turn driver is a refusal, never a degraded execution mode.
+  if (isActor || isSpawned) {
+    auditLog.append({
+      type: 'actor_background_turn_refused',
+      sessionId,
+      details: { reason: 'dedicated_worker_required', performed: false },
+    }).catch(() => {});
+    releaseTurnSlot();
+    return;
+  }
+  // why snapshot: an unavailable boundary stays unavailable to the model for
+  // this whole turn even if a user retry repairs it mid-turn. That keeps the
+  // system prompt, descriptor list, and dispatch story coherent. A boundary
+  // that fails after the turn starts can still remove tools immediately.
+  const actorIsolationAtTurnStart = getActorIsolation();
+  const effectiveActorIsolation = () =>
+    actorIsolationForTurn(actorIsolationAtTurnStart, getActorIsolation());
+  // The prompt and tool descriptors for one model step must describe one
+  // isolation state. refreshMainTools advances this snapshot only after it has
+  // built the matching descriptor list. Dispatch still checks live state and
+  // fails closed if the worker boundary changes after the model call starts.
+  let actorIsolationForModelStep = effectiveActorIsolation();
   /** @type {string|undefined} */
   const actorType = isActor ? turnSession.actorType : undefined;
   /** @type {string|undefined} */
   const actorInstanceId = isActor ? turnSession.instanceId : undefined;
-  // DESIGN-18: a web actor's backing — 'api' (origin-owned, fetch-only, no tab) vs the
+  // DESIGN-18: a web actor's backing: 'api' (origin-owned, no tab/DOM) vs the
   // default tab backing. Threaded to buildToolContext so the gate refuses DOM tools and
   // the egress boundary scopes to the FIXED origin for an API actor.
   /** @type {'tab'|'api'|undefined} */
   const actorBacking = isActor ? turnSession.backing : undefined;
+  // Defense in depth: if a future caller bypasses the dedicated-worker
+  // refusal above, no actor loop receives live credential functions.
+  const loopCredentials = isActor
+    ? {
+      getSecret: async () => { throw new ActorCredentialBoundaryError('secret'); },
+      safeFetch: async () => { throw new ActorCredentialBoundaryError('provider-network'); },
+    }
+    : { getSecret, safeFetch };
 
   // DESIGN-17 P1 glass pane. When an actor turn was triggered by a LIVE
   // message_actor (display set; absent on a boot redrain), re-emit its stream as
@@ -198,6 +294,8 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // vanishes (the user's "back on home → gone" requirement, by construction).
   // Re-derived per turn from the live active tab; never persisted to history.
   let activeTabContext = null;
+  /** @type {'private_network'|'sensitive_site'|null} */
+  let protectedTabContext = null;
   // why: an ACTOR has no user-workspace memory and no foreground-tab
   // reorientation — its context is its INSTANCE, not the user's browsing. Pulling
   // the user's current page + that origin's memory into an actor turn would be
@@ -206,12 +304,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   if (!isActor) {
     try {
       const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
-      const ws = activeTab?.url ? originOfTabUrl(activeTab.url) : '';
-      const loaded = await memory.loadAlwaysLoaded({ workspace: ws });
+      const safeTab = safeForegroundTabContext(activeTab, getDenylist());
+      activeTabContext = safeTab.activeTab;
+      protectedTabContext = safeTab.protectedTab;
+      const loaded = await memory.loadAlwaysLoaded({ workspace: safeTab.workspace });
       memoryBlock = loaded.text;
-      if (typeof activeTab?.url === 'string' && /^https?:\/\//i.test(activeTab.url)) {
-        activeTabContext = { url: activeTab.url, title: (activeTab.title || '').slice(0, 200) };
-      }
     } catch (e) {
       console.warn('[sw] memory load failed', e);
     }
@@ -245,51 +342,62 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     recoveryBlock = await Promise.resolve(drainRecoveryNotices(sessionId))
       .catch(() => '');
   }
+  const actorExecutionBlock = () => {
+    if (isActor) return '';
+    const isolation = actorIsolationForModelStep;
+    return isolation ? actorIsolationPromptBlock(isolation) : '';
+  };
+  const runtimeCapabilities = getRuntimeCapabilities();
   const contextMessage = isActor
     ? ''
-    : [buildTemporalContext({ temporalBlock, activeTab: activeTabContext }), recoveryBlock]
+    : [buildTemporalContext({ temporalBlock, activeTab: activeTabContext, protectedTab: protectedTabContext }), recoveryBlock]
       .filter(Boolean).join('\n\n');
 
+  /** @type {string|null} */
+  let systemPromptBase = null;
   const getSystemPrompt = async () => {
-    // why: re-read the session record at render time so a /system change
-    // (set or clear) takes effect on the very next turn. The block is the
-    // user's per-session augmentation — appended as <session_instructions>,
-    // never replacing the base prompt (the base carries the security/
-    // defense text). Absent → collapses to nothing. The per-change cache
-    // break this causes is by design.
-    const promptSession = await sessions.get(sessionId);
-    // Prewalk: the planning nudge rides the prompt ONLY during the planning
-    // phase. Because the prompt re-renders per turn, the executor's first
-    // turn simply never contains it — the "prune the planning instruction"
-    // half of the handoff falls out of the render, no history surgery.
-    const prewalkBlock = !isActor && promptSession?.prewalk?.phase === 'planning'
-      ? `\n\n${PREWALK_NUDGE}`
-      : '';
-    return (await renderSystemPrompt({
-      memoryBlock,
-      // design 01: the MAIN system string must be byte-stable to cache, so the
-      // orchestrator's volatile temporal bytes ride a leading <context> message
-      // (contextMessage below) instead of the system block. An ACTOR re-renders
-      // its system prompt per turn and keeps embedding the block (relocating it
-      // there too would need offscreen-worker plumbing — deferred). '' for the
-      // main path collapses the {{TEMPORAL_BLOCK}} placeholder cleanly.
-      temporalBlock: isActor ? temporalBlock : '',
-      skillsBlock,
-      customSystemPrompt: promptSession?.customSystemPrompt,
-      // DESIGN-17: an actor gets a kind-specific tuned block appended (the base
-      // template — incl. all the security/defense text — survives verbatim).
-      // DESIGN-18: backing distinguishes a tab-backed web actor (DOM lore) from an
-      // API actor (fetch-only origin lore) — both are actorType:'web'. instanceId lets
-      // an API actor's lore name the ONE origin it owns.
-      // PR #119: a tab web actor's action surface ('tools'|'code'), resolved by
-      // buildToolContext from the setting — the prompt teaches page.* for 'code'.
-      // #241: schemaReply rides the SAME stamp — buildToolContext sets it from the
-      // setting that arms the reply validator, so an actor is never told to emit
-      // the envelope by a build that wouldn't validate it (or vice versa).
-      ...(isActor ? { actorType, backing: actorBacking, instanceId: actorInstanceId, actorSurface: toolContext.actorSurface, schemaReply: toolContext.schemaReply } : {}),
-    // why await: renderSystemPrompt is async — concatenating the un-awaited
-    // promise would bake "[object Promise]" into the prompt.
-    })) + prewalkBlock;
+    // Keep the ordinary system body turn-stable. A /system or prewalk change
+    // takes effect on the next turn, matching the original render-once
+    // behavior. Only the actor-execution suffix can change between steps.
+    if (systemPromptBase === null) {
+      const promptSession = await sessions.get(sessionId);
+      const prewalkBlock = !isActor && promptSession?.prewalk?.phase === 'planning'
+        ? `\n\n${PREWALK_NUDGE}`
+        : '';
+      systemPromptBase = (await renderSystemPrompt({
+        memoryBlock,
+        // design 01: the MAIN system string must be byte-stable to cache, so the
+        // orchestrator's volatile temporal bytes ride a leading <context> message
+        // (contextMessage below) instead of the system block. An ACTOR re-renders
+        // its system prompt per turn and keeps embedding the block. Relocating it
+        // there too would need offscreen-worker plumbing and is deferred. '' for the
+        // main path collapses the {{TEMPORAL_BLOCK}} placeholder cleanly.
+        temporalBlock: isActor ? temporalBlock : '',
+        skillsBlock,
+        customSystemPrompt: promptSession?.customSystemPrompt,
+        // DESIGN-17: an actor gets a kind-specific tuned block appended. The base
+        // template, including all security and defense text, survives verbatim.
+        // DESIGN-18: backing distinguishes a tab-backed web actor (DOM lore) from an
+        // API actor (fetch-only origin lore). Both are actorType:'web'. instanceId lets
+        // an API actor's lore name the ONE origin it owns.
+        // PR #119: a tab web actor's action surface ('tools'|'code'), resolved by
+        // buildToolContext from the setting. The prompt teaches page.* for 'code'.
+        // #241: schemaReply rides the SAME stamp. buildToolContext sets it from the
+        // setting that arms the reply validator, so an actor is never told to emit
+        // the envelope by a build that wouldn't validate it (or vice versa).
+        ...(isActor ? {
+          actorType, backing: actorBacking, instanceId: actorInstanceId,
+          actorSurface: toolContext.actorSurface, schemaReply: toolContext.schemaReply,
+          effectiveTools: toolDescriptors.map((/** @type {any} */ tool) => tool.name),
+          inbound: toolContext.inbound === true,
+        } : {}),
+      // why await: renderSystemPrompt is async. Concatenating the un-awaited
+      // promise would bake "[object Promise]" into the prompt.
+      })) + prewalkBlock;
+    }
+    const suffixes = [actorExecutionBlock(), isActor ? '' : runtimeCapabilityPromptBlock(runtimeCapabilities)]
+      .filter(Boolean);
+    return systemPromptBase + (suffixes.length > 0 ? `\n\n${suffixes.join('\n\n')}` : '');
   };
 
   // Tool descriptors passed to the provider — name, description, and
@@ -325,8 +433,16 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // message_actor sender gate's untrusted-origin signal (synthetic AND not a
   // trusted first-party continuation → inbound → refused).
   const toolContext = await buildToolContext(isActor
-    ? { exposure: EXPOSURE_ACTOR, sessionId, activeTabId, synthetic, trusted, actorInstanceId, actorType, actorBacking }
-    : { exposure: 'main', sessionId, activeTabId, synthetic, trusted });
+    ? {
+      exposure: EXPOSURE_ACTOR, sessionId, activeTabId, synthetic, trusted,
+      actorInstanceId, actorType, actorBacking,
+      lifecycleTurnId, lifecycleUserInitiated: synthetic !== true,
+      ...(actorSurface ? { actorSurface } : {}),
+    }
+    : {
+      exposure: 'main', sessionId, activeTabId, synthetic, trusted,
+      lifecycleTurnId, lifecycleUserInitiated: synthetic !== true,
+    });
   // why: thread THIS turn's abort signal onto the tool ctx so a tool that can
   // block IN-BAND unwinds on Stop / the turn timeout instead of parking the
   // turn — message_actor with await:true (which resolves the actor's reply into
@@ -351,7 +467,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     // SIXTH cut (DESIGN-17): the actor surface. The actor-only instance tier
     // (writes AND the fenced reads) LEAVES the main agent (it delegates via
     // message_actor, which it keeps). Outermost so it composes over everything.
-    const descriptors = filterActorSurface(
+    const exposed = filterActorSurface(
       filterByGoalActive(
         filterByDwebActive(
           filterByDwebEnabled(
@@ -362,7 +478,14 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         ),
         !!goalActiveFor?.(sessionId),
       ),
-    ).map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
+    );
+    const isolation = effectiveActorIsolation();
+    const descriptors = filterByRuntimeCapabilities(
+      isolation ? filterByActorIsolation(exposed, isolation) : exposed,
+      runtimeCapabilities,
+    )
+      .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
+    actorIsolationForModelStep = isolation;
     return descriptors;
   };
   // DESIGN-17: an actor sees a FIXED set — its own kind's toolset (no
@@ -372,12 +495,41 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // inherited tool MANIFEST (sessionToolAllow, above) so the list is honest: a
   // browse-only chat's web actor is shown only the read DOM tools, matching the
   // gate (which refuses click/type for it). null manifest passes through unchanged.
-  const refreshActorTools = async () =>
-    filterDescriptorsByManifest(actorDescriptors(listTools(), actorType, actorBacking, toolContext.actorSurface), sessionToolAllow)
+  const refreshActorTools = async () => {
+    const descriptors = filterByRuntimeCapabilities(
+      filterDescriptorsByManifest(
+        actorDescriptors(listTools(), actorType, actorBacking, toolContext.actorSurface),
+        sessionToolAllow,
+      ),
+      runtimeCapabilities,
+    );
+    const inboundAllowed = new Set(DWEB_INBOUND_TOOL_NAMES);
+    return (toolContext.inbound === true && actorType === 'dweb'
+      ? descriptors.filter((/** @type {any} */ tool) => inboundAllowed.has(tool.name))
+      : descriptors)
       .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
+  };
   const refreshTools = isActor ? refreshActorTools : refreshMainTools;
   const toolDescriptors = await refreshTools();
   const toolDispatch = async (/** @type {any} */ call) => {
+    const capabilityRefusal = runtimeCapabilityRefusal(String(call?.name ?? ''), getRuntimeCapabilities());
+    if (capabilityRefusal) return capabilityRefusal;
+    // The descriptor filter is model guidance. A remote-peer wake may use only
+    // the positive inbound dweb subset even if it forges a hidden tool name.
+    if (!inboundActorCallAllowed({
+      isActor, inbound: toolContext.inbound === true, actorType, name: call?.name,
+    })) {
+      return { ok: false, error: `tool_not_available_to_inbound_actor: ${call?.name}` };
+    }
+    const isolation = effectiveActorIsolation();
+    if (!isActor && isolation && !actorIsolationAvailable(isolation)
+        && ACTOR_ISOLATION_UNAVAILABLE_TOOLS.has(String(call?.name ?? ''))) {
+      const refusal = actorIsolationRefusal(isolation);
+      return {
+        ...refusal,
+        meta: { toolName: call?.name, primitive: 'spawned', gates: [], durationMs: 0 },
+      };
+    }
     // DESIGN-17 per-instance pin: force an actor's instance-target arg to its
     // BOUND instance before dispatch, so it can only ever touch its own (the gate
     // is the backstop). Runs first — before the gate chain sees the args.
@@ -420,6 +572,8 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   };
 
   let lastSession = null;
+  /** @type {{ messages: any[], usage: any } | null} */
+  let turnSnapshot = null;
   // Turn outcome, returned so an outer driver (goal mode — loop/goal-runner.js)
   // can tell a clean turn from a failed/aborted one instead of blindly
   // re-entering. lastStopReason is captured BEFORE the panel guard below (the
@@ -499,14 +653,26 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // unconfigured (resolveFailoverChain returns just the primary).
   /** @type {{ provider: string, model: string } | null} */ let failoverLastGood = null;
   const callModelWithFailover = async function* (/** @type {any} */ modelArgs) {
-    const start = failoverLastGood ?? { provider: modelArgs.provider, model: modelArgs.model };
+    // Pin the first candidate to the persisted turn record. The loop normally
+    // forwards those same values, but the loop is not the credential boundary:
+    // it must not select another keyed adapter by colliding with broker fields.
+    // Later calls stay on a successful failover candidate for this turn.
+    const start = failoverLastGood ?? {
+      provider: costSession?.provider ?? modelArgs.provider,
+      model: costSession?.model ?? modelArgs.model,
+    };
     const chain = resolveFailoverChain(start);
-    // The context inspector sees every ORCHESTRATOR model call here — the
-    // one seam every step of every main turn passes through. (Actors and
-    // spawned are captured at the SW's actor/model-call relay instead.)
+    // The context inspector sees orchestrator turns here. Every actor model
+    // call uses the isolated actor relay.
     // record() is contractually non-throwing; label with the provider the
     // call will actually start on.
-    recordModelCall({ ...modelArgs, provider: start.provider, model: start.model, sessionId, label: 'main' });
+    recordModelCall({
+      ...modelArgs,
+      provider: start.provider,
+      model: start.model,
+      sessionId,
+      label: 'main',
+    });
     // why: the Ollama adapter reads `ollamaHost` to reach a remote daemon (issue
     // #104). Thread it from settings for every candidate; non-ollama adapters
     // ignore the extra arg. (The configured host is also on the egress allowlist.)
@@ -516,7 +682,18 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       const cand = chain[i];
       let streamedContent = false;
       try {
-        for await (const ev of callModel({ ...modelArgs, ollamaHost, provider: cand.provider, model: cand.model })) {
+        // The loop forwards credential fields with every model call. All
+        // broker-owned fields must come AFTER modelArgs. Reversing this order lets the loop
+        // change credential custody, provider choice, or cancellation.
+        for await (const ev of callModel({
+          ...modelArgs,
+          ollamaHost,
+          provider: cand.provider,
+          model: cand.model,
+          signal: abortController.signal,
+          getSecret,
+          safeFetch,
+        })) {
           // rate-limit-pause is the adapter's pre-stream backoff signal, not
           // model output — failover stays safe while only those have flowed.
           if (ev.type !== 'rate-limit-pause') streamedContent = true;
@@ -527,11 +704,15 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       } catch (e) {
         lastErr = e;
         const isLast = i === chain.length - 1;
+        const aborted = abortController.signal.aborted
+          || (/** @type {{ name?: string }} */ (e))?.name === 'AbortError';
         // Can't fail over once real output streamed (would duplicate it);
         // the PRIMARY only triggers a switch on a failover-worthy error,
         // while a fallback already in the chain is advanced on any pre-stream
         // failure (a backup that's also down/keyless shouldn't dead-end).
-        if (streamedContent || isLast) throw e;
+        // A Stop is never provider unavailability. Refuse to read another
+        // provider key or emit a misleading failover note after cancellation.
+        if (aborted || streamedContent || isLast) throw e;
         if (i === 0 && !shouldFailover(e)) throw e;
         const to = chain[i + 1];
         auditLog.append({
@@ -572,15 +753,16 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // persistently-overloaded or out-of-credit provider switches to a
       // configured fallback mid-turn instead of failing the whole turn.
       callModel: callModelWithFailover,
-      getSecret,
-      safeFetch,
+      // Only orchestrator turns reach this driver. Actor sessions are refused
+      // above and use the dedicated-worker host.
+      ...loopCredentials,
       sessions,
       getSystemPrompt,
       appendAudit: /** @type {any} */ (auditLog.append),
       tools: toolDescriptors,
-      // why: the loop calls this each step to get the current tool list, so a
-      // mid-turn exposure change (dweb engagement, goal start/stop) shows on
-      // the next step. An actor uses a fixed-set refresh (the gate is the wall).
+      // why: the loop calls this before each model step, then re-renders the
+      // system prompt against the isolation snapshot selected here. Mid-turn
+      // exposure changes therefore update the prompt and tools together.
       refreshTools,
       toolDispatch,
       classifyToolCall,
@@ -631,6 +813,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // guard (the switch's 'stop' case is panel-only). 'aborted' here = Stop /
       // steer / a spend-limit halt — an outer goal loop must not re-drive it.
       if (ev.type === 'stop') lastStopReason = ev.stopReason;
+      // The production loop turns provider failures into stream events. Fold
+      // their outcome before the UI guard so background and Goal turns fail
+      // even when no panel is connected.
+      if (ev.type === 'error') turnOk = false;
       if (!uiConnected()) continue;
       switch (ev.type) {
         case 'state':
@@ -718,6 +904,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       : e instanceof ProviderHttpError ? `provider-http-${e.status}`
       : e instanceof UnknownProviderError ? 'unknown-provider'
       : e instanceof SessionNotFoundError ? 'session-not-found'
+      : e instanceof ActorCredentialBoundaryError ? ACTOR_CREDENTIAL_BOUNDARY_FAILURE
       : (/** @type {{ message?: string }} */ (e))?.message ?? 'unknown-error';
     turnOk = false;
     if (uiConnected()) {
@@ -728,13 +915,25 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       if (actorDisplay) uiPorts.broadcast({ type: 'turn/actor-error', parentToolUseId: actorDisplay.parentToolUseId, sessionId, error });
     }
   } finally {
-    // Capture while this turn still owns its slot. Releasing first lets a fast
-    // steered/next turn switch Apps or write bytes that get misattributed to
-    // the previous turn's checkpoint.
-    try {
-      const scope = await currentAppScope(sessionId);
-      if (scope) await checkpointMgr.capture({ scope, label: null, meta: { turn: true } });
-    } catch (e) { console.warn('[sw] post-turn snapshot failed', e); }
+    // release() drains the next queued wake synchronously. An opted-in caller
+    // therefore gets an immutable transcript + exact turn-usage snapshot while
+    // this claim still owns the slot; a later read could include turn B in turn
+    // A's reply or contribution. The extra IDB read is actor-only and opt-in.
+    if (captureTurnSnapshot === true) {
+      try {
+        const settled = await sessions.get(sessionId);
+        turnSnapshot = {
+          messages: [...(settled?.messages ?? [])],
+          usage: { ...costTracker.turn() },
+        };
+      } catch (e) { console.warn('[turn] pre-release snapshot failed', e); }
+    }
+    // A shell may also need to atomically consume in-memory turn state (for
+    // example an origin-lock stop report) before the next wake clears it.
+    if (typeof onBeforeRelease === 'function') {
+      try { await onBeforeRelease(); }
+      catch (e) { console.warn('[turn] pre-release snapshot failed', e); }
+    }
     // Self-scoped: a superseded (steered) turn unwinding late can only
     // clear its own slot, never the newer turn that replaced it.
     releaseTurnSlot();
@@ -761,7 +960,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   }
   // why: the outcome lets goal mode stop on a failed/aborted turn rather than
   // re-driving a broken condition up to the cap. Normal sends ignore it.
-  return { ok: turnOk, stopReason: lastStopReason };
+  return {
+    ok: turnOk,
+    stopReason: lastStopReason,
+    ...(turnSnapshot ? { turnSnapshot } : {}),
+  };
 };
 
 // Per-SW-lifetime dedupe for auto-resume: the interrupted message id we've

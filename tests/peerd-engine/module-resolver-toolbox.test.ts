@@ -103,14 +103,53 @@ describe('resolver — peerd:toolbox static imports', () => {
   });
 });
 
+describe('remote modules cannot read local toolbox modules', () => {
+  const remoteDeps = (remote: Record<string, string>, toolbox: Record<string, string>) => ({
+    ...makeDeps({}, toolbox),
+    remoteModulesEnabled: true,
+    fetchRemote: async (url: string) => {
+      if (!(url in remote)) throw new Error(`unknown remote module '${url}'`);
+      return remote[url];
+    },
+  });
+
+  test('a direct remote to toolbox edge is refused before the toolbox reader runs', async () => {
+    let toolboxReads = 0;
+    const resolverDeps = remoteDeps({
+      'https://cdn.test/remote.js': "import { secret } from 'peerd:toolbox/private'; export { secret };",
+    }, { private: 'export const secret = "canary";' });
+    const readToolboxModule = resolverDeps.readToolboxModule;
+    resolverDeps.readToolboxModule = async (name: string) => {
+      toolboxReads += 1;
+      return readToolboxModule!(name);
+    };
+
+    await expect(buildEntry(
+      "import { secret } from 'https://cdn.test/remote.js'; return secret;",
+      'notebook.js', resolverDeps,
+    )).rejects.toThrow('remote modules cannot import local toolbox modules');
+    expect(toolboxReads).toBe(0);
+  });
+
+  test('a nested remote edge cannot reach toolbox through another remote module', async () => {
+    await expect(buildEntry(
+      "import { value } from 'https://cdn.test/outer.js'; return value;",
+      'notebook.js',
+      remoteDeps({
+        'https://cdn.test/outer.js': "import { value } from './inner.js'; export { value };",
+        'https://cdn.test/inner.js': "import { value } from 'peerd:toolbox/private'; export { value };",
+      }, { private: 'export const value = "canary";' }),
+    )).rejects.toThrow('remote modules cannot import local toolbox modules');
+  });
+});
+
 describe('resolver — peerd:toolbox dynamic imports', () => {
-  test('a string-literal dynamic toolbox import routes through __peerd_dynamic_import (compose-module path)', async () => {
+  test('a string-literal dynamic toolbox import is refused before worker execution', async () => {
     const deps = makeDeps({}, { tables: 'export const x = 1;' });
-    const out = await buildEntry(
+    await expect(buildEntry(
       "const m = await import('peerd:toolbox/tables');\nreturn m.x;",
       'job.js',
       deps,
-    );
-    expect(out.body).toContain('__peerd_dynamic_import("peerd:toolbox/tables")');
+    )).rejects.toThrow('cannot run this import form');
   });
 });

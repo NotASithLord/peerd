@@ -19,6 +19,8 @@
 #                     same key forever, or every preview install breaks)
 #   AMO_JWT_ISSUER    addons.mozilla.org API credentials used by
 #   AMO_JWT_SECRET    `web-ext sign` for the Firefox preview package
+#   PEERD_SITE_DISPATCH_TOKEN  fine-grained token scoped only to the private
+#                     NotASithLord/peerd-site repo with Contents:write
 
 name: package-and-release
 
@@ -33,6 +35,14 @@ on:
         description: 'Recapture the side-panel visual baselines on the CI authority and upload them as an artifact to commit'
         type: boolean
         default: false
+      security_read_only:
+        description: 'Run candidate security validation without any write-capable jobs'
+        type: boolean
+        default: false
+      security_release_sha:
+        description: 'Bind an automated security release dispatch to this exact merge commit'
+        type: string
+        default: ''
 
 # Default the workflow token to read-only; jobs that write (visual's diff
 # branch + PR comment, release's assets) elevate per-job. why: the default
@@ -62,6 +72,10 @@ jobs:
     name: bun test
     runs-on: ubuntu-latest
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -72,8 +86,17 @@ jobs:
   checks:
     name: lint + boundary + drift
     runs-on: ubuntu-latest
+    # addons-linter currently depends on an image parser with a known infinite
+    # loop. This bounds a crafted PR asset until upstream publishes a fix.
+    timeout-minutes: 15
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
@@ -88,15 +111,19 @@ jobs:
         run: bun run check:boundary
       - name: Packaged import graph (no pruned-but-imported file black-screens a page)
         run: bun run check:imports
-      # The only gate that judges peerd AS a Firefox extension — every executing
-      # lane is Chrome, so a Chrome-only API reaching the Firefox package would
-      # otherwise ship green. Runs after check:imports, which stages the builds.
+      # Static Firefox package gate: AMO validation and the guarded Chrome-only
+      # API inventory. The separate firefox-runtime job installs the Store XPI
+      # and runs the shared browser suite in Gecko.
       - name: Firefox package lint (AMO validator; no unguarded Chrome-only API)
         run: bun run check:firefox
       - name: Doc path references (top-level docs point at real files)
         run: bun run check:docpaths
       - name: Source hygiene (no control bytes / tracked symlinks in source)
         run: bun run check:hygiene
+      - name: Copy hygiene (no new em dashes / assistant authorship markers)
+        env:
+          COPY_HYGIENE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bun run check:copy
       - name: Vendor integrity (extension/vendor/ matches vendor.lock.json)
         run: bun run check:vendor
       - name: Security invariants (manifest surface / dynamic code / message hosts)
@@ -140,6 +167,10 @@ jobs:
     name: in-browser tests (headless Chrome)
     runs-on: ubuntu-latest
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -156,6 +187,54 @@ jobs:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
         run: bun scripts/cdp/run-inbrowser-tests.mjs
 
+  # Runs the Firefox artifact, not only its manifest and AMO validator, then
+  # runs the shared browser suite in Gecko. Chrome remains the visual authority.
+  firefox-runtime:
+    name: Firefox Store smoke + Gecko suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.9"
+      - name: Read browser pins
+        id: browser-pins
+        shell: bash
+        run: |
+          firefox="$(tr -d '\r\n' < scripts/firefox/firefox-version.txt)"
+          geckodriver="$(tr -d '\r\n' < scripts/firefox/geckodriver-version.txt)"
+          [[ "$firefox" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]] || { echo "invalid Firefox pin: $firefox" >&2; exit 1; }
+          [[ "$geckodriver" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]] || { echo "invalid geckodriver pin: $geckodriver" >&2; exit 1; }
+          echo "firefox=$firefox" >> "$GITHUB_OUTPUT"
+          echo "geckodriver=$geckodriver" >> "$GITHUB_OUTPUT"
+      - uses: browser-actions/setup-firefox@0bc507ddf224827e3b1af68e014d5e42ab93e795 # v1.7.2
+        id: firefox
+        with:
+          firefox-version: ${{ steps.browser-pins.outputs.firefox }}
+      - uses: browser-actions/setup-geckodriver@fac5b0424c584257f32cf12c5eb4ba86014c34f8 # latest built branch, Node 24; no release tag
+        with:
+          geckodriver-version: ${{ steps.browser-pins.outputs.geckodriver }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check local TLS dependency
+        run: openssl version
+      - run: bun install --frozen-lockfile
+      - name: Run the packaged Store smoke and Gecko browser suite
+        env:
+          FIREFOX_PATH: ${{ steps.firefox.outputs.firefox-path }}
+        run: bun run test:firefox
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: firefox-runtime-diagnostics
+          path: artifacts/firefox-runtime/
+          if-no-files-found: ignore
+          retention-days: 7
+
   # Additive job — the headless TWO-PEER dweb integration test (TESTING.md
   # §B–F), previously a manual two-Chrome-profile checklist. Stands up the local
   # signaling node and opens two real browser contexts that must form a WebRTC
@@ -164,6 +243,10 @@ jobs:
     name: dweb two-peer (headless WebRTC)
     runs-on: ubuntu-latest
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -220,6 +303,10 @@ jobs:
     name: dweb netproc (multi-process nodes)
     runs-on: ubuntu-latest
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -242,10 +329,15 @@ jobs:
     name: e2e (side panel)
     runs-on: ubuntu-latest
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
+      - run: bun install --frozen-lockfile --ignore-scripts
       # why setup-chrome: it installs the system libraries headless Chrome
       # needs. We then run against Chrome for Testing (branded Chrome ignores
       # --load-extension), which reuses those libs.
@@ -262,6 +354,16 @@ jobs:
         # smoke, goal mode, stop, error — against ONE Chrome (env-independent;
         # visual states are excluded here as their baselines are per-machine).
         run: bun run test:e2e:all
+      - name: Exercise the MV3 lifecycle fault boundary
+        env:
+          CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
+        run: bun run test:e2e:lifecycle
+      - name: Upload MV3 lifecycle diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: chrome-lifecycle-diagnostics
+          path: artifacts/chrome-lifecycle/
 
   # The VISUAL lane: render the side panel, compare against the committed
   # baselines, go red when the UI moved. NOT in required checks until it has a
@@ -283,6 +385,14 @@ jobs:
     # instead of comparing). A distinct name means a reseed can never satisfy
     # the gating check. Otherwise this display name stays stable.
     name: "visual (render)${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines && ' (reseed baselines)' || '' }}"
+    # A prepared Dependabot head can contain a candidate Action SHA. Never let
+    # that candidate share this job's repository-write token.
+    if: >-
+      !(github.event_name == 'pull_request' &&
+        github.event.pull_request.user.login == 'dependabot[bot]') &&
+      !(github.event_name == 'workflow_dispatch' &&
+        (inputs.security_read_only ||
+          startsWith(github.ref, 'refs/tags/security-validation-pr-')))
     # PINNED, not ubuntu-latest: `latest` migrates between images, and a
     # freetype/fontconfig bump would re-rasterize every glyph in every baseline.
     runs-on: ubuntu-24.04
@@ -295,6 +405,10 @@ jobs:
       VISUAL_PLATFORM: linux-x64
       TZ: UTC
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -516,6 +630,10 @@ jobs:
     name: packaged page boot
     runs-on: ubuntu-latest
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -544,6 +662,10 @@ jobs:
         channel: [store, preview]
         browser: [chrome, firefox]
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -594,9 +716,14 @@ jobs:
 
   release:
     name: GitHub Release (preview channel)
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') &&
+      (github.event_name != 'workflow_dispatch' ||
+        (inputs.security_release_sha != '' && inputs.security_release_sha == github.sha))
     runs-on: ubuntu-latest
-    needs: [test, checks, package]
+    # Bound the same image-validation exposure on the trusted signing path.
+    timeout-minutes: 30
+    needs: [test, checks, firefox-runtime, package]
     # The one job that holds signing secrets. Bound to a GitHub Environment so
     # the secrets can be scoped to it AND protection rules (required reviewers,
     # tag-pattern restrictions) can gate every run that touches the signing
@@ -610,6 +737,10 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -624,6 +755,19 @@ jobs:
             echo "::error::tag v$TAG_VERSION does not match package.json version $PKG_VERSION"
             exit 1
           fi
+
+      # Required once the release environment's manual reviewer is removed for
+      # verified security auto-releases: a v* tag is not sufficient authority
+      # on its own. The exact tagged commit must already be reachable from the
+      # protected main branch before this job is allowed to read signing keys.
+      - name: Require the tagged commit to belong to protected main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo '::error::release tag does not point to a commit on origin/main'
+            exit 1
+          }
 
       - name: Require signing credentials
         env:
@@ -779,6 +923,19 @@ jobs:
               --notes-file "$RUNNER_TEMP/release-notes.md" \
               "${ASSETS[@]}"
           fi
+
+      - name: Trigger peerd.ai feed deployment
+        env:
+          GH_TOKEN: ${{ secrets.PEERD_SITE_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::PEERD_SITE_DISPATCH_TOKEN is not set; peerd-site's scheduled sync remains the fallback"
+            exit 0
+          fi
+          gh api --method POST repos/NotASithLord/peerd-site/dispatches \
+            -f event_type=peerd-release \
+            -F "client_payload[tag]=$GITHUB_REF_NAME"
 
       # The feeds are committed so the repo (and the peerd.ai site deploy,
       # which serves update-feeds/ at /updates/) always reflects the

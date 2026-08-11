@@ -43,6 +43,8 @@ const flush = async () => {
   m.redraw.sync();
 };
 
+const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+
 /**
  * @param {FakeSend} send
  * @param {{ dweb?: boolean }} [attrs]
@@ -114,6 +116,24 @@ describe('home.library', () => {
     } finally { unmount(); }
   });
 
+  it('moves focus through the actions menu and returns it on Escape', async () => {
+    const { root, unmount } = await mountView(makeSend());
+    try {
+      const trigger = need(root, '.library-kebab', HTMLButtonElement);
+      trigger.focus();
+      trigger.click();
+      await flush();
+      expect(document.activeElement?.textContent).toBe('Rename');
+      document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      expect(document.activeElement?.textContent).toBe('History & Git');
+      document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await flush();
+      await nextFrame();
+      expect(root.querySelector('.library-menu')).toBeFalsy();
+      expect(document.activeElement).toBe(trigger);
+    } finally { unmount(); }
+  });
+
   it('tapping a star dispatches apps/favorite', async () => {
     const send = makeSend();
     const { root, unmount } = await mountView(send);
@@ -136,9 +156,38 @@ describe('home.library', () => {
       clickText(root, '.library-menu-item', 'Delete');   // arms
       await flush();
       expect(send.calls.some((c) => c.type === 'apps/delete')).toBe(false);
-      clickText(root, '.library-menu-item', 'Delete?');  // confirms
+      const confirm = /** @type {HTMLElement} */ (byText(root, '.library-menu-item', 'Delete?'));
+      confirm.focus();
+      confirm.click();                                  // confirms
       await flush();
+      await nextFrame();
       expect(send.calls.some((c) => c.type === 'apps/delete')).toBe(true);
+      expect(document.activeElement?.getAttribute('data-library-action')).toBe('open');
+      expect(document.activeElement?.closest('.library-card')?.textContent).toContain('Calculator');
+    } finally { unmount(); }
+  });
+
+  it('announces a failed delete and restores focus to the surviving card menu', async () => {
+    const send = makeSend({
+      'apps/delete': () => ({
+        ok: false,
+        error: 'Could not stop sharing, so your local App was kept. Try again when the dweb is available.',
+      }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      need(root, '.library-kebab').click();
+      await flush();
+      clickText(root, '.library-menu-item', 'Delete');
+      await flush();
+      const confirm = /** @type {HTMLElement} */ (byText(root, '.library-menu-item', 'Delete?'));
+      confirm.focus();
+      confirm.click();
+      await flush();
+      await nextFrame();
+      expect(root.querySelector('[role="alert"]')?.textContent).toContain('local App was kept');
+      expect(document.activeElement?.getAttribute('data-library-action')).toBe('more');
+      expect(document.activeElement?.closest('.library-card')?.textContent).toContain('Snake Game');
     } finally { unmount(); }
   });
 
@@ -177,8 +226,10 @@ describe('home.library', () => {
       await flush();
       clickText(root, '.library-share button', 'Share');
       await flush();
+      await nextFrame();
       const call = send.calls.find((c) => c.type === 'dweb/base/share-app');
       expect(call?.slug).toBe('my-cool-app');    // slugified
+      expect(document.activeElement?.getAttribute('data-library-action')).toBe('share');
     } finally { unmount(); }
   });
 
@@ -215,9 +266,60 @@ describe('home.library', () => {
       expect(root.textContent).toContain('new version available');
       clickText(root, 'button', 'Update');
       await flush();
+      await nextFrame();
       const call = send.calls.find((c) => c.type === 'dweb/base/update-app');
       expect(call?.appId).toBe('app-7');
       expect(call?.uri).toBe('peerd://x/v2');
+      expect(document.activeElement?.getAttribute('data-library-action')).toBe('open');
+    } finally { unmount(); }
+  });
+
+  it('reports a committed update cleanup warning without calling the update failed', async () => {
+    const installed = [{ id: 'app-7', name: 'Notes', tags: [], entryFile: 'index.html',
+      favorite: false, source: 'dweb', thumbnail: null, updatedAt: 4000,
+      dweb: { dwapp_id: 'D', version_id: 'v1', seq: 1, uri: 'peerd://x/v1' } }];
+    const send = makeSend({
+      'apps/list': () => ({ ok: true, apps: structuredClone(installed) }),
+      'dweb/base/updates': () => ({ ok: true, updates: { 'app-7': { uri: 'peerd://x/v2', version_id: 'v2', seq: 2, name: 'Notes', slug: 'notes', dwapp_id: 'D' } } }),
+      'dweb/base/update-app': () => ({
+        ok: true,
+        app: { ...installed[0], dweb: { ...installed[0].dweb, version_id: 'v2', seq: 2 } },
+        warning: 'previous-version-cleanup-pending',
+        cleanupPending: true,
+      }),
+    });
+    const { root, unmount } = await mountView(send, { dweb: true });
+    try {
+      await flush();
+      clickText(root, 'button', 'Update');
+      await flush();
+      expect(root.textContent).toContain('The update was installed. Older shared bytes will be cleaned up');
+      expect(root.textContent.includes('update failed')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('reports both audit and cleanup warnings after a committed update', async () => {
+    const installed = [{ id: 'app-7', name: 'Notes', tags: [], entryFile: 'index.html',
+      favorite: false, source: 'dweb', thumbnail: null, updatedAt: 4000,
+      dweb: { dwapp_id: 'D', version_id: 'v1', seq: 1, uri: 'peerd://x/v1' } }];
+    const send = makeSend({
+      'apps/list': () => ({ ok: true, apps: structuredClone(installed) }),
+      'dweb/base/updates': () => ({ ok: true, updates: { 'app-7': { uri: 'peerd://x/v2', version_id: 'v2', seq: 2, name: 'Notes', slug: 'notes', dwapp_id: 'D' } } }),
+      'dweb/base/update-app': () => ({
+        ok: true,
+        app: { ...installed[0], dweb: { ...installed[0].dweb, version_id: 'v2', seq: 2 } },
+        warning: 'audit-write-failed',
+        warnings: ['audit-write-failed', 'previous-version-cleanup-pending'],
+        cleanupPending: true,
+      }),
+    });
+    const { root, unmount } = await mountView(send, { dweb: true });
+    try {
+      await flush();
+      clickText(root, 'button', 'Update');
+      await flush();
+      expect(root.textContent).toContain('security audit entry could not be written');
+      expect(root.textContent).toContain('Older shared bytes will be cleaned up');
     } finally { unmount(); }
   });
 
@@ -229,7 +331,7 @@ describe('home.library', () => {
       'apps/list': () => ({ ok: true, apps: structuredClone(installed) }),
       'dweb/base/updates': () => ({ ok: true, updates: { 'app-7': { uri: 'peerd://x/v2', version_id: 'v2', seq: 2, name: 'Notes', slug: 'notes', dwapp_id: 'D', changelog: 'Improve sync' } } }),
       'dweb/base/update-app': (msg) => msg.strategy === 'fork'
-        ? { ok: true, app: { dweb: { version_id: 'v2' } }, fork: { id: 'fork-1', name: 'Notes — local fork' } }
+        ? { ok: true, app: { dweb: { version_id: 'v2' } }, fork: { id: 'fork-1', name: 'Notes: local fork' } }
         : { ok: false, error: 'local-changes' },
     });
     const { root, unmount } = await mountView(send, { dweb: true });
@@ -260,6 +362,7 @@ describe('home.library', () => {
       await flush();
       clickText(root, '.library-menu-item', 'History & Git');
       await flush();
+      expect(need(root, '.library-card').classList.contains('is-expanded')).toBe(true);
       expect(root.textContent).toContain('1 uncommitted change');
       expect(root.textContent).toContain('checkpoint');
       clickText(root, '.library-commit button', 'Diff');

@@ -1,6 +1,10 @@
 import { describe, test, expect } from 'bun:test';
 import { makeEngineRoutes } from '../../extension/background/routes/engine.js';
+import { createAppQuiescence } from '../../extension/background/app-quiescence.js';
+import { listOffscreenContexts } from '../../extension/background/offscreen-contexts.js';
+import { requireDenylistPolicy } from '../../extension/background/denylist-store.js';
 import { parseAppManifest } from '../../extension/peerd-engine/app-manifest.js';
+import { podGitRemoteOperation } from '../../extension/peerd-engine/pod-shell.js';
 
 class ArtifactTooLargeError extends Error {}
 class EnvelopeFormatError extends Error {}
@@ -10,7 +14,13 @@ const baseDeps = (over: any = {}) => ({
   vault: { isLocked: () => false },
   auditLog: { append: async () => {} },
   pushState: () => {},
-  browser: { storage: { local: { get: async () => ({}), set: async () => {} } } },
+  browser: {
+    runtime: {
+      getContexts: async () => [], sendMessage: async () => ({ ok: true }),
+      getURL: (path: string) => `moz-extension://peerd/${path}`,
+    },
+    storage: { local: { get: async () => ({}), set: async () => {} } },
+  },
   // #53: engine's sw/web-fetch now delegates to the vm-net vmHttpFetch factory
   // (cache + host-bound git-auth + body cap + base64 — those are covered by
   // tests/peerd-engine/vm-net/vm-http-fetch.test.ts). engine.js only validates
@@ -26,12 +36,25 @@ const baseDeps = (over: any = {}) => ({
   podRegistry: { get: async (id: string) => (id === 'pod-1' ? { id, name: 'Pod' } : null) },
   podTabTracker: { getTabId: (id: string) => (id === 'pod-1' ? 99 : null) },
   appClient: {
-    open: async () => {}, create: async () => ({ id: 'imported' }),
-    readFile: async () => JSON.stringify({ schema: 1, kind: 'app', entry: 'index.html', agent: { kind: 'bound-app' }, capabilities: [] }),
+    open: async () => {},
+    create: async () => ({ id: 'imported' }),
+    readFile: async () => JSON.stringify({
+      schema: 1, kind: 'app', entry: 'index.html',
+      agent: { kind: 'bound-app' }, capabilities: [],
+    }),
     listFiles: async () => [{ path: '/index.html' }, { path: '/peerd.json' }],
+    snapshotFiles: async () => ({
+      record: { id: 'a1', name: 'App', entryFile: 'index.html', fileKinds: { 'index.html': 'text' } },
+      files: { 'index.html': new TextEncoder().encode('<h1>x</h1>') },
+    }),
   },
-  appTabTracker: { reloadTab: async () => {} },
-  opfsHelpers: () => ({ list: async () => [], read: async () => '', write: async () => {} }),
+  appTabTracker: {
+    reloadTab: async () => {}, getTabId: () => null,
+    quiesceTab: async () => true, resumeTab: async () => true,
+    closeTab: async () => {}, ensureTab: async () => {},
+  },
+  appQuiescence: { run: async (_appId: string, operation: () => Promise<any>) => operation() },
+  opfsHelpers: () => ({ list: async () => [], read: async () => '', readBytes: async () => new Uint8Array(), write: async () => {} }),
   NOTEBOOK_OPFS_ROOT: 'peerd-notebooks',
   IMAGE_PIN_STORAGE_KEY: 'vm.imagePins',
   buildAppExport: async () => ({ env: 'app' }),
@@ -41,73 +64,104 @@ const baseDeps = (over: any = {}) => ({
   inspectEnvelope: async () => ({ ok: true, summary: 'x' }),
   exportFilename: (name: string, kind: string) => `${name}.${kind}.peerd`,
   ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
-  ensureOffscreen: async () => {},
   settingsStore: { get: () => ({ dwebEnabled: false }) },
   DWEB_ENABLED: false,
+  withDwebPublication: async (operation: (isCurrent: () => boolean) => Promise<any>) => operation(() => true),
+  withAppLifecycle: async (_appId: string, operation: () => Promise<any>) => operation(),
+  listOffscreenContexts,
+  isOffscreenSender: (sender: any) => sender?.url === 'moz-extension://peerd/offscreen/offscreen.html',
+  assertOpfsWritable: async () => {},
   // The SW always injects the extract post-step (a passthrough when extract is
   // absent — that contract is pinned in tests/shared/fetch-extract.test.ts).
   applyWebExtract: async (resp: any) => resp,
+  awaitDenylistPolicy: async () => {},
   parseAppManifest,
-  kv: { get: async () => ({}), set: async () => {} },
+  podGitRemoteOperation,
   repositories: {
     init: async () => 'abc123456789',
     status: async () => ({ oid: 'abc', branch: 'main', dirty: false, changed: [] }),
-    stage: async () => ({ staged: [] }), commit: async () => ({ oid: 'abc', changed: [], created: false }),
-    history: async () => [], branches: async () => ['main'], branch: async (_ref: any, opts: any) => ({ branch: opts.name }),
+    stage: async () => ({ staged: [] }),
+    commit: async () => ({ oid: 'abc', changed: [], created: false }),
+    history: async () => [],
+    branches: async () => ['main'],
+    branch: async (_ref: any, opts: any) => ({ branch: opts.name }),
     checkout: async (_ref: any, opts: any) => ({ branch: opts.name, oid: 'abc' }),
     clone: async (_ref: any, opts: any) => ({ remote: { url: opts.url } }),
     fetch: async () => ({ remote: { url: 'https://github.com/a/b.git' } }),
     push: async () => ({ ok: true, branch: 'main', remote: { url: 'https://github.com/a/b.git' } }),
-    setRemote: async (_ref: any, opts: any) => ({ url: opts.url }), getRemote: async () => null,
-    coordinate: async (_ref: any, operation: any) => operation(), destroy: async () => {},
+    setRemote: async (_ref: any, opts: any) => ({ url: opts.url }),
+    getRemote: async () => null,
+    statusApp: async () => ({ oid: 'abc', branch: 'main', dirty: false, changed: [] }),
+    getAppRemote: async () => null,
+    historyApp: async () => [],
+    diffApp: async () => ({ files: [], patch: '', truncated: false }),
+    commitApp: async () => ({ oid: 'abc', changed: [], created: false }),
+    restoreApp: async (_id: string, opts: any) => ({ oid: opts.to, restored: true }),
+    coordinate: async (_ref: any, operation: any) => operation(),
+    destroy: async () => {},
   },
   ...over,
 });
 
-describe('pod/git — instance-pinned isomorphic-git shell bridge', () => {
+describe('pod/git: instance-pinned isomorphic-git shell bridge', () => {
   const sender = { tab: { id: 99 } };
 
   test('refuses a first-party page that is not the Pod\'s owning tab', async () => {
     const routes = makeEngineRoutes(baseDeps());
-    expect(await routes['pod/git']({ podId: 'pod-1', argv: ['status'] }, { tab: { id: 12 } }))
-      .toEqual({ ok: false, error: 'pod-sender-not-instance-pinned' });
+    expect(await routes['pod/git'](
+      { podId: 'pod-1', argv: ['status'] },
+      { tab: { id: 12 } },
+    )).toEqual({ ok: false, error: 'pod-sender-not-instance-pinned' });
   });
 
-  test('maps local shell Git to the existing repository service', async () => {
+  test('maps local shell Git to the exact Pod repository', async () => {
     let seen: any = null;
-    const routes = makeEngineRoutes(baseDeps({
-      repositories: {
-        ...baseDeps().repositories,
-        status: async (ref: any) => { seen = ref; return { branch: 'main', changed: [{ status: 'modified', path: 'a.txt' }] }; },
-      },
-    }));
-    const reply = await routes['pod/git']({ podId: 'pod-1', argv: ['status'] }, sender);
+    const deps = baseDeps();
+    deps.repositories.status = async (ref: any) => {
+      seen = ref;
+      return { branch: 'main', changed: [{ status: 'modified', path: 'a.txt' }] };
+    };
+    const reply = await makeEngineRoutes(deps)['pod/git'](
+      { podId: 'pod-1', argv: ['status'] }, sender,
+    );
     expect(seen).toEqual({ kind: 'pod', id: 'pod-1' });
     expect(reply).toMatchObject({ ok: true, result: { exitCode: 0 } });
     expect(reply.result.stdout).toContain('modified a.txt');
   });
 
-  test('remote operations fail closed without the one-job grant', async () => {
+  test('remote operations fail closed without an exact one-job grant', async () => {
     let pushed = false;
     const deps = baseDeps();
+    deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
     deps.repositories.push = async () => { pushed = true; return { ok: true }; };
     const routes = makeEngineRoutes(deps);
-    const reply = await routes['pod/git']({ podId: 'pod-1', argv: ['push', 'origin', 'main'] }, sender);
-    expect(reply.result.exitCode).toBe(126);
-    expect(reply.result.stderr).toContain('explicit authorization');
+    const missing = await routes['pod/git'](
+      { podId: 'pod-1', argv: ['push', 'origin', 'main'] }, sender,
+    );
+    const mismatched = await routes['pod/git']({
+      podId: 'pod-1', argv: ['push', 'origin', 'main'],
+      remoteGrant: { op: 'fetch', url: 'https://github.com/a/b.git' },
+    }, sender);
+    const wrongTarget = await routes['pod/git']({
+      podId: 'pod-1', argv: ['push', 'origin', 'main'],
+      remoteGrant: { op: 'push', url: 'https://evil.example/x.git' },
+    }, sender);
+    for (const reply of [missing, mismatched, wrongTarget]) {
+      expect(reply.result.exitCode).toBe(126);
+      expect(reply.result.stderr).toContain('explicit authorization');
+    }
     expect(pushed).toBe(false);
   });
 
-  test('an explicitly granted remote operation reaches the brokered service', async () => {
+  test('an exact grant reaches the brokered transport with a cancellation signal', async () => {
     let pushedRef: any = null;
     const deps = baseDeps();
+    deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
     deps.repositories.push = async (ref: any, opts: any) => {
       pushedRef = { ref, opts };
       return { ok: true, branch: 'main', remote: { url: 'https://github.com/a/b.git' } };
     };
-    deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
-    const routes = makeEngineRoutes(deps);
-    const reply = await routes['pod/git']({
+    const reply = await makeEngineRoutes(deps)['pod/git']({
       podId: 'pod-1', jobId: 'job-authorized', argv: ['push', 'origin', 'main'],
       remoteGrant: { op: 'push', url: 'https://github.com/a/b.git' },
     }, sender);
@@ -117,20 +171,33 @@ describe('pod/git — instance-pinned isomorphic-git shell bridge', () => {
     expect(pushedRef.opts.signal).toBeInstanceOf(AbortSignal);
   });
 
-  test('an op- or target-mismatched grant fails closed', async () => {
-    let pushed = false;
+  test('validates the granted target and pushes under one repository coordinator', async () => {
+    let coordinated = false;
+    const order: string[] = [];
     const deps = baseDeps();
-    deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
-    deps.repositories.push = async () => { pushed = true; return { ok: true }; };
-    const routes = makeEngineRoutes(deps);
-    for (const remoteGrant of [
-      { op: 'fetch', url: 'https://github.com/a/b.git' },
-      { op: 'push', url: 'https://evil.example/x.git' },
-    ]) {
-      const reply = await routes['pod/git']({ podId: 'pod-1', argv: ['push', 'origin', 'main'], remoteGrant }, sender);
-      expect(reply.result.exitCode).toBe(126);
-    }
-    expect(pushed).toBe(false);
+    deps.repositories.coordinate = async (ref: any, operation: any) => {
+      expect(ref).toEqual({ kind: 'pod', id: 'pod-1' });
+      coordinated = true;
+      order.push('lock');
+      try { return await operation(); }
+      finally { coordinated = false; order.push('unlock'); }
+    };
+    deps.repositories.getRemote = async () => {
+      expect(coordinated).toBe(true);
+      order.push('remote');
+      return { url: 'https://github.com/a/b.git' };
+    };
+    deps.repositories.push = async () => {
+      expect(coordinated).toBe(true);
+      order.push('push');
+      return { ok: true, branch: 'main', remote: { url: 'https://github.com/a/b.git' } };
+    };
+    const reply = await makeEngineRoutes(deps)['pod/git']({
+      podId: 'pod-1', jobId: 'job-coordinated', argv: ['push', 'origin', 'main'],
+      remoteGrant: { op: 'push', url: 'https://github.com/a/b.git' },
+    }, sender);
+    expect(reply.result.exitCode).toBe(0);
+    expect(order).toEqual(['lock', 'remote', 'push', 'unlock']);
   });
 
   test('job cancellation aborts an in-flight remote Git transport', async () => {
@@ -139,7 +206,7 @@ describe('pod/git — instance-pinned isomorphic-git shell bridge', () => {
     deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
     deps.repositories.push = async (_ref: any, opts: any) => {
       seenSignal = opts.signal;
-      await new Promise((resolve, reject) => {
+      await new Promise((_resolve, reject) => {
         opts.signal.addEventListener('abort', () => reject(new Error('git operation aborted')), { once: true });
       });
     };
@@ -149,14 +216,149 @@ describe('pod/git — instance-pinned isomorphic-git shell bridge', () => {
       remoteGrant: { op: 'push', url: 'https://github.com/a/b.git' },
     }, sender);
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const cancelled = await routes['pod/cancel-io']({ podId: 'pod-1', jobId: 'job-cancel-me' }, sender);
+    const cancelled = await routes['pod/cancel-io'](
+      { podId: 'pod-1', jobId: 'job-cancel-me' }, sender,
+    );
     expect(cancelled).toMatchObject({ ok: true, cancelled: 1 });
     expect((seenSignal as AbortSignal | null)?.aborted).toBe(true);
     expect((await running).result.stderr).toContain('aborted');
   });
 });
 
+describe('App repository quiescence', () => {
+  for (const [routeName, message, repositoryMethod] of [
+    ['apps/repository/commit', { appId: 'a1', message: 'save' }, 'commitApp'],
+    ['apps/repository/push', { appId: 'a1' }, 'push'],
+    ['apps/repository/restore', { appId: 'a1', to: 'old' }, 'restoreApp'],
+    ['apps/repository/checkout', { appId: 'a1', name: 'feature' }, 'checkout'],
+  ] as const) {
+    test(`${routeName} flushes and closes the App before taking its repository lock`, async () => {
+      const order: string[] = [];
+      const tracker = {
+        getTabId: () => 41,
+        quiesceTab: async () => { order.push('flush'); return true; },
+        resumeTab: async () => { order.push('resume'); return true; },
+        closeTab: async () => { order.push('close'); return true; },
+        ensureTab: async () => { order.push('reopen'); return 41; },
+        reloadTab: async () => true,
+      };
+      const deps = baseDeps({
+        appTabTracker: tracker,
+        appQuiescence: createAppQuiescence({
+          tracker,
+          withLifecycle: async (_appId, operation) => {
+            order.push('lifecycle');
+            try { return await operation(); }
+            finally { order.push('lifecycle-release'); }
+          },
+          afterClose: async () => {},
+        }),
+      });
+      deps.repositories.coordinate = async (_ref: any, operation: () => Promise<any>) => {
+        order.push('lock');
+        try { return await operation(); }
+        finally { order.push('unlock'); }
+      };
+      deps.repositories.commitApp = async () => {
+        order.push(repositoryMethod === 'commitApp' ? 'operation' : 'checkpoint');
+        return { oid: 'new', changed: [], created: true };
+      };
+      deps.repositories.push = async () => {
+        order.push('operation');
+        return { ok: true, branch: 'main', remote: { host: 'github.com', url: 'https://github.com/a/b.git' } };
+      };
+      deps.repositories.restoreApp = async () => { order.push('operation'); return { oid: 'old', restored: true }; };
+      deps.repositories.checkout = async () => { order.push('operation'); return { oid: 'new', branch: 'feature' }; };
+      const result = await makeEngineRoutes(deps)[routeName](message);
+      expect(result.ok).toBe(true);
+      const operationOrder = repositoryMethod === 'push'
+        ? ['lifecycle', 'flush', 'close', 'lock', 'checkpoint', 'operation', 'unlock', 'reopen', 'lifecycle-release']
+        : ['lifecycle', 'flush', 'close', 'lock', 'operation', 'unlock', 'reopen', 'lifecycle-release'];
+      expect(order).toEqual(operationOrder);
+    });
+  }
+
+  test('a failed editor flush prevents close and repository mutation', async () => {
+    let closed = false;
+    let mutated = false;
+    const tracker = {
+      getTabId: () => 41,
+      quiesceTab: async () => { throw new Error('save failed'); },
+      resumeTab: async () => true,
+      closeTab: async () => { closed = true; return true; },
+      ensureTab: async () => 41,
+      reloadTab: async () => true,
+    };
+    const deps = baseDeps({
+      appTabTracker: tracker,
+      appQuiescence: createAppQuiescence({
+        tracker,
+        withLifecycle: async (_appId, operation) => operation(),
+        afterClose: async () => {},
+      }),
+    });
+    deps.repositories.commitApp = async () => { mutated = true; return {}; };
+    const result = await makeEngineRoutes(deps)['apps/repository/commit']({ appId: 'a1' });
+    expect(result).toEqual({ ok: false, error: 'save failed' });
+    expect(closed).toBe(false);
+    expect(mutated).toBe(false);
+  });
+});
+
+describe('lifecycle/assert-opfs-writable', () => {
+  test('the Firefox Notebook host reaches the authoritative write posture', async () => {
+    let checks = 0;
+    const routes = makeEngineRoutes(baseDeps({
+      assertOpfsWritable: async () => { checks += 1; },
+    }));
+    const result = await (routes['lifecycle/assert-opfs-writable'] as any)(
+      {}, { url: 'moz-extension://peerd/engine-tabs/notebook-tab/index.html#nb-1' });
+    expect(result).toEqual({ ok: true });
+    expect(checks).toBe(1);
+  });
+
+  test('the offscreen host reaches the same posture', async () => {
+    let checks = 0;
+    const routes = makeEngineRoutes(baseDeps({
+      assertOpfsWritable: async () => { checks += 1; },
+    }));
+    const result = await (routes['lifecycle/assert-opfs-writable'] as any)(
+      {}, { url: 'moz-extension://peerd/offscreen/offscreen.html' });
+    expect(result).toEqual({ ok: true });
+    expect(checks).toBe(1);
+  });
+
+  test('blocked posture returns the precise refusal without mutating', async () => {
+    const routes = makeEngineRoutes(baseDeps({
+      assertOpfsWritable: async () => {
+        throw new Error("store 'opfs-workspaces' is read-only. No data was changed. Diagnostic: opfs-v2.");
+      },
+    }));
+    const result = await (routes['lifecycle/assert-opfs-writable'] as any)(
+      {}, { url: 'moz-extension://peerd/engine-tabs/notebook-tab/index.html#nb-1' });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("'opfs-workspaces'");
+    expect(result.error).toContain('No data was changed');
+    expect(result.error).toContain('opfs-v2');
+  });
+
+  test('an unrelated extension page cannot probe the posture', async () => {
+    let checks = 0;
+    const routes = makeEngineRoutes(baseDeps({
+      assertOpfsWritable: async () => { checks += 1; },
+    }));
+    const result = await (routes['lifecycle/assert-opfs-writable'] as any)(
+      {}, { url: 'moz-extension://peerd/sidepanel/sidepanel.html' });
+    expect(result).toEqual({ ok: false, error: 'unauthorized OPFS posture request' });
+    expect(checks).toBe(0);
+  });
+});
+
 describe('sw/web-fetch', () => {
+  test('denylist hydration is a required route dependency', () => {
+    expect(() => makeEngineRoutes(baseDeps({ awaitDenylistPolicy: undefined })))
+      .toThrow('awaitDenylistPolicy is required');
+  });
   test('rejects empty url', async () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['sw/web-fetch']({ url: '' })).toEqual({ ok: false, error: 'url-required' });
@@ -178,6 +380,39 @@ describe('sw/web-fetch', () => {
     const res = await r['sw/web-fetch']({ url: 'https://x' });
     expect(res.ok).toBe(false);
     expect(res.error).toContain('body too large');
+  });
+
+  // The denylist seed hydrates async at SW boot. A fetch racing a cold start
+  // must WAIT for the one-time load (not refuse), and a genuinely failed load
+  // must still refuse before any egress. The injected gate mirrors the SW's
+  // composition exactly: requireDenylistPolicy(await denylistReady).
+  test('a fetch racing seed hydration waits for the load instead of refusing', async () => {
+    const order: string[] = [];
+    let releaseHydration: (value: { ok: boolean }) => void = () => {};
+    const denylistReady = new Promise<{ ok: boolean }>((resolve) => { releaseHydration = resolve; });
+    const r = makeEngineRoutes(baseDeps({
+      awaitDenylistPolicy: async () => { requireDenylistPolicy(await denylistReady); },
+      vmHttpFetch: async () => { order.push('fetch'); return { ok: true, status: 200, headers: {}, bodyB64: btoa('hello') }; },
+    }));
+    const pending = r['sw/web-fetch']({ url: 'https://x' });
+    await Promise.resolve();
+    order.push('hydrated');
+    releaseHydration({ ok: true });
+    const res = await pending;
+    expect(res.ok).toBe(true);
+    expect(order).toEqual(['hydrated', 'fetch']);
+  });
+  test('a failed seed hydration refuses the fetch before any egress', async () => {
+    let fetched = false;
+    const r = makeEngineRoutes(baseDeps({
+      awaitDenylistPolicy: async () => { requireDenylistPolicy(await Promise.resolve({ ok: false })); },
+      vmHttpFetch: async () => { fetched = true; return { ok: true }; },
+    }));
+    expect(await r['sw/web-fetch']({ url: 'https://x' })).toEqual({
+      ok: false,
+      error: 'The sensitive-origin policy is unavailable. Network access is blocked.',
+    });
+    expect(fetched).toBe(false);
   });
 
   // Design 02, 2a: the Notebook tab's code-mode bridge widened this route with
@@ -212,6 +447,154 @@ describe('sw/web-fetch', () => {
     expect(raw.extracted).toBeUndefined();
     expect(seenExtract).toBeUndefined();
   });
+
+  test('a run-scoped fetch needs exact offscreen provenance and a live owner capability', async () => {
+    let fetched = false;
+    let admissions = 0;
+    const controller = new AbortController();
+    const routes = makeEngineRoutes(baseDeps({
+      vmHttpFetch: async () => { fetched = true; return { ok: true }; },
+      isOffscreenSender: (sender: any) => sender?.url === 'offscreen',
+      scriptRuns: {
+        ownerFor: () => 'owner-1',
+        allows: () => true,
+        admitOp: () => { admissions += 1; return true; },
+        signalFor: () => controller.signal,
+      },
+    }));
+    const forged = await (routes['sw/web-fetch'] as any)({
+      url: 'https://example.com', runId: 'run-1', ownerSessionId: 'owner-1',
+    }, { url: 'engine-tab' });
+    expect(forged).toEqual({ ok: false, error: 'web_fetch_unknown_finished_foreign_or_over_limit_run' });
+    expect(fetched).toBe(false);
+    expect(admissions).toBe(0);
+  });
+
+  test('Stop aborts an admitted run-scoped fetch through the injected HTTP signal', async () => {
+    const controller = new AbortController();
+    let seenSignal: AbortSignal | undefined;
+    const routes = makeEngineRoutes(baseDeps({
+      vmHttpFetch: async ({ signal }: any) => {
+        seenSignal = signal;
+        return await new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        });
+      },
+      isOffscreenSender: (sender: any) => sender?.url === 'offscreen',
+      scriptRuns: {
+        ownerFor: () => 'owner-1',
+        allows: (_runId: string, cap: string) => cap === 'egress',
+        admitOp: () => true,
+        signalFor: () => controller.signal,
+      },
+    }));
+    const pending = (routes['sw/web-fetch'] as any)({
+      url: 'https://example.com', runId: 'run-1', ownerSessionId: 'owner-1',
+      deadlineAt: Date.now() + 10_000,
+    }, { url: 'offscreen' });
+    for (let attempt = 0; attempt < 10 && !seenSignal; attempt += 1) await Promise.resolve();
+    expect(seenSignal).toBeDefined();
+    controller.abort();
+    expect(await pending).toEqual({ ok: false, error: 'aborted' });
+    expect(seenSignal?.aborted).toBe(true);
+  });
+
+  test('Stop during unresolved denylist hydration admits then exits without egress', async () => {
+    const controller = new AbortController();
+    let hydrationStarted = false;
+    let fetched = false;
+    let admissions = 0;
+    const routes = makeEngineRoutes(baseDeps({
+      awaitDenylistPolicy: () => {
+        hydrationStarted = true;
+        return new Promise(() => {});
+      },
+      vmHttpFetch: async () => { fetched = true; return { ok: true }; },
+      isOffscreenSender: (sender: any) => sender?.url === 'offscreen',
+      scriptRuns: {
+        ownerFor: () => 'owner-1', allows: () => true,
+        admitOp: () => { admissions += 1; return true; },
+        signalFor: () => controller.signal,
+      },
+    }));
+    const pending = (routes['sw/web-fetch'] as any)({
+      url: 'https://example.com', runId: 'run-1', ownerSessionId: 'owner-1',
+      deadlineAt: Date.now() + 10_000,
+    }, { url: 'offscreen' });
+    await Promise.resolve();
+    expect(hydrationStarted).toBe(true);
+    expect(admissions).toBe(1);
+    controller.abort();
+    expect(await pending).toEqual({ ok: false, error: 'aborted' });
+    expect(fetched).toBe(false);
+  });
+
+  test('deadline during unresolved denylist hydration exits without egress', async () => {
+    let fetched = false;
+    const routes = makeEngineRoutes(baseDeps({
+      awaitDenylistPolicy: () => new Promise(() => {}),
+      vmHttpFetch: async () => { fetched = true; return { ok: true }; },
+      isOffscreenSender: (sender: any) => sender?.url === 'offscreen',
+      scriptRuns: {
+        ownerFor: () => 'owner-1', allows: () => true, admitOp: () => true,
+        signalFor: () => new AbortController().signal,
+      },
+    }));
+    const result = await (routes['sw/web-fetch'] as any)({
+      url: 'https://example.com', runId: 'run-1', ownerSessionId: 'owner-1',
+      deadlineAt: Date.now() + 10,
+    }, { url: 'offscreen' });
+    expect(result).toEqual({ ok: false, error: 'aborted' });
+    expect(fetched).toBe(false);
+  });
+
+  test('a Notebook can cancel only its own token-bound module fetch', async () => {
+    let seenSignal: AbortSignal | undefined;
+    const notebookUrl = 'moz-extension://test/engine-tabs/notebook-tab/index.html#n1';
+    const routes = makeEngineRoutes(baseDeps({
+      browser: {
+        runtime: {
+          getURL: (path: string) => `moz-extension://test/${path}`,
+          getContexts: async () => [], sendMessage: async () => ({ ok: true }),
+        },
+        storage: { local: { get: async () => ({}), set: async () => {} } },
+      },
+      vmHttpFetch: async ({ signal }: any) => {
+        seenSignal = signal;
+        return await new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        });
+      },
+    }));
+    const sender = { tab: { id: 41, url: notebookUrl }, url: notebookUrl };
+    const pending = (routes['sw/web-fetch'] as any)({
+      url: 'https://modules.example/a.js', noCache: true,
+      abortToken: 'token-1', notebookId: 'n1',
+    }, sender);
+    for (let attempt = 0; attempt < 10 && !seenSignal; attempt += 1) await Promise.resolve();
+    expect(seenSignal).toBeDefined();
+    expect(await (routes['sw/web-fetch-abort'] as any)(
+      { abortToken: 'token-1', notebookId: 'n2' }, {
+        tab: { id: 99, url: 'moz-extension://test/engine-tabs/notebook-tab/index.html#n2' },
+        url: 'moz-extension://test/engine-tabs/notebook-tab/index.html#n2',
+      },
+    )).toEqual({ ok: true, aborted: false });
+    expect(await (routes['sw/web-fetch-abort'] as any)(
+      { abortToken: 'token-1', notebookId: 'n1' }, sender,
+    )).toEqual({ ok: true, aborted: true });
+    expect(await pending).toEqual({ ok: false, error: 'aborted' });
+    expect(seenSignal?.aborted).toBe(true);
+
+    const deadlinePending = (routes['sw/web-fetch'] as any)({
+      url: 'https://modules.example/slow.js', noCache: true,
+      abortToken: 'token-2', notebookId: 'n1', deadlineAt: Date.now() + 10,
+    }, sender);
+    expect(await deadlinePending).toEqual({ ok: false, error: 'aborted' });
+    expect(seenSignal?.aborted).toBe(true);
+    expect(await (routes['sw/web-fetch-abort'] as any)(
+      { abortToken: 'token-2', notebookId: 'n1' }, sender,
+    )).toEqual({ ok: true, aborted: false });
+  });
 });
 
 describe('app/vm meta + apps Library', () => {
@@ -219,9 +602,15 @@ describe('app/vm meta + apps Library', () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['app/get-meta']({ appId: 'zzz' })).toEqual({ ok: false, error: 'app-not-found' });
   });
-  test('app/get-meta returns name/entry/dweb', async () => {
+  test('app/get-meta returns name, entry, file kinds, and dweb metadata', async () => {
     const r = makeEngineRoutes(baseDeps());
-    expect(await r['app/get-meta']({ appId: 'a1' })).toEqual({ ok: true, name: 'App', entryFile: 'index.html', dweb: null });
+    expect(await r['app/get-meta']({ appId: 'a1' })).toEqual({
+      ok: true,
+      name: 'App',
+      entryFile: 'index.html',
+      fileKinds: {},
+      dweb: null,
+    });
   });
   test('app/get-meta revokes a stale registry bridge when peerd.json removes dweb', async () => {
     const r = makeEngineRoutes(baseDeps({
@@ -282,12 +671,101 @@ describe('apps/delete', () => {
     const r = makeEngineRoutes(baseDeps({
       DWEB_ENABLED: true,
       settingsStore: { get: () => ({ dwebEnabled: true }) },
-      appRegistry: { get: async () => record },
-      appClient: { delete: async (_id: string, opts: any) => { await opts.beforeDelete(record); return true; } },
-      browser: { runtime: { sendMessage: async (m: any) => { msg = m; return { ok: true }; } } },
+      appRegistry: { get: async () => ({ id: 'a1', name: 'A', shared: true, dweb: { publisher: 'pub', hash: 'h', slug: 'custom-a', local: true } }) },
+      appClient: { delete: async () => true },
+      listOffscreenContexts: async () => [{}],
+      browser: { runtime: { getContexts: async () => [{}], sendMessage: async (m: any) => { msg = m; return { ok: true }; } } },
     }));
     expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
-    expect(msg).toEqual({ type: 'dweb/base-host/unshare-app', name: 'A', slug: null, publisher: 'pub', hash: 'h', hashes: [] });
+    expect(msg).toEqual({
+      type: 'dweb/base-host/unshare-app', appId: 'a1', name: 'A', slug: 'custom-a',
+      publisher: 'pub', unpublish: true, hash: 'h', hashes: ['h'],
+    });
+  });
+  test('disabled dweb still revokes a networked App from a surviving host before delete', async () => {
+    const events: string[] = [];
+    const r = makeEngineRoutes(baseDeps({
+      DWEB_ENABLED: true,
+      settingsStore: { get: () => ({ dwebEnabled: false }) },
+      appRegistry: { get: async () => ({ id: 'a1', name: 'A', shared: true, dweb: { local: true, hash: 'h' } }) },
+      appClient: { delete: async () => { events.push('delete'); return true; } },
+      listOffscreenContexts: async () => [{}],
+      browser: { runtime: {
+        getContexts: async () => [{}],
+        sendMessage: async () => { events.push('unshare'); return { ok: true }; },
+      } },
+    }));
+    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
+    expect(events).toEqual(['unshare', 'delete']);
+  });
+  test('disabled dweb deletes safely without creating an absent offscreen host', async () => {
+    let sent = false;
+    const r = makeEngineRoutes(baseDeps({
+      DWEB_ENABLED: true,
+      settingsStore: { get: () => ({ dwebEnabled: false }) },
+      appRegistry: { get: async () => ({ id: 'a1', name: 'A', shared: true, dweb: { hash: 'h' } }) },
+      appClient: { delete: async () => true },
+      listOffscreenContexts: async () => [],
+      browser: { runtime: {
+        getContexts: async () => [],
+        sendMessage: async () => { sent = true; return { ok: true }; },
+      } },
+    }));
+    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
+    expect(sent).toBe(false);
+  });
+  test('Firefox deletes a networked App without probing the absent offscreen API', async () => {
+    let sent = false;
+    let probed = false;
+    const r = makeEngineRoutes(baseDeps({
+      DWEB_ENABLED: true,
+      appRegistry: { get: async () => ({ id: 'a1', name: 'A', shared: true, dweb: { hash: 'h' } }) },
+      appClient: { delete: async () => true },
+      browser: { runtime: {
+        getContexts: async () => { probed = true; throw new Error('OFFSCREEN_DOCUMENT is unsupported'); },
+        sendMessage: async () => { sent = true; return { ok: true }; },
+      } },
+    }));
+    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
+    expect(probed).toBe(false);
+    expect(sent).toBe(false);
+  });
+  test('un-shares both discovery and room-published versions on delete', async () => {
+    let msg: any = null;
+    const r = makeEngineRoutes(baseDeps({
+      DWEB_ENABLED: true,
+      settingsStore: { get: () => ({ dwebEnabled: true }) },
+      appRegistry: { get: async () => ({
+        id: 'a1', name: 'A', shared: true,
+        dweb: {
+          publisher: 'pub', hash: 'main', room_hash: 'room', slug: 'a',
+          pending_unserve_hashes: ['older-share'],
+          pending_seed_unserve_hashes: ['older-seed'],
+        },
+      }) },
+      appClient: { delete: async () => true },
+      listOffscreenContexts: async () => [{}],
+      browser: { runtime: { getContexts: async () => [{}], sendMessage: async (message: any) => { msg = message; return { ok: true }; } } },
+    }));
+    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
+    expect(msg.hashes).toEqual(['main', 'room', 'older-share', 'older-seed']);
+  });
+  test('deleting an installed App does not tombstone the peer discovery card', async () => {
+    let msg: any = null;
+    const r = makeEngineRoutes(baseDeps({
+      DWEB_ENABLED: true,
+      appRegistry: { get: async () => ({
+        id: 'a1', name: 'A', dweb: { publisher: 'peer', hash: 'main', slug: 'a' },
+      }) },
+      appClient: { delete: async () => true },
+      listOffscreenContexts: async () => [{}],
+      browser: { runtime: {
+        getContexts: async () => [{}],
+        sendMessage: async (message: any) => { msg = message; return { ok: true }; },
+      } },
+    }));
+    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
+    expect(msg).toMatchObject({ publisher: 'peer', hash: 'main', unpublish: false });
   });
   test('does NOT unshare a purely-local app even with dweb fully on', async () => {
     let sent = false;
@@ -301,17 +779,20 @@ describe('apps/delete', () => {
     expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
     expect(sent).toBe(false); // the (record.dweb || record.shared) gate must skip the offscreen round-trip
   });
-  test('unshare failure preserves the local record so revocation can be retried', async () => {
+  test('unshare failure preserves the local App and its revocation metadata', async () => {
     let deleted = false;
-    const record = { id: 'a1', name: 'A', dweb: {} };
     const r = makeEngineRoutes(baseDeps({
       DWEB_ENABLED: true,
       settingsStore: { get: () => ({ dwebEnabled: true }) },
-      appRegistry: { get: async () => record },
-      appClient: { delete: async (_id: string, opts: any) => { await opts.beforeDelete(record); deleted = true; return true; } },
-      browser: { runtime: { sendMessage: async () => { throw new Error('mesh down'); } } },
+      appRegistry: { get: async () => ({ id: 'a1', name: 'A', dweb: {} }) },
+      appClient: { delete: async () => { deleted = true; return true; } },
+      listOffscreenContexts: async () => [{}],
+      browser: { runtime: { getContexts: async () => [{}], sendMessage: async () => { throw new Error('mesh down'); } } },
     }));
-    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: false, error: 'network-unshare-failed: mesh down' });
+    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({
+      ok: false,
+      error: 'Could not stop sharing, so your local App was kept. Try again when the dweb is available.',
+    });
     expect(deleted).toBe(false);
   });
 });
@@ -328,6 +809,21 @@ describe('export/artifact', () => {
   test('app export returns filename + envelope', async () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['export/artifact']({ kind: 'app', id: 'a1' })).toEqual({ ok: true, filename: 'App.app.peerd', envelope: { env: 'app' } });
+  });
+  test('app export preserves every file as bytes, including an unknown suffix', async () => {
+    const raw = new Uint8Array([0xff, 0x00, 0xc0]);
+    let exported: any = null;
+    const r = makeEngineRoutes(baseDeps({
+      buildAppExport: async ({ files }: any) => { exported = files; return { env: 'app' }; },
+      appClient: {
+        snapshotFiles: async () => ({
+          record: { name: 'App', entryFile: 'index.html', fileKinds: { 'index.html': 'text', 'model.custom': 'binary' } },
+          files: { 'index.html': new TextEncoder().encode('<h1>x</h1>'), 'model.custom': raw },
+        }),
+      },
+    }));
+    expect((await r['export/artifact']({ kind: 'app', id: 'a1' })).ok).toBe(true);
+    expect(Array.from(exported['model.custom'])).toEqual(Array.from(raw));
   });
   test('vm export without an image pin refuses', async () => {
     const r = makeEngineRoutes(baseDeps());
@@ -349,6 +845,43 @@ describe('import/apply', () => {
   test('app import mints a fresh id', async () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['import/apply']({ envelope: {} })).toEqual({ ok: true, kind: 'app', id: 'imported' });
+  });
+  test('app import passes raw bytes to storage without classifying the suffix', async () => {
+    const raw = new Uint8Array([0xff, 0x00, 0xc0]);
+    let received: any = null;
+    const r = makeEngineRoutes(baseDeps({
+      appClient: { create: async (opts: any) => { received = opts.files; return { id: 'imported' }; } },
+      openEnvelope: async () => ({
+        kind: 'app', name: 'X', entry: 'index.html', meta: { tags: [] },
+        files: { 'index.html': new TextEncoder().encode('<h1>x</h1>'), 'model.custom': raw },
+      }),
+    }));
+    expect((await r['import/apply']({ envelope: {} })).ok).toBe(true);
+    expect(received['index.html']).toBeInstanceOf(Uint8Array);
+    expect(Array.from(received['model.custom'])).toEqual(Array.from(raw));
+  });
+  test('a blocked Notebook import refuses before metadata or OPFS mutation', async () => {
+    let creates = 0;
+    let writes = 0;
+    const r = makeEngineRoutes(baseDeps({
+      openEnvelope: async () => ({
+        kind: 'notebook', name: 'Imported', entry: 'notebook.js', meta: { tags: [] },
+        files: { 'notebook.js': new TextEncoder().encode('return 1;') },
+      }),
+      jsRegistry: {
+        get: async () => null,
+        create: async () => { creates += 1; return { id: 'nNew' }; },
+      },
+      opfsHelpers: () => ({ write: async () => { writes += 1; } }),
+      assertOpfsWritable: async () => {
+        throw new Error("store 'opfs-workspaces' is read-only. No data was changed.");
+      },
+    }));
+    const result = await r['import/apply']({ envelope: {} });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("'opfs-workspaces'");
+    expect(creates).toBe(0);
+    expect(writes).toBe(0);
   });
   test('unexpected error rethrown (not swallowed)', async () => {
     const r = makeEngineRoutes(baseDeps({ openEnvelope: async () => { throw new Error('weird'); } }));

@@ -28,6 +28,7 @@ const STORAGE_KEY = 'apps.v1';
  *   dwapp_id?: string,
  *   slug?: string,
  *   seq?: number,
+ *   manifest_created?: number,
  *   local?: boolean,
  *   seed?: string,
  *   git_oid?: string,
@@ -35,6 +36,8 @@ const STORAGE_KEY = 'apps.v1';
  *   previous_version_id?: string,
  *   changelog?: string,
  *   release_created?: number,
+ *   release_entry_file?: string,
+ *   release_file_kinds?: Record<string, 'text' | 'binary'>,
  *   published_hashes?: string[],
  *   forked_from?: { publisher?: string | null, dwapp_id?: string | null, version_id?: string | null },
  * }} AppDwebMeta
@@ -52,6 +55,7 @@ const STORAGE_KEY = 'apps.v1';
  *   favorite: boolean,
  *   source: 'local' | 'imported' | 'dweb',
  *   thumbnail: string | null,
+ *   fileKinds: Record<string, 'text' | 'binary'>,
  *   dweb?: AppDwebMeta,
  *   shared?: boolean,
  * }} AppRecord
@@ -59,6 +63,17 @@ const STORAGE_KEY = 'apps.v1';
 
 /** @param {unknown} tags */
 const truncTags = (tags) => (Array.isArray(tags) ? tags.slice(0, 16) : []);
+
+/** @param {unknown} value */
+const cleanFileKinds = (value) => {
+  if (!value || typeof value !== 'object') return Object.create(null);
+  /** @type {Record<string, 'text' | 'binary'>} */
+  const clean = Object.create(null);
+  for (const [path, kind] of Object.entries(value).slice(0, 256)) {
+    if (path && path.length <= 512 && (kind === 'text' || kind === 'binary')) clean[path] = kind;
+  }
+  return clean;
+};
 
 /**
  * @param {Object} deps
@@ -78,6 +93,7 @@ export const createAppRegistry = (deps) => {
     buildExtra: (_id, opts) => ({
       tags: truncTags(opts.tags),
       entryFile: opts.entryFile || 'index.html',
+      fileKinds: cleanFileKinds(opts.fileKinds),
       // why: createdAt is set by the factory; updatedAt starts equal to it.
       updatedAt: Date.now(),
       // Library metadata. favorite = the user's one-click star (filterable
@@ -97,6 +113,9 @@ export const createAppRegistry = (deps) => {
       if (typeof patch.name === 'string') next.name = patch.name;
       if (Array.isArray(patch.tags)) next.tags = truncTags(patch.tags);
       if (typeof patch.entryFile === 'string') next.entryFile = patch.entryFile;
+      if (patch.fileKinds && typeof patch.fileKinds === 'object') {
+        next.fileKinds = cleanFileKinds(patch.fileKinds);
+      }
       // Library-mutable fields. favorite is the one-click star; thumbnail
       // is set when a grid preview is captured. source is immutable after
       // create (provenance), so it is deliberately NOT patchable.
@@ -114,6 +133,14 @@ export const createAppRegistry = (deps) => {
       // The slot is otherwise set at create (a self-authored dwapp / an install);
       // this is the one post-create amendment path, mirroring `shared`.
       if (patch.dweb && typeof patch.dweb === 'object') next.dweb = { ...(next.dweb || {}), ...patch.dweb };
+      // Internal transaction rollback needs exact replacement, including
+      // removal of keys added by a failed version update. Normal callers keep
+      // the merge behavior above.
+      if (Object.hasOwn(patch, 'dwebExact')) {
+        const exact = /** @type {any} */ (patch).dwebExact;
+        if (exact && typeof exact === 'object') next.dweb = { ...exact };
+        else delete next.dweb;
+      }
       // why the cap: the catalog promises "metadata only, stays light" —
       // a fat data-URI thumbnail would ride every apps/list response.
       // Same bounding discipline as name.slice(80) / truncTags.

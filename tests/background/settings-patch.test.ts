@@ -9,6 +9,7 @@ const deps = {
   knownProviderNames: ['anthropic', 'openrouter', 'ollama'],
   reasoningEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] as const,
   dwebEnabled: true,
+  autoUpdateAvailable: true,
   normalizeVariant: (_v: string) => 'base',
   normalizeEngine: (v: string) => (['auto', 'web-speech', 'moonshine'].includes(v) ? v : 'auto'),
 };
@@ -38,6 +39,10 @@ describe('normalizeSettingsPatch — whitelist', () => {
 });
 
 describe('normalizeSettingsPatch — booleans + enums', () => {
+  test('preserves the OCR install intent used by historical backups', () => {
+    expect(norm({ ocrEnabled: true })).toEqual({ ocrEnabled: true });
+    expect(norm({ ocrEnabled: 'yes' })).toEqual({});
+  });
   test('passes real booleans through', () => {
     expect(norm({ voiceEnabled: true, devMode: false, advancedAutomationEnabled: true, autoMemoryEnabled: false }))
       .toEqual({ voiceEnabled: true, devMode: false, advancedAutomationEnabled: true, autoMemoryEnabled: false });
@@ -83,6 +88,11 @@ describe('normalizeSettingsPatch — providers + models', () => {
 });
 
 describe('normalizeSettingsPatch — numeric clamps', () => {
+  test('preserves and bounds historical audit retention settings', () => {
+    expect(norm({ auditLogMaxEntries: 100_000 })).toEqual({ auditLogMaxEntries: 100_000 });
+    expect(norm({ auditLogMaxEntries: 0 })).toEqual({ auditLogMaxEntries: 1 });
+    expect(norm({ auditLogMaxEntries: 2_000_000 })).toEqual({ auditLogMaxEntries: 1_000_000 });
+  });
   test('voiceSilenceMs clamped to [250, 30000] and rounded', () => {
     expect(norm({ voiceSilenceMs: 10 })).toEqual({ voiceSilenceMs: 250 });
     expect(norm({ voiceSilenceMs: 999999 })).toEqual({ voiceSilenceMs: 30_000 });
@@ -127,6 +137,16 @@ describe('normalizeSettingsPatch — dweb gate', () => {
   });
   test('non-boolean dwebEnabled dropped even when build flag on', () => {
     expect(norm({ dwebEnabled: 'yes' })).toEqual({});
+  });
+});
+
+describe('normalizeSettingsPatch - auto-update gate (preview-only key)', () => {
+  test('autoUpdateEnabled honored only where the package carries the key', () => {
+    expect(norm({ autoUpdateEnabled: false })).toEqual({ autoUpdateEnabled: false });
+    expect(norm({ autoUpdateEnabled: true }, { autoUpdateAvailable: false })).toEqual({});
+  });
+  test('non-boolean autoUpdateEnabled dropped even when available', () => {
+    expect(norm({ autoUpdateEnabled: 'yes' })).toEqual({});
   });
 });
 

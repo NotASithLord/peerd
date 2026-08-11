@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval' blob:; worker-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'">
+  <!--
+    Firefox MV3 extension pages cannot authorize blob Worker code. This page is
+    declared in manifest sandbox.pages, so it has no extension APIs, an opaque
+    origin, and the existing sandbox CSP: worker-src blob:, connect-src 'none'.
+    It receives one private MessagePort from the trusted Notebook parent and
+    hosts the same sealed worker source the parent would host directly.
+  -->
+</head>
+<body>
+<script>
+  (() => {
+    'use strict';
+    let initialized = false;
+    window.addEventListener('message', (event) => {
+      const port = event.ports && event.ports[0];
+      if (initialized || event.source !== window.parent
+        || !event.data || event.data.type !== 'notebook-worker-host-init' || !port) return;
+      initialized = true;
+      let active = null;
+
+      const terminate = () => {
+        if (!active) return;
+        try { active.worker.terminate(); } catch (_error) {}
+        URL.revokeObjectURL(active.url);
+        active = null;
+      };
+
+      port.addEventListener('message', (portEvent) => {
+        const message = portEvent.data;
+        if (!message || typeof message !== 'object') return;
+        if (message.type === 'run') {
+          terminate();
+          const runId = message.runId;
+          const source = String(message.source);
+          const markerNonce = String(message.markerNonce || '');
+          const sourceLines = source.split('\n');
+          const regions = [];
+          const escapedNonce = markerNonce.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const markerPattern = new RegExp(
+            '/\\*__peerd_module:' + escapedNonce + ':(module|body):([^*]+)__\\*/',
+          );
+          for (let index = 0; index < sourceLines.length; index += 1) {
+            const marker = markerPattern.exec(sourceLines[index]);
+            if (!marker) continue;
+            try {
+              regions.push({
+                line: index + 1, kind: marker[1], name: decodeURIComponent(marker[2]),
+              });
+            } catch { /* an invalid label is ignored; the worker still starts */ }
+          }
+          const url = URL.createObjectURL(new Blob([source], {
+            type: 'application/javascript',
+          }));
+          const locationForLine = (line) => {
+            let region = null;
+            for (const candidate of regions) {
+              if (candidate.line > line) break;
+              region = candidate;
+            }
+            return region
+              ? { name: region.name, line: Math.max(1, line - region.line) }
+              : { name: 'notebook.js', line };
+          };
+          const mapStack = (stack) => String(stack || '').replace(
+            new RegExp(url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ':(\\d+):(\\d+)', 'g'),
+            (_match, lineText, columnText) => {
+              const line = Number(lineText);
+              const location = locationForLine(line);
+              return location.name + ':' + location.line + ':' + columnText;
+            },
+          );
+          try {
+            const worker = new Worker(url, { type: 'module' });
+            active = { runId, url, worker };
+            worker.addEventListener('message', (workerEvent) => {
+              if (active && active.runId === runId) {
+                port.postMessage({
+                  type: 'worker-event', runId, eventType: 'message',
+                  data: workerEvent.data?.type === 'done' && workerEvent.data.error
+                    ? { ...workerEvent.data, error: mapStack(workerEvent.data.error) }
+                    : workerEvent.data,
+                  workerUrl: url,
+                });
+              }
+            });
+            worker.addEventListener('error', (errorEvent) => {
+              if (active && active.runId === runId) {
+                const location = locationForLine(errorEvent.lineno || 0);
+                port.postMessage({
+                  type: 'worker-event', runId, eventType: 'error',
+                  message: mapStack(errorEvent.message || ''),
+                  filename: location.name,
+                  workerUrl: url,
+                  lineno: location.line, colno: errorEvent.colno || 0,
+                });
+              }
+            });
+          } catch (error) {
+            URL.revokeObjectURL(url);
+            port.postMessage({
+              type: 'worker-event', runId, eventType: 'error',
+              message: error && error.message ? error.message : String(error),
+              filename: '', lineno: 0, colno: 0,
+            });
+          }
+          return;
+        }
+        if (!active || active.runId !== message.runId) return;
+        if (message.type === 'message') active.worker.postMessage(message.data);
+        else if (message.type === 'terminate') terminate();
+      });
+      port.start();
+      port.postMessage({ type: 'notebook-worker-host-ready' });
+    });
+  })();
+</script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-// pod-client.web.js — web stub swapped in for /background/pod-client.js by the
+// pod-client.web.js: web stub swapped in for /background/pod-client.js by the
 // web packaging target (packaging/web-target.ts WEB_SWAPS).
 //
 // why: peerd-runtime/tools/defs/pod-create.js imports only this title constant

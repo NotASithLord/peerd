@@ -21,6 +21,7 @@ import { REPO_ROOT } from './lib.ts';
 export const CHECKED_DOCS = [
   'README.md', 'CLAUDE.md', 'SECURITY.md', 'CONTRIBUTING.md',
   'docs/security/THREAT-MODEL.md',
+  'docs/security/LIFECYCLE-CONTRACT.md',
   'docs/security/HARDENING-ROADMAP.md',
   'docs/security/RED-TEAM-RESULTS.md',
 ];

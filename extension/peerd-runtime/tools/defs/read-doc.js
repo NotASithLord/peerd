@@ -24,11 +24,10 @@ import { wrapUntrusted } from '../prompt-wrap.js';
 import { originOfUrl, isDenylistedTab } from './dom-helpers.js';
 import { formatDocBody, formatDocHead, toMarkdown, DEFAULT_MAX_CHARS, CONVERTIBLE } from '../../doc/index.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
-// Deep import of the PURE SSRF matcher (the read_pdf pattern): the egress
-// barrel pulls in vault/storage, and read_doc re-fetches the bytes offscreen,
-// so it must apply the SAME private-network refusal as open-web egress — the
-// denylist alone does not cover loopback / LAN / 169.254 metadata targets.
-import { isPrivateOrLocalHost } from '../../../peerd-egress/fetch/private-network.js';
+// read_doc re-fetches bytes offscreen, so it applies the same shared lexical
+// private-network refusal as open-web egress. The denylist alone does not cover
+// loopback, LAN, or metadata targets.
+import { isPrivateOrLocalHost } from '../../../shared/private-network.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const readDocTool = {

@@ -90,6 +90,99 @@ export class VMTabClosedError extends TypedError {
 
 // --- Remote module imports (module-resolver.js — the audited import path) --
 
+/** Stable cross-realm code for the package-level remote import refusal. */
+export const REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE = 'remote_module_imports_unavailable';
+export const REMOTE_MODULE_IMPORTS_UNAVAILABLE_MESSAGE =
+  'This version of peerd does not allow remote module imports. '
+  + 'No request was made for this module. '
+  + 'Use peerd:std, peerd:wasi, or inline reviewed source directly in the code you run instead.';
+
+/** Stable cross-realm code for native import syntax the resolver cannot audit. */
+export const UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE = 'unsupported_native_module_import';
+export const UNSUPPORTED_NATIVE_MODULE_IMPORT_MESSAGE =
+  'This version of peerd cannot run this import form. '
+  + 'Where local modules are supported, use a literal static import. '
+  + 'Otherwise, move reviewed dependency code directly into the code you run. '
+  + 'For JSON, read a local file with peerd.self.readFile(path) and parse it with JSON.parse(...).';
+
+/** Stable cross-realm code for parser failures before worker creation. */
+export const MODULE_SYNTAX_ERROR_CODE = 'module_syntax_error';
+
+/** Stable cross-realm code for a host-side static graph linker failure. */
+export const MODULE_LINK_ERROR_CODE = 'module_link_failed';
+
+/** Stable code and guidance for a capability denied to a remote-module run. */
+export const REMOTE_MODULE_CAPABILITY_BLOCKED_CODE = 'remote_module_capability_blocked';
+/** Stable status for a remote graph running under the compute-only profile. */
+export const REMOTE_MODULE_RESTRICTED_CODE = 'remote_module_restricted';
+export const REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE =
+  'Remote imports run with compute only. Network, files, agents, model calls, browser and site access, and dweb are off. '
+  + 'To grant more access, review the dependency and move only the approved code directly into the code you run. '
+  + 'A #sha256 pin verifies the bytes but does not make the code trusted.';
+
+/** @param {string} capability */
+export const remoteModuleCapabilityBlockedMessage = (capability) =>
+  `${REMOTE_MODULE_CAPABILITY_BLOCKED_CODE}: ${capability} is disabled for this remote-module run.`;
+
+/** @type {Readonly<Record<string, string>>} */
+export const MODULE_IMPORT_POLICY_MESSAGES = Object.freeze({
+  [REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE]: REMOTE_MODULE_IMPORTS_UNAVAILABLE_MESSAGE,
+  [UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE]: UNSUPPORTED_NATIVE_MODULE_IMPORT_MESSAGE,
+});
+
+/** @param {string | undefined} code */
+export const moduleImportPolicyMessage = (code) => code && Object.hasOwn(MODULE_IMPORT_POLICY_MESSAGES, code)
+  ? MODULE_IMPORT_POLICY_MESSAGES[code]
+  : null;
+
+/**
+ * The packaged channel does not permit URL-loaded JavaScript. This is separate
+ * from a run that merely lacks egress: Store and web builds refuse before a
+ * fetch function is available, and the code survives worker/host relays so the
+ * tool layer can render a policy failure instead of a successful code error.
+ */
+export class RemoteModuleImportsUnavailableError extends TypedError {
+  /** @param {string} specifier */
+  constructor(specifier) {
+    super(REMOTE_MODULE_IMPORTS_UNAVAILABLE_MESSAGE);
+    this.specifier = specifier;
+    this.code = REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE;
+  }
+}
+
+/**
+ * Code used native syntax the resolver cannot safely run. Dynamic imports are
+ * blocked because packaged MV3 workers cannot complete their blob-import hop.
+ * Import options are not supported by the resolver transform.
+ */
+export class UnsupportedNativeModuleImportError extends TypedError {
+  constructor() {
+    super(UNSUPPORTED_NATIVE_MODULE_IMPORT_MESSAGE);
+    this.code = UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE;
+  }
+}
+
+/** Invalid JavaScript found by the resolver's grammar-correct preflight. */
+export class ModuleSyntaxError extends TypedError {
+  /** @param {string} detail */
+  constructor(detail) {
+    super(`JavaScript syntax error: ${detail}`);
+    this.code = MODULE_SYNTAX_ERROR_CODE;
+  }
+}
+
+/**
+ * A fully resolved static graph could not be linked into one worker entry.
+ * This is a loader failure, not an error in the executing Notebook realm.
+ */
+export class ModuleLinkError extends TypedError {
+  /** @param {string} detail */
+  constructor(detail) {
+    super(`cannot link Notebook module graph: ${detail}`);
+    this.code = MODULE_LINK_ERROR_CODE;
+  }
+}
+
 /**
  * A remote import refused BEFORE any fetch. The default reason is the
  * no-network lane (no `fetchRemote` injected — page_code / a2a / site-client);

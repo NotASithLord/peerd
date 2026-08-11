@@ -34,7 +34,7 @@ const USER_TEXT = Object.freeze({
   [RECOVERY_CATEGORIES.SECURITY_DEGRADATION]:
     'A secure isolated execution host could not be created. This operation was not run.',
   [RECOVERY_CATEGORIES.MIGRATION_BLOCKED]:
-    'This profile requires a newer or supported peerd version. No data was changed.',
+    'This stored data cannot be safely changed by this peerd version. No data was changed.',
 });
 
 // Recovery reports describe RECOVERY outcomes only. A verdict that settled

@@ -9,13 +9,15 @@
 // pattern match. Adoption is incremental — an unstamped failure still takes
 // the heuristic path — but every stamped site is one less guess.
 //
-// The three kinds mirror the contract's evidence semantics:
+// The four kinds mirror the contract's evidence semantics:
 //   transport-lost       the wire died with the request possibly delivered
-//                        (ambiguous for a side effect — never `failed`)
+//                        (ambiguous for a side effect, never `failed`)
 //   host-lost            the execution host (worker, engine tab, message
 //                        port) died mid-work (equally ambiguous)
 //   pre-effect-failure   the action was refused BEFORE any effect — the one
 //                        shape that is positive failure evidence
+//   effect-completed     the effect is known to have completed, but a later
+//                        policy check refused any further authority
 //
 // why plain string kinds + an own-property marker rather than instanceof:
 // errors cross realm and relay boundaries (offscreen worker → SW) where
@@ -24,13 +26,14 @@
 // stamp the field on their own error types without importing anything.
 
 /**
- * @typedef {'transport-lost' | 'host-lost' | 'pre-effect-failure'} FailureOutcomeKind
+ * @typedef {'transport-lost' | 'host-lost' | 'pre-effect-failure' | 'effect-completed'} FailureOutcomeKind
  */
 
 export const FAILURE_OUTCOMES = Object.freeze({
   TRANSPORT_LOST: /** @type {const} */ ('transport-lost'),
   HOST_LOST: /** @type {const} */ ('host-lost'),
   PRE_EFFECT_FAILURE: /** @type {const} */ ('pre-effect-failure'),
+  EFFECT_COMPLETED: /** @type {const} */ ('effect-completed'),
 });
 
 const VALID_OUTCOME_KINDS = Object.freeze(new Set(Object.values(FAILURE_OUTCOMES)));
@@ -42,7 +45,7 @@ export const isFailureOutcomeKind = (v) =>
 /**
  * Read a stamped outcome kind off a thrown error or a tool result.
  * Unknown/missing → undefined (heuristics take over). Fail closed against
- * garbage: only the three known kinds pass.
+ * garbage: only the known kinds pass.
  * @param {unknown} carrier
  * @returns {FailureOutcomeKind | undefined}
  */

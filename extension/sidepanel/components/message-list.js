@@ -25,7 +25,20 @@
 import m from '/vendor/mithril/mithril.js';
 import { renderMarkdown } from '/shared/markdown.js';
 import { stripUntrustedFences } from '/shared/util.js';
-import { formatBytes, classifyFailure } from '/peerd-runtime/index.js';
+import { CHANNEL } from '/shared/channel-config.js';
+import {
+  classifyFailure, contributorFeedbackTargets, formatBytes,
+} from '/peerd-runtime/index.js';
+
+// `performed:false` is host custody metadata. Error bodies are not: provider,
+// actor, and page text can all flow into them. Keep the human recovery generic
+// unless a future host-only typed reason is carried alongside the custody bit.
+const ACTOR_NOT_RUN_USER_FAILURE =
+  'No actor work was started. Review the request before trying again.';
+
+/** @param {string} _text @returns {string} */
+const actorOutcomeUnknownFailure = (_text) =>
+  'peerd cannot confirm whether the actor ran or completed. Check the target before trying again.';
 
 /** @typedef {import('../chat-reducer.js').ChatMessage} ChatMessage */
 /** @typedef {import('../chat-reducer.js').SpawnedSession} SpawnedSession */
@@ -43,7 +56,14 @@ import { formatBytes, classifyFailure } from '/peerd-runtime/index.js';
  * @property {string} [tool_use_id]
  * @property {boolean} [is_error]
  * @property {string} [content]
- * @property {{ primitive?: string, durationMs?: number, dispatch?: string, gates: Array<{ name: string, reason: string, allowed: boolean }> }|null} [meta]
+ * @property {boolean} [actorTerminal]
+ * @property {boolean} [actorOutcomeKnown]
+ * @property {boolean} [actorPerformed]
+ * @property {boolean} [actorAborted]
+ * @property {string} [actorCorrelationId]
+ * @property {string} [actorDeliveryId]
+ * @property {string[]} [actorDeliveryIds]
+ * @property {{ primitive?: string, durationMs?: number, dispatch?: string, gates: Array<{ name: string, reason: string, allowed: boolean }>, browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }> }|null} [meta]
  */
 
 /** @typedef {{ toolUse: ToolUse, toolResult: ToolResult|null }} PairedTool */
@@ -58,6 +78,7 @@ import { formatBytes, classifyFailure } from '/peerd-runtime/index.js';
  * @property {string|null} [kind]
  * @property {string|null} [name]
  * @property {string|null} [label]
+ * @property {boolean} [protected]
  * @property {string|null} [turnId]
  */
 
@@ -74,6 +95,11 @@ import { formatBytes, classifyFailure } from '/peerd-runtime/index.js';
  * @property {number} [depth]
  * @property {TabEvent[]} [tabEvents]
  * @property {UiActions} [uiActions]
+ * @property {string} [sessionId]
+ * @property {((msg: Record<string, any>) => Promise<any>)} [send]
+ * @property {boolean} [busy]
+ * @property {boolean} [announceOnMount]
+ * @property {Map<string|undefined, Set<string>>} [seenRecoveryIdsBySession]
  */
 
 // Auto-scroll heuristic: if the user is reading near the bottom, keep
@@ -95,6 +121,7 @@ const scrollIfNearBottom = (el) => {
 // stopping. Deeper runs still exist and are inspectable, but rendering
 // them inline would explode the layout. See docs/ACTORS.md.
 const MAX_NESTED_DEPTH = 5;
+const CONTRIBUTOR_FEEDBACK_ENABLED = CHANNEL === 'preview' || CHANNEL === 'dev';
 
 // Render one transcript (a flat message array) as keyed user/assistant
 // rows. Shared between the top-level chat and every nested actor
@@ -104,8 +131,14 @@ const MAX_NESTED_DEPTH = 5;
  * @param {TranscriptArgs} args
  * @returns {any[]}
  */
-const renderTranscript = ({ messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth = 0, tabEvents = [], uiActions }) => {
+const renderTranscript = ({ messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth = 0, tabEvents = [], uiActions, send, sessionId, busy = false }) => {
   const groups = groupMessages(messages ?? []);
+  // Feedback belongs to the completed answer for a human turn, not every
+  // intermediate assistant step before a tool call. The live answer becomes
+  // eligible only after the authoritative turn slot is idle.
+  const feedbackMessageIds = busy
+    ? new Set()
+    : new Set(contributorFeedbackTargets(messages ?? []).keys());
   // Inline "peerd opened a tab" notices (top level only), bucketed by the TURN
   // (its starting user-message id) they belong to. They render at the END of that
   // turn — after the agent's later messages — then freeze above the next turn.
@@ -144,6 +177,7 @@ const renderTranscript = ({ messages, vmStreams, spawned, actors, scriptOps, loa
         : m(AssistantMessage, {
             key: g.message.id, message: g.message, toolResults: g.toolResults,
             vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth,
+            send, sessionId, allowFeedback: feedbackMessageIds.has(g.message.id),
           }));
   });
   // The current (last) turn's notices render at the very end — fresh; any with an
@@ -155,18 +189,169 @@ const renderTranscript = ({ messages, vmStreams, spawned, actors, scriptOps, loa
   return out;
 };
 
+/** @param {ChatMessage} message @returns {Array<{ id: string, announcement: string }>} */
+const recoveryReceiptsForMessage = (message) => {
+  /** @type {Array<{ id: string, announcement: string }>} */
+  const receipts = [];
+  const messageId = typeof message.id === 'string' ? message.id : null;
+  if (message.actorReply?.outcomeKnown === false) {
+    if (messageId) receipts.push({
+      id: `${messageId}:actor-reply`,
+      announcement: 'Actor outcome unknown. Check the target before trying again.',
+    });
+  } else if (message.actorReply?.performed === false) {
+    if (messageId) receipts.push({
+      id: `${messageId}:actor-reply`,
+      announcement: 'Actor request not run. Re-issue it if it still matters.',
+    });
+  }
+  for (const rawResult of Array.isArray(message.toolResults) ? message.toolResults : []) {
+    const result = /** @type {any} */ (rawResult);
+    const content = typeof result?.content === 'string'
+      ? result.content
+      : JSON.stringify(result?.content ?? '');
+    if (result?.is_error === true
+      && /outcome is unknown|outcome unknown/i.test(content)
+      && messageId
+      && typeof result?.tool_use_id === 'string') {
+      receipts.push({
+        id: `${messageId}:tool-result:${result.tool_use_id}`,
+        announcement: 'Actor outcome unknown. Check the target before trying again.',
+      });
+    }
+  }
+  return receipts;
+};
+
+/** @param {ChatMessage[]|undefined} messages */
+const recoveryReceipts = (messages) => (messages ?? []).flatMap(recoveryReceiptsForMessage);
+
+/** @param {any} state @param {TabEvent[]|undefined} tabEvents */
+const freshTabAnnouncements = (state, tabEvents) => {
+  const announcements = [];
+  for (const event of tabEvents ?? []) {
+    const isProtected = event.protected !== false;
+    if (state.seenTabEventStates.has(event.key)
+        && state.seenTabEventStates.get(event.key) === isProtected) continue;
+    state.seenTabEventStates.set(event.key, isProtected);
+    announcements.push(!isProtected
+      ? 'peerd left a blank tab because browser control was not confirmed. Close it before continuing. Use Go to focus it.'
+      : 'peerd opened a task tab with additional browser safeguards. Use Go to focus it.');
+  }
+  return announcements;
+};
+
+/** @param {any} state @param {string} announcement */
+const replaceRecoveryAnnouncement = (state, announcement) => {
+  if (state.recoveryAnnouncementTimer) {
+    clearTimeout(state.recoveryAnnouncementTimer);
+    state.recoveryAnnouncementTimer = null;
+  }
+  state.recoveryAnnouncement = announcement;
+};
+
+/** @param {any} state */
+const scheduleRecoveryAnnouncementClear = (state) => {
+  const announced = state.recoveryAnnouncement;
+  if (!announced || state.recoveryAnnouncementTimer) return;
+  state.recoveryAnnouncementTimer = setTimeout(() => {
+    state.recoveryAnnouncementTimer = null;
+    if (state.recoveryAnnouncement === announced) {
+      state.recoveryAnnouncement = '';
+      m.redraw();
+    }
+  }, 1_000);
+};
+
 export const MessageList = {
+  /** @param {{ attrs: TranscriptArgs, state: any }} vnode */
+  oninit(vnode) {
+    vnode.state.sessionId = vnode.attrs.sessionId;
+    // Existing history on the initial mount is a visual receipt, not a new
+    // alert. Keep the baseline per session after that: a receipt first
+    // encountered when the user switches chats is new to this surface and must
+    // be announced, while switching back must not announce it again.
+    vnode.state.seenRecoveryIdsBySession = vnode.attrs.seenRecoveryIdsBySession ?? new Map();
+    const receipts = recoveryReceipts(vnode.attrs.messages);
+    const existing = vnode.state.seenRecoveryIdsBySession.get(vnode.attrs.sessionId);
+    const fresh = existing
+      ? receipts.filter((receipt) => !existing.has(receipt.id))
+      : vnode.attrs.announceOnMount ? receipts : [];
+    const seen = existing ?? new Set();
+    for (const receipt of receipts) seen.add(receipt.id);
+    vnode.state.seenRecoveryIdsBySession.set(vnode.attrs.sessionId, seen);
+    // Existing tab receipts are history. Announce only events added after this
+    // list mounts. Track the host-stamped key and containment state so a later
+    // downgrade from protected to blank is announced instead of deduplicated.
+    vnode.state.seenTabEventStates = new Map((vnode.attrs.tabEvents ?? [])
+      .map((event) => [event.key, event.protected !== false]));
+    vnode.state.recoveryAnnouncement = fresh.map((receipt) => receipt.announcement).join(' ');
+    vnode.state.recoveryAnnouncementTimer = null;
+  },
+  /** @param {{ attrs: TranscriptArgs, state: any }} vnode */
+  onbeforeupdate(vnode) {
+    if (vnode.state.sessionId !== vnode.attrs.sessionId) {
+      vnode.state.sessionId = vnode.attrs.sessionId;
+      const receipts = recoveryReceipts(vnode.attrs.messages);
+      const existing = vnode.state.seenRecoveryIdsBySession.get(vnode.attrs.sessionId);
+      const fresh = existing
+        ? receipts.filter((receipt) => !existing.has(receipt.id))
+        : receipts;
+      const seen = existing ?? new Set();
+      for (const receipt of receipts) seen.add(receipt.id);
+      vnode.state.seenRecoveryIdsBySession.set(vnode.attrs.sessionId, seen);
+      for (const event of vnode.attrs.tabEvents ?? []) {
+        vnode.state.seenTabEventStates.set(event.key, event.protected !== false);
+      }
+      replaceRecoveryAnnouncement(vnode.state, fresh
+        .map((receipt) => receipt.announcement)
+        .join(' '));
+      return true;
+    }
+    const seen = vnode.state.seenRecoveryIdsBySession.get(vnode.attrs.sessionId) ?? new Set();
+    const receipts = recoveryReceipts(vnode.attrs.messages);
+    const fresh = receipts.filter((receipt) => !seen.has(receipt.id));
+    const tabAnnouncements = freshTabAnnouncements(vnode.state, vnode.attrs.tabEvents);
+    for (const receipt of receipts) seen.add(receipt.id);
+    vnode.state.seenRecoveryIdsBySession.set(vnode.attrs.sessionId, seen);
+    if (fresh.length > 0 || tabAnnouncements.length > 0) {
+      replaceRecoveryAnnouncement(vnode.state, [
+        ...fresh.map((receipt) => receipt.announcement),
+        ...tabAnnouncements,
+      ].join(' '));
+    }
+    return true;
+  },
   // Initial mount: jump to the bottom so existing-session render starts
   // with the latest turn visible, not the first message.
-  /** @param {{ dom: HTMLElement }} vnode */
-  oncreate(vnode) { vnode.dom.scrollTop = vnode.dom.scrollHeight; },
-  /** @param {{ dom: HTMLElement }} vnode */
-  onupdate(vnode) { scrollIfNearBottom(vnode.dom); },
+  /** @param {{ dom: HTMLElement, state: any }} vnode */
+  oncreate(vnode) {
+    vnode.dom.scrollTop = vnode.dom.scrollHeight;
+    scheduleRecoveryAnnouncementClear(vnode.state);
+  },
+  /** @param {{ dom: HTMLElement, state: any }} vnode */
+  onupdate(vnode) {
+    scrollIfNearBottom(vnode.dom);
+    scheduleRecoveryAnnouncementClear(vnode.state);
+  },
+  /** @param {{ state: any }} vnode */
+  onremove(vnode) {
+    if (vnode.state.recoveryAnnouncementTimer) clearTimeout(vnode.state.recoveryAnnouncementTimer);
+  },
 
-  /** @param {{ attrs: TranscriptArgs }} vnode */
-  view: ({ attrs: { messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, tabEvents, uiActions } }) =>
-    m('.message-list',
-      renderTranscript({ messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth: 0, tabEvents, uiActions })),
+  /** @param {{ attrs: TranscriptArgs, state: any }} vnode */
+  view: ({ attrs: { messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, tabEvents, uiActions, send, sessionId, busy }, state }) =>
+    m('.message-list', [
+      renderTranscript({
+        messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName,
+        depth: 0, tabEvents, uiActions, send, sessionId, busy,
+      }),
+      state.recoveryAnnouncement
+        ? m('span.sr-only.actor-recovery-announcement.message-list-announcement', {
+            role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true',
+          }, state.recoveryAnnouncement)
+        : null,
+    ]),
 };
 
 // Inline "peerd opened a tab" notice — anchored at the turn it happened so it
@@ -179,12 +364,22 @@ const AgentTabNotice = {
   /** @param {{ attrs: { ev: TabEvent, fresh: boolean, uiActions?: UiActions } }} vnode */
   view: ({ attrs: { ev, fresh, uiActions } }) => {
     const label = (ev.kind && ev.name) ? `${ev.kind} · ${ev.name}` : (ev.label || 'a tab');
+    const protectedTab = ev.protected !== false;
     return m(`.agent-tab-notice${fresh ? '.agent-tab-notice--fresh' : ''}`, [
       m('span.agent-tab-notice-icon', { 'aria-hidden': 'true' }, '▦'),
-      m('span.agent-tab-notice-text', ['peerd opened ', m('span.agent-tab-notice-label', label)]),
+      m('span.agent-tab-notice-copy', [
+        m('span.agent-tab-notice-text', [
+          protectedTab ? 'peerd opened a task tab · ' : 'peerd left a blank tab · ',
+          m('span.agent-tab-notice-label', label),
+        ]),
+        m('span.agent-tab-notice-detail', protectedTab
+          ? 'This task tab uses additional browser safeguards.'
+          : 'Browser control was not confirmed. Close this tab before continuing.'),
+      ]),
       m('button.agent-tab-notice-go', {
         type: 'button',
         title: 'Go to this tab',
+        'aria-label': `Go to ${protectedTab ? 'task' : 'blank'} tab: ${label}`,
         onclick: () => uiActions?.openAgentTab?.(ev.tabId, ev.windowId),
       }, 'Go ↗'),
     ]);
@@ -207,23 +402,25 @@ const AgentTabNotice = {
 const groupMessages = (messages) => {
   /** @type {Array<{ type: 'user', message: ChatMessage } | { type: 'actor-reply', message: ChatMessage } | { type: 'assistant', message: ChatMessage, toolResults: PairedTool[] }>} */
   const out = [];
-  /** @type {Map<string, ToolResult>} */
-  const resultsByToolUseId = new Map();
-  // First pass: collect tool results into a flat map.
-  // why `msg` not `m`: `m` is the Mithril alias imported at module top;
-  // reusing it as a loop var shadows it (matches the `msg` loop below).
-  for (const msg of messages) {
-    if (msg.role === 'user' && Array.isArray(msg.toolResults)) {
-      for (const tr of /** @type {ToolResult[]} */ (msg.toolResults)) {
-        if (tr?.tool_use_id) resultsByToolUseId.set(tr.tool_use_id, tr);
-      }
-    }
-  }
+  /** @type {Map<string, PairedTool[]>} */
+  const unmatchedByToolUseId = new Map();
   for (const msg of messages) {
     if (msg.role === 'user') {
+      // Pair each result with the closest preceding unmatched occurrence. Tool
+      // ids are provider-authored and can repeat on later model calls, so a
+      // transcript-global id map would attach the newest result to old calls.
+      if (Array.isArray(msg.toolResults)) {
+        for (const tr of /** @type {ToolResult[]} */ (msg.toolResults)) {
+          if (!tr?.tool_use_id) continue;
+          const unmatched = unmatchedByToolUseId.get(tr.tool_use_id);
+          const pair = unmatched?.pop();
+          if (pair) pair.toolResult = tr;
+          if (unmatched?.length === 0) unmatchedByToolUseId.delete(tr.tool_use_id);
+        }
+      }
       const isToolResultOnly = (!msg.content || msg.content === '')
         && Array.isArray(msg.toolResults) && msg.toolResults.length > 0;
-      if (isToolResultOnly) continue; // pair with prior assistant via map
+      if (isToolResultOnly) continue;
       // An actor's reply-wake is synthetic (machine-delivered) but it IS the
       // news the user is waiting on — surface it as its own attributed bubble
       // at its place in the transcript instead of burying it in the tool card.
@@ -235,10 +432,13 @@ const groupMessages = (messages) => {
       out.push({ type: 'user', message: msg });
     } else if (msg.role === 'assistant') {
       const toolUses = Array.isArray(msg.toolUses) ? /** @type {ToolUse[]} */ (msg.toolUses) : [];
-      const paired = toolUses.map((tu) => ({
-        toolUse: tu,
-        toolResult: resultsByToolUseId.get(tu.id) ?? null,
-      }));
+      const paired = /** @type {PairedTool[]} */ (toolUses.map(
+        (tu) => ({ toolUse: tu, toolResult: null })));
+      for (const pair of paired) {
+        const unmatched = unmatchedByToolUseId.get(pair.toolUse.id) ?? [];
+        unmatched.push(pair);
+        unmatchedByToolUseId.set(pair.toolUse.id, unmatched);
+      }
       out.push({ type: 'assistant', message: msg, toolResults: paired });
     }
   }
@@ -294,14 +494,30 @@ const ActorReplyMessage = {
     // Drop replyText()'s one-line lead ("The <kind> actor … has replied:") —
     // the role label above the bubble already says who this is.
     const body = content.includes('\n\n') ? content.slice(content.indexOf('\n\n') + 2) : content;
+    // A Stop with an explicitly unknown outcome is not a clean cancellation;
+    // verification guidance must win over the friendlier cancelled label.
+    const aborted = reply.aborted === true && reply.outcomeKnown !== false;
+    const failed = reply.failed === true && !aborted;
+    const userFailure = failed && reply.performed === false
+      ? ACTOR_NOT_RUN_USER_FAILURE : null;
+    const outcomeUnknown = !aborted && reply.outcomeKnown === false;
+    const notRun = !outcomeUnknown && reply.performed === false;
+    const displayBody = outcomeUnknown
+      ? actorOutcomeUnknownFailure(body)
+      : (userFailure ?? body);
     // A `via:'script'` reply came from a fire-and-forget delegation inside an
     // earlier script run — it can land minutes later, so name its origin or the
     // bubble is unexplainable to a user who never saw the fan-out happen.
     const via = /** @type {{ via?: string }} */ (reply).via;
-    return m(`.message.message-actor-reply${reply.failed ? '.failed' : ''}`, [
-      m('.role', [label, via === 'script' ? ' · delegated by an earlier script' : '', reply.failed ? ' · failed' : '']),
-      m('.bubble', renderText(stripUntrustedFences(body))),
-    ]);
+    return m(`.message.message-actor-reply${aborted ? '.cancelled' : failed ? '.failed' : ''}`, [
+      m('.role', [
+        label,
+        via === 'script' ? ' · delegated by an earlier script' : '',
+        aborted ? ' · cancelled'
+          : failed ? ` · ${outcomeUnknown ? 'Outcome unknown' : notRun ? 'Not run' : 'failed'}` : '',
+      ]),
+      m('.bubble', renderText(stripUntrustedFences(displayBody))),
+      ]);
   },
 };
 
@@ -315,9 +531,11 @@ const AssistantMessage = {
    *   scriptOps?: Record<string, any[]>,
    *   loadActor?: (sessionId: string) => void,
    *   peerName?: string, depth?: number,
+   *   send?: (msg: Record<string, any>) => Promise<any>, sessionId?: string,
+   *   allowFeedback?: boolean,
    * } }} vnode
    */
-  view: ({ attrs: { message, toolResults, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth } }) => {
+  view: ({ attrs: { message, toolResults, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth, send, sessionId, allowFeedback } }) => {
     const hasText = typeof message.content === 'string' && message.content.length > 0;
     const hasToolUses = toolResults.length > 0;
     const hasThinking = typeof message.thinking === 'string' && message.thinking.length > 0;
@@ -395,6 +613,69 @@ const AssistantMessage = {
               depth: depth ?? 0,
             })
           ))
+        : null,
+      CONTRIBUTOR_FEEDBACK_ENABLED && depth === 0 && allowFeedback
+        && hasText && !message.streaming && !message.error && send && sessionId
+        ? m(TaskFeedback, { messageId: message.id, sessionId, send })
+        : null,
+    ]);
+  },
+};
+
+// Optional binary task feedback. The route re-derives the selected assistant
+// turn and cohort, so the DOM cannot submit a cohort, counter, or arbitrary
+// text. Selection changes only after the host confirms the write.
+const TaskFeedback = {
+  /** @param {{ state: any }} vnode */
+  oninit(vnode) {
+    vnode.state.selection = null;
+    vnode.state.busy = false;
+    vnode.state.notice = null;
+  },
+  /** @param {{ state: any, attrs: { messageId: string, sessionId: string, send: (msg: Record<string, any>) => Promise<any> } }} vnode */
+  view(vnode) {
+    /** @param {'worked'|'didnt_work'} verdict */
+    const choose = async (verdict) => {
+      if (vnode.state.busy) return;
+      vnode.state.busy = true;
+      vnode.state.notice = null;
+      m.redraw();
+      try {
+        const reply = await vnode.attrs.send({
+          type: 'contributor/feedback',
+          sessionId: vnode.attrs.sessionId,
+          messageId: vnode.attrs.messageId,
+          verdict,
+        });
+        if (reply?.ok === true && reply?.reason == null) {
+          vnode.state.selection = verdict;
+        } else {
+          vnode.state.notice = reply?.reason === 'disabled'
+            ? 'enable Contributor Metrics in Settings to record feedback'
+            : 'feedback was not recorded';
+        }
+      } catch {
+        vnode.state.notice = 'feedback was not recorded';
+      }
+      vnode.state.busy = false;
+      m.redraw();
+    };
+    return m('.task-feedback', { role: 'group', 'aria-label': 'Was this response useful?' }, [
+      m('span', 'did this work?'),
+      m('button', {
+        type: 'button', class: vnode.state.selection === 'worked' ? 'is-selected' : '',
+        'aria-pressed': vnode.state.selection === 'worked' ? 'true' : 'false',
+        disabled: vnode.state.busy,
+        onclick: () => choose('worked'),
+      }, 'worked'),
+      m('button', {
+        type: 'button', class: vnode.state.selection === 'didnt_work' ? 'is-selected' : '',
+        'aria-pressed': vnode.state.selection === 'didnt_work' ? 'true' : 'false',
+        disabled: vnode.state.busy,
+        onclick: () => choose('didnt_work'),
+      }, 'didn’t work'),
+      vnode.state.notice
+        ? m('span.task-feedback-note', { role: 'status' }, vnode.state.notice)
         : null,
     ]);
   },
@@ -521,6 +802,7 @@ const ToolCall = {
     const status = toolResult
       ? (toolResult.is_error ? 'failed' : 'ok')
       : (interrupted ? 'cancelled' : 'pending');
+    const policyStatus = browserPolicyStatus(toolResult);
     const showLiveStream = toolUse.name === 'vm_boot' && !toolResult
       && liveStream && (liveStream.stdout || liveStream.stderr);
     // The live DELEGATION feed for a `script` run: one line per actors op
@@ -536,7 +818,9 @@ const ToolCall = {
     // expanded body so the collapsed chip stays small. The architecture
     // is still legible — one click away, not always on screen.
     return m(`.tool-call.tool-${status}`, [
-      m('.tool-call-header', {
+      m('button.tool-call-header', {
+        type: 'button',
+        'aria-expanded': String(ui.expanded),
         onclick: () => { ui.expanded = !ui.expanded; },
       }, [
         m('span.disclosure', ui.expanded ? '▼' : '▶'),
@@ -544,6 +828,9 @@ const ToolCall = {
           { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : status === 'cancelled' ? 'cancelled' : 'ok' }),
         m('span.tool-name', toolUse.name),
         m('span.tool-args', argsSummary(toolUse.input)),
+        policyStatus
+          ? m('span.policy-kind-chip', { title: policyStatus.title }, policyStatus.label)
+          : null,
         // Failure-class chip on a failed card: the classified neighborhood
         // (policy / environment / timeout / …) at a glance; the raw error
         // stays one click away in the expanded result body.
@@ -568,13 +855,14 @@ const ToolCall = {
           ? m('pre.vm-stream-stderr', liveStream.stderr) : null,
       ]) : null,
       showOps ? m('.script-ops', ops.map((/** @type {any} */ o) => m('.script-op', { key: o.seq }, [
-        m(`span.script-op-dot.dot-${o.phase === 'sent' ? 'pending' : (o.failed ? 'failed' : 'ok')}`),
+        m(`span.script-op-dot.dot-${o.phase === 'sent' ? 'pending' : o.cancelled ? 'cancelled' : (o.failed ? 'failed' : 'ok')}`),
         m('span.script-op-line', [
           `${o.method}${o.to ? ` ${o.to}` : ''}`,
           o.goalPreview ? m('span.script-op-goal', ` "${o.goalPreview}"`) : null,
         ]),
         m('span.script-op-state',
           o.phase === 'sent' ? 'working…'
+            : o.cancelled ? 'cancelled'
             : o.phase === 'handed-off' ? 'handed off'
             : `${o.failed ? 'failed' : 'replied'}${typeof o.ms === 'number' ? ` · ${(o.ms / 1000).toFixed(1)}s` : ''}`),
       ]))) : null,
@@ -634,10 +922,16 @@ const ToolCall = {
 const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, loadActor, peerName, depth, ui }) => {
   const meta = toolResult?.meta ?? null;
   const status = toolResult ? (toolResult.is_error ? 'failed' : 'ok') : (interrupted ? 'cancelled' : 'pending');
+  const resultText = toolResult ? formatResultContent(toolResult) : '';
+  const outcomeUnknown = status === 'failed' && /outcome is unknown|outcome unknown/i.test(resultText);
   const childId = resolveChildSessionId(toolUse, toolResult, spawned);
   const childSession = childId ? spawned?.sessions?.[childId] : null;
   const task = childSession?.task ?? toolUse.input?.task ?? '';
   const tooDeep = depth + 1 > MAX_NESTED_DEPTH;
+  const terminalLabel = status === 'pending' ? 'running…'
+    : status === 'cancelled' ? 'cancelled'
+    : status === 'failed' ? (outcomeUnknown ? 'Outcome unknown' : 'failed')
+    : 'done';
 
   const onToggle = () => {
     ui.expanded = !ui.expanded;
@@ -647,20 +941,23 @@ const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, 
   };
 
   return m(`.tool-call.tool-actor.tool-${status}`, [
-    m('.tool-call-header', { onclick: onToggle }, [
+    m('button.tool-call-header', {
+      type: 'button', onclick: onToggle, 'aria-expanded': String(ui.expanded),
+    }, [
       m('span.disclosure', ui.expanded ? '▼' : '▶'),
       m(`span.tool-status-dot.dot-${status}`,
-        { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : status === 'cancelled' ? 'cancelled' : 'ok' }),
+        { title: status === 'failed' ? (outcomeUnknown ? 'outcome unknown' : 'failed') : status === 'pending' ? 'running' : status === 'cancelled' ? 'cancelled' : 'ok' }),
       m('span.tool-name', 'actor_create'),
       m('span.tool-args', `"${truncate(String(task), 48)}"`),
       m('.spacer'),
-      status === 'pending' ? m('span.tool-pending', 'running…')
-        : status === 'cancelled' ? m('span.tool-cancelled', 'cancelled')
-        : meta ? m('span.tool-duration', `${meta.durationMs}ms`) : null,
+      m(`span.tool-${status === 'pending' ? 'pending' : 'duration'}`, terminalLabel),
+      meta ? m('span.tool-duration', `${meta.durationMs}ms`) : null,
     ]),
     ui.expanded ? m('.actor-body', [
       status === 'failed' && toolResult
-        ? m('p.error-line', formatResultContent(toolResult))
+        ? m('p.error-line', outcomeUnknown
+          ? actorOutcomeUnknownFailure(resultText)
+          : formatResultContent(toolResult))
         : null,
       tooDeep
         ? m('p.muted', `nested ${MAX_NESTED_DEPTH} levels deep — deeper transcripts are inspectable via session navigation`)
@@ -669,7 +966,9 @@ const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, 
               renderTranscript({ messages: childSession.messages, spawned, actors, loadActor, peerName, depth: depth + 1 }))
           : childId
             ? m('p.muted', status === 'pending' ? 'actor running…' : status === 'cancelled' ? 'actor cancelled' : 'loading transcript…')
-            : m('p.muted', 'no child transcript recorded'),
+            : m('p.muted', outcomeUnknown
+              ? 'No reliable actor transcript is available.'
+              : 'no child transcript recorded'),
     ]) : null,
   ]);
 };
@@ -686,50 +985,110 @@ const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, 
  *   loadActor?: (sessionId: string) => void, peerName?: string, depth: number, ui: ToolCallState }} a
  */
 const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, loadActor, peerName, depth, ui }) => {
-  const card = actors?.[toolUse.id] ?? null;
+  // A host-proven pre-effect terminal result never emitted actor-start. If an
+  // id-keyed live card exists, it belongs to an older provider occurrence and
+  // must not override this call's durable Not run result.
+  const preEffectTerminal = toolResult?.actorTerminal === true
+    && toolResult?.actorPerformed === false;
+  const keyedCard = actors?.[toolUse.id] ?? null;
+  const resultCorrelationIds = toolResult ? [
+    toolResult.actorCorrelationId,
+    toolResult.actorDeliveryId,
+    ...(Array.isArray(toolResult.actorDeliveryIds) ? toolResult.actorDeliveryIds : []),
+  ].filter((id) => typeof id === 'string') : [];
+  // Actor cards remain id-keyed for compact state, but provider tool-use ids can
+  // repeat across turns. Once a durable result exists, borrow the live card only
+  // when host correlation proves it belongs to this exact occurrence.
+  const cardMatchesResult = !toolResult || (
+    typeof keyedCard?.actorCorrelationId === 'string'
+    && resultCorrelationIds.includes(keyedCard.actorCorrelationId)
+  );
+  const card = preEffectTerminal || !cardMatchesResult ? null : keyedCard;
   const task = String(toolUse.input?.message ?? '');
   const who = card?.name ?? card?.instanceId ?? toolUse.input?.to ?? '';
   // DESIGN-18: an API actor is a web actor whose instance is an ORIGIN — label it
   // "<origin> integration" to match deliver()/ack + the prompt lore (not "web actor",
   // which wrongly implies a tab/DOM agent for a tabless fetch-only thing).
   const isApiIntegration = card?.kind === 'web' && /^https?:\/\//.test(String(who));
-  const cardLabel = isApiIntegration
-    ? `${who} integration`
-    : `${card?.kind ? `${card.kind} actor` : 'actor'}${who ? ` · ${who}` : ''}`;
+  const resultText = toolResult ? formatResultContent(toolResult) : '';
+  const failureText = `${card?.error ?? ''} ${resultText}`;
+  const outcomeUnknown = card?.outcomeKnown === false
+    || (!card && toolResult?.actorOutcomeKnown === false);
   // The actor's own live state drives the status (the tool result is the async
   // "delivered" ack, not the actor outcome). No card yet → fall back to the ack.
-  const status = card?.error ? 'failed'
+  const status = outcomeUnknown ? 'failed'
+    : card?.error ? 'failed'
     : card?.aborted ? 'cancelled'
     : card?.streaming ? 'pending'
     : card ? 'ok'
-    : (toolResult ? (toolResult.is_error ? 'failed' : 'ok') : (interrupted ? 'cancelled' : 'pending'));
+    : (toolResult ? (toolResult.actorAborted ? 'cancelled' : toolResult.is_error ? 'failed' : 'ok')
+      : (interrupted ? 'cancelled' : 'pending'));
+  const performed = card?.performed ?? (!card ? toolResult?.actorPerformed : undefined);
+  const userFailure = performed === false ? ACTOR_NOT_RUN_USER_FAILURE : null;
+  const notRun = status === 'failed' && !outcomeUnknown
+    && performed === false;
+  const cardLabel = preEffectTerminal
+    ? 'actor'
+    : isApiIntegration
+      ? `${who} integration`
+      : `${card?.kind ? `${card.kind} actor` : 'actor'}${who ? ` · ${who}` : ''}`;
+  const presentationStatus = notRun ? 'not-run' : status;
+  const handedOff = !card && toolUse.input?.await === true
+    && /is still working; its reply will arrive as a fenced note on a later turn/i.test(resultText);
+  const acceptedAsync = !card && !!toolResult && toolResult.is_error !== true
+    && toolUse.input?.await !== true;
+  const completedAwait = !card && !!toolResult && toolResult.is_error !== true
+    && toolUse.input?.await === true && !handedOff;
+  const terminalLabel = status === 'pending' ? 'working…'
+    : status === 'cancelled' ? 'cancelled'
+    : status === 'failed' ? (outcomeUnknown ? 'Outcome unknown' : notRun ? 'Not run' : 'failed')
+    : handedOff ? 'handed off'
+    : acceptedAsync ? 'accepted'
+    : 'done';
   const tooDeep = depth + 1 > MAX_NESTED_DEPTH;
   const onToggle = () => { ui.expanded = !ui.expanded; };
-  return m(`.tool-call.tool-actor.tool-${status}`, [
-    m('.tool-call-header', { onclick: onToggle }, [
+  return m(`.tool-call.tool-actor.tool-${presentationStatus}`, [
+    m('button.tool-call-header', {
+      type: 'button', onclick: onToggle, 'aria-expanded': String(ui.expanded),
+    }, [
       m('span.disclosure', ui.expanded ? '▼' : '▶'),
-      m(`span.tool-status-dot.dot-${status}`,
-        { title: status === 'failed' ? 'failed' : status === 'pending' ? 'working' : status === 'cancelled' ? 'cancelled' : 'ok' }),
+      m(`span.tool-status-dot.dot-${presentationStatus}`,
+        presentationStatus === 'not-run'
+          ? { 'aria-hidden': 'true' }
+          : { title: status === 'failed' ? (outcomeUnknown ? 'outcome unknown' : 'failed') : status === 'pending' ? 'working' : status === 'cancelled' ? 'cancelled' : 'ok' }),
       m('span.tool-name', 'message_actor'),
       m('span.tool-args', `${cardLabel}: "${truncate(task, 40)}"`),
       m('.spacer'),
-      status === 'pending' ? m('span.tool-pending', 'working…')
-        // Show the spend chip whenever a tally is present — incl. $0.00 for a
-        // keyless/Ollama turn — so a completed card always carries a terminal chip.
-        : card?.cost ? m('span.tool-duration', { title: 'this actor turn’s spend' }, `$${Number(card.cost.cost ?? 0).toFixed((card.cost.cost ?? 0) < 0.01 ? 4 : 2)}`)
-        : null,
+      m(`span.tool-${status === 'pending' ? 'pending' : 'duration'}`, terminalLabel),
+      // Spend stays separate so the terminal state is visible even at $0.00.
+      card?.cost ? m('span.tool-duration', { title: 'this actor turn’s spend' }, `$${Number(card.cost.cost ?? 0).toFixed((card.cost.cost ?? 0) < 0.01 ? 4 : 2)}`) : null,
     ]),
     ui.expanded ? m('.actor-body', [
-      card?.error ? m('p.error-line', String(card.error)) : null,
-      tooDeep
+      card?.error
+        ? m('p.error-line', outcomeUnknown
+          ? actorOutcomeUnknownFailure(String(card.error))
+          : (userFailure ?? String(card.error)))
+        : null,
+      !card?.error && toolResult?.is_error
+        ? m('p.error-line', outcomeUnknown
+          ? actorOutcomeUnknownFailure(resultText)
+          : (userFailure ?? resultText))
+        : null,
+      card?.error || toolResult?.is_error
+        ? null
+        : tooDeep
         ? m('p.muted', `nested ${MAX_NESTED_DEPTH} levels deep — deeper transcripts are inspectable via session navigation`)
         : (card && Array.isArray(card.messages) && card.messages.length > 0)
           ? m('.actor-transcript',
               renderTranscript({ messages: card.messages, actors, spawned, loadActor, peerName, depth: depth + 1 }))
+          : completedAwait
+            ? m('pre.tool-result-content', resultText)
+          : handedOff
+            ? m('p.muted', 'the actor is still working; check later messages for the reply')
           : m('p.muted', card?.streaming ? 'actor working…'
-              // No card after a non-error "delivered" ack = the reply already landed
-              // on a later turn (the live stream was lost to a reload / SW restart).
-              : (!card && toolResult && !toolResult.is_error) ? 'reply delivered on a later turn'
+              // Historical success proves acceptance, not delivery. A reload may
+              // have lost the live card while the reply is still pending.
+              : (!card && toolResult && !toolResult.is_error) ? 'request accepted; check later messages for the reply'
               : 'no actor activity yet — its reply will arrive on a later turn'),
     ]) : null,
   ]);
@@ -781,6 +1140,34 @@ const argsSummary = (input) => {
  */
 const truncate = (s, n) => s.length <= n ? s : `${s.slice(0, n - 1)}…`;
 
+/** @param {ToolResult|null} toolResult */
+const browserPolicyStatus = (toolResult) => {
+  if (!toolResult) return null;
+  const notices = (toolResult.meta?.browserPolicies ?? []).filter((notice) =>
+    notice && typeof notice === 'object'
+    && ['protected_child_navigation', 'protected_child_request', 'child_navigation_failed', 'child_navigation_unverified']
+      .includes(notice.reason)
+    && ['not_run', 'unverified'].includes(notice.outcome)
+    && ['closed', 'left_blank', 'guarded', 'uncontained'].includes(notice.child)
+    && notice.retryable === false);
+  if (notices.length === 0) return null;
+  if (notices.some((/** @type {{ child?: string }} */ notice) => notice?.child === 'uncontained')) {
+    return {
+      label: 'child control not confirmed',
+      title: 'The browser did not confirm that the child tab was closed or blank',
+    };
+  }
+  const blocked = notices.filter(
+    (/** @type {{ outcome?: string }} */ notice) => notice?.outcome === 'not_run',
+  ).length;
+  return {
+    label: notices.length > 1 ? `${notices.length} child actions stopped` : 'child action stopped',
+    title: blocked === notices.length
+      ? 'A protected child action did not run'
+      : 'A child navigation could not be verified',
+  };
+};
+
 /** @param {ToolResult} toolResult */
 const formatResultContent = (toolResult) => {
   let content = toolResult.content;
@@ -812,7 +1199,7 @@ const formatResultContent = (toolResult) => {
 //                     actor— agent-loop orchestration (docs/ACTORS.md)
 //   engine  (amber)   webvm    — WebVM execution kind
 //                     notebook — Notebook execution kind
-//                     pod      — Pod execution kind
+//                     pod     : Pod execution kind
 //                     app      — App execution kind
 //   distributed       dweb     — the dweb / dwapp network (share/discover/
 //   (magenta)                    install/peers/block/discovery/guide)

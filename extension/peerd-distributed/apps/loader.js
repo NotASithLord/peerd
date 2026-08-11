@@ -16,17 +16,14 @@
 // loader stays pure logic over bytes.
 
 import { assertBundleWithinLimits, manifestHash, verifyManifest } from '../content/manifest.js';
-import { unpackBundleText } from '../content/bundle.js';
+import { unpackBundle } from '../content/bundle.js';
 import { chunkBytes, sha256hex } from '../content/chunk.js';
 import { parsePeerdUri } from '../content/uri.js';
 
-// The dweb-install ceiling is SEPARATE from the agent's sandbox_create app cap (2 MB /
-// 64 files): a peer-installed app may carry WASM + assets, so it gets a larger
-// bound (PROPAGATION.md "big apps"). It is still bounded — a malicious bundle
-// can't be unbounded — and the Library warns from the card's `size` before the
-// fetch even starts. why 50 MB / 256 files: WASM-friendly, still well under what
-// a swarm fetch + OPFS store handle comfortably.
-const MAX_TOTAL_CHARS = 50_000_000;
+// The peer-install rails are enforced both before bundle decoding and again on
+// the decoded file tree. Keep the live values beside the checks rather than in
+// prose that drifts from the storage and publishing layers.
+const MAX_TOTAL_BYTES = 50_000_000;
 const MAX_FILES = 256;
 
 export class BundleRejectedError extends Error {
@@ -46,7 +43,8 @@ export class BundleRejectedError extends Error {
  *   payload: Uint8Array,
  *   install: (app: {
  *     name: string,
- *     files: Record<string, string>,
+ *     files: Record<string, Uint8Array>,
+ *     fileKinds: Record<string, 'text' | 'binary'>,
  *     entryFile: string,
  *     dweb: { uri: string, publisher: string | null, hash: string,
  *             version_id: string, dwapp_id?: string, slug?: string, seq?: number,
@@ -112,11 +110,16 @@ export const installAppBundle = async ({ uri, manifest, payload, install, name, 
 
   let unpacked;
   try {
-    unpacked = unpackBundleText(payload);
+    unpacked = unpackBundle(payload, {
+      maxPackedBytes: 50_000_000,
+      maxDecodedBytes: MAX_TOTAL_BYTES,
+      maxFiles: MAX_FILES,
+      maxPathChars: 512,
+    });
   } catch (e) {
     throw new BundleRejectedError(`malformed bundle: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
   }
-  const { entry, files } = unpacked;
+  const { entry, files, fileKinds } = unpacked;
   const paths = Object.keys(files);
   if (!paths.length) throw new BundleRejectedError('empty bundle');
   if (paths.length > MAX_FILES) throw new BundleRejectedError(`too many files: ${paths.length} > ${MAX_FILES}`);
@@ -129,12 +132,13 @@ export const installAppBundle = async ({ uri, manifest, payload, install, name, 
       throw new BundleRejectedError(`unsafe path in bundle: ${p}`);
     }
   }
-  const total = Object.values(files).reduce((n, c) => n + c.length, 0);
-  if (total > MAX_TOTAL_CHARS) throw new BundleRejectedError(`bundle too large: ${total} chars`);
+  const total = Object.values(files).reduce((n, bytes) => n + bytes.byteLength, 0);
+  if (total > MAX_TOTAL_BYTES) throw new BundleRejectedError(`bundle too large: ${total} bytes`);
 
   return install({
     name: name ?? manifest.name ?? `peerd app ${hash.slice(0, 8)}`,
     files,
+    fileKinds,
     entryFile: entry,
     // hash IS the version id (the bundle's manifest hash). dwapp_id/slug/seq come
     // from the discovery card the user installed FROM — persisting them lets the

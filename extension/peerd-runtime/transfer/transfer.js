@@ -10,7 +10,7 @@
 // and INJECTED IO (vault reads/writes, memory import, hook saves happen
 // in the SW via the `io` parameter). Pure parts are unit-testable in Bun.
 //
-// Payload shape (format: 'peerd-export', version: 1):
+// Payload shape (format: 'peerd-export', version: 2):
 //   settings           ONLY the user's explicit values (Option A: a
 //                      stored value is an intentional choice; defaults
 //                      never travel). On import, keys unknown to the
@@ -18,33 +18,62 @@
 //                      is how preview-only (dweb*) settings fall
 //                      away on a store import, by mechanism not by list.
 //   providerEndpoints  user-added provider endpoints ({ endpoints: [...] })
-//   secrets            API keys, encrypted under a passphrase the user
-//                      enters at export time (PBKDF2-SHA256 600k →
-//                      AES-GCM). Never exported in plaintext; never
+//   secrets            vault credentials, encrypted under a passphrase the user
+//                      enters at export time (fixed Argon2id → AES-GCM).
+//                      Never exported in plaintext; never
 //                      encrypted under the vault DK (the DK never leaves
 //                      the vault).
 //   memory             memory exportAll() payload (AGENTS.md docs)
 //   hooks              user hook records (exportHooks())
 //   skills             skill METADATA only — bodies reinstall from their
 //                      original sources (git/manifest origin in the meta)
-//   dweb               absent in Phase 0 (identity is ephemeral by
-//                      design — see the dweb module's identity
-//                      notes). When the persistent vault-seeded identity
-//                      lands (Phase 2), it exports here, preview-channel
-//                      only, and store imports drop it with the §10
-//                      notice. (This comment says "the dweb module"
-//                      because this file ships in store packages and the
-//                      artifact verifier greps everything.)
+//   dweb               the portable identity record ({ identityRecord }):
+//                      the did:key root sealed in an encrypted capsule
+//                      whose wrappers only the export passphrase (or an
+//                      enrolled credential) can open — built by the
+//                      channel's dweb crypto host and passed in OPAQUE,
+//                      because this file must not
+//                      touch dweb code. Preview-channel only; store
+//                      imports drop it with the §10 notice. The raw
+//                      identity/device-key secrets are structurally
+//                      excluded from the generic secrets box below —
+//                      the seed travels ONLY inside the capsule, the
+//                      device key never travels at all
+//                      (docs/design/portable-identity/ 02–03). (This
+//                      comment says "the dweb module" because this file
+//                      ships in store packages and the artifact verifier
+//                      greps everything.)
 //   durability         §12 labels for THIS file: the durability tier of
 //                      each section actually included, plus the names of
 //                      the device-bound surfaces an export structurally
-//                      cannot carry. Purely additive (older files simply
-//                      lack it), so EXPORT_VERSION is unchanged.
+//                      cannot carry. Older files may lack this additive block;
+//                      import treats absence as unlabelled durability data.
 
 import { omittedDeviceBoundStores, portableStores } from '../lifecycle/store-registry.js';
+import {
+  BACKUP_ARGON2ID_PARAMS, BACKUP_ARGON2ID_SALT_BYTES,
+  deriveBackupPassphraseBytes,
+} from '/shared/backup-passphrase.js';
 
-export const EXPORT_VERSION = 1;
+export const EXPORT_VERSION = 2;
 export const EXPORT_FORMAT = 'peerd-export';
+const LEGACY_EXPORT_VERSION = 1;
+
+export const EXPORT_PASSPHRASE_MIN_LENGTH = 16;
+
+// Secrets that never enter the generic secrets box (see the header's
+// dweb section): the identity seed travels only inside the capsule, the
+// record is carried as payload.dweb, and the device key is device-bound.
+// Enforced HERE (payload shaping), not in the route — mechanism, not
+// caller discipline. Store-safe names (kv strings, not module paths).
+const NON_EXPORTABLE_SECRET_PREFIXES = Object.freeze([
+  'distributed/identity/',
+  'distributed/device-key/',
+]);
+
+/** @param {string} name */
+export const isCustodySecretName = (name) =>
+  NON_EXPORTABLE_SECRET_PREFIXES.some((prefix) => name.startsWith(prefix));
 
 export class ExportPassphraseError extends Error {
   constructor() {
@@ -54,27 +83,56 @@ export class ExportPassphraseError extends Error {
 }
 
 // ── passphrase crypto ────────────────────────────────────────────────
-// PBKDF2-SHA256 @600k for the EXPORT FILE passphrase only (the vault
-// itself uses Argon2id; an export is an ephemeral user-carried file, a
-// different threat model) but
-// derives an AES-GCM key directly — this is file encryption under a
-// user-chosen passphrase, independent of the vault DK.
+// New exports use the same fixed memory-hard policy as the peer-identity
+// wrapper. A backup containing both sections must not give an attacker a
+// cheaper correctness oracle for their shared passphrase. PBKDF2 remains
+// import-only for backups emitted before this hardening.
 
-const PBKDF2_ITERATIONS = 600_000;
+const LEGACY_PBKDF2_ITERATIONS = 600_000;
 const IV_BYTES = 12;
-const SALT_BYTES = 16;
+const MAX_ENCRYPTED_SECRETS_B64 = 4 * 1024 * 1024;
+const MAX_SECRET_ENTRIES = 256;
+const MAX_SECRET_NAME_LENGTH = 256;
+const MAX_SECRET_VALUE_LENGTH = 1024 * 1024;
+const MAX_SETTINGS_KEYS = 512;
+const MAX_PROVIDER_ENDPOINTS = 64;
+const MAX_MEMORY_DOCS = 10_000;
+const MAX_HOOKS = 256;
+const MAX_SKILLS = 512;
+const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
 
 /** @param {Uint8Array} bytes */
 const bytesToB64 = (bytes) => btoa(String.fromCharCode(...bytes));
 /** @param {string} b64 */
 const b64ToBytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 
+/** @param {any} box */
+const validEncryptedSecretsBox = (box) => {
+  if (!box || typeof box !== 'object' || box.cipher !== 'AES-GCM'
+      || typeof box.salt !== 'string' || box.salt.length !== 24
+      || !BASE64_PATTERN.test(box.salt)
+      || typeof box.data !== 'string' || box.data.length === 0
+      || box.data.length > MAX_ENCRYPTED_SECRETS_B64
+      || !BASE64_PATTERN.test(box.data)) return false;
+  if (box.kdf === BACKUP_ARGON2ID_PARAMS.name) {
+    return box.memKiB === BACKUP_ARGON2ID_PARAMS.memKiB
+      && box.iters === BACKUP_ARGON2ID_PARAMS.iters
+      && box.parallelism === BACKUP_ARGON2ID_PARAMS.parallelism
+      && box.iterations === undefined;
+  }
+  return box.kdf === 'PBKDF2-SHA256'
+    && box.iterations === LEGACY_PBKDF2_ITERATIONS
+    && box.memKiB === undefined
+    && box.iters === undefined
+    && box.parallelism === undefined;
+};
+
 /**
  * @param {string} passphrase
  * @param {BufferSource} salt
  * @param {number} iterations
  */
-const deriveExportKey = async (passphrase, salt, iterations) => {
+const deriveLegacyExportKey = async (passphrase, salt, iterations) => {
   const material = await crypto.subtle.importKey(
     'raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey'],
   );
@@ -87,43 +145,81 @@ const deriveExportKey = async (passphrase, salt, iterations) => {
   );
 };
 
+/** @param {string} passphrase @param {Uint8Array} salt */
+const deriveExportKey = async (passphrase, salt) => {
+  const raw = await deriveBackupPassphraseBytes(passphrase, salt);
+  try {
+    return await crypto.subtle.importKey(
+      'raw', /** @type {BufferSource} */ (raw), { name: 'AES-GCM', length: 256 },
+      false, ['encrypt', 'decrypt'],
+    );
+  } finally {
+    raw.fill(0);
+  }
+};
+
 /**
  * Encrypt a JSON-able value under a passphrase → self-describing box.
  * @param {string} passphrase
  * @param {unknown} value
  */
 export const encryptWithPassphrase = async (passphrase, value) => {
-  const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
+  const salt = crypto.getRandomValues(new Uint8Array(BACKUP_ARGON2ID_SALT_BYTES));
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
-  const key = await deriveExportKey(passphrase, salt, PBKDF2_ITERATIONS);
+  const key = await deriveExportKey(passphrase, salt);
   const plaintext = new TextEncoder().encode(JSON.stringify(value));
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext));
-  const blob = new Uint8Array(iv.length + ct.length);
-  blob.set(iv, 0);
-  blob.set(ct, iv.length);
-  return {
-    kdf: 'PBKDF2-SHA256',
-    iterations: PBKDF2_ITERATIONS,
-    salt: bytesToB64(salt),
-    cipher: 'AES-GCM',
-    data: bytesToB64(blob),
-  };
+  try {
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext));
+    const blob = new Uint8Array(iv.length + ct.length);
+    blob.set(iv, 0);
+    blob.set(ct, iv.length);
+    return {
+      kdf: BACKUP_ARGON2ID_PARAMS.name,
+      memKiB: BACKUP_ARGON2ID_PARAMS.memKiB,
+      iters: BACKUP_ARGON2ID_PARAMS.iters,
+      parallelism: BACKUP_ARGON2ID_PARAMS.parallelism,
+      salt: bytesToB64(salt),
+      cipher: 'AES-GCM',
+      data: bytesToB64(blob),
+    };
+  } finally {
+    plaintext.fill(0);
+  }
 };
 
 /**
  * Decrypt an encryptWithPassphrase box. Throws ExportPassphraseError on
  * auth failure (GCM tag mismatch = wrong passphrase or tampering).
  * @param {string} passphrase
- * @param {{ salt: string, iterations: number, data: string }} box
+ * @param {{ kdf: string, cipher: string, salt: string, data: string, iterations?: number, memKiB?: number, iters?: number, parallelism?: number }} box
  */
 export const decryptWithPassphrase = async (passphrase, box) => {
-  const blob = b64ToBytes(box.data);
-  const iv = blob.slice(0, IV_BYTES);
-  const ct = blob.slice(IV_BYTES);
-  const key = await deriveExportKey(passphrase, b64ToBytes(box.salt), box.iterations);
   try {
-    const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
-    return JSON.parse(new TextDecoder().decode(plaintext));
+    if (!validEncryptedSecretsBox(box)) {
+      throw new Error('malformed encrypted secrets box');
+    }
+    const salt = b64ToBytes(box.salt);
+    if (salt.byteLength !== BACKUP_ARGON2ID_SALT_BYTES) throw new Error('bad salt');
+    const blob = b64ToBytes(box.data);
+    if (blob.byteLength < IV_BYTES + 16) throw new Error('ciphertext too short');
+    const iv = blob.slice(0, IV_BYTES);
+    const ct = blob.slice(IV_BYTES);
+    let key;
+    if (box.kdf === BACKUP_ARGON2ID_PARAMS.name) {
+      key = await deriveExportKey(passphrase, salt);
+    } else if (box.kdf === 'PBKDF2-SHA256') {
+      key = await deriveLegacyExportKey(
+        passphrase, salt, /** @type {number} */ (box.iterations),
+      );
+    } else {
+      throw new Error('unsupported encrypted secrets KDF');
+    }
+    const plaintext = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct));
+    try {
+      return JSON.parse(new TextDecoder().decode(plaintext));
+    } finally {
+      plaintext.fill(0);
+    }
   } catch {
     throw new ExportPassphraseError();
   }
@@ -178,11 +274,16 @@ const durabilitySection = (payload) => {
  * @param {any} args.memory   memory exportAll() payload
  * @param {any[]} args.hooks  exportHooks() records
  * @param {any[]} args.skills skill metadata list
+ * @param {any} [args.dweb]   the portable identity section
+ *        ({ identityRecord } — already encrypted by the dweb crypto host), or null
  */
 export const buildExport = async ({
-  channel, storedSettings, providerEndpoints, secrets, passphrase, memory, hooks, skills,
+  channel, storedSettings, providerEndpoints, secrets, passphrase, memory, hooks, skills, dweb,
 }) => {
-  const secretNames = Object.keys(secrets ?? {});
+  const portableSecrets = Object.fromEntries(
+    Object.entries(secrets ?? {}).filter(([name]) => !isCustodySecretName(name)),
+  );
+  const secretNames = Object.keys(portableSecrets);
   if (secretNames.length > 0 && !passphrase) {
     throw new ExportPassphraseError();
   }
@@ -193,10 +294,13 @@ export const buildExport = async ({
     channel,
     settings: storedSettings ?? {},
     providerEndpoints: providerEndpoints ?? null,
-    secrets: secretNames.length > 0 ? await encryptWithPassphrase(passphrase, secrets) : null,
+    secrets: secretNames.length > 0 ? await encryptWithPassphrase(passphrase, portableSecrets) : null,
     memory: memory ?? null,
     hooks: hooks ?? [],
     skills: skills ?? [],
+    // Absent (not null) when there is nothing to carry — the pre-identity
+    // export shape, so old files and identity-less exports stay identical.
+    ...(dweb ? { dweb } : {}),
   };
   return { ...payload, durability: durabilitySection(payload) };
 };
@@ -210,6 +314,9 @@ export const buildExport = async ({
  * @property {string[]} settingsKeys
  * @property {string[]} settingsDropped
  * @property {boolean} hasSecrets
+ * @property {boolean} hasIdentityRecord
+ * @property {boolean} requiresPassphrase
+ * @property {string | null} identityDid
  * @property {number} memoryDocs
  * @property {number} hooks
  * @property {string[]} skills
@@ -233,18 +340,54 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
   if (!payload || payload.format !== EXPORT_FORMAT) {
     return { ok: false, error: 'not-a-peerd-export' };
   }
-  if (payload.version !== EXPORT_VERSION) {
+  if (payload.version !== EXPORT_VERSION && payload.version !== LEGACY_EXPORT_VERSION) {
     return { ok: false, error: `unsupported-export-version-${payload.version}` };
+  }
+  // Bound every collection that can become work or writes before the user can
+  // approve the file. The UI already caps total bytes; these shape limits stop
+  // small adversarial JSON from expanding into unbounded route activity.
+  const settingsValid = payload.settings == null
+    || (typeof payload.settings === 'object' && !Array.isArray(payload.settings)
+      && Object.keys(payload.settings).length <= MAX_SETTINGS_KEYS);
+  const endpointsValid = payload.providerEndpoints == null
+    || (typeof payload.providerEndpoints === 'object'
+      && Array.isArray(payload.providerEndpoints.endpoints)
+      && payload.providerEndpoints.endpoints.length <= MAX_PROVIDER_ENDPOINTS
+      && payload.providerEndpoints.endpoints.every((/** @type {any} */ endpoint) =>
+        endpoint && typeof endpoint === 'object'
+        && typeof endpoint.url === 'string' && endpoint.url.length <= 4096));
+  const memoryValid = payload.memory == null
+    || (typeof payload.memory === 'object' && Array.isArray(payload.memory.docs)
+      && payload.memory.docs.length <= MAX_MEMORY_DOCS
+      && payload.memory.docs.every((/** @type {any} */ doc) => doc && typeof doc === 'object'));
+  const hooksValid = Array.isArray(payload.hooks) && payload.hooks.length <= MAX_HOOKS
+    && payload.hooks.every((/** @type {any} */ hook) => hook && typeof hook === 'object');
+  const skillsValid = Array.isArray(payload.skills) && payload.skills.length <= MAX_SKILLS
+    && payload.skills.every((/** @type {any} */ skill) => skill && typeof skill === 'object');
+  const dwebValid = payload.dweb == null
+    || (typeof payload.dweb === 'object' && !Array.isArray(payload.dweb));
+  const secretsValid = payload.secrets == null || validEncryptedSecretsBox(payload.secrets);
+  if (!settingsValid || !endpointsValid || !memoryValid || !hooksValid || !skillsValid
+      || !dwebValid || !secretsValid) {
+    return { ok: false, error: 'invalid-export-sections' };
   }
   const settings = (payload.settings && typeof payload.settings === 'object') ? payload.settings : {};
   const known = new Set(knownSettingKeys);
   const settingsDropped = Object.keys(settings).filter((k) => !known.has(k));
   const dwebPresent = payload.dweb != null;
+  const identityRecord = payload.dweb?.identityRecord;
+  const hasIdentityRecord = channel !== 'store' && identityRecord != null;
   /** @type {string[]} */
   const notices = [];
   if (channel === 'store' && dwebPresent) {
-    // The §10 notice, verbatim.
-    notices.push('Dweb state in this export is not supported in the store package and was skipped.');
+    notices.push(identityRecord != null
+      ? 'The peer identity in this preview backup cannot be restored by the store build and will be skipped.'
+      : 'Dweb state in this export is not supported in the store package and was skipped.');
+  }
+  if (hasIdentityRecord) {
+    // §10 transparency: an identity is the most consequential thing an
+    // import can carry — say so before the user confirms.
+    notices.push('This export carries a dweb identity record — if this install has no dweb identity yet, importing restores that identity (same did as the exporting install).');
   }
   if (settingsDropped.length > 0) {
     notices.push(`Settings not recognized by this build were skipped: ${settingsDropped.join(', ')}.`);
@@ -261,6 +404,13 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
   /** @type {string[]} */
   const endpointUrls = (Array.isArray(payload.providerEndpoints?.endpoints) ? payload.providerEndpoints.endpoints : [])
     .map((/** @type {any} */ e) => String(e?.url ?? '')).filter(Boolean);
+  if (typeof settings.ollamaHost === 'string') {
+    try {
+      const configured = new URL(settings.ollamaHost.trim());
+      if ((configured.protocol === 'http:' || configured.protocol === 'https:')
+          && !endpointUrls.includes(configured.origin)) endpointUrls.push(configured.origin);
+    } catch { /* malformed settings are normalized or dropped before apply */ }
+  }
   if (endpointUrls.length > 0) {
     notices.push(`This import adds provider endpoint(s) the agent will send API traffic to: ${endpointUrls.join(', ')} — only proceed if you recognize them.`);
   }
@@ -290,6 +440,9 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
       settingsKeys: Object.keys(settings).filter((k) => known.has(k)),
       settingsDropped,
       hasSecrets: payload.secrets != null,
+      hasIdentityRecord,
+      requiresPassphrase: payload.secrets != null || hasIdentityRecord,
+      identityDid: typeof identityRecord?.did === 'string' ? identityRecord.did : null,
       memoryDocs: Array.isArray(payload.memory?.docs) ? payload.memory.docs.length : 0,
       hooks: Array.isArray(payload.hooks) ? payload.hooks.length : 0,
       hookIds,
@@ -316,93 +469,288 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
  * @param {'store'|'preview'} args.channel
  * @param {string[]} args.knownSettingKeys
  * @param {Object} args.io
- * @param {(patch: Record<string, any>) => Promise<void>} args.io.applySettings
+ * @param {(patch: Record<string, any>) => Promise<void|{count?: number, notices?: string[]}>} args.io.applySettings
  * @param {(endpoints: any) => Promise<void>} args.io.setProviderEndpoints
  * @param {(name: string, value: string) => Promise<void>} args.io.setSecret
  * @param {(payload: any) => Promise<{written: number, skipped: number}>} args.io.importMemory
  * @param {(record: any) => Promise<any>} args.io.saveHook
+ * @param {(record: any, passphrase: string, options?: { replaceExisting?: boolean, prepareOnly?: boolean, expectedExistingDid?: string | null, expectedExistingRevision?: string, expectedIncomingDid?: string }) => Promise<{ adopted: boolean, did?: string | null, reason?: string, existingDid?: string | null, incomingDid?: string | null, existingUnreadable?: boolean, existingRevision?: string, runtimeRecoveryPending?: boolean }>} [args.io.adoptDwebIdentity]
+ *        preview-channel identity adoption (absent on store builds / when
+ *        the receiving build cannot host an identity)
+ * @param {boolean} [args.replaceDwebIdentity] explicit user approval to replace
+ *        a different local identity
+ * @param {string} [args.approvedExistingDwebDid] local did shown in that approval
+ * @param {string} [args.approvedExistingDwebRevision] opaque revision for an
+ *        unreadable local identity shown in that approval
+ * @param {string} [args.approvedIncomingDwebDid] backup did shown in that approval
+ * @param {boolean} [args.skipDwebIdentity] explicit user choice to keep the
+ *        local identity while importing every other section
  */
-export const applyImport = async ({ payload, passphrase, channel, knownSettingKeys, io }) => {
+export const applyImport = async ({
+  payload, passphrase, channel, knownSettingKeys, io,
+  replaceDwebIdentity = false, skipDwebIdentity = false,
+  approvedExistingDwebDid, approvedExistingDwebRevision, approvedIncomingDwebDid,
+}) => {
   const inspected = inspectImport({ payload, channel, knownSettingKeys });
   if (!inspected.ok) return inspected;
   // why: the `!ok` early-return guarantees the ok:true branch, whose
   // `summary` is always present — TS doesn't propagate that through the
   // inferred union, so assert the shape the runtime guarantees here.
   const summary = /** @type {ImportSummary} */ (inspected.summary);
-  const imported = { settings: 0, secrets: 0, memoryWritten: 0, hooks: 0 };
+  const imported = {
+    settings: 0, secrets: 0, providerEndpoints: 0,
+    memoryWritten: 0, hooks: 0, dwebIdentity: 0,
+  };
 
-  // Settings: explicit values only, filtered to keys this build knows.
-  // A preview value stricter-or-looser than this channel's default is
-  // PRESERVED — the user picked it; the channel default only applies in
-  // absence of a stored value (§11 cross-channel nuances).
-  const known = new Set(knownSettingKeys);
-  /** @type {Record<string, unknown>} */
-  const patch = {};
-  for (const [k, v] of Object.entries(payload.settings ?? {})) {
-    if (known.has(k)) patch[k] = v;
-  }
-  if (Object.keys(patch).length > 0) {
-    await io.applySettings(patch);
-    imported.settings = Object.keys(patch).length;
-  }
+  /** @type {'not-present'|'restored'|'replaced'|'already-present'|'kept-local'|'unsupported'} */
+  let identityOutcome = 'not-present';
+  let runtimeRecoveryPending = false;
 
-  if (payload.providerEndpoints?.endpoints) {
-    // R6: an imported endpoint becomes an egress target the agent sends
-    // API traffic (and headers) to. Only https (or local-loopback http for
-    // Ollama-style daemons) parses through; anything else is dropped and
-    // named. This blocks scheme smuggling; the https hosts themselves were
-    // shown to the user in the inspect summary they approved.
-    const accepted = [];
-    const dropped = [];
-    for (const endpoint of payload.providerEndpoints.endpoints) {
-      const url = (() => { try { return new URL(String(endpoint?.url ?? '')); } catch { return null; } })();
-      const localLoopback = url?.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-      if (url && (url.protocol === 'https:' || localLoopback)) accepted.push(endpoint);
-      else dropped.push(String(endpoint?.url ?? '(unparseable)'));
-    }
-    if (accepted.length > 0) {
-      await io.setProviderEndpoints({ ...payload.providerEndpoints, endpoints: accepted });
-    }
-    if (dropped.length > 0) {
-      summary.notices.push(`Dropped ${dropped.length} provider endpoint(s) that are not https or local loopback: ${dropped.join(', ')}.`);
-    }
-  }
-
+  // Stage every credential-dependent decision before the first settings/data
+  // write. A wrong passphrase or identity conflict must leave the rest of the
+  // profile untouched.
+  /** @type {Record<string, string>} */
+  const portableSecrets = {};
   if (payload.secrets != null) {
-    // Throws ExportPassphraseError on a bad passphrase BEFORE any secret
-    // is written — secrets import is all-or-nothing.
-    const secrets = await decryptWithPassphrase(passphrase ?? '', payload.secrets);
-    for (const [name, value] of Object.entries(secrets)) {
-      if (typeof value !== 'string') continue;
-      await io.setSecret(name, value);
-      imported.secrets++;
+    const decrypted = await decryptWithPassphrase(passphrase ?? '', payload.secrets);
+    if (!decrypted || typeof decrypted !== 'object' || Array.isArray(decrypted)) {
+      throw new ExportPassphraseError();
+    }
+    const entries = Object.entries(decrypted);
+    if (entries.length > MAX_SECRET_ENTRIES) throw new ExportPassphraseError();
+    let custodySecretsSkipped = 0;
+    for (const [name, value] of entries) {
+      if (name.length === 0 || name.length > MAX_SECRET_NAME_LENGTH
+          || typeof value !== 'string' || value.length > MAX_SECRET_VALUE_LENGTH) {
+        throw new ExportPassphraseError();
+      }
+      if (isCustodySecretName(name)) { custodySecretsSkipped++; continue; }
+      portableSecrets[name] = value;
+    }
+    if (custodySecretsSkipped > 0) {
+      summary.notices.push(`${custodySecretsSkipped} protected identity/device secret(s) in the file were refused; identity custody only moves through the verified recovery record.`);
     }
   }
 
-  if (payload.memory?.docs) {
-    const res = await io.importMemory(payload.memory);
-    imported.memoryWritten = res.written;
-    if (res.written > 0) {
-      // R6: memory is injected into future prompts as trusted context — an
-      // import that repopulates it is a poisoning vector. Import stays legal
-      // (the user approved the summary), but the consequence is stated.
-      summary.notices.push(`${res.written} memory doc(s) imported — they will inform future prompts; review them via /memory if this file wasn't authored by you.`);
+  // Authenticate the identity wrapper and resolve conflicts before any write,
+  // but do not change custody yet. The final adoption happens after every
+  // fallible ordinary import write, making the permanent identity the commit.
+  let preparedIdentity = false;
+  /** @type {string | null | undefined} */
+  let preparedExistingDid;
+  /** @type {string | undefined} */
+  let preparedExistingRevision;
+  /** @type {string | undefined} */
+  let preparedIncomingDid;
+  if (channel === 'store' && payload.dweb?.identityRecord != null) {
+    identityOutcome = 'unsupported';
+  } else if (channel !== 'store' && payload.dweb?.identityRecord != null && skipDwebIdentity) {
+    identityOutcome = 'kept-local';
+    summary.notices.push('The backup\'s peer identity was skipped; this install kept its current identity.');
+  } else if (channel !== 'store' && payload.dweb?.identityRecord != null) {
+    if (!io.adoptDwebIdentity) return { ok: false, error: 'dweb-identity-unavailable' };
+    const outcome = await io.adoptDwebIdentity(
+      payload.dweb.identityRecord,
+      passphrase ?? '',
+      { replaceExisting: replaceDwebIdentity, prepareOnly: true },
+    );
+    if (replaceDwebIdentity) {
+      const unreadableLocal = outcome?.existingUnreadable === true;
+      const localApprovalPresent = unreadableLocal
+        ? typeof approvedExistingDwebRevision === 'string'
+        : typeof approvedExistingDwebDid === 'string';
+      if (!localApprovalPresent || typeof approvedIncomingDwebDid !== 'string') {
+        return { ok: false, error: 'dweb-identity-approval-required' };
+      }
+      const localApprovalMatches = unreadableLocal
+        ? outcome.existingRevision === approvedExistingDwebRevision
+        : outcome?.existingDid === approvedExistingDwebDid;
+      if (!localApprovalMatches || outcome?.incomingDid !== approvedIncomingDwebDid) {
+        return {
+          ok: false,
+          error: 'dweb-identity-conflict',
+          conflict: {
+            existingDid: outcome?.existingDid ?? outcome?.did ?? null,
+            incomingDid: outcome?.incomingDid ?? null,
+            ...(unreadableLocal ? {
+              existingUnreadable: true,
+              existingRevision: outcome?.existingRevision ?? null,
+            } : {}),
+          },
+        };
+      }
+    }
+    if (outcome?.reason === 'did-conflict') {
+      return {
+        ok: false,
+        error: 'dweb-identity-conflict',
+        conflict: {
+          existingDid: outcome.existingDid ?? outcome.did ?? null,
+          incomingDid: outcome.incomingDid ?? null,
+        },
+      };
+    }
+    if (outcome?.reason === 'identity-in-use') {
+      return {
+        ok: false,
+        error: 'dweb-identity-in-use',
+        conflict: {
+          existingDid: outcome.existingDid ?? outcome.did ?? null,
+          incomingDid: outcome.incomingDid ?? null,
+        },
+      };
+    }
+    if (outcome?.reason === 'invalid-local-identity') {
+      return {
+        ok: false,
+        error: 'dweb-identity-conflict',
+        conflict: {
+          existingDid: null,
+          incomingDid: outcome.incomingDid ?? null,
+          existingUnreadable: true,
+          existingRevision: outcome.existingRevision ?? null,
+        },
+      };
+    }
+    if (!outcome?.adopted) {
+      if (outcome?.reason === 'no-openable-wrapper') throw new ExportPassphraseError();
+      return { ok: false, error: `dweb-identity-${outcome?.reason ?? 'adopt-failed'}` };
+    }
+    if (outcome.reason === 'already-present') identityOutcome = 'already-present';
+    else {
+      preparedIdentity = true;
+      preparedExistingDid = outcome.existingDid ?? null;
+      preparedExistingRevision = outcome.existingUnreadable
+        ? outcome.existingRevision : undefined;
+      preparedIncomingDid = outcome.incomingDid ?? outcome.did ?? undefined;
     }
   }
 
-  for (const record of payload.hooks ?? []) {
-    // R6: an imported hook is CODE (or a rule) that runs against every tool
-    // call. It arrives from a file, not from this user's editor — so it
-    // lands disabled AND untrusted (a kind:'js' hook cannot even compile
-    // without trusted:true). Enabling is an explicit per-hook decision in
-    // Settings → Hooks, where the body is visible.
-    await io.saveHook({ ...record, enabled: false, trusted: false });
-    imported.hooks++;
+  try {
+    // Settings: explicit values only, filtered to keys this build knows.
+    // A preview value stricter-or-looser than this channel's default is
+    // PRESERVED — the user picked it; the channel default only applies in
+    // absence of a stored value (§11 cross-channel nuances).
+    const known = new Set(knownSettingKeys);
+    /** @type {Record<string, unknown>} */
+    const patch = {};
+    for (const [k, v] of Object.entries(payload.settings ?? {})) {
+      if (known.has(k)) patch[k] = v;
+    }
+    if (Object.keys(patch).length > 0) {
+      const applied = await io.applySettings(patch);
+      const appliedResult = applied && typeof applied === 'object' ? applied : null;
+      const appliedCount = appliedResult?.count;
+      imported.settings = Number.isInteger(appliedCount)
+        ? /** @type {number} */ (appliedCount)
+        : Object.keys(patch).length;
+      if (Array.isArray(appliedResult?.notices)) summary.notices.push(...appliedResult.notices);
+    }
+
+    if (payload.providerEndpoints?.endpoints) {
+      // R6: an imported endpoint becomes an egress target the agent sends
+      // API traffic (and headers) to. Only https (or local-loopback http for
+      // Ollama-style daemons) parses through; anything else is dropped and
+      // named. This blocks scheme smuggling; the https hosts themselves were
+      // shown to the user in the inspect summary they approved.
+      const accepted = [];
+      const dropped = [];
+      for (const endpoint of payload.providerEndpoints.endpoints) {
+        const url = (() => { try { return new URL(String(endpoint?.url ?? '')); } catch { return null; } })();
+        const localLoopback = url?.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+        if (url && (url.protocol === 'https:' || localLoopback)) accepted.push(endpoint);
+        else dropped.push(String(endpoint?.url ?? '(unparseable)'));
+      }
+      if (accepted.length > 0) {
+        await io.setProviderEndpoints({ ...payload.providerEndpoints, endpoints: accepted });
+        imported.providerEndpoints = accepted.length;
+      }
+      if (dropped.length > 0) {
+        summary.notices.push(`Dropped ${dropped.length} provider endpoint(s) that are not https or local loopback: ${dropped.join(', ')}.`);
+      }
+    }
+
+    if (payload.secrets != null) {
+      for (const [name, value] of Object.entries(portableSecrets)) {
+        await io.setSecret(name, value);
+        imported.secrets++;
+      }
+    }
+
+    if (payload.memory?.docs) {
+      const res = await io.importMemory(payload.memory);
+      imported.memoryWritten = res.written;
+      if (res.written > 0) {
+        // R6: memory is injected into future prompts as trusted context — an
+        // import that repopulates it is a poisoning vector. Import stays legal
+        // (the user approved the summary), but the consequence is stated.
+        summary.notices.push(`${res.written} memory doc(s) imported — they will inform future prompts; review them via /memory if this file wasn't authored by you.`);
+      }
+    }
+
+    for (const record of payload.hooks ?? []) {
+      // R6: an imported hook is CODE (or a rule) that runs against every tool
+      // call. It arrives from a file, not from this user's editor — so it
+      // lands disabled AND untrusted (a kind:'js' hook cannot even compile
+      // without trusted:true). Enabling is an explicit per-hook decision in
+      // Settings → Hooks, where the body is visible.
+      await io.saveHook({ ...record, enabled: false, trusted: false });
+      imported.hooks++;
+    }
+
+    if (preparedIdentity) {
+      const outcome = await io.adoptDwebIdentity?.(
+        payload.dweb.identityRecord,
+        passphrase ?? '',
+        {
+          replaceExisting: replaceDwebIdentity,
+          expectedExistingDid: preparedExistingDid,
+          ...(preparedExistingRevision
+            ? { expectedExistingRevision: preparedExistingRevision }
+            : {}),
+          expectedIncomingDid: preparedIncomingDid,
+        },
+      );
+      if (!outcome?.adopted) {
+        if (outcome?.reason === 'no-openable-wrapper') throw new ExportPassphraseError();
+        return {
+          ok: false,
+          error: `dweb-identity-${outcome?.reason ?? 'adopt-failed'}`,
+          partial: imported,
+          identityOutcome: 'not-changed',
+        };
+      }
+      if (outcome.reason === 'recovered' || outcome.reason === 'replaced'
+          || outcome.reason === 'replaced-invalid-local') {
+        imported.dwebIdentity = 1;
+        const replaced = outcome.reason === 'replaced' || outcome.reason === 'replaced-invalid-local';
+        identityOutcome = replaced ? 'replaced' : 'restored';
+        summary.notices.push(`${replaced ? 'Local peer identity replaced' : 'Peer identity restored'} from the backup${outcome.did ? ` (${outcome.did})` : ''}.`);
+      } else {
+        identityOutcome = 'already-present';
+      }
+      runtimeRecoveryPending = outcome.runtimeRecoveryPending === true;
+      if (runtimeRecoveryPending) {
+        summary.notices.push('The peer identity was stored, but the peer network is still recovering. Keep peerd open; it will retry automatically.');
+      }
+    }
+    if (identityOutcome === 'already-present') {
+      summary.notices.push('The backup carries the same peer identity already present on this install; no identity change was needed.');
+    }
+    return { ok: true, imported, identityOutcome, runtimeRecoveryPending, notices: summary.notices };
+  } catch (cause) {
+    const named = /** @type {{ name?: string, code?: string }} */ (cause);
+    const failure = cause instanceof ExportPassphraseError
+      ? 'wrong-passphrase'
+      : named?.name === 'IdentityTransferError'
+        ? `dweb-identity-${named.code ?? 'transfer-failed'}`
+        : 'write-failed';
+    return {
+      ok: false,
+      error: 'import-partial',
+      failure,
+      partial: imported,
+      identityOutcome: 'not-changed',
+    };
   }
-
-  // payload.dweb: nothing to apply in Phase 0. Store packages drop
-  // it (notice already in summary); preview packages will consume it when
-  // persistent dweb state exists (Phase 2).
-
-  return { ok: true, imported, notices: summary.notices };
 };

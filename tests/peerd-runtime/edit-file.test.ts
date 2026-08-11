@@ -174,4 +174,15 @@ describe('edit_file — 3a–3d robustness surface', () => {
     expect(r.whitespace).toBe(true);
     expect(r.line).toBe(2);
   });
+
+  test('App edits enforce the UTF-8 byte cap and report actual bytes', async () => {
+    const overLimit = '😀'.repeat(125_001);
+    const edits = `<<<<<<< SEARCH\n=======\n${overLimit}\n>>>>>>> REPLACE\n`;
+    const ctx = withInstance({ appClient: { readFile: async () => null, writeFile: async () => {} } });
+    const result: any = await editFileTool.execute({ path: 'fresh.txt', edits }, ctx as any);
+    expect(result.ok).toBe(false);
+    // The App byte rail catches this even though the string has far fewer
+    // UTF-16 code units.
+    expect(result.error).toContain('content_too_large: 500004 > 500000');
+  });
 });

@@ -1,0 +1,686 @@
+# No-human happy path for the narrow, mechanically verifiable subset of
+# Dependabot security updates. This workflow NEVER checks out PR code into the
+# trusted policy checkout and never exposes a secret while candidate code runs.
+#
+# Eligibility (all fail closed):
+#   - Dependabot-authored PR with GitHub-verified Dependabot commits
+#   - explicit security-only group from dependabot.yml
+#   - semver patch dependency update (minor/major fixes stay human-reviewed)
+#   - Bun replacements: patch-only resolved graph, 3 days of periodic clean
+#     GitHub/Socket observations, and no active or withdrawn malware match
+#   - Actions replacements: 30 days (no equivalent dual malware coverage)
+#   - root Bun or GitHub Actions ecosystem, no maintainer changes
+#   - manifest/lock-only Bun diff, or SHA-pinned uses:-line-only Actions diff
+#
+# The workflow prepares peerd's own patch version and changelog in the same PR,
+# regenerates the reproducible CodeMirror vendor bundle for Bun changes, then
+# waits for protected normal and security CI, then merges only the exact
+# authenticated head. A trusted finalizer tags that merge and explicitly
+# dispatches the existing signed release workflow at the tag.
+
+name: verified Dependabot security release
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+  # GITHUB_TOKEN-triggered pull-request events do not reliably start another
+  # workflow. The publisher starts this documented exception before its final,
+  # exact-head merge so the trusted finalizer cannot be lost after the merge.
+  repository_dispatch:
+    types: [verified-security-merge-ready]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-security-${{ github.event.pull_request.number || github.event.client_payload.pr_number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify and generate on a read-only runner
+    if: >-
+      github.event.action != 'closed' &&
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !contains(github.event.pull_request.labels.*.name, 'security-autorelease')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      release-date: ${{ steps.release.outputs.release-date }}
+    steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      # This action verifies the PR author AND every pre-existing PR commit's
+      # GitHub verification. Keep skip-verification at its safe default false.
+      - name: Authenticate Dependabot metadata and commits
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ github.token }}
+
+      - name: Check immutable event and metadata boundaries
+        env:
+          DIRECTORY: ${{ steps.metadata.outputs.directory }}
+          TARGET_BRANCH: ${{ steps.metadata.outputs.target-branch }}
+          MAINTAINER_CHANGES: ${{ steps.metadata.outputs.maintainer-changes }}
+        run: |
+          set -euo pipefail
+          [ "$DIRECTORY" = / ] || { echo "::error::only the root dependency manifests are eligible"; exit 1; }
+          [ "$TARGET_BRANCH" = main ] || { echo "::error::security PR does not target main"; exit 1; }
+          [ "$MAINTAINER_CHANGES" = false ] || { echo "::error::maintainer-edited Dependabot PR requires human review"; exit 1; }
+
+      # Two disjoint trees are intentional. The candidate can update deps, but
+      # it cannot replace the policy script that judges its diff.
+      - name: Check out trusted base policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out candidate without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.9"
+
+      - name: Enforce the dependency-only patch policy
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          GROUP: ${{ steps.metadata.outputs.dependency-group }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          DEPENDENCIES: ${{ steps.metadata.outputs.dependency-names }}
+          UPDATED_DEPENDENCIES: ${{ steps.metadata.outputs.updated-dependencies-json }}
+          # Used only by the trusted base policy for read-only upstream Action
+          # release/tag/commit verification. Candidate processes never see it.
+          GH_API_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          minimum_age_days=30
+          if [ "$ECOSYSTEM" = bun ]; then minimum_age_days=3; fi
+          bun trusted/packaging/dependabot-security.ts verify \
+            --repo=candidate \
+            --base-sha="$BASE_SHA" \
+            --head-sha="$HEAD_SHA" \
+            --ecosystem="$ECOSYSTEM" \
+            --group="$GROUP" \
+            --update-type="$UPDATE_TYPE" \
+            --dependencies="$DEPENDENCIES" \
+            --metadata="$UPDATED_DEPENDENCIES" \
+            --minimum-age-days="$minimum_age_days"
+
+      - name: Require a continuous clean Bun malware observation window
+        if: steps.metadata.outputs.package-ecosystem == 'bun'
+        env:
+          GH_API_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          bun trusted/packaging/dependabot-security.ts verify-observations \
+            --repository="$GITHUB_REPOSITORY" \
+            --pr="$PR_NUMBER" \
+            --head-sha="$HEAD_SHA"
+
+      # Lifecycle scripts are disabled. Socket and the deterministic vendoring
+      # toolchain still evaluate candidate dependency bytes, which is why this
+      # entire generation job has only a read token and its runner is discarded.
+      - name: Install candidate tree without lifecycle scripts
+        working-directory: candidate
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Prepare patch release and reproducible vendored bytes
+        id: release
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          DEPENDENCIES: ${{ steps.metadata.outputs.dependency-names }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          release_date="$(date -u +%F)"
+          bun trusted/packaging/dependabot-security.ts prepare \
+            --repo=candidate \
+            --base-sha="$BASE_SHA" \
+            --ecosystem="$ECOSYSTEM" \
+            --dependencies="$DEPENDENCIES" \
+            --pr="$PR_NUMBER" \
+            --date="$release_date"
+
+      # Candidate dependencies and generated bytes never share a runner with
+      # a repository-write token. The next job treats this patch as untrusted
+      # input and revalidates it from a fresh checkout before it can push.
+      - name: Export the untrusted generated patch
+        working-directory: candidate
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/security-prepared"
+          git diff --binary --full-index "$HEAD_SHA" -- \
+            > "$RUNNER_TEMP/security-prepared/prepared.patch"
+          test -s "$RUNNER_TEMP/security-prepared/prepared.patch"
+
+      - name: Upload generated patch from the disposable runner
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependabot-security-prepared-${{ github.event.pull_request.number }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/security-prepared/prepared.patch
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: revalidate and publish exact prepared patch
+    needs: verify
+    if: >-
+      github.event.action != 'closed' &&
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !contains(github.event.pull_request.labels.*.name, 'security-autorelease')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: write
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Re-authenticate Dependabot metadata and commits
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ github.token }}
+
+      - name: Recheck immutable event and metadata boundaries
+        env:
+          DIRECTORY: ${{ steps.metadata.outputs.directory }}
+          TARGET_BRANCH: ${{ steps.metadata.outputs.target-branch }}
+          MAINTAINER_CHANGES: ${{ steps.metadata.outputs.maintainer-changes }}
+        run: |
+          set -euo pipefail
+          [ "$DIRECTORY" = / ] || { echo "::error::only the root dependency manifests are eligible"; exit 1; }
+          [ "$TARGET_BRANCH" = main ] || { echo "::error::security PR does not target main"; exit 1; }
+          [ "$MAINTAINER_CHANGES" = false ] || { echo "::error::maintainer-edited Dependabot PR requires human review"; exit 1; }
+
+      - name: Check out trusted base policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out exact authenticated candidate without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.9"
+
+      - name: Re-enforce the authenticated dependency-only policy
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          GROUP: ${{ steps.metadata.outputs.dependency-group }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          DEPENDENCIES: ${{ steps.metadata.outputs.dependency-names }}
+          UPDATED_DEPENDENCIES: ${{ steps.metadata.outputs.updated-dependencies-json }}
+          GH_API_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          minimum_age_days=30
+          if [ "$ECOSYSTEM" = bun ]; then minimum_age_days=3; fi
+          bun trusted/packaging/dependabot-security.ts verify \
+            --repo=candidate \
+            --base-sha="$BASE_SHA" \
+            --head-sha="$HEAD_SHA" \
+            --ecosystem="$ECOSYSTEM" \
+            --group="$GROUP" \
+            --update-type="$UPDATE_TYPE" \
+            --dependencies="$DEPENDENCIES" \
+            --metadata="$UPDATED_DEPENDENCIES" \
+            --minimum-age-days="$minimum_age_days"
+
+      - name: Download the untrusted generated patch
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dependabot-security-prepared-${{ github.event.pull_request.number }}-${{ github.run_id }}
+          path: prepared
+
+      - name: Apply and independently validate the generated patch
+        id: release
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          DEPENDENCIES: ${{ steps.metadata.outputs.dependency-names }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RELEASE_DATE: ${{ needs.verify.outputs.release-date }}
+        run: |
+          set -euo pipefail
+          [ -f prepared/prepared.patch ] && [ ! -L prepared/prepared.patch ]
+          [ "$(find prepared -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ]
+          [ "$(wc -c < prepared/prepared.patch)" -le 2097152 ] \
+            || { echo '::error::generated patch exceeds the 2 MiB safety cap'; exit 1; }
+          git -C candidate apply --check --index ../prepared/prepared.patch
+          git -C candidate apply --index ../prepared/prepared.patch
+          bun trusted/packaging/dependabot-security.ts validate-prepared \
+            --repo=candidate \
+            --base-sha="$BASE_SHA" \
+            --head-sha="$HEAD_SHA" \
+            --ecosystem="$ECOSYSTEM" \
+            --dependencies="$DEPENDENCIES" \
+            --pr="$PR_NUMBER" \
+            --date="$RELEASE_DATE"
+
+      - name: Commit the independently validated preparation
+        id: commit
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          git add --all
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "chore(release): prepare verified security patch v${{ steps.release.outputs.version }}"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # No candidate dependency code runs in this job. The repository-write
+      # token is introduced only after fresh authentication and pure validation.
+      - name: Push prepared commit to the Dependabot branch
+        working-directory: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push https://github.com/${GITHUB_REPOSITORY}.git "HEAD:${HEAD_REF}"
+
+      - name: Mark the exact releasable PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PREPARED_SHA: ${{ steps.commit.outputs.sha }}
+          VERSION: ${{ steps.release.outputs.version }}
+          VENDORED_CODEMIRROR: ${{ steps.release.outputs.vendored-codemirror }}
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+        run: |
+          set -euo pipefail
+          gh label create security-autorelease \
+            --repo "$GITHUB_REPOSITORY" \
+            --color 0E8A16 \
+            --description 'Verified Dependabot patch queued for automatic release' \
+            --force
+          seasoning='30 days of release seasoning'
+          if [ "$ECOSYSTEM" = bun ]; then
+            seasoning='a continuous 72-hour clean GitHub and Socket observation window'
+          fi
+          cat > "$RUNNER_TEMP/security-autorelease.md" <<EOF
+          <!-- peerd-security-autorelease: ${PREPARED_SHA} v${VERSION} -->
+          This semver-patch security update was authenticated as Dependabot-only,
+          every replacement release passed ${seasoning}, and the PR was
+          prepared as peerd v${VERSION} for a protected exact-head merge.
+          Reproducible CodeMirror vendored bytes changed: ${VENDORED_CODEMIRROR}.
+          EOF
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body-file "$RUNNER_TEMP/security-autorelease.md"
+          gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --add-label security-autorelease
+
+      # A workflow dispatch normally resolves a mutable branch name. Pin this
+      # validation run to a dedicated tag so the workflow definition, checkout,
+      # and resulting checks all attach to the exact authenticated commit.
+      - name: Pin an exact read-only validation ref
+        id: validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PREPARED_SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          current_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq .head.sha)"
+          [ "$current_head" = "$PREPARED_SHA" ] \
+            || { echo '::error::PR head moved after preparation'; exit 1; }
+          validation_ref="security-validation-pr-${PR_NUMBER}-${PREPARED_SHA:0:12}"
+          existing="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${validation_ref}" \
+            --jq .object.sha 2>/dev/null || true)"
+          if [ -n "$existing" ]; then
+            [ "$existing" = "$PREPARED_SHA" ] \
+              || { echo '::error::validation ref already points at another commit'; exit 1; }
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${validation_ref}" \
+              -f sha="$PREPARED_SHA" >/dev/null
+          fi
+          echo "ref=$validation_ref" >> "$GITHUB_OUTPUT"
+
+      # Token-pushed PR heads can acquire approval-required pull_request runs.
+      # Dispatch and track separate read-only runs on the exact prepared SHA.
+      # Write-scoped visual and CodeQL jobs are disabled in this mode because a
+      # candidate Action SHA must never execute beside a repository-write token.
+      - name: Dispatch read-only correctness and security CI on the prepared head
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATION_REF: ${{ steps.validation.outputs.ref }}
+          PREPARED_SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          latest_run() {
+            gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/$1/runs" \
+              -f head_sha="$PREPARED_SHA" -f event=workflow_dispatch -f per_page=1 \
+              --jq '.workflow_runs[0].id // empty'
+          }
+          wait_for_new_run() {
+            local workflow="$1"
+            local previous="$2"
+            local candidate=''
+            for attempt in $(seq 1 40); do
+              candidate="$(latest_run "$workflow")"
+              if [[ "$candidate" =~ ^[1-9][0-9]*$ ]] && [ "$candidate" != "$previous" ]; then
+                printf '%s\n' "$candidate"
+                return 0
+              fi
+              sleep 3
+            done
+            echo "::error::dispatch for $workflow did not register a new run" >&2
+            return 1
+          }
+          package_previous="$(latest_run package-and-release.yml)"
+          security_previous="$(latest_run security.yml)"
+          gh workflow run package-and-release.yml --repo "$GITHUB_REPOSITORY" \
+            --ref "$VALIDATION_REF" -f security_read_only=true
+          gh workflow run security.yml --repo "$GITHUB_REPOSITORY" \
+            --ref "$VALIDATION_REF" -f security_read_only=true
+          package_run="$(wait_for_new_run package-and-release.yml "$package_previous")"
+          security_run="$(wait_for_new_run security.yml "$security_previous")"
+          for run_id in "$package_run" "$security_run"; do
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
+              | jq -e \
+                --arg sha "$PREPARED_SHA" '
+                  .event == "workflow_dispatch" and
+                  .head_sha == $sha
+                ' >/dev/null
+          done
+          echo "package-run=$package_run" >> "$GITHUB_OUTPUT"
+          echo "security-run=$security_run" >> "$GITHUB_OUTPUT"
+
+      - name: Approve, await protected checks, and merge the exact head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PREPARED_SHA: ${{ steps.commit.outputs.sha }}
+          PACKAGE_RUN_ID: ${{ steps.ci.outputs.package-run }}
+          SECURITY_RUN_ID: ${{ steps.ci.outputs.security-run }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CANDIDATE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          GROUP: ${{ steps.metadata.outputs.dependency-group }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          DEPENDENCIES: ${{ steps.metadata.outputs.dependency-names }}
+          UPDATED_DEPENDENCIES: ${{ steps.metadata.outputs.updated-dependencies-json }}
+          GH_API_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq .head.sha)"
+          [ "$current_head" = "$PREPARED_SHA" ] \
+            || { echo '::error::PR head moved before approval'; exit 1; }
+          gh pr review "$PR_URL" --approve \
+            --body 'Automated approval: authenticated semver-patch security update; merge remains gated on protected CI.'
+          for attempt in $(seq 1 160); do
+            package_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PACKAGE_RUN_ID}")"
+            security_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SECURITY_RUN_ID}")"
+            for run_json in "$package_json" "$security_json"; do
+              jq -e \
+                --arg sha "$PREPARED_SHA" '
+                  .event == "workflow_dispatch" and .head_sha == $sha
+                ' <<< "$run_json" >/dev/null
+              status="$(jq -r .status <<< "$run_json")"
+              conclusion="$(jq -r '.conclusion // ""' <<< "$run_json")"
+              if [ "$status" = completed ] && [ "$conclusion" != success ]; then
+                echo "::error::exact read-only validation run concluded $conclusion"
+                exit 1
+              fi
+            done
+            if [ "$(jq -r .conclusion <<< "$package_json")" = success ] \
+              && [ "$(jq -r .conclusion <<< "$security_json")" = success ]; then
+              break
+            fi
+            [ "$attempt" -lt 160 ] \
+              || { echo '::error::exact validation runs did not pass within 40 minutes'; exit 1; }
+            sleep 15
+          done
+          pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"
+          current_head="$(jq -r .head.sha <<< "$pr_json")"
+          [ "$current_head" = "$PREPARED_SHA" ] \
+            || { echo '::error::PR head moved while awaiting protected checks'; exit 1; }
+
+          # Re-query publication metadata and GitHub's active + withdrawn
+          # malware advisories after the exact-head Socket/OSV/security runs.
+          # This narrows the feed-change race immediately before merge.
+          minimum_age_days=30
+          if [ "$ECOSYSTEM" = bun ]; then minimum_age_days=3; fi
+          bun trusted/packaging/dependabot-security.ts verify \
+            --repo=candidate \
+            --base-sha="$BASE_SHA" \
+            --head-sha="$CANDIDATE_HEAD_SHA" \
+            --ecosystem="$ECOSYSTEM" \
+            --group="$GROUP" \
+            --update-type="$UPDATE_TYPE" \
+            --dependencies="$DEPENDENCIES" \
+            --metadata="$UPDATED_DEPENDENCIES" \
+            --minimum-age-days="$minimum_age_days"
+          if [ "$ECOSYSTEM" = bun ]; then
+            bun trusted/packaging/dependabot-security.ts verify-observations \
+              --repository="$GITHUB_REPOSITORY" \
+              --pr="$PR_NUMBER" \
+              --head-sha="$CANDIDATE_HEAD_SHA"
+          fi
+
+          # Start the trusted finalizer before the merge. A GITHUB_TOKEN merge
+          # does not guarantee a pull-request event, while repository_dispatch
+          # is explicitly recursive. The finalizer independently waits for and
+          # re-authenticates the exact merge before it can tag anything.
+          jq -n \
+            --arg event_type verified-security-merge-ready \
+            --argjson pr_number "$PR_NUMBER" \
+            --argjson publisher_run_id "$GITHUB_RUN_ID" \
+            --arg expected_head "$PREPARED_SHA" \
+            '{event_type: $event_type, client_payload: {
+              pr_number: $pr_number,
+              publisher_run_id: $publisher_run_id,
+              expected_head: $expected_head
+            }}' > "$RUNNER_TEMP/security-merge-ready.json"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/dispatches" \
+            --input "$RUNNER_TEMP/security-merge-ready.json"
+
+          gh pr merge "$PR_URL" --squash --delete-branch=false \
+            --match-head-commit "$PREPARED_SHA"
+
+  release:
+    name: tag exact merged security patch
+    if: github.event_name == 'repository_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RELEASE_PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+      RELEASE_PUBLISHER_RUN_ID: ${{ github.event.client_payload.publisher_run_id }}
+      RELEASE_EXPECTED_HEAD: ${{ github.event.client_payload.expected_head }}
+    permissions:
+      actions: write
+      contents: write
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Re-authenticate and await the exact protected merge
+        id: merged
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$RELEASE_PUBLISHER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$RELEASE_EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          for attempt in $(seq 1 40); do
+            publisher_json="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${RELEASE_PUBLISHER_RUN_ID}")"
+            jq -e \
+              --arg repository "$GITHUB_REPOSITORY" \
+              --arg path '.github/workflows/dependabot-security-release.yml' '
+                .event == "pull_request_target" and
+                (.path == $path or (.path | startswith($path + "@"))) and
+                .repository.full_name == $repository
+              ' <<< "$publisher_json" >/dev/null
+            if [ "$(jq -r .status <<< "$publisher_json")" = completed ]; then
+              [ "$(jq -r .conclusion <<< "$publisher_json")" = success ] \
+                || { echo '::error::authenticated publisher did not succeed'; exit 1; }
+              break
+            fi
+            [ "$attempt" -lt 40 ] \
+              || { echo '::error::authenticated publisher did not finish within 10 minutes'; exit 1; }
+            sleep 15
+          done
+          artifact="dependabot-security-prepared-${RELEASE_PR_NUMBER}-${RELEASE_PUBLISHER_RUN_ID}"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RELEASE_PUBLISHER_RUN_ID}/artifacts" \
+            | jq -e --arg artifact "$artifact" '
+                any(.artifacts[]; .name == $artifact and .expired == false)
+              ' >/dev/null
+          for attempt in $(seq 1 80); do
+            pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${RELEASE_PR_NUMBER}")"
+            jq -e \
+              --arg repository "$GITHUB_REPOSITORY" \
+              --arg head "$RELEASE_EXPECTED_HEAD" '
+                .user.login == "dependabot[bot]" and
+                .base.ref == "main" and
+                .head.repo.full_name == $repository and
+                .head.sha == $head and
+                any(.labels[]; .name == "security-autorelease")
+              ' <<< "$pr_json" >/dev/null
+            if [ "$(jq -r .merged <<< "$pr_json")" = true ]; then
+              merge_sha="$(jq -r .merge_commit_sha <<< "$pr_json")"
+              [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]] \
+                || { echo '::error::merged PR has no full merge commit SHA'; exit 1; }
+              echo "sha=$merge_sha" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo '::error::exact security head was not merged within 20 minutes'
+          exit 1
+
+      - name: Read the bot-authored release marker
+        id: marker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ env.RELEASE_PR_NUMBER }}
+          EXPECTED_HEAD: ${{ env.RELEASE_EXPECTED_HEAD }}
+        run: |
+          set -euo pipefail
+          marker="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" --paginate \
+            --jq '.[] | select(.user.login == "github-actions[bot]") | .body' \
+            | sed -n 's/.*peerd-security-autorelease: \([0-9a-f]\{40\}\) v\([0-9][0-9.]*\).*/\1 \2/p' \
+            | tail -1)"
+          read -r prepared_sha version <<< "$marker"
+          [ -n "${prepared_sha:-}" ] && [ -n "${version:-}" ] \
+            || { echo '::error::missing bot-authored security release marker'; exit 1; }
+          [ "$prepared_sha" = "$EXPECTED_HEAD" ] \
+            || { echo '::error::PR head changed after automated preparation; refusing to tag'; exit 1; }
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo '::error::invalid marked version'; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the protected merge commit without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.merged.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Recheck patch version, changelog, and main ancestry
+        env:
+          MERGE_SHA: ${{ steps.merged.outputs.sha }}
+          VERSION: ${{ steps.marker.outputs.version }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$MERGE_SHA" origin/main \
+            || { echo '::error::merged commit is not on origin/main'; exit 1; }
+          package_version="$(jq -r .version package.json)"
+          [ "$package_version" = "$VERSION" ] \
+            || { echo '::error::merged package version differs from prepared version'; exit 1; }
+          parent_line="$(git rev-list --parents -n 1 "$MERGE_SHA")"
+          [ "$(wc -w <<< "$parent_line")" -eq 2 ] \
+            || { echo '::error::security squash merge does not have exactly one protected-main parent'; exit 1; }
+          base_commit="$(awk '{print $2}' <<< "$parent_line")"
+          base_version="$(git show "$base_commit:package.json" | jq -r .version)"
+          IFS=. read -r major minor patch <<< "$base_version"
+          [ "$VERSION" = "$major.$minor.$((patch + 1))" ] \
+            || { echo '::error::security release is not exactly one peerd patch version'; exit 1; }
+          grep -Eq "^## \\[$VERSION\\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md \
+            || { echo '::error::prepared changelog section is missing'; exit 1; }
+
+      - name: Create idempotent release tag and dispatch signed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGE_SHA: ${{ steps.merged.outputs.sha }}
+          PR_NUMBER: ${{ env.RELEASE_PR_NUMBER }}
+          VERSION: ${{ steps.marker.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          remote_sha="$(git ls-remote --tags origin "refs/tags/$tag" | awk '{print $1}')"
+          if [ -n "$remote_sha" ]; then
+            [ "$remote_sha" = "$MERGE_SHA" ] \
+              || { echo "::error::$tag already points at another commit"; exit 1; }
+          else
+            git tag "$tag" "$MERGE_SHA"
+            auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+              push origin "refs/tags/$tag"
+          fi
+          existing_run="$(gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/package-and-release.yml/runs" \
+            -f head_sha="$MERGE_SHA" -f event=workflow_dispatch -f per_page=100 \
+            --jq ".workflow_runs | map(select(.head_branch == \"$tag\"))[0].id // empty")"
+          if [ -z "$existing_run" ]; then
+            gh workflow run package-and-release.yml --repo "$GITHUB_REPOSITORY" --ref "$tag" \
+              -f security_release_sha="$MERGE_SHA"
+          fi
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "Merged verified security patch as $tag; signed patch-release workflow run ${existing_run:-dispatched}."

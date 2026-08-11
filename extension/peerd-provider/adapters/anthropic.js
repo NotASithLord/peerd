@@ -129,9 +129,9 @@ export async function* callAnthropic(args) {
       'anthropic-dangerous-direct-browser-access': 'true',
     },
     body: JSON.stringify(body),
-    // AbortSignal flows through to native fetch — when the user clicks
-    // Stop or sends a new message mid-stream, the SSE body stream is
-    // cut and the SW reclaims its socket promptly.
+    // AbortSignal flows through to native fetch. Stop or a new message cuts
+    // the local SSE consumer and prevents late bytes from re-entering the
+    // agent. Physical socket teardown remains browser-managed.
     signal,
   };
 

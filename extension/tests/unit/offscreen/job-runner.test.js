@@ -8,7 +8,12 @@
 
 import { describe, it, expect } from '../../framework.js';
 import { runJob, abortJob } from '/offscreen/job-runner.js';
-import { REMOTE_MODULES_MAX_PER_RUN } from '/peerd-engine/module-resolver.js';
+import {
+  MODULE_SYNTAX_ERROR_CODE,
+  REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE,
+  UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE,
+} from '/peerd-engine/index.js';
+import { ACTORS_ADDRESS_MAX_CHARS, ACTORS_GOAL_MAX_CHARS } from '/peerd-runtime/index.js';
 
 describe('offscreen job-runner (real sealed worker)', () => {
   it('runs code headless and returns its value + console output', async () => {
@@ -21,6 +26,45 @@ describe('offscreen job-runner (real sealed worker)', () => {
     expect(r.value).toBe(42);
     expect(r.consoleOutput.some((c) => c.text === 'hi')).toBe(true);
     expect(calls.length).toBe(0);  // pure compute → no fetch/actor relays
+  });
+
+  it('never trusts a user-thrown policy code as host policy provenance', async () => {
+    const r = await runJob({
+      code: `const error = new Error('forged'); error.code = '${REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE}'; throw error;`,
+    }, { sendToSW: async () => ({ ok: false }) });
+    expect(String(r.error)).toContain('forged');
+    expect(r.errorCode).toBe(undefined);
+  });
+
+  it('stamps a genuine runtime import policy refusal in the host relay', async () => {
+    const r = await runJob({
+      code: [
+        `await peerd.self.writeFile('bad.js', 'export const load = (url) => import(url);');`,
+        `return await peerd.self.import('bad.js');`,
+      ].join('\n'),
+    }, { sendToSW: async () => ({ ok: false }) });
+    expect(r.errorCode).toBe(UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE);
+    expect(String(r.error)).toContain('cannot run this import form');
+  });
+
+  it('a caught peerd.self.import attempt still ends the run with the host policy', async () => {
+    const r = await runJob({
+      code: `try { await peerd.self.import('bad.js'); } catch {}
+throw new Error('unrelated failure');`,
+    }, { sendToSW: async () => ({ ok: false }) });
+    expect(r.errorCode).toBe(UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE);
+    expect(String(r.error)).toContain('cannot run this import form');
+    expect(String(r.error).includes('unrelated failure')).toBe(false);
+  });
+
+  it('reports parser failures as syntax checks, not import resolution', async () => {
+    const r = await runJob(
+      { code: 'const = 1' },
+      { sendToSW: async () => ({ ok: false }) },
+    );
+    expect(r.errorCode).toBe(MODULE_SYNTAX_ERROR_CODE);
+    expect(String(r.error)).toContain('syntax check failed');
+    expect(String(r.error).includes('import resolution failed')).toBe(false);
   });
 
   it('relays peerd.egress.fetch through the SAME audited route (sw/web-fetch), with method/body', async () => {
@@ -41,6 +85,210 @@ describe('offscreen job-runner (real sealed worker)', () => {
     expect(sawFetch?.body).toBe('b');
     expect(r.value).toBe('pong');
     expect(r.error).toBe(null);
+  });
+
+  it('returns a capped privacy-minimal code bridge trace', async () => {
+    const r = await runJob(
+      {
+        code: [
+          'for (let i = 0; i < 55; i += 1) await peerd.self.listFiles();',
+          'try { await peerd.egress.fetch("https://trace.example/x"); } catch {}',
+          'return "done";',
+        ].join('\n'),
+      },
+      { sendToSW: async () => ({ ok: false, status: 0, error: 'blocked' }) },
+    );
+    expect(r.value).toBe('done');
+    const trace = /** @type {any[]} */ (r.codeTrace);
+    expect(trace.length).toBe(50);
+    expect(trace[0].seq > 1).toBe(true);   // oldest entries were evicted
+    expect(trace.at(-1).bridge).toBe('fetch');
+    expect(trace.at(-1).method).toBe('GET');
+    expect(trace.at(-1).outcome).toBe('error');
+    expect(trace.at(-1).settled).toBe(true);
+    expect(typeof trace.at(-1).ms).toBe('number');
+    // Host observability never copies code-client arguments or results.
+    expect(Object.hasOwn(trace.at(-1), 'args')).toBe(false);
+    expect(Object.hasOwn(trace.at(-1), 'result')).toBe(false);
+  });
+
+  it('uses one absolute deadline across import resolution and worker execution', async () => {
+    const startedAt = performance.now();
+    const r = await runJob(
+      {
+        code: [
+          "import { value } from 'https://slow.example/value.js';",
+          'await new Promise((resolve) => setTimeout(resolve, 350));',
+          'return value;',
+        ].join('\n'),
+        timeoutMs: 550,
+      },
+      {
+        sendToSW: async (type) => {
+          if (type !== 'sw/web-fetch') return { ok: false };
+          await new Promise((resolve) => setTimeout(resolve, 350));
+          return { ok: true, status: 200, bodyB64: btoa('export const value = 42;') };
+        },
+      },
+    );
+    const elapsedMs = performance.now() - startedAt;
+    expect(String(r.error)).toContain('job timed out after 550ms');
+    expect(r.value).toBe(undefined);
+    // The pre-fix runner gave each phase 550ms and returned 42 after ~700ms.
+    expect(elapsedMs < 900).toBe(true);
+  });
+
+  it('reserves compute capacity when page, a2a, and site-client jobs relay outward', async () => {
+    /** @type {(() => void) | undefined} */
+    let release;
+    const barrier = new Promise((resolve) => { release = () => resolve(undefined); });
+    let relays = 0;
+    /** @type {(() => void) | undefined} */
+    let bothStarted;
+    const started = new Promise((resolve) => { bothStarted = () => resolve(undefined); });
+    const sendToSW = async (/** @type {string} */ type) => {
+      if (type === 'page/call' || type === 'site-fetch/call') {
+        relays += 1;
+        if (relays === 2) bothStarted?.();
+        await barrier;
+        return type === 'page/call'
+          ? { ok: true, value: 'snapshot' }
+          : { ok: true, value: { status: 200, body: 'ok', json: null } };
+      }
+      return { ok: true };
+    };
+    const pageRun = runJob(
+      { code: 'return await page.snapshot();', caps: { page: true }, ownerSessionId: 'web-1', runId: 'page-relay-1', timeoutMs: 5000 },
+      { sendToSW },
+    );
+    const siteRun = runJob(
+      { code: 'return await site.fetch("/x");', siteFetch: 'https://site.example', ownerSessionId: 'api-1', runId: 'site-relay-1', timeoutMs: 5000 },
+      { sendToSW },
+    );
+    await started;
+
+    // page + site consume the relay sub-cap; a2a is classified in the same
+    // lane and is refused without spawning a third outward-waiting worker.
+    const refused = await runJob(
+      { code: 'return await mesh.peers();', a2a: true, ownerSessionId: 'dweb-1', runId: 'a2a-relay-1' },
+      { sendToSW },
+    );
+    expect(String(refused.error)).toContain('capability-relaying runs already in flight');
+
+    // A normal script does not reserve the sub-cap merely because egress is
+    // available; it acquires on the first actual outward relay and is refused
+    // there while the two dedicated relay runs are holding the lane.
+    const refusedEgress = await runJob(
+      { code: 'return await peerd.egress.fetch("https://example.com");' },
+      { sendToSW },
+    );
+    expect(String(refusedEgress.error)).toContain('capability-relaying runs already in flight');
+
+    // Two global slots remain available to quick compute.
+    const compute = await runJob(
+      { code: 'return 6 * 7;' },
+      { sendToSW },
+    );
+    expect(compute.value).toBe(42);
+    release?.();
+    const settled = await Promise.all([pageRun, siteRun]);
+    expect(settled.every((result) => result.error === null)).toBe(true);
+  });
+
+  it('keeps a failed page call host receipt when user code catches and discards the error', async () => {
+    const policy = {
+      reason: 'child_navigation_failed', outcome: 'unverified', child: 'uncontained', retryable: false,
+    };
+    const result = await runJob(
+      {
+        code: 'try { await page.click("#open"); } catch {} return "handled";',
+        caps: { page: true }, ownerSessionId: 'web-policy', runId: 'page-policy-failure',
+      },
+      {
+        sendToSW: async () => ({ ok: false, error: 'click failed', browserPolicies: [policy] }),
+      },
+    );
+    expect(result.error).toBe(null);
+    expect(result.value).toBe('handled');
+    expect(result.browserPolicies).toEqual([policy]);
+  });
+
+  it('terminates a page job when an inner host policy ends the actor turn', async () => {
+    const result = await runJob(
+      {
+        code: 'await page.snapshot(); return "must not continue";',
+        caps: { page: true }, ownerSessionId: 'web-auth-wait', runId: 'page-auth-wait',
+      },
+      {
+        sendToSW: async () => ({
+          ok: false, error: 'auth_waiting_for_user', endTurn: true,
+          endTurnContent: 'Finish signing in in the open tab.',
+          endTurnOutcomeKind: 'pre-effect-failure',
+        }),
+      },
+    );
+    expect(result.endTurn).toBe(true);
+    expect(result.endTurnContent).toBe('Finish signing in in the open tab.');
+    expect(result.endTurnOutcomeKind).toBe('pre-effect-failure');
+    expect(result.value).toBe(undefined);
+  });
+
+  it('aborts SW relays before releasing a settled job\'s relay lease', async () => {
+    /** @type {(() => void) | undefined} */
+    let releaseAbort;
+    const abortBarrier = new Promise((resolve) => { releaseAbort = () => resolve(undefined); });
+    let aborts = 0;
+    /** @type {(() => void) | undefined} */
+    let bothAborting;
+    const aborting = new Promise((resolve) => { bothAborting = () => resolve(undefined); });
+    const deps = {
+      sendToSW: async (/** @type {string} */ type) => type === 'page/call'
+        ? { ok: true, value: 'snapshot' }
+        : { ok: true, value: { status: 200, body: 'ok', json: null } },
+      abortRun: async () => {
+        aborts += 1;
+        if (aborts === 2) bothAborting?.();
+        await abortBarrier;
+      },
+    };
+    const pageRun = runJob(
+      { code: 'return await page.snapshot();', caps: { page: true }, ownerSessionId: 'web-finalize', runId: 'page-finalize' },
+      deps,
+    );
+    const siteRun = runJob(
+      { code: 'return await site.fetch("/x");', siteFetch: 'https://site.example', ownerSessionId: 'api-finalize', runId: 'site-finalize' },
+      deps,
+    );
+    await aborting;
+
+    // Both workers have returned, but their SW abort handshakes are pending, so
+    // neither relay lease may be reused yet.
+    const refused = await runJob(
+      { code: 'return await mesh.peers();', a2a: true, ownerSessionId: 'dweb-finalize', runId: 'a2a-finalize' },
+      deps,
+    );
+    expect(String(refused.error)).toContain('capability-relaying runs already in flight');
+
+    releaseAbort?.();
+    const settled = await Promise.all([pageRun, siteRun]);
+    expect(settled.every((result) => result.error === null)).toBe(true);
+  });
+
+  it('bounds early Stop tombstones and keeps owner-bound tombstones scoped', async () => {
+    abortJob('early-owned', 'other-session');
+    const owned = await runJob(
+      { code: 'return 7;', runId: 'early-owned', ownerSessionId: 'right-session' },
+      { sendToSW: async () => ({ ok: true }) },
+    );
+    expect(owned.value).toBe(7);
+
+    abortJob('early-evicted');
+    for (let i = 0; i < 64; i += 1) abortJob(`early-fifo-${i}`);
+    const evicted = await runJob(
+      { code: 'return 8;', runId: 'early-evicted' },
+      { sendToSW: async () => ({ ok: true }) },
+    );
+    expect(evicted.value).toBe(8);
   });
 
   // Design 02, 2a — extract:'markdown' on the bridged fetch. The extraction
@@ -107,7 +355,7 @@ describe('offscreen job-runner (real sealed worker)', () => {
 
   it('peerd:std imports resolve in a headless job', async () => {
     const r = await runJob(
-      { code: 'const { mean } = await import("peerd:std"); return mean([2, 4, 6]);' },
+      { code: 'import { mean } from "peerd:std";\nreturn mean([2, 4, 6]);' },
       { sendToSW: async () => ({ ok: true }) },
     );
     expect(r.error).toBe(null);
@@ -209,7 +457,7 @@ describe('offscreen job-runner (real sealed worker)', () => {
     /** @type {any} */
     let seen = null;
     const r = await runJob(
-      { code: 'return await mesh.peers();', a2a: true, ownerSessionId: 'dweb-sess-1' },
+      { code: 'return await mesh.peers();', a2a: true, ownerSessionId: 'dweb-sess-1', runId: 'a2a-run-1' },
       { sendToSW: async (type, payload) => {
         if (type === 'a2a/call') { seen = payload; return { ok: true, value: [{ did: 'did:key:z6MkBob' }] }; }
         return { ok: false };
@@ -217,6 +465,7 @@ describe('offscreen job-runner (real sealed worker)', () => {
     );
     expect(seen?.method).toBe('peers');
     expect(seen?.ownerSessionId).toBe('dweb-sess-1');  // owner from trusted job params, not the worker
+    expect(seen?.runId).toBe('a2a-run-1');
     expect(r.error).toBe(null);
     expect(/** @type {any} */ (r.value)?.[0]?.did).toBe('did:key:z6MkBob');
   });
@@ -304,11 +553,58 @@ describe('offscreen job-runner (real sealed worker)', () => {
     const c = /** @type {any} */ (calls[0]);
     expect(c.type).toBe('actors/call');
     expect(c.payload.method).toBe('ask');
-    expect(c.payload.args).toEqual({ to: 'vm-9', goal: 'run pytest', timeoutMs: undefined, oneShot: true });
+    expect(c.payload.args).toEqual({ to: 'vm-9', goal: 'run pytest', oneShot: true });
     // owner identity rides from job params — the worker cannot spoof it
     expect(c.payload.ownerSessionId).toBe('chat-1');
     expect(c.payload.ownerToolUseId).toBe('tu-7');
     expect(c.payload.runId).toBe('run-1');
+  });
+
+  it('actors: collects delivery custody outside the worker-visible call result', async () => {
+    const r = await runJob(
+      {
+        code: [
+          'const one = await actors.call("vm-1", "one");',
+          'const two = await actors.call("vm-2", "two");',
+          'return [one.reply, two.reply, Object.keys(one)];',
+        ].join('\n'),
+        actors: true, ownerSessionId: 'chat-1', runId: 'run-custody',
+      },
+      {
+        sendToSW: async (_type, payload) => ({
+          ok: true,
+          actorDeliveryId: `delivery-${/** @type {any} */ (payload).args.to}`,
+          value: { reply: /** @type {any} */ (payload).args.to, failed: false },
+        }),
+      },
+    );
+
+    expect(r.error).toBe(null);
+    expect(r.value).toEqual(['vm-1', 'vm-2', ['reply', 'failed']]);
+    expect(r.actorDeliveryIds).toEqual(['delivery-vm-1', 'delivery-vm-2']);
+  });
+
+  it('actors: preserves delivery custody when a later self import terminates on policy', async () => {
+    const r = await runJob(
+      {
+        code: [
+          'await actors.call("vm-1", "one");',
+          'return await peerd.self.import("bad.js");',
+        ].join('\n'),
+        actors: true, ownerSessionId: 'chat-1', runId: 'run-policy-custody',
+      },
+      {
+        sendToSW: async () => ({
+          ok: true,
+          actorDeliveryId: 'delivery-before-import',
+          value: { reply: 'done', failed: false },
+        }),
+      },
+    );
+
+    expect(r.errorCode).toBe(UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE);
+    expect(String(r.error)).toContain('cannot run this import form');
+    expect(r.actorDeliveryIds).toEqual(['delivery-before-import']);
   });
 
   it('actors: the DELEGATIONS trace records every op with outcome + timing, and usedActors flags the run', async () => {
@@ -366,6 +662,35 @@ describe('offscreen job-runner (real sealed worker)', () => {
     expect(r.value).toBe(2);
     expect(r.usedActors).toBe(false);
     expect(/** @type {any[]} */ (r.actorsTrace).length).toBe(0);
+  });
+
+  it('actors: oversized addresses and goals stop at the host before trace allocation or an SW call', async () => {
+    /** @type {any[]} */
+    const calls = [];
+    const r = await runJob(
+      {
+        code: [
+          'const errors = [];',
+          `for (const [address, message] of [["a".repeat(${ACTORS_ADDRESS_MAX_CHARS + 1}), "x"], ["web", "g".repeat(${ACTORS_GOAL_MAX_CHARS + 1})]]) {`,
+          '  try { await actors.call(address, message); } catch (e) { errors.push(e.message); }',
+          '}',
+          'return errors;',
+        ].join('\n'),
+        actors: true, ownerSessionId: 'chat-1', runId: 'run-bounds',
+      },
+      {
+        sendToSW: async (type, payload) => {
+          calls.push({ type, payload });
+          return { ok: true, value: { reply: 'should not run', failed: false } };
+        },
+      },
+    );
+    expect(r.error).toBe(null);
+    expect(r.usedActors).toBe(true);
+    expect(/** @type {any[]} */ (r.actorsTrace)).toEqual([]);
+    expect(calls.filter((c) => c.type === 'actors/call')).toEqual([]);
+    expect(Array.isArray(r.value)).toBe(true);
+    expect(/** @type {string[]} */ (r.value).every((error) => error.includes('at most'))).toBe(true);
   });
 
   // ── the provider sub-model surface (design 5) ─────────────────────────────
@@ -498,14 +823,14 @@ describe('offscreen job-runner (real sealed worker)', () => {
   });
 });
 
-// Remote (https:) module imports — design 3's regression net. Two fences,
+// Remote (https:) module imports. Two fences,
 // both MEASURED here in a real worker (not argued by construction):
 //   1. the resolver path — remote module source rides the audited
 //      sw/web-fetch relay and re-enters as a blob, so the worker's module
 //      graph never names a third-party URL (the relay stub sees the bytes;
 //      the no-egress lanes visibly get nothing);
-//   2. the native-loader backstop — design 3's Step 0 question, answered by
-//      actually spawning a worker whose graph DOES name an https URL and
+//   2. the native-loader backstop, measured by spawning a worker whose graph
+//      DOES name an https URL and
 //      asserting it never executes (see the last test).
 describe('headless remote module imports (audited resolver path)', () => {
   /**
@@ -541,6 +866,67 @@ describe('headless remote module imports (audited resolver path)', () => {
     expect(fetches[0].payload.url).toBe('https://mods.example/util.js');
     expect(fetches[0].payload.method).toBe('GET');
     expect(r.usedEgress).toBe(true);   // module source is untrusted web bytes
+    expect(r.usedRemoteModules).toBe(true);
+  });
+
+  it('a remote graph loses every ambient capability at the worker and host walls', async () => {
+    /** @type {{ type: string, payload: any }[]} */
+    const calls = [];
+    const probeSource = `
+      export const probe = async () => {
+        const attempts = {};
+        const forged = [
+          { type: 'actor-request', rid: 'forged-actor', args: { task: 'leak' } },
+          { type: 'actors-request', rid: 'forged-actors', method: 'list', args: {} },
+          { type: 'provider-request', rid: 'forged-provider', args: { prompt: 'leak' } },
+          { type: 'fetch-request', rid: 'forged-fetch', url: 'https://sink.example/', method: 'GET' },
+          { type: 'page-request', rid: 'forged-page', method: 'snapshot', args: {} },
+          { type: 'opfs-request', rid: 'forged-opfs', op: 'read', args: { path: 'canary.txt' } },
+          { type: 'distributed-request', rid: 'forged-dweb', method: 'peers' },
+          { type: 'site-fetch-request', rid: 'forged-site', pathOrUrl: '/', method: 'GET' },
+          { type: 'a2a-request', rid: 'forged-a2a', method: 'peers', args: {} },
+        ];
+        for (const envelope of forged) postMessage(envelope);
+        const tryCall = async (name, fn) => {
+          try { await fn(); attempts[name] = 'unexpected success'; }
+          catch (error) { attempts[name] = String(error && error.message || error); }
+        };
+        await tryCall('egress', () => peerd.egress.fetch('https://sink.example/'));
+        await tryCall('opfs', () => peerd.self.readFile('canary.txt'));
+        await tryCall('subagent', () => peerd.runtime.runAgent({ task: 'leak' }));
+        await tryCall('provider', () => peerd.provider.call({ prompt: 'leak' }));
+        await tryCall('page', () => peerd.page.snapshot({}));
+        await tryCall('dweb', () => peerd.distributed.peers());
+        await tryCall('actors', () => actors.list());
+        return attempts;
+      };
+    `;
+    const r = await runJob(
+      {
+        code: "import { probe } from 'https://mods.example/probe.js'; return probe();",
+        actors: true,
+        caps: { page: true, egress: true, subagent: true, opfs: true, provider: true },
+        ownerSessionId: 'session-remote', runId: 'run-remote',
+      },
+      { sendToSW: servingSW({ 'https://mods.example/probe.js': probeSource }, calls) },
+    );
+
+    expect(r.error).toBe(null);
+    expect(r.usedRemoteModules).toBe(true);
+    expect(r.usedEgress).toBe(true);
+    const attempts = /** @type {Record<string, string>} */ (r.value);
+    for (const capability of ['egress', 'opfs', 'subagent', 'provider', 'dweb']) {
+      expect(attempts[capability]).toContain('remote_module_capability_blocked');
+    }
+    // why: V8 and SpiderMonkey phrase missing-property errors differently.
+    // The invariant is that neither global exists and no forged relay escapes.
+    expect(attempts.page).toContain('undefined');
+    expect(attempts.actors).toContain('not defined');
+    expect(calls.filter((call) => call.type === 'sw/web-fetch').length).toBe(1);
+    expect(calls.some((call) => [
+      'actor/spawn', 'actors/call', 'script/model-call', 'page/call',
+      'dweb/distributed/info', 'site-fetch/call', 'a2a/call',
+    ].includes(call.type))).toBe(false);
   });
 
   it('a remote module’s relative import resolves against ITS url through the same relay', async () => {
@@ -598,65 +984,33 @@ describe('headless remote module imports (audited resolver path)', () => {
     expect(calls.some((c) => c.type === 'sw/web-fetch')).toBe(true);
   });
 
-  it('a RUNTIME dynamic import("https://…") composes through the audited relay in the live worker', async () => {
-    // The compose-module path executed for real: the worker asks the host,
-    // buildModule routes the https specifier through fetchRemote, and the
-    // worker re-blobs + imports the returned source in its own realm.
-    //
-    // KNOWN GAP (pre-existing, measured 2026-08-02 on Chrome 151, real
-    // extension origin via CDP): the final in-realm `import(blobUrl)` of the
-    // WORKER-created blob violates the MV3 extension CSP (script-src 'self'
-    // 'wasm-unsafe-eval' — blob: is not addable in MV3), so EVERY runtime
-    // dynamic import — OPFS compose and remote alike — currently fails at
-    // that last hop (__peerd_dynamic_import in worker-source.js). The static
-    // graph is unaffected (its blob loads ride the worker-script load, which
-    // extension origins permit). Fixing the mechanism is its own design; what
-    // THIS test pins is design 3's seam, which holds regardless: the module
-    // bytes ride the audited relay, the run is fenced, and the outcome is the
-    // composed module or a loud load error — never silent unaudited code.
+  it('a native dynamic import is refused before egress or worker execution', async () => {
     /** @type {{ type: string, payload: any }[]} */
     const calls = [];
     const r = await runJob(
       { code: "const m = await import('https://mods.example/lazy.js');\nreturn m.x;" },
       { sendToSW: servingSW({ 'https://mods.example/lazy.js': 'export const x = 42;' }, calls) },
     );
-    const fetches = calls.filter((c) => c.type === 'sw/web-fetch');
-    expect(fetches.length).toBe(1);
-    expect(fetches[0].payload.url).toBe('https://mods.example/lazy.js');
-    expect(r.usedEgress).toBe(true);   // the runtime lane fences the run too
-    // Composed-and-ran, or the known CSP-blocked last hop — never anything else.
-    const ok = r.value === 42
-      || String(r.error).includes('Failed to fetch dynamically imported module');
-    expect(ok).toBe(true);
+    expect(r.errorCode).toBe(UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE);
+    expect(String(r.error)).toContain('cannot run this import form');
+    expect(calls.some((c) => c.type === 'sw/web-fetch')).toBe(false);
+    expect(r.usedEgress).toBeFalsy();
   });
 
-  it('runtime dynamic imports share the per-run cap with the static graph', async () => {
-    const cap = REMOTE_MODULES_MAX_PER_RUN;
-    /** @type {Record<string, string>} */
-    const sources = {};
-    const importLines = [];
-    for (let i = 0; i <= cap; i += 1) {   // cap-many static + 1 dynamic
-      sources[`https://mods.example/m${i}.js`] = `export const v${i} = ${i};`;
-      if (i < cap) importLines.push(`import 'https://mods.example/m${i}.js';`);
-    }
+  it('peerd.self.import gets the same host-owned refusal without egress', async () => {
     /** @type {{ type: string, payload: any }[]} */
     const calls = [];
     const r = await runJob(
-      {
-        code: `${importLines.join('\n')}\n`
-          + `try { await import('https://mods.example/m${cap}.js'); return 'REACHED'; }\n`
-          + 'catch (e) { return `capped:${e.message}`; }',
-      },
-      { sendToSW: servingSW(sources, calls) },
+      { code: "return await peerd.self.import('https://mods.example/lazy.js');" },
+      { sendToSW: servingSW({ 'https://mods.example/lazy.js': 'export const x = 42;' }, calls) },
     );
-    expect(r.error).toBe(null);
-    expect(String(r.value)).toContain('capped:');
-    expect(String(r.value)).toContain('per-run cap');   // one counter spans both lanes
-    expect(calls.filter((c) => c.type === 'sw/web-fetch').length).toBe(cap);
+    expect(r.errorCode).toBe(UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE);
+    expect(String(r.error)).toContain('cannot run this import form');
+    expect(calls.some((c) => c.type === 'sw/web-fetch')).toBe(false);
   });
 
-  // Design 3's Step 0 measurement (not an argument): hand the native loader a
-  // module graph that DOES name an https URL — bypassing the resolver on
+  // Backstop measurement: hand the native loader a module graph that DOES name
+  // an https URL, bypassing the resolver on
   // purpose — and record that it never executes. Whichever layer refuses
   // (worker CSP, the network stack), a load failure must surface as the
   // worker error event, never as module execution; this is the regression
@@ -664,7 +1018,7 @@ describe('headless remote module imports (audited resolver path)', () => {
   // loopback port: the fence being measured is "no silent success", and a
   // denied/refused fetch and a CSP block both land in the same observable —
   // the error event — without this test ever touching a real network.
-  it('the native loader never executes a remote static import from a sealed-worker blob (Step 0)', async () => {
+  it('the native loader never executes a remote static import from a sealed-worker blob', async () => {
     const src = "import 'https://127.0.0.1:9/never.js';\npostMessage({ type: 'loaded' });";
     const url = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
     const worker = new Worker(url, { type: 'module' });

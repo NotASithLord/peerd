@@ -39,6 +39,9 @@ import {
 } from '/peerd-runtime/index.js';
 import { CommandPalette, visibleCandidates, PALETTE_OPTION_ID } from './command-palette.js';
 import { CostChip } from './cost-meter.js';
+import {
+  composerForState, composerUnavailableCopy, composerWarningCopy,
+} from '../provider-readiness.js';
 
 /** @typedef {import('../chat-reducer.js').ChatState} ChatState */
 /** @typedef {(msg: object) => Promise<any>} Send */
@@ -110,6 +113,7 @@ const ATTACH_ACCEPT = [
   ...IMAGE_MEDIA_TYPES, 'application/pdf', 'text/*',
   ...DOC_MEDIA_TYPES, ...DOC_ACCEPT_EXTENSIONS,
 ].join(',');
+const BASIC_ATTACH_ACCEPT = [...IMAGE_MEDIA_TYPES, 'application/pdf', 'text/*'].join(',');
 
 // File → base64 payload (no data: prefix). FileReader keeps the panel
 // off raw ArrayBuffer/btoa chunking for multi-MB files.
@@ -237,18 +241,21 @@ export const InputBar = {
       ui.attachError = null;
       ui._sid = sid;
     }
-    const hasKey = state.providers?.hasKey;
+    const composer = composerForState(state);
+    const canSend = !!composer.canSend;
+    const unavailableCopy = canSend ? null : composerUnavailableCopy(composer, { compact: true });
+    const warningCopy = composerWarningCopy(composer);
     // Attachments are Anthropic-only (image/document content blocks).
     // Same gate expression as chat-view's EffortDial: the session's
     // bound provider, else the one a fresh chat would bind to.
-    const canAttach = hasKey
-      && (state.session?.provider ?? state.providers?.current) === 'anthropic';
+    const canAttach = canSend && composer.provider === 'anthropic';
+    const documentReaderAvailable = state.capabilities?.documentReader?.status === 'available';
 
     /** @param {Event} [e] */
     const submit = async (e) => {
       e?.preventDefault?.();
       const text = ui.value.trim();
-      if (!text || ui.busy) return;
+      if (!text || ui.busy || !canSend) return;
 
       // Goal-armed (mode-row toggle): this send starts an autonomous goal run
       // in THIS chat — the agent keeps taking turns toward the goal until it
@@ -327,6 +334,11 @@ export const InputBar = {
         if (kind === 'unsupported') {
           ui.attachError = `"${f.name}": unsupported type — images (PNG/JPEG/GIF/WebP), PDF, `
             + 'Word/Excel/PowerPoint/OpenDocument, RTF, EPUB, or text files.';
+          continue;
+        }
+        if (kind === 'doc' && !documentReaderAvailable) {
+          ui.attachError = `"${f.name}": office and e-book conversion is unavailable in this browser. `
+            + 'Attach a PDF or plain-text export instead.';
           continue;
         }
         if (f.size > ATTACHMENT_CAPS[kind]) {
@@ -465,8 +477,8 @@ export const InputBar = {
       m.redraw();
     };
 
-    const placeholder = !hasKey
-      ? 'Add an API key in Settings to start.'
+    const placeholder = !canSend
+      ? composerUnavailableCopy(composer, { compact: true })
       : goalArmed
         ? 'Describe a goal to run autonomously…'
         : streaming
@@ -484,7 +496,7 @@ export const InputBar = {
     // user's voice would orphan the recording with no way to stop it.
     const listening = voiceManager?.getState?.()?.status === 'listening';
     const hasDraft = !!ui.value.trim();
-    const armed = hasDraft && hasKey && !listening;
+    const armed = hasDraft && canSend && !listening;
     if (hasDraft && !ui.sendAccent) {
       ui.sendAccent = SEND_ACCENTS[Math.floor(Math.random() * SEND_ACCENTS.length)];
     } else if (!hasDraft) {
@@ -492,6 +504,11 @@ export const InputBar = {
     }
 
     return m('form.input-bar', { onsubmit: submit }, [
+      unavailableCopy || warningCopy ? m('p.composer-readiness-note', {
+        id: 'composer-readiness-note',
+        role: unavailableCopy ? 'alert' : 'status',
+        'aria-live': unavailableCopy ? 'assertive' : 'polite',
+      }, unavailableCopy ?? warningCopy) : null,
       m('.composer-wrap', [
         paletteOpen ? m(CommandPalette, {
           trigger: ui.trigger,
@@ -507,12 +524,12 @@ export const InputBar = {
             rows: 2,
             placeholder,
             value: ui.value,
-            disabled: !hasKey,
             role: 'textbox',
             'aria-autocomplete': 'list',
             'aria-expanded': paletteOpen ? 'true' : 'false',
             'aria-controls': paletteOpen ? 'composer-palette' : undefined,
             'aria-activedescendant': activeDesc,
+            'aria-describedby': unavailableCopy || warningCopy ? 'composer-readiness-note' : undefined,
             oncreate: (/** @type {{ dom: HTMLTextAreaElement }} */ vnode) => { ui.el = vnode.dom; },
             onkeydown: onKeydown,
             onkeyup: refreshTrigger,
@@ -544,12 +561,15 @@ export const InputBar = {
                     onclick: () => { ui.attachments.splice(i, 1); ui.attachError = null; },
                   }, '×'),
                 ])),
-                ui.attachError ? m('.attach-error', ui.attachError) : null,
+                ui.attachError ? m('.attach-error', {
+                  role: 'alert',
+                  'aria-live': 'assertive',
+                }, ui.attachError) : null,
               ])
             : null,
           m('.composer-row', [
             // Per-chat usage — small text, far left; tap to expand.
-            hasKey ? m(CostChip, { cost: state.cost, streaming: state.streaming }) : null,
+            canSend ? m(CostChip, { cost: state.cost, streaming: state.streaming }) : null,
             m('.spacer'),
             // Attach — hidden entirely off-Anthropic (the gate above):
             // image/document blocks are an Anthropic wire shape, and a
@@ -557,7 +577,7 @@ export const InputBar = {
             canAttach ? m('input.attach-input', {
               type: 'file',
               multiple: true,
-              accept: ATTACH_ACCEPT,
+              accept: documentReaderAvailable ? ATTACH_ACCEPT : BASIC_ATTACH_ACCEPT,
               style: 'display:none',
               oncreate: (/** @type {{ dom: HTMLInputElement }} */ v) => { ui.fileInputEl = v.dom; },
               onremove: () => { ui.fileInputEl = null; },
@@ -592,18 +612,18 @@ export const InputBar = {
                 manager: voiceManager,
                 targetId: CHAT_INPUT_TARGET,
                 onTranscript,
-                disabled: !hasKey,
+                disabled: false,
               }) : null,
               m('button.send-btn', {
                 type: 'submit',
-                disabled: !hasKey || ui.busy || !ui.value.trim(),
-                'aria-label': goalArmed ? 'Start an autonomous run on this goal'
-                  : streaming ? 'Send and steer the current turn' : 'Send',
-                title: goalArmed
+                disabled: !canSend || ui.busy || !ui.value.trim(),
+                'aria-label': unavailableCopy ?? (goalArmed ? 'Start an autonomous run on this goal'
+                  : streaming ? 'Send and steer the current turn' : 'Send'),
+                title: unavailableCopy ?? (goalArmed
                   ? 'Start an autonomous run on this goal (plan → build → repeat)'
                   : streaming
                     ? 'Sending will abort the current turn and continue with your new message'
-                    : 'Send (⌘/Ctrl + Enter)',
+                    : warningCopy ?? 'Send (⌘/Ctrl + Enter)'),
               }, ARROW_ICON()),
             ]),
           ]),

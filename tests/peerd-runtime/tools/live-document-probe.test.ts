@@ -7,11 +7,14 @@
 //
 // 276: everything above the probe judges `tab.url` — a record frozen before the
 // call. These pin that a document reporting a DIFFERENT origin is re-judged on
-// both rules (denylist and landing), and that a probe which cannot run leaves
-// the earlier verdict untouched rather than refusing.
+// both rules (denylist and landing). A probe that cannot bind the operation to
+// an exact document fails closed.
 
 import { describe, test, expect } from 'bun:test';
-import { resolveTargetTab } from '../../../extension/peerd-runtime/tools/defs/dom-helpers.js';
+import {
+  passwordFieldSignalFromProbe,
+  resolveTargetTab,
+} from '../../../extension/peerd-runtime/tools/defs/dom-helpers.js';
 
 const tabsApi = (byId: Record<number, any>) => ({
   get: async (id: number) => { if (!byId[id]) throw new Error('no tab'); return byId[id]; },
@@ -20,7 +23,24 @@ const tabsApi = (byId: Record<number, any>) => ({
 
 /** A scripting stub whose injected probe answers with a fixed document. */
 const scriptingSaying = (result: unknown, opts: { calls?: number[] } = {}) => ({
-  executeScript: async (o: any) => { opts.calls?.push(o?.target?.tabId); return [{ result }]; },
+  executeScript: async (o: any) => {
+    opts.calls?.push(o?.target?.tabId);
+    const value: any = result;
+    if (o?.func?.name === 'liveDocumentLocationInjected') {
+      return [{
+        documentId: 'doc-1',
+        result: {
+          origin: value?.origin ?? null,
+          href: value?.href ?? null,
+          timeOrigin: 1_700_000_000_000,
+        },
+      }];
+    }
+    return [{
+      documentId: 'doc-1',
+      result: { has: value?.has ?? false, capped: value?.capped === true },
+    }];
+  },
 });
 
 const baseCtx = (over: Record<string, unknown> = {}) => ({
@@ -30,6 +50,13 @@ const baseCtx = (over: Record<string, unknown> = {}) => ({
 });
 
 describe('issue 267 — every DOM tool teaches the classifier, not just snapshot', () => {
+  test('an exhausted negative remains unknown at the policy consumer', () => {
+    expect(passwordFieldSignalFromProbe({ has: false, capped: true })).toBeNull();
+    expect(passwordFieldSignalFromProbe({ has: false, capped: false })).toBe(false);
+    expect(passwordFieldSignalFromProbe({ has: true, capped: true })).toBe(true);
+    expect(passwordFieldSignalFromProbe(null)).toBeNull();
+  });
+
   test('a password field seen at the chokepoint is learned', async () => {
     const learned: Array<[string, string]> = [];
     const ctx: any = baseCtx({
@@ -61,13 +88,15 @@ describe('issue 267 — every DOM tool teaches the classifier, not just snapshot
     expect(learned).toEqual(['https://elsewhere.test']);
   });
 
-  test('an unreadable origin (opaque document) is not learned as anything', async () => {
+  test('an unreadable live document is refused and not learned', async () => {
     const learned: string[] = [];
     const ctx: any = baseCtx({
       scripting: scriptingSaying({ has: true, origin: null, href: null }),
       noteLearnedOrigin: (o: string) => learned.push(o),
     });
-    await resolveTargetTab({}, ctx);
+    await expect(resolveTargetTab({}, ctx)).rejects.toMatchObject({
+      code: 'browser_target_invalid',
+    });
     expect(learned).toEqual([]);
   });
 });
@@ -124,17 +153,16 @@ describe('issue 276 — the live origin is re-judged when the document moved', (
     expect((await ctx.tabs.get(1)).url).toBe('https://example.com/');
   });
 
-  test('a non-web live document (opaque, data:, blob:) is left entirely alone', async () => {
-    // The denylist matches hostnames and the landing rule reasons about http(s):
-    // asking either about "null" is asking a question it cannot answer.
+  test('a non-web replacement is refused without invoking the origin lock', async () => {
     const judged: string[] = [];
     const ctx: any = baseCtx({
       scripting: scriptingSaying({ has: true, origin: 'null', href: 'about:blank' }),
       judgeLanding: async (url: string) => { judged.push(url); return { action: 'continue' }; },
       noteLearnedOrigin: () => { throw new Error('must not learn an opaque origin'); },
     });
-    const tab = await resolveTargetTab({}, ctx);
-    expect(tab?.url).toBe('https://example.com/');
+    await expect(resolveTargetTab({}, ctx)).rejects.toMatchObject({
+      code: 'browser_target_scheme_blocked',
+    });
     expect(judged).toEqual(['https://example.com/']);
   });
 
@@ -149,26 +177,32 @@ describe('issue 276 — the live origin is re-judged when the document moved', (
   });
 });
 
-describe('the probe fails OPEN — it can only ever add a refusal, never remove one', () => {
-  test('a context with no scripting API resolves exactly as before', async () => {
+describe('the probe fails closed when a live web document cannot be verified', () => {
+  test('a context with no scripting API cannot mint exact document authority', async () => {
     const ctx: any = baseCtx();
-    expect((await resolveTargetTab({}, ctx))?.id).toBe(1);
+    await expect(resolveTargetTab({}, ctx)).rejects.toMatchObject({
+      code: 'browser_target_unverified',
+    });
   });
 
-  test('an injection the browser refuses (chrome:// and friends) does not refuse the tool', async () => {
+  test('an injection the browser refuses does refuse a web-page tool', async () => {
     const ctx: any = baseCtx({
       scripting: { executeScript: async () => { throw new Error('Cannot access a chrome:// URL'); } },
     });
-    expect((await resolveTargetTab({}, ctx))?.id).toBe(1);
+    await expect(resolveTargetTab({}, ctx)).rejects.toMatchObject({
+      code: 'browser_target_unverified',
+    });
   });
 
-  test('a probe that answers with nothing usable is treated as "could not look"', async () => {
+  test('a probe that answers with nothing usable refuses the tool', async () => {
     const learned: string[] = [];
     const ctx: any = baseCtx({
       scripting: { executeScript: async () => [] },
       noteLearnedOrigin: (o: string) => learned.push(o),
     });
-    expect((await resolveTargetTab({}, ctx))?.id).toBe(1);
+    await expect(resolveTargetTab({}, ctx)).rejects.toMatchObject({
+      code: 'browser_target_unverified',
+    });
     expect(learned).toEqual([]);
   });
 
@@ -194,17 +228,67 @@ describe('the probe fails OPEN — it can only ever add a refusal, never remove 
     expect(await resolveTargetTab({}, ctx)).toBeNull();
     expect(calls).toEqual([]);
   });
+
+  test('a sign-in wait refuses every DOM operation before the provider is probed', async () => {
+    const calls: number[] = [];
+    const ctx: any = baseCtx({
+      judgeLanding: async () => ({ action: 'wait' }),
+      scripting: scriptingSaying({
+        has: false, origin: 'https://accounts.google.com', href: 'https://accounts.google.com/signin',
+      }, { calls }),
+    });
+    await expect(resolveTargetTab({}, ctx)).rejects.toThrow('auth_waiting_for_user: Finish signing in in the open tab.');
+    expect(calls).toEqual([]);
+  });
+
+  test('a live document that moved into a sign-in wait is not returned to the caller', async () => {
+    const ctx: any = baseCtx({
+      scripting: scriptingSaying({
+        has: false, origin: 'https://accounts.google.com', href: 'https://accounts.google.com/signin',
+      }),
+      judgeLanding: async (url: string) => url.startsWith('https://accounts.google.com/')
+        ? { action: 'wait' }
+        : { action: 'continue' },
+    });
+    await expect(resolveTargetTab({}, ctx)).rejects.toThrow('auth_waiting_for_user: Finish signing in in the open tab.');
+  });
 });
 
 describe('the probe cannot hang a tool call', () => {
-  test('a renderer that never answers resolves the tab anyway (timeout, fail open)', async () => {
+  test('a renderer that never answers refuses after a bounded timeout', async () => {
     const ctx: any = baseCtx({
       scripting: { executeScript: () => new Promise(() => { /* wedged main thread */ }) },
     });
     const started = performance.now();
-    expect((await resolveTargetTab({}, ctx))?.id).toBe(1);
+    await expect(resolveTargetTab({}, ctx)).rejects.toMatchObject({
+      code: 'browser_target_unverified',
+    });
     // The timeout is the point; the exact value lives in the source. Just pin
     // that it returned on the timer rather than waiting on the renderer.
+    expect(performance.now() - started).toBeLessThan(5_000);
+  });
+
+  test('a wedged password observation is bounded after location succeeds', async () => {
+    let calls = 0;
+    const ctx: any = baseCtx({
+      scripting: { executeScript: () => {
+        calls++;
+        if (calls === 1) {
+          return Promise.resolve([{
+            documentId: 'doc-1',
+            result: {
+              origin: 'https://example.com',
+              href: 'https://example.com/',
+              timeOrigin: 1_700_000_000_000,
+            },
+          }]);
+        }
+        return new Promise(() => { /* wedged main thread */ });
+      } },
+    });
+    const started = performance.now();
+    const tab = await resolveTargetTab({}, ctx);
+    expect(tab?.peerdDocumentId).toBe('doc-1');
     expect(performance.now() - started).toBeLessThan(5_000);
   });
 });

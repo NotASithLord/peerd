@@ -8,6 +8,7 @@
 // heap. Module worker → strict.
 import { runUserTurn } from '/peerd-runtime/loop/agent-loop.js';
 import { makeInMemorySessions, makeRelayedCallModel, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
+import { ACTOR_WORKER_PROTOCOL } from './actor-worker-protocol.js';
 
 let seq = 0;
 let runId = '';
@@ -16,10 +17,21 @@ const modelPending = new Map();
 /** @type {Map<string, (v: any) => void>} rid → pending tool-dispatch resolver */
 const toolPending = new Map();
 const abort = new AbortController();
+let hasRun = false;
 
 self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
   const m = /** @type {any} */ (ev.data);
   if (!m || typeof m !== 'object') return;
+
+  if (m.type === 'probe') {
+    self.postMessage({
+      type: 'probe-response',
+      protocol: ACTOR_WORKER_PROTOCOL,
+      rid: m.rid,
+      canaryAbsent: typeof m.canaryName === 'string' && !(m.canaryName in globalThis),
+    });
+    return;
+  }
 
   if (m.type === 'model-response') { modelPending.get(m.rid)?.({ events: m.events }); modelPending.delete(m.rid); return; }
   if (m.type === 'model-error') { modelPending.get(m.rid)?.({ error: m.error }); modelPending.delete(m.rid); return; }
@@ -35,6 +47,11 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
   }
 
   if (m.type === 'run') {
+    if (hasRun) {
+      self.postMessage({ type: 'error', runId, error: 'actor worker refused a second run' });
+      return;
+    }
+    hasRun = true;
     runId = m.runId;
     const requestModel = (/** @type {object} */ args) => new Promise((resolve) => {
       const rid = `mc-${++seq}`;
@@ -52,9 +69,10 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       const callModel = makeRelayedCallModel(requestModel, m.maxOutputTokens);
       const toolDispatch = makeRelayedToolDispatch(requestTool);
       // Phase 3: a WEB/API actor self-fences its own untrusted-provenance rolling
-      // summary. The SW's closure (over the live tab url) can't cross postMessage,
-      // so rebuild it here from the pure fence fns using the turn-start provenance.
-      const fenceActorSummary = makeActorSummaryFence({ actorType: m.actorType, backing: m.backing, tabUrl: m.tabUrl, origin: m.origin });
+      // summary. The SW's closure (over a policy-reduced live tab origin) can't
+      // cross postMessage, so rebuild it here from the pure fence fns using the
+      // turn-start provenance.
+      const fenceActorSummary = makeActorSummaryFence({ actorType: m.actorType, backing: m.backing, tabOrigin: m.tabOrigin, origin: m.origin });
       const result = await runActorLoop(
         {
           runUserTurn, sessions, callModel, toolDispatch,
@@ -64,7 +82,12 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           tools: m.tools ?? [],
           ...(fenceActorSummary ? { fenceActorSummary } : {}),
         },
-        { sessionId: m.sessionId, userText: m.message, maxSteps: m.maxSteps, oneShot: m.oneShot, signal: abort.signal, reasoning: m.reasoning, contextWindow: m.contextWindow },
+        {
+          sessionId: m.sessionId, userText: m.message, maxSteps: m.maxSteps,
+          oneShot: m.oneShot, signal: abort.signal, reasoning: m.reasoning,
+          contextWindow: m.contextWindow, inbound: m.inbound === true,
+          preflightReply: m.preflightReply,
+        },
       );
       // why the worker does NOT stamp `aborted`: a Stop unwinds the loop cleanly (the
       // relay rejects, the loop stops with an empty reply), but whether that counts as
@@ -77,4 +100,19 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       self.postMessage({ type: 'error', runId, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
     }
   }
+});
+
+// Posted only after the complete module graph evaluated and the listener above
+// was installed. The host validates this plus a per-run realm canary before it
+// sends any model input or grants tool relays.
+self.postMessage({
+  type: 'ready',
+  protocol: ACTOR_WORKER_PROTOCOL,
+  realm: {
+    dedicatedWorker: globalThis.constructor?.name === 'DedicatedWorkerGlobalScope',
+    window: typeof window !== 'undefined',
+    document: typeof document !== 'undefined',
+    browser: 'browser' in globalThis,
+    chrome: 'chrome' in globalThis,
+  },
 });

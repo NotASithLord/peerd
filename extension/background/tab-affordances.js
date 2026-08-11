@@ -22,6 +22,8 @@ import { decidePullIn } from './panel-affordance.js';
 import { pullInHintInjected } from '/peerd-runtime/index.js';
 import { matchesDenylist } from '/peerd-egress/index.js';
 import { shouldFollowAgentTab } from './watch-mode.js';
+import { allowedDocumentTarget } from './page-activity.js';
+import { classifyBrowserAutomationTarget } from '/peerd-runtime/index.js';
 
 // The home agent-tab card's Open button draws a fresh brand color each time the
 // card is (re)generated — the sanctioned "peers/actions are the content" accent
@@ -71,7 +73,10 @@ export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSideP
   };
   const noteAgentTab = async (/** @type {number} */ tabId, /** @type {any} */ info = {}) => {
     if (typeof tabId !== 'number') return;
-    const { kind = null, name = null, label = null, opened = true, parentToolUseId: ptuArg = null } = (typeof info === 'string' ? { label: info } : info);
+    const {
+      kind = null, name = null, label = null, opened = true, protected: protectedTab = true,
+      parentToolUseId: ptuArg = null,
+    } = (typeof info === 'string' ? { label: info } : info);
     // The message_actor turn driving this tab (see tabMsgAnchor) — caller-supplied or the
     // last actor-turn-start mapping. Flows to the agent/tab event so the notice anchors to
     // that message's turn instead of the wall-clock-latest user message.
@@ -91,7 +96,10 @@ export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSideP
     // on a tab, which resurfaces an existing notice but never invents one for a tab
     // the USER opened. `noted: true` marks this as a real agent touch (vs. a
     // passive current-flag refresh on tab activation).
-    agentTabInfo = { tabId, windowId, kind, name, label: text, color, opened, parentToolUseId };
+    agentTabInfo = {
+      tabId, windowId, kind, name, label: text, color, opened,
+      protected: protectedTab, parentToolUseId,
+    };
     broadcastAgentTab(true);
     // Watch mode: FOLLOW the agent onto this tab. No-op unless the user opted in
     // (isWatchOn) and it isn't already the active tab — see focusAgentTab.
@@ -196,6 +204,14 @@ export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSideP
     let origin;
     try { origin = new URL(/** @type {string} */ (tab.url)).origin; } catch { return; }
     if (origin !== peerdWebTabs.get(tabId)) { peerdWebTabs.delete(tabId); return; }
+    // Re-check the live committed location and pin the hint to that exact
+    // document. A navigation after this probe makes the mutation fail instead
+    // of landing on the replacement page.
+    const target = await allowedDocumentTarget(tabId, {
+      tabs: browser.tabs,
+      scripting: browser.scripting,
+    }, { denylist: denylistStore.patterns() }, origin);
+    if (!target) return;
     let shortcut = '';
     try {
       const cmds = await browser.commands?.getAll?.();
@@ -203,7 +219,7 @@ export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSideP
     } catch { /* no commands API in this build */ }
     const iconUrl = await getPullInIconUrl();
     try {
-      await browser.scripting.executeScript({ target: { tabId }, func: pullInHintInjected, args: [shortcut, iconUrl] });
+      await browser.scripting.executeScript({ target, func: pullInHintInjected, args: [shortcut, iconUrl] });
     } catch (e) {
       // Pages the browser refuses to inject into (chrome:, the stores, a hard CSP)
       // — harmless; the hint just doesn't show.
@@ -215,6 +231,7 @@ export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSideP
     let u;
     try { u = new URL(url); } catch { return; } // not a real web URL → no hint
     if (!u.protocol.startsWith('http')) return;
+    if (!classifyBrowserAutomationTarget(u).allowed) return;
     if (matchesDenylist(u.hostname, denylistStore.patterns())) return; // never graffiti a sensitive site
     peerdWebTabs.set(tabId, u.origin);
     showWebTabHint(tabId); // if the user is already viewing it with the sidebar closed

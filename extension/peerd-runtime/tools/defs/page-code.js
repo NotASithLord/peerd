@@ -19,6 +19,7 @@
 
 import { clamp } from '/shared/util.js';
 import { formatRunResult } from './script.js';
+import { codeClientReference } from '../../actor/capability-manifest.js';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 180_000;
@@ -34,17 +35,13 @@ export const pageCodeTool = {
   primitive: 'web',
   description: [
     'Drive YOUR tab by writing JavaScript. Async function body in a sealed',
-    'worker with a Playwright-shaped `page` object:',
-    'await page.goto(url) — navigate your tab (opens it on first use);',
-    "await page.click(selector, {nth}) — click; the selector must match EXACTLY one",
-    'element or the call rejects (pass nth to pick among several, 0-based);',
-    "await page.fill(selector, text) — replace a field's value (single-match strict);",
-    'await page.snapshot() — the a11y snapshot (your perception — re-read after acting);',
-    "await page.content() — the page's readable text.",
+    `worker. Exact client: ${codeClientReference('page')}.`,
+    'Selectors are strict unless nth is supplied; snapshot refs such as @e12 are',
+    'accepted by click/fill/login. Re-read snapshot after acting.',
     'Each call rejects on failure (denylist, no match, count mismatch) — wrap in',
     'try/catch to handle. `return <value>` returns your result; console output is',
-    'captured. The worker has NO network fetch, NO files, NO subagents — page.*',
-    'and pure computation only. Keep scripts SHORT (a few actions), then look at',
+    'captured. The worker has NO direct network, NO files, NO subagents — only',
+    'the manifest-listed, gated page methods and pure compute. Keep scripts SHORT, then look at',
     'a fresh snapshot before the next step: pages change under you.',
   ].join(' '),
   schema: {
@@ -66,7 +63,7 @@ export const pageCodeTool = {
     }
     // why: jsOffscreenClient rides the opaque ctx contract (not on ToolContext);
     // narrow to the one method this tool calls.
-    const jsOffscreenClient = /** @type {{ execHeadless?: (code: string, opts: object) => Promise<import('./script.js').RunResult> } | undefined} */ (
+    const jsOffscreenClient = /** @type {{ execHeadless?: (code: string, opts: object) => Promise<import('./script.js').RunResult>, abortHeadless?: (runId: string, owner?: string) => Promise<void> } | undefined} */ (
       /** @type {any} */ (ctx).jsOffscreenClient);
     if (!jsOffscreenClient || typeof jsOffscreenClient.execHeadless !== 'function') {
       return { ok: false, error: 'page_code_unavailable' };
@@ -78,15 +75,53 @@ export const pageCodeTool = {
     if (typeof ownerSessionId !== 'string' || !ownerSessionId) {
       return { ok: false, error: 'page_code_requires_actor_session' };
     }
+    const extras = /** @type {{ scriptRuns?: { mintRunId: (owner: string) => string, register: (runId: string, signal: any, owner: string, caps: Record<string, boolean>) => void, release: (runId: string) => void }, abortSignal?: any }} */ (/** @type {any} */ (ctx));
+    if (!extras.scriptRuns) return { ok: false, error: 'page_code_run_registry_unavailable' };
+    if (extras.abortSignal?.aborted) return { ok: false, error: 'page_code_aborted: the turn was stopped before the run started' };
     const timeoutMs = clamp(args.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1000, MAX_TIMEOUT_MS);
+    const runId = extras.scriptRuns.mintRunId(ownerSessionId);
+    extras.scriptRuns.register(runId, extras.abortSignal, ownerSessionId, { page: true });
+    /** @type {(() => void) | undefined} */
+    let onAbort;
+    if (extras.abortSignal && jsOffscreenClient.abortHeadless) {
+      onAbort = () => { jsOffscreenClient.abortHeadless?.(runId, ownerSessionId); };
+      if (extras.abortSignal.aborted) onAbort();
+      else extras.abortSignal.addEventListener('abort', onAbort, { once: true });
+    }
     try {
       const result = await jsOffscreenClient.execHeadless(args.code, {
-        timeoutMs, caps: PAGE_CODE_CAPS, ownerSessionId,
+        timeoutMs, caps: PAGE_CODE_CAPS, ownerSessionId, runId,
+        signal: extras.abortSignal,
       });
-      return { ok: true, content: formatRunResult(args.code, result) };
+      if (result.endTurn === true) {
+        return {
+          ok: false,
+          error: 'page_code_ended_for_host_policy',
+          content: typeof result.endTurnContent === 'string' && result.endTurnContent
+            ? result.endTurnContent
+            : 'peerd stopped this page run because the tab entered a user-controlled sign-in step.',
+          endTurn: true,
+          outcomeKind: result.endTurnOutcomeKind === 'pre-effect-failure'
+            ? 'pre-effect-failure'
+            : 'effect-completed',
+        };
+      }
+      return {
+        ok: true,
+        content: formatRunResult(args.code, result),
+        ...(Array.isArray(result.images) && result.images.length ? { images: result.images } : {}),
+        ...(Array.isArray(result.browserPolicies) && result.browserPolicies.length
+          ? { browserChildPolicyNotices: result.browserPolicies }
+          : {}),
+      };
     } catch (e) {
       const err = /** @type {{ name?: string, message?: string }} */ (e);
       return { ok: false, error: `page_code_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
+    } finally {
+      extras.scriptRuns.release(runId);
+      if (onAbort && extras.abortSignal) {
+        try { extras.abortSignal.removeEventListener?.('abort', onAbort); } catch { /* stub */ }
+      }
     }
   },
 };

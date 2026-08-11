@@ -9,6 +9,16 @@
 import { describe, it, expect } from '../../framework.js';
 import { pageEvalTool } from '/peerd-runtime/tools/defs/index.js';
 import { BUILTIN_TOOLS } from '/peerd-runtime/index.js';
+import {
+  browserProbeResult,
+  TEST_DOCUMENT_ID,
+} from '../../helpers/browser-scripting.js';
+
+/** @param {any} opts @param {any} result */
+const scriptReply = (opts, result) => {
+  const probe = browserProbeResult(opts, { url: 'https://mail.example.com/' });
+  return probe ?? [{ documentId: TEST_DOCUMENT_ID, result }];
+};
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
 /** @typedef {import('/peerd-runtime/tools/defs/page-eval.js').PageEvalResult} PageEvalResult */
@@ -29,7 +39,7 @@ const mockCtx = (scriptResult, overrides = {}) => /** @type {ToolContext} */ ({
     query: async () => [{ id: 1, url: 'https://mail.example.com/' }],
   },
   scripting: {
-    executeScript: async () => [{ result: scriptResult }],
+    executeScript: async (/** @type {any} */ opts) => scriptReply(opts, scriptResult),
   },
   ...overrides,
 });
@@ -80,8 +90,8 @@ describe('page_eval — outer tool', () => {
     const ctx = mockCtx(SAMPLE_OK, {
       scripting: {
         executeScript: async (/** @type {any} */ opts) => {
-          captured = opts.args;
-          return [{ result: SAMPLE_OK }];
+          if (opts.args) captured = opts.args;
+          return scriptReply(opts, SAMPLE_OK);
         },
       },
     });
@@ -95,8 +105,8 @@ describe('page_eval — outer tool', () => {
     const ctx = mockCtx(SAMPLE_OK, {
       scripting: {
         executeScript: async (/** @type {any} */ opts) => {
-          capturedWorld = opts.world;
-          return [{ result: SAMPLE_OK }];
+          if (opts.args) capturedWorld = opts.world;
+          return scriptReply(opts, SAMPLE_OK);
         },
       },
     });
@@ -155,7 +165,11 @@ describe('page_eval — outer tool', () => {
 
   it('surfaces script_inject_failed when scripting throws', async () => {
     const ctx = mockCtx(SAMPLE_OK, {
-      scripting: { executeScript: async () => { throw new Error('frame gone'); } },
+      scripting: { executeScript: async (/** @type {any} */ opts) => {
+        if (opts?.func?.name === 'liveDocumentLocationInjected'
+            || opts?.func?.name === 'hasPasswordFieldInjected') return scriptReply(opts, SAMPLE_OK);
+        throw new Error('frame gone');
+      } },
     });
     const r = await pageEvalTool.execute({ code: 'x' }, ctx);
     expect(r.ok).toBe(false);

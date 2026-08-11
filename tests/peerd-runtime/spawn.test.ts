@@ -1,12 +1,14 @@
 import { describe, test, expect } from 'bun:test';
 import {
+  ActorPersistenceError,
   makeSpawnActor,
   narrowTools,
-  finalAssistantText,
+  finalActorTurnReply, finalAssistantText,
   restrictCtxCapabilities,
   CAPABILITY_CONSUMERS,
   DEFAULT_MAX_DEPTH,
 } from '../../extension/peerd-runtime/actor/spawn.js';
+import { ACTOR_CREDENTIAL_BOUNDARY_FAILURE } from '../../extension/peerd-runtime/errors.js';
 
 // ---- pure helpers ---------------------------------------------------------
 
@@ -56,6 +58,27 @@ describe('finalAssistantText', () => {
   });
 });
 
+describe('finalActorTurnReply', () => {
+  test('preserves a persisted provider refusal as a failed actor reply', () => {
+    expect(finalActorTurnReply({ messages: [
+      { role: 'assistant', content: 'partial text', error: ACTOR_CREDENTIAL_BOUNDARY_FAILURE },
+    ] } as any)).toEqual({
+      result: ACTOR_CREDENTIAL_BOUNDARY_FAILURE,
+      stopped: true,
+    });
+  });
+
+  test('returns clean text and keeps the empty-turn Stop fallback', () => {
+    expect(finalActorTurnReply({ messages: [
+      { role: 'assistant', content: 'done' },
+    ] } as any)).toEqual({ result: 'done' });
+    expect(finalActorTurnReply({ messages: [] } as any)).toEqual({
+      result: 'the actor turn was stopped before it produced a reply.',
+      stopped: true,
+    });
+  });
+});
+
 describe('restrictCtxCapabilities', () => {
   // A stand-in for the full ctx buildToolContext hands every context: every
   // capability closure present, plus non-capability fields that must survive.
@@ -64,6 +87,10 @@ describe('restrictCtxCapabilities', () => {
     safeFetch: () => {},
     webFetch: () => {},
     webCache: { get: () => {}, put: () => {}, key: () => 'k' },
+    siteClients: { get: () => {}, put: () => {}, remove: () => {} },
+    canUseSiteClientOrigin: () => true,
+    authorizeSiteClientOrigin: async () => true,
+    siteCapture: { start: () => {}, stop: () => {} },
     memory: { read: () => {} },
     kv: { get: () => {} },
     idb: { getAll: () => {} },
@@ -73,8 +100,8 @@ describe('restrictCtxCapabilities', () => {
     actorCancel: () => {},
     requestReview: () => {},
     dweb: { share: () => {} },
-    repositories: { status: () => {} },
-    appClient: { create: () => {} },
+    jsOffscreenClient: { execHeadless: () => {} },
+    scriptRuns: { register: () => {} },
     // non-capability fields — always retained
     denylist: ['evil.com'],
     allowlist: ['https://api.anthropic.com'],
@@ -117,11 +144,24 @@ describe('restrictCtxCapabilities', () => {
     expect('webCache' in restrictCtxCapabilities(fullCtx(), new Set(['read_web_cache']))).toBe(true);
     expect('memory' in restrictCtxCapabilities(fullCtx(), new Set(['remember']))).toBe(true);
     expect('requestReview' in restrictCtxCapabilities(fullCtx(), new Set(['request_review']))).toBe(true);
-    expect('repositories' in restrictCtxCapabilities(fullCtx(), new Set(['repo_history']))).toBe(true);
-    expect('appClient' in restrictCtxCapabilities(fullCtx(), new Set(['repo_history']))).toBe(false);
+    for (const tool of ['site_client_read', 'site_client_run', 'site_client_write']) {
+      const narrowed = restrictCtxCapabilities(fullCtx(), new Set([tool]));
+      expect('siteClients' in narrowed).toBe(true);
+      expect('canUseSiteClientOrigin' in narrowed).toBe(true);
+      expect('authorizeSiteClientOrigin' in narrowed).toBe(true);
+    }
+    const unrelated = restrictCtxCapabilities(fullCtx(), new Set(['fetch_url']));
+    expect('siteClients' in unrelated).toBe(false);
+    expect('canUseSiteClientOrigin' in unrelated).toBe(false);
+    expect('authorizeSiteClientOrigin' in unrelated).toBe(false);
     // sandbox_create keeps the dweb closure (its app arm reads ctx.dweb for the dwapp flag)
     expect('dweb' in restrictCtxCapabilities(fullCtx(), new Set(['sandbox_create']))).toBe(true);
     expect('dweb' in restrictCtxCapabilities(fullCtx(), new Set(['dweb_share']))).toBe(true);
+    for (const tool of ['script', 'a2a_run', 'page_code', 'site_client_run']) {
+      const narrowed = restrictCtxCapabilities(fullCtx(), new Set([tool]));
+      expect('jsOffscreenClient' in narrowed).toBe(true);
+      expect('scriptRuns' in narrowed).toBe(true);
+    }
   });
 
   test('getSecret / safeFetch have NO tool consumer — always stripped', () => {
@@ -214,6 +254,50 @@ const makeMockLoop = (opts: { finalText?: string; toolUses?: number; stopReason?
 const baseDeps = (store: any, loop: any, extra: any = {}) => {
   const audits: any[] = [];
   const modelCalls: any[] = [];
+  const renderSystemPrompt = extra.renderSystemPrompt
+    ?? (async ({ taskOverride }: any) => `sys task=${taskOverride}`);
+  const runChildOffscreen = Object.hasOwn(extra, 'runChildOffscreen')
+    ? extra.runChildOffscreen
+    : async (job: any, opts: any = {}) => {
+    const newMessages: any[] = [];
+    const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    let toolCalls = 0;
+    let stopReason = 'end_turn';
+    const callModel = async function* (args: any) {
+      modelCalls.push({ ...args, maxTokens: job.maxOutputTokens });
+      yield { type: 'message-stop', stopReason: 'end_turn' };
+    };
+    const sessions = {
+      appendMessage: async (_sessionId: string, message: any) => {
+        newMessages.push(message);
+        return message;
+      },
+    };
+    for await (const event of loop({
+      sessionId: job.sessionId,
+      userText: job.task,
+      callModel,
+      sessions,
+      tools: job.tools,
+      maxSteps: job.maxSteps,
+      maxOutputTokens: job.maxOutputTokens,
+      getSystemPrompt: async () => job.systemPrompt,
+      signal: opts.signal,
+    })) {
+      opts.onEvent?.(event);
+      if (event.type === 'tool-use') toolCalls++;
+      if (event.type === 'stop') stopReason = event.stopReason;
+      if (event.type === 'usage') {
+        usage.inputTokens += event.usage?.inputTokens ?? 0;
+        usage.outputTokens += event.usage?.outputTokens ?? 0;
+        usage.cacheReadTokens += event.usage?.cacheReadTokens ?? 0;
+        usage.cacheWriteTokens += event.usage?.cacheWriteTokens ?? 0;
+      }
+    }
+    const finalText = [...newMessages].reverse()
+      .find((message) => message.role === 'assistant' && message.content)?.content ?? '';
+    return { ok: true, started: true, finalText, newMessages, usage, stopReason, toolCalls };
+    };
   return {
     audits,
     modelCalls,
@@ -226,7 +310,9 @@ const baseDeps = (store: any, loop: any, extra: any = {}) => {
       appendAudit: async (e: any) => { audits.push(e); },
       buildToolContext: async ({ sessionId }: any) => ({ session: { sessionId }, audit: async () => {} }),
       dispatchToolCall: async () => ({ ok: true, content: 'tool ran' }),
-      renderSystemPrompt: async ({ taskOverride }: any) => `sys task=${taskOverride}`,
+      renderSystemPrompt,
+      renderSystemPromptForChild: (task: string) => renderSystemPrompt({ taskOverride: task }),
+      runChildOffscreen,
       getToolDescriptors: () => [
         { name: 'a', description: 'A', schema: {} },
         { name: 'b', description: 'B', schema: {} },
@@ -238,70 +324,51 @@ const baseDeps = (store: any, loop: any, extra: any = {}) => {
   };
 };
 
-// The in-SW fallback path (Firefox / a run that never started offscreen) has no
-// heap separation — that is the standing residual. What it MUST have is the
-// offscreen path's credential custody: the child loop is handed throwing stubs and
-// the real getSecret/safeFetch are added by the SW-owned callModel wrapper at the
-// call boundary. Before this, the live credentials went straight into runUserTurn,
-// so the "keyless fallback" claim held for the tool context but not for the loop.
-describe('makeSpawnActor — the in-SW fallback loop is keyless', () => {
-  test('the loop gets THROWING credential stubs, never the live ones', async () => {
-    const store = makeStore();
-    const parent = await store.create({});
-    let loopCtx: any = null;
-    async function* loop(ctx: any) {
-      loopCtx = ctx;
-      for await (const _ of ctx.callModel({ messages: [], system: 's', tools: [] })) { /* drain */ }
-      await ctx.sessions.appendMessage(ctx.sessionId, { role: 'assistant', content: 'done' });
-      yield { type: 'stop', sessionId: ctx.sessionId, stopReason: 'end_turn' };
-    }
-    const { deps } = baseDeps(store, loop);
-    await makeSpawnActor(deps)({ task: 't', parentSessionId: parent.sessionId });
-
-    expect(loopCtx).not.toBeNull();
-    // Not the injected live credentials — and not merely absent: calling them
-    // throws, so a loop (or anything reachable from its frame) that reaches for
-    // the key fails loudly instead of silently succeeding.
-    await expect(loopCtx.getSecret('anthropic')).rejects.toThrow(/no secret access/);
-    await expect(loopCtx.safeFetch('https://example.com')).rejects.toThrow(/no egress/);
-  });
-
-  test('the model call still receives the REAL credentials from the wrapper', async () => {
-    const store = makeStore();
-    const parent = await store.create({});
-    // The loop must forward ctx.getSecret/ctx.safeFetch into ctx.callModel, exactly as
-    // the real agent-loop does. why that matters here: the stubs and the real
-    // credentials COLLIDE in cappedCallModel's object literal, and only the spread
-    // order ({...modelArgs, getSecret, safeFetch}) decides which wins. A mock that
-    // omits the forward never creates the collision, so the natural deps-first
-    // ordering — which hands every in-SW model call a getSecret that throws and kills
-    // the whole fallback lane — would pass. Mutation-checked: flipping the order in
-    // spawn.js fails this test.
-    let loopCtx: any = null;
-    async function* loop(ctx: any) {
-      loopCtx = ctx;
-      const stream = ctx.callModel({
-        messages: [], system: 's', tools: [],
-        getSecret: ctx.getSecret, safeFetch: ctx.safeFetch,
-      });
-      for await (const _ of stream) { /* drain */ }
-      await ctx.sessions.appendMessage(ctx.sessionId, { role: 'assistant', content: 'done' });
-      yield { type: 'stop', sessionId: ctx.sessionId, stopReason: 'end_turn' };
-    }
-    const { deps, modelCalls } = baseDeps(store, loop);
-    await makeSpawnActor(deps)({ task: 't', parentSessionId: parent.sessionId });
-
-    // Custody moved to the call boundary, so the child can still think — the
-    // point is WHERE the key is reachable, not that the lane stops working.
-    expect(modelCalls.length).toBeGreaterThan(0);
-    expect(await modelCalls[0].getSecret('anthropic')).toBe('sk-test');
-    expect(typeof modelCalls[0].safeFetch).toBe('function');
-    // And the loop's own view is still the stub, even though it forwarded it.
-    await expect(loopCtx.getSecret('anthropic')).rejects.toThrow(/no secret access/);
-  });
-});
-
 describe('makeSpawnActor', () => {
+  test('refuses when no dedicated worker host is wired', async () => {
+    const store = makeStore();
+    const parent = await store.create({});
+    let loopRuns = 0;
+    async function* loop() { loopRuns++; yield { type: 'stop', stopReason: 'end_turn' }; }
+    const { deps, audits, modelCalls } = baseDeps(store, loop, {
+      runChildOffscreen: null,
+      renderSystemPromptForChild: null,
+      buildToolContext: async () => { throw new Error('tool context must not be built'); },
+    });
+
+    const result = await makeSpawnActor(deps)({ task: 't', parentSessionId: parent.sessionId });
+
+    expect(result.refused).toBe(true);
+    expect(result.result).toContain('no dedicated worker host is wired');
+    expect(loopRuns).toBe(0);
+    expect(modelCalls).toEqual([]);
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'actor_isolation_failure', details: expect.objectContaining({ performed: false }),
+    }));
+  });
+
+  test('a worker startup failure never falls back to the background loop', async () => {
+    const store = makeStore();
+    const parent = await store.create({});
+    let loopRuns = 0;
+    async function* loop() { loopRuns++; yield { type: 'stop', stopReason: 'end_turn' }; }
+    const { deps, audits, modelCalls } = baseDeps(store, loop, {
+      runChildOffscreen: async () => ({
+        ok: false, started: false, code: 'actor_worker_spawn_failed', error: 'worker failed to start',
+      }),
+    });
+
+    const result = await makeSpawnActor(deps)({ task: 't', parentSessionId: parent.sessionId });
+
+    expect(result.refused).toBe(true);
+    expect(result.result).toContain('worker failed to start');
+    expect(loopRuns).toBe(0);
+    expect(modelCalls).toEqual([]);
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'actor_isolation_failure', details: expect.objectContaining({ performed: false }),
+    }));
+  });
+
   test('creates an actor session with parentage and inherits the parent model', async () => {
     const store = makeStore();
     const parent = await store.create({ model: 'parent-model' });
@@ -320,6 +387,28 @@ describe('makeSpawnActor', () => {
     expect(child.model).toBe('parent-model');   // inherited model
     expect(out.result).toBe('hello from child');
     expect(out.depth).toBe(1);
+  });
+
+  test('fails explicitly when an isolated result cannot be persisted', async () => {
+    const store = makeStore();
+    const parent = await store.create({});
+    const { loop } = makeMockLoop({ finalText: 'work may have happened' });
+    const { deps, audits } = baseDeps(store, loop);
+    store.appendMessage = async () => { throw new Error('idb unavailable'); };
+    const spawn = makeSpawnActor(deps);
+
+    try {
+      await spawn({ task: 'do a thing', parentSessionId: parent.sessionId });
+      throw new Error('expected persistence failure');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ActorPersistenceError);
+      expect((error as Error).message).toContain('outcome is unknown');
+      expect((error as Error).message).toContain('must not be retried automatically');
+    }
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'actor_persistence_failed',
+      details: expect.objectContaining({ performed: true, outcomeKnown: false }),
+    }));
   });
 
   test('inherits the parent Plan/Act permission into the child record', async () => {
@@ -512,6 +601,7 @@ describe('makeSpawnActor', () => {
     expect(events[0].type).toBe('actor-start');
     expect(events[0].parentToolUseId).toBe('card-1');
     expect(events[0].sessionId).toBe(out.sessionId);
+    expect(events[0].rootSessionId).toBe(parent.sessionId);
     expect(events[events.length - 1].type).toBe('actor-stop');
     expect(events.some((e) => e.type === 'tool-use')).toBe(true);
   });
@@ -546,7 +636,7 @@ describe('actor context building', () => {
     expect(seenSystem).toBe('sys task=a thing'); // base+taskOverride path
   });
 
-  test('buildToolContext is called without a tab pin (no activeTabId)', async () => {
+  test('does not build a privileged tool context in the spawning heap', async () => {
     const store = makeStore();
     const parent = await store.create({});
     const ctxArgs: any[] = [];
@@ -556,8 +646,7 @@ describe('actor context building', () => {
     });
     const spawn = makeSpawnActor(deps);
     await spawn({ task: 'a thing', parentSessionId: parent.sessionId });
-    expect(ctxArgs.length).toBe(1);
-    expect(ctxArgs[0].activeTabId).toBeUndefined();
+    expect(ctxArgs.length).toBe(0);
   });
 
   test('accumulates child model usage and returns it (separate from the parent tally)', async () => {
@@ -576,13 +665,13 @@ describe('actor context building', () => {
   });
 });
 
-describe('makeSpawnActor — persistDeltas (ephemeral speed path)', () => {
-  test('persistDeltas:false threads to the loop; userText is exactly the task', async () => {
+describe('makeSpawnActor: isolated job inputs', () => {
+  test('the worker receives the exact task and provenance remains visible', async () => {
     const store = makeStore();
     const parent = await store.create({});
     const seen: any[] = [];
     async function* loop(ctx: any) {
-      seen.push({ userText: ctx.userText, persistDeltas: ctx.persistDeltas });
+      seen.push({ userText: ctx.userText });
       await ctx.sessions.appendMessage(ctx.sessionId, { role: 'assistant', content: 'ok' });
       yield { type: 'stop', sessionId: ctx.sessionId, stopReason: 'end_turn' };
     }
@@ -592,35 +681,17 @@ describe('makeSpawnActor — persistDeltas (ephemeral speed path)', () => {
     const events: any[] = [];
     await spawn({
       task: 'find the price',
-      persistDeltas: false,
       parentSessionId: parent.sessionId,
       parentDepth: 0,
       onEvent: (ev: any) => events.push(ev),
     });
 
     expect(seen[0].userText).toBe('find the price');
-    expect(seen[0].persistDeltas).toBe(false);
     const child = [...store.map.values()].find((s: any) => s.kind === 'spawned');
     expect(child.task).toBe('find the price');
     const spawned = audits.find((a: any) => a.type === 'actor_spawned');
     expect(spawned.details.task).toBe('find the price');
     const startEv = events.find((e: any) => e.type === 'actor-start');
     expect(startEv.task).toBe('find the price');
-  });
-
-  test('persistDeltas defaults true', async () => {
-    const store = makeStore();
-    const parent = await store.create({});
-    const seen: any[] = [];
-    async function* loop(ctx: any) {
-      seen.push({ userText: ctx.userText, persistDeltas: ctx.persistDeltas });
-      await ctx.sessions.appendMessage(ctx.sessionId, { role: 'assistant', content: 'ok' });
-      yield { type: 'stop', sessionId: ctx.sessionId, stopReason: 'end_turn' };
-    }
-    const { deps } = baseDeps(store, loop);
-    const spawn = makeSpawnActor(deps);
-    await spawn({ task: 'plain task', parentSessionId: parent.sessionId, parentDepth: 0 });
-    expect(seen[0].userText).toBe('plain task');
-    expect(seen[0].persistDeltas).toBe(true);
   });
 });

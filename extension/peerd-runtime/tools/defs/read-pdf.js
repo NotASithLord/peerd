@@ -17,12 +17,10 @@
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { resolveTargetTab, originOfUrl, isDenylistedTab } from './dom-helpers.js';
 import { formatPdfBody, DEFAULT_MAX_CHARS, requireEngine } from '../../pdf/index.js';
-// Deep import of the PURE SSRF matcher (same pattern as dom-helpers' denylist
-// import): the egress barrel pulls in vault/storage. read_pdf re-fetches the
-// PDF bytes offscreen, so it must apply the SAME private-network refusal as
-// open-web egress (safeFetch/webFetch) — the denylist alone doesn't cover
-// loopback / LAN / 169.254 metadata targets.
-import { isPrivateOrLocalHost } from '../../../peerd-egress/fetch/private-network.js';
+// read_pdf re-fetches bytes offscreen, so it applies the same shared lexical
+// private-network refusal as open-web egress. The denylist alone does not cover
+// loopback, LAN, or metadata targets.
+import { isPrivateOrLocalHost } from '../../../shared/private-network.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const readPdfTool = {

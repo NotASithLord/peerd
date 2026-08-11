@@ -87,7 +87,7 @@ const DB_NAME = 'peerd';
 // credential. why persist it at all: the key must survive an MV3 service-worker
 // eviction, and a handle is the only form of it we can hold. Additive,
 // forward-only. See peerd-egress/dpop/keys.js.
-// v13 — adds the Pod instance catalog. Pod files remain in one named OPFS
+// v13: adds the Pod instance catalog. Pod files remain in one named OPFS
 // subtree; this store holds only the registry's single { key, value } blob.
 // Additive and forward-only so existing engine catalogs are untouched.
 const DB_VERSION = 13;
@@ -162,7 +162,7 @@ export const openDB = () => {
       if (!db.objectStoreNames.contains('notebooks')) {
         db.createObjectStore('notebooks', { keyPath: 'key' });
       }
-      // v13 — lightweight Pod catalog; workspace bytes live in OPFS.
+      // v13: lightweight Pod catalog; workspace bytes live in OPFS.
       if (!db.objectStoreNames.contains('pods')) {
         db.createObjectStore('pods', { keyPath: 'key' });
       }

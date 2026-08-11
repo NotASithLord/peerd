@@ -1,5 +1,5 @@
 // @ts-check
-// sandbox_create — the single create tool for all tab-hosted sandbox kinds.
+// sandbox_create: the single create tool for all tab-hosted sandbox kinds.
 //
 // why one tool, not three: vm_create / js_create / app_create were three
 // near-identical bootstrap tools (create a record, open a background tab, set
@@ -42,21 +42,16 @@ export const sandboxCreateTool = {
   // create-RESULT note (NOTEBOOK_NOTE / APP_RUNTIME_NOTE) and the owning
   // actor's prompt, disclosed once when the agent actually commits to that kind.
   description: [
-    'Create an isolated SANDBOX in a background tab; returns its id. Pick `kind`:',
-    '"webvm" = full Linux (bash, disk, POSIX, compilers, python, git); heavyweight.',
-    '"notebook" = lightweight fresh-run JS IDE (files, sealed realm, OPFS);',
-    'gitUrl clones without Linux. Use for JSON, numerical work, analysis, charts, tables.',
-    '"pod" = fast local shell + OPFS + WASI + browser Git + audited HTTPS;',
-    'lighter than Linux, with no Node/npm/native-binary claim.',
-    '"app" = user-facing multi-file HTML in a sandboxed iframe (DOM, no extension',
-    'access, NO ambient network; bundle dependencies). Live APIs belong to the web actor;',
-    'dwapp:true grants only the consent-gated dweb bridge.',
-    'Apps currently run only on Chrome; on Firefox the artifact is saved but cannot',
-    'open, so tell the user to open peerd in Chrome to run it.',
-    'Create from `name` + `files`/`html`, or gitUrl when peerd.json declares the',
-    'entry and bound App contract. Use dwapp:true for peer communication.',
-    'It becomes the chat\'s current instance and returns a go-there card. Delegate with',
-    'message_actor(<id>, goal); use script for quick headless compute.',
+    'Create an isolated, tab-hosted sandbox and return its id. Pick `kind`:',
+    '"webvm" = full Linux/POSIX with bash, Python, Node/npm, and native tools; heavy.',
+    '"notebook" = lightweight fresh-run JS workspace for compute, data, and charts.',
+    '"pod" = fast shell + persistent OPFS, pipelines, WASI, browser Git, and audited',
+    'HTTPS; no Linux, Node/npm, native binaries, sockets, or PTY.',
+    '"app" = user-facing multi-file HTML in a sandboxed iframe with NO ambient',
+    'network; bundle dependencies. Firefox saves Apps but cannot run them.',
+    'Apps use `files` (or `html`); pass `dwapp:true` only for peer multiplayer.',
+    'The sandbox becomes current for its kind. Delegate substantial work with',
+    '`message_actor(id, goal)`; use `script` for quick headless compute.',
   ].join(' '),
   schema: {
     type: 'object',
@@ -69,8 +64,20 @@ export const sandboxCreateTool = {
       name: { type: 'string', description: 'Human-friendly label (tab strip + actor_list).' },
       files: {
         type: 'object',
-        description: 'app only: path → content map. Must include the entry (default index.html).',
-        additionalProperties: { type: 'string' },
+        description: 'app only: path → content map. Must include the entry (default index.html). '
+          + 'Text files use strings. Binary assets such as .wasm, images, audio, and fonts use '
+          + '{ "base64": "..." } and are available through window.peerd.assets.',
+        additionalProperties: {
+          anyOf: [
+            { type: 'string' },
+            {
+              type: 'object',
+              properties: { base64: { type: 'string' } },
+              required: ['base64'],
+              additionalProperties: false,
+            },
+          ],
+        },
       },
       html: { type: 'string', description: 'app only: shorthand for files:{index.html: html}.' },
       entryFile: { type: 'string', description: 'app only: entry filename (default index.html).' },
@@ -109,7 +116,7 @@ export const sandboxCreateTool = {
       if (kind === 'app' && typeof args?.gitUrl === 'string') {
         const conflicting = ['files', 'html', 'entryFile', 'tags', 'dwapp'].filter((key) => args?.[key] !== undefined);
         if (conflicting.length) {
-          return { ok: false, error: `sandbox_create: ${conflicting.join(', ')} cannot accompany gitUrl — the cloned peerd.json alone declares the App entry and capabilities.` };
+          return { ok: false, error: `sandbox_create: ${conflicting.join(', ')} cannot accompany gitUrl: the cloned peerd.json alone declares the App entry and capabilities.` };
         }
       }
       if (typeof kind === 'string' && kind !== 'app' && kind in SANDBOX_KIND_HANDLERS) {
@@ -119,12 +126,12 @@ export const sandboxCreateTool = {
         }
       }
       if (typeof kind === 'string' && kind !== 'pod' && args?.persistent !== undefined && kind in SANDBOX_KIND_HANDLERS) {
-        return { ok: false, error: `sandbox_create: persistent is pod-only — ${kind} has its existing lifecycle semantics.` };
+        return { ok: false, error: `sandbox_create: persistent is pod-only: ${kind} has its existing lifecycle semantics.` };
       }
       if (typeof kind === 'string' && kind !== 'notebook' && kind !== 'pod' && kind !== 'app' && kind in SANDBOX_KIND_HANDLERS) {
         const notebookOnly = ['gitUrl', 'gitRef', 'gitDepth'].filter((k) => args?.[k] !== undefined);
         if (notebookOnly.length) {
-          return { ok: false, error: `sandbox_create: ${notebookOnly.join(', ')} ${notebookOnly.length === 1 ? 'is' : 'are'} available only on notebook/pod/app — use kind:'webvm' for a full Linux checkout.` };
+          return { ok: false, error: `sandbox_create: ${notebookOnly.join(', ')} ${notebookOnly.length === 1 ? 'is' : 'are'} available only on notebook/pod/app: use kind:'webvm' for a full Linux checkout.` };
         }
       }
       return dispatch(args, ctx);

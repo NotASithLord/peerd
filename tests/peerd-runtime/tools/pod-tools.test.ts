@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { podExecTool } from '../../../extension/peerd-runtime/tools/defs/pod-exec.js';
+import { pagePodExecJob, podExecTool } from '../../../extension/peerd-runtime/tools/defs/pod-exec.js';
 import { podReadTool } from '../../../extension/peerd-runtime/tools/defs/pod-read.js';
 import { podWriteTool } from '../../../extension/peerd-runtime/tools/defs/pod-write.js';
 import { podStatusTool } from '../../../extension/peerd-runtime/tools/defs/pod-status.js';
@@ -69,6 +69,15 @@ describe('Pod tools', () => {
     const { calls, ctx } = execCtx();
     await podExecTool.execute({ command: 'sleep 1 &' }, ctx as any);
     expect(calls[0].options.background).toBe(true);
+  });
+
+  test('foreground output is previewed with executable pod_status paging args', () => {
+    const paged = pagePodExecJob({ id: 'job-1', stdout: 'x'.repeat(9_000), stderr: '', stdoutTruncated: false }, 'pod-1');
+    expect(paged.stdout).toHaveLength(8_000);
+    expect(paged.stdoutPage).toMatchObject({
+      retainedChars: 9_000, remainingChars: 1_000,
+      next: { tool: 'pod_status', args: { podId: 'pod-1', jobId: 'job-1', stream: 'stdout', offset: 8_000, limit: 8_000 } },
+    });
   });
 
   test('pod_read fences bytes and pod_write remains instance-targeted', async () => {

@@ -13,6 +13,11 @@
 // iframe, peerd-engine).
 
 import { clamp } from '/shared/util.js';
+import {
+  moduleImportPolicyMessage,
+  REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE,
+  REMOTE_MODULE_RESTRICTED_CODE,
+} from '/peerd-engine/index.js';
 import { JS_PITFALLS_NOTE, SCRIPT_BUILTINS_NOTE } from './code-style-note.js';
 import { oncePerSession } from './once-per-session.js';
 import { pushValueBlock, serializeValue } from './value-block.js';
@@ -22,7 +27,9 @@ import { wrapUntrusted } from '../prompt-wrap.js';
 import {
   renderTraceLines, traceGoalLines, traceErrorDetails,
   ACTORS_JOB_DEFAULT_TIMEOUT_MS, ACTORS_JOB_MAX_TIMEOUT_MS,
+  ACTORS_TRACE_ERROR_MAX_CHARS,
 } from '../../actor/actors-api.js';
+import { codeClientReference, renderCodeOpTrace } from '../../actor/capability-manifest.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
@@ -35,13 +42,25 @@ const MAX_TIMEOUT_MS = 120_000;
  * @typedef {Object} RunResult
  * @property {number} durationMs
  * @property {string} [error]
+ * @property {string} [errorCode]
+ * @property {boolean} [endTurn]
+ * @property {string} [endTurnContent]
+ * @property {string} [endTurnOutcomeKind]
  * @property {Array<{ level: string, text: string }>} [consoleOutput]
  * @property {unknown} [value]
  * @property {boolean} [usedEgress]   the run called peerd.egress.fetch (job-runner)
+ * @property {boolean} [usedRemoteModules] the resolved graph included remote code
  * @property {boolean} [usedActors]   the run delegated via the actors client
+ * @property {string[]} [actorDeliveryIds] durable mailbox correlations for
+ *   actor replies consumed by this run; host-only, never part of formatted output
+ * @property {boolean} [usedPage]     the run consumed page/DOM/pixel data through page.*
+ * @property {Array<{ data: string, mediaType: string }>} [images] host-captured page images (bounded by job-runner)
+ * @property {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} [browserPolicies]
+ *   host-captured child-navigation receipts from page calls; never user-code output
  * @property {boolean} [usedWorkspace]   the job was workspace-mounted (host-set, never inferred from ops)
  * @property {boolean} [workspaceOverBudget]   the workspace exceeded its size budget — writes were refused
- * @property {Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string }>} [actorsTrace]
+ * @property {Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean, cancelled?: boolean }>} [actorsTrace]
+ * @property {Array<{ seq: number, bridge: string, method: string, outcome: string, ms: number }>} [codeTrace]
  * @property {boolean} [usedProvider]   the run sub-called the model (peerd.provider.call, design 5)
  * @property {number} [providerCalls]   host-counted sub-call attempts
  * @property {number} [providerTokens]  host-summed tokens (input + output) across them
@@ -61,11 +80,9 @@ export const scriptTool = {
     "(add { extract: 'markdown' } to get an HTML page back as clean readable",
     'markdown — res.extracted says whether it ran);',
     '(3) ORCHESTRATION — the `actors` client drives your OWN actors in code:',
-    'await actors.ask(to, goal, {timeoutMs, oneShot}) delegates and returns',
-    '{ reply, failed }; actors.send(to, goal) hands off without waiting (the',
-    'reply lands in chat later); await actors.list() is the roster. Fan out to',
+    `${codeClientReference('actors')}. actors.call returns { reply, failed }. Fan out to`,
     'several actors, feed one\'s output to the next as a variable, retry/timeout',
-    'in code. `to` is anything message_actor accepts; a failed ask returns',
+    'in code. `address` is anything message_actor accepts; a failed call returns',
     'failed:true (actor-level) or throws (refusal/timeout — the message says',
     'why); every delegation is individually gated + audited and shows live in',
     'chat. (Delegate ENVIRONMENT work to actors; actor_create stays the tool',
@@ -79,7 +96,7 @@ export const scriptTool = {
     'Built-ins: import helpers from \'peerd:std\' (math / data / parsing; charts',
     'need a Notebook) and run compiled wasm32-wasi binaries via \'peerd:wasi\' —',
     'the first-run note lists both with signatures. Returns the value, console',
-    'output, any error, and a [DELEGATIONS] trace of every actors op.',
+    'output, any error, and bounded [DELEGATIONS]/[CODE OPS] traces.',
     'Pass workspace: true to run against your durable session workspace instead',
     'of the ephemeral scratch (files persist across runs and turns; output',
     're-enters fenced; peerd.self.readFile/writeFile/deleteFile/listFiles',
@@ -105,7 +122,7 @@ export const scriptTool = {
     }
     // why: jsOffscreenClient/scriptRuns/messageActor ride the opaque ctx
     // contract (not on ToolContext); narrow to what this tool touches.
-    const c = /** @type {{ jsOffscreenClient?: { execHeadless?: (code: string, opts: object) => Promise<RunResult>, abortHeadless?: (runId: string) => Promise<void> }, scriptRuns?: { mintRunId: (sid: string) => string, register: (runId: string, signal?: any, owner?: string) => void, abort: (runId: string) => void, release: (runId: string) => void, opsFor?: (runId: string) => Array<any> }, runCache?: { put?: (record: object) => Promise<void> }, messageActor?: unknown, inbound?: boolean, abortSignal?: { aborted: boolean, addEventListener: Function, removeEventListener?: Function }, toolUseId?: string }} */ (
+    const c = /** @type {{ jsOffscreenClient?: { execHeadless?: (code: string, opts: object) => Promise<RunResult>, abortHeadless?: (runId: string, ownerSessionId?: string) => Promise<void> }, scriptRuns?: { mintRunId: (sid: string) => string, register: (runId: string, signal?: any, owner?: string, capabilities?: { actors?: boolean, provider?: boolean, egress?: boolean }) => void, abort: (runId: string) => void, release: (runId: string) => void, opsFor?: (runId: string) => Array<any> }, runCache?: { put?: (record: object) => Promise<void> }, messageActor?: unknown, toolAllow?: Set<string> | null, inbound?: boolean, abortSignal?: AbortSignal, toolUseId?: string }} */ (
       /** @type {unknown} */ (ctx));
     const jsOffscreenClient = c.jsOffscreenClient;
     if (!jsOffscreenClient || typeof jsOffscreenClient.execHeadless !== 'function') {
@@ -117,9 +134,11 @@ export const scriptTool = {
     //   • the ctx carries the messageActor capability + the run registry (a
     //     chat's main turn — an actor's keyless narrowing strips it, a child
     //     without the message_actor grant loses the closure);
-    //   • the SESSION is a top-level chat (the actors/call route refuses
-    //     actor/actor owners — minting the stub for them would advertise a
-    //     surface every op then refuses);
+    //   • a bound environment actor is refused (its authority stays pinned to
+    //     one environment), while a spawned actor gets parity with its existing
+    //     direct message_actor grant — no grant, no closure, no client;
+    //   • a chat manifest that removed message_actor cannot recover it through
+    //     script (spawned grants are already manifest-intersected);
     //   • the CODE references `actors` at all (any use requires the
     //     identifier, aliasing included) — a pure-compute script must keep the
     //     30s compute wall-clock, not inherit the ~5-minute delegation one.
@@ -129,15 +148,17 @@ export const scriptTool = {
     // async-actor reintegration wake or the dweb agent's trickle-up, both fenced
     // attacker-derived bytes — is refused a DIRECT message_actor by the sender
     // gate's Wall 1 (mayMessageActor: inbound === true → false). The script tool's
-    // actors.send/ask reach the SAME messageActor through the actors/call relay,
+    // actors.call reaches the SAME messageActor through the actors/call relay,
     // so minting that surface on an inbound turn would be a SECOND, ungated door
     // through the inbound wall (the relay never carried the flag). Fail closed at
     // the mint — no surface advertised — and thread the flag to the SW route below
     // (defense-in-depth: the route re-checks, consistent with "SW re-verifies
     // every op"). Direct message_actor already gates on c.inbound the same way.
     const inbound = c.inbound === true;
+    const messageActorAllowed = !(c.toolAllow instanceof Set) || c.toolAllow.has('message_actor');
     const actorsOn = typeof c.messageActor === 'function' && !!c.scriptRuns && !!sid
-      && sessionKind !== 'spawned' && sessionKind !== 'actor'
+      && sessionKind !== 'actor'
+      && messageActorAllowed
       && !inbound
       && /\bactors\b/.test(args.code);
     // The durable workspace is a CHAT-SESSION surface: a spawned/actor child's
@@ -170,45 +191,84 @@ export const scriptTool = {
       : clamp(args.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1000, MAX_TIMEOUT_MS);
     /** @type {string | undefined} */
     let runId;
+    // A script can consume several actor replies. Custody follows the complete
+    // set into the one outer ToolResult that will be committed to history.
+    // Keep a host-owned union with the SW mirror so an offscreen transport loss
+    // after an actor reply cannot orphan its acknowledgement.
+    /** @type {Set<string>} */
+    const actorDeliveryIds = new Set();
+    const addActorDeliveryIds = (/** @type {unknown} */ ids) => {
+      if (!Array.isArray(ids)) return;
+      for (const id of ids) if (typeof id === 'string' && id) actorDeliveryIds.add(id);
+    };
+    const custody = () => actorDeliveryIds.size > 0
+      ? { actorDeliveryIds: [...actorDeliveryIds] }
+      : {};
+    const mirroredOps = () => runId && c.scriptRuns && 'opsFor' in c.scriptRuns
+      ? /** @type {{ opsFor: (id: string) => Array<any> }} */ (/** @type {unknown} */ (c.scriptRuns)).opsFor(runId)
+      : [];
     /** @type {(() => void) | undefined} */
     let onAbort;
     try {
-      /** @type {{ timeoutMs: number, toolbox: boolean, actors?: boolean, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, caps?: { provider?: boolean } }} */
+      /** @type {{ timeoutMs: number, toolbox: boolean, actors?: boolean, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, caps?: { provider?: boolean, subagent?: boolean }, signal?: AbortSignal }} */
       // toolbox: the script lane resolves peerd:toolbox modules (design 06) —
       // a trusted job param, not a worker choice; the other headless lanes
       // (a2a/site-client/page_code) never set it.
-      const opts = { timeoutMs, toolbox: true };
+      // `script` is compute/orchestration, never a hidden second actor_create.
+      // The default worker also supports embedded artifacts that call
+      // peerd.runtime.runAgent, but here that would bypass the session manifest
+      // and the caller's narrowed grant. Explicit actor_create remains the only
+      // subtask authority; Notebook/App runtimes keep their separate profile.
+      const opts = { timeoutMs, toolbox: true, caps: { subagent: false }, signal: c.abortSignal };
       // The durable workspace mount — the SESSION id rides as a TRUSTED job
       // param (invariant: the worker never names its own root; the SW-side tool
       // is the only place the owning session is resolved).
       if (workspaceOn) opts.workspaceSessionId = sid;
-      if ((actorsOn || workspaceOn || providerOn) && c.scriptRuns) {
+      if (sid && c.scriptRuns) {
         runId = c.scriptRuns.mintRunId(sid);
         // Stop plumbing: register the run under the dispatch abort signal so a
-        // Stop (a) aborts every pending actors.ask AND in-flight sub-model
+        // Stop (a) aborts every pending actors.call AND in-flight sub-model
         // fetches (both race the run's signal SW-side) and (b) terminates the
-        // worker instead of letting it run to its cap. Workspace runs register
-        // too, actors or not: their writes are DURABLE, so a zombie run
-        // outliving Stop would keep mutating an archived session's workspace —
-        // runId forwards on any lane (#153). The owner binds the runId to this
-        // session for the script/model-call relay's check.
-        c.scriptRuns.register(runId, c.abortSignal, sid);
+        // worker instead of letting compute, egress, or workspace writes run to
+        // their cap. Every session-owned lane registers; the capability flags
+        // still decide what its run id may redeem at a relay. The owner binds
+        // the runId to this session for those checks.
+        c.scriptRuns.register(runId, c.abortSignal, sid, {
+          actors: actorsOn,
+          provider: providerOn,
+          egress: true,
+        });
         if (c.abortSignal && jsOffscreenClient.abortHeadless) {
           const rid = runId;
-          onAbort = () => { jsOffscreenClient.abortHeadless?.(rid); };
+          onAbort = () => { jsOffscreenClient.abortHeadless?.(rid, sid); };
           if (c.abortSignal.aborted) onAbort();
           else c.abortSignal.addEventListener('abort', onAbort, { once: true });
         }
-        opts.runId = runId;
-        if (actorsOn) Object.assign(opts, { actors: true, ownerSessionId: sid, ownerToolUseId: c.toolUseId });
+        // Every registered run can redeem the egress capability, so the owner
+        // stamp must ride every job — not only jobs whose source also mentions
+        // actors/provider. The offscreen relay cannot infer this trusted value,
+        // and the SW route correctly refuses an ownerless run.
+        Object.assign(opts, { runId, ownerSessionId: sid });
+        if (actorsOn) Object.assign(opts, { actors: true, ownerToolUseId: c.toolUseId });
         // The caps flag rides as a trusted job param; the job-runner relay and
         // the SW route both refuse without it (two walls + the quota).
-        // ownerSessionId binds the run to this session for the SW
-        // script/model-call route's owner check (set here for a providerOn run
-        // that isn't also an actors run, which already set it above).
-        if (providerOn) Object.assign(opts, { ownerSessionId: sid, caps: { provider: true } });
+        // ownerSessionId above binds the run to this session for every relay;
+        // this branch only adds the provider-specific capability bit.
+        if (providerOn) Object.assign(opts, {
+          caps: { ...(opts.caps ?? {}), provider: true },
+        });
       }
       const result = await jsOffscreenClient.execHeadless(args.code, opts);
+      addActorDeliveryIds(result.actorDeliveryIds);
+      addActorDeliveryIds(mirroredOps().map((op) => op?.actorDeliveryId));
+      const importPolicyMessage = moduleImportPolicyMessage(result.errorCode);
+      if (importPolicyMessage) {
+        return {
+          ok: false,
+          error: `${result.errorCode}: ${importPolicyMessage}`,
+          ...custody(),
+        };
+      }
       // Value spill (run cache): when the serialized [VALUE] overflows its cap,
       // store the FULL text keyed by this run/tool-use, stamped with the owning
       // session and the run's FENCE state — read_run_cache re-applies exactly
@@ -240,20 +300,42 @@ export const scriptTool = {
       if (oncePerSession(sid, 'js-pitfalls')) {
         content += `\n\n${JS_PITFALLS_NOTE}\n\n${SCRIPT_BUILTINS_NOTE}`;
       }
-      return { ok: true, content };
+      return { ok: true, content, ...custody() };
     } catch (e) {
       const err = /** @type {{ name?: string, message?: string }} */ (e);
       // The offscreen heap died mid-run (doc evicted / channel death) — the
       // worker-held trace died with it, but the SW-side mirror survived:
       // report which delegations were already dispatched so the orchestrator
       // doesn't blind-re-send goals actors may have already acted on.
-      const mirrored = runId && c.scriptRuns && 'opsFor' in c.scriptRuns
-        ? /** @type {{ opsFor: (id: string) => Array<any> }} */ (/** @type {unknown} */ (c.scriptRuns)).opsFor(runId)
-        : [];
+      const mirrored = mirroredOps();
+      addActorDeliveryIds(mirrored.map((op) => op?.actorDeliveryId));
       const dispatched = mirrored.length
         ? `\n[DELEGATIONS dispatched before the failure]\n${renderTraceLines(mirrored).join('\n')}`
         : '';
-      return { ok: false, error: `script_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}${dispatched}` };
+      if (actorsOn) {
+        // The thrown bridge error can repeat a runtime-derived target or actor
+        // reply. Keep only a host-authored failure class and the redacted trace
+        // outside the fence; all thrown text and dynamic trace details stay in it.
+        const errorName = String(err?.name ?? 'Error').slice(0, 80);
+        const errorMessage = String(err?.message ?? e).slice(0, ACTORS_TRACE_ERROR_MAX_CHARS);
+        const unsafeDetails = [
+          '[TRANSPORT ERROR]', `${errorName}: ${errorMessage}`,
+          ...traceGoalLines(mirrored), ...traceErrorDetails(mirrored),
+        ];
+        const fenced = wrapUntrusted({
+          origin: 'script (actor replies)', tool: 'script', body: unsafeDetails.join('\n'),
+        });
+        return {
+          ok: false,
+          error: `script_failed: actor orchestration transport failed${dispatched}\n${fenced}`,
+          ...custody(),
+        };
+      }
+      return {
+        ok: false,
+        error: `script_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}`,
+        ...custody(),
+      };
     } finally {
       // Release ABORTS first (script-runs.js): any ask still pending SW-side
       // is an orphan whose actor turn dies with the run — the non-Stop exits
@@ -273,11 +355,12 @@ export const scriptTool = {
  * files an earlier run may have filled with fetched bytes, so nothing read
  * (or imported) from it is reliably agent-authored. UNCONDITIONAL for
  * workspace runs by design: fencing only on observed OPFS reads would make
- * the security property depend on classifying every relay op forever
- * (a `peerd.self.import` of a workspace module is also a read, and executes).
+ * the security property depend on classifying every relay op forever.
  * @param {RunResult} r
  */
-export const runIsFenced = (r) => !!(r.usedEgress || r.usedActors || r.usedWorkspace);
+export const runIsFenced = (r) => !!(
+  r.usedEgress || r.usedRemoteModules || r.usedActors || r.usedPage || r.usedWorkspace
+);
 
 /**
  * The fence origin label for a run — names every untrusted source the run
@@ -287,7 +370,9 @@ export const runIsFenced = (r) => !!(r.usedEgress || r.usedActors || r.usedWorks
 export const runOriginLabel = (r) => {
   const parts = [
     ...(r.usedEgress ? ['fetched web content'] : []),
+    ...(r.usedRemoteModules ? ['remote modules'] : []),
     ...(r.usedActors ? ['actor replies'] : []),
+    ...(r.usedPage ? ['page content'] : []),
     ...(r.usedWorkspace ? ['workspace files'] : []),
   ];
   return parts.length ? `script (${parts.join(' + ')})` : 'script';
@@ -314,13 +399,19 @@ export const formatRunResult = (code, r, valueSpill, serializedValue) => {
   lines.push(`> ${oneLineCode.replace(/\n/g, '\n  ')} (headless)`);
   lines.push(`[${r.durationMs}ms]`);
   // The DELEGATIONS trace — fence-SAFE by construction (host-recorded method/
-  // target/outcome/timing + the model's own goal previews; never actor bytes).
+  // fixed target label/outcome/timing; never actor bytes). Dynamic targets and
+  // the model's own goal previews ride in the fenced details below.
   // It sits OUTSIDE the fence on purpose: this is the chain-of-events the
   // orchestrator debugs from even when the script failed mid-fan.
   const trace = Array.isArray(r.actorsTrace) ? r.actorsTrace : [];
   if (trace.length) {
     lines.push('[DELEGATIONS]');
     lines.push(...renderTraceLines(trace));
+  }
+  const codeTrace = Array.isArray(r.codeTrace) ? r.codeTrace : [];
+  if (codeTrace.length) {
+    lines.push('[CODE OPS]');
+    lines.push(...renderCodeOpTrace(codeTrace));
   }
   // The sub-model meter (design 5) — fence-safe by construction (host-counted
   // numbers, never realm bytes) and unconditional whenever the lane was used:
@@ -361,6 +452,9 @@ export const formatRunResult = (code, r, valueSpill, serializedValue) => {
   // never be able to forge or suppress them; caller-computed values only).
   if (r.workspaceOverBudget) {
     lines.push('[WORKSPACE OVER BUDGET — writes were refused this run; delete files (await peerd.self.deleteFile(path) in a workspace run) to get back under the budget]');
+  }
+  if (r.usedRemoteModules) {
+    lines.push(`[${REMOTE_MODULE_RESTRICTED_CODE}] ${REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE}`);
   }
   if (valueSpill) {
     lines.push([

@@ -3,6 +3,28 @@
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/index.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 
+const POD_EXEC_PREVIEW_CHARS = 8_000;
+
+/** @param {any} job @param {string} podId */
+export const pagePodExecJob = (job, podId) => {
+  const result = { ...job };
+  for (const stream of ['stdout', 'stderr']) {
+    const text = typeof job?.[stream] === 'string' ? job[stream] : '';
+    const end = Math.min(text.length, POD_EXEC_PREVIEW_CHARS);
+    result[stream] = text.slice(0, end);
+    if (end < text.length || job?.[`${stream}Truncated`] === true) {
+      result[`${stream}Page`] = {
+        offset: 0, end, retainedChars: text.length, remainingChars: text.length - end,
+        ...(job?.[`${stream}Truncated`] === true
+          ? { sourceTruncated: true, note: 'The job exceeded retained output; bytes beyond retainedChars are unavailable.' }
+          : {}),
+        ...(end < text.length ? { next: { tool: 'pod_status', args: { podId, jobId: job.id, stream, offset: end, limit: POD_EXEC_PREVIEW_CHARS } } } : {}),
+      };
+    }
+  }
+  return result;
+};
+
 /** @type {import('/shared/tool-types.js').Tool} */
 export const podExecTool = {
   name: 'pod_exec',
@@ -12,6 +34,8 @@ export const podExecTool = {
     'Web-standard JS (`js`, Chromium), WASI tools, browser Git, and audited HTTPS curl.',
     'This is not Linux: no Node/npm/native binaries/sockets/PTY. `background:true`',
     'returns a running job; inspect with pod_status and stop with pod_cancel.',
+    'Foreground results preview 8000 characters per stream; follow the returned',
+    'pod_status args to page retained output. grep uses JS regex; pass -F for literals.',
     'Timeout default 30s, maximum 300s. Ambiguous interrupted commands are never replayed.',
   ].join(' '),
   schema: {
@@ -76,7 +100,7 @@ export const podExecTool = {
         content: wrapUntrusted({
           origin: `pod:${podId}/job:${job.id ?? 'unknown'}`,
           tool: 'pod_exec',
-          body: JSON.stringify(job, null, 2),
+          body: JSON.stringify(pagePodExecJob(job, podId), null, 2),
         }),
       };
     } catch (error) { return { ok: false, error: `pod_exec_failed: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}` }; }

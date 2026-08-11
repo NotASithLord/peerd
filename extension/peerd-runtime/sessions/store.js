@@ -63,9 +63,40 @@ const MSGS = 'session_messages';
  *   test fakes still work). why any-valued: records are untyped IDB blobs.
  * @param {() => number} [deps.now]              injectable clock
  * @param {() => string} [deps.makeId]           injectable id generator
+ * @param {(sessionId: string, message: InternalMessage) => Promise<void>|void} [deps.onMessageAppended]
+ *   post-commit hook. Runs only after the message row and session index are
+ *   durable. A hook failure cannot roll back or fail an already-committed append.
  */
-export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
+export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppended = async () => {} }) => {
   const generateId = makeId ?? (() => uuidv7(now));
+
+  // Session metadata uses read-modify-write updates. Serialize every operation
+  // that can write that record, including a legacy read that migrates it. A
+  // message append and a cost/model/archive update must not both read the same
+  // metadata snapshot and let the later put erase the other's msgIndex or field.
+  /** @type {Map<string, Promise<unknown>>} */
+  const sessionChains = new Map();
+  /**
+   * @template T
+   * @param {string} sessionId
+   * @param {() => Promise<T>} operation
+   * @returns {Promise<T>}
+   */
+  const enqueueSessionOperation = (sessionId, operation) => {
+    const previous = sessionChains.get(sessionId) ?? Promise.resolve();
+    const current = previous.catch(() => {}).then(operation);
+    sessionChains.set(sessionId, current);
+    void current.finally(() => {
+      if (sessionChains.get(sessionId) === current) sessionChains.delete(sessionId);
+    }).catch(() => {});
+    return current;
+  };
+
+  /** @param {string} sessionId @param {InternalMessage} message */
+  const notifyMessageAppended = async (sessionId, message) => {
+    try { await onMessageAppended(sessionId, message); }
+    catch { /* the append is already durable; recovery can retry the receipt */ }
+  };
 
   // ---- message-record helpers -------------------------------------------
 
@@ -100,9 +131,34 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
   // Strip the v2 internals (msgIndex / messagesV2) and attach the assembled
   // `messages` array, so callers see the classic Session shape.
   const present = (/** @type {any} */ record, /** @type {any[]} */ messages) => {
-    const { msgIndex: _i, messagesV2: _v, messages: _m, ...rest } = record;
+    const {
+      msgIndex: _i,
+      messagesV2: _v,
+      messages: _m,
+      latestNonSyntheticUserMessageId: _latest,
+      ...rest
+    } = record;
     return withKindDefaults({ ...rest, messages });
   };
+
+  // Metadata-only readers must never accidentally expose conversation bodies
+  // in their caller-facing result. This shape is also safe for legacy v1 records:
+  // their inline `messages` array is dropped without triggering migration.
+  const presentMetadata = (/** @type {any} */ record) => {
+    const {
+      msgIndex: _i,
+      messagesV2: _v,
+      messages: _m,
+      latestNonSyntheticUserMessageId: _latest,
+      ...rest
+    } = record;
+    return withKindDefaults(rest);
+  };
+
+  /** @param {any} message */
+  const isRealUserMessage = (message) => message?.role === 'user'
+    && message.synthetic !== true
+    && typeof message.content === 'string' && message.content.trim().length > 0;
 
   // Externalize a pre-v2 record's inline messages into the message store and
   // rewrite it in v2 shape. Idempotent; a no-op once `messagesV2` is set.
@@ -191,6 +247,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
       // v2: messages live in the message store; the record carries order.
       msgIndex: [],
       messagesV2: true,
+      latestNonSyntheticUserMessageId: null,
       kind,
       depth,
       ...(permissionMode !== undefined ? { permissionMode } : {}),
@@ -221,7 +278,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
       // #160: the review-exemption marker. MUST be persisted: the offscreen
       // tool-dispatch route rebuilds a review child's ctx from the RECORD alone
       // and re-stamps exposure:'review' from this field — dropping it here (like
-      // backing above) silently makes the reviewer's three instance reads
+      // backing above) silently makes the reviewer's four instance reads
       // refused on the offscreen path. SW-only: spawn.js sets it from the trusted
       // review orchestrator, never a worker/model arg. Persist only when true so
       // every other child stays absent (fail-closed).
@@ -239,7 +296,10 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
   };
 
   /** @returns {Promise<Session | undefined>} */
-  const get = async (/** @type {string} */ sessionId) => assemble(await getRecord(sessionId));
+  const get = (/** @type {string} */ sessionId) => enqueueSessionOperation(
+    sessionId,
+    async () => assemble(await getRecord(sessionId)),
+  );
 
   /**
    * @returns {Promise<Session[]>}
@@ -277,13 +337,54 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     return out.sort((a, b) => b.createdAt - a.createdAt);
   };
 
-  const archive = async (/** @type {string} */ sessionId) => {
+  /**
+   * List session records without reading the per-message store or assembling
+   * message bodies. Unlike `list()`, this touches only the session-record
+   * store, making it suitable for chat lists and other coarse discovery.
+   * Read-only over legacy and v2 shapes; never migrates.
+   * @returns {Promise<Array<Omit<Session, 'messages'>>>}
+   */
+  const listMetadata = async () => {
+    const records = await idb.getAll(STORE);
+    return records
+      .map(presentMetadata)
+      .sort((a, b) => b.createdAt - a.createdAt);
+  };
+
+  /**
+   * Targeted metadata lookup for lifecycle monitors that already know the
+   * session id. It never migrates a legacy record or touches message rows.
+   * @param {string} sessionId
+   * @returns {Promise<Omit<Session, 'messages'> | undefined>}
+   */
+  const getMetadata = async (sessionId) => {
+    const record = await idb.get(STORE, sessionId);
+    return record ? presentMetadata(record) : undefined;
+  };
+
+  /**
+   * Resolve the one metadata-pinned real user request needed by the actor
+   * monitor. New records maintain the pointer on append, making every refresh
+   * constant-time without transcript assembly or compatibility scans.
+   * @param {string} sessionId
+   * @returns {Promise<InternalMessage | undefined>}
+   */
+  const getLatestNonSyntheticUserMessage = async (sessionId) => {
+    const record = await idb.get(STORE, sessionId);
+    if (!record) return undefined;
+    const messageId = record.latestNonSyntheticUserMessageId;
+    if (typeof messageId !== 'string' || !messageId) return undefined;
+    const message = (await idb.get(MSGS, messageId))?.message;
+    return isRealUserMessage(message) ? message : undefined;
+  };
+
+  const archive = (/** @type {string} */ sessionId) => enqueueSessionOperation(sessionId, async () => {
     const record = await getRecord(sessionId);
     if (!record) throw new SessionNotFoundError(sessionId);
     const updated = { ...record, archivedAt: now() };
     await idb.put(STORE, updated);
     return assemble(updated);
-  };
+  });
 
   /**
    * Metadata-only lookup of a live actor session by its self-description — used to
@@ -316,20 +417,34 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    * @param {string} sessionId
    * @param {InternalMessage} message
    */
-  const appendMessage = async (sessionId, message) => {
+  const appendMessage = (sessionId, message) => enqueueSessionOperation(sessionId, async () => {
     const record = await getRecord(sessionId);
     if (!record) throw new SessionNotFoundError(sessionId);
     const seq = record.msgIndex.length;
     const id = messageKey(sessionId, message, seq);
+    // why idempotent by message id: crash recovery writes stable-id receipts.
+    // If the message and index both landed before a background loss, the retry
+    // must return the existing session instead of appending the same receipt a
+    // second time. The message row is written before the index below, so an id in
+    // msgIndex also proves its body was already stored.
+    if (record.msgIndex.includes(id)) {
+      await notifyMessageAppended(sessionId, message);
+      return assemble(record);
+    }
     await idb.put(MSGS, { id, sessionId, seq, message });
-    const updated = { ...record, msgIndex: [...record.msgIndex, id] };
+    const updated = {
+      ...record,
+      msgIndex: [...record.msgIndex, id],
+      ...(isRealUserMessage(message) ? { latestNonSyntheticUserMessageId: id } : {}),
+    };
     if (!record.title && message.role === 'user' && typeof message.content === 'string') {
       const cleaned = message.content.replace(/\s+/g, ' ').trim();
       if (cleaned) updated.title = cleaned.slice(0, 60);
     }
     await idb.put(STORE, updated);
+    await notifyMessageAppended(sessionId, message);
     return assemble(updated);
-  };
+  });
 
   /**
    * Patch the streaming assistant message in place (matched by id). This is
@@ -363,13 +478,13 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    * @param {string} sessionId
    * @param {Record<string, unknown>} patch
    */
-  const update = async (sessionId, patch) => {
+  const update = (sessionId, patch) => enqueueSessionOperation(sessionId, async () => {
     const record = await getRecord(sessionId);
     if (!record) throw new SessionNotFoundError(sessionId);
     const updated = { ...record, ...patch };
     await idb.put(STORE, updated);
     return assemble(updated);
-  };
+  });
 
   /**
    * Set or CLEAR the session's user-authored system-prompt augmentation
@@ -380,7 +495,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    * @param {string} sessionId
    * @param {string | null | undefined} text
    */
-  const setCustomSystemPrompt = async (sessionId, text) => {
+  const setCustomSystemPrompt = (sessionId, text) => enqueueSessionOperation(sessionId, async () => {
     const record = await getRecord(sessionId);
     if (!record) throw new SessionNotFoundError(sessionId);
     const { customSystemPrompt: _removed, ...rest } = record;
@@ -389,7 +504,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
       : rest;
     await idb.put(STORE, updated);
     return assemble(updated);
-  };
+  });
 
   /**
    * Set or CLEAR the session's tool exposure manifest (the /tools command).
@@ -397,7 +512,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    * @param {string} sessionId
    * @param {import('../tools/manifests.js').ToolManifest | null | undefined} manifest
    */
-  const setToolManifest = async (sessionId, manifest) => {
+  const setToolManifest = (sessionId, manifest) => enqueueSessionOperation(sessionId, async () => {
     const record = await getRecord(sessionId);
     if (!record) throw new SessionNotFoundError(sessionId);
     const { toolManifest: _removed, ...rest } = record;
@@ -405,7 +520,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     const updated = normalized ? { ...rest, toolManifest: normalized } : rest;
     await idb.put(STORE, updated);
     return assemble(updated);
-  };
+  });
 
   /**
    * Persist the session's accumulated cost/usage tally (feature 06).
@@ -415,13 +530,13 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    * @param {string} sessionId
    * @param {import('../cost/accumulator.js').CostTally} cost
    */
-  const setCost = async (sessionId, cost) => {
+  const setCost = (sessionId, cost) => enqueueSessionOperation(sessionId, async () => {
     const record = await getRecord(sessionId);
     if (!record) throw new SessionNotFoundError(sessionId);
     const updated = { ...record, cost };
     await idb.put(STORE, updated);
     return assemble(updated);
-  };
+  });
 
   /**
    * Set or CLEAR the session's prewalk state (loop/prewalk.js). null removes
@@ -434,7 +549,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    * @param {import('../loop/prewalk.js').PrewalkState | null} state
    * @param {{ provider?: string, model?: string }} [modelPatch]
    */
-  const setPrewalk = async (sessionId, state, modelPatch) => {
+  const setPrewalk = (sessionId, state, modelPatch) => enqueueSessionOperation(sessionId, async () => {
     const record = await getRecord(sessionId);
     if (!record) throw new SessionNotFoundError(sessionId);
     const { prewalk: _removed, ...rest } = record;
@@ -445,7 +560,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     };
     await idb.put(STORE, updated);
     return assemble(updated);
-  };
+  });
 
   /**
    * Persist the session's rolling trim-summary state.
@@ -453,18 +568,21 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    * @param {string} sessionId
    * @param {import('../loop/rolling-summary.js').TrimSummaryState} state
    */
-  const setTrimSummary = async (sessionId, state) => {
+  const setTrimSummary = (sessionId, state) => enqueueSessionOperation(sessionId, async () => {
     const record = await getRecord(sessionId);
     if (!record) throw new SessionNotFoundError(sessionId);
     const updated = { ...record, trimSummary: state };
     await idb.put(STORE, updated);
     return assemble(updated);
-  };
+  });
 
   return Object.freeze({
     create,
     get,
     list,
+    listMetadata,
+    getMetadata,
+    getLatestNonSyntheticUserMessage,
     findActorSession,
     archive,
     appendMessage,

@@ -193,14 +193,6 @@ export const podGitRemoteIntents = (source) => {
   return intents;
 };
 
-/**
- * Backwards-compatible single-intent view for callers that only need to know
- * whether any remote Git operation exists. Authorization callers must use the
- * plural form so a compound command cannot launder a later operation.
- * @param {string} source
- */
-export const podGitRemoteIntent = (source) => podGitRemoteIntents(source)[0] ?? null;
-
 /** @param {unknown} argv @returns {'clone'|'fetch'|'push'|'link'|null} */
 export const podGitRemoteOperation = (argv) => {
   if (!Array.isArray(argv)) return null;
@@ -224,6 +216,24 @@ export const expandPodWord = (token, env, lastExit = 0) => {
   if (value === '~') value = env.HOME ?? '/';
   else if (value.startsWith('~/')) value = `${env.HOME ?? '/'}${value.slice(1)}`;
   return value;
+};
+
+/**
+ * Match grep input with an explicit contract: JavaScript regular expression
+ * by default, literal substring only when fixed is requested. Invalid regular
+ * expressions fail loudly instead of silently changing semantics.
+ * @param {string} text
+ * @param {string} pattern
+ * @param {{fixed?:boolean}} [options]
+ */
+export const matchPodGrep = (text, pattern, { fixed = false } = {}) => {
+  if (fixed) return text.split('\n').filter((value) => value.includes(pattern));
+  let expression;
+  try { expression = new RegExp(pattern); }
+  catch (error) {
+    throw new PodShellSyntaxError(`grep: invalid regular expression: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}`);
+  }
+  return text.split('\n').filter((value) => expression.test(value));
 };
 
 /** @param {unknown} result @returns {CommandResult} */
@@ -250,6 +260,7 @@ const normalizeResult = (result) => {
  * @param {Record<string,string>} [ctx.env]
  * @param {number} [ctx.lastExit]
  * @param {number} [ctx.maxOutputChars]
+ * @param {number} [ctx.maxPipelineChars]
  * @param {(input:{ argv:string[], stdin:string, cwd:string, env:Record<string,string> })=>Promise<CommandResult>|CommandResult} ctx.runCommand
  * @param {(path:string,cwd:string)=>Promise<string>} ctx.readText
  * @param {(path:string,content:string,opts:{append:boolean,cwd:string})=>Promise<unknown>} ctx.writeText
@@ -264,6 +275,7 @@ export const executePodShell = async (input, ctx) => {
   let stdout = '';
   let stderr = '';
   const outputCap = Number.isFinite(ctx.maxOutputChars) ? Math.max(0, Number(ctx.maxOutputChars)) : Infinity;
+  const pipelineCap = Number.isFinite(ctx.maxPipelineChars) ? Math.max(0, Number(ctx.maxPipelineChars)) : Infinity;
   let stdoutTruncated = false;
   let stderrTruncated = false;
   /** @param {string} current @param {string} value @param {'stdout'|'stderr'} stream */
@@ -281,7 +293,7 @@ export const executePodShell = async (input, ctx) => {
     if (pipeline.connector === 'or' && lastExit === 0) continue;
     let pipeInput = '';
     let pipelineStderr = '';
-    for (const command of pipeline.commands) {
+    for (const [commandIndex, command] of pipeline.commands.entries()) {
       const argv = command.words.map((word) => expandPodWord(word, env, lastExit));
       const redirections = command.redirections;
       let commandInput = pipeInput;
@@ -309,8 +321,18 @@ export const executePodShell = async (input, ctx) => {
           append: redirections.stderrAppend === true, cwd,
         });
       } else pipelineStderr = appendBounded(pipelineStderr, result.stderr, 'stderr');
-      pipeInput = result.stdout.slice(0, outputCap);
-      if (result.stdout.length > outputCap) stdoutTruncated = true;
+      const feedsNextStage = commandIndex < pipeline.commands.length - 1 && !redirections.stdout;
+      if (feedsNextStage && result.stdout.length > pipelineCap) {
+        pipelineStderr = appendBounded(
+          pipelineStderr,
+          `pod: pipeline stage exceeded ${pipelineCap} characters; redirect to a file or reduce it before piping\n`,
+          'stderr',
+        );
+        pipeInput = '';
+        lastExit = 1;
+        break;
+      }
+      pipeInput = result.stdout;
       if (redirections.stdout) {
         await ctx.writeText(expandPodWord(redirections.stdout, env, lastExit), result.stdout, {
           append: redirections.stdoutAppend === true, cwd,

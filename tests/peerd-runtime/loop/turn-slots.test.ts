@@ -29,6 +29,15 @@ describe('makeTurnSlots', () => {
     expect(slots.isBusy('b')).toBe(true);
   });
 
+  test('enumerates only live slot ids for targeted observability', () => {
+    const slots = makeTurnSlots();
+    const a = slots.claim('a');
+    slots.claim('b');
+    expect(slots.busySessionIds()).toEqual(['a', 'b']);
+    a.release();
+    expect(slots.busySessionIds()).toEqual(['b']);
+  });
+
   test('claiming the SAME session aborts the prior turn (steer-live)', () => {
     const slots = makeTurnSlots();
     const first = slots.claim('a');
@@ -71,6 +80,38 @@ describe('makeTurnSlots', () => {
     expect(a.controller.signal.aborted).toBe(true);
     expect(b.controller.signal.aborted).toBe(false);
     expect(slots.stop('missing')).toBe(false);
+  });
+
+  test('only explicit Stop advances the per-session generation', () => {
+    const slots = makeTurnSlots();
+    expect(slots.generation('a')).toBe(0);
+    slots.claim('a');
+    slots.claim('a'); // steer-live is not an explicit Stop
+    expect(slots.generation('a')).toBe(0);
+    expect(slots.stop('a')).toBe(true);
+    expect(slots.generation('a')).toBe(1);
+    expect(slots.stop('a')).toBe(true);
+    expect(slots.generation('a')).toBe(2);
+    expect(slots.generation('b')).toBe(0);
+  });
+
+  test('a queued claimed wake can reject a stale pre-Stop generation', () => {
+    const slots = makeTurnSlots();
+    const live = slots.claim('a');
+    const generationAtQueue = slots.generation('a');
+    let started = false;
+    slots.runWhenIdleClaimed('a', (lease) => {
+      if (slots.generation('a') !== generationAtQueue) {
+        lease.release();
+        return;
+      }
+      started = true;
+    });
+
+    expect(slots.stop('a')).toBe(true);
+    live.release();
+    expect(started).toBe(false);
+    expect(slots.isBusy('a')).toBe(false);
   });
 
   // runWhenIdle — the async-actor reintegration hook (DESIGN-11): wake

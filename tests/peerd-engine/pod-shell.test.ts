@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
   executePodShell,
+  matchPodGrep,
   parsePodShell,
-  podGitRemoteIntent,
   podGitRemoteIntents,
   podGitRemoteOperation,
   PodShellSyntaxError,
@@ -102,19 +102,50 @@ describe('Pod shell execution', () => {
     expect(result.stdoutTruncated).toBe(true);
     expect(result.stderrTruncated).toBe(true);
   });
+
+  test('does not use the display cap as the input cap for downstream stages', async () => {
+    const h = harness();
+    h.ctx.runCommand = async ({ argv, stdin }) => argv[0] === 'produce'
+      ? { stdout: 'abcdefghij', stderr: '', exitCode: 0 }
+      : { stdout: `${stdin.length}\n`, stderr: '', exitCode: 0 };
+    const result = await executePodShell('produce | count', { ...h.ctx, maxOutputChars: 4 });
+    expect(result.stdout).toBe('10\n');
+    expect(result.stdoutTruncated).toBe(false);
+  });
+
+  test('fails a pipeline stage explicitly at its independent safety cap', async () => {
+    const h = harness();
+    let calls = 0;
+    h.ctx.runCommand = async () => { calls += 1; return { stdout: 'abcdefghij', stderr: '', exitCode: 0 }; };
+    const result = await executePodShell('produce | count', { ...h.ctx, maxOutputChars: 200, maxPipelineChars: 5 });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('pipeline stage exceeded 5 characters');
+    expect(calls).toBe(1);
+  });
+});
+
+describe('Pod grep matching', () => {
+  test('uses regex by default, literal matching only with the fixed flag', () => {
+    expect(matchPodGrep('alpha\na.b\nacb', 'a.b')).toEqual(['a.b', 'acb']);
+    expect(matchPodGrep('alpha\na.b\nacb', 'a.b', { fixed: true })).toEqual(['a.b']);
+  });
+
+  test('invalid regular expressions fail instead of silently becoming literals', () => {
+    expect(() => matchPodGrep('value [', '[')).toThrow('invalid regular expression');
+  });
 });
 
 describe('remote Git authority detection', () => {
   test('recognizes only executable literal remote Git commands', () => {
-    expect(podGitRemoteIntent('git clone https://github.com/peerd/example.git')).toEqual({ op: 'clone', url: 'https://github.com/peerd/example.git' });
-    expect(podGitRemoteIntent('echo ready && git push origin main')).toEqual({ op: 'push', url: null });
-    expect(podGitRemoteIntent('git remote set-url origin https://gitlab.com/a/b.git')).toEqual({ op: 'link', url: 'https://gitlab.com/a/b.git' });
-    expect(podGitRemoteIntent('echo "git push"')).toBeNull();
+    expect(podGitRemoteIntents('git clone https://github.com/peerd/example.git')).toEqual([{ op: 'clone', url: 'https://github.com/peerd/example.git' }]);
+    expect(podGitRemoteIntents('echo ready && git push origin main')).toEqual([{ op: 'push', url: null }]);
+    expect(podGitRemoteIntents('git remote set-url origin https://gitlab.com/a/b.git')).toEqual([{ op: 'link', url: 'https://gitlab.com/a/b.git' }]);
+    expect(podGitRemoteIntents('echo "git push"')).toEqual([]);
   });
 
   test('variable-expanded commands never mint remote authority', () => {
-    expect(podGitRemoteIntent('$COMMAND push origin main')).toBeNull();
-    expect(podGitRemoteIntent('git $OP origin main')).toBeNull();
+    expect(podGitRemoteIntents('$COMMAND push origin main')).toEqual([]);
+    expect(podGitRemoteIntents('git $OP origin main')).toEqual([]);
   });
 
   test('enumerates every remote operation in a compound command', () => {

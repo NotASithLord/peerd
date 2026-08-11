@@ -43,7 +43,7 @@ describe('script — the caps.provider mint (design 5)', () => {
   test('code referencing peerd.provider mints the cap, an owner-bound runId, and the delegation wall-clock', async () => {
     const { result, opts, scriptRuns } = await run('const r = await peerd.provider.call({ prompt: "x" }); return r.text;');
     expect(result.ok).toBe(true);
-    expect(opts?.caps).toEqual({ provider: true });
+    expect(opts?.caps).toEqual({ subagent: false, provider: true });
     expect(opts?.ownerSessionId).toBe('s1');
     expect(opts?.runId).toBe('run-s1');
     expect(opts?.timeoutMs).toBe(ACTORS_JOB_DEFAULT_TIMEOUT_MS);
@@ -55,12 +55,14 @@ describe('script — the caps.provider mint (design 5)', () => {
     expect(opts?.actors).toBeUndefined();
   });
 
-  test('a pure-compute run mints NOTHING and keeps the short compute wall-clock', async () => {
+  test('a pure-compute run is Stop-bound but mints no actor/provider capability', async () => {
     const { opts, scriptRuns } = await run('return 6 * 7;');
-    expect(opts?.caps).toBeUndefined();
-    expect(opts?.runId).toBeUndefined();
+    expect(opts?.caps).toEqual({ subagent: false });
+    expect(opts?.runId).toBe('run-s1');
     expect(opts?.timeoutMs).toBe(30_000);
-    expect(scriptRuns.calls.length).toBe(0);
+    const reg = scriptRuns.calls.find((c) => c.fn === 'register');
+    expect(reg?.args[3]).toEqual({ actors: false, egress: true, provider: false });
+    expect(scriptRuns.calls.some((c) => c.fn === 'release')).toBe(true);
   });
 
   test('an actor/spawned session cannot mint the cap (the SW route refuses it anyway)', async () => {
@@ -69,8 +71,8 @@ describe('script — the caps.provider mint (design 5)', () => {
         'return peerd.provider;',
         { session: { sessionId: 's1', kind } },
       );
-      expect(opts?.caps).toBeUndefined();
-      expect(opts?.runId).toBeUndefined();
+      expect(opts?.caps).toEqual({ subagent: false });
+      expect(opts?.runId).toBe('run-s1');
     }
   });
 });
@@ -79,9 +81,56 @@ describe('script — the actors mint is refused on an inbound (untrusted) turn (
   const actorsCtx = () => ({ messageActor: () => {} });
 
   test('baseline: a chat turn referencing `actors` mints the delegation surface', async () => {
-    const { opts } = await run('await actors.send({ to: "web", goal: "x" });', actorsCtx());
+    const { opts } = await run('await actors.ask("web", "x");', actorsCtx());
     expect(opts?.actors).toBe(true);
     expect(opts?.ownerSessionId).toBe('s1');
+  });
+
+  test('a trusted spawned actor gets code parity when message_actor survived narrowing', async () => {
+    const { opts, scriptRuns } = await run('return (await actors.ask("vm-1", "run tests")).reply;', {
+      ...actorsCtx(),
+      session: { sessionId: 'spawn-1', kind: 'spawned' },
+      toolAllow: new Set(['script', 'message_actor']),
+    });
+    expect(opts?.actors).toBe(true);
+    expect(opts?.ownerSessionId).toBe('spawn-1');
+    expect(opts?.runId).toBe('run-spawn-1');
+    expect(opts?.caps).toEqual({ subagent: false });
+    const reg = scriptRuns.calls.find((c) => c.fn === 'register');
+    expect(reg?.args[3]).toEqual({ actors: true, egress: true, provider: false });
+  });
+
+  test('every script disables hidden peerd.runtime.runAgent, even without actors code', async () => {
+    const { opts } = await run('return peerd.runtime.runAgent({ task: "escape" });', {
+      session: { sessionId: 'spawn-1', kind: 'spawned' },
+      toolAllow: new Set(['script']),
+    });
+    expect(opts?.caps).toEqual({ subagent: false });
+    expect(opts?.runId).toBe('run-spawn-1');
+  });
+
+  test('a spawned actor without message_actor cannot recover delegation through script', async () => {
+    const { opts, scriptRuns } = await run('return await actors.list();', {
+      session: { sessionId: 'spawn-1', kind: 'spawned' },
+      toolAllow: new Set(['script']),
+    });
+    expect(opts?.actors).toBeUndefined();
+    const reg = scriptRuns.calls.find((c) => c.fn === 'register');
+    expect(reg?.args[3]).toEqual({ actors: false, egress: true, provider: false });
+  });
+
+  test('a chat manifest that removes message_actor cannot recover it through script', async () => {
+    const { opts } = await run('await actors.ask("web", "x");', {
+      ...actorsCtx(), toolAllow: new Set(['script']),
+    });
+    expect(opts?.actors).toBeUndefined();
+  });
+
+  test('a bound environment actor remains non-delegating even if a malformed ctx carries the closure', async () => {
+    const { opts } = await run('await actors.ask("web", "x");', {
+      ...actorsCtx(), session: { sessionId: 'actor-1', kind: 'actor' },
+    });
+    expect(opts?.actors).toBeUndefined();
   });
 
   test('an INBOUND turn does NOT mint the actors surface — the second door through the inbound wall is closed', async () => {
@@ -89,12 +138,13 @@ describe('script — the actors mint is refused on an inbound (untrusted) turn (
     // script tool must not hand that same delegation reach through a relay that
     // never carried the flag. ctx.inbound is folded SW-side (trusted); the fix
     // fails closed at the mint so no surface is ever advertised.
-    const { opts, scriptRuns } = await run('await actors.send({ to: "site:https://mail.example.com", goal: "x" });', {
+    const { opts, scriptRuns } = await run('await actors.ask("site:https://mail.example.com", "x");', {
       ...actorsCtx(), inbound: true,
     });
     expect(opts?.actors).toBeUndefined();
-    // and with no other cap referenced, the run mints nothing at all
-    expect(scriptRuns.calls.some((c) => c.fn === 'mintRunId')).toBe(false);
+    // It still gets a Stop-bound run, with no delegation authority.
+    const reg = scriptRuns.calls.find((c) => c.fn === 'register');
+    expect(reg?.args[3]).toEqual({ actors: false, egress: true, provider: false });
   });
 });
 

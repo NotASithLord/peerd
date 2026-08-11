@@ -41,12 +41,12 @@ const STYLE = `
   flex-direction: row;
   overflow: hidden;
   --pe-accent: var(--accent, #34d399);
-  --pe-bg: var(--bg, #0d1117);
-  --pe-bg-elev: var(--bg-elev, #161b22);
-  --pe-bg-editor: var(--bg-editor, #11161d);
-  --pe-fg: var(--fg, #e6edf3);
-  --pe-fg-muted: var(--fg-muted, #9ba3ad);
-  --pe-border: var(--border, #30363d);
+  --pe-bg: var(--bg, #101112);
+  --pe-bg-elev: var(--bg-elev, #151617);
+  --pe-bg-editor: var(--bg-editor, #080909);
+  --pe-fg: var(--fg, #F3F3EF);
+  --pe-fg-muted: var(--fg-muted, #ABABA6);
+  --pe-border: var(--border, #25272A);
   --pe-fail: var(--fail, #c43030);
 }
 .pe-tree {
@@ -71,16 +71,22 @@ const STYLE = `
   font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
 }
 .pe-tree-label { font-weight: 500; }
-.pe-new {
+.pe-new, .pe-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
   background: transparent;
   border: 0;
   color: var(--pe-fg-muted);
-  font-size: 14px;
+  font-size: 10px;
   cursor: pointer;
   padding: 0 4px;
   line-height: 1;
 }
-.pe-new:hover { color: var(--pe-accent); }
+.pe-new:hover, .pe-delete:hover:not(:disabled) { color: var(--pe-accent); }
+.pe-delete:disabled { opacity: 0.35; cursor: default; }
 .pe-tree-body {
   flex: 1 1 auto;
   overflow-y: auto;
@@ -99,12 +105,14 @@ const STYLE = `
   white-space: nowrap;
 }
 .pe-node:hover { color: var(--pe-fg); background: color-mix(in srgb, var(--pe-accent) 6%, transparent); }
-.pe-node:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+.pe-node:focus-visible { outline: 1px solid var(--pe-fg-muted); outline-offset: -1px; color: var(--pe-fg); }
 .pe-node.is-active { background: var(--pe-bg-editor); color: var(--pe-fg); }
 .pe-node.is-active::before {
   content: ''; position: absolute; inset: 0 auto 0 0; width: 2px; background: var(--pe-accent);
 }
 .pe-node.is-pinned { font-weight: 500; }
+.pe-node.is-readonly { opacity: 0.78; }
+.pe-node.is-readonly .pe-icon { opacity: 1; }
 .pe-node .pe-indent { display: inline-block; }
 .pe-node .pe-twirl,
 .pe-node .pe-icon {
@@ -162,7 +170,15 @@ const injectStyle = () => {
  * @param {Set<string>} [config.hiddenFiles]    -- paths to omit from the tree
  * @param {() => void} [config.onRun]           -- Cmd-Enter / Ctrl-Enter handler
  * @param {(path: string, content: string) => void} [config.onSaved]
+ * @param {(path: string, error: unknown) => void} [config.onSaveError]
+ * @param {(dirty: boolean, path: string) => void} [config.onDirtyChange]
+ * @param {(path: string, content: string) => Promise<void>} [config.writeFile]
+ * @param {(path: string) => Promise<void>} [config.deleteFile]
+ * @param {() => void | Promise<void>} [config.beforeOpfsMutation]
+ * @param {(action: 'create' | 'delete', path: string, error: unknown) => void} [config.onMutationError]
  * @param {string} [config.initialFile]         -- file to open first (default: pinnedFile)
+ * @param {(path: string) => boolean} [config.isReadOnlyFile]
+ * @param {(path: string) => void} [config.onReadOnlyFile]
  * @param {{read:(path:string)=>Promise<string>,write:(path:string,content:string)=>Promise<void>,delete:(path:string)=>Promise<void>,list:()=>Promise<Array<{path:string,size:number}>>}} [config.fileSystem]
  *
  * Language is auto-picked per file by extension (.html → html,
@@ -176,7 +192,15 @@ export const createEditor = async (config) => {
     hiddenFiles = new Set(),
     onRun,
     onSaved,
+    onSaveError,
+    onDirtyChange,
+    writeFile,
+    deleteFile: deleteFileOverride,
+    beforeOpfsMutation,
+    onMutationError,
     initialFile,
+    isReadOnlyFile = () => false,
+    onReadOnlyFile,
     fileSystem,
   } = config;
 
@@ -188,9 +212,12 @@ export const createEditor = async (config) => {
     <aside class="pe-tree">
       <div class="pe-tree-header">
         <span class="pe-tree-label">files</span>
-        <button class="pe-new" title="New file" aria-label="New file">+</button>
+        <span>
+          <button class="pe-delete" title="Delete focused file" aria-label="Delete focused file" disabled>Delete</button>
+          <button class="pe-new" title="New file" aria-label="New file">New</button>
+        </span>
       </div>
-      <div class="pe-tree-body" role="tree"></div>
+      <div class="pe-tree-body" role="tree" aria-label="Files"></div>
     </aside>
     <div class="pe-editor-column">
       <div class="pe-host"></div>
@@ -200,11 +227,14 @@ export const createEditor = async (config) => {
   // mountEl.innerHTML directly above, so the selectors always resolve.
   const treeBody = /** @type {HTMLElement} */ (mountEl.querySelector('.pe-tree-body'));
   const newBtn = /** @type {HTMLElement} */ (mountEl.querySelector('.pe-new'));
+  const deleteBtn = /** @type {HTMLButtonElement} */ (mountEl.querySelector('.pe-delete'));
   const host = /** @type {HTMLElement} */ (mountEl.querySelector('.pe-host'));
 
   // --- OPFS helpers ---
-  const opfs = fileSystem ?? opfsHelpers(opfsBase);
+  const opfs = fileSystem ?? opfsHelpers(opfsBase, { beforeMutation: beforeOpfsMutation });
   const { read: opfsRead, write: opfsWrite, delete: opfsDelete, list: opfsList } = opfs;
+  const persistFile = writeFile ?? opfsWrite;
+  const removeFile = deleteFileOverride ?? opfsDelete;
 
   // --- CodeMirror ---
   // why the codemirror surface is untyped: the vendored cm.js is a
@@ -213,14 +243,9 @@ export const createEditor = async (config) => {
   // locals; the CM ViewUpdate is described structurally by what we read.
   /** @type {(() => void) | null} */
   let onChangeCb = null;
-  let suppressChange = false;
-  let revision = 0;
-  let lastSavedContent = '';
+  let applyingProgrammaticValue = false;
   const update = EditorView.updateListener.of(/** @param {{ docChanged: boolean }} u */ (u) => {
-    if (u.docChanged && !suppressChange) {
-      revision += 1;
-      if (onChangeCb) onChangeCb();
-    }
+    if (u.docChanged && !applyingProgrammaticValue && onChangeCb) onChangeCb();
   });
 
   // Per-file language: html/css/javascript picked from extension; the
@@ -260,10 +285,10 @@ export const createEditor = async (config) => {
   const getValue = () => view.state.doc.toString();
   /** @param {string} text */
   const setValue = (text) => {
-    suppressChange = true;
+    applyingProgrammaticValue = true;
     try {
       view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
-    } finally { suppressChange = false; }
+    } finally { applyingProgrammaticValue = false; }
   };
 
   // --- State ---
@@ -274,6 +299,40 @@ export const createEditor = async (config) => {
   const collapsedDirs = new Set();
   /** @type {ReturnType<typeof setTimeout> | null} */
   let saveTimer = null;
+  let dirty = false;
+  let editRevision = 0;
+  /** @type {Map<string, number>} */
+  const fileEditRevisions = new Map();
+  let lastSavedContent = '';
+  /** @type {Promise<void> | null} */
+  let activeSave = null;
+  let externalWriteTail = Promise.resolve();
+  let deletingActiveFile = false;
+  let focusedTreeKey = `file:${currentFile}`;
+  let restoreTreeFocus = false;
+  /** @param {string} path */
+  const canonicalFilePath = (path) => {
+    const parts = typeof path === 'string' && !path.includes('\\') && !path.includes('\0')
+      ? path.replace(/^\/+/, '').split('/').filter(Boolean)
+      : [];
+    return parts.length && !parts.some((part) => part === '.' || part === '..')
+      ? parts.join('/')
+      : null;
+  };
+  /** @param {string} path */
+  const fileRevision = (path) => fileEditRevisions.get(canonicalFilePath(path) ?? '') ?? 0;
+  /** @param {string} path */
+  const bumpEditRevision = (path) => {
+    editRevision += 1;
+    const canonical = canonicalFilePath(path);
+    if (canonical) fileEditRevisions.set(canonical, fileRevision(canonical) + 1);
+  };
+  /** @param {boolean} value */
+  const setDirty = (value) => {
+    if (dirty === value) return;
+    dirty = value;
+    onDirtyChange?.(dirty, currentFile);
+  };
 
   // --- Tree rendering ---
   /**
@@ -293,6 +352,15 @@ export const createEditor = async (config) => {
   };
 
   const renderTree = () => {
+    const activeRow = document.activeElement instanceof Element
+      ? document.activeElement.closest('.pe-node')
+      : null;
+    const hadTreeFocus = restoreTreeFocus || treeBody.contains(document.activeElement);
+    restoreTreeFocus = false;
+    if (activeRow instanceof HTMLElement && activeRow.dataset.key) {
+      focusedTreeKey = activeRow.dataset.key;
+    }
+
     /** @type {{ children: Map<string, TreeNode> }} */
     const root = { children: new Map() };
     for (const filePath of fileList) {
@@ -309,88 +377,150 @@ export const createEditor = async (config) => {
               dirPath: parts.slice(0, i + 1).join('/'),
             });
           }
-          // why cast: the branch above guarantees the child exists and is a
-          // directory node (it has `children`); get() can't express that.
           cur = /** @type {{ children: Map<string, TreeNode> }} */ (cur.children.get(part));
         }
       }
     }
+
     treeBody.innerHTML = '';
+    /** @type {HTMLElement[]} */
+    const visibleRows = [];
+    /** @type {Map<string, HTMLElement>} */
+    const rowsByKey = new Map();
+
+    /** @param {HTMLElement} row */
+    const updateDeleteTarget = (row) => {
+      const path = row.dataset.kind === 'file' ? row.dataset.path : '';
+      const canDelete = !!path && path !== pinnedFile;
+      deleteBtn.disabled = !canDelete;
+      const label = canDelete ? `Delete ${path}` : 'Delete focused file';
+      deleteBtn.title = label;
+      deleteBtn.setAttribute('aria-label', label);
+    };
+
+    /** @param {HTMLElement} row */
+    const focusRow = (row) => {
+      for (const item of visibleRows) item.tabIndex = item === row ? 0 : -1;
+      focusedTreeKey = row.dataset.key ?? focusedTreeKey;
+      row.focus({ preventScroll: true });
+      row.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      updateDeleteTarget(row);
+    };
+
+    /** @param {KeyboardEvent} event */
+    const handleTreeKey = (event) => {
+      const row = /** @type {HTMLElement} */ (event.currentTarget);
+      const index = visibleRows.indexOf(row);
+      let target = null;
+      if (event.key === 'ArrowUp') target = visibleRows[index - 1] ?? row;
+      else if (event.key === 'ArrowDown') target = visibleRows[index + 1] ?? row;
+      else if (event.key === 'Home') target = visibleRows[0] ?? row;
+      else if (event.key === 'End') target = visibleRows.at(-1) ?? row;
+      else if (event.key === 'ArrowRight' && row.dataset.kind === 'dir') {
+        if (row.getAttribute('aria-expanded') === 'false') row.click();
+        else {
+          const next = visibleRows[index + 1];
+          if (next && Number(next.getAttribute('aria-level')) > Number(row.getAttribute('aria-level'))) target = next;
+        }
+      } else if (event.key === 'ArrowLeft') {
+        if (row.dataset.kind === 'dir' && row.getAttribute('aria-expanded') === 'true') row.click();
+        else target = rowsByKey.get(row.dataset.parentKey ?? '') ?? row;
+      } else if (event.key === 'Enter' || event.key === ' ') row.click();
+      else if (event.key === 'Delete' && row.dataset.kind === 'file' && row.dataset.path !== pinnedFile) {
+        deleteFile(row.dataset.path ?? '');
+      } else return;
+      event.preventDefault();
+      if (target) focusRow(target);
+    };
+
     /**
      * @param {TreeNode} node
      * @param {number} depth
+     * @param {number} position
+     * @param {number} setSize
+     * @param {string} parentKey
      */
-    const append = (node, depth) => {
-      if (node.children) {
-        // why ?? '': a directory node always carries dirPath at runtime, but
-        // the optional type forces a fallback; has('') is false either way.
-        const isCollapsed = collapsedDirs.has(node.dirPath ?? '');
-        if (node.dirPath !== undefined) {
-          const dirPath = node.dirPath;
-          const row = document.createElement('div');
-          row.className = 'pe-node';
-          row.title = dirPath;
-          row.setAttribute('role', 'treeitem');
-          row.setAttribute('aria-level', String(depth + 1));
-          row.setAttribute('aria-expanded', String(!isCollapsed));
-          row.tabIndex = -1;
-          row.innerHTML =
-            `<span class="pe-indent" style="width:${depth * 10}px"></span>` +
-            `<span class="pe-twirl">${isCollapsed ? '▶' : '▼'}</span>` +
-            `<span class="pe-icon">▸</span>` +
-            `<span class="pe-label"></span>`;
-          const label = row.querySelector('.pe-label');
-          if (label) label.textContent = node.name;
-          row.addEventListener('click', () => {
-            if (isCollapsed) collapsedDirs.delete(dirPath);
-            else collapsedDirs.add(dirPath);
-            renderTree();
-          });
-          treeBody.appendChild(row);
-        }
-        if (!isCollapsed) {
-          const entries = Array.from(node.children.values()).sort(compareTreeNodes);
-          for (const child of entries) append(child, node.dirPath !== undefined ? depth + 1 : depth);
-        }
-        return;
-      }
-      // why ?? '': a leaf node always carries a path at runtime; the
-      // optional type needs a fallback the leaf branch never hits.
-      const nodePath = node.path ?? '';
+    const append = (node, depth, position, setSize, parentKey) => {
+      const isDirectory = !!node.children;
+      const path = isDirectory ? (node.dirPath ?? '') : (node.path ?? '');
+      const key = `${isDirectory ? 'dir' : 'file'}:${path}`;
       const row = document.createElement('div');
       row.className = 'pe-node';
       row.setAttribute('role', 'treeitem');
       row.setAttribute('aria-level', String(depth + 1));
-      row.setAttribute('aria-selected', String(nodePath === currentFile));
-      row.tabIndex = nodePath === currentFile ? 0 : -1;
-      if (nodePath === currentFile) row.classList.add('is-active');
-      if (nodePath === pinnedFile) row.classList.add('is-pinned');
-      row.title = nodePath;
-      row.innerHTML =
-        `<span class="pe-indent" style="width:${depth * 10}px"></span>` +
-        `<span class="pe-twirl"></span>` +
-        `<span class="pe-icon">⋮</span>` +
-        `<span class="pe-label"></span>`;
+      row.setAttribute('aria-posinset', String(position + 1));
+      row.setAttribute('aria-setsize', String(setSize));
+      row.dataset.key = key;
+      row.dataset.kind = isDirectory ? 'dir' : 'file';
+      row.dataset.path = path;
+      row.dataset.parentKey = parentKey;
+      row.tabIndex = -1;
+
+      if (isDirectory) {
+        const isCollapsed = collapsedDirs.has(path);
+        row.title = path;
+        row.setAttribute('aria-expanded', String(!isCollapsed));
+        row.innerHTML =
+          `<span aria-hidden="true" class="pe-indent" style="width:${depth * 10}px"></span>` +
+          `<span aria-hidden="true" class="pe-twirl">${isCollapsed ? '▶' : '▼'}</span>` +
+          '<span aria-hidden="true" class="pe-icon">▸</span>' +
+          '<span class="pe-label"></span>';
+        row.addEventListener('click', () => {
+          focusedTreeKey = key;
+          if (isCollapsed) collapsedDirs.delete(path);
+          else collapsedDirs.add(path);
+          renderTree();
+        });
+      } else {
+        if (path === currentFile) row.classList.add('is-active');
+        if (path === pinnedFile) row.classList.add('is-pinned');
+        row.setAttribute('aria-selected', String(path === currentFile));
+        const readOnly = isReadOnlyFile(path);
+        if (readOnly) row.classList.add('is-readonly');
+        row.title = readOnly ? `${path}, binary asset, read-only` : path;
+        row.setAttribute('aria-label', readOnly ? `${path}, binary asset, read-only` : path);
+        row.innerHTML =
+          `<span aria-hidden="true" class="pe-indent" style="width:${depth * 10}px"></span>` +
+          '<span aria-hidden="true" class="pe-twirl"></span>' +
+          `<span aria-hidden="true" class="pe-icon">${readOnly ? '◆' : '⋮'}</span>` +
+          '<span class="pe-label"></span>';
+        row.addEventListener('click', () => {
+          focusedTreeKey = key;
+          switchToFile(path);
+        });
+      }
       const label = row.querySelector('.pe-label');
       if (label) label.textContent = node.name;
-      if (nodePath !== pinnedFile) {
-        const close = document.createElement('button');
-        close.className = 'pe-close';
-        close.textContent = '×';
-        close.title = `Delete ${nodePath}`;
-        close.setAttribute('aria-label', `Delete ${nodePath}`);
-        close.addEventListener('click', (e) => { e.stopPropagation(); deleteFile(nodePath); });
-        row.appendChild(close);
-      }
-      row.addEventListener('click', () => switchToFile(nodePath));
+      row.addEventListener('focus', () => {
+        focusedTreeKey = key;
+        updateDeleteTarget(row);
+      });
+      row.addEventListener('keydown', handleTreeKey);
       treeBody.appendChild(row);
+      visibleRows.push(row);
+      rowsByKey.set(key, row);
+
+      if (node.children && !collapsedDirs.has(path)) {
+        const children = Array.from(node.children.values()).sort(compareTreeNodes);
+        for (const [index, child] of children.entries()) {
+          append(child, depth + 1, index, children.length, key);
+        }
+      }
     };
+
     const rootEntries = Array.from(root.children.values()).sort(compareTreeNodes);
-    for (const e of rootEntries) append(e, 0);
-    if (!treeBody.querySelector('.pe-node[tabindex="0"]')) {
-      const first = /** @type {HTMLElement|null} */ (treeBody.querySelector('.pe-node'));
-      if (first) first.tabIndex = 0;
+    for (const [index, entry] of rootEntries.entries()) {
+      append(entry, 0, index, rootEntries.length, '');
     }
+    const preferred = rowsByKey.get(focusedTreeKey)
+      ?? rowsByKey.get(`file:${currentFile}`)
+      ?? visibleRows[0];
+    if (preferred) {
+      preferred.tabIndex = 0;
+      focusedTreeKey = preferred.dataset.key ?? focusedTreeKey;
+      updateDeleteTarget(preferred);
+      if (hadTreeFocus) focusRow(preferred);
+    } else deleteBtn.disabled = true;
   };
 
   const refreshTree = async () => {
@@ -413,38 +543,103 @@ export const createEditor = async (config) => {
   // --- Save / switch / create / delete ---
   const flushActiveSave = async () => {
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
-    try {
+    while (dirty && !deletingActiveFile && !isReadOnlyFile(currentFile)) {
+      if (activeSave) {
+        await activeSave;
+        continue;
+      }
+      const path = currentFile;
       const content = getValue();
-      await opfsWrite(currentFile, content);
-      lastSavedContent = content;
-      onSaved?.(currentFile, content);
-    } catch (e) {
-      console.warn('[peerd-editor] flush save failed', e);
-      throw e;
+      const revision = editRevision;
+      const attempt = (async () => {
+        try {
+          await persistFile(path, content);
+          if (currentFile === path) lastSavedContent = content;
+          if (currentFile === path && editRevision === revision && getValue() === content) setDirty(false);
+          onSaved?.(path, content);
+        } catch (error) {
+          console.warn('[peerd-editor] flush save failed', error);
+          // A confirmed delete intentionally discards this buffer. If its
+          // already-running save loses the race, the delete result is the only
+          // status that remains relevant to the user.
+          if (!deletingActiveFile) onSaveError?.(path, error);
+          throw error;
+        }
+      })();
+      activeSave = attempt;
+      try { await attempt; }
+      // why unconditional: no competing flush can replace activeSave while it
+      // is non-null; every concurrent caller waits for this same attempt.
+      finally { activeSave = null; }
     }
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   };
 
   const queueSave = () => {
+    if (isReadOnlyFile(currentFile)) return;
+    setDirty(true);
+    bumpEditRevision(currentFile);
+    if (deletingActiveFile) return;
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(async () => {
-      try {
-        const content = getValue();
-        await opfsWrite(currentFile, content);
-        lastSavedContent = content;
-        onSaved?.(currentFile, content);
-      } catch (e) { console.warn('[peerd-editor] save failed', e); }
+      saveTimer = null;
+      try { await flushActiveSave(); }
+      catch { /* flushActiveSave reports the failure and keeps the buffer dirty. */ }
     }, 400);
+  };
+
+  /**
+   * Apply an external write to the active buffer without racing its autosave.
+   * A dirty buffer wins: persist it, report a conflict, and let the caller
+   * re-read before retrying. Once the buffer is clean, install the external
+   * value synchronously so any later keystrokes are based on that value and
+   * the regular save loop preserves them as a subsequent revision.
+   *
+   * Writes for inactive files are deliberately left to the caller, which owns
+   * the filesystem transaction and can refresh the tree afterward.
+   *
+   * @param {string} path
+   * @param {string} content
+   */
+  const writeExternalActiveFile = (path, content) => {
+    const canonicalPath = canonicalFilePath(path);
+    if (canonicalPath !== currentFile) {
+      return Promise.resolve({ handled: false, conflict: false, path: canonicalPath ?? path });
+    }
+
+    const operation = externalWriteTail.then(async () => {
+      if (canonicalPath !== currentFile) {
+        return { handled: false, conflict: false, path: canonicalPath };
+      }
+      if (dirty) {
+        await flushActiveSave();
+        return { handled: true, conflict: true, path: canonicalPath };
+      }
+      setValue(content);
+      setDirty(true);
+      editRevision += 1;
+      await flushActiveSave();
+      return { handled: true, conflict: false, path: canonicalPath };
+    });
+    externalWriteTail = operation.then(() => undefined, () => undefined);
+    return operation;
   };
 
   /** @param {string} path */
   const switchToFile = async (path) => {
     if (path === currentFile) return;
-    await flushActiveSave();
+    if (isReadOnlyFile(path)) {
+      onReadOnlyFile?.(path);
+      return;
+    }
+    try { await flushActiveSave(); }
+    catch { return; }
     let content = '';
     try { content = await opfsRead(path); } catch {}
     currentFile = path;
     setValue(content);
     lastSavedContent = content;
+    setDirty(false);
     // Reconfigure the language for the new file's extension.
     view.dispatch({ effects: langCompartment.reconfigure(langForPath(path)) });
     renderTree();
@@ -457,10 +652,16 @@ export const createEditor = async (config) => {
     if (!raw) return;
     const name = raw.trim().replace(/^\/+/, '');
     if (!name) return;
+    if (isReadOnlyFile(name)) {
+      onReadOnlyFile?.(name);
+      return;
+    }
     if (fileList.includes(name)) { await switchToFile(name); return; }
-    try { await opfsWrite(name, ''); }
+    bumpEditRevision(name);
+    try { await persistFile(name, ''); }
     catch (e) {
-      alert(`Couldn't create ${name}: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
+      if (onMutationError) onMutationError('create', name, e);
+      else alert(`Couldn't create ${name}: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
       return;
     }
     await refreshTree();
@@ -471,19 +672,52 @@ export const createEditor = async (config) => {
   const deleteFile = async (path) => {
     if (path === pinnedFile) return;
     if (!confirm(`Delete ${path}?\n\nThis removes the file. Imports referencing it will fail until you recreate it.`)) return;
-    try { await opfsDelete(path); }
+    const visible = Array.from(treeBody.querySelectorAll('.pe-node'));
+    const deletedIndex = visible.findIndex((row) => /** @type {HTMLElement} */ (row).dataset.path === path);
+    const fallback = visible[deletedIndex + 1] ?? visible[deletedIndex - 1]
+      ?? treeBody.querySelector(`[data-key="file:${CSS.escape(pinnedFile)}"]`);
+    const shouldRestoreTreeFocus = treeBody.contains(document.activeElement) || document.activeElement === deleteBtn;
+    const deletedActiveFile = currentFile === path;
+    const hadUnsavedChanges = deletedActiveFile && dirty;
+    bumpEditRevision(path);
+    if (deletedActiveFile) {
+      deletingActiveFile = true;
+      setDirty(false);
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+      }
+      try { await activeSave; }
+      catch { /* the confirmed delete still runs after a failed earlier save */ }
+    }
+    try { await removeFile(path); }
     catch (e) {
-      alert(`Delete failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
+      if (deletedActiveFile) {
+        deletingActiveFile = false;
+        if (hadUnsavedChanges || dirty) {
+          setDirty(false);
+          queueSave();
+        }
+      } else if (hadUnsavedChanges) {
+        setDirty(false);
+        queueSave();
+      }
+      restoreTreeFocus = false;
+      if (onMutationError) onMutationError('delete', path, e);
+      else alert(`Delete failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
       return;
     }
-    if (currentFile === path) {
-      saveTimer = null;
+    if (deletedActiveFile) {
       currentFile = pinnedFile;
       let content = '';
       try { content = await opfsRead(pinnedFile); } catch {}
       setValue(content);
       lastSavedContent = content;
+      setDirty(false);
+      deletingActiveFile = false;
     }
+    if (fallback instanceof HTMLElement && fallback.dataset.key) focusedTreeKey = fallback.dataset.key;
+    restoreTreeFocus = shouldRestoreTreeFocus;
     await refreshTree();
   };
 
@@ -498,10 +732,12 @@ export const createEditor = async (config) => {
   const replaceActiveWith = async (content, { backupTo } = {}) => {
     const prev = getValue();
     if (backupTo && prev.trim().length > 0 && prev !== content) {
-      try { await opfsWrite(backupTo, prev); }
+      try { await persistFile(backupTo, prev); }
       catch (e) { console.warn('[peerd-editor] backup-before-replace failed', e); }
     }
     setValue(content);
+    setDirty(true);
+    bumpEditRevision(currentFile);
     await flushActiveSave();
   };
 
@@ -513,23 +749,25 @@ export const createEditor = async (config) => {
    */
   const refreshExternalChanges = async ({ ifRevision } = {}) => {
     await refreshTree();
-    if (typeof ifRevision === 'number' && revision !== ifRevision) {
+    if (typeof ifRevision === 'number' && editRevision !== ifRevision) {
       return { reloaded: false, conflict: true, path: currentFile };
     }
     try {
       const content = await opfsRead(currentFile);
-      if (typeof ifRevision === 'number' && revision !== ifRevision) {
+      if (typeof ifRevision === 'number' && editRevision !== ifRevision) {
         return { reloaded: false, conflict: true, path: currentFile };
       }
       setValue(content);
       lastSavedContent = content;
+      setDirty(false);
       return { reloaded: true, conflict: false, path: currentFile };
     } catch {
       const conflict = getValue() !== lastSavedContent
-        || (typeof ifRevision === 'number' && revision !== ifRevision);
+        || (typeof ifRevision === 'number' && editRevision !== ifRevision);
       if (!conflict) {
         setValue('');
         lastSavedContent = '';
+        setDirty(false);
       }
       return { reloaded: !conflict, conflict, path: currentFile };
     }
@@ -537,27 +775,10 @@ export const createEditor = async (config) => {
 
   // --- Wire UI ---
   newBtn.addEventListener('click', createNewFile);
-  treeBody.addEventListener('keydown', (event) => {
-    if ((/** @type {HTMLElement} */ (event.target)).tagName === 'BUTTON') return;
-    const current = /** @type {HTMLElement|null} */ ((/** @type {Element} */ (event.target)).closest?.('.pe-node'));
-    if (!current) return;
-    const rows = /** @type {HTMLElement[]} */ ([...treeBody.querySelectorAll('.pe-node')]);
-    const index = rows.indexOf(current);
-    let target = null;
-    if (event.key === 'ArrowDown') target = rows[Math.min(rows.length - 1, index + 1)];
-    else if (event.key === 'ArrowUp') target = rows[Math.max(0, index - 1)];
-    else if (event.key === 'Home') target = rows[0];
-    else if (event.key === 'End') target = rows.at(-1) ?? null;
-    else if (event.key === 'Enter' || event.key === ' ') current.click();
-    else if (event.key === 'ArrowRight' && current.getAttribute('aria-expanded') === 'false') current.click();
-    else if (event.key === 'ArrowLeft' && current.getAttribute('aria-expanded') === 'true') current.click();
-    else return;
-    event.preventDefault();
-    if (target) {
-      for (const row of rows) row.tabIndex = -1;
-      target.tabIndex = 0;
-      target.focus();
-    }
+  deleteBtn.addEventListener('click', () => {
+    if (!focusedTreeKey.startsWith('file:')) return;
+    const path = focusedTreeKey.slice('file:'.length);
+    if (path !== pinnedFile) deleteFile(path);
   });
   onChangeCb = queueSave;
 
@@ -567,17 +788,21 @@ export const createEditor = async (config) => {
     const content = await opfsRead(currentFile);
     setValue(content);
     lastSavedContent = content;
+    setDirty(false);
   } catch { /* file doesn't exist yet -- leave editor empty */ }
 
   return {
     getActiveFile: () => currentFile,
     getActiveContent: getValue,
+    hasUnsavedChanges: () => dirty,
     switchToFile,
     refreshTree,
     refreshExternalChanges,
+    writeExternalActiveFile,
     replaceActiveWith,
     flushSave: flushActiveSave,
-    getRevision: () => revision,
+    getRevision: () => editRevision,
+    getFileRevision: fileRevision,
     opfs,
     focus: () => view.focus(),
     destroy: () => view.destroy(),

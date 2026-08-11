@@ -27,6 +27,7 @@
  *   knownProviderNames: string[],
  *   reasoningEffortLevels: readonly string[],
  *   dwebEnabled: boolean,
+ *   autoUpdateAvailable: boolean,
  *   normalizeVariant: (v: string) => string,
  *   normalizeEngine: (v: string) => string,
  * }} deps
@@ -36,6 +37,7 @@ export const normalizeSettingsPatch = (patch, {
   knownProviderNames,
   reasoningEffortLevels,
   dwebEnabled,
+  autoUpdateAvailable,
   normalizeVariant,
   normalizeEngine,
 }) => {
@@ -64,6 +66,9 @@ export const normalizeSettingsPatch = (patch, {
   }
   if (typeof patch.voiceOnboardingDismissed === 'boolean') {
     next.voiceOnboardingDismissed = patch.voiceOnboardingDismissed;
+  }
+  if (typeof patch.ocrEnabled === 'boolean') {
+    next.ocrEnabled = patch.ocrEnabled;
   }
   if (typeof patch.devMode === 'boolean') {
     next.devMode = patch.devMode;
@@ -195,6 +200,9 @@ export const normalizeSettingsPatch = (patch, {
       ? Math.min(Math.max(v, 60_000), 24 * 60 * 60 * 1000)
       : 0;
   }
+  if (typeof patch.auditLogMaxEntries === 'number' && Number.isFinite(patch.auditLogMaxEntries)) {
+    next.auditLogMaxEntries = Math.min(1_000_000, Math.max(1, Math.floor(patch.auditLogMaxEntries)));
+  }
   // Cost telemetry (feature 06). spendLimitUsd: clamp to a sane,
   // non-negative range; 0 disables the hard limit. NaN/garbage → 0.
   if (patch.spendLimitUsd !== undefined) {
@@ -231,6 +239,12 @@ export const normalizeSettingsPatch = (patch, {
   // network back on restores the user's prior agent choice.
   if (dwebEnabled && typeof patch.dwebAgentEnabled === 'boolean') {
     next.dwebAgentEnabled = patch.dwebAgentEnabled;
+  }
+  // Self-update check (preview packages only). Same two-layer posture as the
+  // dweb keys: the key is absent from other channels' CHANNEL_DEFAULTS AND
+  // the patch is refused where the package doesn't carry it.
+  if (autoUpdateAvailable && typeof patch.autoUpdateEnabled === 'boolean') {
+    next.autoUpdateEnabled = patch.autoUpdateEnabled;
   }
   // Ollama host (issue #104). Accept ONLY a well-formed http(s) ORIGIN, stored
   // normalized (origin-only — scheme + host + port, no path/query). why strict:

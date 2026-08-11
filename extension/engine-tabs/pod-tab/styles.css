@@ -1,7 +1,7 @@
 :root {
   color-scheme: dark light;
   --bg: #0d1117; --elev: #161b22; --fg: #e6edf3; --muted: #8b949e;
-  --border: #30363d; --fail: #c43030;
+  --border: #30363d; --fail: #ff7b72;
   --cyan: #00b7eb; --red: #ef4444; --amber: #f59e0b;
   --green: #22c55e; --magenta: #d946ef;
   --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
@@ -45,6 +45,6 @@ button:hover { border-color: var(--muted); }
 button:focus-visible, #terminal-input:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 #stop-button { font-weight: 600; }
 @media (prefers-color-scheme: light) {
-  :root { --bg:#fff; --elev:#f5f5f5; --fg:#151515; --muted:#686868; --border:#d6d6d6; }
+  :root { --bg:#fff; --elev:#f5f5f5; --fg:#151515; --muted:#686868; --border:#d6d6d6; --fail:#b42318; }
   #terminal-pane { background: #fafafa; }
 }

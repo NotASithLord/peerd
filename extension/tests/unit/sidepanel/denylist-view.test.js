@@ -240,7 +240,9 @@ describe('sidepanel.denylist-view', () => {
         input.value = 'tracker.example';
         input.dispatchEvent(new Event('input'));
         await flush();
-        need(root, 'form.denylist-add').dispatchEvent(new Event('submit'));
+        need(root, 'form.denylist-add').dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
         await flush();
         expect(send.calls.find((c) => c.type === 'denylist/add'))
           .toEqual({ type: 'denylist/add', pattern: 'tracker.example' });
@@ -256,7 +258,9 @@ describe('sidepanel.denylist-view', () => {
         input.value = 'not a pattern';
         input.dispatchEvent(new Event('input'));
         await flush();
-        need(root, 'form.denylist-add').dispatchEvent(new Event('submit'));
+        need(root, 'form.denylist-add').dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
         await flush();
         expect(need(root, '.key-msg.err').textContent).toContain('Not a valid pattern');
         expect(need(root, '.denylist-input', HTMLInputElement).value).toBe('not a pattern');

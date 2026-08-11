@@ -67,7 +67,7 @@ import {
 import { normalizeToolManifest } from '/peerd-runtime/tools/manifests.js';
 import { compileUserHook } from '/peerd-runtime/tools/hooks/compile.js';
 import { orderAlwaysLoaded, assembleAlwaysLoaded } from '/peerd-runtime/memory/memory.js';
-import { inspectImport, EXPORT_FORMAT, EXPORT_VERSION } from '/peerd-runtime/transfer/transfer.js';
+import { inspectImport, EXPORT_FORMAT } from '/peerd-runtime/transfer/transfer.js';
 import { runMigration, guardStore } from '/peerd-runtime/lifecycle/store-version.js';
 import { checkStores, storeEntry, STORE_REGISTRY } from '/peerd-runtime/lifecycle/store-registry.js';
 import { CHANNEL_DEFAULTS } from '/shared/channel-config.js';
@@ -350,9 +350,9 @@ const KNOWN_SETTING_KEYS = Object.keys(CHANNEL_DEFAULTS);
 describe.each(FIXTURES)('$name — the export envelope this release wrote', ({ data }) => {
   const envelope = () => data.exportEnvelope;
 
-  test('the format/version this build still speaks', () => {
+  test('the historical format/version remains intact', () => {
     expect(envelope().format).toBe(EXPORT_FORMAT);
-    expect(envelope().version).toBe(EXPORT_VERSION);
+    expect(envelope().version).toBe(1);
   });
 
   test('inspectImport accepts it and the summary is sane', () => {
@@ -407,6 +407,7 @@ describe.each(FIXTURES)('$name — the export envelope this release wrote', ({ d
     });
     if (!result.summary) throw new Error(`expected ok result: ${result.error}`);
     const expectedUrls = (envelope().providerEndpoints?.endpoints ?? []).map((e: Rec) => e.url);
+    if (envelope().settings?.ollamaHost) expectedUrls.push(new URL(envelope().settings.ollamaHost).origin);
     expect(result.summary.endpointUrls).toEqual(expectedUrls);
     expect(result.summary.hookIds).toEqual(envelope().hooks.map((h: Rec) => h.id));
   });
@@ -561,13 +562,15 @@ describe('guardStore over a stamped profile', () => {
     expect(guard.diagnosticId).toBe(`store-${sessions.store}-newer-v${sessions.version + 1}`);
   });
 
-  test('checkStores routes an older stamp to migrate and keeps the rest read-write', async () => {
+  test('checkStores blocks an older stamp until a production migration plan exists', async () => {
     const check = await checkStores({
       read: async () => ({ [sessions.store]: sessions.version - 1 }),
     });
-    expect(check.ok).toBe(true);
+    expect(check.ok).toBe(false);
     const found = check.stores.find((s) => s.store === sessions.store)!;
-    expect(found.mode).toBe('migrate');
+    expect(found.mode).toBe('read-only');
+    expect(found.versionClass).toBe('migratable');
+    expect(found.diagnosticId).toContain('migration-unavailable');
     expect(found.firstRun).toBeUndefined();
     for (const other of check.stores.filter((s) => s.store !== sessions.store)) {
       expect(other.mode).toBe('read-write');
@@ -885,9 +888,9 @@ describe('the new fixtures — permission normalization over non-default values'
 describe.each(NEW_FIXTURES)('$name — inspectImport over the export envelope', ({ data }) => {
   const envelope = () => data.exportEnvelope;
 
-  test('the format/version this build still speaks', () => {
+  test('the historical format/version remains intact', () => {
     expect(envelope().format).toBe(EXPORT_FORMAT);
-    expect(envelope().version).toBe(EXPORT_VERSION);
+    expect(envelope().version).toBe(1);
   });
 
   test('inspectImport accepts it and the summary is sane', () => {
@@ -943,6 +946,7 @@ describe.each(NEW_FIXTURES)('$name — inspectImport over the export envelope', 
     });
     if (!result.summary) throw new Error(`expected ok result: ${result.error}`);
     const expectedUrls = (envelope().providerEndpoints?.endpoints ?? []).map((e: Rec) => e.url);
+    if (envelope().settings?.ollamaHost) expectedUrls.push(new URL(envelope().settings.ollamaHost).origin);
     expect(result.summary.endpointUrls).toEqual(expectedUrls);
     expect(result.summary.hookIds).toEqual(envelope().hooks.map((h: Rec) => h.id));
   });
@@ -1044,12 +1048,12 @@ describe('profile-maximal-historical — checkStores over a partially stamped ma
     }
   });
 
-  test('a partial map with ONE stamp behind asks to migrate that surface only', async () => {
+  test('a partial map with one older stamp blocks that surface only', async () => {
     const sessions = storeEntry('sessions')!;
     const skewed = { ...stamps, [sessions.store]: sessions.version - 1 };
     const check = await checkStores({ read: async () => skewed });
-    expect(check.ok).toBe(true);
-    expect(check.stores.find((s) => s.store === sessions.store)!.mode).toBe('migrate');
+    expect(check.ok).toBe(false);
+    expect(check.stores.find((s) => s.store === sessions.store)!.mode).toBe('read-only');
     for (const other of check.stores.filter((s) => s.store !== sessions.store)) {
       expect(other.mode).toBe('read-write');
       // The other stamped surfaces are current, the unstamped ones firstRun —

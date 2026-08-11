@@ -14,9 +14,9 @@
 //
 // CREDENTIALS ARE NEVER CAPTURED. The tap records method + URL + a posture MARKER
 // (bearer/cookie presence — never the value) + status + content-type + a size-
-// capped response-body SAMPLE (cloned, never consuming the page's stream). The
-// full redaction + templatization happens later in the pure digester (digest.js);
-// this only avoids ever holding a raw secret in the ring buffer.
+// capped response-body SHAPE (cloned, never consuming the page's stream). Raw
+// leaf values are reduced to types before the ring buffer sees them. The pure
+// digester repeats the redaction as defense in depth.
 //
 // Two entry points, both injected:
 //   installFetchTapInjected()  — wraps fetch/XHR, starts a page-side ring buffer
@@ -26,8 +26,9 @@
  * Install the fetch/XHR tap in the page's MAIN world. Idempotent (a second call
  * while active is a no-op). Stashes a ring buffer + the originals on a well-known
  * global so drain can recover them across separate executeScript calls.
+ * @param {string[]} [allowedOrigins]
  */
-export function installFetchTapInjected() {
+export function installFetchTapInjected(allowedOrigins) {
   'use strict';
   try {
     var KEY = '__peerd_fetch_tap__';
@@ -36,6 +37,15 @@ export function installFetchTapInjected() {
     var SAMPLE = 4000;             // response-body sample cap (chars)
     var buf = [];
     var push = function (entry) { if (buf.length < CAP) buf.push(entry); };
+    var allowed = Array.isArray(allowedOrigins)
+      ? allowedOrigins.filter(function (value) { return typeof value === 'string'; })
+      : [];
+    // Check scope before cloning or reading any response. This is both the
+    // private-network fence and the general third-party data-minimization wall.
+    var canSample = function (url) {
+      try { return allowed.indexOf(new URL(url, location.href).origin) !== -1; }
+      catch (e) { return false; }
+    };
     var posture = function (headers) {
       // headers: a plain object OR a Headers instance OR undefined. Return ONLY
       // a presence marker, never a value.
@@ -55,10 +65,29 @@ export function installFetchTapInjected() {
       } catch (e) { /* posture best-effort */ }
       return out;
     };
+    var secretKey = /(token|secret|password|passwd|api[-_]?key|auth|session|csrf|xsrf|bearer|access[-_]?token|refresh[-_]?token|sig|signature|\bs?sid\b)/i;
+    var shape = function (value, depth) {
+      if (value === null) return 'null';
+      if (value === undefined) return 'undefined';
+      var kind = typeof value;
+      if (kind === 'string') return 'string';
+      if (kind === 'number' || kind === 'boolean') return kind;
+      if (kind !== 'object') return kind;
+      if (depth > 3) return '…';
+      if (Array.isArray(value)) return value.length ? [shape(value[0], depth + 1), '…×' + value.length] : [];
+      var out = {}; var count = 0;
+      for (var key in value) {
+        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        if (count++ >= 24) { out['…'] = 1; break; }
+        out[key] = secretKey.test(key) ? '<redacted>' : shape(value[key], depth + 1);
+      }
+      return out;
+    };
     var sampleJson = function (text, ct) {
       if (!text) return undefined;
       if (!/json|javascript|text/i.test(ct || '')) return undefined;
-      try { return JSON.parse(text.slice(0, SAMPLE * 4)); } catch (e) { return text.slice(0, SAMPLE); }
+      try { return shape(JSON.parse(text.slice(0, SAMPLE * 4)), 0); }
+      catch (e) { return 'string'; }
     };
 
     var origFetch = window.fetch;
@@ -79,6 +108,7 @@ export function installFetchTapInjected() {
         try {
           p.then(function (res) {
             try {
+              if (!canSample(url)) return;
               var ct = res.headers && res.headers.get ? res.headers.get('content-type') : '';
               var entry = { method: String(method).toUpperCase(), url: String(url), status: res.status, contentType: ct, reqHeaders: posture(headers) };
               // clone so we never consume the page's own body stream
@@ -109,6 +139,7 @@ export function installFetchTapInjected() {
           this.addEventListener('load', function () {
             try {
               if (!self.__peerd) return;
+              if (!canSample(self.__peerd.url)) return;
               var ct = '';
               try { ct = self.getResponseHeader('content-type') || ''; } catch (e) { /* skip */ }
               var text = '';

@@ -26,8 +26,8 @@
 // rather than to make the seed list exhaustive, which it never could be.
 //
 // WHAT IS NOT HERE. The store (peerd-egress), the observation points that feed
-// it (the DOM walk, the confirm path), and the enforcement (gates,
-// resolveTargetTab) all live elsewhere. This file only answers the question.
+// it (the live DOM-tool probe chokepoint, the confirm path), and the enforcement
+// (gates, resolveTargetTab) all live elsewhere. This file only answers the question.
 
 import { normalizeApiOrigin } from './web-actor.js';
 
@@ -35,7 +35,7 @@ import { normalizeApiOrigin } from './web-actor.js';
  * Why an origin was classified sensitive. Rendered in the handoff notice and
  * the audit trail, so the user can see WHICH signal fired rather than being
  * told a site is special with no account of it.
- * @typedef {'ugc-zone' | 'vault-secret' | 'password-field' | 'confirmed-write'} SensitivityReason
+ * @typedef {'identity-provider' | 'ugc-zone' | 'vault-secret' | 'password-field' | 'confirmed-write'} SensitivityReason
  */
 
 /**
@@ -58,9 +58,9 @@ const ORDINARY = Object.freeze({ sensitive: false });
  * same reasoning that kept `webNavigation` out — see the SW's tabs.onUpdated
  * comment). These two are observable from data we already collect.
  *
- *   password-field   A password input was seen in the DOM walk on this origin.
- *                    Nothing else on the web means "this site has accounts"
- *                    as reliably, and we already walk the DOM for the snapshot.
+ *   password-field   A password input was seen by the standalone exact-document
+ *                    probe every DOM tool passes through. Nothing else on the
+ *                    web means "this site has accounts" as reliably.
  *   confirmed-write  The user approved a web:write on this origin. They
  *                    affirmed acting there under their own name.
  *
@@ -75,9 +75,71 @@ const ORDINARY = Object.freeze({ sensitive: false });
 export const LEARNED_REASONS = Object.freeze(['password-field', 'confirmed-write']);
 
 /**
+ * The cookie-facing identity of a learned web origin.
+ *
+ * Cookies do not isolate ports or schemes, so neither can the learned side of
+ * the sensitivity classifier. The actor's OWNED origin remains exact elsewhere;
+ * this host key is only for deciding whether a roaming actor may enter.
+ *
+ * @param {unknown} input
+ * @returns {string | null}
+ */
+export const sensitivityHost = (input) => {
+  const origin = normalizeApiOrigin(input);
+  if (!origin) return null;
+  try { return new URL(origin).hostname; } catch { return null; }
+};
+
+/**
+ * Does a learned origin conservatively cover this landing?
+ *
+ * A mark on a parent host covers its descendants because a Domain cookie may
+ * be sent there. The reverse is deliberately false: seeing a signal on
+ * login.example.test does not prove that its cookie was scoped to example.test,
+ * and promoting that observation would let one hostile sibling mark all others.
+ *
+ * @param {unknown} learnedOrigin
+ * @param {unknown} landingOrigin
+ * @returns {boolean}
+ */
+export const learnedOriginCovers = (learnedOrigin, landingOrigin) => {
+  const learnedHost = sensitivityHost(learnedOrigin);
+  const landingHost = sensitivityHost(landingOrigin);
+  if (!learnedHost || !landingHost) return false;
+  return landingHost === learnedHost || landingHost.endsWith(`.${learnedHost}`);
+};
+
+/**
+ * Find the closest learned host that covers a landing. Closest wins so a
+ * directly observed child keeps its own explanation when its parent was also
+ * learned. The set is bounded by MAX_LEARNED, so a linear scan stays small and
+ * avoids adding a second policy index that could drift from durable state.
+ *
+ * @param {string} origin
+ * @param {ReadonlySet<string> | ReadonlyMap<string, SensitivityReason>} learned
+ * @returns {SensitivityReason | null}
+ */
+const learnedReasonFor = (origin, learned) => {
+  /** @type {SensitivityReason | null} */
+  let match = null;
+  let matchLength = -1;
+  for (const entry of learned.entries()) {
+    const learnedOrigin = entry[0];
+    if (!learnedOriginCovers(learnedOrigin, origin)) continue;
+    const host = sensitivityHost(learnedOrigin);
+    if (!host || host.length <= matchLength) continue;
+    matchLength = host.length;
+    match = learned instanceof Map
+      ? /** @type {SensitivityReason} */ (entry[1])
+      : 'password-field';
+  }
+  return match;
+};
+
+/**
  * Classify an origin.
  *
- * Order is deliberate: the two SEEDS are checked before the learned set,
+ * Order is deliberate: the SEEDS are checked before the learned set,
  * because a seed carries a stronger provenance (a curated registry entry, or a
  * credential the user typed in themselves) and makes for a better explanation
  * in the handoff notice than "we saw a password box once".
@@ -90,17 +152,28 @@ export const LEARNED_REASONS = Object.freeze(['password-field', 'confirmed-write
  *   this classifier independently testable and free of a hard dependency on
  *   which registry happens to exist. It is a signal here, not a special case.
  * @param {(origin: string) => boolean} [deps.hasVaultSecret]  is there an `origin:` secret for it
+ * @param {(origin: string) => boolean} [deps.isKnownIdp]  is it a dedicated sign-in origin
  * @param {ReadonlySet<string> | ReadonlyMap<string, SensitivityReason>} [deps.learned]
- *   the learned set, keyed by normalized origin. A Map carries WHICH signal
- *   fired; a Set is accepted so callers with no provenance still work.
+ *   the learned set, keyed by normalized observed origin. Matching follows the
+ *   cookie host scope: scheme and port do not isolate it, and a learned parent
+ *   covers descendant hosts. A Map carries WHICH signal fired; a Set is
+ *   accepted so callers with no provenance still work.
  * @returns {SensitivityVerdict}
  */
 export const classifyOriginSensitivity = (input, deps = {}) => {
-  const { isUgcZone, hasVaultSecret, learned } = deps;
+  const { isKnownIdp, isUgcZone, hasVaultSecret, learned } = deps;
   const origin = normalizeApiOrigin(input);
   // Not a usable public origin at all (a blank tab, an extension page, an IP,
   // localhost, junk). Nothing to be signed in to.
   if (!origin) return ORDINARY;
+
+  // TRANSIT-ONLY SEED: a dedicated identity provider carries one of the
+  // user's strongest browser sessions, but it is not a destination peerd may
+  // mint a standalone site helper for. Bound relying-party helpers reach it
+  // only through the separately bounded sign-in excursion.
+  if (isKnownIdp?.(origin) === true) {
+    return { sensitive: true, reason: 'identity-provider', origin };
+  }
 
   // SEED 1 — a curated UGC zone (#242). These are exactly "you have an identity
   // here AND strangers author the content", the worst combination, and the
@@ -119,14 +192,8 @@ export const classifyOriginSensitivity = (input, deps = {}) => {
 
   // LEARNED — grown from ordinary use.
   if (learned) {
-    if (learned instanceof Map) {
-      const reason = learned.get(origin);
-      if (reason) return { sensitive: true, reason, origin };
-    } else if (learned.has(origin)) {
-      // Provenance wasn't retained; report the weaker of the two rather than
-      // claiming a signal we can't substantiate.
-      return { sensitive: true, reason: 'password-field', origin };
-    }
+    const reason = learnedReasonFor(origin, learned);
+    if (reason) return { sensitive: true, reason, origin };
   }
 
   return ORDINARY;

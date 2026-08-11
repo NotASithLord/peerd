@@ -11,6 +11,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { fetchUrlTool } from '../../../extension/peerd-runtime/tools/defs/fetch-url.js';
+import { resolveRuntimeCapabilities } from '../../../extension/peerd-runtime/runtime-capabilities.js';
 
 const TAG_OPEN = /^<untrusted_web_content origin="[^"]*" tool="([^"]*)" retrieved_at="[^"]*">\n/;
 const TAG_CLOSE = /\n<\/untrusted_web_content>$/;
@@ -71,6 +72,15 @@ describe('fetch_url — sessionless secure fetch', () => {
     // The real same-origin cookies come from the browser jar via the boundary, never
     // a tool-supplied header — so the tool sets no credentials of its own.
     expect('credentials' in seen.init).toBe(false);
+  });
+
+  test('does not turn an array-shaped headers arg into numeric wire headers', async () => {
+    const { ctx, seen } = recordingCtx();
+    await fetchUrlTool.execute({
+      url: 'https://api.shop.com/p',
+      headers: ['payload-that-must-not-become-header-zero'],
+    }, ctx);
+    expect(seen.init.headers).toEqual({});
   });
 
   test('a non-GET write is confirm-gated (shared web:write key); declines on "no"', async () => {
@@ -260,5 +270,22 @@ describe('fetch_url — spill-and-page for an oversized body', () => {
     expect(stored).toHaveLength(0);
     expect(r.content).not.toContain('[paging]');
     expect(unwrap(r.content!).truncated).toBe(false);
+  });
+
+  test('a binary document never recommends a reader missing from this runtime', async () => {
+    const { ctx } = recordingCtx({
+      runtimeCapabilities: resolveRuntimeCapabilities({ offscreenDocument: false }),
+      webFetch: async () => mockResponse({
+        body: '%PDF-1.7',
+        headers: { 'content-type': 'application/pdf' },
+        url: 'https://files.example/report.pdf',
+      }),
+    });
+    const result = await fetchUrlTool.execute({ url: 'https://files.example/report.pdf' }, ctx);
+    if (result.ok) throw new Error('expected a binary document refusal');
+    expect(result.error).toBe('binary_document');
+    expect((result as any).readerAvailable).toBe(false);
+    expect(result.content).not.toContain('read_pdf');
+    expect(result.content).toContain('Ask the user to attach this PDF directly');
   });
 });

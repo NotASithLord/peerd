@@ -11,6 +11,7 @@ import {
   inspectEnvelope,
   exportFilename,
   EXPORT_LIMIT_BYTES,
+  EXPORT_FILE_LIMIT_BYTES,
 } from '../../extension/peerd-engine/export.js';
 import { ArtifactTooLargeError } from '../../extension/peerd-engine/errors.js';
 import { fromUtf8 } from '../../extension/shared/bundle/bytes.js';
@@ -48,6 +49,56 @@ describe('.peerd envelope roundtrips', () => {
     expect(opened.entry).toBe('index.html');
     expect(textFiles(opened.files)).toEqual(APP_FILES);
     expect(opened.meta.tags).toEqual(['tool']);
+  });
+
+  test('app: binary and unknown file types round-trip byte-for-byte', async () => {
+    const binary = new Uint8Array([0x00, 0xff, 0xc0, 0x80]);
+    const unknown = new Uint8Array([0xfe, 0x01, 0x00]);
+    const envelope = await buildAppExport({
+      record: { name: 'Binary App', entryFile: 'index.html', tags: [] },
+      files: {
+        'index.html': new TextEncoder().encode('<h1>x</h1>'),
+        'engine.wasm': binary,
+        'model.custom': unknown,
+      },
+    });
+    const opened = await openEnvelope(envelope);
+    expect(Array.from(opened.files['engine.wasm'])).toEqual(Array.from(binary));
+    expect(Array.from(opened.files['model.custom'])).toEqual(Array.from(unknown));
+  });
+
+  test('app: explicit binary kind survives for ASCII bytes with an unknown suffix', async () => {
+    const bytes = new TextEncoder().encode('valid UTF-8 that is still binary');
+    const envelope = await buildAppExport({
+      record: {
+        name: 'Typed App',
+        entryFile: 'index.html',
+        fileKinds: { 'index.html': 'text', 'model.custom': 'binary' },
+      },
+      files: { 'index.html': '<h1>x</h1>', 'model.custom': bytes },
+    });
+    const opened = await openEnvelope(envelope);
+    expect(opened.fileKinds).toEqual({ 'index.html': 'text', 'model.custom': 'binary' });
+    expect(Array.from(opened.files['model.custom'])).toEqual(Array.from(bytes));
+  });
+
+  test('app: a prototype-looking binary path survives export', async () => {
+    const files: Record<string, string | Uint8Array> = Object.fromEntries([
+      ['index.html', '<h1>x</h1>'],
+      ['__proto__', new TextEncoder().encode('ABC')],
+    ]);
+    const fileKinds: Record<string, 'text' | 'binary'> = Object.fromEntries([
+      ['index.html', 'text'],
+      ['__proto__', 'binary'],
+    ]);
+    const envelope = await buildAppExport({
+      record: { name: 'Prototype path', entryFile: 'index.html', fileKinds },
+      files,
+    });
+    const opened = await openEnvelope(envelope);
+    expect(Object.hasOwn(opened.files, '__proto__')).toBe(true);
+    expect(Array.from(opened.files['__proto__'])).toEqual([65, 66, 67]);
+    expect(opened.fileKinds['__proto__']).toBe('binary');
   });
 
   test('notebook: export → inspect → unpack === input (no entry)', async () => {
@@ -124,6 +175,14 @@ describe('.peerd envelope verification fails closed', () => {
     expect(inspected.ok).toBe(false);
   });
 
+  test('rejects oversized encoded chunks before decoding them', async () => {
+    const envelope = await buildNotebookExport({
+      record: { name: 'x' }, files: { 'a.js': '1' },
+    });
+    envelope.chunks[0] = 'A'.repeat(4 * 1024 * 1024);
+    await expect(openEnvelope(envelope)).rejects.toThrow('chunk-size-mismatch:0');
+  });
+
   test('rejects malformed envelopes with normalized errors', async () => {
     for (const bad of [null, 42, {}, { format: 'peerd-bundle' },
       { format: 'peerd-bundle', version: 2, manifest: {}, chunks: [] },
@@ -161,6 +220,15 @@ describe('the 64MB export rail', () => {
     const inspected = await inspectEnvelope(envelope);
     expect(inspected.ok).toBe(false);
     if (!inspected.ok) expect(inspected.error).toContain('64 MB');
+  });
+
+  test('the options page rejects an oversized .peerd file before reading it', async () => {
+    expect(EXPORT_FILE_LIMIT_BYTES).toBeGreaterThan(Math.ceil(EXPORT_LIMIT_BYTES / 3) * 4);
+    const source = await Bun.file('extension/options/sections/transfer.js').text();
+    const sizeCheck = source.indexOf('file.size > EXPORT_FILE_LIMIT_BYTES');
+    const read = source.indexOf('envelope = JSON.parse(await file.text())');
+    expect(sizeCheck).toBeGreaterThan(-1);
+    expect(read).toBeGreaterThan(sizeCheck);
   });
 });
 

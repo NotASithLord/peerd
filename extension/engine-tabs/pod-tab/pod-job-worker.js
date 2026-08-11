@@ -8,10 +8,11 @@ import { podFetch } from './pod-realm-seal.js'; // MUST remain the first import
 // command heap would link unrelated browser/extension modules before the job.
 // This pure leaf carries no authority and is the execution host's shared core.
 // eslint-disable-next-line no-restricted-imports
-import { executePodShell } from '../../peerd-engine/pod-shell.js';
+import { executePodShell, matchPodGrep } from '../../peerd-engine/pod-shell.js';
 import { demoModule, runWasiWorkspace } from '../notebook-tab/notebook-wasi.js';
 
 const OUTPUT_CAP = 512 * 1024;
+const PIPELINE_CAP = 16 * 1024 * 1024;
 /** @type {Map<number,{resolve:(value:any)=>void,reject:(error:Error)=>void}>} */
 const pending = new Map();
 let requestSequence = 0;
@@ -51,6 +52,7 @@ const fs = Object.freeze({
   /** @param {string} path */ read: (path) => hostCall('fs-read', { path }),
   /** @param {string} path */ readBytes: (path) => hostCall('fs-read-bytes', { path }),
   /** @param {string} path @param {string|Uint8Array|ArrayBuffer} content */ write: (path, content) => hostCall('fs-write', { path, content }),
+  /** @param {string} path @param {string} content */ append: (path, content) => hostCall('fs-append', { path, content }),
   /** @param {string} path */ listDir: (path) => hostCall('fs-list-dir', { path }),
   list: () => hostCall('fs-list'),
   /** @param {string} path */ stat: (path) => hostCall('fs-stat', { path }),
@@ -66,9 +68,8 @@ const readText = (path, cwd) => /** @type {Promise<string>} */ (fs.read(resolveP
 /** @param {string} path @param {string} content @param {{append:boolean,cwd:string}} opts */
 const writeText = async (path, content, { append, cwd }) => {
   const target = resolvePodPath(path, cwd);
-  let body = content;
-  if (append && await fs.exists(target)) body = `${await fs.read(target)}${content}`;
-  await fs.write(target, body);
+  if (append) await fs.append(target, content);
+  else await fs.write(target, content);
 };
 
 /** @param {string[]} argv */
@@ -143,7 +144,7 @@ const runCommand = async ({ argv, stdin, cwd, env }) => {
   if (command === 'help') return { stdout: [
     'Peerd Pod commands:',
     '  pwd cd ls cat echo printf mkdir rm cp mv touch',
-    '  head tail wc grep sort uniq env export unset sleep',
+    '  head tail wc grep [-F] pattern [file] sort uniq env export unset sleep',
     '  js [-e code|file]   local Web-standard JavaScript on Chromium; no Node/network',
     '  wasi file.wasm ...  run a WASI Preview 1 command',
     '  install-tool name file.wasm; installed tools run by name',
@@ -279,12 +280,18 @@ const runCommand = async ({ argv, stdin, cwd, env }) => {
       return { stdout: `${lines.length} ${words} ${bytes}\n`, stderr: '', exitCode: 0 };
     }
     if (command === 'grep') {
+      let fixed = false;
+      while (sourceArgs[0]?.startsWith('-')) {
+        const option = sourceArgs.shift();
+        if (option === '-F' || option === '--fixed-strings') fixed = true;
+        else return { stdout: '', stderr: `grep: unsupported option ${option}\n`, exitCode: 2 };
+      }
       const pattern = sourceArgs.shift();
       if (!pattern) return { stdout: '', stderr: 'grep: pattern required\n', exitCode: 2 };
       if (sourceArgs[0]) text = await readText(sourceArgs[0], cwd);
-      /** @type {{test:(value:string)=>boolean}} */ let expression;
-      try { expression = new RegExp(pattern); } catch { expression = { test: (value) => value.includes(pattern) }; }
-      const matches = text.split('\n').filter((value) => expression.test(value));
+      let matches;
+      try { matches = matchPodGrep(text, pattern, { fixed }); }
+      catch (error) { return { stdout: '', stderr: `${/** @type {{message?:string}} */ (error)?.message ?? String(error)}\n`, exitCode: 2 }; }
       return { stdout: matches.length ? `${matches.join('\n')}\n` : '', stderr: '', exitCode: matches.length ? 0 : 1 };
     }
     if (command === 'sort') return { stdout: lines.length ? `${lines.sort((a, b) => a.localeCompare(b)).join('\n')}\n` : '', stderr: '', exitCode: 0 };
@@ -393,6 +400,7 @@ addEventListener('message', (event) => {
     readText,
     writeText,
     maxOutputChars: OUTPUT_CAP,
+    maxPipelineChars: PIPELINE_CAP,
   }).then((result) => {
     const stdout = String(result.stdout ?? '');
     const stderr = String(result.stderr ?? '');

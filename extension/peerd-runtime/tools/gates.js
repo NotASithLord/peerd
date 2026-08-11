@@ -52,6 +52,8 @@ import {
   DEFAULT_CONFIRM_ACTIONS,
   normalizeMode,
 } from '../permissions/index.js';
+import { ACTOR_ISOLATION_UNAVAILABLE_TOOLS, actorIsolationAvailable } from '../actor/isolation.js';
+import { runtimeCapabilityRefusal } from '../runtime-capabilities.js';
 
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
@@ -73,8 +75,25 @@ import {
  *   actorType?: string,
  *   backing?: 'tab' | 'api',
  *   actorSurface?: 'tools' | 'code',
+ *   authWaitingForUser?: boolean,
+ *   idpTransitOnly?: boolean,
+ *   actorIsolation?: import('../actor/isolation.js').ActorIsolationCapability,
+ *   runtimeCapabilities?: ReturnType<typeof import('../runtime-capabilities.js').resolveRuntimeCapabilities>,
  * }} GateContext
  */
+
+/**
+ * A confirmed provider step parks the entire web actor, not only its DOM tools.
+ * The context builder rechecks the live tab before stamping this state, so a
+ * later request automatically loses the park after the tab is exactly home.
+ *
+ * @param {Tool} _tool @param {any} _args @param {GateContext} ctx
+ * @returns {Omit<GateResult, 'name'>}
+ */
+export const authWaitGate = (_tool, _args, ctx) => ctx.authWaitingForUser === true
+  ? { allowed: false, reason: 'auth_waiting_for_user' }
+  : { allowed: true, reason: 'not waiting for user sign-in' };
+
 
 /**
  * Persona / Plan-Act (Feature 03). This is the realization of the
@@ -148,15 +167,31 @@ export const actorTierGate = (tool, args, ctx) => {
     }
     return null;
   }
-  // DESIGN-18: an API actor (actorType:'web', backing:'api') is fetch-only — its
+  if (ctx.idpTransitOnly === true) {
+    return { allowed: false, reason: 'identity providers are transit only; this tool was not run' };
+  }
+  // DESIGN-18: an API actor (actorType:'web', backing:'api') is tab-free; its
   // allow-set drops the DOM toolset (which needs a tab it never has), so a DOM tool
   // refuses HERE, at the gate, not just at execute-time. PR #119: surface-aware —
   // a code-surface web actor's set is {snapshot, read_page, page_code}, so a
   // discrete click/type/navigate FROM THE MODEL refuses here too (the page/call
   // route's inner dispatch builds a tools-surface ctx, which stays allowed).
   if (!isAllowedForActor(tool.name, ctx.actorType, ctx.backing, ctx.actorSurface)) {
-    const scope = ctx.backing === 'api' ? 'API integration (no tab — fetch_url only)' : `${ctx.actorType ?? 'unknown'}`;
+    const scope = ctx.backing === 'api' ? 'API integration (no tab or DOM)' : `${ctx.actorType ?? 'unknown'}`;
     return { allowed: false, reason: `'${tool.name}' is not in this actor's (${scope}) toolset` };
+  }
+  // Durable site-client records are origin-owned executable knowledge. This
+  // runs before confirmation/store access; each tool repeats it at execute time
+  // because pre-tool hooks may rewrite args after the gate stack has completed.
+  if (['site_client_read', 'site_client_run', 'site_client_write'].includes(tool.name)) {
+    const origin = typeof args?.origin === 'string' ? args.origin : '';
+    let allowed = false;
+    try { allowed = ctx.canUseSiteClientOrigin?.(origin) === true; } catch { allowed = false; }
+    if (!allowed) {
+      // Fixed prose: raw model args (path/query/newlines) must not ride through
+      // dispatcher audit into a later main-agent `inspect` result.
+      return { allowed: false, reason: 'actor does not own that site client origin' };
+    }
   }
   // The actor dispatch wrapper (turn-driver pinActorCall) already FORCE-
   // normalizes any id/name arg to the bound instance id before dispatch, so by
@@ -225,6 +260,18 @@ export const actorTierGate = (tool, args, ctx) => {
  * @returns {Omit<GateResult, 'name'>}
  */
 export const exposureGate = (tool, args, ctx) => {
+  const runtimeRefusal = runtimeCapabilityRefusal(tool.name, ctx?.runtimeCapabilities);
+  if (runtimeRefusal) {
+    return {
+      allowed: false,
+      reason: `runtime facility ${runtimeRefusal.facility} is unavailable; alternative: ${runtimeRefusal.alternative}`,
+    };
+  }
+  if (ctx?.actorIsolation
+      && !actorIsolationAvailable(ctx.actorIsolation)
+      && ACTOR_ISOLATION_UNAVAILABLE_TOOLS.has(tool.name)) {
+    return { allowed: false, reason: `actor isolation ${ctx.actorIsolation.status}: '${tool.name}' was not run` };
+  }
   if (ctx?.exposure === 'main') {
     if (isHiddenFromMain(tool.name)) {
       return { allowed: false, reason: `'${tool.name}' is actor-only — message a tab's actor to reach the page` };
@@ -344,6 +391,7 @@ const hostnameOf = (origin) => {
  */
 export const GATES = Object.freeze([
   { name: 'persona',      fn: personaGate },
+  { name: 'auth-wait',    fn: authWaitGate },
   { name: 'exposure',     fn: exposureGate },
   { name: 'origin',       fn: originGate },
   { name: 'confirmation', fn: confirmationGate },

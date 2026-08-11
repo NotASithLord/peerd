@@ -37,6 +37,9 @@ import './unit/peerd-provider/ollama-recommend.test.js';
 import './unit/peerd-runtime/sessions-store.test.js';
 import './unit/peerd-runtime/agent-loop.test.js';
 import './unit/peerd-runtime/actor-spawn.test.js';
+import './unit/peerd-runtime/idp-sign-in-flow.test.js';
+import './unit/sidepanel/login-confirm.test.js';
+import './unit/peerd-runtime/turn-driver-credentials.test.js';
 import './unit/peerd-runtime/dispatcher.test.js';
 import './unit/peerd-runtime/introspection-tools.test.js';
 import './unit/peerd-runtime/query-dom.test.js';
@@ -74,6 +77,9 @@ import './unit/engine-tabs/notebook-tab/notebook-seal.test.js';
 import './unit/engine-tabs/notebook-tab/notebook-extract.test.js';
 import './unit/engine-tabs/notebook-tab/notebook-output-render.test.js';
 
+// --- chassis: app-tab ---
+import './unit/engine-tabs/app-tab/app-binary-assets.test.js';
+
 // --- red-team (in-browser tier): real-realm sandbox escape + CSP fences ---
 import './unit/red-team/sandbox-escape.test.js';
 
@@ -88,6 +94,7 @@ import './unit/offscreen/job-runner-toolbox.test.js';
 
 // --- background (SW chassis: tab trackers + RPC clients + live SW routes) ---
 import './unit/background/vm-tab-close.test.js';
+import './unit/background/app-tab-tracker.test.js';
 import './unit/background/pod-client.test.js';
 import './unit/background/state-get.test.js';
 import './unit/background/script-model-call.test.js';
@@ -106,17 +113,29 @@ import './unit/sidepanel/goal-toggle.test.js';
 import './unit/sidepanel/goal-bar.test.js';
 import './unit/sidepanel/memory-suggestions.test.js';
 import './unit/sidepanel/api-integrations.test.js';
+import './unit/sidepanel/model-picker.test.js';
 import './unit/sidepanel/tools-chip.test.js';
 import './unit/sidepanel/attachments.test.js';
+import './unit/sidepanel/composer-readiness.test.js';
 import './unit/sidepanel/message-list.test.js';
+import './unit/sidepanel/protected-tab-starter.test.js';
 import './unit/sidepanel/failure-chip.test.js';
+import './unit/sidepanel/actor-isolation.test.js';
+import './unit/sidepanel/actor-fabric.test.js';
 import './unit/sidepanel/confirm-note.test.js';
+import './unit/sidepanel/site-client-confirm.test.js';
 import './unit/sidepanel/learned-origins-view.test.js';
 import './unit/options/activity-origin-events.test.js';
 import './unit/options/behavior-rows.test.js';
 import './unit/options/activity-tool-failed.test.js';
+import './unit/options/dweb-section.test.js';
+import './unit/options/runtime-capability-controls.test.js';
+import './unit/options/provider-races.test.js';
+import './unit/options/transfer-identity.test.js';
+import './unit/options/contributor-metrics.test.js';
 
 // --- home (chassis): the full-tab Library page ---
 import './unit/home/library-section.test.js';
+import './unit/home/actors-section.test.js';
 import './unit/home/contacts-section.test.js';
 import './unit/home/network-section.test.js';

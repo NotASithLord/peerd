@@ -16,6 +16,8 @@
 // lives elsewhere; keeping the translation pure makes the semantics — above all
 // Playwright's LOCATOR STRICTNESS — unit-testable without a browser.
 
+import { codeClientMethod, codeClientMethods } from './capability-manifest.js';
+
 /**
  * Raised when a page.* call is malformed or the gated tool it maps to failed.
  * Surfaces to the worker's awaited page.* call as a rejection, the way a real
@@ -42,6 +44,24 @@ export class PageApiError extends Error {
  * @property {(content: any) => any} shape                                pure result shaper (parsed tool content -> page return)
  */
 
+/** @param {any} target @param {string} what @returns {{ ref?: string, selector?: string }} */
+const targetArgs = (target, what) => {
+  if (typeof target === 'string' && target.length > 0) {
+    return /^@e\d+$/.test(target) ? { ref: target } : { selector: target };
+  }
+  if (target && typeof target === 'object' && !Array.isArray(target)) {
+    if (typeof target.ref === 'string' && /^@e\d+$/.test(target.ref)) return { ref: target.ref };
+    if (typeof target.selector === 'string' && target.selector.length > 0) return { selector: target.selector };
+  }
+  throw new PageApiError(`${what}: target must be a CSS selector, an @e ref, or { selector|ref }`);
+};
+
+/** @param {any} value @returns {Record<string, any>} */
+const plainOptions = (value) => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+
+/** @param {any} c */
+const passthrough = (c) => c;
+
 /** @type {Record<string, PageMethodSpec>} */
 const PAGE_METHODS = {
   // page.goto(url) — navigate the owned tab. http(s)-only and the destination
@@ -66,19 +86,19 @@ const PAGE_METHODS = {
   click: {
     tool: 'click',
     toArgs: (a) => {
-      const selector = a?.selector;
-      if (typeof selector !== 'string' || selector.length === 0) {
-        throw new PageApiError('page.click(selector): selector must be a non-empty string');
-      }
+      const target = targetArgs(a?.target ?? a?.selector, 'page.click(target)');
+      if (target.ref) return target;
       return typeof a?.nth === 'number'
-        ? { selector, nth: a.nth }
-        : { selector, expectedCount: 1 };
+        ? { ...target, nth: a.nth }
+        : { ...target, expectedCount: 1 };
     },
     shape: (c) => ({
       ok: true,
       clicked: c?.clicked === true,
       ...(typeof c?.matchedCount === 'number' ? { matchedCount: c.matchedCount } : {}),
       ...(c?.navigated ? { navigated: true } : {}),
+      ...(c?.browserPolicy ? { browserPolicy: c.browserPolicy } : {}),
+      ...(Array.isArray(c?.browserPolicies) ? { browserPolicies: c.browserPolicies } : {}),
     }),
   },
 
@@ -87,20 +107,19 @@ const PAGE_METHODS = {
   fill: {
     tool: 'type',
     toArgs: (a) => {
-      const selector = a?.selector;
+      const target = targetArgs(a?.target ?? a?.selector, 'page.fill(target, text)');
       const text = a?.text;
-      if (typeof selector !== 'string' || selector.length === 0) {
-        throw new PageApiError('page.fill(selector, text): selector must be a non-empty string');
-      }
       if (typeof text !== 'string') {
-        throw new PageApiError('page.fill(selector, text): text must be a string');
+        throw new PageApiError('page.fill(target, text): text must be a string');
       }
-      return { selector, text, expectedCount: 1 };
+      return { ...target, text, ...(target.selector ? { expectedCount: 1 } : {}), ...(a?.submit === true ? { submit: true } : {}) };
     },
     shape: (c) => ({
       ok: true,
       filled: true,
       ...(typeof c?.matchedCount === 'number' ? { matchedCount: c.matchedCount } : {}),
+      ...(c?.browserPolicy ? { browserPolicy: c.browserPolicy } : {}),
+      ...(Array.isArray(c?.browserPolicies) ? { browserPolicies: c.browserPolicies } : {}),
     }),
   },
 
@@ -119,10 +138,105 @@ const PAGE_METHODS = {
     toArgs: () => ({}),
     shape: (c) => c,
   },
+
+  readState: {
+    tool: 'read_state',
+    toArgs: (a) => targetArgs(a?.target ?? a?.selector ?? a?.ref, 'page.readState(target)'),
+    shape: passthrough,
+  },
+  watchChanges: {
+    tool: 'watch_changes',
+    toArgs: () => ({}),
+    shape: passthrough,
+  },
+  query: {
+    tool: 'query_dom',
+    toArgs: (a) => {
+      if (typeof a?.selector !== 'string' || !a.selector) throw new PageApiError('page.query(selector): selector must be a non-empty string');
+      return { selector: a.selector, ...plainOptions(a.options) };
+    },
+    shape: passthrough,
+  },
+  keys: {
+    tool: 'page_keys',
+    toArgs: (a) => {
+      if (typeof a?.sequence !== 'string' || !a.sequence) throw new PageApiError('page.keys(sequence): sequence must be a non-empty string');
+      return { keys: a.sequence };
+    },
+    shape: passthrough,
+  },
+  readPdf: {
+    tool: 'read_pdf',
+    toArgs: (a) => plainOptions(a.options),
+    shape: passthrough,
+  },
+  view: {
+    tool: 'view',
+    toArgs: () => ({}),
+    shape: passthrough,
+  },
+
+  // The rest of the tab web actor's safe non-DOM surface. These remain page.*
+  // so one familiar client owns the actor's entire web hand; each call still
+  // dispatches the named existing tool under the actor's pinned context.
+  fetch: {
+    tool: 'fetch_url',
+    toArgs: (a) => {
+      if (typeof a?.url !== 'string' || !a.url) throw new PageApiError('page.fetch(url): url must be a non-empty string');
+      return { ...plainOptions(a.options), url: a.url };
+    },
+    shape: passthrough,
+  },
+  readDocument: {
+    tool: 'read_doc',
+    toArgs: (a) => {
+      if (typeof a?.url !== 'string' || !a.url) throw new PageApiError('page.readDocument(url): url must be a non-empty string');
+      return { ...plainOptions(a.options), url: a.url };
+    },
+    shape: passthrough,
+  },
+  readCache: {
+    tool: 'read_web_cache',
+    toArgs: (a) => {
+      if (typeof a?.key !== 'string' || !a.key) throw new PageApiError('page.readCache(key): key must be a non-empty string');
+      return { ...plainOptions(a.options), key: a.key };
+    },
+    shape: passthrough,
+  },
+  readSiteClient: {
+    tool: 'site_client_read',
+    toArgs: (a) => {
+      if (typeof a?.origin !== 'string' || !a.origin) throw new PageApiError('page.readSiteClient(origin): origin must be a non-empty string');
+      return { origin: a.origin };
+    },
+    shape: passthrough,
+  },
+  writeSiteClient: {
+    tool: 'site_client_write',
+    toArgs: (a) => {
+      if (typeof a?.origin !== 'string' || !a.origin) throw new PageApiError('page.writeSiteClient(origin, definition): origin must be a non-empty string');
+      const definition = plainOptions(a?.definition);
+      return { ...definition, origin: a.origin };
+    },
+    shape: passthrough,
+  },
+  captureSite: {
+    tool: 'site_capture',
+    toArgs: (a) => {
+      if (a?.action !== 'start' && a?.action !== 'stop') throw new PageApiError("page.captureSite(action): action must be 'start' or 'stop'");
+      return { action: a.action };
+    },
+    shape: passthrough,
+  },
+  login: {
+    tool: 'login',
+    toArgs: (a) => ({ ...targetArgs(a?.target ?? a?.selector, 'page.login(target)'), ...plainOptions(a?.options) }),
+    shape: passthrough,
+  },
 };
 
 /** The page.* methods the actor may call (drives the worker stub + the prompt). */
-export const PAGE_API_METHODS = Object.freeze(Object.keys(PAGE_METHODS));
+export const PAGE_API_METHODS = Object.freeze(codeClientMethods('page'));
 
 /**
  * Translate a `page.<method>(args)` call into the peerd tool call to dispatch.
@@ -133,7 +247,8 @@ export const PAGE_API_METHODS = Object.freeze(Object.keys(PAGE_METHODS));
 export const pageCallToToolCall = (call) => {
   const method = call?.method;
   const spec = typeof method === 'string' ? PAGE_METHODS[method] : undefined;
-  if (!spec) throw new PageApiError(`unknown page method: ${String(method)}`);
+  const declared = typeof method === 'string' ? codeClientMethod('page', method) : null;
+  if (!spec || !declared || declared.tool !== spec.tool) throw new PageApiError(`unknown page method: ${String(method)}`);
   return { name: spec.tool, args: spec.toArgs(call?.args ?? {}) };
 };
 
@@ -162,7 +277,9 @@ export const shapePageResult = (method, toolResult) => {
   const spec = PAGE_METHODS[method];
   if (!spec) throw new PageApiError(`unknown page method: ${String(method)}`);
   if (!toolResult || toolResult.ok !== true) {
-    throw new PageApiError(toolResult?.error ?? `page.${method} failed`);
+    const code = toolResult?.error ?? `page.${method} failed`;
+    const content = typeof toolResult?.content === 'string' ? toolResult.content.trim() : '';
+    throw new PageApiError(content ? `${code}: ${content}` : code);
   }
   return spec.shape(parseContent(toolResult.content));
 };

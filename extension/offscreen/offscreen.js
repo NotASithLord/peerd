@@ -27,6 +27,8 @@ import { runJob, abortJob } from './job-runner.js';
 // The heap split: EVERY offscreen agent loop — ephemeral spawned reasoners AND
 // bound actors (VM/Notebook/App/web) — runs in a dedicated Worker via this ONE host.
 import { runActor, abortActor } from './actor-runner.js';
+import { bindActorChannel } from './actor-channel-host.js';
+import { ACTOR_CHANNEL_OFFER, ACTOR_CHANNEL_PROTOCOL } from '/shared/actor-channel-protocol.js';
 // PDF text extraction (the read_pdf runner tool): pdf.js needs a Worker, which
 // the SW can't host. Self-registers a 'pdf/extract' message handler.
 import './pdf-extract.js';
@@ -43,7 +45,7 @@ import './doc-extract.js';
 import './web-extract.js';
 import { extractMarkdownLocal } from './web-extract-core.js';
 import { initLocalModel, generateLocal, localModelStatus, probeWebgpu, teardownLocalModel } from './local-model.js';
-import { isTrustedSender } from '/shared/messaging.js';
+import { isServiceWorkerSender, isTrustedSender } from '/shared/messaging.js';
 // The always-on base network (S1b). Self-registers a dweb/base-host/* handler;
 // inert on store builds (DWEB_ENABLED false + loadDweb stub). The lobby
 // connection lives here so the network outlives any tab.
@@ -136,6 +138,24 @@ setInterval(() => {
 }, TICK_MS);
 
 connect();
+
+// Chrome actor jobs arrive over a standard MessageChannel transferred by the
+// service worker directly to this exact offscreen WindowClient. This avoids
+// runtime messaging and runtime Port fan-out to other extension frames.
+navigator.serviceWorker?.addEventListener('message', (event) => {
+  const source = /** @type {{ scriptURL?: string } | null} */ (event.source);
+  if (!event.isTrusted
+      || source?.scriptURL !== browser.runtime.getURL('background/service-worker.js')
+      || event.data?.type !== ACTOR_CHANNEL_OFFER
+      || event.data?.protocol !== ACTOR_CHANNEL_PROTOCOL
+      || typeof event.data?.channelId !== 'string'
+      || event.ports?.length !== 1) return;
+  bindActorChannel({
+    port: event.ports[0], channelId: event.data.channelId,
+    run: runActor, abort: abortActor,
+    workerUrl: browser.runtime.getURL('offscreen/actor-worker.js'),
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Voice: lazy-loaded Moonshine transcriber.
@@ -342,10 +362,10 @@ const onJobMessage = (msg, sender, sendResponse) => {
   // Fail closed for any non-first-party sender — this runs arbitrary code, so it
   // must match the SW dispatcher's posture (sender-trust.js). externally_connectable
   // is unset today, so this is defense-in-depth, not an active hole.
-  if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
+  if (!isServiceWorkerSender(sender)) { sendResponse({ ok: false, error: 'unauthorized-command-sender' }); return true; }
   runJob(
     {
-      code: msg.code, timeoutMs: msg.timeoutMs,
+      code: msg.code, timeoutMs: msg.timeoutMs, startedAt: msg.startedAt, deadlineAt: msg.deadlineAt,
       a2a: msg.a2a === true, actors: msg.actors === true,
       // DESIGN-19: the pinned origin for a site-client run (trusted job param, SW-set).
       siteFetch: typeof msg.siteFetch === 'string' ? msg.siteFetch : '',
@@ -364,6 +384,12 @@ const onJobMessage = (msg, sender, sendResponse) => {
     },
     {
       sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }),
+      // Run settlement is a control signal, separate from the capability relay
+      // lane: the SW aborts pending confirmations/tool work before job-runner
+      // releases that lane for reuse.
+      abortRun: (runId, ownerSessionId) => browser.runtime.sendMessage({
+        type: 'script-run/abort', runId, ownerSessionId,
+      }),
       // The bridged fetch's extract:'markdown' post-step — the local pipeline
       // adapter (see shared/fetch-extract.js for the why + posture).
       extractMarkdown: extractMarkdownLocal,
@@ -385,39 +411,12 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (onJobMessage));
  */
 const onJobAbort = (msg, sender, sendResponse) => {
   if (msg?.type !== 'job/abort') return undefined;
-  if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
+  if (!isServiceWorkerSender(sender)) { sendResponse({ ok: false, error: 'unauthorized-command-sender' }); return true; }
   if (typeof msg.runId === 'string' && msg.runId) abortJob(msg.runId, typeof msg.ownerSessionId === 'string' ? msg.ownerSessionId : undefined);
   sendResponse({ ok: true });
   return true;
 };
 browser.runtime.onMessage.addListener(/** @type {any} */ (onJobAbort));
-
-// --- the heap split: every offscreen agent loop (spawned reasoners + bound actors) ---
-// Runs a reasoning (tools:[]) OR bound-actor (VM/Notebook/App/web) loop in a dedicated
-// Worker (its own heap), relaying its model call — AND, for a tool-bearing actor, every
-// tool call — back to the SW (which holds the key and pins + gates + dispatches). Same
-// first-party trust posture as onJobMessage: first-party senders only.
-/**
- * @param {any} msg
- * @param {import('webextension-polyfill').Runtime.MessageSender} sender
- * @param {(response: any) => void} sendResponse
- */
-const onActorMessage = (msg, sender, sendResponse) => {
-  if (msg?.type !== 'actor/run' && msg?.type !== 'actor/abort') return undefined;
-  if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
-  if (msg.type === 'actor/abort') { abortActor(msg.runId); sendResponse({ ok: true }); return true; }
-  runActor(
-    msg.job ?? {},
-    {
-      workerUrl: browser.runtime.getURL('offscreen/actor-worker.js'),
-      sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }),
-    },
-  )
-    .then((result) => sendResponse(result))
-    .catch((e) => sendResponse({ ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }));
-  return true;
-};
-browser.runtime.onMessage.addListener(/** @type {any} */ (onActorMessage));
 
 // Local WebGPU inference (FEATURE-LOCAL-WEBGPU B). The SW's local-webgpu adapter
 // drives this: status/probe/init/teardown are request→response; generate STREAMS

@@ -30,15 +30,22 @@ describe('makeAsyncActors', () => {
       reenter: async (o: any) => { reenters.push(o); },
     }));
 
-    const handle = await as.spawnActorAsync({ task: 'research bromantane', parentSessionId: 'parent' });
+    const handle = await as.spawnActorAsync({
+      task: 'research bromantane', parentSessionId: 'parent', parentToolUseId: 'spawn-tool-1',
+    });
     expect(handle.ok).toBe(true);
     expect(handle.taskId).toBe('as-1');
+    expect(handle.content).toContain('(session c1, async)');
     expect(handle.content).toContain('Do NOT wait'); // the anti-poll instruction baked into the handle
 
     await flush();
     expect(reenters).toHaveLength(1);
     expect(reenters[0].sessionId).toBe('parent');
     expect(reenters[0].synthetic).toBe(true);
+    expect(reenters[0].actorReply).toMatchObject({
+      kind: 'spawned', instanceId: 'spawned', parentToolUseId: 'spawn-tool-1',
+      parentToolUseIds: ['spawn-tool-1'],
+    });
     expect(reenters[0].userText).toContain('BROMANTANE FACTS');
     expect(reenters[0].userText).toContain('[UNTRUSTED]'); // child result is wrapped
   });
@@ -55,6 +62,57 @@ describe('makeAsyncActors', () => {
     await as.spawnActorAsync({ task: 'long', parentSessionId: 'parent' });
     await flush();
     expect(reenters).toHaveLength(0); // no synthetic wake after a user Stop
+  });
+
+  test('a post-start Worker failure wakes the parent with unknown-outcome guidance', async () => {
+    const reenters: any[] = [];
+    const as = makeAsyncActors(baseDeps({
+      spawnActor: async () => ({
+        result: 'The actor worker crashed. Its outcome is unknown and must not be retried automatically.',
+        sessionId: 'c1', stopped: true, executionFailed: true, outcomeKnown: false,
+      }),
+      reenter: async (o: any) => { reenters.push(o); },
+    }));
+    await as.spawnActorAsync({ task: 'write once', parentSessionId: 'parent' });
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(reenters[0].userText).toContain('execution failed after work began');
+    expect(reenters[0].userText).toContain('outcome unknown');
+    expect(reenters[0].userText).toContain('do not retry automatically');
+    expect(reenters[0].userText).toContain('[UNTRUSTED]');
+  });
+
+  test('a post-start persistence exception wakes the parent as outcome unknown', async () => {
+    const reenters: any[] = [];
+    const failure = Object.assign(new Error('transcript write failed'), {
+      executionFailed: true, performed: true, outcomeKnown: false, retryable: false,
+    });
+    const as = makeAsyncActors(baseDeps({
+      spawnActor: async () => { throw failure; },
+      reenter: async (o: any) => { reenters.push(o); },
+    }));
+    await as.spawnActorAsync({ task: 'write once', parentSessionId: 'parent' });
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(reenters[0].userText).toContain('outcome is unknown');
+    expect(reenters[0].userText).toContain('Do not retry automatically');
+    expect(reenters[0].userText).not.toContain('has finished');
+  });
+
+  test('a graceful pre-tool failure is not described as an unknown outcome', async () => {
+    const reenters: any[] = [];
+    const as = makeAsyncActors(baseDeps({
+      spawnActor: async () => ({
+        result: 'The actor model request was not run.', sessionId: 'c1',
+        stopped: true, executionFailed: true, outcomeKnown: true,
+      }),
+      reenter: async (o: any) => { reenters.push(o); },
+    }));
+    await as.spawnActorAsync({ task: 'write once', parentSessionId: 'parent' });
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(reenters[0].userText).toContain('failed before target work ran');
+    expect(reenters[0].userText).not.toContain('outcome unknown');
   });
 
   // A TIMEOUT is different from a user Stop — the parent is still working and
@@ -89,6 +147,23 @@ describe('makeAsyncActors', () => {
     expect(calls.length).toBeGreaterThanOrEqual(2);
   });
 
+  test('task snapshots gain the child id + server-resolved grants when the actor starts', async () => {
+    let finish!: (value: any) => void;
+    const as = makeAsyncActors(baseDeps({
+      spawnActor: async (req: any) => {
+        req.onEvent({ type: 'actor-start', sessionId: 'c1', grantedTools: ['script', 'message_actor'] });
+        return new Promise((resolve) => { finish = resolve; });
+      },
+    }));
+    await as.spawnActorAsync({ task: 'T', parentSessionId: 'parent' });
+    const live = as.actorTasks('parent')[0];
+    expect(live).toMatchObject({
+      status: 'running', childSessionId: 'c1', grantedTools: ['script', 'message_actor'],
+    });
+    finish({ result: 'ok', sessionId: 'c1' });
+    await flush();
+  });
+
   // THE BUG: a wake turn whose model re-spawns → its child wakes → re-spawn …
   // unbounded. The rate cap must stop the burst instead of looping forever.
   test('a re-spawning wake turn is bounded by the rate cap (runaway guard)', async () => {
@@ -119,7 +194,10 @@ describe('makeAsyncActors', () => {
     // children never settle → they stay "running" and fill the outstanding cap
     const as = makeAsyncActors(baseDeps({
       caps: { outstanding: 4, rateCap: 100 },
-      spawnActor: () => new Promise(() => {}), // never resolves
+      spawnActor: (req: any) => {
+        req.onEvent({ type: 'actor-start', sessionId: `child-${req.task}`, grantedTools: [] });
+        return new Promise(() => {});
+      }, // never resolves after allocation
     }));
     for (let i = 0; i < 4; i++) {
       expect((await as.spawnActorAsync({ task: `t${i}`, parentSessionId: 'parent' })).ok).toBe(true);
@@ -138,8 +216,8 @@ describe('makeAsyncActors', () => {
       reenter: async (o: any) => { reenters.push(o); },
     }));
 
-    await as.spawnActorAsync({ task: 'A', parentSessionId: 'parent' });
-    await as.spawnActorAsync({ task: 'B', parentSessionId: 'parent' });
+    await as.spawnActorAsync({ task: 'A', parentSessionId: 'parent', parentToolUseId: 'spawn-a' });
+    await as.spawnActorAsync({ task: 'B', parentSessionId: 'parent', parentToolUseId: 'spawn-b' });
     await flush();
     expect(reenters).toHaveLength(0);   // nothing fires while the parent turn is busy
 
@@ -148,11 +226,111 @@ describe('makeAsyncActors', () => {
     expect(reenters).toHaveLength(1);    // ONE coalesced wake…
     expect(reenters[0].userText).toContain('R:A');
     expect(reenters[0].userText).toContain('R:B');
+    expect(reenters[0].actorReply.parentToolUseIds).toEqual(['spawn-a', 'spawn-b']);
 
     // a redelivered drain finds nothing un-reintegrated → no second wake
     await as.drainReintegration('parent');
     await flush();
     expect(reenters).toHaveLength(1);
+  });
+
+  test('claims the idle parent before setup so a human turn cannot be stolen', async () => {
+    const slots = makeTurnSlots();
+    let resolveActive: ((id: string) => void) | undefined;
+    const active = new Promise<string>((resolve) => { resolveActive = resolve; });
+    let finishReentry: (() => void) | undefined;
+    const heldReentry = new Promise<void>((resolve) => { finishReentry = resolve; });
+    const reenters: any[] = [];
+    const as = makeAsyncActors(baseDeps({
+      turnSlots: slots,
+      getActiveSessionId: () => active,
+      reenter: async (opts: any) => {
+        reenters.push(opts);
+        // Model the turn driver's historical fallback: without a threaded
+        // lease it would claim here, after setup, and abort a newer user turn.
+        const lease = opts.turnLease ?? slots.claim(opts.sessionId);
+        await heldReentry;
+        lease.release();
+      },
+    }));
+
+    await as.spawnActorAsync({
+      task: 'A', parentSessionId: 'parent', parentToolUseId: 'spawn-a',
+    });
+    await flush();
+    expect(reenters).toHaveLength(1); // active-session lookup is still pending
+    expect(reenters[0].turnLease).toBeDefined();
+
+    const actorLease = reenters[0].turnLease;
+    const humanLease = slots.claim('parent');
+    expect(actorLease.controller.signal.aborted).toBe(true);
+    expect(humanLease.controller.signal.aborted).toBe(false);
+
+    resolveActive?.('parent');
+    finishReentry?.();
+    await flush();
+    humanLease.release();
+  });
+
+  test('a finished child queued behind its parent cannot wake after Stop', async () => {
+    const slots = makeTurnSlots({ forceReleaseMs: 1 });
+    const liveParent = slots.claim('parent');
+    const reenters: any[] = [];
+    const as = makeAsyncActors(baseDeps({
+      turnSlots: slots,
+      reenter: async (opts: any) => { reenters.push(opts); },
+    }));
+
+    await as.spawnActorAsync({
+      task: 'done just before Stop', parentSessionId: 'parent', parentToolUseId: 'spawn-a',
+    });
+    await flush();
+    expect(reenters).toHaveLength(0);
+
+    expect(slots.stop('parent')).toBe(true);
+    liveParent.release();
+    await flush();
+    expect(reenters).toHaveLength(0);
+    expect(as.actorTasks('parent')[0].status).toBe('cancelled');
+  });
+
+  test('Stop during child allocation cancels it as soon as actor-start reveals its id', async () => {
+    const slots = makeTurnSlots();
+    const parentLease = slots.claim('parent');
+    const stoppedSubtrees: string[] = [];
+    const reenters: any[] = [];
+    let childLease: ReturnType<typeof slots.claim> | undefined;
+    let publishStart!: () => void;
+    let finishChild!: (value: any) => void;
+    const as = makeAsyncActors(baseDeps({
+      turnSlots: slots,
+      stopSubtree: (sessionId: string) => { stoppedSubtrees.push(sessionId); return [sessionId]; },
+      spawnActor: (req: any) => new Promise((resolve) => {
+        publishStart = () => {
+          childLease = slots.claim('child-delayed');
+          req.onEvent({ type: 'actor-start', sessionId: 'child-delayed', grantedTools: [] });
+        };
+        finishChild = resolve;
+      }),
+      reenter: async (opts: any) => { reenters.push(opts); },
+    }));
+
+    const spawning = as.spawnActorAsync({ task: 'delayed allocation', parentSessionId: 'parent' });
+    await Promise.resolve();
+    expect(slots.stop('parent')).toBe(true);
+    publishStart();
+    const handle = await spawning;
+
+    expect(handle.ok).toBe(true);
+    expect(stoppedSubtrees).toEqual(['child-delayed']);
+    expect(childLease?.controller.signal.aborted).toBe(true);
+    expect(as.actorTasks('parent')[0].status).toBe('cancelled');
+
+    finishChild({ result: 'must not return', sessionId: 'child-delayed', stopped: true });
+    await flush();
+    expect(reenters).toHaveLength(0);
+    childLease?.release();
+    parentLease.release();
   });
 
   test('vault-locked defers the wake (notify only); onVaultUnlock drains it', async () => {
@@ -180,7 +358,10 @@ describe('makeAsyncActors', () => {
   test('cancel drops the result (no wake) and frees the slot', async () => {
     const reenters: any[] = [];
     const as = makeAsyncActors(baseDeps({
-      spawnActor: () => new Promise(() => {}), // never settles on its own
+      spawnActor: (req: any) => {
+        req.onEvent({ type: 'actor-start', sessionId: 'child-cancel', grantedTools: [] });
+        return new Promise(() => {});
+      }, // never settles on its own
       reenter: async (o: any) => { reenters.push(o); },
     }));
     const h = await as.spawnActorAsync({ task: 'cancel me', parentSessionId: 'parent' });

@@ -1,0 +1,38 @@
+Rollup browser build
+====================
+
+Upstream:   https://github.com/rollup/rollup
+Package:    https://www.npmjs.com/package/@rollup/browser
+Version:    4.62.4
+Source URL: https://registry.npmjs.org/@rollup/browser/-/browser-4.62.4.tgz
+License:    MIT (see LICENSE.md)
+
+Why vendored
+------------
+Firefox extension module Workers cannot load generated child module URLs.
+The Notebook host uses Rollup's browser API with a virtual-only loader to link
+an already authorized static graph into one worker entry. This preserves ESM
+semantics without eval, a runtime npm dependency, or a build step.
+
+Files committed
+---------------
+  rollup.browser.js      dist/es/rollup.browser.js from the published package
+  bindings_wasm_bg.wasm dist/es/bindings_wasm_bg.wasm from the package
+  LICENSE.md             LICENSE.md from the package
+
+SHA-256
+-------
+  rollup.browser.js      00c7e102025e8ae11193e9f0f30eb6da31a1fcd34350aae94429833d4f4ea7c0
+  bindings_wasm_bg.wasm ef41a5a1868f6268a10ce5b1ca4eb92b47683a2375b86c675badf0112a165796
+  LICENSE.md             8d218a9c9950dd89c1aede5956f7ab98b45cc41c876a88bbc5df88174fd8a96f
+
+Modification
+------------
+None.
+
+Update procedure
+----------------
+1. Download the published package for the new version.
+2. Copy the three files above without modification.
+3. Update the version and hashes above.
+4. Run `bun packaging/check-vendor.ts --write`.

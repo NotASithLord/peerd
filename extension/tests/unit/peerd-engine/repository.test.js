@@ -6,7 +6,7 @@
 import { describe, it, expect } from '../../framework.js';
 import { createRepositoryService, opfsHelpers } from '/peerd-engine/index.js';
 
-describe('peerd-engine repository — real OPFS + vendored Git', () => {
+describe('peerd-engine repository: real OPFS + vendored Git', () => {
   it('runs a practical local Pod Git workflow against the Pod OPFS tree', async () => {
     const id = `pod-repository-test-${Date.now().toString(36)}`;
     const ref = { kind: 'pod', id };

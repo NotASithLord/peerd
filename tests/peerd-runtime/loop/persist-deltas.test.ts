@@ -5,6 +5,9 @@
 
 import { describe, test, expect } from 'bun:test';
 import { runUserTurn } from '../../../extension/peerd-runtime/loop/agent-loop.js';
+import {
+  ActorCredentialBoundaryError, ACTOR_CREDENTIAL_BOUNDARY_FAILURE,
+} from '../../../extension/peerd-runtime/errors.js';
 
 const makeStore = () => {
   const sessions = new Map<string, any>();
@@ -78,5 +81,24 @@ describe('runUserTurn persistDeltas', () => {
     expect(contentWrites[0].patch.streaming).toBe(false);
     // The live event stream is unaffected — callers still see every delta.
     expect(evs.filter((e) => e.type === 'delta').length).toBe(3);
+  });
+
+  test('maps a credential-boundary refusal before the production loop erases its type', async () => {
+    const store = makeStore();
+    store.seed('s1');
+    const events = await drain(runUserTurn(baseCtx(store, {
+      callModel: () => ({
+        async *[Symbol.asyncIterator]() {
+          throw new ActorCredentialBoundaryError('secret');
+        },
+      }),
+    })));
+
+    expect(events.filter((event) => event.type === 'error')).toEqual([
+      expect.objectContaining({ error: ACTOR_CREDENTIAL_BOUNDARY_FAILURE }),
+    ]);
+    const session = await store.get('s1');
+    expect(session.messages.at(-1)?.error).toBe(ACTOR_CREDENTIAL_BOUNDARY_FAILURE);
+    expect(JSON.stringify(session)).not.toContain('refused direct secret access');
   });
 });

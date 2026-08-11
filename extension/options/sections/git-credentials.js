@@ -48,7 +48,7 @@ export const GitCredentialsSection = {
         const r = await send({ type: 'git-cred/set', host, token });
         if (r?.ok) {
           ui.hostInput = ''; ui.tokenInput = '';
-          ui.msg = { ok: true, text: `Saved for ${r.host} — encrypted in the vault.` };
+          ui.msg = { ok: true, text: `Saved for ${r.host}: encrypted in the vault.` };
           const lr = await send({ type: 'git-cred/list' });
           if (lr?.ok) ui.hosts = lr.hosts;
         } else {

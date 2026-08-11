@@ -22,6 +22,17 @@
  *   inside the tool_result content on Anthropic, and as a follow-on user image
  *   message on OpenAI (its tool role takes string content only). Never persisted.
  * @property {import('/shared/tool-types.js').ToolMeta} [meta]   dispatcher meta — UI uses this
+ * @property {string} [actorDeliveryId]            internal mailbox correlation;
+ *   retained in local history for post-commit acknowledgement and ignored by
+ *   provider formatters
+ * @property {string[]} [actorDeliveryIds]         internal mailbox correlations
+ *   for a tool result that consumed multiple replies; ignored by providers
+ * @property {string} [actorCorrelationId]         host-only non-ack correlation;
+ *   ignored by providers
+ * @property {boolean} [actorTerminal]             host-stamped completion state
+ * @property {boolean} [actorOutcomeKnown]         host-stamped outcome certainty
+ * @property {boolean} [actorPerformed]            host-stamped execution state
+ * @property {boolean} [actorAborted]              host-stamped user cancellation state
  */
 
 /**
@@ -53,7 +64,7 @@
  *                                               trim drop-summary, loop/trim.js); consumers
  *                                               that must skip non-human content check it
  *                                               (e.g. memory/auto-memory.js)
- * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean }} [actorReply]
+ * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, aborted?: boolean, actorDeliveryId?: string, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }} [actorReply]
  *                                               set on an actor's reply-wake (a synthetic turn
  *                                               the chat SHOWS, attributed to the actor —
  *                                               unlike the hidden plumbing synthetics)

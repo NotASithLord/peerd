@@ -40,6 +40,7 @@ const HAVE_LIVE_SW = typeof globalThis.chrome?.runtime?.sendMessage === 'functio
  * @property {object} settings
  * @property {{ hasKey: boolean }} providers
  * @property {{ permission: { mode: string, confirmActions: boolean }, messages?: unknown }} session
+ * @property {{ actorExecution: { status: string, host: string|null, reason: string|null, retryable: boolean } }} capabilities
  *
  * @typedef {{ ok?: boolean, state: StateSnapshot }} StateReply
  */
@@ -114,6 +115,15 @@ describe('background/state-get — one-shot snapshot route', () => {
     const { state } = await getState();
     expect(typeof state.session.permission.mode).toBe('string');
     expect(typeof state.session.permission.confirmActions).toBe('boolean');
+  });
+
+  it('reports one actor execution capability in both locked and unlocked state', async () => {
+    const { state } = await getState();
+    expect(['available', 'unsupported', 'temporarily_unavailable'].includes(state.capabilities.actorExecution.status)).toBe(true);
+    expect(typeof state.capabilities.actorExecution.retryable).toBe('boolean');
+    if (state.capabilities.actorExecution.status === 'available') {
+      expect(['offscreen-document-worker', 'background-page-worker'].includes(state.capabilities.actorExecution.host ?? '')).toBe(true);
+    }
   });
 
   it('carries no key material anywhere in the snapshot', async () => {

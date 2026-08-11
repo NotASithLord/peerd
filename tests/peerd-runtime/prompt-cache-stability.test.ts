@@ -83,6 +83,14 @@ describe('buildTemporalContext — carries the volatile bytes, pure', () => {
     expect(buildTemporalContext({})).toBe('');
     expect(buildTemporalContext({ temporalBlock: '', activeTab: null })).toBe('');
   });
+
+  test('carries only a safe policy marker for a protected foreground tab', () => {
+    const out = buildTemporalContext({ protectedTab: 'private_network' });
+    expect(out).toContain('<protected_tab>');
+    expect(out).toContain('private-network page');
+    expect(out).not.toContain('192.168');
+    expect(out).toContain('Do not claim to read, summarize');
+  });
 });
 
 describe('to-anthropic — breakpoints land on system + last tool, not the context message', () => {

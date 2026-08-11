@@ -7,6 +7,10 @@
 
 import { describe, test, expect, mock } from 'bun:test';
 import { makePageCallHandler, resolvePageTab } from '../../extension/peerd-runtime/actor/page-call-handler.js';
+import {
+  browserTargetRefusalResult,
+  classifyBrowserAutomationTarget,
+} from '../../extension/peerd-runtime/tools/browser-automation-policy.js';
 
 describe('resolvePageTab — first-tab adoption for the code actor', () => {
   test('an owned tab dispatches straight to it', () => {
@@ -68,6 +72,75 @@ describe('page-call handler — gated dispatch on the owned tab', () => {
 });
 
 describe('page-call handler — failures surface as the worker sees them', () => {
+  test('a terminal inner policy result survives the page bridge', async () => {
+    const { handle } = harness({
+      ok: false, error: 'auth_waiting_for_user', content: 'Finish signing in.',
+      endTurn: true, outcomeKind: 'pre-effect-failure',
+    });
+    expect(await handle({ method: 'snapshot', sessionId: 's1', tabId: 42 })).toEqual({
+      ok: false,
+      error: 'auth_waiting_for_user: Finish signing in.',
+      endTurn: true,
+      endTurnContent: 'Finish signing in.',
+      endTurnOutcomeKind: 'pre-effect-failure',
+    });
+  });
+
+  test('a pre-aborted run never builds context or dispatches', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { handle, buildActorContext, dispatchToolCall } = harness();
+    const out = await handle({
+      method: 'click', args: { selector: '#x' }, sessionId: 's1', tabId: 1,
+      signal: controller.signal,
+    });
+    expect(out).toEqual({ ok: false, error: 'page_call_aborted' });
+    expect(buildActorContext).not.toHaveBeenCalled();
+    expect(dispatchToolCall).not.toHaveBeenCalled();
+  });
+
+  test('Stop while context is resolving prevents the gated dispatch', async () => {
+    let finishContext = (_value: any) => {};
+    const context = new Promise((resolve) => { finishContext = resolve; });
+    const dispatchToolCall = mock(async () => ({ ok: true, content: '{}' }));
+    const handle = makePageCallHandler({
+      dispatchToolCall,
+      buildActorContext: async () => context,
+    });
+    const controller = new AbortController();
+    const pending = handle({
+      method: 'click', args: { selector: '#x' }, sessionId: 's1', tabId: 1,
+      signal: controller.signal,
+    });
+    controller.abort();
+    finishContext(ACTOR_CTX);
+    expect(await pending).toEqual({ ok: false, error: 'page_call_aborted' });
+    expect(dispatchToolCall).not.toHaveBeenCalled();
+  });
+
+  test('Stop during dispatch is threaded into the gated context and suppresses its result', async () => {
+    let finishDispatch = (_value: any) => {};
+    const dispatched = new Promise((resolve) => { finishDispatch = resolve; });
+    let seenContext: any = null;
+    const handle = makePageCallHandler({
+      buildActorContext: async () => ACTOR_CTX,
+      dispatchToolCall: async (_call, ctx) => {
+        seenContext = ctx;
+        return await dispatched as any;
+      },
+    });
+    const controller = new AbortController();
+    const pending = handle({
+      method: 'click', args: { selector: '#x' }, sessionId: 's1', tabId: 1,
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+    controller.abort();
+    finishDispatch({ ok: true, content: '{"clicked":true}' });
+    expect(await pending).toEqual({ ok: false, error: 'page_call_aborted' });
+    expect(seenContext.abortSignal).toBe(controller.signal);
+  });
+
   test('an unknown method never dispatches', async () => {
     const { handle, dispatchToolCall } = harness();
     const out = await handle({ method: 'evaluate', args: {}, sessionId: 's1', tabId: 42 });
@@ -80,6 +153,58 @@ describe('page-call handler — failures surface as the worker sees them', () =>
     const { handle } = harness({ ok: false, error: 'gate_blocked:origin:denylisted host evil.test' });
     const out = await handle({ method: 'goto', args: { url: 'https://evil.test' }, sessionId: 's1', tabId: 42 });
     expect(out).toEqual({ ok: false, error: 'gate_blocked:origin:denylisted host evil.test' });
+  });
+
+  test('a failed page call keeps host child-policy custody outside the worker error', async () => {
+    const policy = {
+      reason: 'child_navigation_failed', outcome: 'unverified', child: 'uncontained', retryable: false,
+    };
+    const { handle } = harness({
+      ok: false,
+      error: 'click failed',
+      structured: { browserPolicy: policy },
+    });
+    const out = await handle({ method: 'click', args: { selector: '#x' }, sessionId: 's1', tabId: 42 });
+    expect(out).toEqual({ ok: false, error: 'click failed', browserPolicies: [policy] });
+  });
+
+  test('page.goto preserves the safe browser-policy refusal prefix and copy', async () => {
+    const verdict = classifyBrowserAutomationTarget(
+      'http://user:pass@127.0.0.1/private?q=token');
+    if (verdict.allowed) throw new Error('expected browser target to be refused');
+    const { handle } = harness(browserTargetRefusalResult(verdict));
+    const out = await handle({
+      method: 'goto',
+      args: { url: 'http://user:pass@127.0.0.1/private?q=token' },
+      sessionId: 's1',
+      tabId: 42,
+    });
+    expect(out.ok).toBe(false);
+    if (out.ok) throw new Error('expected page.goto to reject');
+    expect(out.error).toStartWith('browser_private_network_blocked:');
+    expect(out.error).toContain('No browser action was run');
+    expect(out.error.match(/browser_private_network_blocked/g)).toHaveLength(2);
+    expect(out.error).not.toContain('/private');
+    expect(out.error).not.toContain('user:pass');
+    expect(out.error).not.toContain('q=token');
+  });
+
+  test('page.goto preserves committed refusal cleanup truth once', async () => {
+    const verdict = classifyBrowserAutomationTarget('http://127.0.0.1/private', {
+      stage: 'committed_origin',
+    });
+    if (verdict.allowed) throw new Error('expected browser target to be refused');
+    const result = browserTargetRefusalResult(verdict, { neutralized: false });
+    const { handle } = harness(result);
+    const out = await handle({
+      method: 'goto', args: { url: 'https://public.test/redirect' }, sessionId: 's1', tabId: 42,
+    });
+    expect(out.ok).toBe(false);
+    if (out.ok) throw new Error('expected page.goto to reject');
+    expect(out.error).toContain('Navigation loaded a localhost');
+    expect(out.error).toContain('"stage":"committed_origin"');
+    expect(out.error).toContain('browser_private_network_blocked');
+    expect(out.error).not.toContain('/private');
   });
 
   test('a thrown dispatcher is contained, not leaked', async () => {
@@ -98,6 +223,23 @@ describe('page-call handler — failures surface as the worker sees them', () =>
     expect(out.ok).toBe(false);
     expect((out as any).error).toMatch(/page_context_unavailable: no such actor/);
     expect(dispatchToolCall).not.toHaveBeenCalled();
+  });
+
+  test('vision bytes stay separate from the shaped page value and are bounded to one image', async () => {
+    const { handle } = harness({
+      ok: true,
+      content: JSON.stringify({ viewed: true }),
+      images: [
+        { data: 'old', mediaType: 'image/png' },
+        { data: 'latest', mediaType: 'image/png' },
+      ],
+    });
+    const out = await handle({ method: 'view', args: {}, sessionId: 's1', tabId: 1 });
+    expect(out).toEqual({
+      ok: true,
+      value: { viewed: true },
+      images: [{ data: 'latest', mediaType: 'image/png' }],
+    });
   });
 });
 

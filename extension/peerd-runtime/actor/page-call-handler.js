@@ -18,8 +18,8 @@
 import { pageCallToToolCall, shapePageResult } from './page-api.js';
 
 /**
- * @typedef {{ ok: true, value: any } | { ok: false, error: string }} PageCallOutcome
- * @typedef {{ ok?: boolean, error?: string, content?: string }} ToolResult
+ * @typedef {{ ok: true, value: any, images?: Array<{ data: string, mediaType: string }>, browserPolicies?: any[], endTurn?: boolean, endTurnContent?: string, endTurnOutcomeKind?: string } | { ok: false, error: string, browserPolicies?: any[], endTurn?: boolean, endTurnContent?: string, endTurnOutcomeKind?: string }} PageCallOutcome
+ * @typedef {{ ok?: boolean, error?: string, content?: string, endTurn?: boolean, outcomeKind?: string, images?: Array<{ data: string, mediaType: string }>, structured?: Record<string, any> }} ToolResult
  */
 
 /**
@@ -38,11 +38,17 @@ import { pageCallToToolCall, shapePageResult } from './page-api.js';
  *
  * @param {number | null | undefined} ownedTabId  the actor's currently-bound tab, if any
  * @param {string} method  the page.* method
- * @returns {{ action: 'dispatch', tabId: number } | { action: 'adopt' } | { action: 'refuse', error: string }}
+ * @returns {{ action: 'dispatch', tabId?: number } | { action: 'adopt' } | { action: 'refuse', error: string }}
  */
 export const resolvePageTab = (ownedTabId, method) => {
   if (typeof ownedTabId === 'number') return { action: 'dispatch', tabId: ownedTabId };
   if (method === 'goto') return { action: 'adopt' };
+  // Tab-free web operations are valid before the actor renders anything. They
+  // still run in the same actor ctx (origin/cache ownership is session-bound),
+  // but there is no tab id to pin onto their tool args.
+  if (['fetch', 'readDocument', 'readCache', 'readSiteClient', 'writeSiteClient'].includes(method)) {
+    return { action: 'dispatch' };
+  }
   return {
     action: 'refuse',
     error: `page.${method}: no page open yet — call page.goto(url) first to open your tab.`,
@@ -52,14 +58,15 @@ export const resolvePageTab = (ownedTabId, method) => {
 /**
  * @param {{
  *   dispatchToolCall: (call: { name: string, args: object, id?: string }, ctx: any) => Promise<ToolResult>,
- *   buildActorContext: (binding: { sessionId: string, tabId: number }) => any,
+ *   buildActorContext: (binding: { sessionId: string, tabId?: number }) => any,
  * }} deps
  *   - dispatchToolCall: the gated dispatcher (gates + hooks + audit).
  *   - buildActorContext: builds the ToolContext for THIS actor's session, scoped
  *     to its owned tab. May be async.
- * @returns {(req: { method: string, args?: object, sessionId: string, tabId: number, rid?: number | string }) => Promise<PageCallOutcome>}
+ * @returns {(req: { method: string, args?: object, sessionId: string, tabId?: number, rid?: number | string, signal?: AbortSignal }) => Promise<PageCallOutcome>}
  */
 export const makePageCallHandler = ({ dispatchToolCall, buildActorContext }) => async (req) => {
+  if (req.signal?.aborted) return { ok: false, error: 'page_call_aborted' };
   // Translate first — a bad method or malformed args is the worker code's
   // mistake; surface it as a rejection and NEVER dispatch anything.
   let toolCall;
@@ -76,6 +83,8 @@ export const makePageCallHandler = ({ dispatchToolCall, buildActorContext }) => 
   } catch (e) {
     return { ok: false, error: `page_context_unavailable: ${errMessage(e)}` };
   }
+  if (req.signal?.aborted) return { ok: false, error: 'page_call_aborted' };
+  if (req.signal) ctx = { ...ctx, abortSignal: req.signal };
 
   // Pin the owned tab onto the tool args (security invariant above). The DOM
   // tools all accept tabId; ones that don't ignore the extra key.
@@ -88,25 +97,48 @@ export const makePageCallHandler = ({ dispatchToolCall, buildActorContext }) => 
   // re-drives them, so a collision-free random id is the correct identity.
   const call = {
     name: toolCall.name,
-    args: { ...toolCall.args, tabId: req.tabId },
+    args: { ...toolCall.args, ...(typeof req.tabId === 'number' ? { tabId: req.tabId } : {}) },
     id: `page-${req.rid ?? ''}-${crypto.randomUUID()}`,
   };
 
   /** @type {ToolResult} */
   let result;
   try {
+    if (req.signal?.aborted) return { ok: false, error: 'page_call_aborted' };
     result = await dispatchToolCall(call, ctx);
   } catch (e) {
     return { ok: false, error: `page_dispatch_failed: ${errMessage(e)}` };
   }
+  if (req.signal?.aborted) return { ok: false, error: 'page_call_aborted' };
+
+  const structured = result.structured && typeof result.structured === 'object'
+    ? result.structured
+    : {};
+  const browserPolicies = Array.isArray(structured.browserPolicies)
+    ? structured.browserPolicies
+    : structured.browserPolicy ? [structured.browserPolicy] : [];
+  const policyFields = browserPolicies.length ? { browserPolicies } : {};
+  const terminalFields = result.endTurn === true
+    ? {
+      endTurn: true,
+      endTurnContent: typeof result.content === 'string' ? result.content : '',
+      ...(typeof result.outcomeKind === 'string' ? { endTurnOutcomeKind: result.outcomeKind } : {}),
+    }
+    : {};
 
   // Shape the result. A gated failure (denylist / confirm decline / count
   // mismatch) lands here as a thrown PageApiError → the worker's awaited page.*
   // call rejects, exactly like a real Playwright error.
   try {
-    return { ok: true, value: shapePageResult(req.method, result) };
+    return {
+      ok: true,
+      value: shapePageResult(req.method, result),
+      ...(Array.isArray(result.images) && result.images.length ? { images: result.images.slice(-1) } : {}),
+      ...policyFields,
+      ...terminalFields,
+    };
   } catch (e) {
-    return { ok: false, error: errMessage(e) };
+    return { ok: false, error: errMessage(e), ...policyFields, ...terminalFields };
   }
 };
 

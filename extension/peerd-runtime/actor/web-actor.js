@@ -12,6 +12,27 @@
 // See the spec: docs/specs/DESIGN-17-actor-agents.md §"The web actor".
 
 import { wrapUntrusted } from '../tools/prompt-wrap.js';
+import { classifyBrowserAutomationTarget } from '../tools/browser-automation-policy.js';
+import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
+
+/**
+ * Reduce a live actor tab URL to provenance that is safe to send to a model.
+ * Restricted tabs contribute no location at all; allowed tabs contribute only
+ * their origin, never a page-controlled path, query, fragment, or credentials.
+ *
+ * @param {string | null | undefined} tabUrl
+ * @param {readonly string[]} [denylist]
+ * @returns {string | undefined}
+ */
+export const safeWebActorSummaryOrigin = (tabUrl, denylist = []) => {
+  const target = classifyBrowserAutomationTarget(tabUrl);
+  if (!target.allowed) return undefined;
+  let hostname = '';
+  try { hostname = new URL(/** @type {string} */ (tabUrl)).hostname; }
+  catch { return undefined; }
+  if (findDenylistMatch(hostname, denylist)) return undefined;
+  return target.origin;
+};
 
 // The web actor is STATEFUL (it accumulates a rolling progress summary), but
 // its accumulation is 100% UNTRUSTED-PROVENANCE (every byte derives from page
@@ -23,13 +44,17 @@ import { wrapUntrusted } from '../tools/prompt-wrap.js';
 /**
  * Wrap the web actor's own rolling summary as untrusted content for re-insertion.
  * @param {string} summary
- * @param {{ tabUrl?: string, now?: () => number }} [opts]
+ * @param {{ tabOrigin?: string, now?: () => number }} [opts]
  * @returns {string}
  */
 export const fenceWebActorSummary = (summary, opts = {}) => {
-  const { tabUrl, now = Date.now } = opts;
+  const { tabOrigin, now = Date.now } = opts;
+  // why validate again: the SW normally supplies an already-sanitized origin,
+  // but the fence is the final model boundary. A future caller passing a raw
+  // private URL must still fail closed, and a public path must still be erased.
+  const safeOrigin = safeWebActorSummaryOrigin(tabOrigin);
   return wrapUntrusted({
-    origin: tabUrl ? `web-actor(${tabUrl})` : 'web-actor',
+    origin: safeOrigin ? `web-actor(${safeOrigin})` : 'web-actor',
     tool: 'rolling_summary',
     body: typeof summary === 'string' ? summary : '',
     retrievedAt: new Date(now()).toISOString(),
@@ -130,10 +155,79 @@ export const makeWebActorRegistry = () => {
   };
 };
 
+/**
+ * Retire every chat address that points at a stopped roaming web actor.
+ *
+ * A roaming actor has consumed page-controlled text. After an origin-policy
+ * stop, keeping its chat registry entry would let the next `to:"web"` request
+ * resume that same transcript and carry a prompt injection across the handoff.
+ * Bound/site actors are deliberately unaffected: their durable origin state is
+ * the authority boundary and their separate recovery rules apply.
+ *
+ * @param {ReturnType<typeof makeWebActorRegistry>} registry
+ * @param {string} actorSessionId
+ * @param {{ mode?: string, ownedOrigin?: string|null, provisional?: boolean } | null | undefined} originState
+ * @returns {string[]} owner chat ids whose address was retired
+ */
+export const retireStoppedRoamingWebActor = (registry, actorSessionId, originState) => {
+  if (originState?.mode !== 'roaming') return [];
+  const retired = [];
+  for (const [ownerChatId, sessionId] of registry.entries()) {
+    if (sessionId !== actorSessionId) continue;
+    if (registry.drop(ownerChatId)) retired.push(ownerChatId);
+  }
+  return retired;
+};
+
+/**
+ * Retire a roaming actor in heap and attempt both durable fences independently.
+ *
+ * The session tombstone and registry snapshot are deliberately sibling writes:
+ * either one is sufficient to stop a stale address from reviving after a
+ * worker restart. `allSettled` ensures one storage failure never suppresses the
+ * other attempt, while the synchronous heap mark and registry drop protect the
+ * current worker before either promise settles.
+ *
+ * @param {{
+ *   registry: ReturnType<typeof makeWebActorRegistry>,
+ *   actorSessionId: string,
+ *   originState: { mode?: string, ownedOrigin?: string|null, provisional?: boolean } | null | undefined,
+ *   markRetired: (actorSessionId: string) => void,
+ *   writeTombstone: () => Promise<unknown> | unknown,
+ *   persistRouting: () => Promise<unknown> | unknown,
+ * }} input
+ * @returns {Promise<{ retiredOwnerIds: string[], tombstone: PromiseSettledResult<unknown>, routing: PromiseSettledResult<unknown> }>}
+ */
+export const retireStoppedRoamingWebActorDurably = async ({
+  registry, actorSessionId, originState, markRetired, writeTombstone, persistRouting,
+}) => {
+  if (originState?.mode !== 'roaming') {
+    return {
+      retiredOwnerIds: [],
+      tombstone: { status: 'fulfilled', value: undefined },
+      routing: { status: 'fulfilled', value: undefined },
+    };
+  }
+  markRetired(actorSessionId);
+  const retiredOwnerIds = retireStoppedRoamingWebActor(registry, actorSessionId, originState);
+  // Invoke both thunks before awaiting either one. This also catches a
+  // synchronous storage adapter throw as a rejected sibling promise.
+  const attempt = (/** @type {() => Promise<unknown> | unknown} */ fn) => {
+    try { return Promise.resolve(fn()); }
+    catch (error) { return Promise.reject(error); }
+  };
+  const [tombstone, routing] = await Promise.allSettled([
+    attempt(writeTombstone),
+    retiredOwnerIds.length > 0 ? attempt(persistRouting) : Promise.resolve(),
+  ]);
+  return { retiredOwnerIds, tombstone, routing };
+};
+
 // ── DESIGN-18: the API actor (an origin actor with NO tab) ──────────────────
 //
 // An API integration is the SAME web actor (actorType:'web') reaching ONE origin
-// with no DOM — fetch_url only. Unlike a tab actor, whose owned origin is MUTABLE
+// with no DOM; it has only tab-free fetch/cache/site-client tools. Unlike a tab
+// actor, whose owned origin is MUTABLE
 // (it navigates), an API actor's origin is FIXED for its whole life, so it is keyed
 // by (ownerChatId, origin), not by a tab. The origin IS its instanceId, so the
 // egress boundary reads the owned origin straight off the ctx (no reverse lookup).
@@ -173,7 +267,7 @@ export const normalizeApiOrigin = (input) => {
  *
  * why a distinct handle rather than reusing the bare origin: addressing a bare
  * origin already means something — a DESIGN-18 API integration, which is
- * fetch-only and never opens a tab. Both are "an actor bound to one origin", and
+ * tab-free and never opens a tab. Both are "an actor bound to one origin", and
  * that is exactly why they must not share a spelling: one can log in and click,
  * the other cannot, and the orchestrator has to be able to ask for the right one.
  * `site:` is the prefix because it reads as what it is.

@@ -3,8 +3,8 @@
 //
 // The behavior change lives in resolveEngine(); it's pure (booleans in,
 // engine out) so the full truth table is asserted without faking browser
-// globals. The harness runs in real Chrome (Web Speech present), so
-// detectVoiceCapability / createBestTranscriber are checked against that.
+// globals. Capability checks run against whichever real browser owns the
+// harness, including Firefox where Web Speech is absent.
 
 import { describe, it, expect } from '../../../framework.js';
 import {
@@ -35,25 +35,38 @@ describe('resolveEngine — web-speech is the default, moonshine the opt-in', ()
 });
 
 describe('detectVoiceCapability — reports BOTH availabilities for the UI', () => {
-  it('auto resolves to web-speech in the harness and still reports moonshine', () => {
+  it('reports the browser API and chooses the corresponding shipped engine', () => {
+    const browserGlobal = /** @type {any} */ (globalThis);
+    const browserHasWebSpeech = typeof browserGlobal.SpeechRecognition === 'function'
+      || typeof browserGlobal.webkitSpeechRecognition === 'function';
     const cap = detectVoiceCapability('auto');
-    expect(cap.webSpeech).toBe(true);          // real Chrome has Web Speech
-    expect(cap.engine).toBe('web-speech');     // the default
-    expect(typeof cap.moonshine).toBe('boolean'); // present regardless of value
+    expect(cap.webSpeech).toBe(browserHasWebSpeech);
+    expect(cap.moonshine).toBe(true);
+    expect(cap.engine).toBe(browserHasWebSpeech ? 'web-speech' : 'moonshine');
+    expect(cap.source).toBe(browserHasWebSpeech ? 'browser' : 'vendored');
   });
 
-  it('a web-speech engine carries a cloudVendor string on non-Safari', () => {
+  it('cloudVendor is never reported for a local engine', () => {
     const cap = detectVoiceCapability('auto');
-    // Chrome/Chromium route to the cloud, so cloudVendor is named.
-    expect(cap.engine).toBe('web-speech');
-    expect(typeof cap.cloudVendor).toBe('string');
+    expect(cap.cloudVendor === null || typeof cap.cloudVendor === 'string').toBe(true);
+    if (cap.engine !== 'web-speech') expect(cap.cloudVendor).toBe(null);
+  });
+});
+
+describe('detectVoiceCapability host support', () => {
+  it('an unavailable Moonshine host removes it before any setup begins', () => {
+    const cap = detectVoiceCapability('moonshine', { moonshineHostAvailable: false });
+    expect(cap.moonshine).toBe(false);
+    expect(cap.engine === 'moonshine').toBe(false);
   });
 });
 
 describe('createBestTranscriber — lockstep with detectVoiceCapability', () => {
-  it('builds the same engine that detectVoiceCapability resolves', () => {
-    const cap = detectVoiceCapability('auto');
+  it('builds the engine selected from the browser API', () => {
+    const browserGlobal = /** @type {any} */ (globalThis);
+    const browserHasWebSpeech = typeof browserGlobal.SpeechRecognition === 'function'
+      || typeof browserGlobal.webkitSpeechRecognition === 'function';
     const transcriber = createBestTranscriber({}, 'auto');
-    expect(transcriber.engine).toBe(cap.engine); // both web-speech in the harness
+    expect(transcriber.engine).toBe(browserHasWebSpeech ? 'web-speech' : 'moonshine');
   });
 });

@@ -20,8 +20,10 @@
 
 import m from '/vendor/mithril/mithril.js';
 import browser from '/vendor/browser-polyfill.js';
-import { DWEB_ENABLED } from '/shared/channel-config.js';
+import { CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
 import { OptionsApp } from './components/options-app.js';
+import { callPrivateTransfer } from './private-transfer-session.js';
+import { makeOptionsSender } from './options-state-sync.js';
 
 // null until the first snapshot lands — the shell renders a loading
 // gate rather than guessing at vault state (a flash of "set up peerd"
@@ -48,7 +50,17 @@ const fetchState = async () => {
  * @param {any} reply
  */
 const foldReply = (msg, reply) => {
-  if (!reply?.ok || !currentState) return;
+  if (!currentState) return;
+  // A settings write can commit before its live side effect fails. The reply
+  // carries the durable value even when ok:false, so keep the page honest about
+  // what will apply on the next boot while the owning section reports the live
+  // failure and offers a retry.
+  if (!reply?.ok) {
+    if ((msg.type === 'settings/update' || msg.type === 'settings/reset') && reply?.settings) {
+      currentState = { ...currentState, settings: reply.settings };
+    }
+    return;
+  }
   switch (msg.type) {
     case 'settings/update':
     case 'settings/reset': {
@@ -96,11 +108,12 @@ const foldReply = (msg, reply) => {
  * @param {{ type: string } & Record<string, any>} msg
  * @returns {Promise<any>}
  */
-const send = async (msg) => {
-  const reply = await browser.runtime.sendMessage(msg);
-  foldReply(msg, reply);
-  return reply;
-};
+const send = makeOptionsSender({
+  sendRuntime: (msg) => browser.runtime.sendMessage(msg),
+  sendTransfer: callPrivateTransfer,
+  foldReply,
+  fetchState,
+});
 
 fetchState();
 window.addEventListener('focus', fetchState);
@@ -132,6 +145,10 @@ const Root = {
 /** @type {Record<string, typeof Root>} */
 const routes = {};
 for (const id of SECTIONS) routes[`/${id}`] = Root;
+// Contributor Metrics is deliberately preview/dev-only until the separate
+// store go/no-go. Omitting the route makes a guessed store hash fall back to
+// Providers instead of mounting a hidden consent surface.
+if (CHANNEL === 'preview' || CHANNEL === 'dev') routes['/contributor-metrics'] = Root;
 // Build-time literal: the store artifact has DWEB_ENABLED=false, so this route
 // (like the nav entry) is structurally dead code there.
 if (DWEB_ENABLED) routes['/dweb'] = Root;

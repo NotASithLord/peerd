@@ -95,6 +95,12 @@
   padding: 24px 28px 56px;
 }
 
+.options-page > .actor-isolation-banner {
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  margin-bottom: 18px;
+}
+
 /* why the max-width: styles.css assumed a ~400px panel where lines
  * could never run long; a full tab needs an explicit readable column. */
 .options-page { max-width: 760px; }
@@ -110,8 +116,96 @@
 .options-page h3 { font-size: 13px; font-weight: 600; margin: 16px 0 4px; }
 .options-page h3:first-of-type { margin-top: 10px; }
 .options-page p { margin: 0 0 10px; color: var(--fg-muted); font-size: 13px; }
-.options-page p.error { color: var(--danger); }
+.options-page p.error { color: var(--danger-ink); }
 .options-page .hint { font-size: 12px; margin-top: 4px; }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Identity replacement is the one destructive action on this page. The
+ * semantic error red is the brand rule's sanctioned exception. */
+.options-page button.danger {
+  background: transparent;
+  color: var(--danger-ink);
+  border-color: var(--danger);
+}
+.options-page button.danger:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.identity-replace-confirmation {
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-top: 10px;
+}
+.import-summary h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+.import-setting-values code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.identity-did {
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.transfer-progress { color: var(--fg); }
+.transfer-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.transfer-progress-row .transfer-progress { margin: 0; }
+.options-page .transfer-status--success { color: var(--fg); }
+.options-page .transfer-status--error { color: var(--danger-ink); }
+.identity-replace-confirmation:focus { outline: 2px solid var(--danger); outline-offset: 2px; }
+
+/* why transfer controls use neutral ink: cyan with light text misses AA text
+ * contrast in light mode, while the product's surface language is monochrome.
+ * The stronger neutral borders also keep form boundaries and focus visible. */
+.transfer-section button { min-height: 44px; }
+.transfer-section button:not(.secondary):not(.danger) {
+  background: var(--fg);
+  color: var(--bg);
+}
+.transfer-section button.secondary { border-color: var(--border-strong); }
+.transfer-section input[type="password"] {
+  box-sizing: border-box;
+  min-height: 44px;
+  border-color: var(--border-strong);
+}
+.transfer-section input[type="file"] {
+  box-sizing: border-box;
+  min-height: 44px;
+  color: var(--fg);
+}
+.transfer-section input[type="file"]::file-selector-button {
+  min-height: 44px;
+  margin-inline-end: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+.transfer-section input[type="password"]:focus,
+.transfer-section input[type="password"]:focus-visible,
+.transfer-section input[type="file"]:focus-visible,
+.transfer-section button:focus-visible {
+  border-color: var(--fg);
+  outline: 2px solid var(--fg);
+  outline-offset: 2px;
+}
 
 /* --- vault gate ----------------------------------------------------------- */
 
@@ -156,13 +250,8 @@
   border: 1px solid var(--border); border-radius: 10px; background: var(--bg);
   transition: border-color .12s ease, box-shadow .12s ease, transform .12s ease;
 }
-.library-card:hover { border-color: var(--fg-muted); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); transform: translateY(-1px); }
-/* Git history is a developer workspace, not a card footnote. Give an expanded
-   repository two grid tracks where the home surface is wide enough, while the
-   narrow/single-column layout remains naturally contained. */
-@media (min-width: 800px) {
-  .library-card.is-repository-open { grid-column: span 2; }
-}
+.library-card:hover { border-color: var(--border-strong); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); transform: translateY(-1px); }
+.library-card.is-expanded { grid-column: 1 / -1; }
 .library-head { display: flex; align-items: flex-start; gap: 9px; }
 /* The avatar is the card's one splash of brand color (hue set inline, stable
    per app id) — a saturated block with dark glyph for contrast on every hue. */
@@ -194,7 +283,7 @@
   border: 1px solid var(--border); background: transparent; color: var(--fg); cursor: pointer;
 }
 .library-btn:hover, .library-open:hover { background: var(--bg-elev); }
-.library-open { border-color: var(--fg-muted); font-weight: 600; }
+.library-open { border-color: var(--border-strong); font-weight: 600; }
 .library-btn:disabled, .library-open:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .library-actions { position: relative; display: flex; align-items: center; gap: 6px; margin-top: auto; }
@@ -240,6 +329,12 @@
 .library-btn.is-armed { color: var(--danger); border-color: var(--danger); }
 .library-update-conflict strong { font-size: 12px; }
 .library-update-conflict p { margin: 5px 0 9px; color: var(--fg-muted); font-size: 11px; line-height: 1.4; }
+@media (max-width: 720px) {
+  .library-repository-dirty, .library-remote-actions, .library-branch-row, .library-remote-row { flex-wrap: wrap; }
+  .library-repository-dirty input, .library-branch-row input, .library-remote-row input { flex-basis: 100%; }
+  .library-commit { grid-template-columns: 72px minmax(0, 1fr) auto auto; }
+  .library-commit > .muted { grid-column: 1; grid-row: 2; }
+}
 
 /* ── Discover (the dweb app store) — shares the Library's card skeleton ───────
    so the two home tabs read as one surface: same grid, card, avatar (one brand
@@ -253,7 +348,7 @@
   border: 1px solid var(--border); border-radius: 10px; background: var(--bg);
   transition: border-color .12s ease, box-shadow .12s ease, transform .12s ease;
 }
-.disc-card:hover { border-color: var(--fg-muted); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); transform: translateY(-1px); }
+.disc-card:hover { border-color: var(--border-strong); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); transform: translateY(-1px); }
 .disc-head { display: flex; align-items: flex-start; gap: 9px; }
 .disc-avatar {
   width: 32px; height: 32px; flex: 0 0 auto; border-radius: 8px;
@@ -268,7 +363,7 @@
 /* Primary ghost action (Install / Update / Open ↗) — the Library-open recipe. */
 .disc-open {
   font: inherit; font-size: 12.5px; line-height: 1; padding: 6px 13px; border-radius: var(--radius);
-  border: 1px solid var(--fg-muted); background: transparent; color: var(--fg); font-weight: 600; cursor: pointer;
+  border: 1px solid var(--border-strong); background: transparent; color: var(--fg); font-weight: 600; cursor: pointer;
 }
 .disc-open:hover { background: var(--bg-elev); }
 .disc-open:disabled { opacity: 0.5; cursor: not-allowed; }

@@ -106,6 +106,26 @@ describe('voice.manager', () => {
       expect(m.isAvailable()).toBe(false);
     });
 
+    it('refuses an unavailable Moonshine host before download or init', async () => {
+      const backend = makeBackend();
+      let downloads = 0;
+      const m = createVoiceManager({
+        send: backend.send,
+        onMessage: backend.onMessage,
+        modelStore: {
+          getModel: async () => { downloads += 1; return { files: {}, sizeBytes: 0, variant: 'base' }; },
+        },
+        detectCapability: /** @type {DetectCap} */ ((_pref, hosts) =>
+          hosts?.moonshineHostAvailable === false ? noEngineCap() : moonshineCap()),
+        moonshineHostAvailable: () => false,
+        requestMicPermission: async () => {},
+      });
+      await expect(() => m.enable({ engine: 'moonshine' })).toThrow();
+      expect(downloads).toBe(0);
+      expect(backend.sends).toEqual([]);
+      expect(m.getState().error).toBe('voice-not-supported-in-this-build');
+    });
+
     it('disable tears down and returns to idle', async () => {
       const backend = makeBackend();
       const m = createVoiceManager({

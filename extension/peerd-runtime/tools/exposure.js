@@ -17,6 +17,13 @@
 // Pure — unit-tested. The SW applies mainAgentDescriptors() to the main turn's
 // descriptor list, and leaves getToolDescriptors() (the actor's source) full.
 
+import {
+  actorCodeSurfaceTools,
+  actorCapabilityManifest,
+  ACTOR_CAPABILITY_MANIFESTS,
+  WEB_ACTOR_DOM_TOOL_NAMES,
+} from '../actor/capability-manifest.js';
+
 // The DOM/page tools hidden from the MAIN agent. The web actor uses these
 // (ACTOR_TYPE_TOOLS.web below is the actor-side allow-list; this is the
 // main-side deny-list).
@@ -127,22 +134,10 @@ export const EXPOSURE_ACTOR = 'actor';
 // added to its kind's set is automatically refused for every non-actor ctx
 // (forgetting the union was previously a silent escalation hole).
 const ENGINE_ACTOR_TOOLS = Object.freeze({
-  webvm: Object.freeze(new Set([
-    'vm_boot', 'vm_write_file', 'vm_import', 'vm_delete',
-  ])),
-  notebook: Object.freeze(new Set([
-    'js_notebook', 'js_write_file', 'js_read_file', 'js_delete', 'edit_file',
-    'repo_history', 'repo_version', 'repo_remote',
-  ])),
-  pod: Object.freeze(new Set([
-    'pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write', 'pod_destroy',
-    'repo_history', 'repo_version', 'repo_remote',
-  ])),
-  app: Object.freeze(new Set([
-    'app_update', 'app_write_file', 'app_read_file', 'app_list_files',
-    'app_delete_file', 'app_delete', 'edit_file',
-    'repo_history', 'repo_version', 'repo_remote',
-  ])),
+  webvm: Object.freeze(new Set(ACTOR_CAPABILITY_MANIFESTS.webvm.tools)),
+  notebook: Object.freeze(new Set(ACTOR_CAPABILITY_MANIFESTS.notebook.tools)),
+  pod: Object.freeze(new Set(ACTOR_CAPABILITY_MANIFESTS.pod.tools)),
+  app: Object.freeze(new Set(ACTOR_CAPABILITY_MANIFESTS.app.tools)),
 });
 
 // The tiered instance-OPERATION set — refused for every non-actor ctx (the
@@ -177,19 +172,19 @@ export const isActorOnlyTool = (name) => ACTOR_ONLY_TOOLS.has(name);
 // READS ONLY, BY NAME. Not "the reviewer is exempt from the tier" and not "for
 // review, narrow from the full registry" — either of those would hand over
 // fetch_url / read_page / site_client_run in the same stroke and actually build
-// the exfiltration channel this whole design denies. Three names, derived from
+// the exfiltration channel this whole design denies. Four names, derived from
 // the per-kind sets so a rename can't silently orphan the entry.
 export const EXPOSURE_REVIEW = 'review';
 
 export const REVIEW_INSTANCE_READS = Object.freeze(new Set(
-  ['js_read_file', 'app_read_file', 'app_list_files']
+  ['js_read_file', 'pod_read', 'app_read_file', 'app_list_files']
     .filter((n) => ACTOR_ONLY_TOOLS.has(n)),
 ));
 
 /**
  * May this ctx hold this actor-only tool by way of the review exemption? Pure.
  * Positively scoped on BOTH axes: the SW-stamped review marker AND the
- * three-name read set. Anything else is refused exactly as before.
+ * four-name read set. Anything else is refused exactly as before.
  *
  * @param {string} name @param {string | undefined} exposure
  */
@@ -200,26 +195,24 @@ export const isReviewExemptRead = (name, exposure) =>
 // of truth for that set. why these and not page_eval/page_exec: the web actor
 // ingests untrusted page text, so it must not also wield code-exec — the
 // exclusion IS the boundary.
-export const WEB_ACTOR_DOM_TOOLS = Object.freeze([
-  'snapshot', 'read_page', 'read_state', 'watch_changes',
-  'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf', 'view',
-]);
+export const WEB_ACTOR_DOM_TOOLS = WEB_ACTOR_DOM_TOOL_NAMES;
 
 // PR #119 — the CODE-surface web actor's toolset (the Aside-style A/B arm: the
 // actor WRITES page-driving JS instead of emitting discrete tool calls). The
-// surface is page_code ALONE: the actor perceives AND acts through the page.*
-// API (page.snapshot()/page.content() for perception — still the a11y snapshot,
-// the unchanged axis — and page.goto/click/fill for action), every call routing
-// through the SW 'page/call' route to the SAME gated DOM tools on its owned tab.
+// surface is derived from the page client manifest: the actor perceives AND
+// acts through page.* (page.snapshot()/page.content() for perception — still
+// the a11y snapshot, the unchanged axis — and page.goto/click/fill for action),
+// every call routing through the SW 'page/call' route to the SAME gated DOM
+// tools on its owned tab. Operations not represented by a page method stay
+// discrete; today that is site_client_run, because nesting a second sealed job
+// inside page_code would deadlock the bounded relay pool.
 // why NOT also expose direct snapshot/read_page: those resolve the tab from the
 // ACTOR's turn context, which a fresh actor has none of — and a tab adopted
 // mid-turn inside page_code (SW-side) never repins that turn context, so a
 // direct snapshot after a page.goto failed and the actor thrashed. Routing ALL
 // page interaction through page_code keeps ONE consistent tab. (page.snapshot()
 // still dispatches the snapshot tool via the route's inner tools-surface ctx.)
-export const WEB_ACTOR_CODE_TOOLS = Object.freeze(new Set([
-  'page_code',
-]));
+export const WEB_ACTOR_CODE_TOOLS = Object.freeze(new Set(actorCodeSurfaceTools('web', 'tab')));
 
 // The POSITIVE allow-list an actor of each kind may call — its own kind's
 // operational surface (mutations + reads + edit_file). Everything else (other
@@ -241,29 +234,13 @@ const ACTOR_TYPE_TOOLS = Object.freeze({
   // Plus the DESIGN-19 site-client family: run/read/write persist + replay derived
   // per-origin API clients; site_capture records traffic to derive them (tab only —
   // an API actor has no tab, so the WEB_API_TOOLS set below drops site_capture).
-  web: Object.freeze(new Set([
-    // read_doc rides beside fetch_url rather than in WEB_ACTOR_DOM_TOOLS for the
-    // same reason fetch_url does: it takes a URL and owns no tab, so it is not
-    // part of the DOM set. (read_pdf IS in that set — it reads the PDF sitting
-    // in the actor's own tab, which is where the browser puts one.)
-    ...WEB_ACTOR_DOM_TOOLS, 'fetch_url', 'read_doc', 'read_web_cache',
-    'site_client_run', 'site_client_read', 'site_client_write', 'site_capture',
-    // login (Tier 0) — the web actor drives a page's sign-in affordance; keyless
-    // by construction (it holds no secret and fills no password).
-    'login',
-  ])),
+  web: Object.freeze(new Set(ACTOR_CAPABILITY_MANIFESTS.web.tools)),
   // The dweb actor — the mesh's operator (global singleton, handle "dweb").
   // Exactly the dweb family, nothing else: no egress tools, no DOM, no engine
   // mutation — the envoy posture. Its worst case must be a wrong reply, so the
   // only authority it holds is the mesh surface itself (ctx.dweb), and the
   // dangerous pair (share/install) force-confirms regardless of the toggle.
-  dweb: Object.freeze(new Set([
-    'dweb_share', 'dweb_discover', 'dweb_install',
-    'dweb_peers', 'dweb_block', 'dweb_discovery', 'dweb_guide',
-    // a2a_run — the code surface for agent-to-agent. In the dweb family (its
-    // worst case is still a bad message to a peer), just not dweb_-prefixed.
-    'a2a_run',
-  ])),
+  dweb: Object.freeze(new Set(ACTOR_CAPABILITY_MANIFESTS.dweb.tools)),
 });
 
 /** The Set of tool names an actor of `kind` may call (empty for an unknown kind). Pure. @param {string} [kind] */
@@ -275,26 +252,26 @@ export const isAllowedForActorType = (name, kind) => actorAllowedTools(kind).has
 
 // DESIGN-18: an API actor is a `web` actor with `backing:'api'` — it owns ONE origin
 // and has NO tab, so the whole DOM toolset (which needs a tab it never has) is removed
-// from its allow-set. It keeps only the keyless, tab-free fetch_url. Used by BOTH the
-// gate (refuse a DOM tool for an API backing) and the capability strip (drop the DOM
-// capabilities), so an API actor is genuinely fetch-only, not just gated.
-// Plus the site-client run/read/write (an API actor CAN persist + replay a client
-// for its fixed origin) — but NOT site_capture, which needs a tab it never has.
-const WEB_API_TOOLS = Object.freeze(new Set([
-  'fetch_url', 'read_web_cache',
-  'site_client_run', 'site_client_read', 'site_client_write',
-]));
+// from its allow-set. It keeps the keyless, tab-free fetch/cache surface plus
+// site-client run/read/write for its fixed origin, but NOT site_capture, which
+// needs a tab it never has. Used by BOTH the gate and capability strip, so the
+// no-DOM boundary is enforced rather than merely omitted from descriptors.
+const WEB_API_TOOLS = Object.freeze(new Set(actorCapabilityManifest('web', 'api').tools));
 
 /**
  * The Set an actor may call given its kind AND (for a web actor) its backing — the
- * full web toolset for a tab backing, fetch_url-only for an API backing. PR #119:
+ * full web toolset for a tab backing, the API manifest for an API backing. PR #119:
  * a tab-backed web actor on the CODE surface gets WEB_ACTOR_CODE_TOOLS instead
- * (action collapses into page_code; perception stays snapshot/read_page). An
+ * (mapped page operations collapse into page_code; unmapped operations remain
+ * discrete). An
  * absent surface means 'tools' — every existing caller keeps today's set. Pure.
  * @param {string} [kind] @param {'tab' | 'api'} [backing] @param {'tools' | 'code'} [surface]
  */
 export const actorAllowedToolsFor = (kind, backing, surface) => {
   if (kind === 'web' && backing === 'api') return WEB_API_TOOLS;
+  // Absent is the legacy tab spelling. Any PRESENT unknown value is corrupt or
+  // from a future policy version and must not inherit the full tab surface.
+  if (kind === 'web' && backing !== undefined && backing !== 'tab') return new Set();
   if (kind === 'web' && surface === 'code') return WEB_ACTOR_CODE_TOOLS;
   return actorAllowedTools(kind);
 };
@@ -341,9 +318,9 @@ export const actorTargetIdField = (name) =>
  * a possibly-injected worker — supplied), and lock edit_file to the actor's kind.
  * The gate's pin check is the defense-in-depth backstop; this is the
  * normalization that makes it pass. Mutates call.args in place. Pure logic,
- * shared by the in-SW actor turn (turn-driver) AND the offscreen actor tool
- * relay (SW re-pins the worker's call — never trusts it). Moved here from
- * turn-driver so both use ONE implementation (no drift on a security seam).
+ * shared by every dedicated-worker host. The privileged relay re-pins the
+ * worker's call and never trusts it. One implementation prevents drift at this
+ * security seam.
  * @param {any} call @param {string|undefined} actorType @param {string|undefined} instanceId
  */
 export const pinActorCall = (call, actorType, instanceId) => {

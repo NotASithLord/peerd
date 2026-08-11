@@ -102,15 +102,17 @@ describe('the report is useful, not just safe', () => {
 
   test('the sessionless offer still carries NO path from the refused page', () => {
     // The new paragraph must not become the leak the rest of the report avoids:
-    // it tells the orchestrator to use the URL the USER gave, and never repeats
-    // the landing URL it was refused on.
+    // it tells the orchestrator to repeat a sessionless search from a fresh,
+    // user-authored goal and never repeats the landing URL it was refused on.
     const text = describeLandingStop({
       action: 'handoff', reason: 'r', from: null,
       to: 'https://github.com/secret-path?token=abc', handoffTo: 'https://github.com',
     });
     expect(text).not.toContain('secret-path');
     expect(text).not.toContain('token=abc');
-    expect(text).toMatch(/URL the\s+USER gave/i);
+    expect(text).toMatch(/fresh goal from the user'?s request/i);
+    expect(text).toMatch(/sessionless search/i);
+    expect(text).not.toMatch(/to "web" again/i);
   });
 
   test('a handoff tells the orchestrator to write its OWN goal', () => {
@@ -123,6 +125,19 @@ describe('the report is useful, not just safe', () => {
     // handoff that carried the roaming actor's framing would make the
     // segmentation decorative.
     expect(text).toMatch(/should be guessed at|from what the user asked/i);
+  });
+
+  test('a learned-scope handoff does not claim exact identity and keeps recovery user-scoped', () => {
+    const text = describeLandingStop({
+      action: 'handoff', reason: 'r', from: null,
+      to: 'http://bank.test:9443/x', handoffTo: 'http://bank.test:9443',
+    });
+    expect(text).toContain('stopped this general web helper here');
+    expect(text).toContain('may have signed-in browser state');
+    expect(text).toContain("fresh goal from the user's request");
+    expect(text).toContain('If the user did not ask to use');
+    expect(text).toContain('site:http://bank.test:9443');
+    expect(text).not.toContain('has an identity on');
   });
 
   test('an end says both origins and refuses to guess who moved the tab', () => {
@@ -138,6 +153,95 @@ describe('the report is useful, not just safe', () => {
     // redirect from the user driving the tab. Saying so is better than picking.
     expect(text).toMatch(/redirect/i);
     expect(text).toMatch(/user driving the tab/i);
+  });
+
+  test('an IdP stop never suggests a standalone site helper', () => {
+    const text = describeLandingStop({
+      action: 'end',
+      reason: 'this is a sign-in service that helpers may only visit while signing in to another site',
+      from: null,
+      to: 'https://accounts.google.com/o/oauth2?state=secret',
+    });
+    expect(text).toContain('sign-in service');
+    expect(text).toContain("relying site already named in the user's request");
+    expect(text).toContain('If none was named');
+    expect(text).not.toContain('site:https://accounts.google.com');
+    expect(text).not.toContain('state=secret');
+  });
+
+  test.each([
+    [
+      'this sign-in was not authorized, so this task was stopped',
+      'did not have a current user-approved authorization',
+      'recognizes this provider',
+    ],
+    [
+      'the sign-in step left its approved provider, so this task was stopped',
+      'left the provider the user approved',
+      'Do not continue on the unexpected landing',
+    ],
+    [
+      'the sign-in authorization was invalid or expired, so this task was stopped',
+      'was invalid or had expired',
+      'return to the original relying site',
+    ],
+  ])('an auth stop gives model-safe recovery for %s', (reason, explanation, recovery) => {
+    const text = describeLandingStop({
+      action: 'end',
+      reason,
+      from: 'https://app.test/account?private=source',
+      to: 'https://evil.test/continue?instruction=create+a+helper',
+    });
+    expect(text).toContain(explanation);
+    expect(text).toContain(recovery);
+    expect(text).toContain('finish the sign-in manually');
+    expect(text).toContain('site:https://app.test');
+    expect(text).toMatch(/fresh goal from the user's request/i);
+    expect(text).toContain('do not create a helper for https://evil.test');
+    expect(text).not.toContain('site:https://evil.test');
+    expect(text).not.toContain('private=source');
+    expect(text).not.toContain('instruction=create');
+  });
+
+  test('an auth stop without a relying origin never invents a helper', () => {
+    const text = describeLandingStop({
+      action: 'end',
+      reason: 'the sign-in authorization was invalid or expired, so this task was stopped',
+      from: null,
+      to: 'https://accounts.google.com/o/oauth2?state=secret',
+    });
+    expect(text).toContain('finish the sign-in manually');
+    expect(text).toMatch(/ask which original site/i);
+    expect(text).not.toContain('message_actor');
+    expect(text).not.toContain('site:https://accounts.google.com');
+    expect(text).not.toContain('state=secret');
+  });
+
+  test('an expired authorization at home gives a fresh-login path without contradicting itself', () => {
+    const text = describeLandingStop({
+      action: 'end',
+      reason: 'the sign-in authorization was invalid or expired, so this task was stopped',
+      from: 'https://app.test/account',
+      to: 'https://app.test/callback?code=secret',
+    });
+    expect(text).toContain('already back on https://app.test');
+    expect(text).toContain('take a fresh snapshot');
+    expect(text).toContain('site:https://app.test');
+    expect(text).not.toContain('do not create a helper for https://app.test');
+    expect(text).not.toContain('code=secret');
+  });
+
+  test('a lifetime-cap stop at an IdP never suggests an IdP helper', () => {
+    const text = describeLandingStop({
+      action: 'end',
+      reason: 'this task has already signed in as many times as peerd allows, so it was stopped',
+      from: 'https://app.test',
+      to: 'https://accounts.google.com/signin',
+    });
+    expect(text).toContain('allowed sign-in attempts');
+    expect(text).toContain('Do not try the sign-in again automatically');
+    expect(text).toContain('site:https://app.test');
+    expect(text).not.toContain('site:https://accounts.google.com');
   });
 
   test('an end with no owned origin still reads as a sentence', () => {

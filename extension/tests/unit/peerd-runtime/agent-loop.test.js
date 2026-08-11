@@ -329,6 +329,61 @@ describe('agent loop — runUserTurn', () => {
       expect(resultMsg.toolResults[0].content.includes('denylist')).toBe(true);
     });
 
+    it('a host endTurn receipt stops later tools and skips another model call', async () => {
+      let modelCalls = 0;
+      const callModel = () => (async function* () {
+        modelCalls += 1;
+        if (modelCalls > 1) throw new Error('must not infer again while waiting for the user');
+        for (const [id, name] of [['t_login', 'login'], ['t_fetch', 'fetch_url']]) {
+          yield { type: 'tool-use-start', id, name };
+          yield { type: 'tool-use-delta', id, partialJson: '{}' };
+          yield { type: 'tool-use-stop', id };
+        }
+        yield { type: 'message-stop', stopReason: 'tool_use' };
+      })();
+      const { sessions, ctx } = buildCtx({ callModel });
+      ctx.tools = [
+        { name: 'login', description: '', schema: {} },
+        { name: 'fetch_url', description: '', schema: {} },
+      ];
+      /** @type {string[]} */
+      const dispatched = [];
+      ctx.toolDispatch = async (/** @type {any} */ call) => {
+        dispatched.push(call.name);
+        return {
+          ok: true,
+          content: 'Finish signing in. Ask the site helper to continue after the tab returns.',
+          endTurn: true,
+          meta: { toolName: call.name, primitive: 'tab', gates: [], durationMs: 1 },
+        };
+      };
+      const session = await sessions.create();
+      ctx.sessionId = session.sessionId;
+
+      const events = await drain(runUserTurn(asRunCtx(ctx)));
+      const stored = present(await sessions.get(session.sessionId));
+      expect(dispatched).toEqual(['login']);
+      expect(modelCalls).toBe(1);
+      expect(stored.messages.at(-1)?.role).toBe('assistant');
+      expect(msg(stored.messages.at(-1)).content).toContain('Ask the site helper to continue');
+      expect(asEv(events.filter((event) => event.type === 'stop').at(-1)).stopReason).toBe('end_turn');
+    });
+
+    it('a host preflight reply skips model inference and persists the wait', async () => {
+      let modelCalls = 0;
+      const { sessions, ctx } = buildCtx({
+        callModel: () => { modelCalls += 1; throw new Error('must not call model'); },
+      });
+      ctx.preflightReply = 'Finish signing in in the open tab.';
+      const session = await sessions.create();
+      ctx.sessionId = session.sessionId;
+      const events = await drain(runUserTurn(asRunCtx(ctx)));
+      const stored = present(await sessions.get(session.sessionId));
+      expect(modelCalls).toBe(0);
+      expect(msg(stored.messages.at(-1)).content).toBe('Finish signing in in the open tab.');
+      expect(asEv(events.filter((event) => event.type === 'stop').at(-1)).stopReason).toBe('end_turn');
+    });
+
     it('aborts in the stream-end → dispatch gap WITHOUT running the pending tools', async () => {
       // The hard spend-limit halt (and Stop / steer) abort() the controller as
       // the stream ends: adapters emit `usage` — where the limit check rides —

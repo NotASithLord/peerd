@@ -80,9 +80,12 @@ const mountInputBar = async (state, send) => {
 const pasteImage = (textarea, bytes = 'imgbytes', name = 'shot.png') => {
   const dt = new DataTransfer();
   dt.items.add(new File([bytes], name, { type: 'image/png' }));
-  textarea.dispatchEvent(new ClipboardEvent('paste', {
-    clipboardData: dt, bubbles: true, cancelable: true,
-  }));
+  // why: Firefox ignores clipboardData passed to the ClipboardEvent
+  // constructor. Define the same read-only event field explicitly so this
+  // exercises InputBar's paste path in both browser engines.
+  const event = new Event('paste', { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'clipboardData', { value: dt });
+  textarea.dispatchEvent(event);
 };
 
 describe('sidepanel.attachments', () => {
@@ -110,6 +113,31 @@ describe('sidepanel.attachments', () => {
       need(chip, '.attach-chip-remove').click();
       m.redraw.sync();
       expect(root.querySelector('.attach-chip')).toBeFalsy();
+    } finally { unmount(); }
+  });
+
+  it('refuses an office file before staging when document conversion is unavailable', async () => {
+    const send = async () => ({ ok: true });
+    const state = {
+      ...baseState(),
+      capabilities: { documentReader: { status: 'unsupported' } },
+    };
+    const { root, unmount } = await mountInputBar(/** @type {any} */ (state), send);
+    try {
+      const input = need(root, 'input.attach-input', HTMLInputElement);
+      expect(input.accept.includes('.docx')).toBe(false);
+      Object.defineProperty(input, 'files', {
+        configurable: true,
+        value: [new File(['office-bytes'], 'report.docx', {
+          type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        })],
+      });
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      await until(() => root.querySelector('.attach-error'));
+      expect(root.querySelector('.attach-chip')).toBeFalsy();
+      expect(need(root, '.attach-error').textContent).toContain('PDF or plain-text export');
+      expect(need(root, '.attach-error').getAttribute('role')).toBe('alert');
+      expect(need(root, '.attach-error').getAttribute('aria-live')).toBe('assertive');
     } finally { unmount(); }
   });
 

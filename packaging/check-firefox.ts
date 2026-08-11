@@ -1,10 +1,9 @@
-// The FIREFOX gate — the only check in the tree that judges peerd AS a Firefox
-// extension rather than as a Chrome one.
+// The static Firefox package gate. The separate `firefox-runtime` CI job runs
+// the packaged Store XPI and the shared browser suite in Gecko.
 //
-// why this exists: every executing lane is Chrome (in-browser tests, e2e, visual,
-// packaged page boot). Firefox is BUILT, import-checked, and signed — never run.
-// So a Chrome-only API landing in the Firefox package ships green today. This
-// closes the cheapest slice of that gap without needing a browser at all:
+// why this exists: runtime coverage cannot replace AMO validation or an exact
+// inventory of guarded Chrome-only call sites. A bad manifest or a new unguarded
+// API must fail before runtime. This gate does that without launching a browser:
 // `web-ext lint` is AMO's own static validator, so it knows Firefox's API surface
 // and its manifest rules, and it runs offline.
 //
@@ -23,16 +22,15 @@
 //      NEW one. A new unguarded Chrome API in the Firefox build is exactly the
 //      bug this repo currently cannot catch.
 //
-// What this does NOT do: execute anything. It cannot tell you the guards actually
-// hold at runtime — only that the set of things needing a guard has not grown.
-// Real Firefox execution is the next rung and needs a Firefox binary.
+// What this does NOT do: execute anything. It proves the static package posture;
+// the `firefox-runtime` job proves the installed Store package in Firefox.
 //
 // Run: bun run check:firefox   (also part of `bun run preflight`)
 
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { REPO_ROOT, ARTIFACTS_DIR } from './lib.ts';
+import { REPO_ROOT, ARTIFACTS_DIR, STORE_LOADER_TEMPLATE } from './lib.ts';
 
 /**
  * Chrome-only APIs we KNOWINGLY ship into the Firefox package, each behind a
@@ -44,11 +42,10 @@ import { REPO_ROOT, ARTIFACTS_DIR } from './lib.ts';
  * once the guard exists.
  */
 const GUARDED_CHROME_ONLY: readonly { api: string; file: string; why: string }[] = [
-  // The heap split needs the offscreen API; Firefox has none, so actorClient is
-  // null and the actor turn falls back to the in-SW loop (THREAT-MODEL R1).
+  // Chrome uses this for the actor-worker host and other document-only jobs.
+  // Firefox starts the actor Worker directly from its extension background page.
   { api: 'offscreen.createDocument', file: 'background/service-worker.js', why: 'guarded by offscreenAvailable' },
-  { api: 'runtime.getContexts', file: 'background/service-worker.js', why: 'offscreen liveness probe, same guard' },
-  { api: 'runtime.getContexts', file: 'background/routes/dweb.js', why: 'offscreen liveness probe, same guard' },
+  { api: 'runtime.getContexts', file: 'background/offscreen-contexts.js', why: 'one capability-checked offscreen liveness probe' },
   // CDP. The `debugger` permission is STRIPPED from every Firefox manifest
   // (gen-manifest.ts), and the pool is wired in only when advancedAutomationOn().
   { api: 'debugger.attach', file: 'background/debugger-pool.js', why: 'permission stripped on Firefox; guarded by advancedAutomationOn()' },
@@ -109,6 +106,20 @@ const main = () => {
 
   const problems: string[] = [];
   for (const { name, dir } of builds) {
+    if (existsSync(join(dir, 'peerd-distributed'))) {
+      problems.push(`  [${name}] dweb module is present without a Firefox mesh host`);
+    }
+    const loader = join(dir, 'shared', 'dweb-loader.js');
+    if (!existsSync(loader)
+        || !readFileSync(loader).equals(readFileSync(STORE_LOADER_TEMPLATE))) {
+      problems.push(`  [${name}] dweb loader is not the inert package template`);
+    }
+    const channelConfig = readFileSync(join(dir, 'shared', 'channel-config.js'), 'utf8');
+    if (!channelConfig.includes('export const DWEB_ENABLED = false')
+        || channelConfig.includes('dwebEnabled:')
+        || channelConfig.includes('dwebAgentEnabled:')) {
+      problems.push(`  [${name}] channel config advertises dweb without a Firefox mesh host`);
+    }
     const { errors, warnings } = lint(dir);
     for (const e of errors) {
       problems.push(`  [${name}] ERROR ${e.code} — ${e.message} (${e.file ?? 'manifest'}${e.line ? `:${e.line}` : ''})`);

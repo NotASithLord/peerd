@@ -40,7 +40,7 @@
  * sibling id that merely shares a prefix. Using getURL('') rather than a
  * hardcoded scheme keeps this correct on Firefox (`moz-extension://…`).
  *
- * @param {{ id?: string, url?: string } | null | undefined} sender
+ * @param {{ id?: string, url?: string, tab?: unknown } | null | undefined} sender
  *   the second argument browser.runtime.onMessage hands to a listener
  * @param {{ runtimeId?: string, extensionOrigin?: string }} [trust]
  *   runtimeId = browser.runtime.id; extensionOrigin = browser.runtime.getURL('').
@@ -60,7 +60,7 @@ export const isFirstPartySender = (sender, { runtimeId, extensionOrigin } = {}) 
  * Is this sender specifically the OFFSCREEN DOCUMENT?
  *
  * why a second, narrower predicate: isFirstPartySender answers "one of ours",
- * which is every extension page — the side panel, the home tab, and the
+ * which is every extension page: the side panel, the home tab, and the
  * engine tab pages that host agent-authored code. For most routes that is the
  * right question. For the few that carry an actor's authority (the offscreen
  * relay: tool dispatch on a pinned instance, and a model call the service
@@ -73,10 +73,11 @@ export const isFirstPartySender = (sender, { runtimeId, extensionOrigin } = {}) 
  *
  * Exact-match on the document URL, not a prefix: a prefix would also admit
  * `offscreen/offscreen.html.evil.html` or any deeper path under it. Query and
- * hash are tolerated (Chrome does not add them today, but a future
- * createDocument call might) by comparing only the part before `?` or `#`.
+ * hash are rejected because the browser-owned document is created at one exact
+ * URL. A sender with `tab` provenance is also rejected because a real offscreen
+ * document is not hosted by a user-visible tab.
  *
- * @param {{ id?: string, url?: string } | null | undefined} sender
+ * @param {{ id?: string, url?: string, tab?: unknown } | null | undefined} sender
  * @param {{ runtimeId?: string, extensionOrigin?: string, offscreenUrl?: string }} [trust]
  *   offscreenUrl = browser.runtime.getURL('offscreen/offscreen.html'). Missing or
  *   blank fails closed, so an unwired caller is "untrusted" rather than a crash.
@@ -85,6 +86,83 @@ export const isFirstPartySender = (sender, { runtimeId, extensionOrigin } = {}) 
 export const isOffscreenSender = (sender, { runtimeId, extensionOrigin, offscreenUrl } = {}) => {
   if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
   if (typeof offscreenUrl !== 'string' || offscreenUrl.length === 0) return false;
-  const url = /** @type {string} */ (sender?.url).split('?')[0].split('#')[0];
-  return url === offscreenUrl;
+  if (sender && typeof sender === 'object' && 'tab' in sender) return false;
+  return sender?.url === offscreenUrl;
+};
+
+/**
+ * Is this sender specifically the extension SERVICE WORKER?
+ *
+ * why: runtime.sendMessage reaches extension contexts broadly. An engine tab is
+ * first-party but hosts agent-authored or untrusted state, so exact source pins
+ * remain necessary for the headless jobs that still use runtime messaging.
+ * Chrome actor runs and private backup transfers use targeted MessageChannels.
+ * Firefox actor relays stay inside its background page, while its backup Port
+ * still requires an exact options-page sender.
+ *
+ * @param {{ id?: string, url?: string, tab?: unknown, documentId?: string } | null | undefined} sender
+ * @param {{ runtimeId?: string, extensionOrigin?: string, serviceWorkerUrl?: string }} [trust]
+ */
+export const isServiceWorkerSender = (sender, { runtimeId, extensionOrigin, serviceWorkerUrl } = {}) => {
+  if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
+  if (typeof serviceWorkerUrl !== 'string' || serviceWorkerUrl.length === 0) return false;
+  if (sender && typeof sender === 'object' && ('tab' in sender || 'documentId' in sender)) return false;
+  return sender?.url === serviceWorkerUrl;
+};
+
+/**
+ * Is this sender the full-tab options page that owns backup and restore?
+ * Hash routes are part of the trusted page URL. Queries and sibling paths are
+ * not, and open_in_tab means legitimate callers carry tab provenance.
+ * @param {{ id?: string, url?: string, tab?: { id?: number } } | null | undefined} sender
+ * @param {{ runtimeId?: string, extensionOrigin?: string, optionsUrl?: string }} [trust]
+ */
+export const isOptionsSender = (sender, { runtimeId, extensionOrigin, optionsUrl } = {}) => {
+  if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
+  if (typeof optionsUrl !== 'string' || optionsUrl.length === 0) return false;
+  if (typeof sender?.tab?.id !== 'number') return false;
+  const url = /** @type {string} */ (sender.url);
+  const hashAt = url.indexOf('#');
+  const documentUrl = hashAt === -1 ? url : url.slice(0, hashAt);
+  return !documentUrl.includes('?') && documentUrl === optionsUrl;
+};
+
+/**
+ * Is this sender specifically the browser-owned peerd panel/sidebar page?
+ *
+ * why separate from first-party: the binary feedback route is a HUMAN click,
+ * not an agent capability. Engine tabs also have first-party extension URLs
+ * while hosting agent-authored state, so admitting all first-party senders
+ * would let an App/Notebook forge task verdicts. Exact URL and no tab
+ * provenance identifies Chrome's side panel and Firefox's sidebar document.
+ * @param {{ id?: string, url?: string, tab?: unknown } | null | undefined} sender
+ * @param {{ runtimeId?: string, extensionOrigin?: string, sidepanelUrl?: string }} [trust]
+ */
+export const isSidepanelSender = (sender, { runtimeId, extensionOrigin, sidepanelUrl } = {}) => {
+  if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
+  if (typeof sidepanelUrl !== 'string' || sidepanelUrl.length === 0) return false;
+  if (sender && typeof sender === 'object' && 'tab' in sender) return false;
+  return sender?.url === sidepanelUrl;
+};
+
+/**
+ * Is this sender the full-tab Home SPA that owns human feedback and
+ * instance-wide observability?
+ *
+ * why separate from first-party: Home renders the same human chat controls as
+ * the side panel, including binary task feedback, but an engine tab must not
+ * inherit that human-only route merely because it shares the extension origin.
+ * Hashes are one-shot Home deep links and are safe; queries and sibling paths
+ * are not. A real Home caller is tab-hosted, unlike the browser side panel.
+ * @param {{ id?: string, url?: string, tab?: { id?: number } } | null | undefined} sender
+ * @param {{ runtimeId?: string, extensionOrigin?: string, homeUrl?: string }} [trust]
+ */
+export const isHomeSender = (sender, { runtimeId, extensionOrigin, homeUrl } = {}) => {
+  if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
+  if (typeof homeUrl !== 'string' || homeUrl.length === 0) return false;
+  if (typeof sender?.tab?.id !== 'number') return false;
+  const url = /** @type {string} */ (sender.url);
+  const hashAt = url.indexOf('#');
+  const documentUrl = hashAt === -1 ? url : url.slice(0, hashAt);
+  return !documentUrl.includes('?') && documentUrl === homeUrl;
 };

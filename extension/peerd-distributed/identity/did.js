@@ -12,6 +12,10 @@ import { base58encode, base58decode } from '../codec/base58.js';
 // Multicodec prefix for an Ed25519 public key (unsigned varint of 0xed).
 const ED25519_PUB_PREFIX = Uint8Array.from([0xed, 0x01]);
 const DID_PREFIX = 'did:key:z';
+// Fixed multicodec bytes plus a 32-byte Ed25519 key always encode to this
+// length. Check it before base58: the decoder is intentionally tiny and its
+// repeated carry propagation is quadratic on attacker-controlled long input.
+const DID_KEY_LENGTH = 56;
 
 /** @param {Uint8Array} pubkey32 */
 export const encodeDidKey = (pubkey32) => {
@@ -26,7 +30,7 @@ export const encodeDidKey = (pubkey32) => {
 
 /** @param {string} did */
 export const decodeDidKey = (did) => {
-  if (typeof did !== 'string' || !did.startsWith(DID_PREFIX)) {
+  if (typeof did !== 'string' || did.length !== DID_KEY_LENGTH || !did.startsWith(DID_PREFIX)) {
     throw new Error('decodeDidKey: not a did:key:z… string');
   }
   const tagged = base58decode(did.slice(DID_PREFIX.length));

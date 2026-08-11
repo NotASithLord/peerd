@@ -13,8 +13,9 @@
 // keystroke-by-keystroke autocomplete that needs typing flow, the
 // agent can call type() with progressively longer prefixes.
 
-import { resolveTargetTab } from './dom-helpers.js';
+import { browserDocumentIdentity, resolveTargetTab, scriptingTarget } from './dom-helpers.js';
 import { summarizeMutations } from '../../dom/index.js';
+import { browserDocumentRefusalFrom, formSubmissionRefusalFrom } from '../browser-automation-policy.js';
 
 /**
  * Harness-injected ctx extras (ref registry + CDP pool). Not on the
@@ -23,8 +24,8 @@ import { summarizeMutations } from '../../dom/index.js';
  *
  * @typedef {{ backendDOMNodeId: number|null, walkId?: number|null, role: string, name: string }} RefEntry
  * @typedef {{ resolve?: (tabId: number, ref: string) => RefEntry | null }} DomRefs
- * @typedef {{ setValueBackendNode?: (tabId: number, backendDOMNodeId: number, text: string, submit: boolean) =>
- *   Promise<{ ok: false, error?: string }
+ * @typedef {{ setValueBackendNode?: (tabId: number, backendDOMNodeId: number, text: string, submit: boolean, expectedDocument: ReturnType<typeof browserDocumentIdentity>) =>
+ *   Promise<{ ok: false, error?: string, outcomeKind?: import('../../lifecycle/failure-taxonomy.js').FailureOutcomeKind }
  *     | { ok: true, tag?: string, navigated?: boolean, mutations?: any }> }} DebuggerPool
  * @typedef {{ domRefs?: DomRefs, debuggerPool?: DebuggerPool }} DomCtxExtras
  */
@@ -41,7 +42,9 @@ export const typeTool = {
     'ref. Replaces whatever value was there. Fires focus, input, and change',
     'events so reactive frameworks see the update. By default acts on the',
     'active tab. Optional submit=true sends an Enter key after setting',
-    'the value (useful for search boxes).',
+    'the value (useful for search boxes). With submit=true, a native form',
+    'that submits to another origin is not filled or submitted; the user',
+    'must review and submit it manually.',
   ].join(' '),
   schema: {
     type: 'object',
@@ -114,8 +117,13 @@ export const typeTool = {
           return { ok: false, error: 'matched_count_mismatch', matchedCount: 1, expectedCount, outcomeKind: 'pre-effect-failure' };
         }
         try {
-          const r = await debuggerPool.setValueBackendNode(tab.id, entry.backendDOMNodeId, args.text, !!args.submit);
-          if (!r.ok) return { ok: false, error: r.error ?? 'ref_type_failed' };
+          const r = await debuggerPool.setValueBackendNode(
+            tab.id, entry.backendDOMNodeId, args.text, !!args.submit, browserDocumentIdentity(tab));
+          if (!r.ok) return formSubmissionRefusalFrom(r) ?? browserDocumentRefusalFrom(r) ?? {
+            ok: false,
+            error: r.error ?? 'ref_type_failed',
+            ...(r.outcomeKind ? { outcomeKind: r.outcomeKind } : {}),
+          };
           return {
             ok: true,
             content: JSON.stringify({
@@ -127,7 +135,14 @@ export const typeTool = {
             }, null, 2),
           };
         } catch (e) {
-          return { ok: false, error: `ref_type_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+          const outcomeKind = /** @type {{ outcomeKind?: import('../../lifecycle/failure-taxonomy.js').FailureOutcomeKind }} */ (e)?.outcomeKind;
+          const refusal = browserDocumentRefusalFrom(e);
+          if (refusal) return refusal;
+          return {
+            ok: false,
+            error: `ref_type_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`,
+            ...(outcomeKind ? { outcomeKind } : {}),
+          };
         }
       }
 
@@ -135,7 +150,7 @@ export const typeTool = {
         let scriptResult;
         try {
           const results = await scripting.executeScript({
-            target: { tabId: tab.id },
+            target: scriptingTarget(tab),
             func: typeInjected,
             args: [null, args.text, !!args.submit, entry.walkId, expectedCount],
           });
@@ -144,7 +159,8 @@ export const typeTool = {
           return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKind: 'pre-effect-failure' };
         }
         if (!scriptResult) return { ok: false, error: 'script_returned_nothing' };
-        if (!scriptResult.ok) return { ok: false, error: scriptResult.error ?? 'ref_type_failed' };
+        if (!scriptResult.ok) return formSubmissionRefusalFrom(scriptResult)
+          ?? { ok: false, error: scriptResult.error ?? 'ref_type_failed' };
         return {
           ok: true,
           content: JSON.stringify({
@@ -180,7 +196,7 @@ export const typeTool = {
     let scriptResult;
     try {
       const results = await scripting.executeScript({
-        target: { tabId: tab.id },
+        target: scriptingTarget(tab),
         func: typeInjected,
         args: [args.selector, args.text, !!args.submit, null, expectedCount],
       });
@@ -189,7 +205,8 @@ export const typeTool = {
       return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKind: 'pre-effect-failure' };
     }
     if (!scriptResult) return { ok: false, error: 'script_returned_nothing' };
-    if (!scriptResult.ok) return { ok: false, error: scriptResult.error ?? 'type_failed' };
+    if (!scriptResult.ok) return formSubmissionRefusalFrom(scriptResult)
+      ?? { ok: false, error: scriptResult.error ?? 'type_failed' };
 
     return {
       ok: true,
@@ -269,6 +286,27 @@ export function typeInjected(selector, text, submit, walkId, expectedCount) {
     el = nodes[0];
   }
   try {
+    // why: submit=true can send the value without exposing the form action in
+    // the tool args. Check the live action before setting the value or firing
+    // input events, so the refused operation leaves no actor-supplied payload
+    // behind for form submission or page handlers.
+    const targetForm = submit ? /** @type {HTMLInputElement} */ (el).form : null;
+    const targetFormMethod = targetForm
+      ? Element.prototype.getAttribute.call(targetForm, 'method')
+      : null;
+    if (targetForm && (targetFormMethod || 'get').toLowerCase() !== 'dialog') {
+      try {
+        const action = Element.prototype.getAttribute.call(targetForm, 'action');
+        const actionOrigin = action
+          ? new URL(action, document.baseURI).origin
+          : document.location.origin;
+        if (actionOrigin !== document.location.origin) {
+          return { ok: false, error: 'cross_origin_form_submission_blocked' };
+        }
+      } catch {
+        return { ok: false, error: 'cross_origin_form_submission_blocked' };
+      }
+    }
     if (typeof el.focus === 'function') el.focus();
     const tag = el.tagName.toLowerCase();
     if (tag === 'input' || tag === 'textarea') {

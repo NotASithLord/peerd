@@ -93,6 +93,9 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 545/547 → 548: the learned-origins un-learn surface (#262) and the Activity
 // origin-lock rows (#282) land together — both ledgers are kept and the floor
 // is their union, the same shape as the 505/506 → 510 merge above.
+// 648 → 653: Firefox actor isolation adds the direct background host, worker
+// protocol, browser-neutral capability, shared capability banner, and browser
+// UX test.
 // 548 → 549: the in-page activity indicator's two checked cores (#259) —
 // actor/activity-label.js and background/page-activity.js. The injected
 // overlay body itself is ES5 and exempt, so it does not count.
@@ -127,7 +130,35 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 615 → 618: the lifecycle hardening batch — failure-taxonomy.js (typed
 // outcomes), write-guard.js (§11.5 enforcement), engine-liveness.js (§9
 // ledger); all carry // @ts-check.
-const COVERED_FLOOR = 645;
+// 618 → 619: the actors-in-code SW route extracted for issue #324.
+// 619 → 624: the initial portable-identity capsule/record implementation.
+// 624 → 628: custody hardening added the shared crypto/host boundaries,
+// rendered restore-flow test, and tested offscreen lifecycle barrier while
+// centralizing identity-bound sharing and removing unused device-key files.
+// 628 → 629: targeted dweb-custody port client (raw roots and passphrases
+// never ride extension-wide broadcast messaging).
+// 629 → 630: permanent identity reads and first-mint writes moved from generic
+// runtime routes into the verified custody port.
+// 630 → 631: one shared memory-hard KDF policy now protects every new backup
+// password oracle.
+// 631 → 633: the exact-options transfer Port and its client keep backup
+// passwords off extension-wide runtime messages.
+// 633 → 635: App asset classification and the full binary runner test.
+// 635 → 636: the recoverable publish transaction is shared by dweb hosts.
+// 636 → 639: dweb reseed, content ownership, and share rollback are checked.
+// 650 → 651: Firefox actor credential-custody browser coverage is checked.
+// 651 → 657: the direct host, worker protocol, isolation policy, banner,
+// rendered fixture, and UI test are checked.
+// 657 → 658: durable actor isolation failure state is checked.
+// 659 → 660: the remote module import policy is checked.
+// 660 → 662: the shared private-network and browser-target policies are checked.
+// 662 → 670: browser navigation custody and exact-document helpers are checked.
+// 672 → 673: cold-start popup network custody is checked.
+// Contributor Metrics adds the closed accumulator/store, trusted background
+// route, Options surface, and rendered side-panel coverage.
+// 673 → 676: the Actor Fabric adds its pure topology model, SW live projection,
+// and rendered browser contract while replacing the checked async-task bar.
+const COVERED_FLOOR = 707;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

@@ -1,5 +1,5 @@
 // @ts-check
-// background/routes/learned-origins.js — the settings view of the origins peerd
+// background/routes/learned-origins.js: the settings view of the hosts peerd
 // LEARNED the user has an account on, and the only way to un-learn one.
 //
 // why these routes exist: the learned set silently decides which sites a roaming
@@ -32,7 +32,7 @@ export const makeLearnedOriginRoutes = (deps) => {
   // WITHOUT awaiting, and a settings message is exactly what wakes a cold worker
   // — Chrome delivers it right after top-level evaluation, before an async
   // storage read can resolve. Pre-hydrate the map is empty, so `list` rendered
-  // "Nothing learned yet." for a profile full of learned origins, and `clear`
+  // "Nothing learned yet." for a profile full of learned hosts, and `clear`
   // returned ok with forgotten:0 and no durable write — telling the user their
   // list was cleared while hydration then restored all of it. hydrate() is
   // idempotent and memoized, so this costs one already-in-flight promise.
@@ -41,14 +41,17 @@ export const makeLearnedOriginRoutes = (deps) => {
   return {
     'learned/list': async () => { await ready(); return snapshot(); },
 
-    // Un-learn ONE origin. Canonicalized through the same normalizer `note`
+    // Un-learn ONE host. Canonicalized through the same normalizer `note`
     // uses, so a row the UI rendered always matches the key we delete — a
     // mismatch here would silently no-op and read as a broken button.
-    'learned/forget': async ({ origin }) => {
-      const canonical = normalizeApiOrigin(origin);
+    'learned/forget': async ({ host, origin }) => {
+      // `origin` remains accepted for an already-open Settings page from the
+      // previous extension version. Both spellings collapse to the same host.
+      const canonical = normalizeApiOrigin(host ?? origin);
       if (!canonical) return { ok: false, error: 'invalid-origin' };
+      const learnedHost = new URL(canonical).hostname;
       await ready();
-      const forgotten = learnedOrigins.forget(canonical);
+      const forgotten = learnedOrigins.forget(learnedHost);
       if (!forgotten) return { ok: false, error: 'not-learned' };
       // Await the durable write before replying: the caller re-renders from this
       // reply, so returning early would show a row gone that a mid-flight SW

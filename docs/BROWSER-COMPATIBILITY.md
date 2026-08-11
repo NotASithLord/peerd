@@ -29,7 +29,7 @@ a user or agent workflow.
 
 ## Upstream issue ledger
 
-### FF-COI — extension pages cannot opt into cross-origin isolation
+### FF-COI: extension pages cannot opt into cross-origin isolation
 
 - **Peerd impact:** WebVM (CheerpX) cannot boot, and threaded WebAssembly cannot
   share memory with Workers from a Firefox extension page. This does not block
@@ -68,7 +68,7 @@ Dynamic Worker/CSP behavior is not yet a stable Firefox Pod contract.
   Worker under its shipped CSP, AMO policy permits the construction, and the
   same realm-seal, cancellation, egress, and red-team tests pass as Chromium.
 
-### FF-SANDBOX — manifest sandbox support landed in Firefox 154
+### FF-SANDBOX: manifest sandbox support landed in Firefox 154
 
 - **Peerd impact:** Apps are disabled because Peerd's current Firefox manifest
   strips the `sandbox` key and the runtime refuses to open an App without a
@@ -82,7 +82,7 @@ Dynamic Worker/CSP behavior is not yet a stable Firefox Pod contract.
   API access, no ambient network, correct Worker rewriting, and normal
   create/edit/preview/version/reopen behavior.
 
-### FF-OFFSCREEN — Firefox uses event pages instead of `chrome.offscreen`
+### FF-OFFSCREEN: Firefox uses event pages instead of `chrome.offscreen`
 
 - **Peerd impact:** the headless tools and document/media/model hosts listed in
   the table are unavailable or degraded. More importantly, actor turns can fall
@@ -99,7 +99,7 @@ Dynamic Worker/CSP behavior is not yet a stable Firefox Pod contract.
   lifecycle, cancellation, keyless Worker boundary, and document/media
   capabilities, with Firefox browser tests covering both success and recovery.
 
-### FF-DEBUGGER — no compatible `chrome.debugger` extension API
+### FF-DEBUGGER: no compatible `chrome.debugger` extension API
 
 - **Peerd impact:** Firefox uses the same `chrome.scripting`/DOM-walk path as the
   initial Chromium store build. It cannot provide CDP-only trusted input,

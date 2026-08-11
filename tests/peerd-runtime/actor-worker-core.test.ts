@@ -113,13 +113,13 @@ describe('runActorLoop', () => {
     expect(dispatched).toBe(false);   // a tool-less child never dispatches
   });
 
-  test('the loop never receives a real getSecret/safeFetch (the worker holds no key/egress)', async () => {
+  test('the worker loop receives named credential-boundary stubs', async () => {
     const sessions = makeInMemorySessions({ sessionId: 'act-1' });
-    let secretThrew = false;
-    let fetchThrew = false;
+    let secretError: unknown = null;
+    let fetchError: unknown = null;
     const probeLoop = async function* (ctx: any) {
-      try { await ctx.getSecret('anything'); } catch { secretThrew = true; }
-      try { await ctx.safeFetch('https://x'); } catch { fetchThrew = true; }
+      try { await ctx.getSecret('anything'); } catch (error) { secretError = error; }
+      try { await ctx.safeFetch('https://x'); } catch (error) { fetchError = error; }
       await ctx.sessions.appendMessage(ctx.sessionId, { id: 'a', role: 'assistant', content: 'done' });
       yield { type: 'stop', stopReason: 'end_turn' };
     };
@@ -127,19 +127,51 @@ describe('runActorLoop', () => {
       { runUserTurn: probeLoop as any, sessions, callModel: (async function* () {})() as any, toolDispatch: async () => ({}), getSystemPrompt: () => 'S', tools: [] },
       { sessionId: 'act-1', userText: 't', maxSteps: 5 },
     );
-    expect(secretThrew).toBe(true);   // getSecret in the worker is a throwing stub
-    expect(fetchThrew).toBe(true);    // safeFetch too — no egress in the heap
+    expect(secretError).toEqual(expect.objectContaining({
+      name: 'ActorCredentialBoundaryError',
+      capability: 'secret',
+    }));
+    expect(fetchError).toEqual(expect.objectContaining({
+      name: 'ActorCredentialBoundaryError',
+      capability: 'provider-network',
+    }));
+  });
+
+  test('preserves inbound as a synthetic, explicitly untrusted loop turn', async () => {
+    const sessions = makeInMemorySessions({ sessionId: 'dweb' });
+    let seen: any = null;
+    const probeLoop = async function* (ctx: any) {
+      seen = ctx;
+      await ctx.sessions.appendMessage(ctx.sessionId, { id: 'a', role: 'assistant', content: 'observed' });
+      yield { type: 'stop', stopReason: 'end_turn' };
+    };
+    await runActorLoop(
+      { runUserTurn: probeLoop as any, sessions, callModel: (async function* () {})() as any, toolDispatch: async () => ({}), getSystemPrompt: () => 'S', tools: [] },
+      { sessionId: 'dweb', userText: 'peer bytes', inbound: true },
+    );
+    expect(seen).toEqual(expect.objectContaining({
+      synthetic: true,
+      trusted: false,
+      inbound: true,
+    }));
   });
 });
 
 describe('makeActorSummaryFence', () => {
-  test('a tab web actor fences its summary as untrusted, tagged with the tab url', () => {
-    const fence = makeActorSummaryFence({ actorType: 'web', tabUrl: 'https://example.com/page' });
+  test('a tab web actor fences its summary as untrusted, tagged only with the sanitized origin', () => {
+    const fence = makeActorSummaryFence({ actorType: 'web', tabOrigin: 'https://example.com' });
     expect(typeof fence).toBe('function');
     const wrapped = fence!('did three steps on the page');
     // the BODY is present and the envelope is an untrusted-data wrap (not a command)
     expect(wrapped).toContain('did three steps on the page');
     expect(wrapped).toContain('example.com');
+  });
+
+  test('an offscreen tab actor with restricted provenance carries no tab location', () => {
+    const fence = makeActorSummaryFence({ actorType: 'web', tabOrigin: undefined });
+    const wrapped = fence!('private page summary');
+    expect(wrapped).toContain('origin="web-actor"');
+    expect(wrapped).not.toContain('127.0.0.1');
   });
 
   test('an API actor fences with its FIXED owned origin', () => {

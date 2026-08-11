@@ -58,12 +58,25 @@ describe('shapeSketch — structure, never verbatim payload', () => {
   test('keeps keys + types, redacts secret keys, samples arrays', () => {
     const s = shapeSketch({ id: 5, name: 'short', token: 'anything', items: [{ a: 1 }, { a: 2 }] }) as Record<string, unknown>;
     expect(s.id).toBe('number');
-    expect(s.name).toBe('short');           // short strings kept
+    expect(s.name).toBe('string');
     expect(s.token).toBe('<redacted>');
     expect(Array.isArray(s.items)).toBe(true);
   });
   test('long strings collapse to the type', () => {
     expect(shapeSketch('x'.repeat(50))).toBe('string');
+  });
+
+  test('short PII strings never enter the model-facing shape', () => {
+    const shape = shapeSketch({
+      email: 'alice@example.com',
+      name: 'Jane Doe',
+      city: 'Rome',
+    });
+    const serialized = JSON.stringify(shape);
+    expect(serialized).not.toContain('alice@example.com');
+    expect(serialized).not.toContain('Jane Doe');
+    expect(serialized).not.toContain('Rome');
+    expect(shape).toEqual({ email: 'string', name: 'string', city: 'string' });
   });
 });
 
@@ -98,6 +111,25 @@ describe('digestCapture — redacted inventory + inferred posture', () => {
   test('cookie-only traffic → session posture', () => {
     const d = digestCapture([{ method: 'GET', url: 'https://api.x.com/me', reqHeaders: { Cookie: 'sid=1' } }], { origins: ['https://api.x.com'] });
     expect(d.auth).toBe('session');
+  });
+
+  test('multiple approved origins remain separately attributed', () => {
+    const d = digestCapture([
+      { method: 'GET', url: 'https://app.x.com/me', reqHeaders: { Cookie: 'sid=1' } },
+      { method: 'POST', url: 'https://api.x.com/v1/items', reqHeaders: { Authorization: 'Bearer secret' } },
+    ], { origins: ['https://app.x.com', 'https://api.x.com'] });
+    expect(d.originDigests).toEqual([
+      {
+        origin: 'https://api.x.com', auth: 'bearer', sampled: 1,
+        endpoints: [{ method: 'POST', path: '/v1/items' }],
+      },
+      {
+        origin: 'https://app.x.com', auth: 'session', sampled: 1,
+        endpoints: [{ method: 'GET', path: '/me' }],
+      },
+    ]);
+    expect(JSON.stringify(d.originDigests)).not.toContain('secret');
+    expect(JSON.stringify(d.originDigests)).not.toContain('sid=1');
   });
 
   test('no observed in-scope traffic → unknown posture', () => {

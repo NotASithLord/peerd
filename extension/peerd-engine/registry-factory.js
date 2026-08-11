@@ -151,7 +151,13 @@ export const createRegistry = (config, { storage, onActorArchive }) => {
    */
   const create = async (opts = {}) => {
     await load();
-    const id = newId(idPrefix);
+    const requestedId = typeof opts.id === 'string' ? opts.id : null;
+    if (requestedId && (!requestedId.startsWith(`${idPrefix}-`)
+        || requestedId.length > 96 || !/^[a-z0-9-]+$/.test(requestedId))) {
+      throw new Error(`invalid ${notFoundLabel} id`);
+    }
+    const id = requestedId ?? newId(idPrefix);
+    if (collection()[id]) throw new Error(`${notFoundLabel} already exists: ${id}`);
     const now = Date.now();
     const record = /** @type {Rec} */ ({
       id,
