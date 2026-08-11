@@ -17,7 +17,7 @@
 peerd is a browser-native AI agent shipped as a Chrome and Firefox extension. The
 agent loop runs in the user's browser. It holds the user's model-provider API key
 (bring your own key) in an encrypted vault, drives the user's logged-in tabs and
-DOM, runs code in sandboxes (a WebAssembly Linux VM, sealed Notebook/Pod workers, opaque
+DOM, runs code in sandboxes (a WebAssembly Linux VM, sealed JS workers, opaque
 origin App iframes), and on the preview channel reaches a peer-to-peer mesh. There
 is no backend, no telemetry, and no account.
 
@@ -52,7 +52,7 @@ between them.
 | Service worker (`background/`) | Orchestrator agent loop, tool dispatch and gates, vault, egress wrappers, all relays | Yes. The vault key and API key live only here |
 | Offscreen document (`offscreen/`) | Per-actor and per-actor worker heaps, headless `script`, voice, the dweb base network | No. Worker heaps are keyless |
 | Side panel (`sidepanel/`) | The chat UI, confirm prompts, settings | No |
-| Sandbox tabs (`engine-tabs/vm-tab/`, `engine-tabs/notebook-tab/`, `engine-tabs/pod-tab/`, `engine-tabs/app-tab/`) | WebVM (CheerpX), Notebook/Pod (sealed workers), App (opaque origin iframe) | No |
+| Sandbox tabs (`engine-tabs/vm-tab/`, `engine-tabs/notebook-tab/`, `engine-tabs/app-tab/`) | WebVM (CheerpX), Notebook (sealed worker), App (opaque origin iframe) | No |
 | The mesh (`peerd-distributed/`, preview only) | WebRTC mesh, DHT, gossip, signed direct channels, A2A | No |
 
 The module map (`p`rovider, `e`gress, `e`ngine, `r`untime, `d`istributed) is in
@@ -76,7 +76,7 @@ holds both untrusted input and dangerous capability. Enforcement lives in
 |---|---|---|
 | The user | Everything: unlocking the vault, approving confirms, installing skills and imports | (the root of trust) |
 | The orchestrator (main agent loop, in the service worker) | The conversation, planning, and delegating a plain-language goal to an actor | Hold an environment's low-level tools, read raw page bytes, or run untrusted code directly |
-| A bound actor (web, webvm, notebook, pod, app) | Driving one tab, VM, notebook, Pod, or app. It holds only that instance's tools, keyless, in its own worker heap on Chrome | Touch another instance or kind, hold the key, or return anything to the orchestrator except a `wrapUntrusted`-fenced summary |
+| A bound actor (web, webvm, notebook, app) | Driving one tab, VM, notebook, or app. It holds only that instance's tools, keyless, in its own worker heap on Chrome | Touch another instance or kind, hold the key, or return anything to the orchestrator except a `wrapUntrusted`-fenced summary |
 | An actor | A short-lived actor spawned to break down a task. Keyless, own heap, a narrowed toolset | Escalate past its grant, hold the key, or reach another heap. Every tool call is re-checked in the service worker |
 | The dweb actor (preview, opt-in) | Monitoring inbound mesh traffic and A2A over the mesh. Keyless, own heap | Delegate on an inbound (untrusted) turn, or sign as the user without consent |
 | The egress chokepoint (`safeFetch` and `webFetch`) | Every outbound byte: the allowlist for credentialed calls, or the SSRF and denylist checks for open-web calls | Be bypassed. A bare `fetch` is forbidden by lint across the project |
@@ -96,7 +96,7 @@ holds both untrusted input and dangerous capability. Enforcement lives in
 - B3. The extension and the open web. All outbound bytes pass through
   `peerd-egress/fetch/`: `safeFetch` (exact-origin provider allowlist, carries the
   key) or `webFetch` (SSRF and private-network block plus denylist, keyless).
-- B4. Sandboxed code and the host. The WebVM, Notebook/Pod workers, and App iframe each
+- B4. Sandboxed code and the host. The WebVM, Notebook worker, and App iframe each
   run confined to a realm whose only outward edge is an audited postMessage bridge,
   or, for the App, an opaque origin with no privileges.
 - B5. The mesh and the local agent (preview). Peer bytes are content-addressed,
@@ -124,7 +124,7 @@ malicious separate extension, and physical device access.
 | User authentication factor (login) | Never held by the agent — a passkey stays on the user's device; an SSO session stays with the provider; a password is never read or filled | The agent never holds it; a login is initiated only through a gated, origin-verified, always-confirmed, affordance-verified action (`tools/defs/login.js`, Tier 0). The factor stays with the user |
 | Page content the agent reads | Transiently, inside an actor heap | The memory boundary (B1) and the untrusted-content fence |
 | Durable memory (notes loaded into every future prompt) | `peerd-runtime/memory/` | User-approved writes. The digest excludes tool results (see residual risk R2) |
-| Local files (WebVM filesystem, Notebook, Pod, and App OPFS) | Sandbox-local storage | Per-instance OPFS root, path-traversal collapse, realm seal |
+| Local files (WebVM filesystem, Notebook and App OPFS) | Sandbox-local storage | Per-instance OPFS root, path-traversal collapse, realm seal |
 | Peer bundles (dwapps, data, agent cards) | Received over the mesh | Content addressing, Ed25519 signatures, size and shape caps |
 | The agent's own authority (its tools, its delegation) | The orchestrator | Exposure and actor-tier gates, the sender gate, Plan and Act mode |
 | The audit log (record of security events) | IndexedDB, extension origin | Append-only, hash-chained for tamper evidence (residual risk R4: evident, not proof) |
@@ -275,7 +275,7 @@ Code: `peerd-runtime/actor/delegation-lineage.js` (`mayMessageActor`,
 
 <a id="inv-6"></a>
 ### INV-6. Sandboxed code is confined to an audited bridge
-In a Notebook, Pod job, or headless worker realm, every raw network channel throws, the native
+In a Notebook or headless worker realm, every raw network channel throws, the native
 `fetch` is deleted off the prototype chain, and the bridge is pinned non-writable and
 non-configurable so in-realm sabotage cannot unseat it. Same-origin durable stores are
 sealed too — `indexedDB` (the sealed worker runs at the extension origin, so an unsealed
@@ -283,23 +283,18 @@ IDBFactory would reach the `peerd` database: the vault blob, always-loaded memor
 sessions, grants, and audit) and the Cache API are both replaced with throwing stubs and
 deleted off the prototype chain, so the audited postMessage bridge and the per-instance
 OPFS root remain the only outward edges. No fresh un-sealed realm can
-be created, and OPFS import paths collapse `..` inside the instance root. Pod tightens
-the profile further: ambient `fetch`, raw `navigator.storage`, and the `chrome`/`browser`
-namespaces are absent; only named, Pod-rooted file and audited-fetch capabilities remain.
-A wasm32-wasi
+be created, and OPFS import paths collapse `..` inside the instance root. A wasm32-wasi
 module run in that realm via the `peerd:wasi` builtin holds strictly less than the realm
 itself: its only imports are the vendored shim's WASI preview1 syscalls, and every
 descriptor behind them is wrapper-built (stdin bytes, size-capped output collectors, an
 in-memory file table from the call) — no network channel exists for the seal to even
-block. Pod's workspace-backed mode snapshots bytes through that explicit adapter and
-reconciles changes after exit; the module still receives no OPFS handle. The App runs
+block. The App runs
 at an opaque origin (the manifest sandbox omits `allow-same-origin` and
 `allow-top-navigation`) with all `chrome.*` stripped, and its inlined worker source is
 escaped against a `</script>` breakout. The WebVM's only network path is an HTTP bridge
 that refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth
 field, and confirms body-bearing verbs.
 Code: `engine-tabs/notebook-tab/notebook-neutralizers.js` (`applyRealmSeal`),
-`engine-tabs/pod-tab/pod-realm-seal.js`, `engine-tabs/pod-tab/pod-job-worker.js`,
 `peerd-engine/app-compose.js`, `peerd-engine/vm-net/http-bridge.js`,
 `peerd-engine/module-resolver.js`, and the manifest sandbox CSP. Red-team: scenario 06,
 with the real-realm proof in
@@ -547,7 +542,7 @@ verifies against its persisted public key; the Bun tier can only prove this over
 - Exfiltration of the vault, API key, or conversation off-device.
 - Prompt injection that bypasses the actor boundary (the keyless per-environment heap)
   and reaches the orchestrator's tools, memory, or the key.
-- Sandbox escape (WebVM, Notebook/Pod Workers, App iframe) reaching the host, other origins, or
+- Sandbox escape (WebVM, Notebook, App iframe) reaching the host, other origins, or
   privileged extension contexts.
 - Denylist, egress-chokepoint, or SSRF-guard bypass.
 - Vault or crypto weaknesses, and auth-bypass of the lock.

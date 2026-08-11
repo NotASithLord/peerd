@@ -1,5 +1,8 @@
 // @ts-check
 // Pod registry — durable catalog for lightweight shell/WASI environments.
+// A persistent record promises durable workspace bytes, not a durable process:
+// Workers, jobs, cwd, and environment may disappear and are never reconstructed
+// as though an interrupted side effect had completed.
 
 import { createRegistry } from './registry-factory.js';
 

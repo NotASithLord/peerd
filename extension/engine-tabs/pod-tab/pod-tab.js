@@ -1,6 +1,11 @@
 // @ts-check
 // Trusted host for one Pod. It owns rooted OPFS, brokered Git/fetch, and the
 // job table; every command runs in a fresh sealed Worker with only RPC handles.
+//
+// Product boundary: Script is disposable JS, Notebook is a persistent JS
+// workspace, Pod is this shell/WASI/Git layer, and WebVM is Linux compatibility.
+// why: keeping Pod as a thin composition of existing hosts avoids owning a
+// second filesystem, Node/POSIX compatibility layer, or browser Linux runtime.
 
 import browser from '/vendor/browser-polyfill.js';
 import { buildModule, createEditor, opfsHelpers, POD_OPFS_ROOT } from '/peerd-engine/index.js';
