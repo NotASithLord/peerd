@@ -404,6 +404,13 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
   /** @type {string[]} */
   const endpointUrls = (Array.isArray(payload.providerEndpoints?.endpoints) ? payload.providerEndpoints.endpoints : [])
     .map((/** @type {any} */ e) => String(e?.url ?? '')).filter(Boolean);
+  if (typeof settings.ollamaHost === 'string') {
+    try {
+      const configured = new URL(settings.ollamaHost.trim());
+      if ((configured.protocol === 'http:' || configured.protocol === 'https:')
+          && !endpointUrls.includes(configured.origin)) endpointUrls.push(configured.origin);
+    } catch { /* malformed settings are normalized or dropped before apply */ }
+  }
   if (endpointUrls.length > 0) {
     notices.push(`This import adds provider endpoint(s) the agent will send API traffic to: ${endpointUrls.join(', ')} — only proceed if you recognize them.`);
   }
@@ -462,7 +469,7 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
  * @param {'store'|'preview'} args.channel
  * @param {string[]} args.knownSettingKeys
  * @param {Object} args.io
- * @param {(patch: Record<string, any>) => Promise<void>} args.io.applySettings
+ * @param {(patch: Record<string, any>) => Promise<void|{count?: number, notices?: string[]}>} args.io.applySettings
  * @param {(endpoints: any) => Promise<void>} args.io.setProviderEndpoints
  * @param {(name: string, value: string) => Promise<void>} args.io.setSecret
  * @param {(payload: any) => Promise<{written: number, skipped: number}>} args.io.importMemory
@@ -631,8 +638,13 @@ export const applyImport = async ({
       if (known.has(k)) patch[k] = v;
     }
     if (Object.keys(patch).length > 0) {
-      await io.applySettings(patch);
-      imported.settings = Object.keys(patch).length;
+      const applied = await io.applySettings(patch);
+      const appliedResult = applied && typeof applied === 'object' ? applied : null;
+      const appliedCount = appliedResult?.count;
+      imported.settings = Number.isInteger(appliedCount)
+        ? /** @type {number} */ (appliedCount)
+        : Object.keys(patch).length;
+      if (Array.isArray(appliedResult?.notices)) summary.notices.push(...appliedResult.notices);
     }
 
     if (payload.providerEndpoints?.endpoints) {

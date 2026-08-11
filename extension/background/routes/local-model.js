@@ -10,7 +10,10 @@
  * @returns {Record<string, (msg?: any) => Promise<any>>}
  */
 export const makeLocalModelRoutes = (deps) => {
-  const { ensureOffscreen, browser, localModelState, localModelHostAvailable } = deps;
+  const {
+    ensureOffscreen, browser, localModelState, localModelHostAvailable, pushState,
+    onProviderConfigChanged,
+  } = deps;
   const unavailable = () => ({
     ok: false,
     error: 'runtime_capability_unavailable',
@@ -26,7 +29,8 @@ export const makeLocalModelRoutes = (deps) => {
       if (!localModelHostAvailable()) return unavailable();
       await ensureOffscreen();
       const r = await browser.runtime.sendMessage({ type: 'local-model/host/status' });
-      localModelState.setAvailable(!!(r?.available || r?.downloaded)); // cached counts as usable (lazy-loads on first use)
+      const changed = localModelState.setAvailable(!!(r?.available || r?.downloaded)); // cached counts as usable (lazy-loads on first use)
+      if (changed) { onProviderConfigChanged?.(); pushState?.(); }
       // include the last progress event so Settings (which keeps no port) can show
       // a phase hint while the model downloads.
       return r ? { ...r, progress: localModelState.progress() } : { ok: false };
@@ -40,7 +44,8 @@ export const makeLocalModelRoutes = (deps) => {
       if (!localModelHostAvailable()) return unavailable();
       await ensureOffscreen();
       const r = await browser.runtime.sendMessage({ type: 'local-model/host/init' });
-      localModelState.setAvailable(!!(r?.available || r?.downloaded)); // cached counts as usable (lazy-loads on first use)
+      const changed = localModelState.setAvailable(!!(r?.available || r?.downloaded)); // cached counts as usable (lazy-loads on first use)
+      if (changed) { onProviderConfigChanged?.(); pushState?.(); }
       return r ?? { ok: false };
     },
   };

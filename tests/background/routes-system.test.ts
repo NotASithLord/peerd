@@ -137,6 +137,27 @@ describe('transfer import', () => {
     expect((await r['transfer/import'](authorized({ payload: {} }))).ok).toBe(true);
     expect(events).toEqual(['close', 'persist', 'stop']);
   });
+  test('settings import normalizes known values before they reach durable storage', async () => {
+    let persisted: any = null;
+    const r = makeSystemRoutes(baseDeps({
+      applyImport: async ({ io }: any) => {
+        const applied = await io.applySettings({
+          providerName: 'bogus',
+          providerModel: { attacker: true },
+          ollamaHost: 'https://ollama.example.test/path',
+        });
+        return { ok: true, imported: { settings: applied.count }, notices: applied.notices };
+      },
+      normalizeImportedSettings: () => ({ ollamaHost: 'https://ollama.example.test' }),
+      settingsStore: { update: async (patch: any) => { persisted = patch; } },
+    }));
+    const result = await r['transfer/import'](authorized({ payload: {} }));
+    expect(persisted).toEqual({ ollamaHost: 'https://ollama.example.test' });
+    expect(result.imported.settings).toBe(1);
+    expect(result.notices.join(' ')).toContain('providerName');
+    expect(result.notices.join(' ')).toContain('providerModel');
+    expect(result.notices.join(' ')).toContain('normalized');
+  });
   test('partial import audits committed counts and refreshes visible state', async () => {
     let pushed = false; let event: any;
     const partial = { settings: 2, secrets: 1, memoryWritten: 0, hooks: 0, dwebIdentity: 0 };
