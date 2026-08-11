@@ -268,9 +268,11 @@ export const reconcileWorkspaceFiles = (before, after) => {
  * @param {string|Uint8Array} [opts.stdin]
  * @param {number} [opts.maxFiles]
  * @param {number} [opts.maxBytes]
+ * @param {number} [opts.maxFileBytes]
  */
 export const runWasiWorkspace = async (module, {
-  workspace, args = [], env = {}, stdin = '', maxFiles = 2_000, maxBytes = 128_000_000,
+  workspace, args = [], env = {}, stdin = '', maxFiles = 2_000,
+  maxBytes = 128_000_000, maxFileBytes = 16 * 1024 * 1024,
 }) => {
   if (!workspace?.list || !workspace?.readBytes || !workspace?.write || !workspace?.delete) {
     throw new TypeError('runWasiWorkspace: a byte workspace capability is required');
@@ -279,16 +281,47 @@ export const runWasiWorkspace = async (module, {
   if (entries.length > maxFiles) throw new WasiRunError(`workspace has too many files: ${entries.length} > ${maxFiles}`);
   /** @type {Record<string,Uint8Array>} */
   const before = Object.create(null);
+  /** @param {unknown} value */
+  const checkedPath = (value) => {
+    const raw = String(value ?? '');
+    const path = raw.replace(/^\/+/, '');
+    if (!path || raw.includes('\\') || raw.includes('\0')
+        || path.split('/').some((part) => !part || part === '.' || part === '..')) {
+      throw new WasiRunError(`unsafe WASI workspace path: ${JSON.stringify(raw)}`);
+    }
+    return path;
+  };
+  let declaredBytes = 0;
+  for (const entry of entries) {
+    checkedPath(entry.path);
+    if (typeof entry.size === 'number') {
+      if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > maxFileBytes) {
+        throw new WasiRunError(`workspace file exceeds the WASI per-file budget: ${entry.path}`);
+      }
+      declaredBytes += entry.size;
+      if (declaredBytes > maxBytes) throw new WasiRunError(`workspace exceeds the WASI snapshot budget: ${declaredBytes} > ${maxBytes} bytes`);
+    }
+  }
   let totalBytes = 0;
   for (const entry of entries) {
-    const path = String(entry.path ?? '').replace(/^\/+/, '');
-    if (!path) continue;
+    const path = checkedPath(entry.path);
     const bytes = await workspace.readBytes(path);
+    if (bytes.byteLength > maxFileBytes) throw new WasiRunError(`workspace file exceeds the WASI per-file budget: ${path}`);
     totalBytes += bytes.byteLength;
     if (totalBytes > maxBytes) throw new WasiRunError(`workspace exceeds the WASI snapshot budget: ${totalBytes} > ${maxBytes} bytes`);
     before[path] = bytes;
   }
   const result = await runWasi(module, { args, env, stdin, files: before });
+  const outputEntries = Object.entries(result.files);
+  if (outputEntries.length > maxFiles) throw new WasiRunError(`WASI output has too many files: ${outputEntries.length} > ${maxFiles}`);
+  let outputBytes = 0;
+  for (const [rawPath, content] of outputEntries) {
+    checkedPath(rawPath);
+    const size = toBytes(content).byteLength;
+    if (size > maxFileBytes) throw new WasiRunError(`WASI output file exceeds the per-file budget: ${rawPath}`);
+    outputBytes += size;
+    if (outputBytes > maxBytes) throw new WasiRunError(`WASI output exceeds the workspace budget: ${outputBytes} > ${maxBytes} bytes`);
+  }
   const changes = reconcileWorkspaceFiles(before, result.files);
   // why deletes first: a command may replace a file with a directory tree at
   // the same path. Removing stale leaves before writes mirrors command exit.

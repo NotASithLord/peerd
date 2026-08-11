@@ -1,6 +1,7 @@
 // @ts-check
 
-import { podGitRemoteIntent } from '/peerd-engine/index.js';
+import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/index.js';
+import { wrapUntrusted } from '../prompt-wrap.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const podExecTool = {
@@ -35,8 +36,13 @@ export const podExecTool = {
     if (!client?.exec) return { ok: false, error: 'pod_unavailable' };
     try {
       const podId = await client.resolveId({ sessionId: ctx.session?.sessionId, podId: args.podId });
-      const remoteIntent = podGitRemoteIntent(args.command);
-      let remoteGitAuthorized = false;
+      const remoteIntents = podGitRemoteIntents(args.command);
+      if (remoteIntents.length > 1) {
+        return { ok: false, error: 'multiple_remote_git_operations_require_separate_pod_exec_calls' };
+      }
+      const remoteIntent = remoteIntents[0] ?? null;
+      /** @type {{op:'clone'|'fetch'|'push'|'link',url:string}|null} */
+      let remoteGitGrant = null;
       if (remoteIntent) {
         const repositories = /** @type {any} */ (ctx).repositories;
         const current = remoteIntent.url ? null : await repositories?.getRemote?.({ kind: 'pod', id: podId });
@@ -55,15 +61,24 @@ export const podExecTool = {
         if (answer !== true && answer !== 'yes_once' && answer !== 'yes_session') {
           return { ok: false, error: `git_${remoteIntent.op}_declined` };
         }
-        remoteGitAuthorized = true;
+        remoteGitGrant = { op: remoteIntent.op, url: target };
       }
+      const background = args.background === true || parsePodShell(args.command).background;
       const job = await client.exec(args.command, {
         podId,
         timeoutMs: Math.min(300_000, Math.max(1, Number(args.timeoutMs) || 30_000)),
-        background: args.background === true,
-        remoteGitAuthorized,
+        background,
+        remoteGitGrant,
+        signal: background ? undefined : /** @type {any} */ (ctx).abortSignal,
       });
-      return { ok: true, content: JSON.stringify(job, null, 2) };
+      return {
+        ok: true,
+        content: wrapUntrusted({
+          origin: `pod:${podId}/job:${job.id ?? 'unknown'}`,
+          tool: 'pod_exec',
+          body: JSON.stringify(job, null, 2),
+        }),
+      };
     } catch (error) { return { ok: false, error: `pod_exec_failed: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}` }; }
   },
 };

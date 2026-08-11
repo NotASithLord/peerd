@@ -15,7 +15,7 @@ export const podWriteTool = {
     if (!client?.writeFile) return { ok: false, error: 'pod_unavailable' };
     try {
       const podId = await client.writeFile(args.path, args.content, { sessionId: ctx.session?.sessionId, podId: args.podId });
-      return { ok: true, content: JSON.stringify({ podId, path: args.path, bytes: args.content.length }, null, 2) };
+      return { ok: true, content: JSON.stringify({ podId, path: args.path, bytes: new TextEncoder().encode(args.content).byteLength }, null, 2) };
     } catch (error) { return { ok: false, error: `pod_write_failed: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}` }; }
   },
 };

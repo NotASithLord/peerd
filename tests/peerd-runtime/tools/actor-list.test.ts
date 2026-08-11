@@ -23,7 +23,7 @@ const fullCtx = (over: Record<string, any> = {}) => ({
   ], currentId: 'nb-1' }) },
   jsTabTracker: { getTabId: () => null },
   podRegistry: { snapshot: async () => ({ pods: [
-    { id: 'pod-1', name: 'fast-shell', persistent: true },
+    { id: 'pod-1', name: 'fast-shell', persistent: false },
   ], currentId: 'pod-1' }) },
   podTabTracker: { getTabId: () => 55 },
   appRegistry: { snapshot: async () => ({ apps: [
@@ -76,6 +76,7 @@ describe('actor_list — unified actor catalog', () => {
     expect(byHandle('pod-1')[col('type')]).toBe('pod');
     expect(byHandle('pod-1')[col('live')]).toBe(true);
     expect(byHandle('pod-1')[col('current')]).toBe(true);
+    expect(byHandle('pod-1')[col('detail')]).toContain('ephemeral');
     expect(byHandle('app-1')[col('type')]).toBe('app');
     expect(byHandle('app-1')[col('detail')]).toBe('math, demo');   // tags joined
 

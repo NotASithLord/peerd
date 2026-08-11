@@ -6,6 +6,21 @@
 const params = new URLSearchParams(location.hash.split('?')[1] ?? '');
 const reportUrl = params.get('report');
 const stageKey = 'peerd-pod-firefox-smoke-stage';
+const podId = location.hash.slice(1).split(/[?&]/)[0];
+
+// The disposable background fixture uses the real registry API to create the
+// catalog record, then this page reloads at that returned durable id before the
+// production Pod module runs. No production route or fake metadata is needed.
+if (podId === 'pod-firefox-smoke') {
+  const created = await browser.runtime.sendMessage({ type: 'firefox-smoke/create-pod' });
+  if (!created?.ok || !created.record?.id) throw new Error(created?.error ?? 'Firefox smoke could not create its Pod');
+  // A hash-only location.replace is a same-document navigation and would leave
+  // this top-level-await module blocking pod-tab.js forever. Rewrite the URL,
+  // then force a real document reload so the production module boots normally.
+  history.replaceState(null, '', `#${created.record.id}?report=${encodeURIComponent(reportUrl ?? '')}`);
+  location.reload();
+  await new Promise(() => {});
+}
 
 const waitFor = async (probe, budgetMs = 20_000) => {
   const deadline = performance.now() + budgetMs;
@@ -25,7 +40,7 @@ const runTerminal = async (command, budgetMs = 20_000) => {
   /** @type {HTMLFormElement} */ (document.getElementById('terminal-form')).requestSubmit();
   return waitFor(() => {
     const nodes = [...output.children].slice(before);
-    return nodes.some((node) => node.classList.contains('entry-meta'))
+    return nodes.some((node) => node.classList.contains('entry-meta') && node.textContent?.includes('· exit '))
       ? nodes.map((node) => node.textContent ?? '').join('') : '';
   }, budgetMs);
 };
@@ -43,6 +58,40 @@ const phase = async (name) => {
   // Harness-only loopback diagnostic; see report().
   // eslint-disable-next-line no-restricted-globals
   await fetch(reportUrl.replace('/pod-report', '/pod-phase'), { method: 'POST', body: name }).catch(() => {});
+};
+
+// Probe the browser primitive independently of Peerd's product guard. Firefox's
+// MV3 Worker/CSP behavior has changed over time (Mozilla Bug 1869152), so the
+// smoke report must distinguish "the browser rejected this construction" from
+// "Peerd deliberately kept the path disabled pending policy/security review".
+const probeBlobModuleWorker = async () => {
+  const url = URL.createObjectURL(new Blob([
+    'postMessage({ ok: true, source: "blob-module-worker" });',
+  ], { type: 'application/javascript' }));
+  /** @type {Worker | null} */
+  let worker = null;
+  try {
+    worker = new Worker(url, { type: 'module', name: 'peerd-firefox-compat-probe' });
+    return await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ ok: false, error: 'timeout' }), 3_000);
+      worker.onmessage = (event) => {
+        clearTimeout(timer);
+        resolve(event.data?.ok === true
+          ? { ok: true }
+          : { ok: false, error: `unexpected message: ${JSON.stringify(event.data)}` });
+      };
+      worker.onerror = (event) => {
+        clearTimeout(timer);
+        event.preventDefault();
+        resolve({ ok: false, error: event.message || 'worker error' });
+      };
+    });
+  } catch (error) {
+    return { ok: false, error: error?.message ?? String(error) };
+  } finally {
+    worker?.terminate();
+    URL.revokeObjectURL(url);
+  }
 };
 
 const main = async () => {
@@ -71,6 +120,7 @@ const main = async () => {
   }
 
   const shell = await runTerminal("mkdir -p src; echo firefox > src/a.txt; cat src/a.txt | grep fire");
+  const blobModuleWorkerProbe = await probeBlobModuleWorker();
   const javascript = await runTerminal("js -e 'console.log(6 * 7)'");
   const wasi = await runTerminal('wasi-demo');
   const denied = await runTerminal('curl http://127.0.0.1:9/private');
@@ -87,7 +137,10 @@ const main = async () => {
   const saved = await runTerminal('echo survives-firefox > firefox-persistent.txt');
   const checks = {
     shell: shell.includes('firefox\n') && shell.includes('exit 0'),
-    javascriptPolicy: javascript.includes('Firefox MV3 forbids dynamic blob Workers') && javascript.includes('exit 1'),
+    // Deliberately pin today's rejection. If Firefox starts executing this
+    // Worker, fail the smoke so the Pod JS guard gets an explicit review.
+    blobModuleWorkerRejected: blobModuleWorkerProbe?.ok === false,
+    javascriptPolicy: javascript.includes('Peerd disables dynamic blob Workers') && javascript.includes('exit 1'),
     wasi: wasi.includes('hello from wasi') && wasi.includes('exit 0'),
     egressDenial: denied.includes('private_network') && denied.includes('exit 1'),
     concurrentJobs: !!sleepingJob && jobs.includes('\trunning\tjobs'),
@@ -98,7 +151,7 @@ const main = async () => {
   sessionStorage.setItem(stageKey, 'reopen');
   sessionStorage.setItem(`${stageKey}-first`, JSON.stringify({
     browser: navigator.userAgent, bootMs, checks,
-    details: { shell, javascript, wasi, denied, jobs, cancelled, isolated, saved },
+    details: { shell, blobModuleWorkerProbe, javascript, wasi, denied, jobs, cancelled, isolated, saved },
   }));
   location.reload();
 };

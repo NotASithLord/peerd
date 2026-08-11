@@ -28,6 +28,7 @@ header { display: flex; align-items: center; gap: 8px; padding: 0 12px; border-b
 .sep, #pod-id, #pod-status { color: var(--muted); }
 .kind { color: var(--fg); font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
 .spacer { flex: 1; }
+#pod-lifecycle { border: 1px solid currentColor; border-radius: 999px; padding: 1px 7px; font-size: 11px; font-weight: 600; }
 #workspace-pane { min-height: 0; display: flex; border-bottom: 1px solid var(--border); }
 #editor-mount { flex: 1; min-height: 0; display: flex; }
 #terminal-pane { min-height: 0; display: grid; grid-template-rows: 1fr 42px; background: #090c10; }
@@ -41,6 +42,8 @@ header { display: flex; align-items: center; gap: 8px; padding: 0 12px; border-b
 #terminal-input { min-width: 0; border: 0; outline: 0; background: transparent; color: var(--fg); font: inherit; }
 button { border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--fg); padding: 5px 10px; font: inherit; cursor: pointer; }
 button:hover { border-color: var(--muted); }
+button:focus-visible, #terminal-input:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+#stop-button { font-weight: 600; }
 @media (prefers-color-scheme: light) {
   :root { --bg:#fff; --elev:#f5f5f5; --fg:#151515; --muted:#686868; --border:#d6d6d6; }
   #terminal-pane { background: #fafafa; }

@@ -374,8 +374,9 @@ This is NOT Linux. There is no Node/npm, Python, Ruby, Bun, ELF/native binary, r
 WebSocket, PTY, signal, fork, or package-manager compatibility claim. Do not imitate those
 interfaces or fight missing syscalls — move the workload to a WebVM when it needs them.
 Commands are fresh cancellable job Workers; \`background:true\` creates an independent job,
-\`pod_status\` inspects the table, and \`pod_cancel\` terminates one job. Persistent files
-survive a stopped/reopened Pod; cwd, environment, and live jobs are process state and may not.
+\`pod_status\` inspects the table, and \`pod_cancel\` terminates one job. Check its
+\`persistent\` field: persistent Pod files survive a stop/reopen; closing an ephemeral Pod
+deletes its workspace. cwd, environment, and live jobs are process state and may not survive.
 Never blindly replay an interrupted command that may have made an audited request.
 
 Git is isomorphic-git over the same OPFS worktree. The shell supports init/status/add/commit/

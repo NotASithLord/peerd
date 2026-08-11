@@ -17,6 +17,7 @@ export const createPodTabTracker = ({ announce, onAdopt, onDrop, tabs } = {}) =>
   });
   return {
     bootstrap: tracker.bootstrap,
+    onTabPending: tracker.onTabPending,
     onTabReady: tracker.onTabReady,
     onTabRemoved: tracker.onTabRemoved,
     parseIdFromUrl: tracker.parseIdFromUrl,

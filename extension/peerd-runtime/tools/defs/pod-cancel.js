@@ -1,4 +1,5 @@
 // @ts-check
+import { wrapUntrusted } from '../prompt-wrap.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const podCancelTool = {
@@ -10,7 +11,10 @@ export const podCancelTool = {
     if (typeof args?.jobId !== 'string') return { ok: false, error: 'jobId_required' };
     const client = /** @type {any} */ (ctx).podClient;
     if (!client?.cancel) return { ok: false, error: 'pod_unavailable' };
-    try { return { ok: true, content: JSON.stringify(await client.cancel(args.jobId, { sessionId: ctx.session?.sessionId, podId: args.podId }), null, 2) }; }
+    try {
+      const result = await client.cancel(args.jobId, { sessionId: ctx.session?.sessionId, podId: args.podId });
+      return { ok: true, content: wrapUntrusted({ origin: `pod:${result.podId ?? args.podId ?? 'current'}/job:${args.jobId}`, tool: 'pod_cancel', body: JSON.stringify(result, null, 2) }) };
+    }
     catch (error) { return { ok: false, error: `pod_cancel_failed: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}` }; }
   },
 };

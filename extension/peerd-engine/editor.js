@@ -99,6 +99,7 @@ const STYLE = `
   white-space: nowrap;
 }
 .pe-node:hover { color: var(--pe-fg); background: color-mix(in srgb, var(--pe-accent) 6%, transparent); }
+.pe-node:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
 .pe-node.is-active { background: var(--pe-bg-editor); color: var(--pe-fg); }
 .pe-node.is-active::before {
   content: ''; position: absolute; inset: 0 auto 0 0; width: 2px; background: var(--pe-accent);
@@ -121,7 +122,7 @@ const STYLE = `
   color: var(--pe-fg-muted); cursor: pointer; padding: 0 4px;
   font-size: 12px; line-height: 1;
 }
-.pe-node:hover .pe-close, .pe-node.is-active .pe-close { visibility: visible; }
+.pe-node:hover .pe-close, .pe-node.is-active .pe-close, .pe-node:focus-within .pe-close { visibility: visible; }
 .pe-node.is-pinned .pe-close { display: none; }
 .pe-node .pe-close:hover { color: var(--pe-fail); }
 
@@ -187,7 +188,7 @@ export const createEditor = async (config) => {
     <aside class="pe-tree">
       <div class="pe-tree-header">
         <span class="pe-tree-label">files</span>
-        <button class="pe-new" title="New file">+</button>
+        <button class="pe-new" title="New file" aria-label="New file">+</button>
       </div>
       <div class="pe-tree-body" role="tree"></div>
     </aside>
@@ -212,8 +213,14 @@ export const createEditor = async (config) => {
   // locals; the CM ViewUpdate is described structurally by what we read.
   /** @type {(() => void) | null} */
   let onChangeCb = null;
+  let suppressChange = false;
+  let revision = 0;
+  let lastSavedContent = '';
   const update = EditorView.updateListener.of(/** @param {{ docChanged: boolean }} u */ (u) => {
-    if (u.docChanged && onChangeCb) onChangeCb();
+    if (u.docChanged && !suppressChange) {
+      revision += 1;
+      if (onChangeCb) onChangeCb();
+    }
   });
 
   // Per-file language: html/css/javascript picked from extension; the
@@ -252,9 +259,12 @@ export const createEditor = async (config) => {
   const view = new EditorView({ state, parent: host });
   const getValue = () => view.state.doc.toString();
   /** @param {string} text */
-  const setValue = (text) => view.dispatch({
-    changes: { from: 0, to: view.state.doc.length, insert: text },
-  });
+  const setValue = (text) => {
+    suppressChange = true;
+    try {
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+    } finally { suppressChange = false; }
+  };
 
   // --- State ---
   let currentFile = initialFile || pinnedFile;
@@ -320,6 +330,10 @@ export const createEditor = async (config) => {
           const row = document.createElement('div');
           row.className = 'pe-node';
           row.title = dirPath;
+          row.setAttribute('role', 'treeitem');
+          row.setAttribute('aria-level', String(depth + 1));
+          row.setAttribute('aria-expanded', String(!isCollapsed));
+          row.tabIndex = -1;
           row.innerHTML =
             `<span class="pe-indent" style="width:${depth * 10}px"></span>` +
             `<span class="pe-twirl">${isCollapsed ? '▶' : '▼'}</span>` +
@@ -345,6 +359,10 @@ export const createEditor = async (config) => {
       const nodePath = node.path ?? '';
       const row = document.createElement('div');
       row.className = 'pe-node';
+      row.setAttribute('role', 'treeitem');
+      row.setAttribute('aria-level', String(depth + 1));
+      row.setAttribute('aria-selected', String(nodePath === currentFile));
+      row.tabIndex = nodePath === currentFile ? 0 : -1;
       if (nodePath === currentFile) row.classList.add('is-active');
       if (nodePath === pinnedFile) row.classList.add('is-pinned');
       row.title = nodePath;
@@ -360,6 +378,7 @@ export const createEditor = async (config) => {
         close.className = 'pe-close';
         close.textContent = '×';
         close.title = `Delete ${nodePath}`;
+        close.setAttribute('aria-label', `Delete ${nodePath}`);
         close.addEventListener('click', (e) => { e.stopPropagation(); deleteFile(nodePath); });
         row.appendChild(close);
       }
@@ -368,6 +387,10 @@ export const createEditor = async (config) => {
     };
     const rootEntries = Array.from(root.children.values()).sort(compareTreeNodes);
     for (const e of rootEntries) append(e, 0);
+    if (!treeBody.querySelector('.pe-node[tabindex="0"]')) {
+      const first = /** @type {HTMLElement|null} */ (treeBody.querySelector('.pe-node'));
+      if (first) first.tabIndex = 0;
+    }
   };
 
   const refreshTree = async () => {
@@ -393,8 +416,12 @@ export const createEditor = async (config) => {
     try {
       const content = getValue();
       await opfsWrite(currentFile, content);
+      lastSavedContent = content;
       onSaved?.(currentFile, content);
-    } catch (e) { console.warn('[peerd-editor] flush save failed', e); }
+    } catch (e) {
+      console.warn('[peerd-editor] flush save failed', e);
+      throw e;
+    }
   };
 
   const queueSave = () => {
@@ -403,6 +430,7 @@ export const createEditor = async (config) => {
       try {
         const content = getValue();
         await opfsWrite(currentFile, content);
+        lastSavedContent = content;
         onSaved?.(currentFile, content);
       } catch (e) { console.warn('[peerd-editor] save failed', e); }
     }, 400);
@@ -416,6 +444,7 @@ export const createEditor = async (config) => {
     try { content = await opfsRead(path); } catch {}
     currentFile = path;
     setValue(content);
+    lastSavedContent = content;
     // Reconfigure the language for the new file's extension.
     view.dispatch({ effects: langCompartment.reconfigure(langForPath(path)) });
     renderTree();
@@ -453,6 +482,7 @@ export const createEditor = async (config) => {
       let content = '';
       try { content = await opfsRead(pinnedFile); } catch {}
       setValue(content);
+      lastSavedContent = content;
     }
     await refreshTree();
   };
@@ -475,8 +505,60 @@ export const createEditor = async (config) => {
     await flushActiveSave();
   };
 
+  /**
+   * Refresh the tree and active buffer after a shell/agent write. The caller can
+   * pin the editor revision captured before starting its operation; if the user
+   * typed meanwhile, leave their buffer intact and report a visible conflict.
+   * @param {{ifRevision?:number}} [opts]
+   */
+  const refreshExternalChanges = async ({ ifRevision } = {}) => {
+    await refreshTree();
+    if (typeof ifRevision === 'number' && revision !== ifRevision) {
+      return { reloaded: false, conflict: true, path: currentFile };
+    }
+    try {
+      const content = await opfsRead(currentFile);
+      if (typeof ifRevision === 'number' && revision !== ifRevision) {
+        return { reloaded: false, conflict: true, path: currentFile };
+      }
+      setValue(content);
+      lastSavedContent = content;
+      return { reloaded: true, conflict: false, path: currentFile };
+    } catch {
+      const conflict = getValue() !== lastSavedContent
+        || (typeof ifRevision === 'number' && revision !== ifRevision);
+      if (!conflict) {
+        setValue('');
+        lastSavedContent = '';
+      }
+      return { reloaded: !conflict, conflict, path: currentFile };
+    }
+  };
+
   // --- Wire UI ---
   newBtn.addEventListener('click', createNewFile);
+  treeBody.addEventListener('keydown', (event) => {
+    if ((/** @type {HTMLElement} */ (event.target)).tagName === 'BUTTON') return;
+    const current = /** @type {HTMLElement|null} */ ((/** @type {Element} */ (event.target)).closest?.('.pe-node'));
+    if (!current) return;
+    const rows = /** @type {HTMLElement[]} */ ([...treeBody.querySelectorAll('.pe-node')]);
+    const index = rows.indexOf(current);
+    let target = null;
+    if (event.key === 'ArrowDown') target = rows[Math.min(rows.length - 1, index + 1)];
+    else if (event.key === 'ArrowUp') target = rows[Math.max(0, index - 1)];
+    else if (event.key === 'Home') target = rows[0];
+    else if (event.key === 'End') target = rows.at(-1) ?? null;
+    else if (event.key === 'Enter' || event.key === ' ') current.click();
+    else if (event.key === 'ArrowRight' && current.getAttribute('aria-expanded') === 'false') current.click();
+    else if (event.key === 'ArrowLeft' && current.getAttribute('aria-expanded') === 'true') current.click();
+    else return;
+    event.preventDefault();
+    if (target) {
+      for (const row of rows) row.tabIndex = -1;
+      target.tabIndex = 0;
+      target.focus();
+    }
+  });
   onChangeCb = queueSave;
 
   // --- Initial load ---
@@ -484,6 +566,7 @@ export const createEditor = async (config) => {
   try {
     const content = await opfsRead(currentFile);
     setValue(content);
+    lastSavedContent = content;
   } catch { /* file doesn't exist yet -- leave editor empty */ }
 
   return {
@@ -491,8 +574,10 @@ export const createEditor = async (config) => {
     getActiveContent: getValue,
     switchToFile,
     refreshTree,
+    refreshExternalChanges,
     replaceActiveWith,
     flushSave: flushActiveSave,
+    getRevision: () => revision,
     opfs,
     focus: () => view.focus(),
     destroy: () => view.destroy(),

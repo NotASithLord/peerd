@@ -34,11 +34,37 @@ const server = Bun.serve({
   },
 });
 
+const connectRdp = async (port, budgetMs = 15_000) => {
+  const deadline = Date.now() + budgetMs;
+  let lastError = new Error('Firefox RDP did not become ready');
+  while (Date.now() < deadline) {
+    try { return await connectToFirefox(port); }
+    catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  throw lastError;
+};
+
 try {
   const packaged = Bun.spawnSync(['bun', 'packaging/package.ts', '--channel=store', '--browser=firefox'], { cwd: root, stdout: 'inherit', stderr: 'inherit' });
   if (packaged.exitCode !== 0) throw new Error(`Firefox package failed (${packaged.exitCode})`);
   await cp(staging, source, { recursive: true });
   await cp(join(root, 'scripts/firefox/pod-smoke-page.js'), join(source, 'firefox-pod-smoke-page.js'));
+
+  // Test-only public-create seam in the disposable copied extension. It uses
+  // the production registry and trusted-sender check, but never enters either
+  // source artifacts or a release package.
+  const workerPath = join(source, 'background/service-worker.js');
+  const workerSource = await readFile(workerPath, 'utf8');
+  await writeFile(workerPath, `${workerSource}\n
+browser.runtime.onMessage.addListener((msg, sender) => {
+  if (msg?.type !== 'firefox-smoke/create-pod' || !isTrustedSender(sender)) return false;
+  return podRegistry.create({ name: 'Firefox smoke Pod', persistent: true })
+    .then((record) => ({ ok: true, record }))
+    .catch((error) => ({ ok: false, error: error?.message ?? String(error) }));
+});\n`);
 
   const manifestPath = join(source, 'manifest.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
@@ -51,7 +77,8 @@ try {
   const podHtml = await readFile(podHtmlPath, 'utf8');
   await writeFile(podHtmlPath, podHtml
     .replace("content=\"connect-src 'none'\"", `content=\"connect-src ${origin}\"`)
-    .replace('</body>', '  <script type="module" src="/firefox-pod-smoke-page.js"></script>\n</body>'));
+    .replace('  <script type="module" src="pod-tab.js"></script>',
+      '  <script type="module" src="/firefox-pod-smoke-page.js"></script>\n  <script type="module" src="pod-tab.js"></script>'));
 
   profile = await createProfile();
   const running = await launchFirefox(profile, {
@@ -66,7 +93,10 @@ try {
   // page under test is the extension's real Pod URL, not a web facsimile.
   setTimeout(async () => {
     try {
-      const client = await connectToFirefox(running.debuggerPort);
+      // Firefox can publish its debugger port before the RDP listener accepts
+      // connections on a cold start. Retry the bounded local handshake instead
+      // of turning that ordinary startup race into a 60-second false timeout.
+      const client = await connectRdp(running.debuggerPort);
       rdpClient = client;
       // Firefox sends forwardingCancelled when navigation replaces the old
       // content-process actor. It is expected during this one-tab handoff.

@@ -28,6 +28,10 @@ describe('Pod OPFS workspace', () => {
     try { await reopened.copy('src', 'src/recursive-copy', { recursive: true }); }
     catch { recursiveCopyRefused = true; }
     expect(recursiveCopyRefused).toBe(true);
+    let rootCopyRefused = false;
+    try { await reopened.copy('/', 'backup', { recursive: true }); }
+    catch { rootCopyRefused = true; }
+    expect(rootCopyRefused).toBe(true);
 
     await reopened.remove('src', { recursive: true });
     expect(await reopened.exists('src/nested/a.txt')).toBe(false);

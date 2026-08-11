@@ -20,7 +20,7 @@ export class PodShellSyntaxError extends Error {
 /** @typedef {{ words:ShellWord[], redirections:Redirections }} ShellCommand */
 /** @typedef {{ commands:ShellCommand[], connector:'always'|'and'|'or' }} ShellPipeline */
 /** @typedef {{ pipelines:ShellPipeline[], background:boolean }} ShellProgram */
-/** @typedef {{ stdout:string, stderr:string, exitCode:number, cwd?:string, env?:Record<string,string>, unsetEnv?:string[] }} CommandResult */
+/** @typedef {{ stdout:string, stderr:string, exitCode:number, stdoutTruncated?:boolean, stderrTruncated?:boolean, cwd?:string, env?:Record<string,string>, unsetEnv?:string[] }} CommandResult */
 
 const OPERATORS = Object.freeze(['2>>', '2>', '>>', '&&', '||', '|', '>', '<', ';', '&']);
 
@@ -168,10 +168,12 @@ export const parsePodShell = (source) => {
  * one-job remote-Git grant; the host independently refuses remote operations
  * without that grant.
  * @param {string} source
- * @returns {{op:'clone'|'fetch'|'push'|'link', url:string|null}|null}
+ * @returns {Array<{op:'clone'|'fetch'|'push'|'link', url:string|null}>}
  */
-export const podGitRemoteIntent = (source) => {
+export const podGitRemoteIntents = (source) => {
   const program = parsePodShell(source);
+  /** @type {Array<{op:'clone'|'fetch'|'push'|'link', url:string|null}>} */
+  const intents = [];
   for (const pipeline of program.pipelines) {
     for (const command of pipeline.commands) {
       const words = command.words.map((word) => {
@@ -180,15 +182,31 @@ export const podGitRemoteIntent = (source) => {
       });
       if (words[0] !== 'git') continue;
       const subcommand = words[1];
-      if (subcommand === 'clone') return { op: 'clone', url: words.find((word) => typeof word === 'string' && /^https:\/\//i.test(word)) ?? null };
-      if (subcommand === 'fetch') return { op: 'fetch', url: null };
-      if (subcommand === 'push') return { op: 'push', url: null };
+      if (subcommand === 'clone') intents.push({ op: 'clone', url: words.find((word) => typeof word === 'string' && /^https:\/\//i.test(word)) ?? null });
+      else if (subcommand === 'fetch') intents.push({ op: 'fetch', url: null });
+      else if (subcommand === 'push') intents.push({ op: 'push', url: null });
       if (subcommand === 'remote' && (words[2] === 'add' || words[2] === 'set-url')) {
-        return { op: 'link', url: words.find((word) => typeof word === 'string' && /^https:\/\//i.test(word)) ?? null };
+        intents.push({ op: 'link', url: words.find((word) => typeof word === 'string' && /^https:\/\//i.test(word)) ?? null });
       }
     }
   }
-  return null;
+  return intents;
+};
+
+/**
+ * Backwards-compatible single-intent view for callers that only need to know
+ * whether any remote Git operation exists. Authorization callers must use the
+ * plural form so a compound command cannot launder a later operation.
+ * @param {string} source
+ */
+export const podGitRemoteIntent = (source) => podGitRemoteIntents(source)[0] ?? null;
+
+/** @param {unknown} argv @returns {'clone'|'fetch'|'push'|'link'|null} */
+export const podGitRemoteOperation = (argv) => {
+  if (!Array.isArray(argv)) return null;
+  const [command = '', ...args] = argv.map(String);
+  if (command === 'clone' || command === 'fetch' || command === 'push') return command;
+  return command === 'remote' && (args[0] === 'add' || args[0] === 'set-url') ? 'link' : null;
 };
 
 /** @param {string} text @param {Record<string,string>} env @param {number} lastExit */
@@ -215,6 +233,8 @@ const normalizeResult = (result) => {
     stdout: typeof value?.stdout === 'string' ? value.stdout : '',
     stderr: typeof value?.stderr === 'string' ? value.stderr : '',
     exitCode: Number.isInteger(value?.exitCode) ? Number(value?.exitCode) : 0,
+    ...(value?.stdoutTruncated === true ? { stdoutTruncated: true } : {}),
+    ...(value?.stderrTruncated === true ? { stderrTruncated: true } : {}),
     ...(typeof value?.cwd === 'string' ? { cwd: value.cwd } : {}),
     ...(value?.env && typeof value.env === 'object' ? { env: value.env } : {}),
     ...(Array.isArray(value?.unsetEnv) ? { unsetEnv: value.unsetEnv.map(String) } : {}),
@@ -229,6 +249,7 @@ const normalizeResult = (result) => {
  * @param {string} [ctx.cwd]
  * @param {Record<string,string>} [ctx.env]
  * @param {number} [ctx.lastExit]
+ * @param {number} [ctx.maxOutputChars]
  * @param {(input:{ argv:string[], stdin:string, cwd:string, env:Record<string,string> })=>Promise<CommandResult>|CommandResult} ctx.runCommand
  * @param {(path:string,cwd:string)=>Promise<string>} ctx.readText
  * @param {(path:string,content:string,opts:{append:boolean,cwd:string})=>Promise<unknown>} ctx.writeText
@@ -242,6 +263,18 @@ export const executePodShell = async (input, ctx) => {
   let lastExit = ctx.lastExit ?? 0;
   let stdout = '';
   let stderr = '';
+  const outputCap = Number.isFinite(ctx.maxOutputChars) ? Math.max(0, Number(ctx.maxOutputChars)) : Infinity;
+  let stdoutTruncated = false;
+  let stderrTruncated = false;
+  /** @param {string} current @param {string} value @param {'stdout'|'stderr'} stream */
+  const appendBounded = (current, value, stream) => {
+    const remaining = Math.max(0, outputCap - current.length);
+    if (value.length > remaining) {
+      if (stream === 'stdout') stdoutTruncated = true;
+      else stderrTruncated = true;
+    }
+    return `${current}${value.slice(0, remaining)}`;
+  };
 
   for (const pipeline of program.pipelines) {
     if (pipeline.connector === 'and' && lastExit !== 0) continue;
@@ -266,6 +299,8 @@ export const executePodShell = async (input, ctx) => {
         };
       }
       if (result.cwd) cwd = result.cwd;
+      stdoutTruncated ||= result.stdoutTruncated === true;
+      stderrTruncated ||= result.stderrTruncated === true;
       if (result.env) env = { ...env, ...result.env };
       for (const name of result.unsetEnv ?? []) delete env[name];
       lastExit = result.exitCode;
@@ -273,8 +308,9 @@ export const executePodShell = async (input, ctx) => {
         await ctx.writeText(expandPodWord(redirections.stderr, env, lastExit), result.stderr, {
           append: redirections.stderrAppend === true, cwd,
         });
-      } else pipelineStderr += result.stderr;
-      pipeInput = result.stdout;
+      } else pipelineStderr = appendBounded(pipelineStderr, result.stderr, 'stderr');
+      pipeInput = result.stdout.slice(0, outputCap);
+      if (result.stdout.length > outputCap) stdoutTruncated = true;
       if (redirections.stdout) {
         await ctx.writeText(expandPodWord(redirections.stdout, env, lastExit), result.stdout, {
           append: redirections.stdoutAppend === true, cwd,
@@ -282,8 +318,8 @@ export const executePodShell = async (input, ctx) => {
         pipeInput = '';
       }
     }
-    stdout += pipeInput;
-    stderr += pipelineStderr;
+    stdout = appendBounded(stdout, pipeInput, 'stdout');
+    stderr = appendBounded(stderr, pipelineStderr, 'stderr');
   }
-  return { stdout, stderr, exitCode: lastExit, cwd, env, background: program.background };
+  return { stdout, stderr, stdoutTruncated, stderrTruncated, exitCode: lastExit, cwd, env, background: program.background };
 };

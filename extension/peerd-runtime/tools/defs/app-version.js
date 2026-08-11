@@ -35,7 +35,9 @@ export const repositoryVersionTool = {
     const tracker = kind === 'app' ? /** @type {any} */ (ctx).appTabTracker
       : kind === 'pod' ? /** @type {any} */ (ctx).podTabTracker
       : /** @type {any} */ (ctx).jsTabTracker;
-    const reopen = destructive && tracker?.getTabId?.(id) != null;
+    const podClient = /** @type {any} */ (ctx).podClient;
+    const podLive = kind === 'pod' && tracker?.getTabId?.(id) != null;
+    const reopen = destructive && kind !== 'pod' && tracker?.getTabId?.(id) != null;
     try {
       if (args.op === 'branch' && typeof args.name !== 'string') return { ok: false, error: 'branch_name_required' };
       if (args.op === 'checkout' && typeof args.name !== 'string') return { ok: false, error: 'branch_name_required' };
@@ -50,7 +52,7 @@ export const repositoryVersionTool = {
         if (answer !== 'yes_once' && answer !== 'yes_session' && answer !== true) return { ok: false, error: 'restore_declined' };
       }
       if (reopen) { await tracker.closeTab(id); await new Promise((resolve) => setTimeout(resolve, 100)); }
-      const result = await repositories.coordinate(ref, async () => {
+      const operation = () => repositories.coordinate(ref, async () => {
         if (args.op === 'checkpoint') return repositories.commit(ref, { message: typeof args.message === 'string' ? args.message : 'checkpoint' });
         // Git carries a dirty working tree onto the new branch. The next
         // checkpoint therefore lands on the branch the model just requested.
@@ -59,6 +61,10 @@ export const repositoryVersionTool = {
         if (args.op === 'restore') return repositories.restore(ref, { to: args.to });
         throw new Error('unknown_repo_version_op');
       });
+      const result = podLive
+        ? await podClient?.withWorkspaceLock?.(id, operation)
+        : await operation();
+      if (podLive && result === undefined) throw new Error('Pod workspace quiesce unavailable');
       if (!reopen && kind === 'app') tracker?.reloadTab?.(id).catch(() => {});
       return { ok: true, content: JSON.stringify({ repository: ref, op: args.op, result }, null, 2) };
     } catch (e) {

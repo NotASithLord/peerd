@@ -87,7 +87,7 @@ export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', n
     builtins: NOTEBOOK_BUILTINS,
   });
   const source = `${podCommand
-    ? `import { podFetch as __podFetch } from ${JSON.stringify(POD_SEAL_MODULE_URL)};`
+    ? `import ${JSON.stringify(POD_SEAL_MODULE_URL)};`
     : `import ${JSON.stringify(SEAL_MODULE_URL)};`} // realm seal — MUST stay the first import
 ${imports}
 const NOTEBOOK_ID = ${JSON.stringify(notebookId)};
@@ -102,7 +102,7 @@ const stringify = (v) => {
 
 const captureConsole = (level) => (...args) => {
   const text = args.map(stringify).join(' ');
-  consoleOutput.push({ level, text });
+  ${podCommand ? '// Pod host captures bounded log messages as they stream.' : 'consoleOutput.push({ level, text });'}
   postMessage({ type: 'log', level, text });
 };
 console.log = captureConsole('info');
@@ -436,9 +436,9 @@ globalThis.peerd.distributed.status = noDistributed('status');
 globalThis.peerd.distributed.peers = noDistributed('peers');
 globalThis.peerd.distributed.presence = noDistributed('presence');
 `}${podCommand ? `
-// Pod JS gets Web-standard JavaScript plus named, instance-rooted capabilities.
-// There is no ambient fetch: __podFetch is the explicit bridge exported by the
-// first-import seal, while the global slot remains a throwing stub.
+// Pod JS gets local Web-standard JavaScript plus named, instance-rooted file
+// capabilities. Network access stays in the explicit shell curl command so
+// workspace bytes and arbitrary computed URLs never share one capability realm.
 const args = Object.freeze(${JSON.stringify(podCommand.args ?? [])});
 const stdin = ${JSON.stringify(podCommand.stdin ?? '')};
 const env = Object.freeze(${JSON.stringify(podCommand.env ?? {})});
@@ -448,7 +448,6 @@ const pod = Object.freeze({
   writeFile: (path, content) => peerd.self.writeFile(path, content),
   deleteFile: (path) => peerd.self.deleteFile(path),
   listFiles: () => peerd.self.listFiles(),
-  fetch: __podFetch,
 });
 ` : ''}
 // ONE listener fans every '<name>-response' out to its bridge. Each bridge's

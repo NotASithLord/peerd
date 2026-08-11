@@ -42,7 +42,7 @@ export const opfsHelpers = (rootPath) => {
   const assertDistinctTarget = (/** @type {string} */ from, /** @type {string} */ to, /** @type {boolean} */ directory) => {
     const source = canonicalPath(from);
     const target = canonicalPath(to);
-    if (source === target || (directory && target.startsWith(`${source}/`))) {
+    if (source === target || (directory && (!source || target.startsWith(`${source}/`)))) {
       throw new Error('opfs: destination must be outside the source');
     }
   };

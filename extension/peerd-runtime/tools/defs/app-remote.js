@@ -54,10 +54,12 @@ export const repositoryRemoteTool = {
       const tracker = kind === 'notebook' ? /** @type {any} */ (ctx).jsTabTracker
         : kind === 'pod' ? /** @type {any} */ (ctx).podTabTracker
         : null;
-      const reopen = args.op === 'push' && tracker?.getTabId?.(id) != null;
+      const podClient = /** @type {any} */ (ctx).podClient;
+      const podLive = kind === 'pod' && args.op === 'push' && tracker?.getTabId?.(id) != null;
+      const reopen = kind !== 'pod' && args.op === 'push' && tracker?.getTabId?.(id) != null;
       try {
         if (reopen) { await tracker.closeTab(id); await new Promise((resolve) => setTimeout(resolve, 100)); }
-        const result = await repositories.coordinate(ref, async () => {
+        const operation = () => repositories.coordinate(ref, async () => {
           if (args.op === 'link') return repositories.setRemote(ref, { url: args.url });
           if (args.op === 'fetch') return repositories.fetch(ref, { signal: /** @type {any} */ (ctx).abortSignal });
           if (args.op === 'push') {
@@ -66,6 +68,10 @@ export const repositoryRemoteTool = {
           }
           throw new Error('unknown_repo_remote_op');
         });
+        const result = podLive
+          ? await podClient?.withWorkspaceLock?.(id, operation)
+          : await operation();
+        if (podLive && result === undefined) throw new Error('Pod workspace quiesce unavailable');
         if (args.op === 'push' && result?.ok !== true) {
           return { ok: false, error: `git_push_rejected: ${result?.error || 'remote rejected the update'}` };
         }

@@ -36,6 +36,9 @@ describe('Pod tab tracker', () => {
       onAdopt: (id, tabId) => events.push(`adopt:${id}:${tabId}`),
       onDrop: (id) => events.push(`drop:${id}`),
     });
+    tracker.onTabPending('pod-reopened', 39);
+    expect(tracker.getTabId('pod-reopened')).toBe(39);
+    expect(tracker.onTabRemoved(39)).toBe('pod-reopened');
     const opening = tracker.ensureTab('pod-test');
     await tick();
     expect(tracker.getTabId('pod-test')).toBe(40);
@@ -43,13 +46,16 @@ describe('Pod tab tracker', () => {
     expect(await opening).toBe(40);
     expect(tracker.onTabRemoved(40)).toBe('pod-test');
     expect(tracker.getTabId('pod-test')).toBe(null);
-    expect(events).toEqual(['adopt:pod-test:40', 'adopt:pod-test:40', 'drop:pod-test']);
+    expect(events).toEqual([
+      'adopt:pod-reopened:39', 'drop:pod-reopened',
+      'adopt:pod-test:40', 'adopt:pod-test:40', 'drop:pod-test',
+    ]);
   });
 });
 
 describe('Pod client', () => {
   it('reports a stopped durable Pod without opening it, then reopens for exec', async () => {
-    /** @type {string|null} */ let defaultId = null;
+    /** @type {string|null} */ let defaultId = 'pod-1';
     let created = 0;
     /** @type {number|null} */ let liveTab = null;
     let opened = 0;
@@ -73,15 +79,35 @@ describe('Pod client', () => {
       },
     });
 
-    expect(await client.status({ sessionId: 'session-a' })).toEqual({ podId: 'pod-1', state: 'stopped', cwd: '/', jobs: [] });
+    expect(await client.status({ sessionId: 'session-a' })).toEqual({ podId: 'pod-1', persistent: true, state: 'stopped', cwd: '/', jobs: [] });
     expect(opened).toBe(0);
     const result = await client.exec('echo ok', { sessionId: 'session-a', background: true });
     expect(result).toEqual({ podId: 'pod-1', id: 'job-1', state: 'completed', stdout: 'ok\n', stderr: '', exitCode: 0 });
     expect(opened).toBe(1);
-    expect(messages[0]).toEqual({
-      tabId: 71,
-      message: { type: 'pod/exec', command: 'echo ok', timeoutMs: undefined, background: true, remoteGitAuthorized: false, podId: 'pod-1' },
+    expect(messages[0].tabId).toBe(71);
+    expect({ ...messages[0].message, jobId: '<job>' }).toEqual({
+      type: 'pod/exec', command: 'echo ok', timeoutMs: undefined,
+      background: true, remoteGitGrant: null, podId: 'pod-1',
+      jobId: '<job>',
     });
+    expect(messages[0].message.jobId.startsWith('job-')).toBe(true);
+  });
+
+  it('a read-only status does not create a current Pod', async () => {
+    let created = false;
+    const client = createPodClient({
+      registry: {
+        getDefaultForSession: async () => null,
+        create: async () => { created = true; return { id: 'pod-new' }; },
+      },
+      tracker: { getTabId: () => null },
+      sendTabMessage: async () => ({}),
+    });
+    let message = '';
+    try { await client.status({ sessionId: 'session-a' }); }
+    catch (error) { message = /** @type {{message?:string}} */ (error)?.message ?? ''; }
+    expect(message).toContain('No current Pod');
+    expect(created).toBe(false);
   });
 
   it('rejects an explicit id missing from the Pod registry', async () => {
@@ -94,5 +120,29 @@ describe('Pod client', () => {
     try { await client.exec('pwd', { podId: 'pod-missing' }); }
     catch (error) { message = /** @type {{message?:string}} */ (error)?.message ?? ''; }
     expect(message).toContain('Pod not found');
+  });
+
+  it('binds foreground execution to the caller abort signal', async () => {
+    /** @type {any[]} */ const messages = [];
+    /** @type {(value:any)=>void} */ let finishExec = () => {};
+    const client = createPodClient({
+      registry: { get: async () => ({ id: 'pod-1' }) },
+      tracker: { getTabId: () => 7, ensureTab: async () => 7 },
+      sendTabMessage: async (_tabId, message) => {
+        messages.push(message);
+        if (message.type === 'pod/cancel') {
+          finishExec({ ok: true, job: { id: message.jobId, state: 'failed', exitCode: 130 } });
+          return { ok: true, cancelled: true };
+        }
+        return new Promise((resolve) => { finishExec = resolve; });
+      },
+    });
+    const controller = new AbortController();
+    const running = client.exec('sleep 30', { podId: 'pod-1', signal: controller.signal });
+    await tick();
+    controller.abort();
+    expect((await running).exitCode).toBe(130);
+    expect(messages.map((message) => message.type)).toEqual(['pod/exec', 'pod/cancel']);
+    expect(messages[1].jobId).toBe(messages[0].jobId);
   });
 });

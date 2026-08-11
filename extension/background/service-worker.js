@@ -2401,6 +2401,10 @@ const jsClient = createJsClient({ registry: jsRegistry, tracker: jsTabTracker })
 // instead of a Notebook editor evaluator. Files and catalog metadata survive a
 // stopped worker; cwd, environment, and live jobs deliberately do not.
 const podRegistry = createPodRegistry({ storage: idbKV('pods'), onActorArchive: archiveOrphanedActor });
+// A closed ephemeral Pod is invalid as soon as its host tab disappears, even
+// though its coordinated OPFS/catalog cleanup is asynchronous. This closes the
+// tiny reopen race where a fresh tab could otherwise adopt an id being deleted.
+const podsClosing = new Set();
 const podTabTracker = createPodTabTracker({
   announce: trackerNote(podRegistry, 'Pod'),
   onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('pod', id, tabId),
@@ -3228,9 +3232,32 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
   }
   if (msg?.type === 'pod/tab-ready') {
     if (typeof msg.podId !== 'string' || sender?.tab?.id == null) return false;
+    // Only the Pod tab already pinned during create/adopt may resolve the ready
+    // promise. Without this check any extension page could claim an arbitrary
+    // Pod id and redirect later host RPCs to itself.
+    if (podTabTracker.getTabId(msg.podId) !== sender.tab.id) return false;
     podTabTracker.onTabReady(msg.podId, sender.tab.id);
     denylistNetGuard.sync();
     return false;
+  }
+  if (msg?.type === 'pod/tab-adopt') {
+    if (typeof msg.podId !== 'string' || sender?.tab?.id == null) return false;
+    // A user may reopen a persistent Pod from its durable URL after the old
+    // host tab was closed. Re-adopt only that exact engine-tab URL and only an
+    // id still present in the registry; then pod/get-meta can stay instance-
+    // pinned while boot is in progress.
+    if (podTabTracker.parseIdFromUrl(sender.tab.url) !== msg.podId) return false;
+    if (podsClosing.has(msg.podId)) return Promise.resolve({ ok: false, error: 'pod-closing' });
+    return Promise.resolve(podRegistry.get(msg.podId)).then((record) => {
+      if (!record) return { ok: false, error: 'pod-not-found' };
+      const liveTabId = podTabTracker.getTabId(msg.podId);
+      if (liveTabId != null && liveTabId !== sender.tab.id) {
+        return { ok: false, error: 'pod-already-open' };
+      }
+      podTabTracker.onTabPending(msg.podId, sender.tab.id);
+      denylistNetGuard.sync();
+      return { ok: true };
+    });
   }
   if (msg?.type === 'app/tab-ready') {
     if (typeof msg.appId !== 'string' || sender?.tab?.id == null) return false;
@@ -3281,13 +3308,15 @@ browser.tabs.onRemoved.addListener((tabId) => {
     // their catalog + OPFS tree and reopen stopped; ephemeral ones leave no
     // durable workspace after a clean close. The repository coordinator makes
     // this idempotent with an explicit pod_destroy racing the tab event.
+    podsClosing.add(closedPodId);
     Promise.resolve(podRegistry.get(closedPodId)).then(async (record) => {
       if (!record || record.persistent !== false) return;
       await repositories.coordinate({ kind: 'pod', id: closedPodId }, async () => {
         await repositories.destroy({ kind: 'pod', id: closedPodId }, { worktree: true });
         await podRegistry.delete(closedPodId);
       });
-    }).catch((error) => console.warn('[sw] ephemeral Pod cleanup failed', closedPodId, error));
+    }).catch((error) => console.warn('[sw] ephemeral Pod cleanup failed', closedPodId, error))
+      .finally(() => podsClosing.delete(closedPodId));
   }
   appTabTracker.onTabRemoved(tabId);
   // DESIGN-17 note: only the VM client owns a per-instance COMMAND QUEUE to

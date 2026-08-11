@@ -73,7 +73,9 @@ const engineRows = async (src, sessionId) => {
     // stays cheap).
     detail: src.type === 'app'
       ? (Array.isArray(r.tags) ? r.tags.join(', ') : '')
-      : (r.pinned ? 'pinned' : ''),
+      : src.type === 'pod' && r.persistent === false
+        ? 'ephemeral · closing deletes files'
+        : (r.pinned ? 'pinned' : ''),
   }));
 };
 

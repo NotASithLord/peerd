@@ -6,7 +6,8 @@ import { POD_TAB_GROUP_TITLE } from '/background/pod-client.js';
 import { normalizeGitRemote } from '/peerd-engine/index.js';
 import { oncePerSession } from './once-per-session.js';
 
-const POD_NOTE = [
+/** @param {boolean} persistent */
+const podNote = (persistent) => [
   '<pod>',
   'A Pod is a fast local shell + OPFS workspace, not Linux. Use pod_exec for',
   'files, pipelines, Web-standard JavaScript (`js` on Chromium), WASI Preview 1 commands,',
@@ -15,7 +16,9 @@ const POD_NOTE = [
   'There is no Node, npm, native binary, socket, PTY, or package-manager claim.',
   'Use a WebVM when a workload needs Linux, Node/npm, Python/Ruby, native tools,',
   'or broad POSIX compatibility. Commands run in fresh sealed Workers; files',
-  'persist in named Pods, while cwd/environment/live jobs are process state.',
+  persistent
+    ? 'persist in this named Pod, while cwd/environment/live jobs are process state.'
+    : 'are ephemeral in this Pod: closing its tab deletes the workspace. cwd/environment/live jobs are process state.',
   '</pod>',
 ].join('\n');
 
@@ -50,7 +53,12 @@ export const createPodSandbox = async (args, ctx) => {
       depth: Math.min(500, Math.max(1, Number(args.gitDepth) || 50)),
       signal: /** @type {any} */ (ctx).abortSignal,
     });
-    await tracker.ensureTab(record.id, { active: false, groupTitle: POD_TAB_GROUP_TITLE });
+    try { await tracker.ensureTab(record.id, { active: false, groupTitle: POD_TAB_GROUP_TITLE }); }
+    catch (error) {
+      // Background tabs may be throttled past the readiness deadline even though
+      // the tab exists. Keep the live workspace; only roll back a real spawn failure.
+      if (tracker.getTabId?.(record.id) == null) throw error;
+    }
     if (sessionId) await registry.setDefaultForSession(sessionId, record.id);
   } catch (error) {
     await repositories?.destroy?.({ kind: 'pod', id: record.id }, { worktree: true }).catch(() => {});
@@ -63,6 +71,6 @@ export const createPodSandbox = async (args, ctx) => {
   }, null, 2);
   return {
     ok: true,
-    content: `${summary}\n\n${oncePerSession(sessionId, 'pod-note') ? POD_NOTE : '(Pod runtime note shown earlier this session — same rules apply.)'}`,
+    content: `${summary}\n\n${oncePerSession(sessionId, 'pod-note') ? podNote(record.persistent) : (record.persistent ? '(Pod runtime note shown earlier this session — same rules apply.)' : '(Ephemeral Pod: closing its tab deletes this workspace.)')}`,
   };
 };

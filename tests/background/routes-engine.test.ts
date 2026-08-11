@@ -105,10 +105,54 @@ describe('pod/git — instance-pinned isomorphic-git shell bridge', () => {
       pushedRef = { ref, opts };
       return { ok: true, branch: 'main', remote: { url: 'https://github.com/a/b.git' } };
     };
+    deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
     const routes = makeEngineRoutes(deps);
-    const reply = await routes['pod/git']({ podId: 'pod-1', argv: ['push', 'origin', 'main'], remoteAuthorized: true }, sender);
+    const reply = await routes['pod/git']({
+      podId: 'pod-1', jobId: 'job-authorized', argv: ['push', 'origin', 'main'],
+      remoteGrant: { op: 'push', url: 'https://github.com/a/b.git' },
+    }, sender);
     expect(reply.result.exitCode).toBe(0);
-    expect(pushedRef).toEqual({ ref: { kind: 'pod', id: 'pod-1' }, opts: { ref: 'main' } });
+    expect(pushedRef.ref).toEqual({ kind: 'pod', id: 'pod-1' });
+    expect(pushedRef.opts.ref).toBe('main');
+    expect(pushedRef.opts.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test('an op- or target-mismatched grant fails closed', async () => {
+    let pushed = false;
+    const deps = baseDeps();
+    deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
+    deps.repositories.push = async () => { pushed = true; return { ok: true }; };
+    const routes = makeEngineRoutes(deps);
+    for (const remoteGrant of [
+      { op: 'fetch', url: 'https://github.com/a/b.git' },
+      { op: 'push', url: 'https://evil.example/x.git' },
+    ]) {
+      const reply = await routes['pod/git']({ podId: 'pod-1', argv: ['push', 'origin', 'main'], remoteGrant }, sender);
+      expect(reply.result.exitCode).toBe(126);
+    }
+    expect(pushed).toBe(false);
+  });
+
+  test('job cancellation aborts an in-flight remote Git transport', async () => {
+    let seenSignal: AbortSignal | null = null;
+    const deps = baseDeps();
+    deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
+    deps.repositories.push = async (_ref: any, opts: any) => {
+      seenSignal = opts.signal;
+      await new Promise((resolve, reject) => {
+        opts.signal.addEventListener('abort', () => reject(new Error('git operation aborted')), { once: true });
+      });
+    };
+    const routes = makeEngineRoutes(deps);
+    const running = routes['pod/git']({
+      podId: 'pod-1', jobId: 'job-cancel-me', argv: ['push', 'origin', 'main'],
+      remoteGrant: { op: 'push', url: 'https://github.com/a/b.git' },
+    }, sender);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const cancelled = await routes['pod/cancel-io']({ podId: 'pod-1', jobId: 'job-cancel-me' }, sender);
+    expect(cancelled).toMatchObject({ ok: true, cancelled: 1 });
+    expect((seenSignal as AbortSignal | null)?.aborted).toBe(true);
+    expect((await running).result.stderr).toContain('aborted');
   });
 });
 

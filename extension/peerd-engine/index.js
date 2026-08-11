@@ -163,6 +163,8 @@ export {
   tokenizePodShell,
   parsePodShell,
   podGitRemoteIntent,
+  podGitRemoteIntents,
+  podGitRemoteOperation,
   expandPodWord,
   executePodShell,
 } from './pod-shell.js';

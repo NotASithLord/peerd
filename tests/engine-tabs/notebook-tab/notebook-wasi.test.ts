@@ -153,12 +153,25 @@ describe('runWasiWorkspace — Pod shared workspace adapter', () => {
   });
 
   test('snapshot file/byte budgets fail before WASM receives authority', async () => {
+    let read = false;
     const workspace = {
       list: async () => [{ path: 'big.bin', size: 5 }],
-      readBytes: async () => new Uint8Array(5),
+      readBytes: async () => { read = true; return new Uint8Array(5); },
       write: async () => {}, delete: async () => {},
     };
     expect(runWasiWorkspace(demoModule(), { workspace, maxBytes: 4 })).rejects.toThrow(/snapshot budget/);
+    expect(read).toBe(false);
+  });
+
+  test('unsafe snapshot paths fail before reads or mutations', async () => {
+    let touched = false;
+    const workspace = {
+      list: async () => [{ path: '../escape.txt', size: 1 }],
+      readBytes: async () => { touched = true; return new Uint8Array(1); },
+      write: async () => { touched = true; }, delete: async () => { touched = true; },
+    };
+    expect(runWasiWorkspace(demoModule(), { workspace })).rejects.toThrow(/unsafe WASI workspace path/);
+    expect(touched).toBe(false);
   });
 });
 

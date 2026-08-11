@@ -1171,7 +1171,8 @@ export const STATES = [
         })()`);
         const settled = await waitFor(() => evalIn(page, `(() => {
           const nodes = [...document.getElementById('terminal-output').children].slice(${before});
-          return nodes.some((node) => node.classList.contains('entry-meta')) ? nodes.map((node) => ({ className: node.className, text: node.textContent })).filter(Boolean) : null;
+          return nodes.some((node) => node.classList.contains('entry-meta') && node.textContent.includes('· exit '))
+            ? nodes.map((node) => ({ className: node.className, text: node.textContent })).filter(Boolean) : null;
         })()`), { budgetMs, pollMs: 25 });
         return settled ?? [];
       };
@@ -1188,8 +1189,8 @@ export const STATES = [
       const ambient = await runTerminal("js -e 'for (const probe of [() => fetch(\"https://example.com\"), () => navigator.storage.getDirectory()]) { try { await probe() } catch (e) { console.log(e.name) } }; console.log(typeof chrome, typeof browser)'");
       rec.check('Pod JS has no ambient network/storage/extension authority', (joined(ambient).match(/PodEgressBlockedError/g) ?? []).length >= 2 && joined(ambient).includes('undefined undefined'), joined(ambient));
 
-      const controlled = await runTerminal("js -e 'const response = await pod.fetch(\"https://example.com/__peerd_pod_e2e__\"); console.log(await response.text())'");
-      rec.check('named Pod fetch crosses the controlled host bridge', joined(controlled).includes('pod-controlled-egress\n') && joined(controlled).includes('exit 0'), joined(controlled));
+      const controlled = await runTerminal('curl https://example.com/__peerd_pod_e2e__');
+      rec.check('named Pod curl crosses the controlled host bridge', joined(controlled).includes('pod-controlled-egress') && joined(controlled).includes('exit 0'), joined(controlled));
 
       const wasi = await runTerminal('wasi-demo');
       const wasiMs = Number(joined(wasi).match(/· (\d+)ms/)?.[1] ?? NaN);
@@ -1213,6 +1214,20 @@ export const STATES = [
         const killed = await runTerminal(`kill ${sleepingJob}`);
         rec.check('a running job can be cancelled', joined(killed).includes('exit 0'), joined(killed));
       }
+
+      const beforeStop = await evalIn(page, `document.getElementById('terminal-output')?.children.length ?? 0`);
+      await evalIn(page, `(() => {
+        const input = document.getElementById('terminal-input');
+        input.value = 'sleep 10';
+        document.getElementById('terminal-form').requestSubmit();
+      })()`);
+      await waitFor(() => evalIn(page, `!document.getElementById('stop-button')?.hidden`), { budgetMs: 3_000, pollMs: 25 });
+      await evalIn(page, `document.getElementById('stop-button').click()`);
+      const stopped = await waitFor(() => evalIn(page, `(() => {
+        const nodes = [...document.getElementById('terminal-output').children].slice(${beforeStop});
+        return nodes.map((node) => node.textContent).join('').includes('exit 130');
+      })()`), { budgetMs: 3_000, pollMs: 25 });
+      rec.check('visible Stop terminates the foreground Pod job', stopped === true);
 
       await runTerminal('export POD_PARENT=kept');
       await runTerminal('export POD_PARENT=background &');

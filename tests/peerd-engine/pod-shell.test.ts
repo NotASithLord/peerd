@@ -3,6 +3,8 @@ import {
   executePodShell,
   parsePodShell,
   podGitRemoteIntent,
+  podGitRemoteIntents,
+  podGitRemoteOperation,
   PodShellSyntaxError,
   tokenizePodShell,
 } from '../../extension/peerd-engine/pod-shell.js';
@@ -90,6 +92,16 @@ describe('Pod shell execution', () => {
     h.ctx.runCommand = async () => { throw new Error('boom'); };
     expect(await executePodShell('anything', h.ctx)).toMatchObject({ stdout: '', stderr: 'boom\n', exitCode: 1 });
   });
+
+  test('bounds pipeline and accumulated output incrementally', async () => {
+    const h = harness();
+    h.ctx.runCommand = async () => ({ stdout: 'x'.repeat(100), stderr: 'e'.repeat(100), exitCode: 0 });
+    const result = await executePodShell('one; two', { ...h.ctx, maxOutputChars: 50 });
+    expect(result.stdout).toHaveLength(50);
+    expect(result.stderr).toHaveLength(50);
+    expect(result.stdoutTruncated).toBe(true);
+    expect(result.stderrTruncated).toBe(true);
+  });
 });
 
 describe('remote Git authority detection', () => {
@@ -103,5 +115,22 @@ describe('remote Git authority detection', () => {
   test('variable-expanded commands never mint remote authority', () => {
     expect(podGitRemoteIntent('$COMMAND push origin main')).toBeNull();
     expect(podGitRemoteIntent('git $OP origin main')).toBeNull();
+  });
+
+  test('enumerates every remote operation in a compound command', () => {
+    expect(podGitRemoteIntents('git fetch; git push origin main')).toEqual([
+      { op: 'fetch', url: null },
+      { op: 'push', url: null },
+    ]);
+    expect(podGitRemoteIntents('git remote add origin https://example.com/a/b; git push')).toEqual([
+      { op: 'link', url: 'https://example.com/a/b' },
+      { op: 'push', url: null },
+    ]);
+  });
+
+  test('classifies a concrete Git argv for host-side grant enforcement', () => {
+    expect(podGitRemoteOperation(['push', 'origin', 'main'])).toBe('push');
+    expect(podGitRemoteOperation(['remote', 'set-url', 'origin', 'https://example.com/a'])).toBe('link');
+    expect(podGitRemoteOperation(['status'])).toBeNull();
   });
 });

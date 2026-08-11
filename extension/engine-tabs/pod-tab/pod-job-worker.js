@@ -42,7 +42,10 @@ const basename = (path) => path.replace(/\/+$/, '').split('/').at(-1) || '';
 /** @param {string} value */
 const line = (value) => value.endsWith('\n') ? value : `${value}\n`;
 /** @param {string} text */
-const capped = (text) => text.length <= OUTPUT_CAP ? text : `${text.slice(0, OUTPUT_CAP)}\n[output truncated]\n`;
+const capped = (text) => {
+  const marker = '\n[output truncated]\n';
+  return text.length <= OUTPUT_CAP ? text : `${text.slice(0, OUTPUT_CAP - marker.length)}${marker}`;
+};
 
 const fs = Object.freeze({
   /** @param {string} path */ read: (path) => hostCall('fs-read', { path }),
@@ -141,7 +144,7 @@ const runCommand = async ({ argv, stdin, cwd, env }) => {
     'Peerd Pod commands:',
     '  pwd cd ls cat echo printf mkdir rm cp mv touch',
     '  head tail wc grep sort uniq env export unset sleep',
-    '  js [-e code|file]   Web-standard JavaScript; no Node APIs',
+    '  js [-e code|file]   local Web-standard JavaScript on Chromium; no Node/network',
     '  wasi file.wasm ...  run a WASI Preview 1 command',
     '  install-tool name file.wasm; installed tools run by name',
     '  git <init|status|add|commit|log|branch|checkout|clone|fetch|push|remote>',
@@ -294,7 +297,10 @@ const runCommand = async ({ argv, stdin, cwd, env }) => {
     try {
       const module = command === 'wasi-demo' ? demoModule() : /** @type {Uint8Array} */ (await fs.readBytes(resolvePodPath(args.shift() ?? '', cwd)));
       const result = await runWasiTool(module, [command === 'wasi-demo' ? 'wasi-demo' : 'main.wasm', ...args], stdin, cwd, env);
-      return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+      return {
+        stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode,
+        stdoutTruncated: result.stdoutTruncated, stderrTruncated: result.stderrTruncated,
+      };
     } catch (error) { return { stdout: '', stderr: `wasi: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}\n`, exitCode: 1 }; }
   }
   if (command === 'install-tool') {
@@ -327,13 +333,22 @@ const runCommand = async ({ argv, stdin, cwd, env }) => {
       else if (arg === '-o' || arg === '--output') outputPath = args[++index] ?? '';
       else if (arg === '-I' || arg === '--head') method = 'HEAD';
       else if (!arg.startsWith('-')) url = arg;
+      else return { stdout: '', stderr: `curl: unsupported option ${arg}\n`, exitCode: 2 };
     }
     if (!url) return { stdout: '', stderr: 'curl: HTTPS URL required\n', exitCode: 2 };
     try {
       const response = await podFetch(url, { method, headers, body });
-      const text = await response.text();
-      if (outputPath) { await fs.write(resolvePodPath(outputPath, cwd), text); return { stdout: '', stderr: '', exitCode: response.ok ? 0 : 22 }; }
-      return { stdout: text, stderr: response.ok ? '' : `curl: HTTP ${response.status}\n`, exitCode: response.ok ? 0 : 22 };
+      const bytes = await response.bytes();
+      if (outputPath) {
+        await fs.write(resolvePodPath(outputPath, cwd), bytes);
+        return { stdout: '', stderr: '', exitCode: response.ok ? 0 : 22 };
+      }
+      const truncated = bytes.byteLength > OUTPUT_CAP;
+      const text = new TextDecoder().decode(truncated ? bytes.slice(0, OUTPUT_CAP) : bytes);
+      return {
+        stdout: text, stderr: response.ok ? '' : `curl: HTTP ${response.status}\n`,
+        stdoutTruncated: truncated, exitCode: response.ok ? 0 : 22,
+      };
     } catch (error) { return { stdout: '', stderr: `curl: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}\n`, exitCode: 1 }; }
   }
   if (command === 'jobs' || command === 'ps') {
@@ -349,7 +364,10 @@ const runCommand = async ({ argv, stdin, cwd, env }) => {
   if (await fs.exists(toolPath)) {
     try {
       const result = await runWasiTool(/** @type {Uint8Array} */ (await fs.readBytes(toolPath)), [command, ...args], stdin, cwd, env);
-      return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+      return {
+        stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode,
+        stdoutTruncated: result.stdoutTruncated, stderrTruncated: result.stderrTruncated,
+      };
     } catch (error) { return { stdout: '', stderr: `${command}: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}\n`, exitCode: 1 }; }
   }
   return { stdout: '', stderr: `${command}: command not found\n`, exitCode: 127 };
@@ -374,10 +392,18 @@ addEventListener('message', (event) => {
     runCommand,
     readText,
     writeText,
+    maxOutputChars: OUTPUT_CAP,
   }).then((result) => {
+    const stdout = String(result.stdout ?? '');
+    const stderr = String(result.stderr ?? '');
     postMessage({
       type: 'done',
-      result: { ...result, stdout: capped(result.stdout), stderr: capped(result.stderr), durationMs: performance.now() - startedAt },
+      result: {
+        ...result, stdout: capped(stdout), stderr: capped(stderr),
+        stdoutTruncated: result.stdoutTruncated === true || stdout.length > OUTPUT_CAP,
+        stderrTruncated: result.stderrTruncated === true || stderr.length > OUTPUT_CAP,
+        durationMs: performance.now() - startedAt,
+      },
     });
   }).catch((error) => {
     postMessage({ type: 'done', result: { stdout: '', stderr: `${/** @type {{message?:string}} */ (error)?.message ?? String(error)}\n`, exitCode: 2, durationMs: performance.now() - startedAt } });

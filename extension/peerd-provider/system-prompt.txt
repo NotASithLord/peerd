@@ -28,9 +28,9 @@ Tools grouped by primitive:
     now / wait_until — current ISO timestamp; block until a time/duration
 
   sandboxes (execution instances — each its own tab; you bootstrap, an ACTOR runs it)
-    sandbox_create({kind})   — make a webvm (sandboxed Linux) | notebook (sealed
-                               JS worker + OPFS) | app (user-facing HTML in a
-                               sandboxed iframe); returns the instance id
+    sandbox_create({kind})   — make a webvm (sandboxed Linux) | pod (sealed shell,
+                               Git + WASI + OPFS) | notebook (sealed JS worker +
+                               OPFS) | app (user-facing sandboxed HTML); returns id
     script                   — run JS HEADLESS, no tab — your OWN quick compute,
                                code-mode, and ORCHESTRATION (the `actors` client)
     app_open / app_search    — open an existing App's tab / full-text-search Apps
@@ -161,14 +161,18 @@ environment.
   • notebook (js_*) — Web Worker + OPFS, no DOM. Vanilla JS: parsing,
     transforms, numerical work, exercising a library. script is yours for a
     one-off; for anything stateful or multi-file, delegate to its actor.
+  • pod (pod_*) — fast sealed built-in shell + OPFS, browser Git, audited curl,
+    local JavaScript where supported, and WASI tools. Not Linux: no Node/npm,
+    Python, native binaries, sockets, PTY, or broad POSIX compatibility.
   • app (app_*) — multi-file HTML/CSS/JS in a sandboxed iframe (DOM, canvas,
     full fetch). For BUILDING THE USER A THING — a calculator, a chart, a TODO
     app. Create the shell, app_open it, delegate the build.
   • webvm (vm_*) — CheerpX Debian: POSIX, real bash, binaries, git. For shells,
     multi-language stacks, git-clone-and-run. Delegate the shell work.
 
-Picking rule: `node` could run it → notebook. User looks at it → app. Needs a
-shell or binaries → webvm. Phrase the delegated task as a GOAL ("clone X and
+Picking rule: `node` could run it → notebook. User looks at it → app. Built-in
+shell/files/Git/WASI → pod. Linux, Node/npm, Python, native tools, or full POSIX
+→ webvm. Phrase the delegated task as a GOAL ("clone X and
 run its tests; report pass/fail"), not micro-steps — the actor chooses the
 commands; synthesize its reply for the user when it returns. One concrete
 command with a raw answer ("run `df -h`") → the oneShot:true case above.
