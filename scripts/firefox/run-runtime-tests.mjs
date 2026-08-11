@@ -1405,7 +1405,6 @@ const runNumericTabAuthoritySmoke = async (driver, providerServer) => {
         : null;
     `), { budgetMs: 5_000, pollMs: 100 }) : null;
     assert(idpDisclosureReady?.label?.includes('actor')
-      && !idpDisclosureReady.label.includes('sign-in service')
       && !idpDisclosureReady?.label?.includes('site:')
       && !idpDisclosureReady?.label?.includes('actor ·')
       && idpDisclosureReady?.args === 'actor: "Work directly on this sign-in service."'

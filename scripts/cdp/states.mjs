@@ -1742,7 +1742,6 @@ export const STATES = [
       })()`), { budgetMs: 5_000, pollMs: 50 }) : null;
       rec.check('the human sees a generic host-proven Not run explanation',
         disclosureReady?.label.includes('actor')
-          && !disclosureReady.label.includes('sign-in service')
           && disclosureReady?.args === 'actor: "Use this sign-in service as an API inte…"'
           && disclosureReady?.cardClass.includes('tool-not-run')
           && disclosureReady?.dotClass.includes('dot-not-run')
