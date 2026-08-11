@@ -121,8 +121,9 @@ describe('sidepanel actor isolation UX', () => {
       toggle.click();
       await flush();
       expect(toggle.getAttribute('aria-expanded')).toBe('true');
-      expect(root.textContent).toContain('actor_isolation_unavailable');
-      expect(root.textContent).toContain('cannot provide the required isolated worker');
+      expect(root.textContent).toContain('No actor work was started. Review the request before trying again.');
+      expect(root.textContent.includes('actor_isolation_unavailable')).toBe(false);
+      expect(root.textContent.includes('cannot provide the required isolated worker')).toBe(false);
       expect(root.textContent.includes('Do not retry automatically')).toBe(false);
       expect(root.textContent.includes('reply will arrive')).toBe(false);
     } finally { m.mount(root, null); root.remove(); }
@@ -193,7 +194,8 @@ describe('sidepanel actor isolation UX', () => {
       expect(reply?.getAttribute('role')).toBe(null);
       expect(reply?.getAttribute('aria-live')).toBe(null);
       expect(root.querySelectorAll('[role="status"]').length).toBe(0);
-      expect(root.textContent).toContain('before this actor request was dispatched');
+      expect(root.textContent).toContain('No actor work was started. Review the request before trying again.');
+      expect(root.textContent.includes('before this actor request was dispatched')).toBe(false);
     } finally { m.mount(root, null); root.remove(); }
   });
 

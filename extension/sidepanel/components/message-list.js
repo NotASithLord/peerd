@@ -27,36 +27,14 @@ import { renderMarkdown } from '/shared/markdown.js';
 import { stripUntrustedFences } from '/shared/util.js';
 import { CHANNEL } from '/shared/channel-config.js';
 import {
-  ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE, ACTOR_ISOLATION_TEMPORARY_USER_FAILURE,
-  ACTOR_ISOLATION_UNSUPPORTED_USER_FAILURE, classifyFailure,
-  contributorFeedbackTargets, formatBytes,
+  classifyFailure, contributorFeedbackTargets, formatBytes,
 } from '/peerd-runtime/index.js';
 
-/** @param {string} text @returns {string|null} */
-const actorUserFailure = (text) => {
-  if (/actor_identity_provider_transit_only/i.test(text)) {
-    return 'No actor work was started. This is a sign-in service, which peerd can visit only while signing in to another site. '
-      + 'Ask peerd to work through the site you want to sign in to.';
-  }
-  if (/actor_sensitive_tab_requires_site/i.test(text)) {
-    return 'No actor work was started. This tab is on a site peerd treats as signed in. '
-      + 'To continue, ask peerd to work on that site directly.';
-  }
-  if (/actor_tab_sensitivity_unavailable/i.test(text)) {
-    return 'No actor work was started because peerd could not verify this tab. '
-      + 'Reload peerd, then try again.';
-  }
-  if (/actor-provider-boundary-blocked|model request was not run/i.test(text)) {
-    return ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE;
-  }
-  if (/actor_isolation_temporarily_unavailable|isolated worker is temporarily unavailable/i.test(text)) {
-    return ACTOR_ISOLATION_TEMPORARY_USER_FAILURE;
-  }
-  if (/actor_isolation_unavailable|cannot provide the required isolated worker/i.test(text)) {
-    return ACTOR_ISOLATION_UNSUPPORTED_USER_FAILURE;
-  }
-  return null;
-};
+// `performed:false` is host custody metadata. Error bodies are not: provider,
+// actor, and page text can all flow into them. Keep the human recovery generic
+// unless a future host-only typed reason is carried alongside the custody bit.
+const ACTOR_NOT_RUN_USER_FAILURE =
+  'No actor work was started. Review the request before trying again.';
 
 /** @param {string} _text @returns {string} */
 const actorOutcomeUnknownFailure = (_text) =>
@@ -520,7 +498,8 @@ const ActorReplyMessage = {
     // verification guidance must win over the friendlier cancelled label.
     const aborted = reply.aborted === true && reply.outcomeKnown !== false;
     const failed = reply.failed === true && !aborted;
-    const userFailure = failed && reply.performed === false ? actorUserFailure(body) : null;
+    const userFailure = failed && reply.performed === false
+      ? ACTOR_NOT_RUN_USER_FAILURE : null;
     const outcomeUnknown = !aborted && reply.outcomeKnown === false;
     const notRun = !outcomeUnknown && reply.performed === false;
     const displayBody = outcomeUnknown
@@ -1045,13 +1024,11 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
     : (toolResult ? (toolResult.actorAborted ? 'cancelled' : toolResult.is_error ? 'failed' : 'ok')
       : (interrupted ? 'cancelled' : 'pending'));
   const performed = card?.performed ?? (!card ? toolResult?.actorPerformed : undefined);
-  const userFailure = performed === false ? actorUserFailure(failureText) : null;
+  const userFailure = performed === false ? ACTOR_NOT_RUN_USER_FAILURE : null;
   const notRun = status === 'failed' && !outcomeUnknown
     && performed === false;
-  const idpTransitRefusal = preEffectTerminal
-    && /actor_identity_provider_transit_only/i.test(failureText);
-  const cardLabel = idpTransitRefusal
-    ? 'sign-in service'
+  const cardLabel = preEffectTerminal
+    ? 'actor'
     : isApiIntegration
       ? `${who} integration`
       : `${card?.kind ? `${card.kind} actor` : 'actor'}${who ? ` · ${who}` : ''}`;

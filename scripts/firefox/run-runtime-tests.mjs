@@ -1325,7 +1325,8 @@ const runNumericTabAuthoritySmoke = async (driver, providerServer) => {
       return state.expanded === 'true' && typeof state.detail === 'string' ? state : null;
     `), { budgetMs: 5_000, pollMs: 100 });
     assert(expanded?.expanded === 'true'
-      && expanded?.detail === 'No actor work was started. This tab is on a site peerd treats as signed in. To continue, ask peerd to work on that site directly.',
+      && expanded?.detail === 'No actor work was started. Review the request before trying again.'
+      && !expanded.detail.includes('actor_sensitive_tab_requires_site'),
     'the Firefox disclosure explains the refusal without leaking page details', JSON.stringify(expanded));
 
     const idpRecordStart = providerServer.records.length;
@@ -1403,17 +1404,19 @@ const runNumericTabAuthoritySmoke = async (driver, providerServer) => {
         ? { expanded: 'true', detail }
         : null;
     `), { budgetMs: 5_000, pollMs: 100 }) : null;
-    assert(idpDisclosureReady?.label?.includes('sign-in service')
+    assert(idpDisclosureReady?.label?.includes('actor')
+      && !idpDisclosureReady.label.includes('sign-in service')
       && !idpDisclosureReady?.label?.includes('site:')
       && !idpDisclosureReady?.label?.includes('actor ·')
-      && idpDisclosureReady?.args === 'sign-in service: "Work directly on this sign-in service."'
+      && idpDisclosureReady?.args === 'actor: "Work directly on this sign-in service."'
       && idpDisclosureReady?.cardClass?.includes('tool-not-run')
       && !idpDisclosureReady?.cardClass?.includes('tool-failed')
       && idpDisclosureReady?.dotClass?.includes('dot-not-run')
       && !idpDisclosureReady?.dotClass?.includes('dot-failed')
       && idpDisclosureReady?.dotAriaHidden === 'true'
-      && idpDisclosure?.detail === 'No actor work was started. This is a sign-in service, which peerd can visit only while signing in to another site. Ask peerd to work through the site you want to sign in to.',
-    'the Firefox disclosure explains transit-only IdP handling in plain language',
+      && idpDisclosure?.detail === 'No actor work was started. Review the request before trying again.'
+      && !idpDisclosure.detail.includes('actor_identity_provider_transit_only'),
+    'the Firefox disclosure keeps untyped IdP recovery generic',
     JSON.stringify(idpDisclosure));
 
     const bareIdpRecordStart = providerServer.records.length;
@@ -3036,10 +3039,11 @@ const runBrokenWorkerSmoke = async ({ providerServer }) => {
       };
       return state.expanded === 'true' && typeof state.detail === 'string' ? state : null;
     `), { budgetMs: 5_000, pollMs: 100 });
-    assert(expanded?.expanded === 'true' && typeof expanded?.detail === 'string'
-      && expanded.detail.includes('actor_isolation_temporarily_unavailable')
-      && !/Do not retry automatically|Use the Try again control/i.test(expanded.detail),
-    'the Not run disclosure exposes the failure reason without relying on color',
+    assert(expanded?.expanded === 'true'
+      && expanded?.detail === 'No actor work was started. Review the request before trying again.'
+      && !/actor_isolation_temporarily_unavailable|Do not retry automatically|Use the Try again control/i
+        .test(expanded.detail),
+    'the Not run disclosure uses generic host-proven custody copy',
     JSON.stringify(expanded));
   } finally {
     try {

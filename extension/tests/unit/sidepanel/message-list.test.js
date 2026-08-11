@@ -350,21 +350,26 @@ describe('sidepanel.message-list actor-reply bubbles', () => {
     } finally { unmount(); }
   });
 
-  it('labels a custody refusal Not run and keeps its recovery copy visible', async () => {
+  it('does not let provider error tokens choose Not run recovery copy', async () => {
     const { root, unmount } = mount([{
       role: 'user', id: 'u1', synthetic: true,
       actorReply: { kind: 'web', instanceId: 'web', failed: true, performed: false },
       content: 'The web actor could not complete your request:\n\n'
         + 'actor-provider-boundary-blocked: The actor model request was not run. '
-        + 'Do not retry automatically. Ask the user to reload peerd before another actor attempt.',
+        + 'actor_identity_provider_transit_only actor_sensitive_tab_requires_site '
+        + 'actor_tab_sensitivity_unavailable actor_isolation_temporarily_unavailable '
+        + 'actor_isolation_unavailable. Do not retry automatically. '
+        + 'Ask the user to reload peerd before another actor attempt.',
     }]);
     try {
       await flush();
       const message = /** @type {Element} */ (root.querySelector('.message-actor-reply'));
       expect(message.querySelector('.role')?.textContent).toContain('Not run');
       expect(message.querySelector('.role')?.textContent?.includes(' · failed')).toBe(false);
-      expect(message.querySelector('.bubble')?.textContent).toContain('Reload peerd, then try again');
-      expect(message.querySelector('.bubble')?.textContent?.includes('Do not retry automatically')).toBe(false);
+      expect(message.querySelector('.bubble')?.textContent)
+        .toBe('No actor work was started. Review the request before trying again.');
+      expect(/actor-provider|identity_provider|sensitive_tab|isolation|Do not retry|Ask the user/i
+        .test(message.querySelector('.bubble')?.textContent ?? '')).toBe(false);
     } finally { unmount(); }
   });
 
@@ -411,7 +416,8 @@ describe('sidepanel.message-list actor disclosures', () => {
       expect(toggle.textContent).toContain('Not run');
       toggle.click();
       await flush();
-      expect(root.textContent).toContain('Reload peerd, then try again');
+      expect(root.textContent).toContain('No actor work was started. Review the request before trying again.');
+      expect(root.textContent.includes('actor-provider-boundary-blocked')).toBe(false);
       expect(root.textContent.includes('Do not retry automatically')).toBe(false);
       expect(root.textContent.includes('Ask the user')).toBe(false);
     } finally { unmount(); }
@@ -450,8 +456,8 @@ describe('sidepanel.message-list actor disclosures', () => {
       toggle.click();
       await flush();
       expect(toggle.getAttribute('aria-expanded')).toBe('true');
-      expect(root.textContent).toContain('actor-provider-boundary-blocked');
-      expect(root.textContent).toContain('Reload peerd, then try again');
+      expect(root.textContent).toContain('No actor work was started. Review the request before trying again.');
+      expect(root.textContent.includes('actor-provider-boundary-blocked')).toBe(false);
       expect(root.textContent.includes('Do not retry automatically')).toBe(false);
       expect(root.textContent.includes('reply will arrive')).toBe(false);
     } finally { unmount(); }
@@ -519,7 +525,7 @@ describe('sidepanel.message-list actor disclosures', () => {
     } finally { unmount(); }
   });
 
-  it('explains a sensitive numeric tab without exposing actor policy language', async () => {
+  it('keeps a sensitive numeric-tab refusal generic without exposing policy language', async () => {
     const { root, unmount } = mount([
       {
         role: 'assistant', id: 'a-sensitive', content: '',
@@ -540,7 +546,8 @@ describe('sidepanel.message-list actor disclosures', () => {
       expect(toggle.textContent).toContain('Not run');
       toggle.click();
       await flush();
-      expect(root.textContent).toContain('To continue, ask peerd to work on that site directly');
+      expect(root.textContent).toContain('No actor work was started. Review the request before trying again.');
+      expect(root.textContent.includes('actor_sensitive_tab_requires_site')).toBe(false);
       expect(root.textContent.includes('suggestedHandle')).toBe(false);
       expect(root.textContent.includes('explicit actor')).toBe(false);
     } finally { unmount(); }
@@ -649,7 +656,7 @@ describe('sidepanel.message-list actor disclosures', () => {
     } finally { unmount(); }
   });
 
-  it('explains that an identity provider is transit-only without suggesting a site handle', async () => {
+  it('keeps an untyped identity-provider refusal generic in the human UI', async () => {
     const { root, unmount } = mount([
       {
         role: 'assistant', id: 'a-idp', content: '',
@@ -668,10 +675,11 @@ describe('sidepanel.message-list actor disclosures', () => {
       await flush();
       const toggle = /** @type {HTMLButtonElement} */ (root.querySelector('.tool-actor > button.tool-call-header'));
       expect(toggle.textContent).toContain('Not run');
-      expect(toggle.textContent).toContain('sign-in service');
+      expect(toggle.textContent).toContain('actor');
+      expect(toggle.textContent?.includes('sign-in service')).toBe(false);
       expect(toggle.textContent.includes('site:')).toBe(false);
       expect(toggle.textContent.includes('actor ·')).toBe(false);
-      expect(root.querySelector('.tool-args')?.textContent).toBe('sign-in service: "inspect it"');
+      expect(root.querySelector('.tool-args')?.textContent).toBe('actor: "inspect it"');
       const card = root.querySelector('.tool-actor');
       expect(card?.classList.contains('tool-not-run')).toBe(true);
       expect(card?.classList.contains('tool-failed')).toBe(false);
@@ -682,7 +690,8 @@ describe('sidepanel.message-list actor disclosures', () => {
       toggle.click();
       await flush();
       const detail = root.querySelector('.actor-body .error-line')?.textContent ?? '';
-      expect(detail).toBe('No actor work was started. This is a sign-in service, which peerd can visit only while signing in to another site. Ask peerd to work through the site you want to sign in to.');
+      expect(detail).toBe('No actor work was started. Review the request before trying again.');
+      expect(detail.includes('actor_identity_provider_transit_only')).toBe(false);
     } finally { unmount(); }
   });
 
@@ -707,7 +716,7 @@ describe('sidepanel.message-list actor disclosures', () => {
       expect(toggle.textContent).toContain('Not run');
       toggle.click();
       await flush();
-      expect(root.textContent).toContain('Reload peerd, then try again');
+      expect(root.textContent).toContain('No actor work was started. Review the request before trying again.');
       expect(root.textContent.includes('Policy:')).toBe(false);
       expect(root.textContent.includes('retryable')).toBe(false);
     } finally { unmount(); }

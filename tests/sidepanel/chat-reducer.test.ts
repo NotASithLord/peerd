@@ -285,6 +285,52 @@ describe('reduceChat', () => {
     expect(matched.actorProjectionRevision).toBe(3);
   });
 
+  test('a known pre-effect live error carries Not run custody onto the actor card', () => {
+    const started = reduceChat(INITIAL_STATE, {
+      type: 'turn/actor-start', parentToolUseId: 'known-pre-effect', sessionId: 'actor-1',
+      actorCorrelationId: 'known-correlation', actorProjectionEpoch: 'worker-a',
+      actorProjectionRevision: 1,
+      fromIndex: 0, kind: 'web',
+    });
+    const failed = reduceChat(started, {
+      type: 'turn/actor-error', parentToolUseId: 'known-pre-effect',
+      actorCorrelationId: 'known-correlation', actorProjectionEpoch: 'worker-a',
+      actorProjectionRevision: 2,
+      error: 'actor-provider-boundary-blocked: the model request was not run',
+      outcomeKnown: true, performed: false,
+    });
+    expect(failed.actors['known-pre-effect']).toMatchObject({
+      streaming: false, outcomeKnown: true, performed: false,
+      error: 'actor-provider-boundary-blocked: the model request was not run',
+    });
+
+    const reconciled = reduceChat(failed, {
+      type: 'turn/state',
+      session: {
+        sessionId: null,
+        messages: [
+          { role: 'assistant', id: 'known-call', toolUses: [{
+            id: 'known-pre-effect', name: 'message_actor',
+            input: { to: 'web', message: 'inspect it' },
+          }] },
+          { role: 'user', id: 'known-ack', toolResults: [{
+            tool_use_id: 'known-pre-effect', is_error: false,
+            content: 'accepted', actorCorrelationId: 'known-correlation', actorTerminal: false,
+          }] },
+          { role: 'user', id: 'known-receipt', synthetic: true, actorReply: {
+            kind: 'web', instanceId: 'web', parentToolUseId: 'known-pre-effect',
+            actorDeliveryId: 'known-correlation', failed: true,
+            outcomeKnown: true, performed: false,
+          }, content: 'fenced receipt' },
+        ],
+      },
+    });
+    expect(reconciled.actors['known-pre-effect']).toMatchObject({
+      streaming: false, outcomeKnown: true, performed: false,
+      error: 'the actor request was not run',
+    });
+  });
+
   test('a delayed older full snapshot cannot overwrite a newer actor start', () => {
     const viewing = withSession('chat-A');
     const newStarted = reduceChat(viewing, {

@@ -6755,6 +6755,11 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
       : (persistedAssistantError ?? executionError);
     const outcomeUnknown = terminalError != null
       && (!persistOk || r.outcomeKnown !== true);
+    // A graceful host-stamped failure before any actor tool crossed the
+    // privileged relay is a definite pre-effect refusal. Preserve that custody
+    // fact through the live card and durable reply instead of defaulting it to
+    // "performed" in actor-messaging.
+    const performed = terminalError != null ? outcomeUnknown : undefined;
     const turnOk = persistOk && persistedAssistantError == null && r.ok === true && r.aborted !== true;
     // This immutable settlement snapshot is captured while the actor still owns
     // its slot. A queued turn may append immediately after release, so metrics
@@ -6770,7 +6775,7 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
         extensionApisPresent: false, actorSessionId, kind, instanceId,
         ok: turnOk, aborted: r.aborted === true, persistOk,
         ...(terminalError && r.aborted !== true ? {
-          performed: outcomeUnknown,
+          performed,
           outcomeKnown: !outcomeUnknown,
         } : {}),
       },
@@ -6778,13 +6783,13 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
     if (display) {
       const displayCurrent = terminalError
         ? actorLiveProjection.patchBound(display, {
-          error: terminalError, outcomeKnown: !outcomeUnknown, streaming: false,
+          error: terminalError, outcomeKnown: !outcomeUnknown, performed, streaming: false,
         })
         : actorLiveProjection.patchBound(display, {});
       if (displayCurrent) {
         if (terminalError) broadcastBoundProjection(display, {
           type: 'turn/actor-error', parentToolUseId: display.parentToolUseId,
-          error: terminalError, outcomeKnown: !outcomeUnknown,
+          error: terminalError, outcomeKnown: !outcomeUnknown, performed,
         });
         broadcastBoundProjection(display, {
           type: 'turn/actor-done', parentToolUseId: display.parentToolUseId,
@@ -6808,6 +6813,7 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
         stopped: true,
         executionFailed: true,
         outcomeKnown: !outcomeUnknown,
+        performed,
         executionFailure: r,
         turnSnapshot,
       };

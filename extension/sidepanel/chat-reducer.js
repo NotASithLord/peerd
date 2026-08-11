@@ -720,7 +720,8 @@ export const reduceChat = (state, msg) => {
       return stampActorProjectionRevision(putActorCard(state, /** @type {string} */ (msg.parentToolUseId), {
         error: msg.error,
         streaming: false,
-        ...(msg.outcomeKnown === false ? { outcomeKnown: false } : {}),
+        ...(typeof msg.outcomeKnown === 'boolean' ? { outcomeKnown: msg.outcomeKnown } : {}),
+        ...(typeof msg.performed === 'boolean' ? { performed: msg.performed } : {}),
       }), msg);
     }
     case 'turn/actor-done': {

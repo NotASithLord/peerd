@@ -1639,8 +1639,8 @@ export const STATES = [
           disclosureBefore?.initiallyExpanded === 'false'
             && disclosureBefore?.collapsed.includes('Not run')
             && disclosureAfter?.expanded === 'true'
-            && disclosureAfter?.detail.includes('No actor work was started')
-            && disclosureAfter?.detail.includes('ask peerd to work on that site directly'),
+            && disclosureAfter?.detail === 'No actor work was started. Review the request before trying again.'
+            && !disclosureAfter.detail.includes('actor_sensitive_tab_requires_site'),
           JSON.stringify({ disclosureBefore, disclosureAfter }));
         await rec.shot('final');
       } finally {
@@ -1740,13 +1740,15 @@ export const STATES = [
           ? { expanded: 'true', detail }
           : null;
       })()`), { budgetMs: 5_000, pollMs: 50 }) : null;
-      rec.check('the human sees a plain transit-only explanation',
-        disclosureReady?.label.includes('sign-in service')
-          && disclosureReady?.args === 'sign-in service: "Use this sign-in service as an API inte…"'
+      rec.check('the human sees a generic host-proven Not run explanation',
+        disclosureReady?.label.includes('actor')
+          && !disclosureReady.label.includes('sign-in service')
+          && disclosureReady?.args === 'actor: "Use this sign-in service as an API inte…"'
           && disclosureReady?.cardClass.includes('tool-not-run')
           && disclosureReady?.dotClass.includes('dot-not-run')
           && disclosure?.expanded === 'true'
-          && disclosure?.detail === 'No actor work was started. This is a sign-in service, which peerd can visit only while signing in to another site. Ask peerd to work through the site you want to sign in to.',
+          && disclosure?.detail === 'No actor work was started. Review the request before trying again.'
+          && !disclosure.detail.includes('actor_identity_provider_transit_only'),
         JSON.stringify({ disclosureReady, disclosure }));
       await rec.shot('final');
     },
@@ -2207,12 +2209,11 @@ export const STATES = [
             go: row.querySelector('.agent-tab-notice-go')?.textContent?.trim() || '',
           } : null;
         })()`), { budgetMs: 20_000 });
-        rec.check('the notice labels the tab as protected',
-          notice?.primary?.includes('protected tab'), JSON.stringify(notice));
-        rec.check('the notice explains both restrictions and their lifetime',
-          notice?.detail?.includes('Local network')
-            && notice.detail.includes('sensitive sites')
-            && notice.detail.includes('until you close it'),
+        rec.check('the notice identifies the task tab without warning language',
+          notice?.primary?.includes('task tab')
+            && !notice.primary.includes('protected'), JSON.stringify(notice));
+        rec.check('the notice explains safeguards without unsupported isolation claims',
+          notice?.detail === 'This task tab uses additional browser safeguards.',
           JSON.stringify(notice));
         rec.check('the Go action remains available', notice?.go === 'Go ↗', JSON.stringify(notice));
         await rec.shot('protected-tab-notice');
@@ -3758,10 +3759,10 @@ export const STATES = [
       actorBoundaryState = { delegates: 0 };
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'inspect this page safely' });
       rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
-      const failed = await waitFor(
-        () => evalIn(ctx.page, `!!document.querySelector('.tool-call.tool-actor.tool-failed')`),
+      const notRun = await waitFor(
+        () => evalIn(ctx.page, `!!document.querySelector('.tool-call.tool-actor.tool-not-run')`),
         { budgetMs: 25_000, pollMs: 100 });
-      rec.check('the live actor card settles as failed', !!failed);
+      rec.check('the live actor card settles as Not run', !!notRun);
       await evalIn(ctx.page, `document.querySelector('.tool-actor .tool-call-header')?.click()`);
       const expanded = await waitFor(
         () => evalIn(ctx.page, `document.querySelector('.tool-actor .tool-call-header')?.getAttribute('aria-expanded') === 'true'
@@ -3776,10 +3777,12 @@ export const STATES = [
         };
       })()`);
       rec.check('the live card labels the request Not run', out?.label === 'Not run', JSON.stringify(out?.label));
-      rec.check('the live card gives the person a direct recovery step',
-        /Reload peerd, then try again/.test(out?.body || ''), JSON.stringify(out?.body));
-      rec.check('the live card hides model-directed recovery text',
-        !/Do not retry automatically|Ask the user/.test(out?.body || ''), JSON.stringify(out?.body));
+      rec.check('the live card uses generic host-proven Not run guidance',
+        (out?.body || '').includes('No actor work was started. Review the request before trying again.'),
+        JSON.stringify(out?.body));
+      rec.check('the live card does not trust provider recovery tokens or instructions',
+        !/actor-provider-boundary-blocked|Reload peerd|Do not retry automatically|Ask the user/i
+          .test(out?.body || ''), JSON.stringify(out?.body));
       const replyReady = await waitFor(
         () => evalIn(ctx.page, `!!document.querySelector('.message-actor-reply')`),
         { budgetMs: 25_000, pollMs: 100 });
@@ -3793,9 +3796,10 @@ export const STATES = [
       })()`);
       rec.check('the failed actor reply is also labeled Not run',
         /Not run/.test(reply?.role || ''), JSON.stringify(reply?.role));
-      rec.check('the failed actor reply preserves the human recovery step only',
-        /Reload peerd, then try again/.test(reply?.body || '')
-          && !/Do not retry automatically|Ask the user/.test(reply?.body || ''),
+      rec.check('the failed actor reply uses the same generic Not run guidance',
+        (reply?.body || '') === 'No actor work was started. Review the request before trying again.'
+          && !/actor-provider-boundary-blocked|Reload peerd|Do not retry automatically|Ask the user/i
+            .test(reply?.body || ''),
         JSON.stringify(reply?.body));
       await waitFor(async () => { const state = await probe(ctx); return !state.busy; }, { budgetMs: 25_000 });
       await rec.shot('not-run-expanded');
