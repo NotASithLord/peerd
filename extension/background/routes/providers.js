@@ -14,10 +14,16 @@
 export const makeProviderRoutes = (deps) => {
   const {
     vault, auditLog, pushState, settingsStore,
-    listProviders, listProviderModels, listOpenRouterModels, OPENROUTER_POPULAR,
+    listProviders, liveProviderModels, listOpenRouterModels, OPENROUTER_POPULAR,
     callModel, getSecret, safeFetch, secretNameForProvider, maskKey, buildModelOptions,
+    onProviderConfigChanged, ensureSettingsReady, hydrateLocalModelAvailability,
     ProviderHttpError, ProviderKeyMissingError, VaultLockedError,
   } = deps;
+  const awaitSettings = async () => {
+    if (!ensureSettingsReady) return true;
+    try { await ensureSettingsReady(); return true; }
+    catch { return false; }
+  };
 
   return {
     // Validate a saved provider key with a minimal 1-token ping on the REAL
@@ -25,6 +31,7 @@ export const makeProviderRoutes = (deps) => {
     // message (instead of hitting a 401 on the first turn). The adapter's
     // connect-timeout applies, so the test itself can't hang.
     'provider/test': async ({ provider }) => {
+      if (!(await awaitSettings())) return { ok: false, error: 'settings-unavailable' };
       const adapter = listProviders().find((/** @type {any} */ p) => p.name === provider);
       // Keyless local provider (Ollama): "does the daemon answer" is the
       // meaningful test, not a model turn — /api/tags responds instantly
@@ -32,9 +39,14 @@ export const makeProviderRoutes = (deps) => {
       if (adapter?.keyless && adapter.liveModels) {
         try {
           // ollamaHost (issue #104): test the daemon the user actually configured.
-          const models = await listProviderModels(provider, { safeFetch, ollamaHost: settingsStore.get().ollamaHost });
+          const models = await liveProviderModels(provider, { force: true });
+          pushState();
+          if (!Array.isArray(models)) return { ok: false, error: 'unreachable' };
           auditLog.append({ type: 'provider_validated', details: { provider } }).catch(() => {});
-          return { ok: true, models: models?.length ?? 0 };
+          const count = models?.length ?? 0;
+          return count > 0
+            ? { ok: true, reachable: true, models: count }
+            : { ok: false, reachable: true, error: 'no-models', models: 0 };
         } catch (e) {
           return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? 'unreachable' };
         }
@@ -117,6 +129,8 @@ export const makeProviderRoutes = (deps) => {
     // cross-provider set for a fresh chat. `sessionProvider` is non-null only in
     // the locked (mid-session) case, so the UI knows which write to make.
     'models/options': async ({ sessionId = null } = {}) => {
+      if (!(await awaitSettings())) return { ok: false, error: 'settings-unavailable' };
+      await hydrateLocalModelAvailability?.().catch(() => false);
       const { options, selected, sessionProvider } = await buildModelOptions({ sessionId });
       return { ok: true, options, selected, sessionProvider };
     },
@@ -141,6 +155,7 @@ export const makeProviderRoutes = (deps) => {
     },
 
     'provider/setKey': async ({ provider, plaintext }) => {
+      if (!(await awaitSettings())) return { ok: false, error: 'settings-unavailable' };
       try {
         const adapter = listProviders().find((/** @type {any} */ p) => p.name === provider);
         if (!adapter) return { ok: false, error: 'unknown-provider' };
@@ -155,6 +170,7 @@ export const makeProviderRoutes = (deps) => {
         const key = typeof plaintext === 'string' ? plaintext.trim() : '';
         if (key.length < 8) return { ok: false, error: 'key-too-short' };
         await vault.setSecret(adapter.vaultSecretName, key);
+        onProviderConfigChanged?.();
         auditLog.append({ type: 'provider_added', details: { provider } }).catch(() => {});
         // Auto-activate the provider you just configured if the current
         // selection isn't usable yet — so a fresh install (empty default

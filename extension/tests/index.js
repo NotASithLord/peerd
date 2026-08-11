@@ -112,6 +112,7 @@ import './unit/sidepanel/api-integrations.test.js';
 import './unit/sidepanel/model-picker.test.js';
 import './unit/sidepanel/tools-chip.test.js';
 import './unit/sidepanel/attachments.test.js';
+import './unit/sidepanel/composer-readiness.test.js';
 import './unit/sidepanel/message-list.test.js';
 import './unit/sidepanel/protected-tab-starter.test.js';
 import './unit/sidepanel/failure-chip.test.js';
@@ -125,6 +126,7 @@ import './unit/options/behavior-rows.test.js';
 import './unit/options/activity-tool-failed.test.js';
 import './unit/options/dweb-section.test.js';
 import './unit/options/runtime-capability-controls.test.js';
+import './unit/options/provider-races.test.js';
 import './unit/options/transfer-identity.test.js';
 import './unit/options/contributor-metrics.test.js';
 

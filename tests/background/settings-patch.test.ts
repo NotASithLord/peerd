@@ -39,6 +39,10 @@ describe('normalizeSettingsPatch — whitelist', () => {
 });
 
 describe('normalizeSettingsPatch — booleans + enums', () => {
+  test('preserves the OCR install intent used by historical backups', () => {
+    expect(norm({ ocrEnabled: true })).toEqual({ ocrEnabled: true });
+    expect(norm({ ocrEnabled: 'yes' })).toEqual({});
+  });
   test('passes real booleans through', () => {
     expect(norm({ voiceEnabled: true, devMode: false, advancedAutomationEnabled: true, autoMemoryEnabled: false }))
       .toEqual({ voiceEnabled: true, devMode: false, advancedAutomationEnabled: true, autoMemoryEnabled: false });
@@ -84,6 +88,11 @@ describe('normalizeSettingsPatch — providers + models', () => {
 });
 
 describe('normalizeSettingsPatch — numeric clamps', () => {
+  test('preserves and bounds historical audit retention settings', () => {
+    expect(norm({ auditLogMaxEntries: 100_000 })).toEqual({ auditLogMaxEntries: 100_000 });
+    expect(norm({ auditLogMaxEntries: 0 })).toEqual({ auditLogMaxEntries: 1 });
+    expect(norm({ auditLogMaxEntries: 2_000_000 })).toEqual({ auditLogMaxEntries: 1_000_000 });
+  });
   test('voiceSilenceMs clamped to [250, 30000] and rounded', () => {
     expect(norm({ voiceSilenceMs: 10 })).toEqual({ voiceSilenceMs: 250 });
     expect(norm({ voiceSilenceMs: 999999 })).toEqual({ voiceSilenceMs: 30_000 });

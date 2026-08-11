@@ -102,7 +102,7 @@ import {
   listProviders,
   // web actor model resolution: pin → local → provider default → inherit.
   // Pure; the SW resolves it when minting a web actor session.
-  resolveRunnerModel,
+  resolveRunnerTarget,
   // local WebGPU runner: the offscreen-engine bridge + the resident model id.
   setLocalGenerate, LOCAL_MODEL_ID,
   // live model inventory (Ollama /api/tags) for the model picker.
@@ -437,7 +437,9 @@ import { makeStartupPopupNetworkGuard } from './startup-popup-network-guard.js';
 import { makeSessionState } from './session-state.js';
 import { makeLocalModelState } from './local-model-state.js';
 import { makeProfileState } from './profile-state.js';
+import { makeOnboardingReconcile } from './onboarding-reconcile.js';
 import { makeModelCatalog } from './model-catalog.js';
+import { resolveComposerReadiness } from './provider-readiness.js';
 import { makeTabAffordances } from './tab-affordances.js';
 import { makeMintOnce } from './mint-once.js';
 import { makeDwebInboundRateCap } from './dweb-inbound-rate-cap.js';
@@ -713,6 +715,35 @@ const loadSettings = async () => {
   // mean "default lock", never "never lock".
   vault.setAutoLockMs(settingsStore.get().vaultAutoLockMs ?? DEFAULT_AUTO_LOCK_MS);
 };
+let settingsHydrated = false;
+let settingsHydrationFailures = 0;
+/** @type {Promise<void>|null} */
+let settingsHydrationAttempt = null;
+/** @type {() => Promise<void>|void} */
+let onSettingsHydrationRecovered = () => {};
+const ensureSettingsReady = () => {
+  if (settingsHydrated) return Promise.resolve();
+  if (settingsHydrationAttempt) return settingsHydrationAttempt;
+  const attempt = loadSettings()
+    .then(() => {
+      const recovered = settingsHydrationFailures > 0;
+      settingsHydrated = true;
+      if (recovered) queueMicrotask(() => {
+        Promise.resolve(onSettingsHydrationRecovered()).catch((error) => {
+          console.warn('[sw] settings recovery reconciliation failed', error);
+        });
+      });
+    })
+    .catch((error) => {
+      settingsHydrationFailures += 1;
+      throw error;
+    })
+    .finally(() => {
+      settingsHydrationAttempt = null;
+    });
+  settingsHydrationAttempt = attempt;
+  return attempt;
+};
 
 /**
  * Resolve the provider NEW chats should use, from settings. Falls back
@@ -752,6 +783,7 @@ const resolveActiveProvider = () => {
  * case skips the vault/daemon probes entirely.
  */
 const ensureActiveProvider = async () => {
+  await ensureSettingsReady();
   const list = listProviders().filter((provider) =>
     provider.name !== 'local-webgpu' || offscreenAvailable);
   const name = settingsStore.get().providerName;
@@ -761,7 +793,10 @@ const ensureActiveProvider = async () => {
     if (p.keyless) {
       // Keyless usability is REAL readiness, not mere presence: a live daemon
       // (Ollama) must answer; the on-device model must be downloaded.
-      if (p.liveModels) usable = !!(await liveProviderModels(p.name));
+      if (p.liveModels) {
+        const live = await liveProviderModels(p.name);
+        usable = Array.isArray(live) && live.length > 0;
+      }
       else if (p.name === 'local-webgpu') usable = localModelState.available();
       else usable = true;
     } else {
@@ -1062,13 +1097,30 @@ const contacts = createContactsStore({ idb });
 // pushState doesn't re-read IDB on every push and onboarding/complete can reach
 // it via deps. profileState.get() ensures+caches; completeOnboarding refreshes.
 const profileState = makeProfileState({ profiles });
+// First-run reconcile: an install with chat history is onboarded, whatever
+// the latch says. The panel front door never gates first-run, so history
+// can predate the funnel (background/onboarding-reconcile.js has the story).
+const reconcileOnboardingLatch = makeOnboardingReconcile({ profileState, sessions });
 
 // The per-chat model picker's catalog assembly (background/model-catalog.js).
 // localModelAvailable is a thunk because localModelState is created later.
-const { liveProviderModels, liveContextWindow, buildModelOptions } = makeModelCatalog({
+let providerConfigRevision = 0;
+const onProviderConfigChanged = () => { providerConfigRevision += 1; };
+const onLiveProviderModelsChanged = () => {
+  onProviderConfigChanged();
+  if (uiConnected()) void pushState().catch(() => {});
+};
+const {
+  liveProviderModels,
+  liveProviderModelStatus,
+  invalidateLiveProviderModels,
+  liveContextWindow,
+  buildModelOptions,
+} = makeModelCatalog({
   listProviders, listProviderModels, providerModelContextWindow,
   localModelId: LOCAL_MODEL_ID, localModelAvailable: () => localModelState.available(),
   settingsStore, vault, sessions, resolveActiveProvider, getSecret, safeFetch,
+  onLiveModelsChanged: onLiveProviderModelsChanged,
 });
 
 // ---------------------------------------------------------------------------
@@ -2472,11 +2524,11 @@ const buildToolContext = async (/** @type {any} */ {
     // ONLY when the dweb is on (DWEB_ENABLED + the setting), so on the store build
     // (and dweb-off) ctx.dweb is null and the tools (already hidden by exposure)
     // also no-op. share reads the app's OPFS bundle like export does.
-    dweb: (DWEB_ENABLED && settingsStore.get().dwebEnabled) ? {
+    dweb: (DWEB_ENABLED && settingsHydrated && settingsStore.get().dwebEnabled) ? {
       share: (/** @type {string} */ appId) => shareLocalApp(appId, undefined),
       discover: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/heard' }); },
       install: async (/** @type {any} */ { uri, name } = {}) => withDwebPublication(async (isCurrent) => {
-        if (!isCurrent() || !settingsStore.get().dwebEnabled) {
+        if (!isCurrent() || !settingsHydrated || !settingsStore.get().dwebEnabled) {
           return { ok: false, error: 'dweb-disabled', outcomeKind: 'pre-effect-failure' };
         }
         await ensureOffscreen();
@@ -2484,13 +2536,13 @@ const buildToolContext = async (/** @type {any} */ {
       }),
       peers: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }); },
       block: async (/** @type {any} */ { did, block = true, reason } = {}) => withDwebPublication(async (isCurrent) => {
-        if (!isCurrent() || !settingsStore.get().dwebEnabled) return { ok: false, error: 'dweb-disabled' };
+        if (!isCurrent() || !settingsHydrated || !settingsStore.get().dwebEnabled) return { ok: false, error: 'dweb-disabled' };
         await ensureOffscreen();
         if (block && typeof did === 'string') { a2aRevoke(did); conversationRegistry.closeDid(did); }
         return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason });
       }),
       setDiscovery: async (/** @type {any} */ { enabled } = {}) => withDwebPublication(async (isCurrent) => {
-        if (!isCurrent() || !settingsStore.get().dwebEnabled) return { ok: false, error: 'dweb-disabled' };
+        if (!isCurrent() || !settingsHydrated || !settingsStore.get().dwebEnabled) return { ok: false, error: 'dweb-disabled' };
         await ensureOffscreen();
         return browser.runtime.sendMessage({ type: 'dweb/base-host/set-discovery', enabled });
       }),
@@ -3508,7 +3560,7 @@ const invalidateDwebPublications = dwebPublicationFence.invalidate;
 
 const reseedSharedApps = makeReseedSharedApps({
   enabled: DWEB_ENABLED,
-  active: () => settingsStore.get().dwebEnabled,
+  active: () => settingsHydrated && settingsStore.get().dwebEnabled,
   locked: () => vault.isLocked(),
   appRegistry,
   withDwebPublication,
@@ -3525,7 +3577,7 @@ const canChangeDwebIdentity = async () => {
 };
 const dwebIdentityCustody = makeDwebIdentityCustody({
   enabled: DWEB_ENABLED,
-  active: () => settingsStore.get().dwebEnabled,
+  active: () => settingsHydrated && settingsStore.get().dwebEnabled,
   vault,
   auditLog,
   identitySecretName: DWEB_IDENTITY_SECRET,
@@ -3875,6 +3927,24 @@ const applyWebExtract = (/** @type {any} */ resp, /** @type {unknown} */ extract
 // resolveRunnerModel; progress() is polled by Settings.
 const localModelState = makeLocalModelState();
 const localRunnerState = () => ({ available: localModelState.available(), model: LOCAL_MODEL_ID });
+/** @type {Promise<boolean>|null} */
+let localModelHydration = null;
+const hydrateLocalModelAvailability = async ({ force = false } = {}) => {
+  if (!localModelHostAvailable()) return false;
+  if (!force && localModelState.hydrated()) return localModelState.available();
+  if (localModelHydration) return localModelHydration;
+  localModelHydration = (async () => {
+    await ensureOffscreen();
+    const status = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'local-model/host/status' }));
+    if (!status) throw new Error('local model status unavailable');
+    if (localModelState.setAvailable(!!(status.available || status.downloaded))) {
+      onProviderConfigChanged();
+    }
+    return localModelState.available();
+  })();
+  try { return await localModelHydration; }
+  finally { localModelHydration = null; }
+};
 
 // genId → { tokens, waiters, done, error }: the async queue that turns the
 // offscreen's local-model/delta pushes into the adapter's async-generator.
@@ -3885,7 +3955,15 @@ const wakeLocalGen = (/** @type {any} */ s) => { const w = s.waiters.shift(); if
 browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
   if (msg?.type === 'local-model/delta') { const s = localGens.get(msg.genId); if (s) { s.tokens.push(msg.token); wakeLocalGen(s); } return undefined; }
   if (msg?.type === 'local-model/done') { const s = localGens.get(msg.genId); if (s) { s.done = true; s.error = msg.error ?? null; wakeLocalGen(s); } return undefined; }
-  if (msg?.type === 'local-model/progress') { localModelState.setProgress(msg.progress); uiPorts.broadcast({ type: 'local-model/progress', progress: msg.progress }); return undefined; }
+  if (msg?.type === 'local-model/progress') {
+    localModelState.setProgress(msg.progress);
+    if (msg.progress?.status === 'phase' && msg.progress?.phase === 'ready') {
+      if (localModelState.setAvailable(true)) onProviderConfigChanged();
+      void pushState().catch(() => {});
+    }
+    uiPorts.broadcast({ type: 'local-model/progress', progress: msg.progress });
+    return undefined;
+  }
   return undefined;
 });
 
@@ -4188,6 +4266,23 @@ const sessionState = makeSessionState();
  * derived from the vault, never the secret itself.
  */
 const buildStateSnapshot = async () => {
+  // A cold MV3 worker can resume the vault and accept a UI port before the
+  // asynchronous chrome.storage settings read finishes. The snapshot must not
+  // observe channel defaults in that window: if the user selected a keyless
+  // provider (Ollama / Local WebGPU), the default Anthropic projection reports
+  // hasKey:false and strands the already-open composer until some unrelated
+  // mutation happens to push state again (issue #384).
+  //
+  let settingsAvailable = true;
+  try { await ensureSettingsReady(); }
+  catch {
+    // A transient storage failure must not turn channel defaults into a
+    // confirmed provider choice for the rest of this worker's lifetime. The
+    // full hydration gate retries storage AND reapplies boot-time consumers
+    // such as the vault lock policy; a raw store load would leave those stale.
+    try { await ensureSettingsReady(); }
+    catch { settingsAvailable = false; }
+  }
   await actorIsolationReady;
   const sessionId = await sessionCache.sessionGet('currentSessionId');
   // prfEnrolled is cheap to read (one kv.get) and the side panel uses it
@@ -4212,7 +4307,22 @@ const buildStateSnapshot = async () => {
         hasRecovery,
       },
       session: { sessionId: null, messages: [], permission, customSystemPrompt: null, toolManifest: null },
-      providers: { current: resolveActiveProvider().name, hasKey: false, model: resolveActiveProvider().model, defaultRunnerModel: resolveActiveProvider().defaultRunnerModel },
+      providers: {
+        current: resolveActiveProvider().name,
+        hasKey: false,
+        model: resolveActiveProvider().model,
+        defaultRunnerModel: resolveActiveProvider().defaultRunnerModel,
+        configRevision: providerConfigRevision,
+      },
+      composer: {
+        provider: resolveActiveProvider().name,
+        model: resolveActiveProvider().model,
+        keyless: false,
+        credentialReady: false,
+        localReady: false,
+        canSend: false,
+        reason: 'vault-locked',
+      },
       capabilities: { actorExecution: { ...actorIsolation }, ...runtimeCapabilities },
       settings: { ...settingsStore.get() },
       pendingConfirm: null,
@@ -4225,22 +4335,47 @@ const buildStateSnapshot = async () => {
   // Unlocked path.
   const session = sessionId ? (await sessions.get(/** @type {any} */ (sessionId))) ?? null : null;
   const permission = await resolvePermission(session);
-  // Default profile — the side panel gates first-run onboarding on
-  // onboardingComplete and labels assistant transcript rows with
+  // Default profile: the home page gates first-run onboarding on
+  // onboardingComplete and the transcript labels assistant rows with
   // peerName. Only surfaced when unlocked: the locked push deliberately
-  // omits it so the panel's "assume complete" default holds at the gate
-  // and onboarding can never flash before a real unlock.
+  // omits it so the surfaces' "assume complete" default holds at the gate
+  // and onboarding can never flash before a real unlock. Reconcile FIRST
+  // so the same push that would re-show the funnel to an established
+  // install carries the closed latch instead.
+  await reconcileOnboardingLatch();
   const profile = await profileState.get();
-  // why: providers block drives the Settings UI (provider selector + key
-  // field), so it reflects the SELECTED provider (settings), and hasKey
-  // is checked against THAT provider's vault secret. Keyless providers
-  // (Ollama) are always "ready" — there is no key to have.
+  // providers remains the Settings/default-for-NEW-chats projection. Composer
+  // readiness is separate because an existing chat stays bound to the provider
+  // recorded on its session even after the user changes that future default.
   const activeProv = resolveActiveProvider();
-  let hasKey = activeProv.keyless;
-  if (!hasKey) {
-    try { hasKey = !!(await vault.getSecret(/** @type {string} */ (activeProv.vaultSecretName))); }
-    catch { hasKey = false; }
+  const composerProvider = session?.provider ?? activeProv.name;
+  const composerModel = session?.model ?? activeProv.model;
+  if (activeProv.name === 'local-webgpu' || composerProvider === 'local-webgpu') {
+    await hydrateLocalModelAvailability().catch(() => false);
   }
+  const providerRows = listProviders();
+  const ollamaModels = liveProviderModelStatus('ollama');
+  const defaultReadiness = await resolveComposerReadiness({
+    provider: activeProv.name,
+    model: activeProv.model,
+    providers: providerRows,
+    getSecret: (name) => vault.getSecret(name),
+    localModelAvailable: localModelState.available(),
+    ollamaModels,
+    settingsAvailable,
+  });
+  const composer = composerProvider === activeProv.name && composerModel === activeProv.model
+    ? Object.freeze({ ...defaultReadiness, model: composerModel })
+    : await resolveComposerReadiness({
+        provider: composerProvider,
+        model: composerModel,
+        providers: providerRows,
+        getSecret: (name) => vault.getSecret(name),
+        localModelAvailable: localModelState.available(),
+        ollamaModels,
+        settingsAvailable,
+       });
+  const hasKey = settingsAvailable && defaultReadiness.credentialReady;
   // Take every awaited store read before capturing the in-memory projection.
   // Provider tool-use ids can repeat, so an older snapshot must never cross an
   // await and arrive after a newer correlated actor-start for the same id.
@@ -4279,11 +4414,13 @@ const buildStateSnapshot = async () => {
       current: activeProv.name,
       hasKey,
       model: activeProv.model,
+      configRevision: providerConfigRevision,
       // why: the web actor's fast default for this provider — the Settings
       // "Web actor model" field shows it as the blank placeholder so "blank"
       // honestly reads as e.g. claude-haiku-4-5, not "inherit".
       defaultRunnerModel: activeProv.defaultRunnerModel,
     },
+    composer,
     capabilities: { actorExecution: { ...actorIsolation }, ...runtimeCapabilities },
     profile: {
       id: profile.id,
@@ -4312,9 +4449,16 @@ const buildStateSnapshot = async () => {
   };
 };
 
+let statePushGeneration = 0;
 const pushState = async () => {
   if (!uiConnected()) return;
+  const generation = ++statePushGeneration;
   const state = await buildStateSnapshot();
+  // Snapshot assembly crosses vault/session/profile stores. A newer mutation can
+  // start and finish its push while an older build is still awaiting IO. Never
+  // let that older projection arrive last and strand every live surface on
+  // internally inconsistent provider/settings state.
+  if (generation !== statePushGeneration || !uiConnected()) return;
   const ownerSessionId = typeof state.session?.sessionId === 'string'
     ? state.session.sessionId : null;
   // why: buildStateSnapshot awaits several stores. A confirmation can arrive
@@ -4613,7 +4757,7 @@ const prewalk = makePrewalkController({
   now: Date.now,
 });
 
-const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
+const turnDriver = makeTurnDriver({
   vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
   sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser,
   skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
@@ -4641,6 +4785,14 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   // wiring above uses, see the note at the postChatNote site).
   postChatNote: (/** @type {any} */ text, /** @type {any} */ action) => postChatNote(text, action),
 });
+const runAgentTurn = async (/** @type {any} */ args) => {
+  await ensureSettingsReady();
+  return turnDriver.runAgentTurn(args);
+};
+const maybeAutoResume = async (/** @type {string|null|undefined} */ sessionId) => {
+  await ensureSettingsReady();
+  return turnDriver.maybeAutoResume(sessionId);
+};
 
 // Build the goal runner now that runAgentTurn exists. Each goal turn is a
 // normal runAgentTurn on the MAIN session (turn 1 = the goal, later turns =
@@ -4743,11 +4895,9 @@ const notifyRoutineFired = () => {
 // turn. trusted:true — a routine is USER-authored first-party work, same posture
 // as goal mode; untrusted CONTENT it later pulls is still fenced behind actors.
 const fireRoutine = async (/** @type {any} */ routine) => {
-  // why settingsStore.load() first: a cold-unlock catch-up can reach here before
-  // loadSettings() (un-awaited at boot) has hydrated, so ensureActiveProvider
-  // would pick the channel-default provider instead of the user's. load() is
-  // idempotent — same guard the maybeAutoResume path uses.
-  await settingsStore.load().catch(() => {});
+  // Scheduled work must never select a provider from channel defaults while a
+  // cold worker is still loading the user's durable choice.
+  await ensureSettingsReady();
   const ap = await ensureActiveProvider();
   // why explicit ACT + confirm-off (NOT resolvePermission(null)): a routine runs
   // UNATTENDED with the panel closed. Inheriting the foreground chat's mode would
@@ -5352,6 +5502,8 @@ onSessionMessageAppended = async (_sessionId, message) => {
 // to the read DOM tools (+ fetch_url, a read), so the gate refuses click/type for it.
 /** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void, backing?: 'tab' | 'api', actorType?: 'web' | 'dweb', ownedOrigin?: string, provisionalOrigin?: boolean }} o */
 const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorType = 'web', ownedOrigin, provisionalOrigin }) => {
+  await ensureSettingsReady();
+  await hydrateLocalModelAvailability().catch(() => false);
   const ownerChat = ownerChatId ? await sessions.get(ownerChatId) : null;
   const perm = await resolvePermission(/** @type {any} */ (ownerChat));
   // why: the web actor is peerd's page reader/operator — a narrow, high-frequency,
@@ -5361,9 +5513,16 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorTyp
   // default (Haiku) → inherit the chat model (''). Engine actors (webvm/notebook/
   // app, via mintActor) are UNCHANGED — they reason about code/shell and keep the
   // chat model.
-  const actorProviderName = ownerChat?.provider ?? resolveActiveProvider().name;
-  const runnerProvider = listProviders().find((p) => p.name === actorProviderName);
-  const webActorModel = resolveRunnerModel({ settings: settingsStore.get(), provider: runnerProvider, localRunner: localRunnerState() });
+  const ownerProviderName = ownerChat?.provider ?? resolveActiveProvider().name;
+  const runnerProvider = listProviders().find((p) => p.name === ownerProviderName);
+  const runnerTarget = resolveRunnerTarget({
+    settings: settingsStore.get(),
+    providerName: ownerProviderName,
+    provider: runnerProvider,
+    localRunner: localRunnerState(),
+  });
+  const actorProviderName = runnerTarget.provider || ownerProviderName;
+  const webActorModel = runnerTarget.model;
   const created = await sessions.create({
     kind: 'actor',
     ...(ownerChatId ? { parentSessionId: ownerChatId } : {}),
@@ -5639,7 +5798,7 @@ const bindDwebActor = (/** @type {string} */ sessionId) => {
   sessionCache.sessionSet(DWEB_ACTOR_KEY, sessionId).catch(() => {});
 };
 const dwebAgentOn = () => DWEB_ENABLED
-  && !!settingsStore.get().dwebEnabled && !!settingsStore.get().dwebAgentEnabled;
+  && settingsHydrated && !!settingsStore.get().dwebEnabled && !!settingsStore.get().dwebAgentEnabled;
 
 // Agent-inbox room membership. IDEMPOTENT: maybeStartBaseNetwork fires on every
 // unlock/resume, and each raw join op ref-counts the room (dweb-base ensureRoom)
@@ -5694,6 +5853,10 @@ const onSettingsChanging = (/** @type {any} */ patch) => {
 // Named onSettingsChanged so it wires to the settings route by shorthand (the
 // deps-wiring meta-test forbids key:value mis-wires).
 const onSettingsChanged = async (/** @type {any} */ patch) => {
+  if (Object.hasOwn(patch ?? {}, 'vaultAutoLockMs')) {
+    vault.setAutoLockMs(settingsStore.get().vaultAutoLockMs ?? DEFAULT_AUTO_LOCK_MS);
+  }
+  if (Object.hasOwn(patch ?? {}, 'ollamaHost')) invalidateLiveProviderModels('ollama');
   if (patch?.dwebEnabled === false) await stopBaseNetwork();
   else if (patch?.dwebEnabled === true) maybeStartBaseNetwork('settings-enabled');
   if (dwebAgentOn()) joinDwebAgentInbox().catch(() => {});
@@ -7277,7 +7440,7 @@ const ensureSession = ensureCurrentSession;
 
 const shareLocalApp = makeDwebShare({
   enabled: DWEB_ENABLED,
-  active: () => settingsStore.get().dwebEnabled,
+  active: () => settingsHydrated && settingsStore.get().dwebEnabled,
   withDwebPublication,
   withIdentityMutation: withDwebIdentityMutation,
   withAppLifecycle,
@@ -7343,12 +7506,20 @@ const dwebTransfer = makeDwebTransfer({
 // Firefox has no service-worker WindowClient API, so its exact options sender
 // uses the private background-page Port fallback above.
 const privateTransferAuthorization = Symbol('private-transfer');
+const normalizeImportedSettings = (/** @type {any} */ patch) => normalizeSettingsPatch(patch, {
+  knownProviderNames: listProviders().map((/** @type {{ name: string }} */ provider) => provider.name),
+  reasoningEffortLevels: REASONING_EFFORT_LEVELS,
+  dwebEnabled: DWEB_ENABLED,
+  autoUpdateAvailable: Object.hasOwn(DEFAULT_SETTINGS, 'autoUpdateEnabled'),
+  normalizeVariant,
+  normalizeEngine,
+});
 const makeSystemRouteSet = () => makeSystemRoutes({
   vault, auditLog, sessions, pushState, kv, memory, buildStateSnapshot, closeSidePanel,
   uiPorts, loadUserEndpoints, inspectImport, applyImport, settingsStore, saveUserHook,
   CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError, dwebTransfer,
   onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
-  retryActorIsolation,
+  retryActorIsolation, normalizeImportedSettings, onProviderConfigChanged,
 });
 const makeSettingsRouteSet = () => makeSettingsRoutes({
   vault, auditLog, pushState, kv, memory, settingsStore,
@@ -7357,6 +7528,7 @@ const makeSettingsRouteSet = () => makeSettingsRoutes({
   buildExport, CHANNEL, exportHooks, skillRegistry, dwebTransfer,
   EXPORT_PASSPHRASE_MIN_LENGTH, isCustodySecretName,
   onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
+  ensureSettingsReady,
 });
 const systemMessageRoutes = makeSystemRouteSet();
 const settingsMessageRoutes = makeSettingsRouteSet();
@@ -7432,9 +7604,11 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     VaultLockedError,
   }),
   ...makeProviderRoutes({
-    vault, auditLog, pushState, settingsStore, listProviders, listProviderModels, listOpenRouterModels,
+    vault, auditLog, pushState, settingsStore, listProviders, liveProviderModels, listOpenRouterModels,
     OPENROUTER_POPULAR, callModel, getSecret, safeFetch, secretNameForProvider, maskKey,
-    buildModelOptions, ProviderHttpError, ProviderKeyMissingError, VaultLockedError,
+    buildModelOptions, onProviderConfigChanged, ensureSettingsReady,
+    hydrateLocalModelAvailability,
+    ProviderHttpError, ProviderKeyMissingError, VaultLockedError,
   }),
   ...makeHooksRoutes({
     auditLog, kv, listHooks, DEFAULT_HOOKS, parseHookMarkdown, saveUserHook, removeHook, exportHooks,
@@ -7555,12 +7729,14 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     browser,
     localModelState,
     localModelHostAvailable,
+    pushState,
+    onProviderConfigChanged,
   }),
   ...makeDwebRoutes({
     vault, auditLog, kv, ensureOffscreen, browser,
     appRegistry, appClient, appTabTracker, settingsStore, shareLocalApp,
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
-    disableDweb, withDwebPublication, withAppLifecycle,
+    disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady,
   }),
 
   // --- git credentials (host-bound bearer tokens; same vault as API keys) ---
@@ -7605,9 +7781,9 @@ loadUserEndpoints();
 // channel defaults until load() lands), and Chrome persists the behavior
 // browser-side, so by the time a click wakes a future cold SW the native
 // open already reflects the user's real choice.
-const settingsReady = loadSettings();
+const settingsReady = ensureSettingsReady();
 const dwebSettingsGate = createDwebSettingsGate({
-  ready: settingsReady,
+  ready: ensureSettingsReady,
   available: DWEB_ENABLED,
   active: () => !!settingsStore.get().dwebEnabled,
 });
@@ -7633,7 +7809,7 @@ const updateCheck = makeUpdateCheck({
   // update feed - same class as the voice model download; no secret, no
   // agent influence over the URL (see update-check.js's header).
   fetchFn: (url, init) => fetch(url, init),
-  ready: settingsReady,
+  ready: ensureSettingsReady,
   isEnabled: () => settingsStore.get().autoUpdateEnabled === true,
   // "peerd is doing work": live turn slots AND goal runs - a goal run holds
   // its slot only while an individual turn is in flight, so between
@@ -7687,6 +7863,15 @@ const updateCheck = makeUpdateCheck({
 });
 updateCheck.start();
 void updateCheck.checkNow('boot').catch(() => {});
+onSettingsHydrationRecovered = async () => {
+  await syncFrontDoorBehavior();
+  updateCheck.syncEnabled();
+  if (DWEB_ENABLED) {
+    if (settingsStore.get().dwebEnabled) maybeStartBaseNetwork('settings-recovered');
+    else await stopBaseNetwork();
+  }
+  if (uiConnected()) await pushState();
+};
 
 // SW boot logging — we want a clear timeline of when the SW comes up
 // (cold start, extension reload, idle respawn). The console clears

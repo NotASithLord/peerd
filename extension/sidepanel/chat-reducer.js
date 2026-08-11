@@ -87,7 +87,8 @@
  * @typedef {Object} ChatState
  * @property {{ initialized: boolean, locked: boolean, unlockedAt: number, prfEnrolled: boolean, hasRecovery: boolean }} vault
  * @property {SessionState} session
- * @property {{ current: string, hasKey: boolean, model: string }} providers
+ * @property {{ current: string, hasKey: boolean, model: string, configRevision?: number }} providers
+ * @property {{ provider: string, model: string, keyless: boolean, credentialReady: boolean, localReady: boolean, ollamaReady?: boolean, canSend: boolean, reason: string|null }} [composer]
  * @property {{ actorExecution?: { status: string, host: string|null, reason: string|null, retryable: boolean }, moonshineVoiceHost?: { status: string }, documentReader?: { status: string } }} [capabilities]
  * @property {{ id: string, peerName: string, onboardingComplete: boolean }} profile
  * @property {SettingsState} settings

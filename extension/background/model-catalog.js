@@ -27,12 +27,13 @@
  * @param {() => { name: string, model: string }} deps.resolveActiveProvider
  * @param {(name: string) => Promise<string | null>} deps.getSecret
  * @param {any} deps.safeFetch
+ * @param {() => void} [deps.onLiveModelsChanged]
  */
 export const makeModelCatalog = (deps) => {
   const {
     listProviders, listProviderModels, providerModelContextWindow,
     localModelId, localModelAvailable, settingsStore, vault, sessions,
-    resolveActiveProvider, getSecret, safeFetch,
+    resolveActiveProvider, getSecret, safeFetch, onLiveModelsChanged,
   } = deps;
 
   // Curated model options per provider, for the per-chat model picker.
@@ -85,16 +86,60 @@ export const makeModelCatalog = (deps) => {
   const LIVE_MODELS_TTL_MS = 30_000;
   /** @type {Map<string, { at: number, list: Array<{model:string,label:string}> | null }>} */
   const liveModelsCache = new Map();
-  const liveProviderModels = async (/** @type {string} */ name) => {
-    const hit = liveModelsCache.get(name);
+  /** @type {Map<string, number>} */
+  const liveModelsGeneration = new Map();
+  const providerCacheScope = (/** @type {string} */ name) => name === 'ollama'
+    ? `${name}::${settingsStore.get().ollamaHost ?? ''}`
+    : name;
+  const liveProviderModels = async (/** @type {string} */ name, { force = false } = {}) => {
+    const cacheKey = providerCacheScope(name);
+    if (force) liveModelsCache.delete(cacheKey);
+    const hit = liveModelsCache.get(cacheKey);
     if (hit && Date.now() - hit.at < LIVE_MODELS_TTL_MS) return hit.list;
+    const generation = (liveModelsGeneration.get(cacheKey) ?? 0) + 1;
+    liveModelsGeneration.set(cacheKey, generation);
     let list = null;
     // ollamaHost (issue #104) lets the live inventory fetch a remote daemon's
     // /api/tags; non-ollama adapters ignore it.
     try { list = await listProviderModels(name, { safeFetch, ollamaHost: settingsStore.get().ollamaHost }); }
     catch { list = null; }
-    liveModelsCache.set(name, { at: Date.now(), list });
+    // A normal catalog read can be overtaken by an explicit Test/refresh for
+    // the same host. Only the newest request may publish into the shared cache;
+    // otherwise the older response can land last and make the UI stale again.
+    if (liveModelsGeneration.get(cacheKey) === generation) {
+      const previous = liveModelsCache.get(cacheKey)?.list;
+      liveModelsCache.set(cacheKey, { at: Date.now(), list });
+      const changed = JSON.stringify(previous) !== JSON.stringify(list);
+      if (changed) onLiveModelsChanged?.();
+    }
     return list;
+  };
+  const invalidateLiveProviderModels = (/** @type {string} */ name) => {
+    const prefix = `${name}::`;
+    const keys = new Set([
+      providerCacheScope(name),
+      ...liveModelsCache.keys(),
+      ...liveModelsGeneration.keys(),
+    ]);
+    for (const key of keys) {
+      if (key === name || key.startsWith(prefix)) {
+        liveModelsGeneration.set(key, (liveModelsGeneration.get(key) ?? 0) + 1);
+        liveModelsCache.delete(key);
+      }
+    }
+  };
+  const liveProviderModelStatus = (/** @type {string} */ name) => {
+    const hit = liveModelsCache.get(providerCacheScope(name));
+    if (!hit) {
+      return Object.freeze({ known: false, reachable: null, count: null });
+    }
+    return Object.freeze({
+      known: true,
+      reachable: Array.isArray(hit.list),
+      count: Array.isArray(hit.list) ? hit.list.length : null,
+      models: Array.isArray(hit.list) ? hit.list.map((entry) => entry.model) : null,
+      stale: Date.now() - hit.at >= LIVE_MODELS_TTL_MS,
+    });
   };
 
   // OpenRouter's chat catalog = the user's CURATED selection (Settings →
@@ -127,7 +172,8 @@ export const makeModelCatalog = (deps) => {
   /** @type {Map<string, any>} */ const contextWindowCache = new Map();
   const liveContextWindow = (/** @type {string} */ provider, /** @type {string} */ model) => {
     if (!provider || !model) return undefined;
-    const key = `${provider}::${model}`;
+    const hostScope = provider === 'ollama' ? `::${settingsStore.get().ollamaHost ?? ''}` : '';
+    const key = `${provider}${hostScope}::${model}`;
     const hit = contextWindowCache.get(key);
     if (hit && typeof hit.window === 'number') return hit.window; // learned → keep for SW lifetime
     if (hit && hit.fetching) return undefined;                    // in-flight → don't fire a second
@@ -192,7 +238,7 @@ export const makeModelCatalog = (deps) => {
       if (p.name === 'openrouter') catalog = openrouterChatCatalog();
       if (p.liveModels) {
         const live = await liveProviderModels(p.name);
-        if (live) catalog = live;
+        if (Array.isArray(live) && live.length > 0) catalog = live;
         else if (!lockProvider) continue; // unreachable → offer nothing, not a guess
       }
       for (const c of catalog) {
@@ -238,15 +284,30 @@ export const makeModelCatalog = (deps) => {
     } else {
       const active = resolveActiveProvider();
       selected = `${active.name}::${active.model}`;
-      // If the active selection isn't a usable option (e.g. its provider has
-      // no key), fall back to the first option so the picker shows something
-      // valid.
+      // Keep an explicit selection visible even when it is temporarily
+      // unavailable. Falling back only the dropdown is dangerous: the first
+      // send still binds to the explicit provider, so the UI would promise a
+      // different model than the one that actually receives the prompt.
       if (!options.some((o) => o.value === selected)) {
-        selected = options[0]?.value ?? selected;
+        options.unshift({
+          provider: active.name,
+          providerLabel: listProviders().find((p) => p.name === active.name)?.label ?? active.name,
+          model: active.model,
+          label: `${active.model} (currently unavailable)`,
+          value: selected,
+          unavailable: true,
+        });
       }
     }
     return { options, selected, sessionProvider };
   };
 
-  return { liveProviderModels, openrouterChatCatalog, liveContextWindow, buildModelOptions };
+  return {
+    liveProviderModels,
+    liveProviderModelStatus,
+    invalidateLiveProviderModels,
+    openrouterChatCatalog,
+    liveContextWindow,
+    buildModelOptions,
+  };
 };

@@ -2,7 +2,7 @@
 // Pure; first match wins: pin → local WebGPU → provider default → inherit.
 
 import { describe, expect, test } from 'bun:test';
-import { resolveRunnerModel } from '../../extension/peerd-provider/runner-model.js';
+import { resolveRunnerModel, resolveRunnerTarget } from '../../extension/peerd-provider/runner-model.js';
 
 const anthropic = { defaultRunnerModel: 'claude-haiku-4-5', defaultModel: 'claude-sonnet-4-6' };
 const openrouter = { defaultRunnerModel: 'anthropic/claude-haiku-4.5', defaultModel: 'openai/gpt-4o-mini' };
@@ -36,6 +36,24 @@ describe('resolveRunnerModel', () => {
       provider: anthropic,
       localRunner: { available: true, model: 'gemma-local' },
     })).toBe('gemma-local');
+  });
+
+  test('local WebGPU selects the local adapter as well as its model', () => {
+    expect(resolveRunnerTarget({
+      settings: {},
+      providerName: 'anthropic',
+      provider: anthropic,
+      localRunner: { available: true, model: 'gemma-local' },
+    })).toEqual({ provider: 'local-webgpu', model: 'gemma-local' });
+  });
+
+  test('a pinned/default runner stays on the owner provider', () => {
+    expect(resolveRunnerTarget({
+      settings: { runnerModel: 'claude-opus-4-8' },
+      providerName: 'anthropic',
+      provider: anthropic,
+      localRunner: { available: true, model: 'gemma-local' },
+    })).toEqual({ provider: 'anthropic', model: 'claude-opus-4-8' });
   });
 
   test('local runner is ignored until available (download in flight / unsupported)', () => {

@@ -23,6 +23,7 @@ import browser from '/vendor/browser-polyfill.js';
 import { CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
 import { OptionsApp } from './components/options-app.js';
 import { callPrivateTransfer } from './private-transfer-session.js';
+import { makeOptionsSender } from './options-state-sync.js';
 
 // null until the first snapshot lands — the shell renders a loading
 // gate rather than guessing at vault state (a flash of "set up peerd"
@@ -107,13 +108,12 @@ const foldReply = (msg, reply) => {
  * @param {{ type: string } & Record<string, any>} msg
  * @returns {Promise<any>}
  */
-const send = async (msg) => {
-  const reply = msg.type.startsWith('transfer/')
-    ? await callPrivateTransfer(msg)
-    : await browser.runtime.sendMessage(msg);
-  foldReply(msg, reply);
-  return reply;
-};
+const send = makeOptionsSender({
+  sendRuntime: (msg) => browser.runtime.sendMessage(msg),
+  sendTransfer: callPrivateTransfer,
+  foldReply,
+  fetchState,
+});
 
 fetchState();
 window.addEventListener('focus', fetchState);

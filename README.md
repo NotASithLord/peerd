@@ -12,15 +12,14 @@
 
 # The first web-native AI agent harness
 
-**Agent platforms are trying to pull the browser into the harness. peerd pulls
-the harness into the browser.**
+peerd is the first general-purpose agent runtime built directly on browser primitives: Workers, origins, sandboxing, OPFS, WASM/WASI, WebRTC, WebAuthn, and WebExtensions. It runs completely inside Chrome and Firefox, with your tabs, signed-in sessions, web apps, and local compute.
 
-It runs general-purpose agents entirely inside Chrome and Firefox, with your
-tabs, signed-in sessions, web apps, and local compute. You choose a supported
-cloud or local model.
+**While agent platforms are trying to pull the browser into the harness. peerd pulls the harness into the browser.**
 
-No Peerd account, hosted browser, or tool-server connection is required. Current
-builds send no product telemetry to Peerd.
+For actual inference you can choose a supported hosted model provider, a local model using localhost, or check out preliminary support for local WebGPU models (we're keeping an eye on WebNN as well).
+
+No peerd account, hosted browser, or tool-server connection is required. Current
+builds send no product telemetry to peerd.
 
 [Install](#install) · [peerd.ai](https://peerd.ai) ·
 [Architecture](#architecture) · [Security](SECURITY.md)

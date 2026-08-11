@@ -119,6 +119,7 @@ const makeHarness = (over: {
   fetchFails?: boolean,
   feedPromise?: Promise<unknown>,
   readyPromise?: Promise<unknown>,
+  ready?: Promise<unknown> | (() => Promise<unknown>),
   session?: Map<string, unknown>,
   surfacesPromise?: Promise<boolean>,
 } = {}) => {
@@ -170,7 +171,7 @@ const makeHarness = (over: {
           status: 200, headers: { 'content-type': 'application/json' },
         }));
     },
-    ready: over.readyPromise ?? Promise.resolve(),
+    ready: over.ready ?? over.readyPromise ?? Promise.resolve(),
     isEnabled: () => flags.enabled,
     busy: () => flags.busy,
     surfacesOpen: () => over.surfacesPromise ?? flags.surfaces,
@@ -327,6 +328,17 @@ describe('makeUpdateCheck - Chrome flow', () => {
     ready?.();
     await fired;
     await h.settle();
+    expect(h.calls.reload).toBe(1);
+  });
+  test('a readiness function also gates a cold-worker update event', async () => {
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const h = makeHarness({ ready: () => pending });
+    const fired = h.fireUpdateAvailable('0.7.0');
+    await h.settle();
+    expect(h.calls.reload).toBe(0);
+    release?.();
+    await fired;
     expect(h.calls.reload).toBe(1);
   });
   test('re-enabling resumes an update parked before the toggle changed', async () => {

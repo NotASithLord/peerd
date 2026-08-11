@@ -24,11 +24,18 @@ export const makeDwebRoutes = (deps) => {
     vault, auditLog, kv, ensureOffscreen, browser,
     appRegistry, appClient, appTabTracker, settingsStore, shareLocalApp,
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
-    disableDweb, withDwebPublication, withAppLifecycle,
+    disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady,
   } = deps;
 
-  // The two-input gate every route shares (build flag + user setting).
+  // Cold workers expose channel defaults until persisted settings hydrate.
+  // Effectful/read routes fail closed if that hydration is still unavailable.
   const dwebOn = () => DWEB_ENABLED && settingsStore.get().dwebEnabled;
+  const dwebReady = async () => {
+    if (!DWEB_ENABLED) return false;
+    try { await ensureSettingsReady(); }
+    catch { return false; }
+    return dwebOn();
+  };
   /** @param {any} entry */
   const auditCommittedChange = async (entry) => {
     try { await auditLog.append(entry); return null; }
@@ -40,7 +47,7 @@ export const makeDwebRoutes = (deps) => {
 
   return {
     'dweb/app-snapshot': async ({ appId }) => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
         return { ok: true, ...(await appClient.snapshotFilesBase64({ appId })) };
@@ -65,7 +72,7 @@ export const makeDwebRoutes = (deps) => {
     // the storage arm. Files cross runtime messaging as JSON-safe base64
     // envelopes, then appClient applies the same byte limits as local imports.
     'dweb/app-install': async ({ appId, name, files, entryFile, fileKinds, dweb }) => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       if (typeof appId !== 'string' || !appId.startsWith('app-')) {
         return { ok: false, error: 'appId-required' };
       }
@@ -88,7 +95,7 @@ export const makeDwebRoutes = (deps) => {
     // shadow the new entry. The dweb slot is MERGED so version_id/uri/seq advance
     // while publisher/slug/dwapp_id stay put. The open tab reloads to show the update.
     'dweb/app-update': async ({ appId, files, entryFile, fileKinds, dweb }) => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
         const rec = await appRegistry.get(appId);
@@ -115,7 +122,7 @@ export const makeDwebRoutes = (deps) => {
     // Persist the latest room-published hash so replacement and deletion can
     // revoke every version this node still serves.
     'dweb/app-record-served': async ({ appId, uri, hash }) => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       if (typeof appId !== 'string' || typeof hash !== 'string' || typeof uri !== 'string') {
         return { ok: false, error: 'appId-uri-hash-required' };
       }
@@ -139,7 +146,7 @@ export const makeDwebRoutes = (deps) => {
     // SW can't load the dweb module); the SW only checks the registry, stores
     // via appClient, and opens the tab. `seed` is { name, files, entryFile, dweb }.
     'dweb/open-commons': async ({ seed, room, url } = {}) => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       const seedKey = seed?.dweb?.seed;
       // Bound the page-supplied key: it's used to dedupe + persisted in app
       // metadata, so a short plain string only (the real cap on file size
@@ -171,7 +178,7 @@ export const makeDwebRoutes = (deps) => {
     // dedupe-by-seed: a user who DELETES the app must not have it silently
     // re-seeded on the next Library open.
     'dweb/ensure-seed-app': async ({ seed } = {}) => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       const seedKey = seed?.dweb?.seed;
       if (typeof seedKey !== 'string' || !seedKey || seedKey.length > 64) {
         return { ok: false, error: 'seed-required' };
@@ -210,7 +217,7 @@ export const makeDwebRoutes = (deps) => {
     // dweb/base-host/* handler. Distinct type so the SW's own dispatcher doesn't
     // re-catch the forward.
     'dweb/base/start': async () => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       return withDwebPublication(async (/** @type {() => boolean} */ isCurrent) => {
         if (!isCurrent() || !dwebOn()) return { ok: false, error: 'dweb-disabled' };
         await ensureOffscreen();
@@ -228,17 +235,17 @@ export const makeDwebRoutes = (deps) => {
       return disableDweb();
     },
     'dweb/base/status': async () => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       await ensureOffscreen();
       return browser.runtime.sendMessage({ type: 'dweb/base-host/status' });
     },
     'dweb/base/announce': async ({ record } = {}) => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       await ensureOffscreen();
       return browser.runtime.sendMessage({ type: 'dweb/base-host/announce', record });
     },
     'dweb/base/find': async ({ dwappId, publisherDid } = {}) => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       await ensureOffscreen();
       return browser.runtime.sendMessage({ type: 'dweb/base-host/find', dwappId, publisherDid });
     },
@@ -249,12 +256,12 @@ export const makeDwebRoutes = (deps) => {
     // reuses the stored slug — the namespace is locked once chosen so the
     // dwapp_id stays stable. On success we persist the version identity.
     'dweb/base/share-app': async ({ appId, slug } = {}) => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       return shareLocalApp(appId, slug);
     },
     // Discover: what peers have announced (gossip cache + DHT hits).
     'dweb/base/heard': async () => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       await ensureOffscreen();
       return browser.runtime.sendMessage({ type: 'dweb/base-host/heard' });
     },
@@ -262,7 +269,7 @@ export const makeDwebRoutes = (deps) => {
     // base mesh, verifies it, and persists it. The card's version identity rides
     // along so the installed record can be matched against future announces.
     'dweb/base/install': async ({ uri, name, dwappId, slug, seq } = {}) => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       return withDwebPublication(async (/** @type {() => boolean} */ isCurrent) => {
         if (!isCurrent() || !dwebOn()) return { ok: false, error: 'dweb-disabled' };
         await ensureOffscreen();
@@ -273,7 +280,7 @@ export const makeDwebRoutes = (deps) => {
     // local catalog against the offscreen discovery Library (the heard cards).
     // Returns a map keyed by local appId. Best-effort + read-only.
     'dweb/base/updates': async () => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       try {
         const apps = await appRegistry.list();
@@ -299,7 +306,7 @@ export const makeDwebRoutes = (deps) => {
     // refetches + verifies the new bundle and the SW overwrites the existing app's
     // files. The user keeps ONE copy that just updates.
     'dweb/base/update-app': async ({ appId, uri, name } = {}) => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string' || typeof uri !== 'string') return { ok: false, error: 'appId-and-uri-required' };
       return withDwebPublication((/** @type {() => boolean} */ isCurrent) => withAppLifecycle(appId, async () => {
@@ -358,7 +365,7 @@ export const makeDwebRoutes = (deps) => {
     // directly as `dweb/base-room/event` runtime messages, so the SW only
     // carries the request/response.
     'dweb/base/room': async (msg = {}) => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       const { type: _t, ...args } = msg;
       return withDwebPublication(async (/** @type {() => boolean} */ isCurrent) => {
         if (!isCurrent() || !dwebOn()) return { ok: false, error: 'dweb-disabled' };
@@ -374,7 +381,7 @@ export const makeDwebRoutes = (deps) => {
     // a Notebook. Side-effect-free: it reports the base host's CURRENT state with
     // rosters; it never STARTS the lobby (maybeStartBaseNetwork does, on unlock).
     'dweb/distributed/info': async () => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       await ensureOffscreen();
       return browser.runtime.sendMessage({ type: 'dweb/base-host/info' });
     },

@@ -29,7 +29,30 @@ export const makeSettingsStore = ({ kv, key, defaults }) => {
   let stored = {};
   /** The merged view consumers read: { ...defaults, ...stored }. */
   let merged = { ...defaults };
+  // Every read-modify-write runs behind the initial storage read and behind the
+  // previous mutation. A portless Options tab can wake a cold MV3 worker and
+  // send a write before boot hydration settles; multiple live surfaces can also
+  // write concurrently. Without one queue, either path can persist an older
+  // snapshot last and silently discard otherwise-successful settings changes.
+  let hydrated = false;
+  /** @type {Promise<unknown>} */
+  let operationTail = Promise.resolve();
   const recompute = () => { merged = { ...defaults, ...stored }; };
+  /** @template T @param {() => Promise<T>} operation @returns {Promise<T>} */
+  const enqueue = (operation) => {
+    const result = operationTail.then(operation, operation);
+    // A failed storage operation must reject its caller, but must not poison the
+    // queue forever. The next operation retries hydration/persistence normally.
+    operationTail = result.then(() => undefined, () => undefined);
+    return result;
+  };
+  const hydrate = async () => {
+    if (hydrated) return merged;
+    const s = await kv.get(key);
+    if (s && typeof s === 'object') { stored = { ...s }; recompute(); }
+    hydrated = true;
+    return merged;
+  };
 
   return {
     /** The live merged view (defaults overlaid with user choices). */
@@ -38,32 +61,33 @@ export const makeSettingsStore = ({ kv, key, defaults }) => {
     stored: () => stored,
 
     /** Hydrate from kv. A stored object wins verbatim (Option A). */
-    async load() {
-      const s = await kv.get(key);
-      if (s && typeof s === 'object') { stored = { ...s }; recompute(); }
-      return merged;
-    },
+    load: () => enqueue(hydrate),
 
     /**
      * Apply a (already-validated) patch: merge into stored, persist, return merged.
      * @param {Record<string, any>} patch
      */
-    async update(patch) {
-      stored = { ...stored, ...patch };
+    update: (patch) => enqueue(async () => {
+      await hydrate();
+      const next = { ...stored, ...patch };
+      await kv.set(key, next);
+      stored = next;
       recompute();
-      await kv.set(key, stored);
       return merged;
-    },
+    }),
 
     /**
      * Reset keys to channel defaults by FORGETTING the stored values.
      * @param {string[]} keys
      */
-    async reset(keys) {
-      for (const k of keys) delete stored[k];
+    reset: (keys) => enqueue(async () => {
+      await hydrate();
+      const next = { ...stored };
+      for (const k of keys) delete next[k];
+      await kv.set(key, next);
+      stored = next;
       recompute();
-      await kv.set(key, stored);
       return merged;
-    },
+    }),
   };
 };

@@ -143,7 +143,7 @@ export const latestGeckoUpdate = (feedJson, geckoId) => {
  *     reload: () => void,
  *   },
  *   fetchFn: (url: string, init?: RequestInit) => Promise<Response>,
- *   ready: Promise<unknown>,
+ *   ready: Promise<unknown> | (() => Promise<unknown>),
  *   isEnabled: () => boolean,
  *   busy: () => boolean,
  *   surfacesOpen: () => boolean | Promise<boolean>,
@@ -175,6 +175,7 @@ export const makeUpdateCheck = ({
   cancelRetry = (handle) => clearTimeout(/** @type {ReturnType<typeof setTimeout>} */ (handle)),
   log = () => {},
 }) => {
+  const awaitReady = () => typeof ready === 'function' ? ready() : ready;
   /** @type {string | null} a downloaded update waiting for a quiet moment */
   let pendingDownloadedVersion = null;
   /** @type {string | null} downloaded-update note DELIVERED (per SW lifetime) */
@@ -285,7 +286,7 @@ export const makeUpdateCheck = ({
 
   // The browser downloaded an update (our request or its own poll).
   const onUpdateDownloaded = async (/** @type {string} */ version) => {
-    await ready; // stored settings may say OFF; never act on the channel default
+    await awaitReady(); // stored settings may say OFF; never act on the channel default
     pendingDownloadedVersion = version;
     if (!isEnabled()) mustApplyInterceptedDownload = true;
     await maybeApplyPendingDownload();
@@ -336,7 +337,7 @@ export const makeUpdateCheck = ({
   };
 
   const runCheck = async (/** @type {string} */ reason) => {
-    await ready;
+    await awaitReady();
     if (!isEnabled()) return;
     const manifest = runtime.getManifest();
     const gecko = manifest.browser_specific_settings?.gecko;
@@ -411,7 +412,7 @@ export const makeUpdateCheck = ({
       // during that short startup window.
       runtime.onUpdateAvailable?.addListener(onUpdateDownloadedListener);
       listenerRegistered = Boolean(runtime.onUpdateAvailable);
-      void ready.then(syncEnabled).catch(() => {});
+      void awaitReady().then(syncEnabled).catch(() => {});
     },
 
     checkNow,
@@ -433,7 +434,7 @@ export const makeUpdateCheck = ({
      * idle" moment never comes on its own).
      */
     onQuiet() {
-      void ready.then(() => maybeApplyPendingDownload()).catch(() => {});
+      void awaitReady().then(() => maybeApplyPendingDownload()).catch(() => {});
     },
   };
 };
