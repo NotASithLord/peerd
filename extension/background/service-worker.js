@@ -4161,6 +4161,17 @@ const sessionState = makeSessionState();
  * derived from the vault, never the secret itself.
  */
 const buildStateSnapshot = async () => {
+  // A cold MV3 worker can resume the vault and accept a UI port before the
+  // asynchronous chrome.storage settings read finishes. The snapshot must not
+  // observe channel defaults in that window: if the user selected a keyless
+  // provider (Ollama / Local WebGPU), the default Anthropic projection reports
+  // hasKey:false and strands the already-open composer until some unrelated
+  // mutation happens to push state again (issue #384).
+  //
+  // A storage failure still degrades to the channel defaults, as before. Only
+  // the successful-hydration race is closed here.
+  try { await settingsReady; }
+  catch { /* loadSettings failure leaves the store's safe defaults in place */ }
   await actorIsolationReady;
   const sessionId = await sessionCache.sessionGet('currentSessionId');
   // prfEnrolled is cheap to read (one kv.get) and the side panel uses it
