@@ -7,10 +7,11 @@
 // This is the "durable content vs device-local bookkeeping" separation the
 // issue demands, made concrete per surface. Pure functions over INJECTED IO
 // — no chrome.*, no dweb import — so every projection is Bun-testable and
-// the file ships in store packages (it names no dweb path). The sync host
-// (offscreen) calls collectSurface for a pulled surface and applySurface on
-// the receiver; secrets ride the same shape but are gated by the source
-// including them only on explicit consent.
+// the file ships in store packages (it names no dweb module path; the store
+// artifact verifier greps the shipped bytes, comments included). The sync
+// host calls a shaper for a pulled surface and an applier on the receiver;
+// secrets ride the same shape but are gated by the source including them
+// only on explicit consent.
 //
 // The projections, and what each drops:
 //   settings           explicit values only (already the export shape)
@@ -26,9 +27,9 @@
 //   secrets            re-encryptable name→value map (consent-gated)
 //
 // why NOT import the dweb sync module here: the dweb boundary forbids core
-// code from importing peerd-distributed at all (this file ships in store
-// packages). The surface encode/decode is plain JSON over the store-safe
-// shared/bundle primitives — the SAME bytes self/sync.js's
+// code from importing that module at all, and this file ships in store
+// packages. The surface encode/decode is plain JSON over the store-safe
+// shared/bundle primitives — the SAME bytes the dweb sync module's
 // encode/decodeSurfacePayload produce, kept in lockstep by their shared
 // JSON+utf8 shape (self-sync-surfaces.test.ts round-trips it).
 

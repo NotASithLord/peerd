@@ -1,5 +1,15 @@
 # Canonical relying party
 
+Status: SUPERSEDED by `06-device-enrollment.md`. The RP is fixed at
+`id.peerd.ai` — the exact ceremony host, never the registrable suffix
+`peerd.ai`, which would expose the credential to sibling origins. The
+ceremony page lives in `web-identity/`; its transport is an
+extension-origin-bound, one-shot postMessage relay rather than the
+request/response URL that sank the first attempt. Deployment and TLS remain
+site-repository work. The original text follows.
+
+---
+
 Status: proposal; blocked on an owner decision and work in the separate site
 repository.
 
