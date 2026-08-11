@@ -1,10 +1,13 @@
 # Dependency update and security-release policy
 
-Every automatically merged dependency release seasons for 30 days. Dependabot
-security PRs are opened immediately, but the deliberately narrow no-human path
-also verifies the replacement artifact's publication age before it can merge.
-A fresh security fix remains visible and tested in an open PR while a person
-decides whether the known vulnerability outweighs the fresh-artifact risk.
+Routine updates and GitHub Actions security patches season for 30 days. The
+deliberately narrow Bun security-patch path may merge after a continuous 72-hour
+observation window only when every resolved replacement is patch-level, its
+exact npm integrity is authenticated, GitHub reports no active or withdrawn
+malware advisory, and every scheduled Socket scan stays clean. Dependabot
+security PRs are still opened immediately. Until the applicable window closes,
+the PR remains visible for a person to decide whether the known vulnerability
+outweighs the fresh-artifact risk.
 
 ## Covered dependency manifests
 
@@ -18,9 +21,11 @@ decides whether the known vulnerability outweighs the fresh-artifact risk.
 Routine updates are grouped per ecosystem and held until the candidate version
 is at least 30 days old. GitHub applies `cooldown` to version updates, not to
 Dependabot security updates, so the trusted workflow independently checks every
-security replacement's registry or GitHub release timestamp. `bunfig.toml`
-also applies Bun's native 30-day filter to new local/manual resolution of both
-direct and transitive packages; existing locked versions remain reproducible.
+security replacement's registry or GitHub release timestamp. Bun semver-patch
+security replacements use a 3-day publication floor plus periodic dual-malware
+observations; Actions remain at 30 days. `bunfig.toml` also applies Bun's native
+30-day filter to new local/manual resolution of both direct and transitive
+packages; existing locked versions remain reproducible.
 
 Security updates use distinct `bun-security-patches` and
 `actions-security-patches` groups. Their names are security boundaries: the
@@ -38,20 +43,32 @@ of these are true:
 3. The dependency update is semver patch-level. A security fix requiring a
    minor or major dependency change gets an immediate PR but remains
    human-reviewed.
-4. Every replacement has been public for at least 30 days. Bun versions are
-   checked against the exact npm registry publication timestamp and integrity
-   metadata. Actions must have a stable GitHub Release at least 30 days old,
-   whose tag resolves to the newly pinned full SHA and whose commit GitHub
-   marks verified.
+4. Every resolved Bun replacement in `bun.lock`, including transitives, is a
+   stable semver patch from the package already occupying that lock slot. New
+   package slots, integrity-only mutations, minor/major transitive movement, and
+   failure to bind authenticated metadata to the resolved graph remain
+   human-reviewed. The trusted policy checks every replacement's exact npm
+   publication timestamp and binds its lock integrity to the registry digest.
+   All must be public for at least 3 complete days. Every Actions replacement
+   must still have a stable GitHub Release at least 30 days old, whose tag
+   resolves to the newly pinned full SHA and whose commit GitHub marks verified.
 5. A Bun PR changes only `package.json` dependency versions and/or `bun.lock`.
    An Actions PR changes only full-SHA-pinned `uses:` lines in workflow YAML.
-6. Candidate dependency lifecycle scripts are disabled. Socket scanning and
-   deterministic generation run on a disposable runner with only a read token.
-   Its patch is treated as untrusted input; candidate code never shares a
-   runner with a repository-write token.
-7. The workflow increments peerd's patch version, adds release notes,
-   regenerates the development manifest, and, for Bun updates, rebuilds the
-   checked-in CodeMirror bundle and its complete SHA-256 vendor lock.
+6. `.github/workflows/dependabot-malware-observation.yml` starts when the exact
+   Dependabot head appears and every four hours thereafter. Each read-only job
+   rechecks all resolved replacement coordinates against GitHub's active and
+   withdrawn malware feed, verifies npm integrity metadata, and runs Socket with
+   lifecycle scripts disabled. The merge gate requires 72 continuous clean
+   hours, permits no observation gap over 6 hours, resets after a finding or
+   missed interval, and starts over when the head SHA changes. The exact-pinned
+   Socket scanner cannot itself use the three-day path. Once the window is
+   complete, a trusted coordinator re-runs the already-authenticated failed
+   release workflow; passage of time no longer requires a human click.
+7. On a disposable runner with only a read token, the workflow increments
+   peerd's patch version, adds release notes, regenerates the development
+   manifest, and, for Bun updates, rebuilds the checked-in CodeMirror bundle and
+   its complete SHA-256 vendor lock. Candidate code never shares a runner with a
+   repository-write token.
 8. A fresh privileged runner re-authenticates the original PR, rechecks the
    seasoning policy, and applies only the exact expected version, changelog,
    manifest, and CodeMirror hash changes without installing or executing the
@@ -60,8 +77,11 @@ of these are true:
    workflows in a read-only mode. Jobs whose token can write repository state
    or upload SARIF are skipped so a candidate Action SHA never shares their
    authority. The workflow records and waits for the two exact dispatched run
-   IDs, then rechecks the PR head and approves it. No auto-merge is left armed.
-   Once those runs pass, it starts a trusted finalizer through
+   IDs, then rechecks the PR head and approves it. Immediately before merge, the
+   trusted policy re-queries every resolved replacement against npm and both
+   active and withdrawn GitHub malware advisories, then revalidates the complete
+   observation window. No auto-merge is left armed. Once those runs pass, it
+   starts a trusted finalizer through
    `repository_dispatch` (the documented
    `GITHUB_TOKEN` event exception) and performs a protected squash merge with a
    matching-head constraint.
@@ -75,11 +95,16 @@ of these are true:
 Any ambiguity fails closed: the PR remains open for a person rather than being
 merged or tagged.
 
-The 30-day rule addresses a different trust boundary from Dependabot. GitHub's
+Seasoning addresses a different trust boundary from Dependabot. GitHub's
 advisory review and verified bot commits establish that the old version matches
 a reviewed advisory and that Dependabot authored the PR. They do not establish
 that a newly published upstream tarball or Action commit contains no unrelated
-malicious behavior.
+malicious behavior. The 3-day Bun exception is therefore tied to the exact
+candidate head and every resolved package/version/integrity replacement, plus
+GitHub's malware feed and Socket's independently maintained behavioral signal.
+It does not apply to new transitive package slots, minor or major movement
+anywhere in the replacement graph, routine version updates, local/manual
+installs, GitHub Actions, or the Socket scanner itself.
 
 ## Checked-in libraries
 
@@ -109,9 +134,14 @@ Socket's exact-pinned Bun scanner is configured in `bunfig.toml`. It uses the
 unauthenticated public API (no Socket secret or account), scans the resolved
 graph before installation, and fails non-interactive CI on warning or fatal
 findings. This complements OSV by looking for malware and suspicious package
-behavior rather than only known CVEs. Text `bun.lock` support is currently a
-public beta. The scanner necessarily sends the already-public dependency
-snapshot to Socket.
+behavior rather than only known CVEs. The trusted security-patch policy also
+queries GitHub's malware feed directly, including withdrawn advisories imported
+from OpenSSF's `malicious-packages` data; a feed outage or malformed response
+fails closed. The observation workflow provides durable point-in-time results
+at a four-hour cadence; neither upstream API exposes a transactional guarantee
+for the intervals between those observations. Text `bun.lock` support in Socket
+is currently a public beta. The scanner necessarily sends the already-public
+dependency snapshot to Socket.
 
 Every Actions job starts the full-SHA-pinned, seasoned StepSecurity
 Harden-Runner in audit mode. It records source writes and outbound destinations,
@@ -133,8 +163,10 @@ tests.
 The workflow is versioned, but GitHub does not store the following controls in
 the repository. Apply them only after this workflow is present on `main`:
 
-- Keep Dependabot alerts and security updates enabled (already enabled at the
-  time this policy was introduced).
+- Keep Dependabot alerts, Dependabot malware alerts, and security updates
+  enabled. The workflow's direct global-advisory query is an independent gate;
+  repository malware alerts remain the default-branch monitoring and
+  notification layer.
 - Allow GitHub Actions to create pull-request approvals.
 - Keep one required approval and stale-review dismissal on `main`, but turn off
   “require review from Code Owners.” The Actions bot cannot be the repository's

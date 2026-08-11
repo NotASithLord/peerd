@@ -7,12 +7,19 @@ import { join } from 'node:path';
 import {
   addSecurityChangelog,
   assertAtLeastDaysOld,
+  assertMalwareObservationWindow,
+  assertNoGitHubMalwareAdvisories,
   assertRecentUtcDate,
+  assertTrustedSocketScanner,
+  changedBunLockPackages,
+  minimumSecurityAgeDays,
   nextPatchVersion,
   parseDependencyNames,
   validateActionsDiff,
   validatePackageJsonChange,
   validatePrepared,
+  verifyNoGitHubNpmMalware,
+  verifyNpmSeasoning,
 } from '../packaging/dependabot-security.ts';
 
 const sha256 = (value: string): string =>
@@ -25,6 +32,13 @@ const write = (root: string, path: string, value: string): void => {
 
 const git = (root: string, ...args: string[]): string =>
   execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' }).trim();
+
+const bunLock = (packages: Record<string, unknown>): string => JSON.stringify({
+  lockfileVersion: 1,
+  configVersion: 1,
+  workspaces: { '': { devDependencies: {} } },
+  packages,
+});
 
 describe('Dependabot security automation policy', () => {
   test('accepts authenticated dependency-version-only package changes', () => {
@@ -146,9 +160,156 @@ describe('Dependabot security automation policy', () => {
 
   test('requires the replacement release itself to finish seasoning', () => {
     const now = new Date('2026-08-10T12:00:00Z');
-    expect(assertAtLeastDaysOld('2026-07-11T11:59:59Z', 30, now)).toBe(30);
-    expect(() => assertAtLeastDaysOld('2026-07-12T12:00:00Z', 30, now))
-      .toThrow('29 days ago; 30 days of seasoning are required');
+    expect(minimumSecurityAgeDays('bun')).toBe(3);
+    expect(minimumSecurityAgeDays('github_actions')).toBe(30);
+    expect(assertAtLeastDaysOld('2026-08-07T11:59:59Z', 3, now)).toBe(3);
+    expect(() => assertAtLeastDaysOld('2026-08-08T12:00:00Z', 3, now))
+      .toThrow('2 days ago; 3 days of seasoning are required');
+  });
+
+  test('permanently rejects active or withdrawn GitHub malware matches', () => {
+    expect(() => assertNoGitHubMalwareAdvisories([], 'eslint@10.4.1', false)).not.toThrow();
+    expect(() => assertNoGitHubMalwareAdvisories({}, 'eslint@10.4.1', false))
+      .toThrow('GitHub malware lookup for eslint@10.4.1 returned invalid JSON');
+    expect(() => assertNoGitHubMalwareAdvisories(
+      [{ ghsa_id: 'GHSA-1111-2222-3333', withdrawn_at: null }],
+      'eslint@10.4.1',
+      false,
+    )).toThrow('active GitHub malware advisory GHSA-1111-2222-3333');
+    expect(() => assertNoGitHubMalwareAdvisories(
+      [{ ghsa_id: 'GHSA-4444-5555-6666', withdrawn_at: '2026-08-09T00:00:00Z' }],
+      'eslint@10.4.1',
+      true,
+    )).toThrow('withdrawn GitHub malware advisory GHSA-4444-5555-6666');
+  });
+
+  test('checks the active and withdrawn advisory request path for scoped packages', async () => {
+    const urls: string[] = [];
+    const fetcher = (async (input: string | URL | Request) => {
+      urls.push(String(input));
+      return Response.json([]);
+    }) as typeof fetch;
+    await verifyNoGitHubNpmMalware([
+      { dependencyName: '@scope/widget', newVersion: '1.2.4' },
+    ], 'test-token', fetcher);
+    expect(urls).toHaveLength(2);
+    const queries = urls.map((url) => new URL(url).searchParams);
+    expect(queries.map((query) => query.get('type'))).toEqual(['malware', 'malware']);
+    expect(queries.map((query) => query.get('ecosystem'))).toEqual(['npm', 'npm']);
+    expect(queries.map((query) => query.get('affects'))).toEqual([
+      '@scope/widget@1.2.4',
+      '@scope/widget@1.2.4',
+    ]);
+    expect(queries.map((query) => query.get('is_withdrawn'))).toEqual(['false', 'true']);
+  });
+
+  test('fails closed on advisory HTTP and response-shape errors', async () => {
+    const unavailable = (async () => new Response('unavailable', { status: 503 })) as unknown as typeof fetch;
+    await expect(verifyNoGitHubNpmMalware([
+      { dependencyName: 'eslint', newVersion: '10.4.1' },
+    ], undefined, unavailable)).rejects.toThrow('returned HTTP 503');
+
+    const malformed = (async () => Response.json({ advisories: [] })) as unknown as typeof fetch;
+    await expect(verifyNoGitHubNpmMalware([
+      { dependencyName: 'eslint', newVersion: '10.4.1' },
+    ], undefined, malformed)).rejects.toThrow('returned invalid JSON');
+  });
+
+  test('applies patch-only policy to every resolved Bun lockfile replacement', () => {
+    const base = bunLock({
+      eslint: ['eslint@10.4.0', '', {}, 'sha512-AAAA'],
+      transitive: ['transitive@2.7.3', '', {}, 'sha512-BBBB'],
+    });
+    const head = bunLock({
+      eslint: ['eslint@10.4.1', '', {}, 'sha512-CCCC'],
+      transitive: ['transitive@2.7.4', '', {}, 'sha512-DDDD'],
+    });
+    expect(changedBunLockPackages(base, head)).toEqual([
+      {
+        lockKey: 'eslint',
+        dependencyName: 'eslint',
+        previousVersion: '10.4.0',
+        newVersion: '10.4.1',
+        integrity: 'sha512-CCCC',
+      },
+      {
+        lockKey: 'transitive',
+        dependencyName: 'transitive',
+        previousVersion: '2.7.3',
+        newVersion: '2.7.4',
+        integrity: 'sha512-DDDD',
+      },
+    ]);
+
+    expect(() => changedBunLockPackages(base, bunLock({
+      eslint: ['eslint@10.4.1', '', {}, 'sha512-CCCC'],
+      transitive: ['transitive@3.0.0', '', {}, 'sha512-DDDD'],
+    }))).toThrow('is not a semantic patch update');
+    expect(() => changedBunLockPackages(base, bunLock({
+      eslint: ['eslint@10.4.1', '', {}, 'sha512-CCCC'],
+      transitive: ['transitive@2.7.3', '', {}, 'sha512-EEEE'],
+    }))).toThrow('without a version replacement');
+    expect(() => changedBunLockPackages(base, bunLock({
+      eslint: ['eslint@10.4.1', '', {}, 'sha512-CCCC'],
+      transitive: ['transitive@2.7.3', '', {}, 'sha512-BBBB'],
+      surprise: ['surprise@1.0.0', '', {}, 'sha512-FFFF'],
+    }))).toThrow('introduced new dependency slot surprise');
+  });
+
+  test('binds every changed lockfile integrity to exact npm registry metadata', async () => {
+    const requested: string[] = [];
+    const fetcher = (async (input: string | URL | Request) => {
+      const url = String(input);
+      requested.push(url);
+      const dependencyName = decodeURIComponent(new URL(url).pathname.slice(1));
+      const version = dependencyName === 'eslint' ? '10.4.1' : '2.7.4';
+      const integrity = dependencyName === 'eslint' ? 'sha512-CCCC' : 'sha512-DDDD';
+      return Response.json({
+        time: { [version]: '2026-08-01T00:00:00Z' },
+        versions: { [version]: { dist: { integrity } } },
+      });
+    }) as typeof fetch;
+    const replacements = [
+      { dependencyName: 'eslint', newVersion: '10.4.1', integrity: 'sha512-CCCC' },
+      { dependencyName: 'transitive', newVersion: '2.7.4', integrity: 'sha512-DDDD' },
+    ];
+    await expect(verifyNpmSeasoning(replacements, undefined, fetcher)).resolves.toBeUndefined();
+    expect(requested).toHaveLength(2);
+    await expect(verifyNpmSeasoning([
+      { dependencyName: 'eslint', newVersion: '10.4.1', integrity: 'sha512-WRONG' },
+    ], undefined, fetcher)).rejects.toThrow('does not match the npm registry');
+  });
+
+  test('does not allow the Socket scanner to approve its own three-day update', () => {
+    expect(() => assertTrustedSocketScanner([
+      { dependencyName: '@socketsecurity/bun-security-scanner' },
+    ])).toThrow('scanner cannot approve itself');
+    expect(() => assertTrustedSocketScanner([
+      { dependencyName: 'eslint' },
+    ])).not.toThrow();
+  });
+
+  test('requires a continuous, fresh 72-hour malware observation window', () => {
+    const headSha = 'a'.repeat(40);
+    const start = new Date('2026-08-07T12:00:00Z');
+    const observation = (hour: number, conclusion = 'success') => ({
+      headSha,
+      conclusion,
+      completedAt: new Date(start.getTime() + hour * 3_600_000).toISOString(),
+    });
+    const clean = Array.from({ length: 19 }, (_, index) => observation(index * 4));
+    const now = new Date(start.getTime() + 72 * 3_600_000);
+    expect(assertMalwareObservationWindow(clean, headSha, 72, 6, now)).toBe(72);
+
+    const withFinding = clean.map((entry, index) => index === 10
+      ? { ...entry, conclusion: 'failure' }
+      : entry);
+    expect(() => assertMalwareObservationWindow(withFinding, headSha, 72, 6, now))
+      .toThrow('only 28 continuous clean observation hours');
+
+    const missed = clean.filter((_, index) => index !== 10 && index !== 11);
+    expect(() => assertMalwareObservationWindow(missed, headSha, 72, 6, now))
+      .toThrow('only 24 continuous clean observation hours');
   });
 
   test('accepts only the exact generated patch on a fresh privileged runner', () => {
