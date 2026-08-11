@@ -18,8 +18,8 @@ peerd is the first general-purpose agent runtime built directly on browser primi
 
 For actual inference you can choose a supported hosted model provider, a local model using localhost, or check out preliminary support for local WebGPU models (we're keeping an eye on WebNN as well).
 
-No Peerd account, hosted browser, or tool-server connection is required. Current
-builds send no product telemetry to Peerd.
+No peerd account, hosted browser, or tool-server connection is required. Current
+builds send no product telemetry to peerd.
 
 [Install](#install) · [peerd.ai](https://peerd.ai) ·
 [Architecture](#architecture) · [Security](SECURITY.md)
