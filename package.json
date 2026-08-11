@@ -81,6 +81,12 @@
     "fake-indexeddb": "^6.2.5",
     "globals": "^17.6.0",
     "typescript": "^6.0.3",
-    "web-ext": "10.3.0"
+    "web-ext": "10.6.0"
+  },
+  "overrides": {
+    "js-yaml": "4.3.1"
+  },
+  "patchedDependencies": {
+    "image-size@2.0.2": "patches/image-size@2.0.2.patch"
   }
 }
