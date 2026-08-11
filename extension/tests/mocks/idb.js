@@ -48,6 +48,7 @@ export const makeMockIdb = () => {
     // v5 — engine catalogs (single-blob { key, value } records via idbKV).
     apps: 'key',
     notebooks: 'key',
+    pods: 'key',
     vms: 'key',
   };
 

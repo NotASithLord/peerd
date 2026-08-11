@@ -134,6 +134,10 @@ const ENGINE_ACTOR_TOOLS = Object.freeze({
     'js_notebook', 'js_write_file', 'js_read_file', 'js_delete', 'edit_file',
     'repo_history', 'repo_version', 'repo_remote',
   ])),
+  pod: Object.freeze(new Set([
+    'pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write', 'pod_destroy',
+    'repo_history', 'repo_version', 'repo_remote',
+  ])),
   app: Object.freeze(new Set([
     'app_update', 'app_write_file', 'app_read_file', 'app_list_files',
     'app_delete_file', 'app_delete', 'edit_file',
@@ -312,6 +316,12 @@ const ACTOR_TARGET_ID_FIELD = Object.freeze({
   js_write_file: 'notebook',
   js_read_file: 'notebook',
   js_delete: 'notebookId',
+  pod_exec: 'podId',
+  pod_status: 'podId',
+  pod_cancel: 'podId',
+  pod_read: 'podId',
+  pod_write: 'podId',
+  pod_destroy: 'podId',
   app_update: 'appId',
   app_write_file: 'appId',
   app_read_file: 'appId',

@@ -8,12 +8,12 @@
 
 /**
  * @param {Record<string, any>} deps
- * @returns {Record<string, (msg?: any) => Promise<any>>}
+ * @returns {Record<string, (msg?: any, sender?: any) => Promise<any>>}
  */
 export const makeEngineRoutes = (deps) => {
   const {
     vault, auditLog, pushState, browser, vmHttpFetch,
-    appRegistry, vmRegistry, jsRegistry, appClient, appTabTracker,
+    appRegistry, vmRegistry, jsRegistry, podRegistry, podTabTracker, appClient, appTabTracker,
     opfsHelpers, NOTEBOOK_OPFS_ROOT, IMAGE_PIN_STORAGE_KEY,
     buildAppExport, buildNotebookExport, buildVmRecipeExport,
     openEnvelope, inspectEnvelope, exportFilename,
@@ -32,7 +32,174 @@ export const makeEngineRoutes = (deps) => {
     }
   };
 
+  /** @param {unknown} value */
+  const shellLine = (value) => `${String(value ?? '')}\n`;
+  /** @param {any} error */
+  const podGitFailure = (error) => ({ stdout: '', stderr: `git: ${error?.message ?? String(error)}\n`, exitCode: 1 });
+  /** @param {string[]} argv @param {string} name */
+  const optionValue = (argv, name) => {
+    const index = argv.indexOf(name);
+    return index >= 0 ? argv[index + 1] : undefined;
+  };
+  /** @type {Map<string,Set<AbortController>>} */
+  const podJobControllers = new Map();
+  /** @param {string} podId @param {string} jobId */
+  const podJobKey = (podId, jobId) => `${podId}:${jobId}`;
+  /** @param {string} podId @param {unknown} jobId */
+  const registerPodController = (podId, jobId) => {
+    if (typeof jobId !== 'string' || !/^job-[a-z0-9-]{1,100}$/i.test(jobId)) return null;
+    const key = podJobKey(podId, jobId);
+    const controller = new AbortController();
+    const controllers = podJobControllers.get(key) ?? new Set();
+    controllers.add(controller);
+    podJobControllers.set(key, controllers);
+    return { controller, release: () => {
+      controllers.delete(controller);
+      if (!controllers.size) podJobControllers.delete(key);
+    } };
+  };
+  /** @param {unknown} podId @param {any} sender */
+  const podSenderError = async (podId, sender) => {
+    const record = typeof podId === 'string' ? await podRegistry.get(podId) : null;
+    if (!record) return 'pod-not-found';
+    const ownedTab = podTabTracker.getTabId(podId);
+    return ownedTab == null || sender?.tab?.id !== ownedTab ? 'pod-sender-not-instance-pinned' : null;
+  };
+  /** @param {unknown} value */
+  const canonicalUrl = (value) => { try { return new URL(String(value)).href; } catch { return null; } };
+
+  /**
+   * Git is Pod shell userland backed by the existing trusted repository service.
+   * The sender must be the tab hosting this exact Pod. Remote subcommands need a
+   * one-job grant minted either by pod_exec's explicit confirmation or by a
+   * direct command in the visible terminal; a command Worker cannot mint it.
+   * @param {any} msg @param {any} sender
+   */
+  const runPodGit = async ({ podId, jobId, argv = [], remoteGrant = null }, sender) => {
+    if (typeof podId !== 'string' || !Array.isArray(argv)) return { ok: false, error: 'podId-and-argv-required' };
+    const senderError = await podSenderError(podId, sender);
+    if (senderError) return { ok: false, error: senderError };
+    const ref = { kind: 'pod', id: podId };
+    const [command = '', ...args] = argv.map(String);
+    const remoteOp = command === 'clone' || command === 'fetch' || command === 'push'
+      ? command : command === 'remote' && (args[0] === 'add' || args[0] === 'set-url') ? 'link' : null;
+    if (remoteOp && remoteGrant !== true) {
+      let target = null;
+      if (remoteOp === 'clone' || remoteOp === 'link') target = args.find((arg) => /^https:\/\//i.test(arg)) ?? null;
+      else target = (await repositories.getRemote(ref))?.url ?? null;
+      const granted = remoteGrant && typeof remoteGrant === 'object'
+        && remoteGrant.op === remoteOp
+        && canonicalUrl(remoteGrant.url) !== null
+        && canonicalUrl(remoteGrant.url) === canonicalUrl(target);
+      if (!granted) {
+        return { ok: true, result: { stdout: '', stderr: `git ${command}: remote operation requires an exact explicit authorization\n`, exitCode: 126 } };
+      }
+    }
+    const abortable = remoteOp && typeof jobId === 'string' ? registerPodController(podId, jobId) : null;
+    try {
+      let result;
+      if (command === 'init') {
+        const oid = await repositories.init(ref);
+        result = { stdout: shellLine(oid ? 'Initialized Peerd Pod repository' : 'Initialized empty Peerd Pod repository'), stderr: '', exitCode: 0 };
+      } else if (command === 'status') {
+        const state = await repositories.status(ref);
+        const changed = state.changed.map((/** @type {{status:string,path:string}} */ entry) => `${entry.status.padEnd(8)} ${entry.path}`);
+        result = { stdout: `${state.branch ? `On branch ${state.branch}\n` : 'No commits yet\n'}${changed.length ? `${changed.join('\n')}\n` : 'working tree clean\n'}`, stderr: '', exitCode: 0 };
+      } else if (command === 'add') {
+        const staged = await repositories.stage(ref, { paths: args.length ? args : ['.'] });
+        result = { stdout: staged.staged.length ? `${staged.staged.join('\n')}\n` : '', stderr: '', exitCode: 0 };
+      } else if (command === 'commit') {
+        const message = optionValue(args, '-m') ?? optionValue(args, '--message');
+        if (!message) return { ok: true, result: { stdout: '', stderr: 'git commit: -m <message> is required\n', exitCode: 2 } };
+        const committed = await repositories.commit(ref, { message });
+        result = { stdout: committed.created ? shellLine(`[${committed.oid?.slice(0, 10)}] ${message}`) : 'nothing to commit\n', stderr: '', exitCode: 0 };
+      } else if (command === 'log') {
+        const depth = Math.min(200, Math.max(1, Number(optionValue(args, '-n') ?? optionValue(args, '--max-count')) || 20));
+        const rows = await repositories.history(ref, { depth });
+        result = { stdout: rows.map((/** @type {{oid:string,message:string}} */ row) => `${row.oid.slice(0, 10)} ${row.message}`).join('\n') + (rows.length ? '\n' : ''), stderr: '', exitCode: 0 };
+      } else if (command === 'branch') {
+        const name = args.find((arg) => !arg.startsWith('-'));
+        if (name) {
+          const created = await repositories.branch(ref, { name, checkout: false });
+          result = { stdout: shellLine(created.branch), stderr: '', exitCode: 0 };
+        } else {
+          const [names, state] = await Promise.all([repositories.branches(ref), repositories.status(ref)]);
+          result = { stdout: names.map((/** @type {string} */ entry) => `${entry === state.branch ? '* ' : '  '}${entry}`).join('\n') + (names.length ? '\n' : ''), stderr: '', exitCode: 0 };
+        }
+      } else if (command === 'checkout' || command === 'switch') {
+        const name = args.find((arg) => !arg.startsWith('-'));
+        if (!name) return { ok: true, result: { stdout: '', stderr: `git ${command}: branch required\n`, exitCode: 2 } };
+        const checked = await repositories.checkout(ref, { name });
+        result = { stdout: shellLine(`Switched to branch '${checked.branch}'`), stderr: '', exitCode: 0 };
+      } else if (command === 'clone') {
+        const positional = args.filter((arg, index) => !arg.startsWith('-') && args[index - 1] !== '-b' && args[index - 1] !== '--branch' && args[index - 1] !== '--depth');
+        const url = positional[0];
+        if (!url) return { ok: true, result: { stdout: '', stderr: 'git clone: HTTPS URL required\n', exitCode: 2 } };
+        const cloned = await repositories.clone(ref, {
+          url, ref: optionValue(args, '-b') ?? optionValue(args, '--branch'),
+          depth: Math.min(500, Math.max(1, Number(optionValue(args, '--depth')) || 50)),
+          signal: abortable?.controller.signal,
+        });
+        result = { stdout: shellLine(`Cloned ${cloned.remote.url}`), stderr: '', exitCode: 0 };
+      } else if (command === 'fetch') {
+        const fetched = await repositories.fetch(ref, { signal: abortable?.controller.signal });
+        result = { stdout: shellLine(`Fetched ${fetched.remote.url}`), stderr: '', exitCode: 0 };
+      } else if (command === 'push') {
+        const branchName = args.find((arg) => !arg.startsWith('-') && arg !== 'origin');
+        const pushed = await repositories.push(ref, { ...(branchName ? { ref: branchName } : {}), signal: abortable?.controller.signal });
+        result = pushed.ok
+          ? { stdout: shellLine(`Pushed ${pushed.branch} to ${pushed.remote.url}`), stderr: '', exitCode: 0 }
+          : { stdout: '', stderr: shellLine(pushed.error || 'push rejected'), exitCode: 1 };
+      } else if (command === 'remote') {
+        const url = args.find((arg) => /^https:\/\//i.test(arg));
+        if (url && (args.includes('add') || args.includes('set-url'))) {
+          const remote = await repositories.setRemote(ref, { url });
+          result = { stdout: '', stderr: '', exitCode: 0, remote };
+        } else {
+          const remote = await repositories.getRemote(ref);
+          result = { stdout: remote ? `${args.includes('-v') ? `origin\t${remote.url} (fetch)\norigin\t${remote.url} (push)` : 'origin'}\n` : '', stderr: '', exitCode: 0 };
+        }
+      } else {
+        result = { stdout: '', stderr: `git: unsupported Pod subcommand '${command || '(none)'}'\n`, exitCode: 2 };
+      }
+      auditLog.append({ type: 'pod_git_command', details: { podId, command, exitCode: result.exitCode } }).catch(() => {});
+      return { ok: true, result };
+    } catch (error) {
+      const result = podGitFailure(error);
+      auditLog.append({ type: 'pod_git_command', details: { podId, command, exitCode: 1, error: /** @type {{message?:string}} */ (error)?.message ?? String(error) } }).catch(() => {});
+      return { ok: true, result };
+    } finally { abortable?.release(); }
+  };
+
   return {
+    'pod/git': runPodGit,
+    'pod/cancel-io': async ({ podId, jobId }, sender) => {
+      const senderError = await podSenderError(podId, sender);
+      if (senderError) return { ok: false, error: senderError };
+      const controllers = podJobControllers.get(podJobKey(podId, jobId));
+      for (const controller of controllers ?? []) controller.abort('Pod job cancelled');
+      return { ok: true, cancelled: controllers?.size ?? 0 };
+    },
+    'pod/web-fetch': async ({ podId, jobId, url, method, headers, body }, sender) => {
+      const senderError = await podSenderError(podId, sender);
+      if (senderError) return { ok: false, error: senderError };
+      if (typeof url !== 'string' || !url) return { ok: false, error: 'url-required' };
+      const abortable = registerPodController(podId, jobId);
+      try {
+        return await vmHttpFetch({
+          url, method, headers, body, signal: abortable?.controller.signal,
+          noCache: true, maxBodyBytes: 16 * 1024 * 1024,
+        });
+      } catch (error) {
+        return { ok: false, error: /** @type {{message?:string}} */ (error)?.message ?? String(error) };
+      } finally { abortable?.release(); }
+    },
+    'pod/get-meta': async ({ podId }, sender) => {
+      const senderError = await podSenderError(podId, sender);
+      if (senderError) return { ok: false, error: senderError };
+      const record = await podRegistry.get(podId);
+      return { ok: true, record: { id: record.id, name: record.name, persistent: record.persistent !== false } };
+    },
     // VM-originated HTTP egress. The VM tab's HTTP-marker dispatcher
     // calls this when it sees a wrapper script's request marker. webFetch
     // applies the denylist + audit; response body is base64-encoded back

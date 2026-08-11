@@ -156,7 +156,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    *   customSystemPrompt?: string,
    *   toolManifest?: import('../tools/manifests.js').ToolManifest | null,
    *   instanceId?: string,
-   *   actorType?: 'webvm' | 'notebook' | 'app' | 'web' | 'dweb',
+   *   actorType?: 'webvm' | 'notebook' | 'pod' | 'app' | 'web' | 'dweb',
    *   backing?: 'tab' | 'api',
    *   review?: boolean,
    *   originState?: import('../actor/origin-lock.js').ActorOriginState,

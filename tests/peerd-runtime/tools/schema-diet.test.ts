@@ -64,8 +64,8 @@ describe('schema diet — descriptor sizes dropped, no capability lost', () => {
 
   test('sandbox_create description shrank (per-kind how-to moved to create-result notes)', () => {
     expect(sandboxCreateTool.description.length).toBeLessThan(BASELINE.sandbox_create - 200);
-    // still routes all three kinds (the taxonomy the model picks from stays)
-    for (const kind of ['webvm', 'notebook', 'app']) {
+    // still routes all four kinds (the taxonomy the model picks from stays)
+    for (const kind of ['webvm', 'notebook', 'pod', 'app']) {
       expect(sandboxCreateTool.description).toContain(`"${kind}"`);
     }
     expect(sandboxCreateTool.description).toContain('NO ambient network');

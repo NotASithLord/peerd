@@ -12,11 +12,12 @@
 //   profiles     keyPath: id          profile records ('default' today; multi-profile later)
 //   apps         keyPath: key         App catalog blob (record { key:'apps.v1', value })
 //   notebooks    keyPath: key         Notebook catalog blob ({ key:'notebooks.v1', value })
+//   pods         keyPath: key         Pod catalog blob ({ key:'pods.v1', value })
 //   vms          keyPath: key         WebVM catalog blob ({ key:'webvms.v1', value })
 //   contacts     keyPath: did         per-peer overlay (user name/notes/tags), keyed by did:key
 //   dpop_keys    keyPath: origin      DPoP keypair handles, one per owned https origin
 //
-// The apps/notebooks/vms stores hold the per-kind catalog as a SINGLE
+// The apps/notebooks/pods/vms stores hold the per-kind catalog as a SINGLE
 // { key, value } blob (the registry-factory's load-all / persist-all
 // shape), moved off chrome.storage.local for consistency + to escape its
 // ~10MB quota. See `idbKV` at the bottom — the single-blob adapter the
@@ -86,7 +87,10 @@ const DB_NAME = 'peerd';
 // credential. why persist it at all: the key must survive an MV3 service-worker
 // eviction, and a handle is the only form of it we can hold. Additive,
 // forward-only. See peerd-egress/dpop/keys.js.
-const DB_VERSION = 12;
+// v13 — adds the Pod instance catalog. Pod files remain in one named OPFS
+// subtree; this store holds only the registry's single { key, value } blob.
+// Additive and forward-only so existing engine catalogs are untouched.
+const DB_VERSION = 13;
 
 /**
  * Open the database. Cached after first call. Re-opens on connection
@@ -157,6 +161,10 @@ export const openDB = () => {
       // one (orphaning any local instances it held — accepted).
       if (!db.objectStoreNames.contains('notebooks')) {
         db.createObjectStore('notebooks', { keyPath: 'key' });
+      }
+      // v13 — lightweight Pod catalog; workspace bytes live in OPFS.
+      if (!db.objectStoreNames.contains('pods')) {
+        db.createObjectStore('pods', { keyPath: 'key' });
       }
       if (db.objectStoreNames.contains('sandboxes')) {
         db.deleteObjectStore('sandboxes');

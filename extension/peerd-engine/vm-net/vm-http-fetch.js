@@ -18,6 +18,32 @@ import { needsWebWriteConfirm } from './http-bridge.js';
 export const WEB_WRITE_CONFIRM_KEY = 'web:write';
 export const MAX_VM_FETCH_BODY = 50 * 1024 * 1024;
 
+/** @param {Response} response @param {number} limit */
+const readBoundedBody = async (response, limit) => {
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return bytes.byteLength > limit ? { bytes: null, size: bytes.byteLength } : { bytes, size: bytes.byteLength };
+  }
+  /** @type {Uint8Array[]} */ const chunks = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+    size += chunk.byteLength;
+    if (size > limit) {
+      await reader.cancel('response body limit exceeded').catch(() => {});
+      return { bytes: null, size };
+    }
+    chunks.push(chunk);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return { bytes, size };
+};
+
 /**
  * Host-bound git-auth injection. Attaches the user's `git:<host>` token only
  * when the request URL canonicalizes to that host over HTTPS (authHostForRequestUrl
@@ -56,15 +82,16 @@ export const makeVmHttpFetch = (deps) => {
   const injectGitAuth = makeInjectGitAuth(deps);
 
   /**
-   * @param {{ url: string, method?: string, headers?: Record<string,string>, body?: string|null, gitAuth?: boolean, noCache?: boolean }} req
+   * @param {{ url: string, method?: string, headers?: Record<string,string>, body?: string|null, gitAuth?: boolean, noCache?: boolean, signal?:AbortSignal, maxBodyBytes?:number }} req
    *   noCache opts this request out of the IDB cache entirely (no read, no
    *   store). why: remote MODULE source (module-resolver.js makeFetchRemote)
    *   must hit the live audited fetch every run — a warm IDB hit would serve
    *   third-party code with no denylist re-check and no audit entry, and the
    *   design forbids a persistent module cache (stale code silently pinned).
    */
-  return async ({ url, method, headers, body, gitAuth, noCache }) => {
+  return async ({ url, method, headers, body, gitAuth, noCache, signal, maxBodyBytes }) => {
     const verb = (method || 'GET').toUpperCase();
+    const bodyLimit = Math.min(MAX_VM_FETCH_BODY, Math.max(1, Number(maxBodyBytes) || MAX_VM_FETCH_BODY));
 
     // Anti-exfil gate: anything that can transmit a body (every verb except
     // GET/HEAD — including OPTIONS) is confirmed. Control ops never reach here;
@@ -98,8 +125,8 @@ export const makeVmHttpFetch = (deps) => {
     }
 
     const init = (verb !== 'GET') || effHeaders || body != null
-      ? { method: verb, headers: effHeaders || undefined, body: body ?? undefined }
-      : undefined;
+      ? { method: verb, headers: effHeaders || undefined, body: body ?? undefined, signal }
+      : (signal ? { signal } : undefined);
     const res = await webFetch(url, init);
 
     if (res.status === 304 && cached) {
@@ -108,14 +135,14 @@ export const makeVmHttpFetch = (deps) => {
         headers: cached.meta.headers, bodyB64: cached.bodyB64, fromCache: 'revalidated' };
     }
 
-    const ab = await res.arrayBuffer();
-    if (ab.byteLength > MAX_VM_FETCH_BODY) {
-      return { ok: false, error: `body too large: ${ab.byteLength}B > ${MAX_VM_FETCH_BODY}B` };
+    const bodyResult = await readBoundedBody(res, bodyLimit);
+    if (!bodyResult.bytes) {
+      return { ok: false, error: `body too large: at least ${bodyResult.size}B > ${bodyLimit}B` };
     }
-    const bodyB64 = bytesToBase64(new Uint8Array(ab));
+    const bodyB64 = bytesToBase64(bodyResult.bytes);
     const meta = { status: res.status, statusText: res.statusText, headers: Object.fromEntries(res.headers) };
 
-    if (key && isResponseStorable(meta, ab.byteLength)) {
+    if (key && isResponseStorable(meta, bodyResult.size)) {
       try { await cachePut({ key, meta, bodyB64, storedAt: now() }); }
       catch { /* cache is best-effort; a quota failure must not fail the fetch */ }
     }

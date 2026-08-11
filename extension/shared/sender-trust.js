@@ -25,7 +25,7 @@
  * (`sender.id === runtimeId`) AND (b) running from our own packaged
  * origin (`sender.url` starts with `chrome-extension://<id>/`). That
  * admits every legitimate first-party surface — the side panel, the
- * offscreen document, and the vm/js/app tab pages (which legitimately
+ * offscreen document, and the vm/js/pod/app tab pages (which legitimately
  * carry a `sender.tab`) — and rejects:
  *   - a hypothetical content script (its `sender.url` is the WEB page,
  *     not our extension origin — this is the case the manifest currently
@@ -60,7 +60,7 @@ export const isFirstPartySender = (sender, { runtimeId, extensionOrigin } = {}) 
  * Is this sender specifically the OFFSCREEN DOCUMENT?
  *
  * why a second, narrower predicate: isFirstPartySender answers "one of ours",
- * which is every extension page — the side panel, the home tab, and the three
+ * which is every extension page — the side panel, the home tab, and the
  * engine tab pages that host agent-authored code. For most routes that is the
  * right question. For the few that carry an actor's authority (the offscreen
  * relay: tool dispatch on a pinned instance, and a model call the service

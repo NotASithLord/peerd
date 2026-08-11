@@ -51,6 +51,20 @@ const nextMessage = (worker, type, timeoutMs = 10000) => new Promise((resolve, r
 });
 
 describe('notebook-tab realm seal (real worker realm)', () => {
+  it('gives Pod no ambient fetch, raw OPFS root, or extension API namespace', async () => {
+    const worker = spawnFixture('pod-seal-probe-worker.js');
+    try {
+      const result = await nextMessage(worker, 'pod-seal-result');
+      expect(result.globalFetch.threw).toBe(true);
+      expect(result.globalFetch.name).toBe('PodEgressBlockedError');
+      expect(result.rawOpfs.threw).toBe(true);
+      expect(result.rawOpfs.name).toBe('PodEgressBlockedError');
+      expect(result.chromeAbsent).toBe(true);
+      expect(result.browserAbsent).toBe(true);
+      expect(result.namedFetch).toBe('function');
+    } finally { worker.terminate(); }
+  });
+
   it('hard-blocks every raw network channel with NotebookEgressBlockedError', async () => {
     const worker = spawnFixture('seal-probe-worker.js');
     try {

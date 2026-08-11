@@ -77,6 +77,28 @@ describe('red-team: sandboxed code cannot escape a real Notebook worker realm', 
   });
 });
 
+describe('red-team: Pod jobs receive named capabilities, never extension authority', () => {
+  it('blocks ambient fetch, raw OPFS, chrome/browser APIs, and keeps only the named fetch bridge', async () => {
+    const worker = spawnFixture('pod-seal-probe-worker.js');
+    try {
+      const result = await nextMessage(worker, 'pod-seal-result');
+      expect(result.globalFetch.threw).toBe(true);
+      expect(result.globalFetch.name).toBe('PodEgressBlockedError');
+      expect(result.rawOpfs.threw).toBe(true);
+      expect(result.chromeAbsent).toBe(true);
+      expect(result.browserAbsent).toBe(true);
+      expect(result.namedFetch).toBe('function');
+    } finally { worker.terminate(); }
+  });
+
+  it('the Pod host page independently denies native connections with CSP', async () => {
+    // eslint-disable-next-line no-restricted-globals
+    const html = await (await fetch('/engine-tabs/pod-tab/index.html')).text();
+    const meta = html.match(/http-equiv="Content-Security-Policy"\s+content="([^"]*)"/i);
+    expect(meta?.[1]).toBe("connect-src 'none'");
+  });
+});
+
 describe('red-team: the App iframe + Notebook page CSP fences confine untrusted code', () => {
   it('the Notebook page ships connect-src \'none\' as its second fence', async () => {
     // why bare fetch is acceptable: reads our own shipped page source to pin the

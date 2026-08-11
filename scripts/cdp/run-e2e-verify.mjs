@@ -62,6 +62,13 @@ const makeRecorder = (ctx, state) => {
       screenshots.push({ label, path: relative(ROOT, file) });
       return png;
     },
+    async shotPage(label, page) {
+      const png = await capturePage(page);
+      const file = join(ARTIFACTS, `${state.name}-${label}.png`);
+      writeFileSync(file, png);
+      screenshots.push({ label, path: relative(ROOT, file) });
+      return png;
+    },
     // Compare + record ONE captured variant (a state × theme). Shared by the
     // panel-sized `visual` and the wide-page `visualPage`.
     _record(variant, base, theme, png, opts) {

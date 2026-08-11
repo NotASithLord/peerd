@@ -10,6 +10,9 @@ describe('repository storage paths', () => {
     expect(repositoryPaths({ kind: 'notebook', id: 'note-1' })).toEqual({
       dir: '/peerd-notebooks/note-1', gitdir: '/peerd-git/notebook/note-1',
     });
+    expect(repositoryPaths({ kind: 'pod', id: 'pod-1' })).toEqual({
+      dir: '/peerd-pods/pod-1', gitdir: '/peerd-git/pod/pod-1',
+    });
   });
 
   test('rejects traversal and unsupported repository kinds', () => {

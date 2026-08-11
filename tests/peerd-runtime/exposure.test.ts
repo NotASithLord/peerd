@@ -132,6 +132,7 @@ describe('DESIGN-17 actor tier — the tool sets', () => {
   test('the actor-only tier is what leaves the main agent — writes AND the fenced reads', () => {
     for (const n of ['vm_boot', 'vm_write_file', 'vm_import', 'vm_delete',
       'js_notebook', 'js_write_file', 'js_read_file', 'js_delete',
+      'pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write', 'pod_destroy',
       'app_update', 'app_write_file', 'app_read_file', 'app_list_files',
       'app_delete_file', 'app_delete', 'edit_file',
       'repo_history', 'repo_version', 'repo_remote']) {
@@ -153,6 +154,9 @@ describe('DESIGN-17 actor tier — the tool sets', () => {
     expect(isAllowedForActorType('edit_file', 'notebook')).toBe(true);
     expect(isAllowedForActorType('repo_history', 'app')).toBe(true);
     expect(isAllowedForActorType('repo_history', 'notebook')).toBe(true);
+    expect(isAllowedForActorType('pod_exec', 'pod')).toBe(true);
+    expect(isAllowedForActorType('pod_read', 'pod')).toBe(true);
+    expect(isAllowedForActorType('vm_boot', 'pod')).toBe(false);
     expect(isAllowedForActorType('repo_history', 'webvm')).toBe(false);
     expect(isAllowedForActorType('edit_file', 'webvm')).toBe(false);   // no vm files via edit_file
     expect(isAllowedForActorType('vm_boot', 'app')).toBe(false);       // foreign kind
@@ -166,6 +170,8 @@ describe('DESIGN-17 actor tier — the tool sets', () => {
     expect(actorTargetIdField('vm_delete')).toBe('vmId');
     expect(actorTargetIdField('js_delete')).toBe('notebookId');
     expect(actorTargetIdField('js_notebook')).toBe('notebook');
+    expect(actorTargetIdField('pod_exec')).toBe('podId');
+    expect(actorTargetIdField('pod_destroy')).toBe('podId');
     expect(actorTargetIdField('edit_file')).toBe('targetId');
     // Repository tools name no id at all: they derive kind + id from the
     // server-stamped actor context, so there is no model-controlled target.
@@ -216,6 +222,10 @@ describe('DESIGN-17 actor tier — the gate (the wall)', () => {
     expect(rt({ name: 'vm_boot' }, {}, appCtx)?.allowed).toBe(false);   // foreign kind
     expect(rt({ name: 'call_api' }, {}, appCtx)?.allowed).toBe(false);  // non-env
     expect(rt({ name: 'actor_create' }, {}, appCtx)?.allowed).toBe(false);
+    const podCtx = { exposure: EXPOSURE_ACTOR, actorType: 'pod', actorInstanceId: 'pod-1' };
+    expect(rt({ name: 'pod_exec' }, { podId: 'pod-1' }, podCtx)).toBeNull();
+    expect(rt({ name: 'pod_exec' }, { podId: 'pod-2' }, podCtx)?.allowed).toBe(false);
+    expect(rt({ name: 'js_notebook' }, {}, podCtx)?.allowed).toBe(false);
   });
 
   test('the per-instance pin refuses a sibling id, allows the bound id / no id', () => {

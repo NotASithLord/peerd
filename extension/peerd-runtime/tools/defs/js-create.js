@@ -1,7 +1,7 @@
 // @ts-check
 // The notebook arm of sandbox_create — spin up a fresh Notebook.
 // (Was the standalone js_create tool; merged into sandbox_create({kind:'notebook'})
-// 2026-07-05 — one create tool, three kinds.)
+// 2026-07-05 — one kind-discriminated create tool.)
 //
 // Creates a Notebook record + spawns its tab in the background. The new
 // Notebook becomes this chat's current — subsequent js_notebook calls

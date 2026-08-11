@@ -1,5 +1,5 @@
 // @ts-check
-// repo_version — local history mutations for the actor's own App/Notebook.
+// repo_version — local history mutations for the actor's own App/Notebook/Pod.
 // Restore is recoverable (it writes a new commit) but force-confirms because it
 // replaces the live working tree.
 
@@ -8,7 +8,7 @@ export const repositoryVersionTool = {
   name: 'repo_version',
   primitive: 'engine',
   description: [
-    'Manage this App or Notebook\'s LOCAL Git history. checkpoint commits current files;',
+    'Manage this App, Notebook, or Pod LOCAL Git history. checkpoint commits current files;',
     'branch creates a branch; checkout switches a clean working tree; restore',
     'replaces live files with a prior commit and records a NEW commit, so it',
     'remains reversible. Use repo_history first.',
@@ -29,11 +29,15 @@ export const repositoryVersionTool = {
     const repositories = /** @type {any} */ (ctx).repositories;
     const kind = /** @type {any} */ (ctx).actorType;
     const id = /** @type {any} */ (ctx).actorInstanceId;
-    if (!repositories || !id || (kind !== 'app' && kind !== 'notebook')) return { ok: false, error: 'repository_unavailable' };
+    if (!repositories || !id || !['app', 'notebook', 'pod'].includes(kind)) return { ok: false, error: 'repository_unavailable' };
     const ref = { kind, id };
     const destructive = args.op === 'checkout' || args.op === 'restore' || args.op === 'branch';
-    const tracker = kind === 'app' ? /** @type {any} */ (ctx).appTabTracker : /** @type {any} */ (ctx).jsTabTracker;
-    const reopen = destructive && tracker?.getTabId?.(id) != null;
+    const tracker = kind === 'app' ? /** @type {any} */ (ctx).appTabTracker
+      : kind === 'pod' ? /** @type {any} */ (ctx).podTabTracker
+      : /** @type {any} */ (ctx).jsTabTracker;
+    const podClient = /** @type {any} */ (ctx).podClient;
+    const podLive = kind === 'pod' && tracker?.getTabId?.(id) != null;
+    const reopen = destructive && kind !== 'pod' && tracker?.getTabId?.(id) != null;
     try {
       if (args.op === 'branch' && typeof args.name !== 'string') return { ok: false, error: 'branch_name_required' };
       if (args.op === 'checkout' && typeof args.name !== 'string') return { ok: false, error: 'branch_name_required' };
@@ -48,7 +52,7 @@ export const repositoryVersionTool = {
         if (answer !== 'yes_once' && answer !== 'yes_session' && answer !== true) return { ok: false, error: 'restore_declined' };
       }
       if (reopen) { await tracker.closeTab(id); await new Promise((resolve) => setTimeout(resolve, 100)); }
-      const result = await repositories.coordinate(ref, async () => {
+      const operation = () => repositories.coordinate(ref, async () => {
         if (args.op === 'checkpoint') return repositories.commit(ref, { message: typeof args.message === 'string' ? args.message : 'checkpoint' });
         // Git carries a dirty working tree onto the new branch. The next
         // checkpoint therefore lands on the branch the model just requested.
@@ -57,6 +61,10 @@ export const repositoryVersionTool = {
         if (args.op === 'restore') return repositories.restore(ref, { to: args.to });
         throw new Error('unknown_repo_version_op');
       });
+      const result = podLive
+        ? await podClient?.withWorkspaceLock?.(id, operation)
+        : await operation();
+      if (podLive && result === undefined) throw new Error('Pod workspace quiesce unavailable');
       if (!reopen && kind === 'app') tracker?.reloadTab?.(id).catch(() => {});
       return { ok: true, content: JSON.stringify({ repository: ref, op: args.op, result }, null, 2) };
     } catch (e) {

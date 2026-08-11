@@ -19,7 +19,7 @@
 
 import { createServer } from 'node:http';
 import { createSocket } from 'node:dgram';
-import { rpc, evalIn, waitFor, sseText, sseToolCall, openExtPage, openWidePage, sleep, PASSPHRASE } from './e2e-harness.mjs';
+import { rpc, evalIn, waitFor, sseText, sseToolCall, openExtPage, openWidePage, attach, setEmulatedTheme, WIDE_METRICS, sleep, PASSPHRASE } from './e2e-harness.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -76,6 +76,7 @@ let dwebActorState = { delegates: 0, actorCalls: 0 };
 let a2aState = { delegates: 0, actorCalls: 0 };
 // heap-split phase 1: the offscreen pure-reasoning actor state.
 let reasoningState = { spawned: 0, childCalls: 0 };
+let podRuntimeState = { creates: 0, podId: null, lastBody: '' };
 // heap-split phase 4: the offscreen TOOL-BEARING actor state.
 let actorToolsState = { spawned: 0, childCalls: 0 };
 // heap-split phase 4: an offscreen actor DELEGATING to its own web actor.
@@ -932,6 +933,16 @@ export const STATES = [
         await evalIn(page, `[...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')?.click()`);
         await waitFor(() => evalIn(page, `!!document.querySelector('.library-repository .library-commit')`),
           { budgetMs: 20_000, pollMs: 80 });
+        // Git commit IDs include the commit timestamp, so this visual fixture
+        // must normalize them before capture. The surrounding branch, history,
+        // controls, and layout remain production-rendered; only the inherently
+        // run-specific identifier is replaced.
+        await evalIn(page, `(() => {
+          const fixedOid = '0000000000';
+          const head = document.querySelector('.library-repository-head .muted');
+          if (head) head.textContent = head.textContent.replace(/[0-9a-f]{10}$/i, fixedOid);
+          for (const oid of document.querySelectorAll('.library-commit code')) oid.textContent = fixedOid;
+        })()`);
         await rec.visualPage('home-library-git', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
@@ -1098,6 +1109,166 @@ export const STATES = [
       const page = await openWidePage(ctx, 'eval/runner.html', { ready: 'button, select' });
       try { await rec.visualPage('eval-runner', page); }
       finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
+  // --- functional + screenshot: a REAL Pod from create through persistent reopen
+  // This is the browser evidence lane for the new execution kind. It creates via
+  // the public tool, attaches to the actual background engine tab, drives the
+  // visible terminal, then closes/reopens that same persistent workspace.
+  {
+    name: 'pod-runtime', kind: 'functional', phase: 'post-unlock',
+    responder: (_callIndex, request) => {
+      const body = request?.postData || '';
+      try {
+        const payload = JSON.parse(body);
+        podRuntimeState.lastBody = JSON.stringify(payload.messages?.slice(-4) ?? payload).slice(-5000);
+      } catch { podRuntimeState.lastBody = body.slice(-5000); }
+      const id = body.match(/pod-[a-z0-9]+-[a-z0-9]+/i)?.[0] ?? null;
+      if (id) podRuntimeState.podId = id;
+      if (podRuntimeState.creates === 0) {
+        podRuntimeState.creates += 1;
+        return { sse: sseToolCall('sandbox_create', { kind: 'pod', name: 'E2E Pod', persistent: true }) };
+      }
+      return { sse: sseText('POD-CREATED') };
+    },
+    async run(ctx, rec) {
+      // Earlier full-tab visual states may leave another renderer foregrounded;
+      // keep the side panel unthrottled while its model/tool loop creates Pod.
+      await ctx.page.send('Page.bringToFront').catch(() => {});
+      podRuntimeState = { creates: 0, podId: null, lastBody: '' };
+      const createStarted = performance.now();
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Create a persistent Pod for the runtime verification.' });
+      rec.check('sandbox_create request accepted', sent?.ok === true, JSON.stringify(sent));
+      await waitFor(async () => {
+        const settled = await evalIn(ctx.page, `(() => {
+          const busy = !!document.querySelector('form.input-bar button.stop');
+          const text = [...document.querySelectorAll('.message-assistant .bubble')].map((node) => node.textContent).join('\\n');
+          return !busy && text.includes('POD-CREATED');
+        })()`);
+        return settled && podRuntimeState.podId;
+      }, { budgetMs: 30_000, pollMs: 80 });
+      const podEvidence = await evalIn(ctx.page, `document.body.innerText`);
+      let podId = podRuntimeState.podId;
+      if (!podId) podId = String(podEvidence).match(/pod-[a-z0-9]+-[a-z0-9]+/i)?.[0] ?? null;
+      rec.check('sandbox_create returned a durable Pod id', typeof podId === 'string', podId ?? `${String(podEvidence).slice(-800)}\nWIRE:${podRuntimeState.lastBody.slice(-1200)}`);
+      if (!podId) return;
+
+      const target = await waitFor(async () => {
+        const targets = await (await fetch(`http://127.0.0.1:${ctx.port}/json/list`)).json();
+        return targets.find((entry) => String(entry.url).includes(`/engine-tabs/pod-tab/index.html#${podId}`)) ?? null;
+      }, { budgetMs: 15_000, pollMs: 80 });
+      rec.check('Pod opened as its own visible engine tab', !!target, target?.url ?? 'missing');
+      if (!target) return;
+      let page = await attach(target.webSocketDebuggerUrl);
+      await page.send('Runtime.enable');
+      await page.send('Page.enable');
+      await page.send('Performance.enable').catch(() => {});
+      await page.send('Emulation.setDeviceMetricsOverride', WIDE_METRICS);
+      await setEmulatedTheme(page, 'light');
+      await waitFor(() => evalIn(page, `!!document.querySelector('#pod-app:not([hidden])')`), { budgetMs: 15_000, pollMs: 50 });
+
+      const readyText = await evalIn(page, `document.getElementById('terminal-output')?.textContent || ''`);
+      const coldBootMs = Number(String(readyText).match(/ready in (\d+)ms/i)?.[1] ?? NaN);
+      rec.check('Pod reports a measured cold boot', Number.isFinite(coldBootMs), `worker/editor boot=${coldBootMs}ms, create-to-ready=${Math.round(performance.now() - createStarted)}ms`);
+
+      const runTerminal = async (command, budgetMs = 20_000) => {
+        const before = await evalIn(page, `document.getElementById('terminal-output')?.children.length ?? 0`);
+        await evalIn(page, `(() => {
+          const input = document.getElementById('terminal-input');
+          input.value = ${JSON.stringify(command)};
+          document.getElementById('terminal-form').requestSubmit();
+        })()`);
+        const settled = await waitFor(() => evalIn(page, `(() => {
+          const nodes = [...document.getElementById('terminal-output').children].slice(${before});
+          return nodes.some((node) => node.classList.contains('entry-meta') && node.textContent.includes('· exit '))
+            ? nodes.map((node) => ({ className: node.className, text: node.textContent })).filter(Boolean) : null;
+        })()`), { budgetMs, pollMs: 25 });
+        return settled ?? [];
+      };
+      const joined = (rows) => rows.map((row) => row.text).join('');
+
+      const shell = await runTerminal("mkdir -p src; echo alpha > src/a.txt; cat src/a.txt | grep alpha");
+      rec.check('shell files + pipeline + redirection work', joined(shell).includes('alpha\n') && joined(shell).includes('exit 0'), joined(shell));
+      const pwd = await runTerminal('pwd');
+      const shellMs = Number(joined(pwd).match(/· (\d+)ms/)?.[1] ?? NaN);
+      rec.check('warm shell command measured', joined(pwd).includes('/\n') && Number.isFinite(shellMs), `${shellMs}ms`);
+
+      const javascript = await runTerminal("js -e 'console.log(6 * 7)'");
+      rec.check('Web-standard JavaScript runs without a Node claim', joined(javascript).includes('42\n') && joined(javascript).includes('exit 0'), joined(javascript));
+      const ambient = await runTerminal("js -e 'for (const probe of [() => fetch(\"https://example.com\"), () => navigator.storage.getDirectory()]) { try { await probe() } catch (e) { console.log(e.name) } }; console.log(typeof chrome, typeof browser)'");
+      rec.check('Pod JS has no ambient network/storage/extension authority', (joined(ambient).match(/PodEgressBlockedError/g) ?? []).length >= 2 && joined(ambient).includes('undefined undefined'), joined(ambient));
+
+      const controlled = await runTerminal('curl https://example.com/__peerd_pod_e2e__');
+      rec.check('named Pod curl crosses the controlled host bridge', joined(controlled).includes('pod-controlled-egress') && joined(controlled).includes('exit 0'), joined(controlled));
+
+      const wasi = await runTerminal('wasi-demo');
+      const wasiMs = Number(joined(wasi).match(/· (\d+)ms/)?.[1] ?? NaN);
+      rec.check('WASI Preview 1 command executes', joined(wasi).includes('hello from wasi') && joined(wasi).includes('exit 0'), `${wasiMs}ms`);
+
+      const git = await runTerminal("git init; echo tracked > tracked.txt; git add .; git commit -m first; git log -n 1", 30_000);
+      rec.check('browser-native Git init/add/commit/log works in the Pod workspace', joined(git).includes('first') && joined(git).includes('exit 0'), joined(git));
+      const denied = await runTerminal('curl http://127.0.0.1:9/private');
+      rec.check('network request is brokered and private/cleartext egress is denied', /exit [^0]/.test(joined(denied)) && /curl:/i.test(joined(denied)), joined(denied));
+
+      await evalIn(page, `(() => {
+        const input = document.getElementById('terminal-input');
+        input.value = 'sleep 10 &';
+        document.getElementById('terminal-form').requestSubmit();
+      })()`);
+      await waitFor(() => evalIn(page, `document.getElementById('pod-status')?.textContent === 'running'`), { budgetMs: 3_000, pollMs: 25 });
+      const jobs = await runTerminal('jobs');
+      const sleepingJob = joined(jobs).match(/(job-\S+)\trunning\tsleep 10 &/)?.[1] ?? null;
+      rec.check('two independent command Workers run concurrently', !!sleepingJob && joined(jobs).includes('\trunning\tjobs'), joined(jobs));
+      if (sleepingJob) {
+        const killed = await runTerminal(`kill ${sleepingJob}`);
+        rec.check('a running job can be cancelled', joined(killed).includes('exit 0'), joined(killed));
+      }
+
+      const beforeStop = await evalIn(page, `document.getElementById('terminal-output')?.children.length ?? 0`);
+      await evalIn(page, `(() => {
+        const input = document.getElementById('terminal-input');
+        input.value = 'sleep 10';
+        document.getElementById('terminal-form').requestSubmit();
+      })()`);
+      await waitFor(() => evalIn(page, `!document.getElementById('stop-button')?.hidden`), { budgetMs: 3_000, pollMs: 25 });
+      await evalIn(page, `document.getElementById('stop-button').click()`);
+      const stopped = await waitFor(() => evalIn(page, `(() => {
+        const nodes = [...document.getElementById('terminal-output').children].slice(${beforeStop});
+        return nodes.map((node) => node.textContent).join('').includes('exit 130');
+      })()`), { budgetMs: 3_000, pollMs: 25 });
+      rec.check('visible Stop terminates the foreground Pod job', stopped === true);
+
+      await runTerminal('export POD_PARENT=kept');
+      await runTerminal('export POD_PARENT=background &');
+      const isolated = await runTerminal('echo $POD_PARENT');
+      rec.check('background job cwd/environment stay isolated from the parent shell', joined(isolated).includes('kept\n'), joined(isolated));
+
+      await runTerminal('echo survives-reload > persistent.txt');
+      const metrics = await page.send('Performance.getMetrics').catch(() => ({ metrics: [] }));
+      const heapBytes = metrics.metrics?.find((entry) => entry.name === 'JSHeapUsedSize')?.value ?? null;
+      rec.check('host renderer memory sampled', typeof heapBytes === 'number', heapBytes == null ? 'unavailable' : `${(heapBytes / 1048576).toFixed(1)} MiB JS heap (host renderer; idle command Workers terminated)`);
+
+      await rec.shotPage('terminal-before-reopen', page);
+      const closed = await evalIn(ctx.page, `new Promise((resolve) => chrome.tabs.query({}, (tabs) => {
+        const tab = tabs.find((entry) => String(entry.url || '').includes('/engine-tabs/pod-tab/index.html#${podId}'));
+        if (!tab?.id) { resolve(false); return; }
+        chrome.tabs.remove(tab.id, () => resolve(true));
+      }))`, true);
+      rec.check('persistent Pod can be stopped by closing its host tab', closed === true);
+      page.close();
+      await sleep(150);
+
+      page = await openWidePage(ctx, `engine-tabs/pod-tab/index.html#${podId}`, { ready: '#pod-app:not([hidden])' });
+      const reopenedText = await evalIn(page, `document.getElementById('terminal-output')?.textContent || ''`);
+      const reopenMs = Number(String(reopenedText).match(/ready in (\d+)ms/i)?.[1] ?? NaN);
+      const persistent = await runTerminal('cat persistent.txt');
+      rec.check('persistent reopen restores the named OPFS workspace', joined(persistent).includes('survives-reload\n'), `${reopenMs}ms reopen; ${joined(persistent)}`);
+      await rec.shotPage('terminal-persistent-reopen', page);
+      page.close();
+      // The following actor states render progress through Mithril/rAF. Return
+      // foreground ownership after driving the separate engine-tab renderer.
+      await ctx.page.send('Page.bringToFront').catch(() => {});
     },
   },
 

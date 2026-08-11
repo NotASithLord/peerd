@@ -319,6 +319,8 @@ import { createVmClient } from './vm-client.js';
 import { createVmTabTracker } from './vm-tab-tracker.js';
 import { createJsClient } from './notebook-client.js';
 import { createJsTabTracker } from './notebook-tab-tracker.js';
+import { createPodClient } from './pod-client.js';
+import { createPodTabTracker } from './pod-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
 import { createScriptRunRegistry } from './script-runs.js';
 import { createContextSnapshots } from './context-snapshots.js';
@@ -334,6 +336,7 @@ import { createAppTabTracker } from './app-tab-tracker.js';
 import {
   createVmRegistry,
   createNotebookRegistry,
+  createPodRegistry,
   createAppRegistry,
   // artifact export/import (.peerd envelopes — DESIGN-10)
   opfsHelpers,
@@ -1070,7 +1073,7 @@ const drivenTabIds = () => {
   // Notebook worker is sealed, so App tabs are the ones with a real un-gated
   // network edge — but scoping all three keeps the rule uniform and costs a
   // rule condition entry, not a check per request.
-  for (const tracker of [vmTabTracker, jsTabTracker, appTabTracker]) {
+  for (const tracker of [vmTabTracker, jsTabTracker, podTabTracker, appTabTracker]) {
     for (const instanceId of tracker.listLive()) {
       const tabId = tracker.getTabId(instanceId);
       if (typeof tabId === 'number') ids.add(tabId);
@@ -1120,7 +1123,7 @@ const denylistNetGuard = makeDenylistNetGuard({
 //   * the orchestrator          — drives the user's own foreground tab on the
 //                                 user's own instruction. Locking it would mean
 //                                 peerd refusing to look at the page you are on.
-//   * the three engine kinds    — act on an instance, never a tab. No landing.
+//   * engine actors             — act on an instance, never a web tab. No landing.
 //   * the dweb actor            — no tab either.
 //   * an API actor (backing:'api') — already bound to ONE fixed origin by
 //                                 `withApiCredentials`, which is the same
@@ -1752,6 +1755,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     jsClient,
     jsRegistry,
     jsTabTracker,
+    // Pod kind — shell/WASI jobs run in sealed command Workers while this
+    // instance-pinned client and catalog own only tab lifecycle + metadata.
+    podClient,
+    podRegistry,
+    podTabTracker,
     // script — a HEADLESS sibling: the same sealed worker, hosted in the
     // offscreen doc (no tab). Defined after ensureOffscreen below.
     jsOffscreenClient,
@@ -2389,6 +2397,20 @@ const jsTabTracker = createJsTabTracker({
 });
 const jsClient = createJsClient({ registry: jsRegistry, tracker: jsTabTracker });
 
+// Pod is another tab-hosted engine instance, but its tab owns a shell/job host
+// instead of a Notebook editor evaluator. Files and catalog metadata survive a
+// stopped worker; cwd, environment, and live jobs deliberately do not.
+const podRegistry = createPodRegistry({ storage: idbKV('pods'), onActorArchive: archiveOrphanedActor });
+// A closed ephemeral Pod is invalid as soon as its host tab disappears, even
+// though its coordinated OPFS/catalog cleanup is asynchronous. This closes the
+// tiny reopen race where a fresh tab could otherwise adopt an id being deleted.
+const podsClosing = new Set();
+const podTabTracker = createPodTabTracker({
+  announce: trackerNote(podRegistry, 'Pod'),
+  onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('pod', id, tabId),
+  onDrop: (/** @type {string} */ id) => engineLiveness.drop('pod', id),
+});
+
 // App registry + tracker + client. Apps' files live in OPFS at
 // peerd-apps/<appId>/; the registry tracks metadata only.
 const appRegistry = createAppRegistry({ storage: idbKV('apps'), onActorArchive: archiveOrphanedActor });
@@ -2403,6 +2425,7 @@ const repositories = createRepositoryService({
   getSecret,
   audit: (event) => { auditLog.append(event).catch(() => {}); },
 });
+const podClient = createPodClient({ registry: podRegistry, tracker: podTabTracker });
 const appClient = createAppClient({ registry: appRegistry, tracker: appTabTracker, repositories });
 
 // Sessions that have ENGAGED the dweb — a dweb tool was called this turn-or-
@@ -3207,6 +3230,35 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
     denylistNetGuard.sync();
     return false;
   }
+  if (msg?.type === 'pod/tab-ready') {
+    if (typeof msg.podId !== 'string' || sender?.tab?.id == null) return false;
+    // Only the Pod tab already pinned during create/adopt may resolve the ready
+    // promise. Without this check any extension page could claim an arbitrary
+    // Pod id and redirect later host RPCs to itself.
+    if (podTabTracker.getTabId(msg.podId) !== sender.tab.id) return false;
+    podTabTracker.onTabReady(msg.podId, sender.tab.id);
+    denylistNetGuard.sync();
+    return false;
+  }
+  if (msg?.type === 'pod/tab-adopt') {
+    if (typeof msg.podId !== 'string' || sender?.tab?.id == null) return false;
+    // A user may reopen a persistent Pod from its durable URL after the old
+    // host tab was closed. Re-adopt only that exact engine-tab URL and only an
+    // id still present in the registry; then pod/get-meta can stay instance-
+    // pinned while boot is in progress.
+    if (podTabTracker.parseIdFromUrl(sender.tab.url) !== msg.podId) return false;
+    if (podsClosing.has(msg.podId)) return Promise.resolve({ ok: false, error: 'pod-closing' });
+    return Promise.resolve(podRegistry.get(msg.podId)).then((record) => {
+      if (!record) return { ok: false, error: 'pod-not-found' };
+      const liveTabId = podTabTracker.getTabId(msg.podId);
+      if (liveTabId != null && liveTabId !== sender.tab.id) {
+        return { ok: false, error: 'pod-already-open' };
+      }
+      podTabTracker.onTabPending(msg.podId, sender.tab.id);
+      denylistNetGuard.sync();
+      return { ok: true };
+    });
+  }
   if (msg?.type === 'app/tab-ready') {
     if (typeof msg.appId !== 'string' || sender?.tab?.id == null) return false;
     appTabTracker.onTabPending(msg.appId, sender.tab.id);
@@ -3250,6 +3302,22 @@ browser.tabs.onRemoved.addListener((tabId) => {
   const closedVmId = vmTabTracker.onTabRemoved(tabId);
   if (closedVmId) vmClient.onTabClosed(closedVmId);
   jsTabTracker.onTabRemoved(tabId);
+  const closedPodId = podTabTracker.onTabRemoved(tabId);
+  if (closedPodId) {
+    // why: an ephemeral Pod's scope is the tab lifetime. Persistent Pods keep
+    // their catalog + OPFS tree and reopen stopped; ephemeral ones leave no
+    // durable workspace after a clean close. The repository coordinator makes
+    // this idempotent with an explicit pod_destroy racing the tab event.
+    podsClosing.add(closedPodId);
+    Promise.resolve(podRegistry.get(closedPodId)).then(async (record) => {
+      if (!record || record.persistent !== false) return;
+      await repositories.coordinate({ kind: 'pod', id: closedPodId }, async () => {
+        await repositories.destroy({ kind: 'pod', id: closedPodId }, { worktree: true });
+        await podRegistry.delete(closedPodId);
+      });
+    }).catch((error) => console.warn('[sw] ephemeral Pod cleanup failed', closedPodId, error))
+      .finally(() => podsClosing.delete(closedPodId));
+  }
   appTabTracker.onTabRemoved(tabId);
   // DESIGN-17 note: only the VM client owns a per-instance COMMAND QUEUE to
   // interrupt on tab-close (above). The Notebook/App clients have no such lane —
@@ -3599,6 +3667,7 @@ browser.runtime?.onStartup?.addListener(() => {
 const ACTOR_REGISTRY_BY_PREFIX = {
   vm: { reg: vmRegistry, kind: 'webvm' },
   notebook: { reg: jsRegistry, kind: 'notebook' },
+  pod: { reg: podRegistry, kind: 'pod' },
   app: { reg: appRegistry, kind: 'app' },
 };
 
@@ -3660,7 +3729,7 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
 };
 
 // DESIGN-17 — WEB actors (a fourth `kind:'web'` actor that owns one TAB).
-// Unlike the three engine kinds, a web actor has no registry record: the TAB
+// Unlike engine actors, a web actor has no registry record: the TAB
 // is the durable handle and the binding is tab→session, held here and mirrored to
 // session storage (ephemeral by design — on a cold miss we re-mint against the
 // live tab, whose DOM re-derives state). The address the orchestrator uses is the
@@ -5221,6 +5290,7 @@ const actorMessaging = makeActorMessaging({
       const ownedTab = kind === 'web' ? (actorTabId ?? webActorTabBindings.tabFor(actorSessionId) ?? null)
         : kind === 'webvm' ? vmTabTracker.getTabId(instanceId)
         : kind === 'notebook' ? jsTabTracker.getTabId(instanceId)
+        : kind === 'pod' ? podTabTracker.getTabId(instanceId)
         : kind === 'app' ? appTabTracker.getTabId(instanceId)
         : null;
       if (typeof ownedTab === 'number') setTabAnchor(ownedTab, parentToolUseId);
@@ -5275,7 +5345,7 @@ const actorMessaging = makeActorMessaging({
     // tools + fetch_url run SW-side via the 'actor/tool-dispatch' relay (chrome.* is
     // SW-only); the worker holds no key, no chrome.*. Returns the reply, or null to
     // fall back to the in-SW turn below (offscreen unavailable / never started).
-    if (kind === 'webvm' || kind === 'notebook' || kind === 'app' || kind === 'web' || kind === 'dweb') {
+    if (kind === 'webvm' || kind === 'notebook' || kind === 'pod' || kind === 'app' || kind === 'web' || kind === 'dweb') {
       const off = await runActorTurnOffscreen({ actorSessionId, message: deliveredMessage, instanceId, kind, actorTabId, oneShot: oneShot === true, display });
       if (off) return withLandingStop(off);
     }
@@ -5620,7 +5690,8 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   }),
   ...makeEngineRoutes({
     vault, auditLog, pushState, browser, vmHttpFetch, appRegistry, vmRegistry, jsRegistry,
-    appClient, appTabTracker, opfsHelpers, NOTEBOOK_OPFS_ROOT, IMAGE_PIN_STORAGE_KEY,
+    podRegistry, podTabTracker, appClient, appTabTracker, opfsHelpers,
+    NOTEBOOK_OPFS_ROOT, IMAGE_PIN_STORAGE_KEY,
     buildAppExport, buildNotebookExport, buildVmRecipeExport,
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
@@ -5871,7 +5942,7 @@ async function reseedSharedApps() {
 console.log('[sw] boot — ensuring offscreen for keepalive + voice');
 ensureOffscreen().catch((e) => console.error('[sw] boot ensureOffscreen failed', e));
 
-// Instance registry + tracker init for all three kinds: pull persisted
+// Instance registry + tracker init for all tab-hosted kinds: pull persisted
 // catalogs and re-discover live tabs (a SW restart while tabs are open
 // is common — Chrome kills the SW after 30s idle but leaves tabs alone).
 (async () => {
@@ -5880,10 +5951,12 @@ ensureOffscreen().catch((e) => console.error('[sw] boot ensureOffscreen failed',
     await vmTabTracker.bootstrap();
     await jsRegistry.load();
     await jsTabTracker.bootstrap();
+    await podRegistry.load();
+    await podTabTracker.bootstrap();
     await appRegistry.load();
     await appTabTracker.bootstrap();
     console.log('[sw] instance registries initialized — live tabs:',
-      { vm: vmTabTracker.listLive(), js: jsTabTracker.listLive(), app: appTabTracker.listLive() });
+      { vm: vmTabTracker.listLive(), js: jsTabTracker.listLive(), pod: podTabTracker.listLive(), app: appTabTracker.listLive() });
     // §9 engine orphan reap — instances the liveness ledger says were
     // HOSTED before this SW start whose tabs did not survive. The
     // registry catalog (files, metadata) persists; the running process is
@@ -5893,11 +5966,12 @@ ensureOffscreen().catch((e) => console.error('[sw] boot ensureOffscreen failed',
       const surviving = [
         ...vmTabTracker.listLive().map((/** @type {string} */ id) => `vm:${id}`),
         ...jsTabTracker.listLive().map((/** @type {string} */ id) => `notebook:${id}`),
+        ...podTabTracker.listLive().map((/** @type {string} */ id) => `pod:${id}`),
         ...appTabTracker.listLive().map((/** @type {string} */ id) => `app:${id}`),
       ];
       const lost = await engineLiveness.sweep({ surviving });
-      const KIND_LABEL = { vm: 'Linux VM', notebook: 'Notebook', app: 'App' };
-      const REGISTRY_OF = { vm: vmRegistry, notebook: jsRegistry, app: appRegistry };
+      const KIND_LABEL = { vm: 'Linux VM', notebook: 'Notebook', pod: 'Pod', app: 'App' };
+      const REGISTRY_OF = { vm: vmRegistry, notebook: jsRegistry, pod: podRegistry, app: appRegistry };
       for (const entry of lost) {
         auditLog.append({
           type: 'lifecycle.engine.orphan-reaped',
@@ -5905,6 +5979,11 @@ ensureOffscreen().catch((e) => console.error('[sw] boot ensureOffscreen failed',
         }).catch(() => {});
         const registry = /** @type {any} */ (REGISTRY_OF)[entry.kind];
         const record = await Promise.resolve(registry?.get?.(entry.id)).catch(() => null);
+        if (entry.kind === 'pod' && record?.persistent === false) {
+          await repositories.destroy({ kind: 'pod', id: entry.id }, { worktree: true }).catch(() => {});
+          await podRegistry.delete(entry.id).catch(() => {});
+          continue;
+        }
         const owner = record?.ownerSessionId;
         if (!owner) continue; // no owner to tell; the audit entry stands
         await lifecycleBoot.parkNotice(owner, {

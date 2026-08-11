@@ -327,8 +327,10 @@ any open VM/JS/App tabs reload with it.
 **Firefox (temporary source install).** Generate a Firefox manifest with the
 packaging script, then use `about:debugging#/runtime/this-firefox` → **Load
 Temporary Add-on**. Firefox does not currently support the WebVM or Chrome's
-dedicated offscreen Worker-heap isolation path; see the threat model before
-assuming browser parity.
+dedicated offscreen Worker-heap isolation path. The exact capability losses,
+upstream issues, fallbacks, and exit checks live in the
+[`browser compatibility ledger`](docs/BROWSER-COMPATIBILITY.md); see the threat
+model before assuming browser parity.
 
 **Generated files.** `extension/manifest.json` and
 `extension/shared/channel-config.js` are GENERATED (the checked-in copies

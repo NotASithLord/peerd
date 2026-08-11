@@ -1,6 +1,6 @@
 # peerd — visual gallery
 
-**19 states · 38 screens · baselines `linux-x64`**
+**20 states · 40 screens · baselines `linux-x64`**
 
 Every screen below is the live UI rendered through the E2E harness at a pinned
 Chrome build and viewport — the exact images the visual-regression gate compares
@@ -125,7 +125,15 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/eval-runner.light.png" alt="eval-runner (light)" width="380"> | <img src="baselines/linux-x64/eval-runner.dark.png" alt="eval-runner (dark)" width="380"> |
 
-### 15 · mic-permission
+### 15 · home-library-git
+
+`home-library-git`
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/home-library-git.light.png" alt="home-library-git (light)" width="380"> | <img src="baselines/linux-x64/home-library-git.dark.png" alt="home-library-git (dark)" width="380"> |
+
+### 16 · mic-permission
 
 `mic-permission`
 
@@ -133,7 +141,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/mic-permission.light.png" alt="mic-permission (light)" width="380"> | <img src="baselines/linux-x64/mic-permission.dark.png" alt="mic-permission (dark)" width="380"> |
 
-### 16 · notebook-tab-failed
+### 17 · notebook-tab-failed
 
 `notebook-tab-failed`
 
@@ -141,7 +149,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/notebook-tab-failed.light.png" alt="notebook-tab-failed (light)" width="380"> | <img src="baselines/linux-x64/notebook-tab-failed.dark.png" alt="notebook-tab-failed (dark)" width="380"> |
 
-### 17 · options-behavior
+### 18 · options-behavior
 
 `options-behavior`
 
@@ -149,7 +157,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-behavior.light.png" alt="options-behavior (light)" width="380"> | <img src="baselines/linux-x64/options-behavior.dark.png" alt="options-behavior (dark)" width="380"> |
 
-### 18 · options-denylist
+### 19 · options-denylist
 
 `options-denylist`
 
@@ -157,7 +165,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-denylist.light.png" alt="options-denylist (light)" width="380"> | <img src="baselines/linux-x64/options-denylist.dark.png" alt="options-denylist (dark)" width="380"> |
 
-### 19 · vm-tab-failed
+### 20 · vm-tab-failed
 
 `vm-tab-failed`
 

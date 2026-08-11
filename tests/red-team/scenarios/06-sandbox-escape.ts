@@ -56,17 +56,17 @@ const freshGlobal = () => {
 const throwsEgress = (fn: () => unknown): { ok: boolean; detail: string } => {
   try { fn(); return { ok: false, detail: 'did NOT throw, escape succeeded' }; }
   catch (e: any) {
-    const ok = e?.name === 'NotebookEgressBlockedError' || /peerd\.egress\.fetch/.test(String(e?.message));
+    const ok = /EgressBlockedError$/.test(String(e?.name)) || /peerd\.egress\.fetch/.test(String(e?.message));
     return { ok, detail: ok ? `${e?.name}: ${String(e?.message).slice(0, 48)}` : `threw wrong error: ${String(e)}` };
   }
 };
 
 export const scenario: Scenario = {
   id: '06-sandbox-escape',
-  title: 'Sandbox escape (Notebook worker, App iframe, WebVM)',
+  title: 'Sandbox escape (Notebook/Pod workers, App iframe, WebVM)',
   adversary: 'malicious sandboxed code',
   asset: 'the host origin, the network, and other sandbox instances',
-  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store — the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; the App iframe cannot break out of its inlined-worker shim or navigate the host; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
+  claim: 'Across the sandbox kinds, confinement holds: Notebook and Pod jobs run in sealed workers with no raw network or same-origin durable-store authority; Pod additionally removes ambient fetch, raw OPFS, and extension API namespaces while retaining only a named audited fetch bridge. App code cannot break out of its opaque iframe, and the WebVM HTTP bridge rejects dangerous schemes and request smuggling.',
   threatModelRef: 'INV-6',
   tier: 'unit',
   async run() {
@@ -89,6 +89,27 @@ export const scenario: Scenario = {
     for (const c of rawChannels) {
       const r = throwsEgress(c.fn);
       probes.push(r.ok ? blocked(c.label, r.detail) : leaked(c.label, r.detail));
+    }
+
+    // Pod tightens the same seal: shell/JS/WASI code gets named capabilities,
+    // not a global fetch, raw origin storage, or extension namespaces.
+    {
+      const pod = freshGlobal();
+      pod.g.navigator.storage = { getDirectory: () => 'RAW-OPFS' };
+      pod.g.chrome = { runtime: { sendMessage: () => 'privileged' } };
+      pod.g.browser = { tabs: {} };
+      const { fetch: namedFetch } = applyRealmSeal(pod.g, {
+        environment: 'Pod', exposeGlobalFetch: false,
+        blockHostStorage: true, blockExtensionApis: true,
+      });
+      const fetchDenied = throwsEgress(() => pod.g.fetch('https://evil.example/'));
+      const storageDenied = throwsEgress(() => pod.g.navigator.storage.getDirectory());
+      const confined = fetchDenied.ok && storageDenied.ok
+        && pod.g.chrome === undefined && pod.g.browser === undefined
+        && typeof namedFetch === 'function';
+      probes.push(confined
+        ? blocked('use Pod JS to reach ambient fetch, raw OPFS, or extension APIs', 'global edges removed; only the named audited fetch bridge remains')
+        : leaked('use Pod JS to reach ambient fetch, raw OPFS, or extension APIs', `fetch=${fetchDenied.ok} storage=${storageDenied.ok} chrome=${String(pod.g.chrome)} browser=${String(pod.g.browser)}`));
     }
 
     // 2) Mint a fresh un-sealed realm to recover natives: refused.
@@ -194,6 +215,7 @@ export const scenario: Scenario = {
 
     const result = summarize(probes, [
       'applyRealmSeal (raw-channel block + native deletion + bridge pin)',
+      'applyRealmSeal Pod profile (no ambient fetch/raw OPFS/extension API namespaces)',
       'resolveRelativePath (OPFS ".." collapse)',
       'composeApp + stripMetaRefresh (App iframe breakout/navigation defense)',
       'normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)',

@@ -53,6 +53,13 @@ describe('makeVmHttpFetch — anti-exfil write gate', () => {
     expect(calls.confirm.length).toBe(0);
   });
 
+  test('forwards a caller cancellation signal to the audited fetch', async () => {
+    const controller = new AbortController();
+    const { fetch, calls } = build();
+    await fetch({ url: 'https://example.com/x', signal: controller.signal });
+    expect(calls.fetch[0].init.signal).toBe(controller.signal);
+  });
+
   test('HEAD never prompts', async () => {
     const { fetch, calls } = build();
     await fetch({ url: 'https://example.com/x', method: 'HEAD' });
@@ -262,6 +269,26 @@ describe('makeVmHttpFetch — body cap', () => {
     const { fetch } = build({ webFetch: async () => fakeResponse({ body: exact }) });
     const r = await fetch({ url: 'https://example.com/edge', method: 'GET' });
     expect(r.ok).toBe(true);
+  });
+
+  test('a caller can tighten the streaming body cap before full buffering', async () => {
+    let cancelled = false;
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(6));
+        controller.enqueue(new Uint8Array(6));
+      },
+      cancel() { cancelled = true; },
+    });
+    const { fetch } = build({
+      webFetch: async () => new Response(stream),
+      cacheGet: async () => null,
+      cachePut: async () => {},
+    });
+    const result = await fetch({ url: 'https://example.com/pod.bin', noCache: true, maxBodyBytes: 10 });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('body too large');
+    expect(cancelled).toBe(true);
   });
 });
 

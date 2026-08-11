@@ -162,7 +162,7 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   // NOTE: edit_file reaches appRegistry/jsRegistry via a COMPUTED property
   // (edit-file.js: ctx[kind==='app'?'appRegistry':'jsRegistry']), so it must be
   // listed in BOTH despite not matching a `.appRegistry` grep.
-  // actor_list reads the registries + tab trackers of ALL three engine kinds
+  // actor_list reads the registries + tab trackers of ALL four engine kinds
   // (plus tabs + listApiIntegrations, which are ungated/always present) to build
   // the unified catalog — so it appears in every engine registry+tracker list.
   vm:                 ['vm_boot', 'vm_write_file', 'vm_import'],
@@ -171,10 +171,13 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   jsClient:           ['js_notebook', 'js_write_file', 'js_read_file', 'edit_file'],
   jsRegistry:         ['js_notebook', 'sandbox_create', 'js_delete', 'edit_file', 'actor_list'],
   jsTabTracker:       ['sandbox_create', 'js_delete', 'actor_list', 'repo_version'],
+  podClient:          ['pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write'],
+  podRegistry:        ['sandbox_create', 'pod_destroy', 'actor_list'],
+  podTabTracker:      ['sandbox_create', 'pod_destroy', 'actor_list', 'repo_version', 'repo_remote'],
   jsOffscreenClient:  ['script', 'a2a_run', 'page_code', 'site_client_run'],
   appClient:          ['sandbox_create', 'app_open', 'app_update', 'app_write_file',
     'app_read_file', 'app_list_files', 'app_delete_file', 'app_delete', 'app_search', 'edit_file'],
-  repositories:       ['sandbox_create', 'js_delete', 'repo_history', 'repo_version', 'repo_remote'],
+  repositories:       ['sandbox_create', 'js_delete', 'pod_destroy', 'repo_history', 'repo_version', 'repo_remote'],
   appRegistry:        ['app_delete', 'edit_file', 'actor_list'],
   appTabTracker:      ['actor_list', 'repo_version'],
   messageActor:    ['message_actor'],

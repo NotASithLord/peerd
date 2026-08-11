@@ -23,6 +23,8 @@ const baseDeps = (over: any = {}) => ({
   },
   vmRegistry: { get: async (id: string) => (id === 'v1' ? { id, name: 'VM' } : null), create: async () => ({ id: 'vNew' }) },
   jsRegistry: { get: async () => null, create: async () => ({ id: 'nNew' }) },
+  podRegistry: { get: async (id: string) => (id === 'pod-1' ? { id, name: 'Pod' } : null) },
+  podTabTracker: { getTabId: (id: string) => (id === 'pod-1' ? 99 : null) },
   appClient: {
     open: async () => {}, create: async () => ({ id: 'imported' }),
     readFile: async () => JSON.stringify({ schema: 1, kind: 'app', entry: 'index.html', agent: { kind: 'bound-app' }, capabilities: [] }),
@@ -47,7 +49,111 @@ const baseDeps = (over: any = {}) => ({
   applyWebExtract: async (resp: any) => resp,
   parseAppManifest,
   kv: { get: async () => ({}), set: async () => {} },
+  repositories: {
+    init: async () => 'abc123456789',
+    status: async () => ({ oid: 'abc', branch: 'main', dirty: false, changed: [] }),
+    stage: async () => ({ staged: [] }), commit: async () => ({ oid: 'abc', changed: [], created: false }),
+    history: async () => [], branches: async () => ['main'], branch: async (_ref: any, opts: any) => ({ branch: opts.name }),
+    checkout: async (_ref: any, opts: any) => ({ branch: opts.name, oid: 'abc' }),
+    clone: async (_ref: any, opts: any) => ({ remote: { url: opts.url } }),
+    fetch: async () => ({ remote: { url: 'https://github.com/a/b.git' } }),
+    push: async () => ({ ok: true, branch: 'main', remote: { url: 'https://github.com/a/b.git' } }),
+    setRemote: async (_ref: any, opts: any) => ({ url: opts.url }), getRemote: async () => null,
+    coordinate: async (_ref: any, operation: any) => operation(), destroy: async () => {},
+  },
   ...over,
+});
+
+describe('pod/git — instance-pinned isomorphic-git shell bridge', () => {
+  const sender = { tab: { id: 99 } };
+
+  test('refuses a first-party page that is not the Pod\'s owning tab', async () => {
+    const routes = makeEngineRoutes(baseDeps());
+    expect(await routes['pod/git']({ podId: 'pod-1', argv: ['status'] }, { tab: { id: 12 } }))
+      .toEqual({ ok: false, error: 'pod-sender-not-instance-pinned' });
+  });
+
+  test('maps local shell Git to the existing repository service', async () => {
+    let seen: any = null;
+    const routes = makeEngineRoutes(baseDeps({
+      repositories: {
+        ...baseDeps().repositories,
+        status: async (ref: any) => { seen = ref; return { branch: 'main', changed: [{ status: 'modified', path: 'a.txt' }] }; },
+      },
+    }));
+    const reply = await routes['pod/git']({ podId: 'pod-1', argv: ['status'] }, sender);
+    expect(seen).toEqual({ kind: 'pod', id: 'pod-1' });
+    expect(reply).toMatchObject({ ok: true, result: { exitCode: 0 } });
+    expect(reply.result.stdout).toContain('modified a.txt');
+  });
+
+  test('remote operations fail closed without the one-job grant', async () => {
+    let pushed = false;
+    const deps = baseDeps();
+    deps.repositories.push = async () => { pushed = true; return { ok: true }; };
+    const routes = makeEngineRoutes(deps);
+    const reply = await routes['pod/git']({ podId: 'pod-1', argv: ['push', 'origin', 'main'] }, sender);
+    expect(reply.result.exitCode).toBe(126);
+    expect(reply.result.stderr).toContain('explicit authorization');
+    expect(pushed).toBe(false);
+  });
+
+  test('an explicitly granted remote operation reaches the brokered service', async () => {
+    let pushedRef: any = null;
+    const deps = baseDeps();
+    deps.repositories.push = async (ref: any, opts: any) => {
+      pushedRef = { ref, opts };
+      return { ok: true, branch: 'main', remote: { url: 'https://github.com/a/b.git' } };
+    };
+    deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
+    const routes = makeEngineRoutes(deps);
+    const reply = await routes['pod/git']({
+      podId: 'pod-1', jobId: 'job-authorized', argv: ['push', 'origin', 'main'],
+      remoteGrant: { op: 'push', url: 'https://github.com/a/b.git' },
+    }, sender);
+    expect(reply.result.exitCode).toBe(0);
+    expect(pushedRef.ref).toEqual({ kind: 'pod', id: 'pod-1' });
+    expect(pushedRef.opts.ref).toBe('main');
+    expect(pushedRef.opts.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test('an op- or target-mismatched grant fails closed', async () => {
+    let pushed = false;
+    const deps = baseDeps();
+    deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
+    deps.repositories.push = async () => { pushed = true; return { ok: true }; };
+    const routes = makeEngineRoutes(deps);
+    for (const remoteGrant of [
+      { op: 'fetch', url: 'https://github.com/a/b.git' },
+      { op: 'push', url: 'https://evil.example/x.git' },
+    ]) {
+      const reply = await routes['pod/git']({ podId: 'pod-1', argv: ['push', 'origin', 'main'], remoteGrant }, sender);
+      expect(reply.result.exitCode).toBe(126);
+    }
+    expect(pushed).toBe(false);
+  });
+
+  test('job cancellation aborts an in-flight remote Git transport', async () => {
+    let seenSignal: AbortSignal | null = null;
+    const deps = baseDeps();
+    deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
+    deps.repositories.push = async (_ref: any, opts: any) => {
+      seenSignal = opts.signal;
+      await new Promise((resolve, reject) => {
+        opts.signal.addEventListener('abort', () => reject(new Error('git operation aborted')), { once: true });
+      });
+    };
+    const routes = makeEngineRoutes(deps);
+    const running = routes['pod/git']({
+      podId: 'pod-1', jobId: 'job-cancel-me', argv: ['push', 'origin', 'main'],
+      remoteGrant: { op: 'push', url: 'https://github.com/a/b.git' },
+    }, sender);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const cancelled = await routes['pod/cancel-io']({ podId: 'pod-1', jobId: 'job-cancel-me' }, sender);
+    expect(cancelled).toMatchObject({ ok: true, cancelled: 1 });
+    expect((seenSignal as AbortSignal | null)?.aborted).toBe(true);
+    expect((await running).result.stderr).toContain('aborted');
+  });
 });
 
 describe('sw/web-fetch', () => {
