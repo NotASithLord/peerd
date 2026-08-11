@@ -240,10 +240,645 @@ describe('reduceChat', () => {
     expect(done.actors['tu-1'].streaming).toBe(false);
   });
 
+  test('late reused-id live events cannot mutate the newer actor occurrence', () => {
+    const oldStarted = reduceChat(INITIAL_STATE, {
+      type: 'turn/actor-start', parentToolUseId: 'reused-live', sessionId: 'old-actor',
+      actorCorrelationId: 'old-correlation', actorProjectionEpoch: 'worker-a',
+      actorProjectionRevision: 1,
+      fromIndex: 0, kind: 'web',
+    });
+    const newStarted = reduceChat(oldStarted, {
+      type: 'turn/actor-start', parentToolUseId: 'reused-live', sessionId: 'new-actor',
+      actorCorrelationId: 'new-correlation', actorProjectionEpoch: 'worker-a',
+      actorProjectionRevision: 2,
+      fromIndex: 0, kind: 'web',
+    });
+    const oldBase = {
+      parentToolUseId: 'reused-live', actorCorrelationId: 'old-correlation',
+      actorProjectionEpoch: 'worker-a', actorProjectionRevision: 1,
+    };
+
+    expect(reduceChat(newStarted, {
+      type: 'turn/actor-state', ...oldBase,
+      session: { messages: [{ id: 'late-old-state' }] },
+    })).toBe(newStarted);
+    expect(reduceChat(newStarted, {
+      type: 'turn/actor-error', ...oldBase, error: 'late old failure',
+    })).toBe(newStarted);
+    expect(reduceChat(newStarted, {
+      type: 'turn/actor-done', ...oldBase, ok: false,
+    })).toBe(newStarted);
+    expect(reduceChat(newStarted, {
+      type: 'turn/actor-cost', ...oldBase, cost: { cost: 99 },
+    })).toBe(newStarted);
+
+    const matched = reduceChat(newStarted, {
+      type: 'turn/actor-state', parentToolUseId: 'reused-live',
+      actorCorrelationId: 'new-correlation', actorProjectionEpoch: 'worker-a',
+      actorProjectionRevision: 3,
+      session: { messages: [{ id: 'new-state' }] },
+    });
+    expect(matched.actors['reused-live']).toMatchObject({
+      sessionId: 'new-actor', actorCorrelationId: 'new-correlation', streaming: true,
+      messages: [{ id: 'new-state' }],
+    });
+    expect(matched.actorProjectionRevision).toBe(3);
+  });
+
+  test('a known pre-effect live error carries Not run custody onto the actor card', () => {
+    const started = reduceChat(INITIAL_STATE, {
+      type: 'turn/actor-start', parentToolUseId: 'known-pre-effect', sessionId: 'actor-1',
+      actorCorrelationId: 'known-correlation', actorProjectionEpoch: 'worker-a',
+      actorProjectionRevision: 1,
+      fromIndex: 0, kind: 'web',
+    });
+    const failed = reduceChat(started, {
+      type: 'turn/actor-error', parentToolUseId: 'known-pre-effect',
+      actorCorrelationId: 'known-correlation', actorProjectionEpoch: 'worker-a',
+      actorProjectionRevision: 2,
+      error: 'actor-provider-boundary-blocked: the model request was not run',
+      outcomeKnown: true, performed: false,
+    });
+    expect(failed.actors['known-pre-effect']).toMatchObject({
+      streaming: false, outcomeKnown: true, performed: false,
+      error: 'actor-provider-boundary-blocked: the model request was not run',
+    });
+
+    const reconciled = reduceChat(failed, {
+      type: 'turn/state',
+      session: {
+        sessionId: null,
+        messages: [
+          { role: 'assistant', id: 'known-call', toolUses: [{
+            id: 'known-pre-effect', name: 'message_actor',
+            input: { to: 'web', message: 'inspect it' },
+          }] },
+          { role: 'user', id: 'known-ack', toolResults: [{
+            tool_use_id: 'known-pre-effect', is_error: false,
+            content: 'accepted', actorCorrelationId: 'known-correlation', actorTerminal: false,
+          }] },
+          { role: 'user', id: 'known-receipt', synthetic: true, actorReply: {
+            kind: 'web', instanceId: 'web', parentToolUseId: 'known-pre-effect',
+            actorDeliveryId: 'known-correlation', failed: true,
+            outcomeKnown: true, performed: false,
+          }, content: 'fenced receipt' },
+        ],
+      },
+    });
+    expect(reconciled.actors['known-pre-effect']).toMatchObject({
+      streaming: false, outcomeKnown: true, performed: false,
+      error: 'the actor request was not run',
+    });
+  });
+
+  test('a delayed older full snapshot cannot overwrite a newer actor start', () => {
+    const viewing = withSession('chat-A');
+    const newStarted = reduceChat(viewing, {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'reused-snapshot',
+      sessionId: 'new-actor', actorCorrelationId: 'new-correlation',
+      actorProjectionEpoch: 'worker-a', actorProjectionRevision: 2,
+      fromIndex: 0, kind: 'web',
+    });
+    const delayed = reduceChat(newStarted, {
+      type: 'state',
+      state: {
+        session: { sessionId: 'chat-A', messages: [] },
+        actorProjectionEpoch: 'worker-a',
+        actorProjectionRevision: 1,
+        actors: {
+          'reused-snapshot': {
+            sessionId: 'old-actor', actorCorrelationId: 'old-correlation',
+            streaming: true, fromIndex: 0,
+          },
+        },
+      },
+    });
+    expect(delayed.actorProjectionRevision).toBe(2);
+    expect(delayed.actors['reused-snapshot']).toMatchObject({
+      sessionId: 'new-actor', actorCorrelationId: 'new-correlation', streaming: true,
+    });
+  });
+
+  test('a fresh worker epoch is accepted after disconnect and fences delayed old-worker data', () => {
+    const oldStarted = reduceChat(withSession('chat-A'), {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'restart-id',
+      sessionId: 'old-actor', actorCorrelationId: 'old-correlation',
+      actorProjectionEpoch: 'worker-old', actorProjectionRevision: 50,
+      fromIndex: 0, kind: 'web',
+    });
+    const disconnected = {
+      ...oldStarted,
+      actors: INITIAL_STATE.actors,
+      actorProjectionEpoch: INITIAL_STATE.actorProjectionEpoch,
+      actorProjectionRevision: INITIAL_STATE.actorProjectionRevision,
+    };
+    const freshSnapshot = reduceChat(disconnected, {
+      type: 'state', state: {
+        session: { sessionId: 'chat-A', messages: [] },
+        actors: {}, actorProjectionEpoch: 'worker-new', actorProjectionRevision: 0,
+      },
+    });
+    expect(freshSnapshot.actorProjectionEpoch).toBe('worker-new');
+    expect(freshSnapshot.actorProjectionRevision).toBe(0);
+    expect(freshSnapshot.actors).toEqual({});
+
+    const newStarted = reduceChat(freshSnapshot, {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'restart-id',
+      sessionId: 'new-actor', actorCorrelationId: 'new-correlation',
+      actorProjectionEpoch: 'worker-new', actorProjectionRevision: 1,
+      fromIndex: 0, kind: 'web',
+    });
+    expect(newStarted.actors['restart-id']).toMatchObject({
+      sessionId: 'new-actor', actorCorrelationId: 'new-correlation', streaming: true,
+    });
+
+    const delayedOldSnapshot = reduceChat(newStarted, {
+      type: 'state', state: {
+        session: { sessionId: 'chat-A', messages: [] },
+        actorProjectionEpoch: 'worker-old', actorProjectionRevision: 51,
+        actors: { 'restart-id': {
+          sessionId: 'old-actor', actorCorrelationId: 'old-correlation', streaming: true,
+        } },
+      },
+    });
+    expect(delayedOldSnapshot.actorProjectionEpoch).toBe('worker-new');
+    expect(delayedOldSnapshot.actors['restart-id'].sessionId).toBe('new-actor');
+    expect(reduceChat(delayedOldSnapshot, {
+      type: 'turn/actor-done', rootSessionId: 'chat-A', parentToolUseId: 'restart-id',
+      actorCorrelationId: 'old-correlation', actorProjectionEpoch: 'worker-old',
+      actorProjectionRevision: 52, ok: false,
+    })).toBe(delayedOldSnapshot);
+  });
+
+  test('a durable actor reply settles a card when the live done pulse was missed', () => {
+    const viewing = withSession('chat-A');
+    const started = reduceChat(viewing, {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'tu-stale',
+      sessionId: 'actor-web', fromIndex: 0, kind: 'web', instanceId: 'web',
+    });
+    const receipt = {
+      id: 'actor-reply-1', role: 'user', synthetic: true,
+      actorReply: {
+        kind: 'web', instanceId: 'web', parentToolUseId: 'tu-stale',
+        actorDeliveryId: 'delivery-stale', failed: true, outcomeKnown: false,
+      },
+      content: 'fenced actor failure',
+    };
+    const call = {
+      id: 'assistant-call', role: 'assistant',
+      toolUses: [{ id: 'tu-stale', name: 'message_actor', input: { to: 'web' } }],
+    };
+    const accepted = {
+      id: 'tool-result', role: 'user',
+      toolResults: [{ tool_use_id: 'tu-stale', is_error: false, content: 'accepted', actorCorrelationId: 'delivery-stale' }],
+    };
+
+    const untrustedShape = reduceChat(started, {
+      type: 'turn/state', session: {
+        sessionId: 'chat-A',
+        messages: [call, accepted, { ...receipt, id: 'not-a-receipt', role: 'assistant', synthetic: false }],
+      },
+    });
+    expect(untrustedShape.actors['tu-stale'].streaming).toBe(true);
+
+    const settled = reduceChat(started, {
+      type: 'turn/state', session: { sessionId: 'chat-A', messages: [call, accepted, receipt] },
+    });
+
+    expect(settled.actors['tu-stale']).toMatchObject({
+      streaming: false, outcomeKnown: false,
+      error: 'the actor turn ended with an unknown outcome',
+    });
+  });
+
+  test('a correlated synthetic reply settles a unique call when its immediate result is missing', () => {
+    const started = reduceChat(withSession('chat-A'), {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'missing-result',
+      sessionId: 'actor-web', actorCorrelationId: 'delivery-only',
+      fromIndex: 0, kind: 'web', instanceId: 'web',
+    });
+    const settled = reduceChat(started, {
+      type: 'turn/state',
+      session: {
+        sessionId: 'chat-A',
+        messages: [
+          { id: 'call', role: 'assistant', toolUses: [{
+            id: 'missing-result', name: 'message_actor', input: { to: 'web' },
+          }] },
+          { id: 'receipt', role: 'user', synthetic: true, content: 'fenced reply', actorReply: {
+            kind: 'web', instanceId: 'web', parentToolUseId: 'missing-result',
+            actorDeliveryId: 'delivery-only', failed: false, outcomeKnown: true, performed: true,
+          } },
+        ],
+      },
+    });
+    expect(settled.actors['missing-result']).toMatchObject({
+      actorCorrelationId: 'delivery-only', streaming: false, error: null, outcomeKnown: true,
+    });
+  });
+
+  test('a durable failure overrides an earlier aborted pulse', () => {
+    const viewing = withSession('chat-A');
+    const started = reduceChat(viewing, {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'tu-aborted',
+      sessionId: 'actor-web', fromIndex: 0, kind: 'web', instanceId: 'web',
+    });
+    const aborted = reduceChat(started, {
+      type: 'turn/actor-done', rootSessionId: 'chat-A', parentToolUseId: 'tu-aborted',
+      ok: true, aborted: true,
+    });
+    const messages = [
+      { id: 'call', role: 'assistant', toolUses: [{
+        id: 'tu-aborted', name: 'message_actor', input: { to: 'web' },
+      }] },
+      { id: 'accepted', role: 'user', toolResults: [{
+        tool_use_id: 'tu-aborted', is_error: false, content: 'accepted', actorCorrelationId: 'delivery-aborted',
+      }] },
+      { id: 'receipt', role: 'user', synthetic: true, content: 'fenced failure', actorReply: {
+        kind: 'web', instanceId: 'web', parentToolUseId: 'tu-aborted',
+        actorDeliveryId: 'delivery-aborted', failed: true, outcomeKnown: false,
+      } },
+    ];
+
+    const settled = reduceChat(aborted, {
+      type: 'turn/state', session: { sessionId: 'chat-A', messages },
+    });
+    expect(settled.actors['tu-aborted']).toMatchObject({
+      streaming: false, aborted: false, outcomeKnown: false,
+      error: 'the actor turn ended with an unknown outcome',
+    });
+  });
+
+  test('a failed receipt is known unless the host explicitly marks it unknown', () => {
+    const viewing = withSession('chat-A');
+    const started = reduceChat(viewing, {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'tu-known-failure',
+      sessionId: 'actor-web', fromIndex: 0, kind: 'web', instanceId: 'web',
+    });
+    const messages = [
+      { id: 'call', role: 'assistant', toolUses: [{
+        id: 'tu-known-failure', name: 'message_actor', input: { to: 'web' },
+      }] },
+      { id: 'accepted', role: 'user', toolResults: [{
+        tool_use_id: 'tu-known-failure', is_error: false, content: 'accepted',
+        actorCorrelationId: 'delivery-known-failure',
+      }] },
+      { id: 'receipt', role: 'user', synthetic: true, content: 'fenced failure', actorReply: {
+        kind: 'web', instanceId: 'web', parentToolUseId: 'tu-known-failure',
+        actorDeliveryId: 'delivery-known-failure', failed: true,
+      } },
+    ];
+
+    const settled = reduceChat(started, {
+      type: 'turn/state', session: { sessionId: 'chat-A', messages },
+    });
+    expect(settled.actors['tu-known-failure']).toMatchObject({
+      streaming: false, outcomeKnown: true, error: 'the actor turn did not complete',
+    });
+  });
+
+  test('an old receipt cannot settle a newer call when a provider reuses a tool-use id', () => {
+    const viewing = withSession('chat-A');
+    const started = reduceChat(viewing, {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'reused-id',
+      sessionId: 'new-actor-turn', fromIndex: 4, kind: 'web', instanceId: 'web',
+    });
+    const oldTranscript = [
+      { id: 'old-call', role: 'assistant', toolUses: [{
+        id: 'reused-id', name: 'message_actor', input: { to: 'web' },
+      }] },
+      { id: 'old-result', role: 'user', toolResults: [{
+        tool_use_id: 'reused-id', is_error: false, content: 'accepted', actorCorrelationId: 'delivery-old',
+      }] },
+      { id: 'new-call', role: 'assistant', toolUses: [{
+        id: 'reused-id', name: 'message_actor', input: { to: 'web' },
+      }] },
+      { id: 'new-result', role: 'user', toolResults: [{
+        tool_use_id: 'reused-id', is_error: false, content: 'accepted', actorCorrelationId: 'delivery-new',
+      }] },
+      // The older actor can reply late, after the provider has reused its tool id.
+      { id: 'old-receipt', role: 'user', synthetic: true, content: 'old fenced reply', actorReply: {
+        kind: 'web', instanceId: 'web', parentToolUseId: 'reused-id',
+        actorDeliveryId: 'delivery-old', failed: false,
+      } },
+    ];
+
+    const stillLive = reduceChat(started, {
+      type: 'turn/state', session: { sessionId: 'chat-A', messages: oldTranscript },
+    });
+    expect(stillLive.actors['reused-id'].streaming).toBe(true);
+
+    const settled = reduceChat(stillLive, {
+      type: 'turn/state', session: { sessionId: 'chat-A', messages: [
+        ...oldTranscript,
+        { id: 'new-receipt', role: 'user', synthetic: true, content: 'new fenced reply', actorReply: {
+          kind: 'web', instanceId: 'web', parentToolUseId: 'reused-id',
+          actorDeliveryId: 'delivery-new', failed: false,
+        } },
+      ] },
+    });
+    expect(settled.actors['reused-id']).toMatchObject({ streaming: false, aborted: false, error: null });
+  });
+
+  test('awaited tool results settle stale cards, except the explicit async handoff', () => {
+    const viewing = withSession('chat-A');
+    const ids = [
+      'await-ok', 'await-failed', 'await-unknown', 'await-cancelled',
+      'await-cancelled-unknown', 'await-handoff',
+    ];
+    const started = ids.reduce((state, id) => reduceChat(state, {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: id,
+      sessionId: `actor-${id}`, fromIndex: 0, kind: 'web', instanceId: 'web',
+    }), viewing);
+    const messages = [
+      { id: 'await-calls', role: 'assistant', toolUses: ids.map((id) => ({
+        id, name: 'message_actor', input: { to: 'web', await: true },
+      })) },
+      { id: 'await-results', role: 'user', toolResults: [
+        { tool_use_id: 'await-ok', is_error: false, content: 'outcome_unknown: not run',
+          actorTerminal: true, actorOutcomeKnown: true, actorPerformed: true },
+        { tool_use_id: 'await-failed', is_error: true, content: 'outcome_unknown: not run',
+          actorTerminal: true, actorOutcomeKnown: true, actorPerformed: true },
+        { tool_use_id: 'await-unknown', is_error: true, content: 'canonical failure',
+          actorTerminal: true, actorOutcomeKnown: false, actorPerformed: true },
+        { tool_use_id: 'await-cancelled', is_error: true, content: 'aborted by the user',
+          actorTerminal: true, actorOutcomeKnown: true, actorAborted: true },
+        { tool_use_id: 'await-cancelled-unknown', is_error: true, content: 'aborted after dispatch',
+          actorTerminal: true, actorOutcomeKnown: false, actorPerformed: true, actorAborted: true },
+        { tool_use_id: 'await-handoff', is_error: false,
+          content: 'The actor is still working; its reply will arrive as a fenced note on a later turn.',
+          actorTerminal: false },
+      ] },
+    ];
+
+    const reconciled = reduceChat(started, {
+      type: 'turn/state', session: { sessionId: 'chat-A', messages },
+    });
+    expect(reconciled.actors['await-ok']).toMatchObject({ streaming: false, error: null, outcomeKnown: true });
+    expect(reconciled.actors['await-failed']).toMatchObject({
+      streaming: false, error: 'the actor turn did not complete', outcomeKnown: true, performed: true,
+    });
+    expect(reconciled.actors['await-unknown']).toMatchObject({
+      streaming: false, error: 'the actor turn ended with an unknown outcome', outcomeKnown: false,
+    });
+    expect(reconciled.actors['await-cancelled']).toMatchObject({
+      streaming: false, aborted: true, error: null, outcomeKnown: true,
+    });
+    expect(reconciled.actors['await-cancelled-unknown']).toMatchObject({
+      streaming: false, aborted: false,
+      error: 'the actor turn ended with an unknown outcome', outcomeKnown: false,
+    });
+    expect(reconciled.actors['await-handoff'].streaming).toBe(true);
+  });
+
+  test('a default-async refusal cannot settle an older live card with a reused tool id', () => {
+    const viewing = withSession('chat-A');
+    const started = reduceChat(viewing, {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'reused-id',
+      sessionId: 'old-actor', actorCorrelationId: 'old-correlation',
+      fromIndex: 0, kind: 'web', instanceId: 'web',
+    });
+    const reconciled = reduceChat(started, {
+      type: 'turn/state',
+      session: {
+        sessionId: 'chat-A',
+        messages: [
+          { id: 'old-call', role: 'assistant', toolUses: [{
+            id: 'reused-id', name: 'message_actor', input: { to: 'web', message: 'old work' },
+          }] },
+          { id: 'old-result', role: 'user', toolResults: [{
+            tool_use_id: 'reused-id', is_error: false, content: 'accepted',
+            actorCorrelationId: 'old-correlation', actorTerminal: false,
+          }] },
+          { id: 'new-call', role: 'assistant', toolUses: [{
+            id: 'reused-id', name: 'message_actor', input: { to: '42', message: 'inspect it' },
+          }] },
+          { id: 'new-result', role: 'user', toolResults: [{
+            tool_use_id: 'reused-id', is_error: true,
+            content: 'page-authored prose must not decide custody',
+            actorTerminal: true, actorOutcomeKnown: true, actorPerformed: false,
+          }] },
+        ],
+      },
+    });
+    expect(reconciled.actors['reused-id']).toMatchObject({
+      sessionId: 'old-actor', actorCorrelationId: 'old-correlation',
+      streaming: true, error: null,
+    });
+  });
+
+  test('an older correlated actor receipt still settles after a newer same-id pre-effect refusal', () => {
+    const viewing = withSession('chat-A');
+    const started = reduceChat(viewing, {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'reused-receipt',
+      sessionId: 'old-actor', actorCorrelationId: 'old-delivery',
+      fromIndex: 0, kind: 'web', instanceId: 'web',
+    });
+    const prefix = [
+      { id: 'old-call', role: 'assistant', toolUses: [{
+        id: 'reused-receipt', name: 'message_actor', input: { to: 'web', message: 'old work' },
+      }] },
+      { id: 'old-result', role: 'user', toolResults: [{
+        tool_use_id: 'reused-receipt', is_error: false, content: 'accepted',
+        actorCorrelationId: 'old-delivery', actorTerminal: false,
+      }] },
+      { id: 'new-call', role: 'assistant', toolUses: [{
+        id: 'reused-receipt', name: 'message_actor', input: { to: '42', message: 'inspect it' },
+      }] },
+      { id: 'new-result', role: 'user', toolResults: [{
+        tool_use_id: 'reused-receipt', is_error: true, content: 'numeric tab refused',
+        actorTerminal: true, actorOutcomeKnown: true, actorPerformed: false,
+      }] },
+    ];
+
+    for (const failed of [false, true]) {
+      const settled = reduceChat(started, {
+        type: 'turn/state',
+        session: {
+          sessionId: 'chat-A',
+          messages: [...prefix, {
+            id: `old-receipt-${failed}`, role: 'user', synthetic: true, content: 'fenced reply',
+            actorReply: {
+              kind: 'web', instanceId: 'web', parentToolUseId: 'reused-receipt',
+              actorDeliveryId: 'old-delivery', failed, outcomeKnown: true, performed: true,
+            },
+          }],
+        },
+      });
+      expect(settled.actors['reused-receipt']).toMatchObject({
+        actorCorrelationId: 'old-delivery', streaming: false, outcomeKnown: true,
+        error: failed ? 'the actor turn did not complete' : null,
+      });
+    }
+  });
+
+  test('a correlated receipt survives both a missing acknowledgement and later tool-id reuse', () => {
+    const started = reduceChat(withSession('chat-A'), {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'reused-missing',
+      sessionId: 'old-actor', actorCorrelationId: 'old-delivery',
+      fromIndex: 0, kind: 'web', instanceId: 'web',
+    });
+    const prefix = [
+      { id: 'old-call', role: 'assistant', toolUses: [{
+        id: 'reused-missing', name: 'message_actor', input: { to: 'web', message: 'old work' },
+      }] },
+      { id: 'new-call', role: 'assistant', toolUses: [{
+        id: 'reused-missing', name: 'message_actor', input: { to: '42', message: 'inspect it' },
+      }] },
+      { id: 'new-result', role: 'user', toolResults: [{
+        tool_use_id: 'reused-missing', is_error: true, content: 'numeric tab refused',
+        actorTerminal: true, actorOutcomeKnown: true, actorPerformed: false,
+      }] },
+    ];
+
+    for (const failed of [false, true]) {
+      const settled = reduceChat(started, {
+        type: 'turn/state',
+        session: {
+          sessionId: 'chat-A',
+          messages: [...prefix, {
+            id: `old-receipt-missing-${failed}`, role: 'user', synthetic: true,
+            content: 'fenced reply', actorReply: {
+              kind: 'web', instanceId: 'web', parentToolUseId: 'reused-missing',
+              actorDeliveryId: 'old-delivery', failed, outcomeKnown: true, performed: true,
+            },
+          }],
+        },
+      });
+      expect(settled.actors['reused-missing']).toMatchObject({
+        actorCorrelationId: 'old-delivery', streaming: false, outcomeKnown: true,
+        error: failed ? 'the actor turn did not complete' : null,
+      });
+    }
+  });
+
+  test('an older correlated awaited result settles after a newer same-id pre-effect refusal', () => {
+    const started = reduceChat(withSession('chat-A'), {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'reused-awaited',
+      sessionId: 'old-actor', actorCorrelationId: 'old-awaited',
+      fromIndex: 0, kind: 'web', instanceId: 'web',
+    });
+    const cases = [
+      { name: 'success', is_error: false, outcomeKnown: true, performed: true, error: null },
+      {
+        name: 'failure', is_error: true, outcomeKnown: true, performed: true,
+        error: 'the actor turn did not complete',
+      },
+      {
+        name: 'unknown', is_error: true, outcomeKnown: false, performed: true,
+        error: 'the actor turn ended with an unknown outcome',
+      },
+    ];
+
+    for (const item of cases) {
+      const settled = reduceChat(started, {
+        type: 'turn/state',
+        session: {
+          sessionId: 'chat-A',
+          messages: [
+            { id: 'old-call', role: 'assistant', toolUses: [{
+              id: 'reused-awaited', name: 'message_actor',
+              input: { to: 'web', message: 'old work', await: true },
+            }] },
+            { id: `old-result-${item.name}`, role: 'user', toolResults: [{
+              tool_use_id: 'reused-awaited', is_error: item.is_error,
+              actorCorrelationId: 'old-awaited', actorTerminal: true,
+              actorOutcomeKnown: item.outcomeKnown, actorPerformed: item.performed,
+              content: item.name,
+            }] },
+            { id: 'new-call', role: 'assistant', toolUses: [{
+              id: 'reused-awaited', name: 'message_actor',
+              input: { to: '42', message: 'inspect it' },
+            }] },
+            { id: 'new-result', role: 'user', toolResults: [{
+              tool_use_id: 'reused-awaited', is_error: true, content: 'numeric tab refused',
+              actorTerminal: true, actorOutcomeKnown: true, actorPerformed: false,
+            }] },
+          ],
+        },
+      });
+      expect(settled.actors['reused-awaited']).toMatchObject({
+        actorCorrelationId: 'old-awaited', streaming: false,
+        outcomeKnown: item.outcomeKnown, error: item.error,
+      });
+    }
+  });
+
+  test('a correlated awaited pre-effect failure settles a missed live done pulse', () => {
+    const viewing = withSession('chat-A');
+    const started = reduceChat(viewing, {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'failed-start',
+      sessionId: 'actor-failed-start', actorCorrelationId: 'current-correlation',
+      fromIndex: 0, kind: 'web', instanceId: 'web',
+    });
+    const reconciled = reduceChat(started, {
+      type: 'turn/state',
+      session: {
+        sessionId: 'chat-A',
+        messages: [
+          { id: 'call', role: 'assistant', toolUses: [{
+            id: 'failed-start', name: 'message_actor',
+            input: { to: 'web', message: 'inspect it', await: true },
+          }] },
+          { id: 'result', role: 'user', toolResults: [{
+            tool_use_id: 'failed-start', is_error: true,
+            actorCorrelationId: 'current-correlation', actorTerminal: true,
+            actorOutcomeKnown: true, actorPerformed: false,
+            content: 'the isolated actor worker did not start',
+          }] },
+        ],
+      },
+    });
+    expect(reconciled.actors['failed-start']).toMatchObject({
+      actorCorrelationId: 'current-correlation', streaming: false, aborted: false,
+      error: 'the actor request was not run', outcomeKnown: true, performed: false,
+    });
+  });
+
+  test('a state snapshot cannot revive a card with a durable actor receipt', () => {
+    const receipt = {
+      id: 'actor-reply-2', role: 'user', synthetic: true,
+      actorReply: {
+        kind: 'web', instanceId: 'web', parentToolUseId: 'tu-a',
+        actorDeliveryId: 'delivery-a', failed: false,
+      },
+      content: 'fenced actor reply',
+    };
+    const messages = [
+      { id: 'call-a', role: 'assistant', toolUses: [{
+        id: 'tu-a', name: 'message_actor', input: { to: 'web' },
+      }] },
+      { id: 'result-a', role: 'user', toolResults: [{
+        tool_use_id: 'tu-a', is_error: false, content: 'accepted', actorCorrelationId: 'delivery-a',
+      }] },
+      receipt,
+    ];
+    const viewing = withSession('chat-A');
+    const replayed = reduceChat(viewing, {
+      type: 'state',
+      state: {
+        session: { sessionId: 'chat-A', messages },
+        actors: {
+          'tu-a': { sessionId: 'actor-a', streaming: true },
+        },
+      },
+    });
+
+    expect(replayed.actors['tu-a'].streaming).toBe(false);
+  });
+
   test('actor done: an abort renders cancelled; an ok:false failure marks failed; churn is short-circuited', () => {
     const started = reduceChat(INITIAL_STATE, { type: 'turn/actor-start', parentToolUseId: 'tu-a', sessionId: 'r', fromIndex: 0 });
     const aborted = reduceChat(started, { type: 'turn/actor-done', parentToolUseId: 'tu-a', ok: true, aborted: true });
     expect(aborted.actors['tu-a']).toMatchObject({ streaming: false, aborted: true });
+    const restarted = reduceChat(aborted, {
+      type: 'turn/actor-start', parentToolUseId: 'tu-a', sessionId: 'r-new', fromIndex: 5,
+    });
+    expect(restarted.actors['tu-a']).toMatchObject({
+      sessionId: 'r-new', streaming: true, aborted: false, error: null,
+    });
+    expect(restarted.actors['tu-a'].outcomeKnown).toBeUndefined();
+    expect(restarted.actors['tu-a'].performed).toBeUndefined();
     // A done after a card is already terminal (error folded first) is a no-op (no churn).
     const erroredThenDone = reduceChat(
       reduceChat(started, { type: 'turn/actor-error', parentToolUseId: 'tu-a', error: 'boom' }),

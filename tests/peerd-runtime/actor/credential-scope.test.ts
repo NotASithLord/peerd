@@ -88,6 +88,10 @@ describe('bound holds a session only on the origin it owns', () => {
 });
 
 describe('fail closed on anything unrecognizable', () => {
+  test('a retired roaming actor never receives credential scope', () => {
+    expect(scopeFor({ mode: 'roaming', retired: true }, 'https://blog.test')).toBeUndefined();
+  });
+
   test('an unknown mode withholds', () => {
     // Same reasoning as decideLanding: a record predating the field, a JSON
     // round-trip, or a typo must not fall through to a permissive default and

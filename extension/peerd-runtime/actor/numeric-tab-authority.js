@@ -83,6 +83,8 @@ export const numericTabAuthorityRefusal = (decision) => {
     return {
       ok: /** @type {const} */ (false),
       error: decision.code,
+      performed: false,
+      outcomeKnown: true,
       content: 'No actor work was started. This address is a sign-in service, which peerd helpers may visit only while signing in to another site. '
         + "Continue through the relying site already named in the user's request. If none was named, ask which site they want to sign in to. "
         + 'Do not retry this address or create a standalone helper for it.\n'
@@ -104,6 +106,8 @@ export const numericTabAuthorityRefusal = (decision) => {
     return {
       ok: /** @type {const} */ (false),
       error: decision.code,
+      performed: false,
+      outcomeKnown: true,
       content: 'No actor work was started. This numeric tab points to a site peerd treats as signed in. '
         + `Use ${decision.suggestedHandle} only if the user's request already asks for work on that site. `
         + 'Otherwise stop and explain that numeric tab addressing cannot authorize work on that site. '
@@ -122,6 +126,8 @@ export const numericTabAuthorityRefusal = (decision) => {
   return {
     ok: /** @type {const} */ (false),
     error: NUMERIC_TAB_POLICY_UNAVAILABLE_CODE,
+    performed: false,
+    outcomeKnown: true,
     content: 'No actor work was started because peerd could not verify the tab authority policy. '
       + 'Do not retry automatically or create a site actor from the current page. '
       + 'Ask the user to reload peerd before another attempt.\n'

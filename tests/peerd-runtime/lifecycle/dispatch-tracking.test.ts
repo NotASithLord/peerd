@@ -142,6 +142,22 @@ describe('settleTracking — §16.2 semantic failures', () => {
     expect((await log.get('s:c1'))!.state).toBe(S.OUTCOME_UNKNOWN);
   });
 
+  test('typed pre-effect proof makes an aborted Class E dispatch a clean cancellation', async () => {
+    const { tracker, log } = makeTracker();
+    const begun = await tracker.beginTracking({
+      callId: 'c1', tool: { name: 't', retryClass: 'E' }, sessionId: 's',
+    });
+    const rewrite = await tracker.settleTracking((begun as { handle: any }).handle, {
+      ok: false,
+      error: 'stopped before the actor ran',
+      aborted: true,
+      outcomeKind: 'pre-effect-failure',
+    });
+    expect((await log.get('s:c1'))!.state).toBe(S.CANCELLED);
+    expect(rewrite!.error).toStartWith('cancelled:');
+    expect(rewrite!.recovery.state).toBe(S.CANCELLED);
+  });
+
   test('an abort on a Class C write settles cancelled cleanly', async () => {
     const { tracker, log } = makeTracker();
     const begun = await tracker.beginTracking({

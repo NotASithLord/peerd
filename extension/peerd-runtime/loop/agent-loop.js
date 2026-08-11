@@ -217,7 +217,7 @@ export const stripCrossModelThinking = (messages, model) => messages.map((msg) =
  *   from the chat UI, like the truncation-continue path). Used by the
  *   async-actor reintegration wake (DESIGN-11): the child's result
  *   re-enters its parent as a synthetic user turn rather than a real one.
- * @param {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, actorDeliveryId?: string, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }} [ctx.actorReply]
+ * @param {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, aborted?: boolean, actorDeliveryId?: string, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }} [ctx.actorReply]
  *   Set on an ACTOR's reply-wake: stamps who replied onto the appended
  *   message so the chat surfaces it as its own attributed bubble (the one
  *   synthetic turn the UI shows).
@@ -979,6 +979,15 @@ export async function* runUserTurn(ctx) {
           ? { actorDeliveryId: dispatchResult.actorDeliveryId }
           : {}),
         ...(actorDeliveryIds.length > 0 ? { actorDeliveryIds } : {}),
+        ...(typeof dispatchResult.actorCorrelationId === 'string'
+          ? { actorCorrelationId: dispatchResult.actorCorrelationId } : {}),
+        ...(typeof dispatchResult.actorTerminal === 'boolean'
+          ? { actorTerminal: dispatchResult.actorTerminal } : {}),
+        ...(typeof dispatchResult.actorOutcomeKnown === 'boolean'
+          ? { actorOutcomeKnown: dispatchResult.actorOutcomeKnown } : {}),
+        ...(typeof dispatchResult.actorPerformed === 'boolean'
+          ? { actorPerformed: dispatchResult.actorPerformed } : {}),
+        ...(dispatchResult.actorAborted === true ? { actorAborted: true } : {}),
       };
       return { tu, dispatchResult, block };
     };
