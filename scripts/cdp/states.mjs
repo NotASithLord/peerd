@@ -2889,7 +2889,7 @@ export const STATES = [
           queuedRecovery?.role.includes('Not run')
             && !queuedRecovery?.role.includes('failed')
             && !queuedRecovery?.role.includes('Outcome unknown')
-            && queuedRecovery?.body.includes('before this actor request was dispatched'),
+            && queuedRecovery?.body === 'No actor work was started. Review the request before trying again.',
           JSON.stringify(queuedRecovery));
         rec.check('recovery receipts use one transient polite atomic announcement',
           unknownOutcome?.liveRole === 'status'
