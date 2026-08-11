@@ -13,13 +13,22 @@
 
 export const makeLocalModelState = () => {
   let available = false;
+  let hydrated = false;
   /** @type {unknown} */
   let progress = null;
   return {
     /** Is the local model resident/cached (usable as the web actor model)? */
     available: () => available,
+    /** Has this worker confirmed cache/residency with the model host? */
+    hydrated: () => hydrated,
     /** @param {unknown} b */
-    setAvailable: (b) => { available = !!b; },
+    setAvailable: (b) => {
+      const next = !!b;
+      const changed = !hydrated || available !== next;
+      available = next;
+      hydrated = true;
+      return changed;
+    },
     /** The last download-progress event (or null). */
     progress: () => progress,
     /** @param {unknown} p */

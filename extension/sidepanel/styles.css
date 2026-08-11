@@ -1582,6 +1582,13 @@ button.tool-call-header:focus-visible {
   border-top: 1px solid var(--border);
   padding-top: 8px;
 }
+.composer-readiness-note {
+  margin: 0 2px 6px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.composer-readiness-note[role="alert"] { color: var(--danger); }
 .composer {
   display: flex;
   flex-direction: column;

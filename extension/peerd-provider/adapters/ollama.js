@@ -258,7 +258,7 @@ export const fetchOllamaContextWindow = async ({ model, safeFetch, signal, ollam
  */
 export const ollamaAdapter = Object.freeze({
   name: 'ollama',
-  label: 'Ollama (local)',
+  label: 'Ollama',
   // Informational default; the live endpoint is built per-call from the
   // `ollamaHost` setting (endpointsFor) so a remote daemon works (issue #104).
   endpoint: `${DEFAULT_ORIGIN}/v1/chat/completions`,

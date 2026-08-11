@@ -25,6 +25,7 @@ const baseDeps = (over: any = {}) => {
     withDwebPublication: async (operation: (isCurrent: () => boolean) => Promise<any>) => operation(() => true),
     withDwebIdentityMutation: async (operation: () => Promise<any>) => operation(),
     withAppLifecycle: async (_appId: string, operation: () => Promise<any>) => operation(),
+    ensureSettingsReady: async () => {},
     ...over,
   };
   return { deps, sent, audits };
@@ -46,6 +47,29 @@ describe('dweb gate (build flag + setting)', () => {
     expect(sent[0]).toEqual({ type: 'dweb/base-host/start' });
     expect(routes['dweb/identity-get']).toBeUndefined();
     expect(routes['dweb/identity-set']).toBeUndefined();
+  });
+  test('waits for persisted settings and fails closed before side effects', async () => {
+    let release = () => {};
+    const hydration = new Promise<void>((resolve) => { release = resolve; });
+    let hydrated = false;
+    const { deps, sent } = baseDeps({
+      ensureSettingsReady: async () => { await hydration; hydrated = true; },
+      settingsStore: { get: () => ({ dwebEnabled: !hydrated }) },
+    });
+
+    const result = makeDwebRoutes(deps)['dweb/base/start']();
+    await Promise.resolve();
+    expect(sent).toEqual([]);
+    release();
+    expect(await result).toEqual({ ok: false, error: 'dweb-disabled' });
+    expect(sent).toEqual([]);
+  });
+  test('fails closed when settings hydration fails', async () => {
+    const { deps, sent } = baseDeps({
+      ensureSettingsReady: async () => { throw new Error('storage unavailable'); },
+    });
+    expect(await makeDwebRoutes(deps)['dweb/base/start']()).toEqual({ ok: false, error: 'dweb-disabled' });
+    expect(sent).toEqual([]);
   });
 });
 

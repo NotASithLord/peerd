@@ -24,7 +24,7 @@ export {
 // Pure resolution of the web actor model. The SW resolves it when minting a web
 // actor session; once the local WebGPU runner ships it slots in as the on-device
 // rung. See runner-model.js.
-export { resolveRunnerModel } from './runner-model.js';
+export { resolveRunnerModel, resolveRunnerTarget } from './runner-model.js';
 
 export {
   ProviderError,

@@ -67,6 +67,9 @@ export const normalizeSettingsPatch = (patch, {
   if (typeof patch.voiceOnboardingDismissed === 'boolean') {
     next.voiceOnboardingDismissed = patch.voiceOnboardingDismissed;
   }
+  if (typeof patch.ocrEnabled === 'boolean') {
+    next.ocrEnabled = patch.ocrEnabled;
+  }
   if (typeof patch.devMode === 'boolean') {
     next.devMode = patch.devMode;
   }
@@ -196,6 +199,9 @@ export const normalizeSettingsPatch = (patch, {
     next.vaultAutoLockMs = (Number.isFinite(v) && v > 0)
       ? Math.min(Math.max(v, 60_000), 24 * 60 * 60 * 1000)
       : 0;
+  }
+  if (typeof patch.auditLogMaxEntries === 'number' && Number.isFinite(patch.auditLogMaxEntries)) {
+    next.auditLogMaxEntries = Math.min(1_000_000, Math.max(1, Math.floor(patch.auditLogMaxEntries)));
   }
   // Cost telemetry (feature 06). spendLimitUsd: clamp to a sane,
   // non-negative range; 0 disables the hard limit. NaN/garbage → 0.
