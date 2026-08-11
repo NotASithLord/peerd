@@ -10,6 +10,7 @@ import { useFakeIndexedDB } from '../setup.ts';
 let idb: typeof import('../../extension/peerd-egress/storage/idb.js');
 let appRegistry: typeof import('../../extension/peerd-engine/app-registry.js');
 let notebookRegistry: typeof import('../../extension/peerd-engine/notebook-registry.js');
+let podRegistry: typeof import('../../extension/peerd-engine/pod-registry.js');
 let vmRegistry: typeof import('../../extension/peerd-engine/vm-registry.js');
 
 beforeAll(async () => {
@@ -17,6 +18,7 @@ beforeAll(async () => {
   idb = await import('../../extension/peerd-egress/storage/idb.js');
   appRegistry = await import('../../extension/peerd-engine/app-registry.js');
   notebookRegistry = await import('../../extension/peerd-engine/notebook-registry.js');
+  podRegistry = await import('../../extension/peerd-engine/pod-registry.js');
   vmRegistry = await import('../../extension/peerd-engine/vm-registry.js');
 });
 
@@ -25,6 +27,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   await idb.clear('apps');
   await idb.clear('notebooks');
+  await idb.clear('pods');
   await idb.clear('vms');
 });
 
@@ -53,13 +56,20 @@ describe('idbKV — single-blob IDB adapter', () => {
   });
 });
 
-describe('Notebook + VM registries persist through IndexedDB too', () => {
+describe('Notebook + Pod + VM registries persist through IndexedDB too', () => {
   test('a Notebook survives a fresh registry (SW restart)', async () => {
     const r1 = notebookRegistry.createNotebookRegistry({ storage: idb.idbKV('notebooks') });
     const rec = await r1.create({ name: 'parser' });
     expect(rec.id).toMatch(/^notebook-/);
     const r2 = notebookRegistry.createNotebookRegistry({ storage: idb.idbKV('notebooks') });
     expect((await r2.get(rec.id))?.name).toBe('parser');
+  });
+
+  test('a persistent Pod survives a fresh registry (SW restart)', async () => {
+    const r1 = podRegistry.createPodRegistry({ storage: idb.idbKV('pods') });
+    const rec = await r1.create({ name: 'shell', persistent: true });
+    const r2 = podRegistry.createPodRegistry({ storage: idb.idbKV('pods') });
+    expect(await r2.get(rec.id)).toMatchObject({ name: 'shell', persistent: true });
   });
 
   test('a VM survives a fresh registry, disk overlay key intact', async () => {

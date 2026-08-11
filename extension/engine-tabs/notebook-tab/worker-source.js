@@ -22,6 +22,7 @@ import { buildEntry } from '/peerd-engine/index.js';
 // AFTER the seal and is pure. Both resolve against import.meta.url so they work
 // on the extension origin AND the http origin the in-browser harness serves from.
 const SEAL_MODULE_URL = new URL('./realm-seal.js', import.meta.url).href;
+const POD_SEAL_MODULE_URL = new URL('../pod-tab/pod-realm-seal.js', import.meta.url).href;
 const STD_MODULE_URL = new URL('./notebook-std.js', import.meta.url).href;
 const WASI_MODULE_URL = new URL('./notebook-wasi.js', import.meta.url).href;
 
@@ -67,6 +68,10 @@ export const DEFAULT_WORKER_CAPS = Object.freeze({
  * @param {string} [opts.siteFetch] DESIGN-19: expose the `site` client PINNED to this origin (site.fetch → the host site-fetch-request relay → SW site-fetch/call). Off by default; when set, egress/opfs/subagent/page are all off (a site-client run's ONLY outward edge is the pinned fetch).
  * @param {number} [opts.actorsGuardMs] the actors bridge guard — passed from the timeout tower (actors-api.js ACTORS_BRIDGE_GUARD_MS) so it cannot drift below the per-ask cap.
  * @param {{ page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean, distributed?: boolean }} [opts.caps]
+ * @param {{args?:string[],stdin?:string,env?:Record<string,string>,cwd?:string}} [opts.podCommand]
+ *   Pod's restricted JS command profile. It swaps in the stricter Pod seal and
+ *   exposes only lexical args/stdin/env/cwd/pod helpers over the existing OPFS
+ *   bridge. Remote resolution remains a host policy decision.
  *   capability profile (defaults = DEFAULT_WORKER_CAPS — the historical surface;
  *   caps.page is the web actor's page bridge, PR #119; caps.provider is the
  *   script tool's sub-model lane, design 5; caps.distributed gates the
@@ -75,13 +80,15 @@ export const DEFAULT_WORKER_CAPS = Object.freeze({
  *   bodyLine: the 1-based source line the user code's first line lands on
  *   (user line L = source line bodyLine + L - 1) — feed it to mapWorkerError.
  */
-export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false, actorsGuardMs = 250000, caps, siteFetch = '' }) => {
+export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false, actorsGuardMs = 250000, caps, siteFetch = '', podCommand }) => {
   const profile = { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}) };
   const { imports, body, cache } = await buildEntry(userCode, entryPath, {
     ...resolverDeps,
     builtins: NOTEBOOK_BUILTINS,
   });
-  const source = `import ${JSON.stringify(SEAL_MODULE_URL)}; // realm seal — MUST stay the first import
+  const source = `${podCommand
+    ? `import { podFetch as __podFetch } from ${JSON.stringify(POD_SEAL_MODULE_URL)};`
+    : `import ${JSON.stringify(SEAL_MODULE_URL)};`} // realm seal — MUST stay the first import
 ${imports}
 const NOTEBOOK_ID = ${JSON.stringify(notebookId)};
 const PEERD_BUILTINS = ${JSON.stringify(NOTEBOOK_BUILTINS)};
@@ -428,7 +435,22 @@ globalThis.peerd.distributed.whoami = noDistributed('whoami');
 globalThis.peerd.distributed.status = noDistributed('status');
 globalThis.peerd.distributed.peers = noDistributed('peers');
 globalThis.peerd.distributed.presence = noDistributed('presence');
-`}
+`}${podCommand ? `
+// Pod JS gets Web-standard JavaScript plus named, instance-rooted capabilities.
+// There is no ambient fetch: __podFetch is the explicit bridge exported by the
+// first-import seal, while the global slot remains a throwing stub.
+const args = Object.freeze(${JSON.stringify(podCommand.args ?? [])});
+const stdin = ${JSON.stringify(podCommand.stdin ?? '')};
+const env = Object.freeze(${JSON.stringify(podCommand.env ?? {})});
+const cwd = ${JSON.stringify(podCommand.cwd ?? '/')};
+const pod = Object.freeze({
+  readFile: (path) => peerd.self.readFile(path),
+  writeFile: (path, content) => peerd.self.writeFile(path, content),
+  deleteFile: (path) => peerd.self.deleteFile(path),
+  listFiles: () => peerd.self.listFiles(),
+  fetch: __podFetch,
+});
+` : ''}
 // ONE listener fans every '<name>-response' out to its bridge. Each bridge's
 // onResponse claims only its own type, so registration order doesn't matter.
 // ('fetch-response' is consumed by the realm seal's own listener, not here.)

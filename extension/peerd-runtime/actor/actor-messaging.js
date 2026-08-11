@@ -167,7 +167,7 @@ export const makeActorMessaging = (deps) => {
 
   // The kinds oneShot is honored for — the agent's OWN engine sandboxes, whose
   // raw results are (relatively) trusted instance output. Never web/api/dweb.
-  const ONESHOT_KINDS = new Set(['webvm', 'notebook', 'app']);
+  const ONESHOT_KINDS = new Set(['webvm', 'notebook', 'pod', 'app']);
 
   const OUTSTANDING_CAP = caps.outstanding ?? 4;
   const RATE_CAP = caps.rateCap ?? 8;
@@ -590,7 +590,7 @@ export const makeActorMessaging = (deps) => {
     // instance) may hand results back raw. Refuse loudly, never silently strip:
     // a dropped flag would make the model believe the cheap mode worked.
     if (oneShot === true && !ONESHOT_KINDS.has(String(kind))) {
-      return { ok: false, error: `message_actor: oneShot is sandbox-only (webvm/notebook/app) — a ${kind} actor's reply is untrusted web/peer content and always returns summarized. Re-send without oneShot.` };
+      return { ok: false, error: `message_actor: oneShot is sandbox-only (webvm/notebook/pod/app) — a ${kind} actor's reply is untrusted web/peer content and always returns summarized. Re-send without oneShot.` };
     }
 
     // Phase 7 — mechanical dedupe. An IDENTICAL (actor, message) intent already

@@ -8,7 +8,7 @@ export const repositoryRemoteTool = {
   name: 'repo_remote',
   primitive: 'engine',
   description: [
-    'Link, fetch, or push this App or Notebook Git repository over HTTPS. GitHub works',
+    'Link, fetch, or push this App, Notebook, or Pod Git repository over HTTPS. GitHub works',
     'directly from the extension; no CORS proxy. Credentials stay in the vault',
     'and never enter this actor. Every operation asks the user; push never forces.',
     'Fetch downloads refs and objects but never merges the working branch. To import an',
@@ -32,7 +32,7 @@ export const repositoryRemoteTool = {
     const repositories = /** @type {any} */ (ctx).repositories;
     const kind = /** @type {any} */ (ctx).actorType;
     const id = /** @type {any} */ (ctx).actorInstanceId;
-    if (!repositories || !id || (kind !== 'app' && kind !== 'notebook')) return { ok: false, error: 'repository_unavailable' };
+    if (!repositories || !id || !['app', 'notebook', 'pod'].includes(kind)) return { ok: false, error: 'repository_unavailable' };
     try {
       const ref = { kind, id };
       const currentRemote = args.op === 'link' ? null : await repositories.getRemote(ref);
@@ -51,7 +51,9 @@ export const repositoryRemoteTool = {
             : `Link ${kind} ${id} to Git remote ${target}? Future fetch/push can use its vault-bound host token.`,
       });
       if (answer !== 'yes_once' && answer !== 'yes_session' && answer !== true) return { ok: false, error: `git_${args.op}_declined` };
-      const tracker = kind === 'notebook' ? /** @type {any} */ (ctx).jsTabTracker : null;
+      const tracker = kind === 'notebook' ? /** @type {any} */ (ctx).jsTabTracker
+        : kind === 'pod' ? /** @type {any} */ (ctx).podTabTracker
+        : null;
       const reopen = args.op === 'push' && tracker?.getTabId?.(id) != null;
       try {
         if (reopen) { await tracker.closeTab(id); await new Promise((resolve) => setTimeout(resolve, 100)); }

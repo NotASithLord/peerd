@@ -6,11 +6,12 @@
 
 import { describe, test, expect } from 'bun:test';
 import {
-  runWasi, buildFileTree, readFileTree, WasiRunError, demoModule,
+  runWasi, runWasiWorkspace, reconcileWorkspaceFiles,
+  buildFileTree, readFileTree, WasiRunError, demoModule,
 } from '../../../extension/engine-tabs/notebook-tab/notebook-wasi.js';
 import {
   buildHelloModule, buildEchoModule, buildFloodModule,
-  buildEmptyModule, buildNonWasiModule,
+  buildEmptyModule, buildNonWasiModule, buildWriteFileModule,
 } from './wasi-test-module.ts';
 
 describe('runWasi', () => {
@@ -113,6 +114,51 @@ describe('buildFileTree / readFileTree', () => {
 
   test('empty path segments are rejected', () => {
     expect(() => buildFileTree({ '': 'nope' })).toThrow(TypeError);
+  });
+});
+
+describe('runWasiWorkspace — Pod shared workspace adapter', () => {
+  test('a real WASI path_open/fd_write mutation is reconciled into the host workspace', async () => {
+    const files = new Map<string, Uint8Array>([
+      ['kept.txt', new TextEncoder().encode('existing')],
+    ]);
+    const writes: string[] = [];
+    const deletes: string[] = [];
+    const workspace = {
+      list: async () => [...files].map(([path, bytes]) => ({ path, size: bytes.byteLength })),
+      readBytes: async (path: string) => files.get(path)!.slice(),
+      write: async (path: string, content: string | Uint8Array | ArrayBuffer) => {
+        const bytes = typeof content === 'string' ? new TextEncoder().encode(content)
+          : content instanceof Uint8Array ? content.slice() : new Uint8Array(content.slice(0));
+        files.set(path, bytes);
+        writes.push(path);
+      },
+      delete: async (path: string) => { files.delete(path); deletes.push(path); },
+    };
+    const result = await runWasiWorkspace(buildWriteFileModule('made.txt', 'from wasi\n'), { workspace });
+    expect(result.exitCode).toBe(0);
+    expect(new TextDecoder().decode(files.get('made.txt'))).toBe('from wasi\n');
+    expect(new TextDecoder().decode(files.get('kept.txt'))).toBe('existing');
+    expect(writes).toEqual(['made.txt']);
+    expect(deletes).toEqual([]);
+    expect(result.changedFiles).toEqual(['made.txt']);
+  });
+
+  test('minimal reconciliation writes changed/new files and deletes vanished files only', () => {
+    const before = { same: 'x', changed: 'old', removed: 'bye' };
+    const after = { same: 'x', changed: 'new', added: new Uint8Array([1, 2]) };
+    const result = reconcileWorkspaceFiles(before, after);
+    expect(Object.keys(result.writes).sort()).toEqual(['added', 'changed']);
+    expect(result.deletes).toEqual(['removed']);
+  });
+
+  test('snapshot file/byte budgets fail before WASM receives authority', async () => {
+    const workspace = {
+      list: async () => [{ path: 'big.bin', size: 5 }],
+      readBytes: async () => new Uint8Array(5),
+      write: async () => {}, delete: async () => {},
+    };
+    expect(runWasiWorkspace(demoModule(), { workspace, maxBytes: 4 })).rejects.toThrow(/snapshot budget/);
   });
 });
 

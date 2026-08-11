@@ -12,13 +12,13 @@
  *                              ['peerd-apps', 'app-xyz'].
  */
 export const opfsHelpers = (rootPath) => {
-  /** @param {string} path */
-  const safeParts = (path) => {
+  /** @param {string} path @param {{ allowRoot?: boolean }} [opts] */
+  const safeParts = (path, { allowRoot = false } = {}) => {
     if (typeof path !== 'string' || path.includes('\\') || path.includes('\0')) {
       throw new Error('opfs: invalid path');
     }
     const parts = path.replace(/^\/+/, '').split('/').filter(Boolean);
-    if (!parts.length || parts.some((part) => part === '.' || part === '..')) {
+    if ((!allowRoot && !parts.length) || parts.some((part) => part === '.' || part === '..')) {
       throw new Error(`opfs: unsafe path: ${path}`);
     }
     return parts;
@@ -31,6 +31,27 @@ export const opfsHelpers = (rootPath) => {
     let dir = await navigator.storage.getDirectory();
     for (const part of rootPath) {
       dir = await dir.getDirectoryHandle(part, { create: true });
+    }
+    return dir;
+  };
+
+  /** @param {string} path */
+  const canonicalPath = (path) => safeParts(path, { allowRoot: true }).join('/');
+
+  /** Refuse the two copy shapes that would mutate the traversal beneath it. */
+  const assertDistinctTarget = (/** @type {string} */ from, /** @type {string} */ to, /** @type {boolean} */ directory) => {
+    const source = canonicalPath(from);
+    const target = canonicalPath(to);
+    if (source === target || (directory && target.startsWith(`${source}/`))) {
+      throw new Error('opfs: destination must be outside the source');
+    }
+  };
+
+  /** @param {string} path @param {{ create?: boolean }} [opts] */
+  const walkDirectory = async (path, { create = false } = {}) => {
+    let dir = await ensureRoot();
+    for (const part of safeParts(path, { allowRoot: true })) {
+      dir = await dir.getDirectoryHandle(part, { create });
     }
     return dir;
   };
@@ -48,6 +69,39 @@ export const opfsHelpers = (rootPath) => {
     let dir = root;
     for (const part of parts) dir = await dir.getDirectoryHandle(part, { create });
     return { dir, leaf };
+  };
+
+  /** @param {string} path */
+  const getEntry = async (path) => {
+    const parts = safeParts(path, { allowRoot: true });
+    if (!parts.length) return { kind: 'directory', handle: await ensureRoot() };
+    const { dir, leaf } = await walkParent(path);
+    try { return { kind: 'file', handle: await dir.getFileHandle(leaf) }; }
+    catch (error) {
+      if ((/** @type {{name?:string}} */ (error)).name !== 'TypeMismatchError'
+          && (/** @type {{name?:string}} */ (error)).name !== 'NotFoundError') throw error;
+    }
+    return { kind: 'directory', handle: await dir.getDirectoryHandle(leaf) };
+  };
+
+  /** @param {FileSystemFileHandle|FileSystemDirectoryHandle} handle @param {string} target @param {boolean} recursive */
+  const copyEntry = async (handle, target, recursive) => {
+    if (handle.kind === 'file') {
+      const source = await /** @type {FileSystemFileHandle} */ (handle).getFile();
+      const { dir, leaf } = await walkParent(target, { create: true });
+      const output = await dir.getFileHandle(leaf, { create: true });
+      const writable = await output.createWritable();
+      await writable.write(await source.arrayBuffer());
+      await writable.close();
+      return;
+    }
+    if (!recursive) throw new Error('opfs: source is a directory (recursive required)');
+    const targetDir = await walkDirectory(target, { create: true });
+    for await (const child of /** @type {FileSystemDirectoryHandle} */ (handle).values()) {
+      await copyEntry(child, `${target}/${child.name}`, true);
+    }
+    // why touch the handle: creating an empty directory above is the whole copy.
+    void targetDir;
   };
 
   return {
@@ -112,6 +166,73 @@ export const opfsHelpers = (rootPath) => {
       };
       await walk(root, '');
       return out;
+    },
+
+    /** Return metadata without exposing a raw OPFS handle. */
+    stat: async (/** @type {string} */ path) => {
+      const normalized = path.replace(/^\/+|\/+$/g, '');
+      const entry = await getEntry(path);
+      if (entry.kind === 'directory') return { path: normalized ? `/${normalized}` : '/', kind: 'directory', size: 0 };
+      const file = await /** @type {FileSystemFileHandle} */ (entry.handle).getFile();
+      return { path: `/${normalized}`, kind: 'file', size: file.size, modifiedAt: file.lastModified };
+    },
+
+    /** List one directory, including directories (unlike list(), which is recursive files only). */
+    listDir: async (/** @type {string} */ path = '/') => {
+      const dir = await walkDirectory(path);
+      const prefix = path.replace(/^\/+|\/+$/g, '');
+      const entries = [];
+      for await (const entry of dir.values()) {
+        let size = 0;
+        if (entry.kind === 'file') size = (await entry.getFile()).size;
+        entries.push({
+          name: entry.name,
+          path: `/${prefix ? `${prefix}/` : ''}${entry.name}`,
+          kind: entry.kind,
+          size,
+        });
+      }
+      return entries.sort((a, b) => a.name.localeCompare(b.name));
+    },
+
+    /** Create a directory; parents are created by default for shell ergonomics. */
+    mkdir: async (/** @type {string} */ path, /** @type {{recursive?:boolean}} */ { recursive = true } = {}) => {
+      const parts = safeParts(path);
+      if (recursive) { await walkDirectory(path, { create: true }); return; }
+      const leaf = /** @type {string} */ (parts.pop());
+      const parent = await walkDirectory(parts.join('/'));
+      await parent.getDirectoryHandle(leaf, { create: true });
+    },
+
+    /** Remove a file or directory. The mounted root itself is never a valid target. */
+    remove: async (/** @type {string} */ path, /** @type {{recursive?:boolean}} */ { recursive = false } = {}) => {
+      const { dir, leaf } = await walkParent(path);
+      await dir.removeEntry(leaf, { recursive });
+    },
+
+    /** Copy within this rooted workspace. */
+    copy: async (/** @type {string} */ from, /** @type {string} */ to, /** @type {{recursive?:boolean}} */ { recursive = false } = {}) => {
+      const source = await getEntry(from);
+      assertDistinctTarget(from, to, source.kind === 'directory');
+      await copyEntry(/** @type {any} */ (source.handle), to, recursive);
+    },
+
+    /** Move within this rooted workspace, using copy-then-delete for Firefox parity. */
+    move: async (/** @type {string} */ from, /** @type {string} */ to) => {
+      const source = await getEntry(from);
+      assertDistinctTarget(from, to, source.kind === 'directory');
+      await copyEntry(/** @type {any} */ (source.handle), to, true);
+      const { dir, leaf } = await walkParent(from);
+      await dir.removeEntry(leaf, { recursive: source.kind === 'directory' });
+    },
+
+    /** Missing-path checks are common in shell dispatch and should not throw. */
+    exists: async (/** @type {string} */ path) => {
+      try { await getEntry(path); return true; }
+      catch (error) {
+        if ((/** @type {{name?:string}} */ (error)).name === 'NotFoundError') return false;
+        throw error;
+      }
     },
 
     /** Drop the entire subtree (used when an instance is deleted). */

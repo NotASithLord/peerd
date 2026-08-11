@@ -48,7 +48,7 @@ export const messageActorTool = {
     'cheapest in-stock price for X"): the web actor is the single entry point and',
     'PICKS THE MECHANISM itself — a sessionless secure fetch, or opening + driving a',
     'tab — so don\'t pre-open a tab or pick fetch-vs-render. Other address forms, all',
-    'listed by actor_list: a tabId to act on ONE already-open page; a vm/notebook/app',
+    'listed by actor_list: a tabId to act on ONE already-open page; a vm/notebook/pod/app',
     'instance id; "site:<origin>" (e.g. "site:https://github.com") to work on ONE site',
     'the user is logged into (drives a real tab, that site only, so it can sign in',
     'where "web" may not go); or an API integration\'s ORIGIN (a bare host like',
@@ -74,7 +74,7 @@ export const messageActorTool = {
     properties: {
       to: {
         type: 'string',
-        description: 'An address form from actor_list (see the description): "web", a tabId, a vm/notebook/app instance id, "site:<origin>", or an API origin. Minted on first message.',
+        description: 'An address form from actor_list (see the description): "web", a tabId, a vm/notebook/pod/app instance id, "site:<origin>", or an API origin. Minted on first message.',
       },
       message: {
         type: 'string',
@@ -82,7 +82,7 @@ export const messageActorTool = {
       },
       oneShot: {
         type: 'boolean',
-        description: 'Sandbox instances ONLY (a vm/notebook/app id; refused for web/API/tabId/dweb). true when ONE round settles it — a concrete command or read whose raw result IS the answer — so the actor hands that result straight back, skipping its summarize turn. Default false for open-ended or multi-step work.',
+        description: 'Sandbox instances ONLY (a vm/notebook/pod/app id; refused for web/API/tabId/dweb). true when ONE round settles it — a concrete command or read whose raw result IS the answer — so the actor hands that result straight back, skipping its summarize turn. Default false for open-ended or multi-step work.',
       },
       await: {
         type: 'boolean',

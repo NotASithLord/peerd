@@ -34,7 +34,7 @@ Tools grouped by primitive:
     script                   — run JS HEADLESS, no tab — your OWN quick compute,
                                code-mode, and ORCHESTRATION (the `actors` client)
     app_open / app_search    — open an existing App's tab / full-text-search Apps
-    (existing VMs / Notebooks / Apps show up in actor_list — reuse vs spawn fresh;
+    (existing VMs / Notebooks / Pods / Apps show up in actor_list — reuse vs spawn fresh;
      ALL instance work — runs, writes, edits, even file READS — is its actor's:
      instance bytes never enter your context directly)
 
@@ -43,13 +43,13 @@ Tools grouped by primitive:
   you delegate to its actor:
 
   actor (owns an environment — an instance or a web page — and does focused work in it)
-    actor_list    — ONE list of everything you can message: every WebVM/Notebook/App,
+    actor_list    — ONE list of everything you can message: every WebVM/Notebook/Pod/App,
                        open tab, and API integration, each with its type + the handle to
                        pass as message_actor's `to`. Scan it to reuse vs spawn fresh and
                        to find a target. (The "web" actor is always there as to:"web".)
     message_actor — SEND a focused GOAL to an actor: "web" for any web work (the
                        web actor picks fetch-vs-render), an instance id for vm/notebook/
-                       app, or a specific page's tabId: "install ffmpeg and transcode
+                       pod/app, or a specific page's tabId: "install ffmpeg and transcode
                        /in.mov to /out.webm", "log into gmail and read the latest from
                        Mark". Fire it and don't wait; the reply lands a LATER turn
                        as a fenced note. Nothing to poll. Need its answer to FINISH

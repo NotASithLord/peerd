@@ -100,14 +100,14 @@ export const ACTION_CLASSES = Object.freeze({
 });
 
 // Primitives whose *writes* are LOCAL — the agent's own sandbox (webvm/
-// notebook/app) or the dweb node's own state (dweb_block's blocklist,
+// notebook/pod/app) or the dweb node's own state (dweb_block's blocklist,
 // dweb_discovery's switch) — rather than against the user's live browser
 // session. A `write` sideEffect on one of these is WORKSPACE_WRITE; a `write`
 // on a `tab` primitive (click/type/navigate) is EXTERNAL. (dweb_share/install
 // are `mutate_external`, so they're EXTERNAL regardless of primitive.)
 // 'engine' is sandbox_create's cross-kind primitive — a create of the agent's
 // own sandbox is a workspace write exactly like the per-kind creates it folded.
-const WORKSPACE_PRIMITIVES = Object.freeze(new Set(['webvm', 'notebook', 'app', 'engine', 'dweb']));
+const WORKSPACE_PRIMITIVES = Object.freeze(new Set(['webvm', 'notebook', 'pod', 'app', 'engine', 'dweb']));
 
 // Specific tools whose write is really code EXECUTION, not a file edit.
 // These live in workspace primitives but get classified SHELL so the
@@ -116,6 +116,7 @@ const WORKSPACE_PRIMITIVES = Object.freeze(new Set(['webvm', 'notebook', 'app', 
 const SHELL_TOOLS = Object.freeze(new Set([
   'vm_boot',     // boots/executes the Linux VM
   'js_notebook',     // runs arbitrary JS in the Notebook worker
+  'pod_exec',    // runs shell/JS/WASI with files, Git, and brokered egress
   'page_exec',   // CDP Runtime.evaluate in a live page
   'page_eval',   // executeScript in a live page
   'script',      // headless JS with egress + delegation — the strongest code lane must not confirm softer than the rest

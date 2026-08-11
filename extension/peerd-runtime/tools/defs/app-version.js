@@ -1,5 +1,5 @@
 // @ts-check
-// repo_version — local history mutations for the actor's own App/Notebook.
+// repo_version — local history mutations for the actor's own App/Notebook/Pod.
 // Restore is recoverable (it writes a new commit) but force-confirms because it
 // replaces the live working tree.
 
@@ -8,7 +8,7 @@ export const repositoryVersionTool = {
   name: 'repo_version',
   primitive: 'engine',
   description: [
-    'Manage this App or Notebook\'s LOCAL Git history. checkpoint commits current files;',
+    'Manage this App, Notebook, or Pod LOCAL Git history. checkpoint commits current files;',
     'branch creates a branch; checkout switches a clean working tree; restore',
     'replaces live files with a prior commit and records a NEW commit, so it',
     'remains reversible. Use repo_history first.',
@@ -29,10 +29,12 @@ export const repositoryVersionTool = {
     const repositories = /** @type {any} */ (ctx).repositories;
     const kind = /** @type {any} */ (ctx).actorType;
     const id = /** @type {any} */ (ctx).actorInstanceId;
-    if (!repositories || !id || (kind !== 'app' && kind !== 'notebook')) return { ok: false, error: 'repository_unavailable' };
+    if (!repositories || !id || !['app', 'notebook', 'pod'].includes(kind)) return { ok: false, error: 'repository_unavailable' };
     const ref = { kind, id };
     const destructive = args.op === 'checkout' || args.op === 'restore' || args.op === 'branch';
-    const tracker = kind === 'app' ? /** @type {any} */ (ctx).appTabTracker : /** @type {any} */ (ctx).jsTabTracker;
+    const tracker = kind === 'app' ? /** @type {any} */ (ctx).appTabTracker
+      : kind === 'pod' ? /** @type {any} */ (ctx).podTabTracker
+      : /** @type {any} */ (ctx).jsTabTracker;
     const reopen = destructive && tracker?.getTabId?.(id) != null;
     try {
       if (args.op === 'branch' && typeof args.name !== 'string') return { ok: false, error: 'branch_name_required' };

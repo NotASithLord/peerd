@@ -1,0 +1,98 @@
+// @ts-check
+// Pod tracker/client integration with injected browser IO. These tests pin the
+// lifecycle distinction that matters: a stopped durable Pod is catalog state,
+// while execution reopens a tab and each RPC remains instance-addressed.
+
+import { describe, it, expect } from '../../framework.js';
+import { createPodClient } from '/background/pod-client.js';
+import { createPodTabTracker } from '/background/pod-tab-tracker.js';
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+const stubTabs = () => {
+  /** @type {Set<number>} */ const live = new Set();
+  let nextId = 40;
+  return {
+    live,
+    api: /** @type {import('webextension-polyfill').Tabs.Static} */ (/** @type {unknown} */ ({
+      query: async () => [],
+      get: async (/** @type {number} */ id) => {
+        if (!live.has(id)) throw new Error('tab missing');
+        return { id };
+      },
+      create: async () => { const id = nextId++; live.add(id); return { id }; },
+      remove: async (/** @type {number} */ id) => { live.delete(id); },
+      update: async () => ({}),
+    })),
+  };
+};
+
+describe('Pod tab tracker', () => {
+  it('spawns, becomes ready, and cleanly forgets a closed worker host', async () => {
+    const tabs = stubTabs();
+    /** @type {string[]} */ const events = [];
+    const tracker = createPodTabTracker({
+      tabs: tabs.api,
+      onAdopt: (id, tabId) => events.push(`adopt:${id}:${tabId}`),
+      onDrop: (id) => events.push(`drop:${id}`),
+    });
+    const opening = tracker.ensureTab('pod-test');
+    await tick();
+    expect(tracker.getTabId('pod-test')).toBe(40);
+    tracker.onTabReady('pod-test', 40);
+    expect(await opening).toBe(40);
+    expect(tracker.onTabRemoved(40)).toBe('pod-test');
+    expect(tracker.getTabId('pod-test')).toBe(null);
+    expect(events).toEqual(['adopt:pod-test:40', 'adopt:pod-test:40', 'drop:pod-test']);
+  });
+});
+
+describe('Pod client', () => {
+  it('reports a stopped durable Pod without opening it, then reopens for exec', async () => {
+    /** @type {string|null} */ let defaultId = null;
+    let created = 0;
+    /** @type {number|null} */ let liveTab = null;
+    let opened = 0;
+    /** @type {Array<{tabId:number,message:any}>} */ const messages = [];
+    const registry = {
+      get: async (/** @type {string} */ id) => ({ id, persistent: true }),
+      getDefaultForSession: async () => defaultId,
+      setDefaultForSession: async (/** @type {string} */ _sessionId, /** @type {string} */ id) => { defaultId = id; },
+      create: async () => ({ id: `pod-${++created}` }),
+    };
+    const tracker = {
+      getTabId: () => liveTab,
+      ensureTab: async () => { opened += 1; liveTab = 71; return liveTab; },
+    };
+    const client = createPodClient({
+      registry,
+      tracker,
+      sendTabMessage: async (tabId, message) => {
+        messages.push({ tabId, message });
+        return { ok: true, job: { id: 'job-1', state: 'completed', stdout: 'ok\n', stderr: '', exitCode: 0 } };
+      },
+    });
+
+    expect(await client.status({ sessionId: 'session-a' })).toEqual({ podId: 'pod-1', state: 'stopped', cwd: '/', jobs: [] });
+    expect(opened).toBe(0);
+    const result = await client.exec('echo ok', { sessionId: 'session-a', background: true });
+    expect(result).toEqual({ podId: 'pod-1', id: 'job-1', state: 'completed', stdout: 'ok\n', stderr: '', exitCode: 0 });
+    expect(opened).toBe(1);
+    expect(messages[0]).toEqual({
+      tabId: 71,
+      message: { type: 'pod/exec', command: 'echo ok', timeoutMs: undefined, background: true, remoteGitAuthorized: false, podId: 'pod-1' },
+    });
+  });
+
+  it('rejects an explicit id missing from the Pod registry', async () => {
+    const client = createPodClient({
+      registry: { get: async () => null },
+      tracker: {},
+      sendTabMessage: async () => ({}),
+    });
+    let message = '';
+    try { await client.exec('pwd', { podId: 'pod-missing' }); }
+    catch (error) { message = /** @type {{message?:string}} */ (error)?.message ?? ''; }
+    expect(message).toContain('Pod not found');
+  });
+});

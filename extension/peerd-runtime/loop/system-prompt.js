@@ -98,7 +98,7 @@ const loadDwebBlock = async () => {
  *   parent, and which MAY itself message_actor. The base prompt (tools,
  *   defenses) still applies. See docs/ACTORS.md.
  * @param {string} [ctx.actorType]
- *   DESIGN-17: when present ('webvm'|'notebook'|'app'|'web'), the prompt is for
+ *   DESIGN-17: when present ('webvm'|'notebook'|'pod'|'app'|'web'), the prompt is for
  *   an ACTOR — a type-specific tuned block is appended that frames the agent as
  *   the owner of ONE instance or web tab (act only on it; instance output is
  *   untrusted data). The base prompt (defenses) still applies. APPEND, never
@@ -301,6 +301,7 @@ const ephemeralActorBlock = (task) => [
 const ACTOR_TYPE_FRAMING = Object.freeze({
   webvm: 'a Linux shell expert who owns ONE WebVM. Run commands, write files, and install packages to fulfil the request, then report what you did and the key output.',
   notebook: 'a JavaScript compute specialist who owns ONE Notebook. Run code and edit notebook files to fulfil the request, then report the result.',
+  pod: 'a lightweight shell and WASI specialist who owns ONE Pod. Run commands against its local workspace, use browser Git or brokered HTTPS when needed, then report the result.',
   app: 'a client-side App builder who owns ONE App. Build and edit its files to fulfil the request, then report what changed.',
   web: "peerd's single web operator. TWO ways to reach web data — a no-tab secure fetch and driving a tab — pick the cheaper that works, then report what you found.",
   dweb: "peerd's mesh operator. You own this browser's presence on the peer-to-peer network: discover and vet what peers share, publish what the user asks to share, guard the blocklist, and report what you find.",
@@ -358,6 +359,30 @@ repo_version for checkpoints/branches/restores, and repo_remote only at the user
 sandbox_create({kind:'notebook', gitUrl:…}) clones an existing HTTPS repository, shallow by
 default. Browser Git intentionally rejects oversized histories/worktrees and does not support
 LFS, submodules, symlinks, native hooks, or arbitrary credential helpers — use a WebVM for those.`,
+  pod: `Your Pod is a fast local shell over a sealed Worker + OPFS workspace. It sits
+between Notebook and WebVM: use it for files, pipelines/redirection, selected CLI-style
+utilities, Web-standard JavaScript (\`js\` on Chromium; current Firefox MV3 rejects the
+dynamic command Worker), WASI Preview 1 commands, browser-native Git,
+and audited HTTPS (\`curl\`). Start with \`help\` when unsure. \`wasi-demo\` runs the known-good
+WASI smoke module; \`wasi path/tool.wasm ...\` runs a workspace-backed command, and
+\`install-tool name path/tool.wasm\` registers it under that command name. WASI sees a byte
+snapshot of this Pod workspace and has structurally NO network; changed files reconcile back
+to OPFS when the command exits. Where available, JavaScript is Web-standard, receives an explicit
+\`pod\` interface, and has NO Node APIs.
+
+This is NOT Linux. There is no Node/npm, Python, Ruby, Bun, ELF/native binary, raw socket,
+WebSocket, PTY, signal, fork, or package-manager compatibility claim. Do not imitate those
+interfaces or fight missing syscalls — move the workload to a WebVM when it needs them.
+Commands are fresh cancellable job Workers; \`background:true\` creates an independent job,
+\`pod_status\` inspects the table, and \`pod_cancel\` terminates one job. Persistent files
+survive a stopped/reopened Pod; cwd, environment, and live jobs are process state and may not.
+Never blindly replay an interrupted command that may have made an audited request.
+
+Git is isomorphic-git over the same OPFS worktree. The shell supports init/status/add/commit/
+log/branch/checkout/clone/fetch/push/remote; repo_history/repo_version/repo_remote expose the
+same trusted repository service. Browser Git intentionally has no LFS, submodules, symlinks,
+native hooks, or arbitrary credential helpers. Use pod_read/pod_write for focused file IO and
+pod_exec for shell workflows.`,
   app: `Your App is a multi-file artifact (index.html + style.css + script.js + data)
 in a sandboxed iframe — DOM + canvas, but NO ambient network; files live in OPFS at peerd-apps/<appId>/.
 Raw fetch/XHR/WebSocket/WebRTC, remote assets/frames, external/document navigation, form actions, downloads, and

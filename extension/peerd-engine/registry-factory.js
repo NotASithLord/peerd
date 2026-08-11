@@ -1,9 +1,9 @@
 // @ts-check
-// Shared factory for the three peerd-engine instance registries
-// (WebVM, Notebook, App). The fourth execution kind, the headless script
+// Shared factory for the four peerd-engine instance registries
+// (WebVM, Notebook, Pod, App). The fifth execution kind, the headless script
 // worker, is ephemeral (no persisted instances), so it has no registry.
 //
-// why: vm/js/app-registry were ~95% the same code — same persistence
+// why: vm/js/pod/app registries share the same persistence
 // story (a single chrome.storage.local key holding
 // { schemaVersion, <collection>, sessionDefaults }), same per-session
 // "current" pointer with stale-pointer auto-clear, same CRUD shape.

@@ -280,6 +280,27 @@ export const createRepositoryService = ({
   /** @param {{kind:string,id:string}} ref @param {{message?:string}} [opts] */
   const init = (ref, { message = 'initial snapshot' } = {}) => run(ref, (ctx) => ensureUnlocked(ctx, message));
 
+  /** Stage selected paths, or the complete visible worktree for `.` / no paths. */
+  /** @param {{kind:string,id:string}} ref @param {{paths?:string[]}} [opts] */
+  const stage = (ref, { paths = [] } = {}) => run(ref, async (ctx) => {
+    await ensureUnlocked(ctx);
+    const requested = paths.map(String).filter((path) => path && path !== '.').map(validRelativePath);
+    if (!requested.length) {
+      const matrix = await stageAll(ctx);
+      return { staged: matrix.map((/** @type {StatusRow} */ row) => row[0]) };
+    }
+    const matrix = await ctx.git.statusMatrix({ fs: ctx.fs, dir: ctx.dir, gitdir: ctx.gitdir, ignored: false });
+    const wanted = new Set(requested);
+    const staged = [];
+    for (const [filepath, _head, workdir] of matrix) {
+      if (!wanted.has(filepath)) continue;
+      if (workdir === 0) await ctx.git.remove({ fs: ctx.fs, dir: ctx.dir, gitdir: ctx.gitdir, filepath });
+      else await ctx.git.add({ fs: ctx.fs, dir: ctx.dir, gitdir: ctx.gitdir, filepath });
+      staged.push(filepath);
+    }
+    return { staged };
+  });
+
   /** @param {{kind:string,id:string}} ref @param {{message?:string}} [opts] */
   const commit = (ref, { message = 'checkpoint' } = {}) => run(ref, async (ctx) => {
     await ensureUnlocked(ctx, message);
@@ -555,7 +576,7 @@ export const createRepositoryService = ({
 
   return {
     coordinate,
-    init, commit, status, branches, history, diff, restore, branch, checkout,
+    init, stage, commit, status, branches, history, diff, restore, branch, checkout,
     setRemote, getRemote, fetch: fetchRemote, push, clone, snapshot, matches, fork: forkRepository,
     replaceWorkingTree, destroy,
     initApp: (/** @type {string} */ appId, /** @type {{message?:string}} */ opts) => init(appRepositoryRef(appId), opts),

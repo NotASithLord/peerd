@@ -183,7 +183,7 @@ export const markPrewalkSwapped = (prewalk, now) => ({
 // second delegation onward. A one-shot actor (a single delegation) never
 // swaps and stays on the frontier — correct: there's no later turn to make
 // cheaper, and nothing was lost.
-export const ENGINE_ACTOR_KINDS = Object.freeze(new Set(['webvm', 'notebook', 'app']));
+export const ENGINE_ACTOR_KINDS = Object.freeze(new Set(['webvm', 'notebook', 'pod', 'app']));
 
 /** @param {string} [kind] */
 export const isEngineActorKind = (kind) => ENGINE_ACTOR_KINDS.has(kind ?? '');

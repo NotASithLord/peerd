@@ -21,7 +21,7 @@ export const ENGINE_LIVENESS_KEY = 'peerd.lifecycle.engineLiveness';
 
 /**
  * @typedef {Object} LivenessEntry
- * @property {string} kind    'vm' | 'notebook' | 'app'
+ * @property {string} kind    'vm' | 'notebook' | 'pod' | 'app'
  * @property {string} id      instance id
  * @property {number} tabId
  * @property {number} at      adopt time, epoch ms

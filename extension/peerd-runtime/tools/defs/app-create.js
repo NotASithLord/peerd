@@ -1,7 +1,7 @@
 // @ts-check
 // The app arm of sandbox_create — author a new App for the user.
 // (Was the standalone app_create tool; merged into sandbox_create({kind:'app'})
-// 2026-07-05 — one create tool, three kinds.)
+// 2026-07-05 — one kind-discriminated create tool.)
 //
 // Apps are multi-file. Pass `files` as a path → content map; the
 // agent's HTML body lives at index.html (default entry). If you only

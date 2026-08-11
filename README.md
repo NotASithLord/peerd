@@ -107,8 +107,8 @@ equation: more capability and stronger isolation.
 | Runtime | Runs inside your real browser instead of outsourcing its primary execution environment to a cloud browser |
 | Architecture | A privileged orchestrator delegates to environment-specific, capability-narrowed actors |
 | Web | Page tools, a code-first interaction surface, and reusable origin-scoped site clients |
-| Compute | Sealed JavaScript workers, persistent Notebooks, compiled WASI tools, browser Apps, and Chrome WebVMs |
-| State | Local sessions, memory, workspaces, Apps, and browser-native Git history for Apps and Notebooks |
+| Compute | Sealed JavaScript workers, persistent Notebooks, fast cross-browser Pods, compiled WASI tools, browser Apps, and Chromium WebVMs |
+| State | Local sessions, memory, workspaces, Apps, and browser-native Git history for Apps, Notebooks, and Pods |
 | Security | Untrusted reasoning is separated from privileged authority where the browser contract supports it; every tool call is checked again at the privileged boundary |
 | Recovery | Ambiguous side effects remain unknown instead of being silently converted into retries |
 | Providers | Bring a supported cloud provider or use supported local inference; a peerd-hosted model proxy is not required |
@@ -130,7 +130,7 @@ reasoning context should inherit every capability.
        ┌──────────────────────┼──────────────────────┐
        │                      │                      │
        ▼                      ▼                      ▼
-   web actor              VM actor           Notebook / App actor
+   web actor              VM actor        Notebook / Pod / App actor
    one live tab           one WebVM           one local workspace
    narrowed tools         narrowed tools      narrowed tools
        │                      │                      │
@@ -371,7 +371,7 @@ one top-level module, each owning its public API through `index.js`:
 |---|---|---|
 | **`p`** · cyan | [`peerd-provider`](extension/peerd-provider/) | Model adapters — the registry is the live inventory; adapters normalize streaming, tool use, context windows, cost, and retries |
 | **`e`** · red | [`peerd-egress`](extension/peerd-egress/) | Security — the vault, the egress chokepoint, the denylist, the audit log |
-| **`e`** · amber | [`peerd-engine`](extension/peerd-engine/) | Sandboxes — WebVMs, Notebooks, Apps, and the headless worker |
+| **`e`** · amber | [`peerd-engine`](extension/peerd-engine/) | Execution environments — Script workers, Notebooks, Pods, WebVMs, and Apps |
 | **`r`** · green | [`peerd-runtime`](extension/peerd-runtime/) | The orchestrator — agent loop, tools, the `message_actor` delegation channel, actors, sessions, memory, skills, review, goal mode, voice |
 | **`d`** · magenta | [`peerd-distributed`](extension/peerd-distributed/) | The dweb — the peer-to-peer network (preview channel only) |
 
@@ -400,10 +400,10 @@ asked to, because it never held the tool.
 |---|---|---|
 | **The vault** (`peerd-egress/vault`) | API keys and secrets, unlocked by Touch ID / passkey / passphrase with an auto-lock policy | exposing plaintext secrets to actors or sandboxes; provider keys are injected at the brokered egress boundary |
 | **The orchestrator** (`peerd-runtime/loop`) | the conversation, planning, delegating a goal to an actor via `message_actor` | holding any environment's tools, reading raw page bytes, or running untrusted code directly |
-| **A bound actor** (`peerd-runtime/actor`) | driving one tab / VM / Notebook / App with an instance-pinned toolset; keyless and in its own Worker heap on Chrome | touching another instance, receiving provider keys, or returning anything except a fenced summary |
+| **A bound actor** (`peerd-runtime/actor`) | driving one tab / VM / Notebook / Pod / App with an instance-pinned toolset; keyless and in its own Worker heap on Chrome | touching another instance, receiving provider keys, or returning anything except a fenced summary |
 | **An ephemeral actor** (`peerd-runtime/actor`) | short-lived delegated reasoning with a narrowed grant; keyless and in its own Worker heap on Chrome | escalating past its grant or reaching another heap; every tool call is rebuilt and re-checked service-worker-side |
 | **The egress chokepoint** (`safeFetch` / `webFetch`) | every outbound byte — provider allowlist + denylist + SSRF guard | being bypassed; a bare `fetch` is lint-forbidden |
-| **The sandboxes** (WebVM · Notebook · App) | running code — V8 isolates + opaque-origin iframes | extension access; their HTTP routes back through egress |
+| **The sandboxes** (WebVM · Notebook · Pod · App) | running code — sealed Workers, WASM linear memory, and opaque-origin iframes | extension access; their HTTP routes back through egress |
 | **Web content** | nothing by default | being trusted — all of it is fenced as untrusted input |
 
 The AI proposes and drives; the browser platform (WebCrypto vault,
@@ -454,15 +454,16 @@ peerd/
 │   ├── manifest.json
 │   ├── peerd-provider/       # p · cyan    — model adapters; registry.js is the live inventory
 │   ├── peerd-egress/         # e · red     — vault, allowlist, denylist, confirm, audit
-│   ├── peerd-engine/         # e · amber   — execution-instance registries (WebVM, Notebook, App). Tab runtimes in engine-tabs/<kind>-tab/; the headless script worker in offscreen/.
+│   ├── peerd-engine/         # e · amber   — execution-instance registries (WebVM, Notebook, Pod, App). Tab runtimes in engine-tabs/<kind>-tab/; the headless Script worker in offscreen/.
 │   ├── peerd-runtime/        # r · green   — agent loop, tools, actors, sessions, lifecycle, memory, skills, review, voice, DOM
 │   ├── peerd-distributed/   # d · magenta — the dweb layer between peerd instances (ships ONLY in preview packages)
 │   ├── background/           # chassis: service worker + per-kind tab trackers + clients
 │   ├── offscreen/            # chassis: the actor/actor worker heaps, headless script runs, voice, SW keepalive
 │   ├── sidepanel/            # chassis: chat UI (Mithril)
-│   ├── engine-tabs/          # chassis: the three peerd-engine tab-host pages, grouped
+│   ├── engine-tabs/          # chassis: the peerd-engine tab-host pages, grouped
 │   │   ├── vm-tab/           #   WebVM tab page (CheerpX + bash + xterm)
 │   │   ├── notebook-tab/     #   Notebook tab page (Web Worker + OPFS)
+│   │   ├── pod-tab/          #   Pod tab page (sealed command Workers + OPFS)
 │   │   └── app-tab/          #   App tab page (stored HTML in sandboxed iframe)
 │   ├── eval/                 # live end-to-end eval harness (runner.html)
 │   ├── shared/               # base types and utilities (importable everywhere)
@@ -490,19 +491,32 @@ paths. ESLint enforces. Within a module, deep imports are fine.
 
 ## Execution instances
 
-`peerd-engine` hosts Sandboxes: four execution kinds (taxonomy in the
-`peerd-engine/` code). Three are
+`peerd-engine` hosts five execution kinds (taxonomy in the
+`peerd-engine/` code). Four are
 discrete, persistent browser tabs the user can
 see, focus, and close, grouped under "peerd" in the tab strip and
-surviving browser restarts: the WebVM, the Notebook, and the App. The
-fourth, the headless worker (`script`), runs the Notebook's sealed worker
+surviving browser restarts: the WebVM, Notebook, Pod, and App. The
+fifth, the headless worker (`script`), runs the Notebook's sealed worker
 offscreen with no tab: ephemeral, for the agent's own quick compute. The
 orchestrator picks the lightest kind that fits the task, bootstraps the
 instance, and then delegates the work to that instance's actor; the
 tool lists below are the surface an actor drives, not the main agent. One
 main-agent tool spans all of them: **`actor_list`** enumerates every
-addressable actor (WebVMs, Notebooks, Apps, open tabs, and API integrations),
+addressable actor (WebVMs, Notebooks, Pods, Apps, open tabs, and API integrations),
 each tagged with its `type` and the handle to pass to `message_actor`.
+
+The execution spectrum is a routing guide, not a power ladder:
+
+```text
+Script → Notebook → Pod → WebVM
+```
+
+- **Script** is fresh, headless JavaScript for quick compute and orchestration.
+- **Notebook** is a persistent JavaScript workspace and editor.
+- **Pod** is a fast local shell, file, Git, WASI-tool, job, and selected-runtime
+  environment. It is intentionally not Linux.
+- **WebVM** is the compatibility choice for Node/npm, native binaries, POSIX,
+  and multi-language Linux stacks.
 
 **WebVM**: CheerpX-emulated Debian (sandboxed Linux). Own disk overlay, own
 bash, own POSIX. Use it when you need real binaries, a shell, or multi-language
@@ -523,6 +537,16 @@ SQLite over a user's `.sqlite` file, codecs, language runtimes — against an
 in-memory filesystem, with zero ambient capabilities (a wasm module has no
 network path even in principle; it sees only the stdin/files the call
 passes it).
+
+**Pod**: a visible, cross-browser shell environment over the same sealed Worker,
+rooted OPFS, WASI Preview 1, browser-native Git, egress, and lifecycle primitives.
+It adds pipelines, redirection, common built-ins, installed WASI commands,
+brokered `curl`, and cancellable concurrent jobs. Chromium also supports
+Web-standard `js`; Firefox MV3's dynamic-Worker restriction is documented as an
+explicit compatibility limit. Persistent Pods survive tab/worker loss through
+their named OPFS workspace; ephemeral Pods are deleted when their host tab
+closes. Pod does not claim Node, npm, native Linux, raw sockets, PTYs, or POSIX
+compatibility. See [`docs/POD.md`](docs/POD.md).
 
 **Headless worker** is the same sealed worker as a Notebook, but headless:
 `script` runs it in the offscreen document with no tab, ephemeral scratch
@@ -606,6 +630,7 @@ Thank you to the maintainers of all of these projects.
 | [Silero VAD](https://github.com/snakers4/silero-vad) (`@ricky0123/vad-web`) | 0.0.24 | MIT | Voice-activity detection / speech endpointing for Moonshine (`vendor/vad-web/`) |
 | [hash-wasm](https://github.com/Daninet/hash-wasm) (Argon2 bundle) | 4.12.0 | MIT | Argon2id KDF deriving the vault's key-encryption key (`peerd-egress/vault/`) |
 | [browser_wasi_shim](https://github.com/bjorn3/browser_wasi_shim) (`@bjorn3/browser_wasi_shim`) | 0.4.2 | MIT OR Apache-2.0 | WASI preview1 syscall layer behind the `peerd:wasi` builtin — runs wasm32-wasi binaries in the sealed worker (`engine-tabs/notebook-tab/notebook-wasi.js`) |
+| [isomorphic-git](https://isomorphic-git.org/) | 1.38.6 | MIT | Browser-native Git for App, Notebook, and Pod workspaces; the vendored bundle also carries `buffer`/`base64-js` (MIT) and `ieee754` (BSD-3-Clause) |
 | [webextension-polyfill](https://github.com/mozilla/webextension-polyfill) | 0.12.0 | MPL-2.0 | One promise-based `browser.*` API across Chrome and Firefox |
 | [Transformers.js](https://github.com/huggingface/transformers.js) (`@huggingface/transformers`) | 4.2.0 | Apache-2.0 | WebGPU runtime for the on-device local-inference runner (`offscreen/local-model.js`)² |
 

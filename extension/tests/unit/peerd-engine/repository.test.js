@@ -7,6 +7,30 @@ import { describe, it, expect } from '../../framework.js';
 import { createRepositoryService, opfsHelpers } from '/peerd-engine/index.js';
 
 describe('peerd-engine repository — real OPFS + vendored Git', () => {
+  it('runs a practical local Pod Git workflow against the Pod OPFS tree', async () => {
+    const id = `pod-repository-test-${Date.now().toString(36)}`;
+    const ref = { kind: 'pod', id };
+    const files = opfsHelpers(['peerd-pods', id]);
+    const repositories = createRepositoryService();
+    try {
+      await files.write('README.md', '# pod\n');
+      await repositories.init(ref, { message: 'initial Pod' });
+      await files.write('src/main.js', 'export const answer = 42;\n');
+      expect((await repositories.status(ref)).dirty).toBe(true);
+      expect((await repositories.stage(ref, { paths: ['src/main.js'] })).staged)
+        .toEqual(['src/main.js']);
+      const commit = await repositories.commit(ref, { message: 'add source' });
+      expect(commit.created).toBe(true);
+      expect((await repositories.history(ref, { depth: 5 }))[0].message).toBe('add source');
+      await repositories.branch(ref, { name: 'experiment', checkout: true });
+      expect((await repositories.status(ref)).branch).toBe('experiment');
+      await repositories.checkout(ref, { name: 'main' });
+      expect((await repositories.status(ref)).branch).toBe('main');
+    } finally {
+      await repositories.destroy(ref, { worktree: true });
+    }
+  });
+
   it('commits, diffs, restores, and branches without Linux', async () => {
     const id = `repository-test-${Date.now().toString(36)}`;
     const ref = { kind: 'app', id };

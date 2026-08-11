@@ -1,5 +1,5 @@
 // @ts-check
-// sandbox_create — the single create tool for all three sandbox kinds.
+// sandbox_create — the single create tool for all tab-hosted sandbox kinds.
 //
 // why one tool, not three: vm_create / js_create / app_create were three
 // near-identical bootstrap tools (create a record, open a background tab, set
@@ -19,6 +19,7 @@ import { executeByKind, kindEnum } from './kind-dispatch.js';
 import { createWebVmSandbox } from './vm-create.js';
 import { createNotebookSandbox } from './js-create.js';
 import { createAppSandbox } from './app-create.js';
+import { createPodSandbox } from './pod-create.js';
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
 /** @typedef {import('/shared/tool-types.js').ToolResult} ToolResult */
@@ -27,6 +28,7 @@ import { createAppSandbox } from './app-create.js';
 export const SANDBOX_KIND_HANDLERS = Object.freeze({
   webvm: createWebVmSandbox,
   notebook: createNotebookSandbox,
+  pod: createPodSandbox,
   app: createAppSandbox,
 });
 
@@ -44,6 +46,8 @@ export const sandboxCreateTool = {
     '"webvm" = full Linux (bash, disk, POSIX, compilers, python, git); heavyweight.',
     '"notebook" = lightweight fresh-run JS IDE (files, sealed realm, OPFS);',
     'gitUrl clones without Linux. Use for JSON, numerical work, analysis, charts, tables.',
+    '"pod" = fast local shell + OPFS + WASI + browser Git + audited HTTPS;',
+    'lighter than Linux, with no Node/npm/native-binary claim.',
     '"app" = user-facing multi-file HTML in a sandboxed iframe (DOM, no extension',
     'access, NO ambient network; bundle dependencies). Live APIs belong to the web actor;',
     'dwapp:true grants only the consent-gated dweb bridge.',
@@ -82,9 +86,10 @@ export const sandboxCreateTool = {
           + "dweb('join'/'publish'/'subscribe'/'dm-send'/…). REQUIRED for any app "
           + 'that talks to peers. Pair with dweb_guide.',
       },
-      gitUrl: { type: 'string', description: 'app/notebook: HTTPS remote to clone.' },
-      gitRef: { type: 'string', description: 'app/notebook: branch.' },
-      gitDepth: { type: 'integer', description: 'app/notebook: depth, 1–500.' },
+      gitUrl: { type: 'string', description: 'app/notebook/pod: HTTPS remote to clone.' },
+      gitRef: { type: 'string', description: 'app/notebook/pod: branch.' },
+      gitDepth: { type: 'integer', description: 'app/notebook/pod: depth, 1–500.' },
+      persistent: { type: 'boolean', description: 'pod only: preserve the named OPFS workspace when its tab stops (default true).' },
     },
     required: ['kind'],
   },
@@ -113,10 +118,13 @@ export const sandboxCreateTool = {
           return { ok: false, error: `sandbox_create: ${appOnly.join(', ')} ${appOnly.length === 1 ? 'is' : 'are'} app-only — a ${kind} starts empty; seed its files by messaging its actor after create.` };
         }
       }
-      if (typeof kind === 'string' && kind !== 'notebook' && kind !== 'app' && kind in SANDBOX_KIND_HANDLERS) {
+      if (typeof kind === 'string' && kind !== 'pod' && args?.persistent !== undefined && kind in SANDBOX_KIND_HANDLERS) {
+        return { ok: false, error: `sandbox_create: persistent is pod-only — ${kind} has its existing lifecycle semantics.` };
+      }
+      if (typeof kind === 'string' && kind !== 'notebook' && kind !== 'pod' && kind !== 'app' && kind in SANDBOX_KIND_HANDLERS) {
         const notebookOnly = ['gitUrl', 'gitRef', 'gitDepth'].filter((k) => args?.[k] !== undefined);
         if (notebookOnly.length) {
-          return { ok: false, error: `sandbox_create: ${notebookOnly.join(', ')} ${notebookOnly.length === 1 ? 'is' : 'are'} notebook-only — use kind:'notebook' for a lightweight Git clone or kind:'webvm' for a full Linux checkout.` };
+          return { ok: false, error: `sandbox_create: ${notebookOnly.join(', ')} ${notebookOnly.length === 1 ? 'is' : 'are'} available only on notebook/pod/app — use kind:'webvm' for a full Linux checkout.` };
         }
       }
       return dispatch(args, ctx);

@@ -282,7 +282,7 @@ export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready } 
 }
 
 // ---- raw CDP attach over Chrome's WebSocket (no npm client) -----------------
-async function attach(wsUrl, onEvent) {
+export async function attach(wsUrl, onEvent) {
   const ws = new WebSocket(wsUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   let id = 0;
@@ -472,6 +472,11 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
         else await fulfill('text/event-stream', sseText('e2e-smoke-ok'));
       } else if (url.includes('/api/tags')) {
         await fulfill('application/json', JSON.stringify({ models: [{ name: tagsModel, size: 1 }] }));
+      } else if (url === 'https://example.com/__peerd_pod_e2e__') {
+        // Deterministic public HTTPS target for the Pod's brokered egress
+        // evidence. It still traverses Pod Worker → tab → SW safeFetch; CDP
+        // replaces only the final internet response so CI never depends on DNS.
+        await fulfill('text/plain', 'pod-controlled-egress');
       } else if (url.includes('11434')) {
         await fulfill('application/json', '{}');
       } else {
@@ -479,7 +484,10 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
       }
     } catch { /* request may have been torn down (e.g. an aborted turn); ignore */ }
   });
-  await swConn.send('Fetch.enable', { patterns: [{ urlPattern: '*11434*' }] });
+  await swConn.send('Fetch.enable', { patterns: [
+    { urlPattern: '*11434*' },
+    { urlPattern: 'https://example.com/__peerd_pod_e2e__' },
+  ] });
   log('Fetch interception armed on the service worker');
 
   // 3) open the side panel as a normal tab (chrome.sidePanel.open is not

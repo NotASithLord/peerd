@@ -1,7 +1,7 @@
 // @ts-check
 // peerd-engine — public surface.
 //
-// Three instance kinds. Each is a SEALED ISOLATE (a V8 realm — Notebook/App —
+// Four instance kinds. Each is a SEALED ISOLATE (a V8 realm — Notebook/Pod/App —
 // or a WASM machine in one — WebVM), HOSTED today in its own discrete tab the
 // user can see. The tab is the host + observability surface, NOT the sandbox
 // itself; "hosted in a tab," not "is a tab". Visible-by-default is a deliberate
@@ -54,7 +54,7 @@ export { opfsHelpers } from './opfs.js';
 export { createRepositoryService } from './repository/repository-service.js';
 export { createOpfsGitFs, normalizeRepositoryPath } from './repository/opfs-fs.js';
 export { normalizeGitRemote, gitRemoteOwnsRequest, smartHttpAuthHeader } from './repository/remote.js';
-export { repositoryPaths, appRepositoryRef, notebookRepositoryRef } from './repository/paths.js';
+export { repositoryPaths, appRepositoryRef, notebookRepositoryRef, podRepositoryRef } from './repository/paths.js';
 export { diffRepositorySnapshots } from './repository/diff.js';
 export { buildAppManifest, parseAppManifest } from './app-manifest.js';
 
@@ -151,6 +151,21 @@ export {
   NOTEBOOK_TAB_PATH,
   NOTEBOOK_OPFS_ROOT,
 } from './notebook-registry.js';
+
+// --- Pod (sealed shell/WASI jobs + OPFS workspace) ----------------------
+export {
+  createPodRegistry,
+  POD_TAB_PATH,
+  POD_OPFS_ROOT,
+} from './pod-registry.js';
+export {
+  PodShellSyntaxError,
+  tokenizePodShell,
+  parsePodShell,
+  podGitRemoteIntent,
+  expandPodWord,
+  executePodShell,
+} from './pod-shell.js';
 
 // --- App (multi-file in OPFS, rendered in a sandboxed iframe) -----------
 export {

@@ -426,9 +426,9 @@ const STARTER_PROMPTS = [
   { type: 'ask', label: 'Ask', text: 'What can you do?' },
   { type: 'web', label: 'Browse', text: 'Open Hacker News and summarize the top 5 stories.' },
   { type: 'notebook', label: 'Notebook', text: 'Make a notebook on Bitcoin halving math, with a chart.' },
+  { type: 'pod', label: 'Pod', text: 'Create a Pod and demonstrate files, a pipeline, JavaScript, and WASI.' },
   { type: 'vm', label: 'Linux VM', text: 'Spin up a Linux VM and run `python3 --version`.' },
   { type: 'app', label: 'App', text: 'Build me a drum machine I can play in the browser.' },
-  { type: 'app', label: 'App', text: 'Build me a Mandelbrot set explorer I can zoom and pan.' },
 ];
 
 // The starter set is page-aware in the SIDE PANEL: when the panel sits next to
@@ -446,9 +446,9 @@ const promptsFor = (attrs) => (attrs.surface !== 'home' && attrs.activeTabIsWeb
 
 // Action-type glyphs for the path cards. Two voices, both monochrome
 // (currentColor): conceptual paths (ask / web) are stroked LINE icons in
-// the same voice as the composer's send/clip glyphs; the three engine
+// the same voice as the composer's send/clip glyphs; the engine
 // sandboxes wear the LOGO of the tech they run (Notebook → JS, VM → Linux/
-// Tux, App → HTML5) so the kind reads at a glance. The glyph + label carry
+// Tux, Pod → terminal, App → HTML5) so the kind reads at a glance. The glyph + label carry
 // the path's module accent PERMANENTLY (cyan/green/amber). why: owner
 // override (2026-06-21) — this menu is a deliberate, wayfinding-first
 // departure from the "one rainbow accent on monochrome" brand rule; the
@@ -491,6 +491,12 @@ const PATH_ICONS = {
       'font-family': 'ui-monospace, "JetBrains Mono", monospace',
       'font-weight': 700, 'font-size': 10.5, fill: 'currentColor', stroke: 'none',
     }, 'JS'),
+  ),
+  // pod — a compact terminal prompt: shell-oriented but deliberately not Tux,
+  // because a Pod is not Linux.
+  pod: () => pathIcon(
+    m('rect', { x: 3, y: 4, width: 18, height: 16, rx: 3 }),
+    m('path', { d: 'M7 9 10 12 7 15 M12 15 H17' }),
   ),
   // vm — Tux, the Linux mascot (the CheerpX Linux VM)
   vm: () => logoIcon(LINUX_PATH),

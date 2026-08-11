@@ -23,6 +23,8 @@ const baseDeps = (over: any = {}) => ({
   },
   vmRegistry: { get: async (id: string) => (id === 'v1' ? { id, name: 'VM' } : null), create: async () => ({ id: 'vNew' }) },
   jsRegistry: { get: async () => null, create: async () => ({ id: 'nNew' }) },
+  podRegistry: { get: async (id: string) => (id === 'pod-1' ? { id, name: 'Pod' } : null) },
+  podTabTracker: { getTabId: (id: string) => (id === 'pod-1' ? 99 : null) },
   appClient: {
     open: async () => {}, create: async () => ({ id: 'imported' }),
     readFile: async () => JSON.stringify({ schema: 1, kind: 'app', entry: 'index.html', agent: { kind: 'bound-app' }, capabilities: [] }),
@@ -47,7 +49,67 @@ const baseDeps = (over: any = {}) => ({
   applyWebExtract: async (resp: any) => resp,
   parseAppManifest,
   kv: { get: async () => ({}), set: async () => {} },
+  repositories: {
+    init: async () => 'abc123456789',
+    status: async () => ({ oid: 'abc', branch: 'main', dirty: false, changed: [] }),
+    stage: async () => ({ staged: [] }), commit: async () => ({ oid: 'abc', changed: [], created: false }),
+    history: async () => [], branches: async () => ['main'], branch: async (_ref: any, opts: any) => ({ branch: opts.name }),
+    checkout: async (_ref: any, opts: any) => ({ branch: opts.name, oid: 'abc' }),
+    clone: async (_ref: any, opts: any) => ({ remote: { url: opts.url } }),
+    fetch: async () => ({ remote: { url: 'https://github.com/a/b.git' } }),
+    push: async () => ({ ok: true, branch: 'main', remote: { url: 'https://github.com/a/b.git' } }),
+    setRemote: async (_ref: any, opts: any) => ({ url: opts.url }), getRemote: async () => null,
+    coordinate: async (_ref: any, operation: any) => operation(), destroy: async () => {},
+  },
   ...over,
+});
+
+describe('pod/git — instance-pinned isomorphic-git shell bridge', () => {
+  const sender = { tab: { id: 99 } };
+
+  test('refuses a first-party page that is not the Pod\'s owning tab', async () => {
+    const routes = makeEngineRoutes(baseDeps());
+    expect(await routes['pod/git']({ podId: 'pod-1', argv: ['status'] }, { tab: { id: 12 } }))
+      .toEqual({ ok: false, error: 'pod-sender-not-instance-pinned' });
+  });
+
+  test('maps local shell Git to the existing repository service', async () => {
+    let seen: any = null;
+    const routes = makeEngineRoutes(baseDeps({
+      repositories: {
+        ...baseDeps().repositories,
+        status: async (ref: any) => { seen = ref; return { branch: 'main', changed: [{ status: 'modified', path: 'a.txt' }] }; },
+      },
+    }));
+    const reply = await routes['pod/git']({ podId: 'pod-1', argv: ['status'] }, sender);
+    expect(seen).toEqual({ kind: 'pod', id: 'pod-1' });
+    expect(reply).toMatchObject({ ok: true, result: { exitCode: 0 } });
+    expect(reply.result.stdout).toContain('modified a.txt');
+  });
+
+  test('remote operations fail closed without the one-job grant', async () => {
+    let pushed = false;
+    const deps = baseDeps();
+    deps.repositories.push = async () => { pushed = true; return { ok: true }; };
+    const routes = makeEngineRoutes(deps);
+    const reply = await routes['pod/git']({ podId: 'pod-1', argv: ['push', 'origin', 'main'] }, sender);
+    expect(reply.result.exitCode).toBe(126);
+    expect(reply.result.stderr).toContain('explicit authorization');
+    expect(pushed).toBe(false);
+  });
+
+  test('an explicitly granted remote operation reaches the brokered service', async () => {
+    let pushedRef: any = null;
+    const deps = baseDeps();
+    deps.repositories.push = async (ref: any, opts: any) => {
+      pushedRef = { ref, opts };
+      return { ok: true, branch: 'main', remote: { url: 'https://github.com/a/b.git' } };
+    };
+    const routes = makeEngineRoutes(deps);
+    const reply = await routes['pod/git']({ podId: 'pod-1', argv: ['push', 'origin', 'main'], remoteAuthorized: true }, sender);
+    expect(reply.result.exitCode).toBe(0);
+    expect(pushedRef).toEqual({ ref: { kind: 'pod', id: 'pod-1' }, opts: { ref: 'main' } });
+  });
 });
 
 describe('sw/web-fetch', () => {
