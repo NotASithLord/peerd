@@ -104,8 +104,15 @@ export const validatePasskeyBinding = (binding) => {
   if (!binding || typeof binding !== 'object') return 'not-an-object';
   if (binding.v !== PASSKEY_BINDING_VERSION) return `unsupported-version-${binding.v}`;
   try { decodeDidKey(binding.personDid); } catch { return 'bad-person-did'; }
+  // The RP is pinned to the exact canonical host, not merely defaulted to it.
+  // why enforced in the VERIFIER and not just the builder: verification hashes
+  // whatever rpId the signed record carries, so a binding naming a sibling RP
+  // (peerd.ai, or any registrable-suffix relative) would otherwise verify and
+  // be honoured, recreating exactly the RP-scope exposure this design exists to
+  // close. A future RP migration is a binding VERSION bump, not a free field.
   if (typeof binding.rpId !== 'string' || binding.rpId.length === 0
       || binding.rpId.length > MAX_RP_ID_LENGTH) return 'bad-rp-id';
+  if (binding.rpId !== CANONICAL_RP_ID) return 'non-canonical-rp-id';
   if (!Number.isSafeInteger(binding.seq) || binding.seq < 1) return 'bad-seq';
   if (!Array.isArray(binding.credentials)
       || binding.credentials.length > MAX_BINDING_CREDENTIALS) return 'bad-credentials';
