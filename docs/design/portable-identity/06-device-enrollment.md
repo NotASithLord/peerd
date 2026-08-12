@@ -90,35 +90,64 @@ sign; the certificate says whose device is signing.
      |    (origin- and nonce-bound, one-shot)                |
      |                                                       |
      |  derive (topicSecret, macKey) from PRF                |
+     |  mint OWN device key  <-- before asking for anything  |
      |  join enroll rendezvous topic                         |
      |                                                       |
      |------------------ ENROLL_REQ ------------------------>|
-     |   credentialId, ephemeral ECDH key, MAC               |
+     |   credentialId, ephemeral ECDH key, deviceDid, MAC    |
      |                            verify MAC vs binding      |
      |<----------------- ENROLL_CHALLENGE -------------------|
      |   fresh, single-use                                   |
      |                                                       |
      |  ceremony #2: assert over                             |
-     |  H(challenge || ephemeral key)   <-- channel binding  |
+     |  H(challenge || ephemeral key || deviceDid)           |
+     |                                  <-- channel binding  |
      |------------------ ENROLL_PROOF ---------------------->|
      |                            verify assertion against   |
-     |                            the ROOT-SIGNED binding    |
+     |                            the ROOT-SIGNED binding;   |
+     |                            ISSUE a certificate for B's|
+     |                            device key + a seq+1 roster|
      |<----------------- ENROLL_GRANT -----------------------|
      |   AES-GCM sealed to the exchange transcript:          |
-     |   identity material, discovery secret, binding, roster|
+     |   personDid, MY certificate, roster, discovery secret,|
+     |   binding.  NO private key of any kind.               |
      |                                                       |
-     |  verify chain: material -> DID; binding verifies      |
-     |  under that DID and lists MY credential active;       |
-     |  roster verifies under the same DID                   |
-     |  mint OWN device key; self-certify; extend roster     |
+     |  verify chain under the claimed personDid: my cert    |
+     |  names MY device key; roster lists it ACTIVE; binding |
+     |  lists MY credential active; secret is well-sized     |
+     |  store what I was granted; sign nothing               |
 ```
 
+**The grant conveys bounded device authority, never the person root.** This
+is the load-bearing decision, and it is what makes revocation real. A device
+holding the root could mint a fresh device key, self-certify it, and sign a
+`seq+1` roster marking itself active again; every peer would accept it,
+because `rosterSupersedes` is "strictly higher seq under the same person" and
+the signature would genuinely be the person's. Distributing the root and
+claiming roster-based revocation are mutually exclusive designs. So authority
+to *issue* lives only where the root does: the sponsor certifies, the
+enrollee stores.
+
+Moving the root between installs stays a separate, explicit, user-driven act
+with its own consent surface, the encrypted recovery record
+(`identity/recovery-record.js`). It is never a side effect of adding a device.
+
+The consequence, stated plainly: an enrolled device can prove same-person,
+discover its siblings, and sync state, and it **cannot** enroll a further
+device, re-issue a roster, or sign as the person root. Routine mesh signing
+still uses the root today, so an enrolled-only device does not yet publish
+Agent Cards or DHT items as the person; that unblocks when the wire verifier
+accepts certificate-backed identity (`03-device-subkeys.md`).
+
 Three proofs, three jobs. The **possession MAC** gates challenge minting so a
-stranger on the topic cannot even make the sponsor allocate state. The
-**assertion** is the load-bearing "the person is present and approved, now"
-a bearer MAC must never be grant-sufficient. The **channel binding** welds the
-assertion to the key the grant will be sealed to, so a relay that substitutes
-its own key invalidates the assertion it is relaying.
+stranger on the topic cannot even make the sponsor allocate state; it now
+covers `deviceDid` too, so a relay cannot get its own key certified off the
+back of the person's ceremony. The **assertion** is the load-bearing "the
+person is present and approved, now": a bearer MAC must never be
+grant-sufficient. The **channel binding** welds the assertion to two things at
+once, the key the grant will be sealed to *and* the device key the grant will
+certify, so a relay that substitutes either one invalidates the assertion it
+is relaying.
 
 The grant's AES-GCM key is HKDF-salted with the whole transcript (challenge,
 credential, both ephemeral keys), so a recorded grant is undecryptable in any
@@ -196,17 +225,30 @@ can never verify as a proof (asserted in `self-handshake.test.ts`).
      |  reassemble -> verify SHA-256 against manifest |
      |  -> apply that surface                         |
      |                                                |
-     |  on failure: fresh collector, re-PULL the same |
-     |  surface (same snapshot, same bytes, same hash)|
+     |  on SILENCE (stall timer): re-PULL the same    |
+     |  surface, capped + backed off                  |
+     |  on DEFECT (bad chunk / hash): TERMINAL        |
      |                                                |
      |------------------ SYNC_PULL (secrets) -------->|  only after the
      |                                                |  explicit consent
 ```
 
 Surfaces apply independently, so an interrupted transfer leaves whole
-surfaces present or absent: never half-written. Pulls are idempotent, so
-retry is the whole recovery story. The surface vocabulary is **closed**: a
-name outside `SYNC_SURFACES` is refused, never "applied generically".
+surfaces present or absent: never half-written. The surface vocabulary is
+**closed**: a name outside `SYNC_SURFACES` is refused, never "applied
+generically".
+
+**Every surface reaches exactly one end state, so `restore()` always
+settles.** That is a security property, not tidiness. The source is an
+authenticated self device, but authenticated is not correct, and a buggy or
+compromised sibling must not be able to hold a fresh install in an endless
+pull/serve loop. So the two failure shapes are separated. A *defect* (bad
+chunk, changed total, size or hash mismatch) is deterministic: the same
+snapshot serves the same bytes, so re-pulling can only reproduce it. Those
+are terminal, per the disposition table in `self/sync.js`, which fails
+closed on any defect a future version adds. An *interruption* is silence,
+caught by a per-surface stall timer, and only that earns a re-pull, capped
+with exponential backoff before it too becomes terminal.
 
 No Peerd-hosted server is in the data path. TURN, if WebRTC needs it, relays
 opaque DTLS.
@@ -235,6 +277,50 @@ proven device" are different questions.
 | engine-registries | no (device-bound) | no | **no** | tab/VM/worker handles are runtime state |
 | dweb-identity | no | no | **no** | moves only via the verified recovery/grant path |
 
+## 7b. How it is wired into the running extension
+
+The pure modules above are driven from three places, split by what each
+process is allowed to hold.
+
+**The offscreen document** owns the mesh, so it owns the coordinator
+(`offscreen/dweb-self.js`). The base network's lifecycle starts it and stops
+it: on an install that is not yet a member of a person's device set it stays
+INERT, which is the correct behaviour rather than a failure, because the
+rendezvous topics derive from a discovery secret it does not have. It signs
+with the DEVICE key and never sees the person root.
+
+**The service worker** owns the stores and the vault, so it owns what a
+surface *means* (`background/routes/dweb-self.js`). It shapes surfaces out of
+live stores, caches them under a snapshotId, and serves them on demand rather
+than handing the whole snapshot over at once. It also applies arriving
+surfaces. Consent is applied by omission: a surface the caller did not ask
+for is never shaped, so it never reaches the manifest and the protocol has
+nothing to refuse.
+
+Between them, exactly two doors, both verified with `isOffscreenSender`
+because `runtime.sendMessage` is reachable from every extension page:
+`dweb/self-read-surface` (out) and `dweb/self-apply-surface` (in). An unknown
+surface name is refused at that door, never applied generically.
+
+**Vault custody** for the self-device secrets rides the same sender-verified
+port as the identity seed but a separate handler with a closed allowlist
+(`background/dweb-self-custody.js`): the device key, the discovery secret,
+and the cached certificate/roster, and nothing else. It refuses the identity
+secret name explicitly, which is redundant by construction and kept anyway as
+the assertion that survives someone widening the list later.
+
+The coordinator gained the seam these hosts need: `onAppFrame` and `send`,
+both gated on `isSelfDevice`, so a state-transfer host rides the same
+authenticated link the handshake used and a peer that merely guessed a
+rendezvous topic reaches nothing.
+
+Still unwired, and named here rather than implied: the rendered "Use my
+existing Peerd" fork on the vault gate (the reducer and copy are implemented
+and tested; the render needs the visual verify loop), and the `workspaces`
+and `secrets` shapers, which need an OPFS walk through the engine hosts and
+their own consent gate respectively. An offer reports those as `unavailable`
+rather than silently omitting them.
+
 ## 8. Files changed
 
 New, `extension/peerd-distributed/identity/`: `device-key.js`,
@@ -247,14 +333,24 @@ New, `extension/peerd-distributed/self/`: `rendezvous.js`, `handshake.js`,
 New, `extension/peerd-runtime/`: `transfer/self-sync-surfaces.js`,
 `transfer/enrollment-flow.js`.
 
+New, the runtime wiring (§7b): `extension/offscreen/dweb-self.js`,
+`extension/background/routes/dweb-self.js`,
+`extension/background/dweb-self-custody.js`.
+
 New, `web-identity/`: `index.html`, `ceremony.js`, `ceremony.css`, `README.md`.
 
-Modified: `extension/peerd-distributed/index.js` (module surface),
-`extension/peerd-runtime/lifecycle/store-registry.js` (the `personPortable`
-axis + the `device-key` entry), `packaging/check-tscheck.ts` (coverage floor).
+Modified: `extension/peerd-distributed/index.js` and
+`extension/peerd-runtime/index.js` (module surfaces),
+`extension/peerd-distributed/self/coordinator.js` (the `onAppFrame`/`send`
+host seam), `extension/offscreen/dweb-base.js` (lifecycle + routes),
+`extension/background/service-worker.js` (custody routing + the shapers and
+appliers), `extension/background/dweb-custody-client.js` (the named secret
+operations), `extension/peerd-runtime/lifecycle/store-registry.js` (the
+`personPortable` axis + the `device-key` entry), `packaging/check-tscheck.ts`
+(coverage floor).
 
-Tests: eleven new files under `tests/peerd-distributed/`,
-`tests/peerd-runtime/`, and `tests/web/`, plus `tests/helpers/webauthn-fixtures.ts`.
+Tests: new files under `tests/peerd-distributed/`, `tests/peerd-runtime/`,
+`tests/background/`, and `tests/web/`, plus `tests/helpers/webauthn-fixtures.ts`.
 
 ## 9. The hosted component, and exactly what it can observe
 
@@ -355,10 +451,15 @@ deployed ceremony page.
 ## 13. Known limitations
 
 1. **The rendered front door is not wired.** The flow state machine, copy, and
-   every branch are implemented and tested; the vault gate's
-   "Create new / Use my existing Peerd" fork is not yet rendered. Peerd
-   requires UI changes to pass the visual verify loop, and the pinned Chrome
-   for Testing binary was unreachable from the authoring environment.
+   every branch are implemented and tested, and the coordinator, sync hosts,
+   custody, and both relay doors now run in the shipped runtime (§7b); what is
+   missing is the vault gate's rendered "Create new / Use my existing Peerd"
+   fork. Peerd requires UI changes to pass the visual verify loop, and the
+   pinned Chrome for Testing binary was unreachable from the authoring
+   environment. Enrollment therefore has no user-facing entry point yet, even
+   though everything behind it is wired.
+   The `workspaces` and `secrets` shapers are likewise absent: an offer
+   reports them as `unavailable` rather than pretending to carry them.
 2. **No live WebAuthn ceremony has run.** The verifier is exercised against
    fabricated-but-real signatures (WebCrypto keys, genuine DER encoding). A
    real Touch ID ceremony against a deployed `id.peerd.ai` remains release
@@ -376,6 +477,13 @@ deployed ceremony page.
    certificate-backed identity across *all* those surfaces before routine
    signing moves; the certificate machinery and its verifier now exist, and
    the switchover is the next step, not this one.
+   A direct consequence of §3's bounded-authority grant: a device that
+   enrolled but never received the root cannot sign as the person at all
+   until this lands. It can discover, authenticate, and sync (all device-key
+   work); it cannot publish an Agent Card or a DHT item as the person.
+8. **Only the sponsor can enroll.** Adding a third device requires a
+   root-holding device to be online. That is the cost of real revocation, and
+   the escape hatch is the encrypted recovery record, not a weaker grant.
 
 ## 14. Deliberately deferred to ongoing multi-device sync
 

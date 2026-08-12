@@ -92,6 +92,8 @@ export const createSelfDeviceCoordinator = ({
   const peers = new Map();
   /** @type {Set<(arg: { deviceDid: string, cert: DeviceCertificate }) => void>} */
   const selfDeviceCbs = new Set();
+  /** @type {Set<(from: string, frame: any) => void>} */
+  const appFrameCbs = new Set();
   let running = false;
 
   /** @param {string} deviceDid */
@@ -131,9 +133,15 @@ export const createSelfDeviceCoordinator = ({
     if (!data || typeof data !== 'object') return;
     if (data.t === 'AUTH_HELLO') return onAuthHello(from, data);
     if (data.t === 'AUTH_PROOF') return onAuthProof(from, data);
-    // SYNC_* frames are handled by the injected sync host, but only for a
-    // peer that already reached `self`: the routing gate (issue invariant
-    // 12). The coordinator exposes isSelfDevice for that host to consult.
+    // Everything else (SYNC_*) belongs to a host registered via onAppFrame.
+    // The gate is applied HERE as well as inside the host: a frame from a
+    // peer that has not reached `self` is dropped before any host sees it
+    // (issue invariant 12). Two checks, because this one is structural and
+    // the host's keeps the host honest when driven by any other transport.
+    if (!isSelfDevice(from)) return;
+    for (const cb of appFrameCbs) {
+      try { cb(from, data); } catch { /* a host's failure is not the mesh's */ }
+    }
   };
 
   /** @param {string} from @param {any} hello */
@@ -298,6 +306,25 @@ export const createSelfDeviceCoordinator = ({
     isSelfDevice,
     /** @param {(arg: { deviceDid: string, cert: DeviceCertificate }) => void} cb */
     onSelfDevice(cb) { selfDeviceCbs.add(cb); return () => selfDeviceCbs.delete(cb); },
+
+    /**
+     * Subscribe a state-transfer host (host.js) to the frames this
+     * coordinator does not itself speak. Only frames from a peer that
+     * already reached `self` are delivered.
+     * @param {(from: string, frame: any) => void} cb
+     */
+    onAppFrame(cb) { appFrameCbs.add(cb); return () => appFrameCbs.delete(cb); },
+
+    /**
+     * Send on the same authenticated link the handshake used. Refuses any
+     * peer that is not a confirmed self device, so a host cannot be tricked
+     * into serving state to a candidate that never proved same-person.
+     * @param {string} deviceDid @param {any} frame
+     */
+    send(deviceDid, frame) {
+      if (!isSelfDevice(deviceDid)) return Promise.resolve(false);
+      return sendTo(deviceDid, frame);
+    },
     sweep,
 
     stop() {

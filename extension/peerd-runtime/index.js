@@ -397,6 +397,25 @@ export {
   ExportPassphraseError, isCustodySecretName,
 } from './transfer/transfer.js';
 
+// The same-user device sync surfaces: the LOGICAL projection of each store
+// that may cross to a proven self device, and its idempotent applier. The
+// bytes move through peerd-distributed; deciding what a surface means is
+// runtime work, so it lives here.
+export {
+  portableSession,
+  shapeSessionsSurface, applySessionsSurface,
+  shapeSettingsSurface, shapeProviderEndpointsSurface, shapeMemorySurface,
+  shapeHooksSurface, shapeSkillsSurface, shapeSecretsSurface,
+  shapeAppsSurface, applyAppsSurface,
+  shapeWorkspacesSurface, applyWorkspacesSurface,
+  encodeSurface, decodeSurface,
+} from './transfer/self-sync-surfaces.js';
+
+// The "Use my existing Peerd" flow, as a pure reducer + its copy table.
+export {
+  STEP_COPY, initialEnrollmentState, enrollmentStep, describeSurfaces, diagnostics,
+} from './transfer/enrollment-flow.js';
+
 // --- permissions (Plan/Act mode + confirm-actions toggle; Feature 03) ---
 // The foundational write-authorization policy. Other features route every
 // write through decideAction. Pure function — see permissions/policy.js.

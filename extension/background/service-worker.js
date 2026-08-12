@@ -454,6 +454,13 @@ import { makeDwebCustodyClient, makeRetryableCustodyReset } from './dweb-custody
 import {
   identityChangeBlockedByApps, makeDwebIdentityCustody,
 } from './dweb-identity-custody.js';
+import { makeDwebSelfCustody } from './dweb-self-custody.js';
+import { makeDwebSelfRoutes } from './routes/dweb-self.js';
+import {
+  shapeSessionsSurface, applySessionsSurface, shapeMemorySurface,
+  shapeSettingsSurface, shapeSkillsSurface, shapeHooksSurface,
+  shapeAppsSurface, applyAppsSurface,
+} from '/peerd-runtime/index.js';
 import { makePrivateTransferOpenRoute, makePrivateTransferPort } from './private-transfer-port.js';
 import { downgradesActorConfirm, a2aConsentOutcome } from './a2a-consent.js';
 import { makeVaultRoutes } from './routes/vault.js';
@@ -3584,9 +3591,22 @@ const dwebIdentityCustody = makeDwebIdentityCustody({
   withIdentityMutation: withDwebIdentityMutation,
   canChangeIdentity: canChangeDwebIdentity,
 });
+// The self-device secrets (device key, discovery secret, cached records)
+// ride the same verified port but a DIFFERENT handler with a closed
+// allowlist, so the parameterized path can never reach the person root.
+const dwebSelfCustody = makeDwebSelfCustody({
+  enabled: DWEB_ENABLED,
+  active: () => settingsHydrated && settingsStore.get().dwebEnabled,
+  vault,
+  identitySecretName: DWEB_IDENTITY_SECRET,
+});
 const dwebCustodyClient = makeDwebCustodyClient({
   ensureOffscreen,
-  handleSecretRequest: dwebIdentityCustody.handle,
+  handleSecretRequest: (operation, args) => (
+    operation === 'self-get' || operation === 'self-set'
+      ? dwebSelfCustody.handle(operation, args)
+      : dwebIdentityCustody.handle(operation, args)
+  ),
 });
 /** @type {ReturnType<typeof makePrivateTransferPort> | null} */
 let privateTransferPort = null;
@@ -7397,6 +7417,93 @@ const handleToolsCommand = async (/** @type {string} */ arg) => {
 // 6. Message handlers — one-shot sendMessage routes
 // ---------------------------------------------------------------------------
 
+// --- same-user device sync: the SW's half (portable identity) --------------
+// The offscreen host moves opaque bytes between proven self devices; these
+// are the only functions that know what a surface MEANS. Hoisted as named
+// consts so the route wiring below stays shorthand-only (the routes-wiring
+// guard, tests/meta/sw-routes-wiring.test.ts).
+
+// App files ride the sync surfaces as base64 (JSON payloads) and land in
+// OPFS as bytes. Local to the SW: the offscreen host never decodes a
+// surface, it only moves and verifies it.
+const base64FileBytes = (/** @type {string} */ b64) => {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+};
+
+const dwebReady = async () => {
+  if (!DWEB_ENABLED) return false;
+  try { await ensureSettingsReady(); } catch { return false; }
+  return settingsStore.get().dwebEnabled === true;
+};
+
+/** @param {string} type @param {object} [payload] */
+const callBaseHost = (type, payload = {}) => browser.runtime.sendMessage({ type, ...payload });
+
+// Only the surfaces this build can shape from live stores are listed. An
+// absent name is reported as `unavailable` in the offer rather than
+// silently dropped: `workspaces` needs an OPFS walk through the engine
+// hosts, and `secrets` needs its own consent gate, so neither is here yet
+// and the offer says so honestly.
+const surfaceShapers = {
+  sessions: async () => shapeSessionsSurface({ sessions: await sessions.list() }),
+  memory: async () => shapeMemorySurface({ memory: await memory.exportAll() }),
+  settings: async () => shapeSettingsSurface({ settings: settingsStore.get() }),
+  skills: async () => shapeSkillsSurface({ skills: await skillStore.listMeta() }),
+  hooks: async () => shapeHooksSurface({ hooks: await exportHooks() }),
+  apps: async () => {
+    const records = await appRegistry.list();
+    /** @type {any[]} */
+    const apps = [];
+    for (const record of records) {
+      // Files live in OPFS, not the registry row: snapshot each App.
+      try {
+        const snapshot = await appClient.snapshotFilesBase64({ appId: record.id });
+        apps.push({
+          id: record.id,
+          name: record.name,
+          entryFile: snapshot.record.entryFile,
+          fileKinds: snapshot.record.fileKinds,
+          files: Object.fromEntries(Object.entries(snapshot.files)
+            .map(([path, file]) => [path, /** @type {any} */ (file).base64])),
+          // The shared-bundle address when this App has one: the only
+          // cross-device-stable identifier an App carries, so it is what
+          // lets a receiver skip an App it already installed.
+          ...(record.dweb?.hash ? { contentHash: record.dweb.hash } : {}),
+        });
+      } catch { /* an App too large to pack is skipped, not fatal */ }
+    }
+    return shapeAppsSurface({ apps });
+  },
+};
+
+// Idempotent by construction (self-sync-surfaces.js): an existing row on
+// this device wins, so a re-pull after an interruption cannot clobber
+// anything the user has since touched here.
+const surfaceAppliers = {
+  sessions: async (/** @type {any} */ payload) => applySessionsSurface(payload, {
+    existingIds: new Set((await sessions.list()).map((/** @type {any} */ s) => s.sessionId)),
+    putSession: async (/** @type {any} */ session) => { await sessions.create(session); },
+  }),
+  memory: async (/** @type {any} */ payload) => memory.importAll(payload?.memory ?? null),
+  settings: async (/** @type {any} */ payload) => settingsStore.update(payload?.settings ?? {}),
+  apps: async (/** @type {any} */ payload) => applyAppsSurface(payload, {
+    existingHashes: new Set((await appRegistry.list())
+      .map((/** @type {any} */ app) => app.dweb?.hash).filter(Boolean)),
+    installApp: async (/** @type {any} */ app) => {
+      await appClient.create({
+        name: app.name,
+        entryFile: app.entryFile,
+        fileKinds: app.fileKinds,
+        files: Object.fromEntries(Object.entries(app.files ?? {})
+          .map(([path, base64]) => [path, base64FileBytes(/** @type {string} */ (base64))])),
+      });
+    },
+  }),
+};
+
 // Goal-mode handles for the session routes, defined here so they wire as plain
 // SHORTHAND below (the route-wiring guard requires it — no key:value). goalRunner
 // is built above; ensureSession is the same lazy session-create the model turn
@@ -7743,6 +7850,15 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     appRegistry, appClient, appTabTracker, settingsStore, shareLocalApp,
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
     disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady,
+  }),
+
+  // --- same-user devices: shape/apply the sync surfaces (portable identity) ---
+  // The offscreen host moves the bytes; these are the only routes that know
+  // what a surface MEANS. Every collaborator is hoisted at the top of
+  // section 6, so this wiring stays shorthand-only.
+  ...makeDwebSelfRoutes({
+    dwebReady, isOffscreenSender, callBaseHost, auditLog,
+    surfaceShapers, surfaceAppliers,
   }),
 
   // --- git credentials (host-bound bearer tokens; same vault as API keys) ---

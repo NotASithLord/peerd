@@ -30,6 +30,7 @@ import {
 } from '/offscreen/install-card-identity.js';
 import { fromBase64, toBase64 } from '/shared/bundle/bytes.js';
 import { runPublishTransaction } from '/shared/publish-transaction.js';
+import { createSelfDeviceHost } from '/offscreen/dweb-self.js';
 
 /** @param {...any} a */
 const log = (...a) => console.log('[offscreen/dweb]', ...a);
@@ -169,7 +170,7 @@ const waitForCustodyPort = async () => {
   });
 };
 
-/** @param {'get'|'set'} operation @param {any} [args] */
+/** @param {'get'|'set'|'self-get'|'self-set'} operation @param {any} [args] */
 const callIdentitySecret = async (operation, args = {}) => {
   const port = await waitForCustodyPort();
   if (custodyPort !== port) throw new Error('identity custody port disconnected');
@@ -191,6 +192,31 @@ const callIdentitySecret = async (operation, args = {}) => {
     }
   });
 };
+
+// The self-device stack's vault surface. Same verified custody port as the
+// identity seed, different operation pair, and the SW's handler serves a
+// closed allowlist (background/dweb-self-custody.js): this document can
+// read its own device key and the person's discovery secret, and nothing
+// else. The device key never leaves here except as signatures.
+const selfSecretIo = {
+  /** @param {string} name */
+  getSecret: async (name) => {
+    const r = await callIdentitySecret('self-get', { name });
+    if (!r?.ok) throw new Error(r?.error ?? 'self secret unavailable');
+    return r.value ?? null;
+  },
+  /** @param {string} name @param {string} value */
+  setSecret: async (name, value) => {
+    const r = await callIdentitySecret('self-set', { name, value });
+    if (!r?.ok) throw new Error(r?.error ?? 'self secret store failed');
+  },
+};
+
+const selfHost = createSelfDeviceHost({
+  secretIo: selfSecretIo,
+  swCall,
+  getMesh: () => handle?.base?.mesh ?? null,
+});
 
 // peerd notifications: emit a runtime 'dweb/notify' for genuinely-NEW peers and
 // apps so the UI surfaces them (the bell + an in-chat banner), each linking to
@@ -265,9 +291,18 @@ const baseLifecycle = makeStartStopBarrier({
     if (!resubTimer) {
       resubTimer = setInterval(() => { try { handle?.base?.discovery?.subscribeAll(); } catch { /* best-effort */ } }, 12_000);
     }
+    // Same-user device discovery rides the mesh that just came up. It stays
+    // INERT on an install that has not been enrolled into a person's device
+    // set, so this is safe to attempt unconditionally.
+    selfHost.start()
+      .then((r) => log(r.running ? 'self-device coordinator started' : `self-device inert: ${r.reason}`))
+      .catch((e) => warn('self-device start failed:', /** @type {{ message?: string }} */ (e)?.message ?? e));
     log('✅ base network ONLINE — lobby joined, presence beaconing');
   },
   close: (candidate) => {
+    // The self-device coordinator rides this mesh; it must let go of its
+    // rooms before the network under it disappears.
+    try { selfHost.stop(); } catch { /* best-effort teardown */ }
     candidate.close();
     if (handle !== candidate) return;
     // Once close succeeds the identity is no longer live. Listener cleanup is
@@ -568,6 +603,24 @@ const onBaseHostMessage = (msg, _sender, sendResponse) => {
           const h = await start();
           const card = await h.base.findDwapp(msg.dwappId, msg.publisherDid, msg.slug);
           sendResponse({ ok: true, record: card ? toDiscoverApp({ dwapp_id: msg.dwappId, publisher: card.publisher, ...card.value }) : null });
+          return;
+        }
+        // --- same-user devices (portable identity) -----------------------------
+        // The coordinator is started by the base-network lifecycle; these
+        // routes are the SW's read window and the two transfer verbs.
+        case 'dweb/base-host/self-status': { sendResponse({ ok: true, ...selfHost.status() }); return; }
+        case 'dweb/base-host/self-start': {
+          await start();
+          sendResponse({ ok: true, ...await selfHost.start() });
+          return;
+        }
+        case 'dweb/base-host/self-offer': {
+          sendResponse({ ok: true, ...await selfHost.offerSnapshot({ manifest: msg.manifest }) });
+          return;
+        }
+        case 'dweb/base-host/self-restore': {
+          const result = await selfHost.restoreFrom({ deviceDid: msg.deviceDid, surfaces: msg.surfaces });
+          sendResponse({ ok: true, result });
           return;
         }
         case 'dweb/base-host/ban': { const h = await start(); h.base.ban(msg.did, msg.reason); sendResponse({ ok: true }); return; }
