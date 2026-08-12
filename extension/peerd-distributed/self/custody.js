@@ -15,18 +15,28 @@
 //                      holds (public records, but cached here for offline
 //                      handshakes).
 //
-// The two composition entry points:
-//   ensureFounderCustody  the FIRST device of a person: it holds the root,
-//                         so it mints the discovery secret, its device key,
-//                         self-issues a certificate + roster + passkey
-//                         binding, and returns everything the enrollment
-//                         sponsor path serves to later devices.
-//   ensureEnrolledCustody an install that just adopted the person identity
-//                         via enrollment: it has the grant (discovery
-//                         secret, binding, roster) and the root (recovered
-//                         into the identity secret); it mints ITS device
-//                         key and, holding the root, self-certifies and
-//                         appends itself to a new roster.
+// The composition entry points, split by WHO HOLDS THE ROOT:
+//   ensureFounderCustody   the FIRST device of a person: it holds the root,
+//                          so it mints the discovery secret, its device key,
+//                          self-issues a certificate + roster + passkey
+//                          binding, and returns everything the enrollment
+//                          sponsor path serves to later devices.
+//   ensureEnrolleeDevice   a fresh install, BEFORE enrollment: mints its own
+//                          device key so it can name that did in the request.
+//   sponsorDeviceEnrollment  a root-holding device certifying somebody else's
+//                          device did and extending the roster to include it.
+//                          This is the only way a new device gains authority.
+//   ensureEnrolledCustody  the enrollee, AFTER a verified grant: it stores
+//                          the certificate, roster and discovery secret it
+//                          was given. It signs nothing, because it holds no
+//                          root, which is exactly why revoking it works.
+//
+// why the enrollee no longer self-certifies: it used to receive the person
+// root in the grant and mint its own certificate + seq+1 roster. That made
+// roster revocation decorative: a revoked device still held the root, so
+// it could re-certify a fresh key and sign itself back to active under the
+// unchanged person did. Authority to issue now lives only where the root
+// does (enroll.js's header carries the full argument).
 //
 // Pure-ish: all randomness/crypto is WebCrypto, all storage is injected, so
 // the whole composition runs in Bun (self-custody.test.ts).
@@ -34,7 +44,8 @@
 import { createPersistentIdentity } from '../identity/keypair.js';
 import { loadDeviceKeyMaterial, createPersistentDeviceIdentity } from '../identity/device-key.js';
 import {
-  issueDeviceCertificate, buildDeviceRoster, verifyDeviceRoster, rosterSupersedes,
+  issueDeviceCertificate, buildDeviceRoster, verifyDeviceRoster, verifyDeviceCertificate,
+  rosterSupersedes,
 } from '../identity/device-certificate.js';
 import { toBase64, fromBase64 } from '/shared/bundle/bytes.js';
 import { mintDiscoverySecret, DISCOVERY_SECRET_BYTES } from './rendezvous.js';
@@ -152,46 +163,99 @@ export const ensureFounderCustody = async ({ io, buildBinding, label, now }) => 
 };
 
 /**
- * ENROLLED device: the identity secret was just written by the enrollment
- * grant adoption, and the grant also carried the discovery secret + roster.
- * This mints the device key and, holding the recovered root, self-issues
- * a certificate and appends itself to a fresh roster (seq+1), which the
- * device will re-publish so its siblings learn of it.
+ * A fresh install, BEFORE it asks to be enrolled. Mints (or reloads) this
+ * install's own device key so the enrollment request can name its did.
+ * Idempotent: a retried enrollment reuses the same device identity rather
+ * than littering the person's roster with a new entry per attempt.
+ *
+ * @param {SecretIo} io
+ * @returns {Promise<{ did: string, deviceId: string }>}
+ */
+export const ensureEnrolleeDevice = async (io) => {
+  const device = await createPersistentDeviceIdentity(io);
+  return { did: device.did, deviceId: device.deviceId };
+};
+
+/**
+ * SPONSOR side, and the only place device authority is minted: a device
+ * that holds the person root certifies an enrollee's device did and signs
+ * the roster snapshot that names it.
+ *
+ * The enrollee's device PUBLIC did is all that crosses the wire, in either
+ * direction. The sponsor never sees the enrollee's private key, and the
+ * enrollee never sees the root that signs these records.
  *
  * @param {Object} args
- * @param {SecretIo} args.io
- * @param {Uint8Array} args.discoverySecret  from the enrollment grant
- * @param {any} args.priorRoster             the grant's roster (may be null)
- * @param {string} [args.label]
+ * @param {SecretIo} args.io                the sponsor's own vault surface
+ * @param {string} args.deviceDid           the ENROLLEE's device did:key
+ * @param {string} args.deviceId            the ENROLLEE's install id
+ * @param {any} args.priorRoster            newest roster the sponsor holds
+ * @param {string} [args.label]             the enrollee's human label
  * @param {number} [args.now]
+ * @returns {Promise<{ certificate: any, roster: any }>}
  */
-export const ensureEnrolledCustody = async ({ io, discoverySecret, priorRoster, label, now }) => {
+export const sponsorDeviceEnrollment = async ({
+  io, deviceDid, deviceId, priorRoster, label, now,
+}) => {
   const personIdentity = await createPersistentIdentity(io);
-  await storeDiscoverySecret(io, discoverySecret);
-  const device = await createPersistentDeviceIdentity(io);
+  const seq = (priorRoster?.seq ?? 0) + 1;
   const certificate = await issueDeviceCertificate({
-    personIdentity, deviceDid: device.did, deviceId: device.deviceId, label,
-    seq: (priorRoster?.seq ?? 0) + 1, now,
+    personIdentity, deviceDid, deviceId, label, seq, now,
   });
-  // Append this device to a fresh roster snapshot (seq+1). Verify the prior
-  // roster is actually this person's before extending it: a grant is
-  // sender-authenticated end to end, but defense in depth costs nothing.
+  // Extend the prior snapshot, having checked it is actually this person's:
+  // signing a roster built from an unverified input would let a corrupted
+  // cache launder entries into a genuinely person-signed record.
   /** @type {any[]} */
   let devices = [];
   if (priorRoster) {
     const verdict = await verifyDeviceRoster(priorRoster, { expectedPersonDid: personIdentity.did });
-    if (verdict.ok) devices = priorRoster.devices.filter((/** @type {any} */ d) => d.deviceDid !== device.did);
+    if (!verdict.ok) throw new Error(`refusing to extend an unverifiable roster: ${verdict.defect}`);
+    devices = priorRoster.devices.filter((/** @type {any} */ row) => row.deviceDid !== deviceDid);
   }
   devices.push({
-    deviceDid: device.did, deviceId: device.deviceId,
+    deviceDid, deviceId,
     ...(label ? { label } : {}), addedAt: now ?? Date.now(), status: 'active',
   });
-  const roster = await buildDeviceRoster({
-    personIdentity, devices, seq: (priorRoster?.seq ?? 0) + 1,
+  const roster = await buildDeviceRoster({ personIdentity, devices, seq });
+  // The sponsor adopts the roster it just signed, so its own view already
+  // includes the new device when the enrollee first calls.
+  await storeSelfRecords(io, { certificate: (await loadSelfRecords(io))?.certificate, roster });
+  return { certificate, roster };
+};
+
+/**
+ * ENROLLED device, after openEnrollmentGrant verified the chain. It stores
+ * what it was granted and nothing more: the discovery secret, its own
+ * sponsor-issued certificate, and the roster naming it.
+ *
+ * It issues no records, because it holds no root to sign them with. That is the
+ * point: a device whose entry is later revoked has no way to write itself
+ * back in, so a newer roster from the person is the last word.
+ *
+ * @param {Object} args
+ * @param {SecretIo} args.io
+ * @param {Uint8Array} args.discoverySecret  from the verified grant
+ * @param {any} args.certificate             this device's sponsor-issued certificate
+ * @param {any} args.roster                  the roster that names it
+ * @param {string} args.personDid            the did every record above verified under
+ */
+export const ensureEnrolledCustody = async ({
+  io, discoverySecret, certificate, roster, personDid,
+}) => {
+  const device = await createPersistentDeviceIdentity(io);
+  // Re-check the grant's records against the key this install actually
+  // holds. openEnrollmentGrant already did; doing it again here means no
+  // future caller can write unverified records into custody by mistake.
+  const certVerdict = await verifyDeviceCertificate(certificate, {
+    expectedPersonDid: personDid, expectedDeviceDid: device.did,
   });
+  if (!certVerdict.ok) throw new Error(`refusing an unverifiable device certificate: ${certVerdict.defect}`);
+  const rosterVerdict = await verifyDeviceRoster(roster, { expectedPersonDid: personDid });
+  if (!rosterVerdict.ok) throw new Error(`refusing an unverifiable device roster: ${rosterVerdict.defect}`);
+  await storeDiscoverySecret(io, discoverySecret);
   await storeSelfRecords(io, { certificate, roster });
   return {
-    personDid: personIdentity.did,
+    personDid,
     deviceDid: device.did,
     deviceId: device.deviceId,
     certificate,

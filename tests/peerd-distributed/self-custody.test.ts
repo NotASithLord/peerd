@@ -5,9 +5,14 @@
 
 import { describe, test, expect } from 'bun:test';
 import {
-  ensureFounderCustody, ensureEnrolledCustody, loadCoordinatorInputs,
+  ensureFounderCustody, ensureEnrolleeDevice, sponsorDeviceEnrollment,
+  ensureEnrolledCustody, loadCoordinatorInputs,
   loadDiscoverySecret, storeDiscoverySecret, DISCOVERY_SECRET_NAME,
 } from '../../extension/peerd-distributed/self/custody.js';
+
+// The person root's vault secret name (private to keypair.js; named here so
+// the tests can assert an enrolled device never acquires it).
+const IDENTITY_SECRET_NAME = 'distributed/identity/v1';
 import { verifyDeviceCertificate, verifyDeviceRoster, rosterSupersedes } from '../../extension/peerd-distributed/identity/device-certificate.js';
 import { createSelfDeviceCoordinator } from '../../extension/peerd-distributed/self/coordinator.js';
 import { deviceStatusInRoster } from '../../extension/peerd-distributed/identity/device-certificate.js';
@@ -50,36 +55,89 @@ describe('self-device custody', () => {
     expect(second.deviceDid).toBe(first.deviceDid);
   });
 
-  test('enrolled device: mints its OWN device key, self-certifies, and extends the roster', async () => {
-    // The founder (Desktop) exists and holds a person identity + secret.
+  test('enrolled device: mints its own key, the SPONSOR certifies it, and it never sees the root', async () => {
+    // The founder (Desktop) exists and holds the person identity + secret.
     const desktopVault = fakeVault();
     const founder = await ensureFounderCustody({ io: desktopVault, label: 'Desktop', now: 1 });
 
-    // The enrollee (Laptop) adopted the SAME person identity (grant carried
-    // the root material), simulate by copying the identity secret across.
-    const laptopVault = fakeVault({
-      'distributed/identity/v1': desktopVault.map.get('distributed/identity/v1')!,
-    });
-    const enrolled = await ensureEnrolledCustody({
-      io: laptopVault,
-      discoverySecret: founder.discoverySecret!,
+    // The enrollee (Laptop) mints its own device key FIRST: that did is
+    // what it names in the enrollment request.
+    const laptopVault = fakeVault();
+    const laptopDevice = await ensureEnrolleeDevice(laptopVault);
+    expect(laptopDevice.did).not.toBe(founder.deviceDid);
+
+    // The sponsor, which holds the root, is what turns that did into
+    // authority: a certificate plus the roster snapshot naming it.
+    const issued = await sponsorDeviceEnrollment({
+      io: desktopVault,
+      deviceDid: laptopDevice.did,
+      deviceId: laptopDevice.deviceId,
       priorRoster: founder.roster,
       label: 'Laptop',
       now: 2,
     });
 
+    // The enrollee stores what it was granted. It signs nothing.
+    const enrolled = await ensureEnrolledCustody({
+      io: laptopVault,
+      discoverySecret: founder.discoverySecret!,
+      certificate: issued.certificate,
+      roster: issued.roster,
+      personDid: founder.personDid,
+    });
+
     expect(enrolled.personDid).toBe(founder.personDid);       // same person
-    expect(enrolled.deviceDid).not.toBe(founder.deviceDid);   // distinct device key
+    expect(enrolled.deviceDid).toBe(laptopDevice.did);        // its own key, unchanged
     // The laptop's cert chains to the SAME root.
     expect((await verifyDeviceCertificate(enrolled.certificate, {
       expectedPersonDid: founder.personDid, expectedDeviceDid: enrolled.deviceDid,
     })).ok).toBe(true);
-    // Its roster supersedes the founder's and lists BOTH devices.
+    // The roster supersedes the founder's and lists BOTH devices.
     expect(rosterSupersedes(enrolled.roster, founder.roster)).toBe(true);
     expect(deviceStatusInRoster(enrolled.roster, founder.deviceDid)).toBe('active');
     expect(deviceStatusInRoster(enrolled.roster, enrolled.deviceDid)).toBe('active');
     // The laptop shares the discovery secret.
     expect(await loadDiscoverySecret(laptopVault)).toEqual(founder.discoverySecret!);
+
+    // THE invariant: the person root never landed in the enrollee's vault,
+    // so a later revocation of this device is not something it can undo.
+    expect(laptopVault.map.has(IDENTITY_SECRET_NAME)).toBe(false);
+    expect([...laptopVault.map.values()].join('|'))
+      .not.toContain(JSON.parse(desktopVault.map.get(IDENTITY_SECRET_NAME)!).seed);
+  });
+
+  test('the enrollee refuses records that do not verify against the key it holds', async () => {
+    const desktopVault = fakeVault();
+    const founder = await ensureFounderCustody({ io: desktopVault, label: 'Desktop', now: 1 });
+    const laptopVault = fakeVault();
+    await ensureEnrolleeDevice(laptopVault);
+
+    // A certificate for a DIFFERENT device, genuinely signed by the person.
+    const otherVault = fakeVault();
+    const other = await ensureEnrolleeDevice(otherVault);
+    const issued = await sponsorDeviceEnrollment({
+      io: desktopVault, deviceDid: other.did, deviceId: other.deviceId,
+      priorRoster: founder.roster, now: 2,
+    });
+    await expect(ensureEnrolledCustody({
+      io: laptopVault,
+      discoverySecret: founder.discoverySecret!,
+      certificate: issued.certificate,
+      roster: issued.roster,
+      personDid: founder.personDid,
+    })).rejects.toThrow(/unverifiable device certificate/);
+  });
+
+  test('a sponsor refuses to extend a roster it cannot verify', async () => {
+    const desktopVault = fakeVault();
+    const founder = await ensureFounderCustody({ io: desktopVault, label: 'Desktop', now: 1 });
+    const laptop = await ensureEnrolleeDevice(fakeVault());
+    // A corrupted cache must not launder entries into a person-signed record.
+    const tampered = { ...founder.roster, devices: [...founder.roster.devices], seq: 1, sig: 'A'.repeat(88) };
+    await expect(sponsorDeviceEnrollment({
+      io: desktopVault, deviceDid: laptop.did, deviceId: laptop.deviceId,
+      priorRoster: tampered, now: 2,
+    })).rejects.toThrow(/unverifiable roster/);
   });
 
   test('loadCoordinatorInputs yields a runnable, root-free coordinator input set', async () => {

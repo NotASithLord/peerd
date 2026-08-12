@@ -164,8 +164,10 @@ export const enrollmentStep = (state, event) => {
         failure: event.reason ?? 'ceremony-failed',
       });
 
-    // Enrollment landed: the identity is recovered and THIS device is
-    // certified. From here the device is valid even if nothing else works.
+    // Enrollment landed: THIS device now holds a person-signed certificate
+    // for its own key. From here the device is valid even if nothing else
+    // works. (It holds no person root: enrollment grants device authority,
+    // never the signing seed. See peerd-distributed/self/enroll.js.)
     case 'enrolled':
       return next({ step: 'looking', enrolled: true }, [{ type: 'start-discovery' }]);
     case 'enroll-failed':

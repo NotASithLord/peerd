@@ -5,9 +5,32 @@
 // the person's EXISTING devices (the sponsor, "A"), over the enrollment
 // rendezvous room, after the enrollee's passkey ceremony at the canonical
 // relying party. It ends with the sponsor releasing the enrollment grant:
-// the sealed identity material, the self-device discovery secret, and the
-// person's signed records, everything a fresh install needs to become
-// this person and find their devices.
+// a certificate for the enrollee's OWN device key, the roster that now
+// names it, the self-device discovery secret, and the person's signed
+// binding, everything a fresh install needs to act as one of this person's
+// devices and find the others.
+//
+// What the grant deliberately does NOT contain: the person root seed.
+//
+// why, and it is the load-bearing decision in this file: the roster is a
+// revocation mechanism, and revocation is only real if a revoked device
+// cannot re-authorize itself. A device holding the root could mint a fresh
+// device key, self-certify it, and sign a seq+1 roster marking itself
+// active again, and every peer would accept it, because rosterSupersedes
+// is "strictly higher seq under the same person" and the signature would be
+// genuinely the person's. Distributing the root and claiming roster-based
+// revocation are mutually exclusive designs; this one keeps revocation.
+//
+// So enrollment grants BOUNDED DEVICE AUTHORITY. The enrollee mints its own
+// device key before the exchange and names it in the request; the sponsor,
+// which does hold the root, is the only party that can certify it and issue
+// the roster that includes it. An enrolled device can therefore prove
+// same-person, discover its siblings, and sync state, and cannot enroll a
+// further device, re-issue a roster, or survive its own revocation.
+//
+// Moving the ROOT between installs is a separate, explicit, user-driven act
+// with its own consent surface: the encrypted recovery record
+// (identity/recovery-record.js). It is not a side effect of adding a device.
 //
 // What each proof gates (and why all three exist):
 //   possession MAC   HMAC keyed by a passkey-PRF-derived secret both ends
@@ -36,9 +59,11 @@
 
 import { canonicalize } from '/shared/bundle/canonical.js';
 import { utf8, concat, toBase64, fromBase64 } from '/shared/bundle/bytes.js';
-import { assertIdentityMaterial } from '../identity/keypair.js';
+import { decodeDidKey } from '../identity/did.js';
 import { verifyPasskeyBinding, activeBindingCredential } from '../identity/passkey-binding.js';
-import { verifyDeviceRoster } from '../identity/device-certificate.js';
+import {
+  verifyDeviceRoster, verifyDeviceCertificate, deviceStatusInRoster,
+} from '../identity/device-certificate.js';
 import { verifyPasskeyAssertion } from '../identity/webauthn-verify.js';
 import { DISCOVERY_SECRET_BYTES } from './rendezvous.js';
 
@@ -62,6 +87,7 @@ const GRANT_VERSION = 1;
 const IV_BYTES = 12;
 const MAX_FIELD_B64 = 16 * 1024;
 const MAX_GRANT_CT_B64 = 64 * 1024;
+const MAX_DEVICE_ID = 64; // matches device-key.js's stored bound
 
 /** @param {BufferSource} bytes */
 const sha256 = async (bytes) => new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
@@ -102,22 +128,36 @@ const hmac = async (macKey, message) => {
 };
 
 /**
- * The possession MAC over an ENROLL_REQ's identifying fields.
+ * The possession MAC over an ENROLL_REQ's identifying fields, including
+ * the device the request asks to have certified. A relay that keeps the
+ * MAC but swaps in its own device did produces a MAC mismatch, so it cannot
+ * get an attacker-held key certified off the back of the person's ceremony.
+ *
  * @param {Uint8Array} macKey
- * @param {{ credentialId: string, ephemeralKey: string, nonce: string }} fields
+ * @param {{ credentialId: string, ephemeralKey: string, nonce: string,
+ *   deviceDid: string, deviceId: string }} fields
  */
-const requestMac = (macKey, { credentialId, ephemeralKey, nonce }) =>
+const requestMac = (macKey, { credentialId, ephemeralKey, nonce, deviceDid, deviceId }) =>
   hmac(macKey, concat(utf8(MAC_DOMAIN), Uint8Array.from([0]),
-    utf8(canonicalize({ credentialId, ephemeralKey, nonce }))));
+    utf8(canonicalize({ credentialId, ephemeralKey, nonce, deviceDid, deviceId }))));
 
 /**
  * Enrollee → sponsor: open the exchange.
+ *
+ * The device did is minted BEFORE the request (custody.ensureEnrolleeDevice)
+ * and named here: the sponsor certifies exactly this key, and this install
+ * never sends the private half anywhere.
+ *
  * @param {Object} args
  * @param {Uint8Array} args.macKey        deriveEnrollSecrets().macKey
  * @param {string} args.credentialId     base64, from the ceremony
  * @param {string} args.ephemeralKey     base64 SPKI of a fresh P-256 ECDH key
+ * @param {string} args.deviceDid        this install's own device did:key
+ * @param {string} args.deviceId         its stable install identifier
  */
-export const buildEnrollRequest = async ({ macKey, credentialId, ephemeralKey }) => {
+export const buildEnrollRequest = async ({
+  macKey, credentialId, ephemeralKey, deviceDid, deviceId,
+}) => {
   const nonce = toBase64(crypto.getRandomValues(new Uint8Array(16)));
   return {
     t: 'ENROLL_REQ',
@@ -125,7 +165,11 @@ export const buildEnrollRequest = async ({ macKey, credentialId, ephemeralKey })
     credentialId,
     ephemeralKey,
     nonce,
-    mac: toBase64(await requestMac(macKey, { credentialId, ephemeralKey, nonce })),
+    deviceDid,
+    deviceId,
+    mac: toBase64(await requestMac(macKey, {
+      credentialId, ephemeralKey, nonce, deviceDid, deviceId,
+    })),
   };
 };
 
@@ -142,12 +186,16 @@ export const evaluateEnrollRequest = async (request, { macKey, binding }) => {
     return { ok: false, defect: 'not-enroll-req' };
   }
   if (request.proto !== ENROLL_PROTO) return { ok: false, defect: 'unsupported-proto' };
-  for (const field of ['credentialId', 'ephemeralKey', 'nonce', 'mac']) {
+  for (const field of ['credentialId', 'ephemeralKey', 'nonce', 'mac', 'deviceDid', 'deviceId']) {
     const value = request[field];
     if (typeof value !== 'string' || value.length === 0 || value.length > MAX_FIELD_B64) {
       return { ok: false, defect: `bad-${field}` };
     }
   }
+  if (request.deviceId.length > MAX_DEVICE_ID) return { ok: false, defect: 'bad-deviceId' };
+  // The sponsor is about to SIGN a certificate naming this did; it must be a
+  // real did:key before it can end up in a person-signed record.
+  try { decodeDidKey(request.deviceDid); } catch { return { ok: false, defect: 'bad-deviceDid' }; }
   if (!activeBindingCredential(binding, request.credentialId)) {
     return { ok: false, defect: 'unknown-credential' };
   }
@@ -157,6 +205,8 @@ export const evaluateEnrollRequest = async (request, { macKey, binding }) => {
       credentialId: request.credentialId,
       ephemeralKey: request.ephemeralKey,
       nonce: request.nonce,
+      deviceDid: request.deviceDid,
+      deviceId: request.deviceId,
     }));
   } catch {
     return { ok: false, defect: 'bad-mac' };
@@ -174,31 +224,39 @@ export const buildEnrollChallenge = () => ({
 
 /**
  * The WebAuthn challenge for the ceremony: H(domain || sponsor challenge ||
- * enrollee ECDH key). Both sides compute it: the enrollee to run the
- * ceremony, the sponsor to verify the assertion, which is what welds the
- * assertion to the key the grant will be sealed to.
+ * enrollee ECDH key || enrollee device did). Both sides compute it: the
+ * enrollee to run the ceremony, the sponsor to verify the assertion.
+ *
+ * It welds the assertion to two things at once: the key the grant will be
+ * sealed TO, and the device key the grant will certify. A relay that swaps
+ * either one invalidates the assertion it is relaying, so the person's
+ * single Touch ID approval cannot be redirected into certifying somebody
+ * else's device.
  *
  * @param {string} challengeB64   the sponsor's ENROLL_CHALLENGE value
  * @param {string} ephemeralKeyB64  the enrollee's P-256 SPKI
+ * @param {string} deviceDid      the enrollee's device did:key
  * @returns {Promise<Uint8Array>} 32 bytes for prf-free credentials.get()
  */
-export const enrollCeremonyChallenge = (challengeB64, ephemeralKeyB64) =>
+export const enrollCeremonyChallenge = (challengeB64, ephemeralKeyB64, deviceDid) =>
   sha256(concat(
     utf8(CEREMONY_CHALLENGE_DOMAIN), Uint8Array.from([0]),
     fromBase64(challengeB64), Uint8Array.from([0]),
-    fromBase64(ephemeralKeyB64),
+    fromBase64(ephemeralKeyB64), Uint8Array.from([0]),
+    utf8(String(deviceDid)),
   ));
 
 /**
  * Enrollee → sponsor: the ceremony result.
  * @param {{ assertion: import('../identity/webauthn-verify.js').WirePasskeyAssertion,
- *   ephemeralKey: string }} args
+ *   ephemeralKey: string, deviceDid: string }} args
  */
-export const buildEnrollProof = ({ assertion, ephemeralKey }) => ({
+export const buildEnrollProof = ({ assertion, ephemeralKey, deviceDid }) => ({
   t: 'ENROLL_PROOF',
   proto: ENROLL_PROTO,
   assertion,
   ephemeralKey,
+  deviceDid,
 });
 
 /**
@@ -213,11 +271,12 @@ export const buildEnrollProof = ({ assertion, ephemeralKey }) => ({
  * @param {import('../identity/passkey-binding.js').PasskeyBinding} context.binding
  * @param {string} context.issuedChallenge  base64, what this sponsor issued
  * @param {string} context.requestEphemeralKey  base64, from the admitted ENROLL_REQ
+ * @param {string} context.requestDeviceDid  from the same admitted ENROLL_REQ
  * @param {string[]} context.allowedOrigins
  * @returns {Promise<{ ok: boolean, defect: string | null }>}
  */
 export const evaluateEnrollProof = async (proof, {
-  binding, issuedChallenge, requestEphemeralKey, allowedOrigins,
+  binding, issuedChallenge, requestEphemeralKey, requestDeviceDid, allowedOrigins,
 }) => {
   if (!proof || typeof proof !== 'object' || proof.t !== 'ENROLL_PROOF') {
     return { ok: false, defect: 'not-enroll-proof' };
@@ -226,13 +285,21 @@ export const evaluateEnrollProof = async (proof, {
   if (typeof proof.ephemeralKey !== 'string' || proof.ephemeralKey !== requestEphemeralKey) {
     return { ok: false, defect: 'ephemeral-key-mismatch' };
   }
+  // The proof must name the same device the request did: the certificate the
+  // sponsor is about to sign is for THAT key, so a proof that quietly
+  // re-points it is a splice, refused here rather than certified.
+  if (typeof proof.deviceDid !== 'string' || proof.deviceDid !== requestDeviceDid) {
+    return { ok: false, defect: 'device-did-mismatch' };
+  }
   const credentialId = proof.assertion?.credentialId;
   if (typeof credentialId !== 'string') return { ok: false, defect: 'bad-assertion' };
   const credential = activeBindingCredential(binding, credentialId);
   if (!credential) return { ok: false, defect: 'unknown-credential' };
   let expectedChallenge;
   try {
-    expectedChallenge = await enrollCeremonyChallenge(issuedChallenge, proof.ephemeralKey);
+    expectedChallenge = await enrollCeremonyChallenge(
+      issuedChallenge, proof.ephemeralKey, proof.deviceDid,
+    );
   } catch {
     return { ok: false, defect: 'bad-challenge' };
   }
@@ -301,16 +368,24 @@ const deriveGrantKey = async (ownPrivateKey, peerPublicKeyB64, transcript) => {
 };
 
 /**
- * The grant payload, everything a fresh install needs to become this
- * person. Never includes any DEVICE private key: the enrollee mints its
- * own and (holding the root after adoption) certifies it locally.
+ * The grant payload: everything a fresh install needs to ACT AS one of this
+ * person's devices. It carries no private key of any kind: not the person
+ * root (see the header: that is what makes revocation real), and not a
+ * device key either, since the enrollee minted its own and the sponsor only
+ * ever saw the public did.
+ *
+ * What it does carry is bounded, public, and revocable: the person's did,
+ * a certificate binding the ENROLLEE'S device key to it, the roster that
+ * now names that device, the person's signed passkey binding, and the
+ * shared discovery secret that lets the devices find each other.
  *
  * @typedef {{
  *   v: number,
- *   material: { seed: string, pub: string },
+ *   personDid: string,
+ *   deviceCertificate: import('../identity/device-certificate.js').DeviceCertificate,
+ *   deviceRoster: import('../identity/device-certificate.js').DeviceRoster,
  *   discoverySecret: string,
  *   passkeyBinding: import('../identity/passkey-binding.js').PasskeyBinding,
- *   deviceRoster: import('../identity/device-certificate.js').DeviceRoster,
  * }} EnrollmentGrantPayload
  */
 
@@ -346,16 +421,24 @@ export const sealEnrollmentGrant = async ({
 
 /**
  * Enrollee: open the grant and verify the whole trust chain before
- * anything is adopted. The chain closes only when:
- *   - the material is a real keypair (seed proves control of pub) whose
- *     did we now know;
- *   - the passkey binding VERIFIES UNDER THAT DID and lists, as active,
- *     exactly the credential this enrollee authenticated with, an
- *     attacker without the person root cannot forge that record around
- *     someone else's credential, so a hostile sponsor on the topic cannot
- *     hand over a substitute identity;
- *   - the device roster verifies under the same did;
+ * anything is adopted. The chain is rooted in the person did the grant
+ * names, and closes only when every record independently verifies UNDER
+ * THAT DID, which an attacker without the person root cannot forge:
+ *   - the certificate verifies under the claimed person did AND names OUR
+ *     device did, so a hostile sponsor cannot hand back a certificate for
+ *     some other key (nor for a device we do not hold the key to);
+ *   - the roster verifies under the same did and lists our device ACTIVE,
+ *     so an enrollment that is dead on arrival is refused here rather than
+ *     discovered later at the first handshake;
+ *   - the passkey binding verifies under the same did and lists, as
+ *     active, exactly the credential this enrollee authenticated with, so
+ *     a hostile sponsor on the topic cannot hand over a substitute
+ *     identity built around someone else's credential;
  *   - the discovery secret is exactly the expected size.
+ *
+ * Note what is NOT checked, because it is not present: there is no root
+ * material to validate. The enrollee never learns the person's signing
+ * seed, and the did it adopts is the one every record above agrees on.
  *
  * @param {any} grant
  * @param {Object} context
@@ -363,10 +446,11 @@ export const sealEnrollmentGrant = async ({
  * @param {string} context.enrolleeKey     our SPKI b64 (transcript element)
  * @param {string} context.issuedChallenge the sponsor challenge we answered
  * @param {string} context.credentialId    the credential we asserted with
+ * @param {string} context.deviceDid       our own device did, the one we asked to have certified
  * @returns {Promise<{ ok: boolean, defect: string | null, payload: EnrollmentGrantPayload | null, did: string | null }>}
  */
 export const openEnrollmentGrant = async (grant, {
-  enrolleePrivateKey, enrolleeKey, issuedChallenge, credentialId,
+  enrolleePrivateKey, enrolleeKey, issuedChallenge, credentialId, deviceDid,
 }) => {
   /** @param {string} defect */
   const refuse = (defect) => ({ ok: false, defect, payload: null, did: null });
@@ -398,13 +482,19 @@ export const openEnrollmentGrant = async (grant, {
     return refuse('open-failed');
   }
   if (payload?.v !== GRANT_VERSION) return refuse('unsupported-payload');
+  // A grant that still carries root material is a downgrade to the design
+  // this version replaced: refuse it outright rather than quietly ignoring
+  // the field, so an old or hostile sponsor cannot hand a new install the
+  // person's signing seed.
+  if (payload.material !== undefined) return refuse('root-material-present');
 
-  let did;
-  try {
-    did = await assertIdentityMaterial(payload.material);
-  } catch {
-    return refuse('bad-material');
-  }
+  const did = payload.personDid;
+  try { decodeDidKey(did); } catch { return refuse('bad-person-did'); }
+
+  const certVerdict = await verifyDeviceCertificate(payload.deviceCertificate, {
+    expectedPersonDid: did, expectedDeviceDid: deviceDid,
+  });
+  if (!certVerdict.ok) return refuse(`certificate-${certVerdict.defect}`);
   const bindingVerdict = await verifyPasskeyBinding(payload.passkeyBinding, { expectedPersonDid: did });
   if (!bindingVerdict.ok) return refuse(`binding-${bindingVerdict.defect}`);
   if (!activeBindingCredential(payload.passkeyBinding, credentialId)) {
@@ -412,6 +502,9 @@ export const openEnrollmentGrant = async (grant, {
   }
   const rosterVerdict = await verifyDeviceRoster(payload.deviceRoster, { expectedPersonDid: did });
   if (!rosterVerdict.ok) return refuse(`roster-${rosterVerdict.defect}`);
+  if (deviceStatusInRoster(payload.deviceRoster, deviceDid) !== 'active') {
+    return refuse('device-not-active-in-roster');
+  }
   let secretBytes;
   try {
     secretBytes = fromBase64(payload.discoverySecret);
