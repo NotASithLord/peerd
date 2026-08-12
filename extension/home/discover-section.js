@@ -114,7 +114,7 @@ export const DiscoverSection = () => {
     try {
       // Pass the card's version identity so the installed record can later be
       // matched against newer announces ("update available").
-      const r = await send({ type: 'dweb/base/install', uri: app.uri, name: app.name, dwappId: id, slug: app.slug, seq: app.seq });
+      const r = await send({ type: 'dweb/base/install', uri: app.uri, name: app.name, dwappId: id, slug: app.slug, seq: app.seq, publisher: app.publisher });
       if (r?.ok) {
         busy[id] = 'installed';
         if (r.warning === 'audit-write-failed') {
@@ -148,7 +148,7 @@ export const DiscoverSection = () => {
     delete notices[id];
     if (!dead) m.redraw();
     try {
-      const r = await send({ type: 'dweb/base/update-app', appId, uri: app.uri, name: app.name, dwappId: id, slug: app.slug, seq: app.seq });
+      const r = await send({ type: 'dweb/base/update-app', appId, uri: app.uri, name: app.name, dwappId: id, slug: app.slug, seq: app.seq, publisher: app.publisher });
       if (r?.ok) {
         busy[id] = 'installed';
         const warnings = new Set(Array.isArray(r.warnings) ? r.warnings : []);

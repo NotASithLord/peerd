@@ -1,11 +1,8 @@
 // @ts-check
 // js_delete — destroy a Notebook.
 //
-// Closes the tab and removes the registry entry. The OPFS scratch
-// directory under `/peerd-notebooks/<id>/` is left in place; cleaning
-// it requires an OPFS operation that needs a fresh worker. V1 accepts
-// the small leak — files are tiny and the user can drop the whole
-// extension's OPFS via DevTools if it ever matters.
+// Closes the tab, removes the registry entry, and drops both the OPFS working
+// tree and its sibling Git object store.
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const jsDeleteTool = {
@@ -41,8 +38,21 @@ export const jsDeleteTool = {
     const rec = await jsRegistry.get(args.notebookId);
     if (!rec) return { ok: false, error: 'notebook_not_found' };
     if (rec.pinned) return { ok: false, error: 'notebook_pinned' };
-    await jsTabTracker.closeTab(args.notebookId);
-    await jsRegistry.delete(args.notebookId);
+    const repositories = /** @type {any} */ (ctx).repositories;
+    if (!repositories?.coordinate || !repositories?.destroy) return { ok: false, error: 'repository_unavailable' };
+    try {
+      await repositories.coordinate({ kind: 'notebook', id: args.notebookId }, async () => {
+        const fresh = await jsRegistry.get(args.notebookId);
+        if (!fresh) throw new Error('notebook_not_found');
+        await jsTabTracker.closeTab(args.notebookId);
+        // Destroy bytes first and fail closed. If catalog deletion then fails,
+        // retry is safe because repository destruction is idempotent.
+        await repositories.destroy({ kind: 'notebook', id: args.notebookId }, { worktree: true });
+        await jsRegistry.delete(args.notebookId);
+      });
+    } catch (error) {
+      return { ok: false, error: `notebook_delete_failed: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}` };
+    }
     return {
       ok: true,
       content: JSON.stringify({ deleted: { id: args.notebookId, name: rec.name } }, null, 2),

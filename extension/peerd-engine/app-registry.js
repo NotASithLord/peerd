@@ -31,6 +31,15 @@ const STORAGE_KEY = 'apps.v1';
  *   manifest_created?: number,
  *   local?: boolean,
  *   seed?: string,
+ *   git_oid?: string,
+ *   source_git_oid?: string,
+ *   previous_version_id?: string,
+ *   changelog?: string,
+ *   release_created?: number,
+ *   release_entry_file?: string,
+ *   release_file_kinds?: Record<string, 'text' | 'binary'>,
+ *   published_hashes?: string[],
+ *   forked_from?: { publisher?: string | null, dwapp_id?: string | null, version_id?: string | null },
  * }} AppDwebMeta
  */
 

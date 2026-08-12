@@ -224,3 +224,112 @@ export const runWasi = async (module, { args = [], env = {}, stdin = '', files =
     stderrTruncated: stderr.wasTruncated(),
   };
 };
+
+/** @param {string|Uint8Array|ArrayBuffer} left @param {string|Uint8Array|ArrayBuffer} right */
+const sameFileBytes = (left, right) => {
+  const a = toBytes(left);
+  const b = toBytes(right);
+  return a.byteLength === b.byteLength && a.every((byte, index) => byte === b[index]);
+};
+
+/**
+ * Compute the minimal write/delete reconciliation between two flat WASI trees.
+ * Pure and exported so the workspace authority adapter is independently tested.
+ *
+ * @param {Record<string,string|Uint8Array|ArrayBuffer>} before
+ * @param {Record<string,string|Uint8Array|ArrayBuffer>} after
+ */
+export const reconcileWorkspaceFiles = (before, after) => {
+  /** @type {Record<string,string|Uint8Array|ArrayBuffer>} */
+  const writes = Object.create(null);
+  for (const [path, content] of Object.entries(after)) {
+    if (!Object.hasOwn(before, path) || !sameFileBytes(before[path], content)) writes[path] = content;
+  }
+  const deletes = Object.keys(before).filter((path) => !Object.hasOwn(after, path));
+  return { writes, deletes };
+};
+
+/**
+ * Run a WASI command against a snapshot of a host-provided workspace and apply
+ * only its resulting changes. The adapter is an explicit byte capability: no
+ * OPFS handle, browser storage object, or network primitive enters WASM.
+ *
+ * The snapshot boundary is intentional: Preview 1 syscalls are synchronous,
+ * while portable OPFS access is asynchronous. A synchronous OPFS mount would
+ * require SharedArrayBuffer/Atomics (losing Firefox/extension portability) or a
+ * second filesystem runtime. Snapshot + minimal reconciliation keeps one
+ * durable filesystem and preserves the current `runWasi()` isolation contract.
+ *
+ * @param {Uint8Array|ArrayBuffer|WebAssembly.Module} module
+ * @param {Object} opts
+ * @param {{ list:()=>Promise<Array<{path:string,size?:number}>>, readBytes:(path:string)=>Promise<Uint8Array>, write:(path:string,content:string|Uint8Array|ArrayBuffer)=>Promise<unknown>, delete:(path:string)=>Promise<unknown> }} opts.workspace
+ * @param {string[]} [opts.args]
+ * @param {Record<string,string>} [opts.env]
+ * @param {string|Uint8Array} [opts.stdin]
+ * @param {number} [opts.maxFiles]
+ * @param {number} [opts.maxBytes]
+ * @param {number} [opts.maxFileBytes]
+ */
+export const runWasiWorkspace = async (module, {
+  workspace, args = [], env = {}, stdin = '', maxFiles = 2_000,
+  maxBytes = 128_000_000, maxFileBytes = 16 * 1024 * 1024,
+}) => {
+  if (!workspace?.list || !workspace?.readBytes || !workspace?.write || !workspace?.delete) {
+    throw new TypeError('runWasiWorkspace: a byte workspace capability is required');
+  }
+  const entries = await workspace.list();
+  if (entries.length > maxFiles) throw new WasiRunError(`workspace has too many files: ${entries.length} > ${maxFiles}`);
+  /** @type {Record<string,Uint8Array>} */
+  const before = Object.create(null);
+  /** @param {unknown} value */
+  const checkedPath = (value) => {
+    const raw = String(value ?? '');
+    const path = raw.replace(/^\/+/, '');
+    if (!path || raw.includes('\\') || raw.includes('\0')
+        || path.split('/').some((part) => !part || part === '.' || part === '..')) {
+      throw new WasiRunError(`unsafe WASI workspace path: ${JSON.stringify(raw)}`);
+    }
+    return path;
+  };
+  let declaredBytes = 0;
+  for (const entry of entries) {
+    checkedPath(entry.path);
+    if (typeof entry.size === 'number') {
+      if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > maxFileBytes) {
+        throw new WasiRunError(`workspace file exceeds the WASI per-file budget: ${entry.path}`);
+      }
+      declaredBytes += entry.size;
+      if (declaredBytes > maxBytes) throw new WasiRunError(`workspace exceeds the WASI snapshot budget: ${declaredBytes} > ${maxBytes} bytes`);
+    }
+  }
+  let totalBytes = 0;
+  for (const entry of entries) {
+    const path = checkedPath(entry.path);
+    const bytes = await workspace.readBytes(path);
+    if (bytes.byteLength > maxFileBytes) throw new WasiRunError(`workspace file exceeds the WASI per-file budget: ${path}`);
+    totalBytes += bytes.byteLength;
+    if (totalBytes > maxBytes) throw new WasiRunError(`workspace exceeds the WASI snapshot budget: ${totalBytes} > ${maxBytes} bytes`);
+    before[path] = bytes;
+  }
+  const result = await runWasi(module, { args, env, stdin, files: before });
+  const outputEntries = Object.entries(result.files);
+  if (outputEntries.length > maxFiles) throw new WasiRunError(`WASI output has too many files: ${outputEntries.length} > ${maxFiles}`);
+  let outputBytes = 0;
+  for (const [rawPath, content] of outputEntries) {
+    checkedPath(rawPath);
+    const size = toBytes(content).byteLength;
+    if (size > maxFileBytes) throw new WasiRunError(`WASI output file exceeds the per-file budget: ${rawPath}`);
+    outputBytes += size;
+    if (outputBytes > maxBytes) throw new WasiRunError(`WASI output exceeds the workspace budget: ${outputBytes} > ${maxBytes} bytes`);
+  }
+  const changes = reconcileWorkspaceFiles(before, result.files);
+  // why deletes first: a command may replace a file with a directory tree at
+  // the same path. Removing stale leaves before writes mirrors command exit.
+  for (const path of changes.deletes) await workspace.delete(path);
+  for (const [path, content] of Object.entries(changes.writes)) await workspace.write(path, content);
+  return {
+    ...result,
+    changedFiles: Object.keys(changes.writes).sort(),
+    deletedFiles: changes.deletes.sort(),
+  };
+};

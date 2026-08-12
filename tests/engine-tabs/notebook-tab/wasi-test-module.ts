@@ -59,6 +59,13 @@ const TYPES = vec([
   [0x60, 0x01, 0x7f, 0x00],
   [0x60, 0x00, 0x00],
 ]);
+const EXTENDED_TYPES = vec([
+  [0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f],
+  [0x60, 0x01, 0x7f, 0x00],
+  [0x60, 0x00, 0x00],
+  [0x60, 0x09, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7e, 0x7e, 0x7f, 0x7f, 0x01, 0x7f],
+  [0x60, 0x01, 0x7f, 0x01, 0x7f],
+]);
 
 const wasiImport = (field: string, typeIndex: number): number[] =>
   [...str('wasi_snapshot_preview1'), ...str(field), 0x00, ...uleb(typeIndex)];
@@ -70,12 +77,13 @@ const commandModule = (opts: {
   body: number[];           // instruction bytes, WITHOUT the trailing end
   locals?: number[][];      // locals vec entries, e.g. [[1, 0x7f]] = one i32
   data?: { offset: number; bytes: Uint8Array };
+  types?: number[];
 }): Uint8Array => {
   const startFuncIndex = opts.imports.length;
   const codeBody = [...vec(opts.locals ?? []), ...opts.body, END];
   const bytes = [
     ...MAGIC,
-    ...section(1, TYPES),
+    ...section(1, opts.types ?? TYPES),
     ...section(2, vec(opts.imports)),
     ...section(3, vec([uleb(2)])),                       // one local func of type t2
     ...section(5, vec([[0x00, 0x01]])),                  // memory: min 1 page
@@ -123,6 +131,31 @@ export const buildEchoModule = (): Uint8Array => commandModule({
     ...i32c(1), ...i32c(0), ...i32c(1), ...i32c(12), ...call(1), DROP, // fd_write(1, …)
   ],
 });
+
+/** Create/truncate one workspace file and write UTF-8 bytes to it. This is the
+ * integration fixture for the Pod's workspace-backed WASI mode. Memory map:
+ * iovec 0, nwritten 8, opened fd 12, path 32, content after path. */
+export const buildWriteFileModule = (path: string, content: string): Uint8Array => {
+  const pathBytes = new TextEncoder().encode(path);
+  const bodyBytes = new TextEncoder().encode(content);
+  const bodyOffset = 32 + pathBytes.length;
+  const data = new Uint8Array(pathBytes.length + bodyBytes.length);
+  data.set(pathBytes, 0);
+  data.set(bodyBytes, pathBytes.length);
+  return commandModule({
+    types: EXTENDED_TYPES,
+    imports: [wasiImport('path_open', 3), wasiImport('fd_write', 0), wasiImport('fd_close', 4)],
+    data: { offset: 32, bytes: data },
+    body: [
+      ...i32c(3), ...i32c(0), ...i32c(32), ...i32c(pathBytes.length), ...i32c(9),
+      0x42, ...sleb(66), 0x42, ...sleb(0), ...i32c(0), ...i32c(12), ...call(0), DROP,
+      ...i32c(0), ...i32c(bodyOffset), ...I32_STORE,
+      ...i32c(4), ...i32c(bodyBytes.length), ...I32_STORE,
+      ...i32c(12), ...I32_LOAD, ...i32c(0), ...i32c(1), ...i32c(8), ...call(1), DROP,
+      ...i32c(12), ...I32_LOAD, ...call(2), DROP,
+    ],
+  });
+};
 
 /** Write `pages` × 4096 zero-bytes to stdout in a loop — exercises the output
  * cap. Locals: one i32 loop counter. */

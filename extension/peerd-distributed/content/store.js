@@ -36,9 +36,7 @@ export const createContentStore = () => {
   };
 
   // why: un-share. Drop a chunk's refcount; at zero it leaves the serveable
-  // set so the serve path returns null for it. The manifest + bytes stay in
-  // memory (the user still has the app installed) — only the SERVE permission
-  // is revoked. Mirrors refUp exactly.
+  // set so the serve path returns null for it. Mirrors refUp exactly.
   /** @param {StoredManifest} manifest */
   const refDown = (manifest) => {
     for (const m of manifest.chunks) {
@@ -66,7 +64,13 @@ export const createContentStore = () => {
     if (!announced.has(hash)) return false;
     announced.delete(hash);
     const manifest = manifests.get(hash);
-    if (manifest) refDown(manifest);
+    if (manifest) {
+      refDown(manifest);
+      manifests.delete(hash);
+      // OPFS/App Git remains the durable local copy. Keeping unannounced bundle
+      // bytes here only creates an unbounded version-by-version memory leak.
+      for (const chunk of manifest.chunks) if (!serveable.has(chunk.hash)) chunkData.delete(chunk.hash);
+    }
     return true;
   };
 

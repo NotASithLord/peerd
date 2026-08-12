@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { makeDwebShare } from '../../extension/background/dweb-share.js';
+import { createAppQuiescence } from '../../extension/background/app-quiescence.js';
 
 const makeLane = () => {
   let tail = Promise.resolve();
@@ -51,6 +52,118 @@ describe('identity-bound dweb share', () => {
         slug: 'app', dwapp_id: 'dwapp', seq: 7, local: true,
       },
     });
+  });
+
+  test('publishes one immutable Git release and persists its signed lineage', async () => {
+    const committedOid = 'a'.repeat(40);
+    const previousOid = 'b'.repeat(40);
+    const previousVersionId = 'c'.repeat(64);
+    const publishedHash = 'd'.repeat(64);
+    const events: string[] = [];
+    const patches: any[] = [];
+    let publication: any = null;
+    const quiescence = createAppQuiescence({
+      tracker: {
+        getTabId: () => 41,
+        quiesceTab: async () => { events.push('flush'); return true; },
+        resumeTab: async () => { events.push('resume'); return true; },
+        closeTab: async () => true,
+        ensureTab: async () => 41,
+        reloadTab: async () => true,
+      },
+      withLifecycle: async (_appId, operation) => operation(),
+    });
+    const share = makeDwebShare({
+      enabled: true,
+      active: () => true,
+      withDwebPublication,
+      withIdentityMutation: makeLane(),
+      withAppLifecycle,
+      withAppWriteLock: (appId, operation) => quiescence.runUnlocked(appId, async () => {
+        events.push('lock-enter');
+        try { return await operation(); }
+        finally { events.push('lock-exit'); }
+      }),
+      appRegistry: {
+        get: async () => ({
+          name: 'Release App', entryFile: 'index.html',
+          fileKinds: { 'index.html': 'text', 'module.wasm': 'binary' },
+          dweb: {
+            git_oid: previousOid,
+            version_id: previousVersionId,
+            published_hashes: ['e'.repeat(64)],
+          },
+        }),
+        update: async (_id, patch) => { events.push('persist'); patches.push(patch); return { id: 'app-1', ...patch }; },
+      },
+      repositories: {
+        statusApp: async () => ({ changed: [{ path: 'index.html' }, { path: 'module.wasm' }] }),
+        commitApp: async (_id, opts) => {
+          events.push(`commit:${opts.message}`);
+          return { oid: committedOid, created: true };
+        },
+        historyApp: async () => [
+          { oid: committedOid, message: 'release: update index.html, module.wasm' },
+          { oid: 'f'.repeat(40), message: 'improve wasm worker\ninternal detail' },
+          { oid: previousOid, message: 'previous release' },
+        ],
+        snapshot: async (_ref, opts) => {
+          events.push(`snapshot:${opts.at}`);
+          return {
+            'index.html': new TextEncoder().encode('<h1>release</h1>'),
+            'module.wasm': Uint8Array.of(0, 97, 115, 109),
+          };
+        },
+      },
+      prepareRuntime: async () => ({ ok: true }),
+      sendMessage: async (message) => {
+        if (message.type === 'dweb/base-host/commit-share') return { ok: true };
+        publication = message;
+        events.push('publish');
+        return {
+          ok: true, uri: `peerd://did:key:zLocal/${publishedHash}`,
+          publisher: 'did:key:zLocal', hash: publishedHash, slug: 'release-app',
+          dwapp_id: 'dwapp', seq: 8, created: 1234, transactionId: 'tx-release',
+        };
+      },
+    });
+
+    expect(await share('app-1', 'release-app')).toMatchObject({ ok: true, hash: publishedHash });
+    expect(publication.release).toEqual({
+      previousVersionId,
+      gitCommitOid: committedOid,
+      changelog: 'improve wasm worker\nrelease: update index.html, module.wasm',
+    });
+    expect(publication.releaseSnapshot).toMatchObject({
+      ok: true,
+      oid: committedOid,
+      totalBytes: 20,
+      record: {
+        name: 'Release App', entryFile: 'index.html',
+        fileKinds: { 'index.html': 'text', 'module.wasm': 'binary' },
+      },
+    });
+    expect(atob(publication.releaseSnapshot.files['index.html'].base64)).toBe('<h1>release</h1>');
+    expect([...Uint8Array.from(atob(publication.releaseSnapshot.files['module.wasm'].base64), (c) => c.charCodeAt(0))])
+      .toEqual([0, 97, 115, 109]);
+    expect(patches[0].dweb).toMatchObject({
+      git_oid: committedOid,
+      source_git_oid: committedOid,
+      previous_version_id: previousVersionId,
+      changelog: 'improve wasm worker\nrelease: update index.html, module.wasm',
+      release_created: 1234,
+      published_hashes: ['e'.repeat(64), publishedHash],
+    });
+    expect(events).toEqual([
+      'flush',
+      'lock-enter',
+      'commit:release: update index.html, module.wasm',
+      `snapshot:${committedOid}`,
+      'publish',
+      'persist',
+      'lock-exit',
+      'resume',
+    ]);
   });
 
   test('passes the previously served hash so a successful reshare can revoke it', async () => {

@@ -20,6 +20,7 @@ import {
 } from '/peerd-engine/index.js';
 import { loadDweb } from '/shared/dweb-loader.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
+import { isServiceWorkerSender } from '/shared/messaging.js';
 
 const appId = location.hash.slice(1).split(/[?&]/)[0];
 // Launch params ride the hash past the appId (`#<id>?room=…&url=…`) —
@@ -118,6 +119,37 @@ let appMeta = null;        // { name, entryFile }
 let editorApi = null;
 let mode = 'render';
 const binaryFilePaths = new Set();
+
+// Repository replacement must first drain the editor's debounced write. The
+// SW requests this before taking the repository coordinator; taking the lock
+// first would deadlock because flushSave itself writes through that lane.
+browser.runtime.onMessage.addListener(/** @type {any} */ ((
+  /** @type {any} */ message,
+  /** @type {any} */ sender,
+  /** @type {(value:any)=>void} */ sendResponse,
+) => {
+  if (!isServiceWorkerSender(sender)
+      || message?.type !== 'app/quiesce'
+      || message.appId !== appId) return false;
+  if (message.action === 'release') {
+    document.body.inert = false;
+    sendResponse({ ok: true });
+    return false;
+  }
+  if (message.action !== 'acquire') {
+    sendResponse({ ok: false, error: 'invalid App quiesce action' });
+    return false;
+  }
+  document.body.inert = true;
+  Promise.resolve(editorApi?.flushSave?.()).then(
+    () => sendResponse({ ok: true }),
+    (error) => {
+      document.body.inert = false;
+      sendResponse({ ok: false, error: /** @type {{message?:string}} */ (error)?.message ?? String(error) });
+    },
+  );
+  return true;
+}));
 /** @type {HTMLElement | null} */
 let saveReturnFocus = null;
 /** @param {string} path */

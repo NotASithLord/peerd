@@ -333,6 +333,30 @@ describe('buildPrivateNetworkInitiatorBlockRules, no-tab worker floor', () => {
   });
 });
 
+describe('buildAppEgressBlockRule: App tabs have no remote network edge', () => {
+  test('no App tabs means no rule', () => {
+    expect(buildAppEgressBlockRule({ tabIds: [] })).toBeNull();
+  });
+
+  test('the rule is tab-scoped and blocks every HTTP(S) resource type', () => {
+    const rule: any = buildAppEgressBlockRule({ tabIds: [11, 11, -1, 12] });
+    expect(rule.id).toBe(APP_EGRESS_RULE_ID);
+    expect(rule.action).toEqual({ type: 'block' });
+    expect(rule.condition.regexFilter).toBe('^https?://');
+    expect(rule.condition.tabIds).toEqual([11, 12]);
+    expect(rule.condition.resourceTypes).toEqual([...DENYLIST_RESOURCE_TYPES]);
+  });
+
+  test('the App rule survives even when the user denylist is empty', () => {
+    const update: any = denylistSessionRuleUpdate({
+      patterns: [], tabIds: [], appTabIds: [17],
+    });
+    expect(update.addRules).toHaveLength(1);
+    expect(update.addRules[0].id).toBe(APP_EGRESS_RULE_ID);
+    expect(update.addRules[0].condition.tabIds).toEqual([17]);
+  });
+});
+
 describe('buildAppEgressBlockRule — App tabs have no remote network edge', () => {
   test('no App tabs means no rule', () => {
     expect(buildAppEgressBlockRule({ tabIds: [] })).toBeNull();

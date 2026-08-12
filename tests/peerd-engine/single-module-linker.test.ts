@@ -47,7 +47,7 @@ return { value: values.value, order: globalThis.sideOrder };`, {
     expect(linked).not.toContain('import.meta');
     expect(linked).toContain('"./lib/value.js"');
     expect(linked).toMatch(/\/\*__peerd_module:[0-9a-f-]+:module:.%2Flib%2Fvalue\.js__\*\//);
-    expect(linked.indexOf('applyRealmSeal(globalThis)'))
+    expect(linked.indexOf('applyNotebookRealmSeal(globalThis)'))
       .toBeLessThan(linked.indexOf('let value = 40'));
     expect(linked).not.toContain('blob:peerd-test');
     expect(linked).toContain('value += n');

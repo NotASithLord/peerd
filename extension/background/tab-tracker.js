@@ -1,8 +1,8 @@
 // @ts-check
 // tab-tracker — SW-side bookkeeping of which engine-instance id lives in
-// which browser tab. The shared core behind vm-/notebook-/app-tab-tracker.
+// which browser tab. The shared core behind vm-/notebook-/pod-/app-tab-tracker.
 //
-// Each TAB-HOSTED peerd execution kind (WebVM, Notebook, App) is a discrete
+// Each TAB-HOSTED peerd execution kind (WebVM, Notebook, Pod, App) is a discrete
 // browser tab at chrome-extension://<id>/<kind>-tab/index.html#<id> (the
 // headless script worker has no tab, so it isn't tracked here). The
 // tab announces itself on load (`<kind>/tab-ready` message) and we learn
@@ -10,7 +10,7 @@
 // by querying for matching URLs (the SW can restart while instance tabs
 // keep running). chrome.tabs.onRemoved drops stale entries.
 //
-// The three kinds were ~95% identical bookkeeping; the only real
+// The kinds share the same bookkeeping; the only real
 // differences are the tab path, the ready timeout, the injectable tabs
 // API (the in-browser vm test stubs it), and the error thrown when a tab
 // closes before it's ready. Those are the config below. Each kind's

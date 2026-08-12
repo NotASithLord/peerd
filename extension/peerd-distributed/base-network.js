@@ -17,6 +17,7 @@ import { createPresence } from './gossip/presence.js';
 import { mutableKey, signProvider } from './dht/records.js';
 import { decodeDidKey } from './identity/did.js';
 import {
+  assertBundleWithinLimits,
   assertBundlePayloadWithinLimits,
   buildManifest,
   manifestHash,
@@ -154,9 +155,9 @@ export const createBaseNetwork = async ({
   };
 
   /** @param {{ name: string, entry: string, files: Record<string, string | Uint8Array>,
-   *   fileKinds?: Record<string, 'text' | 'binary'>, created?: number,
+   *   fileKinds?: Record<string, 'text' | 'binary'>, release?: Record<string, any>, created?: number,
    *   expectedHash?: string }} opts */
-  const publishApp = async ({ name, entry, files, fileKinds, created, expectedHash }) => {
+  const publishApp = async ({ name, entry, files, fileKinds, release, created, expectedHash }) => {
     /** @type {Record<string, Uint8Array>} */
     const bytes = Object.create(null);
     for (const [path, content] of Object.entries(files)) {
@@ -170,8 +171,10 @@ export const createBaseNetwork = async ({
       type: 'app',
       entry,
       identity,
+      ...(release ? { meta: { release } } : {}),
       ...(manifestCreated !== null ? { now: () => manifestCreated } : {}),
     });
+    assertBundleWithinLimits(manifest);
     if (expectedHash && hash !== expectedHash) {
       throw new Error('shared App bytes changed since the recorded version');
     }
@@ -216,14 +219,16 @@ export const createBaseNetwork = async ({
     return { removed: !!id, dwapp_id: id };
   };
 
-  /** @param {{ slug?: string | null, publisher?: string, hash?: string | null }} [opts] */
-  const unshareApp = async ({ slug = null, publisher = identity.did, hash = null } = {}) => {
+  /** @param {{ slug?: string | null, publisher?: string, hash?: string | null, hashes?: string[] }} [opts] */
+  const unshareApp = async ({ slug = null, publisher = identity.did, hash = null, hashes = [] } = {}) => {
     const id = slug ? await dwappId(publisher, slug) : null;
     // Prefer the caller's hash (installed apps carry it on their record); else read
     // it off our own card (a self-published app — version_id IS the bundle hash).
     let h = hash;
     if (!h && id) { const card = library.get(id); h = card?.value?.head?.version_id ?? null; }
-    const unserved = h ? node.content.unannounce(h) : false;
+    const releaseHashes = [...new Set([h, ...hashes].filter((value) => typeof value === 'string'))];
+    let unserved = 0;
+    for (const releaseHash of releaseHashes) if (node.content.unannounce(releaseHash)) unserved += 1;
     // tombstone (not a bare remove): also blocks a peer's cached copy from
     // re-infecting our Library on the next snapshot. Lifted if we re-share.
     await unpublishMeta({ slug, publisher });

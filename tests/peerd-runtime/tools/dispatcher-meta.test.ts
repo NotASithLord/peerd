@@ -5,6 +5,7 @@
 import { describe, test, expect, afterEach } from 'bun:test';
 import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/dispatcher.js';
 import { registerTool, clearTools } from '../../../extension/peerd-runtime/tools/registry.js';
+import { messageActorTool } from '../../../extension/peerd-runtime/tools/defs/message-actor.js';
 import {
   BROWSER_TARGET_STAGES,
   BrowserAutomationPolicyError,
@@ -244,6 +245,88 @@ describe('dispatcher lineage spine fields', () => {
       error: 'outcome_unknown: verify before retry',
       actorDeliveryId: 'delivery-one',
       actorDeliveryIds: ['delivery-two'],
+    });
+  });
+
+  test('outer outcome_unknown overrides stale inner actor certainty and cancellation', async () => {
+    registerTool(baseTool({
+      name: 'message_actor',
+      primitive: 'spawned',
+      sideEffect: 'write',
+      execute: async () => ({
+        ok: false,
+        error: 'clean inner policy stop',
+        actorCorrelationId: 'actor-delivery',
+        actorTerminal: true,
+        actorOutcomeKnown: true,
+        actorPerformed: false,
+        actorAborted: true,
+      }),
+    }) as any);
+    let settledOutcome: any = null;
+    const lifecycle = {
+      beginTracking: async () => ({ handle: { operationId: 'op-actor' } }),
+      settleTracking: async (_handle: any, outcome: any) => {
+        settledOutcome = outcome;
+        return {
+          error: 'outcome_unknown: This action may have completed, but peerd did not receive confirmation.',
+          recovery: { state: 'outcome_unknown', category: 'verify_before_retry' },
+        };
+      },
+    };
+
+    const result: any = await dispatchToolCall(
+      { id: 'actor-call', name: 'message_actor', args: { await: true } } as any,
+      { ...ctx, lifecycle },
+    );
+
+    expect(settledOutcome.aborted).toBe(true);
+    expect(result).toMatchObject({
+      ok: false,
+      actorCorrelationId: 'actor-delivery',
+      actorTerminal: true,
+      actorOutcomeKnown: false,
+      actorPerformed: true,
+      actorAborted: false,
+    });
+    expect(result.error).toStartWith('outcome_unknown:');
+  });
+
+  test('message_actor Not run evidence reaches lifecycle as a typed pre-effect failure', async () => {
+    registerTool(messageActorTool as any);
+    let settledOutcome: any = null;
+    const lifecycle = {
+      beginTracking: async () => ({ handle: { operationId: 'op-not-run' } }),
+      settleTracking: async (_handle: any, outcome: any) => {
+        settledOutcome = outcome;
+        return null;
+      },
+    };
+
+    const result: any = await dispatchToolCall(
+      { id: 'actor-not-run', name: 'message_actor', args: { to: 'web', message: 'read it', await: true } } as any,
+      {
+        ...ctx,
+        lifecycle,
+        messageActor: async () => ({
+          ok: false,
+          error: 'the actor request was not run because that helper was retired.',
+          actorTerminal: true,
+          actorOutcomeKnown: true,
+          actorPerformed: false,
+        }),
+      } as any,
+    );
+
+    expect(settledOutcome).toMatchObject({
+      ok: false, outcomeKind: 'pre-effect-failure', aborted: false,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'the actor request was not run because that helper was retired.',
+      outcomeKind: 'pre-effect-failure',
+      actorOutcomeKnown: true,
+      actorPerformed: false,
     });
   });
 

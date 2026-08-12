@@ -5,13 +5,19 @@
 /** @param {string} rootSessionId @param {string} parentToolUseId */
 const boundKey = (rootSessionId, parentToolUseId) => `${rootSessionId}:${parentToolUseId}`;
 
-export const createActorLiveProjection = () => {
+/** @param {{ epoch?: string }} [opts] */
+export const createActorLiveProjection = (opts = {}) => {
   /** @type {Map<string, any>} */
   const spawned = new Map();
   /** @type {Map<string, any>} */
   const bound = new Map();
   /** @type {Map<string, any[]>} */
   const asyncTasks = new Map();
+  const projectionEpoch = typeof opts.epoch === 'string' && opts.epoch
+    ? opts.epoch
+    : (globalThis.crypto?.randomUUID?.()
+      ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  let boundRevision = 0;
 
   const pruneSettledSpawned = () => {
     let pruned = true;
@@ -38,6 +44,7 @@ export const createActorLiveProjection = () => {
   const startBound = (card) => {
     if (!card?.rootSessionId || !card?.parentToolUseId) return false;
     bound.set(boundKey(card.rootSessionId, card.parentToolUseId), { ...card });
+    boundRevision += 1;
     return true;
   };
 
@@ -47,14 +54,26 @@ export const createActorLiveProjection = () => {
     const key = boundKey(display.rootSessionId, display.parentToolUseId);
     const current = bound.get(key);
     if (!current) return false;
+    if (typeof current.actorCorrelationId === 'string'
+        && typeof display.actorCorrelationId === 'string'
+        && current.actorCorrelationId !== display.actorCorrelationId) return false;
     bound.set(key, { ...current, ...patch });
+    boundRevision += 1;
     return true;
   };
 
   /** @param {any} display */
   const finishBound = (display) => {
     if (!display?.rootSessionId || !display?.parentToolUseId) return false;
-    return bound.delete(boundKey(display.rootSessionId, display.parentToolUseId));
+    const key = boundKey(display.rootSessionId, display.parentToolUseId);
+    const current = bound.get(key);
+    if (!current) return false;
+    if (typeof current.actorCorrelationId === 'string'
+        && typeof display.actorCorrelationId === 'string'
+        && current.actorCorrelationId !== display.actorCorrelationId) return false;
+    const removed = bound.delete(key);
+    if (removed) boundRevision += 1;
+    return removed;
   };
 
   /**
@@ -114,13 +133,19 @@ export const createActorLiveProjection = () => {
   /** @param {string | null | undefined} rootSessionId */
   const snapshot = (rootSessionId) => {
     if (!rootSessionId) {
-      return { actors: {}, spawned: { byToolUse: {}, sessions: {} }, asyncTasks: {} };
+      return {
+        actorProjectionEpoch: projectionEpoch,
+        actorProjectionRevision: boundRevision,
+        actors: {}, spawned: { byToolUse: {}, sessions: {} }, asyncTasks: {},
+      };
     }
     const liveSpawned = [...spawned.values()]
       .filter((session) => session.rootSessionId === rootSessionId);
     const spawnedSessions = Object.fromEntries(liveSpawned
       .map((session) => [session.sessionId, { ...session }]));
     return {
+      actorProjectionEpoch: projectionEpoch,
+      actorProjectionRevision: boundRevision,
       actors: Object.fromEntries([...bound.values()]
         .filter((card) => card.rootSessionId === rootSessionId)
         .map((card) => [card.parentToolUseId, { ...card }])),
@@ -187,6 +212,9 @@ export const createActorLiveProjection = () => {
 
   return {
     startBound, patchBound, finishBound,
-    foldSpawned, rootForSpawned, setAsyncTasks, snapshot, rootSessionIds, activeActorCount,
+    foldSpawned, rootForSpawned, setAsyncTasks, snapshot,
+    epoch: () => projectionEpoch,
+    revision: () => boundRevision,
+    rootSessionIds, activeActorCount,
   };
 };

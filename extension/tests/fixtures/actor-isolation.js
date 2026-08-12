@@ -57,7 +57,10 @@ const state = {
       },
       {
         role: 'user', id: 'result-unknown', content: '',
-        toolResults: [{ tool_use_id: 'tool-unknown', is_error: false, content: 'Message delivered.' }],
+        toolResults: [{
+          tool_use_id: 'tool-unknown', is_error: false, content: 'Message delivered.',
+          actorCorrelationId: 'delivery-unknown', actorTerminal: false,
+        }],
       },
       {
         role: 'user', id: 'reply-unknown', synthetic: true,
@@ -97,6 +100,7 @@ const state = {
   fixtureState.actors = {
     'tool-unknown': {
       kind: 'web', instanceId: 'web', streaming: false,
+      actorCorrelationId: 'delivery-unknown',
       error: 'The actor worker stopped. Its outcome is unknown.',
       outcomeKnown: false,
     },

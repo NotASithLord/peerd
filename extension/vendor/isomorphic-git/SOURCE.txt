@@ -1,0 +1,57 @@
+isomorphic-git browser bundle
+=============================
+
+Upstream: https://github.com/isomorphic-git/isomorphic-git
+Package:  isomorphic-git@1.38.6
+Artifact: npm package `isomorphic-git-1.38.6.tgz`
+Retrieved: 2026-08-06
+License: MIT plus bundled third-party licenses (see THIRD-PARTY-NOTICES.txt)
+
+The vendored runtime is the package's self-contained `index.umd.min.js`, renamed
+to `isomorphic-git.umd.min.js`. It includes isomorphic-git's published runtime
+dependencies. Their inventory, attributions, and complete non-MIT license
+texts are shipped beside the bundle in THIRD-PARTY-NOTICES.txt and the named
+license files. `index.umd.min.js.LICENSE.txt` is also present at the exact path
+referenced by the bundle banner.
+`index.js` and `install-buffer.js` are peerd's small static-ESM wrapper; they are
+original project code. The wrapper and its caller use only static imports because
+MV3 service workers reject runtime `import()` even though extension pages permit
+it.
+
+Local hardening patch: the vendored UMD rejects a pack entry or delta target
+whose declared inflated size exceeds 64 MiB before pako allocates its result.
+This closes the browser-memory gap that an OPFS write quota alone cannot cover.
+
+Browser peer dependency:
+  buffer@6.0.3 (MIT, BUFFER-LICENSE)
+  base64-js@1.5.1 (MIT, BASE64-JS-LICENSE)
+  ieee754@1.2.1 (BSD-3-Clause, IEEE754-LICENSE)
+
+isomorphic-git's browser bundle expects the Node-compatible `Buffer` global.
+`buffer-polyfill.js` is a deterministic browser-targeted ESM bundle of those
+three packages, produced with the repository's pinned Bun (`bun build ...
+--target=browser --format=esm --minify`). The ESM wrapper installs it before
+evaluating isomorphic-git's UMD factory.
+
+Integrity:
+  npm tarball sha256: d2547d46c0a23ef9fc6fb2052e01ff78c348ceb92d394be05b146bc790943858
+  bundle sha256:      c4bc9f6231552ca864bfe99c34a0a618debc4b17d072ccb20a9c6976cab5ac18
+  license sha256:     b916888fb16893c3a1df138543f994b96bb6892d74b6777c3a080d9cd2520c48
+  buffer tarball:     555b6f49224afcf6b2c5a9aea7cd34a7f443f395b10532bc5580022d57aa51f5
+  base64-js tarball:  b1b7a945b52685269083425216d6597e33d97bf21699d656e92fdb3eb5210a85
+  ieee754 tarball:    8ef14b9b397e339db89db97881fb714f49319d8f0eb1275901f45567b28f9dac
+  buffer bundle:      bc3df7730243cc61dd5a8e1f61be8fa15cef16458c1fe6a43390f47efe7baf45
+
+Update procedure:
+  1. `npm pack isomorphic-git@<version>` into a temporary directory.
+  2. Audit the package metadata, bundle, license, and dependency/license delta.
+  3. Copy `index.umd.min.js` and `LICENSE.md`; pack the Buffer packages above,
+     rebuild the ESM polyfill, audit the source-map dependency/license delta,
+     update THIRD-PARTY-NOTICES.txt + every applicable license file, and refresh
+     every integrity value.
+  4. Run `bun packaging/check-vendor.ts --write` in the same change.
+
+why vendored: peerd has no runtime package manager or build step. Browser-native
+Git must execute entirely from extension-owned, CSP-approved bytes and remain
+available offline. Git object IDs are developer-interoperability identifiers;
+peerd's SHA-256 manifests and Ed25519 signatures remain the dwapp trust anchor.

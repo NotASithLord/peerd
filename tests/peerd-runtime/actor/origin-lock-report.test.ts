@@ -102,15 +102,17 @@ describe('the report is useful, not just safe', () => {
 
   test('the sessionless offer still carries NO path from the refused page', () => {
     // The new paragraph must not become the leak the rest of the report avoids:
-    // it tells the orchestrator to use the URL the USER gave, and never repeats
-    // the landing URL it was refused on.
+    // it tells the orchestrator to repeat a sessionless search from a fresh,
+    // user-authored goal and never repeats the landing URL it was refused on.
     const text = describeLandingStop({
       action: 'handoff', reason: 'r', from: null,
       to: 'https://github.com/secret-path?token=abc', handoffTo: 'https://github.com',
     });
     expect(text).not.toContain('secret-path');
     expect(text).not.toContain('token=abc');
-    expect(text).toMatch(/URL the\s+USER gave/i);
+    expect(text).toMatch(/fresh goal from the user'?s request/i);
+    expect(text).toMatch(/sessionless search/i);
+    expect(text).not.toMatch(/to "web" again/i);
   });
 
   test('a handoff tells the orchestrator to write its OWN goal', () => {
@@ -125,14 +127,15 @@ describe('the report is useful, not just safe', () => {
     expect(text).toMatch(/should be guessed at|from what the user asked/i);
   });
 
-  test('a learned-scope handoff does not claim exact identity and forbids spelling retries', () => {
+  test('a learned-scope handoff does not claim exact identity and keeps recovery user-scoped', () => {
     const text = describeLandingStop({
       action: 'handoff', reason: 'r', from: null,
       to: 'http://bank.test:9443/x', handoffTo: 'http://bank.test:9443',
     });
-    expect(text).toContain("may share the user's browser session");
-    expect(text).toContain('Do not evade this stop by changing the address');
-    expect(text).toContain("comes from the user's request");
+    expect(text).toContain('stopped this general web helper here');
+    expect(text).toContain('may have signed-in browser state');
+    expect(text).toContain("fresh goal from the user's request");
+    expect(text).toContain('If the user did not ask to use');
     expect(text).toContain('site:http://bank.test:9443');
     expect(text).not.toContain('has an identity on');
   });

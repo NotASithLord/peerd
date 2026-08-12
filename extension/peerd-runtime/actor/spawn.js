@@ -178,7 +178,7 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   // NOTE: edit_file reaches appRegistry/jsRegistry via a COMPUTED property
   // (edit-file.js: ctx[kind==='app'?'appRegistry':'jsRegistry']), so it must be
   // listed in BOTH despite not matching a `.appRegistry` grep.
-  // actor_list reads the registries + tab trackers of ALL three engine kinds
+  // actor_list reads the registries + tab trackers of ALL four engine kinds
   // (plus tabs + listApiIntegrations, which are ungated/always present) to build
   // the unified catalog — so it appears in every engine registry+tracker list.
   vm:                 ['vm_boot', 'vm_write_file', 'vm_import'],
@@ -186,12 +186,17 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   vmTabTracker:       ['sandbox_create', 'vm_delete', 'actor_list'],
   jsClient:           ['js_notebook', 'js_write_file', 'js_read_file', 'edit_file'],
   jsRegistry:         ['js_notebook', 'sandbox_create', 'js_delete', 'edit_file', 'actor_list'],
-  jsTabTracker:       ['sandbox_create', 'js_delete', 'actor_list'],
+  jsTabTracker:       ['sandbox_create', 'js_delete', 'actor_list', 'repo_version'],
+  podClient:          ['pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write'],
+  podRegistry:        ['sandbox_create', 'pod_destroy', 'actor_list'],
+  podTabTracker:      ['sandbox_create', 'pod_destroy', 'actor_list', 'repo_version', 'repo_remote'],
   jsOffscreenClient:  ['script', 'a2a_run', 'page_code', 'site_client_run'],
   appClient:          ['sandbox_create', 'app_open', 'app_update', 'app_write_file',
     'app_read_file', 'app_list_files', 'app_delete_file', 'app_delete', 'app_search', 'edit_file'],
+  repositories:       ['sandbox_create', 'js_delete', 'pod_destroy', 'repo_history', 'repo_version', 'repo_remote'],
   appRegistry:        ['app_delete', 'edit_file', 'actor_list'],
-  appTabTracker:      ['actor_list'],
+  appTabTracker:      ['actor_list', 'repo_version'],
+  appQuiescence:      ['repo_version', 'repo_remote'],
   messageActor:    ['message_actor'],
   // The sealed-code run registry (Stop + relay custody). Script's actor client
   // additionally requires messageActor, so code delegation still composes off
@@ -370,9 +375,9 @@ export const makeSpawnActor = (deps) => {
    * @param {number} [req.maxDepth]                depth ceiling (default 5)
    * @param {boolean} [req.allowRecursion]         keep actor_create in the subset
    * @param {boolean} [req.review]                 issue 160 - SW-ONLY. Set solely by the
-   *   review orchestrator (review/orchestrator.js). Re-adds the three instance
+   *   review orchestrator (review/orchestrator.js). Re-adds the four instance
    *   READS (REVIEW_INSTANCE_READS) to the grantable surface and stamps
-   *   ctx.exposure='review', which the actor-tier gate admits for those three
+   *   ctx.exposure='review', which the actor-tier gate admits for those four
    *   names only. NOT reachable from the model: actor_create builds its spawn
    *   request from an explicit field whitelist and never spreads args (pinned by
    *   a test in review.test.ts). Never accept this from a worker or tool arg.
@@ -400,7 +405,7 @@ export const makeSpawnActor = (deps) => {
       maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
       maxDepth = DEFAULT_MAX_DEPTH,
       allowRecursion = false,
-      // #160: SW-ONLY flag (the review orchestrator). Grants the three instance
+      // #160: SW-ONLY flag (the review orchestrator). Grants the four instance
       // reads + stamps the review exposure marker. Unreachable from model args.
       review = false,
       parentSessionId,
@@ -478,7 +483,7 @@ export const makeSpawnActor = (deps) => {
     // authority the spawning agent itself lacks. Filtering the grantable universe here is
     // the fix: an actor holds ⊆ what the main agent holds, delegating web/DOM work to
     // the web actor via message_actor like the main agent does.
-    // #160: a REVIEW spawn re-adds the three instance READS that filterActorSurface
+    // #160: a REVIEW spawn re-adds the four instance READS that filterActorSurface
     // just dropped — by name, from the descriptors we already have. This is the
     // whole exemption: a positive re-add, never "skip the narrowing for review"
     // (which would restore fetch_url / read_page / site_client_run too, i.e. build

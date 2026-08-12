@@ -55,7 +55,7 @@ import { RETRY_CLASSES, isRetryClass } from './retry-class.js';
 // are deliberately read twice from one shared vocabulary; if the list moves,
 // both sites move together.
 const WORKSPACE_PRIMITIVES = Object.freeze(
-  new Set(['webvm', 'notebook', 'app', 'engine', 'dweb']),
+  new Set(['webvm', 'notebook', 'pod', 'app', 'engine', 'dweb']),
 );
 
 /**
@@ -102,6 +102,7 @@ export const RETRY_CLASS_OVERRIDES = Object.freeze(
     // request, and `script` additionally holds egress and delegation. Silently
     // re-running one is the textbook unsafe replay.
     js_notebook: 'E',
+    pod_exec: 'E',
     script: 'E',
     // why: a2a_run's `dweb` primitive reads as workspace-local, but the mesh
     // bridge SENDS signed messages to other agents — the effect lands in a
