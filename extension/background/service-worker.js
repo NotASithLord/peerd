@@ -255,8 +255,6 @@ import {
   normalizeConfirmActions,
   confirmActionsFromRecord,
   // edit (SEARCH/REPLACE diff editing + review-diff snapshots, feature 02)
-  createBrowserSnapshotStore,
-  createCheckpointManager,
   // cost telemetry (feature 06): normalize for the state push + the
   // per-turn tracker (fold/persist/push/halt with all IO injected).
   // addUsage/limitExceeded also serve the script/model-call route's cost
@@ -370,6 +368,8 @@ import { createVmClient } from './vm-client.js';
 import { createVmTabTracker } from './vm-tab-tracker.js';
 import { createJsClient } from './notebook-client.js';
 import { createJsTabTracker } from './notebook-tab-tracker.js';
+import { createPodClient } from './pod-client.js';
+import { createPodTabTracker } from './pod-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
 import { createScriptRunRegistry } from './script-runs.js';
 import { createContextSnapshots } from './context-snapshots.js';
@@ -388,9 +388,11 @@ import { makeUiPorts } from './ui-ports.js';
 import { createAppClient, APP_TAB_GROUP_TITLE } from './app-client.js';
 import { createPageActivityReporter } from './page-activity.js';
 import { createAppTabTracker } from './app-tab-tracker.js';
+import { createAppQuiescence } from './app-quiescence.js';
 import {
   createVmRegistry,
   createNotebookRegistry,
+  createPodRegistry,
   createAppRegistry,
   appFileCheckpointContent,
   // artifact export/import (.peerd envelopes — DESIGN-10)
@@ -419,7 +421,15 @@ import {
   needsWebWriteConfirm,
   // §11.5: the dormant App-bodies store's write gate (self-hosted DB).
   setAppBodyWriteGate,
+  parseAppManifest,
+  createRepositoryService,
+  podGitRemoteOperation,
 } from '/peerd-engine/index.js';
+// MV3 ServiceWorkerGlobalScope rejects runtime import(). Keep the heavy vendor
+// statically reachable only from this host and inject it into the otherwise
+// operation-lazy repository service; unrelated peerd-engine consumers do not
+// inherit these bytes through the public barrel.
+import browserGit from '/vendor/isomorphic-git/index.js';
 import { createDebuggerPool } from './debugger-pool.js';
 import { normalizeSettingsPatch } from './settings-patch.js';
 import { makeSettingsStore } from './settings-store.js';
@@ -1301,7 +1311,7 @@ const drivenTabIds = () => {
   // Notebook worker is sealed, so App tabs are the ones with a real un-gated
   // network edge — but scoping all three keeps the rule uniform and costs a
   // rule condition entry, not a check per request.
-  for (const tracker of [vmTabTracker, jsTabTracker, appTabTracker]) {
+  for (const tracker of [vmTabTracker, jsTabTracker, podTabTracker, appTabTracker]) {
     for (const instanceId of tracker.listLive()) {
       const tabId = tracker.getTabId(instanceId);
       if (typeof tabId === 'number') ids.add(tabId);
@@ -1708,7 +1718,7 @@ registerFirefoxDrivenChildRequestGuard({
 //   * the orchestrator          — drives the user's own foreground tab on the
 //                                 user's own instruction. Locking it would mean
 //                                 peerd refusing to look at the page you are on.
-//   * the three engine kinds    — act on an instance, never a tab. No landing.
+//   * engine actors            : act on an instance, never a web tab. No landing.
 //   * the dweb actor            — no tab either.
 //   * an API actor (backing:'api') — already bound to ONE fixed origin by
 //                                 `withApiCredentials`, which is the same
@@ -2498,6 +2508,11 @@ const buildToolContext = async (/** @type {any} */ {
     jsClient,
     jsRegistry,
     jsTabTracker,
+    // Pod kind: shell/WASI jobs run in sealed command Workers while this
+    // instance-pinned client and catalog own only tab lifecycle + metadata.
+    podClient,
+    podRegistry,
+    podTabTracker,
     // script — a HEADLESS sibling: the same sealed worker, hosted in the
     // offscreen doc (no tab). Defined after ensureOffscreen below.
     jsOffscreenClient,
@@ -2517,8 +2532,12 @@ const buildToolContext = async (/** @type {any} */ {
     // why: App kind — DOM-bearing artifact the agent built for the
     // user. appClient combines registry (metadata) + body store (IDB).
     appClient,
+    // why separate from appClient: both App and Notebook actors use the narrow
+    // repository surface without inheriting either engine client's wider API.
+    repositories,
     appRegistry,
     appTabTracker,
+    appQuiescence,
     // why: the dweb network surface for the dweb_share/discover/install tools —
     // the SAME ops the home UI uses, reaching the offscreen base host. Injected
     // ONLY when the dweb is on (DWEB_ENABLED + the setting), so on the store build
@@ -3209,6 +3228,20 @@ const jsTabTracker = createJsTabTracker({
 });
 const jsClient = createJsClient({ registry: jsRegistry, tracker: jsTabTracker });
 
+// Pod is another tab-hosted engine instance, but its tab owns a shell/job host
+// instead of a Notebook editor evaluator. Files and catalog metadata survive a
+// stopped worker; cwd, environment, and live jobs deliberately do not.
+const podRegistry = createPodRegistry({ storage: idbKV('pods'), onActorArchive: archiveOrphanedActor });
+// A closed ephemeral Pod is invalid as soon as its host tab disappears, even
+// though its coordinated OPFS/catalog cleanup is asynchronous. This closes the
+// tiny reopen race where a fresh tab could otherwise adopt an id being deleted.
+const podsClosing = new Set();
+const podTabTracker = createPodTabTracker({
+  announce: trackerNote(podRegistry, 'Pod'),
+  onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('pod', id, tabId),
+  onDrop: (/** @type {string} */ id) => engineLiveness.drop('pod', id),
+});
+
 // App registry + tracker + client. Apps' files live in OPFS at
 // peerd-apps/<appId>/; the registry tracks metadata only.
 const appRegistry = createAppRegistry({ storage: idbKV('apps'), onActorArchive: archiveOrphanedActor });
@@ -3217,10 +3250,18 @@ const appTabTracker = createAppTabTracker({
   onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('app', id, tabId),
   onDrop: (/** @type {string} */ id) => engineLiveness.drop('app', id),
 });
+const repositories = createRepositoryService({
+  loadGit: async () => browserGit,
+  webFetch,
+  getSecret,
+  audit: (/** @type {any} */ event) => { auditLog.append(event).catch(() => {}); },
+});
+const podClient = createPodClient({ registry: podRegistry, tracker: podTabTracker });
 const appClient = createAppClient({
   registry: appRegistry,
   tracker: appTabTracker,
   beforeOpfsMutation: () => storeWriteGuard.assertWritable('app-manifests'),
+  repositories,
 });
 
 // Sessions that have ENGAGED the dweb — a dweb tool was called this turn-or-
@@ -3281,10 +3322,38 @@ const workspaceForScope = (/** @type {string} */ scope) => {
   }
   return null; // unknown scope kind (notebook snapshots: V1.x)
 };
-const checkpointMgr = createCheckpointManager({
-  store: createBrowserSnapshotStore(),
-  workspaceFor: workspaceForScope,
-});
+// Apps use their standard Git repository as the checkpoint substrate. This
+// preserves one version lineage for automatic turn captures, manual commits,
+// review diffs, restores, and remote publication instead of duplicating App
+// bytes into the legacy snapshot store.
+const checkpointMgr = {
+  capture: async (/** @type {{ scope: string, label?: string | null }} */ { scope, label }) => {
+    if (typeof scope !== 'string' || !scope.startsWith('app:')) return null;
+    const appId = scope.slice('app:'.length);
+    const result = await appQuiescence.run(appId, () => repositories.coordinate(
+      { kind: 'app', id: appId },
+      async () => {
+        const status = await repositories.statusApp(appId);
+        const paths = status.changed.slice(0, 3)
+          .map((/** @type {{path:string}} */ change) => change.path);
+        const automatic = paths.length
+          ? `agent turn: update ${paths.join(', ')}${status.changed.length > paths.length ? ', …' : ''}`
+          : 'agent turn';
+        return repositories.commitApp(appId, { message: label || automatic });
+      },
+    ));
+    return result?.oid ? { id: result.oid, scope } : null;
+  },
+  diffSince: async (/** @type {{ scope?: string | null, ref?: string | null }} */ { scope, ref }) => {
+    if (typeof scope !== 'string' || !scope.startsWith('app:')) return { files: [] };
+    const appId = scope.slice('app:'.length);
+    const status = await repositories.statusApp(appId);
+    const from = ref || status.oid;
+    if (!from) return { files: [] };
+    const result = await repositories.diffApp(appId, { from });
+    return { files: result.files, ref: from };
+  },
+};
 
 /**
  * Resolve the App scope to snapshot for a session, or null if the session
@@ -3554,6 +3623,12 @@ const withAppLifecycle = async (appId, operation) => {
   }
 };
 
+// Every live-App repository boundary uses this one ordering:
+// lifecycle lane -> editor flush/freeze -> repository lane -> resume/reopen.
+// The editor flush itself writes through the repository lane, so moving it
+// inside repositories.coordinate/appClient.withWriteLock would deadlock.
+const appQuiescence = createAppQuiescence({ tracker: appTabTracker, withLifecycle: withAppLifecycle });
+
 const dwebPublicationFence = createDwebPublicationFence();
 const withDwebPublication = dwebPublicationFence.run;
 const invalidateDwebPublications = dwebPublicationFence.invalidate;
@@ -3565,6 +3640,7 @@ const reseedSharedApps = makeReseedSharedApps({
   appRegistry,
   withDwebPublication,
   withAppLifecycle,
+  repositories,
   sendMessage: (message) => browser.runtime.sendMessage(message),
 });
 
@@ -4552,6 +4628,57 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
       return { ok: true };
     });
   }
+  if (msg?.type === 'pod/tab-adopt') {
+    if (typeof msg.podId !== 'string' || sender?.tab?.id == null) return false;
+    // A user may reopen a persistent Pod from its durable URL after the old
+    // host tab was closed. Re-adopt only that exact engine-tab URL and only an
+    // id still present in the registry; then pod/get-meta can stay instance-
+    // pinned while boot is in progress.
+    if (podTabTracker.parseIdFromUrl(sender.tab.url) !== msg.podId) return false;
+    if (podsClosing.has(msg.podId)) return Promise.resolve({ ok: false, error: 'pod-closing' });
+    return Promise.resolve(podRegistry.get(msg.podId)).then((record) => {
+      if (!record) return { ok: false, error: 'pod-not-found' };
+      const liveTabId = podTabTracker.getTabId(msg.podId);
+      if (liveTabId != null && liveTabId !== sender.tab.id) {
+        return { ok: false, error: 'pod-already-open' };
+      }
+      podTabTracker.onTabPending(msg.podId, sender.tab.id);
+      denylistNetGuard.sync();
+      return { ok: true };
+    });
+  }
+  if (msg?.type === 'app/tab-ready') {
+    if (typeof msg.appId !== 'string' || sender?.tab?.id == null) return false;
+    appTabTracker.onTabPending(msg.appId, sender.tab.id);
+    // Firefox currently has no proven manifest-sandbox host (its generated
+    // manifest intentionally omits Chrome's top-level `sandbox` key). Do not
+    // infer enforcement from its partial DNR API accepting a rule.
+    if (typeof browser.runtime.getBrowserInfo === 'function') {
+      appTabTracker.onTabFailed(msg.appId, new Error('Apps are not available in Firefox yet.'));
+      setTimeout(() => browser.tabs.remove(sender.tab.id).catch(() => {}), 250);
+      return Promise.resolve({
+        ok: false,
+        error: 'Apps are not available in Firefox yet. Use Chrome for isolated Apps.',
+      });
+    }
+    // App code is not delivered until its tab-scoped all-remote DNR rule is
+    // LIVE. CSP closes resource/connect paths, while DNR closes self-navigation
+    // that CSP cannot reliably govern. Unsupported/failing DNR therefore means
+    // the App host fails closed (not a best-effort degradation like denylist).
+    return denylistNetGuard.sync().then(() => {
+      const net = denylistNetGuard.state();
+      if (!net.supported || net.lastError) {
+        appTabTracker.onTabFailed(msg.appId, new Error('App network isolation is unavailable.'));
+        setTimeout(() => browser.tabs.remove(sender.tab.id).catch(() => {}), 250);
+        return {
+          ok: false,
+          error: 'Apps are unavailable because this browser cannot enforce their network isolation.',
+        };
+      }
+      appTabTracker.onTabReady(msg.appId, sender.tab.id);
+      return { ok: true };
+    });
+  }
   return false;
 });
 
@@ -4563,6 +4690,22 @@ browser.tabs.onRemoved.addListener((tabId) => {
   const closedVmId = vmTabTracker.onTabRemoved(tabId);
   if (closedVmId) vmClient.onTabClosed(closedVmId);
   jsTabTracker.onTabRemoved(tabId);
+  const closedPodId = podTabTracker.onTabRemoved(tabId);
+  if (closedPodId) {
+    // why: an ephemeral Pod's scope is the tab lifetime. Persistent Pods keep
+    // their catalog + OPFS tree and reopen stopped; ephemeral ones leave no
+    // durable workspace after a clean close. The repository coordinator makes
+    // this idempotent with an explicit pod_destroy racing the tab event.
+    podsClosing.add(closedPodId);
+    Promise.resolve(podRegistry.get(closedPodId)).then(async (record) => {
+      if (!record || record.persistent !== false) return;
+      await repositories.coordinate({ kind: 'pod', id: closedPodId }, async () => {
+        await repositories.destroy({ kind: 'pod', id: closedPodId }, { worktree: true });
+        await podRegistry.delete(closedPodId);
+      });
+    }).catch((error) => console.warn('[sw] ephemeral Pod cleanup failed', closedPodId, error))
+      .finally(() => podsClosing.delete(closedPodId));
+  }
   appTabTracker.onTabRemoved(tabId);
   // DESIGN-17 note: only the VM client owns a per-instance COMMAND QUEUE to
   // interrupt on tab-close (above). The Notebook/App clients have no such lane —
@@ -4972,6 +5115,7 @@ browser.runtime?.onStartup?.addListener(() => {
 const ACTOR_REGISTRY_BY_PREFIX = {
   vm: { reg: vmRegistry, kind: 'webvm' },
   notebook: { reg: jsRegistry, kind: 'notebook' },
+  pod: { reg: podRegistry, kind: 'pod' },
   app: { reg: appRegistry, kind: 'app' },
 };
 
@@ -5033,7 +5177,7 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
 };
 
 // DESIGN-17 — WEB actors (a fourth `kind:'web'` actor that owns one TAB).
-// Unlike the three engine kinds, a web actor has no registry record: the TAB
+// Unlike engine actors, a web actor has no registry record: the TAB
 // is the durable handle and the binding is tab→session, held here and mirrored to
 // session storage (ephemeral by design — on a cold miss we re-mint against the
 // live tab, whose DOM re-derives state). The address the orchestrator uses is the
@@ -7014,6 +7158,7 @@ const actorMessaging = makeActorMessaging({
       const ownedTab = kind === 'web' ? (actorTabId ?? webActorTabBindings.tabFor(actorSessionId) ?? null)
         : kind === 'webvm' ? vmTabTracker.getTabId(instanceId)
         : kind === 'notebook' ? jsTabTracker.getTabId(instanceId)
+        : kind === 'pod' ? podTabTracker.getTabId(instanceId)
         : kind === 'app' ? appTabTracker.getTabId(instanceId)
         : null;
       if (typeof ownedTab === 'number') setTabAnchor(ownedTab, parentToolUseId);
@@ -7450,7 +7595,15 @@ const shareLocalApp = makeDwebShare({
   withDwebPublication,
   withIdentityMutation: withDwebIdentityMutation,
   withAppLifecycle,
+  // makeDwebShare already owns the lifecycle lane. Flush before its App write
+  // lock, then hold the frozen editor through commit, snapshot, publication,
+  // and durable metadata persistence.
+  withAppWriteLock: (appId, operation) => appQuiescence.runUnlocked(
+    appId,
+    () => appClient.withWriteLock(appId, operation),
+  ),
   appRegistry,
+  repositories,
   prepareRuntime: async () => {
     await ensureDwebSuspensionRecovery();
     await ensureOffscreen();
@@ -7658,12 +7811,14 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   }),
   ...makeEngineRoutes({
     vault, auditLog, pushState, browser, vmHttpFetch, appRegistry, vmRegistry, jsRegistry,
-    appClient, appTabTracker, opfsHelpers, NOTEBOOK_OPFS_ROOT, IMAGE_PIN_STORAGE_KEY,
+    podRegistry, podTabTracker, appClient, appTabTracker, appQuiescence, opfsHelpers,
+    NOTEBOOK_OPFS_ROOT, IMAGE_PIN_STORAGE_KEY,
     buildAppExport, buildNotebookExport, buildVmRecipeExport,
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
     listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
+    repositories, parseAppManifest, podGitRemoteOperation,
   }),
   ...systemMessageRoutes,
   // denylistNetGuard: an edit changes what the network backstop blocks, so the
@@ -7740,9 +7895,10 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   }),
   ...makeDwebRoutes({
     vault, auditLog, kv, ensureOffscreen, browser,
-    appRegistry, appClient, appTabTracker, settingsStore, shareLocalApp,
+    appRegistry, appClient, appTabTracker, appQuiescence, settingsStore, shareLocalApp,
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
     disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady,
+    repositories, isOffscreenSender,
   }),
 
   // --- git credentials (host-bound bearer tokens; same vault as API keys) ---
@@ -7926,7 +8082,12 @@ function maybeStartBaseNetwork(/** @type {string} */ reason) {
     }).then((/** @type {any} */ r) => {
       if (r?.ok && settingsStore.get().dwebEnabled) {
         console.log('[sw] dweb base network ONLINE', { did: r.did, peers: r.peers, present: r.present });
-        reseedSharedApps().catch((e) => console.warn('[sw] re-seed after start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+        // Resolve the previous publish transaction before announcing current
+        // catalog state. Otherwise an interrupted release can be reseeded next
+        // to bytes that its catalog commit never made durable.
+        reconcilePendingPublications()
+          .then(() => reseedSharedApps())
+          .catch((e) => console.warn('[sw] publication recovery/re-seed after start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
         // The dweb AGENT's inbox: join the reserved agent room (idempotent) so
         // inbound peer messages flow as dweb/base-room/event 'direct' events the
         // listener consumes. Opt-in — no join, no inbox, no wakes.
@@ -7934,6 +8095,30 @@ function maybeStartBaseNetwork(/** @type {string} */ reason) {
       } else if (r?.error !== 'dweb-disabled') console.warn('[sw] dweb base network start returned', r);
     });
   }).catch((e) => console.warn('[sw] dweb base network auto-start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+}
+
+// Complete the tiny publish→catalog two-phase commit after an MV3 restart.
+// A hash already present in the App registry committed successfully; anything
+// else is an interrupted release and is revoked before normal reseeding.
+async function reconcilePendingPublications() {
+  const pending = (await kv.get('dweb.pendingPublications.v1')) ?? {};
+  if (!Object.keys(pending).length) return;
+  const records = new Map((await appRegistry.list()).map((record) => [record.id, record]));
+  const remaining = { ...pending };
+  for (const [appId, publication] of Object.entries(pending)) {
+    const entry = /** @type {any} */ (publication);
+    const record = /** @type {any} */ (records.get(appId));
+    const committed = record?.dweb?.hash === entry.hash || record?.dweb?.published_hashes?.includes?.(entry.hash);
+    if (committed) { delete remaining[appId]; continue; }
+    try {
+      const result = /** @type {any} */ (await browser.runtime.sendMessage({
+        type: 'dweb/base-host/unshare-app', name: entry.name,
+        slug: entry.slug, publisher: entry.publisher, hash: entry.hash, hashes: [entry.hash],
+      }));
+      if (result?.ok) delete remaining[appId];
+    } catch { /* keep the journal for the next online start */ }
+  }
+  await kv.set('dweb.pendingPublications.v1', remaining);
 }
 
 // why: the offscreen base network's discovery Library AND content store are
@@ -7958,7 +8143,7 @@ ensureOffscreen().then(async () => {
   await ensureDwebSuspensionRecovery();
 }).catch((e) => console.error('[sw] boot ensureOffscreen failed', e));
 
-// Instance registry + tracker init for all three kinds: pull persisted
+// Instance registry + tracker init for all tab-hosted kinds: pull persisted
 // catalogs and re-discover live tabs (a SW restart while tabs are open
 // is common — Chrome kills the SW after 30s idle but leaves tabs alone).
 const engineTrackersReady = (async () => {
@@ -7967,10 +8152,12 @@ const engineTrackersReady = (async () => {
     await vmTabTracker.bootstrap();
     await jsRegistry.load();
     await jsTabTracker.bootstrap();
+    await podRegistry.load();
+    await podTabTracker.bootstrap();
     await appRegistry.load();
     await appTabTracker.bootstrap();
     console.log('[sw] instance registries initialized — live tabs:',
-      { vm: vmTabTracker.listLive(), js: jsTabTracker.listLive(), app: appTabTracker.listLive() });
+      { vm: vmTabTracker.listLive(), js: jsTabTracker.listLive(), pod: podTabTracker.listLive(), app: appTabTracker.listLive() });
     // §9 engine orphan reap — instances the liveness ledger says were
     // HOSTED before this SW start whose tabs did not survive. The
     // registry catalog (files, metadata) persists; the running process is
@@ -7981,10 +8168,11 @@ const engineTrackersReady = (async () => {
       const surviving = [
         ...vmTabTracker.listLive().map((/** @type {string} */ id) => `vm:${id}`),
         ...jsTabTracker.listLive().map((/** @type {string} */ id) => `notebook:${id}`),
+        ...podTabTracker.listLive().map((/** @type {string} */ id) => `pod:${id}`),
         ...appTabTracker.listLive().map((/** @type {string} */ id) => `app:${id}`),
       ];
       const lost = await engineLiveness.sweep({ surviving });
-      const REGISTRY_OF = { vm: vmRegistry, notebook: jsRegistry, app: appRegistry };
+      const REGISTRY_OF = { vm: vmRegistry, notebook: jsRegistry, pod: podRegistry, app: appRegistry };
       const lostResources = [];
       for (const entry of lost) {
         auditLog.append({
@@ -7993,6 +8181,11 @@ const engineTrackersReady = (async () => {
         }).catch(() => {});
         const registry = /** @type {any} */ (REGISTRY_OF)[entry.kind];
         const record = await Promise.resolve(registry?.get?.(entry.id)).catch(() => null);
+        if (entry.kind === 'pod' && record?.persistent === false) {
+          await repositories.destroy({ kind: 'pod', id: entry.id }, { worktree: true }).catch(() => {});
+          await podRegistry.delete(entry.id).catch(() => {});
+          continue;
+        }
         const owner = record?.ownerSessionId;
         if (!owner) continue; // no owner to tell; the audit entry stands
         lostResources.push({

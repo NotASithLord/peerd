@@ -135,7 +135,7 @@ export const linkSingleModuleWorkerDetailed = async (
     if (loads.length > 0) {
       throw new ModuleLinkError('the linked worker retained a child module edge');
     }
-    const sealCall = linked.indexOf('applyRealmSeal(globalThis)');
+    const sealCall = linked.indexOf('applyNotebookRealmSeal(globalThis)');
     const workerBody = linked.indexOf('const NOTEBOOK_ID');
     if (sealCall < 0 || workerBody < 0 || sealCall > workerBody) {
       throw new ModuleLinkError('the linked worker does not apply the realm seal first');

@@ -130,7 +130,7 @@ const STYLE = `
   color: var(--pe-fg-muted); cursor: pointer; padding: 0 4px;
   font-size: 12px; line-height: 1;
 }
-.pe-node:hover .pe-close, .pe-node.is-active .pe-close { visibility: visible; }
+.pe-node:hover .pe-close, .pe-node.is-active .pe-close, .pe-node:focus-within .pe-close { visibility: visible; }
 .pe-node.is-pinned .pe-close { display: none; }
 .pe-node .pe-close:hover { color: var(--pe-fail); }
 
@@ -179,6 +179,7 @@ const injectStyle = () => {
  * @param {string} [config.initialFile]         -- file to open first (default: pinnedFile)
  * @param {(path: string) => boolean} [config.isReadOnlyFile]
  * @param {(path: string) => void} [config.onReadOnlyFile]
+ * @param {{read:(path:string)=>Promise<string>,write:(path:string,content:string)=>Promise<void>,delete:(path:string)=>Promise<void>,list:()=>Promise<Array<{path:string,size:number}>>}} [config.fileSystem]
  *
  * Language is auto-picked per file by extension (.html → html,
  * .css → css, anything else → javascript).
@@ -200,6 +201,7 @@ export const createEditor = async (config) => {
     initialFile,
     isReadOnlyFile = () => false,
     onReadOnlyFile,
+    fileSystem,
   } = config;
 
   injectStyle();
@@ -229,7 +231,7 @@ export const createEditor = async (config) => {
   const host = /** @type {HTMLElement} */ (mountEl.querySelector('.pe-host'));
 
   // --- OPFS helpers ---
-  const opfs = opfsHelpers(opfsBase, { beforeMutation: beforeOpfsMutation });
+  const opfs = fileSystem ?? opfsHelpers(opfsBase, { beforeMutation: beforeOpfsMutation });
   const { read: opfsRead, write: opfsWrite, delete: opfsDelete, list: opfsList } = opfs;
   const persistFile = writeFile ?? opfsWrite;
   const removeFile = deleteFileOverride ?? opfsDelete;
@@ -299,11 +301,32 @@ export const createEditor = async (config) => {
   let saveTimer = null;
   let dirty = false;
   let editRevision = 0;
+  /** @type {Map<string, number>} */
+  const fileEditRevisions = new Map();
+  let lastSavedContent = '';
   /** @type {Promise<void> | null} */
   let activeSave = null;
+  let externalWriteTail = Promise.resolve();
   let deletingActiveFile = false;
   let focusedTreeKey = `file:${currentFile}`;
   let restoreTreeFocus = false;
+  /** @param {string} path */
+  const canonicalFilePath = (path) => {
+    const parts = typeof path === 'string' && !path.includes('\\') && !path.includes('\0')
+      ? path.replace(/^\/+/, '').split('/').filter(Boolean)
+      : [];
+    return parts.length && !parts.some((part) => part === '.' || part === '..')
+      ? parts.join('/')
+      : null;
+  };
+  /** @param {string} path */
+  const fileRevision = (path) => fileEditRevisions.get(canonicalFilePath(path) ?? '') ?? 0;
+  /** @param {string} path */
+  const bumpEditRevision = (path) => {
+    editRevision += 1;
+    const canonical = canonicalFilePath(path);
+    if (canonical) fileEditRevisions.set(canonical, fileRevision(canonical) + 1);
+  };
   /** @param {boolean} value */
   const setDirty = (value) => {
     if (dirty === value) return;
@@ -531,6 +554,7 @@ export const createEditor = async (config) => {
       const attempt = (async () => {
         try {
           await persistFile(path, content);
+          if (currentFile === path) lastSavedContent = content;
           if (currentFile === path && editRevision === revision && getValue() === content) setDirty(false);
           onSaved?.(path, content);
         } catch (error) {
@@ -554,7 +578,7 @@ export const createEditor = async (config) => {
   const queueSave = () => {
     if (isReadOnlyFile(currentFile)) return;
     setDirty(true);
-    editRevision += 1;
+    bumpEditRevision(currentFile);
     if (deletingActiveFile) return;
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(async () => {
@@ -562,6 +586,43 @@ export const createEditor = async (config) => {
       try { await flushActiveSave(); }
       catch { /* flushActiveSave reports the failure and keeps the buffer dirty. */ }
     }, 400);
+  };
+
+  /**
+   * Apply an external write to the active buffer without racing its autosave.
+   * A dirty buffer wins: persist it, report a conflict, and let the caller
+   * re-read before retrying. Once the buffer is clean, install the external
+   * value synchronously so any later keystrokes are based on that value and
+   * the regular save loop preserves them as a subsequent revision.
+   *
+   * Writes for inactive files are deliberately left to the caller, which owns
+   * the filesystem transaction and can refresh the tree afterward.
+   *
+   * @param {string} path
+   * @param {string} content
+   */
+  const writeExternalActiveFile = (path, content) => {
+    const canonicalPath = canonicalFilePath(path);
+    if (canonicalPath !== currentFile) {
+      return Promise.resolve({ handled: false, conflict: false, path: canonicalPath ?? path });
+    }
+
+    const operation = externalWriteTail.then(async () => {
+      if (canonicalPath !== currentFile) {
+        return { handled: false, conflict: false, path: canonicalPath };
+      }
+      if (dirty) {
+        await flushActiveSave();
+        return { handled: true, conflict: true, path: canonicalPath };
+      }
+      setValue(content);
+      setDirty(true);
+      editRevision += 1;
+      await flushActiveSave();
+      return { handled: true, conflict: false, path: canonicalPath };
+    });
+    externalWriteTail = operation.then(() => undefined, () => undefined);
+    return operation;
   };
 
   /** @param {string} path */
@@ -577,6 +638,7 @@ export const createEditor = async (config) => {
     try { content = await opfsRead(path); } catch {}
     currentFile = path;
     setValue(content);
+    lastSavedContent = content;
     setDirty(false);
     // Reconfigure the language for the new file's extension.
     view.dispatch({ effects: langCompartment.reconfigure(langForPath(path)) });
@@ -595,6 +657,7 @@ export const createEditor = async (config) => {
       return;
     }
     if (fileList.includes(name)) { await switchToFile(name); return; }
+    bumpEditRevision(name);
     try { await persistFile(name, ''); }
     catch (e) {
       if (onMutationError) onMutationError('create', name, e);
@@ -616,10 +679,10 @@ export const createEditor = async (config) => {
     const shouldRestoreTreeFocus = treeBody.contains(document.activeElement) || document.activeElement === deleteBtn;
     const deletedActiveFile = currentFile === path;
     const hadUnsavedChanges = deletedActiveFile && dirty;
+    bumpEditRevision(path);
     if (deletedActiveFile) {
       deletingActiveFile = true;
       setDirty(false);
-      editRevision += 1;
       if (saveTimer) {
         clearTimeout(saveTimer);
         saveTimer = null;
@@ -649,6 +712,7 @@ export const createEditor = async (config) => {
       let content = '';
       try { content = await opfsRead(pinnedFile); } catch {}
       setValue(content);
+      lastSavedContent = content;
       setDirty(false);
       deletingActiveFile = false;
     }
@@ -673,8 +737,40 @@ export const createEditor = async (config) => {
     }
     setValue(content);
     setDirty(true);
-    editRevision += 1;
+    bumpEditRevision(currentFile);
     await flushActiveSave();
+  };
+
+  /**
+   * Refresh the tree and active buffer after a shell/agent write. The caller can
+   * pin the editor revision captured before starting its operation; if the user
+   * typed meanwhile, leave their buffer intact and report a visible conflict.
+   * @param {{ifRevision?:number}} [opts]
+   */
+  const refreshExternalChanges = async ({ ifRevision } = {}) => {
+    await refreshTree();
+    if (typeof ifRevision === 'number' && editRevision !== ifRevision) {
+      return { reloaded: false, conflict: true, path: currentFile };
+    }
+    try {
+      const content = await opfsRead(currentFile);
+      if (typeof ifRevision === 'number' && editRevision !== ifRevision) {
+        return { reloaded: false, conflict: true, path: currentFile };
+      }
+      setValue(content);
+      lastSavedContent = content;
+      setDirty(false);
+      return { reloaded: true, conflict: false, path: currentFile };
+    } catch {
+      const conflict = getValue() !== lastSavedContent
+        || (typeof ifRevision === 'number' && editRevision !== ifRevision);
+      if (!conflict) {
+        setValue('');
+        lastSavedContent = '';
+        setDirty(false);
+      }
+      return { reloaded: !conflict, conflict, path: currentFile };
+    }
   };
 
   // --- Wire UI ---
@@ -691,6 +787,7 @@ export const createEditor = async (config) => {
   try {
     const content = await opfsRead(currentFile);
     setValue(content);
+    lastSavedContent = content;
     setDirty(false);
   } catch { /* file doesn't exist yet -- leave editor empty */ }
 
@@ -700,8 +797,12 @@ export const createEditor = async (config) => {
     hasUnsavedChanges: () => dirty,
     switchToFile,
     refreshTree,
+    refreshExternalChanges,
+    writeExternalActiveFile,
     replaceActiveWith,
     flushSave: flushActiveSave,
+    getRevision: () => editRevision,
+    getFileRevision: fileRevision,
     opfs,
     focus: () => view.focus(),
     destroy: () => view.destroy(),

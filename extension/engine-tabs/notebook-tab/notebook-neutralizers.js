@@ -42,16 +42,23 @@
  * @param {any} global the worker (or mock) global scope to seal. why any: this
  *   reaches into arbitrary realm globals (fetch, Worker, navigator, …) and
  *   deletes/redefines them — the operation is type-erased by design.
+ * @param {{ environment?: string, exposeGlobalFetch?: boolean, blockHostStorage?: boolean, blockExtensionApis?: boolean }} [options]
+ * @returns {{ fetch: (input:any, init?:any)=>Promise<any> }} the audited fetch
+ *   capability, allowing stricter hosts such as Pod to expose it only through
+ *   a named interface while keeping global fetch blocked.
  */
-export function applyRealmSeal(global) {
+export function applyRealmSeal(global, options = {}) {
+  const environment = options.environment ?? 'Notebook';
   // why a named subclass: convention (CLAUDE.md) — and it lets notebook
   // code (and our tests) distinguish "the notebook blocked this" from a
   // genuine platform error.
   class NotebookEgressBlockedError extends Error {
     /** @param {string} channel */
     constructor(channel) {
-      super(`${channel} is disabled in the peerd Notebook. Use peerd.egress.fetch(url) for audited network access.`);
-      this.name = 'NotebookEgressBlockedError';
+      super(environment === 'Notebook'
+        ? `${channel} is disabled in the peerd Notebook. Use peerd.egress.fetch(url) for audited network access.`
+        : `${channel} is disabled in the peerd ${environment}. Use the environment's audited fetch interface.`);
+      this.name = `${environment.replace(/[^a-z0-9]/gi, '') || 'Worker'}EgressBlockedError`;
       /** @type {string} */
       this.channel = channel;
     }
@@ -172,7 +179,9 @@ export function applyRealmSeal(global) {
       bytes: async () => bytes,
     });
   });
-  seal(global, 'fetch', bridgedFetch);
+  if (options.exposeGlobalFetch === false) {
+    seal(global, 'fetch', function () { fail('fetch'); });
+  } else seal(global, 'fetch', bridgedFetch);
 
   // --- hard-block every other network-capable primitive -----------------
   // why function expressions (not arrows): `new <arrow>` throws a generic
@@ -201,6 +210,25 @@ export function applyRealmSeal(global) {
   seal(global, 'importScripts', function () { fail('importScripts'); });
   if (global.navigator) {
     seal(global.navigator, 'sendBeacon', function () { fail('navigator.sendBeacon'); });
+    if (options.blockHostStorage === true) {
+      // Pod files are instance-rooted capabilities held by the trusted tab.
+      // navigator.storage.getDirectory() would instead hand this untrusted
+      // realm the extension origin's OPFS ROOT: every Notebook/Pod/App.
+      const storageBlocked = () => fail('StorageManager (navigator.storage)');
+      seal(global.navigator, 'storage', /** @type {any} */ ({
+        getDirectory: storageBlocked, estimate: storageBlocked,
+        persist: storageBlocked, persisted: storageBlocked,
+      }));
+    }
+  }
+
+  if (options.blockExtensionApis === true) {
+    // Dedicated extension Workers do not consistently expose these namespaces
+    // across browsers/versions. Pin them absent anyway: a future platform
+    // widening must not silently turn Pod code into a runtime.sendMessage or
+    // storage.local client.
+    seal(global, 'chrome', undefined);
+    seal(global, 'browser', undefined);
   }
 
   // The Cache API: cache.add()/addAll() run the Fetch algorithm — a REAL network
@@ -239,4 +267,17 @@ export function applyRealmSeal(global) {
   seal(global, 'indexedDB', /** @type {any} */ ({
     open: idbBlocked, deleteDatabase: idbBlocked, databases: idbBlocked, cmp: idbBlocked,
   }));
+  return Object.freeze({ fetch: bridgedFetch });
 }
+
+/**
+ * Production Notebook profile: audited fetch remains available, but the worker
+ * receives neither the extension-origin OPFS root nor ambient extension APIs.
+ * Keeping the profile here makes the production entry and adversarial tests use
+ * the same invocation instead of duplicating security-significant options.
+ * @param {any} global
+ */
+export const applyNotebookRealmSeal = (global) => applyRealmSeal(global, {
+  blockHostStorage: true,
+  blockExtensionApis: true,
+});

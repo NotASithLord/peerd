@@ -136,6 +136,7 @@ export const EXPOSURE_ACTOR = 'actor';
 const ENGINE_ACTOR_TOOLS = Object.freeze({
   webvm: Object.freeze(new Set(ACTOR_CAPABILITY_MANIFESTS.webvm.tools)),
   notebook: Object.freeze(new Set(ACTOR_CAPABILITY_MANIFESTS.notebook.tools)),
+  pod: Object.freeze(new Set(ACTOR_CAPABILITY_MANIFESTS.pod.tools)),
   app: Object.freeze(new Set(ACTOR_CAPABILITY_MANIFESTS.app.tools)),
 });
 
@@ -171,19 +172,19 @@ export const isActorOnlyTool = (name) => ACTOR_ONLY_TOOLS.has(name);
 // READS ONLY, BY NAME. Not "the reviewer is exempt from the tier" and not "for
 // review, narrow from the full registry" — either of those would hand over
 // fetch_url / read_page / site_client_run in the same stroke and actually build
-// the exfiltration channel this whole design denies. Three names, derived from
+// the exfiltration channel this whole design denies. Four names, derived from
 // the per-kind sets so a rename can't silently orphan the entry.
 export const EXPOSURE_REVIEW = 'review';
 
 export const REVIEW_INSTANCE_READS = Object.freeze(new Set(
-  ['js_read_file', 'app_read_file', 'app_list_files']
+  ['js_read_file', 'pod_read', 'app_read_file', 'app_list_files']
     .filter((n) => ACTOR_ONLY_TOOLS.has(n)),
 ));
 
 /**
  * May this ctx hold this actor-only tool by way of the review exemption? Pure.
  * Positively scoped on BOTH axes: the SW-stamped review marker AND the
- * three-name read set. Anything else is refused exactly as before.
+ * four-name read set. Anything else is refused exactly as before.
  *
  * @param {string} name @param {string | undefined} exposure
  */
@@ -292,6 +293,12 @@ const ACTOR_TARGET_ID_FIELD = Object.freeze({
   js_write_file: 'notebook',
   js_read_file: 'notebook',
   js_delete: 'notebookId',
+  pod_exec: 'podId',
+  pod_status: 'podId',
+  pod_cancel: 'podId',
+  pod_read: 'podId',
+  pod_write: 'podId',
+  pod_destroy: 'podId',
   app_update: 'appId',
   app_write_file: 'appId',
   app_read_file: 'appId',

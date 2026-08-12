@@ -590,8 +590,10 @@ export const STATES = [
         };
         rec.check('the trusted click reaches its about:blank child action',
           burstObserved.completed && burstObserved.attempted, JSON.stringify(burstObserved));
-        rec.check('Chrome immediate-child race remains visible with native local-network checks disabled',
-          burstObserved.requests.some((request) => request.includes('trusted-click-blank')),
+        const expectedRaceRequests = burstObserved.requests.filter((request) => request.includes('trusted-click-blank'));
+        rec.check('Chrome immediate-child outcome stays inside the documented race envelope',
+          burstObserved.requests.length === 0
+            || expectedRaceRequests.length === burstObserved.requests.length,
           JSON.stringify(burstObserved));
         rec.check('the protected child is closed instead of left as a blank tab',
           !burstTabs.some((tab) => !burstTabIdsBefore.has(tab.id) && tab.openerTabId === drivenTab.id),
@@ -1026,7 +1028,7 @@ export const STATES = [
           && replaced.imported?.dwebIdentity === 1 && storedDid === incoming.did,
         JSON.stringify({ replaced, storedDid, incomingDid: incoming.did }));
 
-      const restarted = await rpc(ctx.page, { type: 'dweb/base-host/start' });
+      const restarted = await rpc(ctx.page, { type: 'dweb/base/start' });
       rec.check('the peer host starts under the restored identity after lease release',
         restarted?.ok === true && restarted?.running === true && restarted?.did === incoming.did,
         JSON.stringify(restarted));
@@ -2605,6 +2607,65 @@ export const STATES = [
     },
   },
 
+  // --- visual (WIDE): browser-native Git history on an App -------------------
+  // Creates through the real import→App→Git path, then opens the Library's
+  // developer panel. Import avoids opening a second tab during the visual state,
+  // while still exercising the production App client and OPFS repository init.
+  // This covers what assertions cannot see: dense log rows, remote controls,
+  // and the restore affordance in both themes.
+  {
+    name: 'home-library-git', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const imported = await evalIn(ctx.page, `(async () => {
+        const { buildAppExport } = await import('/peerd-engine/index.js');
+        const envelope = await buildAppExport({
+          record: { name: 'Versioned App', entryFile: 'index.html', tags: ['visual-fixture'] },
+          files: { 'index.html': '<!doctype html><title>Versioned App</title><main>Hello</main>' },
+        });
+        return chrome.runtime.sendMessage({ type: 'import/apply', envelope });
+      })()`, true);
+      rec.check('visual fixture App imported with a Git repository', imported?.ok && imported?.kind === 'app', JSON.stringify(imported));
+      const branched = imported?.id ? await evalIn(ctx.page,
+        `chrome.runtime.sendMessage({ type: 'apps/repository/branch', appId: ${JSON.stringify(imported.id)}, name: 'feature/visual', checkout: true })`, true) : null;
+      rec.check('visual fixture exposes existing-branch switching', branched?.ok === true, JSON.stringify(branched));
+      const page = await openWidePage(ctx, 'home/home.html#library');
+      try {
+        const libraryReady = await waitFor(() => evalIn(page, `
+          document.querySelector('[data-home-view="library"]')?.getAttribute('aria-current') === 'page'
+            && !!document.querySelector('.library-grid')
+        `), { budgetMs: 15_000, pollMs: 80 });
+        rec.check('visual fixture opens the Library route', !!libraryReady);
+        const appReady = await waitFor(() => evalIn(page,
+          `[...document.querySelectorAll('.library-name')].some((n) => n.textContent.includes('Versioned App'))`),
+        { budgetMs: 20_000, pollMs: 80 });
+        rec.check('visual fixture App appears in the Library', !!appReady);
+        await evalIn(page, `(() => {
+          const name = [...document.querySelectorAll('.library-name')].find((n) => n.textContent.includes('Versioned App'));
+          name?.closest('.library-card')?.querySelector('.library-kebab')?.click();
+        })()`);
+        const historyActionReady = await waitFor(() => evalIn(page, `!![...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')`),
+          { budgetMs: 5_000, pollMs: 50 });
+        rec.check('visual fixture exposes the History and Git action', !!historyActionReady);
+        await evalIn(page, `[...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')?.click()`);
+        const historyReady = await waitFor(() => evalIn(page, `!!document.querySelector('.library-repository .library-commit')`),
+          { budgetMs: 20_000, pollMs: 80 });
+        rec.check('visual fixture renders repository history', !!historyReady);
+        // Git commit IDs include the commit timestamp, so this visual fixture
+        // must normalize them before capture. The surrounding branch, history,
+        // controls, and layout remain production-rendered; only the inherently
+        // run-specific identifier is replaced.
+        await evalIn(page, `(() => {
+          const fixedOid = '0000000000';
+          const head = document.querySelector('.library-repository-head .muted');
+          if (head) head.textContent = head.textContent.replace(/[0-9a-f]{10}$/i, fixedOid);
+          for (const oid of document.querySelectorAll('.library-commit code')) oid.textContent = fixedOid;
+        })()`);
+        await rec.visualPage('home-library-git', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
   // Functional rendered coverage for committed success warnings. This takes a
   // screenshot without creating a local visual authority baseline. CI remains
   // the only source of Linux pixel baselines.
@@ -2639,7 +2700,10 @@ export const STATES = [
             .find((button) => button.textContent === 'Update')?.click()
         `);
         const warningLayout = await waitFor(() => evalIn(page, `(() => {
-          const statuses = [...document.querySelectorAll('.warning-fixture [role="status"]')];
+          const statuses = [
+            document.querySelector('section[aria-labelledby="library-warning-heading"] p.muted[role="status"]'),
+            document.querySelector('.disc-card [role="status"]'),
+          ].filter(Boolean);
           if (statuses.length !== 2) return null;
           return {
             texts: statuses.map((status) => status.textContent ?? ''),

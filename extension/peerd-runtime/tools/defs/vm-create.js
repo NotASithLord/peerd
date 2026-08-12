@@ -1,7 +1,7 @@
 // @ts-check
 // The webvm arm of sandbox_create — spin up a fresh WebVM instance.
 // (Was the standalone vm_create tool; merged into sandbox_create({kind:'webvm'})
-// 2026-07-05 — one create tool, three kinds.)
+// 2026-07-05: one kind-discriminated create tool.)
 //
 // Creates a new VM record + spawns a browser tab that takes focus, so
 // the user immediately sees the terminal appear (DECISIONS #20). The new

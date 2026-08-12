@@ -799,6 +799,7 @@ label {
 
 input[type="password"],
 input[type="text"],
+input[type="url"],
 input[type="search"],
 textarea {
   font: inherit;
@@ -3162,13 +3163,14 @@ button.tool-call-header:focus-visible {
 }
 
 /* Per-type accent (glyph + label, shown PERMANENTLY — owner override of the
- * one-accent brand rule, 2026-06-21). The three engine sandboxes wear engine
+ * one-accent brand rule, 2026-06-21). The engine sandboxes wear engine
  * amber (their honest module color); ask + web take the two remaining
  * non-reserved hues (cyan, green) to stay distinct — red is reserved for
  * errors, magenta for the dweb (absent from these starters). */
 .path-card[data-path="ask"]      { --path-accent: var(--cyan); }
 .path-card[data-path="web"]      { --path-accent: var(--green); }
 .path-card[data-path="notebook"] { --path-accent: var(--amber); }
+.path-card[data-path="pod"]      { --path-accent: var(--amber); }
 .path-card[data-path="vm"]       { --path-accent: var(--amber); }
 .path-card[data-path="app"]      { --path-accent: var(--amber); }
 
@@ -3181,6 +3183,7 @@ button.tool-call-header:focus-visible {
   .path-card[data-path="ask"]      { --path-accent: color-mix(in srgb, var(--cyan)  55%, #000); }
   .path-card[data-path="web"]      { --path-accent: color-mix(in srgb, var(--green) 55%, #000); }
   .path-card[data-path="notebook"],
+  .path-card[data-path="pod"],
   .path-card[data-path="vm"],
   .path-card[data-path="app"]      { --path-accent: color-mix(in srgb, var(--amber) 50%, #000); }
 }

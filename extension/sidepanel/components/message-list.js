@@ -1199,6 +1199,7 @@ const formatResultContent = (toolResult) => {
 //                     actor— agent-loop orchestration (docs/ACTORS.md)
 //   engine  (amber)   webvm    — WebVM execution kind
 //                     notebook — Notebook execution kind
+//                     pod     : Pod execution kind
 //                     app      — App execution kind
 //   distributed       dweb     — the dweb / dwapp network (share/discover/
 //   (magenta)                    install/peers/block/discovery/guide)
@@ -1215,6 +1216,7 @@ const PRIMITIVE_MODULE = Object.freeze({
   actor: 'runtime',
   webvm:    'engine',
   notebook: 'engine',
+  pod:      'engine',
   app:      'engine',
   engine:   'engine',
   dweb:     'distributed',

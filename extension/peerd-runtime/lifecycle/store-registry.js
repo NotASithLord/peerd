@@ -132,7 +132,7 @@ export const STORE_REGISTRY = Object.freeze([
   // physically co-locate, so blocking either blocks the shared blob.
   Object.freeze({
     store: 'engine-registries', version: 1, tier: DURABILITY_TIERS.SESSION, portable: false, deviceBound: true,
-    physical: Object.freeze({ idbStores: ['vms', 'notebooks', 'apps'] }),
+    physical: Object.freeze({ idbStores: ['vms', 'notebooks', 'pods', 'apps'] }),
   }),
   // Workspace METADATA outlives sessions, but it points at OPFS roots that
   // exist only in this browser profile's origin storage. The bytes

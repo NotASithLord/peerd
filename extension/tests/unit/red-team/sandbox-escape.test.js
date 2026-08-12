@@ -45,11 +45,14 @@ describe('red-team: sandboxed code cannot escape a real Notebook worker realm', 
       // and minting a fresh un-sealed realm, all must throw the egress error.
       for (const channel of [
         'XMLHttpRequest', 'WebSocket', 'WebSocketStream', 'EventSource',
-        'WebTransport', 'Worker', 'SharedWorker', 'importScripts', 'sendBeacon', 'caches',
+        'WebTransport', 'Worker', 'SharedWorker', 'importScripts', 'sendBeacon',
+        'caches', 'rawOpfs',
       ]) {
         expect(results[channel].threw).toBe(true);
         expect(results[channel].name).toBe('NotebookEgressBlockedError');
       }
+      expect(results.chromeAbsent).toBe(true);
+      expect(results.browserAbsent).toBe(true);
       // The native fetch is unrecoverable off the prototype chain, and the bridge
       // slot is pinned so it can't be reassigned to an exfiltrating function.
       expect(fetchInspection.protoFetchFound).toBe(false);
@@ -74,6 +77,28 @@ describe('red-team: sandboxed code cannot escape a real Notebook worker realm', 
       expect(result.attempts.define).toBe('TypeError');    // defineProperty on the pinned slot throws
       expect(result.fetch.ok).toBe(true);                  // the sanctioned bridge still works
     } finally { worker.terminate(); }
+  });
+});
+
+describe('red-team: Pod jobs receive named capabilities, never extension authority', () => {
+  it('blocks ambient fetch, raw OPFS, chrome/browser APIs, and keeps only the named fetch bridge', async () => {
+    const worker = spawnFixture('pod-seal-probe-worker.js');
+    try {
+      const result = await nextMessage(worker, 'pod-seal-result');
+      expect(result.globalFetch.threw).toBe(true);
+      expect(result.globalFetch.name).toBe('PodEgressBlockedError');
+      expect(result.rawOpfs.threw).toBe(true);
+      expect(result.chromeAbsent).toBe(true);
+      expect(result.browserAbsent).toBe(true);
+      expect(result.namedFetch).toBe('function');
+    } finally { worker.terminate(); }
+  });
+
+  it('the Pod host page independently denies native connections with CSP', async () => {
+    // eslint-disable-next-line no-restricted-globals
+    const html = await (await fetch('/engine-tabs/pod-tab/index.html')).text();
+    const meta = html.match(/http-equiv="Content-Security-Policy"\s+content="([^"]*)"/i);
+    expect(meta?.[1]).toBe("connect-src 'none'");
   });
 });
 

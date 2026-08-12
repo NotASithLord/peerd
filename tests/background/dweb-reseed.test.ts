@@ -51,6 +51,72 @@ describe('dweb restart reseed', () => {
     ]);
   });
 
+  test('reconstructs the exact signed Git release instead of publishing the mutable worktree', async () => {
+    const oid = 'a'.repeat(40);
+    const previousVersionId = 'b'.repeat(64);
+    const releaseApp = {
+      ...sharedApp,
+      entryFile: 'current.html',
+      fileKinds: { 'current.html': 'text' },
+      dweb: {
+        ...sharedApp.dweb,
+        hash: 'c'.repeat(64),
+        git_oid: oid,
+        source_git_oid: oid,
+        previous_version_id: previousVersionId,
+        changelog: 'ship the immutable release',
+        release_entry_file: 'index.html',
+        release_file_kinds: { 'index.html': 'text', 'module.wasm': 'binary' },
+      },
+    };
+    const messages: any[] = [];
+    const reseed = makeReseedSharedApps({
+      enabled: true,
+      active: () => true,
+      locked: () => false,
+      appRegistry: { list: async () => [releaseApp], get: async () => releaseApp },
+      withDwebPublication: async (operation) => operation(() => true),
+      withAppLifecycle: async (_id, operation) => operation(),
+      repositories: {
+        snapshot: async (ref, opts) => {
+          expect(ref).toEqual({ kind: 'app', id: 'app-1' });
+          expect(opts).toEqual({ at: oid });
+          return {
+            'index.html': new TextEncoder().encode('released'),
+            'module.wasm': Uint8Array.of(0, 97, 115, 109),
+          };
+        },
+      },
+      sendMessage: async (message) => { messages.push(message); return { ok: true }; },
+      log: { log: () => {}, warn: () => {}, debug: () => {} },
+    });
+
+    await reseed();
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      expectedHash: 'c'.repeat(64),
+      release: {
+        previousVersionId,
+        gitCommitOid: oid,
+        changelog: 'ship the immutable release',
+      },
+      releaseSnapshot: {
+        ok: true,
+        oid,
+        totalBytes: 12,
+        record: {
+          entryFile: 'index.html',
+          fileKinds: { 'index.html': 'text', 'module.wasm': 'binary' },
+        },
+      },
+    });
+    expect(atob(messages[0].releaseSnapshot.files['index.html'].base64)).toBe('released');
+    expect([...Uint8Array.from(
+      atob(messages[0].releaseSnapshot.files['module.wasm'].base64),
+      (character) => character.charCodeAt(0),
+    )]).toEqual([0, 97, 115, 109]);
+  });
+
   test('rechecks master state and vault lock after waiting for lifecycle lanes', async () => {
     const messages: any[] = [];
     let active = true;

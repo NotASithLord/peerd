@@ -21,7 +21,7 @@
 import {
   type Scenario, type Probe, blocked, leaked, summarize,
 } from '../harness.ts';
-import { applyRealmSeal } from '../../../extension/engine-tabs/notebook-tab/notebook-neutralizers.js';
+import { applyNotebookRealmSeal } from '../../../extension/engine-tabs/notebook-tab/notebook-neutralizers.js';
 import { resolveRelativePath } from '../../../extension/peerd-engine/module-resolver.js';
 import { opfsHelpers } from '../../../extension/peerd-engine/opfs.js';
 import { composeApp, stripMetaRefresh } from '../../../extension/peerd-engine/app-compose.js';
@@ -51,7 +51,12 @@ const freshGlobal = () => {
   g.EventSource = function EventSource() {};
   g.WebTransport = function WebTransport() {};
   g.Worker = function Worker() {};
-  g.navigator = { sendBeacon: () => true };
+  g.navigator = {
+    sendBeacon: () => true,
+    storage: { getDirectory: () => 'EXTENSION-OPFS-ROOT' },
+  };
+  g.chrome = { runtime: { sendMessage: () => 'PRIVILEGED' } };
+  g.browser = { storage: { local: {} } };
   g.postMessage = (m: any) => posted.push(m);
   g.addEventListener = () => {};
   return { g, proto, nativeFetch };
@@ -60,14 +65,14 @@ const freshGlobal = () => {
 const throwsEgress = (fn: () => unknown): { ok: boolean; detail: string } => {
   try { fn(); return { ok: false, detail: 'did NOT throw, escape succeeded' }; }
   catch (e: any) {
-    const ok = e?.name === 'NotebookEgressBlockedError' || /peerd\.egress\.fetch/.test(String(e?.message));
+    const ok = /EgressBlockedError$/.test(String(e?.name)) || /peerd\.egress\.fetch/.test(String(e?.message));
     return { ok, detail: ok ? `${e?.name}: ${String(e?.message).slice(0, 48)}` : `threw wrong error: ${String(e)}` };
   }
 };
 
 export const scenario: Scenario = {
   id: '06-sandbox-escape',
-  title: 'Sandbox escape (Notebook worker, App iframe, WebVM)',
+  title: 'Sandbox escape (Notebook/Pod workers, App iframe, WebVM)',
   adversary: 'malicious sandboxed code',
   asset: 'the host origin, the network, and other sandbox instances',
   claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; OPFS mutation is checked before any root handle is opened; a remote module restricts its whole run to compute only and all remote-controlled output is fenced; an App cannot break out of its iframe or observe a targeted actor job; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
@@ -76,7 +81,7 @@ export const scenario: Scenario = {
   async run() {
     const probes: Probe[] = [];
     const { g, proto, nativeFetch } = freshGlobal();
-    applyRealmSeal(g);
+    applyNotebookRealmSeal(g);
 
     // 1) Raw exfil / remote-code channels all throw.
     const rawChannels: { label: string; fn: () => unknown }[] = [
@@ -88,12 +93,17 @@ export const scenario: Scenario = {
       { label: 'reach the network via the Cache API', fn: () => g.caches.open('x') },
       { label: 'open the extension-origin IndexedDB (vault blob, memory, grants, audit, sibling instances)', fn: () => g.indexedDB.open('peerd') },
       { label: 'delete an extension-origin IndexedDB database', fn: () => g.indexedDB.deleteDatabase('peerd') },
+      { label: 'open the extension-origin OPFS root outside the rooted Notebook workspace', fn: () => g.navigator.storage.getDirectory() },
       { label: 'construct a WebSocketStream (missing-API stub)', fn: () => new g.WebSocketStream('wss://evil.example/') },
     ];
     for (const c of rawChannels) {
       const r = throwsEgress(c.fn);
       probes.push(r.ok ? blocked(c.label, r.detail) : leaked(c.label, r.detail));
     }
+    const extensionApisAbsent = g.chrome === undefined && g.browser === undefined;
+    probes.push(extensionApisAbsent
+      ? blocked('call ambient extension APIs from Notebook code', 'chrome and browser namespaces are pinned absent')
+      : leaked('call ambient extension APIs from Notebook code', 'an extension API namespace remained reachable'));
 
     // A forged worker relay still lands at the host helper. A blocked schema
     // posture must stop every mutator before OPFS is touched.
@@ -290,7 +300,8 @@ export const scenario: Scenario = {
     }
 
     const result = summarize(probes, [
-      'applyRealmSeal (raw-channel block + native deletion + bridge pin)',
+      'applyRealmSeal Notebook profile (raw channels, OPFS root, extension APIs, native deletion, bridge pin)',
+      'applyRealmSeal Pod profile (no ambient fetch/raw OPFS/extension API namespaces)',
       'resolveRelativePath (OPFS ".." collapse)',
       'opfsHelpers (host-side mutation posture before root access)',
       'buildWorkerSource + formatEvalResult (remote graph capability collapse + output fence)',

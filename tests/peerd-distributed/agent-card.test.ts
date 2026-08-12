@@ -80,4 +80,14 @@ describe('agent-card caps are wired into the card paths (not dead code)', () => 
     expect(src).toContain('validateCard');
     expect(src).toContain('parsePeerCard');
   });
+  test('the privileged base host accepts commands only from the exact service worker', () => {
+    const src = readFileSync(join(import.meta.dir, '../../extension/offscreen/dweb-base.js'), 'utf8');
+    const handlerAt = src.indexOf('const onBaseHostMessage');
+    const senderGateAt = src.indexOf('if (!isServiceWorkerSender(sender))', handlerAt);
+    const dispatchAt = src.indexOf('switch (msg.type)', handlerAt);
+    expect(src).toContain("import { isServiceWorkerSender } from '/shared/messaging.js'");
+    expect(senderGateAt).toBeGreaterThan(handlerAt);
+    expect(senderGateAt).toBeLessThan(dispatchAt);
+    expect(src.slice(senderGateAt, dispatchAt)).toContain('unauthorized-command-sender');
+  });
 });

@@ -278,6 +278,9 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
     };
     const routes = makeEngineRoutes({
       awaitDenylistPolicy: async () => {},
+      repositories: { coordinate: async (_target: unknown, operation: () => Promise<unknown>) => operation() },
+      parseAppManifest: () => ({}),
+      podGitRemoteOperation: () => null,
       vmHttpFetch: async () => { fetched = true; return { ok: true, status: 200 }; },
       applyWebExtract: async (response: any) => response,
       scriptRuns,

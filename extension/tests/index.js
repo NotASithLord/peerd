@@ -70,6 +70,7 @@ import './unit/peerd-runtime/vm-tools.test.js';
 // --- peerd-engine ---
 import './unit/peerd-engine/overlay.test.js';
 import './unit/peerd-engine/personal-index-durability.test.js';
+import './unit/peerd-engine/pod-opfs.test.js';
 
 // --- chassis: notebook-tab ---
 import './unit/engine-tabs/notebook-tab/notebook-seal.test.js';
@@ -84,6 +85,7 @@ import './unit/red-team/sandbox-escape.test.js';
 
 // --- chassis: vm-tab ---
 import './unit/engine-tabs/vm-tab/firefox-webvm-note.test.js';
+import './unit/peerd-engine/repository.test.js';
 
 // --- chassis: offscreen (headless JS jobs / script) ---
 import './unit/offscreen/job-runner.test.js';
@@ -92,6 +94,8 @@ import './unit/offscreen/job-runner-toolbox.test.js';
 
 // --- background (SW chassis: tab trackers + RPC clients + live SW routes) ---
 import './unit/background/vm-tab-close.test.js';
+import './unit/background/app-tab-tracker.test.js';
+import './unit/background/pod-client.test.js';
 import './unit/background/state-get.test.js';
 import './unit/background/script-model-call.test.js';
 

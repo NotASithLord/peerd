@@ -247,8 +247,9 @@ export const resolveWebActorSurfaceDecision = ({ requested, allowedTools = null,
 // must not gain a second host-control channel just for symmetry.
 const ENGINE_TOOLS = Object.freeze({
   webvm: Object.freeze(['vm_boot', 'vm_write_file', 'vm_import', 'vm_delete']),
-  notebook: Object.freeze(['js_notebook', 'js_write_file', 'js_read_file', 'js_delete', 'edit_file']),
-  app: Object.freeze(['app_update', 'app_write_file', 'app_read_file', 'app_list_files', 'app_delete_file', 'app_delete', 'edit_file']),
+  notebook: Object.freeze(['js_notebook', 'js_write_file', 'js_read_file', 'js_delete', 'edit_file', 'repo_history', 'repo_version', 'repo_remote']),
+  pod: Object.freeze(['pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write', 'pod_destroy', 'repo_history', 'repo_version', 'repo_remote']),
+  app: Object.freeze(['app_update', 'app_write_file', 'app_read_file', 'app_list_files', 'app_delete_file', 'app_delete', 'edit_file', 'repo_history', 'repo_version', 'repo_remote']),
 });
 
 export const WEB_ACTOR_DOM_TOOL_NAMES = Object.freeze([
@@ -289,6 +290,7 @@ export const DWEB_INBOUND_TOOL_NAMES = Object.freeze([
 export const ACTOR_CAPABILITY_MANIFESTS = Object.freeze({
   webvm: Object.freeze({ tools: ENGINE_TOOLS.webvm, codeTool: 'vm_boot', client: null, codeDecision: 'shell is the code surface; no second host-control client' }),
   notebook: Object.freeze({ tools: ENGINE_TOOLS.notebook, codeTool: 'js_notebook', client: null, codeDecision: 'the owned notebook worker is the code surface' }),
+  pod: Object.freeze({ tools: ENGINE_TOOLS.pod, codeTool: 'pod_exec', client: null, codeDecision: 'the owned Pod shell is the code surface' }),
   app: Object.freeze({ tools: ENGINE_TOOLS.app, codeTool: 'app_write_file', client: null, codeDecision: 'the actor writes the app artifact; a runtime control bridge would widen iframe authority' }),
   web: Object.freeze({ tools: WEB_ACTOR_TOOL_NAMES, codeTool: 'page_code', client: 'page', codeDecision: 'page maps only to the same gated web tools' }),
   api: Object.freeze({ tools: WEB_API_TOOL_NAMES, codeTool: 'site_client_run', client: 'site', codeDecision: 'origin-pinned site client code; no arbitrary-origin client' }),
