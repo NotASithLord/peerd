@@ -259,7 +259,22 @@ const baseLifecycle = makeStartStopBarrier({
       throw e;
     }
     log(`joining lobby "${client.BASE_TOPIC}" as …${identity.did.slice(-8)}`);
-    return client.joinBaseNetwork({ identity });
+    return client.joinBaseNetwork({
+      identity,
+      // Signature/shape/derived-id verification happens in discovery before
+      // this callback. The SW persists the monotonic decision; fail closed if
+      // that authority is unavailable so an offscreen restart cannot reset it.
+      admitDwappMeta: async (/** @type {{ dwappId: string, publisher: string, seq: number, versionId: string }} */ candidate) => {
+        try {
+          const result = await swCall('dweb/meta-admit', candidate);
+          if (result?.accepted === true) return true;
+          warn('discovery card refused by durable version gate:', result?.error ?? 'unknown refusal');
+        } catch (error) {
+          warn('durable discovery version gate unavailable:', /** @type {{ message?: string }} */ (error)?.message ?? error);
+        }
+        return false;
+      },
+    });
   },
   activate: (candidate) => {
     candidate.base.start();

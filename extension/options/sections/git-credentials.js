@@ -83,7 +83,7 @@ export const GitCredentialsSection = {
 
     return m('div', [
       m('p', [
-        'Tokens for private GitHub/GitLab repositories in WebVMs, Apps, and lightweight Notebooks. Each is '
+        'Tokens for private GitHub/GitLab repositories in WebVMs, Apps, Notebooks, and Pods. Each is '
         + 'encrypted in the same vault as your API keys, decrypted only for a clone, fetch, or push request to that host, '
         + 'bound to its host, and ', m('strong', 'never shown to the agent or the VM'),
         '. peerd only sends it to that exact host over HTTPS (redirects are refused), '

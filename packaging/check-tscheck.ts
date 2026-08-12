@@ -158,7 +158,9 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // route, Options surface, and rendered side-panel coverage.
 // 673 → 676: the Actor Fabric adds its pure topology model, SW live projection,
 // and rendered browser contract while replacing the checked async-task bar.
-const COVERED_FLOOR = 707;
+// 726 → 762: portable identity, Pod and Notebook repository lifecycle, and
+// durable dweb rollback enforcement land as checked extension modules.
+const COVERED_FLOOR = 762;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

@@ -25,6 +25,7 @@ import {
   buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS, SEAL_MODULE_URL,
 } from './worker-source.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
+import { isServiceWorkerSender } from '/shared/messaging.js';
 import {
   NOTEBOOK_MODULE_LOADER, REMOTE_MODULE_IMPORTS_ENABLED,
 } from '/shared/channel-config.js';
@@ -854,7 +855,7 @@ const exportNotebook = async () => {
 // SW → tab dispatch.
 // ---------------------------------------------------------------------------
 
-const JS_ROUTES = new Set(['js/eval', 'js/abort', 'js/write-file', 'js/read-file', 'js/list-files']);
+const JS_ROUTES = new Set(['js/eval', 'js/abort', 'js/write-file', 'js/read-file', 'js/list-files', 'js/quiesce']);
 
 // why the cast: the polyfill's OnMessageListenerCallback types the return as the
 // literal `true` (keep the channel open), so it can't model the legitimate
@@ -862,18 +863,38 @@ const JS_ROUTES = new Set(['js/eval', 'js/abort', 'js/write-file', 'js/read-file
 // for real and casting at the boundary keeps the body checked.
 /**
  * @param {any} msg
- * @param {import('webextension-polyfill').Runtime.MessageSender} _sender
+ * @param {import('webextension-polyfill').Runtime.MessageSender} sender
  * @param {(response: any) => void} sendResponse
  * @returns {boolean}
  */
-const onNotebookMessage = (msg, _sender, sendResponse) => {
-  if (!msg || typeof msg !== 'object') return false;
+const onNotebookMessage = (msg, sender, sendResponse) => {
+  if (!msg || typeof msg !== 'object' || !isServiceWorkerSender(sender)) return false;
   if (!JS_ROUTES.has(msg.type)) return false;
   if (msg.notebookId && msg.notebookId !== notebookId) return false;
 
   (async () => {
     try {
       switch (msg.type) {
+        case 'js/quiesce':
+          if (msg.notebookId !== notebookId) return;
+          if (msg.action === 'release') {
+            document.body.inert = false;
+            sendResponse({ ok: true });
+            return;
+          }
+          if (msg.action !== 'acquire') {
+            sendResponse({ ok: false, error: 'invalid Notebook quiesce action' });
+            return;
+          }
+          document.body.inert = true;
+          try {
+            await editor.flushSave();
+            sendResponse({ ok: true });
+          } catch (error) {
+            document.body.inert = false;
+            throw error;
+          }
+          return;
         case 'js/eval': {
           const runId = typeof msg.runId === 'string' ? msg.runId : crypto.randomUUID();
           const controller = reserveRun(runId);

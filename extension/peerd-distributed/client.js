@@ -105,13 +105,17 @@ export const createDwebClient = () => {
     // holds this for the life of the extension session so the net outlives any
     // tab (S1b). close() leaves the lobby + tears down the mesh.
     BASE_TOPIC,
-    /** @param {{ identity: import('./transport/mesh.js').Identity, url?: string, audit?: import('./transport/mesh.js').AuditFn }} opts */
-    joinBaseNetwork: async ({ identity, url = DEFAULT_SIGNALING[0], audit = null } = /** @type {any} */ ({})) => {
+    /** @param {{ identity: import('./transport/mesh.js').Identity, url?: string, audit?: import('./transport/mesh.js').AuditFn,
+     *   admitDwappMeta?: ((candidate: { dwappId: string, publisher: string, seq: number, versionId: string }) => Promise<boolean>) | null }} opts */
+    joinBaseNetwork: async ({ identity, url = DEFAULT_SIGNALING[0], audit = null, admitDwappMeta = null } = /** @type {any} */ ({})) => {
       const room = await joinRoom({ roomId: BASE_TOPIC, identity, url, audit });
       // why kind: the lobby presence beacon carries `kind:'extension'` so other
       // members (e.g. an ephemeral peer the peerd.ai landing page joins) can tell
       // a real extension apart from a website visitor in the live network view.
-      const base = await createBaseNetwork({ identity, mesh: room.mesh, meta: () => ({ kind: 'extension' }), dial: makeDhtDialer(room), audit });
+      const base = await createBaseNetwork({
+        identity, mesh: room.mesh, meta: () => ({ kind: 'extension' }),
+        dial: makeDhtDialer(room), audit, admitDwappMeta,
+      });
       return { base, room, url, close: () => { base.close(); room.leave(); } };
     },
     loadSeedApp,

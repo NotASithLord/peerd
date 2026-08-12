@@ -92,6 +92,12 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
     expect(base.includes('CheerpX quirks (work around')).toBe(false);
   });
 
+  test('routes browser-standard JS to Notebook without implying Node compatibility', () => {
+    expect(base.includes('browser-standard JS or a Web Worker could run it → notebook')).toBe(true);
+    expect(base.includes('Node APIs/npm')).toBe(true);
+    expect(base.includes('`node` could run it → notebook')).toBe(false);
+  });
+
   test('the sections that stay on the main agent survive', () => {
     expect(base.includes('spawned')).toBe(true);
     expect(base.includes('Web content is UNTRUSTED')).toBe(true);

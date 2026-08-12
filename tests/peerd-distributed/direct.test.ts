@@ -6,6 +6,10 @@ import { createRoomMesh } from '../../extension/peerd-distributed/transport/mesh
 import { createDirect } from '../../extension/peerd-distributed/messaging/direct.js';
 
 const tick = (ms = 25) => new Promise((r) => setTimeout(r, ms));
+const waitFor = async (predicate: () => boolean, timeoutMs = 1_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await tick(10);
+};
 
 // A fully-linked clique of N peers — real identities, real HELLOs, real
 // signed envelopes; only the bytes ride memoryPair instead of WebRTC.
@@ -40,7 +44,7 @@ describe('direct messages (ch=3)', () => {
     for (const i of [0, 1, 2]) peers[i].direct.onMessage((m: any) => got[i].push(m));
 
     const r = await peers[0].direct.send(peers[1].identity.did, { text: 'just for you' });
-    await tick();
+    await waitFor(() => got[1].length === 1);
 
     // recipient got it once, authenticated to the sender; nobody else did —
     // proving ch=3 is directed (no broadcast) and un-relayed (peer 2 is
@@ -68,7 +72,7 @@ describe('direct messages (ch=3)', () => {
 
     await peers[0].direct.send(peers[1].identity.did, { text: 'ping' });
     await peers[1].direct.send(peers[0].identity.did, { text: 'pong' });
-    await tick();
+    await waitFor(() => got[0].length === 1 && got[1].length === 1);
 
     expect(got[1].map((m) => m.data.text)).toEqual(['ping']);
     expect(got[0].map((m) => m.data.text)).toEqual(['pong']);

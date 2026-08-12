@@ -358,11 +358,15 @@ describe('home.library', () => {
     });
     const { root, unmount } = await mountView(send);
     try {
-      need(root, '.library-kebab').click();
+      const trigger = need(root, '.library-kebab', HTMLButtonElement);
+      trigger.click();
       await flush();
       clickText(root, '.library-menu-item', 'History & Git');
       await flush();
       expect(need(root, '.library-card').classList.contains('is-expanded')).toBe(true);
+      const panel = need(root, '.library-repository', HTMLElement);
+      expect(panel.getAttribute('role')).toBe('region');
+      expect(document.activeElement).toBe(panel);
       expect(root.textContent).toContain('1 uncommitted change');
       expect(root.textContent).toContain('checkpoint');
       clickText(root, '.library-commit button', 'Diff');
@@ -374,6 +378,38 @@ describe('home.library', () => {
       clickText(root, '.library-commit button', 'Restore?');
       await flush();
       expect(send.calls.some((c) => c.type === 'apps/repository/restore' && c.to === 'abcdef123456')).toBe(true);
+      need(root, 'button[title="Close history"]').click();
+      await flush();
+      await nextFrame();
+      expect(document.activeElement).toBe(trigger);
+    } finally { unmount(); }
+  });
+
+  it('invalidates a cached commit diff when repository state refreshes', async () => {
+    let diffRead = 0;
+    const send = makeSend({
+      'apps/repository/status': () => ({ ok: true, status: { oid: 'abcdef123456', branch: 'main', dirty: true, changed: [{ path: 'index.html', status: 'modified' }] }, remote: null }),
+      'apps/repository/history': () => ({ ok: true, commits: [{ oid: 'abcdef123456', message: 'checkpoint', timestamp: Date.now() - 1000 }] }),
+      'apps/repository/diff': () => ({ ok: true, diff: { files: [], patch: `working-tree-${++diffRead}`, truncated: false } }),
+      'apps/repository/commit': () => ({ ok: true, result: { oid: 'new-checkpoint', created: true } }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      need(root, '.library-kebab').click();
+      await flush();
+      clickText(root, '.library-menu-item', 'History & Git');
+      await flush();
+      clickText(root, '.library-commit button', 'Diff');
+      await flush();
+      expect(root.textContent).toContain('working-tree-1');
+
+      clickText(root, '.library-repository-dirty button', 'Checkpoint');
+      await flush();
+      await flush();
+      clickText(root, '.library-commit button', 'Diff');
+      await flush();
+      expect(root.textContent).toContain('working-tree-2');
+      expect(send.calls.filter((call) => call.type === 'apps/repository/diff').length).toBe(2);
     } finally { unmount(); }
   });
 

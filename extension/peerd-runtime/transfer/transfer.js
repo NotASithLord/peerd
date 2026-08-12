@@ -54,6 +54,8 @@ import {
   BACKUP_ARGON2ID_PARAMS, BACKUP_ARGON2ID_SALT_BYTES,
   deriveBackupPassphraseBytes,
 } from '/shared/backup-passphrase.js';
+import { isCustodySecretName, portableSecretEntries } from './secret-policy.js';
+export { isCustodySecretName } from './secret-policy.js';
 
 export const EXPORT_VERSION = 2;
 export const EXPORT_FORMAT = 'peerd-export';
@@ -66,15 +68,6 @@ export const EXPORT_PASSPHRASE_MIN_LENGTH = 16;
 // record is carried as payload.dweb, and the device key is device-bound.
 // Enforced HERE (payload shaping), not in the route — mechanism, not
 // caller discipline. Store-safe names (kv strings, not module paths).
-const NON_EXPORTABLE_SECRET_PREFIXES = Object.freeze([
-  'distributed/identity/',
-  'distributed/device-key/',
-]);
-
-/** @param {string} name */
-export const isCustodySecretName = (name) =>
-  NON_EXPORTABLE_SECRET_PREFIXES.some((prefix) => name.startsWith(prefix));
-
 export class ExportPassphraseError extends Error {
   constructor() {
     super('wrong passphrase (or corrupted export file)');
@@ -280,9 +273,7 @@ const durabilitySection = (payload) => {
 export const buildExport = async ({
   channel, storedSettings, providerEndpoints, secrets, passphrase, memory, hooks, skills, dweb,
 }) => {
-  const portableSecrets = Object.fromEntries(
-    Object.entries(secrets ?? {}).filter(([name]) => !isCustodySecretName(name)),
-  );
+  const portableSecrets = portableSecretEntries(secrets);
   const secretNames = Object.keys(portableSecrets);
   if (secretNames.length > 0 && !passphrase) {
     throw new ExportPassphraseError();

@@ -87,11 +87,11 @@ export const actorListTool = {
   description: [
     'Enumerate actor targets in one call. The result includes actor_execution;',
     'targets are addressable with message_actor only when its status is available.',
-    'Returns a row per actor with: type (webvm | notebook | app | tab |',
+    'Returns a row per actor with: type (webvm | notebook | pod | app | tab |',
     'integration), handle (pass it as message_actor `to`), name, live (has a',
     'warm tab / open page right now), current (this chat\'s default of that',
     'type — what an instance op defaults to), and detail (a tab\'s origin, an',
-    'integration\'s keyed-ness, an app\'s tags). Use it to decide whether to',
+    'integration\'s keyed-ness, a Pod\'s lifecycle, an app\'s tags). Use it to decide whether to',
     'reuse an existing instance/tab or spawn fresh, and to find the handle to',
     'message. (When actor_execution is available, the general "web" actor is',
     'addressable as to:"web" and is not listed here; likewise the mesh operator,',

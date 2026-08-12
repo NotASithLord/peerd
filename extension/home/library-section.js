@@ -138,6 +138,7 @@ export const LibrarySection = {
     vnode.state.repositoryCheckout = '';
     vnode.state.repositoryDiffs = {};   // `${appId}:${oid}` -> bounded diff result
     vnode.state.repositoryDiffKey = null;
+    vnode.state.repositoryFocusId = null;
     vnode.state.armedRestore = null;    // { appId, oid, expiresAt }: never arms another App
     vnode.state.updateConflictId = null;
     vnode.state.notice = null;
@@ -332,10 +333,21 @@ export const LibrarySection = {
       ui.repositoryOpenId = null;
       ui.armedRestore = null;
       ui.repositoryDiffKey = null;
+      ui.repositoryFocusId = null;
       m.redraw();
+      focusLibraryAction(app.id, 'more');
       return;
     }
     ui.repositoryOpenId = app.id;
+    ui.repositoryFocusId = refresh ? null : app.id;
+    // A cached diff compares the selected commit to a mutable working tree.
+    // Opening or refreshing Git is the synchronization boundary for edits made
+    // in the App tab and for every repository mutation below, so no prior
+    // commit-to-tree preview remains truthful past this point.
+    for (const key of Object.keys(ui.repositoryDiffs)) {
+      if (key.startsWith(`${app.id}:`)) delete ui.repositoryDiffs[key];
+    }
+    if (ui.repositoryDiffKey?.startsWith(`${app.id}:`)) ui.repositoryDiffKey = null;
     ui.busyId = app.id;
     try {
       const [statusReply, historyReply] = await Promise.all([
@@ -870,17 +882,30 @@ export const LibrarySection = {
   repositoryPanel(vnode, app) {
     const ui = vnode.state;
     const repo = ui.repositories[app.id];
-    if (!repo) return m('.library-repository', m('p.muted', 'Loading repository…'));
+    const panelAttrs = {
+      role: 'region', 'aria-label': `History and Git for ${app.name}`, tabindex: '-1',
+      'data-library-repository-id': app.id,
+      oncreate: (/** @type {{dom:HTMLElement}} */ v) => {
+        if (ui.repositoryFocusId !== app.id) return;
+        ui.repositoryFocusId = null;
+        v.dom.focus({ preventScroll: true });
+      },
+    };
+    if (!repo) return m('.library-repository', panelAttrs, m('p.muted', 'Loading repository…'));
     const changed = repo.status?.changed ?? [];
     const isArmed = (/** @type {string} */ oid) => ui.armedRestore?.appId === app.id
       && ui.armedRestore?.oid === oid && ui.armedRestore?.expiresAt >= Date.now();
-    return m('.library-repository', [
+    return m('.library-repository', panelAttrs, [
       m('.library-repository-head', [
         m('strong', 'History & Git'),
         m('span.muted', `${repo.status?.branch ?? 'detached'} · ${String(repo.status?.oid ?? '').slice(0, 10) || 'empty'}`),
         m('button.icon', {
           title: 'Close history', 'aria-label': `Close Git history for ${app.name}`,
-          onclick: () => { ui.repositoryOpenId = null; ui.armedRestore = null; ui.repositoryDiffKey = null; },
+          onclick: () => {
+            ui.repositoryOpenId = null; ui.armedRestore = null; ui.repositoryDiffKey = null;
+            ui.repositoryFocusId = null;
+            focusLibraryAction(app.id, 'more');
+          },
         }, '×'),
       ]),
       changed.length

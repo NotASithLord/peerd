@@ -199,5 +199,7 @@ describe('actor_list — unified actor catalog', () => {
     expect(actorListTool.sideEffect).toBe('read');
     expect(actorListTool.origins?.({}, {} as any)).toEqual([]);
     expect(actorListTool.name).toBe('actor_list');
+    expect(actorListTool.description).toContain('webvm | notebook | pod | app');
+    expect(actorListTool.description).toContain("a Pod's lifecycle");
   });
 });

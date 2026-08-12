@@ -6,6 +6,10 @@ import { createRoomMesh } from '../../extension/peerd-distributed/transport/mesh
 import { createBaseNetwork } from '../../extension/peerd-distributed/base-network.js';
 
 const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+const waitFor = async (predicate: () => boolean, timeoutMs = 1_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await tick(10);
+};
 
 const link = async (a: any, b: any) => {
   const [ca, cb] = memoryPair();
@@ -37,7 +41,7 @@ describe('base network — the always-on lobby + sub-protocols', () => {
   test('global presence: every node sees every other on the lobby', async () => {
     const peers = await clique(5);
     for (const p of peers) p.base.presence.announce();
-    await tick(60);
+    await waitFor(() => peers.every((p) => p.base.presence.list().length >= 4));
     for (const p of peers) expect(p.base.presence.list().length).toBeGreaterThanOrEqual(4);
     for (const p of peers) p.base.close();
   });
@@ -47,19 +51,20 @@ describe('base network — the always-on lobby + sub-protocols', () => {
     const subs = peers.map((p) => p.base.joinSubProtocol('commons'));
     const gotMsg: Record<string, any[]> = {}; const gotDirect: Record<string, any[]> = {};
     subs.forEach((s, i) => { gotMsg[i] = []; gotDirect[i] = []; s.onMessage((m: any) => gotMsg[i].push(m.data)); s.onDirect((m: any) => gotDirect[i].push(m.data)); });
-    await tick(60); // PEER_ON_DWAPP floods → membership
+    await waitFor(() => subs.every((s) => s.peers().length >= 3));
 
     // membership: everyone sees the other 3 on "commons"
     for (const s of subs) expect(s.peers().length).toBeGreaterThanOrEqual(3);
 
     // broadcast from node0 reaches the other members
     await subs[0].broadcast({ hello: 'commons' });
-    await tick(60);
+    await waitFor(() => [1, 2, 3].every((i) => gotMsg[i]
+      .some((message) => message.hello === 'commons')));
     for (let i = 1; i < 4; i++) expect(gotMsg[i]).toContainEqual({ hello: 'commons' });
 
     // a private direct message goes to exactly one member
     subs[0].send(peers[2].identity.did, { secret: 'for n2' });
-    await tick(60);
+    await waitFor(() => gotDirect[2].some((message) => message.secret === 'for n2'));
     expect(gotDirect[2]).toContainEqual({ secret: 'for n2' });
     expect(gotDirect[1]).toHaveLength(0); // not broadcast — only n2 got it
     for (const p of peers) p.base.close();
@@ -74,7 +79,8 @@ describe('base network — the always-on lobby + sub-protocols', () => {
     const { dwapp_id } = await peers[0].base.publishMeta({
       slug: 'commons', name: 'commons', head: { version_id: 'v1', content_addr: 'peerd://pub/h', size: 1 },
     });
-    await tick(80);
+    await waitFor(() => [1, 2, 3].every((i) => heard[i]
+      .some((a) => a.dwapp_id === dwapp_id)));
     for (let i = 1; i < 4; i++) expect(heard[i].some((a) => a.dwapp_id === dwapp_id)).toBe(true);
     expect((await peers[1].base.findDwapp(dwapp_id))?.value.name).toBe('commons');
     for (const p of peers) p.base.close();
@@ -95,7 +101,8 @@ describe('base network — the always-on lobby + sub-protocols', () => {
     late.base.start();
     expect(late.base.heardDwapps()).toHaveLength(0); // hasn't asked anyone yet
     await link(sharer, late);                         // newcomer subscribes; sharer snapshots
-    await tick(80);
+    await waitFor(() => late.base.heardDwapps()
+      .some((a: any) => a.dwapp_id === dwapp_id));
 
     const heard = late.base.heardDwapps();
     expect(heard.some((a: any) => a.dwapp_id === dwapp_id)).toBe(true);
@@ -112,7 +119,8 @@ describe('base network — the always-on lobby + sub-protocols', () => {
     const { dwapp_id } = await a.base.publishMeta({
       slug: 'spammy', name: 'spammy', head: { version_id: 'v1', content_addr: 'peerd://a/x', size: 1 },
     });
-    await tick(60);
+    await waitFor(() => b.base.heardDwapps()
+      .some((r: any) => r.dwapp_id === dwapp_id));
     expect(b.base.heardDwapps().some((r: any) => r.dwapp_id === dwapp_id)).toBe(true);
     b.base.ban(a.identity.did, 'spam');
     expect(b.base.heardDwapps().some((r: any) => r.dwapp_id === dwapp_id)).toBe(false);

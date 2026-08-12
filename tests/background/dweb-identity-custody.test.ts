@@ -23,6 +23,7 @@ const makeFixture = (overrides: any = {}) => {
     identitySecretName: 'distributed/identity/v1',
     withIdentityMutation: async (operation: () => Promise<any>) => operation(),
     canChangeIdentity: async () => true,
+    canMintIdentity: async () => true,
     ...overrides.deps,
   });
   return { custody, audits, get stored() { return stored; }, get writes() { return writes; } };
@@ -72,6 +73,15 @@ describe('dweb identity custody', () => {
     });
     expect(await fixture.custody.handle('set', { value: 'replacement-root' }))
       .toEqual({ ok: false, error: 'identity-in-use' });
+    expect(fixture.writes).toBe(0);
+  });
+
+  test('blocks legacy root minting on an enrolled certificate-only device', async () => {
+    const fixture = makeFixture({
+      deps: { canMintIdentity: async () => false },
+    });
+    expect(await fixture.custody.handle('set', { value: 'unrelated-root' }))
+      .toEqual({ ok: false, error: 'certificate-only-device' });
     expect(fixture.writes).toBe(0);
   });
 

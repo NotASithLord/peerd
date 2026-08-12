@@ -30,15 +30,31 @@ The code is the specification:
 - Structural exclusion of raw identity and device-key secrets from the generic
   encrypted-secrets section.
 
+Since then, same-user device enrollment and P2P state sync landed, device
+subkeys and certificates, passkey enrollment authority, private rotating
+rendezvous, mutual self-device authentication, and direct device-to-device
+state transfer. That arc has its own document: `06-device-enrollment.md`
+(architecture, trust model, sequence diagrams, portability matrix, red-team
+results, limitations). Documents 03–05 below record the design intent that
+preceded it and are superseded where they conflict.
+
 ## What is not implemented
 
-- Passkey wrappers, enrollment, or recovery ceremonies.
-- Device subkeys. The permanent root remains the routine mesh signer.
-- QR transfer, hosted recovery records, or automatic synchronization.
-- A canonical `peerd.ai` relying party or a website-facing identity protocol.
+- QR transfer, hosted recovery records, or continuous background
+  synchronization. State transfer is initial migration by snapshot.
+- The routine-signing switchover. Device certificates exist and verify, but
+  mesh envelopes, Agent Cards, manifests, DHT items, and A2A still sign with
+  the permanent root; the wire verifier must accept certificate-backed
+  identity across all of them first.
+- A deployed `id.peerd.ai` or a website-facing identity capability protocol.
+  The ceremony page is written (`web-identity/`); hosting belongs to the site
+  repository.
+- The rendered "Create new / Use my existing Peerd" fork on the vault gate.
+  The flow, its branches, and its copy are implemented and tested; the render
+  awaits the visual verify loop.
 - A checked-in live Chrome-to-Firefox end-to-end proof. Both host paths have
   automated boundary coverage; a real two-browser ceremony remains release
-  validation work.
+  validation work, and Firefox additionally has no mesh host (issue #376).
 
 ## Invariants
 

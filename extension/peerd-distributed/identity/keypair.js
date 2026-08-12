@@ -52,7 +52,7 @@ const PKCS8_ED25519_PREFIX = Uint8Array.from([
   0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
 ]);
 
-const SECRET_NAME = 'distributed/identity/v1';
+export const IDENTITY_SECRET_NAME = 'distributed/identity/v1';
 
 /**
  * Rehydrate an identity from its stored material. The private key is
@@ -101,7 +101,7 @@ export const importIdentity = async ({ seed, publicKey }) => {
  * @returns {Promise<{ seed: string, pub: string, did: string }>}
  */
 export const loadIdentityMaterial = async ({ getSecret, setSecret }) => {
-  const stored = await getSecret(SECRET_NAME);
+  const stored = await getSecret(IDENTITY_SECRET_NAME);
   if (stored) {
     const { seed, pub } = JSON.parse(stored);
     const did = await assertIdentityMaterial({ seed, pub });
@@ -110,7 +110,7 @@ export const loadIdentityMaterial = async ({ getSecret, setSecret }) => {
   // First run: mint once and persist. Any later backup exports it only inside
   // the authenticated, passphrase-encrypted recovery capsule.
   const material = await mintKeypairMaterial();
-  await setSecret(SECRET_NAME, JSON.stringify({ v: 1, seed: material.seed, pub: material.pub }));
+  await setSecret(IDENTITY_SECRET_NAME, JSON.stringify({ v: 1, seed: material.seed, pub: material.pub }));
   return material;
 };
 

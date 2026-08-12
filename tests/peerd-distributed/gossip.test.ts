@@ -8,6 +8,10 @@ import { createPresence, PRESENCE_TOPIC } from '../../extension/peerd-distribute
 import { createTopicSync, createMemoryTopicStore } from '../../extension/peerd-distributed/gossip/sync.js';
 
 const tick = (ms = 25) => new Promise((r) => setTimeout(r, ms));
+const waitFor = async (predicate: () => boolean, timeoutMs = 1_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await tick(10);
+};
 
 // A fully-linked clique of N peers: real identities, real HELLOs, real
 // signed envelopes — only the bytes ride memoryPair instead of WebRTC.
@@ -184,13 +188,13 @@ describe('presence', () => {
     pa.onLeave((l: any) => leaves.push(l));
 
     pa.start(); pb.start();
-    await tick(50);
+    await waitFor(() => pa.list().some((p: any) => p.did === peers[1].identity.did));
     expect(joins.map((j) => j.did)).toContain(peers[1].identity.did);
     expect(joins.find((j) => j.did === peers[1].identity.did).meta).toEqual({ name: 'walt' });
     expect(pa.list().map((p: any) => p.did)).toContain(peers[1].identity.did);
 
     pb.stop(); // b goes silent → a times it out
-    await tick(250);
+    await waitFor(() => leaves.some((l) => l.did === peers[1].identity.did));
     expect(leaves.map((l) => l.did)).toContain(peers[1].identity.did);
     pa.close(); pb.close();
     close(peers);
@@ -203,7 +207,7 @@ describe('presence', () => {
     const leaves: any[] = [];
     pa.onLeave((l: any) => leaves.push(l));
     pa.start(); pb.start();
-    await tick(50);
+    await waitFor(() => pa.list().some((p: any) => p.did === peers[1].identity.did));
     expect(pa.list().map((p: any) => p.did)).toContain(peers[1].identity.did);
 
     // expiry is ~forever here; forget() drops it immediately (the link-died path).
@@ -256,7 +260,7 @@ describe('presence', () => {
     peers[1].gossip.subscribe(PRESENCE_TOPIC, (m: any) => raw.push(m));
     const pa = createPresence({ gossip: peers[0].gossip, selfDid: peers[0].identity.did, heartbeatMs: 1000 });
     pa.start();
-    await tick();
+    await waitFor(() => raw.length >= 1);
     expect(raw.length).toBeGreaterThanOrEqual(1);
     pa.close();
     close(peers);

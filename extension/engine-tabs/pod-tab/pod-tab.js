@@ -13,6 +13,7 @@ import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
 import { isServiceWorkerSender } from '/shared/messaging.js';
 import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS } from '../notebook-tab/worker-source.js';
 import { createExternalWorkspaceLockManager } from './external-workspace-lock.js';
+import { createPodJobOperationTracker, podJobState, podJobStatusMessage } from './job-state.js';
 
 const podId = location.hash.slice(1).split(/[?&]/)[0];
 const validPodId = /^pod-[a-z0-9-]+$/i.test(podId);
@@ -25,7 +26,7 @@ const workspace = opfsHelpers([POD_OPFS_ROOT, podId]);
 const firefoxRuntime = typeof browser.runtime.getBrowserInfo === 'function'
   ? browser.runtime.getBrowserInfo().then((info) => info.name === 'Firefox').catch(() => false)
   : Promise.resolve(false);
-/** @typedef {{id:string,command:string,state:'running'|'completed'|'failed',stdout:string,stderr:string,stdoutTruncated?:boolean,stderrTruncated?:boolean,exitCode:number|null,startedAt:number,finishedAt?:number,durationMs?:number,timeoutMs:number,worker:Worker,children:Set<Worker>,resolve?:(value:any)=>void,timer?:ReturnType<typeof setTimeout>,remoteGitGrant:true|{op:string,url:string}|null,remoteGitGrantConsumed:boolean,background:boolean,render:boolean,restoreTerminalFocus?:boolean,editorRevision?:number,settle?:(result:any)=>void}} PodJob */
+/** @typedef {{id:string,command:string,state:'running'|'completed'|'failed'|'cancelled',settling:boolean,completion:Promise<any>,workspaceOps:ReturnType<typeof createPodJobOperationTracker>,stdout:string,stderr:string,stdoutTruncated?:boolean,stderrTruncated?:boolean,exitCode:number|null,startedAt:number,finishedAt?:number,durationMs?:number,timeoutMs:number,worker:Worker,children:Set<Worker>,resolve?:(value:any)=>void,timer?:ReturnType<typeof setTimeout>,remoteGitGrant:true|{op:string,url:string}|null,remoteGitGrantConsumed:boolean,background:boolean,render:boolean,restoreTerminalFocus?:boolean,editorRevision?:number,settle?:(result:any)=>Promise<any>}} PodJob */
 /** @type {Map<string, PodJob>} */ const jobs = new Map();
 let jobSequence = 0;
 let workspaceTail = Promise.resolve();
@@ -42,6 +43,7 @@ mountPullInPeerd();
 const element = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
 const output = element('terminal-output');
 const status = element('pod-status');
+const jobStatus = element('pod-job-status');
 const promptLabel = element('prompt-label');
 const input = /** @type {HTMLInputElement} */ (element('terminal-input'));
 const form = /** @type {HTMLFormElement} */ (element('terminal-form'));
@@ -61,6 +63,7 @@ const append = (className, text) => {
 
 const publicJob = (/** @type {any} */ job, { includeOutput = true } = {}) => ({
   id: job.id, command: job.command, state: job.state,
+  cancelled: job.state === 'cancelled',
   exitCode: job.exitCode ?? null,
   startedAt: job.startedAt, finishedAt: job.finishedAt ?? null,
   durationMs: job.durationMs ?? (Date.now() - job.startedAt),
@@ -127,6 +130,20 @@ const withWorkspace = (worker, operation) => {
   return result;
 };
 
+/**
+ * Run workspace work on behalf of one job. The inner assertion happens when
+ * the serialized lane actually starts, not merely when the Worker requested
+ * it, which prevents queued writes from landing after cancellation.
+ * @template T @param {PodJob} job @param {Worker|null} worker @param {()=>Promise<T>} operation
+ */
+const withJobWorkspace = (job, worker, operation) => job.workspaceOps.track(() => {
+  const guarded = () => {
+    job.workspaceOps.assertAccepting();
+    return operation();
+  };
+  return worker ? withWorkspace(worker, guarded) : enqueueWorkspace(guarded);
+});
+
 const externalWorkspaceLocks = createExternalWorkspaceLockManager({
   appendHold: () => {
     const previous = workspaceTail.catch(() => {});
@@ -179,7 +196,7 @@ const runPodJavaScript = async (job, args) => {
   }
   const entryPath = String(args.entryPath || 'pod-command.js');
   const resolverDeps = makePodResolverDeps();
-  const built = await enqueueWorkspace(() => buildWorkerSource(String(args.code ?? ''), {
+  const built = await withJobWorkspace(job, null, () => buildWorkerSource(String(args.code ?? ''), {
     entryPath,
     notebookId: podId,
     resolverDeps,
@@ -238,16 +255,16 @@ const runPodJavaScript = async (job, args) => {
       if (message.type === 'opfs-request') {
         try {
           let result;
-          if (message.op === 'read') result = await enqueueWorkspace(() => workspace.read(message.args.path));
+          if (message.op === 'read') result = await withJobWorkspace(job, null, () => workspace.read(message.args.path));
           else if (message.op === 'write') {
-            await enqueueWorkspace(() => workspace.write(message.args.path, checkedFileContent(message.args)));
+            await withJobWorkspace(job, null, () => workspace.write(message.args.path, checkedFileContent(message.args)));
             result = null;
           } else if (message.op === 'delete') {
-            await enqueueWorkspace(() => workspace.remove(message.args.path));
+            await withJobWorkspace(job, null, () => workspace.remove(message.args.path));
             result = null;
-          } else if (message.op === 'list') result = await enqueueWorkspace(() => workspace.list());
+          } else if (message.op === 'list') result = await withJobWorkspace(job, null, () => workspace.list());
           else if (message.op === 'compose-module') {
-            const module = await enqueueWorkspace(() => buildModule(message.args.path, resolverDeps, built.cache));
+            const module = await withJobWorkspace(job, null, () => buildModule(message.args.path, resolverDeps, built.cache));
             result = module.source;
           } else throw new Error(`unknown Pod JS filesystem operation: ${message.op}`);
           worker.postMessage({ type: 'opfs-response', rid: message.rid, result });
@@ -277,32 +294,32 @@ const answerWorkerRequest = async (worker, message, job) => {
   const reply = (/** @type {any} */ result) => worker.postMessage({ type: 'pod-response', rid: message.rid, result });
   const fail = (/** @type {any} */ error) => worker.postMessage({ type: 'pod-response', rid: message.rid, error: /** @type {{message?:string}} */ (error)?.message ?? String(error) });
   try {
-    if (job.state !== 'running') throw new Error('Pod job is no longer running');
+    if (job.state !== 'running' || job.settling) throw new Error('Pod job is no longer running');
     const args = message.args ?? {};
     switch (message.op) {
       case 'workspace-lock': await acquireWorkspace(worker); reply(null); return;
       case 'workspace-unlock': await releaseWorkspace(worker); reply(null); return;
-      case 'fs-read': reply(await withWorkspace(worker, () => workspace.read(args.path))); return;
-      case 'fs-read-bytes': reply(await withWorkspace(worker, () => workspace.readBytes(args.path))); return;
+      case 'fs-read': reply(await withJobWorkspace(job, worker, () => workspace.read(args.path))); return;
+      case 'fs-read-bytes': reply(await withJobWorkspace(job, worker, () => workspace.readBytes(args.path))); return;
       case 'fs-write': {
-        await withWorkspace(worker, () => workspace.write(args.path, checkedFileContent(args))); reply(null); return;
+        await withJobWorkspace(job, worker, () => workspace.write(args.path, checkedFileContent(args))); reply(null); return;
       }
       case 'fs-append': {
         if (typeof args.content !== 'string') throw new Error('append content must be text');
-        await withWorkspace(worker, async () => {
+        await withJobWorkspace(job, worker, async () => {
           const previous = await workspace.exists(args.path) ? await workspace.read(args.path) : '';
           await workspace.write(args.path, checkedFileContent({ content: `${previous}${args.content}` }));
         });
         reply(null); return;
       }
-      case 'fs-list': reply(await withWorkspace(worker, () => workspace.list())); return;
-      case 'fs-list-dir': reply(await withWorkspace(worker, () => workspace.listDir(args.path))); return;
-      case 'fs-stat': reply(await withWorkspace(worker, () => workspace.stat(args.path))); return;
-      case 'fs-exists': reply(await withWorkspace(worker, () => workspace.exists(args.path))); return;
-      case 'fs-mkdir': await withWorkspace(worker, () => workspace.mkdir(args.path, { recursive: args.recursive === true })); reply(null); return;
-      case 'fs-remove': await withWorkspace(worker, () => workspace.remove(args.path, { recursive: args.recursive === true })); reply(null); return;
-      case 'fs-copy': await withWorkspace(worker, () => workspace.copy(args.from, args.to, { recursive: args.recursive === true })); reply(null); return;
-      case 'fs-move': await withWorkspace(worker, () => workspace.move(args.from, args.to)); reply(null); return;
+      case 'fs-list': reply(await withJobWorkspace(job, worker, () => workspace.list())); return;
+      case 'fs-list-dir': reply(await withJobWorkspace(job, worker, () => workspace.listDir(args.path))); return;
+      case 'fs-stat': reply(await withJobWorkspace(job, worker, () => workspace.stat(args.path))); return;
+      case 'fs-exists': reply(await withJobWorkspace(job, worker, () => workspace.exists(args.path))); return;
+      case 'fs-mkdir': await withJobWorkspace(job, worker, () => workspace.mkdir(args.path, { recursive: args.recursive === true })); reply(null); return;
+      case 'fs-remove': await withJobWorkspace(job, worker, () => workspace.remove(args.path, { recursive: args.recursive === true })); reply(null); return;
+      case 'fs-copy': await withJobWorkspace(job, worker, () => workspace.copy(args.from, args.to, { recursive: args.recursive === true })); reply(null); return;
+      case 'fs-move': await withJobWorkspace(job, worker, () => workspace.move(args.from, args.to)); reply(null); return;
       case 'git': {
         const remoteOp = podGitRemoteOperation(args.argv);
         let remoteGrant = null;
@@ -313,7 +330,7 @@ const answerWorkerRequest = async (worker, message, job) => {
             job.remoteGitGrantConsumed = true;
           }
         }
-        const response = /** @type {any} */ (await withWorkspace(worker, () => browser.runtime.sendMessage({
+        const response = /** @type {any} */ (await withJobWorkspace(job, worker, () => browser.runtime.sendMessage({
           type: 'pod/git', podId, jobId: job.id, argv: args.argv, cwd: args.cwd,
           remoteGrant,
         })));
@@ -322,7 +339,7 @@ const answerWorkerRequest = async (worker, message, job) => {
       }
       case 'js-run': reply(await runPodJavaScript(job, args)); return;
       case 'jobs': reply([...jobs.values()].map((entry) => publicJob(entry, { includeOutput: false }))); return;
-      case 'cancel-job': reply(cancelJob(String(args.jobId ?? ''))); return;
+      case 'cancel-job': reply(await cancelJob(String(args.jobId ?? ''))); return;
       default: throw new Error(`unknown Pod host operation: ${message.op}`);
     }
   } catch (error) { fail(error); }
@@ -343,13 +360,17 @@ const answerFetch = async (worker, message, job) => {
 };
 
 /** @param {string} jobId */
-const cancelJob = (jobId) => {
+const cancelJob = async (jobId) => {
   const job = jobs.get(jobId);
   if (!job) return { jobId, cancelled: false, state: 'not_found' };
   if (job.state !== 'running') return { jobId, cancelled: false, state: job.state };
+  if (job.settling) {
+    await job.completion;
+    return { jobId, cancelled: false, state: job.state };
+  }
   browser.runtime.sendMessage({ type: 'pod/cancel-io', podId, jobId }).catch(() => {});
-  job.settle?.({ stderr: 'cancelled\n', exitCode: 130, durationMs: Date.now() - job.startedAt });
-  return { jobId, cancelled: true, state: 'failed' };
+  await job.settle?.({ cancelled: true, exitCode: 130, durationMs: Date.now() - job.startedAt });
+  return { jobId, cancelled: true, state: job.state };
 };
 
 /** @param {string} command @param {{jobId?:string,timeoutMs?:number,background?:boolean,render?:boolean,source?:'agent'|'user',remoteGitGrant?:true|{op:string,url:string}|null}} [options] */
@@ -365,7 +386,8 @@ const startJob = (command, { jobId, timeoutMs = 30_000, background = false, rend
   const completion = new Promise((done) => { resolve = done; });
   const restoreTerminalFocus = !background && source === 'user' && document.activeElement === input;
   const job = /** @type {PodJob} */ ({
-    id, command, state: 'running', stdout: '', stderr: '', exitCode: null,
+    id, command, state: 'running', settling: false, workspaceOps: createPodJobOperationTracker(),
+    completion, stdout: '', stderr: '', exitCode: null,
     startedAt: Date.now(), timeoutMs, worker, children: new Set(), resolve,
     remoteGitGrant, remoteGitGrantConsumed: false, background, render, restoreTerminalFocus,
   });
@@ -378,21 +400,29 @@ const startJob = (command, { jobId, timeoutMs = 30_000, background = false, rend
     append('entry-command', `${source === 'agent' ? '[agent] ' : ''}${cwd} $ ${command}\n`);
     append('entry-meta', `[${id} · running${background ? ' in background' : ''}]\n`);
   }
-  const settle = (/** @type {any} */ result) => {
-    if (job.state !== 'running') return;
+  const settle = async (/** @type {any} */ result) => {
+    if (job.settling) return completion;
+    if (job.state !== 'running') return publicJob(job);
+    job.settling = true;
     clearTimeout(job.timer);
-    releaseWorkspace(worker);
     try { worker.terminate(); } catch {}
     for (const child of job.children) try { child.terminate(); } catch {}
     job.children.clear();
+    // Close admission before draining. OPFS writes cannot be interrupted once
+    // started, so the terminal result is not observable until every admitted
+    // host mutation has either completed or been refused at its queued gate.
+    const release = releaseWorkspace(worker);
+    await Promise.allSettled([release, job.workspaceOps.closeAndDrain()]);
     const rawStdout = String(result?.stdout ?? '');
     const rawStderr = String(result?.stderr ?? '');
     job.stdout = rawStdout.slice(0, MAX_JOB_OUTPUT);
     job.stderr = rawStderr.slice(0, MAX_JOB_OUTPUT);
     job.stdoutTruncated = result?.stdoutTruncated === true || rawStdout.length > MAX_JOB_OUTPUT;
     job.stderrTruncated = result?.stderrTruncated === true || rawStderr.length > MAX_JOB_OUTPUT;
-    job.exitCode = Number.isInteger(result?.exitCode) ? result.exitCode : 1;
-    job.state = job.exitCode === 0 ? 'completed' : 'failed';
+    const exitCode = Number.isInteger(result?.exitCode) ? Number(result.exitCode) : 1;
+    const terminalState = podJobState({ cancelled: result?.cancelled === true, exitCode });
+    job.exitCode = exitCode;
+    job.state = terminalState;
     job.finishedAt = Date.now();
     job.durationMs = Number(result?.durationMs ?? job.finishedAt - job.startedAt);
     // Background commands run as independent subshells: finishing last must
@@ -404,35 +434,42 @@ const startJob = (command, { jobId, timeoutMs = 30_000, background = false, rend
       && (document.activeElement === stopButton || document.activeElement === document.body);
     if (activeForegroundJobId === id) activeForegroundJobId = null;
     updateForegroundControls();
+    jobStatus.textContent = podJobStatusMessage({
+      id: job.id, state: terminalState, exitCode,
+      stdout: job.stdout, stderr: job.stderr,
+    });
     if (shouldRestoreTerminalFocus) input.focus({ preventScroll: true });
     if (render) {
       append('entry-stdout', job.stdout);
       append('entry-stderr', job.stderr);
       if (job.stdoutTruncated || job.stderrTruncated) append('entry-meta', '[output truncated in this terminal; redirect to a file before displaying large output, or ask the owning agent to page retained output]\n');
-      append('entry-meta', `[${job.id} · exit ${job.exitCode} · ${Math.round(job.durationMs)}ms]\n`);
+      append('entry-meta', job.state === 'cancelled'
+        ? `[${job.id} · cancelled · ${Math.round(job.durationMs)}ms]\n`
+        : `[${job.id} · exit ${job.exitCode} · ${Math.round(job.durationMs)}ms]\n`);
     }
     editor?.refreshExternalChanges?.({ ifRevision: job.editorRevision }).then((sync) => {
       if (sync?.conflict && render) append('entry-meta', `[${job.id} · editor changed during the command; active file was not reloaded]\n`);
     }).catch(() => editor?.refreshTree?.().catch(() => {}));
     resolve(publicJob(job));
+    return publicJob(job);
   };
   job.settle = settle;
   job.timer = setTimeout(() => {
     if (job.state !== 'running') return;
     browser.runtime.sendMessage({ type: 'pod/cancel-io', podId, jobId: id }).catch(() => {});
-    settle({ stderr: `timed out after ${timeoutMs}ms\n`, exitCode: 124, durationMs: timeoutMs });
+    settle({ stderr: `timed out after ${timeoutMs}ms\n`, exitCode: 124, durationMs: timeoutMs }).catch(() => {});
   }, Math.min(300_000, Math.max(1, timeoutMs)));
   worker.addEventListener('message', (event) => {
     const message = event.data;
     if (message?.type === 'pod-request') { answerWorkerRequest(worker, message, job); return; }
     if (message?.type === 'fetch-request') { answerFetch(worker, message, job); return; }
-    if (message?.type === 'done') settle(message.result);
+    if (message?.type === 'done') settle(message.result).catch(() => {});
   });
-  worker.addEventListener('error', (event) => settle({ stderr: `worker error: ${event.message || 'unknown'}\n`, exitCode: 1 }));
+  worker.addEventListener('error', (event) => settle({ stderr: `worker error: ${event.message || 'unknown'}\n`, exitCode: 1 }).catch(() => {}));
   Promise.resolve(editor?.flushSave?.()).then(() => {
     job.editorRevision = editor?.getRevision?.();
     if (job.state === 'running') worker.postMessage({ type: 'run', command, cwd, env: environment });
-  }).catch((error) => settle({ stderr: `editor save failed: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}\n`, exitCode: 1 }));
+  }).catch((error) => settle({ stderr: `editor save failed: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}\n`, exitCode: 1 }).catch(() => {}));
   return background ? Promise.resolve(publicJob(job)) : completion;
 };
 
@@ -464,7 +501,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ me
           ...(job ? { job } : { jobs: [...jobs.values()].map((entry) => publicJob(entry, { includeOutput: false })) }),
         } });
       }
-      else if (message.type === 'pod/cancel') sendResponse({ ok: true, podId, ...cancelJob(String(message.jobId ?? '')) });
+      else if (message.type === 'pod/cancel') sendResponse({ ok: true, podId, ...(await cancelJob(String(message.jobId ?? ''))) });
       else if (message.type === 'pod/read-file') sendResponse({ ok: true, content: await enqueueWorkspace(() => workspace.read(message.path)) });
       else if (message.type === 'pod/write-file') {
         const content = checkedFileContent(message);
@@ -532,7 +569,7 @@ form.addEventListener('submit', (event) => {
 });
 
 stopButton.addEventListener('click', () => {
-  if (activeForegroundJobId) cancelJob(activeForegroundJobId);
+  if (activeForegroundJobId) cancelJob(activeForegroundJobId).catch(() => {});
 });
 
 (async () => {

@@ -9,6 +9,10 @@
 * { box-sizing: border-box; }
 html, body { width: 100%; height: 100%; margin: 0; background: var(--bg); color: var(--fg); }
 body { font: 13px/1.45 var(--mono); }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
 .boot-card { height: 100%; display: grid; place-content: center; text-align: center; color: var(--muted); }
 .boot-card[hidden] { display: none; }
 .boot-card h2 { color: var(--fg); font-size: 16px; }

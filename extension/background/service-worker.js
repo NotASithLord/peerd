@@ -482,6 +482,7 @@ import { makeSettingsRoutes } from './routes/settings.js';
 import { makeSessionMutationRoutes } from './routes/session-mutations.js';
 import { makeLocalModelRoutes } from './routes/local-model.js';
 import { makeDwebRoutes } from './routes/dweb.js';
+import { createDwebRollbackGuard } from './dweb-rollback-guard.js';
 import { makeToolboxRoutes } from './routes/toolbox.js';
 import { makeActorsRoutes } from './routes/actors.js';
 import { makeScriptRunControlRoutes } from './routes/script-run-control.js';
@@ -699,6 +700,9 @@ const DEFAULT_SETTINGS = CHANNEL_DEFAULTS;
 // room-hosting page. Store-safe: not the dweb module path. Mirrors
 // identity/keypair.js SECRET_NAME by convention.
 const DWEB_IDENTITY_SECRET = 'distributed/identity/v1';
+// Certificate-only enrolled devices must not let legacy public-network
+// startup turn the intentionally absent person root into a new identity.
+const DWEB_SELF_RECORDS_SECRET = 'distributed/self-records/v1';
 // Extended-thinking budget (tokens) when reasoningEnabled. Modest by
 // design — enough for a real plan, not a dissertation. The adapter
 // lifts max_tokens above this so the visible answer still has room.
@@ -3659,6 +3663,7 @@ const dwebIdentityCustody = makeDwebIdentityCustody({
   identitySecretName: DWEB_IDENTITY_SECRET,
   withIdentityMutation: withDwebIdentityMutation,
   canChangeIdentity: canChangeDwebIdentity,
+  canMintIdentity: async () => !await vault.getSecret(DWEB_SELF_RECORDS_SECRET),
 });
 const dwebCustodyClient = makeDwebCustodyClient({
   ensureOffscreen,
@@ -7898,7 +7903,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     appRegistry, appClient, appTabTracker, appQuiescence, settingsStore, shareLocalApp,
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
     disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady,
-    repositories, isOffscreenSender,
+    repositories, isOffscreenSender, createDwebRollbackGuard,
   }),
 
   // --- git credentials (host-bound bearer tokens; same vault as API keys) ---

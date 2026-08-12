@@ -12,8 +12,7 @@
 // the store package, same as when these routes were inline. (Do not write the
 // hyphenated module-dir name here — the store-artifact verifier greps for that
 // literal string in every shipped file.)
-// Imports nothing (every collaborator injected, incl. DWEB_ENABLED + the two
-// hardcoded names).
+// Every privileged collaborator is injected.
 
 /**
  * @param {Record<string, any>} deps
@@ -25,8 +24,45 @@ export const makeDwebRoutes = (deps) => {
     appRegistry, appClient, appTabTracker, appQuiescence, settingsStore, shareLocalApp,
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
     disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady, repositories,
-    isOffscreenSender,
+    isOffscreenSender, createDwebRollbackGuard,
   } = deps;
+  const rollbackGuard = createDwebRollbackGuard({ kv });
+
+  /**
+   * Public discovery installs carry a complete stream tuple. Cold URI/private
+   * room installs carry neither dwapp_id nor seq and remain intentionally
+   * untracked. A partial tuple is never silently downgraded to untracked.
+   * @param {any} dweb
+   */
+  const trackedVersion = (dweb) => {
+    const trackingClaimed = dweb?.dwapp_id != null || dweb?.seq != null;
+    if (!trackingClaimed) return { ok: true, candidate: null };
+    if (typeof dweb?.dwapp_id !== 'string'
+        || typeof dweb?.publisher !== 'string'
+        || !Number.isSafeInteger(dweb?.seq)
+        || typeof dweb?.version_id !== 'string') {
+      return { ok: false, error: 'dweb-version-metadata-invalid' };
+    }
+    return {
+      ok: true,
+      candidate: {
+        dwappId: dweb.dwapp_id,
+        publisher: dweb.publisher,
+        seq: dweb.seq,
+        versionId: dweb.version_id,
+      },
+    };
+  };
+
+  /** @param {any} dweb */
+  const admitTrackedVersion = async (dweb) => {
+    const tracked = trackedVersion(dweb);
+    if (!tracked.ok || !tracked.candidate) return tracked;
+    const result = await rollbackGuard.admit(tracked.candidate);
+    return result.accepted === true
+      ? { ok: true, candidate: tracked.candidate }
+      : { ok: false, error: result.error ?? 'dweb-version-refused' };
+  };
 
   // Cold workers expose channel defaults until persisted settings hydrate.
   // Effectful/read routes fail closed if that hydration is still unavailable.
@@ -47,6 +83,18 @@ export const makeDwebRoutes = (deps) => {
   };
 
   return {
+    // The offscreen discovery host calls this only after signature + shape +
+    // derived-id verification. Persist BEFORE its in-memory Library accepts the
+    // card, so tearing that host down cannot erase the anti-rollback decision.
+    'dweb/meta-admit': async ({ dwappId, publisher, seq, versionId }, sender) => {
+      if (isOffscreenSender?.(sender) !== true) return { ok: false, accepted: false, error: 'offscreen-sender-required' };
+      if (!(await dwebReady())) return { ok: false, accepted: false, error: 'dweb-disabled' };
+      try { return await rollbackGuard.admit({ dwappId, publisher, seq, versionId }); }
+      catch (error) {
+        return { ok: false, accepted: false, error: /** @type {{ message?: string }} */ (error)?.message ?? String(error) };
+      }
+    },
+
     'dweb/app-snapshot': async ({ appId }, sender) => {
       if (isOffscreenSender?.(sender) !== true) return { ok: false, error: 'offscreen-sender-required' };
       if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
@@ -88,6 +136,8 @@ export const makeDwebRoutes = (deps) => {
       let record = null;
       let createdAppId = null;
       try {
+        const admitted = await admitTrackedVersion(dweb);
+        if (!admitted.ok) return { ok: false, error: admitted.error };
         record = await appClient.create({ appId, name, files, entryFile, fileKinds, dweb, source: 'dweb' });
         createdAppId = record.id;
         const repository = await repositories.statusApp(record.id);
@@ -132,6 +182,12 @@ export const makeDwebRoutes = (deps) => {
           if (rec.dweb?.dwapp_id && dweb?.dwapp_id !== rec.dweb.dwapp_id) {
             return { ok: false, error: 'dwapp-id-changed' };
           }
+          if (Number.isSafeInteger(rec.dweb?.seq)
+              && (!Number.isSafeInteger(dweb?.seq) || dweb.seq <= rec.dweb.seq)) {
+            return { ok: false, error: 'dweb-version-not-newer' };
+          }
+          const admitted = await admitTrackedVersion(dweb);
+          if (!admitted.ok) return { ok: false, error: admitted.error };
 
           const repository = await repositories.statusApp(appId);
           const diverged = !rec.dweb?.git_oid

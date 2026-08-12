@@ -11,13 +11,19 @@
 
 import { createTabTracker } from './tab-tracker.js';
 import { NOTEBOOK_TAB_PATH } from '/peerd-engine/index.js';
+import browser from '/vendor/browser-polyfill.js';
 
 const READY_TIMEOUT_MS = 15_000;       // Notebooks boot fast; tighter than VMs
+const QUIESCE_TIMEOUT_MS = 5_000;
 
 /** @param {{ announce?: import('./tab-tracker.js').TabTrackerConfig['announce'],
  *   onAdopt?: import('./tab-tracker.js').TabTrackerConfig['onAdopt'],
- *   onDrop?: import('./tab-tracker.js').TabTrackerConfig['onDrop'] }} [deps] */
-export const createJsTabTracker = ({ announce, onAdopt, onDrop } = {}) => {
+ *   onDrop?: import('./tab-tracker.js').TabTrackerConfig['onDrop'],
+ *   sendTabMessage?: (tabId:number, message:any)=>Promise<any> }} [deps] */
+export const createJsTabTracker = ({
+  announce, onAdopt, onDrop,
+  sendTabMessage = browser.tabs.sendMessage.bind(browser.tabs),
+} = {}) => {
   const tracker = createTabTracker({
     tabPath: NOTEBOOK_TAB_PATH,
     readyTimeoutMs: READY_TIMEOUT_MS,
@@ -29,6 +35,33 @@ export const createJsTabTracker = ({ announce, onAdopt, onDrop } = {}) => {
     kindLabel: 'a Notebook',
   });
 
+  /** Flush and freeze a live Notebook editor before repository work. */
+  const quiesceTab = async (/** @type {string} */ notebookId) => {
+    const tabId = tracker.getTabId(notebookId);
+    if (tabId == null) return false;
+    /** @type {ReturnType<typeof setTimeout>|undefined} */ let timer;
+    try {
+      const response = /** @type {any} */ (await Promise.race([
+        sendTabMessage(tabId, { type: 'js/quiesce', action: 'acquire', notebookId }),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`Notebook ${notebookId} editor flush timed out`)), QUIESCE_TIMEOUT_MS);
+        }),
+      ]));
+      if (!response?.ok) throw new Error(response?.error ?? `Notebook ${notebookId} editor flush failed`);
+      return true;
+    } finally { clearTimeout(timer); }
+  };
+
+  /** Re-enable a Notebook after non-tree-replacing repository work. */
+  const resumeTab = async (/** @type {string} */ notebookId) => {
+    const tabId = tracker.getTabId(notebookId);
+    if (tabId == null) return false;
+    const response = /** @type {any} */ (await sendTabMessage(tabId, {
+      type: 'js/quiesce', action: 'release', notebookId,
+    }));
+    return response?.ok === true;
+  };
+
   return {
     bootstrap: tracker.bootstrap,
     onTabReady: tracker.onTabReady,
@@ -38,6 +71,9 @@ export const createJsTabTracker = ({ announce, onAdopt, onDrop } = {}) => {
     isReady: tracker.isReady,
     ensureTab: tracker.ensureTab,
     closeTab: tracker.closeTab,
+    reloadTab: tracker.reloadTab,
+    quiesceTab,
+    resumeTab,
     listLive: tracker.listLive,
   };
 };

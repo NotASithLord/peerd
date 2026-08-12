@@ -41,7 +41,7 @@ describe('base-room — a dwapp room over the shared base mesh (no signaler)', (
     rb.gossip.subscribe('feed', (m: any) => got.push(m));
     await tick();
     await ra.gossip.publish('feed', { text: 'hi room' });
-    await tick();
+    await waitFor(() => got.some((m) => m.data.text === 'hi room'));
     expect(got.map((m) => m.data.text)).toContain('hi room');
     ra.leave(); rb.leave(); a.close(); b.close();
   });
@@ -57,7 +57,7 @@ describe('base-room — a dwapp room over the shared base mesh (no signaler)', (
     rbBeta.gossip.subscribe('feed', (m: any) => beta.push(m));
     await tick();
     await ra.gossip.publish('feed', { text: 'global-only' });
-    await tick();
+    await waitFor(() => alpha.some((m) => m.data.text === 'global-only'));
     expect(alpha.map((m) => m.data.text)).toContain('global-only');
     expect(beta.length).toBe(0);                // never leaked into the other room
     ra.leave(); rbAlpha.leave(); rbBeta.leave(); a.close(); b.close();
@@ -69,7 +69,7 @@ describe('base-room — a dwapp room over the shared base mesh (no signaler)', (
     const rb = b.openRoom('peerd-global', { meta: () => ({ name: 'bo' }) });
     await tick();
     ra.presence.announce(); rb.presence.announce();
-    await tick();
+    await waitFor(() => rb.presence.list().some((p: any) => p.did === ia.did));
     const bSeesA = rb.presence.list().find((p: any) => p.did === ia.did);
     expect(bSeesA?.meta).toEqual({ name: 'ada' });
     ra.leave(); rb.leave(); a.close(); b.close();
@@ -83,7 +83,7 @@ describe('base-room — a dwapp room over the shared base mesh (no signaler)', (
     rb.direct.onMessage((m: any) => directs.push(m));
     await tick();
     await ra.direct.send(b.did, { secret: 'just you' });
-    await tick();
+    await waitFor(() => directs.some((m) => m.data.secret === 'just you'));
     expect(directs.map((m) => m.data.secret)).toContain('just you');
     expect(directs[0].from).toBe(ia.did);
     ra.leave(); rb.leave(); a.close(); b.close();
@@ -149,7 +149,7 @@ describe('base-room — a dwapp room over the shared base mesh (no signaler)', (
     ]);
     ma.addLink(ca, ib.did);
     mb.addLink(cb, ia.did);
-    await tick(80);
+    await waitFor(() => got.some((m) => m.data.text === 'before-you-joined'));
 
     expect(got.map((m) => m.data.text)).toContain('before-you-joined');
     ra.leave(); rb.leave(); a.close(); b.close();

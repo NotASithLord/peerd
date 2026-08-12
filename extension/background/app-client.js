@@ -803,8 +803,12 @@ export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => 
     await tracker.closeTab(appId);
     await withMutation(appId, async () => {
       await new Promise((r) => setTimeout(r, 100));
-      try { await guardedOpfsForApp(appId).nuke(); }
-      catch (e) { console.warn('[app-client] OPFS nuke failed', e); }
+      // Every App now owns a separate peerd-git/app/<id> DAG and remote
+      // configuration. Deletion is one fail-closed transaction: preserve the
+      // catalog/worktree recovery handle unless Git cleanup succeeds, and never
+      // claim deletion while either durable byte root remains.
+      await repositories?.destroyApp?.(appId);
+      await guardedOpfsForApp(appId).nuke();
       await registry.delete(appId);
     });
     return true;

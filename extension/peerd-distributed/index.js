@@ -17,8 +17,69 @@
 // docs/distributed and land in later phases.
 
 // --- identity (Ed25519, did:key) ----------------------------------------
-export { generateIdentity, createPersistentIdentity, importIdentity, verifySignature } from './identity/keypair.js';
+export {
+  generateIdentity, createPersistentIdentity, importIdentity, verifySignature,
+  IDENTITY_SECRET_NAME,
+} from './identity/keypair.js';
 export { encodeDidKey, decodeDidKey } from './identity/did.js';
+
+// --- portable identity: device subkeys + certificates -------------------
+// A per-install device key (never exported) certified by the person root, and
+// the signed roster whose revocation entries supersede standing.
+export { createPersistentDeviceIdentity, loadDeviceKeyMaterial, DEVICE_KEY_SECRET_NAME } from './identity/device-key.js';
+export {
+  issueDeviceCertificate, verifyDeviceCertificate, validateDeviceCertificate,
+  buildDeviceRoster, verifyDeviceRoster, validateDeviceRoster,
+  rosterSupersedes, deviceStatusInRoster,
+} from './identity/device-certificate.js';
+
+// --- portable identity: passkey enrollment authority --------------------
+// The root-signed record that makes a WebAuthn credential an enrollment/
+// recovery authority for a did, plus the pure assertion verifier peers run
+// offline against it.
+export {
+  buildPasskeyBinding, verifyPasskeyBinding, validatePasskeyBinding,
+  bindingSupersedes, activeBindingCredential, CANONICAL_RP_ID,
+} from './identity/passkey-binding.js';
+export { verifyPasskeyAssertion } from './identity/webauthn-verify.js';
+
+// --- self-device: private discovery, mutual auth, enrollment, sync ------
+export {
+  deriveRendezvousTopic, rendezvousWindow, mintDiscoverySecret,
+  SELF_RENDEZVOUS_DOMAIN, ENROLL_RENDEZVOUS_DOMAIN, RENDEZVOUS_EPOCH_MS,
+} from './self/rendezvous.js';
+export {
+  buildAuthHello, evaluateAuthHello, buildAuthProof, verifyAuthProof, mintAuthNonce,
+} from './self/handshake.js';
+export {
+  deriveEnrollSecrets, deriveEnrollIdentityCommitment,
+  verifyEnrollIdentityCommitment, enrollPrfInput,
+  buildEnrollRequest, evaluateEnrollRequest, buildEnrollChallenge,
+  enrollCeremonyChallenge, buildEnrollProof, evaluateEnrollProof,
+  sealEnrollmentGrant, openEnrollmentGrant,
+  mintEnrollmentKeyPair, exportEnrollmentPublicKey,
+} from './self/enroll.js';
+export {
+  buildSnapshotOffer, validateSnapshotManifest, buildSyncOffer, buildSyncPull,
+  buildSyncChunks, buildSyncRefuse, validateSyncPull, createSurfaceCollector,
+  encodeSurfacePayload, decodeSurfacePayload, surfaceHash, SYNC_SURFACES,
+} from './self/sync.js';
+export { createSelfDeviceCoordinator } from './self/coordinator.js';
+export { createSelfDeviceMesh } from './self/mesh.js';
+export {
+  buildDiscoveryRotation, verifyDiscoveryRotation, DISCOVERY_ROTATION_VERSION,
+} from './self/discovery-rotation.js';
+export { createSyncSource, createSyncReceiver } from './self/host.js';
+export {
+  buildCeremonyRequest, acceptCeremonyReply, ceremonyFailureReason,
+  CEREMONY_ORIGIN, CEREMONY_URL,
+} from './self/ceremony-client.js';
+export {
+  ensureFounderCustody, issueEnrolledDeviceRecords, ensureEnrolledCustody, loadCoordinatorInputs,
+  loadDiscoverySecret, storeDiscoverySecret, rotateDiscoverySecret,
+  storeSelfRecords, loadSelfRecords,
+  DISCOVERY_SECRET_NAME, SELF_RECORDS_NAME,
+} from './self/custody.js';
 
 // --- content addressing (peerd://, signed manifests, chunked bundles) ----
 export { parsePeerdUri, formatPeerdUri } from './content/uri.js';

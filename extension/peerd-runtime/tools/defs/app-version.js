@@ -31,13 +31,15 @@ export const repositoryVersionTool = {
     const id = /** @type {any} */ (ctx).actorInstanceId;
     if (!repositories || !id || !['app', 'notebook', 'pod'].includes(kind)) return { ok: false, error: 'repository_unavailable' };
     const ref = { kind, id };
-    const destructive = args.op === 'checkout' || args.op === 'restore' || args.op === 'branch';
+    const replacesTree = args.op === 'checkout' || args.op === 'restore';
     const tracker = kind === 'pod' ? /** @type {any} */ (ctx).podTabTracker
       : /** @type {any} */ (ctx).jsTabTracker;
     const appQuiescence = /** @type {any} */ (ctx).appQuiescence;
     const podClient = /** @type {any} */ (ctx).podClient;
     const podLive = kind === 'pod' && tracker?.getTabId?.(id) != null;
-    const reopen = kind === 'notebook' && destructive && tracker?.getTabId?.(id) != null;
+    const notebookLive = kind === 'notebook' && tracker?.getTabId?.(id) != null;
+    let notebookQuiesced = false;
+    let operationSucceeded = false;
     try {
       if (args.op === 'branch' && typeof args.name !== 'string') return { ok: false, error: 'branch_name_required' };
       if (args.op === 'checkout' && typeof args.name !== 'string') return { ok: false, error: 'branch_name_required' };
@@ -51,9 +53,11 @@ export const repositoryVersionTool = {
         });
         if (answer !== 'yes_once' && answer !== 'yes_session' && answer !== true) return { ok: false, error: 'restore_declined' };
       }
-      if (reopen) {
-        await tracker.closeTab(id);
-        await new Promise((resolve) => setTimeout(resolve, 100));
+      if (notebookLive) {
+        if (typeof tracker?.quiesceTab !== 'function' || await tracker.quiesceTab(id) !== true) {
+          throw new Error('Notebook editor quiesce unavailable');
+        }
+        notebookQuiesced = true;
       }
       const operation = () => repositories.coordinate(ref, async () => {
         if (args.op === 'checkpoint') return repositories.commit(ref, { message: typeof args.message === 'string' ? args.message : 'checkpoint' });
@@ -71,11 +75,19 @@ export const repositoryVersionTool = {
           : await operation();
       if (kind === 'app' && result === undefined) throw new Error('App editor quiesce unavailable');
       if (podLive && result === undefined) throw new Error('Pod workspace quiesce unavailable');
+      operationSucceeded = true;
       return { ok: true, content: JSON.stringify({ repository: ref, op: args.op, result }, null, 2) };
     } catch (e) {
       return { ok: false, error: `repo_version_failed: ${/** @type {{message?:string}} */ (e)?.message ?? String(e)}` };
     } finally {
-      if (reopen) tracker.ensureTab(id, { active: false, groupTitle: 'peerd' }).catch(() => {});
+      if (notebookQuiesced) {
+        // checkout/restore replace bytes the live editor has cached; reload the
+        // same tab (preserving focus/window placement) instead of closing it.
+        if (operationSucceeded && replacesTree) {
+          const reloaded = await tracker.reloadTab?.(id).catch(() => false);
+          if (!reloaded) await tracker.resumeTab?.(id).catch(() => {});
+        } else await tracker.resumeTab?.(id).catch(() => {});
+      }
     }
   },
 };

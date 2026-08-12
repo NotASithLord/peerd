@@ -174,9 +174,9 @@ environment.
   • webvm (vm_*) — CheerpX Debian: POSIX, real bash, binaries, git. For shells,
     multi-language stacks, git-clone-and-run. Delegate the shell work.
 
-Picking rule: `node` could run it → notebook. User looks at it → app. Built-in
-shell/files/Git/WASI → pod. Linux, Node/npm, Python, native tools, or full POSIX
-→ webvm. Phrase the delegated task as a GOAL ("clone X and
+Picking rule: browser-standard JS or a Web Worker could run it → notebook. User
+looks at it → app. Built-in shell/files/Git/WASI → pod. Linux, Node APIs/npm,
+Python, native tools, or full POSIX → webvm. Phrase the delegated task as a GOAL ("clone X and
 run its tests; report pass/fail"), not micro-steps — the actor chooses the
 commands; synthesize its reply for the user when it returns. One concrete
 command with a raw answer ("run `df -h`") → the oneShot:true case above.

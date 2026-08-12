@@ -23,6 +23,26 @@ describe('repository actor tools', () => {
     expect(result).toEqual({ ok: false, error: 'git_push_rejected: non-fast-forward' });
   });
 
+  test('does not reuse approval after the remote changes while consent is pending', async () => {
+    let reads = 0;
+    let pushed = false;
+    const repositories = {
+      getRemote: async () => (++reads === 1
+        ? { url: 'https://github.com/owner/approved.git', host: 'github.com' }
+        : { url: 'https://gitlab.com/attacker/rebound.git', host: 'gitlab.com' }),
+      coordinate: async (_ref: any, operation: () => Promise<any>) => operation(),
+      commit: async () => ({ created: false }),
+      push: async () => { pushed = true; return { ok: true }; },
+    };
+    const result = await repositoryRemoteTool.execute(
+      { op: 'push' }, actorContext(repositories) as any,
+    );
+    expect(result.ok).toBe(false);
+    expect('error' in result && result.error)
+      .toContain('remote changed while authorization was pending');
+    expect(pushed).toBe(false);
+  });
+
   test('refuses arbitrary/private refs before a model-facing diff', async () => {
     let diffCalled = false;
     const repositories = {
@@ -112,5 +132,77 @@ describe('repository actor tools', () => {
     );
     expect(result.ok).toBe(true);
     expect(order).toEqual(['flush', 'close', 'lock', 'checkpoint', 'push', 'unlock', 'reopen']);
+  });
+
+  test('flushes a live Notebook before branch and leaves its tab open', async () => {
+    const order: string[] = [];
+    const repositories = {
+      coordinate: async (_ref: any, operation: () => Promise<any>) => {
+        order.push('lock');
+        try { return await operation(); } finally { order.push('unlock'); }
+      },
+      branch: async () => { order.push('branch'); return { branch: 'feature' }; },
+    };
+    const tracker = {
+      getTabId: () => 17,
+      quiesceTab: async () => { order.push('flush'); return true; },
+      resumeTab: async () => { order.push('resume'); return true; },
+      reloadTab: async () => { order.push('reload'); return true; },
+      closeTab: async () => { order.push('close'); return true; },
+    };
+    const result = await repositoryVersionTool.execute(
+      { op: 'branch', name: 'feature' },
+      actorContext(repositories, { actorType: 'notebook', jsTabTracker: tracker }) as any,
+    );
+    expect(result.ok).toBe(true);
+    expect(order).toEqual(['flush', 'lock', 'branch', 'unlock', 'resume']);
+  });
+
+  test('flushes then reloads the same live Notebook after restore', async () => {
+    const order: string[] = [];
+    const repositories = {
+      coordinate: async (_ref: any, operation: () => Promise<any>) => {
+        order.push('lock');
+        try { return await operation(); } finally { order.push('unlock'); }
+      },
+      restore: async () => { order.push('restore'); return { restored: true }; },
+    };
+    const tracker = {
+      getTabId: () => 17,
+      quiesceTab: async () => { order.push('flush'); return true; },
+      resumeTab: async () => { order.push('resume'); return true; },
+      reloadTab: async () => { order.push('reload'); return true; },
+    };
+    const result = await repositoryVersionTool.execute(
+      { op: 'restore', to: 'abc123' },
+      actorContext(repositories, { actorType: 'notebook', jsTabTracker: tracker }) as any,
+    );
+    expect(result.ok).toBe(true);
+    expect(order).toEqual(['flush', 'lock', 'restore', 'unlock', 'reload']);
+  });
+
+  test('flushes a live Notebook before checkpoint-and-push', async () => {
+    const order: string[] = [];
+    const remote = { url: 'https://github.com/owner/repo.git', host: 'github.com' };
+    const repositories = {
+      getRemote: async () => remote,
+      coordinate: async (_ref: any, operation: () => Promise<any>) => {
+        order.push('lock');
+        try { return await operation(); } finally { order.push('unlock'); }
+      },
+      commit: async () => { order.push('checkpoint'); return { created: true }; },
+      push: async () => { order.push('push'); return { ok: true }; },
+    };
+    const tracker = {
+      getTabId: () => 17,
+      quiesceTab: async () => { order.push('flush'); return true; },
+      resumeTab: async () => { order.push('resume'); return true; },
+    };
+    const result = await repositoryRemoteTool.execute(
+      { op: 'push' },
+      actorContext(repositories, { actorType: 'notebook', jsTabTracker: tracker }) as any,
+    );
+    expect(result.ok).toBe(true);
+    expect(order).toEqual(['flush', 'lock', 'checkpoint', 'push', 'unlock', 'resume']);
   });
 });

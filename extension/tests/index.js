@@ -95,6 +95,7 @@ import './unit/offscreen/job-runner-toolbox.test.js';
 // --- background (SW chassis: tab trackers + RPC clients + live SW routes) ---
 import './unit/background/vm-tab-close.test.js';
 import './unit/background/app-tab-tracker.test.js';
+import './unit/background/notebook-tab-tracker.test.js';
 import './unit/background/pod-client.test.js';
 import './unit/background/state-get.test.js';
 import './unit/background/script-model-call.test.js';

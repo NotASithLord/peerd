@@ -81,6 +81,7 @@ describe('options.api-integrations', () => {
     try {
       expect(root.textContent).toContain('Git credentials');
       expect(root.textContent).toContain('No git tokens yet');   // the git list's empty state
+      expect(root.textContent).toContain('Notebooks, and Pods');
       // Two forms now: API keys + git tokens, both under the one API-integrations section.
       expect(root.querySelectorAll('.provider-card-form').length).toBe(2);
     } finally { unmount(); }

@@ -50,7 +50,19 @@ export const DURABILITY_TIERS = Object.freeze({
  * @property {string} store          lowercase-hyphenated surface name
  * @property {number} version        schema version THIS build speaks
  * @property {DurabilityTier} tier   §12 durability tier
- * @property {boolean} portable      may this surface cross installs?
+ * @property {boolean} portable      may this surface cross installs via the
+ *   FILE export? (the hand-carried peerd-export path)
+ * @property {boolean} [personPortable] may this surface cross installs via
+ *   VERIFIED SELF-DEVICE SYNC? A third axis added by the portable-identity
+ *   arc. It is deliberately BROADER than `portable`: a surface can be
+ *   unsafe to write to a JSON file a stranger might read (sessions carry
+ *   conversation bodies; apps carry executable artifacts) yet safe to
+ *   replicate to a peer that has cryptographically proven it is the same
+ *   person's device. `portable` gates the file box; `personPortable` gates
+ *   the sync offer. Device-bound state is never either.
+ * @property {string} [syncSurface] the self/sync.js SYNC_SURFACES name this
+ *   store shapes into, when personPortable: the translation the sync host
+ *   uses without knowing store internals.
  * @property {boolean} [deviceBound] structurally untransferable state
  * @property {{ kvKeys?: string[], kvPrefixes?: string[], idbStores?: string[],
  *   selfHosted?: string[] }} [physical]
@@ -77,22 +89,30 @@ export const DURABILITY_TIERS = Object.freeze({
  * @type {readonly StoreEntry[]}
  */
 export const STORE_REGISTRY = Object.freeze([
-  // Conversation state: durable across service-worker generations, but
-  // its meaning dies with the session it belongs to.
+  // Conversation state: durable across service-worker generations, but its
+  // meaning dies with the SESSION it belongs to, so it stays non-portable
+  // to the FILE box (a stranger reading the JSON would read your chats).
+  // It IS personPortable: a proven self-device may replicate the durable
+  // conversation content (a stripped record; actor/runtime bookkeeping does
+  // not travel, self-sync-surfaces.js owns that projection).
   Object.freeze({
     store: 'sessions', version: 1, tier: DURABILITY_TIERS.SESSION, portable: false,
+    personPortable: true, syncSurface: 'sessions',
     physical: Object.freeze({ idbStores: ['sessions', 'session_messages'] }),
   }),
   // The encrypted blob travels; the DK does not (transfer re-encrypts the
   // plaintext secrets under a passphrase the user types at export time).
   // The session DK mirror lives in chrome.storage.session — session-tier
-  // by definition, outside the guard's remit.
+  // by definition, outside the guard's remit. personPortable via the
+  // explicit, consent-gated secrets surface (never silently).
   Object.freeze({
     store: 'vault', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: true,
+    personPortable: true, syncSurface: 'secrets',
     physical: Object.freeze({ idbStores: ['vault'], kvKeys: ['vault.v1'], kvPrefixes: ['secret:'] }),
   }),
   Object.freeze({
     store: 'memory', version: 1, tier: DURABILITY_TIERS.PORTABLE, portable: true,
+    personPortable: true, syncSurface: 'memory',
     physical: Object.freeze({ idbStores: ['agents_memory'], kvKeys: ['memory_suggestions.v1'] }),
   }),
   // Skill METADATA travels; bodies reinstall from their origin. The store
@@ -100,22 +120,26 @@ export const STORE_REGISTRY = Object.freeze([
   // injected adapters, so read-only enforcement is a per-module follow-up.
   Object.freeze({
     store: 'skills', version: 1, tier: DURABILITY_TIERS.PORTABLE, portable: true,
+    personPortable: true, syncSurface: 'skills',
     physical: Object.freeze({ selfHosted: ['peerd-skills'] }),
   }),
   Object.freeze({
     store: 'hooks', version: 1, tier: DURABILITY_TIERS.PORTABLE, portable: true,
+    personPortable: true, syncSurface: 'hooks',
     physical: Object.freeze({ kvKeys: ['hooks.user.v1'] }),
   }),
   // Consent is granted to THIS install by THIS user; a transplanted grant
-  // would be consent nobody gave here, so it never travels. (The durable
-  // tool_grants object store exists in the schema but nothing writes it
-  // yet — live grants are in-memory; the entry is the reserved seat.)
+  // would be consent nobody gave here, so it never travels: NOT portable,
+  // NOT personPortable (issue invariant 13: permission grants never arrive
+  // via profile sync). (The durable tool_grants object store exists in the
+  // schema but nothing writes it yet, live grants are in-memory.)
   Object.freeze({
     store: 'permission-grants', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
     physical: Object.freeze({ idbStores: ['tool_grants'], kvKeys: ['learnedOrigins.v1'] }),
   }),
   // Append-only local record; importing one elsewhere would misattribute
-  // history to a device that never did it.
+  // history to a device that never did it: NOT personPortable either
+  // (issue invariant 14: audit provenance is not rewritten).
   Object.freeze({
     store: 'audit', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
     physical: Object.freeze({ idbStores: ['audit_log', 'audit_meta'] }),
@@ -126,6 +150,14 @@ export const STORE_REGISTRY = Object.freeze([
     store: 'dpop-keys', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false, deviceBound: true,
     physical: Object.freeze({ idbStores: ['dpop_keys'] }),
   }),
+  // The per-install device key (portable-identity arc). Same custody as the
+  // did:key root: a vault secret under the device-key prefix, but UNLIKE
+  // the root it is deviceBound: it must NEVER travel (issue invariant 9).
+  // A fresh install mints its own and gets it certified during enrollment.
+  Object.freeze({
+    store: 'device-key', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false, deviceBound: true,
+    physical: Object.freeze({ kvKeys: ['secret:distributed/device-key/v1'] }),
+  }),
   // Live instance bookkeeping (tab ids, engine handles) — valid only for
   // the browser session that minted it. NOTE: the `apps` blob is shared
   // with app-manifests below — the two surfaces version independently but
@@ -134,23 +166,37 @@ export const STORE_REGISTRY = Object.freeze([
     store: 'engine-registries', version: 1, tier: DURABILITY_TIERS.SESSION, portable: false, deviceBound: true,
     physical: Object.freeze({ idbStores: ['vms', 'notebooks', 'pods', 'apps'] }),
   }),
-  // Workspace METADATA outlives sessions, but it points at OPFS roots that
-  // exist only in this browser profile's origin storage. The bytes
-  // themselves are OPFS, outside both adapters. Notebook tabs and the
-  // offscreen job host therefore check the service worker's live posture at
-  // their OPFS mutation boundary; reads open roots without creating them.
+  // OPFS handles are device-bound and must remain so, but the workspace
+  // CONTENTS are not inherently device-bound. The `opfs-workspaces` store's
+  // physical HANDLES never travel (deviceBound); the portable-identity arc
+  // adds a distinct LOGICAL snapshot surface (self-sync-surfaces.js walks
+  // the tree into path→bytes and re-materializes it into a fresh receiving
+  // OPFS root: never a platform handle). That logical surface is what
+  // `personPortable`+`syncSurface:'workspaces'` names here; the deviceBound
+  // flag still forbids the file box and the raw-handle path.
   Object.freeze({
-    store: 'opfs-workspaces', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false, deviceBound: true,
+    store: 'opfs-workspaces', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
+    deviceBound: true, personPortable: true, syncSurface: 'workspaces',
     physical: Object.freeze({ selfHosted: ['opfs'] }),
   }),
   // Manifest metadata shares the `apps` blob (see engine-registries). Current
   // App files live in OPFS; peerd-app-bodies is a reserved legacy database.
-  // Both self-hosted byte surfaces use the app-manifests posture.
+  // personPortable via LOGICAL App artifacts (manifest + content-addressed
+  // body/assets), never the local IDB handle, self-sync-surfaces.js shapes
+  // them; the receiver re-installs into fresh local storage.
   Object.freeze({
     store: 'app-manifests', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
+    personPortable: true, syncSurface: 'apps',
     physical: Object.freeze({
       idbStores: ['apps'], selfHosted: ['opfs:peerd-apps', 'peerd-app-bodies'],
     }),
+  }),
+  // Device-local rollback memory for publisher-signed public App streams.
+  // Losing or importing this state changes what old releases the device will
+  // accept, so it is profile-scoped and never part of file or self-device sync.
+  Object.freeze({
+    store: 'dweb-release-history', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
+    physical: Object.freeze({ kvKeys: ['dweb.metaHighWater.v1'] }),
   }),
   // The did:key keypair is a vault secret — physically under the vault's
   // secret: prefix, encrypted under the DK.
@@ -184,6 +230,27 @@ export const storeEntry = (name) => STORE_REGISTRY.find((entry) => entry.store =
 
 /** @returns {readonly StoreEntry[]} surfaces an export may carry */
 export const portableStores = () => STORE_REGISTRY.filter((entry) => entry.portable);
+
+/**
+ * Surfaces a VERIFIED SELF-DEVICE SYNC may carry (the broader axis)
+ * settings/providerEndpoints are transfer sections rather than registry
+ * stores, so the sync host adds them explicitly; this returns the registry
+ * stores that opt in.
+ * @returns {readonly StoreEntry[]}
+ */
+export const personPortableStores = () => STORE_REGISTRY.filter((entry) => entry.personPortable);
+
+/**
+ * The self/sync.js surface names this build can offer, mapped from their
+ * owning store. Used by the sync host to assert an offered/pulled surface
+ * corresponds to a real, opted-in store.
+ * @returns {Record<string, string>} syncSurface -> store
+ */
+export const syncSurfaceStores = () => Object.fromEntries(
+  STORE_REGISTRY
+    .filter((entry) => entry.personPortable && entry.syncSurface)
+    .map((entry) => [/** @type {string} */ (entry.syncSurface), entry.store]),
+);
 
 /**
  * The §12 disclosure list: names of the surfaces an export STRUCTURALLY

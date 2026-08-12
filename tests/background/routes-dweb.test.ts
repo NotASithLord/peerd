@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { makeDwebRoutes } from '../../extension/background/routes/dweb.js';
+import { createDwebRollbackGuard } from '../../extension/background/dweb-rollback-guard.js';
 import { createAppQuiescence } from '../../extension/background/app-quiescence.js';
 
 const offscreenSender = { url: 'moz-extension://peerd/offscreen/offscreen.html' };
@@ -44,6 +45,7 @@ const baseDeps = (over: any = {}) => {
     withAppLifecycle: async (_appId: string, operation: () => Promise<any>) => operation(),
     ensureSettingsReady: async () => {},
     isOffscreenSender: (sender: any) => sender?.url === offscreenSender.url,
+    createDwebRollbackGuard,
     repositories: {
       statusApp: async () => ({ oid: 'base', branch: 'main', dirty: false }),
       matches: async () => true,
@@ -164,6 +166,44 @@ describe('dweb app store', () => {
     expect(created).toMatchObject({ appId: 'app-new12345', source: 'dweb' });
     expect(audits.at(-1)).toMatchObject({ type: 'dweb_app_installed', details: { uri: 'u', publisher: 'p' } });
   });
+  test('durable discovery history rejects a lower-sequence fresh install after restart', async () => {
+    const values = new Map<string, any>();
+    const kv = {
+      get: async (key: string) => values.get(key),
+      set: async (key: string, value: any) => { values.set(key, structuredClone(value)); },
+    };
+    const dwappId = 'a'.repeat(64);
+    const publisher = 'did:key:zPublisher';
+    const currentVersion = 'b'.repeat(64);
+    const first = baseDeps({ kv });
+    expect(await makeDwebRoutes(first.deps)['dweb/meta-admit']({
+      dwappId, publisher, seq: 9, versionId: currentVersion,
+    }, offscreenSender)).toMatchObject({ ok: true, accepted: true });
+
+    let created = false;
+    const restarted = baseDeps({
+      kv,
+      appClient: { create: async () => { created = true; return { id: 'unexpected' }; } },
+    });
+    const routes = makeDwebRoutes(restarted.deps); // new SW route closure
+    expect(await routes['dweb/app-install']({
+      appId: 'app-old12345', name: 'old', files: {}, entryFile: 'i.html',
+      dweb: {
+        dwapp_id: dwappId, publisher, seq: 8, version_id: 'c'.repeat(64),
+      },
+    }, offscreenSender)).toEqual({ ok: false, error: 'dweb-version-rollback' });
+    expect(created).toBe(false);
+
+    // Replaying the exact current card is how an empty offscreen Library
+    // rehydrates; storage may install that current release on a fresh profile.
+    const currentInstall = baseDeps({ kv });
+    expect((await makeDwebRoutes(currentInstall.deps)['dweb/app-install']({
+      appId: 'app-current12345', name: 'current', files: {}, entryFile: 'i.html',
+      dweb: {
+        dwapp_id: dwappId, publisher, seq: 9, version_id: currentVersion,
+      },
+    }, offscreenSender)).ok).toBe(true);
+  });
   test('a post-commit install audit failure does not report the installed App as absent', async () => {
     const { deps } = baseDeps({
       auditLog: { append: async () => { throw new Error('audit unavailable'); } },
@@ -250,6 +290,35 @@ describe('dweb app store', () => {
       dweb: { version_id: 'v2', git_oid: 'new-base', published_hashes: [] },
     });
     expect(directMetadataWrites).toBe(0);
+  });
+  test('the storage arm refuses a lower-sequence tracked update before replacing files', async () => {
+    let replaced = false;
+    const dwappId = 'd'.repeat(64);
+    const publisher = 'did:key:zPublisher';
+    const { deps } = baseDeps({
+      appRegistry: {
+        get: async () => ({
+          id: 'a1',
+          dweb: {
+            git_oid: 'base', dwapp_id: dwappId, publisher,
+            seq: 9, version_id: 'e'.repeat(64),
+          },
+        }),
+      },
+      appClient: {
+        replaceVersionedFilesUnlocked: async () => {
+          replaced = true;
+          return { record: { id: 'a1' }, oid: 'new-base' };
+        },
+      },
+    });
+    expect(await makeDwebRoutes(deps)['dweb/app-update']({
+      appId: 'a1', files: { 'i.html': 'old' }, entryFile: 'i.html',
+      dweb: {
+        dwapp_id: dwappId, publisher, seq: 8, version_id: 'f'.repeat(64),
+      },
+    }, offscreenSender)).toEqual({ ok: false, error: 'dweb-version-not-newer' });
+    expect(replaced).toBe(false);
   });
 
   test('a live App update flushes before close and takes the write lock last', async () => {
