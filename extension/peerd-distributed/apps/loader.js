@@ -91,7 +91,7 @@ export const installAppBundle = async ({ uri, manifest, payload, install, name, 
   // the same signer. Refuse curator/payload substitution: otherwise a card from
   // A could silently install executable bytes signed by B while retaining A's
   // stable dwapp_id and future update stream.
-  if (addressedPublisher && manifest.publisher !== addressedPublisher) {
+  if (manifest.publisher !== addressedPublisher) {
     throw new BundleRejectedError('manifest publisher does not match its content address');
   }
   if (expectedPublisher && manifest.publisher !== expectedPublisher) {

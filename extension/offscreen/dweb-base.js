@@ -136,16 +136,6 @@ const publishLocalApp = async (h, msg, ownerSlot) => {
 // rendezvous): a dwapp is a sub-protocol, not tied to a signaler.
 /** @type {Map<string, { room: any, refs: number, name: string, topicSubs: Map<string, () => void>, offs: (() => void)[] }>} */
 const rooms = new Map();        // roomId -> { room, refs, name, topicSubs:Map, offs:[] }
-/** @type {Map<string,Promise<any>>} */
-const pendingSeeds = new Map();
-
-/** @param {string} hash @param {Promise<any>} operation */
-const trackSeed = async (hash, operation) => {
-  pendingSeeds.set(hash, operation);
-  try { return await operation; }
-  finally { if (pendingSeeds.get(hash) === operation) pendingSeeds.delete(hash); }
-};
-
 /** @param {string} type @param {object} [payload] @returns {Promise<any>} */
 const swCall = (type, payload = {}) => browser.runtime.sendMessage({ type, ...payload });
 

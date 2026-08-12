@@ -52,23 +52,36 @@ try {
   if (packaged.exitCode !== 0) throw new Error(`Firefox package failed (${packaged.exitCode})`);
   await cp(staging, source, { recursive: true });
   await cp(join(root, 'scripts/firefox/pod-smoke-page.js'), join(source, 'firefox-pod-smoke-page.js'));
+  const origin = `http://127.0.0.1:${server.port}`;
 
-  // Test-only public-create seam in the disposable copied extension. It uses
-  // the production registry and trusted-sender check, but never enters either
-  // source artifacts or a release package.
+  // Test-only harness seam in the disposable copied extension. It uses the
+  // production registry and trusted-sender check, and keeps the loopback URL
+  // out of page-controlled state. It never enters a release package.
   const workerPath = join(source, 'background/service-worker.js');
   const workerSource = await readFile(workerPath, 'utf8');
   await writeFile(workerPath, `${workerSource}\n
 browser.runtime.onMessage.addListener((msg, sender) => {
-  if (msg?.type !== 'firefox-smoke/create-pod' || !isTrustedSender(sender)) return false;
-  return podRegistry.create({ name: 'Firefox smoke Pod', persistent: true })
-    .then((record) => ({ ok: true, record }))
-    .catch((error) => ({ ok: false, error: error?.message ?? String(error) }));
+  if (!isTrustedSender(sender)) return false;
+  if (msg?.type === 'firefox-smoke/create-pod') {
+    return podRegistry.create({ name: 'Firefox smoke Pod', persistent: true })
+      .then((record) => ({ ok: true, record }))
+      .catch((error) => ({ ok: false, error: error?.message ?? String(error) }));
+  }
+  if (msg?.type === 'firefox-smoke/report') {
+    return fetch('${origin}/pod-report', { method: 'POST', body: JSON.stringify(msg.payload) })
+      .then(() => ({ ok: true }))
+      .catch((error) => ({ ok: false, error: error?.message ?? String(error) }));
+  }
+  if (msg?.type === 'firefox-smoke/phase') {
+    return fetch('${origin}/pod-phase', { method: 'POST', body: String(msg.name ?? '') })
+      .then(() => ({ ok: true }))
+      .catch((error) => ({ ok: false, error: error?.message ?? String(error) }));
+  }
+  return false;
 });\n`);
 
   const manifestPath = join(source, 'manifest.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
-  const origin = `http://127.0.0.1:${server.port}`;
   manifest.content_security_policy.extension_pages = manifest.content_security_policy.extension_pages.replace(
     /connect-src ([^;]+)/, (_match, sources) => `connect-src ${sources} ${origin}`);
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
@@ -76,7 +89,6 @@ browser.runtime.onMessage.addListener((msg, sender) => {
   const podHtmlPath = join(source, 'engine-tabs/pod-tab/index.html');
   const podHtml = await readFile(podHtmlPath, 'utf8');
   await writeFile(podHtmlPath, podHtml
-    .replace("content=\"connect-src 'none'\"", `content=\"connect-src ${origin}\"`)
     .replace('  <script type="module" src="pod-tab.js"></script>',
       '  <script type="module" src="/firefox-pod-smoke-page.js"></script>\n  <script type="module" src="pod-tab.js"></script>'));
 
@@ -114,7 +126,7 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       const addonOrigin = [addon?.manifestURL, addon?.url]
         .find((value) => typeof value === 'string' && value.startsWith('moz-extension://'));
       if (!addonOrigin) throw new Error(`installed add-on has no moz-extension origin: ${JSON.stringify(installed.addon)}`);
-      const podUrl = `${new URL('/engine-tabs/pod-tab/index.html', addonOrigin).href}#pod-firefox-smoke?report=${encodeURIComponent(`${origin}/pod-report`)}`;
+      const podUrl = `${new URL('/engine-tabs/pod-tab/index.html', addonOrigin).href}#pod-firefox-smoke`;
       console.log(`FIREFOX POD INSTALLED ${installed.addon.id} · ${new URL(addonOrigin).host}`);
       const tabs = await client.request('listTabs');
       const tab = tabs.tabs?.[0];

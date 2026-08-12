@@ -3,10 +3,8 @@
 // real Pod tab in Firefox, reloads it once, and reports evidence to the local
 // harness. This file is never included in a release artifact.
 
-const params = new URLSearchParams(location.hash.split('?')[1] ?? '');
-const reportUrl = params.get('report');
 const stageKey = 'peerd-pod-firefox-smoke-stage';
-const podId = location.hash.slice(1).split(/[?&]/)[0];
+const podId = location.hash.slice(1);
 
 // The disposable background fixture uses the real registry API to create the
 // catalog record, then this page reloads at that returned durable id before the
@@ -17,7 +15,7 @@ if (podId === 'pod-firefox-smoke') {
   // A hash-only location.replace is a same-document navigation and would leave
   // this top-level-await module blocking pod-tab.js forever. Rewrite the URL,
   // then force a real document reload so the production module boots normally.
-  history.replaceState(null, '', `#${created.record.id}?report=${encodeURIComponent(reportUrl ?? '')}`);
+  history.replaceState(null, '', `#${created.record.id}`);
   location.reload();
   await new Promise(() => {});
 }
@@ -46,18 +44,12 @@ const runTerminal = async (command, budgetMs = 20_000) => {
 };
 
 const report = async (payload) => {
-  if (!reportUrl) throw new Error('Firefox smoke report URL missing');
-  // Harness-only: this disposable trusted page reports to the loopback origin
-  // injected into its temporary CSP. It is not Pod code or shipped code.
-  // eslint-disable-next-line no-restricted-globals
-  await fetch(reportUrl, { method: 'POST', body: JSON.stringify(payload) });
+  const reply = await browser.runtime.sendMessage({ type: 'firefox-smoke/report', payload });
+  if (!reply?.ok) throw new Error(reply?.error ?? 'Firefox smoke report failed');
 };
 
 const phase = async (name) => {
-  if (!reportUrl) return;
-  // Harness-only loopback diagnostic; see report().
-  // eslint-disable-next-line no-restricted-globals
-  await fetch(reportUrl.replace('/pod-report', '/pod-phase'), { method: 'POST', body: name }).catch(() => {});
+  await browser.runtime.sendMessage({ type: 'firefox-smoke/phase', name }).catch(() => {});
 };
 
 // Probe the browser primitive independently of Peerd's product guard. Firefox's

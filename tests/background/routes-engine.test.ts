@@ -667,7 +667,6 @@ describe('apps/delete', () => {
   });
   test('un-shares a shared app when dweb is on', async () => {
     let msg: any = null;
-    const record = { id: 'a1', name: 'A', shared: true, dweb: { publisher: 'pub', hash: 'h' } };
     const r = makeEngineRoutes(baseDeps({
       DWEB_ENABLED: true,
       settingsStore: { get: () => ({ dwebEnabled: true }) },

@@ -380,7 +380,12 @@ const runCommand = async ({ argv, stdin, cwd, env }) => {
   return { stdout: '', stderr: `${command}: command not found\n`, exitCode: 127 };
 };
 
+let runAccepted = false;
 addEventListener('message', (event) => {
+  // A DedicatedWorker can only receive messages from its creator. Browsers
+  // expose those messages with an empty origin; reject any non-empty origin
+  // unless it is this exact extension origin as an additional fail-closed rail.
+  if (event.origin !== '' && event.origin !== location.origin) return;
   const message = event.data;
   if (!message || typeof message !== 'object') return;
   if (message.type === 'pod-response') {
@@ -391,7 +396,8 @@ addEventListener('message', (event) => {
     else waiter.resolve(message.result);
     return;
   }
-  if (message.type !== 'run') return;
+  if (message.type !== 'run' || runAccepted) return;
+  runAccepted = true;
   const startedAt = performance.now();
   executePodShell(String(message.command ?? ''), {
     cwd: typeof message.cwd === 'string' ? message.cwd : '/',

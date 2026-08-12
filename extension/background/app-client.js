@@ -658,9 +658,7 @@ export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => 
     const nextFiles = Object.create(null);
     for (const file of normalized.files) nextFiles[file.path] = file.stored;
 
-    let replacementAttempted = false;
     try {
-      replacementAttempted = true;
       const committed = await repositories.replaceWorkingTree(
         { kind: 'app', id },
         { files: nextFiles, message },
@@ -677,14 +675,14 @@ export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => 
     } catch (cause) {
       /** @type {unknown[]} */
       const rollbackFailures = [];
-      if (replacementAttempted) {
-        try {
-          await repositories.replaceWorkingTree(
-            { kind: 'app', id },
-            { files: oldFiles, message: 'rollback failed App release update' },
-          );
-        } catch (error) { rollbackFailures.push(error); }
-      }
+      // replaceWorkingTree can fail after changing bytes, so every failed
+      // attempt must restore the exact snapshot captured above.
+      try {
+        await repositories.replaceWorkingTree(
+          { kind: 'app', id },
+          { files: oldFiles, message: 'rollback failed App release update' },
+        );
+      } catch (error) { rollbackFailures.push(error); }
       try { await restoreRecord(id, oldRecord); }
       catch (error) { rollbackFailures.push(error); }
       if (rollbackFailures.length) {

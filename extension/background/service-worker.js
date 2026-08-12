@@ -8082,7 +8082,12 @@ function maybeStartBaseNetwork(/** @type {string} */ reason) {
     }).then((/** @type {any} */ r) => {
       if (r?.ok && settingsStore.get().dwebEnabled) {
         console.log('[sw] dweb base network ONLINE', { did: r.did, peers: r.peers, present: r.present });
-        reseedSharedApps().catch((e) => console.warn('[sw] re-seed after start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+        // Resolve the previous publish transaction before announcing current
+        // catalog state. Otherwise an interrupted release can be reseeded next
+        // to bytes that its catalog commit never made durable.
+        reconcilePendingPublications()
+          .then(() => reseedSharedApps())
+          .catch((e) => console.warn('[sw] publication recovery/re-seed after start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
         // The dweb AGENT's inbox: join the reserved agent room (idempotent) so
         // inbound peer messages flow as dweb/base-room/event 'direct' events the
         // listener consumes. Opt-in — no join, no inbox, no wakes.
