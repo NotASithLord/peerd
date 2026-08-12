@@ -32,6 +32,7 @@ import {
 } from '/offscreen/install-card-identity.js';
 import { base64ByteLength, fromBase64, toBase64 } from '/shared/bundle/bytes.js';
 import { runPublishTransaction } from '/shared/publish-transaction.js';
+import { createSelfDeviceHost } from '/offscreen/dweb-self.js';
 
 /** @param {...any} a */
 const log = (...a) => console.log('[offscreen/dweb]', ...a);
@@ -175,7 +176,7 @@ const waitForCustodyPort = async () => {
   });
 };
 
-/** @param {'get'|'set'} operation @param {any} [args] */
+/** @param {'get'|'set'|'self-get'|'self-set'} operation @param {any} [args] */
 const callIdentitySecret = async (operation, args = {}) => {
   const port = await waitForCustodyPort();
   if (custodyPort !== port) throw new Error('identity custody port disconnected');
@@ -197,6 +198,40 @@ const callIdentitySecret = async (operation, args = {}) => {
     }
   });
 };
+
+// The self-device stack's vault surface. Same verified custody port as the
+// identity seed, different operation pair, and the SW's handler serves a
+// closed allowlist (background/dweb-self-custody.js): this document can
+// read its own device key and the person's discovery secret, and nothing
+// else. The device key never leaves here except as signatures.
+const selfSecretIo = {
+  /** @param {string} name */
+  getSecret: async (name) => {
+    const r = await callIdentitySecret('self-get', { name });
+    if (!r?.ok) throw new Error(r?.error ?? 'self secret unavailable');
+    return r.value ?? null;
+  },
+  /** @param {string} name @param {string} value */
+  setSecret: async (name, value) => {
+    const r = await callIdentitySecret('self-set', { name, value });
+    if (!r?.ok) throw new Error(r?.error ?? 'self secret store failed');
+    if (name === 'distributed/self-records/v1' || name === 'distributed/self-discovery/v1') {
+      // Do not await here: coordinator roster persistence itself uses this
+      // write seam. The next task observes the completed write and avoids a
+      // recursive update while still refreshing before the next user action.
+      setTimeout(() => {
+        selfHost.refreshCustody(name)
+          .catch((/** @type {any} */ e) => warn('self custody refresh failed:', e?.message ?? e));
+      }, 0);
+    }
+  },
+};
+
+const selfHost = createSelfDeviceHost({
+  secretIo: selfSecretIo,
+  swCall,
+  getSignalingUrl: () => handle?.url ?? null,
+});
 
 // peerd notifications: emit a runtime 'dweb/notify' for genuinely-NEW peers and
 // apps so the UI surfaces them (the bell + an in-chat banner), each linking to
@@ -286,9 +321,18 @@ const baseLifecycle = makeStartStopBarrier({
     if (!resubTimer) {
       resubTimer = setInterval(() => { try { handle?.base?.discovery?.subscribeAll(); } catch { /* best-effort */ } }, 12_000);
     }
+    // Same-user device discovery rides the mesh that just came up. It stays
+    // INERT on an install that has not been enrolled into a person's device
+    // set, so this is safe to attempt unconditionally.
+    selfHost.start()
+      .then((r) => log(r.running ? 'self-device coordinator started' : `self-device inert: ${r.reason}`))
+      .catch((e) => warn('self-device start failed:', /** @type {{ message?: string }} */ (e)?.message ?? e));
     log('✅ base network ONLINE — lobby joined, presence beaconing');
   },
-  close: (candidate) => {
+  close: async (candidate) => {
+    // The self-device coordinator rides this mesh; it must let go of its
+    // rooms before the network under it disappears.
+    try { await selfHost.stop(); } catch { /* best-effort teardown */ }
     candidate.close();
     if (handle !== candidate) return;
     // Once close succeeds the identity is no longer live. Listener cleanup is
@@ -315,6 +359,7 @@ const runCustodyOperation = async (operation, args) => {
     if (typeof args?.leaseId !== 'string' || args.leaseId.length === 0) {
       throw new Error('lease-required');
     }
+    await selfHost.stop({ suspend: true });
     await baseLifecycle.stop({ suspensionOwner: args.leaseId });
     return { suspended: true };
   }
@@ -322,10 +367,13 @@ const runCustodyOperation = async (operation, args) => {
     if (typeof args?.leaseId !== 'string' || args.leaseId.length === 0) {
       throw new Error('lease-required');
     }
-    return { resumed: baseLifecycle.resume(args.leaseId) };
+    const resumed = baseLifecycle.resume(args.leaseId);
+    if (resumed) selfHost.resume();
+    return { resumed };
   }
   if (operation === 'reset') {
     baseLifecycle.resetSuspension();
+    selfHost.resume();
     return { reset: true };
   }
   const client = await loadDweb();
@@ -385,6 +433,12 @@ const connectCustodyPort = () => {
       }
       setTimeout(connectCustodyPort, CUSTODY_RECONNECT_MS);
     });
+    // Certificate-only installs cannot start the public person-root base.
+    // Connecting the verified custody channel is their boot signal for the
+    // private self-device host, including after offscreen eviction/restart.
+    // Start only after the response listener exists: custody reads can reply
+    // immediately on a warm service worker.
+    void selfHost.start().catch((/** @type {any} */ e) => warn('self-device auto-start failed:', e?.message ?? e));
   } catch {
     setTimeout(connectCustodyPort, CUSTODY_RECONNECT_MS);
   }
@@ -586,6 +640,29 @@ const onBaseHostMessage = (msg, sender, sendResponse) => {
           const h = await start();
           const card = await h.base.findDwapp(msg.dwappId, msg.publisherDid, msg.slug);
           sendResponse({ ok: true, record: card ? discoveredAppFromRow({ dwapp_id: msg.dwappId, publisher: card.publisher, ...card.value }) : null });
+          return;
+        }
+        // --- same-user devices (portable identity) -----------------------------
+        // The coordinator is started by the base-network lifecycle; these
+        // routes are the SW's read window and the two transfer verbs.
+        case 'dweb/base-host/self-status': { sendResponse({ ok: true, ...selfHost.status() }); return; }
+        case 'dweb/base-host/self-start': {
+          sendResponse({ ok: true, ...await selfHost.start() });
+          return;
+        }
+        case 'dweb/base-host/self-offer': {
+          sendResponse({
+            ok: true,
+            ...await selfHost.offerSnapshot({
+              manifest: msg.manifest,
+              targetDeviceDid: msg.targetDeviceDid,
+            }),
+          });
+          return;
+        }
+        case 'dweb/base-host/self-restore': {
+          const result = await selfHost.restoreFrom({ deviceDid: msg.deviceDid, surfaces: msg.surfaces });
+          sendResponse({ ...result, result });
           return;
         }
         case 'dweb/base-host/ban': { const h = await start(); h.base.ban(msg.did, msg.reason); sendResponse({ ok: true }); return; }
@@ -890,6 +967,7 @@ const onBaseHostMessage = (msg, sender, sendResponse) => {
           return;
         }
         case 'dweb/base-host/stop': {
+          await selfHost.stop();
           await baseLifecycle.stop();
           sendResponse({ ok: true });
           return;

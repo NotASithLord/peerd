@@ -98,21 +98,49 @@ export const shapeSessionsSurface = ({ sessions }) => ({
  * @returns {Promise<{ written: number, skipped: number }>}
  */
 export const applySessionsSurface = async (payload, { existingIds, putSession }) => {
+  if (!payload || payload.v !== 1 || !Array.isArray(payload.sessions)) {
+    throw new Error('sessions surface payload is malformed or unsupported');
+  }
   let written = 0;
   let skipped = 0;
   for (const session of payload?.sessions ?? []) {
-    if (!session || typeof session.sessionId !== 'string') { skipped++; continue; }
+    if (!session || typeof session.sessionId !== 'string') {
+      throw new Error('sessions surface contains a malformed session');
+    }
     if (existingIds.has(session.sessionId)) { skipped++; continue; }
-    await putSession(portableSession(session));
-    written++;
+    try {
+      await putSession(portableSession(session));
+      written++;
+    } catch (error) {
+      // The surface is item-atomic, not transaction-atomic. Preserve the
+      // durable count in the thrown result so the transport cannot report
+      // `applied: []` after earlier chats already committed.
+      if (written > 0) throw new SurfaceApplyPartialError('sessions', { written, skipped }, error);
+      throw error;
+    }
   }
   return { written, skipped };
 };
 
+export class SurfaceApplyPartialError extends Error {
+  /** @param {string} surface @param {Record<string, number>} result @param {unknown} cause */
+  constructor(surface, result, cause) {
+    super(`${surface} surface applied only part of its items`, { cause });
+    this.name = 'SurfaceApplyPartialError';
+    this.surface = surface;
+    this.result = result;
+  }
+}
+
 // ── generic value surfaces (settings / endpoints / memory / hooks / skills) ──
 
 /** @param {{ settings: Record<string, unknown> }} args */
-export const shapeSettingsSurface = ({ settings }) => ({ v: 1, settings: settings ?? {} });
+export const shapeSettingsSurface = ({ settings }) => {
+  // Transport lifecycle is device-local. Moving `dwebEnabled:false` while a
+  // restore is using that same transport would ask stop() to await itself.
+  const { dwebEnabled: _transportControl, ...portable } = settings ?? {};
+  return { v: 1, settings: portable };
+};
 
 /** @param {{ providerEndpoints: any }} args */
 export const shapeProviderEndpointsSurface = ({ providerEndpoints }) =>
@@ -175,19 +203,68 @@ export const shapeAppsSurface = ({ apps }) => ({
   })),
 });
 
+/** @param {any} app */
+const appHashBytes = (app) => utf8(JSON.stringify({
+  name: app.name,
+  entryFile: app.entryFile,
+  fileKinds: Object.fromEntries(Object.entries(app.fileKinds ?? {}).sort(([a], [b]) => a.localeCompare(b))),
+  files: Object.fromEntries(Object.entries(app.files ?? {}).sort(([a], [b]) => a.localeCompare(b))),
+}));
+
+/** @param {any} app */
+const portableAppHash = async (app) => {
+  const digest = new Uint8Array(await crypto.subtle.digest(
+    'SHA-256', /** @type {BufferSource} */ (appHashBytes(app)),
+  ));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+};
+
+/**
+ * Capture every live App before declaring the Apps surface available. A
+ * partial list is not an honest snapshot: the remote side has no inventory
+ * against which it could detect an App silently omitted after a read error.
+ *
+ * @param {{ records: any[], snapshotApp: (record: any) => Promise<any>, maxBytes?: number }} args
+ */
+export const captureAppsSurface = async ({ records, snapshotApp, maxBytes = 64 * 1024 * 1024 }) => {
+  const apps = [];
+  let capturedBytes = 0;
+  for (const record of records ?? []) {
+    const app = await snapshotApp(record);
+    const appBytes = appHashBytes(app).length;
+    if (capturedBytes + appBytes > maxBytes) throw new Error('Apps surface exceeds its transfer cap');
+    capturedBytes += appBytes;
+    // The transfer identity belongs to the captured bytes, never registry
+    // metadata. Imported Apps may retain an earlier snapshot hash, but local
+    // edits make it stale; recomputing here keeps sync -> edit -> sync honest.
+    apps.push({ ...app, contentHash: await portableAppHash(app) });
+  }
+  return shapeAppsSurface({ apps });
+};
+
 /**
  * @param {any} payload
  * @param {{ existingHashes: Set<string>, installApp: (app: any) => Promise<void> }} io
  * @returns {Promise<{ installed: number, skipped: number }>}
  */
 export const applyAppsSurface = async (payload, { existingHashes, installApp }) => {
+  if (!payload || payload.v !== 1 || !Array.isArray(payload.apps)) {
+    throw new Error('apps surface payload is malformed or unsupported');
+  }
   let installed = 0;
   let skipped = 0;
   for (const app of payload?.apps ?? []) {
-    if (!app || typeof app.name !== 'string' || !app.files) { skipped++; continue; }
+    if (!app || typeof app.name !== 'string' || !app.files || typeof app.files !== 'object') {
+      throw new Error('apps surface contains a malformed App');
+    }
     if (app.contentHash && existingHashes.has(app.contentHash)) { skipped++; continue; }
-    await installApp(app);
-    installed++;
+    try {
+      await installApp(app);
+      installed++;
+    } catch (error) {
+      if (installed > 0) throw new SurfaceApplyPartialError('apps', { installed, skipped }, error);
+      throw error;
+    }
   }
   return { installed, skipped };
 };

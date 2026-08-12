@@ -5,15 +5,14 @@
 
 import { describe, test, expect } from 'bun:test';
 import {
-  ensureFounderCustody, issueEnrolledDeviceRecords, ensureEnrolledCustody, loadCoordinatorInputs,
-  loadDiscoverySecret, storeDiscoverySecret, DISCOVERY_SECRET_NAME,
+  ensureFounderCustody, ensureEnrolleeDevice, sponsorDeviceEnrollment,
+  ensureEnrolledCustody, loadCoordinatorInputs,
+  loadDiscoverySecret, storeDiscoverySecret, rotateDiscoverySecret, DISCOVERY_SECRET_NAME,
 } from '../../extension/peerd-distributed/self/custody.js';
 import { verifyDeviceCertificate, verifyDeviceRoster, rosterSupersedes } from '../../extension/peerd-distributed/identity/device-certificate.js';
 import { createSelfDeviceCoordinator } from '../../extension/peerd-distributed/self/coordinator.js';
 import { deviceStatusInRoster } from '../../extension/peerd-distributed/identity/device-certificate.js';
 import { mintDiscoverySecret } from '../../extension/peerd-distributed/self/rendezvous.js';
-import { createPersistentDeviceIdentity } from '../../extension/peerd-distributed/identity/device-key.js';
-import { createPersistentIdentity } from '../../extension/peerd-distributed/identity/keypair.js';
 
 const fakeVault = (seed: Record<string, string> = {}) => {
   const m = new Map(Object.entries(seed));
@@ -58,9 +57,9 @@ describe('self-device custody', () => {
     const founder = await ensureFounderCustody({ io: desktopVault, label: 'Desktop', now: 1 });
 
     const laptopVault = fakeVault();
-    const laptopDevice = await createPersistentDeviceIdentity(laptopVault);
-    const issued = await issueEnrolledDeviceRecords({
-      personIdentity: await createPersistentIdentity(desktopVault),
+    const laptopDevice = await ensureEnrolleeDevice(laptopVault);
+    const issued = await sponsorDeviceEnrollment({
+      io: desktopVault,
       priorRoster: founder.roster,
       deviceDid: laptopDevice.did,
       deviceId: laptopDevice.deviceId,
@@ -72,6 +71,7 @@ describe('self-device custody', () => {
       discoverySecret: founder.discoverySecret!,
       certificate: issued.certificate,
       roster: issued.roster,
+      personDid: founder.personDid,
     });
 
     expect(enrolled.personDid).toBe(founder.personDid);       // same person
@@ -89,6 +89,64 @@ describe('self-device custody', () => {
     expect(laptopVault.map.has('distributed/identity/v1')).toBe(false);
     await expect(ensureFounderCustody({ io: laptopVault })).rejects.toThrow(/not a person-root authority/);
     expect(laptopVault.map.has('distributed/identity/v1')).toBe(false);
+
+    // An ordinary enrolled device cannot sponsor another device or cause a
+    // replacement root to be minted as a side effect.
+    const third = await ensureEnrolleeDevice(fakeVault());
+    await expect(sponsorDeviceEnrollment({
+      io: laptopVault, priorRoster: issued.roster,
+      deviceDid: third.did, deviceId: third.deviceId,
+    })).rejects.toThrow(/not a person-root enrollment authority/);
+    expect(laptopVault.map.has('distributed/identity/v1')).toBe(false);
+  });
+
+  test('a lost grant is reissued idempotently without a ghost roster row', async () => {
+    const sponsor = fakeVault();
+    const founder = await ensureFounderCustody({ io: sponsor, label: 'Desktop', now: 10 });
+    const enrollee = await ensureEnrolleeDevice(fakeVault());
+    const first = await sponsorDeviceEnrollment({
+      io: sponsor, priorRoster: founder.roster,
+      deviceDid: enrollee.did, deviceId: enrollee.deviceId, label: 'Laptop', now: 20,
+    });
+    // The caller only knows its stale pre-commit roster because the first
+    // sealed grant was lost. The sponsor reconstructs the committed result.
+    const retry = await sponsorDeviceEnrollment({
+      io: sponsor, priorRoster: founder.roster,
+      deviceDid: enrollee.did, deviceId: enrollee.deviceId, label: 'Ignored retry label', now: 99,
+    });
+    expect(retry.roster).toEqual(first.roster);
+    expect(retry.certificate).toEqual(first.certificate);
+    expect(retry.roster.devices.filter((d: any) => d.deviceDid === enrollee.did)).toHaveLength(1);
+  });
+
+  test('an interrupted enrollment commits the membership fence before discovery', async () => {
+    const sponsor = fakeVault();
+    const founder = await ensureFounderCustody({ io: sponsor, now: 1 });
+    const enrolleeVault = fakeVault();
+    const enrollee = await ensureEnrolleeDevice(enrolleeVault);
+    const issued = await sponsorDeviceEnrollment({
+      io: sponsor, priorRoster: founder.roster,
+      deviceDid: enrollee.did, deviceId: enrollee.deviceId, now: 2,
+    });
+    const writes: string[] = [];
+    const interrupted = {
+      getSecret: enrolleeVault.getSecret,
+      setSecret: async (name: string, value: string) => {
+        writes.push(name);
+        if (name === DISCOVERY_SECRET_NAME) throw new Error('quota while writing discovery');
+        await enrolleeVault.setSecret(name, value);
+      },
+    };
+    await expect(ensureEnrolledCustody({
+      io: interrupted, discoverySecret: founder.discoverySecret!,
+      certificate: issued.certificate, roster: issued.roster,
+    })).rejects.toThrow(/quota while writing discovery/);
+    expect(writes.slice(-2)).toEqual(['distributed/self-records/v1', DISCOVERY_SECRET_NAME]);
+    expect(enrolleeVault.map.has('distributed/self-records/v1')).toBe(true);
+    expect(enrolleeVault.map.has(DISCOVERY_SECRET_NAME)).toBe(false);
+    await expect(ensureFounderCustody({ io: enrolleeVault }))
+      .rejects.toThrow(/not a person-root authority/);
+    expect(enrolleeVault.map.has('distributed/identity/v1')).toBe(false);
   });
 
   test('loadCoordinatorInputs yields a runnable, root-free coordinator input set', async () => {
@@ -122,5 +180,17 @@ describe('self-device custody', () => {
     await storeDiscoverySecret(io, a); // idempotent
     const b = mintDiscoverySecret();
     await expect(storeDiscoverySecret(io, b)).rejects.toThrow(/different discovery secret/);
+  });
+
+  test('discovery rotation is compare-and-set and cannot apply against stale custody', async () => {
+    const io = fakeVault();
+    const current = mintDiscoverySecret();
+    const next = mintDiscoverySecret();
+    await storeDiscoverySecret(io, current);
+    expect(await rotateDiscoverySecret(io, { expected: current, next })).toBe(true);
+    expect(await loadDiscoverySecret(io)).toEqual(next);
+    await expect(rotateDiscoverySecret(io, {
+      expected: current, next: mintDiscoverySecret(),
+    })).rejects.toThrow(/changed before rotation/);
   });
 });

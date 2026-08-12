@@ -33,6 +33,7 @@ const materialRevision = async (material) => {
  * @param {() => Promise<any>} deps.loadDweb
  * @param {<T>(operation: () => Promise<T>) => Promise<T>} deps.withIdentityMutation
  * @param {() => Promise<boolean>} deps.canReplaceIdentity
+ * @param {(incomingDid: string | null) => Promise<boolean>} [deps.canAdoptIdentity]
  * @param {(leaseId: string) => Promise<void>} deps.stopIdentityRuntime
  * @param {(leaseId: string) => Promise<void>} deps.startIdentityRuntime
  * @param {() => string} [deps.newLeaseId]
@@ -41,7 +42,8 @@ const materialRevision = async (material) => {
 export const makeDwebTransfer = ({
   enabled, offscreenAvailable, vault, identitySecretName,
   runCustodyOperation, loadDweb, withIdentityMutation,
-  canReplaceIdentity, stopIdentityRuntime, startIdentityRuntime,
+  canReplaceIdentity, canAdoptIdentity = async () => true,
+  stopIdentityRuntime, startIdentityRuntime,
   newLeaseId = () => crypto.randomUUID(), audit,
 }) => {
   /** @param {'export'|'adopt'} operation @param {any} args */
@@ -106,6 +108,10 @@ export const makeDwebTransfer = ({
           ? await materialRevision(existingMaterial)
           : undefined;
         const changesIdentity = outcome?.adopted && typeof outcome.material === 'string';
+        if (changesIdentity && !await canAdoptIdentity(outcome?.did ?? outcome?.incomingDid ?? null)) {
+          const { material: _material, ...blockedOutcome } = outcome ?? {};
+          return { ...blockedOutcome, adopted: false, reason: 'self-custody-mismatch' };
+        }
         if (changesIdentity && !await canReplaceIdentity()) {
           const { material: _material, ...blockedOutcome } = outcome ?? {};
           return {
@@ -172,6 +178,9 @@ export const makeDwebTransfer = ({
           if (!outcome?.adopted || typeof outcome.material !== 'string') return outcome;
 
           const changesIdentity = outcome.adopted && typeof outcome.material === 'string';
+          if (changesIdentity && !await canAdoptIdentity(outcome?.did ?? outcome?.incomingDid ?? null)) {
+            return { ...outcome, adopted: false, material: null, reason: 'self-custody-mismatch' };
+          }
           if (changesIdentity && !await canReplaceIdentity()) {
             return { ...outcome, adopted: false, material: null, reason: 'identity-in-use' };
           }

@@ -50,13 +50,14 @@ export const mintAuthNonce = () =>
 /**
  * The opening message: my certificate and my challenge to you.
  *
- * @param {{ cert: DeviceCertificate, nonce: string }} args
+ * @param {{ cert: DeviceCertificate, nonce: string, roster?: DeviceRoster }} args
  */
-export const buildAuthHello = ({ cert, nonce }) => ({
+export const buildAuthHello = ({ cert, nonce, roster }) => ({
   t: 'AUTH_HELLO',
   proto: SELF_AUTH_PROTO,
   cert,
   nonce,
+  ...(roster ? { roster } : {}),
 });
 
 /**

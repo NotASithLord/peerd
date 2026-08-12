@@ -19,9 +19,9 @@
 //                  unknown surface, oversize).
 //
 // The receiver verifies each surface against the offered hash before
-// applying it, applies surfaces independently (a torn transfer leaves
-// whole surfaces present or absent, never half-written), and can re-pull
-// any surface after a drop: same snapshotId, same bytes, same hash.
+// applying it and reports item-level durable effects when a store cannot
+// transact a whole surface. It can re-pull any surface after a drop: same
+// snapshotId, same bytes, same hash.
 //
 // Secrets ride the SAME mechanics but are consent-gated at the source
 // (the runtime includes the surface only when the user approved), the
@@ -78,7 +78,7 @@ export const surfaceHash = async (bytes) =>
 /**
  * @typedef {{ name: string, version: number, bytes: number, hash: string, count?: number }} SurfaceEntry
  * @typedef {{ v: number, snapshotId: string, createdAt: number, label?: string,
- *   surfaces: SurfaceEntry[] }} SnapshotManifest
+ *   surfaces: SurfaceEntry[], unavailable?: Record<string, string> }} SnapshotManifest
  */
 
 /**
@@ -132,6 +132,9 @@ export const buildSnapshotOffer = async ({ surfaces, snapshotId, label, now }) =
  */
 export const validateSnapshotManifest = (manifest) => {
   if (!manifest || typeof manifest !== 'object') return 'not-an-object';
+  if (Object.keys(manifest).some((field) => ![
+    'v', 'snapshotId', 'createdAt', 'label', 'surfaces', 'unavailable',
+  ].includes(field))) return 'unknown-field';
   if (manifest.v !== SNAPSHOT_VERSION) return `unsupported-version-${manifest.v}`;
   if (typeof manifest.snapshotId !== 'string' || manifest.snapshotId.length === 0
       || manifest.snapshotId.length > MAX_SNAPSHOT_ID) return 'bad-snapshot-id';
@@ -148,7 +151,7 @@ export const validateSnapshotManifest = (manifest) => {
     if (!SYNC_SURFACES.includes(entry.name)) return `unknown-surface-${String(entry.name).slice(0, 32)}`;
     if (seen.has(entry.name)) return 'duplicate-surface';
     seen.add(entry.name);
-    if (!Number.isSafeInteger(entry.version) || entry.version < 1) return 'bad-surface-version';
+    if (entry.version !== 1) return 'unsupported-surface-version';
     const cap = SURFACE_BYTE_CAPS[/** @type {keyof typeof SURFACE_BYTE_CAPS} */ (entry.name)];
     if (!Number.isSafeInteger(entry.bytes) || entry.bytes < 0 || entry.bytes > cap) {
       return 'bad-surface-bytes';
@@ -156,6 +159,21 @@ export const validateSnapshotManifest = (manifest) => {
     if (typeof entry.hash !== 'string' || !/^[0-9a-f]{64}$/.test(entry.hash)) return 'bad-surface-hash';
     if (entry.count !== undefined
         && (!Number.isSafeInteger(entry.count) || entry.count < 0)) return 'bad-surface-count';
+  }
+  if (manifest.unavailable !== undefined) {
+    if (!manifest.unavailable || typeof manifest.unavailable !== 'object'
+        || Array.isArray(manifest.unavailable)
+        || Object.keys(manifest.unavailable).length > SYNC_SURFACES.length) {
+      return 'bad-unavailable';
+    }
+    for (const [name, reason] of Object.entries(manifest.unavailable)) {
+      if (!SYNC_SURFACES.includes(name)) return `unknown-unavailable-${String(name).slice(0, 32)}`;
+      if (seen.has(name)) return 'surface-both-available-and-unavailable';
+      if (typeof reason !== 'string' || reason.length === 0 || reason.length > 64) {
+        return 'bad-unavailable-reason';
+      }
+      seen.add(name);
+    }
   }
   return null;
 };
@@ -179,12 +197,10 @@ export const buildSyncRefuse = ({ snapshotId, surface, reason }) => ({
  * Slice one surface's bytes into bounded chunk frames.
  * @param {{ snapshotId: string, surface: string, bytes: Uint8Array }} args
  */
-export const buildSyncChunks = ({ snapshotId, surface, bytes }) => {
+export function* iterateSyncChunks({ snapshotId, surface, bytes }) {
   const total = Math.max(1, Math.ceil(bytes.length / SYNC_CHUNK_BYTES));
-  /** @type {Array<{ t: string, proto: number, snapshotId: string, surface: string, seq: number, total: number, data: string }>} */
-  const frames = [];
   for (let seq = 0; seq < total; seq++) {
-    frames.push({
+    yield {
       t: 'SYNC_CHUNK',
       proto: SYNC_PROTO,
       snapshotId,
@@ -192,10 +208,15 @@ export const buildSyncChunks = ({ snapshotId, surface, bytes }) => {
       seq,
       total,
       data: toBase64(bytes.slice(seq * SYNC_CHUNK_BYTES, (seq + 1) * SYNC_CHUNK_BYTES)),
-    });
+    };
   }
-  return frames;
-};
+}
+
+/**
+ * Compatibility helper for tests and small callers that need an array.
+ * @param {{ snapshotId: string, surface: string, bytes: Uint8Array }} args
+ */
+export const buildSyncChunks = (args) => [...iterateSyncChunks(args)];
 
 /**
  * A pull's validity from the source's side: known snapshot, known surface,
@@ -282,6 +303,53 @@ export const createSurfaceCollector = ({ entry, snapshotId }) => {
 
   return Object.freeze({ accept });
 };
+
+// ── retry taxonomy ───────────────────────────────────────────────────
+//
+// What a receiver should DO about each defect the collector can raise.
+// The honest answer for every one of them is "stop": each is a property of
+// the bytes the source served measured against the manifest it already
+// committed to, so re-pulling the same surface of the same snapshot
+// reproduces the same defect exactly. A re-pull is not recovery there, it
+// is an unbounded request/reply loop with a peer that is either buggy or
+// hostile, and the restore never settles.
+//
+// why a table and not a bare `return 'terminal'`: this is the place a
+// future transient defect (a genuinely resumable one) would be added, and
+// naming the disposition per defect keeps that decision explicit instead of
+// hidden in a receiver's control flow.
+//
+// Actual interruption has the opposite shape: it produces NO defect at all,
+// just silence. That is the receiver's stall timer's job (host.js), and it
+// is the only thing that earns a bounded, backed-off retry.
+export const SYNC_DEFECT_DISPOSITIONS = Object.freeze({
+  // A late duplicate chunk for a surface that already completed. Not a
+  // failure of anything: drop it and leave the settled surface alone.
+  'already-settled': 'ignore',
+  'not-sync-chunk': 'terminal',
+  'unsupported-proto': 'terminal',
+  'wrong-surface': 'terminal',
+  'bad-total': 'terminal',
+  'total-changed': 'terminal',
+  'bad-seq': 'terminal',
+  'bad-data': 'terminal',
+  'chunk-oversize': 'terminal',
+  'size-mismatch': 'terminal',
+  'missing-chunk': 'terminal',
+  'hash-mismatch': 'terminal',
+});
+
+/**
+ * Fail closed: a defect this build does not recognise is terminal, never
+ * a licence to keep pulling.
+ *
+ * @param {string} defect
+ * @returns {'ignore' | 'retry' | 'terminal'}
+ */
+export const syncDefectDisposition = (defect) =>
+  /** @type {'ignore' | 'retry' | 'terminal'} */ (
+    SYNC_DEFECT_DISPOSITIONS[/** @type {keyof typeof SYNC_DEFECT_DISPOSITIONS} */ (defect)] ?? 'terminal'
+  );
 
 /** Decode a completed surface's bytes back into its logical payload. */
 /** @param {Uint8Array} bytes */

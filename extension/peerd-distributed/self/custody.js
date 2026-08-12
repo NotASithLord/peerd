@@ -83,6 +83,17 @@ export const storeDiscoverySecret = async ({ getSecret, setSecret }, secret) => 
   if (!existing) await setSecret(DISCOVERY_SECRET_NAME, b64);
 };
 
+/** Validate an enrollment discovery write without mutating custody. */
+const preflightDiscoverySecret = async ({ getSecret }, secret) => {
+  if (!(secret instanceof Uint8Array) || secret.length !== DISCOVERY_SECRET_BYTES) {
+    throw new Error('discovery secret must be exactly 32 bytes');
+  }
+  const existing = await getSecret(DISCOVERY_SECRET_NAME);
+  if (existing && existing !== toBase64(secret)) {
+    throw new Error('a different discovery secret is already stored');
+  }
+};
+
 /**
  * Atomically replace a held discovery secret after the caller has verified a
  * newer roster/rotation record. Requiring the expected prior value prevents
@@ -217,6 +228,18 @@ export const ensureFounderCustody = async ({ io, buildBinding, label, now }) => 
 };
 
 /**
+ * Fresh install, before enrollment: mint or reload the device key whose DID
+ * the request asks the sponsor to certify. The private half never leaves this
+ * vault and retries reuse the same identity.
+ *
+ * @param {SecretIo} io
+ */
+export const ensureEnrolleeDevice = async (io) => {
+  const device = await createPersistentDeviceIdentity(io);
+  return { did: device.did, deviceId: device.deviceId };
+};
+
+/**
  * Sponsor-side issuance for a new device. The ordinary enrolled device never
  * receives the person root: the already-active sponsor signs its certificate
  * and the next roster, then includes both in the sealed grant.
@@ -236,23 +259,83 @@ export const issueEnrolledDeviceRecords = async ({
     expectedPersonDid: personIdentity.did,
   });
   if (!priorVerdict.ok) throw new Error(`enrollment roster is invalid: ${priorVerdict.defect}`);
-  if (priorRoster.devices.some((/** @type {any} */ entry) =>
-    entry.deviceDid === deviceDid || entry.deviceId === deviceId)) {
-    throw new Error('enrollment device is already present in the roster');
+  const didEntry = priorRoster.devices.find((/** @type {any} */ entry) => entry.deviceDid === deviceDid);
+  const idEntry = priorRoster.devices.find((/** @type {any} */ entry) => entry.deviceId === deviceId);
+  if (didEntry || idEntry) {
+    if (didEntry !== idEntry || didEntry?.status !== 'active') {
+      throw new Error('enrollment device conflicts with an existing roster entry');
+    }
+    // The roster commit may have landed while the sealed grant was lost.
+    // Reconstruct the same deterministic certificate instead of stranding
+    // this install or growing a ghost row. Ed25519 signatures are deterministic.
+    const certificate = await issueDeviceCertificate({
+      personIdentity,
+      deviceDid,
+      deviceId,
+      label: didEntry.label,
+      seq: priorRoster.seq,
+      now: didEntry.addedAt,
+    });
+    return { certificate, roster: priorRoster, replayed: true };
   }
+  const issuedAt = now ?? Date.now();
   const seq = priorRoster.seq + 1;
   const certificate = await issueDeviceCertificate({
-    personIdentity, deviceDid, deviceId, label, seq, now,
+    personIdentity, deviceDid, deviceId, label, seq, now: issuedAt,
   });
   const roster = await buildDeviceRoster({
     personIdentity,
     devices: [...priorRoster.devices, {
       deviceDid, deviceId, ...(label ? { label } : {}),
-      addedAt: now ?? Date.now(), status: 'active',
+      addedAt: issuedAt, status: 'active',
     }],
     seq,
   });
   return { certificate, roster };
+};
+
+/**
+ * Root-holding sponsor convenience entry point used by the PR398 host. It
+ * refuses ordinary enrolled devices before createPersistentIdentity could
+ * mint a disconnected replacement root, signs the enrollee's records, then
+ * durably adopts the roster it issued.
+ *
+ * @param {Object} args
+ * @param {SecretIo} args.io
+ * @param {any} args.priorRoster
+ * @param {string} args.deviceDid
+ * @param {string} args.deviceId
+ * @param {string} [args.label]
+ * @param {number} [args.now]
+ */
+export const sponsorDeviceEnrollment = async ({
+  io, priorRoster, deviceDid, deviceId, label, now,
+}) => {
+  const heldRoot = await io.getSecret(IDENTITY_SECRET_NAME);
+  const heldRecords = await loadSelfRecords(io);
+  if (!heldRoot || !heldRecords?.certificate || !heldRecords?.roster) {
+    throw new Error('this device is not a person-root enrollment authority');
+  }
+  const personIdentity = await createPersistentIdentity(io);
+  if (heldRecords.certificate.personDid !== personIdentity.did) {
+    throw new Error('stored sponsor certificate does not match the person root');
+  }
+  const alreadyIssued = heldRecords.roster.devices.some((/** @type {any} */ entry) =>
+    entry.deviceDid === deviceDid && entry.deviceId === deviceId && entry.status === 'active');
+  if (!alreadyIssued
+      && (priorRoster?.seq !== heldRecords.roster.seq || priorRoster?.sig !== heldRecords.roster.sig)) {
+    throw new Error('enrollment roster is stale relative to sponsor custody');
+  }
+  const issued = await issueEnrolledDeviceRecords({
+    personIdentity, priorRoster: heldRecords.roster, deviceDid, deviceId, label, now,
+  });
+  if (!issued.replayed) {
+    await storeSelfRecords(io, {
+      certificate: heldRecords.certificate,
+      roster: issued.roster,
+    });
+  }
+  return issued;
 };
 
 /**
@@ -264,25 +347,35 @@ export const issueEnrolledDeviceRecords = async ({
  * @param {Uint8Array} args.discoverySecret
  * @param {any} args.certificate
  * @param {any} args.roster
+ * @param {string} [args.personDid]
  */
-export const ensureEnrolledCustody = async ({ io, discoverySecret, certificate, roster }) => {
-  await storeDiscoverySecret(io, discoverySecret);
+export const ensureEnrolledCustody = async ({
+  io, discoverySecret, certificate, roster, personDid = certificate?.personDid,
+}) => {
   const device = await createPersistentDeviceIdentity(io);
   const certVerdict = await verifyDeviceCertificate(certificate, {
+    expectedPersonDid: personDid,
     expectedDeviceDid: device.did,
   });
   if (!certVerdict.ok || certificate.deviceId !== device.deviceId) {
     throw new Error(`enrollment certificate does not name this device: ${certVerdict.defect ?? 'device-id-mismatch'}`);
   }
   const rosterVerdict = await verifyDeviceRoster(roster, {
-    expectedPersonDid: certificate.personDid,
+    expectedPersonDid: personDid,
   });
-  if (!rosterVerdict.ok || deviceStatusInRoster(roster, device.did) !== 'active') {
+  const ownEntry = roster?.devices?.find((/** @type {any} */ entry) => entry.deviceDid === device.did);
+  if (!rosterVerdict.ok || deviceStatusInRoster(roster, device.did) !== 'active'
+      || ownEntry?.deviceId !== device.deviceId) {
     throw new Error(`enrollment roster does not authorize this device: ${rosterVerdict.defect ?? 'device-not-active'}`);
   }
+  // Preflight every key before the first write, then commit the membership
+  // marker before discovery. A crash between the two writes cannot leave a
+  // discovery-only install that legacy startup mistakes for a new person.
+  await preflightDiscoverySecret(io, discoverySecret);
   await storeSelfRecords(io, { certificate, roster });
+  await storeDiscoverySecret(io, discoverySecret);
   return {
-    personDid: certificate.personDid,
+    personDid,
     deviceDid: device.did,
     deviceId: device.deviceId,
     certificate,

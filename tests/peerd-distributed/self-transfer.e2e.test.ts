@@ -8,11 +8,9 @@
 
 import { describe, test, expect } from 'bun:test';
 import {
-  ensureFounderCustody, issueEnrolledDeviceRecords, ensureEnrolledCustody,
-  loadCoordinatorInputs, storeSelfRecords,
+  ensureFounderCustody, ensureEnrolleeDevice, sponsorDeviceEnrollment,
+  ensureEnrolledCustody, loadCoordinatorInputs,
 } from '../../extension/peerd-distributed/self/custody.js';
-import { createPersistentIdentity } from '../../extension/peerd-distributed/identity/keypair.js';
-import { createPersistentDeviceIdentity } from '../../extension/peerd-distributed/identity/device-key.js';
 import { createSelfDeviceCoordinator } from '../../extension/peerd-distributed/self/coordinator.js';
 import { createSyncSource, createSyncReceiver } from '../../extension/peerd-distributed/self/host.js';
 import { buildSnapshotOffer, encodeSurfacePayload } from '../../extension/peerd-distributed/self/sync.js';
@@ -107,22 +105,23 @@ describe('finished-marker rehearsal (Bun, in-memory mesh)', () => {
   test('two devices authenticate then transfer real state; the receiver materializes it', async () => {
     const now = () => 1_700_000_000_000;
     // ── custody: Device A founds, Device B enrolls under the same person ──
+    // B mints its own device key, A (the root holder) certifies it, B stores
+    // the result. B never receives the person root, which is what makes the
+    // roster a revocation mechanism rather than a suggestion.
     const vaultA = fakeVault();
     const founder = await ensureFounderCustody({ io: vaultA, label: 'Desktop', now: now() });
     const vaultB = fakeVault();
-    const deviceB = await createPersistentDeviceIdentity(vaultB);
-    const issued = await issueEnrolledDeviceRecords({
-      personIdentity: await createPersistentIdentity(vaultA), priorRoster: founder.roster,
-      deviceDid: deviceB.did, deviceId: deviceB.deviceId, label: 'Laptop', now: now(),
+    const deviceB = await ensureEnrolleeDevice(vaultB);
+    const issued = await sponsorDeviceEnrollment({
+      io: vaultA, deviceDid: deviceB.did, deviceId: deviceB.deviceId,
+      priorRoster: founder.roster, label: 'Laptop', now: now(),
     });
     const enrolled = await ensureEnrolledCustody({
       io: vaultB, discoverySecret: founder.discoverySecret!,
-      certificate: issued.certificate, roster: issued.roster,
+      certificate: issued.certificate, roster: issued.roster, personDid: founder.personDid,
     });
-    // Enrollment is not complete until the sponsor adopts the signed roster
-    // that contains the new device. Unknown certificates fail closed.
-    await storeSelfRecords(vaultA, { certificate: founder.certificate, roster: enrolled.roster });
     expect(enrolled.personDid).toBe(founder.personDid);
+    expect(vaultB.map.has('distributed/identity/v1')).toBe(false);
 
     // ── discovery + mutual auth over the rendezvous mesh ──
     const { meshFor, flush } = createMeshFabric();
@@ -202,6 +201,7 @@ describe('finished-marker rehearsal (Bun, in-memory mesh)', () => {
       ok: true,
       partial: false,
       applied: expect.arrayContaining(['sessions', 'memory', 'settings', 'apps', 'workspaces']),
+      failed: [],
       refused: {},
     });
     // The chat travelled; the actor session did not.
@@ -237,5 +237,33 @@ describe('finished-marker rehearsal (Bun, in-memory mesh)', () => {
     await source.onFrame('did:key:zStranger', { t: 'SYNC_PULL', proto: 1, snapshotId: manifest.snapshotId, surface: 'settings' });
     expect(sent).toEqual([]); // not one chunk, not even a refusal, silent drop
     void founder;
+  });
+
+  test('the live surface reader re-reads bounded storage but never serves changed bytes', async () => {
+    const original = encodeSurfacePayload({ v: 1, theme: 'dark' });
+    const { manifest } = await buildSnapshotOffer({
+      surfaces: { settings: { bytes: original, version: 1 } }, now: 1_700_000_000_000,
+    });
+    let liveBytes = original;
+    let reads = 0;
+    const sent: any[] = [];
+    const source = createSyncSource({
+      coordinator: { isSelfDevice: () => true }, manifest,
+      readSurfaceBytes: async () => { reads++; return liveBytes; },
+      send: async (_to, frame) => { sent.push(frame); },
+    });
+    const pull = {
+      t: 'SYNC_PULL', proto: 1, snapshotId: manifest.snapshotId, surface: 'settings',
+    };
+
+    await source.onFrame('did:key:zSibling', pull);
+    const firstTransfer = sent.map((frame) => frame.data);
+    liveBytes = encodeSurfacePayload({ v: 1, theme: 'evil' });
+    await source.onFrame('did:key:zSibling', pull);
+
+    expect(reads).toBe(2);
+    expect(sent.slice(firstTransfer.length)).toEqual([expect.objectContaining({
+      t: 'SYNC_REFUSE', reason: 'snapshot-changed',
+    })]);
   });
 });

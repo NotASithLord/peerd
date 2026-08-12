@@ -27,6 +27,10 @@ import { createDwebBridge, iframeTransport } from './apps/bridge.js';
 import { loadSeedApp, COMMONS_SEED } from './apps/seed.js';
 import { DEFAULT_SIGNALING } from './transport/signaling-client.js';
 import { dlog } from './log.js';
+import { createSelfDeviceCoordinator } from './self/coordinator.js';
+import { createSelfDeviceMesh } from './self/mesh.js';
+import { createSyncSource, createSyncReceiver } from './self/host.js';
+import { loadCoordinatorInputs } from './self/custody.js';
 
 // Protocol phase. Phase 1 = rooms & live collaboration: N-peer rooms,
 // topic gossip + sync, the dwapp bridge, the commons. Research-grade; may
@@ -81,6 +85,15 @@ export const createDwebClient = () => {
     // --- Phase 1 ---------------------------------------------------------
     identityMaterial: loadIdentityMaterial,
     identityFromMaterial,
+
+    // Self-device runtime. These must be properties of the client returned
+    // by loadDweb(), not merely exports of the module index: the offscreen
+    // host deliberately reaches the live module only through this boundary.
+    createSelfDeviceCoordinator,
+    createSelfDeviceMesh,
+    createSyncSource,
+    createSyncReceiver,
+    loadCoordinatorInputs,
 
     // --- portable identity (docs/design/portable-identity/) --------------
     // Record build/open runs in the channel's dweb crypto host (Chrome

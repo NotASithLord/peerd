@@ -355,9 +355,11 @@ export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => 
    * @param {{ appId?: string, name?: string, files?: Record<string, unknown>, html?: string,
    *   tags?: string[], entryFile?: string, sessionId?: string,
    *   dweb?: import('/peerd-engine/app-registry.js').AppDwebMeta, source?: string,
-   *   fileKinds?: Record<string, unknown> }} [opts]
+   *   fileKinds?: Record<string, unknown>, syncContentHash?: string }} [opts]
    */
-  const create = async ({ appId, name, files, html, tags, entryFile, sessionId, dweb, source, fileKinds } = {}) => {
+  const create = async ({
+    appId, name, files, html, tags, entryFile, sessionId, dweb, source, fileKinds, syncContentHash,
+  } = {}) => {
     if (typeof name !== 'string' || !name.trim()) throw new Error('name required');
 
     const suppliedFiles = files && typeof files === 'object'
@@ -397,6 +399,7 @@ export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => 
       entryFile: entry,
       ownerSessionId: sessionId ?? null,
       dweb,
+      syncContentHash,
       fileKinds: normalized.fileKinds,
     });
 

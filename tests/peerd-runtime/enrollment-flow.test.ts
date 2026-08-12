@@ -238,6 +238,22 @@ describe('refusals and declines', () => {
       refusedSurfaces: { settings: 'unavailable' },
     });
   });
+
+  test('item-level durable effects cannot be presented as an empty restore', () => {
+    const before = run([
+      ...completeEnrollment(),
+      { type: 'devices-found', devices: [{ deviceDid: 'd' }] },
+      { type: 'restore-approved' },
+      { type: 'offer-received', surfaces: ['sessions'] },
+    ]).state;
+    const { state } = run([{ type: 'transfer-complete', result: {
+      ok: false, partial: true, applied: [],
+      failed: [{ surface: 'sessions', defect: 'apply-failed', partial: { written: 1 } }],
+      partialEffects: { sessions: { written: 1 } }, refused: {},
+    } }], before);
+    expect(state.step).toBe('partial');
+    expect(state.failure).toBe('transfer-partial');
+  });
 });
 
 describe('§16 copy', () => {
@@ -257,7 +273,8 @@ describe('§16 copy', () => {
     expect(STEP_COPY.looking.title).toBe('Looking for your other Peerd devices…');
     expect(STEP_COPY.found.body).toBe('Restore your Peerd here?');
     expect(STEP_COPY.done.title).toBe('This device is ready');
-    expect(STEP_COPY.restoring.body).toContain('Chats, memory, Apps, settings, and workspaces');
+    expect(STEP_COPY.restoring.body).toContain('Chats, memory, Apps, and settings');
+    expect(STEP_COPY.restoring.body).not.toContain('workspaces');
   });
 
   test('surfaces are described in plain language', () => {

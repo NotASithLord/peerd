@@ -137,6 +137,9 @@ describe('snapshot offers', () => {
       surfaces: [{ ...manifest.surfaces[0], hash: 'ZZZ' }],
     })).toBe('bad-surface-hash');
     expect(validateSnapshotManifest({ ...manifest, v: 9 })).toBe('unsupported-version-9');
+    expect(validateSnapshotManifest({
+      ...manifest, surfaces: [{ ...manifest.surfaces[0], version: 2 }],
+    })).toBe('unsupported-surface-version');
   });
 
   test('pull validation refuses unknown snapshots and unoffered surfaces', async () => {

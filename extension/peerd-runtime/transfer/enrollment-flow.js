@@ -76,7 +76,7 @@ export const STEP_COPY = Object.freeze({
   },
   restoring: {
     title: 'Restoring your Peerd…',
-    body: 'Chats, memory, Apps, settings, and workspaces.',
+    body: 'Chats, memory, Apps, and settings.',
   },
   secrets: {
     title: 'Restore your saved keys?',
@@ -241,8 +241,10 @@ export const enrollmentStep = (state, event) => {
         challenge: event.challenge, device: event.device ?? null, sponsor: event.sponsor ?? null,
       }]);
 
-    // Enrollment landed: the identity is recovered and THIS device is
-    // certified. From here the device is valid even if nothing else works.
+    // Enrollment landed: THIS device now holds a person-signed certificate
+    // for its own key. From here the device is valid even if nothing else
+    // works. (It holds no person root: enrollment grants device authority,
+    // never the signing seed. See the dweb module's self/enroll.js.)
     case 'enrolled':
       if (!state.authorizationComplete) {
         return next({}, [{ type: 'report-invalid-transition', step: state.step, event: 'enrolled-before-approval' }]);
@@ -315,10 +317,11 @@ export const enrollmentStep = (state, event) => {
       const complete = result?.ok === true && expected.every((surface) => reportedApplied.includes(surface));
       if (!complete) {
         return next({
-          step: applied.length ? 'partial' : 'none-online',
+          step: applied.length || result?.partial === true ? 'partial' : 'none-online',
           appliedSurfaces: applied,
           refusedSurfaces: refused,
-          failure: result?.defect ?? (applied.length ? 'transfer-partial' : 'transfer-empty'),
+          failure: result?.defect ?? (applied.length || result?.partial === true
+            ? 'transfer-partial' : 'transfer-empty'),
         });
       }
       // Only now ask about credentials: an explicit, separate decision.

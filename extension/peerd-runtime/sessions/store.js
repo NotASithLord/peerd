@@ -295,6 +295,91 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     return present(record, []);
   };
 
+  // Same-user transfer imports an existing conversation identity rather
+  // than creating a fresh empty chat. Keep this path deliberately narrower
+  // than create/update: a peer may supply durable conversation content, but
+  // never actor lineage, tool authority, live trim/prewalk state, or other
+  // device-local bookkeeping.
+  const PORTABLE_MESSAGE_FIELDS = Object.freeze([
+    'role', 'content', 'toolUses', 'toolResults', 'model', 'provider',
+    'error', 'stopReason', 'synthetic', 'when', 'generation',
+  ]);
+
+  /** @param {any} value @param {readonly string[]} fields */
+  const pickPortable = (value, fields) => Object.fromEntries(
+    fields.filter((field) => value?.[field] !== undefined)
+      .map((field) => [field, value[field]]),
+  );
+
+  /**
+   * Import one portable top-level chat under its original session id.
+   *
+   * Message ids are re-keyed into a session namespace. The message store is
+   * global, so trusting a remote message id would let a compromised old
+   * self-device overwrite a row belonging to an unrelated local chat. The
+   * metadata record is committed last: interruption can leave harmless
+   * orphan rows, while retry deterministically resumes and can never expose
+   * a half-imported conversation.
+   *
+   * @param {any} portable
+   * @returns {Promise<Session>}
+   */
+  const importPortable = async (portable) => {
+    const sessionId = typeof portable?.sessionId === 'string' ? portable.sessionId.trim() : '';
+    if (!sessionId) throw new TypeError('portable sessionId is required');
+
+    return enqueueSessionOperation(sessionId, async () => {
+      const existing = await idb.get(STORE, sessionId);
+      if (existing) return /** @type {Session} */ (await assemble(existing));
+
+      const sourceMessages = Array.isArray(portable.messages) ? portable.messages : [];
+      /** @type {string[]} */
+      const msgIndex = [];
+      let latestNonSyntheticUserMessageId = null;
+      for (let seq = 0; seq < sourceMessages.length; seq++) {
+        const source = sourceMessages[seq];
+        if (!source || typeof source !== 'object') continue;
+
+        // Collision resolution is deterministic across a retry: rows already
+        // written for this import are reusable; rows owned by another session
+        // force the same monotonically numbered suffix on every attempt.
+        const base = `selfsync:${sessionId}:${seq}`;
+        let id = base;
+        for (let suffix = 1; ; suffix++) {
+          const occupied = await idb.get(MSGS, id);
+          if (!occupied || occupied.sessionId === sessionId) break;
+          id = `${base}:${suffix}`;
+        }
+        const message = { ...pickPortable(source, PORTABLE_MESSAGE_FIELDS), id };
+        await idb.put(MSGS, { id, sessionId, seq: msgIndex.length, message });
+        msgIndex.push(id);
+        if (isRealUserMessage(message)) latestNonSyntheticUserMessageId = id;
+      }
+
+      const record = {
+        sessionId,
+        createdAt: Number.isFinite(portable.createdAt) ? portable.createdAt : now(),
+        provider: typeof portable.provider === 'string' && portable.provider
+          ? portable.provider : 'anthropic',
+        model: typeof portable.model === 'string' && portable.model
+          ? portable.model : 'claude-sonnet-4-6',
+        kind: 'chat',
+        depth: 0,
+        msgIndex,
+        messagesV2: true,
+        latestNonSyntheticUserMessageId,
+        ...(Number.isFinite(portable.archivedAt) ? { archivedAt: portable.archivedAt } : {}),
+        ...(typeof portable.title === 'string' && portable.title ? { title: portable.title } : {}),
+        ...(portable.cost && typeof portable.cost === 'object' ? { cost: portable.cost } : {}),
+        ...(typeof portable.customSystemPrompt === 'string' && portable.customSystemPrompt.trim()
+          ? { customSystemPrompt: portable.customSystemPrompt }
+          : {}),
+      };
+      await idb.put(STORE, record);
+      return present(record, await readMessages(msgIndex));
+    });
+  };
+
   /** @returns {Promise<Session | undefined>} */
   const get = (/** @type {string} */ sessionId) => enqueueSessionOperation(
     sessionId,
@@ -578,6 +663,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
 
   return Object.freeze({
     create,
+    importPortable,
     get,
     list,
     listMetadata,

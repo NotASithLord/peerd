@@ -16,13 +16,17 @@ const createMemoryMeshFabric = () => {
   type Member = { did: string; onPeer: Set<(a: { did: string }) => void>; onDirect: Set<(a: { from: string; data: any }) => void> };
   const rooms = new Map<string, Map<string, Member>>();
   const deliver: Array<() => void> = [];
+  // Drain until QUIESCENT, not until first-empty. why the distinction: the
+  // handshake handlers are async and await real Ed25519 work, so the queue
+  // empties between "message delivered" and "reply enqueued". Stopping at
+  // the first empty queue ends the drain mid-handshake and the assertions
+  // race the crypto: the flake this shape exists to remove.
   const flush = async ({ idleTurns = 8, maxTurns = 4000 } = {}) => {
-    // Crypto promises can leave the delivery queue briefly empty between
-    // handshake rounds. Require several idle turns before calling it drained.
     let idle = 0;
     for (let turn = 0; turn < maxTurns && idle < idleTurns; turn++) {
-      if (deliver.length === 0) idle++;
-      else {
+      if (deliver.length === 0) {
+        idle++;
+      } else {
         idle = 0;
         for (const fn of deliver.splice(0)) fn();
       }
@@ -109,6 +113,93 @@ describe('self-device coordinator', () => {
     expect(desktop.selfDevices()[0].cert?.label).toBe('Device 1');
   });
 
+  test('a signed roster advance reaches running siblings before a new device handshakes', async () => {
+    const { root, discoverySecret, devices } = await person(3);
+    const oldRoster = await buildDeviceRoster({
+      personIdentity: root,
+      devices: devices.slice(0, 2).map((device, i) => ({
+        deviceDid: device.identity.did, deviceId: `dev-${i}`,
+        addedAt: i + 1, status: 'active' as const,
+      })),
+      seq: 1,
+    });
+    const nextRoster = await buildDeviceRoster({
+      personIdentity: root,
+      devices: devices.map((device, i) => ({
+        deviceDid: device.identity.did, deviceId: `dev-${i}`,
+        addedAt: i + 1, status: 'active' as const,
+      })),
+      seq: 2,
+    });
+    const { meshFor, flush } = createMemoryMeshFabric();
+    const persisted: number[] = [];
+    const make = (index: number, roster: any) => createSelfDeviceCoordinator({
+      personDid: root.did,
+      deviceIdentity: devices[index].identity,
+      deviceCert: devices[index].cert,
+      roster,
+      discoverySecret,
+      mesh: meshFor(devices[index].identity.did),
+      now: () => 1_700_000_000_000,
+      persistRoster: async (candidate) => { persisted.push(candidate.seq); },
+    });
+    const desktop = make(0, oldRoster);
+    const tablet = make(1, oldRoster);
+    await desktop.start();
+    await tablet.start();
+    await flush();
+    expect(desktop.isSelfDevice(devices[1].identity.did)).toBe(true);
+
+    expect(await desktop.updateRoster(nextRoster)).toEqual({ ok: true, defect: null });
+    await flush(); // deliver the authenticated SELF_ROSTER relay to tablet
+
+    const laptop = make(2, nextRoster);
+    await laptop.start();
+    await flush();
+    expect(desktop.isSelfDevice(devices[2].identity.did)).toBe(true);
+    expect(tablet.isSelfDevice(devices[2].identity.did)).toBe(true);
+    expect(laptop.selfDevices().map((d) => d.deviceDid).sort())
+      .toEqual([devices[0].identity.did, devices[1].identity.did].sort());
+    expect(persisted).toContain(2);
+  });
+
+  test('concurrent roster advances serialize check, persistence, and adoption', async () => {
+    const { root, discoverySecret, devices, roster } = await person(1);
+    const roster2 = await buildDeviceRoster({
+      personIdentity: root, devices: roster.devices, seq: 2,
+    });
+    const roster3 = await buildDeviceRoster({
+      personIdentity: root, devices: roster.devices, seq: 3,
+    });
+    let release2!: () => void;
+    const seq2Gate = new Promise<void>((resolve) => { release2 = resolve; });
+    let seq2Started!: () => void;
+    const started = new Promise<void>((resolve) => { seq2Started = resolve; });
+    const persisted: number[] = [];
+    const coordinator = createSelfDeviceCoordinator({
+      personDid: root.did,
+      deviceIdentity: devices[0].identity,
+      deviceCert: devices[0].cert,
+      roster,
+      discoverySecret,
+      mesh: createMemoryMeshFabric().meshFor(devices[0].identity.did),
+      persistRoster: async (candidate) => {
+        if (candidate.seq === 2) { seq2Started(); await seq2Gate; }
+        persisted.push(candidate.seq);
+      },
+    });
+    const p2 = coordinator.updateRoster(roster2);
+    await started;
+    const p3 = coordinator.updateRoster(roster3);
+    await Promise.resolve();
+    expect(persisted).toEqual([]);
+    release2();
+    expect(await p2).toEqual({ ok: true, defect: null });
+    expect(await p3).toEqual({ ok: true, defect: null });
+    expect(persisted).toEqual([2, 3]);
+    expect(await coordinator.updateRoster(roster2)).toEqual({ ok: false, defect: 'roster-not-newer' });
+  });
+
   test('an intruder who guessed the rendezvous room is discovered but refused (no same-person cert)', async () => {
     const { root, discoverySecret, devices, roster } = await person(1);
     const other = await person(1); // a different person entirely
@@ -189,5 +280,37 @@ describe('self-device coordinator', () => {
     desktop.sweep();
     expect(desktop.selfDevices()).toEqual([]);
     void laptop;
+  });
+
+  test('stop fences a deferred room open so discovery cannot resurrect afterward', async () => {
+    const { root, discoverySecret, devices, roster } = await person(1);
+    let resolveRoom: ((room: any) => void) | null = null;
+    let leaves = 0;
+    const room = {
+      roomId: 'deferred',
+      direct: { send: async () => true, onMessage: () => () => {} },
+      onPeer: () => () => {},
+      peers: () => [],
+      leave: () => { leaves++; },
+    };
+    const coordinator = createSelfDeviceCoordinator({
+      personDid: root.did,
+      deviceIdentity: devices[0].identity,
+      deviceCert: devices[0].cert,
+      roster,
+      discoverySecret,
+      mesh: {
+        did: devices[0].identity.did,
+        openRoom: () => new Promise((resolve) => { resolveRoom = resolve; }),
+      },
+      now: () => 1_700_000_000_000,
+    });
+    const starting = coordinator.start();
+    while (!resolveRoom) await new Promise((resolve) => setTimeout(resolve, 0));
+    coordinator.stop();
+    resolveRoom!(room);
+    await starting;
+    expect(leaves).toBe(1);
+    expect(coordinator.selfDevices()).toEqual([]);
   });
 });

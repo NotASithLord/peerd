@@ -73,6 +73,10 @@ const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
 const bindingSigningBytes = (binding) =>
   concat(utf8(BINDING_DOMAIN), Uint8Array.from([0]), utf8(canonicalize(binding)));
 
+/** @param {any} value @param {readonly string[]} fields */
+const hasOnlyFields = (value, fields) => value && typeof value === 'object'
+  && !Array.isArray(value) && Object.keys(value).every((field) => fields.includes(field));
+
 /**
  * Sign a binding snapshot. personDid comes from the signer: a caller
  * cannot bind credentials to a did it doesn't control.
@@ -104,17 +108,23 @@ export const buildPasskeyBinding = async ({
  */
 export const validatePasskeyBinding = (binding) => {
   if (!binding || typeof binding !== 'object') return 'not-an-object';
+  if (!hasOnlyFields(binding, ['v', 'personDid', 'rpId', 'credentials', 'seq', 'sig'])) {
+    return 'unknown-field';
+  }
   if (binding.v !== PASSKEY_BINDING_VERSION) return `unsupported-version-${binding.v}`;
   try { decodeDidKey(binding.personDid); } catch { return 'bad-person-did'; }
   if (typeof binding.rpId !== 'string' || binding.rpId.length === 0
-      || binding.rpId.length > MAX_RP_ID_LENGTH
-      || binding.rpId !== CANONICAL_RP_ID) return 'bad-rp-id';
+      || binding.rpId.length > MAX_RP_ID_LENGTH) return 'bad-rp-id';
+  if (binding.rpId !== CANONICAL_RP_ID) return 'non-canonical-rp-id';
   if (!Number.isSafeInteger(binding.seq) || binding.seq < 1) return 'bad-seq';
   if (!Array.isArray(binding.credentials)
       || binding.credentials.length > MAX_BINDING_CREDENTIALS) return 'bad-credentials';
   const seen = new Set();
   for (const credential of binding.credentials) {
     if (!credential || typeof credential !== 'object') return 'bad-credential';
+    if (!hasOnlyFields(credential, [
+      'credentialId', 'alg', 'publicKeySpki', 'identityCommitment', 'addedAt', 'status',
+    ])) return 'unknown-credential-field';
     if (typeof credential.credentialId !== 'string' || credential.credentialId.length === 0
         || credential.credentialId.length > MAX_CREDENTIAL_ID_B64
         || !BASE64_PATTERN.test(credential.credentialId)) return 'bad-credential-id';

@@ -71,6 +71,10 @@ const certSigningBytes = (cert) =>
 const rosterSigningBytes = (roster) =>
   concat(utf8(ROSTER_DOMAIN), Uint8Array.from([0]), utf8(canonicalize(roster)));
 
+/** @param {any} value @param {readonly string[]} fields */
+const hasOnlyFields = (value, fields) => value && typeof value === 'object'
+  && !Array.isArray(value) && Object.keys(value).every((field) => fields.includes(field));
+
 /**
  * Issue a certificate for a device key. The signer must BE the person
  * root: the resulting personDid is taken from it, never from an argument,
@@ -114,6 +118,9 @@ export const issueDeviceCertificate = async ({
  */
 export const validateDeviceCertificate = (cert) => {
   if (!cert || typeof cert !== 'object') return 'not-an-object';
+  if (!hasOnlyFields(cert, ['v', 'personDid', 'deviceDid', 'deviceId', 'label', 'issuedAt', 'seq', 'sig'])) {
+    return 'unknown-field';
+  }
   if (cert.v !== DEVICE_CERT_VERSION) return `unsupported-version-${cert.v}`;
   try { decodeDidKey(cert.personDid); } catch { return 'bad-person-did'; }
   try { decodeDidKey(cert.deviceDid); } catch { return 'bad-device-did'; }
@@ -187,6 +194,7 @@ export const buildDeviceRoster = async ({ personIdentity, devices, seq }) => {
  */
 export const validateDeviceRoster = (roster) => {
   if (!roster || typeof roster !== 'object') return 'not-an-object';
+  if (!hasOnlyFields(roster, ['v', 'personDid', 'seq', 'devices', 'sig'])) return 'unknown-field';
   if (roster.v !== DEVICE_ROSTER_VERSION) return `unsupported-version-${roster.v}`;
   try { decodeDidKey(roster.personDid); } catch { return 'bad-person-did'; }
   if (!Number.isSafeInteger(roster.seq) || roster.seq < 1) return 'bad-seq';
@@ -194,6 +202,9 @@ export const validateDeviceRoster = (roster) => {
   const seen = new Set();
   for (const entry of roster.devices) {
     if (!entry || typeof entry !== 'object') return 'bad-entry';
+    if (!hasOnlyFields(entry, ['deviceDid', 'deviceId', 'label', 'addedAt', 'status'])) {
+      return 'unknown-entry-field';
+    }
     try { decodeDidKey(entry.deviceDid); } catch { return 'bad-entry-device-did'; }
     if (seen.has(entry.deviceDid)) return 'duplicate-device';
     seen.add(entry.deviceDid);

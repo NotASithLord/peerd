@@ -464,6 +464,13 @@ import { makeDwebCustodyClient, makeRetryableCustodyReset } from './dweb-custody
 import {
   identityChangeBlockedByApps, makeDwebIdentityCustody,
 } from './dweb-identity-custody.js';
+import { makeDwebSelfCustody, hasEnrolledSelfCustody } from './dweb-self-custody.js';
+import { makeDwebSelfRoutes } from './routes/dweb-self.js';
+import {
+  shapeSessionsSurface, applySessionsSurface, shapeMemorySurface,
+  shapeSettingsSurface,
+  captureAppsSurface, applyAppsSurface, SurfaceApplyPartialError,
+} from '/peerd-runtime/index.js';
 import { makePrivateTransferOpenRoute, makePrivateTransferPort } from './private-transfer-port.js';
 import { downgradesActorConfirm, a2aConsentOutcome } from './a2a-consent.js';
 import { makeVaultRoutes } from './routes/vault.js';
@@ -702,7 +709,6 @@ const DEFAULT_SETTINGS = CHANNEL_DEFAULTS;
 const DWEB_IDENTITY_SECRET = 'distributed/identity/v1';
 // Certificate-only enrolled devices must not let legacy public-network
 // startup turn the intentionally absent person root into a new identity.
-const DWEB_SELF_RECORDS_SECRET = 'distributed/self-records/v1';
 // Extended-thinking budget (tokens) when reasoningEnabled. Modest by
 // design — enough for a real plan, not a dissertation. The adapter
 // lifts max_tokens above this so the visible answer still has room.
@@ -3610,6 +3616,11 @@ const withDwebIdentityMutation = (operation) => {
   return result;
 };
 
+// Self-membership writes and permanent-root mint/replacement are one custody
+// transaction domain. Otherwise a delayed enrollment record write and a
+// concurrent first mint can both observe an empty profile and split it.
+const withDwebSelfCustodyMutation = withDwebIdentityMutation;
+
 // App network publication, version replacement, and deletion share one keyed
 // lane. The App client's own queue protects OPFS mutations; this wider lane
 // keeps a publish from committing a served hash while deletion revokes a stale
@@ -3663,11 +3674,25 @@ const dwebIdentityCustody = makeDwebIdentityCustody({
   identitySecretName: DWEB_IDENTITY_SECRET,
   withIdentityMutation: withDwebIdentityMutation,
   canChangeIdentity: canChangeDwebIdentity,
-  canMintIdentity: async () => !await vault.getSecret(DWEB_SELF_RECORDS_SECRET),
+  canMintIdentity: async () => !await hasEnrolledSelfCustody(vault),
+});
+// The self-device secrets (device key, discovery secret, cached records)
+// ride the same verified port but a DIFFERENT handler with a closed
+// allowlist, so the parameterized path can never reach the person root.
+const dwebSelfCustody = makeDwebSelfCustody({
+  enabled: DWEB_ENABLED,
+  active: () => settingsHydrated && settingsStore.get().dwebEnabled,
+  vault,
+  identitySecretName: DWEB_IDENTITY_SECRET,
+  withCustodyMutation: withDwebSelfCustodyMutation,
 });
 const dwebCustodyClient = makeDwebCustodyClient({
   ensureOffscreen,
-  handleSecretRequest: dwebIdentityCustody.handle,
+  handleSecretRequest: (operation, args) => (
+    operation === 'self-get' || operation === 'self-set'
+      ? dwebSelfCustody.handle(operation, args)
+      : dwebIdentityCustody.handle(operation, args)
+  ),
 });
 /** @type {ReturnType<typeof makePrivateTransferPort> | null} */
 let privateTransferPort = null;
@@ -7547,6 +7572,116 @@ const handleToolsCommand = async (/** @type {string} */ arg) => {
 // 6. Message handlers — one-shot sendMessage routes
 // ---------------------------------------------------------------------------
 
+// --- same-user device sync: the SW's half (portable identity) --------------
+// The offscreen host moves opaque bytes between proven self devices; these
+// are the only functions that know what a surface MEANS. Hoisted as named
+// consts so the route wiring below stays shorthand-only (the routes-wiring
+// guard, tests/meta/sw-routes-wiring.test.ts).
+
+// App files ride the sync surfaces as base64 (JSON payloads) and land in
+// OPFS as bytes. Local to the SW: the offscreen host never decodes a
+// surface, it only moves and verifies it.
+const base64FileBytes = (/** @type {string} */ b64) => {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+};
+
+const dwebReady = async () => {
+  if (!DWEB_ENABLED) return false;
+  try { await ensureSettingsReady(); } catch { return false; }
+  return settingsStore.get().dwebEnabled === true;
+};
+
+/** @param {string} type @param {object} [payload] */
+const callBaseHost = (type, payload = {}) => browser.runtime.sendMessage({ type, ...payload });
+
+const applySelfSyncSettings = async (/** @type {any} */ patch) => {
+  // Defense in depth against a hostile/future sender: the dweb toggle owns
+  // the transport carrying this apply and can never be remotely restored.
+  const { dwebEnabled: _transportControl, ...portablePatch } = patch ?? {};
+  const normalized = normalizeImportedSettings(portablePatch);
+  if (Object.keys(normalized).length === 0) return { written: 0 };
+  onSettingsChanging(normalized);
+  await settingsStore.update(normalized);
+  try {
+    await onSettingsChanged(normalized);
+    pushState();
+  } catch (error) {
+    throw new SurfaceApplyPartialError('settings', {
+      written: Object.keys(normalized).length, sideEffectsCompleted: 0,
+    }, error);
+  }
+  return { written: Object.keys(normalized).length };
+};
+
+// Only the surfaces this build can shape from live stores are listed. An
+// absent name is reported as `unavailable` in the offer rather than
+// silently dropped: `workspaces` needs an OPFS walk through the engine
+// hosts, and `secrets` needs its own consent gate, so neither is here yet
+// and the offer says so honestly.
+const surfaceShapers = {
+  sessions: async () => shapeSessionsSurface({ sessions: await sessions.list() }),
+  memory: async () => shapeMemorySurface({ memory: await memory.exportAll() }),
+  settings: async () => shapeSettingsSurface({ settings: settingsStore.stored() }),
+  apps: async () => {
+    const records = await appRegistry.list();
+    return captureAppsSurface({ records, snapshotApp: async (/** @type {any} */ record) => {
+      // Files live in OPFS, not the registry row: snapshot each App.
+      // Fail the WHOLE surface if even one App cannot be captured. Silently
+      // omitting it would produce a hash-valid surface and a false-success
+      // restore result with no way for the receiver to know an App was lost.
+      const snapshot = await appClient.snapshotFilesBase64({ appId: record.id });
+      return {
+        id: record.id,
+        name: record.name,
+        entryFile: snapshot.record.entryFile,
+        fileKinds: snapshot.record.fileKinds,
+        files: Object.fromEntries(Object.entries(snapshot.files)
+          .map(([path, file]) => [path, /** @type {any} */ (file).base64])),
+      };
+    } });
+  },
+};
+
+// Idempotent by construction (self-sync-surfaces.js): an existing row on
+// this device wins, so a re-pull after an interruption cannot clobber
+// anything the user has since touched here.
+const surfaceAppliers = {
+  sessions: async (/** @type {any} */ payload) => applySessionsSurface(payload, {
+    existingIds: new Set((await sessions.list()).map((/** @type {any} */ s) => s.sessionId)),
+    putSession: async (/** @type {any} */ session) => { await sessions.importPortable(session); },
+  }),
+  memory: async (/** @type {any} */ payload) => {
+    if (!payload || payload.v !== 1 || !Object.hasOwn(payload, 'memory')) {
+      throw new Error('memory surface payload is malformed or unsupported');
+    }
+    return memory.importAll(payload.memory);
+  },
+  settings: async (/** @type {any} */ payload) => {
+    if (!payload || payload.v !== 1 || !payload.settings || typeof payload.settings !== 'object'
+        || Array.isArray(payload.settings)) {
+      throw new Error('settings surface payload is malformed or unsupported');
+    }
+    return applySelfSyncSettings(payload.settings);
+  },
+  apps: async (/** @type {any} */ payload) => applyAppsSurface(payload, {
+    existingHashes: new Set((await appRegistry.list())
+      .flatMap((/** @type {any} */ app) => [app.syncContentHash, app.dweb?.hash]).filter(Boolean)),
+    installApp: async (/** @type {any} */ app) => {
+      await appClient.create({
+        name: app.name,
+        syncContentHash: app.contentHash,
+        entryFile: app.entryFile,
+        fileKinds: app.fileKinds,
+        files: Object.fromEntries(Object.entries(app.files ?? {})
+          .map(([path, base64]) => [path, base64FileBytes(/** @type {string} */ (base64))])),
+      });
+    },
+  }),
+};
+
 // Goal-mode handles for the session routes, defined here so they wire as plain
 // SHORTHAND below (the route-wiring guard requires it — no key:value). goalRunner
 // is built above; ensureSession is the same lazy session-create the model turn
@@ -7626,6 +7761,12 @@ const dwebTransfer = makeDwebTransfer({
   loadDweb,
   withIdentityMutation: withDwebIdentityMutation,
   canReplaceIdentity: canChangeDwebIdentity,
+  canAdoptIdentity: async (incomingDid) => {
+    const stored = await vault.getSecret('distributed/self-records/v1');
+    if (!stored) return true;
+    try { return JSON.parse(stored)?.certificate?.personDid === incomingDid; }
+    catch { return false; }
+  },
   stopIdentityRuntime: async (leaseId) => {
     if (!offscreenAvailable) return;
     await ensureDwebSuspensionRecovery();
@@ -7906,6 +8047,15 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     repositories, isOffscreenSender, createDwebRollbackGuard,
   }),
 
+  // --- same-user devices: shape/apply the sync surfaces (portable identity) ---
+  // The offscreen host moves the bytes; these are the only routes that know
+  // what a surface MEANS. Every collaborator is hoisted at the top of
+  // section 6, so this wiring stays shorthand-only.
+  ...makeDwebSelfRoutes({
+    dwebReady, isOffscreenSender, callBaseHost, auditLog,
+    surfaceShapers, surfaceAppliers,
+  }),
+
   // --- git credentials (host-bound bearer tokens; same vault as API keys) ---
   // #53: stored under git:<host>, decrypted only in injectGitAuth at request
   // time, never shown to the agent or the VM. `list` returns HOST NAMES ONLY.
@@ -8034,7 +8184,10 @@ onSettingsHydrationRecovered = async () => {
   await syncFrontDoorBehavior();
   updateCheck.syncEnabled();
   if (DWEB_ENABLED) {
-    if (settingsStore.get().dwebEnabled) maybeStartBaseNetwork('settings-recovered');
+    if (settingsStore.get().dwebEnabled) {
+      maybeStartSelfDeviceHost('settings-recovered');
+      maybeStartBaseNetwork('settings-recovered');
+    }
     else await stopBaseNetwork();
   }
   if (uiConnected()) await pushState();
@@ -8066,7 +8219,21 @@ setInterval(() => {
 // block or fail an unlock, so everything is swallowed to a warning. Gated
 // preview + setting; on the store build maybeStart is a no-op (DWEB_ENABLED
 // false) — and this file names no dweb module, so the store verifier stays clean.
+function maybeStartSelfDeviceHost(/** @type {string} */ reason) {
+  if (!DWEB_ENABLED || !settingsHydrated || !settingsStore.get().dwebEnabled || vault.isLocked()) return;
+  void ensureOffscreen()
+    .then(() => browser.runtime.sendMessage({ type: 'dweb/base-host/self-start' }))
+    .then((/** @type {any} */ reply) => {
+      if (reply?.ok && reply.running) console.log('[sw] self-device host ONLINE on', reason);
+      else if (reply?.reason !== 'not-enrolled') console.warn('[sw] self-device host start returned', reply);
+    })
+    .catch((e) => console.warn('[sw] self-device host auto-start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+}
+
 function maybeStartBaseNetwork(/** @type {string} */ reason) {
+  // This private host is independent of the public person-root base. Starting
+  // it first is what lets certificate-only enrolled devices cold-boot.
+  maybeStartSelfDeviceHost(reason);
   void dwebSettingsGate.startWhenEnabled(() => {
     if (dwebIdentityMutationActive) {
       dwebStartDeferredByIdentityMutation = true;

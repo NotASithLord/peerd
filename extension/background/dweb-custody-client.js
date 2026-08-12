@@ -40,7 +40,7 @@ export const makeRetryableCustodyReset = ({ enabled, hostAvailable, reset }) => 
 /**
  * @param {Object} deps
  * @param {() => Promise<void>} deps.ensureOffscreen
- * @param {(operation: 'get'|'set', args: any) => Promise<any>} deps.handleSecretRequest
+ * @param {(operation: 'get'|'set'|'self-get'|'self-set', args: any) => Promise<any>} deps.handleSecretRequest
  * @param {number} [deps.timeoutMs]
  * @param {() => string} [deps.newRequestId]
  */
@@ -92,9 +92,14 @@ export const makeDwebCustodyClient = ({
         ));
         return;
       }
+      // 'get'/'set' carry the person root (dweb-identity-custody.js);
+      // 'self-get'/'self-set' carry the allowlisted self-device secrets
+      // (dweb-self-custody.js). Both ride this one verified port, and the
+      // SW's handler is what routes by operation, so a widened operation
+      // list here can never by itself reach a secret the handler refuses.
       if (message?.type !== 'custody/secret-request'
           || typeof message.requestId !== 'string'
-          || !['get', 'set'].includes(message.operation)) return;
+          || !['get', 'set', 'self-get', 'self-set'].includes(message.operation)) return;
       /** @param {any} response */
       const respond = (response) => {
         if (activePort !== port) return;

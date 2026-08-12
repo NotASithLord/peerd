@@ -36,9 +36,12 @@
 
 import { canonicalize } from '/shared/bundle/canonical.js';
 import { utf8, concat, toBase64, fromBase64 } from '/shared/bundle/bytes.js';
-import { verifyPasskeyBinding, activeBindingCredential } from '../identity/passkey-binding.js';
 import {
-  verifyDeviceCertificate, verifyDeviceRoster, deviceStatusInRoster,
+  verifyPasskeyBinding, validatePasskeyBinding, activeBindingCredential,
+} from '../identity/passkey-binding.js';
+import {
+  verifyDeviceCertificate, validateDeviceCertificate,
+  verifyDeviceRoster, validateDeviceRoster, deviceStatusInRoster,
 } from '../identity/device-certificate.js';
 import { verifyPasskeyAssertion } from '../identity/webauthn-verify.js';
 import { decodeDidKey } from '../identity/did.js';
@@ -66,6 +69,17 @@ const GRANT_VERSION = 1;
 const IV_BYTES = 12;
 const MAX_FIELD_B64 = 16 * 1024;
 const MAX_GRANT_CT_B64 = 64 * 1024;
+const GRANT_PAYLOAD_FIELDS = Object.freeze([
+  'v', 'personDid', 'deviceCertificate', 'deviceRoster',
+  'discoverySecret', 'passkeyBinding',
+]);
+
+/** @param {any} payload */
+const unexpectedGrantPayloadField = (payload) => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return 'not-an-object';
+  const allowed = new Set(GRANT_PAYLOAD_FIELDS);
+  return Object.keys(payload).find((field) => !allowed.has(field)) ?? null;
+};
 
 /** @param {BufferSource} bytes */
 const sha256 = async (bytes) => new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
@@ -425,6 +439,22 @@ const deriveGrantKey = async (ownPrivateKey, peerPublicKeyB64, transcript) => {
 export const sealEnrollmentGrant = async ({
   payload, enrolleeKey, issuedChallenge, credentialId,
 }) => {
+  // Version 1 grants are certificate-only. Exact-field validation prevents a
+  // caller from accidentally reintroducing the person seed under any extension
+  // field without a protocol/version review.
+  const unexpected = unexpectedGrantPayloadField(payload);
+  if (unexpected) throw new Error(`enrollment grant payload field is not allowed: ${unexpected}`);
+  const certDefect = validateDeviceCertificate(payload.deviceCertificate);
+  const rosterDefect = validateDeviceRoster(payload.deviceRoster);
+  const bindingDefect = validatePasskeyBinding(payload.passkeyBinding);
+  if (certDefect) throw new Error(`enrollment grant certificate is malformed: ${certDefect}`);
+  if (rosterDefect) throw new Error(`enrollment grant roster is malformed: ${rosterDefect}`);
+  if (bindingDefect) throw new Error(`enrollment grant binding is malformed: ${bindingDefect}`);
+  let discoveryBytes;
+  try { discoveryBytes = fromBase64(payload.discoverySecret); } catch { discoveryBytes = null; }
+  if (discoveryBytes?.length !== DISCOVERY_SECRET_BYTES) {
+    throw new Error('enrollment grant discovery secret is invalid');
+  }
   const sponsorPair = await mintEnrollmentKeyPair();
   const sponsorKey = await exportEnrollmentPublicKey(sponsorPair.publicKey);
   const key = await deriveGrantKey(sponsorPair.privateKey, enrolleeKey, {
@@ -463,12 +493,13 @@ export const sealEnrollmentGrant = async ({
  * @param {Uint8Array} context.prfOutput   fresh output from that assertion;
  *        never supplied by or recovered from the sponsor
  * @param {string} context.expectedDeviceDid local device signing DID
- * @param {string} context.expectedDeviceId local stable installation id
+ * @param {string} [context.deviceDid] PR398 alias for expectedDeviceDid
+ * @param {string} [context.expectedDeviceId] local stable installation id
  * @returns {Promise<{ ok: boolean, defect: string | null, payload: EnrollmentGrantPayload | null, did: string | null }>}
  */
 export const openEnrollmentGrant = async (grant, {
   enrolleePrivateKey, enrolleeKey, issuedChallenge, credentialId, prfOutput,
-  expectedDeviceDid, expectedDeviceId,
+  expectedDeviceDid, deviceDid, expectedDeviceId,
 }) => {
   /** @param {string} defect */
   const refuse = (defect) => ({ ok: false, defect, payload: null, did: null });
@@ -500,9 +531,14 @@ export const openEnrollmentGrant = async (grant, {
     return refuse('open-failed');
   }
   if (payload?.v !== GRANT_VERSION) return refuse('unsupported-payload');
+  const unexpected = unexpectedGrantPayloadField(payload);
+  if (unexpected === 'material') return refuse('root-material-present');
+  if (unexpected) return refuse('unexpected-payload-field');
 
-  const did = payload?.personDid;
-  if (typeof did !== 'string') return refuse('bad-person-did');
+  const did = payload.personDid;
+  try { decodeDidKey(did); } catch { return refuse('bad-person-did'); }
+  const localDeviceDid = expectedDeviceDid ?? deviceDid;
+  if (typeof localDeviceDid !== 'string') return refuse('expected-device-did-required');
   const bindingVerdict = await verifyPasskeyBinding(payload.passkeyBinding, { expectedPersonDid: did });
   if (!bindingVerdict.ok) return refuse(`binding-${bindingVerdict.defect}`);
   const credential = activeBindingCredential(payload.passkeyBinding, credentialId);
@@ -513,17 +549,19 @@ export const openEnrollmentGrant = async (grant, {
     return refuse('identity-commitment-mismatch');
   }
   const certificateVerdict = await verifyDeviceCertificate(payload.deviceCertificate, {
-    expectedPersonDid: did, expectedDeviceDid,
+    expectedPersonDid: did, expectedDeviceDid: localDeviceDid,
   });
-  if (!certificateVerdict.ok || payload.deviceCertificate.deviceId !== expectedDeviceId) {
+  if (!certificateVerdict.ok
+      || (expectedDeviceId !== undefined && payload.deviceCertificate.deviceId !== expectedDeviceId)) {
     return refuse(`certificate-${certificateVerdict.defect ?? 'device-id-mismatch'}`);
   }
   const rosterVerdict = await verifyDeviceRoster(payload.deviceRoster, { expectedPersonDid: did });
   if (!rosterVerdict.ok) return refuse(`roster-${rosterVerdict.defect}`);
   const rosterEntry = payload.deviceRoster.devices.find((/** @type {any} */ entry) =>
-    entry.deviceDid === expectedDeviceDid);
-  if (deviceStatusInRoster(payload.deviceRoster, expectedDeviceDid) !== 'active'
-      || rosterEntry?.deviceId !== expectedDeviceId) return refuse('roster-device-not-active');
+    entry.deviceDid === localDeviceDid);
+  const expectedRosterDeviceId = expectedDeviceId ?? payload.deviceCertificate.deviceId;
+  if (deviceStatusInRoster(payload.deviceRoster, localDeviceDid) !== 'active'
+      || rosterEntry?.deviceId !== expectedRosterDeviceId) return refuse('roster-device-not-active');
   let secretBytes;
   try {
     secretBytes = fromBase64(payload.discoverySecret);

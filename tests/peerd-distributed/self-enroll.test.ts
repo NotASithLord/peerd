@@ -8,7 +8,9 @@
 
 import { describe, test, expect } from 'bun:test';
 import { generateIdentity, mintKeypairMaterial } from '../../extension/peerd-distributed/identity/keypair.js';
-import { buildPasskeyBinding } from '../../extension/peerd-distributed/identity/passkey-binding.js';
+import {
+  buildPasskeyBinding, validatePasskeyBinding,
+} from '../../extension/peerd-distributed/identity/passkey-binding.js';
 import { buildDeviceRoster } from '../../extension/peerd-distributed/identity/device-certificate.js';
 import {
   deriveEnrollSecrets, deriveEnrollIdentityCommitment,
@@ -129,11 +131,18 @@ const runEnrollment = async (setup: Awaited<ReturnType<typeof sponsorSetup>>) =>
   });
   return {
     admitted, verdict, outcome, grant, challenge, enrolleePair, enrolleeKey,
-    enrolleeDevice, enrolleeDeviceId,
+    enrolleeDevice, enrolleeDeviceId, issued,
   };
 };
 
 describe('enrollment protocol', () => {
+  test('the verifier rejects a root-signed binding for any non-canonical RP', async () => {
+    const setup = await sponsorSetup();
+    expect(validatePasskeyBinding({
+      ...setup.binding, rpId: 'peerd.ai',
+    })).toBe('non-canonical-rp-id');
+  });
+
   test('happy path: a fresh install becomes the person, with the full chain verified', async () => {
     const setup = await sponsorSetup();
     const run = await runEnrollment(setup);
@@ -163,6 +172,25 @@ describe('enrollment protocol', () => {
     });
     expect(admitted.ok).toBe(false);
     expect(admitted.defect).toBe('mac-mismatch');
+  });
+
+  test('a relay cannot substitute the device key named by the enrollee', async () => {
+    const setup = await sponsorSetup();
+    const pair = await mintEnrollmentKeyPair();
+    const honestDevice = await generateIdentity();
+    const attackerDevice = await generateIdentity();
+    const request = await buildEnrollRequest({
+      macKey: setup.secrets.macKey,
+      credentialId: setup.passkey.credentialId,
+      ephemeralKey: await exportEnrollmentPublicKey(pair.publicKey),
+      deviceDid: honestDevice.did,
+      deviceId: 'laptop-1',
+    });
+    expect((await evaluateEnrollRequest({
+      ...request, deviceDid: attackerDevice.did,
+    }, {
+      macKey: setup.secrets.macKey, binding: setup.binding,
+    })).defect).toBe('mac-mismatch');
   });
 
   test('a revoked credential is refused at request time', async () => {
@@ -222,6 +250,38 @@ describe('enrollment protocol', () => {
       allowedOrigins: ORIGINS,
     });
     expect(verdict.defect).toBe('assertion-challenge-mismatch');
+  });
+
+  test('channel binding also commits the assertion to the device being certified', async () => {
+    const setup = await sponsorSetup();
+    const pair = await mintEnrollmentKeyPair();
+    const enrolleeKey = await exportEnrollmentPublicKey(pair.publicKey);
+    const honestDevice = await generateIdentity();
+    const attackerDevice = await generateIdentity();
+    const challenge = buildEnrollChallenge();
+    const assertion = await fabricateAssertion({
+      credential: setup.passkey,
+      challenge: await enrollCeremonyChallenge(
+        challenge.challenge, enrolleeKey, honestDevice.did,
+      ),
+    });
+    const proof = buildEnrollProof({
+      assertion, ephemeralKey: enrolleeKey, deviceDid: attackerDevice.did,
+    });
+    expect((await evaluateEnrollProof(proof, {
+      binding: setup.binding,
+      issuedChallenge: challenge.challenge,
+      requestEphemeralKey: enrolleeKey,
+      requestDeviceDid: honestDevice.did,
+      allowedOrigins: ORIGINS,
+    })).defect).toBe('device-did-mismatch');
+    expect((await evaluateEnrollProof(proof, {
+      binding: setup.binding,
+      issuedChallenge: challenge.challenge,
+      requestEphemeralKey: enrolleeKey,
+      requestDeviceDid: attackerDevice.did,
+      allowedOrigins: ORIGINS,
+    })).defect).toBe('assertion-challenge-mismatch');
   });
 
   test('replay: an assertion for an old challenge fails against a fresh one', async () => {
@@ -410,6 +470,64 @@ describe('enrollment protocol', () => {
       'deviceCertificate', 'deviceRoster', 'discoverySecret', 'passkeyBinding', 'personDid', 'v',
     ]);
     expect(JSON.stringify(outcome!.payload!)).not.toContain(setup.material.seed);
+  });
+
+  test('the grant sealer refuses root material or any unversioned payload extension', async () => {
+    const setup = await sponsorSetup();
+    const run = await runEnrollment(setup);
+    await expect(sealEnrollmentGrant({
+      payload: {
+        ...run.outcome!.payload!,
+        material: setup.material,
+      } as any,
+      enrolleeKey: run.enrolleeKey!,
+      issuedChallenge: run.challenge!.challenge,
+      credentialId: setup.passkey.credentialId,
+    })).rejects.toThrow(/field is not allowed: material/);
+
+    await expect(sealEnrollmentGrant({
+      payload: {
+        ...run.outcome!.payload!,
+        passkeyBinding: { ...run.outcome!.payload!.passkeyBinding, material: setup.material },
+      } as any,
+      enrolleeKey: run.enrolleeKey!,
+      issuedChallenge: run.challenge!.challenge,
+      credentialId: setup.passkey.credentialId,
+    })).rejects.toThrow(/binding is malformed: unknown-field/);
+  });
+
+  test('a valid certificate with a roster that marks this device revoked is refused', async () => {
+    const setup = await sponsorSetup();
+    const run = await runEnrollment(setup);
+    const revokedRoster = await buildDeviceRoster({
+      personIdentity: setup.person,
+      devices: run.issued!.roster.devices.map((row: any) => (
+        row.deviceDid === run.enrolleeDevice!.did
+          ? { ...row, status: 'revoked' as const }
+          : row
+      )),
+      seq: run.issued!.roster.seq + 1,
+    });
+    const grant = await sealEnrollmentGrant({
+      payload: {
+        ...run.outcome!.payload!,
+        deviceRoster: revokedRoster,
+      },
+      enrolleeKey: run.enrolleeKey!,
+      issuedChallenge: run.challenge!.challenge,
+      credentialId: setup.passkey.credentialId,
+    });
+    const outcome = await openEnrollmentGrant(grant, {
+      enrolleePrivateKey: run.enrolleePair!.privateKey,
+      enrolleeKey: run.enrolleeKey!,
+      issuedChallenge: run.challenge!.challenge,
+      credentialId: setup.passkey.credentialId,
+      prfOutput: setup.prfOutput,
+      deviceDid: run.enrolleeDevice!.did,
+      expectedDeviceId: run.enrolleeDeviceId!,
+    });
+    expect(outcome.ok).toBe(false);
+    expect(outcome.defect).toBe('roster-device-not-active');
   });
 
   test('PRF-derived secrets are purpose-separated and sized', async () => {

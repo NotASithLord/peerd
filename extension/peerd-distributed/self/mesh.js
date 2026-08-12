@@ -40,7 +40,7 @@ export const createSelfDeviceMesh = ({
     const messageCbs = new Set();
     const offEnvelope = joined.onEnvelope(({ env }) => {
       if (env.ch !== SELF_DIRECT_CHANNEL || env.typ !== SELF_DIRECT_TYPE) return;
-      for (const cb of [...messageCbs]) cb({ from: env.from, data: env.body?.data });
+      for (const cb of [...messageCbs]) cb({ from: env.from, data: env.body?.data, roomId });
     });
     let left = false;
 
@@ -53,7 +53,7 @@ export const createSelfDeviceMesh = ({
           if (!joined.mesh.send(toDid, env)) throw new Error('self-device link is unavailable');
           return true;
         },
-        /** @param {(arg: { from: string, data: any }) => void} cb */
+        /** @param {(arg: { from: string, data: any, roomId: string }) => void} cb */
         onMessage(cb) { messageCbs.add(cb); return () => messageCbs.delete(cb); },
       },
       onPeer: joined.onPeer,

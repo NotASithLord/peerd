@@ -7,7 +7,8 @@
 import { describe, test, expect } from 'bun:test';
 import {
   portableSession, shapeSessionsSurface, applySessionsSurface,
-  shapeAppsSurface, applyAppsSurface,
+  shapeSettingsSurface,
+  shapeAppsSurface, captureAppsSurface, applyAppsSurface,
   shapeWorkspacesSurface, applyWorkspacesSurface,
   shapeSecretsSurface, applySecretsSurface,
   encodeSurface, decodeSurface,
@@ -70,6 +71,38 @@ describe('session projection', () => {
     expect(result).toEqual({ written: 1, skipped: 1 });
     expect(written.map((s) => s.sessionId)).toEqual(['chat-2']);
   });
+
+  test('a second-session failure reports the item that already committed', async () => {
+    const surface = shapeSessionsSurface({
+      sessions: [
+        { sessionId: 'chat-1', kind: 'chat', messages: [] },
+        { sessionId: 'chat-2', kind: 'chat', messages: [] },
+      ],
+    });
+    let calls = 0;
+    try {
+      await applySessionsSurface(surface, {
+        existingIds: new Set(),
+        putSession: async () => {
+          calls++;
+          if (calls === 2) throw new Error('disk full');
+        },
+      });
+      throw new Error('expected the sessions surface to fail');
+    } catch (error: any) {
+      expect(error.name).toBe('SurfaceApplyPartialError');
+      expect(error.result).toEqual({ written: 1, skipped: 0 });
+    }
+  });
+
+  test('future or malformed session/App payloads fail instead of applying empty success', async () => {
+    await expect(applySessionsSurface({ v: 2, conversations: [] }, {
+      existingIds: new Set(), putSession: async () => {},
+    })).rejects.toThrow(/malformed or unsupported/);
+    await expect(applyAppsSurface({ v: 2, artifacts: [] }, {
+      existingHashes: new Set(), installApp: async () => {},
+    })).rejects.toThrow(/malformed or unsupported/);
+  });
 });
 
 describe('secret custody boundary', () => {
@@ -94,6 +127,11 @@ describe('secret custody boundary', () => {
   });
 });
 
+test('settings projection never moves the dweb transport toggle', () => {
+  expect(shapeSettingsSurface({ settings: { theme: 'dark', dwebEnabled: false } }))
+    .toEqual({ v: 1, settings: { theme: 'dark' } });
+});
+
 describe('apps projection', () => {
   test('shapes logical artifacts, dedups by content hash on apply', async () => {
     const surface = shapeAppsSurface({
@@ -110,6 +148,63 @@ describe('apps projection', () => {
     });
     expect(result).toEqual({ installed: 1, skipped: 1 });
     expect(installed[0].name).toBe('Notes');
+  });
+
+  test('a failed live App snapshot makes the whole surface unavailable', async () => {
+    const seen: string[] = [];
+    await expect(captureAppsSurface({
+      records: [{ id: 'a' }, { id: 'broken' }, { id: 'c' }],
+      snapshotApp: async (record) => {
+        seen.push(record.id);
+        if (record.id === 'broken') throw new Error('OPFS read failed');
+        return { name: record.id, entryFile: 'index.html', files: { 'index.html': '' } };
+      },
+    })).rejects.toThrow('OPFS read failed');
+    expect(seen).toEqual(['a', 'broken']);
+  });
+
+  test('local Apps get stable retry identities and capture stops at the cumulative cap', async () => {
+    const record = { id: 'local-1' };
+    const snapshot = async () => ({
+      name: 'Local', entryFile: 'index.html', fileKinds: {}, files: { 'index.html': 'PGgxPk9LPC9oMT4=' },
+    });
+    const first = await captureAppsSurface({ records: [record], snapshotApp: snapshot });
+    const second = await captureAppsSurface({ records: [record], snapshotApp: snapshot });
+    expect(first.apps[0].contentHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(second.apps[0].contentHash).toBe(first.apps[0].contentHash);
+    await expect(captureAppsSurface({ records: [record], snapshotApp: snapshot, maxBytes: 8 }))
+      .rejects.toThrow(/transfer cap/);
+  });
+
+  test('recomputes App identity from captured bytes after a local edit', async () => {
+    const staleHash = 'a'.repeat(64);
+    const record = { id: 'app-1', syncContentHash: staleHash };
+    const capture = (bytes: string) => captureAppsSurface({
+      records: [record],
+      snapshotApp: async () => ({
+        name: 'Notes', entryFile: 'index.html', fileKinds: {},
+        files: { 'index.html': bytes }, contentHash: staleHash,
+      }),
+    });
+    const original = await capture('b2xk');
+    const edited = await capture('bmV3');
+    expect(original.apps[0].contentHash).not.toBe(staleHash);
+    expect(edited.apps[0].contentHash).not.toBe(original.apps[0].contentHash);
+  });
+
+  test('a second-App failure reports the App that already committed', async () => {
+    let attempts = 0;
+    await expect(applyAppsSurface({ v: 1,
+      apps: [
+        { name: 'One', entryFile: 'index.html', files: { 'index.html': 'MQ==' } },
+        { name: 'Two', entryFile: 'index.html', files: { 'index.html': 'Mg==' } },
+      ],
+    }, {
+      existingHashes: new Set(),
+      installApp: async () => { attempts++; if (attempts === 2) throw new Error('quota'); },
+    })).rejects.toMatchObject({
+      name: 'SurfaceApplyPartialError', result: { installed: 1, skipped: 0 },
+    });
   });
 });
 

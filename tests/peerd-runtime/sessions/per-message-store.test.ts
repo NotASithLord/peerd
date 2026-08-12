@@ -61,6 +61,45 @@ describe('session store v2 — per-message records', () => {
     expect('messagesV2' in s).toBe(false);
   });
 
+  test('portable import preserves the chat and is idempotent without trusting message ids', async () => {
+    const idb = makeIdb();
+    const store = makeStore(idb);
+    // Occupy the imported row's deterministic base key from another chat.
+    await idb.put('session_messages', {
+      id: 'selfsync:remote-chat:0', sessionId: 'local-chat', seq: 0,
+      message: { id: 'selfsync:remote-chat:0', role: 'user', content: 'local' },
+    });
+    const portable = {
+      sessionId: 'remote-chat', createdAt: 42, provider: 'openai', model: 'gpt-test',
+      title: 'A restored chat', customSystemPrompt: 'Keep this preference',
+      // These authority/runtime fields must never survive this narrow path.
+      permissionMode: 'act', trimSummary: { text: 'stale' }, parentSessionId: 'victim',
+      messages: [
+        { id: 'selfsync:remote-chat:0', role: 'user', content: 'hello', when: 1 },
+        { id: 'attacker-picked-id', role: 'assistant', content: 'world', when: 2 },
+      ],
+    };
+
+    const imported = await store.importPortable(portable as any);
+    expect(imported).toMatchObject({
+      sessionId: 'remote-chat', createdAt: 42, provider: 'openai', model: 'gpt-test',
+      title: 'A restored chat', kind: 'chat', depth: 0,
+    });
+    expect(imported.messages.map((message: any) => message.content)).toEqual(['hello', 'world']);
+    expect(imported.messages.map((message: any) => message.id)).toEqual([
+      'selfsync:remote-chat:0:1', 'selfsync:remote-chat:1',
+    ]);
+    expect((imported as any).permissionMode).toBeUndefined();
+    expect((imported as any).trimSummary).toBeUndefined();
+    expect((imported as any).parentSessionId).toBeUndefined();
+    expect(idb._tbl('session_messages').get('selfsync:remote-chat:0').message.content).toBe('local');
+
+    const second = await store.importPortable({ ...portable, title: 'must not overwrite' } as any);
+    expect(second.title).toBe('A restored chat');
+    expect(idb._tbl('sessions').size).toBe(1);
+    expect(idb._tbl('session_messages').size).toBe(3);
+  });
+
   test('listMetadata never reads or returns message bodies', async () => {
     const idb = makeIdb();
     const store = makeStore(idb);

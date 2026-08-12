@@ -46,7 +46,7 @@ const HANDSHAKE_TIMEOUT_MS = 20_000;
  * @typedef {{
  *     roomId: string,
  *     direct: { send: (toDid: string, data: any) => Promise<any> | any,
- *       onMessage: (cb: (arg: { from: string, data: any }) => void) => (() => void) },
+ *       onMessage: (cb: (arg: { from: string, data: any, roomId?: string }) => void) => (() => void) },
  *     onPeer: (cb: (arg: { did: string }) => void) => (() => void),
  *     onPeerGone?: (cb: (arg: { did: string, why?: string }) => void) => (() => void),
  *     peers: () => string[],
@@ -72,11 +72,12 @@ const HANDSHAKE_TIMEOUT_MS = 20_000;
  * @param {SelfMesh} deps.mesh
  * @param {() => number} [deps.now]
  * @param {(event: string, detail?: any) => void} [deps.onEvent]  observability
+ * @param {(roster: DeviceRoster) => Promise<void>} [deps.persistRoster]
  * @param {number} [deps.skew]  rendezvous epoch skew window (default 1)
  */
 export const createSelfDeviceCoordinator = ({
   personDid, deviceIdentity, deviceCert, roster, discoverySecret, mesh,
-  now = Date.now, onEvent = () => {}, skew = 1,
+  now = Date.now, onEvent = () => {}, persistRoster = async () => {}, skew = 1,
 }) => {
   /** @type {Map<string, { room: Awaited<ReturnType<SelfMesh['openRoom']>>, offs: (() => void)[] }>} */
   const joined = new Map(); // topic -> room handle
@@ -99,21 +100,66 @@ export const createSelfDeviceCoordinator = ({
   const peers = new Map();
   /** @type {Set<(arg: { deviceDid: string, cert: DeviceCertificate }) => void>} */
   const selfDeviceCbs = new Set();
+  /** @type {Set<(from: string, frame: any) => void>} */
+  const appFrameCbs = new Set();
   let running = false;
+  let lifecycleGeneration = 0;
   let currentRoster = roster;
+  /** Serialize check+persist+adopt so seq 7 can never commit before seq 6. */
+  let rosterUpdateTail = Promise.resolve();
 
   /** @param {string} deviceDid */
   const isSelfDevice = (deviceDid) => peers.get(deviceDid)?.status === 'self';
+
+  /**
+   * Adopt and durably cache a strictly newer root-signed roster. Active
+   * siblings relay it over already-authenticated links; AUTH_HELLO carries
+   * it too so a newly-added device is accepted by an older sibling on the
+   * first handshake rather than only after a restart.
+   * @param {DeviceRoster} candidate
+   * @param {{ broadcast?: boolean }} [options]
+   */
+  const adoptRoster = (candidate, { broadcast = true } = {}) => {
+    const operation = rosterUpdateTail.then(async () => {
+    const verdict = await verifyDeviceRoster(candidate, { expectedPersonDid: personDid });
+    if (!verdict.ok) return { ok: false, defect: `roster-${verdict.defect}` };
+    if (!rosterSupersedes(candidate, currentRoster)) {
+      return { ok: false, defect: 'roster-not-newer' };
+    }
+    await persistRoster(candidate);
+    currentRoster = candidate;
+    for (const [deviceDid, entry] of peers) {
+      if (entry.status === 'self' && deviceStatusInRoster(currentRoster, deviceDid) !== 'active') {
+        entry.status = 'refused';
+        entry.defect = 'device-not-active';
+        onEvent('self_device_demoted', { deviceDid, defect: entry.defect });
+      }
+    }
+    onEvent('roster_adopted', { seq: currentRoster.seq });
+    if (broadcast) {
+      const frame = { t: 'SELF_ROSTER', proto: 1, roster: currentRoster };
+      await Promise.allSettled([...peers.entries()]
+        .filter(([, entry]) => entry.status === 'self')
+        .map(([deviceDid]) => Promise.resolve(sendTo(deviceDid, frame))));
+    }
+    return { ok: true, defect: null };
+    });
+    rosterUpdateTail = operation.then(() => undefined, () => undefined);
+    return operation;
+  };
 
   /** @param {string} deviceDid @param {any} frame */
   const sendTo = (deviceDid, frame) => {
     const entry = peers.get(deviceDid);
     const room = entry && joined.get(topicOf(entry.roomId))?.room;
-    // Fall back to whichever joined room links the peer.
+    // Once a handshake exists, its room id is part of every proof signature.
+    // Never silently send that proof on another overlapping epoch room.
+    if (room?.peers().includes(deviceDid)) return room.direct.send(deviceDid, frame);
+    if (entry) return Promise.resolve(false);
+    // Before a handshake exists, choose one linked room to open it on.
     for (const { room: r } of joined.values()) {
       if (r.peers().includes(deviceDid)) return r.direct.send(deviceDid, frame);
     }
-    if (room) return room.direct.send(deviceDid, frame);
     return Promise.resolve(false);
   };
 
@@ -131,17 +177,33 @@ export const createSelfDeviceCoordinator = ({
       roomId, deadline: now() + HANDSHAKE_TIMEOUT_MS,
     });
     onEvent('handshake_started', { deviceDid });
-    await sendTo(deviceDid, buildAuthHello({ cert: deviceCert, nonce: selfNonce }));
+    await sendTo(deviceDid, buildAuthHello({ cert: deviceCert, nonce: selfNonce, roster: currentRoster }));
   };
 
   /** @param {string} from @param {any} data */
-  const onDirect = async (from, data) => {
+  const onDirect = async (from, data, inboundRoomId) => {
     if (!data || typeof data !== 'object') return;
+    const entry = peers.get(from);
+    if (entry && inboundRoomId && entry.roomId !== inboundRoomId) {
+      onEvent('cross_room_frame_ignored', { deviceDid: from, expected: entry.roomId, received: inboundRoomId });
+      return;
+    }
     if (data.t === 'AUTH_HELLO') return onAuthHello(from, data);
     if (data.t === 'AUTH_PROOF') return onAuthProof(from, data);
-    // SYNC_* frames are handled by the injected sync host, but only for a
-    // peer that already reached `self`: the routing gate (issue invariant
-    // 12). The coordinator exposes isSelfDevice for that host to consult.
+    if (data.t === 'SELF_ROSTER') {
+      if (!isSelfDevice(from) || data.proto !== 1) return;
+      await adoptRoster(data.roster);
+      return;
+    }
+    // Everything else (SYNC_*) belongs to a host registered via onAppFrame.
+    // The gate is applied HERE as well as inside the host: a frame from a
+    // peer that has not reached `self` is dropped before any host sees it
+    // (issue invariant 12). Two checks, because this one is structural and
+    // the host's keeps the host honest when driven by any other transport.
+    if (!isSelfDevice(from)) return;
+    for (const cb of appFrameCbs) {
+      try { cb(from, data); } catch { /* a host's failure is not the mesh's */ }
+    }
   };
 
   /** @param {string} from @param {any} hello */
@@ -153,6 +215,10 @@ export const createSelfDeviceCoordinator = ({
       entry = peers.get(from);
     }
     if (!entry) return;
+    // A valid newer root-signed roster may be the only local evidence that
+    // this newly-certified device is active. Adopt it before evaluating the
+    // certificate against our prior high-water mark.
+    if (hello.roster) await adoptRoster(hello.roster, { broadcast: false });
     const verdict = await evaluateAuthHello(hello, {
       personDid, selfDeviceDid: deviceIdentity.did, linkDeviceDid: from, roster: currentRoster,
     });
@@ -271,9 +337,11 @@ export const createSelfDeviceCoordinator = ({
      */
     async start() {
       running = true;
+      const startGeneration = lifecycleGeneration;
       const window = await rendezvousWindow(discoverySecret, {
         now: now(), skew, domain: SELF_RENDEZVOUS_DOMAIN,
       });
+      if (!running || startGeneration !== lifecycleGeneration) return { rooms: [] };
       const wanted = new Set(window.map((w) => `${SELF_ROOM_PREFIX}/${w.topic}`));
       // Leave rooms no longer in the window.
       for (const [topic, entry] of joined) {
@@ -287,14 +355,18 @@ export const createSelfDeviceCoordinator = ({
       for (const { topic } of window) {
         if (joined.has(topic)) continue;
         const room = await mesh.openRoom(`${SELF_ROOM_PREFIX}/${topic}`);
+        if (!running || startGeneration !== lifecycleGeneration) {
+          room.leave();
+          return { rooms: [...joined.keys()].map((joinedTopic) => `${SELF_ROOM_PREFIX}/${joinedTopic}`) };
+        }
         const offs = [
           room.onPeer(({ did }) => {
             if (running) beginHandshake(did, room.roomId).catch((error) => {
               onEvent('handshake_error', { deviceDid: did, error });
             });
           }),
-          room.direct.onMessage(({ from, data }) => {
-            if (running) onDirect(from, data).catch((error) => {
+          room.direct.onMessage(({ from, data, roomId: inboundRoomId }) => {
+            if (running) onDirect(from, data, inboundRoomId ?? room.roomId).catch((error) => {
               onEvent('handshake_error', { deviceDid: from, error });
             });
           }),
@@ -328,6 +400,25 @@ export const createSelfDeviceCoordinator = ({
     isSelfDevice,
     /** @param {(arg: { deviceDid: string, cert: DeviceCertificate }) => void} cb */
     onSelfDevice(cb) { selfDeviceCbs.add(cb); return () => selfDeviceCbs.delete(cb); },
+
+    /**
+     * Subscribe a state-transfer host (host.js) to the frames this
+     * coordinator does not itself speak. Only frames from a peer that
+     * already reached `self` are delivered.
+     * @param {(from: string, frame: any) => void} cb
+     */
+    onAppFrame(cb) { appFrameCbs.add(cb); return () => appFrameCbs.delete(cb); },
+
+    /**
+     * Send on the same authenticated link the handshake used. Refuses any
+     * peer that is not a confirmed self device, so a host cannot be tricked
+     * into serving state to a candidate that never proved same-person.
+     * @param {string} deviceDid @param {any} frame
+     */
+    send(deviceDid, frame) {
+      if (!isSelfDevice(deviceDid)) return Promise.resolve(false);
+      return sendTo(deviceDid, frame);
+    },
     sweep,
 
     /**
@@ -336,24 +427,12 @@ export const createSelfDeviceCoordinator = ({
      * @param {DeviceRoster} candidate
      */
     async updateRoster(candidate) {
-      const verdict = await verifyDeviceRoster(candidate, { expectedPersonDid: personDid });
-      if (!verdict.ok) return { ok: false, defect: `roster-${verdict.defect}` };
-      if (!rosterSupersedes(candidate, currentRoster)) {
-        return { ok: false, defect: 'roster-not-newer' };
-      }
-      currentRoster = candidate;
-      for (const [deviceDid, entry] of peers) {
-        if (entry.status === 'self' && deviceStatusInRoster(currentRoster, deviceDid) !== 'active') {
-          entry.status = 'refused';
-          entry.defect = 'device-not-active';
-          onEvent('self_device_demoted', { deviceDid, defect: entry.defect });
-        }
-      }
-      return { ok: true, defect: null };
+      return adoptRoster(candidate);
     },
 
     stop() {
       running = false;
+      lifecycleGeneration += 1;
       for (const entry of joined.values()) {
         for (const off of entry.offs) off();
         entry.room.leave();

@@ -58,6 +58,7 @@ const STORAGE_KEY = 'apps.v1';
  *   fileKinds: Record<string, 'text' | 'binary'>,
  *   dweb?: AppDwebMeta,
  *   shared?: boolean,
+ *   syncContentHash?: string,
  * }} AppRecord
  */
 
@@ -108,6 +109,8 @@ export const createAppRegistry = (deps) => {
       // seed. Its presence is what unlocks the app-tab dweb bridge. Set at
       // create, immutable after (like source) — so it is NOT in applyPatch.
       ...(opts.dweb && typeof opts.dweb === 'object' ? { dweb: opts.dweb } : {}),
+      ...(typeof opts.syncContentHash === 'string' && /^[0-9a-f]{64}$/.test(opts.syncContentHash)
+        ? { syncContentHash: opts.syncContentHash } : {}),
     }),
     applyPatch: (next, patch) => {
       if (typeof patch.name === 'string') next.name = patch.name;
