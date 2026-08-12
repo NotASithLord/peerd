@@ -40,6 +40,9 @@ import { denylistModel, removalCopy, groupDenylist } from './denylist-format.js'
  * @property {Set<string>} openGroups   category keys currently expanded
  * @property {{ ok: boolean, text: string }|null} note
  * @property {string|null} confirm      pattern with the armed remove/disable confirm
+ * @property {boolean} confirmNeedsFocus  move focus to the verb on the NEXT strip mount only
+ * @property {string|null} refocus      pattern whose arm button should regain focus after a disarm
+ * @property {HTMLInputElement|null} searchEl
  * @property {boolean} busy
  */
 
@@ -57,6 +60,9 @@ export const DenylistView = {
     vnode.state.openGroups = new Set(['__user']);   // your own patterns open; the seed's categories collapsed
     vnode.state.note = null;       // { ok, text } action banner
     vnode.state.confirm = null;    // pattern with the armed remove/disable confirm
+    vnode.state.confirmNeedsFocus = false;
+    vnode.state.refocus = null;
+    vnode.state.searchEl = null;
     vnode.state.busy = false;
     DenylistView.refresh(vnode);
   },
@@ -161,7 +167,15 @@ export const DenylistView = {
           placeholder: 'Search patterns…',
           'aria-label': 'Search denylist patterns',
           value: ui.query,
-          oninput: (/** @type {Event} */ e) => { ui.query = /** @type {HTMLInputElement} */ (e.target).value; },
+          oncreate: (/** @type {{ dom: HTMLInputElement }} */ v) => { ui.searchEl = v.dom; },
+          onremove: () => { ui.searchEl = null; },
+          oninput: (/** @type {Event} */ e) => {
+            ui.query = /** @type {HTMLInputElement} */ (e.target).value;
+            // why: a pending refocus is a one-shot claim for the chip that
+            // replaced a disarmed strip - typing means the user moved on,
+            // and a match resurfacing later must not yank focus from here.
+            ui.refocus = null;
+          },
         }),
         m('span.denylist-count',
           model.filtered
@@ -175,7 +189,16 @@ export const DenylistView = {
           : null,
       ]),
 
-      ui.note ? m(`p.key-msg${ui.note.ok ? '.ok' : '.err'}`, ui.note.text) : null,
+      // why role=status: the banner announces the outcome of a mutation
+      // (added / removed / re-enabled / refused) to assistive tech without
+      // stealing focus. why ALWAYS mounted: a live region announces content
+      // CHANGES inside a registered region - a node freshly inserted with its
+      // text already present is announced unreliably (VoiceOver, some NVDA).
+      // Empty it takes no space (.key-msg:empty zeroes the margin).
+      m('p.key-msg', {
+        role: 'status',
+        class: ui.note ? (ui.note.ok ? 'ok' : 'err') : '',
+      }, ui.note ? ui.note.text : null),
 
       // A search that matches nothing says so ONCE, at the top. The groups stay
       // listed underneath (a category that vanishes reads as "peerd does not
@@ -233,9 +256,13 @@ const groupBlock = (vnode, g) => {
   // unfiltered, "38 of 38" is noise where "38" is the fact. ("Your patterns"
   // has no seed total to be a fraction of, so it is always a plain count.)
   const count = (g.user || !ui.query.trim()) ? String(g.total) : `${g.shown} of ${g.total}`;
+  const headId = `denylist-group-head-${g.key}`;
+  const bodyId = `denylist-group-body-${g.key}`;
   const header = m('button.denylist-group-head', {
     type: 'button',
+    id: headId,
     'aria-expanded': open ? 'true' : 'false',
+    'aria-controls': bodyId,
     'aria-label': `${g.label}, ${count} patterns`,
     onclick: () => {
       if (ui.openGroups.has(g.key)) ui.openGroups.delete(g.key);
@@ -254,11 +281,17 @@ const groupBlock = (vnode, g) => {
   }, [
     header,
     open && g.rows.length > 0
-      ? m('.denylist-group-body', g.rows.map(({ pattern: p, user }) =>
+      ? m('.denylist-group-body', {
+          id: bodyId,
+          role: 'group',
+          'aria-labelledby': headId,
+        }, g.rows.map(({ pattern: p, user }) =>
         ui.confirm === p ? confirmStrip(vnode, p, user) : patternChip(vnode, p, user)))
       : null,
+    // why the id here too: an expanded-but-empty group renders this line as
+    // its whole body, and the header's aria-controls must resolve to it.
     open && g.rows.length === 0
-      ? m('p.muted.denylist-group-empty', ui.query.trim()
+      ? m('p.muted.denylist-group-empty', { id: bodyId }, ui.query.trim()
         ? 'No patterns in this group match the search.'
         : 'Every pattern in this group is currently disabled.')
       : null,
@@ -275,6 +308,12 @@ const groupBlock = (vnode, g) => {
  */
 const patternChip = (vnode, p, user) => {
   const ui = vnode.state;
+  // why the refocus dance: a disarm (Escape / ✕) destroys the focused verb
+  // button, which would drop keyboard focus to <body>. The chip that replaces
+  // the strip claims focus back onto the arm button it grew from.
+  const takeFocus = (/** @type {{ dom: HTMLButtonElement }} */ v) => {
+    if (ui.refocus === p) { ui.refocus = null; v.dom.focus(); }
+  };
   return m('span.denylist-item-row', { key: p }, [
     m(`code.denylist-item${user ? '.is-user' : ''}`,
       { title: user ? 'Added by you' : 'Built-in seed pattern' }, p),
@@ -282,7 +321,9 @@ const patternChip = (vnode, p, user) => {
       'aria-label': `${user ? 'Remove' : 'Disable'} ${p}`,
       title: user ? 'Remove this pattern' : 'Disable this built-in pattern (reversible)',
       disabled: ui.busy,
-      onclick: () => { ui.confirm = p; },
+      oncreate: takeFocus,
+      onupdate: takeFocus,
+      onclick: () => { ui.confirm = p; ui.confirmNeedsFocus = true; },
     }, '×'),
   ]);
 };
@@ -298,7 +339,17 @@ const patternChip = (vnode, p, user) => {
 const confirmStrip = (vnode, p, user) => {
   const ui = vnode.state;
   const { verb, consequence } = removalCopy(p, user);
-  return m('span.denylist-item-row.is-arming', { key: p }, [
+  return m('span.denylist-item-row.is-arming', {
+    key: p,
+    // why Escape here (not per button): cancel must work wherever focus
+    // sits inside the armed strip, and keydown bubbles to the row. The
+    // event keeps bubbling - nothing above this pane handles Escape, and
+    // silently eating a key an ancestor may someday want is how document-
+    // level directives get shadowed by accident.
+    onkeydown: (/** @type {KeyboardEvent} */ e) => {
+      if (e.key === 'Escape') { ui.confirm = null; ui.refocus = p; }
+    },
+  }, [
     m(`code.denylist-item${user ? '.is-user' : ''}`, p),
     m('span.denylist-badge',
       { title: user ? 'A pattern you added' : 'Ships with peerd — can be disabled, not deleted' },
@@ -306,12 +357,28 @@ const confirmStrip = (vnode, p, user) => {
     m('span.denylist-consequence', consequence),
     m('button.linkish.danger-text', {
       disabled: ui.busy,
+      // why the name carries the pattern: the visible label is just
+      // "Remove?" - a screen reader landing here must hear WHAT it removes.
+      'aria-label': `${verb} ${p}`,
+      // why focus on arm - and ONLY on arm: the confirm replaces the chip
+      // the user just clicked, so focus would otherwise be left on a removed
+      // node. But this strip also re-mounts on unrelated redraws (group
+      // collapse/expand, a search narrowing past it and back) while
+      // ui.confirm survives - a re-mount must never steal focus, so the
+      // one-shot flag is consumed on the first mount after arming.
+      oncreate: (/** @type {{ dom: HTMLButtonElement }} */ v) => {
+        if (ui.confirmNeedsFocus) { ui.confirmNeedsFocus = false; v.dom.focus(); }
+      },
+      // why refocus search on success: the strip (and for a removal, the
+      // chip itself) is gone once the mutation lands - the search box is
+      // the pane's one stable control for focus to land on.
       onclick: () => DenylistView.act(vnode, { type: 'denylist/remove', pattern: p },
-        user ? `Removed ${p}.` : `Disabled ${p} — re-enable it below.`),
+        user ? `Removed ${p}.` : `Disabled ${p} - re-enable it below.`)
+        .then((r) => { if (r?.ok) ui.searchEl?.focus(); }),
     }, `${verb}?`),
     m('button.linkish', {
       'aria-label': 'Cancel',
-      onclick: () => { ui.confirm = null; },
+      onclick: () => { ui.confirm = null; ui.refocus = p; },
     }, '✕'),
   ]);
 };

@@ -208,6 +208,9 @@ export const OptionsApp = {
     const navItem = ([id, label]) => m('a.options-nav-item', {
       href: `#!/${id}`,
       class: section === id ? 'is-active' : '',
+      // why aria-current: the class alone marks the active entry visually;
+      // a screen reader needs the programmatic current-page state.
+      'aria-current': section === id ? 'page' : undefined,
     }, [
       label,
       // Memory carries the pending-suggestions badge so proposals are

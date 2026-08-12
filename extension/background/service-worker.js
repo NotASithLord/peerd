@@ -346,7 +346,7 @@ import {
   hasDurableSiteClientState,
   decideNumericTabAuthority, numericTabAuthorityRefusal,
   IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
-  isKnownIdp, isKnownIdpHost, knownIdpDomains, describeLandingStop, originPhrase, isUgcHost,
+  isKnownIdp, isKnownIdpHost, knownIdpDomains, describeLandingStop, landingStopCard, originPhrase, isUgcHost,
   isAddressableBrowserTab,
   finalActorTurnReply, finalAssistantText,
   groupResourceLossNotices,
@@ -1878,6 +1878,14 @@ const sensitivitySignals = () => ({
 const landingStopReports = new Map();
 
 /**
+ * The same stop, shaped for the transcript CARD (§4c) - landingStopCard's
+ * output, held beside the prose report and consumed at the same moment. Same
+ * authorship rule: every field is ours, none is the actor's.
+ * @type {Map<string, ReturnType<typeof landingStopCard>>}
+ */
+const landingStopCards = new Map();
+
+/**
  * A monotonic token per actor TURN, and the reason it has to exist.
  *
  * Aborting an offscreen actor run unwinds the worker but does NOT cancel the
@@ -1919,7 +1927,10 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
         // anything. It still records the landing in the audit trail below — the
         // observation was real even when the turn it belonged to is gone.
         const current = isCurrentTurn();
-        if (current) landingStopReports.set(actorSessionId, describeLandingStop(/** @type {any} */ (event)));
+        if (current) {
+          landingStopReports.set(actorSessionId, describeLandingStop(/** @type {any} */ (event)));
+          landingStopCards.set(actorSessionId, landingStopCard(/** @type {any} */ (event)));
+        }
         // RELEASE THE TAB. Without this the stop is self-sealing and a bound
         // actor is dead for good:
         //
@@ -4202,6 +4213,22 @@ const deliverConfirmationToActiveOwner = (prompt, deliver) => {
     console.warn('[sw] scoped confirmation delivery failed', error);
   });
 };
+// A confirm that settles ITSELF (timeout, abort/Stop, closed panel) is
+// invisible today - the modal just vanishes, or never existed. Keep the last
+// few self-settles per session so the transcript can say what happened, even
+// to a panel that opens later (UI redesign §4e). SW memory only: the prompts
+// themselves have the same lifetime, so this is the right blast radius.
+/** @type {Map<string, Array<{ id: string, at: number, answer: string, cause: string, via: string|null }>>} */
+const confirmSettleNotes = new Map();
+const CONFIRM_SETTLE_NOTES_CAP = 20;
+/** @param {string|null} sessionId @param {{ id: string, answer: string, cause: string, via: string|null }} note */
+const recordConfirmSettle = (sessionId, note) => {
+  if (!sessionId) return;
+  const list = confirmSettleNotes.get(sessionId) ?? [];
+  list.push({ ...note, at: Date.now() });
+  confirmSettleNotes.set(sessionId, list.slice(-CONFIRM_SETTLE_NOTES_CAP));
+};
+
 const confirmCoordinator = makeConfirmCoordinator({
   notifySidePanel: (prompt) => {
     if (!uiConnected()) return;
@@ -4216,10 +4243,16 @@ const confirmCoordinator = makeConfirmCoordinator({
   // Dismiss the modal on EVERY open surface when a prompt settles for ANY
   // reason — answer, 120s timeout, or session reset (DESIGN-12). Without this a
   // timed-out/reset prompt lingers, and a later click "approves" an action that
-  // was already auto-denied.
-  onSettled: (id, prompt) => {
+  // was already auto-denied. The outcome rides along so surfaces can render the
+  // settle as a transcript line; self-settles are also recorded for late joiners.
+  onSettled: (id, prompt, outcome) => {
+    if (outcome.cause !== 'answer') {
+      recordConfirmSettle(outcome.sessionId, {
+        id, answer: outcome.answer, cause: outcome.cause, via: outcome.via,
+      });
+    }
     deliverConfirmationToActiveOwner(prompt, () => {
-      try { uiPorts.broadcast({ type: 'confirm/resolved', id }); } catch { /* port closing */ }
+      try { uiPorts.broadcast({ type: 'confirm/resolved', id, outcome }); } catch { /* port closing */ }
     });
   },
   // Raise an action badge while a confirm is pending so a waiting agent is
@@ -4319,6 +4352,15 @@ const confirmAction = async (prompt, signal) => {
       // to be open when it asks.
       const ownerSessionId = sid ? await resolveLifecycleRootSession(sid) : null;
       const ownedPrompt = { ...prompt, ownerSessionId };
+      // No surface to ask → the coordinator fail-closes WITHOUT minting an id
+      // or broadcasting anything, so nothing else can ever tell the user this
+      // happened. Record it here - the badge they didn't see is not a record
+      // (§4e). Keyed on the OWNER chat, which is where the note renders.
+      if (!uiConnected()) {
+        recordConfirmSettle(ownerSessionId, {
+          id: crypto.randomUUID(), answer: 'no', cause: 'unreachable', via: null,
+        });
+      }
       // ...and TELL THE PANEL, so it can stop offering a button that grants
       // nothing. why this became load-bearing with #242: before the UGC override, a
       // default-config user (confirmActions OFF) never saw an actor confirm at all,
@@ -4411,6 +4453,9 @@ const buildStateSnapshot = async () => {
         unlockedAt: 0,
         prfEnrolled: prf.enrolled,
         hasRecovery,
+        // §5g: WHY it locked ('idle'|'manual'|null) - the unlock screen's
+        // one added sentence renders only for an idle lock.
+        lockReason: vault.lockReason?.() ?? null,
       },
       session: { sessionId: null, messages: [], permission, customSystemPrompt: null, toolManifest: null },
       providers: {
@@ -4540,6 +4585,10 @@ const buildStateSnapshot = async () => {
     pendingConfirm: confirmCoordinator.getPendingForOwner(
       typeof sessionId === 'string' ? sessionId : null,
     ),
+    // Self-settled confirms for THIS chat (timeout / stop / closed panel) - the
+    // panel folds these into its transcript notes so a settle that happened
+    // while no surface was open is still tellable (§4e).
+    confirmSettleNotes: sessionId ? (confirmSettleNotes.get(/** @type {string} */ (sessionId)) ?? []) : [],
     // Live actor projections are part of the fresh snapshot, not a lucky stream
     // of events seen only by panels that were already open. Every row is scoped
     // to this viewed root before it crosses the UI boundary.
@@ -7154,6 +7203,7 @@ const actorMessaging = makeActorMessaging({
     // Invalidate old judges synchronously, then wait for their serialized
     // transitions to drain before this turn builds a tool context.
     landingStopReports.delete(actorSessionId);
+    landingStopCards.delete(actorSessionId);
     beginLandingTurn(actorSessionId);
     await originStates.serialize(actorSessionId, () => undefined);
     // DESIGN-19 mint-time injection: if this web/API actor's origin has a stored
@@ -7224,6 +7274,8 @@ const actorMessaging = makeActorMessaging({
     const actorSurface = contributorDecision?.resolved;
     /** @type {string | null} */
     let landingStopSnapshot = null;
+    /** @type {ReturnType<typeof landingStopCard> | null} */
+    let landingStopCardSnapshot = null;
     const captureLandingStop = () => {
       // The next queued turn clears this report at its own start. Consume it
       // while this turn still owns the actor slot.
@@ -7232,6 +7284,11 @@ const actorMessaging = makeActorMessaging({
         landingStopReports.delete(actorSessionId);
         landingStopSnapshot = report;
       }
+      const card = landingStopCards.get(actorSessionId);
+      if (card) {
+        landingStopCards.delete(actorSessionId);
+        landingStopCardSnapshot = card;
+      }
     };
     /**
      * If the origin lock stopped this actor mid-turn, its own reply is not the
@@ -7239,14 +7296,19 @@ const actorMessaging = makeActorMessaging({
      * actor may still have emitted text, and text written after the moment we
      * decided it was somewhere it shouldn't be is exactly what must not reach the
      * orchestrator. `stopped:true` marks the delivery failed, so the reply arrives
-     * as "this did not work, here is why" rather than as a result.
-     * @param {{ result: string, stopped?: boolean }} reply
-     * @returns {{ result: string, stopped?: boolean }}
+     * as "this did not work, here is why" rather than as a result. The card
+     * rides beside the prose so the transcript renders the slotted version (§4c).
+     * @param {{ result: string, stopped?: boolean, landingStop?: object }} reply
+     * @returns {{ result: string, stopped?: boolean, landingStop?: object }}
      */
     const withLandingStop = (reply) => {
       const report = landingStopSnapshot;
       if (!report) return reply;
-      return { result: report, stopped: true };
+      return {
+        result: report,
+        stopped: true,
+        ...(landingStopCardSnapshot ? { landingStop: landingStopCardSnapshot } : {}),
+      };
     };
     /**
      * Record only fixed enums/counters after the actor session has settled.

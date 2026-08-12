@@ -36,7 +36,7 @@ export const createSelfDeviceMesh = ({
       WebSocket, RTCPeerConnection, now, audit,
       caps: ['self-device'],
     });
-    /** @type {Set<(arg: { from: string, data: any }) => void>} */
+    /** @type {Set<(arg: { from: string, data: any, roomId: string }) => void>} */
     const messageCbs = new Set();
     const offEnvelope = joined.onEnvelope(({ env }) => {
       if (env.ch !== SELF_DIRECT_CHANNEL || env.typ !== SELF_DIRECT_TYPE) return;

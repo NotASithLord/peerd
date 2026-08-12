@@ -48,7 +48,9 @@ export const hasEnrolledSelfCustody = async (vault) => Boolean(
 const MAX_SELF_SECRET_BYTES = 256 * 1024;
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
-/** Store-safe did:key derivation used only to keep root/self custody coherent. */
+/** Store-safe did:key derivation used only to keep root/self custody coherent.
+ * @param {string} stored
+ */
 const personDidFromRootMaterial = (stored) => {
   const material = JSON.parse(stored);
   const binary = atob(material.pub);
@@ -145,9 +147,9 @@ export const makeDwebSelfCustody = ({
     };
     try {
       if (args.name !== SELF_RECORDS_SECRET_NAME) return await persist();
-      const operation = recordsWriteTail.then(() => withCustodyMutation(persist));
-      recordsWriteTail = operation.then(() => undefined, () => undefined);
-      return await operation;
+      const queuedWrite = recordsWriteTail.then(() => withCustodyMutation(persist));
+      recordsWriteTail = queuedWrite.then(() => undefined, () => undefined);
+      return await queuedWrite;
     } catch (cause) {
       return { ok: false, error: /** @type {{ message?: string }} */ (cause)?.message ?? String(cause) };
     }

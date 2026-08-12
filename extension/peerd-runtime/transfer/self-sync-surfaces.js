@@ -89,6 +89,16 @@ export const shapeSessionsSurface = ({ sessions }) => ({
   sessions: (sessions ?? []).filter(isPortableSession).map(portableSession),
 });
 
+export class SurfaceApplyPartialError extends Error {
+  /** @param {string} surface @param {Record<string, number>} result @param {unknown} cause */
+  constructor(surface, result, cause) {
+    super(`${surface} surface applied only part of its items`, { cause });
+    this.name = 'SurfaceApplyPartialError';
+    this.surface = surface;
+    this.result = result;
+  }
+}
+
 /**
  * Apply a sessions surface. Idempotent by sessionId: an existing session on
  * the receiver is left alone (conflict behavior = keep destination), a new
@@ -121,16 +131,6 @@ export const applySessionsSurface = async (payload, { existingIds, putSession })
   }
   return { written, skipped };
 };
-
-export class SurfaceApplyPartialError extends Error {
-  /** @param {string} surface @param {Record<string, number>} result @param {unknown} cause */
-  constructor(surface, result, cause) {
-    super(`${surface} surface applied only part of its items`, { cause });
-    this.name = 'SurfaceApplyPartialError';
-    this.surface = surface;
-    this.result = result;
-  }
-}
 
 // ── generic value surfaces (settings / endpoints / memory / hooks / skills) ──
 

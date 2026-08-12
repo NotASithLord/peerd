@@ -523,7 +523,7 @@ describe('enrollment protocol', () => {
       issuedChallenge: run.challenge!.challenge,
       credentialId: setup.passkey.credentialId,
       prfOutput: setup.prfOutput,
-      deviceDid: run.enrolleeDevice!.did,
+      expectedDeviceDid: run.enrolleeDevice!.did,
       expectedDeviceId: run.enrolleeDeviceId!,
     });
     expect(outcome.ok).toBe(false);

@@ -151,6 +151,18 @@ describe('provider/setKey', () => {
     expect(await r['provider/setKey']({ provider: 'openrouter', plaintext: 'sk-or-abcdefgh' })).toEqual({ ok: true });
     expect(updated).toEqual({ providerName: 'openrouter', providerModel: '' });
   });
+  test('activate:false stores without auto-activating before onboarding verification', async () => {
+    let updated: any = null;
+    const r = makeProviderRoutes(baseDeps({
+      listProviders: twoCloud,
+      vault: { setSecret: async () => {}, getSecret: async () => null },
+      settingsStore: { get: () => ({ providerName: 'anthropic', providerModel: 'claude' }), update: async (p: any) => { updated = p; } },
+    }));
+    expect(await r['provider/setKey']({
+      provider: 'openrouter', plaintext: 'sk-or-abcdefgh', activate: false,
+    })).toEqual({ ok: true });
+    expect(updated).toBe(null);
+  });
   test('does NOT override an already-usable active provider', async () => {
     let updated: any = null;
     const r = makeProviderRoutes(baseDeps({

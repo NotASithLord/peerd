@@ -100,10 +100,13 @@ export const makeDwebSelfRoutes = (deps) => {
     (sum, entry) => sum + [...entry.payloads.values()].reduce((n, bytes) => n + bytes.length, 0), 0,
   );
 
+  /** @param {number} incomingBytes */
   const makeSnapshotRoom = (incomingBytes) => {
     while (snapshots.size >= MAX_CACHED_SNAPSHOTS
         || (snapshots.size > 0 && cachedBytes() + incomingBytes > MAX_CACHED_SNAPSHOT_BYTES)) {
-      snapshots.delete(snapshots.keys().next().value);
+      const oldest = snapshots.keys().next().value;
+      if (oldest === undefined) break;
+      snapshots.delete(oldest);
     }
   };
 

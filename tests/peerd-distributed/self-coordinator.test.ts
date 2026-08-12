@@ -308,7 +308,8 @@ describe('self-device coordinator', () => {
     const starting = coordinator.start();
     while (!resolveRoom) await new Promise((resolve) => setTimeout(resolve, 0));
     coordinator.stop();
-    resolveRoom!(room);
+    const releaseRoom: (nextRoom: any) => void = resolveRoom as any;
+    releaseRoom(room);
     await starting;
     expect(leaves).toBe(1);
     expect(coordinator.selfDevices()).toEqual([]);

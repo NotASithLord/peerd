@@ -180,7 +180,7 @@ export const createSelfDeviceCoordinator = ({
     await sendTo(deviceDid, buildAuthHello({ cert: deviceCert, nonce: selfNonce, roster: currentRoster }));
   };
 
-  /** @param {string} from @param {any} data */
+  /** @param {string} from @param {any} data @param {string | undefined} inboundRoomId */
   const onDirect = async (from, data, inboundRoomId) => {
     if (!data || typeof data !== 'object') return;
     const entry = peers.get(from);

@@ -74,6 +74,7 @@ export const createSyncSource = ({
    * itself immutable, so re-read it for retries instead of retaining another
    * full decoded clone in the network-facing renderer.
    */
+  /** @param {string} surface */
   const snapshotBytes = (surface) => {
     if (captured.has(surface)) return /** @type {Promise<Uint8Array | null>} */ (captured.get(surface));
     return (async () => {
@@ -232,7 +233,7 @@ export const createSyncReceiver = ({
   /** @type {{ defect: string } | null} */
   let deferredFinish = null;
 
-  /** @param {string | undefined} defect */
+  /** @param {string} [defect] */
   const resultFor = (defect) => ({
     ok: !defect
       && requested.size > 0
@@ -427,7 +428,9 @@ export const createSyncReceiver = ({
         collectors.delete(frame.surface);
         const surface = frame.surface;
         applyingSurfaces.add(surface);
-        const applying = (async () => {
+        /** @type {Promise<void>} */
+        let applying = Promise.resolve();
+        applying = (async () => {
           try {
             await applySurface(surface, result.bytes);
             applied.add(surface);

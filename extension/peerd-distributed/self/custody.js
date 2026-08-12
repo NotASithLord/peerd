@@ -83,7 +83,10 @@ export const storeDiscoverySecret = async ({ getSecret, setSecret }, secret) => 
   if (!existing) await setSecret(DISCOVERY_SECRET_NAME, b64);
 };
 
-/** Validate an enrollment discovery write without mutating custody. */
+/** Validate an enrollment discovery write without mutating custody.
+ * @param {SecretIo} io
+ * @param {Uint8Array} secret
+ */
 const preflightDiscoverySecret = async ({ getSecret }, secret) => {
   if (!(secret instanceof Uint8Array) || secret.length !== DISCOVERY_SECRET_BYTES) {
     throw new Error('discovery secret must be exactly 32 bytes');

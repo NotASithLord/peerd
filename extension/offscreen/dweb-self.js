@@ -229,7 +229,9 @@ export const createSelfDeviceHost = ({ secretIo, swCall, getSignalingUrl }) => {
     if (inertReason === 'suspended') inertReason = null;
   };
 
-  /** Reload a custody mutation into the live coordinator before it answers. */
+  /** Reload a custody mutation into the live coordinator before it answers.
+   * @param {string} name
+   */
   const refreshCustody = async (name) => {
     if (name === 'distributed/self-discovery/v1') {
       await stop();
@@ -260,7 +262,7 @@ export const createSelfDeviceHost = ({ secretIo, swCall, getSignalingUrl }) => {
       }
       lastOfferRequestAt.set(from, requestedAt);
       const requested = Array.isArray(frame.surfaces)
-        ? frame.surfaces.filter((surface) => DEFAULT_RESTORE_SURFACES.includes(surface))
+        ? frame.surfaces.filter((/** @type {any} */ surface) => DEFAULT_RESTORE_SURFACES.includes(surface))
         : [...DEFAULT_RESTORE_SURFACES];
       if (requested.length === 0) return;
       const operation = swCall('dweb/self-prepare-offer', {
@@ -284,7 +286,11 @@ export const createSelfDeviceHost = ({ secretIo, swCall, getSignalingUrl }) => {
       }
       pendingOffers.delete(from);
       pendingOffers.set(from, frame);
-      while (pendingOffers.size > 32) pendingOffers.delete(pendingOffers.keys().next().value);
+      while (pendingOffers.size > 32) {
+        const oldest = pendingOffers.keys().next().value;
+        if (oldest === undefined) break;
+        pendingOffers.delete(oldest);
+      }
       return;
     }
     return receiver?.onFrame(from, frame);
@@ -318,15 +324,17 @@ export const createSelfDeviceHost = ({ secretIo, swCall, getSignalingUrl }) => {
     }
     while (sources.size > 8) {
       const oldest = sources.keys().next().value;
+      if (oldest === undefined) break;
       sources.delete(oldest);
       for (const [target, snapshotId] of sourceByTarget) {
         if (snapshotId === oldest) sourceByTarget.delete(target);
       }
     }
     const offer = nextSource.offer();
+    /** @type {string[]} */
     const allPeers = coordinator.selfDevices().map((/** @type {any} */ d) => d.deviceDid);
     const peers = targetDeviceDid
-      ? allPeers.filter((deviceDid) => deviceDid === targetDeviceDid)
+      ? allPeers.filter((/** @type {string} */ deviceDid) => deviceDid === targetDeviceDid)
       : allPeers;
     if (targetDeviceDid && peers.length === 0) throw new Error('offer target is not a proven self device');
     for (const deviceDid of peers) await coordinator.send(deviceDid, offer);
