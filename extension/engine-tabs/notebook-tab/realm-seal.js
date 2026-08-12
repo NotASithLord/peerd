@@ -14,10 +14,10 @@
 // its static imports have evaluated — too late to seal the realm against
 // imported agent code.
 
-import { applyRealmSeal } from './notebook-neutralizers.js';
+import { applyNotebookRealmSeal } from './notebook-neutralizers.js';
 
 try {
-  applyRealmSeal(globalThis);
+  applyNotebookRealmSeal(globalThis);
 } catch (error) {
   // why report before rethrow: Firefox strips detail from Worker error
   // events. This trusted pre-user-code message keeps a seal regression

@@ -66,6 +66,10 @@ Apps and WebVMs run on Chrome. Apps have no ambient network access. Remote
 resources, fetches, WebRTC, forms, and external document navigation are blocked.
 External HTTP and HTTPS links require user confirmation.
 
+Concrete browser capability gaps, their upstream issues, and the tests required
+to remove each guard are tracked in
+[`docs/BROWSER-COMPATIBILITY.md`](docs/BROWSER-COMPATIBILITY.md).
+
 The code is the source of truth for current behavior. Start with
 [`CLAUDE.md`](CLAUDE.md), then read the relevant module under `extension/`.
 

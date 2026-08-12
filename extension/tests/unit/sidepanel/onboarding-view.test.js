@@ -89,6 +89,21 @@ const skipStep = async (root) => {
   m.redraw.sync();
 };
 
+// §5h put the provider step in front of the greeting. The naming-funnel
+// tests pass it the way a keyless user would - "I'll do this later" wears
+// the same .onboarding-skip class and writes nothing.
+/** @param {ParentNode} root */
+const passProviderStep = async (root) => {
+  await tick();          // provider/status resolves
+  m.redraw.sync();
+  await skipStep(root);  // provider → greeting
+};
+
+// The mount stubs answer every route, so raw send counts now include the
+// provider step's provider/status probe - assertions read the completes.
+/** @param {Msg[]} sends */
+const completions = (sends) => sends.filter((s) => s.type === 'onboarding/complete');
+
 describe('sidepanel.onboarding', () => {
   describe('needsOnboarding (route gate)', () => {
     it('fires only for an unlocked vault with the latch open', () => {
@@ -119,6 +134,7 @@ describe('sidepanel.onboarding', () => {
         send: async () => ({ ok: true }),
       });
       try {
+        await passProviderStep(root);
         expect(root.textContent).toContain('Hello, I’m');
         // The name is a real input (it owns the caret) twinned with a
         // colored mirror; the input's text is transparent via CSS, so
@@ -142,8 +158,8 @@ describe('sidepanel.onboarding', () => {
         expect(root.querySelector('#onb-call')).toBe(null);
         expect(root.querySelector('#onb-notes')).toBe(null);
         expect(!!root.querySelector('.onboarding-skip')).toBe(true);
-        // Progress dots: step 1 of 3 active.
-        expect(root.querySelectorAll('.onb-dot').length).toBe(3);
+        // Progress dots: four steps since §5h; the greeting is the active one.
+        expect(root.querySelectorAll('.onb-dot').length).toBe(4);
         expect(root.querySelectorAll('.onb-dot.is-on').length).toBe(1);
       } finally { unmount(); }
     });
@@ -154,6 +170,7 @@ describe('sidepanel.onboarding', () => {
         send: async () => ({ ok: true }),
       });
       try {
+        await passProviderStep(root);
         expect(need(root, '.peer-name-input').getAttribute('maxlength')).toBe('32');
       } finally { unmount(); }
     });
@@ -167,6 +184,7 @@ describe('sidepanel.onboarding', () => {
           send: async (msg) => { sends.push(msg); return { ok: true }; },
         });
         try {
+          await passProviderStep(root);
           // Past holdFull + a few del steps: the mirror must have shrunk.
           await wait(45);
           m.redraw.sync();
@@ -179,7 +197,7 @@ describe('sidepanel.onboarding', () => {
           await skipStep(root);   // call-me → notes
           await skipStep(root);   // notes → finish
           await tick();
-          expect(sends[0].peerName).toBe('peerd');
+          expect(completions(sends)[0].peerName).toBe('peerd');
         } finally { unmount(); }
       });
     });
@@ -192,16 +210,18 @@ describe('sidepanel.onboarding', () => {
         send: async (msg) => { sends.push(msg); return { ok: true }; },
       });
       try {
+        await passProviderStep(root);
         const input = need(root, '.peer-name-input', HTMLInputElement);
         input.focus();
         input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
         await wait(220);
         m.redraw.sync();
-        expect(sends.length).toBe(0);
-        // Step 2 is on screen: the call-me question (typing or typed).
+        expect(completions(sends).length).toBe(0);
+        // The call-me question is on screen (typing or typed).
         expect(root.querySelector('.peer-name-input')).toBe(null);
         expect(!!root.querySelector('.onb-ask')).toBe(true);
-        expect(root.querySelectorAll('.onb-dot.is-done').length).toBe(1);
+        // Two steps behind us now: provider + name.
+        expect(root.querySelectorAll('.onb-dot.is-done').length).toBe(2);
       } finally { unmount(); }
     });
 
@@ -211,6 +231,7 @@ describe('sidepanel.onboarding', () => {
         send: async () => ({ ok: true }),
       });
       try {
+        await passProviderStep(root);
         const input = need(root, '.peer-name-input', HTMLInputElement);
         input.focus();
         input.value = '';
@@ -230,6 +251,7 @@ describe('sidepanel.onboarding', () => {
           send: async () => ({ ok: true }),
         });
         try {
+          await passProviderStep(root);
           const input = need(root, '.peer-name-input', HTMLInputElement);
           input.value = 'Jarvis';
           input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -259,14 +281,15 @@ describe('sidepanel.onboarding', () => {
         send: async (msg) => { sends.push(msg); return { ok: true }; },
       });
       try {
+        await passProviderStep(root);   // provider → name (writes nothing)
         await skipStep(root);
         await skipStep(root);
         await skipStep(root);
         await tick();
-        expect(sends.length).toBe(1);
-        expect(sends[0].type).toBe('onboarding/complete');
-        expect(sends[0].facts).toBe(null);
-        expect(sends[0].peerName).toBe('peerd');
+        const done = completions(sends);
+        expect(done.length).toBe(1);
+        expect(done[0].facts).toBe(null);
+        expect(done[0].peerName).toBe('peerd');
       } finally { unmount(); }
     });
 
@@ -278,6 +301,7 @@ describe('sidepanel.onboarding', () => {
         send: async (msg) => { sends.push(msg); return { ok: true }; },
       });
       try {
+        await passProviderStep(root);
         const name = need(root, '.peer-name-input', HTMLInputElement);
         name.value = 'jarvis';
         name.dispatchEvent(new Event('input', { bubbles: true }));
@@ -285,8 +309,9 @@ describe('sidepanel.onboarding', () => {
         await skipStep(root);
         await skipStep(root);
         await tick();
-        expect(sends[0].peerName).toBe('jarvis');
-        expect(sends[0].facts).toBe(null);
+        const done = completions(sends);
+        expect(done[0].peerName).toBe('jarvis');
+        expect(done[0].facts).toBe(null);
       } finally { unmount(); }
     });
   });
@@ -318,15 +343,16 @@ describe('sidepanel.onboarding', () => {
           /** @type {HTMLElement | null} */ (root.querySelector('.onb-step'))?.click();
           m.redraw.sync();
         };
+        await passProviderStep(root);              // provider → name
         await continueStep();                      // name → call-me
         type('#onb-call', 'Ari');
         await continueStep();                      // call-me → notes
         type('#onb-notes', 'Keep answers terse.');
         await continueStep();                      // notes → finish (Start)
         await tick();
-        expect(sends.length).toBe(1);
-        expect(sends[0].type).toBe('onboarding/complete');
-        expect(sends[0].facts).toEqual({ callMe: 'Ari', notes: 'Keep answers terse.' });
+        const done = completions(sends);
+        expect(done.length).toBe(1);
+        expect(done[0].facts).toEqual({ callMe: 'Ari', notes: 'Keep answers terse.' });
       } finally { unmount(); }
     });
   });

@@ -42,6 +42,7 @@ const DESCRIPTORS = [
   { name: 'site_client_run', sideEffect: 'read' },
   { name: 'dweb_discover', sideEffect: 'read' },
   { name: 'js_read_file', sideEffect: 'read' },       // actor-only tier (#159)
+  { name: 'pod_read', sideEffect: 'read' },           // actor-only tier (#159)
   { name: 'app_read_file', sideEffect: 'read' },      // actor-only tier (#159)
   { name: 'app_list_files', sideEffect: 'read' },     // actor-only tier (#159)
   // writes / mutations
@@ -62,7 +63,7 @@ describe('readOnlyToolNames', () => {
     const names = readOnlyToolNames(DESCRIPTORS);
     expect(names.sort()).toEqual([
       'actor_list', 'inspect', 'now', 'read_memory',
-      'js_read_file', 'app_read_file', 'app_list_files',   // #160
+      'js_read_file', 'pod_read', 'app_read_file', 'app_list_files',   // #160
     ].sort());
   });
 
@@ -300,7 +301,7 @@ describe('makeRequestReview (clean-context, read-only, structured)', () => {
     // "everything read-tagged" (which would have included fetch_url).
     expect([...granted].sort()).toEqual([
       'actor_list', 'app_list_files', 'app_read_file', 'inspect',
-      'js_read_file', 'now', 'read_memory',
+      'js_read_file', 'now', 'pod_read', 'read_memory',
     ]);
     // ASSERT: no write/mutate/orchestration tool exposed
     for (const w of ['click', 'navigate', 'page_exec', 'app_write_file', 'submit_form', 'actor_create', 'request_review']) {
@@ -427,11 +428,11 @@ describe('reviewer grant — through the real narrowing pipeline', () => {
     }
     // Instance reads are actor-only (#159), so a NORMAL spawned child never gets
     // them — filterActorSurface drops them from the grantable universe.
-    for (const t of ['js_read_file', 'app_read_file', 'app_list_files']) {
+    for (const t of ['js_read_file', 'pod_read', 'app_read_file', 'app_list_files']) {
       expect(granted.has(t)).toBe(false);
     }
 
-    // …and the #160 REVIEW spawn re-adds exactly those three, and ONLY those:
+    // …and the #160 REVIEW spawn re-adds exactly those four, and ONLY those:
     // egress and writes stay gone even on the review path.
     const { REVIEW_INSTANCE_READS } = await import('../../extension/peerd-runtime/tools/exposure.js');
     const reviewGrantable = (grantable as any[]).concat(
@@ -441,7 +442,7 @@ describe('reviewer grant — through the real narrowing pipeline', () => {
       narrowTools(reviewGrantable as any, { tools: readOnlyToolNames(DESCRIPTORS), allowRecursion: false })
         .map((t: any) => t.name),
     );
-    for (const t of ['js_read_file', 'app_read_file', 'app_list_files']) {
+    for (const t of ['js_read_file', 'pod_read', 'app_read_file', 'app_list_files']) {
       expect(reviewGranted.has(t)).toBe(true);
     }
     for (const t of ['fetch_url', 'read_page', 'site_client_run', 'app_write_file', 'message_actor']) {
@@ -476,12 +477,12 @@ describe('reviewer grant — through the real narrowing pipeline', () => {
 // The exemption is the ONE hole in the actor-only wall, so these pin that it is
 // exactly one hole: the three READ names, only under the SW-stamped marker.
 describe('#160 review exemption — positively scoped on BOTH axes', () => {
-  test('a review ctx may hold the three instance READS — and nothing else actor-only', async () => {
+  test('a review ctx may hold the four instance READS: and nothing else actor-only', async () => {
     const { actorTierGate } = await import('../../extension/peerd-runtime/tools/gates.js');
     const { EXPOSURE_REVIEW } = await import('../../extension/peerd-runtime/tools/exposure.js');
     const reviewCtx = { exposure: EXPOSURE_REVIEW } as any;
 
-    for (const name of ['js_read_file', 'app_read_file', 'app_list_files']) {
+    for (const name of ['js_read_file', 'pod_read', 'app_read_file', 'app_list_files']) {
       expect(actorTierGate({ name } as any, {}, reviewCtx)).toBe(null); // no opinion → allowed
     }
     // every actor-only WRITE stays refused for the very same ctx
@@ -490,10 +491,10 @@ describe('#160 review exemption — positively scoped on BOTH axes', () => {
     }
   });
 
-  test('the SAME three reads stay refused for a NON-review, non-actor ctx', async () => {
+  test('the SAME four reads stay refused for a NON-review, non-actor ctx', async () => {
     const { actorTierGate } = await import('../../extension/peerd-runtime/tools/gates.js');
     for (const ctx of [{ exposure: 'main' }, {}, { exposure: 'spoofed' }] as any[]) {
-      for (const name of ['js_read_file', 'app_read_file', 'app_list_files']) {
+      for (const name of ['js_read_file', 'pod_read', 'app_read_file', 'app_list_files']) {
         expect(actorTierGate({ name } as any, {}, ctx)?.allowed).toBe(false);
       }
     }
@@ -502,8 +503,8 @@ describe('#160 review exemption — positively scoped on BOTH axes', () => {
   test('the exemption grants no EGRESS — the marker does not widen anything else', async () => {
     const { actorTierGate } = await import('../../extension/peerd-runtime/tools/gates.js');
     const { EXPOSURE_REVIEW, REVIEW_INSTANCE_READS } = await import('../../extension/peerd-runtime/tools/exposure.js');
-    // the exempt set is exactly three reads — no fetch/page/site/dweb tool in it
-    expect([...REVIEW_INSTANCE_READS].sort()).toEqual(['app_list_files', 'app_read_file', 'js_read_file']);
+    // the exempt set is exactly four reads: no fetch/page/site/dweb tool in it
+    expect([...REVIEW_INSTANCE_READS].sort()).toEqual(['app_list_files', 'app_read_file', 'js_read_file', 'pod_read']);
     // and a review ctx is still refused the dweb family
     const dwebTool = { name: 'dweb_discover', dweb: true } as any;
     expect(actorTierGate(dwebTool, {}, { exposure: EXPOSURE_REVIEW } as any)?.allowed).toBe(false);

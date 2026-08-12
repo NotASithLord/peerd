@@ -1,0 +1,62 @@
+isomorphic-git 1.38.6 — third-party notices
+================================================
+
+This distribution includes the self-contained browser bundle published by
+isomorphic-git. The upstream source and build scripts for the exact release are:
+https://github.com/isomorphic-git/isomorphic-git/tree/v1.38.6
+
+The bundle contains the following runtime packages. Package names are taken
+from the bundle source map and audited against the 1.38.6 package metadata.
+
+MIT:
+  async-lock, available-typed-arrays, base64-js, buffer, call-bind,
+  call-bind-apply-helpers, call-bound, define-data-property, diff3,
+  dunder-proto, es-define-property, es-errors, es-object-atoms, for-each,
+  function-bind, get-intrinsic, get-proto, gopd, has-property-descriptors,
+  has-symbols, has-tostringtag, hasown, ignore, is-callable, is-typed-array,
+  isarray, math-intrinsics, minimisted, pako, pify,
+  possible-typed-array-names, readable-stream, safe-buffer,
+  set-function-length, sha.js, simple-get, to-buffer, typed-array-buffer,
+  which-typed-array, and isomorphic-git itself.
+
+Apache-2.0:
+  clean-git-ref, crc-32. The complete license is in APACHE-2.0.txt.
+
+BSD-3-Clause:
+  ieee754; portions of sha.js derived from Paul Johnston's implementation.
+  Their complete notices are in IEEE754-LICENSE and SHAJS-LICENSE.
+
+ISC:
+  inherits.
+
+MIT AND Zlib:
+  pako. Its complete notice is in PAKO-LICENSE.
+
+LGPL-3.0-or-later:
+  A modified `path.join` implementation copied from @zenfs/core/path by
+  isomorphic-git. The legal header is preserved in
+  index.umd.min.js.LICENSE.txt. The LGPL is in LGPL-3.0.txt and ZenFS's
+  supplemental permission is in ZENFS-COPYING.md. The exact corresponding
+  modified source is available at the isomorphic-git v1.38.6 source link
+  above. Users of an unpacked peerd extension may replace/relink the vendored
+  UMD file with a compatible build.
+
+Additional preserved copyright notices
+--------------------------------------
+
+diff3:
+  Copyright (c) 2013 Tatsuhiko Kubo <cubicdaiya@gmail.com>
+  Copyright (c) 2006, 2008 Tony Garnock-Jones <tonyg@lshift.net>
+  Copyright (c) 2006, 2008 LShift Ltd. <query@lshift.net>
+  Licensed under the MIT License.
+
+is-git-ref-name-valid-derived validation:
+  Copyright © Vincent Weevers. Licensed under the MIT License.
+
+Buffer, safe-buffer, ieee754:
+  Copyright Feross Aboukhadijeh and contributors. See the sibling license
+  files and index.umd.min.js.LICENSE.txt.
+
+The standard MIT grant for isomorphic-git is reproduced in LICENSE.md. The
+same grant applies to the MIT packages above; package-specific notices that
+carry additional attribution are reproduced in the sibling license files.

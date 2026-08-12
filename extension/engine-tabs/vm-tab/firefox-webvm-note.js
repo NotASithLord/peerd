@@ -16,14 +16,14 @@
 // resolve to the real bug + standards issue.
 
 export const FIREFOX_WEBVM_BUG = 'https://bugzilla.mozilla.org/show_bug.cgi?id=1673477';
-export const W3C_WEBEXT_ISSUES = 'https://github.com/w3c/webextensions/issues';
+export const WECG_COI_ISSUE = 'https://github.com/w3c/webextensions/issues/1039';
 
 /**
  * Build the Firefox WebVM-unavailable notice element.
- * @param {{ bugUrl?: string, w3cUrl?: string, doc?: Document }} [opts]
+ * @param {{ bugUrl?: string, wecgUrl?: string, doc?: Document }} [opts]
  * @returns {HTMLElement}
  */
-export const buildFirefoxWebVmNote = ({ bugUrl = FIREFOX_WEBVM_BUG, w3cUrl = W3C_WEBEXT_ISSUES, doc = document } = {}) => {
+export const buildFirefoxWebVmNote = ({ bugUrl = FIREFOX_WEBVM_BUG, wecgUrl = WECG_COI_ISSUE, doc = document } = {}) => {
   const note = doc.createElement('div');
   note.className = 'boot-firefox-note';
 
@@ -45,7 +45,7 @@ export const buildFirefoxWebVmNote = ({ bugUrl = FIREFOX_WEBVM_BUG, w3cUrl = W3C
   list.className = 'ffx-links';
   for (const [label, href] of [
     ['Firefox bug 1673477 — Bugzilla', bugUrl],
-    ['W3C WebExtensions — standards issue', w3cUrl],
+    ['WECG issue 1039: cross-browser proposal', wecgUrl],
   ]) {
     const li = doc.createElement('li');
     const a = doc.createElement('a');

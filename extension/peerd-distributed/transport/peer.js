@@ -47,10 +47,14 @@ export const DEFAULT_ICE_SERVERS = [
 // gone. Short enough that a closed browser leaves the view fast, long enough to
 // ride out a brief network blip.
 const DISCONNECT_GRACE_MS = 5_000;
+const MAX_DATA_CHANNEL_FRAME_BYTES = 1_000_000;
 
 /** @param {string | ArrayBuffer | Uint8Array} data */
-const decode = (data) =>
-  JSON.parse(typeof data === 'string' ? data : new TextDecoder().decode(data));
+const decode = (data) => {
+  const bytes = typeof data === 'string' ? new TextEncoder().encode(data).byteLength : data.byteLength;
+  if (bytes > MAX_DATA_CHANNEL_FRAME_BYTES) throw new Error('data-channel frame too large');
+  return JSON.parse(typeof data === 'string' ? data : new TextDecoder().decode(data));
+};
 
 /**
  * @param {{

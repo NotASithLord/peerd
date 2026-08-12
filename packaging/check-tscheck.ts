@@ -161,7 +161,11 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 726 → 729: portable identity's runtime wiring adds the offscreen
 // self-device host, its service-worker surface routes, and the allowlisted
 // self-device vault custody; all three carry // @ts-check.
-const COVERED_FLOOR = 729;
+// Merge with main (Git + Pods #399, UI redesign #389): both sides moved this
+// floor from different bases, so neither number describes the merged tree.
+// Taking the count the merged scan actually reports is the only honest
+// resolution; it is above both sides, so no coverage was dropped.
+const COVERED_FLOOR = 763;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

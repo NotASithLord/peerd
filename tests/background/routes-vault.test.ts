@@ -45,8 +45,8 @@ const makeDeps = (vaultOver: Record<string, any> = {}) => {
     isActualSidepanelSender: (sender: any) => sender?.surface === 'sidepanel',
     isActualHomeSender: (sender: any) => sender?.surface === 'home',
     confirmCoordinator: {
-      resolve: (claim: Record<string, unknown>, answer: string) => {
-        calls.resolve = [claim, answer];
+      resolve: (claim: Record<string, unknown>, answer: string, via: string) => {
+        calls.resolve = [claim, answer, via];
         return claim.ownerSessionId === 'chat-a'
           && claim.sessionId === 'actor-a'
           && claim.dispatchId === 'tu-a';
@@ -105,7 +105,19 @@ describe('vault routes — success paths', () => {
     expect(await r['confirm/answer'](message, { surface: 'sidepanel' })).toEqual({ ok: true });
     expect(calls.resolve).toEqual([{
       id: 'x', ownerSessionId: 'chat-a', sessionId: 'actor-a', dispatchId: 'tu-a',
-    }, 'yes_once']);
+    }, 'yes_once', 'sidepanel']);
+  });
+
+  test('confirm/answer: derives the answering surface from sender provenance', async () => {
+    const { r, calls } = routes();
+    const message = {
+      id: 'x', answer: 'yes_once', ownerSessionId: 'chat-a',
+      sessionId: 'actor-a', dispatchId: 'tu-a', surface: 'home',
+    };
+    expect(await r['confirm/answer'](message, { surface: 'sidepanel' })).toEqual({ ok: true });
+    expect(calls.resolve).toEqual([{
+      id: 'x', ownerSessionId: 'chat-a', sessionId: 'actor-a', dispatchId: 'tu-a',
+    }, 'yes_once', 'sidepanel']);
   });
 
   test('confirm/answer: a foreign chat UUID or non-human surface cannot grant authority', async () => {

@@ -1,7 +1,7 @@
 // @ts-check
 // peerd-engine — public surface.
 //
-// Three instance kinds. Each is a SEALED ISOLATE (a V8 realm — Notebook/App —
+// Four instance kinds. Each is a SEALED ISOLATE (a V8 realm: Notebook/Pod/App -
 // or a WASM machine in one — WebVM), HOSTED today in its own discrete tab the
 // user can see. The tab is the host + observability surface, NOT the sandbox
 // itself; "hosted in a tab," not "is a tab". Visible-by-default is a deliberate
@@ -50,6 +50,11 @@ export { createEditor } from './editor.js';
 
 // --- OPFS helpers (rooted; usable in any extension context) ---
 export { opfsHelpers } from './opfs.js';
+
+// --- Browser-native Git repositories (trusted engine resource) ----------
+export { createRepositoryService } from './repository/repository-service.js';
+export { normalizeGitRemote } from './repository/remote.js';
+export { buildAppManifest, parseAppManifest } from './app-manifest.js';
 
 // --- App asset classification (text composition vs byte delivery) -------
 export {
@@ -171,6 +176,23 @@ export {
   NOTEBOOK_TAB_PATH,
   NOTEBOOK_OPFS_ROOT,
 } from './notebook-registry.js';
+
+// --- Pod (sealed shell/WASI jobs + OPFS workspace) ----------------------
+export {
+  createPodRegistry,
+  POD_TAB_PATH,
+  POD_OPFS_ROOT,
+} from './pod-registry.js';
+export {
+  PodShellSyntaxError,
+  tokenizePodShell,
+  parsePodShell,
+  podGitRemoteIntents,
+  podGitRemoteOperation,
+  matchPodGrep,
+  expandPodWord,
+  executePodShell,
+} from './pod-shell.js';
 
 // --- App (multi-file in OPFS, rendered in a sandboxed iframe) -----------
 export {

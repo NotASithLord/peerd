@@ -25,6 +25,7 @@ import {
 // body before any agent module body. peerd:std loads after the seal and is pure.
 // The URLs work on the extension origin and the HTTP in-browser harness.
 export const SEAL_MODULE_URL = new URL('./realm-seal.js', import.meta.url).href;
+const POD_SEAL_MODULE_URL = new URL('../pod-tab/pod-realm-seal.js', import.meta.url).href;
 const STD_MODULE_URL = new URL('./notebook-std.js', import.meta.url).href;
 const WASI_MODULE_URL = new URL('./notebook-wasi.js', import.meta.url).href;
 
@@ -79,6 +80,10 @@ export const REMOTE_MODULE_WORKER_CAPS = Object.freeze({
  *   Fallback installers below preserve direct engine tests/Notebook embedding;
  *   production headless runs always pass the generated sources.
  * @param {{ page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean, distributed?: boolean }} [opts.caps]
+ * @param {{args?:string[],stdin?:string,env?:Record<string,string>,cwd?:string}} [opts.podCommand]
+ *   Pod's restricted JS command profile. It swaps in the stricter Pod seal and
+ *   exposes only lexical args/stdin/env/cwd/pod helpers over the existing OPFS
+ *   bridge. Remote resolution remains a host policy decision.
  *   capability profile (defaults = DEFAULT_WORKER_CAPS — the historical surface;
  *   caps.page is the web actor's page bridge, PR #119; caps.provider is the
  *   script tool's sub-model lane, design 5; caps.distributed gates the
@@ -87,7 +92,10 @@ export const REMOTE_MODULE_WORKER_CAPS = Object.freeze({
  *   bodyLine: the 1-based source line the user code's first line lands on
  *   (user line L = source line bodyLine + L - 1) — feed it to mapWorkerError.
  */
-export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false, actorsGuardMs = 250000, caps, siteFetch = '', clientSources = {} }) => {
+export const buildWorkerSource = async (userCode, {
+  entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false,
+  actorsGuardMs = 250000, caps, siteFetch = '', clientSources = {}, podCommand,
+}) => {
   const { imports, body, cache } = await buildEntry(userCode, entryPath, {
     ...resolverDeps,
     builtins: NOTEBOOK_BUILTINS,
@@ -100,7 +108,9 @@ export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', n
     : { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}) };
   /** @param {string} capability */
   const capabilityBlocked = (capability) => remoteModuleCapabilityBlockedMessage(capability);
-  const source = `import ${JSON.stringify(SEAL_MODULE_URL)}; // realm seal — MUST stay the first import
+  const source = `${podCommand
+    ? `import ${JSON.stringify(POD_SEAL_MODULE_URL)};`
+    : `import ${JSON.stringify(SEAL_MODULE_URL)};`} // realm seal: MUST stay the first import
 ${imports}
 const NOTEBOOK_ID = ${JSON.stringify(notebookId)};
 const consoleOutput = [];
@@ -113,7 +123,7 @@ const stringify = (v) => {
 
 const captureConsole = (level) => (...args) => {
   const text = args.map(stringify).join(' ');
-  consoleOutput.push({ level, text });
+  ${podCommand ? '// Pod host captures bounded log messages as they stream.' : 'consoleOutput.push({ level, text });'}
   postMessage({ type: 'log', level, text });
 };
 console.log = captureConsole('info');
@@ -440,7 +450,21 @@ globalThis.peerd.distributed.whoami = noDistributed('whoami');
 globalThis.peerd.distributed.status = noDistributed('status');
 globalThis.peerd.distributed.peers = noDistributed('peers');
 globalThis.peerd.distributed.presence = noDistributed('presence');
-`}
+`}${podCommand ? `
+// Pod JS gets local Web-standard JavaScript plus named, instance-rooted file
+// capabilities. Network access stays in the explicit shell curl command so
+// workspace bytes and arbitrary computed URLs never share one capability realm.
+const args = Object.freeze(${JSON.stringify(podCommand.args ?? [])});
+const stdin = ${JSON.stringify(podCommand.stdin ?? '')};
+const env = Object.freeze(${JSON.stringify(podCommand.env ?? {})});
+const cwd = ${JSON.stringify(podCommand.cwd ?? '/')};
+const pod = Object.freeze({
+  readFile: (path) => peerd.self.readFile(path),
+  writeFile: (path, content) => peerd.self.writeFile(path, content),
+  deleteFile: (path) => peerd.self.deleteFile(path),
+  listFiles: () => peerd.self.listFiles(),
+});
+` : ''}
 // ONE listener fans every '<name>-response' out to its bridge. Each bridge's
 // onResponse claims only its own type, so registration order doesn't matter.
 // ('fetch-response' is consumed by the realm seal's own listener, not here.)

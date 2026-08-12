@@ -1,7 +1,7 @@
 // Unit tests for the privileged-dispatcher sender-provenance guard.
 //
 // Pure predicate, no browser needed — covers the legitimate first-party
-// surfaces (side panel, offscreen, vm/js/app tab pages) and the spoof /
+// surfaces (side panel, offscreen, vm/js/pod/app tab pages) and the spoof /
 // future-content-script cases the guard exists to reject.
 
 import { describe, it, expect } from 'bun:test';
@@ -27,7 +27,7 @@ describe('isFirstPartySender', () => {
     )).toBe(true);
   });
 
-  it('accepts a vm/js/app tab page even though it carries a sender.tab', () => {
+  it('accepts an engine tab page even though it carries a sender.tab', () => {
     // Tab-hosted extension pages legitimately have sender.tab set; the
     // discriminator must be the URL origin, not the presence of a tab.
     const sender = { id: ID, url: `${ORIGIN}vm-tab/vm-tab.html#vm-1`, tab: { id: 7 } };

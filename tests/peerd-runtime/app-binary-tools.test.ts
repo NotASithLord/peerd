@@ -90,3 +90,48 @@ describe('sandbox_create App binary contract', () => {
     expect((result as any).error).toContain('500004 > 500000 bytes');
   });
 });
+
+describe('sandbox_create App Git contract', () => {
+  test('clones without an inline file map while preserving confirmation and repository metadata', async () => {
+    const controller = new AbortController();
+    const cloneCalls: any[] = [];
+    const confirmations: any[] = [];
+    const result = await createAppSandbox({
+      gitUrl: 'https://github.com/example/browser-app',
+      gitRef: 'release',
+      gitDepth: 900,
+    }, {
+      session: { sessionId: 's-git-app' },
+      abortSignal: controller.signal,
+      confirm: async (prompt: any, signal: AbortSignal) => {
+        confirmations.push({ prompt, signal });
+        return 'yes_once';
+      },
+      appClient: {
+        createFromGit: async (args: any) => {
+          cloneCalls.push(args);
+          return {
+            record: { id: 'app-git', name: 'browser-app', entryFile: 'index.html' },
+            repository: { branch: 'release', oid: 'abc123' },
+            contract: { entryFile: 'index.html' },
+          };
+        },
+        open: async () => {},
+      },
+    } as any);
+
+    expect(result.ok).toBe(true);
+    expect(confirmations[0].signal).toBe(controller.signal);
+    expect(confirmations[0].prompt.origins).toEqual(['https://github.com']);
+    expect(cloneCalls[0]).toMatchObject({
+      url: 'https://github.com/example/browser-app.git',
+      ref: 'release',
+      depth: 500,
+      signal: controller.signal,
+    });
+    const summary = JSON.parse(String(result.content).split('\n\n', 1)[0]);
+    expect(summary.fileCount).toBeUndefined();
+    expect(summary.repository).toEqual({ branch: 'release', oid: 'abc123' });
+    expect(summary.contract).toEqual({ entryFile: 'index.html' });
+  });
+});

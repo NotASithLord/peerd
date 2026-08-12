@@ -93,8 +93,8 @@ describe('markPrewalkSwapped', () => {
 describe('engine-actor prewalk helpers', () => {
   const armed = { phase: 'planning', plannerProvider: 'anthropic', plannerModel: 'claude-opus-4-8', executorProvider: 'anthropic', executorModel: 'claude-haiku-4-5', armedAt: NOW } as const;
 
-  test('the engine actor kinds are exactly VM/Notebook/App (not web/dweb)', () => {
-    expect([...ENGINE_ACTOR_KINDS].sort()).toEqual(['app', 'notebook', 'webvm']);
+  test('the engine actor kinds are exactly VM/Notebook/Pod/App (not web/dweb)', () => {
+    expect([...ENGINE_ACTOR_KINDS].sort()).toEqual(['app', 'notebook', 'pod', 'webvm']);
     expect(isEngineActorKind('webvm')).toBe(true);
     expect(isEngineActorKind('notebook')).toBe(true);
     expect(isEngineActorKind('app')).toBe(true);

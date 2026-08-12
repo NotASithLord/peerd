@@ -590,8 +590,10 @@ export const STATES = [
         };
         rec.check('the trusted click reaches its about:blank child action',
           burstObserved.completed && burstObserved.attempted, JSON.stringify(burstObserved));
-        rec.check('Chrome immediate-child race remains visible with native local-network checks disabled',
-          burstObserved.requests.some((request) => request.includes('trusted-click-blank')),
+        const expectedRaceRequests = burstObserved.requests.filter((request) => request.includes('trusted-click-blank'));
+        rec.check('Chrome immediate-child outcome stays inside the documented race envelope',
+          burstObserved.requests.length === 0
+            || expectedRaceRequests.length === burstObserved.requests.length,
           JSON.stringify(burstObserved));
         rec.check('the protected child is closed instead of left as a blank tab',
           !burstTabs.some((tab) => !burstTabIdsBefore.has(tab.id) && tab.openerTabId === drivenTab.id),
@@ -1026,7 +1028,7 @@ export const STATES = [
           && replaced.imported?.dwebIdentity === 1 && storedDid === incoming.did,
         JSON.stringify({ replaced, storedDid, incomingDid: incoming.did }));
 
-      const restarted = await rpc(ctx.page, { type: 'dweb/base-host/start' });
+      const restarted = await rpc(ctx.page, { type: 'dweb/base/start' });
       rec.check('the peer host starts under the restored identity after lease release',
         restarted?.ok === true && restarted?.running === true && restarted?.did === incoming.did,
         JSON.stringify(restarted));
@@ -2447,6 +2449,197 @@ export const STATES = [
     },
   },
 
+  // --- visual: the confirm modal, standard shape (§4d) ----------------------
+  // Component-render like login-confirm above: the modal's STRUCTURE is the
+  // subject - the honest session-grant label (verb + true scope) and, second
+  // pass, the helper-raised variant where the absence is explained, not silent.
+  {
+    name: 'sidepanel-confirm', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ConfirmModal } = await import('/sidepanel/components/app.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-sidepanel-confirm';
+          document.body.appendChild(host);
+          m.render(host, m(ConfirmModal, { prompt: {
+            id: 'e2e-confirm', tool: 'write_file', actionClass: 'workspace_write',
+            summary: 'write_file notes/2026-08.md',
+            origins: ['https://notes.example.com'],
+          } }));
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => ({
+          title: document.querySelector('#e2e-sidepanel-confirm h3')?.textContent,
+          buttons: [...document.querySelectorAll('#e2e-sidepanel-confirm .peerd-modal-actions button')]
+            .map((b) => b.textContent.trim().replace(/\\s+/g, ' ')),
+          scope: document.querySelector('#e2e-sidepanel-confirm .confirm-grant-scope')?.textContent,
+        }))()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the session button names the grant and its true scope (§4d)',
+          rendered?.title === 'Confirm action'
+            && rendered?.buttons?.[0] === 'Reject'
+            && String(rendered?.buttons?.[1] ?? '').startsWith('Allow all writes')
+            && rendered?.buttons?.[2] === 'Allow once'
+            && rendered?.scope === 'this chat, this site',
+          JSON.stringify(rendered));
+        await rec.visual('sidepanel-confirm');
+        // Second pass - helper-raised (ephemeral): the session button is gone
+        // AND the quiet line says why; a control that grants nothing must not
+        // render, and its absence must not be silent.
+        const ephemeral = await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ConfirmModal } = await import('/sidepanel/components/app.js');
+          const host = document.querySelector('#e2e-sidepanel-confirm');
+          m.render(host, null);
+          m.render(host, m(ConfirmModal, { prompt: {
+            id: 'e2e-confirm-eph', tool: 'click', actionClass: 'external',
+            summary: 'click "Confirm booking"', ephemeral: true,
+            origins: ['https://rooms.example.com'],
+          } }));
+          return {
+            buttons: [...document.querySelectorAll('#e2e-sidepanel-confirm .peerd-modal-actions button')]
+              .map((b) => b.textContent.trim()),
+            note: document.querySelector('#e2e-sidepanel-confirm .confirm-ephemeral-note')?.textContent ?? null,
+          };
+        })()`, true);
+        rec.check('a helper-raised confirm hides the session grant and explains the absence',
+          ephemeral?.buttons?.length === 2
+            && ephemeral?.buttons?.[0] === 'Reject'
+            && ephemeral?.buttons?.[1] === 'Allow once'
+            && typeof ephemeral?.note === 'string'
+            && ephemeral.note.includes('approved a single time'),
+          JSON.stringify(ephemeral));
+      } finally {
+        await evalIn(ctx.page, `document.querySelector('#e2e-sidepanel-confirm')?.remove()`);
+      }
+    },
+  },
+
+  // --- visual: the origin-lock stop card (§4c) ------------------------------
+  // One state per family: the variants differ by string, and the gate exists to
+  // catch layout regressions, not to inventory copy. HANDOFF carries the one
+  // action (composer prefill), so it is the layout-complete member.
+  {
+    name: 'sidepanel-stop-card', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { MessageList } = await import('/sidepanel/components/message-list.js');
+          const { landingStopCard } = await import('/peerd-runtime/index.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-stop-card';
+          // why fixed over the viewport: an appended host lands below the home
+          // content, off-frame - the visual would photograph nothing.
+          host.style.cssText = 'position:fixed;inset:0;z-index:999;background:var(--bg);padding:14px;overflow:auto;';
+          document.body.appendChild(host);
+          const card = landingStopCard({
+            action: 'handoff',
+            reason: 'this is a site you have an account on, so its own helper should do the work',
+            from: null, to: 'https://mail.example.com/inbox?x=1',
+            handoffTo: 'https://mail.example.com',
+          });
+          m.render(host, m(MessageList, { messages: [{
+            id: 'e2e-stop-1', role: 'user', synthetic: true,
+            content: 'The web actor could not complete your request:\\n\\n(fenced report)',
+            actorReply: { kind: 'web', instanceId: 'web', failed: true, landingStop: card },
+          }] }));
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => ({
+          chip: document.querySelector('#e2e-stop-card .landing-stop-chip')?.textContent,
+          group: document.querySelector('#e2e-stop-card .landing-stop-group')?.textContent,
+          headline: document.querySelector('#e2e-stop-card .landing-stop-headline')?.textContent,
+          unknownLabel: document.querySelector('#e2e-stop-card .landing-stop-unknown-label')?.textContent,
+          action: document.querySelector('#e2e-stop-card .landing-stop-action')?.textContent,
+          proseHidden: !document.querySelector('#e2e-stop-card .bubble'),
+        }))()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the stop card renders four slots, origin-only, with the one action',
+          rendered?.chip === 'STOPPED'
+            && rendered?.group === 'HANDOFF'
+            && rendered?.headline === 'The web helper was stopped when the tab arrived at https://mail.example.com'
+            && !String(rendered?.headline).includes('/inbox')
+            && rendered?.unknownLabel === 'WHAT PEERD DOESN’T KNOW'
+            && rendered?.action === 'Try reading it without signing in'
+            && rendered?.proseHidden === true,
+          JSON.stringify(rendered));
+        await rec.visual('sidepanel-stop-card');
+      } finally {
+        await evalIn(ctx.page, `document.querySelector('#e2e-stop-card')?.remove()`);
+      }
+    },
+  },
+
+  // --- visual: first-run provider choice -----------------------------------
+  // Component-rendered before the harness completes vault bootstrap because
+  // normal E2E startup deliberately closes onboarding before post-unlock
+  // states run. The production component and provider inventory shape are
+  // real; only the status/probe replies are fixed so the screenshot never
+  // contacts a daemon.
+  {
+    name: 'onboarding-provider', kind: 'visual', phase: 'pre-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ProviderStep } = await import('/sidepanel/components/onboarding-provider-step.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-onboarding-provider';
+          host.style.cssText = 'position:fixed;inset:0;z-index:999;background:var(--bg);padding:14px;overflow:auto;';
+          document.body.appendChild(host);
+          const providers = [
+            { name: 'anthropic', label: 'Anthropic', keyless: false },
+            { name: 'openrouter', label: 'OpenRouter', keyless: false },
+            { name: 'openai', label: 'OpenAI', keyless: false },
+            { name: 'glm', label: 'GLM', keyless: false },
+            { name: 'ollama', label: 'Ollama', keyless: true, liveModels: true },
+            { name: 'local-webgpu', label: 'Local WebGPU', keyless: true, liveModels: false },
+          ];
+          const send = async (message) => message.type === 'provider/status'
+            ? { ok: true, providers }
+            : message.type === 'provider/test' && message.provider === 'ollama'
+              ? { ok: true, reachable: true, models: 2 }
+              : { ok: true };
+          m.mount(host, { view: () => m('.onboarding-view', m('.card.onboarding-card', [
+            m(ProviderStep, { send, onDone: () => {} }),
+            m('.onb-dots', { 'aria-label': 'Step 1 of 4' }, [0, 1, 2, 3].map((i) =>
+              m('span.onb-dot', { class: i === 0 ? 'is-on' : '', 'aria-current': i === 0 ? 'step' : undefined }))),
+          ])) });
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => {
+          const rows = document.querySelectorAll('#e2e-onboarding-provider .onb-provider-row').length;
+          if (rows === 0) return null;
+          return {
+            title: document.querySelector('#e2e-onboarding-provider h3')?.textContent,
+            rows,
+            selected: document.querySelector('#e2e-onboarding-provider [aria-checked="true"]')?.textContent,
+            keyType: document.querySelector('#e2e-onboarding-provider #onb-key')?.type,
+            copy: document.querySelector('#e2e-onboarding-provider .onb-provider-sub')?.textContent,
+          };
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the provider front door is complete and honest',
+          rendered?.title === 'Choose a provider'
+            && rendered?.rows === 6
+            && String(rendered?.selected).includes('Anthropic')
+            && rendered?.keyType === 'password'
+            && String(rendered?.copy).includes('sent only to the provider you choose')
+            && !String(rendered?.copy).includes('never leaves this browser'),
+          JSON.stringify(rendered));
+        await rec.visual('onboarding-provider');
+      } finally {
+        await evalIn(ctx.page, `(async () => {
+          const host = document.querySelector('#e2e-onboarding-provider');
+          if (!host) return;
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          m.mount(host, null);
+          host.remove();
+        })()`, true);
+      }
+    },
+  },
+
   // --- visual: the mode row in Plan mode (segmented Plan/Act + chips) ---------
   {
     name: 'mode-plan', kind: 'visual', phase: 'post-unlock',
@@ -2605,6 +2798,65 @@ export const STATES = [
     },
   },
 
+  // --- visual (WIDE): browser-native Git history on an App -------------------
+  // Creates through the real import→App→Git path, then opens the Library's
+  // developer panel. Import avoids opening a second tab during the visual state,
+  // while still exercising the production App client and OPFS repository init.
+  // This covers what assertions cannot see: dense log rows, remote controls,
+  // and the restore affordance in both themes.
+  {
+    name: 'home-library-git', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const imported = await evalIn(ctx.page, `(async () => {
+        const { buildAppExport } = await import('/peerd-engine/index.js');
+        const envelope = await buildAppExport({
+          record: { name: 'Versioned App', entryFile: 'index.html', tags: ['visual-fixture'] },
+          files: { 'index.html': '<!doctype html><title>Versioned App</title><main>Hello</main>' },
+        });
+        return chrome.runtime.sendMessage({ type: 'import/apply', envelope });
+      })()`, true);
+      rec.check('visual fixture App imported with a Git repository', imported?.ok && imported?.kind === 'app', JSON.stringify(imported));
+      const branched = imported?.id ? await evalIn(ctx.page,
+        `chrome.runtime.sendMessage({ type: 'apps/repository/branch', appId: ${JSON.stringify(imported.id)}, name: 'feature/visual', checkout: true })`, true) : null;
+      rec.check('visual fixture exposes existing-branch switching', branched?.ok === true, JSON.stringify(branched));
+      const page = await openWidePage(ctx, 'home/home.html#library');
+      try {
+        const libraryReady = await waitFor(() => evalIn(page, `
+          document.querySelector('[data-home-view="library"]')?.getAttribute('aria-current') === 'page'
+            && !!document.querySelector('.library-grid')
+        `), { budgetMs: 15_000, pollMs: 80 });
+        rec.check('visual fixture opens the Library route', !!libraryReady);
+        const appReady = await waitFor(() => evalIn(page,
+          `[...document.querySelectorAll('.library-name')].some((n) => n.textContent.includes('Versioned App'))`),
+        { budgetMs: 20_000, pollMs: 80 });
+        rec.check('visual fixture App appears in the Library', !!appReady);
+        await evalIn(page, `(() => {
+          const name = [...document.querySelectorAll('.library-name')].find((n) => n.textContent.includes('Versioned App'));
+          name?.closest('.library-card')?.querySelector('.library-kebab')?.click();
+        })()`);
+        const historyActionReady = await waitFor(() => evalIn(page, `!![...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')`),
+          { budgetMs: 5_000, pollMs: 50 });
+        rec.check('visual fixture exposes the History and Git action', !!historyActionReady);
+        await evalIn(page, `[...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')?.click()`);
+        const historyReady = await waitFor(() => evalIn(page, `!!document.querySelector('.library-repository .library-commit')`),
+          { budgetMs: 20_000, pollMs: 80 });
+        rec.check('visual fixture renders repository history', !!historyReady);
+        // Git commit IDs include the commit timestamp, so this visual fixture
+        // must normalize them before capture. The surrounding branch, history,
+        // controls, and layout remain production-rendered; only the inherently
+        // run-specific identifier is replaced.
+        await evalIn(page, `(() => {
+          const fixedOid = '0000000000';
+          const head = document.querySelector('.library-repository-head .muted');
+          if (head) head.textContent = head.textContent.replace(/[0-9a-f]{10}$/i, fixedOid);
+          for (const oid of document.querySelectorAll('.library-commit code')) oid.textContent = fixedOid;
+        })()`);
+        await rec.visualPage('home-library-git', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
   // Functional rendered coverage for committed success warnings. This takes a
   // screenshot without creating a local visual authority baseline. CI remains
   // the only source of Linux pixel baselines.
@@ -2639,7 +2891,10 @@ export const STATES = [
             .find((button) => button.textContent === 'Update')?.click()
         `);
         const warningLayout = await waitFor(() => evalIn(page, `(() => {
-          const statuses = [...document.querySelectorAll('.warning-fixture [role="status"]')];
+          const statuses = [
+            document.querySelector('section[aria-labelledby="library-warning-heading"] p.muted[role="status"]'),
+            document.querySelector('.disc-card [role="status"]'),
+          ].filter(Boolean);
           if (statuses.length !== 2) return null;
           return {
             texts: statuses.map((status) => status.textContent ?? ''),
@@ -5067,16 +5322,26 @@ Promise.resolve().then(async () => {
                 return rect.width >= 24 && rect.height >= 24;
               }),
               wraps: getComputedStyle(row).flexWrap === 'wrap',
-              actionsFit: actions.length === 6 && actions.every(inside),
+              // why: the pill-squeeze bug - a control narrower than its own
+              // label overflows internally (scrollWidth > clientWidth) or
+              // grows a second text line. Fitting means neither happens.
+              unsqueezed: controls.every((el) => el.scrollWidth <= el.clientWidth
+                && el.getBoundingClientRect().height <= 30),
+              // 7 actions since the §5g top-bar Lock joined the rail.
+              actionsFit: actions.length === 7 && actions.every(inside),
               actionNames: actions.map((el) => el.getAttribute('aria-label')),
             };
           })()`));
         }
+        // why wraps at EVERY width: the row is flex-wrap:wrap unconditionally
+        // now - overflow becomes a second row of intact pills. The old
+        // nowrap-above-370 rule squeezed the pills at 371–460px and their
+        // labels broke onto two lines inside the pill.
         rec.check('the authority row fits across both sides of every responsive boundary',
           widthResults.every((result) => result.pageFits && result.rowFits && result.targets
-            && result.wraps === (result.width <= 370)),
+            && result.wraps && result.unsqueezed),
           JSON.stringify(widthResults));
-        rec.check('all six named top-bar actions remain reachable across the width matrix',
+        rec.check('all seven named top-bar actions remain reachable across the width matrix',
           widthResults.every((result) => result.actionsFit
             && result.actionNames.every((name) => typeof name === 'string' && name.length > 0)),
           JSON.stringify(widthResults));

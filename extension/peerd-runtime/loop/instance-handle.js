@@ -56,8 +56,8 @@ export const extractInstanceHandle = (primitive, content) => {
   // re-harvest survives compaction). A per-kind primitive IS the kind. Both
   // patterns are enum-bound, same defensive posture as the id pattern.
   const kind = primitive === 'engine'
-    ? (content.match(/"kind"\s*:\s*"(app|notebook|webvm)"/)?.[1]
-      ?? content.match(/\bkind=(app|notebook|webvm)\b/)?.[1]
+    ? (content.match(/"kind"\s*:\s*"(app|notebook|pod|webvm)"/)?.[1]
+      ?? content.match(/\bkind=(app|notebook|pod|webvm)\b/)?.[1]
       ?? 'engine')
     : primitive;
   return { id, name, kind };

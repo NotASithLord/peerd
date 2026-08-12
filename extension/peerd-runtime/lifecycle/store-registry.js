@@ -164,7 +164,7 @@ export const STORE_REGISTRY = Object.freeze([
   // physically co-locate, so blocking either blocks the shared blob.
   Object.freeze({
     store: 'engine-registries', version: 1, tier: DURABILITY_TIERS.SESSION, portable: false, deviceBound: true,
-    physical: Object.freeze({ idbStores: ['vms', 'notebooks', 'apps'] }),
+    physical: Object.freeze({ idbStores: ['vms', 'notebooks', 'pods', 'apps'] }),
   }),
   // OPFS handles are device-bound and must remain so, but the workspace
   // CONTENTS are not inherently device-bound. The `opfs-workspaces` store's

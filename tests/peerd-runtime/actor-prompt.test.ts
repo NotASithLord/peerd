@@ -100,7 +100,7 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
 
 describe('actorBlock (the per-kind tuned prompt)', () => {
   test('every kind gets the compact kernel, pin rule, exact manifest surface, and defense', () => {
-    for (const kind of ['webvm', 'notebook', 'app', 'web']) {
+    for (const kind of ['webvm', 'notebook', 'pod', 'app', 'web']) {
       const block = actorBlock(kind);
       expect(block.includes('<actor_agent>\nkind: bound;')).toBe(true);
       expect(block.includes('address-bound actor')).toBe(true);
@@ -279,7 +279,7 @@ describe('the schema-reply rule (issue 241)', () => {
     // A sandbox reply is the agent's OWN compute coming back, not page bytes;
     // there is nothing untrusted to fence, so it keeps the cheaper free-form
     // path. If this ever inverts, the validator has to change with it.
-    for (const kind of ['webvm', 'notebook', 'app', 'dweb']) {
+    for (const kind of ['webvm', 'notebook', 'pod', 'app', 'dweb']) {
       const block = actorBlock(kind, 'tab', 'i1', 'tools', true);
       expect(block.includes(SCHEMA_MARK)).toBe(false);
       expect(block.includes(FREE_MARK)).toBe(true);

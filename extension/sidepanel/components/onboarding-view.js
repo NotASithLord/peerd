@@ -2,23 +2,24 @@
 // First-run onboarding — "Hello, I'm peerd".
 //
 // Shown ONCE per profile: after vault setup, before the first chat
-// (route gating lives in sidepanel.js via needsOnboarding below). Two
+// (route gating lives in sidepanel.js via needsOnboarding below). Three
 // jobs, per the owner's deprioritized "Profiles" direction:
 //
-//   1. Name your AI peer. The greeting's name is inline-editable and
+//   1. Choose and verify the provider that will answer the first chat.
+//   2. Name your AI peer. The greeting's name is inline-editable and
 //      writes peerName on the default profile. It wears the brand
 //      letterform colors (owner call, 2026-06-12: the name IS the
-//      wordmark concept here — anything you type inherits the same
+//      wordmark concept here; anything you type inherits the same
 //      five-color cycle), and at rest it plays a type-and-delete tease
 //      so editability is unmissable. The name only ever reflects in
-//      chat transcripts — the assistant row label — never in the brand
+//      chat transcripts (the assistant row label), never in the brand
 //      wordmark.
-//   2. Seed the user doc: two optional basic-facts questions persisted
+//   3. Seed the user doc: two optional basic-facts questions persisted
 //      into memory's 'user' scope (editable later from the options
 //      page). Skipping everything writes nothing.
 //
-// SHAPE (owner call 2026-06-12): a SEQUENTIAL three-step funnel — name
-// your peer, "what should I call you", "anything else about you" — one
+// SHAPE (owner call 2026-06-12): a SEQUENTIAL four-step funnel: provider,
+// name your peer, "what should I call you", then "anything else about you". One
 // question on screen at a time, each with its own Skip, prompts TYPING
 // themselves in terminal-style before the input appears. Game-feel
 // without breaking the brand: motion is monochrome; the peer name's
@@ -45,6 +46,7 @@
 
 import m from '/vendor/mithril/mithril.js';
 import { PEER_NAME_MAX } from '/peerd-runtime/index.js';
+import { ProviderStep } from './onboarding-provider-step.js';
 
 /** @typedef {import('../chat-reducer.js').ChatState} ChatState */
 /** @typedef {(msg: object) => Promise<any>} Send */
@@ -55,7 +57,7 @@ import { PEER_NAME_MAX } from '/peerd-runtime/index.js';
  */
 
 /**
- * The typed-question reveal state for steps 1/2.
+ * The typed-question reveal state for steps 2/3.
  * @typedef {{ text: string, shown: number, done: boolean, timer: ReturnType<typeof setTimeout>|null }} PromptState
  */
 
@@ -149,9 +151,10 @@ const stopTease = (ui) => {
   if (ui.tease.timer) clearTimeout(ui.tease.timer);
 };
 
-// The funnel's three prompts. Step 0's heading is the greeting itself
-// (the colored name widget); 1 and 2 are typed questions.
-const STEP_PROMPTS = [null, 'What should I call you?', 'Anything else about you I should know?'];
+// The funnel's prompts, one per step. Step 0 (provider, §5h) and step 1
+// (the greeting itself - the colored name widget) have no typed question;
+// 2 and 3 are typed questions.
+const STEP_PROMPTS = [null, null, 'What should I call you?', 'Anything else about you I should know?'];
 // Exported MUTABLE for tests (TEASE precedent) — production never writes.
 export const PROMPT_TYPE = { ms: 22 };
 
@@ -200,6 +203,9 @@ const goToStep = (ui, next) => {
     ui.step = next;
     ui.anim = 'in';
     startPromptType(ui);
+    // Entering the greeting the FIRST time starts the rename tease (it
+    // used to start at mount, when the greeting was step 0).
+    if (next === 1 && !ui.tease && !reducedMotion()) startTease(ui);
     m.redraw();
   };
   if (reducedMotion()) { ui.anim = ''; swap(); return; }
@@ -223,13 +229,13 @@ export const OnboardingView = {
     vnode.state.busy = false;
     vnode.state.error = null;
     vnode.state.tease = null;
-    vnode.state.step = 0;       // 0 name · 1 call-me · 2 notes
+    vnode.state.step = 0;       // 0 provider (§5h) · 1 name · 2 call-me · 3 notes
     vnode.state.anim = '';      // ''|'out'|'in' — step transition class
-    vnode.state.prompt = null;  // typed question state for steps 1/2
+    vnode.state.prompt = null;  // typed question state for steps 2/3
     vnode.state.stepTimer = null;
-    if (!reducedMotion()) {
-      startTease(vnode.state);
-    }
+    // The name tease now waits for its step: it starts when the funnel
+    // reaches the greeting (goToStep), not at mount - step 0 is the
+    // provider choice and has no name on screen to tease.
   },
 
   /** @param {OnbVnode} vnode */
@@ -319,7 +325,7 @@ export const OnboardingView = {
             oninput: (/** @type {Event} */ e) => { stopTease(ui); ui.peerName = /** @type {HTMLInputElement} */ (e.target).value; },
             onkeydown: (/** @type {KeyboardEvent} */ e) => {
               // Enter = "I'm done naming" — advance the funnel.
-              if (e.key === 'Enter') { e.preventDefault(); goToStep(ui, 1); }
+              if (e.key === 'Enter') { e.preventDefault(); goToStep(ui, 2); }
             },
             onblur: (/** @type {Event} */ e) => {
               // An emptied name visibly falls back so the user is never
@@ -340,12 +346,12 @@ export const OnboardingView = {
       m('.onboarding-actions', [
         m('button', {
           type: 'button', disabled: ui.busy,
-          onclick: () => goToStep(ui, 1),
+          onclick: () => goToStep(ui, 2),
         }, 'Continue'),
         m('button.linklike.onboarding-skip', {
           type: 'button', disabled: ui.busy,
           // Skip = don't rename: revert any half-edit, move on.
-          onclick: () => { ui.peerName = ui.peerName.trim() || 'peerd'; goToStep(ui, 1); },
+          onclick: () => { ui.peerName = ui.peerName.trim() || 'peerd'; goToStep(ui, 2); },
         }, 'Skip'),
       ]),
     ];
@@ -377,25 +383,27 @@ export const OnboardingView = {
                 oncreate: (/** @type {{ dom: HTMLElement }} */ v) => v.dom.focus(),
                 oninput: (/** @type {Event} */ e) => setValue(/** @type {HTMLInputElement} */ (e.target).value),
                 onkeydown: (/** @type {KeyboardEvent} */ e) => {
-                  if (e.key === 'Enter') { e.preventDefault(); goToStep(ui, 2); }
+                  if (e.key === 'Enter') { e.preventDefault(); goToStep(ui, 3); }
                 },
               })),
         m('p.muted.onb-hint-line', 'Optional — it lands in your memory doc, editable any time.'),
         m('.onboarding-actions', [
           m('button', {
             type: 'button', disabled: ui.busy,
-            onclick: () => (last ? submit() : goToStep(ui, 2)),
+            onclick: () => (last ? submit() : goToStep(ui, 3)),
           }, ui.busy ? '…' : last ? 'Start' : 'Continue'),
           m('button.linklike.onboarding-skip', {
             type: 'button', disabled: ui.busy,
-            onclick: () => { setValue(''); (last ? submit() : goToStep(ui, 2)); },
+            onclick: () => { setValue(''); (last ? submit() : goToStep(ui, 3)); },
           }, 'Skip'),
         ]),
       ] : null,
     ];
 
-    const body = ui.step === 0 ? stepName
-      : ui.step === 1 ? askStep({
+    const body = ui.step === 0
+      ? m(ProviderStep, { send, onDone: () => goToStep(ui, 1) })
+      : ui.step === 1 ? stepName
+      : ui.step === 2 ? askStep({
           id: 'onb-call', value: ui.callMe,
           setValue: (v) => { ui.callMe = v; }, multiline: false, last: false,
         })
@@ -417,10 +425,13 @@ export const OnboardingView = {
           }
         },
       }, body),
-      // Monochrome progress: where you are in the three questions.
-      m('.onb-dots', { 'aria-label': `Step ${ui.step + 1} of 3` },
-        [0, 1, 2].map((i) => m('span.onb-dot', {
+      // Monochrome progress: where you are in the four steps (§5h made it
+      // four). The active dot carries aria-current so the step is
+      // announced, not just painted (§5e - the treatment 3h gave the nav).
+      m('.onb-dots', { 'aria-label': `Step ${ui.step + 1} of 4` },
+        [0, 1, 2, 3].map((i) => m('span.onb-dot', {
           class: i === ui.step ? 'is-on' : i < ui.step ? 'is-done' : '',
+          'aria-current': i === ui.step ? 'step' : undefined,
         }))),
       ui.error ? m('p.error', ui.error) : null,
     ]));

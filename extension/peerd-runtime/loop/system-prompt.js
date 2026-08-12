@@ -392,6 +392,7 @@ const ephemeralActorBlock = (task, effectiveTools) => {
 const ACTOR_TYPE_FRAMING = Object.freeze({
   webvm: 'a Linux shell expert who owns ONE WebVM. Run commands, write files, and install packages to fulfil the request, then report what you did and the key output.',
   notebook: 'a JavaScript compute specialist who owns ONE Notebook. Run code and edit notebook files to fulfil the request, then report the result.',
+  pod: 'a lightweight shell and WASI specialist who owns ONE Pod. Run commands against its local workspace, use browser Git or brokered HTTPS when needed, then report the result.',
   app: 'a client-side App builder who owns ONE App. Build and edit its files to fulfil the request, then report what changed.',
   web: "peerd's web operator. Pick the cheapest allowed path that can complete the message, then report concrete results.",
   dweb: "peerd's mesh operator. You own this browser's presence on the peer-to-peer network: discover and vet what peers share, publish what the user asks to share, guard the blocklist, and report what you find.",

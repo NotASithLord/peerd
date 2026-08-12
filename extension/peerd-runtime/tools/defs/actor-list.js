@@ -2,7 +2,7 @@
 // actor_list — the ONE discovery surface for everything you can message_actor.
 //
 // DESIGN-17/18 unified addressing into a single arg (message_actor `to`): a
-// vm/notebook/app instance id, an open tab's id, an API integration's origin.
+// vm/notebook/pod/app instance id, an open tab's id, an API integration's origin.
 // This tool is the matching half — one enumeration of every addressable actor
 // with a `type` discriminator, instead of five separate list calls
 // (vm_list / js_list / app_list / list_tabs / list_integrations). One tool
@@ -34,7 +34,7 @@ import { classifyBrowserAutomationTarget } from '../browser-automation-policy.js
 /**
  * One addressable actor, in the uniform shape every row shares.
  * @typedef {Object} ActorRow
- * @property {'webvm'|'notebook'|'app'|'tab'|'integration'} type
+ * @property {'webvm'|'notebook'|'pod'|'app'|'tab'|'integration'} type
  * @property {string|number} handle   what to pass to message_actor `to`
  * @property {string} name            human label
  * @property {boolean} live           warm right now (instance has a tab / tab open / integration worked this chat)
@@ -45,7 +45,7 @@ import { classifyBrowserAutomationTarget } from '../browser-automation-policy.js
 /**
  * A registry snapshot + its tab tracker, for one engine kind.
  * @typedef {Object} EngineSource
- * @property {'webvm'|'notebook'|'app'} type
+ * @property {'webvm'|'notebook'|'pod'|'app'} type
  * @property {{ snapshot: (opts: { sessionId?: string }) => Promise<{ [k: string]: any, currentId?: string, currentVmId?: string }> } | undefined} registry
  * @property {{ getTabId: (id: string) => number | null | undefined } | undefined} tracker
  * @property {string} listKey         the array field in the snapshot (vms/notebooks/apps)
@@ -74,7 +74,9 @@ const engineRows = async (src, sessionId) => {
     // stays cheap).
     detail: src.type === 'app'
       ? (Array.isArray(r.tags) ? r.tags.join(', ') : '')
-      : (r.pinned ? 'pinned' : ''),
+      : src.type === 'pod' && r.persistent === false
+        ? 'ephemeral · closing deletes files'
+        : (r.pinned ? 'pinned' : ''),
   }));
 };
 
@@ -106,7 +108,7 @@ export const actorListTool = {
     const c = /** @type {{
      *   vmRegistry?: any, vmTabTracker?: any,
      *   jsRegistry?: any, jsTabTracker?: any,
-     *   appRegistry?: any, appTabTracker?: any,
+     *   appRegistry?: any, appTabTracker?: any, podRegistry?: any, podTabTracker?: any,
      *   tabs?: { query: (q: Record<string, unknown>) => Promise<Array<Record<string, any>>> },
      *   listApiIntegrations?: () => Promise<Array<{ origin: string, keyed: boolean, formed: boolean }>>,
      *   denylist?: string[],
@@ -125,6 +127,7 @@ export const actorListTool = {
     const engines = [
       { type: 'webvm', registry: c.vmRegistry, tracker: c.vmTabTracker, listKey: 'vms', currentKey: 'currentVmId' },
       { type: 'notebook', registry: c.jsRegistry, tracker: c.jsTabTracker, listKey: 'notebooks', currentKey: 'currentId' },
+      { type: 'pod', registry: c.podRegistry, tracker: c.podTabTracker, listKey: 'pods', currentKey: 'currentId' },
       { type: 'app', registry: c.appRegistry, tracker: c.appTabTracker, listKey: 'apps', currentKey: 'currentId' },
     ];
     for (const src of engines) {
@@ -179,7 +182,7 @@ export const actorListTool = {
 
     // Group by type for an at-a-glance read; current-first within a type. Stable
     // otherwise (registry/query order preserved).
-    const TYPE_ORDER = { webvm: 0, notebook: 1, app: 2, tab: 3, integration: 4 };
+    const TYPE_ORDER = { webvm: 0, notebook: 1, pod: 2, app: 3, tab: 4, integration: 5 };
     actors.sort((a, b) => {
       const byType = TYPE_ORDER[a.type] - TYPE_ORDER[b.type];
       if (byType !== 0) return byType;

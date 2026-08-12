@@ -264,6 +264,11 @@ const ERROR_MESSAGES = {
  * @property {string} passphrase
  * @property {string} confirmPassphrase
  * @property {string|null} error
+ * @property {'wrong'|'neutral'} errorKind  §5f: only a WRONG ANSWER is red
+ *   (the mismatch, the wrong passphrase); every other message is a condition
+ *   and takes the neutral treatment.
+ * @property {boolean} floorViolated  §5d: the 8-character floor is announced
+ *   up front and a violation emphasizes the hint - it is not an error.
  * @property {boolean} busy
  * @property {boolean} showPassphrase
  * @property {boolean} forcePassphrase
@@ -279,6 +284,8 @@ export const VaultGate = {
     vnode.state.passphrase = '';
     vnode.state.confirmPassphrase = '';
     vnode.state.error = null;
+    vnode.state.errorKind = 'neutral';
+    vnode.state.floorViolated = false;
     vnode.state.busy = false;
     // Unlock-state: with a passkey enrolled, the recovery-passphrase
     // form is collapsed behind a link. Persisted for the component mount
@@ -308,6 +315,30 @@ export const VaultGate = {
     // The faint code-stream rides behind every gate state, then the card.
     /** @param {any} kids */
     const shell = (kids) => [m(CodeStream), m('.gate-card', kids)];
+    // §5f: one message element, two severities. A red line is reserved for a
+    // WRONG ANSWER; conditions render the same line in the neutral voice.
+    const gateError = () => (ui.error
+      ? m('p.gate-msg', { class: ui.errorKind === 'wrong' ? 'is-wrong' : '' }, [
+          m('span.gate-msg-dot', { 'aria-hidden': 'true' }),
+          ui.error,
+        ])
+      : null);
+    // §5f: the ceremony hands control to the browser - say so while it is
+    // pending. The spec marks this sentence as the non-negotiable part.
+    const waitNote = () => (ui.busy
+      ? m('p.muted.gate-wait-note', 'Your browser is asking. Nothing has been sent anywhere.')
+      : null);
+    // §5g: say WHY it locked - only for an idle lock (a manual lock was the
+    // user's own act, and a fresh session has no reason to explain), quoting
+    // the user's own configured interval. The one genuine anxiety this
+    // screen creates is whether the conversation survived. It did.
+    const idleLockNote = () => {
+      if (state.vault.lockReason !== 'idle') return null;
+      const ms = Number(state.settings?.vaultAutoLockMs);
+      const minutes = Number.isFinite(ms) && ms > 0 ? Math.round(ms / 60_000) : null;
+      return m('p.muted.gate-lock-note',
+        `Locked after ${minutes ?? 'a few'} minutes idle. Your chats are still here.`);
+    };
     const isFirstRun = !state.vault.initialized;
     const prfEnrolled = !!state.vault.prfEnrolled;
     const hasRecovery = !!state.vault.hasRecovery;
@@ -331,6 +362,7 @@ export const VaultGate = {
     const setupWithPasskey = async (flavor) => {
       if (ui.busy) return;
       ui.error = null;
+      ui.errorKind = 'neutral';
       ui.busy = true;
       m.redraw();
       try {
@@ -380,12 +412,19 @@ export const VaultGate = {
       e?.preventDefault?.();
       if (ui.busy) return;
       ui.error = null;
+      ui.errorKind = 'neutral';
+      ui.floorViolated = false;
+      // §5d: two failure kinds, two treatments. The floor was announced up
+      // front (the hint under the confirm field), so violating it only
+      // emphasizes the hint - a violated rule you were told about is neutral.
+      // A mismatch is a wrong answer, and takes the sanctioned red.
       if (ui.passphrase.length < 8) {
-        ui.error = 'Passphrase must be at least 8 characters.';
+        ui.floorViolated = true;
         return;
       }
       if (ui.passphrase !== ui.confirmPassphrase) {
         ui.error = 'Passphrases do not match.';
+        ui.errorKind = 'wrong';
         return;
       }
       ui.busy = true;
@@ -394,6 +433,8 @@ export const VaultGate = {
       if (reply?.ok) {
         ui.passphrase = '';
         ui.confirmPassphrase = '';
+      } else if (reply?.error === 'invalid-passphrase') {
+        ui.floorViolated = true;
       } else {
         ui.error = ERROR_MESSAGES[reply?.error] ?? reply?.error ?? 'Something went wrong.';
       }
@@ -404,6 +445,7 @@ export const VaultGate = {
     const unlockWithPasskey = async () => {
       if (ui.busy) return;
       ui.error = null;
+      ui.errorKind = 'neutral';
       ui.busy = true;
       m.redraw();
       try {
@@ -455,6 +497,7 @@ export const VaultGate = {
       e?.preventDefault?.();
       if (ui.busy) return;
       ui.error = null;
+      ui.errorKind = 'neutral';
       if (!ui.passphrase) {
         ui.error = 'Enter your recovery passphrase.';
         return;
@@ -466,6 +509,9 @@ export const VaultGate = {
         ui.passphrase = '';
       } else {
         ui.error = ERROR_MESSAGES[reply?.error] ?? reply?.error ?? 'Something went wrong.';
+        // §5f: the wrong passphrase is the one WRONG ANSWER on this
+        // screen - everything else that can land here is a condition.
+        ui.errorKind = reply?.error === 'wrong-passphrase' ? 'wrong' : 'neutral';
       }
       m.redraw();
     };
@@ -498,15 +544,23 @@ export const VaultGate = {
         return shell([
           m(BrandHeader),
           m('h2', 'Initial set up'),
-          m('p.muted', leadsWithPlatform || !plan
-            ? `Create your vault with a passkey — ${
-              PLATFORM_LABEL ? `${PLATFORM_LABEL}, ` : 'Touch ID, Windows Hello, ' 
-              }or a hardware security key. It encrypts your API keys and ` +
-              `secrets on this device. No password to choose or remember.`
-            : 'No built-in authenticator was detected on this machine. You ' +
-              'can create your vault with a hardware security key — a ' +
-              'YubiKey 5 or any FIDO2 key that supports PRF — or use a ' +
-              'passphrase.'),
+          // §5c: never render a platform name the probe did not return -
+          // before the probe settles, and on an unrecognized platform, the
+          // copy stays generic. The label is cosmetic; the ceremony is
+          // identical either way.
+          m('p.muted', !plan
+            ? 'Create your vault with a passkey or a hardware security ' +
+              'key. It encrypts your API keys and secrets on this device. ' +
+              'No password to choose or remember.'
+            : leadsWithPlatform
+              ? `Create your vault with a passkey${
+                PLATFORM_LABEL ? ` (${PLATFORM_LABEL})` : ''
+                } or a hardware security key. It encrypts your API keys and ` +
+                `secrets on this device. No password to choose or remember.`
+              : 'No built-in authenticator was detected on this machine. You ' +
+                'can create your vault with a hardware security key (a ' +
+                'YubiKey 5 or any FIDO2 key that supports PRF) or use a ' +
+                'passphrase.'),
           m('.auth-actions', [
             ...paths.map((flavor, i) => m(i === 0 ? 'button' : 'button.secondary', {
               type: 'button',
@@ -516,7 +570,7 @@ export const VaultGate = {
             m('button.linklike', {
               type: 'button',
               disabled: ui.busy,
-              onclick: () => { ui.forcePassphrase = true; ui.error = null; m.redraw(); },
+              onclick: () => { ui.forcePassphrase = true; ui.error = null; ui.errorKind = 'neutral'; ui.floorViolated = false; m.redraw(); },
             }, 'Use a passphrase instead'),
           ]),
           // why "recent" and no version trivia: PRF support via Windows
@@ -528,7 +582,8 @@ export const VaultGate = {
           m('p.muted', { style: 'font-size:11px; margin-top:12px;' },
             'You can add a recovery passphrase later in Settings, in case ' +
             'you lose access to your passkey.'),
-          ui.error ? m('p.error', ui.error) : null,
+          waitNote(),
+          gateError(),
         ]);
       }
 
@@ -542,8 +597,9 @@ export const VaultGate = {
           'This passphrase encrypts your provider API keys and other ' +
           'secrets at rest. We cannot recover it for you.'),
         // Capability honesty: tell the user WHY there is no passkey
-        // option rather than silently hiding it.
-        passkeyBlocked ? m('p.muted', { style: 'font-size:11px;' },
+        // option rather than silently hiding it. §5d draws it as a
+        // callout - the absent option's replacement, not a footnote.
+        passkeyBlocked ? m('p.muted.gate-callout',
           'This browser can’t use passkeys to protect the vault key ' +
           '(no PRF support), so a passphrase is required.') : null,
         m('form', { onsubmit: setupWithPassphrase }, [
@@ -567,9 +623,16 @@ export const VaultGate = {
               autocomplete: 'new-password',
               value: ui.confirmPassphrase,
               disabled: ui.busy,
+              // §5f: the wrong answer marks the field it contradicts.
+              class: ui.errorKind === 'wrong' && ui.error ? 'is-error' : '',
               oninput: (/** @type {Event} */ e) => { ui.confirmPassphrase = /** @type {HTMLInputElement} */ (e.target).value; },
             }),
           ]),
+          // §5d: the 8-character floor moves up front - discoverable by
+          // reading, not by failing. A violation emphasizes this line.
+          m('p.passphrase-floor-hint', { class: ui.floorViolated ? 'is-violated' : '' },
+            'at least 8 characters'),
+          gateError(),
           m('.auth-actions.auth-actions--row', [
             m('button', { type: 'submit', disabled: ui.busy },
               ui.busy ? '…' : 'Create vault'),
@@ -579,10 +642,9 @@ export const VaultGate = {
             (webauthnAvailable && !passkeyBlocked) ? m('button.secondary', {
               type: 'button',
               disabled: ui.busy,
-              onclick: () => { ui.forcePassphrase = false; ui.error = null; m.redraw(); },
+              onclick: () => { ui.forcePassphrase = false; ui.error = null; ui.errorKind = 'neutral'; ui.floorViolated = false; m.redraw(); },
             }, 'Use a passkey instead') : null,
           ]),
-          ui.error ? m('p.error', ui.error) : null,
         ]),
       ]);
     }
@@ -592,6 +654,7 @@ export const VaultGate = {
       return shell([
         m(BrandHeader),
         // The wordmark + tagline + the button say it all — no heading/subtext.
+        idleLockNote(),
         m('.auth-actions.auth-actions--row', [
           m('button', {
             type: 'button',
@@ -602,10 +665,11 @@ export const VaultGate = {
           hasRecovery ? m('button.secondary', {
             type: 'button',
             disabled: ui.busy,
-            onclick: () => { ui.showPassphrase = true; ui.error = null; m.redraw(); },
+            onclick: () => { ui.showPassphrase = true; ui.error = null; ui.errorKind = 'neutral'; m.redraw(); },
           }, 'Use recovery passphrase') : null,
         ]),
-        ui.error ? m('p.error', ui.error) : null,
+        waitNote(),
+        gateError(),
       ]);
     }
 
@@ -613,6 +677,7 @@ export const VaultGate = {
     // recovery passphrase this time.
     return shell([
       m(BrandHeader),
+      idleLockNote(),
       m('form', { onsubmit: unlockWithPassphrase }, [
         m('.input-row', [
           m('label', { for: 'pass' }, prfEnrolled ? 'Recovery passphrase' : 'Passphrase'),
@@ -622,20 +687,22 @@ export const VaultGate = {
             autocomplete: 'current-password',
             value: ui.passphrase,
             disabled: ui.busy,
+            // §5f: only the wrong answer marks the field.
+            class: ui.errorKind === 'wrong' && ui.error ? 'is-error' : '',
             oninput: (/** @type {Event} */ e) => { ui.passphrase = /** @type {HTMLInputElement} */ (e.target).value; },
             autofocus: true,
           }),
         ]),
+        gateError(),
         m('.auth-actions.auth-actions--row', [
           m('button', { type: 'submit', disabled: ui.busy },
             ui.busy ? '…' : 'Unlock'),
           (prfEnrolled && webauthnAvailable) ? m('button.secondary', {
             type: 'button',
             disabled: ui.busy,
-            onclick: () => { ui.showPassphrase = false; ui.error = null; m.redraw(); },
+            onclick: () => { ui.showPassphrase = false; ui.error = null; ui.errorKind = 'neutral'; m.redraw(); },
           }, 'Use passkey') : null,
         ]),
-        ui.error ? m('p.error', ui.error) : null,
       ]),
     ]);
   },
