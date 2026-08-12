@@ -298,7 +298,7 @@ describe('topic sync (late-join backfill)', () => {
     ]);
     pa.mesh.addLink(ca, idC.did);
     pc.mesh.addLink(cc, pa.identity.did);
-    await tick(60);
+    await waitFor(() => pc.sync.history('feed').length === 2 && seen.length === 2);
 
     expect(pc.sync.history('feed')).toHaveLength(2);
     expect(seen.map((m) => m.data.post).sort()).toEqual(['first', 'second']);

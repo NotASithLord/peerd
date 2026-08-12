@@ -14,7 +14,7 @@
     "url": "https://github.com/NotASithLord/peerd/issues"
   },
   "scripts": {
-    "test": "bun test ./tests",
+    "test": "bun test ./tests --timeout 15000",
     "test:watch": "bun test ./tests --watch",
     "red-team": "bun test ./tests/red-team",
     "red-team:report": "bun tests/red-team/report.ts",
