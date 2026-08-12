@@ -1,6 +1,6 @@
 # peerd — visual gallery
 
-**28 states · 56 screens · baselines `linux-x64`**
+**31 states · 62 screens · baselines `linux-x64`**
 
 Every screen below is the live UI rendered through the E2E harness at a pinned
 Chrome build and viewport — the exact images the visual-regression gate compares
@@ -93,7 +93,15 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/sessions-list.light.png" alt="Chats (light)" width="380"> | <img src="baselines/linux-x64/sessions-list.dark.png" alt="Chats (dark)" width="380"> |
 
-### 11 · Home (full tab)
+### 11 · Provider onboarding
+
+`onboarding-provider` — First-run provider choice and encrypted-key setup.
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/onboarding-provider.light.png" alt="Provider onboarding (light)" width="380"> | <img src="baselines/linux-x64/onboarding-provider.dark.png" alt="Provider onboarding (dark)" width="380"> |
+
+### 12 · Home (full tab)
 
 `home-fulltab` · `full tab · 1280` — The large in-browser view — nav rail, app library.
 
@@ -101,7 +109,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/home-fulltab.light.png" alt="Home (full tab) (light)" width="460"> | <img src="baselines/linux-x64/home-fulltab.dark.png" alt="Home (full tab) (dark)" width="460"> |
 
-### 12 · App history and Git
+### 13 · App history and Git
 
 `home-library-git` · `full tab · 1280` — App history and remote controls in the Library.
 
@@ -109,7 +117,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/home-library-git.light.png" alt="App history and Git (light)" width="460"> | <img src="baselines/linux-x64/home-library-git.dark.png" alt="App history and Git (dark)" width="460"> |
 
-### 13 · Settings (full tab)
+### 14 · Settings (full tab)
 
 `options-fulltab` · `full tab · 1280` — The full-tab options page — providers, security, memory.
 
@@ -117,7 +125,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-fulltab.light.png" alt="Settings (full tab) (light)" width="460"> | <img src="baselines/linux-x64/options-fulltab.dark.png" alt="Settings (full tab) (dark)" width="460"> |
 
-### 14 · app-tab-failed
+### 15 · app-tab-failed
 
 `app-tab-failed`
 
@@ -125,7 +133,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/app-tab-failed.light.png" alt="app-tab-failed (light)" width="380"> | <img src="baselines/linux-x64/app-tab-failed.dark.png" alt="app-tab-failed (dark)" width="380"> |
 
-### 15 · eval-runner
+### 16 · eval-runner
 
 `eval-runner`
 
@@ -133,7 +141,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/eval-runner.light.png" alt="eval-runner (light)" width="380"> | <img src="baselines/linux-x64/eval-runner.dark.png" alt="eval-runner (dark)" width="380"> |
 
-### 16 · login-confirm
+### 17 · login-confirm
 
 `login-confirm`
 
@@ -141,7 +149,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/login-confirm.light.png" alt="login-confirm (light)" width="380"> | <img src="baselines/linux-x64/login-confirm.dark.png" alt="login-confirm (dark)" width="380"> |
 
-### 17 · mic-permission
+### 18 · mic-permission
 
 `mic-permission`
 
@@ -149,7 +157,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/mic-permission.light.png" alt="mic-permission (light)" width="380"> | <img src="baselines/linux-x64/mic-permission.dark.png" alt="mic-permission (dark)" width="380"> |
 
-### 18 · narrow-sidebar
+### 19 · narrow-sidebar
 
 `narrow-sidebar`
 
@@ -157,7 +165,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/narrow-sidebar.light.png" alt="narrow-sidebar (light)" width="380"> | <img src="baselines/linux-x64/narrow-sidebar.dark.png" alt="narrow-sidebar (dark)" width="380"> |
 
-### 19 · notebook-tab-failed
+### 20 · notebook-tab-failed
 
 `notebook-tab-failed`
 
@@ -165,7 +173,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/notebook-tab-failed.light.png" alt="notebook-tab-failed (light)" width="380"> | <img src="baselines/linux-x64/notebook-tab-failed.dark.png" alt="notebook-tab-failed (dark)" width="380"> |
 
-### 20 · options-behavior
+### 21 · options-behavior
 
 `options-behavior`
 
@@ -173,7 +181,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-behavior.light.png" alt="options-behavior (light)" width="380"> | <img src="baselines/linux-x64/options-behavior.dark.png" alt="options-behavior (dark)" width="380"> |
 
-### 21 · options-contributor-metrics
+### 22 · options-contributor-metrics
 
 `options-contributor-metrics`
 
@@ -181,7 +189,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-contributor-metrics.light.png" alt="options-contributor-metrics (light)" width="380"> | <img src="baselines/linux-x64/options-contributor-metrics.dark.png" alt="options-contributor-metrics (dark)" width="380"> |
 
-### 22 · options-denylist
+### 23 · options-denylist
 
 `options-denylist`
 
@@ -189,7 +197,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-denylist.light.png" alt="options-denylist (light)" width="380"> | <img src="baselines/linux-x64/options-denylist.dark.png" alt="options-denylist (dark)" width="380"> |
 
-### 23 · options-dweb-stop-failed
+### 24 · options-dweb-stop-failed
 
 `options-dweb-stop-failed`
 
@@ -197,7 +205,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-dweb-stop-failed.light.png" alt="options-dweb-stop-failed (light)" width="380"> | <img src="baselines/linux-x64/options-dweb-stop-failed.dark.png" alt="options-dweb-stop-failed (dark)" width="380"> |
 
-### 24 · options-learned-sites
+### 25 · options-learned-sites
 
 `options-learned-sites`
 
@@ -205,7 +213,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-learned-sites.light.png" alt="options-learned-sites (light)" width="380"> | <img src="baselines/linux-x64/options-learned-sites.dark.png" alt="options-learned-sites (dark)" width="380"> |
 
-### 25 · options-transfer
+### 26 · options-transfer
 
 `options-transfer`
 
@@ -213,7 +221,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-transfer.light.png" alt="options-transfer (light)" width="380"> | <img src="baselines/linux-x64/options-transfer.dark.png" alt="options-transfer (dark)" width="380"> |
 
-### 26 · options-transfer-conflict
+### 27 · options-transfer-conflict
 
 `options-transfer-conflict`
 
@@ -221,7 +229,23 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-transfer-conflict.light.png" alt="options-transfer-conflict (light)" width="380"> | <img src="baselines/linux-x64/options-transfer-conflict.dark.png" alt="options-transfer-conflict (dark)" width="380"> |
 
-### 27 · site-client-confirm
+### 28 · sidepanel-confirm
+
+`sidepanel-confirm`
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/sidepanel-confirm.light.png" alt="sidepanel-confirm (light)" width="380"> | <img src="baselines/linux-x64/sidepanel-confirm.dark.png" alt="sidepanel-confirm (dark)" width="380"> |
+
+### 29 · sidepanel-stop-card
+
+`sidepanel-stop-card`
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/sidepanel-stop-card.light.png" alt="sidepanel-stop-card (light)" width="380"> | <img src="baselines/linux-x64/sidepanel-stop-card.dark.png" alt="sidepanel-stop-card (dark)" width="380"> |
+
+### 30 · site-client-confirm
 
 `site-client-confirm`
 
@@ -229,7 +253,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/site-client-confirm.light.png" alt="site-client-confirm (light)" width="380"> | <img src="baselines/linux-x64/site-client-confirm.dark.png" alt="site-client-confirm (dark)" width="380"> |
 
-### 28 · vm-tab-failed
+### 31 · vm-tab-failed
 
 `vm-tab-failed`
 

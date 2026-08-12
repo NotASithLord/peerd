@@ -154,7 +154,7 @@ export const makeProviderRoutes = (deps) => {
       }
     },
 
-    'provider/setKey': async ({ provider, plaintext }) => {
+    'provider/setKey': async ({ provider, plaintext, activate = true }) => {
       if (!(await awaitSettings())) return { ok: false, error: 'settings-unavailable' };
       try {
         const adapter = listProviders().find((/** @type {any} */ p) => p.name === provider);
@@ -180,7 +180,10 @@ export const makeProviderRoutes = (deps) => {
         // already has a key). Clear providerModel so the new provider's default
         // model applies (mirrors the Settings provider <select>).
         const activeName = settingsStore.get().providerName;
-        if (provider !== activeName) {
+        // Onboarding verifies a candidate after vaulting it but before making
+        // it active. Its explicit activate:false prevents this convenience
+        // auto-switch from defeating that verify-before-switch contract.
+        if (activate !== false && provider !== activeName) {
           const active = listProviders().find((/** @type {any} */ p) => p.name === activeName);
           let activeUsable = !!active?.keyless;
           if (!activeUsable && active?.vaultSecretName) {

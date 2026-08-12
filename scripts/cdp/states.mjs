@@ -2449,6 +2449,197 @@ export const STATES = [
     },
   },
 
+  // --- visual: the confirm modal, standard shape (§4d) ----------------------
+  // Component-render like login-confirm above: the modal's STRUCTURE is the
+  // subject - the honest session-grant label (verb + true scope) and, second
+  // pass, the helper-raised variant where the absence is explained, not silent.
+  {
+    name: 'sidepanel-confirm', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ConfirmModal } = await import('/sidepanel/components/app.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-sidepanel-confirm';
+          document.body.appendChild(host);
+          m.render(host, m(ConfirmModal, { prompt: {
+            id: 'e2e-confirm', tool: 'write_file', actionClass: 'workspace_write',
+            summary: 'write_file notes/2026-08.md',
+            origins: ['https://notes.example.com'],
+          } }));
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => ({
+          title: document.querySelector('#e2e-sidepanel-confirm h3')?.textContent,
+          buttons: [...document.querySelectorAll('#e2e-sidepanel-confirm .peerd-modal-actions button')]
+            .map((b) => b.textContent.trim().replace(/\\s+/g, ' ')),
+          scope: document.querySelector('#e2e-sidepanel-confirm .confirm-grant-scope')?.textContent,
+        }))()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the session button names the grant and its true scope (§4d)',
+          rendered?.title === 'Confirm action'
+            && rendered?.buttons?.[0] === 'Reject'
+            && String(rendered?.buttons?.[1] ?? '').startsWith('Allow all writes')
+            && rendered?.buttons?.[2] === 'Allow once'
+            && rendered?.scope === 'this chat, this site',
+          JSON.stringify(rendered));
+        await rec.visual('sidepanel-confirm');
+        // Second pass - helper-raised (ephemeral): the session button is gone
+        // AND the quiet line says why; a control that grants nothing must not
+        // render, and its absence must not be silent.
+        const ephemeral = await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ConfirmModal } = await import('/sidepanel/components/app.js');
+          const host = document.querySelector('#e2e-sidepanel-confirm');
+          m.render(host, null);
+          m.render(host, m(ConfirmModal, { prompt: {
+            id: 'e2e-confirm-eph', tool: 'click', actionClass: 'external',
+            summary: 'click "Confirm booking"', ephemeral: true,
+            origins: ['https://rooms.example.com'],
+          } }));
+          return {
+            buttons: [...document.querySelectorAll('#e2e-sidepanel-confirm .peerd-modal-actions button')]
+              .map((b) => b.textContent.trim()),
+            note: document.querySelector('#e2e-sidepanel-confirm .confirm-ephemeral-note')?.textContent ?? null,
+          };
+        })()`, true);
+        rec.check('a helper-raised confirm hides the session grant and explains the absence',
+          ephemeral?.buttons?.length === 2
+            && ephemeral?.buttons?.[0] === 'Reject'
+            && ephemeral?.buttons?.[1] === 'Allow once'
+            && typeof ephemeral?.note === 'string'
+            && ephemeral.note.includes('approved a single time'),
+          JSON.stringify(ephemeral));
+      } finally {
+        await evalIn(ctx.page, `document.querySelector('#e2e-sidepanel-confirm')?.remove()`);
+      }
+    },
+  },
+
+  // --- visual: the origin-lock stop card (§4c) ------------------------------
+  // One state per family: the variants differ by string, and the gate exists to
+  // catch layout regressions, not to inventory copy. HANDOFF carries the one
+  // action (composer prefill), so it is the layout-complete member.
+  {
+    name: 'sidepanel-stop-card', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { MessageList } = await import('/sidepanel/components/message-list.js');
+          const { landingStopCard } = await import('/peerd-runtime/index.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-stop-card';
+          // why fixed over the viewport: an appended host lands below the home
+          // content, off-frame - the visual would photograph nothing.
+          host.style.cssText = 'position:fixed;inset:0;z-index:999;background:var(--bg);padding:14px;overflow:auto;';
+          document.body.appendChild(host);
+          const card = landingStopCard({
+            action: 'handoff',
+            reason: 'this is a site you have an account on, so its own helper should do the work',
+            from: null, to: 'https://mail.example.com/inbox?x=1',
+            handoffTo: 'https://mail.example.com',
+          });
+          m.render(host, m(MessageList, { messages: [{
+            id: 'e2e-stop-1', role: 'user', synthetic: true,
+            content: 'The web actor could not complete your request:\\n\\n(fenced report)',
+            actorReply: { kind: 'web', instanceId: 'web', failed: true, landingStop: card },
+          }] }));
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => ({
+          chip: document.querySelector('#e2e-stop-card .landing-stop-chip')?.textContent,
+          group: document.querySelector('#e2e-stop-card .landing-stop-group')?.textContent,
+          headline: document.querySelector('#e2e-stop-card .landing-stop-headline')?.textContent,
+          unknownLabel: document.querySelector('#e2e-stop-card .landing-stop-unknown-label')?.textContent,
+          action: document.querySelector('#e2e-stop-card .landing-stop-action')?.textContent,
+          proseHidden: !document.querySelector('#e2e-stop-card .bubble'),
+        }))()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the stop card renders four slots, origin-only, with the one action',
+          rendered?.chip === 'STOPPED'
+            && rendered?.group === 'HANDOFF'
+            && rendered?.headline === 'The web helper was stopped when the tab arrived at https://mail.example.com'
+            && !String(rendered?.headline).includes('/inbox')
+            && rendered?.unknownLabel === 'WHAT PEERD DOESN’T KNOW'
+            && rendered?.action === 'Try reading it without signing in'
+            && rendered?.proseHidden === true,
+          JSON.stringify(rendered));
+        await rec.visual('sidepanel-stop-card');
+      } finally {
+        await evalIn(ctx.page, `document.querySelector('#e2e-stop-card')?.remove()`);
+      }
+    },
+  },
+
+  // --- visual: first-run provider choice -----------------------------------
+  // Component-rendered before the harness completes vault bootstrap because
+  // normal E2E startup deliberately closes onboarding before post-unlock
+  // states run. The production component and provider inventory shape are
+  // real; only the status/probe replies are fixed so the screenshot never
+  // contacts a daemon.
+  {
+    name: 'onboarding-provider', kind: 'visual', phase: 'pre-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ProviderStep } = await import('/sidepanel/components/onboarding-provider-step.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-onboarding-provider';
+          host.style.cssText = 'position:fixed;inset:0;z-index:999;background:var(--bg);padding:14px;overflow:auto;';
+          document.body.appendChild(host);
+          const providers = [
+            { name: 'anthropic', label: 'Anthropic', keyless: false },
+            { name: 'openrouter', label: 'OpenRouter', keyless: false },
+            { name: 'openai', label: 'OpenAI', keyless: false },
+            { name: 'glm', label: 'GLM', keyless: false },
+            { name: 'ollama', label: 'Ollama', keyless: true, liveModels: true },
+            { name: 'local-webgpu', label: 'Local WebGPU', keyless: true, liveModels: false },
+          ];
+          const send = async (message) => message.type === 'provider/status'
+            ? { ok: true, providers }
+            : message.type === 'provider/test' && message.provider === 'ollama'
+              ? { ok: true, reachable: true, models: 2 }
+              : { ok: true };
+          m.mount(host, { view: () => m('.onboarding-view', m('.card.onboarding-card', [
+            m(ProviderStep, { send, onDone: () => {} }),
+            m('.onb-dots', { 'aria-label': 'Step 1 of 4' }, [0, 1, 2, 3].map((i) =>
+              m('span.onb-dot', { class: i === 0 ? 'is-on' : '', 'aria-current': i === 0 ? 'step' : undefined }))),
+          ])) });
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => {
+          const rows = document.querySelectorAll('#e2e-onboarding-provider .onb-provider-row').length;
+          if (rows === 0) return null;
+          return {
+            title: document.querySelector('#e2e-onboarding-provider h3')?.textContent,
+            rows,
+            selected: document.querySelector('#e2e-onboarding-provider [aria-checked="true"]')?.textContent,
+            keyType: document.querySelector('#e2e-onboarding-provider #onb-key')?.type,
+            copy: document.querySelector('#e2e-onboarding-provider .onb-provider-sub')?.textContent,
+          };
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the provider front door is complete and honest',
+          rendered?.title === 'Choose a provider'
+            && rendered?.rows === 6
+            && String(rendered?.selected).includes('Anthropic')
+            && rendered?.keyType === 'password'
+            && String(rendered?.copy).includes('sent only to the provider you choose')
+            && !String(rendered?.copy).includes('never leaves this browser'),
+          JSON.stringify(rendered));
+        await rec.visual('onboarding-provider');
+      } finally {
+        await evalIn(ctx.page, `(async () => {
+          const host = document.querySelector('#e2e-onboarding-provider');
+          if (!host) return;
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          m.mount(host, null);
+          host.remove();
+        })()`, true);
+      }
+    },
+  },
+
   // --- visual: the mode row in Plan mode (segmented Plan/Act + chips) ---------
   {
     name: 'mode-plan', kind: 'visual', phase: 'post-unlock',
@@ -5131,16 +5322,26 @@ Promise.resolve().then(async () => {
                 return rect.width >= 24 && rect.height >= 24;
               }),
               wraps: getComputedStyle(row).flexWrap === 'wrap',
-              actionsFit: actions.length === 6 && actions.every(inside),
+              // why: the pill-squeeze bug - a control narrower than its own
+              // label overflows internally (scrollWidth > clientWidth) or
+              // grows a second text line. Fitting means neither happens.
+              unsqueezed: controls.every((el) => el.scrollWidth <= el.clientWidth
+                && el.getBoundingClientRect().height <= 30),
+              // 7 actions since the §5g top-bar Lock joined the rail.
+              actionsFit: actions.length === 7 && actions.every(inside),
               actionNames: actions.map((el) => el.getAttribute('aria-label')),
             };
           })()`));
         }
+        // why wraps at EVERY width: the row is flex-wrap:wrap unconditionally
+        // now - overflow becomes a second row of intact pills. The old
+        // nowrap-above-370 rule squeezed the pills at 371–460px and their
+        // labels broke onto two lines inside the pill.
         rec.check('the authority row fits across both sides of every responsive boundary',
           widthResults.every((result) => result.pageFits && result.rowFits && result.targets
-            && result.wraps === (result.width <= 370)),
+            && result.wraps && result.unsqueezed),
           JSON.stringify(widthResults));
-        rec.check('all six named top-bar actions remain reachable across the width matrix',
+        rec.check('all seven named top-bar actions remain reachable across the width matrix',
           widthResults.every((result) => result.actionsFit
             && result.actionNames.every((name) => typeof name === 'string' && name.length > 0)),
           JSON.stringify(widthResults));

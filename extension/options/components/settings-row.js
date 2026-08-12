@@ -47,6 +47,7 @@ export const toggleSwitch = ({ on, busy = false, disabled = false, label, onclic
  * One settings row.
  *
  * @param {{
+ *   id?: string | null,
  *   label: string,
  *   summary: string,
  *   pill?: string | null,
@@ -57,6 +58,9 @@ export const toggleSwitch = ({ on, busy = false, disabled = false, label, onclic
  *   onToggleWhy?: () => void,
  *   children?: any,
  * }} p
+ *   id - wires the disclosure: the "Why this matters" button declares
+ *     aria-controls on the rationale region it expands. Absent = the button
+ *     still carries aria-expanded, but controls nothing nameable.
  *   summary — present tense, describing the CURRENT state. Not a description of
  *     the setting: "peerd clicks and types without asking" tells you where you
  *     stand; "controls whether peerd asks" does not.
@@ -66,7 +70,7 @@ export const toggleSwitch = ({ on, busy = false, disabled = false, label, onclic
  *     and MUST NOT discard their values.
  */
 export const settingsRow = ({
-  label, summary, pill = null, badge = null, control = null,
+  id = null, label, summary, pill = null, badge = null, control = null,
   why = null, open = false, onToggleWhy, children = null,
 }) => m('.set-row', [
   m('.set-row-main', [
@@ -81,6 +85,7 @@ export const settingsRow = ({
         ? m('button.set-why', {
           type: 'button',
           'aria-expanded': open ? 'true' : 'false',
+          'aria-controls': id ? `${id}-why` : undefined,
           onclick: onToggleWhy,
         }, [
           m('span.set-why-chev', { class: open ? 'is-open' : '', 'aria-hidden': 'true' }, '›'),
@@ -90,7 +95,7 @@ export const settingsRow = ({
     ]),
     control ? m('.set-row-control', control) : null,
   ]),
-  why && open ? m('.set-why-body', why) : null,
+  why && open ? m('.set-why-body', { id: id ? `${id}-why` : undefined }, why) : null,
   children ? m('.set-row-children', children) : null,
 ]);
 

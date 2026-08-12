@@ -332,6 +332,12 @@ export const createVault = (deps) => {
    * must win, or an in-flight persist would resurrect bytes the user just
    * asked us to forget. */
   let lockEpoch = 0;
+  // WHY the vault locked, for the unlock screen's one added sentence (§5g):
+  // 'idle' (the auto-lock timer, or a mirror expired past the idle policy),
+  // 'manual' (an explicit lock()), or null - a fresh SW that never locked
+  // this session, which is also what "absent on first unlock" requires.
+  /** @type {'idle'|'manual'|null} */
+  let lockReason = null;
   /** Tail of the serialized session-mirror write/delete chain.
    * @type {Promise<void>} */
   let mirrorQueue = Promise.resolve();
@@ -358,7 +364,7 @@ export const createVault = (deps) => {
     // The DEFAULT is ON (45min) so the unwrapped DK doesn't sit live for the
     // whole browser session; re-unlock is a single passkey tap.
     if (!(autoLockMs > 0) || !Number.isFinite(autoLockMs)) return;
-    timerHandle = setTimer(lock, autoLockMs);
+    timerHandle = setTimer(() => lock('idle'), autoLockMs);
   };
 
   const isLocked = () => dk === null;
@@ -401,6 +407,9 @@ export const createVault = (deps) => {
     rewrapKek = kek;
     rewrappedDK = rewrapped;
     dk = resident;
+    // Every unlock path adopts a DK, so this is the one place the previous
+    // lock's reason ends. (A lock racing a resume re-sets it in lock().)
+    lockReason = null;
   };
 
   /**
@@ -417,7 +426,8 @@ export const createVault = (deps) => {
     return unwrapWrappableDK(rewrappedDK, rewrapKek);
   };
 
-  const lock = () => {
+  /** @param {'idle'|'manual'} [reason] */
+  const lock = (reason = 'manual') => {
     // why the epoch bump + the clear come FIRST, ABOVE the already-locked
     // early return: the mirror lives in chrome.storage.session, which
     // outlives this service worker's memory. A lock that arrives when `dk`
@@ -427,6 +437,9 @@ export const createVault = (deps) => {
     lockEpoch += 1;
     _clearPersistedDK();
     if (dk === null) return;
+    // Recorded only on a real transition - a double lock keeps the first
+    // reason (the one that actually ended the unlocked session).
+    lockReason = reason;
     dk = null;
     rewrapKek = null;
     rewrappedDK = null;
@@ -662,6 +675,9 @@ export const createVault = (deps) => {
     if (plan.action === 'absent') return false;
     if (plan.action === 'refuse') {
       console.warn(`[vault] refusing session DK mirror (${plan.reason}); clearing`);
+      // A mirror past the idle policy IS an idle lock - it just fired while
+      // no SW was alive to run the timer. Say so on the unlock screen.
+      if (plan.reason === 'expired') lockReason = 'idle';
       _clearPersistedDK();
       return false;
     }
@@ -1071,6 +1087,9 @@ export const createVault = (deps) => {
     initializeWithPrfOnly,
     unlock,
     lock,
+    /** Why the vault is locked ('idle' | 'manual'), null when unlocked or on
+     * a fresh SW that never locked - drives the §5g unlock-screen sentence. */
+    lockReason: () => lockReason,
     touch,
     setAutoLockMs,
     isLocked,

@@ -48,7 +48,7 @@ const dir = join(BASELINES_ROOT, platform);
 const ORDER = [
   'initial-screen', 'idle-unlocked', 'completed-turn', 'multi-turn-transcript',
   'busy-thinking', 'mode-plan', 'tool-card-expanded', 'goal-running',
-  'error-turn', 'sessions-list',
+  'error-turn', 'sessions-list', 'onboarding-provider',
   'home-fulltab', 'home-library-git', 'options-fulltab',
 ];
 const LABELS = {
@@ -62,6 +62,7 @@ const LABELS = {
   'goal-running': ['Goal running', 'Goal bar, plan-todo card, tool-call cards.'],
   'error-turn': ['Failed turn', 'The error banner + failure-class chip.'],
   'sessions-list': ['Chats', 'The sessions list — active row highlighted.'],
+  'onboarding-provider': ['Provider onboarding', 'First-run provider choice and encrypted-key setup.'],
   'home-fulltab': ['Home (full tab)', 'The large in-browser view — nav rail, app library.'],
   'home-library-git': ['App history and Git', 'App history and remote controls in the Library.'],
   'options-fulltab': ['Settings (full tab)', 'The full-tab options page — providers, security, memory.'],

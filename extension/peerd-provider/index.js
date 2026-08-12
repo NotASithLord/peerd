@@ -94,6 +94,10 @@ export {
 // the SW multiplies it by these rates (with user overrides) client-side.
 export { DEFAULT_PRICING, costOf, resolvePricing, hasPricing } from './pricing.js';
 
+// Pure key-format sanity, shared by the options Providers card and the
+// onboarding provider step (§5h) so the paste rule can never drift.
+export { KEY_PREFIX, checkApiKeyFormat } from './key-format.js';
+
 // Per-model context-window table + resolver. The long-session trim layer
 // scales its trigger to a fraction of the ACTIVE model's window (dynamic,
 // not a fixed token count). Same static-snapshot + user-override + live-
