@@ -23,7 +23,7 @@ export const GitCredentialsSection = {
 
   load(/** @type {any} */ vnode) {
     vnode.attrs.send({ type: 'git-cred/list' }).then((/** @type {any} */ r) => {
-      vnode.state.hosts = r?.ok ? r.hosts : [];
+      vnode.state.hosts = r?.ok && Array.isArray(r.hosts) ? r.hosts : [];
       if (r && !r.ok && r.error === 'locked') vnode.state.msg = { ok: false, text: 'Vault is locked — unlock in the peerd panel first.' };
       m.redraw();
     }).catch(() => { vnode.state.hosts = []; m.redraw(); });
@@ -50,7 +50,7 @@ export const GitCredentialsSection = {
           ui.hostInput = ''; ui.tokenInput = '';
           ui.msg = { ok: true, text: `Saved for ${r.host}: encrypted in the vault.` };
           const lr = await send({ type: 'git-cred/list' });
-          if (lr?.ok) ui.hosts = lr.hosts;
+          if (lr?.ok) ui.hosts = Array.isArray(lr.hosts) ? lr.hosts : [];
         } else {
           ui.msg = { ok: false, text: errText(r?.error) };
         }
