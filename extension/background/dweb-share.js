@@ -3,6 +3,8 @@
 // call this shell so publisher-derived metadata and custody serialization cannot
 // drift apart again.
 
+import { toBase64 } from '../shared/bundle/bytes.js';
+
 /**
  * @param {Object} deps
  * @param {boolean} deps.enabled
@@ -10,12 +12,15 @@
  * @param {<T>(operation: (isCurrent: () => boolean) => Promise<T>) => Promise<T>} deps.withDwebPublication
  * @param {<T>(operation: () => Promise<T>) => Promise<T>} deps.withIdentityMutation
  * @param {<T>(appId: string, operation: () => Promise<T>) => Promise<T>} deps.withAppLifecycle
+ * @param {<T>(appId: string, operation: () => Promise<T>) => Promise<T>} [deps.withAppWriteLock]
  * @param {{ get: (id: string) => Promise<any>, update: (id: string, patch: any) => Promise<any> }} deps.appRegistry
+ * @param {{ statusApp: (id: string) => Promise<any>, commitApp: (id: string, opts: {message: string}) => Promise<any>, historyApp: (id: string, opts: {depth: number}) => Promise<any[]>, snapshot: (ref: {kind: string, id: string}, opts: {at: string}) => Promise<Record<string, Uint8Array>> }} [deps.repositories]
  * @param {() => Promise<any>} deps.prepareRuntime
  * @param {(message: any) => Promise<any>} deps.sendMessage
  */
 export const makeDwebShare = ({
   enabled, active, withDwebPublication, withIdentityMutation, withAppLifecycle, appRegistry,
+  withAppWriteLock = (_appId, operation) => operation(), repositories,
   prepareRuntime, sendMessage,
 }) => async (/** @type {string} */ appId, /** @type {string | undefined} */ slug) => {
   if (!enabled || !active()) return { ok: false, error: 'dweb-disabled' };
@@ -27,10 +32,60 @@ export const makeDwebShare = ({
     const started = await prepareRuntime();
     if (!started?.ok) return started ?? { ok: false, error: 'dweb-start-failed' };
 
-    return withIdentityMutation(() => withAppLifecycle(appId, async () => {
+    return withIdentityMutation(() => withAppLifecycle(appId, () => withAppWriteLock(appId, async () => {
     if (!enabled || !isCurrent() || !active()) return { ok: false, error: 'dweb-disabled' };
     const record = await appRegistry.get(appId);
     if (!record) return { ok: false, error: 'app-not-found' };
+    let release = null;
+    let releaseSnapshot = null;
+    if (repositories) {
+      const beforeRelease = await repositories.statusApp(appId);
+      const changes = Array.isArray(beforeRelease.changed) ? beforeRelease.changed : [];
+      const changedPaths = changes.slice(0, 3)
+        .map((/** @type {{path?: unknown}} */ change) => change?.path)
+        .filter((/** @type {unknown} */ path) => typeof path === 'string');
+      const committed = await repositories.commitApp(appId, {
+        message: changedPaths.length
+          ? `release: update ${changedPaths.join(', ')}${changes.length > changedPaths.length ? ', …' : ''}`
+          : 'publish dweb release',
+      });
+      if (typeof committed?.oid !== 'string' || !/^[a-f0-9]{40}$/.test(committed.oid)) {
+        throw new Error('release Git commit identity invalid');
+      }
+      const history = await repositories.historyApp(appId, { depth: 100 });
+      const messages = [];
+      for (const item of history) {
+        if (record.dweb?.git_oid && item.oid === record.dweb.git_oid) break;
+        if (typeof item.message === 'string' && item.message) messages.push(item.message.split('\n')[0]);
+        if (messages.length >= 20) break;
+      }
+      const changelog = messages.reverse().join('\n').slice(0, 1200);
+      const snapshot = await repositories.snapshot({ kind: 'app', id: appId }, { at: committed.oid });
+      if (!Object.hasOwn(snapshot, record.entryFile)) throw new Error('release-entry-missing');
+      /** @type {Record<string, {base64: string}>} */
+      const encodedFiles = Object.create(null);
+      let totalBytes = 0;
+      for (const [path, bytes] of Object.entries(snapshot)) {
+        totalBytes += bytes.byteLength;
+        encodedFiles[path] = { base64: toBase64(bytes) };
+      }
+      release = {
+        previousVersionId: record.dweb?.version_id ?? null,
+        gitCommitOid: committed.oid,
+        changelog,
+      };
+      releaseSnapshot = {
+        ok: true,
+        oid: committed.oid,
+        totalBytes,
+        record: {
+          name: record.name,
+          entryFile: record.entryFile,
+          fileKinds: { ...(record.fileKinds ?? {}) },
+        },
+        files: encodedFiles,
+      };
+    }
     const useSlug = record.dweb?.slug || slug || undefined;
     const previousHash = record.dweb?.hash ?? null;
     const previousShareHash = record.dweb?.local === true ? previousHash : null;
@@ -43,6 +98,7 @@ export const makeDwebShare = ({
       fileKinds: record.fileKinds ?? {},
       slug: useSlug,
       previousHash: previousShareHash,
+      ...(release ? { release, releaseSnapshot } : {}),
     });
     if (!reply?.ok) return reply;
     const rollbackShare = async () => {
@@ -96,6 +152,19 @@ export const makeDwebShare = ({
       ...(Number.isInteger(reply.size) ? { size: reply.size } : {}),
       version_id: reply.hash, slug: reply.slug, dwapp_id: reply.dwapp_id,
       seq: reply.seq, manifest_created: reply.created, local: true,
+      ...(release ? {
+        git_oid: release.gitCommitOid,
+        source_git_oid: release.gitCommitOid,
+        previous_version_id: release.previousVersionId ?? undefined,
+        changelog: release.changelog,
+        release_entry_file: record.entryFile,
+        release_file_kinds: { ...(record.fileKinds ?? {}) },
+        ...(Number.isInteger(reply.created) ? { release_created: reply.created } : {}),
+        published_hashes: [...new Set([
+          ...(Array.isArray(record.dweb?.published_hashes) ? record.dweb.published_hashes : []),
+          reply.hash,
+        ].filter((hash) => typeof hash === 'string'))],
+      } : {}),
       ...(pendingHashes.length ? { pending_unserve_hashes: pendingHashes } : {}),
       ...(pendingSeedHashes.length ? { pending_seed_unserve_hashes: pendingSeedHashes } : {}),
     };
@@ -156,6 +225,6 @@ export const makeDwebShare = ({
     return remaining.length || remainingSeed.length
       ? { ...reply, warning: 'previous-version-cleanup-pending', cleanupPending: true }
       : reply;
-    }));
+    })));
   });
 };

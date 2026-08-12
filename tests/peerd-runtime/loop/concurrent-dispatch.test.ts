@@ -13,6 +13,9 @@
 
 import { describe, test, expect } from 'bun:test';
 import { runUserTurn } from '../../../extension/peerd-runtime/loop/agent-loop.js';
+import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/dispatcher.js';
+import { registerTool, clearTools } from '../../../extension/peerd-runtime/tools/registry.js';
+import { INITIAL_STATE, reduceChat } from '../../../extension/sidepanel/chat-reducer.js';
 
 // ---- harness ----------------------------------------------------------------
 
@@ -37,7 +40,7 @@ const makeStore = () => {
 
 // A model that emits the given tool_use calls on step 1 and plain text on
 // step 2 (so the loop terminates).
-const makeToolModel = (calls: Array<{ id: string; name: string }>) => {
+const makeToolModel = (calls: Array<{ id: string; name: string; args?: Record<string, unknown> }>) => {
   let step = 0;
   return () => {
     step += 1;
@@ -45,7 +48,7 @@ const makeToolModel = (calls: Array<{ id: string; name: string }>) => {
       return (async function* () {
         for (const c of calls) {
           yield { type: 'tool-use-start', id: c.id, name: c.name };
-          yield { type: 'tool-use-delta', id: c.id, partialJson: '{}' };
+          yield { type: 'tool-use-delta', id: c.id, partialJson: JSON.stringify(c.args ?? {}) };
           yield { type: 'tool-use-stop', id: c.id };
         }
         yield { type: 'message-stop', stopReason: 'tool_use' };
@@ -157,6 +160,11 @@ describe('runUserTurn — concurrent tool dispatch', () => {
         meta: {},
         actorDeliveryId: 'delivery-one',
         actorDeliveryIds: ['delivery-two', 'delivery-two', ''],
+        actorCorrelationId: 'correlation-one',
+        actorTerminal: true,
+        actorOutcomeKnown: false,
+        actorPerformed: true,
+        actorAborted: true,
       }),
     });
 
@@ -166,6 +174,87 @@ describe('runUserTurn — concurrent tool dispatch', () => {
       .toolResults[0];
     expect(block.actorDeliveryId).toBe('delivery-one');
     expect(block.actorDeliveryIds).toEqual(['delivery-two']);
+    expect(block.actorCorrelationId).toBe('correlation-one');
+    expect(block.actorTerminal).toBe(true);
+    expect(block.actorOutcomeKnown).toBe(false);
+    expect(block.actorPerformed).toBe(true);
+    expect(block.actorAborted).toBe(true);
+  });
+
+  test('outer actor uncertainty survives dispatcher, persistence, and reducer replay', async () => {
+    clearTools();
+    registerTool({
+      name: 'message_actor', description: '', primitive: 'spawned', sideEffect: 'write',
+      schema: { type: 'object', properties: {} },
+      origins: () => [],
+      execute: async () => ({
+        ok: false,
+        error: 'inner policy stop',
+        actorCorrelationId: 'correlation-outer-unknown',
+        actorTerminal: true,
+        actorOutcomeKnown: true,
+        actorPerformed: true,
+        actorAborted: true,
+      }),
+    } as any);
+    try {
+      const lifecycle = {
+        beginTracking: async () => ({ handle: { operationId: 'op-outer-unknown' } }),
+        settleTracking: async () => ({
+          error: 'outcome_unknown: This action may have completed, but peerd did not receive confirmation.',
+          recovery: { state: 'outcome_unknown', category: 'verify_before_retry' },
+        }),
+      };
+      const dispatchCtx: any = {
+        audit: async () => {},
+        confirm: async () => 'yes_once',
+        session: { sessionId: 's1', kind: 'chat' },
+        permission: { mode: 'act', confirmActions: false },
+        lifecycle,
+      };
+      const store = makeStore();
+      store.seed('s1');
+      const loopCtx = baseCtx(store, {
+        callModel: makeToolModel([{
+          id: 'actor-unknown', name: 'message_actor', args: { to: 'web', await: true },
+        }]),
+        tools: [{ name: 'message_actor', description: '', schema: {} }],
+        classifyToolCall: () => WRITE_VERDICT,
+        toolDispatch: (call: any) => dispatchToolCall(call, dispatchCtx),
+      });
+
+      await drain(runUserTurn(loopCtx));
+      const session = await store.get('s1');
+      const block = session.messages.find((m: any) => Array.isArray(m.toolResults)).toolResults[0];
+      expect(block.content).toStartWith('outcome_unknown:');
+      expect(block).toMatchObject({
+        is_error: true,
+        actorCorrelationId: 'correlation-outer-unknown',
+        actorTerminal: true,
+        actorOutcomeKnown: false,
+        actorPerformed: true,
+      });
+      expect(block.actorAborted).toBeUndefined();
+
+      const viewing: any = {
+        ...INITIAL_STATE,
+        session: { sessionId: 's1', messages: [], cost: null },
+      };
+      const started: any = reduceChat(viewing, {
+        type: 'turn/actor-start', rootSessionId: 's1', parentToolUseId: 'actor-unknown',
+        sessionId: 'actor-web', fromIndex: 0, kind: 'web', instanceId: 'web',
+      });
+      const replayed: any = reduceChat(started, { type: 'turn/state', session });
+      expect(replayed.actors['actor-unknown']).toMatchObject({
+        streaming: false,
+        aborted: false,
+        outcomeKnown: false,
+        performed: true,
+        error: 'the actor turn ended with an unknown outcome',
+      });
+    } finally {
+      clearTools();
+    }
   });
 
   test('a write is a barrier: [read, write, read] runs strictly in order', async () => {

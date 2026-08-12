@@ -25,13 +25,8 @@
 # dependency a PR adds — is not on this list and fails the job today.
 #
 # Re-triage checklist when these expire: `bun outdated`, check whether
-# web-ext has released past 10.3.0, drop any entry that no longer appears
+# web-ext has released past 10.6.0, drop any entry that no longer appears
 # in the scan, and extend only what genuinely still cannot move.
-
-[[IgnoredVulns]]
-id = "GHSA-xcpc-8h2w-3j85"
-ignoreUntil = 2026-11-01
-reason = "adm-zip, via addons-scanner-utils (web-ext's xpi linter). Build-time only; never shipped."
 
 [[IgnoredVulns]]
 id = "GHSA-3jxr-9vmj-r5cp"
@@ -63,35 +58,15 @@ id = "GHSA-v2hh-gcrm-f6hx"
 ignoreUntil = 2026-11-01
 reason = "fast-uri, via addons-linter's JSON-schema validation. Build-time only; never shipped."
 
-# image-size is exact-pinned by addons-linter. Both advisories are parser hangs
-# on crafted image bytes and have no patched release as of this triage. On our
-# path it scans repo-owned extension images during AMO lint; it is never shipped
-# and a hostile PR can at worst consume its already-time-limited CI job. Recheck
-# sooner than the older toolchain ignores because these advisories are fresh.
 [[IgnoredVulns]]
 id = "GHSA-5p2g-fcmc-qvqq"
-ignoreUntil = 2026-09-01
-reason = "image-size, exact-pinned by addons-linter with no fixed release. Crafted-image DoS is limited to build-time AMO lint; never shipped."
+ignoreUntil = 2026-09-15
+reason = "image-size 2.0.2, exact-pinned by the latest addons-linter and with no patched upstream release. Our Bun patch disables the vulnerable HEIF/JXL parsers before calculation; regression tested. Build-time only; never shipped."
 
 [[IgnoredVulns]]
 id = "GHSA-w3rx-r6r6-pgpr"
-ignoreUntil = 2026-09-01
-reason = "image-size, exact-pinned by addons-linter with no fixed release. Crafted-image DoS is limited to build-time AMO lint; never shipped."
-
-[[IgnoredVulns]]
-id = "GHSA-395f-4hp3-45gv"
-ignoreUntil = 2026-11-01
-reason = "shell-quote, exact-pinned at 1.7.3 by web-ext itself — unresolvable until upstream moves. Build-time only."
-
-[[IgnoredVulns]]
-id = "GHSA-w7jw-789q-3m8p"
-ignoreUntil = 2026-11-01
-reason = "shell-quote, exact-pinned at 1.7.3 by web-ext itself — unresolvable until upstream moves. Build-time only."
-
-[[IgnoredVulns]]
-id = "GHSA-7c78-jf6q-g5cm"
-ignoreUntil = 2026-11-01
-reason = "tmp, exact-pinned at 0.2.6 by web-ext itself — unresolvable until upstream moves. Build-time only."
+ignoreUntil = 2026-09-15
+reason = "image-size 2.0.2, exact-pinned by the latest addons-linter and with no patched upstream release. Our Bun patch disables the vulnerable ICNS parser before calculation; regression tested. Build-time only; never shipped."
 
 # undici — web-ext's HTTP client for the AMO upload/poll. The closest thing
 # here to a path that matters (it talks to a network service during signing),

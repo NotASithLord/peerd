@@ -392,6 +392,7 @@ const ephemeralActorBlock = (task, effectiveTools) => {
 const ACTOR_TYPE_FRAMING = Object.freeze({
   webvm: 'a Linux shell expert who owns ONE WebVM. Run commands, write files, and install packages to fulfil the request, then report what you did and the key output.',
   notebook: 'a JavaScript compute specialist who owns ONE Notebook. Run code and edit notebook files to fulfil the request, then report the result.',
+  pod: 'a lightweight shell and WASI specialist who owns ONE Pod. Run commands against its local workspace, use browser Git or brokered HTTPS when needed, then report the result.',
   app: 'a client-side App builder who owns ONE App. Build and edit its files to fulfil the request, then report what changed.',
   web: "peerd's web operator. Pick the cheapest allowed path that can complete the message, then report concrete results.",
   dweb: "peerd's mesh operator. You own this browser's presence on the peer-to-peer network: discover and vet what peers share, publish what the user asks to share, guard the blocklist, and report what you find.",
@@ -468,7 +469,9 @@ result links/snippets from the served HTML. Use the html. subdomain exactly: the
 duckduckgo.com/html/ path 302-redirects (fetch_url does not follow redirects), which
 wastes a turn for no reason. Open a tab (navigate) only when the fetched results come
 back empty/blocked or the task needs the rendered engine (news/images tabs, a
-JS-gated engine). There is no search tool; this fetch IS the search.
+JS-gated engine). Do not click a result just to read a public page; fetch_url the
+result URL instead, especially on sites that may have signed-in sessions. There is no
+search tool; this fetch IS the search.
 
 YOUR TAB — you own 0-OR-1 tab. You start with NONE (fetch needs no tab); calling navigate
 OPENS your tab right then — you can ALWAYS render. There is no open_tab here and you don't

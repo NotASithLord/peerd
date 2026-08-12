@@ -590,8 +590,10 @@ export const STATES = [
         };
         rec.check('the trusted click reaches its about:blank child action',
           burstObserved.completed && burstObserved.attempted, JSON.stringify(burstObserved));
-        rec.check('Chrome immediate-child race remains visible with native local-network checks disabled',
-          burstObserved.requests.some((request) => request.includes('trusted-click-blank')),
+        const expectedRaceRequests = burstObserved.requests.filter((request) => request.includes('trusted-click-blank'));
+        rec.check('Chrome immediate-child outcome stays inside the documented race envelope',
+          burstObserved.requests.length === 0
+            || expectedRaceRequests.length === burstObserved.requests.length,
           JSON.stringify(burstObserved));
         rec.check('the protected child is closed instead of left as a blank tab',
           !burstTabs.some((tab) => !burstTabIdsBefore.has(tab.id) && tab.openerTabId === drivenTab.id),
@@ -1026,7 +1028,7 @@ export const STATES = [
           && replaced.imported?.dwebIdentity === 1 && storedDid === incoming.did,
         JSON.stringify({ replaced, storedDid, incomingDid: incoming.did }));
 
-      const restarted = await rpc(ctx.page, { type: 'dweb/base-host/start' });
+      const restarted = await rpc(ctx.page, { type: 'dweb/base/start' });
       rec.check('the peer host starts under the restored identity after lease release',
         restarted?.ok === true && restarted?.running === true && restarted?.did === incoming.did,
         JSON.stringify(restarted));
@@ -1639,8 +1641,8 @@ export const STATES = [
           disclosureBefore?.initiallyExpanded === 'false'
             && disclosureBefore?.collapsed.includes('Not run')
             && disclosureAfter?.expanded === 'true'
-            && disclosureAfter?.detail.includes('No actor work was started')
-            && disclosureAfter?.detail.includes('ask peerd to work on that site directly'),
+            && disclosureAfter?.detail === 'No actor work was started. Review the request before trying again.'
+            && !disclosureAfter.detail.includes('actor_sensitive_tab_requires_site'),
           JSON.stringify({ disclosureBefore, disclosureAfter }));
         await rec.shot('final');
       } finally {
@@ -1740,13 +1742,14 @@ export const STATES = [
           ? { expanded: 'true', detail }
           : null;
       })()`), { budgetMs: 5_000, pollMs: 50 }) : null;
-      rec.check('the human sees a plain transit-only explanation',
-        disclosureReady?.label.includes('sign-in service')
-          && disclosureReady?.args === 'sign-in service: "Use this sign-in service as an API inte…"'
+      rec.check('the human sees a generic host-proven Not run explanation',
+        disclosureReady?.label.includes('actor')
+          && disclosureReady?.args === 'actor: "Use this sign-in service as an API inte…"'
           && disclosureReady?.cardClass.includes('tool-not-run')
           && disclosureReady?.dotClass.includes('dot-not-run')
           && disclosure?.expanded === 'true'
-          && disclosure?.detail === 'No actor work was started. This is a sign-in service, which peerd can visit only while signing in to another site. Ask peerd to work through the site you want to sign in to.',
+          && disclosure?.detail === 'No actor work was started. Review the request before trying again.'
+          && !disclosure.detail.includes('actor_identity_provider_transit_only'),
         JSON.stringify({ disclosureReady, disclosure }));
       await rec.shot('final');
     },
@@ -2207,12 +2210,11 @@ export const STATES = [
             go: row.querySelector('.agent-tab-notice-go')?.textContent?.trim() || '',
           } : null;
         })()`), { budgetMs: 20_000 });
-        rec.check('the notice labels the tab as protected',
-          notice?.primary?.includes('protected tab'), JSON.stringify(notice));
-        rec.check('the notice explains both restrictions and their lifetime',
-          notice?.detail?.includes('Local network')
-            && notice.detail.includes('sensitive sites')
-            && notice.detail.includes('until you close it'),
+        rec.check('the notice identifies the task tab without warning language',
+          notice?.primary?.includes('task tab')
+            && !notice.primary.includes('protected'), JSON.stringify(notice));
+        rec.check('the notice explains safeguards without unsupported isolation claims',
+          notice?.detail === 'This task tab uses additional browser safeguards.',
           JSON.stringify(notice));
         rec.check('the Go action remains available', notice?.go === 'Go ↗', JSON.stringify(notice));
         await rec.shot('protected-tab-notice');
@@ -2569,6 +2571,75 @@ export const STATES = [
     },
   },
 
+  // --- visual: first-run provider choice -----------------------------------
+  // Component-rendered before the harness completes vault bootstrap because
+  // normal E2E startup deliberately closes onboarding before post-unlock
+  // states run. The production component and provider inventory shape are
+  // real; only the status/probe replies are fixed so the screenshot never
+  // contacts a daemon.
+  {
+    name: 'onboarding-provider', kind: 'visual', phase: 'pre-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ProviderStep } = await import('/sidepanel/components/onboarding-provider-step.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-onboarding-provider';
+          host.style.cssText = 'position:fixed;inset:0;z-index:999;background:var(--bg);padding:14px;overflow:auto;';
+          document.body.appendChild(host);
+          const providers = [
+            { name: 'anthropic', label: 'Anthropic', keyless: false },
+            { name: 'openrouter', label: 'OpenRouter', keyless: false },
+            { name: 'openai', label: 'OpenAI', keyless: false },
+            { name: 'glm', label: 'GLM', keyless: false },
+            { name: 'ollama', label: 'Ollama', keyless: true, liveModels: true },
+            { name: 'local-webgpu', label: 'Local WebGPU', keyless: true, liveModels: false },
+          ];
+          const send = async (message) => message.type === 'provider/status'
+            ? { ok: true, providers }
+            : message.type === 'provider/test' && message.provider === 'ollama'
+              ? { ok: true, reachable: true, models: 2 }
+              : { ok: true };
+          m.mount(host, { view: () => m('.onboarding-view', m('.card.onboarding-card', [
+            m(ProviderStep, { send, onDone: () => {} }),
+            m('.onb-dots', { 'aria-label': 'Step 1 of 4' }, [0, 1, 2, 3].map((i) =>
+              m('span.onb-dot', { class: i === 0 ? 'is-on' : '', 'aria-current': i === 0 ? 'step' : undefined }))),
+          ])) });
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => {
+          const rows = document.querySelectorAll('#e2e-onboarding-provider .onb-provider-row').length;
+          if (rows === 0) return null;
+          return {
+            title: document.querySelector('#e2e-onboarding-provider h3')?.textContent,
+            rows,
+            selected: document.querySelector('#e2e-onboarding-provider [aria-checked="true"]')?.textContent,
+            keyType: document.querySelector('#e2e-onboarding-provider #onb-key')?.type,
+            copy: document.querySelector('#e2e-onboarding-provider .onb-provider-sub')?.textContent,
+          };
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the provider front door is complete and honest',
+          rendered?.title === 'Choose a provider'
+            && rendered?.rows === 6
+            && String(rendered?.selected).includes('Anthropic')
+            && rendered?.keyType === 'password'
+            && String(rendered?.copy).includes('sent only to the provider you choose')
+            && !String(rendered?.copy).includes('never leaves this browser'),
+          JSON.stringify(rendered));
+        await rec.visual('onboarding-provider');
+      } finally {
+        await evalIn(ctx.page, `(async () => {
+          const host = document.querySelector('#e2e-onboarding-provider');
+          if (!host) return;
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          m.mount(host, null);
+          host.remove();
+        })()`, true);
+      }
+    },
+  },
+
   // --- visual: the mode row in Plan mode (segmented Plan/Act + chips) ---------
   {
     name: 'mode-plan', kind: 'visual', phase: 'post-unlock',
@@ -2727,6 +2798,65 @@ export const STATES = [
     },
   },
 
+  // --- visual (WIDE): browser-native Git history on an App -------------------
+  // Creates through the real import→App→Git path, then opens the Library's
+  // developer panel. Import avoids opening a second tab during the visual state,
+  // while still exercising the production App client and OPFS repository init.
+  // This covers what assertions cannot see: dense log rows, remote controls,
+  // and the restore affordance in both themes.
+  {
+    name: 'home-library-git', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const imported = await evalIn(ctx.page, `(async () => {
+        const { buildAppExport } = await import('/peerd-engine/index.js');
+        const envelope = await buildAppExport({
+          record: { name: 'Versioned App', entryFile: 'index.html', tags: ['visual-fixture'] },
+          files: { 'index.html': '<!doctype html><title>Versioned App</title><main>Hello</main>' },
+        });
+        return chrome.runtime.sendMessage({ type: 'import/apply', envelope });
+      })()`, true);
+      rec.check('visual fixture App imported with a Git repository', imported?.ok && imported?.kind === 'app', JSON.stringify(imported));
+      const branched = imported?.id ? await evalIn(ctx.page,
+        `chrome.runtime.sendMessage({ type: 'apps/repository/branch', appId: ${JSON.stringify(imported.id)}, name: 'feature/visual', checkout: true })`, true) : null;
+      rec.check('visual fixture exposes existing-branch switching', branched?.ok === true, JSON.stringify(branched));
+      const page = await openWidePage(ctx, 'home/home.html#library');
+      try {
+        const libraryReady = await waitFor(() => evalIn(page, `
+          document.querySelector('[data-home-view="library"]')?.getAttribute('aria-current') === 'page'
+            && !!document.querySelector('.library-grid')
+        `), { budgetMs: 15_000, pollMs: 80 });
+        rec.check('visual fixture opens the Library route', !!libraryReady);
+        const appReady = await waitFor(() => evalIn(page,
+          `[...document.querySelectorAll('.library-name')].some((n) => n.textContent.includes('Versioned App'))`),
+        { budgetMs: 20_000, pollMs: 80 });
+        rec.check('visual fixture App appears in the Library', !!appReady);
+        await evalIn(page, `(() => {
+          const name = [...document.querySelectorAll('.library-name')].find((n) => n.textContent.includes('Versioned App'));
+          name?.closest('.library-card')?.querySelector('.library-kebab')?.click();
+        })()`);
+        const historyActionReady = await waitFor(() => evalIn(page, `!![...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')`),
+          { budgetMs: 5_000, pollMs: 50 });
+        rec.check('visual fixture exposes the History and Git action', !!historyActionReady);
+        await evalIn(page, `[...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')?.click()`);
+        const historyReady = await waitFor(() => evalIn(page, `!!document.querySelector('.library-repository .library-commit')`),
+          { budgetMs: 20_000, pollMs: 80 });
+        rec.check('visual fixture renders repository history', !!historyReady);
+        // Git commit IDs include the commit timestamp, so this visual fixture
+        // must normalize them before capture. The surrounding branch, history,
+        // controls, and layout remain production-rendered; only the inherently
+        // run-specific identifier is replaced.
+        await evalIn(page, `(() => {
+          const fixedOid = '0000000000';
+          const head = document.querySelector('.library-repository-head .muted');
+          if (head) head.textContent = head.textContent.replace(/[0-9a-f]{10}$/i, fixedOid);
+          for (const oid of document.querySelectorAll('.library-commit code')) oid.textContent = fixedOid;
+        })()`);
+        await rec.visualPage('home-library-git', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
   // Functional rendered coverage for committed success warnings. This takes a
   // screenshot without creating a local visual authority baseline. CI remains
   // the only source of Linux pixel baselines.
@@ -2761,7 +2891,10 @@ export const STATES = [
             .find((button) => button.textContent === 'Update')?.click()
         `);
         const warningLayout = await waitFor(() => evalIn(page, `(() => {
-          const statuses = [...document.querySelectorAll('.warning-fixture [role="status"]')];
+          const statuses = [
+            document.querySelector('section[aria-labelledby="library-warning-heading"] p.muted[role="status"]'),
+            document.querySelector('.disc-card [role="status"]'),
+          ].filter(Boolean);
           if (statuses.length !== 2) return null;
           return {
             texts: statuses.map((status) => status.textContent ?? ''),
@@ -3011,7 +3144,7 @@ export const STATES = [
           queuedRecovery?.role.includes('Not run')
             && !queuedRecovery?.role.includes('failed')
             && !queuedRecovery?.role.includes('Outcome unknown')
-            && queuedRecovery?.body.includes('before this actor request was dispatched'),
+            && queuedRecovery?.body === 'No actor work was started. Review the request before trying again.',
           JSON.stringify(queuedRecovery));
         rec.check('recovery receipts use one transient polite atomic announcement',
           unknownOutcome?.liveRole === 'status'
@@ -3880,10 +4013,10 @@ export const STATES = [
       actorBoundaryState = { delegates: 0 };
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'inspect this page safely' });
       rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
-      const failed = await waitFor(
-        () => evalIn(ctx.page, `!!document.querySelector('.tool-call.tool-actor.tool-failed')`),
+      const notRun = await waitFor(
+        () => evalIn(ctx.page, `!!document.querySelector('.tool-call.tool-actor.tool-not-run')`),
         { budgetMs: 25_000, pollMs: 100 });
-      rec.check('the live actor card settles as failed', !!failed);
+      rec.check('the live actor card settles as Not run', !!notRun);
       await evalIn(ctx.page, `document.querySelector('.tool-actor .tool-call-header')?.click()`);
       const expanded = await waitFor(
         () => evalIn(ctx.page, `document.querySelector('.tool-actor .tool-call-header')?.getAttribute('aria-expanded') === 'true'
@@ -3898,10 +4031,12 @@ export const STATES = [
         };
       })()`);
       rec.check('the live card labels the request Not run', out?.label === 'Not run', JSON.stringify(out?.label));
-      rec.check('the live card gives the person a direct recovery step',
-        /Reload peerd, then try again/.test(out?.body || ''), JSON.stringify(out?.body));
-      rec.check('the live card hides model-directed recovery text',
-        !/Do not retry automatically|Ask the user/.test(out?.body || ''), JSON.stringify(out?.body));
+      rec.check('the live card uses generic host-proven Not run guidance',
+        (out?.body || '').includes('No actor work was started. Review the request before trying again.'),
+        JSON.stringify(out?.body));
+      rec.check('the live card does not trust provider recovery tokens or instructions',
+        !/actor-provider-boundary-blocked|Reload peerd|Do not retry automatically|Ask the user/i
+          .test(out?.body || ''), JSON.stringify(out?.body));
       const replyReady = await waitFor(
         () => evalIn(ctx.page, `!!document.querySelector('.message-actor-reply')`),
         { budgetMs: 25_000, pollMs: 100 });
@@ -3915,9 +4050,10 @@ export const STATES = [
       })()`);
       rec.check('the failed actor reply is also labeled Not run',
         /Not run/.test(reply?.role || ''), JSON.stringify(reply?.role));
-      rec.check('the failed actor reply preserves the human recovery step only',
-        /Reload peerd, then try again/.test(reply?.body || '')
-          && !/Do not retry automatically|Ask the user/.test(reply?.body || ''),
+      rec.check('the failed actor reply uses the same generic Not run guidance',
+        (reply?.body || '') === 'No actor work was started. Review the request before trying again.'
+          && !/actor-provider-boundary-blocked|Reload peerd|Do not retry automatically|Ask the user/i
+            .test(reply?.body || ''),
         JSON.stringify(reply?.body));
       await waitFor(async () => { const state = await probe(ctx); return !state.busy; }, { budgetMs: 25_000 });
       await rec.shot('not-run-expanded');

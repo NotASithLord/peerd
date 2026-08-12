@@ -76,7 +76,7 @@ const providerLogo = (name) => {
 };
 
 export const ProvidersSection = {
-  /** @param {{ state: any, attrs: { send: Send } }} vnode */
+  /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode */
   oninit(vnode) {
     // Per-provider key entry state — keyed by provider name so every
     // provider has its own independent input / busy / message / editing.
@@ -93,26 +93,44 @@ export const ProvidersSection = {
     // using the SAME source as the chat picker (models/options).
     vnode.state.modelOptions = null;
     vnode.state.modelOptionsKey = '';
+    vnode.state.modelOptionsGeneration = 0;
+    vnode.state.probeGeneration = {};
+    vnode.state.ollamaHostSave = null;
+    vnode.state.ollamaHostSaving = false;
+    vnode.state.ollamaHostSaveGeneration = 0;
+    vnode.state.providerStatusGeneration = 0;
+    vnode.state.observedConfigRevision = vnode.attrs.state?.providers?.configRevision ?? 0;
     ProvidersSection.loadProviderStatus(vnode);
+  },
+
+  /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode */
+  onupdate(vnode) {
+    const revision = vnode.attrs.state?.providers?.configRevision ?? 0;
+    if (revision !== vnode.state.observedConfigRevision) {
+      vnode.state.observedConfigRevision = revision;
+      ProvidersSection.loadProviderStatus(vnode);
+    }
   },
 
   // Fetch per-provider key status (which providers have a key stored).
   // Called on mount and after any key save so the badges stay accurate.
-  /** @param {{ state: any, attrs: { send: Send } }} vnode */
-  loadProviderStatus(vnode) {
-    vnode.attrs.send({ type: 'provider/status' }).then((/** @type {any} */ r) => {
-      if (r?.ok) {
-        vnode.state.providerStatus = r.providers;
-        m.redraw();
-        // Auto-probe keyless providers that expose a live daemon (Ollama): the
-        // badge should reflect REAL reachability, not a default-green. Quiet
-        // (no card message) so an unused provider doesn't shout a red error on
-        // mount — clicking Test still gives the full message.
-        for (const p of r.providers) {
-          if (p.keyless && p.liveModels) ProvidersSection.probeConnection(vnode, p.name);
-        }
+  /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode */
+  async loadProviderStatus(vnode) {
+    const generation = vnode.state.providerStatusGeneration + 1;
+    vnode.state.providerStatusGeneration = generation;
+    try {
+      const r = await vnode.attrs.send({ type: 'provider/status' });
+      if (vnode.state.providerStatusGeneration !== generation || !r?.ok) return;
+      vnode.state.providerStatus = r.providers;
+      m.redraw();
+      // Auto-probe keyless providers that expose a live daemon (Ollama): the
+      // badge should reflect REAL reachability, not a default-green. Quiet
+      // (no card message) so an unused provider doesn't shout a red error on
+      // mount; clicking Test still gives the full message.
+      for (const p of r.providers) {
+        if (p.keyless && p.liveModels) ProvidersSection.probeConnection(vnode, p.name);
       }
-    }).catch(() => {});
+    } catch { /* a later revision/focus retries */ }
   },
 
   // Quietly ping a keyless daemon (provider/test) and record reachability for
@@ -120,12 +138,22 @@ export const ProvidersSection = {
   // surfaces the full message; this path only moves the badge.
   /** @param {{ state: any, attrs: { send: Send } }} vnode @param {string} name */
   probeConnection(vnode, name) {
+    const generation = (vnode.state.probeGeneration[name] ?? 0) + 1;
+    vnode.state.probeGeneration[name] = generation;
     vnode.state.connStatus[name] = 'checking';
     m.redraw();
     vnode.attrs.send({ type: 'provider/test', provider: name }).then((/** @type {any} */ r) => {
-      vnode.state.connStatus[name] = r?.ok ? 'connected' : 'down';
+      if (vnode.state.probeGeneration[name] !== generation) return;
+      vnode.state.connStatus[name] = r?.ok ? 'connected'
+        : r?.reachable && r?.error === 'no-models' ? 'no-models'
+          : 'down';
+      vnode.state.modelOptionsKey = '';
       m.redraw();
-    }).catch(() => { vnode.state.connStatus[name] = 'down'; m.redraw(); });
+    }).catch(() => {
+      if (vnode.state.probeGeneration[name] !== generation) return;
+      vnode.state.connStatus[name] = 'down';
+      m.redraw();
+    });
   },
 
   // Fetch the Model-dropdown options from the SAME source the chat picker uses
@@ -137,7 +165,9 @@ export const ProvidersSection = {
    * @param {Send} send
    */
   loadModelOptions(state, send) {
+    const generation = ++state.modelOptionsGeneration;
     send({ type: 'models/options' }).then((/** @type {any} */ r) => {
+      if (generation !== state.modelOptionsGeneration) return;
       if (r?.ok) { state.modelOptions = r.options ?? []; m.redraw(); }
     }).catch(() => {});
   },
@@ -172,8 +202,7 @@ export const ProvidersSection = {
         ui.keyEditing[name] = false;   // collapse the editor back to the badge
         ui.keyMsg[name] = { ok: true, text: 'Saved — encrypted in the vault.' };
         // Refresh the badges so this provider flips to "Key saved".
-        const sr = await send({ type: 'provider/status' });
-        if (sr?.ok) ui.providerStatus = sr.providers;
+        await ProvidersSection.loadProviderStatus({ attrs: { state, send }, state: ui });
         // Auto-verify so the user never has to click Test (the ask). For
         // OpenRouter the model panel below loads the live catalog — that load
         // IS the verification (and populates the curation list). Bump its
@@ -200,13 +229,23 @@ export const ProvidersSection = {
     // the installed-model count.
     /** @param {string} name */
     const testKey = async (name) => {
+      // A blur/change event can race the immediately following Test click.
+      // Never let the test route observe the old persisted host.
+      while (name === 'ollama' && ui.ollamaHostSave) {
+        await ui.ollamaHostSave.catch(() => {});
+      }
       if (ui.keyBusy[name]) return;
+      const generation = (ui.probeGeneration[name] ?? 0) + 1;
+      ui.probeGeneration[name] = generation;
       ui.keyBusy[name] = true; ui.keyMsg[name] = null; m.redraw();
       const reply = await send({ type: 'provider/test', provider: name });
       ui.keyBusy[name] = false;
+      if (ui.probeGeneration[name] !== generation) { m.redraw(); return; }
       // Keep the badge in sync with an explicit Test (keyless daemons only — the
       // badge for keyed providers tracks hasKey, not live reachability).
-      ui.connStatus[name] = reply?.ok ? 'connected' : 'down';
+      ui.connStatus[name] = reply?.ok ? 'connected'
+        : reply?.reachable && reply?.error === 'no-models' ? 'no-models'
+          : 'down';
       ui.keyMsg[name] = reply?.ok
         ? {
             ok: true,
@@ -219,8 +258,12 @@ export const ProvidersSection = {
             text: reply?.error === 'invalid-key' ? 'Provider rejected the key (401). Double-check it.'
               : reply?.error === 'no-key' ? 'No key saved for this provider yet.'
               : reply?.error === 'locked' ? 'Vault is locked — unlock in the peerd panel first.'
+              : reply?.error === 'no-models' ? 'Ollama is running, but it has no models installed. Run “ollama pull qwen3:8b”, then test again.'
+              : name === 'ollama' && reply?.error === 'unreachable'
+                ? 'Couldn’t reach Ollama. Start it with “ollama serve”, then test again.'
               : `Couldn’t reach the provider: ${reply?.error ?? 'unknown error'}.`,
           };
+      if (name === 'ollama' && (reply?.ok || reply?.reachable)) ui.modelOptionsKey = '';
       m.redraw();
     };
 
@@ -232,7 +275,7 @@ export const ProvidersSection = {
       { name: 'openrouter', label: 'OpenRouter', hasKey: provider.current === 'openrouter' && provider.hasKey },
       { name: 'openai',     label: 'OpenAI', hasKey: provider.current === 'openai' && provider.hasKey },
       { name: 'glm',        label: 'Z.ai',       hasKey: provider.current === 'glm'        && provider.hasKey },
-      { name: 'ollama',     label: 'Ollama (local)', hasKey: true, keyless: true },
+      { name: 'ollama',     label: 'Ollama', hasKey: true, keyless: true },
     ];
     /** @param {string} name */
     const keyPlaceholder = (name) => KEY_PREFIX[name]
@@ -267,10 +310,14 @@ export const ProvidersSection = {
         ? settingsProviderName
         : (firstUsable?.name ?? (ui.modelOptions ?? [])[0]?.provider ?? provider.current);
     const defaultProvRow = providerRows.find((p) => p.name === effectiveProvider);
-    const runnerPlaceholder = defaultProvRow?.defaultRunnerModel ?? provider.defaultRunnerModel ?? 'claude-haiku-4-5';
+    const providerRunnerDefault = defaultProvRow?.defaultRunnerModel ?? provider.defaultRunnerModel ?? 'claude-haiku-4-5';
+    const localRunnerCapable = state.capabilities?.localWebGpuHost?.status === 'available';
     // Keep the Model selector populated from the chat-picker source; re-fetch
     // when the active provider, the curated OpenRouter set, or key-state changes.
-    const moKey = `${effectiveProvider}|${defaultProvRow?.hasKey ? 1 : 0}|${(state.settings?.openrouterModels ?? []).join(',')}`;
+    const providerStatusKey = providerRows
+      .map((p) => `${p.name}:${p.hasKey ? 1 : 0}:${ui.connStatus[p.name] ?? ''}`)
+      .join(',');
+    const moKey = `${effectiveProvider}|${providerStatusKey}|${state.settings?.ollamaHost ?? ''}|${(state.settings?.openrouterModels ?? []).join(',')}`;
     if (moKey !== ui.modelOptionsKey) {
       ui.modelOptionsKey = moKey;
       ProvidersSection.loadModelOptions(ui, send);
@@ -285,7 +332,7 @@ export const ProvidersSection = {
     /** @param {ProviderRow} p */
     const renderProviderCard = (p) => {
       const editing = !!ui.keyEditing[p.name];
-      const busy = !!ui.keyBusy[p.name];
+      const busy = !!ui.keyBusy[p.name] || (p.name === 'ollama' && ui.ollamaHostSaving);
       const msg = ui.keyMsg[p.name];
       const draft = ui.keyInput[p.name] ?? '';
       const showForm = !p.keyless && (editing || !p.hasKey);
@@ -299,9 +346,13 @@ export const ProvidersSection = {
               // not given for free. Neutral until we've confirmed it answers.
               ? (ui.connStatus[p.name] === 'connected'
                   ? m('span.key-badge.key-set', '✓ Connected')
+                  : ui.connStatus[p.name] === 'no-models'
+                    ? m('span.key-badge.key-local', 'Connected, no models')
                   : ui.connStatus[p.name] === 'checking'
                     ? m('span.key-badge.key-local', 'Checking…')
-                    : m('span.key-badge.key-local', 'Local — no key needed'))
+                    : ui.connStatus[p.name] === 'down'
+                      ? m('span.key-badge.key-local', 'Not reachable')
+                    : m('span.key-badge.key-local', 'No key needed'))
               : p.hasKey
                 ? m('span.key-badge.key-set', p.keyPreview ? `✓ ${p.keyPreview}` : '✓ Key saved')
                 : m('span.key-badge.key-unset', 'No key set'),
@@ -354,6 +405,52 @@ export const ProvidersSection = {
         // Card-level message (Save OR Test) — shows whether the form is open or
         // collapsed (Test runs while the card is collapsed).
         msg ? m(`p.key-msg${msg.ok ? '.ok' : '.err'}`, msg.text) : null,
+        p.name === 'ollama' ? [
+          m('.input-row', [
+            m('label', { for: 'ollama-host' }, 'Ollama host'),
+            m('input', {
+              id: 'ollama-host',
+              type: 'text',
+              spellcheck: false,
+              disabled: ui.ollamaHostSaving,
+              placeholder: 'http://localhost:11434',
+              value: state.settings?.ollamaHost ?? '',
+              onchange: async (/** @type {{ target: HTMLInputElement }} */ e) => {
+                const value = e.target.value.trim();
+                const generation = ++ui.ollamaHostSaveGeneration;
+                ui.ollamaHostSaving = true;
+                m.redraw();
+                const save = (async () => {
+                  const reply = value
+                    ? await send({ type: 'settings/update', patch: { ollamaHost: value } })
+                    : await send({ type: 'settings/reset', keys: ['ollamaHost'] });
+                  if (generation !== ui.ollamaHostSaveGeneration) return;
+                  if (!reply?.ok) {
+                    ui.keyMsg.ollama = { ok: false, text: 'Enter a full http:// or https:// Ollama URL.' };
+                    return;
+                  }
+                  ui.keyMsg.ollama = null;
+                  ui.modelOptionsKey = '';
+                  ProvidersSection.probeConnection({ state: ui, attrs: { send } }, 'ollama');
+                })();
+                ui.ollamaHostSave = save;
+                try { await save; }
+                finally {
+                  if (generation === ui.ollamaHostSaveGeneration) {
+                    ui.ollamaHostSaving = false;
+                    ui.ollamaHostSave = null;
+                  }
+                  m.redraw();
+                }
+              },
+            }),
+          ]),
+          m('p.hint', [
+            'Leave blank for ', m('code', 'http://localhost:11434'),
+            ', or enter the address of a remote daemon. Over plain HTTP only ',
+            m('code', '11434'), ' is reachable; an HTTPS-fronted host works on any port.',
+          ]),
+        ] : null,
       ]);
     };
 
@@ -362,15 +459,21 @@ export const ProvidersSection = {
         + 'independently and encrypted in the vault. OpenRouter is an '
         + 'OpenAI-compatible gateway to many vendors’ models. Z.ai serves '
         + 'its GLM models (GLM-5.2, …) from a direct OpenAI-compatible '
-        + 'endpoint. Ollama runs models on THIS machine — keyless, $0, '
-        + 'fully local.'),
+        + 'endpoint. Ollama runs models on a daemon you control: keyless '
+        + 'with no per-token API cost. Using localhost keeps inference on this machine.'),
       // The on-device WebGPU model is a full provider now — its card hosts the
       // hardware-test → download → ready flow inline (the old split-out
       // "On-device models" section is folded in here), with a status-driven
       // badge instead of a meaningless key form.
       m('.provider-cards', providerRows.map((p) =>
         p.name === 'local-webgpu'
-          ? m(LocalModelsSection, { state, send, logo: providerLogo('local-webgpu'), label: p.label })
+          ? m(LocalModelsSection, {
+              state,
+              send,
+              logo: providerLogo('local-webgpu'),
+              label: p.label,
+              onReady: () => { ui.modelOptionsKey = ''; m.redraw(); },
+            })
           : renderProviderCard(p))),
 
       // OpenRouter model curation — only once a key is saved (the gateway has
@@ -438,27 +541,6 @@ export const ProvidersSection = {
         effectiveProvider === 'ollama'
           ? [
               m('.settings-divider'),
-              // Remote Ollama host (issue #104). Empty/default = local loopback.
-              m('.input-row', [
-                m('label', { for: 'ollama-host' }, 'Ollama host'),
-                m('input', {
-                  id: 'ollama-host',
-                  type: 'text',
-                  spellcheck: false,
-                  placeholder: 'http://localhost:11434',
-                  value: state.settings?.ollamaHost ?? '',
-                  onchange: async (/** @type {{ target: HTMLInputElement }} */ e) => {
-                    await send({ type: 'settings/update', patch: { ollamaHost: e.target.value } });
-                    m.redraw();
-                  },
-                }),
-              ]),
-              m('p.hint', [
-                'The Ollama daemon URL — default ', m('code', 'http://localhost:11434'),
-                '. For a daemon on another machine, enter its address (e.g. ',
-                m('code', 'http://192.168.1.4:11434'), '). Over plain HTTP only the standard ',
-                m('code', '11434'), ' port is reachable; an HTTPS-fronted host works on any port.',
-              ]),
               m(OllamaRecommendation, { send }),
             ]
           : null,
@@ -469,10 +551,9 @@ export const ProvidersSection = {
             'aria-describedby': actorUnavailable ? 'runner-model-hint runner-model-status' : 'runner-model-hint',
             type: 'text',
             spellcheck: false,
-            // why: blank no longer means "inherit chat model" — it means this
-            // provider's fast web-actor default (Haiku on Anthropic / OpenRouter).
-            // Show that id as the placeholder so the field is honest about what runs.
-            placeholder: runnerPlaceholder,
+            // Blank is an automatic policy, not a fixed provider model: an
+            // installed Local WebGPU runner wins, then the provider fast model.
+            placeholder: 'Automatic',
             value: state.settings?.runnerModel ?? '',
             onchange: async (/** @type {{ target: HTMLInputElement }} */ e) => {
               await send({ type: 'settings/update', patch: { runnerModel: e.target.value } });
@@ -482,10 +563,13 @@ export const ProvidersSection = {
         ]),
         m('p.hint', { id: 'runner-model-hint' }, [
           'The web actor — peerd’s page reader and operator — runs on a fast, cheap ',
-          'model by default: ',
-          m('code', runnerPlaceholder),
+          'model. Leave blank for Automatic: ',
+          ...(localRunnerCapable
+            ? ['use Local WebGPU when its model is installed; otherwise use ']
+            : ['use ']),
+          m('code', providerRunnerDefault),
           ' on ', m('strong', defaultProvRow?.label ?? 'this provider'),
-          '. Leave blank for that default, or pin any same-provider model id.',
+          '. Enter a model id to pin the web actor to this provider instead.',
         ]),
         actorUnavailable
           ? m('p.hint', { id: 'runner-model-status' }, actorExecution.status === 'temporarily_unavailable'

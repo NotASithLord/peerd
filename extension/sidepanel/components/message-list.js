@@ -27,36 +27,14 @@ import { renderMarkdown } from '/shared/markdown.js';
 import { stripUntrustedFences } from '/shared/util.js';
 import { CHANNEL } from '/shared/channel-config.js';
 import {
-  ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE, ACTOR_ISOLATION_TEMPORARY_USER_FAILURE,
-  ACTOR_ISOLATION_UNSUPPORTED_USER_FAILURE, classifyFailure,
-  contributorFeedbackTargets, formatBytes,
+  classifyFailure, contributorFeedbackTargets, formatBytes,
 } from '/peerd-runtime/index.js';
 
-/** @param {string} text @returns {string|null} */
-const actorUserFailure = (text) => {
-  if (/actor_identity_provider_transit_only/i.test(text)) {
-    return 'No actor work was started. This is a sign-in service, which peerd can visit only while signing in to another site. '
-      + 'Ask peerd to work through the site you want to sign in to.';
-  }
-  if (/actor_sensitive_tab_requires_site/i.test(text)) {
-    return 'No actor work was started. This tab is on a site peerd treats as signed in. '
-      + 'To continue, ask peerd to work on that site directly.';
-  }
-  if (/actor_tab_sensitivity_unavailable/i.test(text)) {
-    return 'No actor work was started because peerd could not verify this tab. '
-      + 'Reload peerd, then try again.';
-  }
-  if (/actor-provider-boundary-blocked|model request was not run/i.test(text)) {
-    return ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE;
-  }
-  if (/actor_isolation_temporarily_unavailable|isolated worker is temporarily unavailable/i.test(text)) {
-    return ACTOR_ISOLATION_TEMPORARY_USER_FAILURE;
-  }
-  if (/actor_isolation_unavailable|cannot provide the required isolated worker/i.test(text)) {
-    return ACTOR_ISOLATION_UNSUPPORTED_USER_FAILURE;
-  }
-  return null;
-};
+// `performed:false` is host custody metadata. Error bodies are not: provider,
+// actor, and page text can all flow into them. Keep the human recovery generic
+// unless a future host-only typed reason is carried alongside the custody bit.
+const ACTOR_NOT_RUN_USER_FAILURE =
+  'No actor work was started. Review the request before trying again.';
 
 /** @param {string} _text @returns {string} */
 const actorOutcomeUnknownFailure = (_text) =>
@@ -78,6 +56,13 @@ const actorOutcomeUnknownFailure = (_text) =>
  * @property {string} [tool_use_id]
  * @property {boolean} [is_error]
  * @property {string} [content]
+ * @property {boolean} [actorTerminal]
+ * @property {boolean} [actorOutcomeKnown]
+ * @property {boolean} [actorPerformed]
+ * @property {boolean} [actorAborted]
+ * @property {string} [actorCorrelationId]
+ * @property {string} [actorDeliveryId]
+ * @property {string[]} [actorDeliveryIds]
  * @property {{ primitive?: string, durationMs?: number, dispatch?: string, gates: Array<{ name: string, reason: string, allowed: boolean }>, browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }> }|null} [meta]
  */
 
@@ -258,7 +243,7 @@ const freshTabAnnouncements = (state, tabEvents) => {
     state.seenTabEventStates.set(event.key, isProtected);
     announcements.push(!isProtected
       ? 'peerd left a blank tab because browser control was not confirmed. Close it before continuing. Use Go to focus it.'
-      : 'peerd opened a protected tab. Local network and sensitive sites remain blocked until you close it. Use Go to focus it.');
+      : 'peerd opened a task tab with additional browser safeguards. Use Go to focus it.');
   }
   return announcements;
 };
@@ -391,17 +376,17 @@ const AgentTabNotice = {
       m('span.agent-tab-notice-icon', { 'aria-hidden': 'true' }, '▦'),
       m('span.agent-tab-notice-copy', [
         m('span.agent-tab-notice-text', [
-          protectedTab ? 'peerd opened a protected tab · ' : 'peerd left a blank tab · ',
+          protectedTab ? 'peerd opened a task tab · ' : 'peerd left a blank tab · ',
           m('span.agent-tab-notice-label', label),
         ]),
         m('span.agent-tab-notice-detail', protectedTab
-          ? 'Local network and sensitive sites are blocked until you close it.'
+          ? 'This task tab uses additional browser safeguards.'
           : 'Browser control was not confirmed. Close this tab before continuing.'),
       ]),
       m('button.agent-tab-notice-go', {
         type: 'button',
         title: 'Go to this tab',
-        'aria-label': `Go to ${protectedTab ? 'protected' : 'blank'} tab: ${label}`,
+        'aria-label': `Go to ${protectedTab ? 'task' : 'blank'} tab: ${label}`,
         onclick: () => uiActions?.openAgentTab?.(ev.tabId, ev.windowId),
       }, 'Go ↗'),
     ]);
@@ -438,23 +423,25 @@ const ConfirmSettledNotice = {
 const groupMessages = (messages) => {
   /** @type {Array<{ type: 'user', message: ChatMessage } | { type: 'actor-reply', message: ChatMessage } | { type: 'assistant', message: ChatMessage, toolResults: PairedTool[] }>} */
   const out = [];
-  /** @type {Map<string, ToolResult>} */
-  const resultsByToolUseId = new Map();
-  // First pass: collect tool results into a flat map.
-  // why `msg` not `m`: `m` is the Mithril alias imported at module top;
-  // reusing it as a loop var shadows it (matches the `msg` loop below).
-  for (const msg of messages) {
-    if (msg.role === 'user' && Array.isArray(msg.toolResults)) {
-      for (const tr of /** @type {ToolResult[]} */ (msg.toolResults)) {
-        if (tr?.tool_use_id) resultsByToolUseId.set(tr.tool_use_id, tr);
-      }
-    }
-  }
+  /** @type {Map<string, PairedTool[]>} */
+  const unmatchedByToolUseId = new Map();
   for (const msg of messages) {
     if (msg.role === 'user') {
+      // Pair each result with the closest preceding unmatched occurrence. Tool
+      // ids are provider-authored and can repeat on later model calls, so a
+      // transcript-global id map would attach the newest result to old calls.
+      if (Array.isArray(msg.toolResults)) {
+        for (const tr of /** @type {ToolResult[]} */ (msg.toolResults)) {
+          if (!tr?.tool_use_id) continue;
+          const unmatched = unmatchedByToolUseId.get(tr.tool_use_id);
+          const pair = unmatched?.pop();
+          if (pair) pair.toolResult = tr;
+          if (unmatched?.length === 0) unmatchedByToolUseId.delete(tr.tool_use_id);
+        }
+      }
       const isToolResultOnly = (!msg.content || msg.content === '')
         && Array.isArray(msg.toolResults) && msg.toolResults.length > 0;
-      if (isToolResultOnly) continue; // pair with prior assistant via map
+      if (isToolResultOnly) continue;
       // An actor's reply-wake is synthetic (machine-delivered) but it IS the
       // news the user is waiting on — surface it as its own attributed bubble
       // at its place in the transcript instead of burying it in the tool card.
@@ -466,10 +453,13 @@ const groupMessages = (messages) => {
       out.push({ type: 'user', message: msg });
     } else if (msg.role === 'assistant') {
       const toolUses = Array.isArray(msg.toolUses) ? /** @type {ToolUse[]} */ (msg.toolUses) : [];
-      const paired = toolUses.map((tu) => ({
-        toolUse: tu,
-        toolResult: resultsByToolUseId.get(tu.id) ?? null,
-      }));
+      const paired = /** @type {PairedTool[]} */ (toolUses.map(
+        (tu) => ({ toolUse: tu, toolResult: null })));
+      for (const pair of paired) {
+        const unmatched = unmatchedByToolUseId.get(pair.toolUse.id) ?? [];
+        unmatched.push(pair);
+        unmatchedByToolUseId.set(pair.toolUse.id, unmatched);
+      }
       out.push({ type: 'assistant', message: msg, toolResults: paired });
     }
   }
@@ -563,9 +553,14 @@ const ActorReplyMessage = {
     // Drop replyText()'s one-line lead ("The <kind> actor … has replied:") —
     // the role label above the bubble already says who this is.
     const body = content.includes('\n\n') ? content.slice(content.indexOf('\n\n') + 2) : content;
-    const userFailure = reply.failed === true ? actorUserFailure(body) : null;
-    const outcomeUnknown = reply.outcomeKnown === false;
-    const notRun = !outcomeUnknown && (reply.performed === false || userFailure !== null);
+    // A Stop with an explicitly unknown outcome is not a clean cancellation;
+    // verification guidance must win over the friendlier cancelled label.
+    const aborted = reply.aborted === true && reply.outcomeKnown !== false;
+    const failed = reply.failed === true && !aborted;
+    const userFailure = failed && reply.performed === false
+      ? ACTOR_NOT_RUN_USER_FAILURE : null;
+    const outcomeUnknown = !aborted && reply.outcomeKnown === false;
+    const notRun = !outcomeUnknown && reply.performed === false;
     const displayBody = outcomeUnknown
       ? actorOutcomeUnknownFailure(body)
       : (userFailure ?? body);
@@ -573,11 +568,12 @@ const ActorReplyMessage = {
     // earlier script run — it can land minutes later, so name its origin or the
     // bubble is unexplainable to a user who never saw the fan-out happen.
     const via = /** @type {{ via?: string }} */ (reply).via;
-    return m(`.message.message-actor-reply${reply.failed ? '.failed' : ''}`, [
+    return m(`.message.message-actor-reply${aborted ? '.cancelled' : failed ? '.failed' : ''}`, [
       m('.role', [
         label,
         via === 'script' ? ' · delegated by an earlier script' : '',
-        reply.failed ? ` · ${outcomeUnknown ? 'Outcome unknown' : notRun ? 'Not run' : 'failed'}` : '',
+        aborted ? ' · cancelled'
+          : failed ? ` · ${outcomeUnknown ? 'Outcome unknown' : notRun ? 'Not run' : 'failed'}` : '',
       ]),
       m('.bubble', renderText(stripUntrustedFences(displayBody))),
       ]);
@@ -1048,35 +1044,54 @@ const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, 
  *   loadActor?: (sessionId: string) => void, peerName?: string, depth: number, ui: ToolCallState }} a
  */
 const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, loadActor, peerName, depth, ui }) => {
-  const card = actors?.[toolUse.id] ?? null;
+  // A host-proven pre-effect terminal result never emitted actor-start. If an
+  // id-keyed live card exists, it belongs to an older provider occurrence and
+  // must not override this call's durable Not run result.
+  const preEffectTerminal = toolResult?.actorTerminal === true
+    && toolResult?.actorPerformed === false;
+  const keyedCard = actors?.[toolUse.id] ?? null;
+  const resultCorrelationIds = toolResult ? [
+    toolResult.actorCorrelationId,
+    toolResult.actorDeliveryId,
+    ...(Array.isArray(toolResult.actorDeliveryIds) ? toolResult.actorDeliveryIds : []),
+  ].filter((id) => typeof id === 'string') : [];
+  // Actor cards remain id-keyed for compact state, but provider tool-use ids can
+  // repeat across turns. Once a durable result exists, borrow the live card only
+  // when host correlation proves it belongs to this exact occurrence.
+  const cardMatchesResult = !toolResult || (
+    typeof keyedCard?.actorCorrelationId === 'string'
+    && resultCorrelationIds.includes(keyedCard.actorCorrelationId)
+  );
+  const card = preEffectTerminal || !cardMatchesResult ? null : keyedCard;
   const task = String(toolUse.input?.message ?? '');
   const who = card?.name ?? card?.instanceId ?? toolUse.input?.to ?? '';
   // DESIGN-18: an API actor is a web actor whose instance is an ORIGIN — label it
   // "<origin> integration" to match deliver()/ack + the prompt lore (not "web actor",
   // which wrongly implies a tab/DOM agent for a tabless fetch-only thing).
   const isApiIntegration = card?.kind === 'web' && /^https?:\/\//.test(String(who));
-  // The actor's own live state drives the status (the tool result is the async
-  // "delivered" ack, not the actor outcome). No card yet → fall back to the ack.
-  const status = card?.error ? 'failed'
-    : card?.aborted ? 'cancelled'
-    : card?.streaming ? 'pending'
-    : card ? 'ok'
-    : (toolResult ? (toolResult.is_error ? 'failed' : 'ok') : (interrupted ? 'cancelled' : 'pending'));
   const resultText = toolResult ? formatResultContent(toolResult) : '';
   const failureText = `${card?.error ?? ''} ${resultText}`;
   const outcomeUnknown = card?.outcomeKnown === false
-    || /outcome is unknown|outcome unknown/i.test(failureText);
-  const userFailure = actorUserFailure(failureText);
+    || (!card && toolResult?.actorOutcomeKnown === false);
+  // The actor's own live state drives the status (the tool result is the async
+  // "delivered" ack, not the actor outcome). No card yet → fall back to the ack.
+  const status = outcomeUnknown ? 'failed'
+    : card?.error ? 'failed'
+    : card?.aborted ? 'cancelled'
+    : card?.streaming ? 'pending'
+    : card ? 'ok'
+    : (toolResult ? (toolResult.actorAborted ? 'cancelled' : toolResult.is_error ? 'failed' : 'ok')
+      : (interrupted ? 'cancelled' : 'pending'));
+  const performed = card?.performed ?? (!card ? toolResult?.actorPerformed : undefined);
+  const userFailure = performed === false ? ACTOR_NOT_RUN_USER_FAILURE : null;
   const notRun = status === 'failed' && !outcomeUnknown
-    && (userFailure !== null
-      || /not run|no work was started|actor isolation|isolated worker.*(did not|unavailable)|actor_(?:sensitive_tab_requires_site|identity_provider_transit_only)/i.test(failureText));
-  const idpTransitRefusal = /actor_identity_provider_transit_only/i.test(failureText);
-  const cardLabel = idpTransitRefusal
-    ? 'sign-in service'
+    && performed === false;
+  const cardLabel = preEffectTerminal
+    ? 'actor'
     : isApiIntegration
       ? `${who} integration`
       : `${card?.kind ? `${card.kind} actor` : 'actor'}${who ? ` · ${who}` : ''}`;
-  const presentationStatus = idpTransitRefusal && notRun ? 'not-run' : status;
+  const presentationStatus = notRun ? 'not-run' : status;
   const handedOff = !card && toolUse.input?.await === true
     && /is still working; its reply will arrive as a fenced note on a later turn/i.test(resultText);
   const acceptedAsync = !card && !!toolResult && toolResult.is_error !== true
@@ -1114,7 +1129,9 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
           : (userFailure ?? String(card.error)))
         : null,
       !card?.error && toolResult?.is_error
-        ? m('p.error-line', userFailure ?? resultText)
+        ? m('p.error-line', outcomeUnknown
+          ? actorOutcomeUnknownFailure(resultText)
+          : (userFailure ?? resultText))
         : null,
       card?.error || toolResult?.is_error
         ? null
@@ -1241,6 +1258,7 @@ const formatResultContent = (toolResult) => {
 //                     actor— agent-loop orchestration (docs/ACTORS.md)
 //   engine  (amber)   webvm    — WebVM execution kind
 //                     notebook — Notebook execution kind
+//                     pod     : Pod execution kind
 //                     app      — App execution kind
 //   distributed       dweb     — the dweb / dwapp network (share/discover/
 //   (magenta)                    install/peers/block/discovery/guide)
@@ -1257,6 +1275,7 @@ const PRIMITIVE_MODULE = Object.freeze({
   actor: 'runtime',
   webvm:    'engine',
   notebook: 'engine',
+  pod:      'engine',
   app:      'engine',
   engine:   'engine',
   dweb:     'distributed',

@@ -27,6 +27,12 @@
  *   provider formatters
  * @property {string[]} [actorDeliveryIds]         internal mailbox correlations
  *   for a tool result that consumed multiple replies; ignored by providers
+ * @property {string} [actorCorrelationId]         host-only non-ack correlation;
+ *   ignored by providers
+ * @property {boolean} [actorTerminal]             host-stamped completion state
+ * @property {boolean} [actorOutcomeKnown]         host-stamped outcome certainty
+ * @property {boolean} [actorPerformed]            host-stamped execution state
+ * @property {boolean} [actorAborted]              host-stamped user cancellation state
  */
 
 /**
@@ -58,7 +64,7 @@
  *                                               trim drop-summary, loop/trim.js); consumers
  *                                               that must skip non-human content check it
  *                                               (e.g. memory/auto-memory.js)
- * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, actorDeliveryId?: string, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }} [actorReply]
+ * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, aborted?: boolean, actorDeliveryId?: string, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }} [actorReply]
  *                                               set on an actor's reply-wake (a synthetic turn
  *                                               the chat SHOWS, attributed to the actor —
  *                                               unlike the hidden plumbing synthetics)

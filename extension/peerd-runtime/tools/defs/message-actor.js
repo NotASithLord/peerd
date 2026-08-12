@@ -25,7 +25,7 @@ const ORCHESTRATOR_AWAIT_CAP_MS = 3 * 60_000;
  * The ctx slot message_actor reads (an SW-injected extra, not on the base
  * ToolContext contract).
  * @typedef {Object} MessageActorCtx
- * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitSignal?: any, degradeToAsync?: boolean, awaitCapMs?: number }) => Promise<{ ok: boolean, content?: string, error?: string, structured?: Record<string, unknown>, outcomeKind?: 'pre-effect-failure', actorDeliveryId?: string }>} [messageActor]
+ * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitSignal?: any, degradeToAsync?: boolean, awaitCapMs?: number }) => Promise<{ ok: boolean, content?: string, error?: string, structured?: Record<string, unknown>, outcomeKind?: 'pre-effect-failure', actorDeliveryId?: string, actorCorrelationId?: string, actorTerminal?: boolean, actorOutcomeKnown?: boolean, actorPerformed?: boolean, actorAborted?: boolean }>} [messageActor]
  * @property {{ sessionId?: string, kind?: string }} [session]
  * @property {boolean} [inbound]
  * @property {string} [toolUseId]
@@ -75,7 +75,7 @@ export const messageActorTool = {
     properties: {
       to: {
         type: 'string',
-        description: 'An address form from actor_list (see the description): "web", a tabId, a vm/notebook/app instance id, "site:<origin>", or an API origin. Minted on first message.',
+        description: 'An address form from actor_list (see the description): "web", a tabId, a vm/notebook/pod/app instance id, "site:<origin>", or an API origin. Minted on first message.',
       },
       message: {
         type: 'string',
@@ -83,7 +83,7 @@ export const messageActorTool = {
       },
       oneShot: {
         type: 'boolean',
-        description: 'Sandbox instances ONLY (a vm/notebook/app id; refused for web/API/tabId/dweb). true when ONE round settles it — a concrete command or read whose raw result IS the answer — so the actor hands that result straight back, skipping its summarize turn. Default false for open-ended or multi-step work.',
+        description: 'Sandbox instances ONLY (a vm/notebook/pod/app id; refused for web/API/tabId/dweb). true when ONE round settles it: a concrete command or read whose raw result IS the answer: so the actor hands that result straight back, skipping its summarize turn. Default false for open-ended or multi-step work.',
       },
       await: {
         type: 'boolean',
@@ -143,10 +143,25 @@ export const messageActorTool = {
     // Keep the internal delivery id until the caller's tool-result message is
     // durably appended. The session store acknowledges the mailbox only after
     // that commit, closing the crash window without exposing the id to the model.
+    const raw = /** @type {any} */ (res);
+    const actorHostState = {
+      ...(res.actorCorrelationId ? { actorCorrelationId: res.actorCorrelationId } : {}),
+      ...(typeof res.actorTerminal === 'boolean'
+        ? { actorTerminal: res.actorTerminal }
+        : res.ok ? {} : { actorTerminal: true }),
+      ...(typeof res.actorOutcomeKnown === 'boolean'
+        ? { actorOutcomeKnown: res.actorOutcomeKnown }
+        : res.ok ? {} : { actorOutcomeKnown: raw.outcomeKnown !== false }),
+      ...(typeof res.actorPerformed === 'boolean'
+        ? { actorPerformed: res.actorPerformed }
+        : typeof raw.performed === 'boolean' ? { actorPerformed: raw.performed } : {}),
+      ...(res.actorAborted === true ? { actorAborted: true } : {}),
+    };
     return res.ok
       ? {
         ok: true,
         content: res.content ?? 'message delivered',
+        ...actorHostState,
         ...(res.actorDeliveryId ? { actorDeliveryId: res.actorDeliveryId } : {}),
       }
       : {
@@ -154,7 +169,12 @@ export const messageActorTool = {
         error: res.error ?? 'message_actor failed',
         ...(res.content ? { content: res.content } : {}),
         ...(res.structured ? { structured: res.structured } : {}),
-        ...(res.outcomeKind ? { outcomeKind: res.outcomeKind } : {}),
+        ...(res.outcomeKind
+          ? { outcomeKind: res.outcomeKind }
+          : actorHostState.actorPerformed === false
+            ? { outcomeKind: /** @type {const} */ ('pre-effect-failure') }
+            : {}),
+        ...actorHostState,
         ...(res.actorDeliveryId ? { actorDeliveryId: res.actorDeliveryId } : {}),
       };
   },

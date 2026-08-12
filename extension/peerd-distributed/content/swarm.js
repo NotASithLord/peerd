@@ -103,13 +103,11 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
     }
     if (!manifest) throw new Error(`no reachable provider holds ${hash}`);
 
-    // 2. Verify the address commits to this manifest, then the signature.
+    // 2. Bound shape before canonicalization/signature work.
+    assertBundleWithinLimits(manifest);
     if (await manifestHash(manifest) !== hash) throw new Error('manifest hash mismatch — address does not match payload');
     const v = await verifyManifest(manifest);
     if (!v.ok) throw new Error(`manifest signature invalid: ${v.reason}`);
-    // 2b. Bound the (attacker-signed) manifest before buffering anything — a
-    // valid signature does not bound its declared size or chunk count.
-    assertBundleWithinLimits(manifest);
     onProgress?.({ phase: 'manifest', publisher: v.publisher, total: manifest.chunks.length, providers: clients.length });
 
     // 3. Stripe unique chunks across providers — α concurrent, per-chunk failover.

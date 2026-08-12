@@ -17,7 +17,7 @@ const baseDeps = (over: Record<string, any> = {}) => ({
     { name: 'anthropic', label: 'Anthropic', defaultModel: 'claude', vaultSecretName: 'anthropic.key' },
     { name: 'ollama', label: 'Ollama', defaultModel: 'llama', keyless: true, liveModels: true },
   ],
-  listProviderModels: async () => [{ model: 'a' }, { model: 'b' }],
+  liveProviderModels: async () => [{ model: 'a' }, { model: 'b' }],
   listOpenRouterModels: async () => [{ model: 'x' }],
   OPENROUTER_POPULAR: ['p'],
   callModel: async function* () { yield { type: 'delta', text: 'hi' }; },
@@ -26,18 +26,42 @@ const baseDeps = (over: Record<string, any> = {}) => ({
   secretNameForProvider: (n: string) => `${n}.key`,
   maskKey: (k: string) => `masked(${k.length})`,
   buildModelOptions: async () => ({ options: [{ value: 'anthropic::claude' }], selected: 'anthropic::claude', sessionProvider: null }),
+  ensureSettingsReady: async () => {},
+  hydrateLocalModelAvailability: async () => false,
   ProviderHttpError, ProviderKeyMissingError, VaultLockedError,
   ...over,
 });
 
 describe('provider/test', () => {
+  test('waits for cold settings hydration before probing the configured daemon', async () => {
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => { release = resolve; });
+    let host = 'http://localhost:11434';
+    let seen = '';
+    const r = makeProviderRoutes(baseDeps({
+      ensureSettingsReady: async () => { await ready; host = 'http://remote:11434'; },
+      liveProviderModels: async () => { seen = host; return [{ model: 'remote' }]; },
+    }));
+    const testing = r['provider/test']({ provider: 'ollama' });
+    await Promise.resolve();
+    expect(seen).toBe('');
+    release();
+    expect(await testing).toMatchObject({ ok: true, models: 1 });
+    expect(seen).toBe('http://remote:11434');
+  });
   test('keyless live provider: counts models from the daemon', async () => {
     const r = makeProviderRoutes(baseDeps());
-    expect(await r['provider/test']({ provider: 'ollama' })).toEqual({ ok: true, models: 2 });
+    expect(await r['provider/test']({ provider: 'ollama' })).toEqual({ ok: true, reachable: true, models: 2 });
   });
   test('keyless daemon unreachable → error message', async () => {
-    const r = makeProviderRoutes(baseDeps({ listProviderModels: async () => { throw new Error('ECONNREFUSED'); } }));
-    expect(await r['provider/test']({ provider: 'ollama' })).toEqual({ ok: false, error: 'ECONNREFUSED' });
+    const r = makeProviderRoutes(baseDeps({ liveProviderModels: async () => null }));
+    expect(await r['provider/test']({ provider: 'ollama' })).toEqual({ ok: false, error: 'unreachable' });
+  });
+  test('keyless daemon with no models is reachable but not ready', async () => {
+    const r = makeProviderRoutes(baseDeps({ liveProviderModels: async () => [] }));
+    expect(await r['provider/test']({ provider: 'ollama' })).toEqual({
+      ok: false, reachable: true, error: 'no-models', models: 0,
+    });
   });
   test('keyed provider: vault locked → locked', async () => {
     const r = makeProviderRoutes(baseDeps({ vault: { getSecret: async () => { throw new Error('locked'); } } }));
@@ -126,6 +150,18 @@ describe('provider/setKey', () => {
     }));
     expect(await r['provider/setKey']({ provider: 'openrouter', plaintext: 'sk-or-abcdefgh' })).toEqual({ ok: true });
     expect(updated).toEqual({ providerName: 'openrouter', providerModel: '' });
+  });
+  test('activate:false stores without auto-activating before onboarding verification', async () => {
+    let updated: any = null;
+    const r = makeProviderRoutes(baseDeps({
+      listProviders: twoCloud,
+      vault: { setSecret: async () => {}, getSecret: async () => null },
+      settingsStore: { get: () => ({ providerName: 'anthropic', providerModel: 'claude' }), update: async (p: any) => { updated = p; } },
+    }));
+    expect(await r['provider/setKey']({
+      provider: 'openrouter', plaintext: 'sk-or-abcdefgh', activate: false,
+    })).toEqual({ ok: true });
+    expect(updated).toBe(null);
   });
   test('does NOT override an already-usable active provider', async () => {
     let updated: any = null;

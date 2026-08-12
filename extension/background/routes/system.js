@@ -21,7 +21,7 @@ export const makeSystemRoutes = (deps) => {
     inspectImport, applyImport, settingsStore, saveUserHook,
     CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError, dwebTransfer,
     onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
-    retryActorIsolation,
+    retryActorIsolation, normalizeImportedSettings, onProviderConfigChanged,
   } = deps;
 
   return {
@@ -135,9 +135,20 @@ export const makeSystemRoutes = (deps) => {
           knownSettingKeys: Object.keys(DEFAULT_SETTINGS),
           io: {
             applySettings: async (/** @type {any} */ patch) => {
-              onSettingsChanging?.(patch);
-              await settingsStore.update(patch);
-              await onSettingsChanged?.(patch);
+              const normalized = normalizeImportedSettings?.(patch) ?? patch;
+              const notices = [];
+              const dropped = Object.keys(patch).filter((key) => !Object.hasOwn(normalized, key));
+              const canonicalized = Object.keys(normalized).filter((key) =>
+                Object.hasOwn(patch, key)
+                && JSON.stringify(normalized[key]) !== JSON.stringify(patch[key]));
+              if (dropped.length > 0) notices.push(`Invalid setting value(s) were skipped: ${dropped.join(', ')}.`);
+              if (canonicalized.length > 0) notices.push(`Setting value(s) were normalized before import: ${canonicalized.join(', ')}.`);
+              if (Object.keys(normalized).length > 0) {
+                onSettingsChanging?.(normalized);
+                await settingsStore.update(normalized);
+                await onSettingsChanged?.(normalized);
+              }
+              return { count: Object.keys(normalized).length, notices };
             },
             setProviderEndpoints: async (/** @type {any} */ v) => {
               await kv.set('provider_endpoints.v1', v);
@@ -161,9 +172,11 @@ export const makeSystemRoutes = (deps) => {
           approvedIncomingDwebDid,
         });
         if (result.ok) {
+          if ((result.imported?.secrets ?? 0) > 0) onProviderConfigChanged?.();
           auditLog.append({ type: 'settings_imported', counts: result.imported }).catch(() => {});
           pushState();
         } else if (result.partial) {
+          if ((result.partial?.secrets ?? 0) > 0) onProviderConfigChanged?.();
           auditLog.append({ type: 'settings_import_partial', counts: result.partial, details: { failure: result.failure ?? result.error } }).catch(() => {});
           pushState();
         }

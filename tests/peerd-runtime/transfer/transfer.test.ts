@@ -301,6 +301,17 @@ describe('R6 import gates', () => {
     expect(joined).toContain('DISABLED');
   });
 
+  test('the inspect summary calls out an imported Ollama egress destination', () => {
+    const res = inspectImport({
+      payload: makePayload({ settings: { ollamaHost: 'https://ollama.example.test/path' } }),
+      channel: 'preview',
+      knownSettingKeys: [...KNOWN_KEYS, 'ollamaHost'],
+    });
+    if (!res.ok || !res.summary) throw new Error('expected ok summary');
+    expect(res.summary.endpointUrls).toContain('https://ollama.example.test');
+    expect(res.summary.notices.join(' ')).toContain('ollama.example.test');
+  });
+
   test('a memory import states its consequence in the notices', async () => {
     const { io } = stubIo();
     const res = await applyImport({

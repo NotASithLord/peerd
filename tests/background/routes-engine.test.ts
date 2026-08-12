@@ -1,7 +1,10 @@
 import { describe, test, expect } from 'bun:test';
 import { makeEngineRoutes } from '../../extension/background/routes/engine.js';
+import { createAppQuiescence } from '../../extension/background/app-quiescence.js';
 import { listOffscreenContexts } from '../../extension/background/offscreen-contexts.js';
 import { requireDenylistPolicy } from '../../extension/background/denylist-store.js';
+import { parseAppManifest } from '../../extension/peerd-engine/app-manifest.js';
+import { podGitRemoteOperation } from '../../extension/peerd-engine/pod-shell.js';
 
 class ArtifactTooLargeError extends Error {}
 class EnvelopeFormatError extends Error {}
@@ -30,15 +33,27 @@ const baseDeps = (over: any = {}) => ({
   },
   vmRegistry: { get: async (id: string) => (id === 'v1' ? { id, name: 'VM' } : null), create: async () => ({ id: 'vNew' }) },
   jsRegistry: { get: async () => null, create: async () => ({ id: 'nNew' }) },
+  podRegistry: { get: async (id: string) => (id === 'pod-1' ? { id, name: 'Pod' } : null) },
+  podTabTracker: { getTabId: (id: string) => (id === 'pod-1' ? 99 : null) },
   appClient: {
     open: async () => {},
     create: async () => ({ id: 'imported' }),
+    readFile: async () => JSON.stringify({
+      schema: 1, kind: 'app', entry: 'index.html',
+      agent: { kind: 'bound-app' }, capabilities: [],
+    }),
+    listFiles: async () => [{ path: '/index.html' }, { path: '/peerd.json' }],
     snapshotFiles: async () => ({
       record: { id: 'a1', name: 'App', entryFile: 'index.html', fileKinds: { 'index.html': 'text' } },
       files: { 'index.html': new TextEncoder().encode('<h1>x</h1>') },
     }),
   },
-  appTabTracker: { reloadTab: async () => {} },
+  appTabTracker: {
+    reloadTab: async () => {}, getTabId: () => null,
+    quiesceTab: async () => true, resumeTab: async () => true,
+    closeTab: async () => {}, ensureTab: async () => {},
+  },
+  appQuiescence: { run: async (_appId: string, operation: () => Promise<any>) => operation() },
   opfsHelpers: () => ({ list: async () => [], read: async () => '', readBytes: async () => new Uint8Array(), write: async () => {} }),
   NOTEBOOK_OPFS_ROOT: 'peerd-notebooks',
   IMAGE_PIN_STORAGE_KEY: 'vm.imagePins',
@@ -60,7 +75,234 @@ const baseDeps = (over: any = {}) => ({
   // absent — that contract is pinned in tests/shared/fetch-extract.test.ts).
   applyWebExtract: async (resp: any) => resp,
   awaitDenylistPolicy: async () => {},
+  parseAppManifest,
+  podGitRemoteOperation,
+  repositories: {
+    init: async () => 'abc123456789',
+    status: async () => ({ oid: 'abc', branch: 'main', dirty: false, changed: [] }),
+    stage: async () => ({ staged: [] }),
+    commit: async () => ({ oid: 'abc', changed: [], created: false }),
+    history: async () => [],
+    branches: async () => ['main'],
+    branch: async (_ref: any, opts: any) => ({ branch: opts.name }),
+    checkout: async (_ref: any, opts: any) => ({ branch: opts.name, oid: 'abc' }),
+    clone: async (_ref: any, opts: any) => ({ remote: { url: opts.url } }),
+    fetch: async () => ({ remote: { url: 'https://github.com/a/b.git' } }),
+    push: async () => ({ ok: true, branch: 'main', remote: { url: 'https://github.com/a/b.git' } }),
+    setRemote: async (_ref: any, opts: any) => ({ url: opts.url }),
+    getRemote: async () => null,
+    statusApp: async () => ({ oid: 'abc', branch: 'main', dirty: false, changed: [] }),
+    getAppRemote: async () => null,
+    historyApp: async () => [],
+    diffApp: async () => ({ files: [], patch: '', truncated: false }),
+    commitApp: async () => ({ oid: 'abc', changed: [], created: false }),
+    restoreApp: async (_id: string, opts: any) => ({ oid: opts.to, restored: true }),
+    coordinate: async (_ref: any, operation: any) => operation(),
+    destroy: async () => {},
+  },
   ...over,
+});
+
+describe('pod/git: instance-pinned isomorphic-git shell bridge', () => {
+  const sender = { tab: { id: 99 } };
+
+  test('refuses a first-party page that is not the Pod\'s owning tab', async () => {
+    const routes = makeEngineRoutes(baseDeps());
+    expect(await routes['pod/git'](
+      { podId: 'pod-1', argv: ['status'] },
+      { tab: { id: 12 } },
+    )).toEqual({ ok: false, error: 'pod-sender-not-instance-pinned' });
+  });
+
+  test('maps local shell Git to the exact Pod repository', async () => {
+    let seen: any = null;
+    const deps = baseDeps();
+    deps.repositories.status = async (ref: any) => {
+      seen = ref;
+      return { branch: 'main', changed: [{ status: 'modified', path: 'a.txt' }] };
+    };
+    const reply = await makeEngineRoutes(deps)['pod/git'](
+      { podId: 'pod-1', argv: ['status'] }, sender,
+    );
+    expect(seen).toEqual({ kind: 'pod', id: 'pod-1' });
+    expect(reply).toMatchObject({ ok: true, result: { exitCode: 0 } });
+    expect(reply.result.stdout).toContain('modified a.txt');
+  });
+
+  test('remote operations fail closed without an exact one-job grant', async () => {
+    let pushed = false;
+    const deps = baseDeps();
+    deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
+    deps.repositories.push = async () => { pushed = true; return { ok: true }; };
+    const routes = makeEngineRoutes(deps);
+    const missing = await routes['pod/git'](
+      { podId: 'pod-1', argv: ['push', 'origin', 'main'] }, sender,
+    );
+    const mismatched = await routes['pod/git']({
+      podId: 'pod-1', argv: ['push', 'origin', 'main'],
+      remoteGrant: { op: 'fetch', url: 'https://github.com/a/b.git' },
+    }, sender);
+    const wrongTarget = await routes['pod/git']({
+      podId: 'pod-1', argv: ['push', 'origin', 'main'],
+      remoteGrant: { op: 'push', url: 'https://evil.example/x.git' },
+    }, sender);
+    for (const reply of [missing, mismatched, wrongTarget]) {
+      expect(reply.result.exitCode).toBe(126);
+      expect(reply.result.stderr).toContain('explicit authorization');
+    }
+    expect(pushed).toBe(false);
+  });
+
+  test('an exact grant reaches the brokered transport with a cancellation signal', async () => {
+    let pushedRef: any = null;
+    const deps = baseDeps();
+    deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
+    deps.repositories.push = async (ref: any, opts: any) => {
+      pushedRef = { ref, opts };
+      return { ok: true, branch: 'main', remote: { url: 'https://github.com/a/b.git' } };
+    };
+    const reply = await makeEngineRoutes(deps)['pod/git']({
+      podId: 'pod-1', jobId: 'job-authorized', argv: ['push', 'origin', 'main'],
+      remoteGrant: { op: 'push', url: 'https://github.com/a/b.git' },
+    }, sender);
+    expect(reply.result.exitCode).toBe(0);
+    expect(pushedRef.ref).toEqual({ kind: 'pod', id: 'pod-1' });
+    expect(pushedRef.opts.ref).toBe('main');
+    expect(pushedRef.opts.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test('validates the granted target and pushes under one repository coordinator', async () => {
+    let coordinated = false;
+    const order: string[] = [];
+    const deps = baseDeps();
+    deps.repositories.coordinate = async (ref: any, operation: any) => {
+      expect(ref).toEqual({ kind: 'pod', id: 'pod-1' });
+      coordinated = true;
+      order.push('lock');
+      try { return await operation(); }
+      finally { coordinated = false; order.push('unlock'); }
+    };
+    deps.repositories.getRemote = async () => {
+      expect(coordinated).toBe(true);
+      order.push('remote');
+      return { url: 'https://github.com/a/b.git' };
+    };
+    deps.repositories.push = async () => {
+      expect(coordinated).toBe(true);
+      order.push('push');
+      return { ok: true, branch: 'main', remote: { url: 'https://github.com/a/b.git' } };
+    };
+    const reply = await makeEngineRoutes(deps)['pod/git']({
+      podId: 'pod-1', jobId: 'job-coordinated', argv: ['push', 'origin', 'main'],
+      remoteGrant: { op: 'push', url: 'https://github.com/a/b.git' },
+    }, sender);
+    expect(reply.result.exitCode).toBe(0);
+    expect(order).toEqual(['lock', 'remote', 'push', 'unlock']);
+  });
+
+  test('job cancellation aborts an in-flight remote Git transport', async () => {
+    let seenSignal: AbortSignal | null = null;
+    const deps = baseDeps();
+    deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
+    deps.repositories.push = async (_ref: any, opts: any) => {
+      seenSignal = opts.signal;
+      await new Promise((_resolve, reject) => {
+        opts.signal.addEventListener('abort', () => reject(new Error('git operation aborted')), { once: true });
+      });
+    };
+    const routes = makeEngineRoutes(deps);
+    const running = routes['pod/git']({
+      podId: 'pod-1', jobId: 'job-cancel-me', argv: ['push', 'origin', 'main'],
+      remoteGrant: { op: 'push', url: 'https://github.com/a/b.git' },
+    }, sender);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const cancelled = await routes['pod/cancel-io'](
+      { podId: 'pod-1', jobId: 'job-cancel-me' }, sender,
+    );
+    expect(cancelled).toMatchObject({ ok: true, cancelled: 1 });
+    expect((seenSignal as AbortSignal | null)?.aborted).toBe(true);
+    expect((await running).result.stderr).toContain('aborted');
+  });
+});
+
+describe('App repository quiescence', () => {
+  for (const [routeName, message, repositoryMethod] of [
+    ['apps/repository/commit', { appId: 'a1', message: 'save' }, 'commitApp'],
+    ['apps/repository/push', { appId: 'a1' }, 'push'],
+    ['apps/repository/restore', { appId: 'a1', to: 'old' }, 'restoreApp'],
+    ['apps/repository/checkout', { appId: 'a1', name: 'feature' }, 'checkout'],
+  ] as const) {
+    test(`${routeName} flushes and closes the App before taking its repository lock`, async () => {
+      const order: string[] = [];
+      const tracker = {
+        getTabId: () => 41,
+        quiesceTab: async () => { order.push('flush'); return true; },
+        resumeTab: async () => { order.push('resume'); return true; },
+        closeTab: async () => { order.push('close'); return true; },
+        ensureTab: async () => { order.push('reopen'); return 41; },
+        reloadTab: async () => true,
+      };
+      const deps = baseDeps({
+        appTabTracker: tracker,
+        appQuiescence: createAppQuiescence({
+          tracker,
+          withLifecycle: async (_appId, operation) => {
+            order.push('lifecycle');
+            try { return await operation(); }
+            finally { order.push('lifecycle-release'); }
+          },
+          afterClose: async () => {},
+        }),
+      });
+      deps.repositories.coordinate = async (_ref: any, operation: () => Promise<any>) => {
+        order.push('lock');
+        try { return await operation(); }
+        finally { order.push('unlock'); }
+      };
+      deps.repositories.commitApp = async () => {
+        order.push(repositoryMethod === 'commitApp' ? 'operation' : 'checkpoint');
+        return { oid: 'new', changed: [], created: true };
+      };
+      deps.repositories.push = async () => {
+        order.push('operation');
+        return { ok: true, branch: 'main', remote: { host: 'github.com', url: 'https://github.com/a/b.git' } };
+      };
+      deps.repositories.restoreApp = async () => { order.push('operation'); return { oid: 'old', restored: true }; };
+      deps.repositories.checkout = async () => { order.push('operation'); return { oid: 'new', branch: 'feature' }; };
+      const result = await makeEngineRoutes(deps)[routeName](message);
+      expect(result.ok).toBe(true);
+      const operationOrder = repositoryMethod === 'push'
+        ? ['lifecycle', 'flush', 'close', 'lock', 'checkpoint', 'operation', 'unlock', 'reopen', 'lifecycle-release']
+        : ['lifecycle', 'flush', 'close', 'lock', 'operation', 'unlock', 'reopen', 'lifecycle-release'];
+      expect(order).toEqual(operationOrder);
+    });
+  }
+
+  test('a failed editor flush prevents close and repository mutation', async () => {
+    let closed = false;
+    let mutated = false;
+    const tracker = {
+      getTabId: () => 41,
+      quiesceTab: async () => { throw new Error('save failed'); },
+      resumeTab: async () => true,
+      closeTab: async () => { closed = true; return true; },
+      ensureTab: async () => 41,
+      reloadTab: async () => true,
+    };
+    const deps = baseDeps({
+      appTabTracker: tracker,
+      appQuiescence: createAppQuiescence({
+        tracker,
+        withLifecycle: async (_appId, operation) => operation(),
+        afterClose: async () => {},
+      }),
+    });
+    deps.repositories.commitApp = async () => { mutated = true; return {}; };
+    const result = await makeEngineRoutes(deps)['apps/repository/commit']({ appId: 'a1' });
+    expect(result).toEqual({ ok: false, error: 'save failed' });
+    expect(closed).toBe(false);
+    expect(mutated).toBe(false);
+  });
 });
 
 describe('lifecycle/assert-opfs-writable', () => {
@@ -369,6 +611,25 @@ describe('app/vm meta + apps Library', () => {
       fileKinds: {},
       dweb: null,
     });
+  });
+  test('app/get-meta revokes a stale registry bridge when peerd.json removes dweb', async () => {
+    const r = makeEngineRoutes(baseDeps({
+      appRegistry: {
+        get: async () => ({ id: 'a1', name: 'App', entryFile: 'index.html', dweb: { publisher: 'did:key:zOld' } }),
+        update: async (_id: string, patch: any) => ({ id: 'a1', name: 'App', dweb: { publisher: 'did:key:zOld' }, ...patch }),
+      },
+    }));
+    expect((await r['app/get-meta']({ appId: 'a1' })).dweb).toBeNull();
+  });
+  test('app/get-meta grants the bridge from peerd.json without mutating provenance', async () => {
+    const r = makeEngineRoutes(baseDeps({
+      DWEB_ENABLED: true,
+      appClient: {
+        readFile: async () => JSON.stringify({ schema: 1, kind: 'app', entry: 'index.html', agent: { kind: 'bound-app' }, capabilities: ['dweb'] }),
+        listFiles: async () => [{ path: '/index.html' }, { path: '/peerd.json' }],
+      },
+    }));
+    expect((await r['app/get-meta']({ appId: 'a1' })).dweb).toMatchObject({ local: true });
   });
   test('vm/get-meta requires a string id', async () => {
     const r = makeEngineRoutes(baseDeps());

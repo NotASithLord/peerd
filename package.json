@@ -32,6 +32,7 @@
     "test:firefox": "bun scripts/firefox/run-runtime-tests.mjs",
     "test:e2e:visual": "bun scripts/cdp/run-e2e-verify.mjs --visual",
     "test:e2e:visual:update": "UPDATE_BASELINES=1 bun scripts/cdp/run-e2e-verify.mjs --visual",
+    "test:firefox:pod": "bun scripts/firefox/run-pod-smoke.mjs",
     "gallery": "bun scripts/cdp/build-gallery.mjs",
     "e2e:chrome": "bun scripts/cdp/ensure-chrome-for-testing.mjs",
     "eval:bench": "bun scripts/cdp/run-eval-bench.mjs",
@@ -86,9 +87,12 @@
     "globals": "^17.6.0",
     "puppeteer-core": "^25.5.0",
     "typescript": "^6.0.3",
-    "web-ext": "10.3.0"
+    "web-ext": "10.6.0"
   },
   "overrides": {
     "js-yaml": "4.3.1"
+  },
+  "patchedDependencies": {
+    "image-size@2.0.2": "patches/image-size@2.0.2.patch"
   }
 }

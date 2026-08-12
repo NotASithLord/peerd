@@ -238,13 +238,15 @@ export const makeVaultRoutes = (deps) => {
     // The side panel posts the user's answer to a pending confirm prompt;
     // we resolve the waiting Promise so the dispatcher proceeds (or blocks).
     'confirm/answer': async ({
-      id, answer, surface, ownerSessionId, sessionId, dispatchId,
+      id, answer, ownerSessionId, sessionId, dispatchId,
     }, sender) => {
       // A confirmation is a HUMAN authority route. Exact page provenance keeps
       // engine tabs and other first-party extension contexts from answering,
       // while the active-root check prevents a stale/background chat card from
       // granting authority after the user switches away.
-      if (!isActualSidepanelSender?.(sender) && !isActualHomeSender?.(sender)) {
+      const fromSidepanel = isActualSidepanelSender?.(sender) === true;
+      const fromHome = isActualHomeSender?.(sender) === true;
+      if (!fromSidepanel && !fromHome) {
         return { ok: false, error: 'confirm-answer-unauthorized-sender' };
       }
       const activeOwnerSessionId = await sessionCache.sessionGet('currentSessionId');
@@ -253,11 +255,11 @@ export const makeVaultRoutes = (deps) => {
       }
       // resolve → settle → onSettled dismisses the prompt on the active
       // owner surface (DESIGN-12), so no explicit broadcast is needed here.
-      // `surface` rides the outcome so the surface that did NOT answer can
-      // say who decided (§4e).
+      // The verified sender provenance, not a caller-claimed string, rides the
+      // outcome so the other surface can say who decided (§4e).
       const resolved = confirmCoordinator.resolve({
         id, ownerSessionId, sessionId, dispatchId,
-      }, answer, typeof surface === 'string' ? surface : null);
+      }, answer, fromHome ? 'home' : 'sidepanel');
       if (!resolved) return { ok: false, error: 'confirm-answer-stale-or-foreign' };
       return { ok: true };
     },

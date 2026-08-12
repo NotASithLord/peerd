@@ -18,9 +18,9 @@ const ROWS = [
 ];
 
 /**
- * @param {{ testOk?: boolean, ollamaOk?: boolean }} [opts]
+ * @param {{ testOk?: boolean, ollamaOk?: boolean, settingsOk?: boolean }} [opts]
  */
-const makeHarness = ({ testOk = true, ollamaOk = false } = {}) => {
+const makeHarness = ({ testOk = true, ollamaOk = false, settingsOk = true } = {}) => {
   /** @type {Msg[]} */
   const sends = [];
   let doneCount = 0;
@@ -31,6 +31,9 @@ const makeHarness = ({ testOk = true, ollamaOk = false } = {}) => {
     if (msg.type === 'provider/test') {
       if (msg.provider === 'ollama') return { ok: ollamaOk, models: 2 };
       return testOk ? { ok: true } : { ok: false, error: 'invalid-key' };
+    }
+    if (msg.type === 'settings/update') {
+      return settingsOk ? { ok: true } : { ok: false, error: 'settings-unavailable' };
     }
     return { ok: true };
   };
@@ -103,6 +106,7 @@ describe('sidepanel.onboarding provider step (§5h)', () => {
       m.redraw.sync();
       const order = h.sends.filter((s) => s.type !== 'provider/status').map((s) => s.type);
       expect(order).toEqual(['provider/test', 'provider/setKey', 'provider/test', 'settings/update']);
+      expect(h.sends.find((s) => s.type === 'provider/setKey')?.activate).toBe(false);
       expect(h.sends.find((s) => s.type === 'settings/update')?.patch?.providerName).toBe('anthropic');
       // The plaintext left component state with the save.
       const input = /** @type {HTMLInputElement|null} */ (h.root.querySelector('#onb-key'));
@@ -140,5 +144,23 @@ describe('sidepanel.onboarding provider step (§5h)', () => {
       expect((down.root.textContent ?? '').includes('REACHED')).toBe(false);
       expect(down.root.textContent).toContain('NO KEY NEEDED');
     } finally { down.unmount(); }
+  });
+
+  it('a failed keyless switch stays on the provider step', async () => {
+    const h = makeHarness({ settingsOk: false });
+    try {
+      await tick(); await tick();
+      m.redraw.sync();
+      const ollama = [...h.root.querySelectorAll('.onb-provider-row')]
+        .find((row) => row.textContent?.includes('Ollama'));
+      if (!(ollama instanceof HTMLElement)) throw new Error('missing Ollama row');
+      ollama.click();
+      m.redraw.sync();
+      need(h.root, '.onboarding-actions button').click();
+      await tick(); await tick();
+      m.redraw.sync();
+      expect(h.doneCount()).toBe(0);
+      expect(need(h.root, '.key-msg').textContent).toContain('settings-unavailable');
+    } finally { h.unmount(); }
   });
 });

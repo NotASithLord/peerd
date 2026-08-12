@@ -31,26 +31,31 @@
  */
 
 /**
+ * Resolve the provider + model pair for a web actor. A local runner is a real
+ * provider switch, not merely a model id that can be sent through the owner's
+ * cloud adapter.
+ *
+ * @param {RunnerModelInputs & { providerName?: string }} inputs
+ * @returns {{ provider: string, model: string }}
+ */
+export const resolveRunnerTarget = ({ settings, provider, providerName = '', localRunner } = {}) => {
+  const pinned = typeof settings?.runnerModel === 'string' ? settings.runnerModel.trim() : '';
+  if (pinned) return Object.freeze({ provider: providerName, model: pinned });
+  if (localRunner?.available && typeof localRunner.model === 'string' && localRunner.model) {
+    return Object.freeze({ provider: 'local-webgpu', model: localRunner.model });
+  }
+  return Object.freeze({
+    provider: providerName,
+    model: provider?.defaultRunnerModel || provider?.defaultModel || '',
+  });
+};
+
+/**
  * Resolve the web actor model id.
  *
  * @param {RunnerModelInputs} inputs
  * @returns {string} a model id, or '' to inherit the owner chat model.
  */
 export const resolveRunnerModel = ({ settings, provider, localRunner } = {}) => {
-  // 1. Explicit user pin always wins — power users override deliberately.
-  const pinned = typeof settings?.runnerModel === 'string' ? settings.runnerModel.trim() : '';
-  if (pinned) return pinned;
-
-  // 2. Local WebGPU runner, once downloaded + available. Provider-independent
-  //    (keyless, on-device), so it works whatever the main provider is.
-  if (localRunner?.available && typeof localRunner.model === 'string' && localRunner.model) {
-    return localRunner.model;
-  }
-
-  // 3. The active provider's fast default (e.g. claude-haiku-4-5).
-  const providerDefault = provider?.defaultRunnerModel || provider?.defaultModel || '';
-  if (providerDefault) return providerDefault;
-
-  // 4. Inherit the main session model.
-  return '';
+  return resolveRunnerTarget({ settings, provider, localRunner }).model;
 };

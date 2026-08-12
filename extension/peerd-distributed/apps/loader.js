@@ -15,8 +15,10 @@
 // install itself is INJECTED — the SW route or page supplies it — so the
 // loader stays pure logic over bytes.
 
-import { manifestHash, verifyManifest } from '../content/manifest.js';
+import { assertBundleWithinLimits, manifestHash, verifyManifest } from '../content/manifest.js';
 import { unpackBundle } from '../content/bundle.js';
+import { chunkBytes, sha256hex } from '../content/chunk.js';
+import { parsePeerdUri } from '../content/uri.js';
 
 // The peer-install rails are enforced both before bundle decoding and again on
 // the decoded file tree. Keep the live values beside the checks rather than in
@@ -45,21 +47,66 @@ export class BundleRejectedError extends Error {
  *     fileKinds: Record<string, 'text' | 'binary'>,
  *     entryFile: string,
  *     dweb: { uri: string, publisher: string | null, hash: string,
- *             version_id: string, dwapp_id?: string, slug?: string, seq?: number },
+ *             version_id: string, dwapp_id?: string, slug?: string, seq?: number,
+ *             published_hashes?: string[], previous_version_id?: string,
+ *             source_git_oid?: string, changelog?: string },
  *   }) => Promise<any>,
  *   name?: string,
  *   dwappId?: string | null,
  *   slug?: string | null,
  *   seq?: number | null,
+ *   expectedPublisher?: string | null,
  * }} opts
  * @returns {Promise<any>} whatever `install` resolves to (the app record)
  */
-export const installAppBundle = async ({ uri, manifest, payload, install, name, dwappId = null, slug = null, seq = null }) => {
+export const installAppBundle = async ({ uri, manifest, payload, install, name, dwappId = null, slug = null, seq = null, expectedPublisher = null }) => {
   // Re-verify the commitment chain even though fetchBundle already did.
+  assertBundleWithinLimits(manifest);
   const hash = await manifestHash(manifest);
   const v = await verifyManifest(manifest);
   if (!v.ok) throw new BundleRejectedError(`manifest signature invalid: ${v.reason}`);
   if (manifest.type !== 'app') throw new BundleRejectedError(`not an app bundle: ${manifest.type}`);
+  let addressedPublisher = null;
+  let addressedHash = null;
+  try {
+    const addressed = parsePeerdUri(uri);
+    addressedPublisher = addressed.did ?? null;
+    addressedHash = addressed.hash ?? null;
+  }
+  catch (error) { throw new BundleRejectedError(/** @type {{message?:string}} */ (error)?.message ?? 'invalid URI'); }
+  if (!addressedPublisher || typeof manifest.publisher !== 'string' || typeof manifest.sig !== 'string') {
+    throw new BundleRejectedError('executable apps require an authored URI and signed publisher manifest');
+  }
+  if (addressedHash !== hash) throw new BundleRejectedError('manifest hash does not match its content address');
+  const payloadChunks = chunkBytes(payload);
+  if (payload.byteLength !== manifest.size || payloadChunks.length !== manifest.chunks.length) {
+    throw new BundleRejectedError('payload does not match the signed manifest shape');
+  }
+  for (const [index, chunk] of payloadChunks.entries()) {
+    if (chunk.byteLength !== manifest.chunks[index].size || await sha256hex(chunk) !== manifest.chunks[index].hash) {
+      throw new BundleRejectedError(`payload chunk ${index} does not match the signed manifest`);
+    }
+  }
+  // A signed card names an author namespace and an authored peerd:// URI names
+  // the same signer. Refuse curator/payload substitution: otherwise a card from
+  // A could silently install executable bytes signed by B while retaining A's
+  // stable dwapp_id and future update stream.
+  if (manifest.publisher !== addressedPublisher) {
+    throw new BundleRejectedError('manifest publisher does not match its content address');
+  }
+  if (expectedPublisher && manifest.publisher !== expectedPublisher) {
+    throw new BundleRejectedError('manifest publisher does not match the discovery card');
+  }
+  const release = manifest.meta?.release;
+  if (release?.previousVersionId != null && !/^[a-f0-9]{64}$/.test(release.previousVersionId)) {
+    throw new BundleRejectedError('release predecessor identity invalid');
+  }
+  if (release?.gitCommitOid != null && !/^[a-f0-9]{40}$/.test(release.gitCommitOid)) {
+    throw new BundleRejectedError('release Git commit identity invalid');
+  }
+  if (release?.changelog != null && typeof release.changelog !== 'string') {
+    throw new BundleRejectedError('release changelog invalid');
+  }
 
   let unpacked;
   try {
@@ -78,7 +125,7 @@ export const installAppBundle = async ({ uri, manifest, payload, install, name, 
   if (paths.length > MAX_FILES) throw new BundleRejectedError(`too many files: ${paths.length} > ${MAX_FILES}`);
   // why the explicit !entry: an undefined entry was already rejected by the
   // `in` check (no "undefined" key); naming it lets TS narrow entry to string.
-  if (!entry || !(entry in files)) throw new BundleRejectedError(`entry file missing: ${entry}`);
+  if (!entry || !Object.hasOwn(files, entry)) throw new BundleRejectedError(`entry file missing: ${entry}`);
   for (const p of paths) {
     // OPFS paths are flat-relative; a bundle must not climb out of its dir.
     if (p.startsWith('/') || p.split('/').includes('..')) {
@@ -100,9 +147,16 @@ export const installAppBundle = async ({ uri, manifest, payload, install, name, 
     // works, it just can't be version-tracked until a card arrives.
     dweb: {
       uri, publisher: manifest.publisher ?? null, hash, version_id: hash,
+      published_hashes: [hash],
       ...(dwappId ? { dwapp_id: dwappId } : {}),
       ...(slug ? { slug } : {}),
       ...(Number.isInteger(seq) ? { seq: /** @type {number} */ (seq) } : {}),
+      ...(typeof manifest.meta?.release?.previousVersionId === 'string'
+        ? { previous_version_id: manifest.meta.release.previousVersionId } : {}),
+      ...(typeof manifest.meta?.release?.gitCommitOid === 'string'
+        ? { source_git_oid: manifest.meta.release.gitCommitOid } : {}),
+      ...(typeof manifest.meta?.release?.changelog === 'string'
+        ? { changelog: manifest.meta.release.changelog.slice(0, 1200) } : {}),
     },
   });
 };

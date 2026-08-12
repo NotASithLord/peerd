@@ -50,6 +50,7 @@ const baseDeps = (over: any = {}) => {
     onSettingsChanging: (patch: any) => { calls.changing.push(patch); },
     onSettingsChanged: async (patch: any) => { calls.changed.push(patch); },
     privateTransferAuthorization: PRIVATE_TRANSFER_AUTHORIZATION,
+    ensureSettingsReady: async () => {},
     ...over,
   };
   return { deps, calls };
@@ -64,11 +65,12 @@ describe('settings/update', () => {
     const { deps } = baseDeps({ normalizeSettingsPatch: () => ({}) });
     expect(await makeSettingsRoutes(deps)['settings/update']({ patch: { junk: 1 } })).toEqual({ ok: false, error: 'no-known-keys-in-patch' });
   });
-  test('applies vault auto-lock when vaultAutoLockMs present (incl. 0)', async () => {
+  test('persists auto-lock and forwards it to the centralized side-effect hook', async () => {
     const { deps, calls } = baseDeps({ normalizeSettingsPatch: () => ({ vaultAutoLockMs: 0 }) });
     await makeSettingsRoutes(deps)['settings/update']({ patch: { vaultAutoLockMs: 0 } });
-    expect(calls.autoLock).toEqual([0]);
+    expect(calls.autoLock).toEqual([]);
     expect(calls.updated).toEqual([{ vaultAutoLockMs: 0 }]);
+    expect(calls.changed).toEqual([{ vaultAutoLockMs: 0 }]);
   });
   test('persists via the store and returns the merged view', async () => {
     const { deps, calls } = baseDeps({ normalizeSettingsPatch: () => ({ providerModel: 'x' }) });
@@ -85,12 +87,39 @@ describe('settings/update', () => {
     });
     const updating = makeSettingsRoutes(deps)['settings/update']({ patch: { dwebEnabled: false } })
       .then((result: any) => { settled = true; return result; });
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(settled).toBe(false);
     expect(calls.changing).toEqual([{ dwebEnabled: false }]);
     finishStop();
     expect(await updating).toEqual({ ok: true, settings: { a: 1 } });
     expect(calls.changed).toEqual(['stopped']);
+  });
+});
+
+describe('settings hydration gate', () => {
+  test('does not export the stored-settings snapshot before hydration finishes', async () => {
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => { release = resolve; });
+    let hydrated = false;
+    const { deps } = baseDeps({
+      ensureSettingsReady: async () => { await ready; hydrated = true; },
+      settingsStore: {
+        get: () => ({}),
+        stored: () => hydrated ? { providerName: 'ollama' } : {},
+        update: async () => {},
+        reset: async () => {},
+      },
+      vault: {
+        isLocked: () => false,
+        listSecretNames: async () => [],
+        getSecret: async () => null,
+      },
+    });
+    const exporting = makeSettingsRoutes(deps)['transfer/export'](authorized({ passphrase: '' }));
+    await Promise.resolve();
+    release();
+    const result = await exporting;
+    expect(result.payload.stored).toEqual({ providerName: 'ollama' });
   });
 });
 

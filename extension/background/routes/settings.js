@@ -19,12 +19,17 @@ export const makeSettingsRoutes = (deps) => {
     REASONING_EFFORT_LEVELS, DWEB_ENABLED, DEFAULT_SETTINGS,
     buildExport, CHANNEL, exportHooks, skillRegistry, dwebTransfer,
     EXPORT_PASSPHRASE_MIN_LENGTH, isCustodySecretName,
-    onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
+    onSettingsChanging, onSettingsChanged, privateTransferAuthorization, ensureSettingsReady,
   } = deps;
+  const awaitSettings = async () => {
+    try { await ensureSettingsReady?.(); return true; }
+    catch { return false; }
+  };
 
   return {
     // --- settings ---
     'settings/update': async ({ patch }) => {
+      if (!(await awaitSettings())) return { ok: false, error: 'settings-unavailable' };
       if (!patch || typeof patch !== 'object') {
         return { ok: false, error: 'invalid-patch' };
       }
@@ -40,10 +45,6 @@ export const makeSettingsRoutes = (deps) => {
         normalizeVariant,
         normalizeEngine,
       });
-      // The one settings key with a side effect beyond persistence: apply the
-      // idle auto-lock to the live vault immediately so it takes effect without
-      // an SW restart. Keyed on presence — `0` (never) is a valid value.
-      if (next.vaultAutoLockMs !== undefined) vault.setAutoLockMs(next.vaultAutoLockMs);
       if (Object.keys(next).length === 0) {
         return { ok: false, error: 'no-known-keys-in-patch' };
       }
@@ -68,6 +69,7 @@ export const makeSettingsRoutes = (deps) => {
     // CHANNEL_DEFAULTS then applies and tracks future releases (§11: the
     // explicit migration path for picking up new defaults).
     'settings/reset': async ({ keys }) => {
+      if (!(await awaitSettings())) return { ok: false, error: 'settings-unavailable' };
       if (!Array.isArray(keys) || keys.length === 0) {
         return { ok: false, error: 'keys-required' };
       }
@@ -82,12 +84,7 @@ export const makeSettingsRoutes = (deps) => {
         onSettingsChanging?.({ dwebEnabled: false });
       }
       await settingsStore.reset(known);
-      const changed = {
-        ...(resetsDweb ? { dwebEnabled: settingsStore.get().dwebEnabled } : {}),
-        ...(known.includes('autoUpdateEnabled')
-          ? { autoUpdateEnabled: settingsStore.get().autoUpdateEnabled }
-          : {}),
-      };
+      const changed = Object.fromEntries(known.map((key) => [key, settingsStore.get()[key]]));
       if (Object.keys(changed).length > 0) await onSettingsChanged?.(changed);
       pushState();
       return { ok: true, settings: { ...settingsStore.get() } };
@@ -104,6 +101,7 @@ export const makeSettingsRoutes = (deps) => {
       if (authorization !== privateTransferAuthorization) {
         return { ok: false, error: 'private-transfer-required' };
       }
+      if (!(await awaitSettings())) return { ok: false, error: 'settings-unavailable' };
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       const names = await vault.listSecretNames();
       if (names.length > 0

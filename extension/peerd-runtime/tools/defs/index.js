@@ -43,6 +43,12 @@ import { pageCodeTool }               from './page-code.js';
 import { jsWriteFileTool }            from './js-write-file.js';
 import { jsReadFileTool }             from './js-read-file.js';
 import { jsDeleteTool }               from './js-delete.js';
+import { podExecTool }                from './pod-exec.js';
+import { podStatusTool }              from './pod-status.js';
+import { podCancelTool }              from './pod-cancel.js';
+import { podReadTool }                from './pod-read.js';
+import { podWriteTool }               from './pod-write.js';
+import { podDestroyTool }             from './pod-destroy.js';
 import { appUpdateTool }              from './app-update.js';
 import { appOpenTool }                from './app-open.js';
 import { appSearchTool }              from './app-search.js';
@@ -51,6 +57,9 @@ import { appWriteFileTool }           from './app-write-file.js';
 import { appReadFileTool }            from './app-read-file.js';
 import { appListFilesTool }           from './app-list-files.js';
 import { appDeleteFileTool }          from './app-delete-file.js';
+import { repositoryHistoryTool }      from './app-history.js';
+import { repositoryVersionTool }      from './app-version.js';
+import { repositoryRemoteTool }       from './app-remote.js';
 import { editFileTool }               from './edit-file.js';
 import { toolboxWriteTool }           from './toolbox-write.js';
 import { toolboxListTool }            from './toolbox-list.js';
@@ -117,6 +126,13 @@ export {
   jsWriteFileTool,
   jsReadFileTool,
   jsDeleteTool,
+  // engine (Pod)
+  podExecTool,
+  podStatusTool,
+  podCancelTool,
+  podReadTool,
+  podWriteTool,
+  podDestroyTool,
   // engine (App)
   appUpdateTool,
   appOpenTool,
@@ -126,6 +142,9 @@ export {
   appReadFileTool,
   appListFilesTool,
   appDeleteFileTool,
+  repositoryHistoryTool,
+  repositoryVersionTool,
+  repositoryRemoteTool,
   // edit (SEARCH/REPLACE — primary write path)
   editFileTool,
   // toolbox (design js-superpower/06 — durable agent-authored modules)
@@ -232,6 +251,13 @@ export const BUILTIN_TOOLS = Object.freeze([
   jsWriteFileTool,
   jsReadFileTool,
   jsDeleteTool,
+  // engine (Pod)
+  podExecTool,
+  podStatusTool,
+  podCancelTool,
+  podReadTool,
+  podWriteTool,
+  podDestroyTool,
   // engine (App)
   appUpdateTool,
   appOpenTool,
@@ -241,6 +267,9 @@ export const BUILTIN_TOOLS = Object.freeze([
   appReadFileTool,
   appListFilesTool,
   appDeleteFileTool,
+  repositoryHistoryTool,
+  repositoryVersionTool,
+  repositoryRemoteTool,
   // edit (SEARCH/REPLACE — primary write path)
   editFileTool,
   // toolbox (design js-superpower/06 — durable agent-authored modules the

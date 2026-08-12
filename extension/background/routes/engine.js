@@ -41,17 +41,220 @@ const awaitWithinSignal = (start, signal) => {
 export const makeEngineRoutes = (deps) => {
   const {
     vault, auditLog, pushState, browser, vmHttpFetch,
-    appRegistry, vmRegistry, jsRegistry, appClient, appTabTracker,
+    appRegistry, vmRegistry, jsRegistry, podRegistry, podTabTracker, appClient, appTabTracker,
+    appQuiescence,
     opfsHelpers, NOTEBOOK_OPFS_ROOT, IMAGE_PIN_STORAGE_KEY,
     buildAppExport, buildNotebookExport, buildVmRecipeExport,
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
     listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
+    repositories, parseAppManifest, podGitRemoteOperation,
   } = deps;
   if (typeof awaitDenylistPolicy !== 'function') {
     throw new TypeError('makeEngineRoutes: awaitDenylistPolicy is required');
   }
+  if (!repositories || typeof repositories.coordinate !== 'function') {
+    throw new TypeError('makeEngineRoutes: repositories is required');
+  }
+  if (typeof parseAppManifest !== 'function') {
+    throw new TypeError('makeEngineRoutes: parseAppManifest is required');
+  }
+  if (typeof podGitRemoteOperation !== 'function') {
+    throw new TypeError('makeEngineRoutes: podGitRemoteOperation is required');
+  }
+
+  /** @param {string} appId @param {() => Promise<any>} operation */
+  const coordinateApp = (appId, operation) => repositories.coordinate({ kind: 'app', id: appId }, operation);
+  /** @param {string} appId @param {() => Promise<any>} operation */
+  const quiesceApp = (appId, operation) => appQuiescence.run(
+    appId,
+    () => coordinateApp(appId, operation),
+    { close: true },
+  );
+
+  /** @param {unknown} value */
+  const shellLine = (value) => `${String(value ?? '')}\n`;
+  /** @param {any} error */
+  const podGitFailure = (error) => ({ stdout: '', stderr: `git: ${error?.message ?? String(error)}\n`, exitCode: 1 });
+  /** @param {string[]} argv @param {string} name */
+  const optionValue = (argv, name) => {
+    const index = argv.indexOf(name);
+    return index >= 0 ? argv[index + 1] : undefined;
+  };
+  /** @type {Map<string, Set<AbortController>>} */
+  const podJobControllers = new Map();
+  /** @param {string} podId @param {string} jobId */
+  const podJobKey = (podId, jobId) => `${podId}:${jobId}`;
+  /** @param {string} podId @param {unknown} jobId */
+  const registerPodController = (podId, jobId) => {
+    if (typeof jobId !== 'string' || !/^job-[a-z0-9-]{1,100}$/i.test(jobId)) return null;
+    const key = podJobKey(podId, jobId);
+    const controller = new AbortController();
+    const controllers = podJobControllers.get(key) ?? new Set();
+    controllers.add(controller);
+    podJobControllers.set(key, controllers);
+    return {
+      controller,
+      release: () => {
+        controllers.delete(controller);
+        if (!controllers.size) podJobControllers.delete(key);
+      },
+    };
+  };
+  /** @param {unknown} podId @param {any} sender */
+  const podSenderError = async (podId, sender) => {
+    const record = typeof podId === 'string' ? await podRegistry.get(podId) : null;
+    if (!record) return 'pod-not-found';
+    const ownedTab = podTabTracker.getTabId(podId);
+    return ownedTab == null || sender?.tab?.id !== ownedTab
+      ? 'pod-sender-not-instance-pinned'
+      : null;
+  };
+  /** @param {unknown} value */
+  const canonicalUrl = (value) => {
+    try { return new URL(String(value)).href; }
+    catch { return null; }
+  };
+
+  /**
+   * Pod Git stays behind an exact instance/tab pin. Agent jobs receive one
+   * structured, target-bound grant; direct terminal jobs carry the explicit
+   * `true` grant minted by their visible first-party host.
+   * @param {any} msg
+   * @param {any} sender
+   */
+  const runPodGit = async ({ podId, jobId, argv = [], remoteGrant = null }, sender) => {
+    if (typeof podId !== 'string' || !Array.isArray(argv)) {
+      return { ok: false, error: 'podId-and-argv-required' };
+    }
+    const senderError = await podSenderError(podId, sender);
+    if (senderError) return { ok: false, error: senderError };
+    const ref = { kind: 'pod', id: podId };
+    // Grant validation and the resulting Git operation are one repository
+    // transaction. Otherwise a concurrent remote set-url can land after the
+    // user approves target A but before push reads origin, sending to target B.
+    return repositories.coordinate(ref, async () => {
+    const [command = '', ...args] = argv.map(String);
+    const remoteOp = podGitRemoteOperation(argv);
+    if (remoteOp && remoteGrant !== true) {
+      let target = null;
+      if (remoteOp === 'clone' || remoteOp === 'link') {
+        target = args.find((arg) => /^https:\/\//i.test(arg)) ?? null;
+      } else {
+        target = (await repositories.getRemote(ref))?.url ?? null;
+      }
+      const granted = remoteGrant && typeof remoteGrant === 'object'
+        && remoteGrant.op === remoteOp
+        && canonicalUrl(remoteGrant.url) !== null
+        && canonicalUrl(remoteGrant.url) === canonicalUrl(target);
+      if (!granted) {
+        return {
+          ok: true,
+          result: {
+            stdout: '',
+            stderr: `git ${command}: remote operation requires an exact explicit authorization\n`,
+            exitCode: 126,
+          },
+        };
+      }
+    }
+    const abortable = remoteOp && typeof jobId === 'string'
+      ? registerPodController(podId, jobId)
+      : null;
+    try {
+      if (remoteOp) {
+        await awaitWithinSignal(awaitDenylistPolicy, abortable?.controller.signal ?? null);
+        if (abortable?.controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      }
+      let result;
+      if (command === 'init') {
+        const oid = await repositories.init(ref);
+        result = { stdout: shellLine(oid ? 'Initialized Peerd Pod repository' : 'Initialized empty Peerd Pod repository'), stderr: '', exitCode: 0 };
+      } else if (command === 'status') {
+        const state = await repositories.status(ref);
+        const changed = state.changed.map((/** @type {{status:string,path:string}} */ entry) => `${entry.status.padEnd(8)} ${entry.path}`);
+        result = { stdout: `${state.branch ? `On branch ${state.branch}\n` : 'No commits yet\n'}${changed.length ? `${changed.join('\n')}\n` : 'working tree clean\n'}`, stderr: '', exitCode: 0 };
+      } else if (command === 'add') {
+        const staged = await repositories.stage(ref, { paths: args.length ? args : ['.'] });
+        result = { stdout: staged.staged.length ? `${staged.staged.join('\n')}\n` : '', stderr: '', exitCode: 0 };
+      } else if (command === 'commit') {
+        const message = optionValue(args, '-m') ?? optionValue(args, '--message');
+        if (!message) return { ok: true, result: { stdout: '', stderr: 'git commit: -m <message> is required\n', exitCode: 2 } };
+        const committed = await repositories.commit(ref, { message });
+        result = { stdout: committed.created ? shellLine(`[${committed.oid?.slice(0, 10)}] ${message}`) : 'nothing to commit\n', stderr: '', exitCode: 0 };
+      } else if (command === 'log') {
+        const depth = Math.min(200, Math.max(1, Number(optionValue(args, '-n') ?? optionValue(args, '--max-count')) || 20));
+        const rows = await repositories.history(ref, { depth });
+        result = { stdout: rows.map((/** @type {{oid:string,message:string}} */ row) => `${row.oid.slice(0, 10)} ${row.message}`).join('\n') + (rows.length ? '\n' : ''), stderr: '', exitCode: 0 };
+      } else if (command === 'branch') {
+        const name = args.find((arg) => !arg.startsWith('-'));
+        if (name) {
+          const created = await repositories.branch(ref, { name, checkout: false });
+          result = { stdout: shellLine(created.branch), stderr: '', exitCode: 0 };
+        } else {
+          const [names, state] = await Promise.all([repositories.branches(ref), repositories.status(ref)]);
+          result = { stdout: names.map((/** @type {string} */ entry) => `${entry === state.branch ? '* ' : '  '}${entry}`).join('\n') + (names.length ? '\n' : ''), stderr: '', exitCode: 0 };
+        }
+      } else if (command === 'checkout' || command === 'switch') {
+        const name = args.find((arg) => !arg.startsWith('-'));
+        if (!name) return { ok: true, result: { stdout: '', stderr: `git ${command}: branch required\n`, exitCode: 2 } };
+        const checked = await repositories.checkout(ref, { name });
+        result = { stdout: shellLine(`Switched to branch '${checked.branch}'`), stderr: '', exitCode: 0 };
+      } else if (command === 'clone') {
+        const positional = args.filter((arg, index) => !arg.startsWith('-')
+          && args[index - 1] !== '-b' && args[index - 1] !== '--branch'
+          && args[index - 1] !== '--depth');
+        const url = positional[0];
+        if (!url) return { ok: true, result: { stdout: '', stderr: 'git clone: HTTPS URL required\n', exitCode: 2 } };
+        const cloned = await repositories.clone(ref, {
+          url,
+          ref: optionValue(args, '-b') ?? optionValue(args, '--branch'),
+          depth: Math.min(500, Math.max(1, Number(optionValue(args, '--depth')) || 50)),
+          signal: abortable?.controller.signal,
+        });
+        result = { stdout: shellLine(`Cloned ${cloned.remote.url}`), stderr: '', exitCode: 0 };
+      } else if (command === 'fetch') {
+        const fetched = await repositories.fetch(ref, { signal: abortable?.controller.signal });
+        result = { stdout: shellLine(`Fetched ${fetched.remote.url}`), stderr: '', exitCode: 0 };
+      } else if (command === 'push') {
+        const branchName = args.find((arg) => !arg.startsWith('-') && arg !== 'origin');
+        const pushed = await repositories.push(ref, {
+          ...(branchName ? { ref: branchName } : {}),
+          signal: abortable?.controller.signal,
+        });
+        result = pushed.ok
+          ? { stdout: shellLine(`Pushed ${pushed.branch} to ${pushed.remote.url}`), stderr: '', exitCode: 0 }
+          : { stdout: '', stderr: shellLine(pushed.error || 'push rejected'), exitCode: 1 };
+      } else if (command === 'remote') {
+        const url = args.find((arg) => /^https:\/\//i.test(arg));
+        if (url && (args.includes('add') || args.includes('set-url'))) {
+          const remote = await repositories.setRemote(ref, { url });
+          result = { stdout: '', stderr: '', exitCode: 0, remote };
+        } else {
+          const remote = await repositories.getRemote(ref);
+          result = { stdout: remote ? `${args.includes('-v') ? `origin\t${remote.url} (fetch)\norigin\t${remote.url} (push)` : 'origin'}\n` : '', stderr: '', exitCode: 0 };
+        }
+      } else {
+        result = { stdout: '', stderr: `git: unsupported Pod subcommand '${command || '(none)'}'\n`, exitCode: 2 };
+      }
+      auditLog.append({ type: 'pod_git_command', details: { podId, command, exitCode: result.exitCode } }).catch(() => {});
+      return { ok: true, result };
+    } catch (error) {
+      const result = podGitFailure(error);
+      auditLog.append({
+        type: 'pod_git_command',
+        details: {
+          podId, command, exitCode: 1,
+          error: /** @type {{message?:string}} */ (error)?.message ?? String(error),
+        },
+      }).catch(() => {});
+      return { ok: true, result };
+    } finally {
+      abortable?.release();
+    }
+    });
+  };
 
   /** @type {Map<string, AbortController>} */
   const notebookFetchControllers = new Map();
@@ -69,6 +272,51 @@ export const makeEngineRoutes = (deps) => {
   };
 
   return {
+    'pod/git': runPodGit,
+    'pod/cancel-io': async ({ podId, jobId }, sender) => {
+      const senderError = await podSenderError(podId, sender);
+      if (senderError) return { ok: false, error: senderError };
+      const controllers = podJobControllers.get(podJobKey(podId, jobId));
+      for (const controller of controllers ?? []) controller.abort('Pod job cancelled');
+      return { ok: true, cancelled: controllers?.size ?? 0 };
+    },
+    'pod/web-fetch': async ({ podId, jobId, url, method, headers, body }, sender) => {
+      const senderError = await podSenderError(podId, sender);
+      if (senderError) return { ok: false, error: senderError };
+      if (typeof url !== 'string' || !url) return { ok: false, error: 'url-required' };
+      const abortable = registerPodController(podId, jobId);
+      try {
+        await awaitWithinSignal(awaitDenylistPolicy, abortable?.controller.signal ?? null);
+        if (abortable?.controller.signal.aborted) return { ok: false, error: 'aborted' };
+        return await vmHttpFetch({
+          url, method, headers, body,
+          signal: abortable?.controller.signal,
+          noCache: true,
+          maxBodyBytes: 16 * 1024 * 1024,
+        });
+      } catch (error) {
+        const value = /** @type {{name?:string,message?:string}} */ (error);
+        return {
+          ok: false,
+          error: value?.name === 'AbortError'
+            ? 'aborted'
+            : value?.name === 'DenylistPolicyUnavailableError'
+              ? 'The sensitive-origin policy is unavailable. Network access is blocked.'
+              : value?.message ?? String(error),
+        };
+      } finally {
+        abortable?.release();
+      }
+    },
+    'pod/get-meta': async ({ podId }, sender) => {
+      const senderError = await podSenderError(podId, sender);
+      if (senderError) return { ok: false, error: senderError };
+      const record = await podRegistry.get(podId);
+      return {
+        ok: true,
+        record: { id: record.id, name: record.name, persistent: record.persistent !== false },
+      };
+    },
     // Notebook tabs and the offscreen job host own the actual OPFS handles.
     // They ask here immediately before mutation so the service worker's live
     // schema posture remains authoritative in Chrome and Firefox alike.
@@ -198,8 +446,22 @@ export const makeEngineRoutes = (deps) => {
     'app/get-meta': async ({ appId }) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
-        const meta = await appRegistry.get(appId);
+        let meta = await appRegistry.get(appId);
         if (!meta) return { ok: false, error: 'app-not-found' };
+        let runtimeDweb = meta.dweb ?? null;
+        try {
+          const contract = parseAppManifest(await appClient.readFile({ appId, path: 'peerd.json' }));
+          const paths = new Set((await appClient.listFiles({ appId })).map((/** @type {{path:string}} */ file) => file.path.replace(/^\/+/, '')));
+          if (!paths.has(contract.entry)) return { ok: false, error: `peerd.json entry is missing: ${contract.entry}` };
+          runtimeDweb = contract.capabilities.includes('dweb') && DWEB_ENABLED
+            ? (meta.dweb ?? { uri: null, publisher: null, hash: null, local: true })
+            : null;
+          if (contract.entry !== meta.entryFile) meta = await appRegistry.update(appId, { entryFile: contract.entry });
+        } catch (error) {
+          if ((/** @type {{name?:string}} */ (error)).name !== 'NotFoundError') {
+            return { ok: false, error: /** @type {{message?:string}} */ (error)?.message ?? String(error) };
+          }
+        }
         // dweb meta unlocks the app-tab bridge for dwapps (preview builds);
         // harmless null elsewhere.
         return {
@@ -207,7 +469,7 @@ export const makeEngineRoutes = (deps) => {
           name: meta.name,
           entryFile: meta.entryFile,
           fileKinds: meta.fileKinds ?? {},
-          dweb: meta.dweb ?? null,
+          dweb: runtimeDweb,
         };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
@@ -310,6 +572,106 @@ export const makeEngineRoutes = (deps) => {
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
+    },
+    // App-tab editor IO goes through the same mutation coordinator as Git.
+    // This keeps a multi-surface browser App from writing around restore/share.
+    'app/editor/read': async ({ appId, path }) => {
+      if (typeof appId !== 'string' || typeof path !== 'string') return { ok: false, error: 'appId-and-path-required' };
+      try { return { ok: true, content: await appClient.readFile({ appId, path }) }; }
+      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'app/editor/list': async ({ appId }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      try { return { ok: true, files: await appClient.listFiles({ appId }) }; }
+      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'app/editor/write': async ({ appId, path, content }) => {
+      if (typeof appId !== 'string' || typeof path !== 'string' || typeof content !== 'string') return { ok: false, error: 'appId-path-content-required' };
+      try { await appClient.writeFile({ appId, path, content }); return { ok: true }; }
+      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'app/editor/delete': async ({ appId, path }) => {
+      if (typeof appId !== 'string' || typeof path !== 'string') return { ok: false, error: 'appId-and-path-required' };
+      try { await appClient.deleteFile({ appId, path }); return { ok: true }; }
+      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/status': async ({ appId }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      try {
+        const [status, remote, branches] = await Promise.all([
+          repositories.statusApp(appId), repositories.getAppRemote(appId),
+          repositories.branches({ kind: 'app', id: appId }),
+        ]);
+        return { ok: true, status, remote, branches };
+      }
+      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/history': async ({ appId, depth }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      try { return { ok: true, commits: await repositories.historyApp(appId, { depth, includeSafety: true }) }; }
+      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/diff': async ({ appId, from, to }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      try { return { ok: true, diff: await repositories.diffApp(appId, { from: from || 'HEAD', to: to || null }) }; }
+      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/commit': async ({ appId, message }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      try {
+        const result = await quiesceApp(appId, () => repositories.commitApp(appId, { message: typeof message === 'string' ? message : 'manual edit' }));
+        await auditLog.append({ type: 'git_commit_created', details: { kind: 'app', appId, oid: result.oid, changed: result.changed.length } });
+        return { ok: true, result };
+      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/restore': async ({ appId, to }) => {
+      if (typeof appId !== 'string' || typeof to !== 'string') return { ok: false, error: 'appId-and-to-required' };
+      try {
+        const result = await quiesceApp(appId, () => repositories.restoreApp(appId, { to }));
+        appTabTracker.reloadTab(appId).catch(() => {});
+        await auditLog.append({ type: 'git_version_restored', details: { kind: 'app', appId, to, oid: result.oid } });
+        return { ok: true, result };
+      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/branch': async ({ appId, name, checkout = true }) => {
+      if (typeof appId !== 'string' || typeof name !== 'string') return { ok: false, error: 'appId-and-name-required' };
+      try { return { ok: true, result: await (checkout === false ? coordinateApp : quiesceApp)(appId, () => repositories.branch({ kind: 'app', id: appId }, { name, checkout: checkout !== false })) }; }
+      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/checkout': async ({ appId, name }) => {
+      if (typeof appId !== 'string' || typeof name !== 'string') return { ok: false, error: 'appId-and-name-required' };
+      try {
+        const result = await quiesceApp(appId, () => repositories.checkout({ kind: 'app', id: appId }, { name }));
+        appTabTracker.reloadTab(appId).catch(() => {});
+        return { ok: true, result };
+      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/link': async ({ appId, url }) => {
+      if (typeof appId !== 'string' || typeof url !== 'string') return { ok: false, error: 'appId-and-url-required' };
+      try {
+        const remote = await coordinateApp(appId, () => repositories.setRemote({ kind: 'app', id: appId }, { url }));
+        await auditLog.append({ type: 'git_remote_linked', details: { kind: 'app', appId, host: remote.host, url: remote.url } });
+        return { ok: true, remote };
+      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/fetch': async ({ appId }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      try {
+        const result = await coordinateApp(appId, () => repositories.fetch({ kind: 'app', id: appId }));
+        await auditLog.append({ type: 'git_remote_fetched', details: { kind: 'app', appId, host: result.remote.host } });
+        return { ok: true, result };
+      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/push': async ({ appId, branch }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      try {
+        const result = await quiesceApp(appId, async () => {
+          await repositories.commitApp(appId, { message: 'checkpoint before push' });
+          return repositories.push({ kind: 'app', id: appId }, { ref: typeof branch === 'string' ? branch : undefined });
+        });
+        await auditLog.append({ type: 'git_remote_pushed', details: { kind: 'app', appId, host: result.remote.host, branch: result.branch } });
+        return { ok: result.ok, result, ...(result.ok ? {} : { error: result.error || 'push rejected (the remote may contain unrelated or newer commits)' }) };
+      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
     },
     'apps/delete': async ({ appId }) => {
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };

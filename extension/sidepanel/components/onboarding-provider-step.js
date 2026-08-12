@@ -102,7 +102,10 @@ export const ProviderStep = {
         ui.busy = true;
         m.redraw();
         try {
-          const saved = await send({ type: 'provider/setKey', provider: selectedRow.name, plaintext: check.value });
+          const saved = await send({
+            type: 'provider/setKey', provider: selectedRow.name,
+            plaintext: check.value, activate: false,
+          });
           if (!saved?.ok) {
             ui.msg = { ok: false, text: saved?.error ?? 'Something went wrong.' };
             return;
@@ -141,7 +144,11 @@ export const ProviderStep = {
       ui.busy = true;
       m.redraw();
       try {
-        await send({ type: 'settings/update', patch: { providerName: selectedRow.name, providerModel: '' } });
+        const switched = await send({ type: 'settings/update', patch: { providerName: selectedRow.name, providerModel: '' } });
+        if (!switched?.ok) {
+          ui.msg = { ok: false, text: switched?.error ?? 'Something went wrong.' };
+          return;
+        }
         onDone();
       } finally {
         ui.busy = false;
@@ -163,8 +170,8 @@ export const ProviderStep = {
     return [
       m('h3.onb-provider-heading', 'Choose a provider'),
       m('p.muted.onb-provider-sub',
-        'Your key is encrypted in the vault you just created. It never ' +
-        'leaves this browser, and there is no peerd account.'),
+        'Your key is encrypted in the vault you just created and is sent ' +
+        'only to the provider you choose. There is no peerd account.'),
       rows === null
         ? m('p.muted', 'Loading…')
         : m('.onb-provider-rows', { role: 'radiogroup', 'aria-label': 'Provider' },

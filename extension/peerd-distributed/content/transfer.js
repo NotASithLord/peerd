@@ -121,14 +121,13 @@ export const fetchBundle = async ({ uri, channel, onProgress, timeoutMs = 15000 
   /** @type {{ chunks: Array<{ hash: string, size: number }>, size: number } & Record<string, any>} */
   const manifest = manResp.manifest;
 
-  // 2. Verify the address commits to this manifest, then the signature.
+  // 2. Bound shape before canonicalization/signature work; signed hostile
+  // manifests are still hostile inputs.
+  assertBundleWithinLimits(manifest);
   const computed = await manifestHash(manifest);
   if (computed !== hash) throw new Error('manifest hash mismatch — content address does not match payload');
   const v = await verifyManifest(manifest);
   if (!v.ok) throw new Error(`manifest signature invalid: ${v.reason}`);
-  // 2b. Bound the (attacker-signed) manifest before buffering anything — a
-  // valid signature does not bound its declared size or chunk count.
-  assertBundleWithinLimits(manifest);
   onProgress?.({ phase: 'manifest', publisher: v.publisher, total: manifest.chunks.length });
 
   // 3. Fetch unique chunk hashes in parallel (dedup so identical chunks

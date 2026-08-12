@@ -106,7 +106,11 @@ describe('sidepanel actor isolation UX', () => {
     document.body.appendChild(root);
     m.mount(root, { view: () => m(MessageList, { messages: [
       { role: 'assistant', id: 'a1', content: '', toolUses: [{ id: 't1', name: 'message_actor', input: { to: 'web', message: 'click submit' } }] },
-      { role: 'user', id: 'u1', content: '', toolResults: [{ tool_use_id: 't1', is_error: true, content: 'actor_isolation_unavailable: Actors were not run' }] },
+      { role: 'user', id: 'u1', content: '', toolResults: [{
+        tool_use_id: 't1', is_error: true,
+        actorTerminal: true, actorOutcomeKnown: true, actorPerformed: false,
+        content: 'actor_isolation_unavailable: Actors were not run',
+      }] },
     ] }) });
     try {
       await flush();
@@ -117,8 +121,9 @@ describe('sidepanel actor isolation UX', () => {
       toggle.click();
       await flush();
       expect(toggle.getAttribute('aria-expanded')).toBe('true');
-      expect(root.textContent).toContain('actor_isolation_unavailable');
-      expect(root.textContent).toContain('cannot provide the required isolated worker');
+      expect(root.textContent).toContain('No actor work was started. Review the request before trying again.');
+      expect(root.textContent.includes('actor_isolation_unavailable')).toBe(false);
+      expect(root.textContent.includes('cannot provide the required isolated worker')).toBe(false);
       expect(root.textContent.includes('Do not retry automatically')).toBe(false);
       expect(root.textContent.includes('reply will arrive')).toBe(false);
     } finally { m.mount(root, null); root.remove(); }
@@ -130,7 +135,10 @@ describe('sidepanel actor isolation UX', () => {
     m.mount(root, { view: () => m(MessageList, {
       messages: [
         { role: 'assistant', id: 'a-unknown', content: '', toolUses: [{ id: 't-unknown', name: 'message_actor', input: { to: 'web', message: 'submit it' } }] },
-        { role: 'user', id: 'u-unknown', content: '', toolResults: [{ tool_use_id: 't-unknown', is_error: false, content: 'Message delivered.' }] },
+        { role: 'user', id: 'u-unknown', content: '', toolResults: [{
+          tool_use_id: 't-unknown', is_error: false,
+          actorCorrelationId: 'unknown-correlation', content: 'Message delivered.',
+        }] },
         {
           role: 'user', id: 'reply-unknown', synthetic: true,
           actorReply: { kind: 'web', instanceId: 'web', failed: true, outcomeKnown: false },
@@ -140,6 +148,7 @@ describe('sidepanel actor isolation UX', () => {
       actors: {
         't-unknown': {
           kind: 'web', instanceId: 'web', streaming: false,
+          actorCorrelationId: 'unknown-correlation',
           error: 'the actor worker stopped after execution began; the outcome is unknown',
           outcomeKnown: false,
         },
@@ -185,7 +194,8 @@ describe('sidepanel actor isolation UX', () => {
       expect(reply?.getAttribute('role')).toBe(null);
       expect(reply?.getAttribute('aria-live')).toBe(null);
       expect(root.querySelectorAll('[role="status"]').length).toBe(0);
-      expect(root.textContent).toContain('before this actor request was dispatched');
+      expect(root.textContent).toContain('No actor work was started. Review the request before trying again.');
+      expect(root.textContent.includes('before this actor request was dispatched')).toBe(false);
     } finally { m.mount(root, null); root.remove(); }
   });
 
@@ -358,6 +368,8 @@ describe('sidepanel actor isolation UX', () => {
           role: 'user', id: 'u-awaited-unknown', content: '',
           toolResults: [{
             tool_use_id: 't-awaited-unknown', is_error: true,
+            actorCorrelationId: 'awaited-unknown-correlation', actorTerminal: true,
+            actorOutcomeKnown: false, actorPerformed: true,
             content: 'Actor execution did not complete. Its outcome is unknown. Do not retry automatically.',
           }],
         },
@@ -365,6 +377,7 @@ describe('sidepanel actor isolation UX', () => {
       actors: {
         't-awaited-unknown': {
           kind: 'web', instanceId: 'web', streaming: false,
+          actorCorrelationId: 'awaited-unknown-correlation',
           error: 'the actor host stopped; the outcome is unknown',
           outcomeKnown: false,
         },

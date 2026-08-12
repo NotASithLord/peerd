@@ -213,9 +213,6 @@ const confirmAnswer = (prompt, answer) => {
     ownerSessionId: prompt.ownerSessionId ?? null,
     sessionId: prompt.sessionId ?? null,
     dispatchId: prompt.dispatchId ?? null,
-    // Which surface decided (§4e): the OTHER surface renders the settle
-    // line naming it, and never lines its own click.
-    surface: 'home',
   });
   currentState = { ...currentState, pendingConfirm: null };
   m.redraw();

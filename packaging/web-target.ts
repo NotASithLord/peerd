@@ -72,6 +72,7 @@ export const WEB_PRUNE_WITHIN = [
 export const WEB_SWAPS: Record<string, string> = {
   'vendor/browser-polyfill.js': 'browser-polyfill.web.js',
   'background/notebook-client.js': 'notebook-client.web.js',
+  'background/pod-client.js': 'pod-client.web.js',
   'background/vm-client.js': 'vm-client.web.js',
 };
 
@@ -82,6 +83,7 @@ export const WEB_SWAPS: Record<string, string> = {
 // (check-web-boundary verifies).
 export const WEB_STUB_PATHS = [
   'background/notebook-client.js',
+  'background/pod-client.js',
   'background/vm-client.js',
 ] as const;
 

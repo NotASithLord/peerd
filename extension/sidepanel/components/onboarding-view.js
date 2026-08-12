@@ -2,10 +2,11 @@
 // First-run onboarding — "Hello, I'm peerd".
 //
 // Shown ONCE per profile: after vault setup, before the first chat
-// (route gating lives in sidepanel.js via needsOnboarding below). Two
+// (route gating lives in sidepanel.js via needsOnboarding below). Three
 // jobs, per the owner's deprioritized "Profiles" direction:
 //
-//   1. Name your AI peer. The greeting's name is inline-editable and
+//   1. Choose and verify the provider that will answer the first chat.
+//   2. Name your AI peer. The greeting's name is inline-editable and
 //      writes peerName on the default profile. It wears the brand
 //      letterform colors (owner call, 2026-06-12: the name IS the
 //      wordmark concept here — anything you type inherits the same
@@ -13,12 +14,12 @@
 //      so editability is unmissable. The name only ever reflects in
 //      chat transcripts — the assistant row label — never in the brand
 //      wordmark.
-//   2. Seed the user doc: two optional basic-facts questions persisted
+//   3. Seed the user doc: two optional basic-facts questions persisted
 //      into memory's 'user' scope (editable later from the options
 //      page). Skipping everything writes nothing.
 //
-// SHAPE (owner call 2026-06-12): a SEQUENTIAL three-step funnel — name
-// your peer, "what should I call you", "anything else about you" — one
+// SHAPE (owner call 2026-06-12): a SEQUENTIAL four-step funnel — provider,
+// name your peer, "what should I call you", "anything else about you" — one
 // question on screen at a time, each with its own Skip, prompts TYPING
 // themselves in terminal-style before the input appears. Game-feel
 // without breaking the brand: motion is monochrome; the peer name's
@@ -56,7 +57,7 @@ import { ProviderStep } from './onboarding-provider-step.js';
  */
 
 /**
- * The typed-question reveal state for steps 1/2.
+ * The typed-question reveal state for steps 2/3.
  * @typedef {{ text: string, shown: number, done: boolean, timer: ReturnType<typeof setTimeout>|null }} PromptState
  */
 

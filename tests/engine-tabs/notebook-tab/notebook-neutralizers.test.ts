@@ -9,7 +9,10 @@
 // pins the pure semantics against mock globals.
 
 import { describe, test, expect } from 'bun:test';
-import { applyRealmSeal } from '../../../extension/engine-tabs/notebook-tab/notebook-neutralizers.js';
+import {
+  applyNotebookRealmSeal,
+  applyRealmSeal,
+} from '../../../extension/engine-tabs/notebook-tab/notebook-neutralizers.js';
 
 // Mock worker global: network primitives live where they live in a real
 // DedicatedWorkerGlobalScope — constructors as own props of the global,
@@ -47,7 +50,9 @@ const freshGlobal = () => {
   g.Worker = function Worker() {};
   // (no WebSocketStream / SharedWorker — the seal must create the stubs
   // even where the platform lacks the API, like Firefox today.)
-  g.navigator = { sendBeacon: () => true };
+  g.navigator = { sendBeacon: () => true, storage: { getDirectory: () => 'ROOT' } };
+  g.chrome = { runtime: { sendMessage: () => 'PRIVILEGED' } };
+  g.browser = { storage: { local: {} } };
   g.postMessage = (m: any) => posted.push(m);
   g.addEventListener = (_type: string, fn: any) => listeners.push(fn);
   return { g, proto, posted, listeners, nativeFetch };
@@ -163,6 +168,44 @@ describe('realm seal — native fetch is unrecoverable, bridge is pinned', () =>
 
     try { g.XMLHttpRequest = function () {}; } catch { /* strict throw */ }
     expect(() => new g.XMLHttpRequest()).toThrow('peerd.egress.fetch');
+  });
+});
+
+describe('Pod profile: named egress and rooted storage only', () => {
+  test('ambient fetch, raw OPFS, and extension API namespaces are absent', () => {
+    const { g } = freshGlobal();
+    const capability = applyRealmSeal(g, {
+      environment: 'Pod', exposeGlobalFetch: false,
+      blockHostStorage: true, blockExtensionApis: true,
+    });
+    expect(() => g.fetch('https://example.test')).toThrow('audited fetch interface');
+    expect(() => g.navigator.storage.getDirectory()).toThrow('StorageManager');
+    expect(g.chrome).toBeUndefined();
+    expect(g.browser).toBeUndefined();
+    expect(typeof capability.fetch).toBe('function');
+  });
+
+  test('the named Pod fetch still uses the same audited postMessage protocol', async () => {
+    const { g, posted, listeners } = freshGlobal();
+    const { fetch: podFetch } = applyRealmSeal(g, {
+      environment: 'Pod', exposeGlobalFetch: false,
+      blockHostStorage: true, blockExtensionApis: true,
+    });
+    const pending = podFetch('https://allowed.example/data');
+    expect(posted[0]).toMatchObject({ type: 'fetch-request', url: 'https://allowed.example/data' });
+    respond(listeners, { type: 'fetch-response', rid: posted[0].rid, ok: true, status: 200, bodyB64: btoa('ok') });
+    expect(await (await pending).text()).toBe('ok');
+  });
+});
+
+describe('Notebook production profile: rooted storage and no extension APIs', () => {
+  test('keeps audited fetch but blocks the raw OPFS root and extension namespaces', () => {
+    const { g } = freshGlobal();
+    const capability = applyNotebookRealmSeal(g);
+    expect(g.fetch).toBe(capability.fetch);
+    expect(() => g.navigator.storage.getDirectory()).toThrow('StorageManager');
+    expect(g.chrome).toBeUndefined();
+    expect(g.browser).toBeUndefined();
   });
 });
 

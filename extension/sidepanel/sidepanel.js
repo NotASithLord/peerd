@@ -99,6 +99,8 @@ const handlePortDisconnect = () => {
     // with no parentToolUseId, so the card never receives turn/actor-done. Reset
     // them; a revived SW re-seeds anything still live via turn/actor-state.
     actors: INITIAL_STATE.actors,
+    actorProjectionEpoch: INITIAL_STATE.actorProjectionEpoch,
+    actorProjectionRevision: INITIAL_STATE.actorProjectionRevision,
     spawned: INITIAL_STATE.spawned,
     asyncTasks: INITIAL_STATE.asyncTasks,
   };
@@ -223,9 +225,6 @@ const confirmAnswer = (prompt, answer) => {
     ownerSessionId: prompt.ownerSessionId ?? null,
     sessionId: prompt.sessionId ?? null,
     dispatchId: prompt.dispatchId ?? null,
-    // Which surface decided (§4e): the OTHER surface renders the settle
-    // line naming it, and never lines its own click.
-    surface: 'sidepanel',
   });
   currentState = { ...currentState, pendingConfirm: null };
   m.redraw();
