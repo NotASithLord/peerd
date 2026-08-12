@@ -85,11 +85,10 @@ describe('dwapp discovery — sovereign subscription plane', () => {
     const a = await spawn();
     const b = await spawn();
     await link(a, b);
-    await tick();
+    await waitFor(() => a.discovery.subscriberCount() === 1);
     await b.discovery.unsubscribeFrom(a.identity.did); // B tells A: stop sending
-    await tick();
+    await waitFor(() => a.discovery.subscriberCount() === 0);
     await a.discovery.announce(await ownCard(a, 'pong'));
-    await tick();
     expect(b.library.rows().some((r: any) => r.name === 'pong')).toBe(false);
     [a, b].forEach((p) => p.discovery.close());
   });

@@ -9,6 +9,10 @@ import { buildManifest } from '../../extension/peerd-distributed/content/manifes
 import { installAppBundle } from '../../extension/peerd-distributed/apps/loader.js';
 
 const tick = (ms = 25) => new Promise((r) => setTimeout(r, ms));
+const waitFor = async (predicate: () => boolean, timeoutMs = 1_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await tick(10);
+};
 
 // Two base networks over a linked memoryPair mesh — the same shape as the live
 // offscreen lobby, minus WebRTC. Proves the app-store content path rides the
@@ -134,13 +138,14 @@ describe('the dweb app store (base-network content + discovery)', () => {
   test('share → a subscribed peer gets the card, and the bundle fetches over the mesh', async () => {
     const { a, b } = await linkedPair();
     a.start(); b.start();          // start() runs discovery.subscribeAll() (reconcile linked peers)
-    await tick(60);                // SUBSCRIBE → SNAPSHOT settles
+    await waitFor(() => a.discovery.subscriberCount() === 1
+      && b.discovery.subscriberCount() === 1);
 
     const { uri, hash } = await a.publishApp({ name: 'notes', entry: 'index.html', files: { 'index.html': 'x' } });
     const { dwapp_id } = await a.publishMeta({
       slug: 'notes', name: 'notes', head: { version_id: hash, content_addr: uri, size: 1 },
     });
-    await tick(60);
+    await waitFor(() => b.heardDwapps().some((r: any) => r.dwapp_id === dwapp_id));
 
     // B discovered the card over the sovereign subscription plane (it asked on connect).
     expect(b.heardDwapps().some((r: any) => r.dwapp_id === dwapp_id)).toBe(true);
