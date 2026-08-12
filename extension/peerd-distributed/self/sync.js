@@ -283,6 +283,53 @@ export const createSurfaceCollector = ({ entry, snapshotId }) => {
   return Object.freeze({ accept });
 };
 
+// ── retry taxonomy ───────────────────────────────────────────────────
+//
+// What a receiver should DO about each defect the collector can raise.
+// The honest answer for every one of them is "stop": each is a property of
+// the bytes the source served measured against the manifest it already
+// committed to, so re-pulling the same surface of the same snapshot
+// reproduces the same defect exactly. A re-pull is not recovery there, it
+// is an unbounded request/reply loop with a peer that is either buggy or
+// hostile, and the restore never settles.
+//
+// why a table and not a bare `return 'terminal'`: this is the place a
+// future transient defect (a genuinely resumable one) would be added, and
+// naming the disposition per defect keeps that decision explicit instead of
+// hidden in a receiver's control flow.
+//
+// Actual interruption has the opposite shape: it produces NO defect at all,
+// just silence. That is the receiver's stall timer's job (host.js), and it
+// is the only thing that earns a bounded, backed-off retry.
+export const SYNC_DEFECT_DISPOSITIONS = Object.freeze({
+  // A late duplicate chunk for a surface that already completed. Not a
+  // failure of anything: drop it and leave the settled surface alone.
+  'already-settled': 'ignore',
+  'not-sync-chunk': 'terminal',
+  'unsupported-proto': 'terminal',
+  'wrong-surface': 'terminal',
+  'bad-total': 'terminal',
+  'total-changed': 'terminal',
+  'bad-seq': 'terminal',
+  'bad-data': 'terminal',
+  'chunk-oversize': 'terminal',
+  'size-mismatch': 'terminal',
+  'missing-chunk': 'terminal',
+  'hash-mismatch': 'terminal',
+});
+
+/**
+ * Fail closed: a defect this build does not recognise is terminal, never
+ * a licence to keep pulling.
+ *
+ * @param {string} defect
+ * @returns {'ignore' | 'retry' | 'terminal'}
+ */
+export const syncDefectDisposition = (defect) =>
+  /** @type {'ignore' | 'retry' | 'terminal'} */ (
+    SYNC_DEFECT_DISPOSITIONS[/** @type {keyof typeof SYNC_DEFECT_DISPOSITIONS} */ (defect)] ?? 'terminal'
+  );
+
 /** Decode a completed surface's bytes back into its logical payload. */
 /** @param {Uint8Array} bytes */
 export const decodeSurfacePayload = (bytes) => JSON.parse(fromUtf8(bytes));

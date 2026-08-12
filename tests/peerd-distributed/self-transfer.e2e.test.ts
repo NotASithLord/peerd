@@ -7,7 +7,10 @@
 // production code.
 
 import { describe, test, expect } from 'bun:test';
-import { ensureFounderCustody, ensureEnrolledCustody, loadCoordinatorInputs } from '../../extension/peerd-distributed/self/custody.js';
+import {
+  ensureFounderCustody, ensureEnrolleeDevice, sponsorDeviceEnrollment,
+  ensureEnrolledCustody, loadCoordinatorInputs,
+} from '../../extension/peerd-distributed/self/custody.js';
 import { createSelfDeviceCoordinator } from '../../extension/peerd-distributed/self/coordinator.js';
 import { createSyncSource, createSyncReceiver } from '../../extension/peerd-distributed/self/host.js';
 import { buildSnapshotOffer, encodeSurfacePayload } from '../../extension/peerd-distributed/self/sync.js';
@@ -102,13 +105,23 @@ describe('finished-marker rehearsal (Bun, in-memory mesh)', () => {
   test('two devices authenticate then transfer real state; the receiver materializes it', async () => {
     const now = () => 1_700_000_000_000;
     // ── custody: Device A founds, Device B enrolls under the same person ──
+    // B mints its own device key, A (the root holder) certifies it, B stores
+    // the result. B never receives the person root, which is what makes the
+    // roster a revocation mechanism rather than a suggestion.
     const vaultA = fakeVault();
     const founder = await ensureFounderCustody({ io: vaultA, label: 'Desktop', now: now() });
-    const vaultB = fakeVault({ 'distributed/identity/v1': vaultA.map.get('distributed/identity/v1')! });
+    const vaultB = fakeVault();
+    const deviceB = await ensureEnrolleeDevice(vaultB);
+    const issued = await sponsorDeviceEnrollment({
+      io: vaultA, deviceDid: deviceB.did, deviceId: deviceB.deviceId,
+      priorRoster: founder.roster, label: 'Laptop', now: now(),
+    });
     const enrolled = await ensureEnrolledCustody({
-      io: vaultB, discoverySecret: founder.discoverySecret!, priorRoster: founder.roster, label: 'Laptop', now: now(),
+      io: vaultB, discoverySecret: founder.discoverySecret!,
+      certificate: issued.certificate, roster: issued.roster, personDid: founder.personDid,
     });
     expect(enrolled.personDid).toBe(founder.personDid);
+    expect(vaultB.map.has('distributed/identity/v1')).toBe(false);
 
     // ── discovery + mutual auth over the rendezvous mesh ──
     const { meshFor, flush } = createMeshFabric();
@@ -185,7 +198,12 @@ describe('finished-marker rehearsal (Bun, in-memory mesh)', () => {
       );
     }
 
-    expect(result).toEqual({ ok: true, applied: expect.arrayContaining(['sessions', 'memory', 'settings', 'apps', 'workspaces']) });
+    expect(result).toEqual({
+      ok: true,
+      applied: expect.arrayContaining(['sessions', 'memory', 'settings', 'apps', 'workspaces']),
+      failed: [], // every surface reached a terminal state, none by retry exhaustion
+      refused: [],
+    });
     // The chat travelled; the actor session did not.
     expect(receivedSessions.map((s) => s.sessionId)).toEqual(['chat-1']);
     expect(receivedSessions[0].title).toBe('Trip planning');

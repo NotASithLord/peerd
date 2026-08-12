@@ -16,12 +16,20 @@ const createMemoryMeshFabric = () => {
   type Member = { did: string; onPeer: Set<(a: { did: string }) => void>; onDirect: Set<(a: { from: string; data: any }) => void> };
   const rooms = new Map<string, Map<string, Member>>();
   const deliver: Array<() => void> = [];
-  const flush = async () => {
-    // Drain the async delivery queue until quiescent (handshakes are
-    // multi-round-trip, so re-check after each drain).
-    for (let i = 0; i < 50 && deliver.length; i++) {
-      const batch = deliver.splice(0);
-      for (const fn of batch) fn();
+  // Drain until QUIESCENT, not until first-empty. why the distinction: the
+  // handshake handlers are async and await real Ed25519 work, so the queue
+  // empties between "message delivered" and "reply enqueued". Stopping at
+  // the first empty queue ends the drain mid-handshake and the assertions
+  // race the crypto: the flake this shape exists to remove.
+  const flush = async ({ idleTurns = 8, maxTurns = 4000 } = {}) => {
+    let idle = 0;
+    for (let turn = 0; turn < maxTurns && idle < idleTurns; turn++) {
+      if (deliver.length === 0) {
+        idle++;
+      } else {
+        idle = 0;
+        for (const fn of deliver.splice(0)) fn();
+      }
       await Promise.resolve();
       await new Promise((r) => setTimeout(r, 0));
     }

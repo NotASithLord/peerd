@@ -59,6 +59,7 @@ export {
   buildSnapshotOffer, validateSnapshotManifest, buildSyncOffer, buildSyncPull,
   buildSyncChunks, buildSyncRefuse, validateSyncPull, createSurfaceCollector,
   encodeSurfacePayload, decodeSurfacePayload, surfaceHash, SYNC_SURFACES,
+  syncDefectDisposition,
 } from './self/sync.js';
 export { createSelfDeviceCoordinator } from './self/coordinator.js';
 export { createSyncSource, createSyncReceiver } from './self/host.js';
@@ -66,7 +67,8 @@ export {
   buildCeremonyRequest, acceptCeremonyReply, CEREMONY_ORIGIN, CEREMONY_URL,
 } from './self/ceremony-client.js';
 export {
-  ensureFounderCustody, ensureEnrolledCustody, loadCoordinatorInputs,
+  ensureFounderCustody, ensureEnrolleeDevice, sponsorDeviceEnrollment,
+  ensureEnrolledCustody, loadCoordinatorInputs,
   loadDiscoverySecret, storeDiscoverySecret, storeSelfRecords, loadSelfRecords,
   DISCOVERY_SECRET_NAME, SELF_RECORDS_NAME,
 } from './self/custody.js';
