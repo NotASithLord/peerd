@@ -9,17 +9,17 @@
 //   2. Name your AI peer. The greeting's name is inline-editable and
 //      writes peerName on the default profile. It wears the brand
 //      letterform colors (owner call, 2026-06-12: the name IS the
-//      wordmark concept here — anything you type inherits the same
+//      wordmark concept here; anything you type inherits the same
 //      five-color cycle), and at rest it plays a type-and-delete tease
 //      so editability is unmissable. The name only ever reflects in
-//      chat transcripts — the assistant row label — never in the brand
+//      chat transcripts (the assistant row label), never in the brand
 //      wordmark.
 //   3. Seed the user doc: two optional basic-facts questions persisted
 //      into memory's 'user' scope (editable later from the options
 //      page). Skipping everything writes nothing.
 //
-// SHAPE (owner call 2026-06-12): a SEQUENTIAL four-step funnel — provider,
-// name your peer, "what should I call you", "anything else about you" — one
+// SHAPE (owner call 2026-06-12): a SEQUENTIAL four-step funnel: provider,
+// name your peer, "what should I call you", then "anything else about you". One
 // question on screen at a time, each with its own Skip, prompts TYPING
 // themselves in terminal-style before the input appears. Game-feel
 // without breaking the brand: motion is monochrome; the peer name's
