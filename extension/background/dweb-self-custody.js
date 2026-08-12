@@ -18,7 +18,8 @@
 // It rides the same sender-verified offscreen custody Port as the identity
 // handler. The device key in particular must never travel any other way,
 // and it never leaves this install at all: `distributed/device-key/` is
-// under the export-excluded prefix (peerd-distributed/identity/device-key.js).
+// under the export-excluded prefix the dweb module's device-key custody
+// defines (NON_EXPORTABLE_SECRET_PREFIXES).
 
 // The exact secret names the self-device stack owns. Growing this list is a
 // deliberate act: each entry is a value the offscreen document may read.

@@ -399,7 +399,7 @@ export {
 
 // The same-user device sync surfaces: the LOGICAL projection of each store
 // that may cross to a proven self device, and its idempotent applier. The
-// bytes move through peerd-distributed; deciding what a surface means is
+// bytes move through the dweb module; deciding what a surface means is
 // runtime work, so it lives here.
 export {
   portableSession,

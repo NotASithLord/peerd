@@ -167,7 +167,7 @@ export const enrollmentStep = (state, event) => {
     // Enrollment landed: THIS device now holds a person-signed certificate
     // for its own key. From here the device is valid even if nothing else
     // works. (It holds no person root: enrollment grants device authority,
-    // never the signing seed. See peerd-distributed/self/enroll.js.)
+    // never the signing seed. See the dweb module's self/enroll.js.)
     case 'enrolled':
       return next({ step: 'looking', enrolled: true }, [{ type: 'start-discovery' }]);
     case 'enroll-failed':
