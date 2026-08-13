@@ -119,10 +119,16 @@ describe('isOffscreenSender', () => {
 
 describe('isServiceWorkerSender', () => {
   const serviceWorkerUrl = `${ORIGIN}background/service-worker.js`;
-  const swTrust = { ...trust, serviceWorkerUrl };
+  const backgroundPageUrl = `${ORIGIN}_generated_background_page.html`;
+  const swTrust = { ...trust, serviceWorkerUrl, backgroundPageUrl };
 
-  it('accepts only the exact worker script with no document/tab provenance', () => {
+  it('accepts the exact Chrome worker or Firefox generated background page', () => {
     expect(isServiceWorkerSender({ id: ID, url: serviceWorkerUrl }, swTrust)).toBe(true);
+    expect(isServiceWorkerSender({ id: ID, url: backgroundPageUrl }, swTrust)).toBe(true);
+    expect(isServiceWorkerSender(
+      { id: ID, url: backgroundPageUrl, documentId: 'firefox-background-document' },
+      swTrust,
+    )).toBe(true);
   });
 
   it('rejects a first-party engine page replay and document-hosted copies', () => {
@@ -133,11 +139,18 @@ describe('isServiceWorkerSender', () => {
     expect(isServiceWorkerSender(
       { id: ID, url: serviceWorkerUrl, documentId: 'forged-copy' }, swTrust,
     )).toBe(false);
+    expect(isServiceWorkerSender(
+      { id: ID, url: backgroundPageUrl, tab: { id: 8 } }, swTrust,
+    )).toBe(false);
   });
 
   it('rejects suffix/query variants and missing trust data', () => {
     expect(isServiceWorkerSender({ id: ID, url: `${serviceWorkerUrl}?x=1` }, swTrust)).toBe(false);
+    expect(isServiceWorkerSender({ id: ID, url: `${backgroundPageUrl}#copy` }, swTrust)).toBe(false);
     expect(isServiceWorkerSender({ id: ID, url: serviceWorkerUrl }, trust as any)).toBe(false);
+    expect(isServiceWorkerSender(
+      { id: ID, url: serviceWorkerUrl }, { ...trust, serviceWorkerUrl } as any,
+    )).toBe(false);
   });
 });
 

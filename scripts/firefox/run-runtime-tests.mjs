@@ -38,6 +38,8 @@ const EXTENSION_ORIGIN = `moz-extension://${TEST_UUID}`;
 const PREVIEW_ADDON_ID = 'peerd-preview@peerd.ai';
 const PREVIEW_TEST_UUID = '7d12f198-31fc-4e95-9184-e954123981a7';
 const PREVIEW_EXTENSION_ORIGIN = `moz-extension://${PREVIEW_TEST_UUID}`;
+const NOTEBOOK_PROBE_TYPE = 'firefox-notebook-probe/call';
+const NOTEBOOK_PROBE_TOKEN = 'firefox-notebook-probe-7d12f198';
 const FIXTURE_PATH = '/__firefox-runtime-fixture';
 const WORKER_PROBE_PATH = '/__firefox-worker-startup-probe';
 const MODULE_IMPORT_PROBE_PATH = '/__firefox-module-import-probe.js';
@@ -1539,6 +1541,54 @@ browser.runtime.onMessage.addListener((message) =>
   overwriteRegularFile(worker, `await fetch('https://api.anthropic.com${WORKER_PROBE_PATH}', { method: 'POST', cache: 'no-store' });
 throw new Error('Firefox runtime test fault: actor worker failed before ready');
 `);
+  execFileSync('zip', ['-q', '-X', '-r', artifact, '.'], {
+    cwd: staging,
+    env: { ...process.env, TZ: 'UTC' },
+  });
+  return { artifact, directory };
+};
+
+// The packaged Notebook rejects every tab RPC that did not originate in the
+// background page. The runtime harness is itself a visible extension page, so
+// direct browser.tabs.sendMessage probes would either weaken that boundary or
+// test a caller production never accepts. Build a throwaway copy with one
+// narrow relay in the background page; all Notebook/editor/worker code remains
+// byte-for-byte the staged Store or Preview package, and the relay never ships.
+const createNotebookProbeArtifact = (channel) => {
+  const directory = mkdtempSync(join(tmpdir(), `peerd-firefox-${channel}-notebook-probe-`));
+  const staging = join(directory, 'staging');
+  const artifact = join(directory, `peerd-${VERSION}-${channel}-firefox-notebook-probe.xpi`);
+  cpSync(join(ROOT, 'artifacts', 'staging', `${channel}-firefox`), staging, { recursive: true });
+  const serviceWorker = join(staging, 'background', 'service-worker.js');
+  const source = readFileSync(serviceWorker, 'utf8');
+  const probe = `{
+  const probeType = ${JSON.stringify(NOTEBOOK_PROBE_TYPE)};
+  const probeToken = ${JSON.stringify(NOTEBOOK_PROBE_TOKEN)};
+  const probeExtensionOrigin = browser.runtime.getURL('');
+  const probeSidepanelUrl = browser.runtime.getURL('sidepanel/sidepanel.html');
+  const probeNotebookUrl = browser.runtime.getURL('engine-tabs/notebook-tab/index.html');
+
+  browser.runtime.onMessage.addListener((request, sender) => {
+    if (request?.type !== probeType || request?.token !== probeToken) return undefined;
+    const senderUrl = typeof sender?.url === 'string' ? sender.url : '';
+    const fromSidepanel = sender?.id === browser.runtime.id && senderUrl === probeSidepanelUrl;
+    const fromTargetNotebook = sender?.id === browser.runtime.id
+      && sender?.tab?.id === request.tabId
+      && senderUrl.startsWith(probeNotebookUrl + '#');
+    if (!senderUrl.startsWith(probeExtensionOrigin) || (!fromSidepanel && !fromTargetNotebook)) {
+      return Promise.resolve({ ok: false, error: 'unauthorized Firefox Notebook probe' });
+    }
+    if (!Number.isInteger(request.tabId)
+        || !request.message || typeof request.message.type !== 'string') {
+      return Promise.resolve({ ok: false, error: 'malformed Firefox Notebook probe' });
+    }
+    return browser.tabs.sendMessage(request.tabId, request.message).then((reply) =>
+      reply && typeof reply === 'object'
+        ? { ...reply, probeBackgroundUrl: location.href }
+        : { ok: false, error: 'Notebook returned no response', probeBackgroundUrl: location.href });
+  });
+}`;
+  overwriteRegularFile(serviceWorker, `${probe}\n${source}`);
   execFileSync('zip', ['-q', '-X', '-r', artifact, '.'], {
     cwd: staging,
     env: { ...process.env, TZ: 'UTC' },
@@ -3105,12 +3155,21 @@ return 'REACHED';`;
     const computedReply = await waitFor(() => driver.executeAsync(`
       const [tabId, id, source] = arguments;
       const done = arguments[arguments.length - 1];
-      browser.tabs.sendMessage(tabId, {
-        type: 'js/eval', notebookId: id, code: source, timeoutMs: 10_000,
+      browser.runtime.sendMessage({
+        type: ${JSON.stringify(NOTEBOOK_PROBE_TYPE)},
+        token: ${JSON.stringify(NOTEBOOK_PROBE_TOKEN)},
+        tabId,
+        message: {
+          type: 'js/eval', notebookId: id, code: source, timeoutMs: 10_000,
+        },
       }).then((response) => done(response?.ok === true ? response : null), () => done(null));
     `, [notebookTabId, notebookId, computedCode]), { budgetMs: 30_000, pollMs: 200 });
     assert(computedReply?.ok === true, 'the live Notebook returns its computed-import result',
       JSON.stringify(computedReply));
+    assert(computedReply.probeBackgroundUrl
+      === `${EXTENSION_ORIGIN}/_generated_background_page.html`,
+    'the diagnostic relay executes in Firefox\'s browser-owned background page',
+    String(computedReply.probeBackgroundUrl));
     assert(computedReply.result?.errorCode === policy.unsupportedCode
       && computedReply.result?.durationMs === 0
       && computedReply.result?.error?.startsWith('import resolution failed:'),
@@ -3123,8 +3182,13 @@ return 'REACHED';`;
     const staticReply = await waitFor(() => driver.executeAsync(`
       const [tabId, id, source] = arguments;
       const done = arguments[arguments.length - 1];
-      browser.tabs.sendMessage(tabId, {
-        type: 'js/eval', notebookId: id, code: source, timeoutMs: 10_000,
+      browser.runtime.sendMessage({
+        type: ${JSON.stringify(NOTEBOOK_PROBE_TYPE)},
+        token: ${JSON.stringify(NOTEBOOK_PROBE_TOKEN)},
+        tabId,
+        message: {
+          type: 'js/eval', notebookId: id, code: source, timeoutMs: 10_000,
+        },
       }).then((response) => done(response?.ok === true ? response : null), () => done(null));
     `, [notebookTabId, notebookId, staticCode]), { budgetMs: 30_000, pollMs: 200 });
     assert(staticReply?.ok === true, 'the live Notebook returns its Store-import result',
@@ -3169,7 +3233,14 @@ const runLocalModuleGraphSmoke = async (driver) => {
       const done = arguments[arguments.length - 1];
       Promise.all([
         browser.tabs.get(tabId),
-        browser.tabs.sendMessage(tabId, { type: 'js/list-files', notebookId: id }),
+        browser.runtime.sendMessage({
+          type: ${JSON.stringify(NOTEBOOK_PROBE_TYPE)},
+          token: ${JSON.stringify(NOTEBOOK_PROBE_TOKEN)},
+          tabId,
+          message: {
+            type: 'js/list-files', notebookId: id,
+          },
+        }),
       ]).then(([tab, reply]) => done(tab.status === 'complete' && reply?.ok === true),
         () => done(false));
     `, [notebookTabId, notebookId]), { budgetMs: 30_000, pollMs: 200 });
@@ -3211,8 +3282,13 @@ const runLocalModuleGraphSmoke = async (driver) => {
     const write = async (path, content) => driver.executeAsync(`
       const [tabId, id, modulePath, source] = arguments;
       const done = arguments[arguments.length - 1];
-      browser.tabs.sendMessage(tabId, {
-        type: 'js/write-file', notebookId: id, path: modulePath, content: source,
+      browser.runtime.sendMessage({
+        type: ${JSON.stringify(NOTEBOOK_PROBE_TYPE)},
+        token: ${JSON.stringify(NOTEBOOK_PROBE_TOKEN)},
+        tabId,
+        message: {
+          type: 'js/write-file', notebookId: id, path: modulePath, content: source,
+        },
       }).then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
     `, [notebookTabId, notebookId, path, content]);
     assert((await write('lib/value.js', 'export const value = 42;'))?.ok === true,
@@ -3233,8 +3309,13 @@ const runLocalModuleGraphSmoke = async (driver) => {
     const run = async (source) => driver.executeAsync(`
       const [tabId, id, code] = arguments;
       const done = arguments[arguments.length - 1];
-      browser.tabs.sendMessage(tabId, {
-        type: 'js/eval', notebookId: id, code, timeoutMs: 20_000,
+      browser.runtime.sendMessage({
+        type: ${JSON.stringify(NOTEBOOK_PROBE_TYPE)},
+        token: ${JSON.stringify(NOTEBOOK_PROBE_TOKEN)},
+        tabId,
+        message: {
+          type: 'js/eval', notebookId: id, code, timeoutMs: 20_000,
+        },
       }).then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
     `, [notebookTabId, notebookId, source]);
     const inline = await run("return 'INLINE-OK';");
@@ -3299,16 +3380,24 @@ return { sourceUrl, tlaValue };`);
       const [tabId, id] = arguments;
       const done = arguments[arguments.length - 1];
       const runId = 'firefox-immediate-stop-probe';
-      const evaluation = browser.tabs.sendMessage(tabId, {
-        type: 'js/eval', notebookId: id, runId,
-        code: 'while (true) {}', timeoutMs: 20_000,
+      const send = (message) => browser.runtime.sendMessage({
+        type: ${JSON.stringify(NOTEBOOK_PROBE_TYPE)},
+        token: ${JSON.stringify(NOTEBOOK_PROBE_TOKEN)},
+        tabId,
+        message,
       });
-      const abort = browser.tabs.sendMessage(tabId, {
-        type: 'js/abort', notebookId: id, runId,
-      });
-      Promise.all([evaluation, abort]).then(([runResult, abortResult]) =>
-        done({ runResult, abortResult }),
-      (error) => done({ error: error?.message || String(error) }));
+      {
+        const evaluation = send({
+          type: 'js/eval', notebookId: id, runId,
+          code: 'while (true) {}', timeoutMs: 20_000,
+        });
+        const abort = send({
+          type: 'js/abort', notebookId: id, runId,
+        });
+        Promise.all([evaluation, abort]).then(([runResult, abortResult]) =>
+          done({ runResult, abortResult }),
+        (error) => done({ error: error?.message || String(error) }));
+      }
     `, [notebookTabId, notebookId]);
     assert(immediateStop?.abortResult?.stopped === true
       && immediateStop?.runResult?.result?.stopped === true,
@@ -3319,16 +3408,24 @@ return { sourceUrl, tlaValue };`);
       const [tabId, id] = arguments;
       const done = arguments[arguments.length - 1];
       const runId = 'firefox-stop-probe';
-      const evaluation = browser.tabs.sendMessage(tabId, {
-        type: 'js/eval', notebookId: id, runId,
-        code: 'while (true) {}', timeoutMs: 20_000,
+      const send = (message) => browser.runtime.sendMessage({
+        type: ${JSON.stringify(NOTEBOOK_PROBE_TYPE)},
+        token: ${JSON.stringify(NOTEBOOK_PROBE_TOKEN)},
+        tabId,
+        message,
       });
-      setTimeout(() => {
-        browser.tabs.sendMessage(tabId, {
-          type: 'js/abort', notebookId: id, runId,
-        }).then((abort) => evaluation.then((run) => done({ abort, run })),
-          (error) => done({ error: error?.message || String(error) }));
-      }, 250);
+      {
+        const evaluation = send({
+          type: 'js/eval', notebookId: id, runId,
+          code: 'while (true) {}', timeoutMs: 20_000,
+        });
+        setTimeout(() => {
+          send({
+            type: 'js/abort', notebookId: id, runId,
+          }).then((abort) => evaluation.then((run) => done({ abort, run })),
+            (error) => done({ error: error?.message || String(error) }));
+        }, 250);
+      }
     `, [notebookTabId, notebookId]);
     assert(stopped?.abort?.ok === true && stopped.abort.stopped === true
       && stopped?.run?.ok === true && stopped.run.result?.stopped === true
@@ -3363,14 +3460,19 @@ return { sourceUrl, tlaValue };`);
       const done = arguments[arguments.length - 1];
       (async () => {
         const tab = await browser.tabs.getCurrent();
+        const send = (message) => browser.runtime.sendMessage({
+          type: ${JSON.stringify(NOTEBOOK_PROBE_TYPE)},
+          token: ${JSON.stringify(NOTEBOOK_PROBE_TOKEN)},
+          tabId: tab.id,
+          message,
+        });
         const values = Array.from({ length: 180_000 }, (_, index) => String(index)).join(',');
-        await browser.tabs.sendMessage(tab.id, {
+        await send({
           type: 'js/write-file', notebookId: id, path: 'lib/linker-load.js',
           content: 'export const values = [' + values + '];',
         });
         const runId = 'firefox-linker-stop-probe';
-        const startedAt = Date.now();
-        const evaluation = browser.tabs.sendMessage(tab.id, {
+        const evaluation = send({
           type: 'js/eval', notebookId: id, runId,
           code: "import { values } from './lib/linker-load.js'; return values.length;",
           timeoutMs: 20_000,
@@ -3383,12 +3485,13 @@ return { sourceUrl, tlaValue };`);
           }
           await new Promise((resolveWait) => setTimeout(resolveWait, 5));
         }
-        const abort = await browser.tabs.sendMessage(tab.id, {
+        const abortSentAt = Date.now();
+        const abort = await send({
           type: 'js/abort', notebookId: id, runId,
         });
         done({
           sawLinking, abort, run: await evaluation,
-          elapsedMs: Date.now() - startedAt,
+          elapsedMs: Date.now() - abortSentAt,
         });
       })().catch((error) => done({ error: error?.message || String(error) }));
     `, [notebookId]);
@@ -3403,8 +3506,14 @@ return { sourceUrl, tlaValue };`);
       const done = arguments[arguments.length - 1];
       (async () => {
         const tab = await browser.tabs.getCurrent();
+        const send = (message) => browser.runtime.sendMessage({
+          type: ${JSON.stringify(NOTEBOOK_PROBE_TYPE)},
+          token: ${JSON.stringify(NOTEBOOK_PROBE_TOKEN)},
+          tabId: tab.id,
+          message,
+        });
         const runId = 'firefox-control-stop-probe';
-        const evaluation = browser.tabs.sendMessage(tab.id, {
+        const evaluation = send({
           type: 'js/eval', notebookId: id, runId,
           code: 'while (true) {}', timeoutMs: 20_000,
         });
@@ -3413,13 +3522,13 @@ return { sourceUrl, tlaValue };`);
           const button = document.getElementById('run-btn');
           if (button?.getAttribute('aria-label') === 'Stop notebook run') {
             button.focus();
-            const concurrent = await browser.tabs.sendMessage(tab.id, {
+            const concurrent = await send({
               type: 'js/eval', notebookId: id, runId: 'firefox-concurrent-probe',
               code: "return 'MUST-NOT-REPLACE';", timeoutMs: 20_000,
             });
             let notebookFile = null;
             for (let fileAttempt = 0; fileAttempt < 50; fileAttempt += 1) {
-              notebookFile = await browser.tabs.sendMessage(tab.id, {
+              notebookFile = await send({
                 type: 'js/read-file', notebookId: id, path: 'notebook.js',
               });
               if (notebookFile?.content === 'while (true) {}') break;
@@ -3450,7 +3559,7 @@ return { sourceUrl, tlaValue };`);
           }
           await new Promise((resolveWait) => setTimeout(resolveWait, 20));
         }
-        const recoveredRun = await browser.tabs.sendMessage(tab.id, {
+        const recoveredRun = await send({
           type: 'js/eval', notebookId: id, runId: 'firefox-control-recovery',
           code: "return 'CONTROL-RECOVERED';", timeoutMs: 20_000,
         });
@@ -3532,13 +3641,19 @@ return {
       const browser = (await import('/vendor/browser-polyfill.js')).default;
       const config = await import('/shared/channel-config.js');
       const tab = await browser.tabs.getCurrent();
+      const send = (message) => browser.runtime.sendMessage({
+        type: ${JSON.stringify(NOTEBOOK_PROBE_TYPE)},
+        token: ${JSON.stringify(NOTEBOOK_PROBE_TOKEN)},
+        tabId: tab.id,
+        message,
+      });
       const original = browser.runtime.sendMessage.bind(browser.runtime);
       const calls = [];
       browser.runtime.sendMessage = (message) => {
         calls.push(message?.type ?? 'unknown');
         return original(message);
       };
-      const run = await browser.tabs.sendMessage(tab.id, {
+      const run = await send({
         type: 'js/eval', notebookId: id,
         code,
         timeoutMs: 20_000,
@@ -3599,8 +3714,14 @@ return {
     (async () => {
       const browser = (await import('/vendor/browser-polyfill.js')).default;
       const tab = await browser.tabs.getCurrent();
+      const send = (message) => browser.runtime.sendMessage({
+        type: ${JSON.stringify(NOTEBOOK_PROBE_TYPE)},
+        token: ${JSON.stringify(NOTEBOOK_PROBE_TOKEN)},
+        tabId: tab.id,
+        message,
+      });
       const runId = 'firefox-remote-fetch-stop';
-      const evaluation = browser.tabs.sendMessage(tab.id, {
+      const evaluation = send({
         type: 'js/eval', notebookId: id, runId,
         code: 'import ' + JSON.stringify(url) + '; return false;', timeoutMs: 20_000,
       });
@@ -3616,7 +3737,7 @@ return {
         await new Promise((resolveWait) => setTimeout(resolveWait, 25));
       }
       const abortSentAt = Date.now();
-      const abort = await browser.tabs.sendMessage(tab.id, {
+      const abort = await send({
         type: 'js/abort', notebookId: id, runId,
       });
       const run = await evaluation;
@@ -3643,8 +3764,14 @@ return {
     (async () => {
       const browser = (await import('/vendor/browser-polyfill.js')).default;
       const tab = await browser.tabs.getCurrent();
+      const send = (message) => browser.runtime.sendMessage({
+        type: ${JSON.stringify(NOTEBOOK_PROBE_TYPE)},
+        token: ${JSON.stringify(NOTEBOOK_PROBE_TOKEN)},
+        tabId: tab.id,
+        message,
+      });
       const startedAt = Date.now();
-      const run = await browser.tabs.sendMessage(tab.id, {
+      const run = await send({
         type: 'js/eval', notebookId: id, runId: 'firefox-remote-fetch-timeout',
         code: 'import ' + JSON.stringify(url) + '; return false;', timeoutMs: 400,
       });
@@ -3667,6 +3794,57 @@ return {
   JSON.stringify({ timedOutFetch, requests: providerServer.slowModuleRequests }));
   writeFileSync(join(OUTPUT, 'preview-notebook-remote-restricted.png'),
     Buffer.from(await driver.screenshot(), 'base64'));
+};
+
+const runNotebookModuleSmokes = async ({ server, providerServer }) => {
+  console.log('Firefox Notebook module smoke: use an exact-background diagnostic relay');
+  const store = createNotebookProbeArtifact('store');
+  const preview = createNotebookProbeArtifact('preview');
+  let driver = null;
+  try {
+    driver = await startGeckodriver({
+      binary: geckodriverBinary,
+      firefoxBinary,
+      acceptInsecureCerts: true,
+      proxy: {
+        proxyType: 'manual',
+        httpProxy: `127.0.0.1:${providerServer.port}`,
+        sslProxy: `127.0.0.1:${providerServer.port}`,
+        noProxy: ['localhost', 'localhost.', '127.0.0.1'],
+      },
+      prefs: {
+        'extensions.webextensions.uuids': JSON.stringify({
+          [ADDON_ID]: TEST_UUID,
+          [PREVIEW_ADDON_ID]: PREVIEW_TEST_UUID,
+        }),
+        'network.lna.enabled': false,
+        'network.lna.blocking': false,
+        'network.lna.websocket.enabled': false,
+        'network.dns.disableIPv6': true,
+      },
+    });
+    await driver.setWindowRect({ width: 1280, height: 900, x: 0, y: 0 });
+    const installedStoreId = await driver.installAddon(resolve(store.artifact));
+    assert(installedStoreId === ADDON_ID,
+      'the Notebook diagnostic keeps the Firefox Store add-on id', String(installedStoreId));
+    await driver.navigate(`${EXTENSION_ORIGIN}/sidepanel/sidepanel.html`);
+    const storeMounted = await waitFor(() => driver.execute(
+      "return document.readyState === 'complete' && (document.getElementById('app')?.childElementCount || 0) > 0;",
+    ), { budgetMs: 30_000 });
+    assert(storeMounted === true, 'the Notebook diagnostic Store package mounts');
+    await runModuleImportPolicySmoke(driver, server);
+    await runLocalModuleGraphSmoke(driver);
+
+    const installedPreviewId = await driver.installAddon(resolve(preview.artifact));
+    assert(installedPreviewId === PREVIEW_ADDON_ID,
+      'the Notebook diagnostic keeps the Firefox Preview add-on id', String(installedPreviewId));
+    await runPreviewRemoteModuleSmoke(driver, providerServer);
+    console.log('Firefox Notebook module smoke OK');
+  } finally {
+    await driver?.close();
+    rmSync(store.directory, { recursive: true, force: true });
+    rmSync(preview.directory, { recursive: true, force: true });
+  }
 };
 
 const serviceWorkerProbeUrl = (providerServer, {
@@ -4380,6 +4558,10 @@ const main = async () => {
   let driver = null;
   try {
     providerServer = await startProviderServer();
+    if (process.env.FIREFOX_RUNTIME_ONLY !== 'recovery') {
+      await runNotebookModuleSmokes({ server, providerServer });
+    }
+    if (process.env.FIREFOX_RUNTIME_ONLY === 'notebook-modules') return;
     driver = await startGeckodriver({
       binary: geckodriverBinary,
       firefoxBinary,
@@ -4553,16 +4735,6 @@ const main = async () => {
     assert(unsupportedVoiceNudge === false,
       'Firefox hides voice setup when no transcription engine can run');
 
-    if (process.env.FIREFOX_RUNTIME_ONLY === 'notebook-modules') {
-      await runModuleImportPolicySmoke(driver, server);
-      await runLocalModuleGraphSmoke(driver);
-      const installedPreviewId = await driver.installAddon(resolve(previewArtifact));
-      assert(installedPreviewId === PREVIEW_ADDON_ID,
-        'the targeted Notebook run installs the Firefox Preview package');
-      await runPreviewRemoteModuleSmoke(driver, providerServer);
-      console.log('Firefox Notebook module smoke OK');
-      return;
-    }
     if (process.env.FIREFOX_RUNTIME_ONLY === 'recovery') {
       await runActorRecoverySmoke({ providerServer });
       console.log('Firefox recovery smoke OK');
@@ -4570,8 +4742,6 @@ const main = async () => {
     }
 
     await runPrivateNetworkDnrSmoke(driver, providerServer);
-    await runModuleImportPolicySmoke(driver, server);
-    await runLocalModuleGraphSmoke(driver);
     await runBoundActorSmoke(driver, providerServer);
     await runNumericTabAuthoritySmoke(driver, providerServer);
     await runActorLifetimeSmoke({ providerServer });
@@ -4744,7 +4914,6 @@ const main = async () => {
       && previewPosture?.dwebAvailable === false,
     'installed Firefox Preview omits the dweb surface until it has a mesh host',
     JSON.stringify(previewPosture));
-    await runPreviewRemoteModuleSmoke(driver, providerServer);
 
     await driver.setWindowRect({ width: 400, height: 900, x: 0, y: 0 });
 

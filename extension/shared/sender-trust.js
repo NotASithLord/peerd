@@ -91,7 +91,7 @@ export const isOffscreenSender = (sender, { runtimeId, extensionOrigin, offscree
 };
 
 /**
- * Is this sender specifically the extension SERVICE WORKER?
+ * Is this sender specifically the browser-owned BACKGROUND HOST?
  *
  * why: runtime.sendMessage reaches extension contexts broadly. An engine tab is
  * first-party but hosts agent-authored or untrusted state, so exact source pins
@@ -101,13 +101,24 @@ export const isOffscreenSender = (sender, { runtimeId, extensionOrigin, offscree
  * still requires an exact options-page sender.
  *
  * @param {{ id?: string, url?: string, tab?: unknown, documentId?: string } | null | undefined} sender
- * @param {{ runtimeId?: string, extensionOrigin?: string, serviceWorkerUrl?: string }} [trust]
+ * Chrome presents the MV3 worker script URL. Firefox implements the same
+ * manifest entry as a generated background page and presents its exact
+ * `_generated_background_page.html` URL. Firefox's host is a real document and
+ * may therefore carry `documentId`; the exact generated URL plus absence of a
+ * tab is its boundary. Chrome's worker must carry neither tab nor document.
+ *
+ * @param {{ runtimeId?: string, extensionOrigin?: string, serviceWorkerUrl?: string, backgroundPageUrl?: string }} [trust]
  */
-export const isServiceWorkerSender = (sender, { runtimeId, extensionOrigin, serviceWorkerUrl } = {}) => {
+export const isServiceWorkerSender = (sender, {
+  runtimeId, extensionOrigin, serviceWorkerUrl, backgroundPageUrl,
+} = {}) => {
   if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
   if (typeof serviceWorkerUrl !== 'string' || serviceWorkerUrl.length === 0) return false;
-  if (sender && typeof sender === 'object' && ('tab' in sender || 'documentId' in sender)) return false;
-  return sender?.url === serviceWorkerUrl;
+  if (typeof backgroundPageUrl !== 'string' || backgroundPageUrl.length === 0) return false;
+  if (sender && typeof sender === 'object' && 'tab' in sender) return false;
+  if (sender?.url === backgroundPageUrl) return true;
+  return sender?.url === serviceWorkerUrl
+    && !(sender && typeof sender === 'object' && 'documentId' in sender);
 };
 
 /**

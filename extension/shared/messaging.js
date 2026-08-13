@@ -63,6 +63,7 @@ export const isServiceWorkerSender = (sender) => isServiceWorkerSenderCore(sende
   runtimeId: browser.runtime?.id,
   extensionOrigin: browser.runtime?.getURL?.('') ?? '',
   serviceWorkerUrl: browser.runtime?.getURL?.('background/service-worker.js') ?? '',
+  backgroundPageUrl: browser.runtime?.getURL?.('_generated_background_page.html') ?? '',
 });
 
 /**
