@@ -26,6 +26,7 @@ body { font: 13px/1.45 var(--mono); }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .boot-spinner { animation: none; } }
 .boot-card.is-failed .boot-spinner { background: var(--fail); animation: none; }
+.boot-card.is-failed { color: var(--fg-muted); }
 /* why: a Pod combines an editor and terminal, so its 42px identity strip keeps
    the mixed workspace oriented while sibling engine-tab chrome remains an owner decision. */
 #pod-app { height: 100%; display: grid; grid-template-rows: 42px minmax(180px, 1fr) minmax(220px, .8fr); }

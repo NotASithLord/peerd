@@ -3266,6 +3266,14 @@ export const STATES = [
       try {
         await waitFor(() => evalIn(page, `document.querySelector('#app')?.children.length > 0`),
           { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        // why: the keyless probe resolves just after mount; capture only its
+        // settled contract so light and dark cannot split across probe states.
+        const ollamaReady = await waitFor(() => evalIn(page, `(() => {
+          const card = [...document.querySelectorAll('.provider-card')]
+            .find((node) => node.querySelector('.provider-card-name')?.textContent === 'Ollama');
+          return card?.querySelector('.key-badge')?.textContent?.trim() === '✓ Connected';
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        if (!ollamaReady) throw new Error('options full-tab Ollama probe did not settle');
         await rec.visualPage('options-fulltab', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
