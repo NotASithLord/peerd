@@ -161,10 +161,11 @@ describe('the dweb app store (base-network content + discovery)', () => {
   test('a late joiner resolves a card it never had streamed, via the DHT (by publisher+slug)', async () => {
     const { a, b, ia, ib } = await linkedPair();
     a.start(); b.start();
-    await tick(60);
+    await waitFor(() => a.discovery.subscriberCount() === 1
+      && b.discovery.subscriberCount() === 1);
     const { uri, hash } = await a.publishApp({ name: 'late', entry: 'index.html', files: { 'index.html': 'x' } });
     const { dwapp_id } = await a.publishMeta({ slug: 'late', name: 'late', head: { version_id: hash, content_addr: uri, size: 1 } });
-    await tick(60);
+    await waitFor(() => b.heardDwapps().some((r: any) => r.dwapp_id === dwapp_id));
 
     // C links only B (which holds A's DHT card), and disables discovery so it gets
     // NO subscription stream — it must resolve the card cold from the DHT.
@@ -192,12 +193,14 @@ describe('the dweb app store (base-network content + discovery)', () => {
   test('reshare = a version UPDATE: same dwapp_id, higher seq, new version_id (no duplicate card)', async () => {
     const { a, b } = await linkedPair();
     a.start(); b.start();
-    await tick(60);
+    await waitFor(() => a.discovery.subscriberCount() === 1
+      && b.discovery.subscriberCount() === 1);
 
     // v1: publish bytes + announce the card under a stable slug.
     const v1 = await a.publishApp({ name: 'editor', entry: 'index.html', files: { 'index.html': 'v1' } });
     const m1 = await a.publishMeta({ slug: 'editor', name: 'editor', seq: 1, head: { version_id: v1.hash, content_addr: v1.uri, size: 2 } });
-    await tick(60);
+    await waitFor(() => b.heardDwapps()
+      .some((r: any) => r.dwapp_id === m1.dwapp_id && r.seq === 1));
     expect(b.heardDwapps().filter((r: any) => r.dwapp_id === m1.dwapp_id).length).toBe(1);
 
     // v2: tweak the files (a NEW bundle hash), reshare under the SAME slug + higher seq.
@@ -205,7 +208,10 @@ describe('the dweb app store (base-network content + discovery)', () => {
     expect(v2.hash).not.toBe(v1.hash);                         // different bytes → different version id
     const m2 = await a.publishMeta({ slug: 'editor', name: 'editor', seq: 2, head: { version_id: v2.hash, content_addr: v2.uri, size: 10 } });
     expect(m2.dwapp_id).toBe(m1.dwapp_id);                     // SAME app identity
-    await tick(60);
+    await waitFor(() => b.heardDwapps()
+      .some((r: any) => r.dwapp_id === m1.dwapp_id
+        && r.seq === 2
+        && r.head.version_id === v2.hash));
 
     // B holds exactly ONE card for the app, now pointing at v2 (the amendment won).
     const rows = b.heardDwapps().filter((r: any) => r.dwapp_id === m1.dwapp_id);
@@ -258,7 +264,8 @@ describe('the dweb app store (base-network content + discovery)', () => {
     mc.addLink(cc, ia.did);
     ma2.addLink(ca2, ic.did);
     a2.start(); c.start();
-    await tick(60);
+    await waitFor(() => a2.discovery.subscriberCount() === 1
+      && c.discovery.subscriberCount() === 1);
 
     // The BUG, demonstrated: A2's Library is empty, so C's snapshot carries nothing.
     expect(c.heardDwapps().some((r: any) => r.dwapp_id === m1.dwapp_id)).toBe(false);
@@ -279,7 +286,8 @@ describe('the dweb app store (base-network content + discovery)', () => {
     expect(v1b.hash).toBe(v1.hash);
     const m1b = await a2.publishMeta({ slug: 'editor', name: 'editor', seq: 7, head: { version_id: v1b.hash, content_addr: v1b.uri, size: 2 } });
     expect(m1b.dwapp_id).toBe(m1.dwapp_id);        // same stable app identity (no fork)
-    await tick(60);
+    await waitFor(() => c.heardDwapps()
+      .some((r: any) => r.dwapp_id === m1.dwapp_id && r.seq === 7));
 
     await expect(a2.publishApp({
       name: 'editor', entry: 'index.html', files: { 'index.html': 'changed' },
@@ -313,13 +321,14 @@ describe('the dweb app store (base-network content + discovery)', () => {
   test('un-share: deleting stops serving the bytes AND drops the card (re-infection-proof)', async () => {
     const { a, b } = await linkedPair();
     a.start(); b.start();
-    await tick(60);
+    await waitFor(() => a.discovery.subscriberCount() === 1
+      && b.discovery.subscriberCount() === 1);
 
     const { uri, hash } = await a.publishApp({ name: 'ping', entry: 'index.html', files: { 'index.html': 'pong' } });
     const { dwapp_id, card } = await a.publishMeta({
       slug: 'ping', name: 'ping', head: { version_id: hash, content_addr: uri, size: 4 },
     });
-    await tick(60);
+    await waitFor(() => b.heardDwapps().some((r: any) => r.dwapp_id === dwapp_id));
 
     // Sanity: B discovered it and the bytes pull.
     expect(b.heardDwapps().some((r: any) => r.dwapp_id === dwapp_id)).toBe(true);

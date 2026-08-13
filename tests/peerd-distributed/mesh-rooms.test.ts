@@ -9,6 +9,13 @@ import { createSession } from '../../extension/peerd-distributed/transport/sessi
 import { createRoomMesh, CTRL } from '../../extension/peerd-distributed/transport/mesh.js';
 import { joinRoom } from '../../extension/peerd-distributed/transport/rooms.js';
 
+const waitFor = async (predicate: () => boolean, timeoutMs = 1_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+};
+
 // ---------------------------------------------------------------------------
 // Fakes. The REAL reducer runs the fake node (same code as the Bun/CF
 // shells); the fake transport swaps WebRTC bytes for memoryPair while
@@ -129,7 +136,7 @@ describe('rooms over the rendezvous (fake node, real reducer)', () => {
     const ra = await join('r1', a, node, ether);
     const rb = await join('r1', b, node, ether);
     const rc = await join('r1', c, node, ether);
-    await tick();
+    await waitFor(() => [ra, rb, rc].every((room) => room.peers().length === 2));
 
     expect(didsOf(ra)).toEqual([b.did, c.did].sort());
     expect(didsOf(rb)).toEqual([a.did, c.did].sort());
@@ -144,7 +151,7 @@ describe('rooms over the rendezvous (fake node, real reducer)', () => {
     const ra = await join('r2', a, node, ether);
     const rb = await join('r2', b, node, ether);
     const rc = await join('r2', c, node, ether);
-    await tick();
+    await waitFor(() => [ra, rb, rc].every((room) => room.peers().length === 2));
 
     const roster = await rc.mesh.requestRoster(a.did);
     expect(roster.sort()).toEqual([a.did, b.did].sort()); // a + a's links, minus c
@@ -160,11 +167,11 @@ describe('rooms over the rendezvous (fake node, real reducer)', () => {
     const ra = await join('r3', a, node, ether);
     const rb = await join('r3', b, node, ether);
     const rc = await join('r3', c, node, ether);
-    await tick();
+    await waitFor(() => [ra, rb, rc].every((room) => room.peers().length === 2));
 
     // The beat: the only server dies mid-session.
     node.kill();
-    await tick();
+    await waitFor(() => ra.rendezvous() === 'connecting');
     expect(ra.rendezvous()).toBe('connecting'); // reconnecting with backoff (was 'down') — mesh survives meanwhile
     expect(didsOf(ra)).toEqual([b.did, c.did].sort()); // links untouched
 
@@ -179,7 +186,8 @@ describe('rooms over the rendezvous (fake node, real reducer)', () => {
     ra.mesh.addLink(chA, dSeenByA);
     rd.mesh.addLink(chD, a.did);
     await rd.expandViaPeer(a.did);
-    await tick();
+    await waitFor(() => rd.peers().length === 3
+      && rb.peers().some((peer: any) => peer.did === d.did));
 
     expect(didsOf(rd)).toEqual([a.did, b.did, c.did].sort());
     expect(didsOf(rb)).toContain(d.did); // b answered the relayed offer
@@ -192,12 +200,12 @@ describe('rooms over the rendezvous (fake node, real reducer)', () => {
     const [a, b] = await Promise.all([generateIdentity(), generateIdentity()]);
     const ra = await join('r4', a, node, ether);
     const rb = await join('r4', b, node, ether);
-    await tick();
+    await waitFor(() => ra.peers().length === 1 && rb.peers().length === 1);
 
     const gone: string[] = [];
     ra.onPeerGone(({ did }: any) => gone.push(did));
     rb.leave(); // closes b's channels → a's side signals close
-    await tick();
+    await waitFor(() => gone.includes(b.did));
     expect(gone).toEqual([b.did]);
     expect(ra.peers()).toHaveLength(0);
     ra.leave();
@@ -229,7 +237,7 @@ describe('mesh boundary rules', () => {
     // b signs an envelope AS ITSELF on ch=3 → delivered.
     const ok = await mb.sign(3, 0, { msg: 'hi' });
     mb.send(a.did, ok);
-    await tick();
+    await waitFor(() => got.length === 1);
     expect(got).toHaveLength(1);
 
     // b replays one of C's envelopes (validly signed BY C) on its own
@@ -237,7 +245,7 @@ describe('mesh boundary rules', () => {
     const mc = createRoomMesh({ roomId: 'r', identity: c });
     const fromC = await mc.sign(3, 0, { msg: 'laundered' });
     mb.send(a.did, fromC);
-    await tick();
+    await waitFor(() => audits.some((x) => x.t === 'peer_envelope_misattributed'));
     expect(got).toHaveLength(1);
     expect(audits.some((x) => x.t === 'peer_envelope_misattributed')).toBe(true);
     ma.close(); mb.close(); mc.close();
@@ -273,7 +281,7 @@ describe('mesh boundary rules', () => {
     // Poll for arrival rather than a single fixed tick: the relay is two async
     // Ed25519 hops (b→a verify+re-sign→c verify), which a single 20ms tick can
     // miss under CI load (flake). Still fails fast if the frame never arrives.
-    for (let i = 0; i < 50 && cGot.length === 0; i += 1) await tick(10);
+    await waitFor(() => cGot.length === 1);
     expect(cGot).toEqual([{ from: b.did, via: a.did, kind: 'offer' }]);
     ma.close(); mb.close(); mc.close();
   });
