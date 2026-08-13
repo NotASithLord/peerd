@@ -258,9 +258,9 @@ export const ProvidersSection = {
             text: reply?.error === 'invalid-key' ? 'Provider rejected the key (401). Double-check it.'
               : reply?.error === 'no-key' ? 'No key saved for this provider yet.'
               : reply?.error === 'locked' ? 'Vault is locked — unlock in the peerd panel first.'
-              : reply?.error === 'no-models' ? 'Ollama is running, but it has no models installed. Run “ollama pull qwen3:8b”, then test again.'
+              : reply?.error === 'no-models' ? 'Ollama is running, but it has no models installed. Then test again after running: ollama pull qwen3:8b'
               : name === 'ollama' && reply?.error === 'unreachable'
-                ? 'Couldn’t reach Ollama. Start it with “ollama serve”, then test again.'
+                ? 'Couldn’t reach Ollama. Start it, then test again. Command: ollama serve'
               : `Couldn’t reach the provider: ${reply?.error ?? 'unknown error'}.`,
           };
       if (name === 'ollama' && (reply?.ok || reply?.reachable)) ui.modelOptionsKey = '';
@@ -283,13 +283,19 @@ export const ProvidersSection = {
       // why: providers without a stable sk- prefix (Z.ai GLM keys are shaped
       // `id.secret`) get a neutral hint rather than a misleading `sk-...`.
       : 'your API key';
-    // A provider is USABLE when it's keyed-with-key, or a keyless daemon we've
-    // confirmed reachable (Ollama probed 'connected'). anyUsable gates the whole
-    // "Default model for new chats" block: on a fresh install (nothing
-    // configured) it stays hidden rather than showing a keyless-Anthropic guess.
+    const settingsProviderName = state.settings?.providerName ?? '';
+    const localWebGpuAvailable = state.capabilities?.localWebGpuHost?.status === 'available';
+    // why: A provider is usable when it has its required key, Local WebGPU has a
+    // runtime host, or a keyless daemon is reachable. Keep an explicitly chosen
+    // Ollama usable through a transient outage so its warning does not replace
+    // the configured default controls. A confirmed no-models result still blocks.
     /** @param {ProviderRow} p */
     const isUsable = (p) => (!p.keyless && !!p.hasKey)
-      || (!!p.keyless && ui.connStatus[p.name] === 'connected');
+      || (p.name === 'local-webgpu' && localWebGpuAvailable)
+      || (!!p.keyless && ui.connStatus[p.name] === 'connected')
+      || (p.name === 'ollama'
+        && settingsProviderName === p.name
+        && ui.connStatus[p.name] !== 'no-models');
     const firstUsable = providerRows.find(isUsable);
     const anyUsable = !!firstUsable || ((ui.modelOptions ?? []).length > 0);
     // The provider the block edits. HONOR an explicit choice as-is — even one
@@ -301,17 +307,16 @@ export const ProvidersSection = {
     // fallback resolveActiveProvider returns for an empty providerName. The
     // modelOptions[0] fallback covers the brief window where a daemon probe is
     // still in flight (so it never momentarily reads as Anthropic).
-    const settingsProviderName = state.settings?.providerName ?? '';
     const selectableProviderRows = providerRows.filter((p) =>
       p.name !== 'local-webgpu'
-        || state.capabilities?.localWebGpuHost?.status === 'available');
+        || localWebGpuAvailable);
     const effectiveProvider =
       (settingsProviderName && selectableProviderRows.some((p) => p.name === settingsProviderName))
         ? settingsProviderName
         : (firstUsable?.name ?? (ui.modelOptions ?? [])[0]?.provider ?? provider.current);
     const defaultProvRow = providerRows.find((p) => p.name === effectiveProvider);
     const providerRunnerDefault = defaultProvRow?.defaultRunnerModel ?? provider.defaultRunnerModel ?? 'claude-haiku-4-5';
-    const localRunnerCapable = state.capabilities?.localWebGpuHost?.status === 'available';
+    const localRunnerCapable = localWebGpuAvailable;
     // Keep the Model selector populated from the chat-picker source; re-fetch
     // when the active provider, the curated OpenRouter set, or key-state changes.
     const providerStatusKey = providerRows
