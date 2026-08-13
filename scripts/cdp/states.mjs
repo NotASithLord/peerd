@@ -2880,7 +2880,15 @@ export const STATES = [
         // pathologically slow runner would drift it.
         await waitFor(() => evalIn(page, `document.querySelectorAll('.library-grid > *').length > 0`),
           { budgetMs: 10_000, pollMs: 100 }).catch(() => {});
-        await rec.visualPage('home-fulltab', page);
+        // why: live dweb notifications are unrelated to this quiet-instance
+        // contract and can arrive between the light and dark captures.
+        const pinQuietHome = async () => {
+          await evalIn(page, `import('/shared/peer-notifications.js')
+            .then(({ peerNotifications }) => peerNotifications.clear())`, true);
+          await waitFor(() => evalIn(page, `!document.querySelector('.notif-badge, .notif-banner')`),
+            { budgetMs: 2_000, pollMs: 25 });
+        };
+        await rec.visualPage('home-fulltab', page, { beforeShot: pinQuietHome });
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
