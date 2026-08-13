@@ -258,9 +258,9 @@ export const ProvidersSection = {
             text: reply?.error === 'invalid-key' ? 'Provider rejected the key (401). Double-check it.'
               : reply?.error === 'no-key' ? 'No key saved for this provider yet.'
               : reply?.error === 'locked' ? 'Vault is locked — unlock in the peerd panel first.'
-              : reply?.error === 'no-models' ? 'Ollama is running, but it has no models installed. Then test again after running: ollama pull qwen3:8b'
+              : reply?.error === 'no-models' ? 'Ollama is running, but it has no models installed. Get one with: ollama pull qwen3:8b'
               : name === 'ollama' && reply?.error === 'unreachable'
-                ? 'Couldn’t reach Ollama. Start it, then test again. Command: ollama serve'
+                ? 'Couldn’t reach Ollama. Start it with: ollama serve'
               : `Couldn’t reach the provider: ${reply?.error ?? 'unknown error'}.`,
           };
       if (name === 'ollama' && (reply?.ok || reply?.reachable)) ui.modelOptionsKey = '';
