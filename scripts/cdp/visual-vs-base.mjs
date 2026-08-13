@@ -66,8 +66,23 @@ if (!visualStates.length) {
 }
 
 const git = (...args) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' }).trim();
-const baseRef = arg('base') || git('merge-base', 'origin/main', 'HEAD');
+const tryGit = (...args) => { try { return git(...args); } catch { return null; } };
+
+// why the fallback chain: on a PR the runner checks out the MERGE ref, so
+// merge-base(origin/main, HEAD) resolves to main's tip - the right "before" for
+// "what will main look like after this lands". A checkout that never fetched
+// origin/main would otherwise throw here and silently cost the whole comparison,
+// so fall back to the plain ref before giving up.
+const resolveBase = () => arg('base')
+  || tryGit('merge-base', 'origin/main', 'HEAD')
+  || tryGit('rev-parse', 'origin/main')
+  || tryGit('rev-parse', 'main');
+const baseRef = resolveBase();
 const headRef = git('rev-parse', 'HEAD');
+if (!baseRef) {
+  console.error('[vs-base] no merge base and no origin/main - nothing to compare against');
+  process.exit(0);
+}
 
 const BASE_RUN = join(RUNS, 'base');
 const SCREENS = join(RUNS, 'screens');
