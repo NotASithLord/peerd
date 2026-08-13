@@ -11,9 +11,15 @@
 // body. Same hand-rolled codec as visual.mjs — no npm, no ImageMagick.
 //
 //   bun scripts/cdp/visual-compare.mjs --before <dir> --after <dir> --out <dir>
+//                                      [--report <visual-vs-base.json>]
 //
 // Inputs match on the shared basename, tolerating the harness's `-current`
 // suffix, so you can point it straight at two artifacts/ runs.
+//
+// --report narrows the set to the screens that comparison flagged, so a PR that
+// moved two screens does not compose sixty-odd identical pairs to push. Exits
+// non-zero when nothing is left to compose, which the caller reads as "no
+// montage needed" rather than as a failure.
 
 import { readdirSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
@@ -73,9 +79,19 @@ const blit = (canvas, cw, img, ox, oy) => {
   }
 };
 
+const REPORT = arg('report');
+const wanted = REPORT && existsSync(REPORT)
+  ? new Set(JSON.parse(readFileSync(REPORT, 'utf8')).rows
+    .filter((/** @type {{verdict:string}} */ r) => r.verdict !== 'identical')
+    .map((/** @type {{key:string}} */ r) => r.key))
+  : null;
+
 const befores = index(BEFORE);
 const afters = index(AFTER);
-const names = [...befores.keys()].filter((n) => afters.has(n)).sort();
+const names = [...befores.keys()]
+  .filter((n) => afters.has(n))
+  .filter((n) => !wanted || wanted.has(n))
+  .sort();
 
 const onlyBefore = [...befores.keys()].filter((n) => !afters.has(n));
 const onlyAfter = [...afters.keys()].filter((n) => !befores.has(n));
@@ -86,7 +102,9 @@ for (const n of onlyBefore) console.error(`[compare] only in BEFORE, no pair: ${
 for (const n of onlyAfter) console.error(`[compare] only in AFTER, no pair: ${n}`);
 
 if (!names.length) {
-  console.error('[compare] no paired states — nothing to compose');
+  console.error(wanted
+    ? '[compare] nothing flagged as changed - no montage to compose'
+    : '[compare] no paired states - nothing to compose');
   process.exit(1);
 }
 

@@ -54,7 +54,6 @@ const EXCLUDED_FILES = Object.freeze(new Set([
   'extension/manifest.json',
   'extension/shared/channel-config.js',
   'packaging/security-baseline.json',
-  'scripts/cdp/GALLERY.md',
 ]));
 
 const EXTENSIONLESS_COPY_FILES = Object.freeze(new Set(['Dockerfile', '.gitignore']));

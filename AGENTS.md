@@ -171,19 +171,20 @@ prose orientation is this file, and the rest is the source itself.
       loop: edit, `bun run e2e:verify`, read `result.json` + the
       screenshots, fix, repeat until `ok:true`. (`--functional` skips the
       visual states; CI runs that via `test:e2e:all`.)
-    - **The visual lane has ONE baseline authority, and it is CI.**
-      macOS and Linux cannot be pixel-compared — most of the panel's text
-      uses the system font stack, so the family changes per OS and
-      paragraphs re-wrap. So baselines are captured and compared only on
-      the pinned runner + pinned Chrome (`scripts/cdp/chrome-version.txt`)
-      and committed under `scripts/cdp/baselines/<authority>/`; the
-      `visual` CI job goes red when the render moves and uploads
-      before/after/diff PNGs. A dev's run still captures and still diffs —
-      against a gitignored self-baseline — but never gates, so the
-      LOOK-at-it loop above is unchanged. Reseed deliberately: dispatch
-      the workflow with `update_visual_baselines`, eyeball every PNG, then
-      commit. Bumping the Chrome pin and reseeding belong in the SAME
-      commit. Details + the measured numbers: `scripts/cdp/visual.mjs`.
+    - **The visual lane STORES NOTHING. The reference is the merge base.**
+      No screenshot is committed anywhere in this repo (CI enforces that).
+      On a PR the `visual` job renders every state twice on the pinned
+      runner + pinned Chrome (`scripts/cdp/chrome-version.txt`) - once
+      against the merge-base extension build, once against the branch -
+      diffs the pairs, and posts the before/after inline on the PR
+      (`scripts/cdp/visual-vs-base.mjs`). peerd has no build step, so
+      "check out the base and render it" is a worktree plus a harness
+      run. The trade, stated: a computed reference cannot tell an intended
+      redesign from a regression, so the lane REPORTS and never gates -
+      the checkpoint is a human reading the before/after, not a committed
+      baseline. What lands in `scripts/cdp/baselines/<platform>/` is a
+      gitignored LOCAL self-reference for your own loop only. Details +
+      the measured numbers: `scripts/cdp/visual-vs-base.mjs`.
 - **UI work runs through the verify loop — never call a rendered change
   done on assertions alone.** When you touch a side-panel / home /
   component surface, iterate edit → `bun run e2e:verify` → read
@@ -192,8 +193,8 @@ prose orientation is this file, and the rest is the source itself.
   for *new* UI there's no baseline, so your eyes are the test; on a
   regression read the `*-diff.png` to see what moved. Tighten the loop
   with `--only=<state>` or `--visual`. If you change a flow no state
-  covers, ADD one to `scripts/cdp/states.mjs` (seed a new visual
-  baseline with `UPDATE_BASELINES=1 … --visual` and commit it) — an
+  covers, ADD one to `scripts/cdp/states.mjs` — nothing to seed or
+  commit, since CI computes its "before" from the merge base — an
   uncovered UI change is an unfinished one. why: the unit tiers can
   assert structure but can't SEE the render; this loop is how an agent
   closes that gap on its own before pushing.

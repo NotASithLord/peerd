@@ -53,7 +53,6 @@ describe('copy path scope', () => {
     expect(isCopyPath('vendor/library.js')).toBe(false);
     expect(isCopyPath('web-prototype/public/sw.js')).toBe(false);
     expect(isCopyPath('extension/manifest.json')).toBe(false);
-    expect(isCopyPath('scripts/cdp/GALLERY.md')).toBe(false);
     expect(isCopyPath('AGENTS.md')).toBe(false);
     expect(isCopyPath('CLAUDE.md')).toBe(false);
     expect(isCopyPath('nested/CODEX.md')).toBe(false);
