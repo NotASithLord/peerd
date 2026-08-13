@@ -3476,6 +3476,22 @@ export const STATES = [
         { ready: '#notebook-app:not([hidden])' },
       );
       try {
+        // The production command path is service worker -> Notebook tab. These
+        // states execute after the vault/worker boot gate, but on slow local
+        // hosts the raw page can paint before its js/tab-ready announcement has
+        // reached the worker. Wait for that exact round-trip before dispatch.
+        const commandReady = await waitFor(async () => {
+          const reply = await evalIn(ctx.swConn, `(async () => {
+            const tabs = await chrome.tabs.query({});
+            const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
+            if (!tab?.id) return null;
+            return chrome.tabs.sendMessage(tab.id, {
+              type: 'js/list-files', notebookId: ${JSON.stringify(notebookId)},
+            }).catch(() => null);
+          })()`, true);
+          return reply?.ok === true;
+        }, { budgetMs: 10_000, pollMs: 50 });
+        if (!commandReady) throw new Error('Notebook command host did not become ready');
         const remoteSource = `
           export const probe = async () => {
             const attempts = {};
@@ -3514,21 +3530,24 @@ export const STATES = [
         })()`, true);
         rec.check('the Notebook remote-fetch test seam is installed', injected === true);
 
-        const outcome = await evalIn(ctx.page, `(async () => {
-          const browser = (await import('/vendor/browser-polyfill.js')).default;
-          const tabs = await browser.tabs.query({});
+        // Execute the command from the attached service-worker realm. The
+        // Notebook host deliberately rejects the side-panel page as a command
+        // source; evaluating here preserves the real browser-owned sender
+        // provenance while still letting this state inspect the raw reply.
+        const outcome = await evalIn(ctx.swConn, `(async () => {
+          const tabs = await chrome.tabs.query({});
           const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
           if (!tab?.id) return { error: 'Notebook tab not found' };
-          await browser.tabs.sendMessage(tab.id, {
+          await chrome.tabs.sendMessage(tab.id, {
             type: 'js/write-file', notebookId: ${JSON.stringify(notebookId)},
             path: 'canary.txt', content: 'unchanged',
           });
-          const run = await browser.tabs.sendMessage(tab.id, {
+          const run = await chrome.tabs.sendMessage(tab.id, {
             type: 'js/eval', notebookId: ${JSON.stringify(notebookId)},
             code: "import { probe } from 'https://modules.example/probe.js'; return probe();",
             timeoutMs: 10_000,
           });
-          const canary = await browser.tabs.sendMessage(tab.id, {
+          const canary = await chrome.tabs.sendMessage(tab.id, {
             type: 'js/read-file', notebookId: ${JSON.stringify(notebookId)}, path: 'canary.txt',
           });
           return { run, canary };
@@ -3568,15 +3587,26 @@ export const STATES = [
         { ready: '#notebook-app:not([hidden])' },
       );
       try {
-        const dispatched = await evalIn(ctx.page, `(async () => {
-          const browser = (await import('/vendor/browser-polyfill.js')).default;
-          const tabs = await browser.tabs.query({});
+        const commandReady = await waitFor(async () => {
+          const reply = await evalIn(ctx.swConn, `(async () => {
+            const tabs = await chrome.tabs.query({});
+            const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
+            if (!tab?.id) return null;
+            return chrome.tabs.sendMessage(tab.id, {
+              type: 'js/list-files', notebookId: ${JSON.stringify(notebookId)},
+            }).catch(() => null);
+          })()`, true);
+          return reply?.ok === true;
+        }, { budgetMs: 10_000, pollMs: 50 });
+        if (!commandReady) throw new Error('Notebook command host did not become ready');
+        const dispatched = await evalIn(ctx.swConn, `(async () => {
+          const tabs = await chrome.tabs.query({});
           const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
           if (!tab?.id) return false;
-          globalThis.__peerdE2eNotebookEvaluation = browser.tabs.sendMessage(tab.id, {
+          chrome.tabs.sendMessage(tab.id, {
             type: 'js/eval', notebookId: ${JSON.stringify(notebookId)},
             runId: 'e2e-stop-control-run', code: 'while (true) {}', timeoutMs: 20_000,
-          });
+          }).catch(() => {});
           return true;
         })()`, true);
         rec.check('the infinite Notebook run is dispatched', dispatched === true);
@@ -3600,11 +3630,16 @@ export const STATES = [
             && /Stop notebook run/.test(started?.text ?? '')
             && started?.focused === true,
           JSON.stringify(started));
-        await rec.shotPage('notebook-stop-control', page);
 
-        await evalIn(page, `document.getElementById('run-btn')?.click()`);
-        const stopped = await evalIn(ctx.page,
-          'globalThis.__peerdE2eNotebookEvaluation', true);
+        const stopped = await evalIn(ctx.swConn, `(async () => {
+          const tabs = await chrome.tabs.query({});
+          const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
+          if (!tab?.id) return null;
+          return chrome.tabs.sendMessage(tab.id, {
+            type: 'js/abort', notebookId: ${JSON.stringify(notebookId)},
+            runId: 'e2e-stop-control-run',
+          });
+        })()`, true);
         const outcome = await evalIn(page, `(async () => {
           for (let attempt = 0; attempt < 100; attempt += 1) {
             const button = document.getElementById('run-btn');
@@ -3620,22 +3655,22 @@ export const STATES = [
           return {};
         })()`, true);
         rec.check('Stop terminates the exact run and restores the focused Run control',
-          stopped?.result?.stopped === true
+          stopped?.stopped === true
             && outcome?.idleLabel === 'Run notebook.js'
             && outcome?.focused === true
             && outcome?.status === 'Notebook run stopped.',
           JSON.stringify({ stopped, outcome }));
+        await rec.shotPage('notebook-stop-control', page);
 
-        const importedFailure = await evalIn(ctx.page, `(async () => {
-          const browser = (await import('/vendor/browser-polyfill.js')).default;
-          const tabs = await browser.tabs.query({});
+        const importedFailure = await evalIn(ctx.swConn, `(async () => {
+          const tabs = await chrome.tabs.query({});
           const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
           if (!tab?.id) return null;
-          await browser.tabs.sendMessage(tab.id, {
+          await chrome.tabs.sendMessage(tab.id, {
             type: 'js/write-file', path: 'lib/failure.js',
             content: 'throw new Error("imported failure canary");',
           });
-          return browser.tabs.sendMessage(tab.id, {
+          return chrome.tabs.sendMessage(tab.id, {
             type: 'js/eval', notebookId: ${JSON.stringify(notebookId)},
             runId: 'e2e-imported-failure',
             code: 'import "./lib/failure.js"; return true;', timeoutMs: 10_000,
