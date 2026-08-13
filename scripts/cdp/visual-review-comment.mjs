@@ -30,6 +30,10 @@ const MONTAGE_DIR = arg('montage-dir') || join(RUNS, 'montage');
 const REPORT = join(RUNS, 'visual-vs-base.json');
 
 const pct = (n) => `${(n * 100).toFixed(3)}%`;
+/** @param {number} n */
+const allMatch = (n) => (n === 1
+  ? 'The single screen renders exactly as it does at the merge base.'
+  : `All ${n} screens render exactly as they do at the merge base.`);
 const LABELS = {
   'initial-screen': 'Vault gate', 'idle-unlocked': 'Empty chat',
   'completed-turn': 'Completed turn', 'multi-turn-transcript': 'Multi-turn',
@@ -60,14 +64,15 @@ const shortBase = String(report.baseRef ?? '').slice(0, 12);
 const shortHead = String(report.headRef ?? '').slice(0, 12);
 
 if (!notable.length) {
-  console.log(`✅ **No visual change.** All ${rows.length} screens render exactly as they do at the merge base.`);
+  console.log(`✅ **No visual change.** ${allMatch(rows.length)}`);
   console.log('');
-  console.log(`<sub>Rendered twice in this run: \`${shortBase}\` (merge base) and \`${shortHead}\`. `
-    + 'peerd keeps no reference screenshots, so there was nothing to compare against until now.</sub>');
+  console.log(`<sub>\`${shortBase}\` (merge base) ⟶ \`${shortHead}\`. `
+    + 'peerd commits no reference screenshots, so both sides were rendered from source in this run.</sub>');
   process.exit(0);
 }
 
-console.log(`⚠️ **The UI renders differently than the merge base** - ${notable.length} of ${rows.length} screens moved.`);
+console.log(`⚠️ **The UI renders differently than the merge base** - ${notable.length} of ${rows.length}`
+  + ` screen${rows.length === 1 ? '' : 's'} moved.`);
 console.log('');
 
 // Group by base state so light + dark sit together.
