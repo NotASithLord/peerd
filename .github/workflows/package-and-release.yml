@@ -81,7 +81,14 @@ jobs:
         with:
           bun-version: "1.3.9"
       - run: bun install --frozen-lockfile
-      - run: bun run test
+      - name: Run functional suite and generate passing-count badge
+        run: bun run test:functional:badge
+      - name: Functional test badge in sync
+        run: |
+          git diff --exit-code badges/functional-tests.json || {
+            echo '::error::badges/functional-tests.json is stale - run `bun run gen:badge:functional` and commit it.'
+            exit 1
+          }
 
   checks:
     name: lint + boundary + drift

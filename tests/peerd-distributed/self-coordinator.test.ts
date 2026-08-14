@@ -16,23 +16,16 @@ const createMemoryMeshFabric = () => {
   type Member = { did: string; onPeer: Set<(a: { did: string }) => void>; onDirect: Set<(a: { from: string; data: any }) => void> };
   const rooms = new Map<string, Map<string, Member>>();
   const deliver: Array<() => void> = [];
-  // Drain until QUIESCENT, not until first-empty. why the distinction: the
-  // handshake handlers are async and await real Ed25519 work, so the queue
-  // empties between "message delivered" and "reply enqueued". Stopping at
-  // the first empty queue ends the drain mid-handshake and the assertions
-  // race the crypto: the flake this shape exists to remove.
-  const flush = async ({ idleTurns = 8, maxTurns = 4000 } = {}) => {
-    let idle = 0;
-    for (let turn = 0; turn < maxTurns && idle < idleTurns; turn++) {
-      if (deliver.length === 0) {
-        idle++;
-      } else {
-        idle = 0;
-        for (const fn of deliver.splice(0)) fn();
-      }
+  // Crypto handlers can leave the delivery queue empty while awaiting WebCrypto.
+  // Settle against the state each test needs instead of guessing an idle duration.
+  const flushUntil = async (ready: () => boolean, maxTurns = 4000) => {
+    for (let turn = 0; turn < maxTurns; turn++) {
+      for (const fn of deliver.splice(0)) fn();
       await Promise.resolve();
-      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (ready()) return;
     }
+    throw new Error('memory mesh did not reach the expected state');
   };
   const meshFor = (did: string) => ({
     did,
@@ -66,7 +59,7 @@ const createMemoryMeshFabric = () => {
       };
     },
   });
-  return { meshFor, flush };
+  return { meshFor, flushUntil };
 };
 
 // Build a person with N certified devices sharing one discovery secret.
@@ -90,7 +83,7 @@ const person = async (deviceCount: number) => {
 describe('self-device coordinator', () => {
   test('two devices of one person mutually authenticate to self over the rendezvous room', async () => {
     const { root, discoverySecret, devices, roster } = await person(2);
-    const { meshFor, flush } = createMemoryMeshFabric();
+    const { meshFor, flushUntil } = createMemoryMeshFabric();
     const now = () => 1_700_000_000_000;
 
     const desktop = createSelfDeviceCoordinator({
@@ -104,7 +97,8 @@ describe('self-device coordinator', () => {
 
     await desktop.start();
     await laptop.start();
-    await flush();
+    await flushUntil(() => desktop.isSelfDevice(devices[1].identity.did)
+      && laptop.isSelfDevice(devices[0].identity.did));
 
     expect(desktop.selfDevices().map((d) => d.deviceDid)).toEqual([devices[1].identity.did]);
     expect(laptop.selfDevices().map((d) => d.deviceDid)).toEqual([devices[0].identity.did]);
@@ -131,7 +125,7 @@ describe('self-device coordinator', () => {
       })),
       seq: 2,
     });
-    const { meshFor, flush } = createMemoryMeshFabric();
+    const { meshFor, flushUntil } = createMemoryMeshFabric();
     const persisted: number[] = [];
     const make = (index: number, roster: any) => createSelfDeviceCoordinator({
       personDid: root.did,
@@ -147,15 +141,19 @@ describe('self-device coordinator', () => {
     const tablet = make(1, oldRoster);
     await desktop.start();
     await tablet.start();
-    await flush();
+    await flushUntil(() => desktop.isSelfDevice(devices[1].identity.did)
+      && tablet.isSelfDevice(devices[0].identity.did));
     expect(desktop.isSelfDevice(devices[1].identity.did)).toBe(true);
 
     expect(await desktop.updateRoster(nextRoster)).toEqual({ ok: true, defect: null });
-    await flush(); // deliver the authenticated SELF_ROSTER relay to tablet
+    await flushUntil(() => persisted.filter((seq) => seq === 2).length >= 2);
 
     const laptop = make(2, nextRoster);
     await laptop.start();
-    await flush();
+    await flushUntil(() => desktop.isSelfDevice(devices[2].identity.did)
+      && tablet.isSelfDevice(devices[2].identity.did)
+      && laptop.isSelfDevice(devices[0].identity.did)
+      && laptop.isSelfDevice(devices[1].identity.did));
     expect(desktop.isSelfDevice(devices[2].identity.did)).toBe(true);
     expect(tablet.isSelfDevice(devices[2].identity.did)).toBe(true);
     expect(laptop.selfDevices().map((d) => d.deviceDid).sort())
@@ -203,7 +201,7 @@ describe('self-device coordinator', () => {
   test('an intruder who guessed the rendezvous room is discovered but refused (no same-person cert)', async () => {
     const { root, discoverySecret, devices, roster } = await person(1);
     const other = await person(1); // a different person entirely
-    const { meshFor, flush } = createMemoryMeshFabric();
+    const { meshFor, flushUntil } = createMemoryMeshFabric();
     const now = () => 1_700_000_000_000;
 
     const mine = createSelfDeviceCoordinator({
@@ -220,7 +218,8 @@ describe('self-device coordinator', () => {
 
     await mine.start();
     await intruder.start();
-    await flush();
+    await flushUntil(() => mine.candidates().some((candidate) =>
+      candidate.deviceDid === other.devices[0].identity.did && candidate.status === 'refused'));
 
     expect(mine.selfDevices()).toEqual([]);
     const candidate = mine.candidates().find((c) => c.deviceDid === other.devices[0].identity.did);
@@ -230,7 +229,7 @@ describe('self-device coordinator', () => {
 
   test('a revoked device is discovered but refused at the handshake', async () => {
     const { root, discoverySecret, devices } = await person(2);
-    const { meshFor, flush } = createMemoryMeshFabric();
+    const { meshFor, flushUntil } = createMemoryMeshFabric();
     const now = () => 1_700_000_000_000;
     // Desktop's roster REVOKES the laptop.
     const revokingRoster = await buildDeviceRoster({
@@ -253,7 +252,8 @@ describe('self-device coordinator', () => {
     });
     await desktop.start();
     await laptop.start();
-    await flush();
+    await flushUntil(() => desktop.candidates().some((candidate) =>
+      candidate.deviceDid === devices[1].identity.did && candidate.defect === 'device-revoked'));
     expect(desktop.selfDevices()).toEqual([]);
     const candidate = desktop.candidates().find((c) => c.deviceDid === devices[1].identity.did);
     expect(candidate?.defect).toBe('device-revoked');

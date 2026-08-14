@@ -25,26 +25,16 @@ const createMeshFabric = () => {
   type Member = { did: string; onPeer: Set<(a: { did: string }) => void>; onDirect: Set<(a: { from: string; data: any }) => void> };
   const rooms = new Map<string, Map<string, Member>>();
   const queue: Array<() => void> = [];
-  // Drain until the fabric is genuinely quiescent.
-  //
-  // why not "loop while queue.length": a handler awaits real crypto (SHA-256
-  // over a surface, Ed25519 verification), so the queue is repeatedly EMPTY
-  // while the next frame is still being produced. Stopping at the first empty
-  // queue makes the drain finish early, which is only visible as a flake on a
-  // loaded machine. Instead, keep turning the event loop until several
-  // consecutive turns produce no new work.
-  const flush = async ({ idleTurns = 8, maxTurns = 4000 } = {}) => {
-    let idle = 0;
-    for (let turn = 0; turn < maxTurns && idle < idleTurns; turn++) {
-      if (queue.length === 0) {
-        idle++;
-      } else {
-        idle = 0;
-        for (const fn of queue.splice(0)) fn();
-      }
+  // Crypto and hashing can leave the queue empty while work is still pending.
+  // Settle against the state each test needs instead of guessing an idle duration.
+  const flushUntil = async (ready: () => boolean, maxTurns = 4000) => {
+    for (let turn = 0; turn < maxTurns; turn++) {
+      for (const fn of queue.splice(0)) fn();
       await Promise.resolve();
       await new Promise((resolve) => setTimeout(resolve, 0));
+      if (ready()) return;
     }
+    throw new Error('memory mesh did not reach the expected state');
   };
   const meshFor = (did: string) => ({
     did,
@@ -74,7 +64,7 @@ const createMeshFabric = () => {
       };
     },
   });
-  return { meshFor, flush };
+  return { meshFor, flushUntil };
 };
 
 const fakeVault = (seed: Record<string, string> = {}) => {
@@ -124,14 +114,15 @@ describe('finished-marker rehearsal (Bun, in-memory mesh)', () => {
     expect(vaultB.map.has('distributed/identity/v1')).toBe(false);
 
     // ── discovery + mutual auth over the rendezvous mesh ──
-    const { meshFor, flush } = createMeshFabric();
+    const { meshFor, flushUntil } = createMeshFabric();
     const inputsA = (await loadCoordinatorInputs(vaultA))!;
     const inputsB = (await loadCoordinatorInputs(vaultB))!;
     const coordA = createSelfDeviceCoordinator({ ...inputsA, mesh: meshFor(inputsA.deviceIdentity.did), now });
     const coordB = createSelfDeviceCoordinator({ ...inputsB, mesh: meshFor(inputsB.deviceIdentity.did), now });
     await coordA.start();
     await coordB.start();
-    await flush();
+    await flushUntil(() => coordA.isSelfDevice(inputsB.deviceIdentity.did)
+      && coordB.isSelfDevice(inputsA.deviceIdentity.did));
     expect(coordA.isSelfDevice(inputsB.deviceIdentity.did)).toBe(true);
     expect(coordB.isSelfDevice(inputsA.deviceIdentity.did)).toBe(true);
 
@@ -189,7 +180,7 @@ describe('finished-marker rehearsal (Bun, in-memory mesh)', () => {
     // One quiescent drain carries the whole offer/pull/chunk/apply exchange.
     // If the restore did not complete, say WHAT was outstanding rather than
     // asserting on a null and leaving the next reader guessing.
-    await flush();
+    await flushUntil(() => result !== null);
     if (!result) {
       throw new Error(
         `restore did not complete: wanted=${JSON.stringify(receiver.wantedSurfaces())} `
