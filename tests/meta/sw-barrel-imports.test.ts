@@ -15,8 +15,9 @@
 // (no `export *`), so a text parse is exact.
 
 import { describe, test, expect } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
+import { init, parse } from 'es-module-lexer';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 
 const stripComments = (s: string): string => s.replace(/\/\/[^\n]*/g, '');
@@ -54,6 +55,35 @@ const swBarrelImports = (src: string): string[] => {
   return names;
 };
 
+/**
+ * Every statically linked module Chrome must parse before the MV3 worker can
+ * finish registration. Dynamic imports are deliberately excluded: they do not
+ * delay listener registration and are the intended boundary for host-only code.
+ */
+const staticImportGraph = async (entry: string): Promise<Set<string>> => {
+  await init;
+  const graph = new Set<string>();
+  const extensionPrefix = `${resolve(EXTENSION_DIR)}${sep}`;
+
+  const visit = (file: string) => {
+    const absolute = resolve(file);
+    if (graph.has(absolute) || !existsSync(absolute)) return;
+    graph.add(absolute);
+    const source = readFileSync(absolute, 'utf8');
+    for (const imported of parse(source)[0]) {
+      if (imported.d !== -1 || !imported.n) continue;
+      const specifier = imported.n.split(/[?#]/, 1)[0];
+      const target = specifier.startsWith('/')
+        ? resolve(EXTENSION_DIR, `.${specifier}`)
+        : resolve(dirname(absolute), specifier);
+      if (target.startsWith(extensionPrefix)) visit(target);
+    }
+  };
+
+  visit(entry);
+  return graph;
+};
+
 describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
   const swSrc = readFileSync(join(EXTENSION_DIR, 'background', 'service-worker.js'), 'utf8');
   const barrelSrc = readFileSync(join(EXTENSION_DIR, 'peerd-runtime', 'background.js'), 'utf8');
@@ -89,5 +119,21 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     expect(barrelSrc).not.toContain("from './voice/mic-button.js'");
     expect(voicePickerSrc).not.toContain("from './transcriber.js'");
     expect(swSrc).not.toContain('/vendor/moonshine-js/');
+  });
+
+  test('the complete cold service-worker graph excludes universal and UI-only modules', async () => {
+    const graph = await staticImportGraph(join(EXTENSION_DIR, 'background', 'service-worker.js'));
+    const modules = new Set([...graph].map((file) => relative(EXTENSION_DIR, file)));
+
+    // Keep this non-trivial assertion so a parser or path-resolution regression
+    // cannot turn the exclusions below into vacuous passes.
+    expect(modules.size).toBeGreaterThan(100);
+    expect(modules).not.toContain('peerd-runtime/index.js');
+    expect(modules).not.toContain('peerd-engine/index.js');
+    expect(modules).not.toContain('peerd-runtime/voice/mic-button.js');
+    expect(modules).not.toContain('peerd-voice-host/index.js');
+    expect(modules).not.toContain('peerd-engine/editor.js');
+    expect([...modules].some((file) => file.includes('vendor/codemirror'))).toBe(false);
+    expect([...modules].some((file) => file.includes('vendor/moonshine-js'))).toBe(false);
   });
 });
