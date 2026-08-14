@@ -445,14 +445,14 @@ export {
   WEB_TOOLS, captureTool,
 } from './tools/web/index.js';
 
-// --- voice (local transcription) ----------------------------------------
-export {
-  createVoiceManager,
-  createModelStore,
-  createBestTranscriber, detectVoiceCapability,
-  MicButton,
-  normalizeVariant, normalizeEngine, VOICE_ENGINES,
-} from './voice/index.js';
+// --- voice (lightweight control/UI surface) -----------------------------
+// The offscreen-only transcriber factory imports Moonshine and must never be
+// reachable from this universal barrel: the MV3 worker evaluates it cold.
+export { createVoiceManager } from './voice/manager.js';
+export { createModelStore } from './voice/model-store.js';
+export { detectVoiceCapability } from './voice/engine-picker.js';
+export { MicButton } from './voice/mic-button.js';
+export { normalizeVariant, normalizeEngine, VOICE_ENGINES } from './voice/settings.js';
 
 // --- pdf (read_pdf tool: pdf.js text layer + opt-in OCR) ----------------
 export {

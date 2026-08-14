@@ -1,6 +1,6 @@
 // @ts-check
 
-import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/index.js';
+import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/background.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 
 const POD_EXEC_PREVIEW_CHARS = 8_000;

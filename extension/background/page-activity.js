@@ -30,7 +30,7 @@ import {
   clearActivityOverlayInjected,
   isDenylistedTab,
   liveDocumentLocationInjected,
-} from '/peerd-runtime/index.js';
+} from '/peerd-runtime/background.js';
 
 /**
  * The tab group the driven tab joins. Deliberately the SAME title the engine

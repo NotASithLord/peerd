@@ -491,7 +491,14 @@ export async function launchPeerd({
   process.on('exit', cleanup);
   process.on('SIGINT', () => { cleanup(); process.exit(130); });
 
-  const port = await waitForCdpPort(profile);
+  let port;
+  try {
+    port = await waitForCdpPort(profile);
+  } catch (error) {
+    cleanup();
+    const diagnostics = chromeErr.trim();
+    throw new Error(`${error?.message ?? error}${diagnostics ? `\nChrome stderr:\n${diagnostics}` : ''}`);
+  }
   log('cdp port:', port);
 
   // Redirect downloads browser-wide to the temp dir (headless honors this CDP

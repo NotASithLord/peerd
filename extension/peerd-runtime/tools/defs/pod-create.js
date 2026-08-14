@@ -3,7 +3,7 @@
 // Git, egress, and tab lifecycle primitives.
 
 import { POD_TAB_GROUP_TITLE } from '/background/pod-client.js';
-import { normalizeGitRemote } from '/peerd-engine/index.js';
+import { normalizeGitRemote } from '/peerd-engine/background.js';
 import { oncePerSession } from './once-per-session.js';
 
 /** @param {boolean} persistent */

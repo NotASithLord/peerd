@@ -15,15 +15,14 @@
 // everything above (manager, mic button, UI) is engine-agnostic and passes
 // down the user's voiceEngine preference ('auto' | 'web-speech' | 'moonshine').
 
-import { createTranscriber, isMoonshineVendored } from './transcriber.js';
-import { createWebSpeechTranscriber, isWebSpeechAvailable } from './web-speech-transcriber.js';
+import { isWebSpeechAvailable } from './web-speech-transcriber.js';
 import { hasValidModelSris } from './model-store.js';
-import { VoiceUnsupportedError } from './errors.js';
+import { MOONSHINE_VENDORED } from './vendor-status.js';
 
 // why: Moonshine is only a real option when it's BOTH vendored AND its model
 // SRIs are pinned (compute-model-sri.sh). Until then it can't download, so
 // 'auto' must never resolve to it.
-const moonshineReady = () => isMoonshineVendored() && hasValidModelSris();
+export const moonshineReady = () => MOONSHINE_VENDORED && hasValidModelSris();
 
 /**
  * Pure resolution of which engine to run, given a preference + what each
@@ -80,25 +79,4 @@ export const detectVoiceCapability = (pref = 'auto', hosts = {}) => {
     source = 'vendored';
   }
   return { engine, webSpeech, moonshine, cloudVendor, source };
-};
-
-/**
- * Build the chosen transcriber. Mirrors detectVoiceCapability's decision so
- * the side panel and the offscreen doc never disagree on which engine runs.
- * The offscreen voice handler calls this on voice/init with the manager's
- * already-resolved preference.
- *
- * @param {object} [deps]
- * @param {'auto'|'web-speech'|'moonshine'} [pref] default 'auto'
- * @returns {ReturnType<typeof createTranscriber> | ReturnType<typeof createWebSpeechTranscriber>}
- */
-export const createBestTranscriber = (deps = {}, pref = 'auto') => {
-  const engine = resolveEngine(pref, isWebSpeechAvailable(), moonshineReady());
-  if (engine === 'web-speech') return createWebSpeechTranscriber(deps);
-  if (engine === 'moonshine') return createTranscriber(deps);
-  throw new VoiceUnsupportedError(
-    'No transcription engine available. Run peerd in a browser with the Web '
-    + 'Speech API, or pin the Moonshine model SRIs (scripts/compute-model-sri.sh) '
-    + 'for local voice.',
-  );
 };

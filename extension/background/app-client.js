@@ -20,7 +20,7 @@ import {
   opfsHelpers,
   buildAppManifest,
   parseAppManifest,
-} from '/peerd-engine/index.js';
+} from '/peerd-engine/background.js';
 import { base64ByteLength, fromBase64, toBase64 } from '/shared/bundle/bytes.js';
 import { MAX_NETWORK_BUNDLE_BYTES, packBundle } from '/shared/bundle/bundle.js';
 
@@ -167,10 +167,10 @@ const opfsForApp = (appId, beforeMutation = () => {}) =>
 
 /**
  * @param {Object} deps
- * @param {ReturnType<typeof import('/peerd-engine/index.js').createAppRegistry>} deps.registry
+ * @param {ReturnType<typeof import('/peerd-engine/background.js').createAppRegistry>} deps.registry
  * @param {ReturnType<typeof import('./app-tab-tracker.js').createAppTabTracker>} deps.tracker
  * @param {() => void | Promise<void>} [deps.beforeOpfsMutation]
- * @param {ReturnType<typeof import('/peerd-engine/index.js').createRepositoryService>} [deps.repositories]
+ * @param {ReturnType<typeof import('/peerd-engine/background.js').createRepositoryService>} [deps.repositories]
  */
 export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => {}, repositories = undefined }) => {
   // why injected: App files are a self-hosted durable surface. The lifecycle

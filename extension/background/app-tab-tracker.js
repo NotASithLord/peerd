@@ -11,7 +11,7 @@
 // so re-opening an existing app doesn't yank the user back.
 
 import { createTabTracker } from './tab-tracker.js';
-import { APP_TAB_PATH } from '/peerd-engine/index.js';
+import { APP_TAB_PATH } from '/peerd-engine/background.js';
 import browser from '/vendor/browser-polyfill.js';
 
 const READY_TIMEOUT_MS = 15_000;

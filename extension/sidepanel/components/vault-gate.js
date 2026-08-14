@@ -270,6 +270,7 @@ const ERROR_MESSAGES = {
  * @property {boolean} floorViolated  §5d: the 8-character floor is announced
  *   up front and a violation emphasizes the hint - it is not an error.
  * @property {boolean} busy
+ * @property {'idle'|'ceremony'|'finishing'} passkeyStage
  * @property {boolean} showPassphrase
  * @property {boolean} forcePassphrase
  * @property {CapabilityProbe|null} probe
@@ -287,6 +288,7 @@ export const VaultGate = {
     vnode.state.errorKind = 'neutral';
     vnode.state.floorViolated = false;
     vnode.state.busy = false;
+    vnode.state.passkeyStage = 'idle';
     // Unlock-state: with a passkey enrolled, the recovery-passphrase
     // form is collapsed behind a link. Persisted for the component mount
     // so a single cancelled passkey tap doesn't yank the form away.
@@ -325,7 +327,7 @@ export const VaultGate = {
       : null);
     // §5f: the ceremony hands control to the browser - say so while it is
     // pending. The spec marks this sentence as the non-negotiable part.
-    const waitNote = () => (ui.busy
+    const waitNote = () => (ui.busy && ui.passkeyStage !== 'finishing'
       ? m('p.muted.gate-wait-note', 'Your browser is asking. Nothing has been sent anywhere.')
       : null);
     // §5g: say WHY it locked - only for an idle lock (a manual lock was the
@@ -342,6 +344,11 @@ export const VaultGate = {
     const isFirstRun = !state.vault.initialized;
     const prfEnrolled = !!state.vault.prfEnrolled;
     const hasRecovery = !!state.vault.hasRecovery;
+    // INITIAL_STATE is only a paint-safe placeholder. Do not let a user finish
+    // WebAuthn before the background has loaded and sent its authoritative
+    // vault snapshot; otherwise the post-credential request can appear stuck
+    // behind a cold service-worker module graph.
+    const backendReady = state.hydrated === true;
     const webauthnAvailable = isWebAuthnAvailable();
     // What this machine offers, per the capability probe. null while the
     // probe is in flight → the generic single passkey button (legacy).
@@ -360,16 +367,25 @@ export const VaultGate = {
     // flavor: 'platform' | 'security-key' | undefined (browser's picker).
     /** @param {EnrollFlavor} [flavor] */
     const setupWithPasskey = async (flavor) => {
-      if (ui.busy) return;
+      if (ui.busy || !backendReady) return;
       ui.error = null;
       ui.errorKind = 'neutral';
       ui.busy = true;
+      ui.passkeyStage = 'ceremony';
+      // A hardware authenticator can keep the browser prompt open long enough
+      // for an extension SW to become idle. A cheap status request keeps the
+      // already-hydrated backend warm until the credential is ready to commit.
+      const keepBackendWarm = setInterval(() => {
+        send({ type: 'vault/prfStatus' }).catch(() => {});
+      }, 20_000);
       m.redraw();
       try {
         // Run the ceremony FIRST while the click is the active gesture —
         // create() needs user activation, which a SW round-trip can lose.
         const { credentialId, prfSalt, prfOutput, transports } =
           await enrollWithPrf({ flavor });
+        ui.passkeyStage = 'finishing';
+        m.redraw();
         const reply = await send({
           type: 'vault/initializeWithPasskey',
           credentialId: bytesToBase64(credentialId),
@@ -402,7 +418,9 @@ export const VaultGate = {
           ui.error = 'Passkey setup failed. Try again, or use a passphrase.';
         }
       } finally {
+        clearInterval(keepBackendWarm);
         ui.busy = false;
+        ui.passkeyStage = 'idle';
         m.redraw();
       }
     };
@@ -410,7 +428,7 @@ export const VaultGate = {
     /** @param {Event} [e] */
     const setupWithPassphrase = async (e) => {
       e?.preventDefault?.();
-      if (ui.busy) return;
+      if (ui.busy || !backendReady) return;
       ui.error = null;
       ui.errorKind = 'neutral';
       ui.floorViolated = false;
@@ -524,6 +542,9 @@ export const VaultGate = {
         // browser's full picker, exactly the pre-probe behavior.
         const paths = plan?.paths?.length ? plan.paths : [undefined];
         const leadsWithPlatform = paths[0] === 'platform';
+        const passkeyBusyLabel = ui.passkeyStage === 'finishing'
+          ? 'Finishing setup…'
+          : 'Waiting for passkey…';
         /**
          * @param {EnrollFlavor|undefined} flavor
          * @param {boolean} isLead
@@ -564,12 +585,13 @@ export const VaultGate = {
           m('.auth-actions', [
             ...paths.map((flavor, i) => m(i === 0 ? 'button' : 'button.secondary', {
               type: 'button',
-              disabled: ui.busy,
+              disabled: ui.busy || !backendReady,
               onclick: () => setupWithPasskey(flavor),
-            }, ui.busy ? '…' : buttonLabel(flavor, i === 0))),
+            }, !backendReady ? 'Preparing secure setup…'
+              : ui.busy ? passkeyBusyLabel : buttonLabel(flavor, i === 0))),
             m('button.linklike', {
               type: 'button',
-              disabled: ui.busy,
+              disabled: ui.busy || !backendReady,
               onclick: () => { ui.forcePassphrase = true; ui.error = null; ui.errorKind = 'neutral'; ui.floorViolated = false; m.redraw(); },
             }, 'Use a passphrase instead'),
           ]),
@@ -582,6 +604,14 @@ export const VaultGate = {
           m('p.muted', { style: 'font-size:11px; margin-top:12px;' },
             'You can add a recovery passphrase later in Settings, in case ' +
             'you lose access to your passkey.'),
+          !backendReady ? m('p.muted', {
+            role: 'status',
+            'aria-live': 'polite',
+          }, 'Starting the secure vault service. This may take a moment on first launch…') : null,
+          ui.passkeyStage === 'finishing' ? m('p.muted', {
+            role: 'status',
+            'aria-live': 'polite',
+          }, 'Passkey verified. Finishing secure vault setup…') : null,
           waitNote(),
           gateError(),
         ]);
@@ -634,17 +664,21 @@ export const VaultGate = {
             'at least 8 characters'),
           gateError(),
           m('.auth-actions.auth-actions--row', [
-            m('button', { type: 'submit', disabled: ui.busy },
-              ui.busy ? '…' : 'Create vault'),
+            m('button', { type: 'submit', disabled: ui.busy || !backendReady },
+              !backendReady ? 'Preparing secure setup…' : ui.busy ? '…' : 'Create vault'),
             // No passkey toggle when the client definitively can't do
             // PRF — offering a path that can only fail is worse than
             // not offering it.
             (webauthnAvailable && !passkeyBlocked) ? m('button.secondary', {
               type: 'button',
-              disabled: ui.busy,
+              disabled: ui.busy || !backendReady,
               onclick: () => { ui.forcePassphrase = false; ui.error = null; ui.errorKind = 'neutral'; ui.floorViolated = false; m.redraw(); },
             }, 'Use a passkey instead') : null,
           ]),
+          !backendReady ? m('p.muted', {
+            role: 'status',
+            'aria-live': 'polite',
+          }, 'Starting the secure vault service. This may take a moment on first launch…') : null,
         ]),
       ]);
     }

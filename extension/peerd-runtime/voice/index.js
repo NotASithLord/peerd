@@ -10,6 +10,7 @@
 
 export { createVoiceManager } from './manager.js';
 export { createModelStore } from './model-store.js';
-export { createBestTranscriber, detectVoiceCapability } from './engine-picker.js';
+export { detectVoiceCapability } from './engine-picker.js';
+export { createBestTranscriber } from './transcriber-picker.js';
 export { MicButton } from './mic-button.js';
 export { normalizeVariant, normalizeEngine, VOICE_ENGINES } from './settings.js';

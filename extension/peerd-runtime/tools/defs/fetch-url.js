@@ -21,7 +21,7 @@ import { originOfUrl } from './dom-helpers.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { disarmMarkup, disarmText } from '../../dom/cdr.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
-import { needsWebWriteConfirm } from '/peerd-engine/index.js';
+import { needsWebWriteConfirm } from '/peerd-engine/background.js';
 // The pure "is this response a document file?" test — see peerd-runtime/doc.
 import { sniffResponseAsDocument } from '../../doc/sniff.js';
 import { runtimeCapabilityAvailable, runtimeCapabilityForTool } from '../../runtime-capabilities.js';

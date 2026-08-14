@@ -17,7 +17,7 @@ import {
   moduleImportPolicyMessage,
   REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE,
   REMOTE_MODULE_RESTRICTED_CODE,
-} from '/peerd-engine/index.js';
+} from '/peerd-engine/background.js';
 import { JS_PITFALLS_NOTE, SCRIPT_BUILTINS_NOTE } from './code-style-note.js';
 import { oncePerSession } from './once-per-session.js';
 import { pushValueBlock, serializeValue } from './value-block.js';

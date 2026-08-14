@@ -19,7 +19,7 @@
 import {
   REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE,
   UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE,
-} from '/peerd-engine/index.js';
+} from '/peerd-engine/background.js';
 
 /**
  * The taxonomy. Small on purpose: a debugging user needs the NEIGHBORHOOD

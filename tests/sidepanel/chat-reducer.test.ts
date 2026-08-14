@@ -15,6 +15,15 @@ const withSession = (sessionId: string, messages: any[] = []) =>
   ({ ...INITIAL_STATE, session: { sessionId, messages, cost: null } });
 
 describe('reduceChat', () => {
+  test('the client becomes hydrated only after an authoritative state snapshot', () => {
+    expect(INITIAL_STATE.hydrated).toBe(false);
+    const hydrated = reduceChat(INITIAL_STATE, {
+      type: 'state',
+      state: { vault: { initialized: false, locked: true } },
+    });
+    expect(hydrated.hydrated).toBe(true);
+  });
+
   test('unhandled / voice / malformed → returns the SAME ref (surface skips redraw)', () => {
     expect(reduceChat(INITIAL_STATE, { type: 'voice/chunk' })).toBe(INITIAL_STATE);
     expect(reduceChat(INITIAL_STATE, { type: 'totally/unknown' })).toBe(INITIAL_STATE);

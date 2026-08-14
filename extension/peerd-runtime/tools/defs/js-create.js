@@ -8,7 +8,7 @@
 // without an explicit `notebook` arg route here.
 
 import { JS_TAB_GROUP_TITLE } from '/background/notebook-client.js';
-import { normalizeGitRemote } from '/peerd-engine/index.js';
+import { normalizeGitRemote } from '/peerd-engine/background.js';
 import { oncePerSession } from './once-per-session.js';
 
 // why a Notebook-specific note (the shared CODE_STYLE_NOTE rides the Notebook

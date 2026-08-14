@@ -1,4 +1,4 @@
-// Guard: every name the service worker imports from the peerd-runtime barrel
+// Guard: every name the service worker imports from its peerd-runtime barrel
 // must be exported by that barrel.
 //
 // why this exists: the SW (background/service-worker.js) is an ES module Chrome
@@ -36,25 +36,32 @@ const barrelExports = (src: string): Set<string> => {
   return out;
 };
 
-/** Names the SW imports specifically from the peerd-runtime barrel. */
+/** Names the SW imports specifically from its background runtime barrel. */
 const swBarrelImports = (src: string): string[] => {
   // [^}]* (not [\s\S]*?) so the match can't span EARLIER import blocks from other
   // modules — an import's braces never contain a '}', so this isolates exactly the
   // peerd-runtime statement.
-  const m = src.match(/import\s*\{([^}]*)\}\s*from\s*['"]\/peerd-runtime\/index\.js['"]/);
-  if (!m) throw new Error('could not find the SW import from /peerd-runtime/index.js');
   const names: string[] = [];
-  for (const raw of stripComments(m[1]).split(',')) {
-    const name = raw.trim();
-    if (!name) continue;
-    names.push(name.split(/\s+as\s+/)[0].trim()); // `a as b` needs the barrel to export a
+  const matches = src.matchAll(/import\s*\{([^}]*)\}\s*from\s*['"]\/peerd-runtime\/background\.js['"]/g);
+  for (const match of matches) {
+    for (const raw of stripComments(match[1]).split(',')) {
+      const name = raw.trim();
+      if (!name) continue;
+      names.push(name.split(/\s+as\s+/)[0].trim()); // `a as b` needs the barrel to export a
+    }
   }
+  if (!names.length) throw new Error('could not find the SW import from /peerd-runtime/background.js');
   return names;
 };
 
 describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
   const swSrc = readFileSync(join(EXTENSION_DIR, 'background', 'service-worker.js'), 'utf8');
-  const barrelSrc = readFileSync(join(EXTENSION_DIR, 'peerd-runtime', 'index.js'), 'utf8');
+  const barrelSrc = readFileSync(join(EXTENSION_DIR, 'peerd-runtime', 'background.js'), 'utf8');
+  const universalSrc = readFileSync(join(EXTENSION_DIR, 'peerd-runtime', 'index.js'), 'utf8');
+  const voicePickerSrc = readFileSync(
+    join(EXTENSION_DIR, 'peerd-runtime', 'voice', 'engine-picker.js'),
+    'utf8',
+  );
   const exported = barrelExports(barrelSrc);
   const imported = swBarrelImports(swSrc);
 
@@ -66,5 +73,21 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
   test('every SW import from the barrel is exported by it (a miss = SW registration failure, status 15)', () => {
     const missing = imported.filter((n) => !exported.has(n));
     expect(missing).toEqual([]);
+  });
+
+  test('the SW-reachable runtime barrel excludes offscreen-only voice code', () => {
+    // voice/index exposes the transcriber factory and reaches the multi-MB
+    // Moonshine bundle. The universal barrel must export only lightweight
+    // voice control/UI modules directly.
+    expect(universalSrc).not.toMatch(/from\s*['"]\.\/voice\/index\.js['"]/);
+    expect(universalSrc).not.toContain('createBestTranscriber');
+    expect(universalSrc).toContain("from './voice/settings.js'");
+    expect(swSrc).toContain("from '/peerd-runtime/background.js'");
+    expect(swSrc).not.toContain("from '/peerd-runtime/index.js'");
+    expect(swSrc).toContain("from '/peerd-engine/background.js'");
+    expect(swSrc).not.toContain("from '/peerd-engine/index.js'");
+    expect(barrelSrc).not.toContain("from './voice/mic-button.js'");
+    expect(voicePickerSrc).not.toContain("from './transcriber.js'");
+    expect(swSrc).not.toContain('/vendor/moonshine-js/');
   });
 });

@@ -30,7 +30,7 @@
 //     page_exec (works on Gmail). Same code, different channel.
 
 import browser from '/vendor/browser-polyfill.js';
-import { shapeSketch } from '/peerd-runtime/index.js';
+import { shapeSketch } from '/peerd-runtime/background.js';
 import {
   createNetworkCaptureRegistry,
   networkCaptureRequestPolicy,

@@ -67,8 +67,9 @@ prose orientation is this file, and the rest is the source itself.
 1. **`CLAUDE.md`** (this file) — orientation. Start here every session.
 2. **The module code** — `extension/peerd-provider/`, `peerd-egress/`,
    `peerd-engine/`, `peerd-runtime/`, `peerd-distributed/`. Each
-   module's `index.js` is its public surface; read it first, then the
-   files it exports.
+   module's `index.js` is its universal public surface; read it first, then the
+   files it exports. An explicit environment entry point such as
+   `background.js` may expose a cold-start-safe subset for that host.
 3. **The code.** For concrete behavior (vault crypto, denylist matcher,
    agent loop, tool dispatcher, prompt-injection defenses, the manifest,
    the MV3 keepalive trick), read the source in the relevant module. It
@@ -199,9 +200,10 @@ prose orientation is this file, and the rest is the source itself.
   uncovered UI change is an unfinished one. why: the unit tiers can
   assert structure but can't SEE the render; this loop is how an agent
   closes that gap on its own before pushing.
-- **`index.js` is the public API per module.** ESLint
-  `no-restricted-imports` forbids deep paths from outside the module.
-  Inside the module, deep imports are fine.
+- **Public entry points are the API per module.** `index.js` is the universal
+  surface; a named environment surface such as `background.js` may expose a
+  strict cold-start subset. ESLint `no-restricted-imports` forbids every other
+  deep path from outside the module. Inside the module, deep imports are fine.
 - **The credential ladder — prefer the credential peerd cannot read.**
   When the agent must act as the user, climb DOWN this ladder and stop at
   the first rung that works; never drop a rung for convenience:

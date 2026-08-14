@@ -2,7 +2,7 @@
 // Pod tab lifecycle: thin configuration over the shared tracker.
 
 import { createTabTracker } from './tab-tracker.js';
-import { POD_TAB_PATH } from '/peerd-engine/index.js';
+import { POD_TAB_PATH } from '/peerd-engine/background.js';
 
 const READY_TIMEOUT_MS = 15_000;
 

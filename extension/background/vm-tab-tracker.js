@@ -12,7 +12,7 @@
 // `.vmId`, so the SW can interrupt that VM's pending RPCs in vm-client.
 
 import { createTabTracker } from './tab-tracker.js';
-import { VM_TAB_PATH, VMTabClosedError } from '/peerd-engine/index.js';
+import { VM_TAB_PATH, VMTabClosedError } from '/peerd-engine/background.js';
 
 const READY_TIMEOUT_MS = 30_000;
 

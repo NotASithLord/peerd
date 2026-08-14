@@ -19,7 +19,7 @@ import {
   EditParseError, SearchNotFoundError, SearchAmbiguousError,
 } from '../../edit/errors.js';
 import { resolveCanWrite } from '../../edit/permissions-adapter.js';
-import { MAX_MODEL_APP_FILE_BYTES } from '/peerd-engine/index.js';
+import { MAX_MODEL_APP_FILE_BYTES } from '/peerd-engine/background.js';
 
 const MAX_CONTENT_CHARS = 500_000;
 

@@ -4,7 +4,7 @@
 // the queue after dispatch so two Workers may run independently.
 
 import browser from '/vendor/browser-polyfill.js';
-import { createKeyedQueue } from '/peerd-engine/index.js';
+import { createKeyedQueue } from '/peerd-engine/background.js';
 
 export const POD_TAB_GROUP_TITLE = 'peerd';
 const CALL_TIMEOUT_MS = 310_000;

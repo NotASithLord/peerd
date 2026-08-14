@@ -8,7 +8,7 @@
 // vocabulary.
 
 import browser from '/vendor/browser-polyfill.js';
-import { createKeyedQueue } from '/peerd-engine/index.js';
+import { createKeyedQueue } from '/peerd-engine/background.js';
 
 const MESSAGE_TIMEOUT_MS = 60_000;
 
@@ -22,7 +22,7 @@ export const JS_TAB_GROUP_TITLE = 'peerd';
 
 /**
  * @param {Object} deps
- * @param {ReturnType<typeof import('/peerd-engine/index.js').createNotebookRegistry>} deps.registry
+ * @param {ReturnType<typeof import('/peerd-engine/background.js').createNotebookRegistry>} deps.registry
  * @param {ReturnType<typeof import('./notebook-tab-tracker.js').createJsTabTracker>} deps.tracker
  */
 export const createJsClient = ({ registry, tracker }) => {

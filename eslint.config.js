@@ -26,9 +26,9 @@
 //     /peerd-egress/index.js — bare fetch bypasses the egress allowlist.
 //   - `no-restricted-syntax` forbids Mithril `m.request`, `m.jsonp`, and
 //     `m.mount(document.body, …)`.
-//   - `no-restricted-imports` enforces per-module public APIs — only
-//     /peerd-<name>/index.js is importable from outside the module.
-//     (CLAUDE.md: "index.js is the public API per module.")
+//   - `no-restricted-imports` enforces per-module public APIs — the universal
+//     index.js and the MV3 cold-start-safe background.js surface are the only
+//     module entry points importable from outside the module.
 //
 // New in this pass — the shadow/TDZ class of bug (as warnings):
 //   - `no-shadow`, `no-redeclare`, and `no-use-before-define`. These catch
@@ -42,9 +42,9 @@ import globals from 'globals';
 // re-list every rule EXCEPT the eval one (a flat-config override REPLACES the
 // whole rule, so the patterns it keeps must be spelled out).
 const CROSS_MODULE_IMPORT = {
-  // any `peerd-<name>/<deeper>` path that isn't the module's own top-level index.js
-  regex: '(^|/)peerd-[a-z]+/(?!index\\.js$).+',
-  message: 'Cross-module imports must go through /peerd-<name>/index.js. See docs/architecture.md §4.',
+  // any `peerd-<name>/<deeper>` path that isn't a declared public entry point
+  regex: '(^|/)peerd-[a-z]+/(?!index\\.js$|background\\.js$).+',
+  message: 'Cross-module imports must go through a declared /peerd-<name> public entry point.',
 };
 // The dweb module is stricter: NOTHING outside it may import it — not even its
 // index.js. Core code programs against /shared/dweb-interface.js + loadDweb()
@@ -130,7 +130,7 @@ export default [
         },
       ],
       // Cross-module deep imports are forbidden. From outside a peerd-*
-      // module you may only import the module's top-level index.js. Relaxed
+      // module you may only import a declared top-level public entry point. Relaxed
       // below for files INSIDE any peerd-* module (deep imports there are
       // fine) and for tests.
       //
@@ -141,8 +141,8 @@ export default [
       // relative (`../../peerd-engine/foo.js`). So the glob form matched
       // nothing; the rule was a no-op. (It went unnoticed because ESLint
       // itself never ran — the very gap this migration closes.) The regex
-      // matches any `peerd-<name>/<deeper>` path that isn't the module's
-      // own top-level `index.js`.
+      // matches any `peerd-<name>/<deeper>` path that isn't one of the
+      // module's declared top-level public entry points.
       'no-restricted-imports': [
         'error',
         { patterns: [CROSS_MODULE_IMPORT, DWEB_IMPORT, TESTS_IMPORT, EVAL_IMPORT] },

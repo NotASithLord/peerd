@@ -31,11 +31,20 @@ let currentState = INITIAL_STATE;
 // On disconnect, we reset our local state to the locked-vault default
 // — otherwise the UI would show a stale "unlocked" state after a SW
 // restart, and the user's next action would fail confusingly.
+/** @type {any} */
 let port = null;
 const connectPort = () => {
-  port = browser.runtime.connect({ name: 'sidepanel' });
-  port.onMessage.addListener(handlePortMessage);
-  port.onDisconnect.addListener(handlePortDisconnect);
+  const connectedPort = browser.runtime.connect({ name: 'sidepanel' });
+  port = connectedPort;
+  connectedPort.onMessage.addListener(handlePortMessage);
+  connectedPort.onDisconnect.addListener(handlePortDisconnect);
+  // Chrome can establish this port while a cold MV3 module worker is still
+  // linking, before its onConnect listener exists. In that race Chrome neither
+  // replays the event nor disconnects the orphaned port, so the historical
+  // push-on-connect contract leaves the panel on its placeholder state forever.
+  // A one-shot message is queued independently; retry it until the worker's
+  // dispatcher is live, then fold the reply through the same state reducer.
+  void requestInitialState(connectedPort);
 };
 
 
@@ -68,6 +77,42 @@ const handlePortMessage = (raw) => {
   m.redraw();
 };
 
+/**
+ * Establish the initial snapshot even if the port's onConnect event was lost
+ * while the cold worker registered its listeners.
+ * @param {any} connectedPort
+ */
+const requestInitialState = async (connectedPort) => {
+  /** @param {string} type */
+  const waitForReply = async (type) => {
+    let retryMs = 100;
+    while (port === connectedPort && !currentState.hydrated) {
+      // A send begun before onMessage registration can remain pending forever
+      // on Chrome instead of rejecting. Bound each attempt so a lost startup
+      // message cannot prevent the next one from reaching a live listener.
+      const reply = /** @type {{ ok?: boolean, state?: any } | null }} */ (
+        await Promise.race([
+          browser.runtime.sendMessage({ type }).catch(() => null),
+          new Promise((resolve) => setTimeout(() => resolve(null), 1_000)),
+        ])
+      );
+      if (reply?.ok) return reply;
+      await new Promise((resolve) => setTimeout(resolve, retryMs));
+      retryMs = Math.min(1_000, retryMs * 2);
+    }
+    return null;
+  };
+
+  // bootstrap/ready is registered early and deliberately holds its response
+  // channel open until the unified privileged dispatcher exists. That pending
+  // event prevents Chrome from retiring a cold worker halfway through boot.
+  if (!await waitForReply('bootstrap/ready')) return;
+  const reply = await waitForReply('state/get');
+  if (port === connectedPort && reply?.state) {
+    handlePortMessage({ type: 'state', state: reply.state });
+  }
+};
+
 const handlePortDisconnect = () => {
   console.warn('[sidepanel] SW port disconnected — reconnecting');
   // Pessimistically assume any in-memory unlocked state is stale: the
@@ -75,6 +120,8 @@ const handlePortDisconnect = () => {
   // until we get a fresh state push.
   currentState = {
     ...currentState,
+    // The old snapshot is no longer authoritative until the revived SW replies.
+    hydrated: false,
     // why: prfEnrolled is kept across the disconnect — it's a persistent
     // vault property, not a session one, so the Touch ID button shouldn't
     // flicker away while we reconnect.

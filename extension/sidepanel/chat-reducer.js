@@ -85,6 +85,7 @@
  * The shared UI state folded by reduceChat. Mirrors INITIAL_STATE; fields
  * the SW pushes via the 'state' snapshot are merged in wholesale.
  * @typedef {Object} ChatState
+ * @property {boolean} hydrated  true only after the surface receives an authoritative SW snapshot
  * @property {{ initialized: boolean, locked: boolean, unlockedAt: number, prfEnrolled: boolean, hasRecovery: boolean, lockReason?: 'idle'|'manual'|null }} vault
  * @property {SessionState} session
  * @property {{ current: string, hasKey: boolean, model: string, configRevision?: number }} providers
@@ -149,6 +150,7 @@
 
 /** @type {ChatState} */
 export const INITIAL_STATE = Object.freeze({
+  hydrated: false,
   vault: { initialized: false, locked: true, unlockedAt: 0, prfEnrolled: false, hasRecovery: false },
   session: { sessionId: null, messages: [], cost: null },
   providers: { current: 'anthropic', hasKey: false, model: 'claude-sonnet-4-6' },
@@ -925,7 +927,7 @@ export const reduceChat = (state, msg) => {
         : acceptsActorEpoch
           ? Math.max(state.actorProjectionRevision, incomingActorRevision ?? 0)
           : state.actorProjectionRevision;
-      return { ...state, ...msg.state, ...pruneProjections, notices,
+      return { ...state, ...msg.state, hydrated: true, ...pruneProjections, notices,
         actorProjectionEpoch,
         actorProjectionRevision,
         pendingConfirm: sessionChanged ? (msg.state?.pendingConfirm ?? null) : state.pendingConfirm,

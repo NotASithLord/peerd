@@ -353,7 +353,7 @@ import {
   // The debug surface: the bundle assembler + the delegation-tree walk the
   // session/debugBundle route runs (pure; the SW supplies the reads).
   assembleDebugBundle, childSessionIdsOf,
-} from '/peerd-runtime/index.js';
+} from '/peerd-runtime/background.js';
 
 import {
   flattenCategorisedDenylist,
@@ -424,7 +424,7 @@ import {
   parseAppManifest,
   createRepositoryService,
   podGitRemoteOperation,
-} from '/peerd-engine/index.js';
+} from '/peerd-engine/background.js';
 // MV3 ServiceWorkerGlobalScope rejects runtime import(). Keep the heavy vendor
 // statically reachable only from this host and inject it into the otherwise
 // operation-lazy repository service; unrelated peerd-engine consumers do not
@@ -470,7 +470,7 @@ import {
   shapeSessionsSurface, applySessionsSurface, shapeMemorySurface,
   shapeSettingsSurface,
   captureAppsSurface, applyAppsSurface, SurfaceApplyPartialError,
-} from '/peerd-runtime/index.js';
+} from '/peerd-runtime/background.js';
 import { makePrivateTransferOpenRoute, makePrivateTransferPort } from './private-transfer-port.js';
 import { downgradesActorConfirm, a2aConsentOutcome } from './a2a-consent.js';
 import { makeVaultRoutes } from './routes/vault.js';
@@ -4069,7 +4069,26 @@ let localGenSeq = 0;
 const localGens = new Map();
 const wakeLocalGen = (/** @type {any} */ s) => { const w = s.waiters.shift(); if (w) w(); };
 
-browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
+// The first UI can wake this large MV3 module graph before the unified route
+// dispatcher near the boot tail has registered. Chrome may otherwise retire
+// the worker while that unclaimed connect/message event is still waiting. This
+// early, first-party-only barrier holds one response channel open until every
+// privileged route is live; it returns no state or authority of its own.
+/** @type {() => void} */
+let markMessageDispatcherReady = () => {};
+const messageDispatcherReady = /** @type {Promise<void>} */ (new Promise((resolve) => {
+  markMessageDispatcherReady = () => resolve();
+}));
+
+browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ msg, /** @type {any} */ sender, /** @type {(reply: any) => void} */ sendResponse) => {
+  if (msg?.type === 'bootstrap/ready') {
+    if (!isTrustedSender(sender)) {
+      sendResponse({ ok: false, error: 'untrusted-sender' });
+      return false;
+    }
+    messageDispatcherReady.then(() => sendResponse({ ok: true }));
+    return true;
+  }
   if (msg?.type === 'local-model/delta') { const s = localGens.get(msg.genId); if (s) { s.tokens.push(msg.token); wakeLocalGen(s); } return undefined; }
   if (msg?.type === 'local-model/done') { const s = localGens.get(msg.genId); if (s) { s.done = true; s.error = msg.error ?? null; wakeLocalGen(s); } return undefined; }
   if (msg?.type === 'local-model/progress') {
@@ -4082,7 +4101,7 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
     return undefined;
   }
   return undefined;
-});
+}));
 
 // The async-generator the local-webgpu adapter consumes. Sends a SERIALIZABLE
 // generate command to the offscreen (no AbortSignal — not serializable; v1 runs
@@ -8150,6 +8169,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // resolver) + post-run rot bookkeeping ---
   ...makeToolboxRoutes({ toolboxStore }),
 })));
+markMessageDispatcherReady();
 
 // The toolbar icon + Alt+Shift+P front door (open the panel or home, per the
 // frontDoorView setting) lives in background/tab-affordances.js alongside the

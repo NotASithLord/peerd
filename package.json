@@ -29,6 +29,7 @@
     "test:e2e:goal": "bun scripts/cdp/run-e2e-verify.mjs --only=goal",
     "test:e2e:stop": "bun scripts/cdp/run-e2e-verify.mjs --only=stop",
     "test:e2e:error": "bun scripts/cdp/run-e2e-verify.mjs --only=error",
+    "test:e2e:passkey": "bun scripts/cdp/run-passkey-signup.mjs",
     "test:firefox": "bun scripts/firefox/run-runtime-tests.mjs",
     "test:e2e:visual": "bun scripts/cdp/run-e2e-verify.mjs --visual",
     "test:e2e:visual:update": "UPDATE_BASELINES=1 bun scripts/cdp/run-e2e-verify.mjs --visual",
