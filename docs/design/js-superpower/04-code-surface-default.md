@@ -70,6 +70,35 @@ mapping to the same gated tool. Functional E2E states exercise both the direct
 actor path and `script + actors.call` through real worker/SW/actor heaps, but the
 faked model wire makes those protocol evidence, not model-performance evidence.
 
+## External evidence (2026-08, non-qualifying)
+
+The industry is converging on the same bet. Browser Use CLI 3.0 dropped its
+fixed menu of browser actions for an agent-authored script surface (Python
+against a small harness), and Nous Research's Hermes agent replaced its twelve
+discrete browser tools with a single `browser_exec` on top of it, reporting a
+48–66% token reduction with no accuracy drop. Vercel's `agent-browser` CLI is
+the same shape.
+
+What this does and does not change here:
+
+- It corroborates the `page_code` direction and is exactly the result shape
+  the gate above demands (token savings WITHOUT a task-success loss). It does
+  NOT satisfy the gate: different model, harness, and perception surface, and
+  no paired peerd rows. It raises the prior that the paired web-surface bench
+  will pass: a reason to actually run the provider-backed comparison, not a
+  reason to skip it.
+- Much of the reported saving is the schema diet (a dozen tool schemas leaving
+  every request). peerd already collects that: a code-surface web actor is
+  advertised only its code toolset (`actorAllowedToolsFor` /
+  `actorDescriptors`, `tools/exposure.js`).
+- Those harnesses run the script with the agent's ambient authority. peerd's
+  does not: the sealed no-egress worker and per-call gating (denylist,
+  confirm, audit) via the `page/call` route are the part they don't have, and
+  the surface decision must never trade them away for token wins.
+- Their "editable harness" (the agent extending its own helper layer) is a
+  datapoint for the deferred durable DOM-routine library, not field evidence;
+  the deferral above stands, and peerd's stable layer remains site clients.
+
 ## Revisit condition
 
 Revisit the store default only with a qualifying paired dataset from the
