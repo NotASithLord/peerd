@@ -9,6 +9,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { REPO_ROOT } from './lib.ts';
+import { laneLogo } from './test-badges.ts';
 
 export interface FunctionalTestTotals {
   passed: number;
@@ -39,6 +40,8 @@ export const functionalTestBadge = (totals: FunctionalTestTotals) => ({
   label: 'Functional Tests',
   message: `${totals.passed}/${totals.total} passing`,
   color: totals.passed === totals.total ? 'brightgreen' : 'red',
+  // The suite runs under Bun; the browser lanes wear their own engine's mark.
+  ...laneLogo('bun'),
 });
 
 export const failedFunctionalTests = (xml: string): string[] => {

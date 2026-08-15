@@ -13,13 +13,15 @@
 // Usage:  bun scripts/cdp/run-inbrowser-tests.mjs [path/to/extension]
 // Env:    CHROME_PATH or CHROME — explicit Chrome/Chromium binary
 //         (browser-actions/setup-chrome exports CHROME_PATH in CI).
+//         PEERD_TEST_SUMMARY: path to write the run's counts to as JSON,
+//         which is what packaging/gen-inbrowser-test-badge.ts badges.
 // Exit:   0 if all in-browser tests pass, 1 otherwise.
 
 import { resolve, join, dirname, extname, delimiter, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { createReadStream, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 // why fileURLToPath: this repo lives under a path with SPACES (iCloud
@@ -218,6 +220,19 @@ const main = async () => {
     if (events.length) console.error('  page errors:\n   ' + events.slice(0, 12).join('\n   '));
   }
   close();
+  // why an optional summary file: the badge generator
+  // (packaging/gen-inbrowser-test-badge.ts) needs these counts as DATA. Scraping
+  // the log line below would make a console tweak silently rewrite a published
+  // coverage number.
+  if (process.env.PEERD_TEST_SUMMARY) {
+    writeFileSync(process.env.PEERD_TEST_SUMMARY, `${JSON.stringify({
+      lane: 'inbrowser-chrome',
+      passed: result.passed,
+      failed: result.failed,
+      total: result.total ?? result.passed + result.failed,
+      ms: result.ms,
+    }, null, 2)}\n`);
+  }
   console.log(`IN-BROWSER: ${result.passed} passed, ${result.failed} failed — ${result.ms}ms`);
   process.exit(result.failed === 0 ? 0 : 1);
 };

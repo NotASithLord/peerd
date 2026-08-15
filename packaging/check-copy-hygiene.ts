@@ -47,7 +47,11 @@ const EXCLUDED_PREFIXES = Object.freeze([
 const EXCLUDED_FILES = Object.freeze(new Set([
   'AGENTS.md',
   'LICENSE',
+  'badges/e2e-chrome.json',
   'badges/functional-tests.json',
+  'badges/inbrowser-chrome.json',
+  'badges/inbrowser-gecko.json',
+  'badges/red-team.json',
   'badges/tscheck.json',
   'bun.lock',
   'docs/security/RED-TEAM-RESULTS.md',
