@@ -35,7 +35,7 @@ export const CONTRIBUTOR_PROVIDERS = Object.freeze([
 export const CONTRIBUTOR_MODEL_FAMILIES = Object.freeze([
   'claude-opus', 'claude-sonnet', 'claude-haiku', 'gpt', 'openai-o', 'glm',
   'gemini', 'qwen', 'llama', 'deepseek', 'mistral', 'grok', 'command',
-  'hermes', 'kimi', 'minimax', 'gemma', 'custom',
+  'hermes', 'kimi', 'minimax', 'gemma', 'muse-glimmer', 'custom',
 ]);
 export const CONTRIBUTOR_OUTCOMES = Object.freeze(['completed', 'cancelled', 'error']);
 export const CONTRIBUTOR_FAILURES = Object.freeze(['none', ...FAILURE_KINDS]);
@@ -105,6 +105,7 @@ export const CONTRIBUTOR_KNOWN_MODEL_FAMILIES = Object.freeze({
   'moonshotai/kimi-k2.6': 'kimi',
   'minimax/minimax-m2': 'minimax',
   'gemma-4-e2b': 'gemma',
+  'muse-glimmer-30b': 'muse-glimmer',
 });
 
 const ROW_DIMENSION_KEYS = Object.freeze([

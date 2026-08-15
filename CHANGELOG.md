@@ -10,6 +10,31 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Added
+
+- On-device WebGPU inference now supports more than one model. The engine,
+  residency tracking, chat picker, and Settings cards are driven by a model
+  registry instead of a single hard-coded model, so a new on-device model is a
+  registry entry rather than engine surgery. Weights already downloaded on an
+  existing install continue to be recognised without re-downloading.
+- Muse Glimmer 30B runs on-device via a second local engine: the Muse Glimmer
+  WebGPU GGUF runtime (custom WGSL kernels, from the webml-community Space,
+  vendored with provenance and hash-locked). The engine streams the ~12.4 GB
+  Q2_K_XL GGUF from Hugging Face, caches it in IndexedDB, splits the model's
+  reasoning channel out of the visible stream, and reports the effective
+  context window it enforces to the trim layer. Which runtime a model needs is
+  a registry fact (`engine` on the model spec), and each model's support
+  verdict comes from its own engine's check - before any download.
+
+### Changed
+
+- A local model download is refused up front when the vendored runtime cannot
+  load its architecture, when another model is already downloading, or when the
+  model id is unknown - each with the reason, rather than a failure mid-transfer.
+- One on-device model is held in GPU memory at a time; requesting a different
+  one unloads the previous model first and loads from cache, never silently
+  answering from whichever model happened to be resident.
+
 ## [0.7.0] - 2026-08-15
 
 ### Added

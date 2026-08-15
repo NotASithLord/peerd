@@ -37,7 +37,8 @@ describe('provider settings request ordering', () => {
           { name: 'local-webgpu', label: 'Local WebGPU', defaultModel: 'gemma-4-e2b', hasKey: true, keyless: true },
         ],
       };
-      if (msg.type === 'local-model/status') return { ok: true, downloaded: options.length > 0 };
+      if (msg.type === 'local-model/status') return { ok: true, model: 'gemma-4-e2b', downloaded: options.length > 0 };
+      if (msg.type === 'local-model/catalog') return { ok: true, models: [{ model: 'gemma-4-e2b', downloaded: options.length > 0, supported: true }] };
       if (msg.type === 'models/options') return { ok: true, options };
       return { ok: false };
     };

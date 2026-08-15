@@ -42,7 +42,7 @@ import './doc-extract.js';
 // (same document — no route needed).
 import './web-extract.js';
 import { extractMarkdownLocal } from './web-extract-core.js';
-import { initLocalModel, generateLocal, localModelStatus, probeWebgpu, teardownLocalModel } from './local-model.js';
+import { initLocalModel, generateLocal, generationInFlight, localModelStatus, localModelCatalog, loadingModelId, probeWebgpu, teardownLocalModel } from './local-model.js';
 import { isServiceWorkerSender, isTrustedSender } from '/shared/messaging.js';
 // The always-on base network (S1b). Self-registers a dweb/base-host/* handler;
 // inert on store builds (DWEB_ENABLED false + loadDweb stub). The lobby
@@ -431,6 +431,12 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (onJobAbort));
 // `local-model/host/*` are the SW→offscreen COMMANDS (distinct from the SW's own
 // dispatcher routes so the harness's local-model/status hits the SW, not also
 // here). Pushes BACK to the SW use local-model/delta|done|progress.
+
+// Live per-generation abort handles, keyed by the SW's genId (see the
+// generate + abort handlers below).
+/** @type {Map<string, AbortController>} */
+const localGenerationControllers = new Map();
+
 /**
  * @param {any} msg
  * @param {import('webextension-polyfill').Runtime.MessageSender} sender
@@ -442,36 +448,79 @@ const onLocalModelMessage = (msg, sender, sendResponse) => {
   (async () => {
     switch (msg.type) {
       case 'local-model/host/status':
-        sendResponse({ ok: true, ...(await localModelStatus()) });
+        // The status reply carries its own ok (false for an unknown model id).
+        sendResponse(await localModelStatus({ model: msg.model, includeSupport: !!msg.includeSupport }));
+        return;
+      case 'local-model/host/catalog':
+        // Every shipped model in one round-trip - what the Settings cards render.
+        sendResponse(await localModelCatalog({ includeSupport: msg.includeSupport !== false }));
         return;
       case 'local-model/host/probe':
         // probeWebgpu always carries its own `ok` (true/false) — spread it as-is.
         sendResponse(await probeWebgpu());
         return;
-      case 'local-model/host/init':
+      case 'local-model/host/init': {
         // Kick off the (minutes-long, ONE-TIME) load fire-and-forget — progress
         // streams via local-model/progress, status reflects completion. Respond
         // immediately so the SW route doesn't block for the whole download; the
         // caller polls local-model/status.
-        initLocalModel((p) => { try { browser.runtime.sendMessage({ type: 'local-model/progress', progress: p }); } catch { /* SW asleep */ } })
-          .catch((e) => { try { browser.runtime.sendMessage({ type: 'local-model/progress', progress: { status: 'error', message: /** @type {{ message?: string }} */ (e)?.message ?? String(e) } }); } catch { /* SW asleep */ } });
-        sendResponse({ ok: true, started: true, ...(await localModelStatus()) });
+        // why the pre-flight await: an unknown id / unsupported architecture /
+        // a load already in flight for another model must come back as a REFUSAL
+        // on this response, not as a progress event the caller may never see.
+        const pre = await localModelStatus({ model: msg.model, includeSupport: true });
+        if (!pre.ok) { sendResponse(pre); return; }
+        // Only a DEFINITE 'unsupported' blocks the download. 'unknown' means we
+        // could not read the model's config, which is a reason to try and report
+        // honestly, not to refuse on a guess.
+        if (pre.supportState === 'unsupported') {
+          sendResponse({ ok: false, error: pre.supportReason, model: pre.model, supportState: 'unsupported' });
+          return;
+        }
+        const busy = loadingModelId();
+        if (busy && busy !== pre.model) {
+          sendResponse({ ok: false, error: `another model is still downloading (${busy}) - wait for it to finish first.`, model: pre.model });
+          return;
+        }
+        initLocalModel({ model: pre.model }, (p) => { try { browser.runtime.sendMessage({ type: 'local-model/progress', progress: p }); } catch { /* SW asleep */ } })
+          .catch((e) => {
+            try { browser.runtime.sendMessage({ type: 'local-model/progress', progress: { status: 'error', message: /** @type {{ message?: string }} */ (e)?.message ?? String(e), model: pre.model } }); } catch { /* SW asleep */ }
+          });
+        sendResponse({ ...(await localModelStatus({ model: pre.model })), started: true });
         return;
+      }
       case 'local-model/host/teardown':
+        // Never destroy the GPU device under a live stream - the caller can
+        // retry once the turn settles.
+        if (generationInFlight()) {
+          sendResponse({ ok: false, error: 'a local generation is in progress - stop it first.' });
+          return;
+        }
         await teardownLocalModel();
         sendResponse({ ok: true });
         return;
       case 'local-model/host/generate': {
         const { genId } = msg;
+        // Per-generation abort handle: the SW's abort route (below) ends this
+        // run early so the engine's generation lease is released instead of
+        // running out a multi-thousand-token budget after the user hit Stop.
+        const controller = new AbortController();
+        if (typeof genId === 'string') localGenerationControllers.set(genId, controller);
         try {
-          await generateLocal(msg, (token) => { try { browser.runtime.sendMessage({ type: 'local-model/delta', genId, token }); } catch { /* SW asleep */ } });
+          await generateLocal(msg, (token) => { try { browser.runtime.sendMessage({ type: 'local-model/delta', genId, token }); } catch { /* SW asleep */ } }, { signal: controller.signal });
           try { browser.runtime.sendMessage({ type: 'local-model/done', genId }); } catch { /* SW asleep */ }
         } catch (e) {
           try { browser.runtime.sendMessage({ type: 'local-model/done', genId, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }); } catch { /* SW asleep */ }
+        } finally {
+          if (typeof genId === 'string') localGenerationControllers.delete(genId);
         }
         sendResponse({ ok: true });
         return;
       }
+      case 'local-model/host/abort':
+        // Idempotent: aborting a settled/unknown genId is a no-op.
+        localGenerationControllers.get(msg.genId)?.abort();
+        sendResponse({ ok: true });
+        return;
       default:
         sendResponse({ ok: false, error: `unknown local-model message: ${msg.type}` });
     }

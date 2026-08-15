@@ -19,8 +19,8 @@ const makeDeps = (overrides: Record<string, any> = {}) => {
       }],
       listProviderModels: async () => [],
       providerModelContextWindow: async () => null,
-      localModelId: 'local-model',
-      localModelAvailable: () => false,
+      localModelIds: () => [],
+      localModelLabel: (id: string) => id,
       settingsStore: { get: () => settings },
       vault: { getSecret: async () => null },
       sessions: { get: async () => null },
@@ -107,5 +107,37 @@ describe('model catalog host-scoped live caches', () => {
       unavailable: true,
     });
     expect(result.options.some((option: any) => option.provider === 'anthropic')).toBe(true);
+  });
+});
+
+describe('local WebGPU models in the chat picker', () => {
+  const localDeps = (localModelIds: () => string[]) => makeDeps({
+    listProviders: () => [{ name: 'local-webgpu', label: 'Local (WebGPU)', defaultModel: 'gemma-4-e2b', keyless: true }],
+    localModelIds,
+    localModelLabel: (id: string) => (id === 'gemma-4-e2b' ? 'Gemma 4 E2B' : 'Muse Glimmer 30B'),
+    settingsStore: { get: () => ({ providerName: 'local-webgpu', providerModel: '' }) },
+    resolveActiveProvider: () => ({ name: 'local-webgpu', model: 'gemma-4-e2b' }),
+  }).deps;
+
+  test('offers nothing while no model is downloaded - an un-resident model would fail on the first turn', async () => {
+    const { options } = await makeModelCatalog(localDeps(() => [])).buildModelOptions();
+    expect(options.filter((o: any) => o.provider === 'local-webgpu' && !o.unavailable)).toEqual([]);
+  });
+
+  test('offers exactly the models this machine has downloaded, labelled from the registry', async () => {
+    const { options } = await makeModelCatalog(localDeps(() => ['gemma-4-e2b', 'muse-glimmer-30b'])).buildModelOptions();
+    expect(options.map((o: any) => o.value)).toEqual(['local-webgpu::gemma-4-e2b', 'local-webgpu::muse-glimmer-30b']);
+    expect(options.map((o: any) => o.label)).toEqual(['Gemma 4 E2B', 'Muse Glimmer 30B']);
+  });
+
+  test('a non-default model is offered on its own; the uninstalled default survives only as the flagged selection', async () => {
+    // The active provider still points at gemma here. It must NOT become a
+    // silent catalog entry (it isn't downloaded), but the existing rule stands:
+    // an explicit selection stays visible, marked unavailable, because the first
+    // send binds to it regardless of what the dropdown shows.
+    const { options } = await makeModelCatalog(localDeps(() => ['muse-glimmer-30b'])).buildModelOptions();
+    const selectable = options.filter((o: any) => !o.unavailable).map((o: any) => o.value);
+    expect(selectable).toEqual(['local-webgpu::muse-glimmer-30b']);
+    expect(options.find((o: any) => o.value === 'local-webgpu::gemma-4-e2b')).toMatchObject({ unavailable: true });
   });
 });

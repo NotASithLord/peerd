@@ -382,16 +382,23 @@ describe('home.library', () => {
       clickText(root, '.library-menu-item', 'History & Git');
       await flush();
       expect(need(root, '.library-card').classList.contains('is-expanded')).toBe(true);
-      const panel = need(root, '.library-repository', HTMLElement);
-      expect(panel.getAttribute('role')).toBe('region');
-      // why: the panel claims focus from its own oncreate, which only runs once
-      // the repository send has resolved and Mithril has committed that redraw.
-      // A fixed flush() is a bet on how many turns that takes. #405 polled the
-      // kebab-focus assertions in this file but not this one, and this is the one
-      // that kept turning Gecko shard 5/8 red with the uninformative
-      // `actual: {} / expected: {}` signature.
-      await focusSettles(() => document.activeElement === panel);
-      expect(document.activeElement).toBe(panel);
+      expect(need(root, '.library-repository', HTMLElement).getAttribute('role')).toBe('region');
+      // why the RE-QUERY inside the poll (the #405 follow-up that finally
+      // killed this flake): the panel claims focus from its own oncreate, which
+      // only runs once the repository send has resolved and Mithril has
+      // committed that redraw - and a LATER redraw can REPLACE the panel node.
+      // Capturing the element once and comparing identity races that
+      // replacement: focus lands on the live node while the captured one is
+      // detached, and the assertion fails as two distinct objects with the
+      // uninformative `actual: {} / expected: {}` signature that kept turning
+      // Gecko shard 5/8 red. Poll for "the CURRENT panel is focused", then
+      // assert against a fresh query.
+      const panelFocused = () => {
+        const live = root.querySelector('.library-repository');
+        return !!live && document.activeElement === live;
+      };
+      await focusSettles(panelFocused);
+      expect(panelFocused()).toBe(true);
       expect(root.textContent).toContain('1 uncommitted change');
       expect(root.textContent).toContain('checkpoint');
       clickText(root, '.library-commit button', 'Diff');
@@ -405,8 +412,15 @@ describe('home.library', () => {
       expect(send.calls.some((c) => c.type === 'apps/repository/restore' && c.to === 'abcdef123456')).toBe(true);
       need(root, 'button[title="Close history"]').click();
       await flush();
-      await focusSettles(() => document.activeElement === trigger);
-      expect(document.activeElement).toBe(trigger);
+      // Same re-query-inside-the-poll shape as the panel-focus assertion
+      // above: the collapse redraw can replace the kebab node, so identity
+      // against the early capture would race it.
+      const kebabFocused = () => {
+        const live = root.querySelector('.library-kebab');
+        return !!live && document.activeElement === live;
+      };
+      await focusSettles(kebabFocused);
+      expect(kebabFocused()).toBe(true);
     } finally { unmount(); }
   });
 

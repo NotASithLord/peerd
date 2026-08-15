@@ -60,6 +60,14 @@ jobs:
           # security-and-quality is noisier than the default suite; the extra
           # queries are worth it on a codebase whose whole thesis is isolation.
           queries: security-and-quality
+          # Vendored third-party bundles are excluded here for the same reason
+          # every other source gate exempts them: they are reviewed once at
+          # vendoring time and hash-locked from then on (packaging/check-vendor.ts),
+          # and semantic analysis of minified vendor code yields only noise
+          # nobody can act on without forking the upstream.
+          config: |
+            paths-ignore:
+              - extension/vendor
       # No build step by design (vanilla JS, no bundler), so the JS extractor
       # just reads the tree — nothing to compile.
       - uses: github/codeql-action/analyze@d1ba80a13dd99fba24a470575428917156a28b43 # v4.37.5

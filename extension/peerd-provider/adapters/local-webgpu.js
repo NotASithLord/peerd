@@ -21,12 +21,13 @@
 // (a) the SW wires the real offscreen RPC at boot, and (b) this module is fully
 // unit-testable with a mock token stream — no WebGPU needed to test the shim.
 
-import { MODEL_SPECS } from '../local-model-capability.js';
+import { MODEL_SPECS, DEFAULT_LOCAL_MODEL_ID } from '../local-model-capability.js';
 import { asWindow } from '../model-window.js';
 
-// The resident on-device model id (also the adapter's defaultRunnerModel). The
-// offscreen engine answers to it; pricing is $0.
-export const LOCAL_MODEL_ID = 'gemma-4-e2b';
+// The DEFAULT on-device model id (also the adapter's defaultRunnerModel) - not
+// the only one: the engine runs any model in MODEL_SPECS, and a call carries the
+// id it wants. Re-exported from the spec table so the default has ONE home.
+export const LOCAL_MODEL_ID = DEFAULT_LOCAL_MODEL_ID;
 
 /**
  * @typedef {import('../format/from-anthropic.js').ProviderEvent} ProviderEvent
@@ -61,8 +62,17 @@ export const setLocalModelInfo = (fn) => { localModelContextWindow = fn; };
 /**
  * Live context window for the on-device model, unified with the API
  * providers' `contextWindow` seam (providerModelContextWindow). Prefers the
- * engine-reported value when the bridge is wired; otherwise the static
- * MODEL_SPECS nominal. Best-effort: any failure → null → static table.
+ * engine-reported value when the bridge is wired; the static MODEL_SPECS
+ * value (the engine-ENFORCED window where the spec declares one) is the
+ * bridge-not-wired fallback only.
+ *
+ * why a wired-but-failing bridge returns null instead of the static value:
+ * the caller (model-catalog's liveContextWindow) caches a returned number for
+ * the SW's lifetime as if it were live. Handing it the static value on a
+ * TRANSIENT bridge failure would freeze it in place and stop the retry that
+ * would have learned the engine's real answer; null leaves the miss uncached
+ * so the next turn asks again, while the trim layer meanwhile uses the same
+ * static table on its own (resolveContextWindow's fallback).
  *
  * @param {{ model?: string }} args
  * @returns {Promise<number | null>}
@@ -70,14 +80,14 @@ export const setLocalModelInfo = (fn) => { localModelContextWindow = fn; };
 export const fetchLocalContextWindow = async ({ model = LOCAL_MODEL_ID } = {}) => {
   if (typeof localModelContextWindow === 'function') {
     try {
-      const live = asWindow(await localModelContextWindow(model));
-      if (live !== null) return live;
-    } catch { /* fall through to the spec */ }
+      return asWindow(await localModelContextWindow(model));
+    } catch { return null; }
   }
   // MODEL_SPECS has no index signature; the cast lets an arbitrary model id
   // be looked up (?. handles the miss, returning a static-table null).
   const specs = /** @type {Record<string, import('../local-model-capability.js').ModelSpec | undefined>} */ (MODEL_SPECS);
-  return asWindow(specs[model]?.contextWindow);
+  const spec = specs[model];
+  return asWindow(spec?.enforcedContextWindow ?? spec?.contextWindow);
 };
 
 const TOOL_OPEN = '<tool_call>';

@@ -87,6 +87,11 @@ export const DEFAULT_CONTEXT_WINDOWS = Object.freeze({
 
   // ---- Local WebGPU (on-device; canonical value in MODEL_SPECS) ----
   'gemma-4-e2b': 32_768,
+  // The ENFORCED window, not the model's 131K nominal: peerd's engine caps the
+  // muse KV cache (MODEL_SPECS enforcedContextWindow), and a cold-start value
+  // 8x what the engine will accept would make the trim layer compress far too
+  // late and the turn die on "context window is full" instead.
+  'muse-glimmer-30b': 16_384,
 });
 
 /**
