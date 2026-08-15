@@ -151,11 +151,16 @@ jobs:
       # merge-base source (scripts/cdp/visual-vs-base.mjs). A PNG under
       # scripts/cdp/ is therefore always a mistake - a stale baseline someone
       # re-added, or a capture committed by accident.
+      # why a single `*` and not `**/`: git pathspec globbing is wildmatch
+      # WITHOUT FNM_PATHNAME, so `*` already crosses `/` while `**/` requires at
+      # least one intermediate directory. `scripts/cdp/**/*.png` therefore misses
+      # scripts/cdp/panel.png - a capture dropped next to the scripts, which is
+      # the likeliest way one lands here at all.
       - name: No screenshots tracked in the repo
         run: |
-          if git ls-files -- 'scripts/cdp/**/*.png' | grep -q .; then
+          if git ls-files -- 'scripts/cdp/*.png' | grep -q .; then
             echo '::error::Screenshots are tracked under scripts/cdp/ - this repo stores no baseline images; see scripts/cdp/visual-vs-base.mjs.'
-            git ls-files -- 'scripts/cdp/**/*.png'
+            git ls-files -- 'scripts/cdp/*.png'
             exit 1
           fi
           echo 'no tracked screenshots under scripts/cdp/'
@@ -387,6 +392,15 @@ jobs:
   #      PNGs and writes a PR comment; the functional job does neither.
   visual:
     name: "visual (render)"
+    # why serialize per ref: the publish step does `rm -rf pr<N>` before adding
+    # its own sha dir, so two runs on one PR race on the visual-diffs branch. An
+    # older run that loses the push and takes the rebase-retry re-applies that
+    # delete on top of the NEWER run's directory, leaving the newest comment
+    # pointing at 404ing images. Cancelling the superseded run is also what you
+    # want on its own terms: its montage is already stale.
+    concurrency:
+      group: visual-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     # A prepared Dependabot head can contain a candidate Action SHA. Never let
     # that candidate share this job's repository-write token.
     if: >-
@@ -559,8 +573,13 @@ jobs:
           bun scripts/cdp/visual-review-comment.mjs \
             --base-url "$base" --run-url "$RUN_URL" --montage-dir "$montage" > "$RUNNER_TEMP/visual-comment.md"
           MARKER='<!-- peerd-visual -->'
+          # why `|| true`: --paginate keeps writing after `head -1` closes the
+          # pipe, so gh takes SIGPIPE (141); under `set -o pipefail` that would
+          # abort this step immediately BEFORE posting, and continue-on-error
+          # would mask it as "the review channel just stopped updating". head has
+          # already emitted the id by then, so the assignment still holds.
           ID=$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
-                 --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty" | head -1)
+                 --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty" | head -1) || true
           if [ -n "$ID" ]; then
             gh api -X PATCH "repos/${REPO}/issues/comments/${ID}" -F body=@"$RUNNER_TEMP/visual-comment.md" >/dev/null
             echo "updated sticky visual comment $ID"
