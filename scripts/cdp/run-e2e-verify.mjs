@@ -14,7 +14,17 @@
 //
 // Flags / env:
 //   --functional            skip visual states (environment-independent; CI)
-//   UPDATE_BASELINES=1       (re)write visual baselines instead of comparing
+//   --extension=<dir>       load a DIFFERENT extension build (visual-vs-base
+//                           renders the merge-base through this same path, so
+//                           both sides of a comparison run identical code)
+//   --artifacts=<dir>       write this run's artifacts somewhere other than
+//                           scripts/cdp/artifacts/ (the dir is WIPED on start,
+//                           so two runs that must coexist need separate dirs)
+//   UPDATE_BASELINES=1       (re)write the local self-reference instead of comparing
+//
+// Visual states never fail this run: the local baselines are a self-reference,
+// not an approved look (see visual.mjs). The regression verdict is
+// visual-vs-base.mjs. A visual state's own rec.check()s DO gate.
 //
 // Artifacts (gitignored) land in scripts/cdp/artifacts/:
 //   <state>-<label>.png         screenshots to look at
@@ -22,20 +32,23 @@
 //   result.json                 the structured verdict
 
 import { rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
-import { join, relative, dirname } from 'node:path';
+import { join, relative, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchPeerd, unlockAndReady, resetSession, freezeAnimations, setEmulatedTheme, capturePage, THEMES, sleep, log } from './e2e-harness.mjs';
 import { STATES } from './states.mjs';
 import {
   compareToBaseline, decodePng, writeDiffImage, BASELINE_DIR, UPDATE_BASELINES,
-  VISUAL_PLATFORM, VISUAL_AUTHORITY, IS_AUTHORITY,
+  VISUAL_PLATFORM,
 } from './visual.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..', '..');
-const ARTIFACTS = join(HERE, 'artifacts');
+const ARTIFACTS = resolve((process.argv.find((a) => a.startsWith('--artifacts=')) || '')
+  .slice('--artifacts='.length) || join(HERE, 'artifacts'));
 const FUNCTIONAL_ONLY = process.argv.includes('--functional'); // CI: env-independent
 const VISUAL_ONLY = process.argv.includes('--visual');
+const EXTENSION_DIR = (process.argv.find((a) => a.startsWith('--extension=')) || '')
+  .slice('--extension='.length) || undefined;
 const ONLY = (process.argv.find((a) => a.startsWith('--only=')) || '').slice('--only='.length)
   .split(',').map((s) => s.trim()).filter(Boolean);
 
@@ -78,11 +91,11 @@ const makeRecorder = (ctx, state) => {
       const entry = {
         name: variant, base, theme,
         ratio: Number(v.ratio.toFixed(5)), threshold: v.threshold,
-        pass: v.pass, rawPass: v.rawPass ?? v.pass, gated: v.gated ?? true,
+        pass: v.pass, rawPass: v.rawPass ?? v.pass, gated: v.gated ?? false,
         platform: VISUAL_PLATFORM, wrote: v.wrote, current: relative(ROOT, curFile),
       };
-      // why keyed on rawPass, not pass: off-authority `pass` is forced true, but
-      // the diff image is exactly what that lane exists to produce.
+      // why keyed on rawPass, not pass: `pass` is pinned true (a self-reference
+      // never fails a run), but the diff image is the point of this lane.
       if (!v.wrote && v.dimsMatch && !entry.rawPass) {
         const baseFile = join(BASELINE_DIR, `${variant}.png`);
         const diffFile = join(ARTIFACTS, `${variant}-diff.png`);
@@ -91,10 +104,10 @@ const makeRecorder = (ctx, state) => {
         entry.diff = relative(ROOT, diffFile);
       }
       visuals.push(entry);
-      const status = v.wrote ? 'baseline written'
+      const status = v.wrote ? 'self-reference written'
         : entry.rawPass ? `OK ${(v.ratio * 100).toFixed(2)}%`
-          : `DIFF ${(v.ratio * 100).toFixed(2)}% > ${(v.threshold * 100).toFixed(2)}%${entry.gated ? '' : ' (off-authority, not gating)'}`;
-      log(`  ${entry.rawPass ? 'PASS' : entry.gated ? 'FAIL' : 'note'}  [${state.name}] visual:${variant} — ${status}`);
+          : `MOVED ${(v.ratio * 100).toFixed(2)}% > ${(v.threshold * 100).toFixed(2)}% (look at the diff)`;
+      log(`  ${entry.rawPass ? 'PASS' : 'note'}  [${state.name}] visual:${variant} - ${status}`);
     },
     // Capture the side panel in BOTH themes. Each becomes its own baseline
     // `<name>.<theme>.png`, so the gate and the gallery both see light + dark.
@@ -154,7 +167,7 @@ async function main() {
   const preUnlock = states.filter((s) => s.phase === 'pre-unlock');
   const postUnlock = states.filter((s) => s.phase === 'post-unlock');
   const results = [];
-  const ctx = await launchPeerd({});
+  const ctx = await launchPeerd({ extensionDir: EXTENSION_DIR });
   try {
     await freezeAnimations(ctx);
     for (const s of preUnlock) await runState(ctx, s, results);
@@ -172,20 +185,19 @@ async function main() {
 
   const checksTotal = results.reduce((n, r) => n + r.checks.length, 0);
   const checksFailed = results.reduce((n, r) => n + r.checks.filter((c) => !c.pass).length, 0);
-  // Counted on rawPass so an off-authority run still REPORTS what moved, even
-  // though those renders don't fail the exit code.
-  const visualFailed = results.reduce((n, r) => n + r.visuals.filter((v) => !(v.rawPass ?? v.pass)).length, 0);
+  // Counted on rawPass: the run REPORTS what moved without failing on it.
+  const visualMoved = results.reduce((n, r) => n + r.visuals.filter((v) => !(v.rawPass ?? v.pass)).length, 0);
   const ok = results.every((r) => r.ok);
   const report = {
     ok,
     runAt: new Date().toISOString(),
     visual: {
       platform: VISUAL_PLATFORM,
-      authority: VISUAL_AUTHORITY,
-      gating: IS_AUTHORITY,
+      gating: false,
       baselineDir: relative(ROOT, BASELINE_DIR),
+      extensionDir: EXTENSION_DIR ? relative(ROOT, EXTENSION_DIR) : 'extension',
     },
-    summary: { states: results.length, checksTotal, checksFailed, visualFailed },
+    summary: { states: results.length, checksTotal, checksFailed, visualMoved },
     artifactsDir: relative(ROOT, ARTIFACTS),
     states: results,
   };
@@ -200,10 +212,10 @@ async function main() {
     log(`  ${tag}  ${r.name} — ${detail}`);
   }
   log('');
-  log(`${ok ? 'VERIFY PASSED' : 'VERIFY FAILED'} — ${results.length} states, ${checksTotal - checksFailed}/${checksTotal} checks${visualFailed ? `, ${visualFailed} visual diff(s)` : ''}`);
-  if (visualFailed && !IS_AUTHORITY) {
-    log(`NOTE: visual diffs above are INFORMATIONAL — ${VISUAL_PLATFORM} is not the baseline`);
-    log(`authority (${VISUAL_AUTHORITY}). Look at the -diff.png files; CI decides pass/fail.`);
+  log(`${ok ? 'VERIFY PASSED' : 'VERIFY FAILED'} - ${results.length} states, ${checksTotal - checksFailed}/${checksTotal} checks${visualMoved ? `, ${visualMoved} screen(s) moved` : ''}`);
+  if (visualMoved) {
+    log('NOTE: those screens moved since YOUR last local run, which is a prompt to');
+    log('LOOK at the -diff.png files, not a verdict. CI compares against the merge base.');
   }
   log(`artifacts + result.json → ${relative(ROOT, ARTIFACTS)}/`);
   process.exit(ok ? 0 : 1);

@@ -5,11 +5,11 @@
 // read/compare/write flow. CDP's Page.captureScreenshot emits 8-bit, colour
 // type 2 (RGB) or 6 (RGBA), non-interlaced PNGs — exactly the cases handled here.
 //
-// Baselines live committed under scripts/cdp/baselines/. Run a visual scenario
-// with UPDATE_BASELINES=1 to (re)write them; otherwise each capture is decoded
-// and compared, and the scenario asserts the diff ratio stays under a small
-// threshold (rendering noise — antialiasing, subpixel — is absorbed by the
-// per-pixel tolerance, so only real UI changes trip it).
+// NO BASELINE IMAGE IS COMMITTED. The regression comparison is computed per run
+// by scripts/cdp/visual-vs-base.mjs: render the merge-base build, render this
+// one, diff them. What lives under scripts/cdp/baselines/ is a purely LOCAL,
+// gitignored self-reference for the verify loop ("did this move since my last
+// run") - it never gates, on any platform. See visual-vs-base.mjs for the why.
 
 import { inflateSync, deflateSync } from 'node:zlib';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -18,22 +18,18 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-// ---- baselines: committed per platform, GATED on one authority --------------
+// ---- the local self-reference (gitignored, never a gate) --------------------
 //
-// Baselines write to `baselines/<platform>/`, but only ONE platform's dir is
-// COMMITTED: the CI authority (linux-x64). It is the gate AND the source the
-// committed gallery renders from. Any other platform (a dev's mac) writes a
-// gitignored self-baseline for the eye — it never gates and is never committed.
-//
-// why one authority: macOS and Linux cannot be pixel-compared. ~96% of the
+// Per platform, because macOS and Linux cannot be pixel-compared: ~96% of the
 // panel's text uses the `-apple-system, system-ui, …` stack, which resolves to a
 // DIFFERENT family per OS — advance widths change, paragraphs re-wrap. That is
 // layout drift, not edge noise, and no tolerance admits it while still catching
-// a real change. So the reference is captured + committed on CI (via the reseed
-// workflow_dispatch), and a mac run compares locally without gating.
-export const VISUAL_AUTHORITY = 'linux-x64';
+// a real change. Keeping one dir per platform means your own loop compares like
+// with like; nothing here is ever shared, committed, or authoritative.
+//
+// The REGRESSION answer comes from visual-vs-base.mjs, which renders both sides
+// on the same machine in the same run, so the platform question does not arise.
 export const VISUAL_PLATFORM = process.env.VISUAL_PLATFORM || `${process.platform}-${process.arch}`;
-export const IS_AUTHORITY = VISUAL_PLATFORM === VISUAL_AUTHORITY;
 export const BASELINES_ROOT = join(HERE, 'baselines');
 export const BASELINE_DIR = join(BASELINES_ROOT, VISUAL_PLATFORM);
 
@@ -136,10 +132,13 @@ export function comparePixels(a, b, { tolerance = 8 } = {}) {
   return { dimsMatch: true, diffPixels, totalPixels, ratio: totalPixels ? diffPixels / totalPixels : 0 };
 }
 
-// why this is 0.0005 and not the 2% it used to be: on a pinned platform +
-// pinned Chrome the capture is BYTE-IDENTICAL run to run (measured: two
-// independent launches, 0.0000% at tolerance 0 on every state). The noise floor
-// is zero, so nearly any movement is signal.
+// The line between "noise" and "this moved". Used by the local self-reference
+// and by visual-vs-base to decide which screens are worth showing a reviewer.
+//
+// why 0.0005 and not the 2% it used to be: on a pinned platform + pinned Chrome
+// the capture is BYTE-IDENTICAL run to run (measured: two independent launches,
+// 0.0000% at tolerance 0 on every state). The noise floor is zero, so nearly any
+// movement is signal.
 //
 // 2% was theatre, and this is measured, not asserted: at the old 756x413 capture
 // it silently accepted a brand-new toolbar button (0.066%), a new `debug` chip
@@ -147,16 +146,14 @@ export function comparePixels(a, b, { tolerance = 8 } = {}) {
 // version-string drift. A whole-UI corner-radius change (6px→10px) scores
 // 0.03-0.28% — every one of those passed. Roughly 7.5x headroom on the worst
 // real change the suite had ever seen.
-//
-// UNVERIFIED: the Linux runner's own noise floor. If the CI job proves flaky on
-// an unchanged tree, raise this — but measure the floor first and put the number
-// in the commit message, rather than nudging it until green.
 export const DEFAULT_THRESHOLD = 0.0005;
 
 /**
- * Compare a freshly-captured PNG against a committed baseline, or (re)write the
- * baseline. Returns a verdict the scenario turns into a named check.
- * @param {string} name  baseline key (file is baselines/<name>.png)
+ * Compare a freshly-captured PNG against the LOCAL self-reference, or (re)write
+ * it. Reports what moved since your last run; never decides pass/fail - `pass`
+ * is always true and `gated` is always false. CI's verdict comes from
+ * visual-vs-base.mjs, which has an actual reference to compare against.
+ * @param {string} name  self-reference key (file is baselines/<platform>/<name>.png)
  * @param {Buffer} pngBuffer  the captured screenshot
  * @param {{ update?: boolean, threshold?: number, tolerance?: number }} [opts]
  * @returns {{ name:string, wrote:boolean, missing:boolean, dimsMatch:boolean, ratio:number, pass:boolean, rawPass:boolean, gated:boolean, threshold:number }}
@@ -166,39 +163,34 @@ export function compareToBaseline(name, pngBuffer, { update = false, threshold =
   const exists = existsSync(file);
   if (update || !exists) {
     mkdirSync(BASELINE_DIR, { recursive: true });
-    // why a RESEED compares before it writes: Chrome's PNG encoder is not
-    // byte-stable across runs, so a reseed rewrote EVERY baseline even when
-    // nothing rendered differently. Measured on this repo, one reseed touched 22
-    // of 24 files at a 0.0000% pixel diff — pure re-encoding. Git keeps each of
-    // those copies forever, so the history cost of a reseed was the size of the
-    // whole set rather than of what actually moved, and the diff buried the real
-    // change in noise a reviewer then has to hand-verify.
+    // why this compares before it writes: Chrome's PNG encoder is not byte-stable
+    // across runs, so a rewrite touches almost every file even when nothing
+    // rendered differently (measured here: 22 of 24 files at a 0.0000% pixel
+    // diff, pure re-encoding). Skipping the identical ones keeps the mtimes
+    // honest, so "what did my last edit move" stays answerable from the dir.
     //
-    // tolerance 0, deliberately: the question here is "is this literally the same
-    // image", not "is this within the gate's noise budget". A pixel that genuinely
-    // moved by 1 should still be written, so the committed baseline is always the
-    // exact bytes the authority most recently rendered.
+    // tolerance 0, deliberately: the question is "is this literally the same
+    // image", not "is this within a noise budget".
     if (exists) {
       const prev = decodePng(readFileSync(file));
       const next = decodePng(pngBuffer);
       const same = comparePixels(prev, next, { tolerance: 0 });
       if (same.dimsMatch && same.ratio === 0) {
-        return { name, wrote: false, unchanged: true, missing: false, dimsMatch: true, ratio: 0, pass: true, rawPass: true, gated: IS_AUTHORITY, threshold };
+        return { name, wrote: false, unchanged: true, missing: false, dimsMatch: true, ratio: 0, pass: true, rawPass: true, gated: false, threshold };
       }
     }
     writeFileSync(file, pngBuffer);
-    return { name, wrote: true, missing: !exists, dimsMatch: true, ratio: 0, pass: true, rawPass: true, gated: IS_AUTHORITY, threshold };
+    return { name, wrote: true, missing: !exists, dimsMatch: true, ratio: 0, pass: true, rawPass: true, gated: false, threshold };
   }
   const base = decodePng(readFileSync(file));
   const shot = decodePng(pngBuffer);
   const { dimsMatch, ratio } = comparePixels(base, shot, { tolerance });
-  const rawPass = dimsMatch && ratio <= threshold;
+  // rawPass carries the signal; pass is pinned true because a self-reference is
+  // "what I rendered last time", not an approved look. Failing on it would fail
+  // every intentional edit. The ratio and the diff image are still produced.
   return {
     name, wrote: false, missing: false, dimsMatch, ratio, threshold,
-    rawPass, gated: IS_AUTHORITY,
-    // Off-authority never fails the run — the ratio is still reported and the
-    // diff image is still written, so a human/agent can look at what moved.
-    pass: IS_AUTHORITY ? rawPass : true,
+    rawPass: dimsMatch && ratio <= threshold, gated: false, pass: true,
   };
 }
 

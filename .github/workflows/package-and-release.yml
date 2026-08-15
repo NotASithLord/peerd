@@ -31,10 +31,6 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
-      update_visual_baselines:
-        description: 'Recapture the side-panel visual baselines on the CI authority and upload them as an artifact to commit'
-        type: boolean
-        default: false
       security_read_only:
         description: 'Run candidate security validation without any write-capable jobs'
         type: boolean
@@ -151,21 +147,23 @@ jobs:
             echo '::error::A generated file (manifest.json, channel-config.js, or badges/tscheck.json) is out of sync with its generator — run `bun run gen:dev` and commit.'
             exit 1
           }
-      # The committed visual gallery ("brief") must always reflect the committed
-      # baselines — it is regenerated FROM them, so a reseed that forgets to
-      # rebuild it would ship a stale brief. Skips cleanly until the authority
-      # baselines are first committed (nothing to render yet).
-      - name: Gallery in sync with baselines
+      # No visual images are tracked: each run renders its own reference from the
+      # merge-base source (scripts/cdp/visual-vs-base.mjs). A PNG under
+      # scripts/cdp/ is therefore always a mistake - a stale baseline someone
+      # re-added, or a capture committed by accident.
+      # why a single `*` and not `**/`: git pathspec globbing is wildmatch
+      # WITHOUT FNM_PATHNAME, so `*` already crosses `/` while `**/` requires at
+      # least one intermediate directory. `scripts/cdp/**/*.png` therefore misses
+      # scripts/cdp/panel.png - a capture dropped next to the scripts, which is
+      # the likeliest way one lands here at all.
+      - name: No screenshots tracked in the repo
         run: |
-          if [ -d scripts/cdp/baselines/linux-x64 ]; then
-            bun run gallery
-            git diff --exit-code scripts/cdp/GALLERY.md || {
-              echo '::error::scripts/cdp/GALLERY.md is out of sync with the committed baselines — run `bun run gallery` and commit.'
-              exit 1
-            }
-          else
-            echo 'no linux-x64 baselines committed yet — skipping gallery drift check'
+          if git ls-files -- 'scripts/cdp/*.png' | grep -q .; then
+            echo '::error::Screenshots are tracked under scripts/cdp/ - this repo stores no baseline images; see scripts/cdp/visual-vs-base.mjs.'
+            git ls-files -- 'scripts/cdp/*.png'
+            exit 1
           fi
+          echo 'no tracked screenshots under scripts/cdp/'
 
   # Additive job — existing job names above/below are referenced by
   # branch-protection required checks; this one can be added to that
@@ -393,11 +391,16 @@ jobs:
   #   3. Different outputs and permissions: this one uploads before/after/diff
   #      PNGs and writes a PR comment; the functional job does neither.
   visual:
-    # The reseed suffix is load-bearing: a workflow_dispatch run lands a check
-    # run on the SAME head SHA, and a reseed passes trivially (it rewrites
-    # instead of comparing). A distinct name means a reseed can never satisfy
-    # the gating check. Otherwise this display name stays stable.
-    name: "visual (render)${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines && ' (reseed baselines)' || '' }}"
+    name: "visual (render)"
+    # why serialize per ref: the publish step does `rm -rf pr<N>` before adding
+    # its own sha dir, so two runs on one PR race on the visual-diffs branch. An
+    # older run that loses the push and takes the rebase-retry re-applies that
+    # delete on top of the NEWER run's directory, leaving the newest comment
+    # pointing at 404ing images. Cancelling the superseded run is also what you
+    # want on its own terms: its montage is already stale.
+    concurrency:
+      group: visual-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     # A prepared Dependabot head can contain a candidate Action SHA. Never let
     # that candidate share this job's repository-write token.
     if: >-
@@ -414,7 +417,8 @@ jobs:
       contents: write        # push before/after montages to the visual-diffs branch
       pull-requests: write   # inline-image diff comment; same-repo PRs only
     env:
-      # This lane is the sole baseline authority — see scripts/cdp/visual.mjs.
+      # Names the render platform in the report. Both sides of the comparison are
+      # rendered HERE, in this job, so no cross-platform question arises.
       VISUAL_PLATFORM: linux-x64
       TZ: UTC
     steps:
@@ -422,7 +426,11 @@ jobs:
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
+      # fetch-depth 0: the comparison needs the MERGE BASE's tree, and a shallow
+      # clone cannot produce a worktree at a commit it never fetched.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
@@ -443,121 +451,59 @@ jobs:
       - name: Provision Chrome for Testing (pinned)
         id: cft
         run: echo "chrome-path=$(bun scripts/cdp/ensure-chrome-for-testing.mjs | tail -1)" >> "$GITHUB_OUTPUT"
-      - name: Render every visual state and compare to the committed baselines
+      # This branch's render. It still GATES, but on the states' own functional
+      # checks and on a state throwing - never on pixels. Pixels are decided by
+      # the comparison below, which has something to compare against.
+      - name: Render every visual state on this branch
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
-          UPDATE_BASELINES: ${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines && '1' || '' }}
         id: render
         run: bun run test:e2e:visual
 
-      # A state ADDED by this PR has no committed baseline, so the step above can
-      # only seed it — it passes trivially and the PR reports "no visual drift"
-      # for a screen nobody ever photographed. This computes that missing
-      # "before" by rendering the same state definitions against the MERGE-BASE
-      # build (peerd has no build step, so that is a checkout and a render).
+      # The regression answer. Renders the SAME state definitions against the
+      # merge-base extension build and diffs the pairs - see the header of
+      # scripts/cdp/visual-vs-base.mjs for why nothing is stored in the repo.
       #
-      # Non-gating on purpose: it reports what changed, it does not decide. The
-      # committed baselines remain the approved-look record, and the human
-      # checkpoint that comes with reseeding them.
-      - name: Compute before/after for states with no baseline
+      # continue-on-error, deliberately: a computed reference cannot tell an
+      # intended redesign from a regression, so this REPORTS. The reviewer
+      # decides, from the before/after images in the PR comment below.
+      - name: Compare every screen against the merge base
         if: always() && github.event_name == 'pull_request'
         continue-on-error: true
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
-        id: newstates
+        id: vsbase
         run: |
-          # The merge-base needs main's history; the PR checkout is shallow.
-          git fetch --no-tags --depth=50 origin main || true
-          bun scripts/cdp/new-state-before-after.mjs > "$RUNNER_TEMP/new-states.md" || true
-          cat "$RUNNER_TEMP/new-states.md"
+          git fetch --no-tags origin main || true
+          bun scripts/cdp/visual-vs-base.mjs --reuse-head || true
 
       - name: Write the render report to the job summary
         if: always()
         run: |
+          report=scripts/cdp/visual-runs/visual-vs-base.md
           {
             echo "## visual — UI render (side panel + full tab, light + dark)"
             echo
-            bun scripts/cdp/visual-report.mjs
+            if [ -s "$report" ]; then
+              cat "$report"
+            else
+              echo "_Rendered this branch only (no merge base to compare against on this event)._"
+            fi
             echo
-            echo "Before / after / diff PNGs are attached to this run as the \`visual-diff-…\` artifact."
-            if [ -s "$RUNNER_TEMP/new-states.md" ]; then echo; cat "$RUNNER_TEMP/new-states.md"; fi
-            echo
-            echo "If the change is INTENDED: re-run this workflow on your branch with"
-            echo "**update_visual_baselines** checked, download \`visual-baselines-linux-x64\`,"
-            echo "LOOK at every PNG, then unzip it over \`scripts/cdp/baselines/linux-x64/\`,"
-            echo "regenerate \`scripts/cdp/GALLERY.md\` with \`bun run gallery\`, and commit."
+            echo "Every screen, both sides, plus the diff masks: the \`visual-screens\` artifact on this run."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # ALWAYS link the gallery on a PR, with the verdict — pass or drift.
-      #
-      # why unconditional and not only on failure: the failure path already had a
-      # comment, so the only PRs that said anything about the UI were the ones
-      # that broke it. A reviewer of a green PR had no way to know what the visual
-      # gate actually covers, or that it ran at all. A one-line sticky comment
-      # makes the gallery discoverable on every PR and turns "no drift" into a
-      # stated result rather than an absence.
-      #
-      # STICKY by a hidden marker: find our previous comment and PATCH it, so a
-      # branch that is pushed ten times leaves one comment, not ten.
-      #
-      # Same-repo PRs only — a fork PR's GITHUB_TOKEN is read-only. The job
-      # summary carries the same verdict and does work on forks.
-      - name: Link the visual gallery on the PR
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DRIFTED: ${{ steps.render.outcome }}
-          SHA: ${{ github.event.pull_request.head.sha }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          MARKER='<!-- peerd-visual-gallery -->'
-          GALLERY="https://github.com/${GITHUB_REPOSITORY}/blob/${SHA}/scripts/cdp/GALLERY.md"
-          COUNT=$(ls scripts/cdp/baselines/linux-x64/*.png 2>/dev/null | wc -l | tr -d ' ' || echo 0)
-          if [ "$DRIFTED" = "success" ]; then
-            VERDICT="✅ **No visual drift.** Every state renders identically to the committed baselines."
-          else
-            VERDICT="⚠️ **Visual drift detected.** One or more states no longer match the committed baselines — see the before/after below and the job summary. If the change is intended, reseed: re-run this workflow with **update_visual_baselines**, then \`bun run gallery\` and commit."
-          fi
-          BODY=$(printf '%s\n### Visual regression\n\n%s\n\n📸 **[Browse the visual gallery](%s)** — %s baseline screens (light + dark) as of this commit.\n' \
-            "$MARKER" "$VERDICT" "$GALLERY" "$COUNT")
-          # Find our previous sticky comment, if any, and update it in place.
-          ID=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
-                 --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty" | head -1)
-          if [ -n "$ID" ]; then
-            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${ID}" -f body="$BODY" >/dev/null
-            echo "updated sticky gallery comment $ID"
-          else
-            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -f body="$BODY" >/dev/null
-            echo "posted gallery comment"
-          fi
-
-      # Flat triple per state so before/after/diff sort ADJACENTLY for a human —
-      # the raw globs would scatter them across two directories. why the .before
-      # copy: on a capture-SIZE change there IS no diff image, and before+after
-      # is then the only evidence a reviewer gets.
-      - name: Stage the before / after / diff bundle
-        if: failure()
-        run: |
-          mkdir -p visual-review
-          for cur in scripts/cdp/artifacts/*-current.png; do
-            [ -e "$cur" ] || continue
-            n="$(basename "$cur" -current.png)"
-            cp "$cur" "visual-review/$n.after.png"
-            [ -e "scripts/cdp/baselines/linux-x64/$n.png" ] && cp "scripts/cdp/baselines/linux-x64/$n.png" "visual-review/$n.before.png"
-            [ -e "scripts/cdp/artifacts/$n-diff.png" ] && cp "scripts/cdp/artifacts/$n-diff.png" "visual-review/$n.diff.png"
-          done
-          [ -e scripts/cdp/artifacts/result.json ] && cp scripts/cdp/artifacts/result.json visual-review/
-          ls -la visual-review || true
-
-      # Works on FORK PRs too — upload-artifact authenticates with the Actions
-      # runtime token, not GITHUB_TOKEN. This is the fork-safe evidence channel.
-      - name: Upload before / after / diff renders
-        if: failure()
+      # The full evidence channel, and the only one that works on FORK PRs
+      # (upload-artifact authenticates with the Actions runtime token, not
+      # GITHUB_TOKEN). Both renders plus the diff masks, every screen, always -
+      # not just when something moved, so a reviewer of a quiet PR can still see
+      # what the lane actually covers.
+      - name: Upload every screen (both sides + diff masks)
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: visual-diff-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || github.ref_name }}-run${{ github.run_number }}.${{ github.run_attempt }}
-          path: visual-review/
+          name: visual-screens-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || github.ref_name }}-run${{ github.run_number }}.${{ github.run_attempt }}
+          path: scripts/cdp/visual-runs/screens/
           if-no-files-found: warn
           retention-days: 14
 
@@ -566,72 +512,81 @@ jobs:
       # same information and DO work on forks. Keep this on `pull_request`, never
       # `pull_request_target` (untrusted head, write token = unsafe).
       #
-      # Publishes each changed screen's before|after montage to the `visual-diffs`
+      # Publishes each CHANGED screen's before|after montage to the `visual-diffs`
       # branch (orphan; images only, never merges to main) under pr<N>/<sha>/, then
-      # posts a PR comment that embeds them by raw URL — so before/after renders
+      # posts a PR comment that embeds them by raw URL - so before/after renders
       # INLINE, no artifact download. Keyed by head sha so re-runs bust GitHub's
-      # image cache; the PR's old sha dir is replaced each run to bound growth.
+      # image cache; the PR's old sha dir is replaced each run to bound growth,
+      # and the whole pr<N>/ dir is removed when the PR closes (see visual-prune).
+      #
+      # ALWAYS, not only when something changed: a reviewer of a quiet PR had no
+      # way to know the lane ran at all, so "nothing moved" has to be a stated
+      # result rather than an absence. STICKY by a hidden marker, so a branch
+      # pushed ten times leaves one comment, not ten.
       - name: Publish before/after montages + inline PR comment
-        if: failure() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REPO: ${{ github.repository }}
-          SERVER: ${{ github.server_url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          set -e
+          set -euo pipefail
           short="${HEAD_SHA:0:12}"
-          montage="$RUNNER_TEMP/montage"
-          bun scripts/cdp/visual-compare.mjs \
-            --before scripts/cdp/baselines/linux-x64 --after scripts/cdp/artifacts --out "$montage"
+          montage="scripts/cdp/visual-runs/montage"
+          report="scripts/cdp/visual-runs/visual-vs-base.json"
+          base=""
 
-          # Publish to the visual-diffs branch via an authenticated clone. why a
-          # separate clone: the main checkout is on the PR head; this branch is
-          # orphan and unrelated. Fall back to creating it if it doesn't exist yet.
-          auth="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
-          pub="$RUNNER_TEMP/visual-diffs"
-          git clone --branch visual-diffs --single-branch --depth 1 "$auth" "$pub" 2>/dev/null || {
-            git clone --depth 1 "$auth" "$pub"
-            git -C "$pub" checkout --orphan visual-diffs
-            git -C "$pub" rm -rqf . || true
-            printf '# peerd visual diffs\n\nCI-published before/after montages for review. Orphan branch (never merges to main); images only under `pr<N>/<sha>/`.\n' > "$pub/README.md"
-          }
-          rm -rf "$pub/pr${PR}"
-          mkdir -p "$pub/pr${PR}/$short"
-          cp "$montage"/*.before-after.png "$pub/pr${PR}/$short/"
-          git -C "$pub" add -A
-          git -C "$pub" -c user.name='github-actions[bot]' \
-            -c user.email='github-actions[bot]@users.noreply.github.com' \
-            commit -q -m "visual diffs: PR #${PR} @ $short"
-          # A racing run on another PR can advance the branch; rebase-retry once.
-          git -C "$pub" push origin visual-diffs || {
-            git -C "$pub" pull --rebase origin visual-diffs && git -C "$pub" push origin visual-diffs
-          }
+          # Compose only the screens the comparison flagged. No flagged screen
+          # means no montage and no push - just the "nothing moved" comment.
+          if [ -f "$report" ] && bun scripts/cdp/visual-compare.mjs \
+               --before scripts/cdp/visual-runs/screens/base \
+               --after scripts/cdp/visual-runs/screens/head \
+               --report "$report" --out "$montage"; then
+            # Publish to the visual-diffs branch via an authenticated clone. why a
+            # separate clone: the main checkout is on the PR head; this branch is
+            # orphan and unrelated. Fall back to creating it if it does not exist.
+            auth="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+            pub="$RUNNER_TEMP/visual-diffs"
+            git clone --branch visual-diffs --single-branch --depth 1 "$auth" "$pub" 2>/dev/null || {
+              git clone --depth 1 "$auth" "$pub"
+              git -C "$pub" checkout --orphan visual-diffs
+              git -C "$pub" rm -rqf . || true
+              printf '# peerd visual diffs\n\nCI-published before/after montages for review. Orphan branch (never merges to main); images only under `pr<N>/<sha>/`, removed when the PR closes.\n' > "$pub/README.md"
+            }
+            rm -rf "$pub/pr${PR}"
+            mkdir -p "$pub/pr${PR}/$short"
+            cp "$montage"/*.before-after.png "$pub/pr${PR}/$short/"
+            git -C "$pub" add -A
+            git -C "$pub" -c user.name='github-actions[bot]' \
+              -c user.email='github-actions[bot]@users.noreply.github.com' \
+              commit -q -m "visual diffs: PR #${PR} @ $short"
+            # A racing run on another PR can advance the branch; rebase-retry once.
+            git -C "$pub" push origin visual-diffs || {
+              git -C "$pub" pull --rebase origin visual-diffs && git -C "$pub" push origin visual-diffs
+            }
+            base="https://raw.githubusercontent.com/${REPO}/visual-diffs/pr${PR}/$short"
+          fi
 
-          base="https://raw.githubusercontent.com/${REPO}/visual-diffs/pr${PR}/$short"
           bun scripts/cdp/visual-review-comment.mjs \
             --base-url "$base" --run-url "$RUN_URL" --montage-dir "$montage" > "$RUNNER_TEMP/visual-comment.md"
-          gh pr comment "$PR" --body-file "$RUNNER_TEMP/visual-comment.md" --edit-last --create-if-none \
-            || gh pr comment "$PR" --body-file "$RUNNER_TEMP/visual-comment.md"
-
-      # Reseed mode: regenerate the gallery from the fresh baselines so the two
-      # stay in lockstep, then hand BOTH back as a downloadable zip. No token, no
-      # push — a HUMAN looks at them and commits baselines/linux-x64/ + GALLERY.md.
-      - name: Regenerate the gallery from the fresh baselines
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines }}
-        run: bun run gallery
-      - name: Upload the reseeded baselines + gallery
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: visual-baselines-linux-x64
-          path: |
-            scripts/cdp/baselines/linux-x64/*.png
-            scripts/cdp/GALLERY.md
-          if-no-files-found: error
-          retention-days: 7
+          MARKER='<!-- peerd-visual -->'
+          # why `|| true`: --paginate keeps writing after `head -1` closes the
+          # pipe, so gh takes SIGPIPE (141); under `set -o pipefail` that would
+          # abort this step immediately BEFORE posting, and continue-on-error
+          # would mask it as "the review channel just stopped updating". head has
+          # already emitted the id by then, so the assignment still holds.
+          ID=$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+                 --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty" | head -1) || true
+          if [ -n "$ID" ]; then
+            gh api -X PATCH "repos/${REPO}/issues/comments/${ID}" -F body=@"$RUNNER_TEMP/visual-comment.md" >/dev/null
+            echo "updated sticky visual comment $ID"
+          else
+            gh api -X POST "repos/${REPO}/issues/${PR}/comments" -F body=@"$RUNNER_TEMP/visual-comment.md" >/dev/null
+            echo "posted visual comment"
+          fi
 
   # The behavioral packaged-build gate. Its OWN job (stable name) on purpose:
   # check:pages is the only tier that loads the REAL pruned artifact and so the

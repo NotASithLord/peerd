@@ -191,7 +191,7 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before changing code.
 - [`docs/security/LIFECYCLE-CONTRACT.md`](docs/security/LIFECYCLE-CONTRACT.md): interruption behavior and recovery limits
 - [`docs/security/RED-TEAM-RESULTS.md`](docs/security/RED-TEAM-RESULTS.md): red-team coverage
 - [`docs/store/`](docs/store/): store packaging, permissions, privacy, and reviewer notes
-- [`scripts/cdp/GALLERY.md`](scripts/cdp/GALLERY.md): E2E and visual states
+- [`scripts/cdp/states.mjs`](scripts/cdp/states.mjs): E2E and visual states
 
 Design records under `docs/design/` are point-in-time proposals. They explain
 past decisions and planned work. They do not override current code.

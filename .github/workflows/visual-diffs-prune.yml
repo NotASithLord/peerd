@@ -1,0 +1,64 @@
+# Prune a closed PR's before/after montages from the `visual-diffs` branch.
+#
+# The visual lane stores no baseline images in the repo, but it DOES publish the
+# montages a reviewer looks at to an orphan branch, so GitHub can render them
+# inline in the PR comment. Those are review scaffolding with the lifetime of the
+# review: once the PR is closed or merged, nobody follows the link again, and
+# without this the branch accumulates every screen every PR ever moved.
+#
+# Deliberately its own workflow rather than a job in package-and-release: adding
+# `closed` to that workflow's pull_request types would run the whole matrix -
+# packaging, e2e, the browser suites - on every close.
+
+name: visual-diffs-prune
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  prune:
+    name: prune visual diffs for the closed PR
+    # Fork PRs never had montages published (that step needs a write token the
+    # fork's GITHUB_TOKEN does not carry), so there is nothing to prune.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write        # delete this PR's dir from the visual-diffs branch
+    steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - name: Remove pr<N>/ from the visual-diffs branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          auth="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          pub="$RUNNER_TEMP/visual-diffs"
+          # No branch yet means nothing was ever published. Not an error.
+          git clone --branch visual-diffs --single-branch --depth 1 "$auth" "$pub" 2>/dev/null || {
+            echo "no visual-diffs branch - nothing to prune"
+            exit 0
+          }
+          if [ ! -d "$pub/pr${PR}" ]; then
+            echo "no montages published for PR #${PR}"
+            exit 0
+          fi
+          rm -rf "$pub/pr${PR}"
+          git -C "$pub" add -A
+          git -C "$pub" -c user.name='github-actions[bot]' \
+            -c user.email='github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "visual diffs: prune PR #${PR}"
+          # A racing publish from another PR can advance the branch; retry once.
+          git -C "$pub" push origin visual-diffs || {
+            git -C "$pub" pull --rebase origin visual-diffs && git -C "$pub" push origin visual-diffs
+          }
+          echo "pruned pr${PR}/ from visual-diffs"
