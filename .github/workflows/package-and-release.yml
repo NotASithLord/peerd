@@ -4,6 +4,14 @@
 #                     file drift check, then the FULL 2-channel × 2-browser
 #                     artifact matrix (store artifacts are verified to
 #                     contain zero dweb traces as part of packaging).
+#   DRAFT PRs       → the browser tier (in-browser Chrome, Firefox/Gecko,
+#                     e2e, visual, two-peer, packaged page boot) is SKIPPED
+#                     so iteration costs only the fast lanes. Marking the PR
+#                     ready for review re-runs the workflow with the full
+#                     tier on the current head; branch protection can require
+#                     those jobs and the requirement bites exactly at merge
+#                     time, since a draft cannot merge. Pushes to main still
+#                     run everything.
 #   tag push v*     → additionally: signed preview artifacts, a GitHub
 #                     Release titled peerd-preview-v<X.Y.Z> with the
 #                     preview artifacts + update feeds attached, and a
@@ -28,7 +36,11 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+  # why explicit types: ready_for_review is NOT in the default set, and it is
+  # the event that turns a draft into a mergeable PR. Without it, the browser
+  # jobs below would stay skipped on the head that branch protection inspects.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       security_read_only:
@@ -187,6 +199,7 @@ jobs:
   # branch-protection required checks; this one can be added to that
   # list once it has a green history.
   inbrowser:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: in-browser tests (headless Chrome)
     runs-on: ubuntu-latest
     steps:
@@ -219,6 +232,7 @@ jobs:
   # Runs the Firefox artifact, not only its manifest and AMO validator, then
   # runs the shared browser suite in Gecko. Chrome remains the visual authority.
   firefox-runtime:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Firefox Store smoke + Gecko suite
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -277,6 +291,7 @@ jobs:
   # signaling node and opens two real browser contexts that must form a WebRTC
   # mesh and exchange gossip — the live peer-to-peer seam no other job covers.
   twopeer:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: dweb two-peer (headless WebRTC)
     runs-on: ubuntu-latest
     steps:
@@ -363,6 +378,7 @@ jobs:
   # history before gating. First test that loads the REAL unpacked extension
   # and drives the live side panel through one full agent turn.
   e2e:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: e2e (side panel)
     runs-on: ubuntu-latest
     steps:
@@ -443,6 +459,8 @@ jobs:
     # A prepared Dependabot head can contain a candidate Action SHA. Never let
     # that candidate share this job's repository-write token.
     if: >-
+      (github.event_name != 'pull_request' ||
+        github.event.pull_request.draft == false) &&
       !(github.event_name == 'pull_request' &&
         github.event.pull_request.user.login == 'dependabot[bot]') &&
       !(github.event_name == 'workflow_dispatch' &&
@@ -634,6 +652,7 @@ jobs:
   # this job to the branch-protection required-checks list once it has a green
   # history (mirrors the note on `inbrowser`).
   packaged-pages:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: packaged page boot
     runs-on: ubuntu-latest
     steps:
