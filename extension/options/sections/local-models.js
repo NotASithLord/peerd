@@ -21,6 +21,7 @@ import { MODEL_SPECS, probeLocalModelCapability, judgeModelCapability } from '/p
 const MODELS = [MODEL_SPECS['gemma-4-e2b']].filter(Boolean);
 
 const GB = 2 ** 30;
+export const LOCAL_MODEL_POLL = { ms: 3000 };
 
 /** @param {any} status local-model/status reply */
 const dlText = (status) => {
@@ -49,18 +50,57 @@ export const LocalModelsSection = {
     vnode.state.testing = false;
     vnode.state.status = null;      // local-model/status reply
     vnode.state.downloading = false;
+    vnode.state.pollTimer = null;
+    vnode.state.removed = false;
+    vnode.state.readyNotified = false;
+    vnode.state.statusGeneration = 0;
     LocalModelsSection.refreshStatus(vnode);
   },
 
+  /** @param {{ state: any }} vnode */
+  onremove(vnode) {
+    vnode.state.removed = true;
+    if (vnode.state.pollTimer) clearTimeout(vnode.state.pollTimer);
+    vnode.state.pollTimer = null;
+  },
+
   /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode */
+  schedulePoll(vnode) {
+    if (vnode.state.removed || vnode.state.pollTimer) return;
+    vnode.state.pollTimer = setTimeout(async () => {
+      vnode.state.pollTimer = null;
+      if (!vnode.state.removed) await LocalModelsSection.refreshStatus(vnode);
+    }, LOCAL_MODEL_POLL.ms);
+  },
+
+  /** @param {{ state: any, attrs: { state: any, send: Send, onReady?: () => void } }} vnode */
   async refreshStatus(vnode) {
+    const generation = vnode.state.statusGeneration + 1;
+    vnode.state.statusGeneration = generation;
     if (vnode.attrs.state?.capabilities?.localWebGpuHost?.status !== 'available') {
       vnode.state.status = { ok: false, error: 'runtime_capability_unavailable' };
       m.redraw();
       return;
     }
-    try { vnode.state.status = await vnode.attrs.send({ type: 'local-model/status' }); }
-    catch { vnode.state.status = null; }
+    let status = null;
+    try { status = await vnode.attrs.send({ type: 'local-model/status' }); }
+    catch { status = null; }
+    if (vnode.state.removed || vnode.state.statusGeneration !== generation) return;
+    vnode.state.status = status;
+    const ready = !!(vnode.state.status?.available || vnode.state.status?.downloaded);
+    const loading = !!vnode.state.status?.loading;
+    const failed = vnode.state.status?.progress?.status === 'error';
+    if (ready) {
+      vnode.state.downloading = false;
+      if (!vnode.state.readyNotified) {
+        vnode.state.readyNotified = true;
+        vnode.attrs.onReady?.();
+      }
+    } else if (failed) {
+      vnode.state.downloading = false;
+    } else if (loading || vnode.state.downloading) {
+      LocalModelsSection.schedulePoll(vnode);
+    }
     m.redraw();
   },
 
@@ -91,16 +131,10 @@ export const LocalModelsSection = {
       m.redraw();
       return;
     }
-    const poll = async () => {
-      await LocalModelsSection.refreshStatus(vnode);
-      if (vnode.state.status?.available || vnode.state.status?.progress?.status === 'error') {
-        vnode.state.downloading = false; m.redraw();
-      } else { setTimeout(poll, 3000); }
-    };
-    poll();
+    await LocalModelsSection.refreshStatus(vnode);
   },
 
-  /** @param {{ state: any, attrs: { state: any, send: Send, logo?: any, label?: string } }} vnode */
+  /** @param {{ state: any, attrs: { state: any, send: Send, logo?: any, label?: string, onReady?: () => void } }} vnode */
   view(vnode) {
     const ui = vnode.state;
     const hostAvailable = vnode.attrs.state?.capabilities?.localWebGpuHost?.status === 'available';

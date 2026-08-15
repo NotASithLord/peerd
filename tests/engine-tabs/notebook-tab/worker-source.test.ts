@@ -77,3 +77,24 @@ describe('buildWorkerSource — bodyLine + mapWorkerError', () => {
     expect(source).toContain('const s = "a$&b$1c"; return s;');
   });
 });
+
+describe('buildWorkerSource: Pod JS profile', () => {
+  test('uses the Pod seal and exposes only named command/workspace inputs', async () => {
+    const { source } = await buildWorkerSource('console.log(args[0]); return stdin', {
+      notebookId: 'pod-1', resolverDeps,
+      caps: { page: false, egress: false, subagent: false, opfs: true, provider: false, distributed: false },
+      podCommand: { args: ['x'], stdin: 'pipe', cwd: '/src', env: { MODE: 'test' } },
+    });
+    expect(source.split('\n')[0]).toContain('pod-realm-seal.js');
+    expect(source).toContain('const args = Object.freeze(["x"])');
+    expect(source).toContain('const stdin = "pipe"');
+    expect(source).toContain('const cwd = "/src"');
+    expect(source).not.toContain('fetch: __podFetch');
+    expect(source).toContain('Network access stays in the explicit shell curl command');
+    expect(source).toContain('no-egress capability profile');
+    expect(source).toContain('no-subagent capability profile');
+    expect(source).toContain('no-distributed capability profile');
+    expect(source).not.toContain("makeBridge('page'");
+    expect(source).not.toContain("makeBridge('provider'");
+  });
+});

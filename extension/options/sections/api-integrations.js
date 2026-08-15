@@ -41,7 +41,7 @@ export const ApiIntegrationsSection = {
 
   load(/** @type {any} */ vnode) {
     vnode.attrs.send({ type: 'origin-cred/list' }).then((/** @type {any} */ r) => {
-      vnode.state.integrations = r?.ok ? r.integrations : [];
+      vnode.state.integrations = r?.ok && Array.isArray(r.integrations) ? r.integrations : [];
       if (r && !r.ok && r.error === 'locked') vnode.state.msg = { ok: false, text: 'Vault is locked — unlock in the peerd panel first.' };
       m.redraw();
     }).catch(() => { vnode.state.integrations = []; m.redraw(); });
@@ -78,7 +78,7 @@ export const ApiIntegrationsSection = {
           ? `Saved for ${r.origin} — encrypted in the vault. Register the key thumbprint below with ${r.origin}.`
           : `Saved for ${r.origin} — encrypted in the vault.` };
         const lr = await send({ type: 'origin-cred/list' });
-        if (lr?.ok) ui.integrations = lr.integrations;
+        if (lr?.ok) ui.integrations = Array.isArray(lr.integrations) ? lr.integrations : [];
       } else {
         ui.msg = { ok: false, text: errText(r?.error) };
       }
@@ -201,7 +201,7 @@ export const ApiIntegrationsSection = {
 
       // Git credentials fold in here — a git PAT is the same class of secret (a
       // host-bound bearer token, stored git:<host> in the same vault), just for private
-      // `git clone` inside the WebVM. Rendered as a subsection rather than its own nav
+      // Git operations across every engine repository. Rendered as a subsection rather than its own nav
       // entry (owner's call). GitCredentialsSection owns its own load/save/list lifecycle.
       m('.settings-divider'),
       m('h3', 'Git credentials'),
@@ -238,7 +238,7 @@ export const SiteClientsSection = {
 
   load(/** @type {any} */ vnode) {
     vnode.attrs.send({ type: 'site-client/list' }).then((/** @type {any} */ r) => {
-      vnode.state.clients = r?.ok ? r.clients : [];
+      vnode.state.clients = r?.ok && Array.isArray(r.clients) ? r.clients : [];
       m.redraw();
     }).catch(() => { vnode.state.clients = []; m.redraw(); });
   },

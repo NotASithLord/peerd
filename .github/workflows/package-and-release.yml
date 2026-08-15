@@ -73,7 +73,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -81,7 +81,14 @@ jobs:
         with:
           bun-version: "1.3.9"
       - run: bun install --frozen-lockfile
-      - run: bun test ./tests
+      - name: Run functional suite and generate passing-count badge
+        run: bun run test:functional:badge
+      - name: Functional test badge in sync
+        run: |
+          git diff --exit-code badges/functional-tests.json || {
+            echo '::error::badges/functional-tests.json is stale - run `bun run gen:badge:functional` and commit it.'
+            exit 1
+          }
 
   checks:
     name: lint + boundary + drift
@@ -91,7 +98,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -168,7 +175,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -195,7 +202,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -244,7 +251,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -304,7 +311,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -330,7 +337,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -354,6 +361,12 @@ jobs:
         # smoke, goal mode, stop, error — against ONE Chrome (env-independent;
         # visual states are excluded here as their baselines are per-machine).
         run: bun run test:e2e:all
+      - name: Run cold first-signup passkey regression
+        env:
+          CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
+        # A virtual CTAP2.1 authenticator exercises WebAuthn PRF through the
+        # real side panel and MV3 worker, including the post-credential commit.
+        run: bun run test:e2e:passkey
       - name: Exercise the MV3 lifecycle fault boundary
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
@@ -406,7 +419,7 @@ jobs:
       TZ: UTC
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -631,7 +644,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -663,7 +676,7 @@ jobs:
         browser: [chrome, firefox]
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -738,7 +751,7 @@ jobs:
       attestations: write
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

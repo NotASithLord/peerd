@@ -43,6 +43,13 @@ describe('extractInstanceHandle', () => {
     expect(ENGINE_PRIMITIVES.has('engine')).toBe(true);
   });
 
+  test('retains a Pod handle and concrete kind', () => {
+    expect(extractInstanceHandle('engine', '{"id":"pod-abc","name":"build","kind":"pod"}'))
+      .toEqual({ id: 'pod-abc', name: 'build', kind: 'pod' });
+    expect(extractInstanceHandle('engine', 'sandbox_create · id=pod-abc "build" · kind=pod'))
+      .toEqual({ id: 'pod-abc', name: 'build', kind: 'pod' });
+  });
+
   test('null on non-string / no id / empty', () => {
     expect(extractInstanceHandle('app', null)).toBe(null);
     expect(extractInstanceHandle('app', '{}')).toBe(null);

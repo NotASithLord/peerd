@@ -5,6 +5,8 @@ import {
   WEB_ACTOR_SUMMARY_PROMPT,
   makeWebActorTabBindings,
   makeWebActorRegistry,
+  retireStoppedRoamingWebActor,
+  retireStoppedRoamingWebActorDurably,
 } from '../../extension/peerd-runtime/actor/web-actor.js';
 import { stripUntrustedFences } from '../../extension/shared/util.js';
 
@@ -110,5 +112,72 @@ describe('makeWebActorRegistry — the chat→web-actor map (0-or-1-tab actor)',
     const r2 = makeWebActorRegistry();
     r2.load(r.entries());
     expect(r2.resolve('chat-2')).toBe('b');
+  });
+
+  test('an origin stop retires a roaming actor so the next address mints fresh', () => {
+    const r = makeWebActorRegistry();
+    r.bind('chat-1', 'actor-poisoned');
+    r.bind('chat-alias', 'actor-poisoned');
+    r.bind('chat-2', 'actor-safe');
+
+    expect(retireStoppedRoamingWebActor(r, 'actor-poisoned', { mode: 'roaming' }))
+      .toEqual(['chat-1', 'chat-alias']);
+    expect(r.resolve('chat-1')).toBeNull();
+    expect(r.resolve('chat-alias')).toBeNull();
+    expect(r.resolve('chat-2')).toBe('actor-safe');
+
+    // Mirrors resolveWebActor's lazy mint after the retired lookup returns null.
+    r.bind('chat-1', 'actor-fresh');
+    expect(r.resolve('chat-1')).toBe('actor-fresh');
+    expect(r.resolve('chat-1')).not.toBe('actor-poisoned');
+  });
+
+  test('a stopped bound actor keeps its chat registry address', () => {
+    const r = makeWebActorRegistry();
+    r.bind('chat-1', 'actor-bound');
+    expect(retireStoppedRoamingWebActor(r, 'actor-bound', {
+      mode: 'bound', ownedOrigin: 'https://example.test',
+    })).toEqual([]);
+    expect(r.resolve('chat-1')).toBe('actor-bound');
+  });
+
+  test('a tombstone failure cannot suppress the durable routing drop', async () => {
+    const r = makeWebActorRegistry();
+    r.bind('chat-1', 'actor-poisoned');
+    const marked: string[] = [];
+    let routingWrites = 0;
+    const result = await retireStoppedRoamingWebActorDurably({
+      registry: r,
+      actorSessionId: 'actor-poisoned',
+      originState: { mode: 'roaming' },
+      markRetired: (id) => { marked.push(id); },
+      writeTombstone: async () => { throw new Error('session write unavailable'); },
+      persistRouting: async () => { routingWrites += 1; },
+    });
+
+    expect(marked).toEqual(['actor-poisoned']);
+    expect(r.resolve('chat-1')).toBeNull();
+    expect(routingWrites).toBe(1);
+    expect(result.tombstone.status).toBe('rejected');
+    expect(result.routing.status).toBe('fulfilled');
+  });
+
+  test('a routing write failure cannot suppress the durable session tombstone', async () => {
+    const r = makeWebActorRegistry();
+    r.bind('chat-1', 'actor-poisoned');
+    let tombstones = 0;
+    const result = await retireStoppedRoamingWebActorDurably({
+      registry: r,
+      actorSessionId: 'actor-poisoned',
+      originState: { mode: 'roaming' },
+      markRetired: () => {},
+      writeTombstone: async () => { tombstones += 1; },
+      persistRouting: async () => { throw new Error('session routing unavailable'); },
+    });
+
+    expect(tombstones).toBe(1);
+    expect(r.resolve('chat-1')).toBeNull();
+    expect(result.tombstone.status).toBe('fulfilled');
+    expect(result.routing.status).toBe('rejected');
   });
 });

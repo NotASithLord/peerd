@@ -8,6 +8,10 @@ import { createPresence, PRESENCE_TOPIC } from '../../extension/peerd-distribute
 import { createTopicSync, createMemoryTopicStore } from '../../extension/peerd-distributed/gossip/sync.js';
 
 const tick = (ms = 25) => new Promise((r) => setTimeout(r, ms));
+const waitFor = async (predicate: () => boolean, timeoutMs = 1_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await tick(10);
+};
 
 // A fully-linked clique of N peers: real identities, real HELLOs, real
 // signed envelopes — only the bytes ride memoryPair instead of WebRTC.
@@ -42,7 +46,7 @@ describe('topic gossip', () => {
     for (const i of [1, 2, 3]) peers[i].gossip.subscribe('feed', (m: any) => got[i].push(m));
 
     await peers[0].gossip.publish('feed', { text: 'hello room' });
-    await tick();
+    await waitFor(() => [1, 2, 3].every((i) => got[i].length === 1));
 
     for (const i of [1, 2, 3]) {
       // In a 4-clique each peer hears the frame from up to 3 paths —
@@ -75,7 +79,7 @@ describe('topic gossip', () => {
     const atC: any[] = [];
     gs[2].subscribe('t', (m: any) => atC.push(m));
     await gs[0].publish('t', 'over the hop');
-    await tick();
+    await waitFor(() => atC.length === 1);
     expect(atC).toHaveLength(1);
     expect(atC[0].from).toBe(ids[0].did); // origin attribution survives the hop
     for (const g of gs) g.close();
@@ -112,7 +116,7 @@ describe('topic gossip', () => {
     const got: any[] = [];
     gb.subscribe('t', (m: any) => got.push(m));
     for (let i = 0; i < 12; i++) await ga.publish('t', i);
-    await tick();
+    await waitFor(() => got.length === 5 && audits.includes('gossip_rate_limited'));
     expect(got.length).toBe(5); // burst allowance, then the wall
     expect(audits).toContain('gossip_rate_limited');
     ga.close(); gb.close(); ma.close(); mb.close();
@@ -154,7 +158,7 @@ describe('topic gossip', () => {
 
     // A normal post traverses the whole chain — proves the topology relays.
     await ga.publish('feed', { post: 'small' });
-    await tick(60);
+    await waitFor(() => atC.some((m) => m.data.post === 'small'));
     expect(atC.map((m) => m.data.post)).toEqual(['small']);
 
     await ga.publish('feed', { post: 'x'.repeat(40_000) });
@@ -184,13 +188,13 @@ describe('presence', () => {
     pa.onLeave((l: any) => leaves.push(l));
 
     pa.start(); pb.start();
-    await tick(50);
+    await waitFor(() => pa.list().some((p: any) => p.did === peers[1].identity.did));
     expect(joins.map((j) => j.did)).toContain(peers[1].identity.did);
     expect(joins.find((j) => j.did === peers[1].identity.did).meta).toEqual({ name: 'walt' });
     expect(pa.list().map((p: any) => p.did)).toContain(peers[1].identity.did);
 
     pb.stop(); // b goes silent → a times it out
-    await tick(250);
+    await waitFor(() => leaves.some((l) => l.did === peers[1].identity.did));
     expect(leaves.map((l) => l.did)).toContain(peers[1].identity.did);
     pa.close(); pb.close();
     close(peers);
@@ -203,7 +207,7 @@ describe('presence', () => {
     const leaves: any[] = [];
     pa.onLeave((l: any) => leaves.push(l));
     pa.start(); pb.start();
-    await tick(50);
+    await waitFor(() => pa.list().some((p: any) => p.did === peers[1].identity.did));
     expect(pa.list().map((p: any) => p.did)).toContain(peers[1].identity.did);
 
     // expiry is ~forever here; forget() drops it immediately (the link-died path).
@@ -256,7 +260,7 @@ describe('presence', () => {
     peers[1].gossip.subscribe(PRESENCE_TOPIC, (m: any) => raw.push(m));
     const pa = createPresence({ gossip: peers[0].gossip, selfDid: peers[0].identity.did, heartbeatMs: 1000 });
     pa.start();
-    await tick();
+    await waitFor(() => raw.length >= 1);
     expect(raw.length).toBeGreaterThanOrEqual(1);
     pa.close();
     close(peers);
@@ -276,7 +280,7 @@ describe('topic sync (late-join backfill)', () => {
     const [pa, pb] = (await clique(2)).map(withSync);
     await pa.sync.publish('feed', { post: 'first' });
     await pb.sync.publish('feed', { post: 'second' });
-    await tick();
+    await waitFor(() => pa.sync.history('feed').length === 2);
     expect(pa.sync.history('feed')).toHaveLength(2);
 
     // c links to a only — and must end with BOTH posts.
@@ -294,7 +298,7 @@ describe('topic sync (late-join backfill)', () => {
     ]);
     pa.mesh.addLink(ca, idC.did);
     pc.mesh.addLink(cc, pa.identity.did);
-    await tick(60);
+    await waitFor(() => pc.sync.history('feed').length === 2 && seen.length === 2);
 
     expect(pc.sync.history('feed')).toHaveLength(2);
     expect(seen.map((m) => m.data.post).sort()).toEqual(['first', 'second']);
@@ -322,7 +326,8 @@ describe('topic sync (late-join backfill)', () => {
     ]);
     pa.mesh.addLink(ca, idD.did);
     pd.mesh.addLink(cd, pa.identity.did);
-    await tick(60);
+    await waitFor(() => pa.sync.history('feed')
+      .some((e: any) => e.body.data.post === 'written offline'));
 
     expect(pa.sync.history('feed').map((e: any) => e.body.data.post)).toContain('written offline');
     pd.sync.close(); pd.gossip.close(); pd.mesh.close();

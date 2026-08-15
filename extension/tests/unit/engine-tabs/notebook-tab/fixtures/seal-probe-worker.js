@@ -74,6 +74,12 @@ const runProbes = () => ({
   // caches.open(...).add(url) runs the Fetch algorithm — sealed because the
   // offscreen script host has no connect-src 'none' backstop.
   caches: probe(() => workerGlobal.caches.open('x')),
+  // A Notebook receives its workspace only through the rooted host bridge. The
+  // extension-origin OPFS root would expose every Notebook/Pod/App tree.
+  rawOpfs: probe(() => workerGlobal.navigator.storage.getDirectory()),
+  // Dedicated extension Workers must not inherit ambient extension authority.
+  chromeAbsent: /** @type {any} */ (workerGlobal).chrome === undefined,
+  browserAbsent: /** @type {any} */ (workerGlobal).browser === undefined,
 });
 
 const inspectFetch = () => {

@@ -42,10 +42,12 @@ const DEFAULTS = Object.freeze({
  *   now?: () => number,
  *   caps?: { relayPerMin?: number, snapshotMax?: number },
  *   onCard?: ((card: any) => void) | null,
+ *   admitMeta?: ((candidate: { dwappId: string, publisher: string, seq: number, versionId: string }) => Promise<boolean>) | null,
  * }} opts
  */
 export const createDiscovery = ({
   mesh, identity, library, isBlocked = () => false, block = null, audit = null, now = Date.now, caps = {}, onCard = null,
+  admitMeta = null,
 } = /** @type {{ mesh: any, identity: { did: string }, library: any }} */ ({})) => {
   const relayPerMin = caps.relayPerMin ?? DEFAULTS.relayPerMin;
   const snapshotMax = caps.snapshotMax ?? DEFAULTS.snapshotMax;
@@ -88,6 +90,15 @@ export const createDiscovery = ({
     // SNAPSHOT — otherwise our own deleted app keeps re-infecting our Library (it'd
     // pop back into Discover as "by you · in your Library"). Cleared on re-share.
     if (tombstoned.has(id)) return false;
+    if (admitMeta && !await admitMeta({
+      dwappId: id,
+      publisher: item.publisher,
+      seq: item.seq,
+      versionId: item.value.head.version_id,
+    })) {
+      audit?.('discovery_card_rollback_refused', { via, dwapp_id: id, seq: item.seq });
+      return false;
+    }
     const fresh = library.put(id, item);
     if (fresh) { onCard?.({ dwapp_id: id, ...item }); await forward(item, via); } // relay over consented edges
     return fresh;
@@ -150,6 +161,12 @@ export const createDiscovery = ({
       if (item.publisher !== identity.did) throw new Error('announce: not our card to publish');
       const id = await metaDwappId(item);
       tombstoned.delete(id); // re-sharing an app lifts its un-share tombstone
+      if (admitMeta && !await admitMeta({
+        dwappId: id,
+        publisher: item.publisher,
+        seq: item.seq,
+        versionId: item.value.head.version_id,
+      })) throw new Error('announce: durable version gate refused card');
       const fresh = library.put(id, item);
       library.markInstalled(id, true); // our own app is installed by definition (we authored + seed it)
       if (fresh) { onCard?.({ dwapp_id: id, ...item }); await forward(item, null); }

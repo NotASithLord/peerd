@@ -45,7 +45,10 @@ the mic-permission grant page; `eval/` is the live end-to-end eval
 harness. (There is no `content/` directory — DOM work happens via
 injected functions, not a persistent content script.) Outside
 `extension/`, the repo also carries `signaling-node/` (the dweb
-rendezvous server shells sharing the pure signaling reducer). The
+rendezvous server shells sharing the pure signaling reducer) and
+`web-identity/` (the static `id.peerd.ai` ceremony page: the ONE hosted
+component of portable identity; a WebAuthn front-end with no storage and
+no network egress, deployed through the site repo). The
 peerd.ai site lives in its own repo now (`NotASithLord/peerd-site`); it
 vendors snapshots of the VM-demo runtime + the `peerd-distributed`
 transport, and the auto-update feeds are still generated here
@@ -64,8 +67,9 @@ prose orientation is this file, and the rest is the source itself.
 1. **`CLAUDE.md`** (this file) — orientation. Start here every session.
 2. **The module code** — `extension/peerd-provider/`, `peerd-egress/`,
    `peerd-engine/`, `peerd-runtime/`, `peerd-distributed/`. Each
-   module's `index.js` is its public surface; read it first, then the
-   files it exports.
+   module's `index.js` is its universal public surface; read it first, then the
+   files it exports. An explicit environment entry point such as
+   `background.js` may expose a cold-start-safe subset for that host.
 3. **The code.** For concrete behavior (vault crypto, denylist matcher,
    agent loop, tool dispatcher, prompt-injection defenses, the manifest,
    the MV3 keepalive trick), read the source in the relevant module. It
@@ -196,9 +200,10 @@ prose orientation is this file, and the rest is the source itself.
   uncovered UI change is an unfinished one. why: the unit tiers can
   assert structure but can't SEE the render; this loop is how an agent
   closes that gap on its own before pushing.
-- **`index.js` is the public API per module.** ESLint
-  `no-restricted-imports` forbids deep paths from outside the module.
-  Inside the module, deep imports are fine.
+- **Public entry points are the API per module.** `index.js` is the universal
+  surface; a named environment surface such as `background.js` may expose a
+  strict cold-start subset. ESLint `no-restricted-imports` forbids every other
+  deep path from outside the module. Inside the module, deep imports are fine.
 - **The credential ladder — prefer the credential peerd cannot read.**
   When the agent must act as the user, climb DOWN this ladder and stop at
   the first rung that works; never drop a rung for convenience:
@@ -413,6 +418,28 @@ gotchas to know going in:
   dwapp bridge (it builds p2p dwapps that users and agents both use).
   Chrome-preview only until Firefox has a mesh host. Other artifacts prune the
   module and CI verifies the package boundary. See the `peerd-distributed/` code.
+- **Portable identity, same-user device enrollment + P2P state sync**
+  (`peerd-distributed/identity/` + `self/`, doc:
+  `docs/design/portable-identity/06-device-enrollment.md`). The permanent
+  person did:key stays the root; nothing is derived from a passkey, biometric,
+  or device. Under it: a per-install **device key** (never exported, under the
+  export-excluded `distributed/device-key/` prefix) certified by the root; a
+  **passkey binding** making a WebAuthn credential at the canonical RP
+  (`id.peerd.ai`, page in `web-identity/`) an enrollment/recovery authority;
+  and a **discovery secret**, distinct from every signing seed and vault key
+  that derives **rotating HMAC rendezvous topics** so a person's devices find
+  each other without advertising their did. Certificates + rosters are signed
+  SNAPSHOTS with monotone `seq` (add/revoke/rotate never change the did).
+  A discovered peer is a CANDIDATE only: `self-device` requires a same-root
+  certificate AND challenge-response proof of its device key, both directions,
+  domain- and nonce-bound. State then moves over **versioned logical surfaces**
+  (`self/sync.js`), hash-verified per surface, idempotent on retry, and
+  refused to any non-self peer. The durability registry gained a
+  `personPortable` axis (broader than file `portable`: chats/Apps/workspace
+  CONTENTS sync to a proven self device); permission grants, audit history,
+  device keys, and live engine handles are excluded on both. Routine mesh
+  signing still uses the root: the wire verifier must accept
+  certificate-backed identity everywhere first (03-device-subkeys.md).
 - The **dweb actor** — a fifth bound-actor kind (`actorType:'dweb'`) and the
   first DAEMON actor: an opt-in (`dwebAgentEnabled`, Chrome-preview-only, default
   off), persistent, GLOBAL singleton addressable as `message_actor("dweb",…)`.
@@ -471,6 +498,15 @@ land with deliberate design work):
   (find an agent by capability across the whole mesh, not just the present
   roster). The base network + signed direct channels + the Agent Card are in
   place; this is fleshing out what rides them.
+- Portable identity's remainder: the certificate machinery ships, but the
+  ROUTINE-SIGNING switchover does not: envelopes, Agent Cards, manifests, DHT
+  items, and A2A still sign with the person root, and the wire verifier must
+  accept certificate-backed identity across all of them before that moves.
+  Also ahead: the rendered "Use my existing Peerd" fork on the vault gate
+  (the flow + copy are implemented and tested; the render needs the visual
+  verify loop), a deployed `id.peerd.ai`, roster/binding propagation over
+  gossip + DHT with offline revocation (#362), and ongoing multi-device sync
+  (this arc is initial migration by snapshot: no CRDTs, no multi-master).
 
 ---
 

@@ -81,6 +81,8 @@ describe('numeric tab authority', () => {
     expect(refusal).toMatchObject({
       ok: false,
       error: NUMERIC_TAB_SENSITIVE_CODE,
+      performed: false,
+      outcomeKnown: true,
       outcomeKind: 'pre-effect-failure',
       structured: {
         performed: false,
@@ -104,6 +106,8 @@ describe('numeric tab authority', () => {
     expect(numericTabAuthorityRefusal(decision)).toMatchObject({
       ok: false,
       error: NUMERIC_TAB_POLICY_UNAVAILABLE_CODE,
+      performed: false,
+      outcomeKnown: true,
       outcomeKind: 'pre-effect-failure',
       structured: {
         performed: false,

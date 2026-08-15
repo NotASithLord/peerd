@@ -43,7 +43,25 @@ const flush = async () => {
   m.redraw.sync();
 };
 
-const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+// why: the view moves focus from inside its OWN requestAnimationFrame
+// (focusLibraryAction), so awaiting a single frame races it - under CI load the
+// test's frame can run first and read the pre-move element. Poll to a deadline
+// instead. A genuine focus regression still fails the assertion that follows,
+// just one budget later.
+/**
+ * @param {() => boolean} landed
+ * @param {number} [budgetMs]
+ */
+const focusSettles = async (landed, budgetMs = 2000) => {
+  const deadline = performance.now() + budgetMs;
+  while (!landed() && performance.now() < deadline) {
+    await new Promise((resolve) => { setTimeout(resolve, 16); });
+  }
+};
+
+/** @param {string} action */
+const focusedAction = (action) => () =>
+  document.activeElement?.getAttribute('data-library-action') === action;
 
 /**
  * @param {FakeSend} send
@@ -116,6 +134,24 @@ describe('home.library', () => {
     } finally { unmount(); }
   });
 
+  it('moves focus through the actions menu and returns it on Escape', async () => {
+    const { root, unmount } = await mountView(makeSend());
+    try {
+      const trigger = need(root, '.library-kebab', HTMLButtonElement);
+      trigger.focus();
+      trigger.click();
+      await flush();
+      expect(document.activeElement?.textContent).toBe('Rename');
+      document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      expect(document.activeElement?.textContent).toBe('History & Git');
+      document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await flush();
+      await focusSettles(() => document.activeElement === trigger);
+      expect(root.querySelector('.library-menu')).toBeFalsy();
+      expect(document.activeElement).toBe(trigger);
+    } finally { unmount(); }
+  });
+
   it('tapping a star dispatches apps/favorite', async () => {
     const send = makeSend();
     const { root, unmount } = await mountView(send);
@@ -142,7 +178,7 @@ describe('home.library', () => {
       confirm.focus();
       confirm.click();                                  // confirms
       await flush();
-      await nextFrame();
+      await focusSettles(focusedAction('open'));
       expect(send.calls.some((c) => c.type === 'apps/delete')).toBe(true);
       expect(document.activeElement?.getAttribute('data-library-action')).toBe('open');
       expect(document.activeElement?.closest('.library-card')?.textContent).toContain('Calculator');
@@ -166,7 +202,7 @@ describe('home.library', () => {
       confirm.focus();
       confirm.click();
       await flush();
-      await nextFrame();
+      await focusSettles(focusedAction('more'));
       expect(root.querySelector('[role="alert"]')?.textContent).toContain('local App was kept');
       expect(document.activeElement?.getAttribute('data-library-action')).toBe('more');
       expect(document.activeElement?.closest('.library-card')?.textContent).toContain('Snake Game');
@@ -208,7 +244,7 @@ describe('home.library', () => {
       await flush();
       clickText(root, '.library-share button', 'Share');
       await flush();
-      await nextFrame();
+      await focusSettles(focusedAction('share'));
       const call = send.calls.find((c) => c.type === 'dweb/base/share-app');
       expect(call?.slug).toBe('my-cool-app');    // slugified
       expect(document.activeElement?.getAttribute('data-library-action')).toBe('share');
@@ -248,7 +284,7 @@ describe('home.library', () => {
       expect(root.textContent).toContain('new version available');
       clickText(root, 'button', 'Update');
       await flush();
-      await nextFrame();
+      await focusSettles(focusedAction('open'));
       const call = send.calls.find((c) => c.type === 'dweb/base/update-app');
       expect(call?.appId).toBe('app-7');
       expect(call?.uri).toBe('peerd://x/v2');
@@ -302,6 +338,117 @@ describe('home.library', () => {
       await flush();
       expect(root.textContent).toContain('security audit entry could not be written');
       expect(root.textContent).toContain('Older shared bytes will be cleaned up');
+    } finally { unmount(); }
+  });
+
+  it('an update never overwrites local work without a fork-or-replace choice', async () => {
+    const installed = [{ id: 'app-7', name: 'Notes', tags: [], entryFile: 'index.html',
+      favorite: false, source: 'dweb', thumbnail: null, updatedAt: 4000,
+      dweb: { dwapp_id: 'D', version_id: 'v1', seq: 1, uri: 'peerd://x/v1' } }];
+    const send = makeSend({
+      'apps/list': () => ({ ok: true, apps: structuredClone(installed) }),
+      'dweb/base/updates': () => ({ ok: true, updates: { 'app-7': { uri: 'peerd://x/v2', version_id: 'v2', seq: 2, name: 'Notes', slug: 'notes', dwapp_id: 'D', changelog: 'Improve sync' } } }),
+      'dweb/base/update-app': (msg) => msg.strategy === 'fork'
+        ? { ok: true, app: { dweb: { version_id: 'v2' } }, fork: { id: 'fork-1', name: 'Notes: local fork' } }
+        : { ok: false, error: 'local-changes' },
+    });
+    const { root, unmount } = await mountView(send, { dweb: true });
+    try {
+      await flush();
+      expect(root.textContent).toContain('Improve sync');
+      clickText(root, 'button', 'Update');
+      await flush();
+      expect(root.textContent).toContain('will not overwrite');
+      clickText(root, 'button', 'Keep a fork & update');
+      await flush();
+      const calls = send.calls.filter((c) => c.type === 'dweb/base/update-app');
+      expect(calls.at(-1)?.strategy).toBe('fork');
+      expect(root.textContent).toContain('Kept your local work');
+    } finally { unmount(); }
+  });
+
+  it('History & Git shows status/log and restore requires a second click', async () => {
+    const send = makeSend({
+      'apps/repository/status': () => ({ ok: true, status: { oid: 'abcdef123456', branch: 'main', dirty: true, changed: [{ path: 'index.html', status: 'modified' }] }, remote: { url: 'https://github.com/me/app.git', host: 'github.com' } }),
+      'apps/repository/history': () => ({ ok: true, commits: [{ oid: 'abcdef123456', message: 'checkpoint', timestamp: Date.now() - 1000 }] }),
+      'apps/repository/diff': () => ({ ok: true, diff: { files: [{ path: 'index.html', status: 'modified' }], patch: '--- a/index.html\n+++ b/index.html', truncated: false } }),
+      'apps/repository/restore': () => ({ ok: true, result: { oid: 'restored', restored: true } }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      const trigger = need(root, '.library-kebab', HTMLButtonElement);
+      trigger.click();
+      await flush();
+      clickText(root, '.library-menu-item', 'History & Git');
+      await flush();
+      expect(need(root, '.library-card').classList.contains('is-expanded')).toBe(true);
+      const panel = need(root, '.library-repository', HTMLElement);
+      expect(panel.getAttribute('role')).toBe('region');
+      expect(document.activeElement).toBe(panel);
+      expect(root.textContent).toContain('1 uncommitted change');
+      expect(root.textContent).toContain('checkpoint');
+      clickText(root, '.library-commit button', 'Diff');
+      await flush();
+      expect(root.textContent).toContain('--- a/index.html');
+      clickText(root, '.library-commit button', 'Restore');
+      await flush();
+      expect(send.calls.some((c) => c.type === 'apps/repository/restore')).toBe(false);
+      clickText(root, '.library-commit button', 'Restore?');
+      await flush();
+      expect(send.calls.some((c) => c.type === 'apps/repository/restore' && c.to === 'abcdef123456')).toBe(true);
+      need(root, 'button[title="Close history"]').click();
+      await flush();
+      await focusSettles(() => document.activeElement === trigger);
+      expect(document.activeElement).toBe(trigger);
+    } finally { unmount(); }
+  });
+
+  it('invalidates a cached commit diff when repository state refreshes', async () => {
+    let diffRead = 0;
+    const send = makeSend({
+      'apps/repository/status': () => ({ ok: true, status: { oid: 'abcdef123456', branch: 'main', dirty: true, changed: [{ path: 'index.html', status: 'modified' }] }, remote: null }),
+      'apps/repository/history': () => ({ ok: true, commits: [{ oid: 'abcdef123456', message: 'checkpoint', timestamp: Date.now() - 1000 }] }),
+      'apps/repository/diff': () => ({ ok: true, diff: { files: [], patch: `working-tree-${++diffRead}`, truncated: false } }),
+      'apps/repository/commit': () => ({ ok: true, result: { oid: 'new-checkpoint', created: true } }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      need(root, '.library-kebab').click();
+      await flush();
+      clickText(root, '.library-menu-item', 'History & Git');
+      await flush();
+      clickText(root, '.library-commit button', 'Diff');
+      await flush();
+      expect(root.textContent).toContain('working-tree-1');
+
+      clickText(root, '.library-repository-dirty button', 'Checkpoint');
+      await flush();
+      await flush();
+      clickText(root, '.library-commit button', 'Diff');
+      await flush();
+      expect(root.textContent).toContain('working-tree-2');
+      expect(send.calls.filter((call) => call.type === 'apps/repository/diff').length).toBe(2);
+    } finally { unmount(); }
+  });
+
+  it('uses a developer-supplied checkpoint message', async () => {
+    const send = makeSend({
+      'apps/repository/status': () => ({ ok: true, status: { oid: 'abcdef123456', branch: 'main', dirty: true, changed: [{ path: 'script.js', status: 'modified' }] }, remote: null }),
+      'apps/repository/history': () => ({ ok: true, commits: [] }),
+      'apps/repository/commit': () => ({ ok: true, result: { oid: 'new', created: true } }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      need(root, '.library-kebab').click();
+      await flush();
+      clickText(root, '.library-menu-item', 'History & Git');
+      await flush();
+      const input = need(root, '.library-repository-dirty input', HTMLInputElement);
+      input.value = 'Explain the renderer fix';
+      input.dispatchEvent(new Event('input'));
+      clickText(root, '.library-repository-dirty button', 'Checkpoint');
+      await flush();
+      expect(send.calls.some((c) => c.type === 'apps/repository/commit' && c.message === 'Explain the renderer fix')).toBe(true);
     } finally { unmount(); }
   });
 

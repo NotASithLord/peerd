@@ -1,7 +1,8 @@
 # Routine dependency updates get 30 days of release seasoning. GitHub applies
 # `cooldown` only to version updates, so Dependabot security PRs remain eligible
-# immediately. The no-human merge workflow separately requires every security
-# replacement release to have completed the same 30 days of seasoning.
+# immediately. The no-human merge workflow separately requires a continuous
+# 72-hour clean observation window for patch-only Bun lockfile replacements,
+# and 30 days for Actions patch fixes.
 version: 2
 updates:
   - package-ecosystem: github-actions

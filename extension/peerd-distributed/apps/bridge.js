@@ -30,7 +30,6 @@
 //                                    not the whole room), so it adds no reach
 //                                    a flooding app didn't already have.
 //   announce { meta }
-//   publish-app                    → this app's own files, signed + served
 //   install-app { uri, name? }     → CONSENT-GATED EVERY TIME (never
 //                                    remembered): fetch from base peers,
 //                                    verify, install as an engine App
@@ -136,13 +135,16 @@ export const createDwebBridge = ({
     /** @param {string} rid */
     async has(rid) {
       const got = await storage.get(GRANTS_KEY);
-      return !!got?.[GRANTS_KEY]?.[appKey]?.rooms?.[rid];
+      const rooms = got?.[GRANTS_KEY]?.[appKey]?.rooms;
+      return !!rooms && Object.hasOwn(rooms, rid) && rooms[rid] === true;
     },
     /** @param {string} rid */
     async grant(rid) {
       const got = await storage.get(GRANTS_KEY);
-      const all = got?.[GRANTS_KEY] ?? {};
-      const rooms = { ...(all[appKey]?.rooms ?? {}), [rid]: true };
+      const stored = got?.[GRANTS_KEY];
+      const all = Object.assign(Object.create(null), stored && typeof stored === 'object' ? stored : {});
+      const rooms = Object.assign(Object.create(null), all[appKey]?.rooms ?? {});
+      rooms[rid] = true;
       all[appKey] = { ...(all[appKey] ?? {}), rooms };
       await storage.set({ [GRANTS_KEY]: all });
     },
@@ -187,6 +189,7 @@ export const createDwebBridge = ({
       if (typeof rid !== 'string' || !rid.trim()) throw new Error('roomId required');
       const id = rid.trim();
       if (id.length > 64) throw new Error('room name too long (max 64 chars)');
+      if (id === '__proto__' || id === 'constructor' || id === 'toString') throw new Error('reserved room name');
       if (!(await consent(id))) throw new Error('denied');
       displayName = String(name ?? '').slice(0, 40);
       roomId = id; // set before the op so room() carries it; cleared on failure
@@ -292,8 +295,7 @@ export const createDwebBridge = ({
     'install-app': async ({ uri, name } = {}) => {
       if (!roomId) throw new Error('not in a room');
       if (typeof uri !== 'string' || !uri.startsWith('peerd://')) throw new Error('peerd:// uri required');
-      const meta = await room('fetch-app', { uri });
-      const publisher = meta?.publisher ?? 'unsigned';
+      const publisher = uri.slice('peerd://'.length).split('/')[0] || 'unknown';
       const okd = await confirmAction({
         kind: 'install',
         appName,
@@ -312,6 +314,7 @@ export const createDwebBridge = ({
   // transport), so this logic is window-free and host-location-agnostic.
   // why any m: an opaque, already-identity-checked wire message validated by the
   // guard below before any field is trusted.
+  let installInFlight = false;
   /** @param {any} m */
   const handleOp = async (m) => {
     if (!m || m.peerd !== 'dweb' || typeof m.op !== 'string') return;
@@ -324,10 +327,14 @@ export const createDwebBridge = ({
       ...(ok ? { value: valueOrError } : { error: String(valueOrError?.message ?? valueOrError) }),
     });
     if (!op) return reply(false, `unknown op: ${m.op}`);
+    if (m.op === 'install-app' && installInFlight) return reply(false, 'an install request is already in progress');
     try {
+      if (m.op === 'install-app') installInFlight = true;
       reply(true, await op(m.args ?? {}));
     } catch (err) {
       reply(false, err);
+    } finally {
+      if (m.op === 'install-app') installInFlight = false;
     }
   };
 

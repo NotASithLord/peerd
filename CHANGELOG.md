@@ -10,6 +10,56 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-12
+
+### Added
+
+- Apps and Notebooks now have browser-native Git history, branches,
+  checkpoints, restore, diff inspection, and consent-bound Smart HTTP remotes.
+  Repository operations quiesce live editors before touching the working tree.
+- Pods add an ephemeral, isolated WASI shell for agent-driven command and file
+  workflows. Cancellation, timeout, workspace ownership, and teardown are
+  explicit terminal states rather than best-effort background cleanup.
+- The preview dweb gains the cryptographic and runtime foundation for
+  same-person device enrollment and private state restoration: rootless device
+  grants, device certificates, private rendezvous, authenticated snapshot
+  transfer, live custody wiring, and bounded partial-result reporting. The
+  rendered enrollment controller and canonical hosted ceremony remain explicit
+  release gates, so this is not presented as an end-user enrollment feature yet.
+- Provider onboarding now verifies key shape and readiness before activation,
+  with a first-run flow that does not reappear on established installations.
+
+### Changed
+
+- The composer, confirmation card, Stop state, onboarding, and narrow-sidebar
+  layouts share the refreshed monochrome interaction system, with restored
+  focus, clearer recovery actions, and expanded screen-reader coverage.
+- App history and remote operations use the same mutation lanes and recovery
+  contracts as the underlying OPFS workspace, including immutable approval
+  targets and cleanup of repository data when an App is deleted.
+- Self-device state transfer uses strict versioned schemas, authenticated
+  unavailable-surface rows, deterministic byte identities, bounded caches and
+  retries, and fail-closed completeness accounting.
+- Release automation, dependency observation, package integrity, Firefox
+  validation, and update-feed monitoring use tighter provenance and lifecycle
+  gates.
+
+### Fixed
+
+- Closed portable-identity substitution, root-custody, revocation rollback,
+  extension-origin, roster propagation, stale-offer, false-success, and
+  post-cancellation mutation gaps found during adversarial review.
+- Git remote approval can no longer authorize one origin and operate on a
+  concurrently replaced origin; recent Notebook edits are flushed before
+  version operations.
+- Edited Apps receive a new byte-derived transfer identity, so a later restore
+  cannot mistake changed content for an already-installed retry.
+- Browser and actor lifecycle recovery now fences cold-start egress, private
+  navigation, sign-in transitions, host loss, and stale async completions more
+  consistently across Chrome and Firefox.
+- Provider readiness survives worker restarts, preview updates avoid disrupting
+  active work, and established vaults no longer regress into first-run setup.
+
 ## [0.6.0] - 2026-08-08
 
 ### Added
@@ -966,5 +1016,6 @@ Initial **experimental preview**. The core buildout, integrated:
   CI gates (bun tests, strict typecheck, lint, dweb boundary, drift,
   in-browser CDP job, artifact matrix).
 
-[Unreleased]: https://github.com/NotASithLord/peerd/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/NotASithLord/peerd/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/NotASithLord/peerd/compare/v0.6.0...v0.7.0
 [0.1.0]: https://github.com/NotASithLord/peerd/releases/tag/v0.1.0

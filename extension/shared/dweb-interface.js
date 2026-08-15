@@ -36,6 +36,12 @@
  *   persistent identity material (vault IO injected — SW-side)
  * @property {((material: { seed: string, pub: string }) => Promise<any>)=} identityFromMaterial
  *   rehydrate a signing identity from material (page-side)
+ * @property {((opts: any) => any)=} createSelfDeviceCoordinator
+ * @property {((opts: any) => any)=} createSelfDeviceMesh
+ * @property {((opts: any) => any)=} createSyncSource
+ * @property {((opts: any) => any)=} createSyncReceiver
+ * @property {((io: any) => Promise<any>)=} loadCoordinatorInputs
+ *   preview-only same-user device runtime, hosted offscreen
  * @property {((args: { material: { seed: string, pub: string }, passphrase: string }) => Promise<any>)=} identityRecordExport
  *   build the portable identity record (capsule + wrappers) in the dweb crypto host
  * @property {((args: { record: any, passphrase?: string, existingMaterial?: string | null, replaceExisting?: boolean }) => Promise<any>)=} identityRecordAdopt

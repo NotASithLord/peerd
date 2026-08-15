@@ -4,18 +4,19 @@
  * Keep dweb boot effects behind persisted settings hydration.
  *
  * @param {{
- *   ready: Promise<unknown>,
+ *   ready: Promise<unknown> | (() => Promise<unknown>),
  *   available: boolean,
  *   active: () => boolean,
  * }} deps
  */
 export const createDwebSettingsGate = ({ ready, available, active }) => {
+  const awaitReady = () => typeof ready === 'function' ? ready() : ready;
   /**
    * @param {() => boolean} condition
    * @param {() => unknown | Promise<unknown>} effect
    */
   const runWhen = async (condition, effect) => {
-    await ready;
+    await awaitReady();
     if (!available || !condition()) return false;
     await effect();
     return true;

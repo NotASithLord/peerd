@@ -19,6 +19,7 @@ import { GoalBar } from './goal-bar.js';
 import { TodoCard } from './todo-card.js';
 import { ActorFabric } from './actor-fabric.js';
 import { ContextInspector } from './context-inspector.js';
+import { composerForState, composerUnavailableCopy } from '../provider-readiness.js';
 
 // The transfer section's Blob + anchor pattern — the panel document is a
 // normal DOM context, so a synthetic download link is all a file save takes.
@@ -93,26 +94,31 @@ export const ChatView = {
     const announceOnMount = messages.length > 0
       && (isUserVisibleSwitch || !ui.hadMessages);
     if (messages.length > 0) ui.hadMessages = true;
-    const hasKey = state.providers?.hasKey;
+    const composer = composerForState(state);
+    const canSend = !!composer.canSend;
     // Fingerprint of the settings that shape the model-picker options. The
     // side panel gets live settings pushes (e.g. editing the OpenRouter
     // curated set in Settings while this chat stays open), so when this key
     // moves the picker re-pulls instead of showing the options it cached on
     // mount. why include each: providerName/providerModel drive the active
     // selection + custom-model append; openrouterModels is the curated list;
-    // hasKey flips which providers contribute at all.
+    // composer readiness flips which providers contribute at all. The
+    // configured-provider revision catches a second key being added while the
+    // current provider remains ready; ollamaHost prevents stale daemon models.
     const modelOptionsKey = [
       state.settings?.providerName ?? '',
       state.settings?.providerModel ?? '',
       (state.settings?.openrouterModels ?? []).join(','),
-      hasKey ? '1' : '0',
+      state.settings?.ollamaHost ?? '',
+      state.providers?.configRevision ?? 0,
+      canSend ? '1' : '0',
     ].join('|');
     const showVoiceOnboarding = !!state.settings
       && !state.settings.voiceOnboardingDismissed
       && !state.settings.voiceEnabled
       // why: only nudge once the user has gotten past the API-key
       // hurdle. Stacking onboarding cards is hostile.
-      && hasKey
+      && canSend
       && messages.length === 0
       && detectVoiceCapability('auto', {
         moonshineHostAvailable: state.capabilities?.moonshineVoiceHost?.status === 'available',
@@ -176,7 +182,7 @@ export const ChatView = {
       showVoiceOnboarding ? m(VoiceOnboardingCard, { send }) : null,
 
       messages.length === 0 ? m(EmptyState, {
-        hasKey, send, surface, activeTabStatus,
+        canSend, composer, send, surface, activeTabStatus,
         actorExecution: state.capabilities?.actorExecution,
       })
         : m(MessageList, {
@@ -202,6 +208,9 @@ export const ChatView = {
             // turn they happened (and fade into the backlog as the chat continues)
             // — not a bright sticky footer. Filtered to this session.
             tabEvents: (state.agentTabEvents ?? []).filter((e) => e.sessionId === state.session?.sessionId),
+            // Confirm settles for THIS chat only - the events carry their
+            // sessionId so a background chat's timeout can't leak into view.
+            confirmEvents: (state.confirmEvents ?? []).filter((e) => e.sessionId === state.session?.sessionId),
             uiActions,
             send,
             // A model turn may be idle after acknowledging asynchronous actor
@@ -215,7 +224,9 @@ export const ChatView = {
       // on a fresh chat it sets provider+model for the next send; mid-session
       // it switches the model on THIS session (model-only, same provider). The
       // component self-hides unless there are 2+ choices.
-      hasKey ? m(ModelPicker, { send, sessionId: state.session?.sessionId, optionsKey: modelOptionsKey }) : null,
+      !state.vault?.locked
+        ? m(ModelPicker, { send, sessionId: state.session?.sessionId, optionsKey: modelOptionsKey })
+        : null,
 
       // Feature 03: the Plan/Act permission selector. Lives in the chat
       // context (not the global header — the TopBar is icon-budget-bound)
@@ -230,7 +241,7 @@ export const ChatView = {
         // that silently does nothing is a lie. Fresh chats read the
         // SELECTED provider (what the session will bind to on first send).
         state.settings?.reasoningEnabled
-            && (state.session?.provider ?? state.providers?.current) === 'anthropic'
+            && composer.provider === 'anthropic'
           ? m(EffortDial, { settings: state.settings, send })
           : null,
         // Goal arming — the in-chat entry point for goal mode. Arms the NEXT
@@ -240,7 +251,7 @@ export const ChatView = {
         m(GoalToggle, {
           armed: ui.goalArmed,
           run: state.goalRuns?.[sid ?? ''] ?? null,
-          disabled: !hasKey,
+          disabled: !canSend,
           onToggle: (/** @type {boolean} */ next) => { ui.goalArmed = next; },
           onStop: () => send({ type: 'agent/stop' }),
         }),
@@ -473,9 +484,9 @@ const STARTER_PROMPTS = [
   { type: 'ask', label: 'Ask', text: 'What can you do?' },
   { type: 'web', label: 'Browse', text: 'Open Hacker News and summarize the top 5 stories.' },
   { type: 'notebook', label: 'Notebook', text: 'Make a notebook on Bitcoin halving math, with a chart.' },
+  { type: 'pod', label: 'Pod', text: 'Create a Pod and demonstrate files, a pipeline, JavaScript, and WASI.' },
   { type: 'vm', label: 'Linux VM', text: 'Spin up a Linux VM and run `python3 --version`.' },
   { type: 'app', label: 'App', text: 'Build me a drum machine I can play in the browser.' },
-  { type: 'app', label: 'App', text: 'Build me a Mandelbrot set explorer I can zoom and pan.' },
 ];
 
 // The starter set is page-aware in the SIDE PANEL: when the panel sits next to
@@ -505,9 +516,9 @@ export const promptsFor = (attrs) => {
 
 // Action-type glyphs for the path cards. Two voices, both monochrome
 // (currentColor): conceptual paths (ask / web) are stroked LINE icons in
-// the same voice as the composer's send/clip glyphs; the three engine
+// the same voice as the composer's send/clip glyphs; the engine
 // sandboxes wear the LOGO of the tech they run (Notebook → JS, VM → Linux/
-// Tux, App → HTML5) so the kind reads at a glance. The glyph + label carry
+// Tux, Pod → terminal, App → HTML5) so the kind reads at a glance. The glyph + label carry
 // the path's module accent PERMANENTLY (cyan/green/amber). why: owner
 // override (2026-06-21) — this menu is a deliberate, wayfinding-first
 // departure from the "one rainbow accent on monochrome" brand rule; the
@@ -551,6 +562,12 @@ const PATH_ICONS = {
       'font-weight': 700, 'font-size': 10.5, fill: 'currentColor', stroke: 'none',
     }, 'JS'),
   ),
+  // pod: a compact terminal prompt: shell-oriented but deliberately not Tux,
+  // because a Pod is not Linux.
+  pod: () => pathIcon(
+    m('rect', { x: 3, y: 4, width: 18, height: 16, rx: 3 }),
+    m('path', { d: 'M7 9 10 12 7 15 M12 15 H17' }),
+  ),
   // vm — Tux, the Linux mascot (the CheerpX Linux VM)
   vm: () => logoIcon(LINUX_PATH),
   // app — the HTML5 shield (the opaque-origin HTML iframe)
@@ -580,15 +597,15 @@ export const PATH_TYPE = { ms: 18, start: 980, cascade: 90 };
  * @property {boolean[]} started
  */
 
-/** @typedef {{ state: EmptyState_State, attrs: { hasKey?: boolean, send: Send, surface?: string, activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive', actorExecution?: { status?: string } } }} EmptyStateVnode */
+/** @typedef {{ state: EmptyState_State, attrs: { canSend?: boolean, composer?: any, send: Send, surface?: string, activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive', actorExecution?: { status?: string } } }} EmptyStateVnode */
 
 // Arm the one-shot type-in (step 3) for every card. Idempotent via
 // `ui.armed`, so the redraw-driven onupdate can't re-trigger it; only runs
-// once the menu is actually shown (hasKey) AND motion is allowed.
+// once the menu is actually shown (canSend) AND motion is allowed.
 /** @param {EmptyStateVnode} vnode */
 const armReveal = (vnode) => {
   const ui = vnode.state;
-  if (ui.armed || reducedMotion() || !vnode.attrs.hasKey) return;
+  if (ui.armed || reducedMotion() || !vnode.attrs.canSend) return;
   ui.armed = true;
   promptsFor(vnode.attrs).forEach((p, i) => {
     const text = p.text;
@@ -626,7 +643,7 @@ const EmptyState = {
     ui.timers = [];
     ui.armed = false;
     // Reduced motion -> full text immediately; otherwise start hidden (0),
-    // ready to type. (hasKey false means the menu isn't rendered yet, so
+    // ready to type. (canSend false means the menu isn't rendered yet, so
     // these only matter once it appears - no full-text flash on the flip.)
     const reduce = reducedMotion();
     ui.shown = STARTER_PROMPTS.map(() => (reduce ? Infinity : 0));
@@ -641,7 +658,7 @@ const EmptyState = {
   },
   /** @param {EmptyStateVnode} vnode */
   view: ({ attrs, state: ui }) => {
-    const { hasKey, send } = attrs;
+    const { canSend, composer, send } = attrs;
     // The home full-tab surface has room for a wider 3-across grid; the side
     // panel stays 2-across (its column is narrow). One flag drives both the
     // wider container and the 3-column track (CSS owns the actual widths).
@@ -651,11 +668,11 @@ const EmptyState = {
       class: isHome ? 'empty-state--home' : '',
       'data-active-tab-status': attrs.activeTabStatus ?? 'none',
     }, [
-    m('p', 'peerd is ready.'),
-    m('p.muted', hasKey
+    m('p', canSend ? 'peerd is ready.' : 'Provider setup needed.'),
+    m('p.muted', canSend
       ? 'Ask anything — or pick a path:'
-      : 'Connect a provider in Settings to start chatting.'),
-    hasKey
+      : composerUnavailableCopy(composer)),
+    canSend
       ? m('.path-menu', { class: isHome ? 'path-menu--home' : '' }, prompts.map((p, i) => {
           const shown = ui.shown?.[i] ?? Infinity;
           const done = shown >= p.text.length;

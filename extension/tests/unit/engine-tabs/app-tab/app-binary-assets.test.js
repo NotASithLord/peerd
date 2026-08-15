@@ -487,6 +487,87 @@ describe('App editor binary asset UX', () => {
     await opfs.nuke();
   });
 
+  it('rejects an external active-file write while the user buffer is dirty', async () => {
+    const root = ['peerd-apps', 'binary-editor-external-conflict'];
+    const opfs = opfsHelpers(root);
+    await opfs.nuke();
+    await opfs.write('index.html', 'old');
+    const mount = document.createElement('div');
+    mount.style.cssText = 'position:fixed;left:-9999px;width:600px;height:400px';
+    document.body.appendChild(mount);
+    /** @type {() => void} */
+    let markWriteStarted = () => {};
+    /** @type {() => void} */
+    let releaseWrite = () => {};
+    const writeStarted = new Promise((resolve) => { markWriteStarted = () => resolve(undefined); });
+    const writeReleased = new Promise((resolve) => { releaseWrite = () => resolve(undefined); });
+    /** @type {string[]} */
+    const persisted = [];
+    const editor = await createEditor({
+      mountEl: mount,
+      opfsBase: root,
+      pinnedFile: 'index.html',
+      writeFile: async (_path, content) => {
+        persisted.push(content);
+        markWriteStarted();
+        await writeReleased;
+      },
+    });
+    const userSave = editor.replaceActiveWith('user draft');
+    await writeStarted;
+    const externalWrite = editor.writeExternalActiveFile('index.html', 'agent replacement');
+    releaseWrite();
+    const [conflict] = await Promise.all([externalWrite, userSave]);
+    expect(conflict).toEqual({ handled: true, conflict: true, path: 'index.html' });
+    expect(persisted).toEqual(['user draft']);
+    expect(editor.getActiveContent()).toBe('user draft');
+    editor.destroy();
+    mount.remove();
+    await opfs.nuke();
+  });
+
+  it('layers user edits made after an external active-file write begins', async () => {
+    const root = ['peerd-apps', 'binary-editor-external-followup'];
+    const opfs = opfsHelpers(root);
+    await opfs.nuke();
+    await opfs.write('index.html', 'old');
+    const mount = document.createElement('div');
+    mount.style.cssText = 'position:fixed;left:-9999px;width:600px;height:400px';
+    document.body.appendChild(mount);
+    /** @type {() => void} */
+    let markWriteStarted = () => {};
+    /** @type {() => void} */
+    let releaseWrite = () => {};
+    const writeStarted = new Promise((resolve) => { markWriteStarted = () => resolve(undefined); });
+    const writeReleased = new Promise((resolve) => { releaseWrite = () => resolve(undefined); });
+    /** @type {string[]} */
+    const persisted = [];
+    const editor = await createEditor({
+      mountEl: mount,
+      opfsBase: root,
+      pinnedFile: 'index.html',
+      writeFile: async (_path, content) => {
+        persisted.push(content);
+        if (persisted.length === 1) {
+          markWriteStarted();
+          await writeReleased;
+        }
+      },
+    });
+    const externalWrite = editor.writeExternalActiveFile('index.html', 'agent replacement');
+    await writeStarted;
+    const userSave = editor.replaceActiveWith('agent replacement + user edit');
+    releaseWrite();
+    const [result] = await Promise.all([externalWrite, userSave]);
+    expect(result).toEqual({ handled: true, conflict: false, path: 'index.html' });
+    expect(persisted).toEqual(['agent replacement', 'agent replacement + user edit']);
+    expect(editor.getActiveContent()).toBe('agent replacement + user edit');
+    expect(editor.hasUnsavedChanges()).toBe(false);
+    editor.destroy();
+    mount.remove();
+    await opfs.nuke();
+  });
+
   it('does not recreate an active file when deletion overlaps a save', async () => {
     const root = ['peerd-apps', 'binary-editor-delete-race'];
     const opfs = opfsHelpers(root);

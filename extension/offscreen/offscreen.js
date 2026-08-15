@@ -18,9 +18,7 @@
 //      on the first voice/init message; teardown drops it.
 
 import browser from '/vendor/browser-polyfill.js';
-// why /peerd-runtime/index.js (not /voice/index.js): index.js is the
-// module's public API; the top-level barrel re-exports createBestTranscriber.
-import { createBestTranscriber, createModelStore } from '/peerd-runtime/index.js';
+import { createModelStore } from '/peerd-runtime/index.js';
 // Headless JS jobs (the script tool / engine.runJob): a sealed Worker hosted
 // here, no UI. See job-runner.js for its (deliberately seal-only) security note.
 import { runJob, abortJob } from './job-runner.js';
@@ -169,8 +167,11 @@ navigator.serviceWorker?.addEventListener('message', (event) => {
 // the other way (offscreen → SW → all side-panel ports).
 // ---------------------------------------------------------------------------
 
-/** @type {ReturnType<typeof createBestTranscriber> | null} */
+/** @type {ReturnType<import('/peerd-runtime/voice/transcriber-picker.js').createBestTranscriber> | null} */
 let transcriber = null;
+/** @type {Promise<typeof import('/peerd-voice-host/index.js')> | null} */
+let voiceHostPromise = null;
+const loadVoiceHost = () => (voiceHostPromise ??= import('/peerd-voice-host/index.js'));
 
 // Lazy model-store for reading the Moonshine bytes the side panel already
 // downloaded + SRI-verified + cached. They live in the shared origin IDB
@@ -286,18 +287,23 @@ const onVoiceMessage = (msg, _sender, sendResponse) => {
     try {
       switch (msg.type) {
         case 'voice/init': {
-          if (!transcriber) transcriber = createBestTranscriber({}, msg.engine);
+          let activeTranscriber = transcriber;
+          if (!activeTranscriber) {
+            const { createBestTranscriber } = await loadVoiceHost();
+            activeTranscriber = createBestTranscriber({}, msg.engine);
+            transcriber = activeTranscriber;
+          }
           // why: Moonshine needs model bytes; Web Speech doesn't. The
           // bytes can't ride the message (sendMessage drops ArrayBuffers
           // on Chrome), so we read them from the shared origin IDB the
           // side panel just populated — a cache hit, no re-download.
-          if (transcriber.engine === 'moonshine') {
+          if (activeTranscriber.engine === 'moonshine') {
             const { files } = await getVoiceModelStore().getModel(msg.variant, { dev: true });
-            await transcriber.init({ files });
+            await activeTranscriber.init({ files });
           } else {
-            await transcriber.init();
+            await activeTranscriber.init();
           }
-          sendResponse({ ok: true, engine: transcriber.engine });
+          sendResponse({ ok: true, engine: activeTranscriber.engine });
           return;
         }
         case 'voice/listen': {

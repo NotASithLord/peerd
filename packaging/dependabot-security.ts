@@ -8,11 +8,17 @@
 //     --repo=. --base-sha=<sha> --head-sha=<sha> \
 //     --ecosystem=bun --group=bun-security-patches \
 //     --update-type=version-update:semver-patch --dependencies=foo,bar \
-//     --metadata='[...]' --minimum-age-days=30
+//     --metadata='[...]' --minimum-age-days=3
 //
 //   bun packaging/dependabot-security.ts prepare \
 //     --repo=. --base-sha=<sha> --ecosystem=bun \
 //     --dependencies=foo,bar --pr=123 --date=2026-08-10
+//
+//   bun packaging/dependabot-security.ts observe-bun \
+//     --repo=. --base-sha=<sha> --head-sha=<sha>
+//
+//   bun packaging/dependabot-security.ts verify-observations \
+//     --repository=owner/repo --pr=123 --head-sha=<sha>
 //
 //   bun packaging/dependabot-security.ts validate-prepared \
 //     --repo=. --base-sha=<sha> --head-sha=<sha> --ecosystem=bun \
@@ -37,11 +43,40 @@ const SECURITY_GROUPS = {
 
 type SupportedEcosystem = keyof typeof SECURITY_GROUPS;
 
+const MINIMUM_SECURITY_AGE_DAYS: Record<SupportedEcosystem, number> = {
+  // Bun patches get the shorter window only because exact package/version
+  // malware checks from both GitHub and Socket surround the merge.
+  bun: 3,
+  // SHA-pinned Actions do not have equivalent malware-alert coverage.
+  github_actions: 30,
+};
+
+const SOCKET_SCANNER_PACKAGE = '@socketsecurity/bun-security-scanner';
+const MALWARE_OBSERVATION_WORKFLOW = 'dependabot-malware-observation.yml';
+const MALWARE_OBSERVATION_HOURS = 72;
+const MALWARE_OBSERVATION_MAX_GAP_HOURS = 6;
+
 type UpdatedDependency = {
   dependencyName: string;
   newVersion: string;
   updateType: string;
 };
+
+export type LockedNpmReplacement = {
+  lockKey: string;
+  dependencyName: string;
+  previousVersion: string;
+  newVersion: string;
+  integrity: string;
+};
+
+export type MalwareObservation = {
+  headSha: string;
+  conclusion: string;
+  completedAt: string;
+};
+
+type JsonFetcher = typeof fetch;
 
 type ActionUpdate = {
   repository: string;
@@ -271,6 +306,133 @@ export const assertAtLeastDaysOld = (
   return ageDays;
 };
 
+export const minimumSecurityAgeDays = (ecosystem: SupportedEcosystem): number =>
+  MINIMUM_SECURITY_AGE_DAYS[ecosystem];
+
+type LockedNpmPackage = {
+  lockKey: string;
+  dependencyName: string;
+  version: string;
+  integrity: string;
+  serialized: string;
+};
+
+const parseLockedNpmCoordinate = (resolution: string): { dependencyName: string, version: string } => {
+  const split = resolution.lastIndexOf('@');
+  if (split <= 0) fail(`bun.lock package resolution ${JSON.stringify(resolution)} is not an npm coordinate`);
+  const dependencyName = resolution.slice(0, split);
+  const version = resolution.slice(split + 1);
+  parseDependencyNames(dependencyName);
+  if (!/^\d+\.\d+\.\d+$/.test(version)) {
+    fail(`bun.lock package resolution ${resolution} is not a stable plain semver release`);
+  }
+  return { dependencyName, version };
+};
+
+const parseBunLockPackages = (text: string): Map<string, LockedNpmPackage> => {
+  let parsed: unknown;
+  try {
+    parsed = Bun.JSONC.parse(text) as unknown;
+  } catch {
+    fail('bun.lock is not valid JSONC');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) fail('bun.lock root is malformed');
+  const packages = (parsed as Record<string, unknown>).packages;
+  if (!packages || typeof packages !== 'object' || Array.isArray(packages)) {
+    fail('bun.lock has no package table');
+  }
+  const result = new Map<string, LockedNpmPackage>();
+  for (const [lockKey, raw] of Object.entries(packages as Record<string, unknown>)) {
+    if (!Array.isArray(raw) || typeof raw[0] !== 'string' || typeof raw[3] !== 'string') {
+      fail(`bun.lock package ${lockKey} is not an integrity-pinned registry package`);
+    }
+    const entry = raw as unknown[];
+    const resolution = entry[0] as string;
+    const integrity = entry[3] as string;
+    const { dependencyName, version } = parseLockedNpmCoordinate(resolution);
+    if (!/^sha(?:256|384|512)-[A-Za-z0-9+/]+={0,2}$/.test(integrity)) {
+      fail(`bun.lock package ${lockKey} has an invalid integrity digest`);
+    }
+    result.set(lockKey, {
+      lockKey,
+      dependencyName,
+      version,
+      integrity,
+      serialized: JSON.stringify(raw),
+    });
+  }
+  return result;
+};
+
+const semverParts = (version: string): [number, number, number] => {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version)
+    ?? fail(`version ${JSON.stringify(version)} is not stable plain semver`);
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+};
+
+/** Return every resolved npm package replacement in a Bun lockfile update. */
+export const changedBunLockPackages = (
+  baseText: string,
+  headText: string,
+): LockedNpmReplacement[] => {
+  const base = parseBunLockPackages(baseText);
+  const head = parseBunLockPackages(headText);
+  const replacements: LockedNpmReplacement[] = [];
+  for (const [lockKey, current] of head) {
+    const existing = base.get(lockKey);
+    if (!existing) {
+      fail(`bun.lock introduced new dependency slot ${lockKey} (${current.dependencyName}@${current.version})`);
+    }
+    const previous = existing as LockedNpmPackage;
+    if (previous.serialized === current.serialized) continue;
+    if (previous.dependencyName !== current.dependencyName) {
+      fail(`bun.lock replaced ${previous.dependencyName} with ${current.dependencyName} at ${lockKey}`);
+    }
+    if (previous.version === current.version) {
+      fail(`bun.lock changed ${current.dependencyName}@${current.version} without a version replacement`);
+    }
+    const [oldMajor, oldMinor, oldPatch] = semverParts(previous.version);
+    const [newMajor, newMinor, newPatch] = semverParts(current.version);
+    if (oldMajor !== newMajor || oldMinor !== newMinor || newPatch <= oldPatch) {
+      fail(`bun.lock replacement ${current.dependencyName} ${previous.version} -> ${current.version} is not a semantic patch update`);
+    }
+    replacements.push({
+      lockKey,
+      dependencyName: current.dependencyName,
+      previousVersion: previous.version,
+      newVersion: current.version,
+      integrity: current.integrity,
+    });
+  }
+  if (replacements.length === 0) fail('bun.lock has no resolved package replacements');
+  return replacements.sort((left, right) => left.lockKey.localeCompare(right.lockKey));
+};
+
+export const assertTrustedSocketScanner = (updates: Array<{ dependencyName: string }>): void => {
+  if (updates.some(({ dependencyName }) => dependencyName === SOCKET_SCANNER_PACKAGE)) {
+    fail(`${SOCKET_SCANNER_PACKAGE} updates cannot use the three-day no-human path because the scanner cannot approve itself`);
+  }
+};
+
+export const assertNoGitHubMalwareAdvisories = (
+  advisories: unknown,
+  coordinate: string,
+  withdrawn: boolean,
+): void => {
+  if (!Array.isArray(advisories)) {
+    fail(`GitHub malware lookup for ${coordinate} returned invalid JSON`);
+  }
+  const entries = advisories as unknown[];
+  if (entries.length === 0) return;
+  const identifiers = entries.map((advisory: unknown) => {
+    if (!advisory || typeof advisory !== 'object' || Array.isArray(advisory)) return 'unknown advisory';
+    const ghsa = (advisory as Record<string, unknown>).ghsa_id;
+    return typeof ghsa === 'string' ? ghsa : 'unknown advisory';
+  });
+  const status = withdrawn ? 'withdrawn' : 'active';
+  fail(`${coordinate} matched ${status} GitHub malware advisory ${identifiers.join(', ')}`);
+};
+
 const parseMetadata = (raw: string, dependencies: string[]): UpdatedDependency[] => {
   const value = JSON.parse(raw) as unknown;
   if (!Array.isArray(value) || value.length === 0) fail('updated-dependencies-json is empty or invalid');
@@ -302,28 +464,206 @@ const parseMetadata = (raw: string, dependencies: string[]): UpdatedDependency[]
   return updates;
 };
 
-const fetchJson = async (url: string, githubToken?: string): Promise<Record<string, unknown>> => {
+const fetchJson = async (
+  url: string,
+  githubToken?: string,
+  fetcher: JsonFetcher = fetch,
+): Promise<Record<string, unknown>> => {
   const headers: Record<string, string> = {
     Accept: 'application/vnd.github+json, application/json',
     'User-Agent': 'peerd-dependabot-security-policy',
+    'X-GitHub-Api-Version': '2022-11-28',
   };
   if (githubToken) headers.Authorization = `Bearer ${githubToken}`;
-  const response = await fetch(url, { headers, redirect: 'error' });
+  const response = await fetcher(url, {
+    headers,
+    redirect: 'error',
+    signal: AbortSignal.timeout(30_000),
+  });
   if (!response.ok) fail(`metadata lookup ${url} returned HTTP ${response.status}`);
   const value = await response.json() as unknown;
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail(`metadata lookup ${url} returned invalid JSON`);
   return value as Record<string, unknown>;
 };
 
-const verifyNpmSeasoning = async (
-  updates: UpdatedDependency[],
-  minimumAgeDays: number,
+const fetchJsonArray = async (
+  url: string,
+  githubToken?: string,
+  fetcher: JsonFetcher = fetch,
+): Promise<unknown[]> => {
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'peerd-dependabot-security-policy',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+  if (githubToken) headers.Authorization = `Bearer ${githubToken}`;
+  const response = await fetcher(url, {
+    headers,
+    redirect: 'error',
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) fail(`metadata lookup ${url} returned HTTP ${response.status}`);
+  const value = await response.json() as unknown;
+  if (!Array.isArray(value)) fail(`metadata lookup ${url} returned invalid JSON`);
+  return value as unknown[];
+};
+
+export const verifyNoGitHubNpmMalware = async (
+  updates: Array<{ dependencyName: string, newVersion: string }>,
+  githubToken = process.env.GH_API_TOKEN,
+  fetcher: JsonFetcher = fetch,
+): Promise<void> => {
+  for (const update of updates) {
+    const version = update.newVersion.replace(/^v/, '');
+    const coordinate = `${update.dependencyName}@${version}`;
+    // Query active and withdrawn records separately. A withdrawn advisory still
+    // proves the release tripped GitHub's malware feed during seasoning, so it
+    // permanently disqualifies the three-day no-human path.
+    for (const withdrawn of [false, true]) {
+      const query = new URLSearchParams({
+        type: 'malware',
+        ecosystem: 'npm',
+        affects: coordinate,
+        is_withdrawn: String(withdrawn),
+        per_page: '1',
+      });
+      const advisories = await fetchJsonArray(
+        `https://api.github.com/advisories?${query.toString()}`,
+        githubToken,
+        fetcher,
+      );
+      assertNoGitHubMalwareAdvisories(advisories, coordinate, withdrawn);
+    }
+    console.log(`clean GitHub malware history: ${coordinate}`);
+  }
+};
+
+export const assertMalwareObservationWindow = (
+  observations: MalwareObservation[],
+  headSha: string,
+  requiredHours = MALWARE_OBSERVATION_HOURS,
+  maximumGapHours = MALWARE_OBSERVATION_MAX_GAP_HOURS,
+  now = new Date(),
+): number => {
+  assertSha(headSha, 'observation head SHA');
+  if (!Number.isSafeInteger(requiredHours) || requiredHours < 1
+    || !Number.isSafeInteger(maximumGapHours) || maximumGapHours < 1) {
+    fail('malware observation window is invalid');
+  }
+  const matching = observations
+    .filter((observation) => observation.headSha === headSha)
+    .map((observation) => {
+      const completed = new Date(observation.completedAt);
+      if (!Number.isFinite(completed.getTime())) fail('malware observation has an invalid completion time');
+      return { ...observation, completed };
+    })
+    .sort((left, right) => left.completed.getTime() - right.completed.getTime());
+  if (matching.length === 0) fail('no malware observations exist for the exact candidate head');
+
+  const maximumGapMs = maximumGapHours * 3_600_000;
+  let cleanStart: Date | undefined;
+  let previousClean: Date | undefined;
+  for (const observation of matching) {
+    if (observation.conclusion !== 'success') {
+      cleanStart = undefined;
+      previousClean = undefined;
+      continue;
+    }
+    if (!previousClean || observation.completed.getTime() - previousClean.getTime() > maximumGapMs) {
+      cleanStart = observation.completed;
+    }
+    previousClean = observation.completed;
+  }
+  if (!cleanStart || !previousClean) fail('the latest malware observation is not clean');
+  const windowStart = cleanStart as Date;
+  const latestClean = previousClean as Date;
+  const freshnessMs = now.getTime() - latestClean.getTime();
+  if (freshnessMs < 0 || freshnessMs > maximumGapMs) {
+    fail(`the latest clean malware observation is more than ${maximumGapHours} hours old`);
+  }
+  const cleanHours = Math.floor((latestClean.getTime() - windowStart.getTime()) / 3_600_000);
+  if (cleanHours < requiredHours) {
+    fail(`the exact candidate has only ${cleanHours} continuous clean observation hours; ${requiredHours} are required`);
+  }
+  return cleanHours;
+};
+
+const loadMalwareObservations = async (
+  repository: string,
+  pr: number,
+  headSha: string,
+  githubToken: string,
+  now = new Date(),
+): Promise<MalwareObservation[]> => {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) fail('GitHub repository is invalid');
+  if (!Number.isSafeInteger(pr) || pr < 1) fail('observation PR number is invalid');
+  assertSha(headSha, 'observation head SHA');
+  const since = new Date(now.getTime() - (MALWARE_OBSERVATION_HOURS + MALWARE_OBSERVATION_MAX_GAP_HOURS) * 3_600_000);
+  const query = new URLSearchParams({
+    created: `>=${since.toISOString()}`,
+    per_page: '100',
+  });
+  const response = await fetchJson(
+    `https://api.github.com/repos/${repository}/actions/workflows/${MALWARE_OBSERVATION_WORKFLOW}/runs?${query}`,
+    githubToken,
+  );
+  const runValue = response.workflow_runs;
+  if (!Array.isArray(runValue)) fail('malware observation workflow-runs response is malformed');
+  const runs = runValue as unknown[];
+  const jobName = `observe Bun malware window (PR ${pr}, ${headSha})`;
+  const observations: MalwareObservation[] = [];
+  for (const run of runs) {
+    if (!run || typeof run !== 'object' || Array.isArray(run)) fail('malware observation run is malformed');
+    const id = (run as Record<string, unknown>).id;
+    if (!Number.isSafeInteger(id)) fail('malware observation run has no numeric ID');
+    const response = await fetchJson(
+      `https://api.github.com/repos/${repository}/actions/runs/${String(id)}/jobs?filter=latest&per_page=100`,
+      githubToken,
+    );
+    if (!Array.isArray(response.jobs)) fail('malware observation jobs response is malformed');
+    for (const job of response.jobs as unknown[]) {
+      if (!job || typeof job !== 'object' || Array.isArray(job)) fail('malware observation job is malformed');
+      const record = job as Record<string, unknown>;
+      if (record.name !== jobName) continue;
+      if (typeof record.conclusion !== 'string' || typeof record.completed_at !== 'string') {
+        fail('malware observation job is incomplete');
+      }
+      const conclusion = record.conclusion as string;
+      const completedAt = record.completed_at as string;
+      observations.push({
+        headSha,
+        conclusion,
+        completedAt,
+      });
+    }
+  }
+  return observations;
+};
+
+const verifyObservationWindow = async (values: Record<string, string>): Promise<void> => {
+  const repository = required(values, 'repository');
+  const pr = Number(required(values, 'pr'));
+  const headSha = required(values, 'head-sha');
+  const githubToken = process.env.GH_API_TOKEN ?? fail('GH_API_TOKEN is required for observation verification');
+  const observations = await loadMalwareObservations(repository, pr, headSha, githubToken);
+  const cleanHours = assertMalwareObservationWindow(observations, headSha);
+  console.log(`verified ${cleanHours} continuous clean malware observation hours for PR #${pr} at ${headSha}`);
+};
+
+export const verifyNpmSeasoning = async (
+  updates: Array<{ dependencyName: string, newVersion: string, integrity?: string }>,
+  minimumAgeDays?: number,
+  fetcher: JsonFetcher = fetch,
 ): Promise<void> => {
   const packuments = new Map<string, Record<string, unknown>>();
   for (const update of updates) {
     let packument = packuments.get(update.dependencyName);
     if (!packument) {
-      packument = await fetchJson(`https://registry.npmjs.org/${encodeURIComponent(update.dependencyName)}`);
+      packument = await fetchJson(
+        `https://registry.npmjs.org/${encodeURIComponent(update.dependencyName)}`,
+        undefined,
+        fetcher,
+      );
       packuments.set(update.dependencyName, packument);
     }
     const version = update.newVersion.replace(/^v/, '');
@@ -343,11 +683,23 @@ const verifyNpmSeasoning = async (
       || typeof (dist as Record<string, unknown>).integrity !== 'string') {
       fail(`npm release ${update.dependencyName}@${version} has no registry integrity digest`);
     }
+    const registryIntegrity = (dist as Record<string, unknown>).integrity as string;
+    if (update.integrity !== undefined
+      && !registryIntegrity.split(/\s+/).includes(update.integrity)) {
+      fail(`bun.lock integrity for ${update.dependencyName}@${version} does not match the npm registry`);
+    }
     if (typeof (manifest as Record<string, unknown>).deprecated === 'string') {
       fail(`npm release ${update.dependencyName}@${version} is deprecated`);
     }
-    const age = assertAtLeastDaysOld(publishedAt as string, minimumAgeDays);
-    console.log(`seasoned npm release: ${update.dependencyName}@${version} (${age} days old)`);
+    if (minimumAgeDays === undefined) {
+      if (!Number.isFinite(new Date(publishedAt as string).getTime())) {
+        fail(`invalid publication timestamp ${JSON.stringify(publishedAt)}`);
+      }
+      console.log(`verified npm release metadata: ${update.dependencyName}@${version}`);
+    } else {
+      const age = assertAtLeastDaysOld(publishedAt as string, minimumAgeDays);
+      console.log(`seasoned npm release: ${update.dependencyName}@${version} (${age} days old)`);
+    }
   }
 };
 
@@ -454,6 +806,48 @@ const assertInitialPaths = (ecosystem: SupportedEcosystem, paths: string[]): voi
   }
 };
 
+const bunLockReplacements = (
+  repo: string,
+  baseSha: string,
+  headSha: string,
+  paths: string[],
+): LockedNpmReplacement[] => {
+  if (!paths.includes('bun.lock')) fail('Bun security PR did not replace a resolved package in bun.lock');
+  const replacements = changedBunLockPackages(
+    readAt(repo, baseSha, 'bun.lock'),
+    readAt(repo, headSha, 'bun.lock'),
+  );
+  assertTrustedSocketScanner(replacements);
+  return replacements;
+};
+
+const assertMetadataMatchesResolvedReplacements = (
+  metadata: UpdatedDependency[],
+  replacements: LockedNpmReplacement[],
+): void => {
+  const coordinates = new Set(replacements.map(({ dependencyName, newVersion }) => `${dependencyName}@${newVersion}`));
+  for (const update of metadata) {
+    const coordinate = `${update.dependencyName}@${update.newVersion.replace(/^v/, '')}`;
+    if (!coordinates.has(coordinate)) {
+      fail(`authenticated update ${coordinate} is absent from the resolved bun.lock replacements`);
+    }
+  }
+};
+
+const observeBun = async (values: Record<string, string>): Promise<void> => {
+  const repo = resolve(required(values, 'repo'));
+  const baseSha = required(values, 'base-sha');
+  const headSha = required(values, 'head-sha');
+  assertSha(baseSha, 'base SHA');
+  assertSha(headSha, 'head SHA');
+  const paths = changedPaths(repo, baseSha, headSha);
+  assertInitialPaths('bun', paths);
+  const replacements = bunLockReplacements(repo, baseSha, headSha, paths);
+  await verifyNpmSeasoning(replacements);
+  await verifyNoGitHubNpmMalware(replacements);
+  console.log(`observed clean Bun replacement graph at ${headSha}: ${replacements.map(({ dependencyName, newVersion }) => `${dependencyName}@${newVersion}`).join(', ')}`);
+};
+
 const verify = async (values: Record<string, string>): Promise<void> => {
   const repo = resolve(required(values, 'repo'));
   const baseSha = required(values, 'base-sha');
@@ -471,8 +865,9 @@ const verify = async (values: Record<string, string>): Promise<void> => {
   const dependencies = parseDependencyNames(required(values, 'dependencies'));
   const metadata = parseMetadata(required(values, 'metadata'), dependencies);
   const minimumAgeDays = Number(required(values, 'minimum-age-days'));
-  if (!Number.isSafeInteger(minimumAgeDays) || minimumAgeDays < 30) {
-    fail('no-human security updates require at least 30 days of replacement seasoning');
+  const policyMinimumAgeDays = minimumSecurityAgeDays(ecosystem);
+  if (!Number.isSafeInteger(minimumAgeDays) || minimumAgeDays < policyMinimumAgeDays) {
+    fail(`${ecosystem} no-human security updates require at least ${policyMinimumAgeDays} days of replacement seasoning`);
   }
   const paths = changedPaths(repo, baseSha, headSha);
   assertInitialPaths(ecosystem, paths);
@@ -486,7 +881,11 @@ const verify = async (values: Record<string, string>): Promise<void> => {
         Object.fromEntries(metadata.map(({ dependencyName, newVersion }) => [dependencyName, newVersion])),
       );
     }
-    await verifyNpmSeasoning(metadata, minimumAgeDays);
+    const replacements = bunLockReplacements(repo, baseSha, headSha, paths);
+    assertMetadataMatchesResolvedReplacements(metadata, replacements);
+    assertTrustedSocketScanner(metadata);
+    await verifyNpmSeasoning(replacements, minimumAgeDays);
+    await verifyNoGitHubNpmMalware(replacements);
   } else {
     const diff = git(repo, ['diff', '--no-ext-diff', '--unified=0', `${baseSha}..${headSha}`, '--', ...paths]);
     const actionUpdates = parseActionsDiff(diff);
@@ -684,9 +1083,11 @@ if (import.meta.main) {
   try {
     const { command, values } = parseArgs(process.argv.slice(2));
     if (command === 'verify') await verify(values);
+    else if (command === 'observe-bun') await observeBun(values);
+    else if (command === 'verify-observations') await verifyObservationWindow(values);
     else if (command === 'prepare') prepare(values);
     else if (command === 'validate-prepared') validatePrepared(values);
-    else fail('expected verify, prepare, or validate-prepared command');
+    else fail('expected verify, observe-bun, verify-observations, prepare, or validate-prepared command');
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
     process.exit(1);

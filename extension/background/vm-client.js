@@ -32,7 +32,7 @@ import {
   VMNetworkDeniedError,
   VMTabClosedError,
   createKeyedQueue,
-} from '/peerd-engine/index.js';
+} from '/peerd-engine/background.js';
 
 // why ...any[]: these classes have genuinely different constructor arities
 // (VMRunTimeoutError(cmd, timeoutMs) vs VMNotReadyError(reason)); reviveError
@@ -88,7 +88,7 @@ export const VM_TAB_GROUP_TITLE = 'peerd';
 
 /**
  * @param {Object} deps
- * @param {ReturnType<typeof import('/peerd-engine/index.js').createVmRegistry>} deps.registry
+ * @param {ReturnType<typeof import('/peerd-engine/background.js').createVmRegistry>} deps.registry
  * @param {ReturnType<typeof import('./vm-tab-tracker.js').createVmTabTracker>} deps.tracker
  * @param {(tabId: number, message: object) => Promise<any>} [deps.sendTabMessage]
  *   Injected message IO (defaults to browser.tabs.sendMessage) so the

@@ -34,4 +34,36 @@ describe('App OPFS lifecycle posture', () => {
       expect(deletedMetadata).toBe(false);
     });
   }
+
+  test('Git cleanup failure preserves App metadata and fails deletion', async () => {
+    let deletedMetadata = false;
+    let closedTab = false;
+    const client = createAppClient({
+      registry: {
+        get: async () => ({ id: 'app-1' }),
+        delete: async () => { deletedMetadata = true; },
+      } as any,
+      tracker: {
+        closeTab: async () => { closedTab = true; return true; },
+      } as any,
+      repositories: {
+        coordinate: async (_ref: unknown, operation: () => Promise<unknown>) => operation(),
+        destroyApp: async () => { throw new Error('gitdir cleanup failed'); },
+      } as any,
+    });
+
+    await expect(client.delete('app-1')).rejects.toThrow('gitdir cleanup failed');
+    expect(closedTab).toBe(true);
+    expect(deletedMetadata).toBe(false);
+  });
+
+  test('deletion source removes Git before worktree and catalog metadata', async () => {
+    const source = await Bun.file('./extension/background/app-client.js').text();
+    const body = source.slice(source.indexOf('const deleteApp = async'));
+    expect(body.indexOf('repositories?.destroyApp?.(appId)')).toBeGreaterThan(-1);
+    expect(body.indexOf('guardedOpfsForApp(appId).nuke()'))
+      .toBeGreaterThan(body.indexOf('repositories?.destroyApp?.(appId)'));
+    expect(body.indexOf('registry.delete(appId)'))
+      .toBeGreaterThan(body.indexOf('guardedOpfsForApp(appId).nuke()'));
+  });
 });

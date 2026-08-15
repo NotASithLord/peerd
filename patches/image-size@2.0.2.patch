@@ -1,0 +1,24 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -967,5 +967,7 @@ var globalOptions = {
+ var globalOptions = {
+-  disabledTypes: []
++  // These parsers can loop forever on zero-sized boxes in image-size 2.0.2.
++  // addons-linter only needs browser-supported extension icon formats.
++  disabledTypes: ["heif", "icns", "jxl"]
+ };
+ function imageSize(input) {
+   const type = detector(input);
+diff --git a/dist/index.mjs b/dist/index.mjs
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -963,5 +963,7 @@ var globalOptions = {
+ var globalOptions = {
+-  disabledTypes: []
++  // These parsers can loop forever on zero-sized boxes in image-size 2.0.2.
++  // addons-linter only needs browser-supported extension icon formats.
++  disabledTypes: ["heif", "icns", "jxl"]
+ };
+ function imageSize(input) {
+   const type = detector(input);

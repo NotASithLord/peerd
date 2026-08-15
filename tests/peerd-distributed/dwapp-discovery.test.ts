@@ -6,11 +6,16 @@ import { createRoomMesh } from '../../extension/peerd-distributed/transport/mesh
 import { createLibrary } from '../../extension/peerd-distributed/apps/library.js';
 import { createDiscovery } from '../../extension/peerd-distributed/apps/discovery.js';
 import { buildMeta } from '../../extension/peerd-distributed/apps/meta.js';
+import { createDwebRollbackGuard } from '../../extension/background/dweb-rollback-guard.js';
 
 const tick = (ms = 40) => new Promise((r) => setTimeout(r, ms));
+const waitFor = async (predicate: () => boolean, timeoutMs = 1_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await tick(10);
+};
 const head = (n = 1) => ({ version_id: `v${n}`, content_addr: 'peerd://p/h', size: 10 });
 
-const spawn = async () => {
+const spawn = async (over: any = {}) => {
   const identity = await generateIdentity();
   const mesh = createRoomMesh({ roomId: 'base', identity });
   const blocked = new Set<string>();
@@ -19,6 +24,7 @@ const spawn = async () => {
     mesh, identity, library,
     isBlocked: (d: string) => blocked.has(d),
     block: (d: string) => blocked.add(d),
+    ...(over.admitMeta ? { admitMeta: over.admitMeta } : {}),
   });
   return { identity, mesh, library, discovery, blocked };
 };
@@ -44,7 +50,8 @@ describe('dwapp discovery — sovereign subscription plane', () => {
     const joiner = await spawn();
     expect(joiner.library.size()).toBe(0);
     await link(sharer, joiner);          // onPeer → both auto-subscribe → snapshots flow
-    await tick();
+    await waitFor(() => joiner.library.rows()
+      .some((r: any) => r.name === 'tictactoe'));
 
     expect(joiner.library.rows().some((r: any) => r.name === 'tictactoe')).toBe(true);
     [sharer, joiner].forEach((p) => p.discovery.close());
@@ -56,7 +63,7 @@ describe('dwapp discovery — sovereign subscription plane', () => {
     await link(a, b);
     await tick();                        // subscriptions established
     await a.discovery.announce(await ownCard(a, 'chess'));
-    await tick();
+    await waitFor(() => b.library.rows().some((r: any) => r.name === 'chess'));
     expect(b.library.rows().some((r: any) => r.name === 'chess')).toBe(true);
     [a, b].forEach((p) => p.discovery.close());
   });
@@ -69,7 +76,7 @@ describe('dwapp discovery — sovereign subscription plane', () => {
     await link(b, c);
     await tick();
     await a.discovery.announce(await ownCard(a, 'snake'));
-    await tick(80);                      // A→B (live), B→C (relay)
+    await waitFor(() => c.library.rows().some((r: any) => r.name === 'snake'));
     expect(c.library.rows().some((r: any) => r.name === 'snake')).toBe(true);
     [a, b, c].forEach((p) => p.discovery.close());
   });
@@ -78,11 +85,10 @@ describe('dwapp discovery — sovereign subscription plane', () => {
     const a = await spawn();
     const b = await spawn();
     await link(a, b);
-    await tick();
+    await waitFor(() => a.discovery.subscriberCount() === 1);
     await b.discovery.unsubscribeFrom(a.identity.did); // B tells A: stop sending
-    await tick();
+    await waitFor(() => a.discovery.subscriberCount() === 0);
     await a.discovery.announce(await ownCard(a, 'pong'));
-    await tick();
     expect(b.library.rows().some((r: any) => r.name === 'pong')).toBe(false);
     [a, b].forEach((p) => p.discovery.close());
   });
@@ -105,7 +111,7 @@ describe('dwapp discovery — sovereign subscription plane', () => {
     await link(a, b);
     await tick();
     await a.discovery.announce(await ownCard(a, 'roulette'));
-    await tick();
+    await waitFor(() => b.library.size() === 1);
     expect(b.library.size()).toBe(1);
     b.discovery.ban(a.identity.did, 'spam');
     expect(b.library.size()).toBe(0);                 // purged
@@ -113,5 +119,36 @@ describe('dwapp discovery — sovereign subscription plane', () => {
     // a re-announce can't get back in (blocklist-gated ingest)
     expect(await b.discovery.ingest(await ownCard(a, 'roulette', 2))).toBe(false);
     [a, b].forEach((p) => p.discovery.close());
+  });
+
+  test('an offscreen restart cannot make a replayed lower sequence fresh', async () => {
+    const values = new Map<string, any>();
+    const kv = {
+      get: async (key: string) => values.get(key),
+      set: async (key: string, value: any) => { values.set(key, structuredClone(value)); },
+    };
+    const publisher = await spawn();
+    const current = await ownCard(publisher, 'durable', 9);
+    const older = await ownCard(publisher, 'durable', 8);
+
+    const firstGuard = createDwebRollbackGuard({ kv });
+    const firstHost = await spawn({
+      admitMeta: async (candidate: any) => (await firstGuard.admit(candidate)).accepted === true,
+    });
+    expect(await firstHost.discovery.ingest(current)).toBe(true);
+    firstHost.discovery.close(); // offscreen cache is gone
+
+    // Both the offscreen host and SW closure restart. The durable kv mark is the
+    // only remaining state, and it must reject the older signed card.
+    const restartedGuard = createDwebRollbackGuard({ kv });
+    const restartedHost = await spawn({
+      admitMeta: async (candidate: any) => (await restartedGuard.admit(candidate)).accepted === true,
+    });
+    expect(await restartedHost.discovery.ingest(older)).toBe(false);
+    expect(restartedHost.library.size()).toBe(0);
+    expect(await restartedHost.discovery.ingest(current)).toBe(true);
+    expect(restartedHost.library.rows()[0]).toMatchObject({ seq: 9, head: head(9) });
+
+    [publisher, restartedHost].forEach((p) => p.discovery.close());
   });
 });

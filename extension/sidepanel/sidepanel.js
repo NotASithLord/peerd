@@ -31,11 +31,20 @@ let currentState = INITIAL_STATE;
 // On disconnect, we reset our local state to the locked-vault default
 // — otherwise the UI would show a stale "unlocked" state after a SW
 // restart, and the user's next action would fail confusingly.
+/** @type {any} */
 let port = null;
 const connectPort = () => {
-  port = browser.runtime.connect({ name: 'sidepanel' });
-  port.onMessage.addListener(handlePortMessage);
-  port.onDisconnect.addListener(handlePortDisconnect);
+  const connectedPort = browser.runtime.connect({ name: 'sidepanel' });
+  port = connectedPort;
+  connectedPort.onMessage.addListener(handlePortMessage);
+  connectedPort.onDisconnect.addListener(handlePortDisconnect);
+  // Chrome can establish this port while a cold MV3 module worker is still
+  // linking, before its onConnect listener exists. In that race Chrome neither
+  // replays the event nor disconnects the orphaned port, so the historical
+  // push-on-connect contract leaves the panel on its placeholder state forever.
+  // A one-shot message is queued independently; retry it until the worker's
+  // dispatcher is live, then fold the reply through the same state reducer.
+  void requestInitialState(connectedPort);
 };
 
 
@@ -55,13 +64,53 @@ const handlePortMessage = (raw) => {
   }
   // Everything else folds through the shared pure reducer (DESIGN-12) so home
   // and the side panel stay byte-identical projections of the SW session.
-  const next = reduceChat(currentState, msg);
+  // §4e: a confirm settle carries WHICH surface answered; the reducer needs to
+  // know which surface it is folding FOR, so the answering surface doesn't
+  // transcript-line its own click.
+  const folded = msg.type === 'confirm/resolved' ? { ...msg, confirmSurface: 'sidepanel' } : msg;
+  const next = reduceChat(currentState, folded);
   if (next === currentState) return; // guarded bail / live complement — nothing changed
   currentState = next;
   // Side-panel-only: the voice manager doesn't survive the panel, so re-enable
   // it on a full snapshot when the persisted setting says it was on.
   if (msg.type === 'state') maybeRestoreVoice(currentState);
   m.redraw();
+};
+
+/**
+ * Establish the initial snapshot even if the port's onConnect event was lost
+ * while the cold worker registered its listeners.
+ * @param {any} connectedPort
+ */
+const requestInitialState = async (connectedPort) => {
+  /** @param {string} type */
+  const waitForReply = async (type) => {
+    let retryMs = 100;
+    while (port === connectedPort && !currentState.hydrated) {
+      // A send begun before onMessage registration can remain pending forever
+      // on Chrome instead of rejecting. Bound each attempt so a lost startup
+      // message cannot prevent the next one from reaching a live listener.
+      const reply = /** @type {{ ok?: boolean, state?: any } | null }} */ (
+        await Promise.race([
+          browser.runtime.sendMessage({ type }).catch(() => null),
+          new Promise((resolve) => setTimeout(() => resolve(null), 1_000)),
+        ])
+      );
+      if (reply?.ok) return reply;
+      await new Promise((resolve) => setTimeout(resolve, retryMs));
+      retryMs = Math.min(1_000, retryMs * 2);
+    }
+    return null;
+  };
+
+  // bootstrap/ready is registered early and deliberately holds its response
+  // channel open until the unified privileged dispatcher exists. That pending
+  // event prevents Chrome from retiring a cold worker halfway through boot.
+  if (!await waitForReply('bootstrap/ready')) return;
+  const reply = await waitForReply('state/get');
+  if (port === connectedPort && reply?.state) {
+    handlePortMessage({ type: 'state', state: reply.state });
+  }
 };
 
 const handlePortDisconnect = () => {
@@ -71,6 +120,8 @@ const handlePortDisconnect = () => {
   // until we get a fresh state push.
   currentState = {
     ...currentState,
+    // The old snapshot is no longer authoritative until the revived SW replies.
+    hydrated: false,
     // why: prfEnrolled is kept across the disconnect — it's a persistent
     // vault property, not a session one, so the Touch ID button shouldn't
     // flicker away while we reconnect.
@@ -95,6 +146,8 @@ const handlePortDisconnect = () => {
     // with no parentToolUseId, so the card never receives turn/actor-done. Reset
     // them; a revived SW re-seeds anything still live via turn/actor-state.
     actors: INITIAL_STATE.actors,
+    actorProjectionEpoch: INITIAL_STATE.actorProjectionEpoch,
+    actorProjectionRevision: INITIAL_STATE.actorProjectionRevision,
     spawned: INITIAL_STATE.spawned,
     asyncTasks: INITIAL_STATE.asyncTasks,
   };
@@ -269,7 +322,19 @@ const openAgentTab = async (tabId, windowId) => {
   const focused = await focusBrowserTab(browser, tabId, windowId);
   if (!focused) console.warn('[sidepanel] focus tab failed');
 };
-const uiActions = { loadActor, confirmAnswer, dismissNotice, requestDebugger, openAgentTab };
+
+// A card action types the user's likely next message INTO the composer (§4c) -
+// it never sends. The nonce makes each click a fresh one-shot for the InputBar
+// to consume; the user edits or discards like any draft.
+let prefillNonce = 0;
+/** @param {string} text */
+const prefillComposer = (text) => {
+  if (typeof text !== 'string' || !text.trim()) return;
+  prefillNonce += 1;
+  currentState = { ...currentState, composerPrefill: { text, nonce: prefillNonce } };
+  m.redraw();
+};
+const uiActions = { loadActor, confirmAnswer, dismissNotice, requestDebugger, openAgentTab, prefillComposer };
 
 // ---- brand hand-off: is the options tab the active one? -------------------
 //

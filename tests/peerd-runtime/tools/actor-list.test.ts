@@ -1,5 +1,5 @@
 // actor_list — the ONE discovery surface that collapsed vm_list / js_list /
-// app_list / list_tabs / list_integrations. It aggregates the three engine
+// app_list / list_tabs / list_integrations. It aggregates the four engine
 // registries (session-scoped) + open tabs (global, denylisted dropped) + API
 // integrations into one uniform columnar list keyed by `type`. These tests pin:
 // the uniform row shape per type, the denylist enumeration-leak fence inherited
@@ -22,6 +22,10 @@ const fullCtx = (over: Record<string, any> = {}) => ({
     { id: 'nb-1', name: 'analysis' },
   ], currentId: 'nb-1' }) },
   jsTabTracker: { getTabId: () => null },
+  podRegistry: { snapshot: async () => ({ pods: [
+    { id: 'pod-1', name: 'fast-shell', persistent: false },
+  ], currentId: 'pod-1' }) },
+  podTabTracker: { getTabId: () => 55 },
   appRegistry: { snapshot: async () => ({ apps: [
     { id: 'app-1', name: 'calculator', tags: ['math', 'demo'] },
   ], currentId: null }) },
@@ -47,8 +51,8 @@ describe('actor_list — unified actor catalog', () => {
   test('aggregates every source into one uniform-shaped list keyed by type', async () => {
     const r = await actorListTool.execute({}, fullCtx() as any);
     const out = parse(r);
-    // 2 vms + 1 notebook + 1 app + 1 tab + 2 integrations
-    expect(out.count).toBe(7);
+    // 2 vms + 1 notebook + 1 pod + 1 app + 1 tab + 2 integrations
+    expect(out.count).toBe(8);
 
     // densified (>= 5 uniform records) — columnar pair, not the raw array.
     expect(out.actors).toBeUndefined();
@@ -66,9 +70,13 @@ describe('actor_list — unified actor catalog', () => {
     expect(byHandle('vm-2')[col('live')]).toBe(true);     // has tab 42
     expect(byHandle('vm-2')[col('current')]).toBe(true);  // currentVmId
 
-    // notebook + app
+    // notebook + Pod + app
     expect(byHandle('nb-1')[col('type')]).toBe('notebook');
     expect(byHandle('nb-1')[col('current')]).toBe(true);
+    expect(byHandle('pod-1')[col('type')]).toBe('pod');
+    expect(byHandle('pod-1')[col('live')]).toBe(true);
+    expect(byHandle('pod-1')[col('current')]).toBe(true);
+    expect(byHandle('pod-1')[col('detail')]).toContain('ephemeral');
     expect(byHandle('app-1')[col('type')]).toBe('app');
     expect(byHandle('app-1')[col('detail')]).toBe('math, demo');   // tags joined
 
@@ -86,12 +94,12 @@ describe('actor_list — unified actor catalog', () => {
     expect(byHandle('https://api.github.com')[col('live')]).toBe(true);  // formed
   });
 
-  test('groups by type order (webvm→notebook→app→tab→integration)', async () => {
+  test('groups by type order (webvm→notebook→pod→app→tab→integration)', async () => {
     const r = await actorListTool.execute({}, fullCtx() as any);
     const out = parse(r);
     const types = out.actors_rows.map((row: any[]) => row[out.actors_columns.indexOf('type')]);
-    // every webvm precedes every notebook precedes app precedes tab precedes integration
-    const order = ['webvm', 'notebook', 'app', 'tab', 'integration'];
+    // every webvm precedes every notebook precedes Pod precedes app precedes tab precedes integration
+    const order = ['webvm', 'notebook', 'pod', 'app', 'tab', 'integration'];
     const ranks = types.map((t: string) => order.indexOf(t));
     expect(ranks).toEqual([...ranks].sort((a, b) => a - b));
   });
@@ -99,7 +107,7 @@ describe('actor_list — unified actor catalog', () => {
   test('drops denylisted tabs and reports the hidden count (enumeration-leak fence)', async () => {
     const ctx = fullCtx({
       // only the engine sources off so the result is tab-only and easy to read
-      vmRegistry: undefined, jsRegistry: undefined, appRegistry: undefined,
+      vmRegistry: undefined, jsRegistry: undefined, podRegistry: undefined, appRegistry: undefined,
       listApiIntegrations: undefined,
       denylist: ['chase.com', 'mail.proton.me'],
       tabs: { query: async () => [
@@ -120,7 +128,7 @@ describe('actor_list — unified actor catalog', () => {
 
   test('omits the hidden-count field when nothing is denylisted', async () => {
     const ctx = fullCtx({
-      vmRegistry: undefined, jsRegistry: undefined, appRegistry: undefined,
+      vmRegistry: undefined, jsRegistry: undefined, podRegistry: undefined, appRegistry: undefined,
       listApiIntegrations: undefined,
       denylist: ['chase.com'],
       tabs: { query: async () => [{ id: 1, url: 'https://example.com/', title: 'x', active: true, windowId: 1 }] },
@@ -131,7 +139,7 @@ describe('actor_list — unified actor catalog', () => {
 
   test('drops private-network and cloud-metadata tabs from model and code results', async () => {
     const ctx = fullCtx({
-      vmRegistry: undefined, jsRegistry: undefined, appRegistry: undefined,
+      vmRegistry: undefined, jsRegistry: undefined, podRegistry: undefined, appRegistry: undefined,
       listApiIntegrations: undefined,
       tabs: { query: async () => [
         { id: 1, url: 'https://example.com/', title: 'Example', active: true, windowId: 1 },
@@ -154,8 +162,8 @@ describe('actor_list — unified actor catalog', () => {
       vmRegistry: { snapshot: async () => { throw new Error('vm registry down'); } },
     });
     const out = parse(await actorListTool.execute({}, ctx as any));
-    // vms dropped (2 fewer than the 7 above), notebook/app/tab/integrations remain
-    expect(out.count).toBe(5);
+    // vms dropped (2 fewer than the 8 above), notebook/pod/app/tab/integrations remain
+    expect(out.count).toBe(6);
     expect(out.unavailable).toContain('webvm: vm registry down');
     // no webvm rows leaked into the catalog
     expect(JSON.stringify(out)).not.toContain('vm-1');
@@ -169,7 +177,7 @@ describe('actor_list — unified actor catalog', () => {
 
   test('sanitizes the page-controlled tab title — no raw newline or angle bracket reaches the trusted result (#4)', async () => {
     const ctx = fullCtx({
-      vmRegistry: undefined, jsRegistry: undefined, appRegistry: undefined, listApiIntegrations: undefined,
+      vmRegistry: undefined, jsRegistry: undefined, podRegistry: undefined, appRegistry: undefined, listApiIntegrations: undefined,
       tabs: { query: async () => [
         // document.title is fully attacker-controlled: a newline to break out of the
         // lead + a forged fence close + an angle-bracket tag.
@@ -191,5 +199,7 @@ describe('actor_list — unified actor catalog', () => {
     expect(actorListTool.sideEffect).toBe('read');
     expect(actorListTool.origins?.({}, {} as any)).toEqual([]);
     expect(actorListTool.name).toBe('actor_list');
+    expect(actorListTool.description).toContain('webvm | notebook | pod | app');
+    expect(actorListTool.description).toContain("a Pod's lifecycle");
   });
 });

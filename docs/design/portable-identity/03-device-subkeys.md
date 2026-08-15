@@ -1,5 +1,16 @@
 # Device subkeys
 
+Status: SUPERSEDED by `06-device-enrollment.md`, which implements the model
+below. Device keys, certificates, and a revocation roster now ship
+(`identity/device-key.js`, `identity/device-certificate.js`), and the
+self-device handshake verifies them. The sequencing this document insisted
+on still holds and is still pending: the wire verifier must accept
+certificate-backed identity across handshakes, Agent Cards, envelopes,
+manifests, and A2A before routine signing switches off the root. The
+original text follows.
+
+---
+
 Status: proposal; no device-key or certificate code is shipped by this change.
 
 Portable roots increase the cost of using the permanent identity key for daily

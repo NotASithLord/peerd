@@ -100,13 +100,14 @@ describe('declarative code-capability contract', () => {
   test('code surfaces retain only manifest operations not represented by their client', () => {
     expect(actorCodeSurfaceTools('webvm')).toEqual(['vm_boot']);
     expect(actorCodeSurfaceTools('notebook')).toEqual(['js_notebook']);
+    expect(actorCodeSurfaceTools('pod')).toEqual(['pod_exec']);
     expect(actorCodeSurfaceTools('app')).toEqual(['app_write_file']);
     expect(actorCodeSurfaceTools('dweb')).toEqual(['a2a_run']);
     expect(actorCodeSurfaceTools('mystery')).toEqual([]);
   });
 
   test('safe-client decisions are explicit for every actor kind', () => {
-    expect(Object.keys(ACTOR_CAPABILITY_MANIFESTS).sort()).toEqual(['api', 'app', 'dweb', 'notebook', 'web', 'webvm']);
+    expect(Object.keys(ACTOR_CAPABILITY_MANIFESTS).sort()).toEqual(['api', 'app', 'dweb', 'notebook', 'pod', 'web', 'webvm']);
     for (const profile of Object.values(ACTOR_CAPABILITY_MANIFESTS)) {
       expect(profile.codeTool.length).toBeGreaterThan(0);
       expect(profile.codeDecision.length).toBeGreaterThan(20);

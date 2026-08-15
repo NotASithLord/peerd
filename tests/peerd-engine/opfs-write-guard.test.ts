@@ -50,10 +50,13 @@ describe('OPFS open and mutation posture', () => {
       beforeMutation: () => { throw new Error('read called the mutation gate'); },
     });
     await expect(opfs.list()).resolves.toEqual([]);
-    expect(creates).toEqual([false]);
+    await expect(opfs.listDir('/')).resolves.toEqual([]);
+    await expect(opfs.stat('/')).resolves.toEqual({ path: '/', kind: 'directory', size: 0 });
+    await expect(opfs.exists('/')).resolves.toBe(true);
+    expect(creates).toEqual([false, false]);
   });
 
-  test('a blocked posture stops write, delete, and nuke before touching OPFS', async () => {
+  test('a blocked posture stops every mutation before touching OPFS', async () => {
     let rootReads = 0;
     const blocked = new Error(
       "store 'opfs-workspaces' is read-only. No data was changed.",
@@ -67,7 +70,25 @@ describe('OPFS open and mutation posture', () => {
     });
     await expect(opfs.write('x.txt', 'x')).rejects.toBe(blocked);
     await expect(opfs.delete('x.txt')).rejects.toBe(blocked);
+    await expect(opfs.mkdir('dir')).rejects.toBe(blocked);
+    await expect(opfs.remove('dir', { recursive: true })).rejects.toBe(blocked);
+    await expect(opfs.copy('x.txt', 'copy.txt')).rejects.toBe(blocked);
+    await expect(opfs.move('x.txt', 'moved.txt')).rejects.toBe(blocked);
     await expect(opfs.nuke()).rejects.toBe(blocked);
+    expect(rootReads).toBe(0);
+  });
+
+  test('rejects traversal and invalid mounted roots before OPFS lookup', async () => {
+    let rootReads = 0;
+    const opfs = opfsHelpers(['peerd-pods', 'pod-1'], {
+      getDirectory: async () => {
+        rootReads += 1;
+        return {} as any;
+      },
+    });
+    await expect(opfs.read('../secret')).rejects.toThrow('unsafe path');
+    await expect(opfs.stat('dir\\secret')).rejects.toThrow('invalid path');
+    expect(() => opfsHelpers([])).toThrow('invalid root path');
     expect(rootReads).toBe(0);
   });
 });

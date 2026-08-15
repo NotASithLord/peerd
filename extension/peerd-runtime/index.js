@@ -187,7 +187,9 @@ export { buildAncestry } from './actor/delegation-lineage.js';
 // DESIGN-18: the API actor is the same origin actor with NO tab; its
 // origin-keyed bindings, normalizer, and "what I learned" summary live here too.
 export {
-  makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT,
+  makeWebActorTabBindings, makeWebActorRegistry, retireStoppedRoamingWebActor,
+  retireStoppedRoamingWebActorDurably,
+  WEB_ACTOR_SUMMARY_PROMPT,
   safeWebActorSummaryOrigin, fenceWebActorSummary,
   makeApiActorBindings, normalizeApiOrigin, API_ACTOR_SUMMARY_PROMPT, fenceApiActorSummary,
   // issue 251: the SITE actor's handle — a web actor BOUND to one origin, with a
@@ -239,7 +241,7 @@ export { makeLearnedOrigins, MAX_LEARNED } from './actor/learned-origins.js';
 // made its content attacker-authorable in the first place.
 export { isUgcHost } from './actor/ugc-registry.js';
 export { isKnownIdp, isKnownIdpHost, knownIdpSeeds, knownIdpDomains } from './actor/idp-registry.js';
-export { describeLandingStop, originPhrase } from './actor/origin-lock-report.js';
+export { describeLandingStop, landingStopCard, originPhrase } from './actor/origin-lock-report.js';
 // DESIGN-19: site clients — per-origin derived API clients. The pure core
 // (validation, confirm-gated proposal, staleness header, fenced dossier, URL pin),
 // the two-tier store, and the capture digester. See site-clients/index.js.
@@ -395,6 +397,25 @@ export {
   ExportPassphraseError, isCustodySecretName,
 } from './transfer/transfer.js';
 
+// The same-user device sync surfaces: the LOGICAL projection of each store
+// that may cross to a proven self device, and its idempotent applier. The
+// bytes move through the dweb module; deciding what a surface means is
+// runtime work, so it lives here.
+export {
+  portableSession,
+  shapeSessionsSurface, applySessionsSurface,
+  shapeSettingsSurface, shapeProviderEndpointsSurface, shapeMemorySurface,
+  shapeHooksSurface, shapeSkillsSurface, shapeSecretsSurface,
+  shapeAppsSurface, captureAppsSurface, applyAppsSurface, SurfaceApplyPartialError,
+  shapeWorkspacesSurface, applyWorkspacesSurface,
+  encodeSurface, decodeSurface,
+} from './transfer/self-sync-surfaces.js';
+
+// The "Use my existing Peerd" flow, as a pure reducer + its copy table.
+export {
+  STEP_COPY, initialEnrollmentState, enrollmentStep, describeSurfaces, diagnostics,
+} from './transfer/enrollment-flow.js';
+
 // --- permissions (Plan/Act mode + confirm-actions toggle; Feature 03) ---
 // The foundational write-authorization policy. Other features route every
 // write through decideAction. Pure function — see permissions/policy.js.
@@ -424,14 +445,14 @@ export {
   WEB_TOOLS, captureTool,
 } from './tools/web/index.js';
 
-// --- voice (local transcription) ----------------------------------------
-export {
-  createVoiceManager,
-  createModelStore,
-  createBestTranscriber, detectVoiceCapability,
-  MicButton,
-  normalizeVariant, normalizeEngine, VOICE_ENGINES,
-} from './voice/index.js';
+// --- voice (lightweight control/UI surface) -----------------------------
+// The offscreen-only transcriber factory imports Moonshine and must never be
+// reachable from this universal barrel: the MV3 worker evaluates it cold.
+export { createVoiceManager } from './voice/manager.js';
+export { createModelStore } from './voice/model-store.js';
+export { detectVoiceCapability } from './voice/engine-picker.js';
+export { MicButton } from './voice/mic-button.js';
+export { normalizeVariant, normalizeEngine, VOICE_ENGINES } from './voice/settings.js';
 
 // --- pdf (read_pdf tool: pdf.js text layer + opt-in OCR) ----------------
 export {

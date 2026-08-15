@@ -21,10 +21,12 @@ export const identityChangeBlockedByApps = (apps) => apps.some((app) =>
  * @param {string} deps.identitySecretName
  * @param {<T>(operation: () => Promise<T>) => Promise<T>} deps.withIdentityMutation
  * @param {() => Promise<boolean>} deps.canChangeIdentity
+ * @param {() => Promise<boolean>} deps.canMintIdentity
+ *        false when this install already has certificate-only device custody
  */
 export const makeDwebIdentityCustody = ({
   enabled, active, vault, auditLog, identitySecretName,
-  withIdentityMutation, canChangeIdentity,
+  withIdentityMutation, canChangeIdentity, canMintIdentity,
 }) => {
   const available = () => enabled && active();
 
@@ -50,6 +52,10 @@ export const makeDwebIdentityCustody = ({
         // a recovered root.
         const existing = await vault.getSecret(identitySecretName);
         if (existing) return { ok: false, error: 'identity-already-exists' };
+        // An enrolled device deliberately has no person-root seed. Letting the
+        // legacy public-network startup path interpret that absence as a fresh
+        // profile would mint a second person DID and split the installation.
+        if (!await canMintIdentity()) return { ok: false, error: 'certificate-only-device' };
         // A surviving local share is derived from the missing root. Minting a
         // replacement would orphan its publisher and app identifiers.
         if (!await canChangeIdentity()) return { ok: false, error: 'identity-in-use' };

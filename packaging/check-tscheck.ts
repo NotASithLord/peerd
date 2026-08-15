@@ -158,7 +158,11 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // route, Options surface, and rendered side-panel coverage.
 // 673 → 676: the Actor Fabric adds its pure topology model, SW live projection,
 // and rendered browser contract while replacing the checked async-task bar.
-const COVERED_FLOOR = 707;
+// Portable identity's live offscreen/SW/custody wiring, the Git + Pods arc,
+// and the UI redesign moved this floor from different bases. The release
+// candidate's merged scan reports 769 checked files; recording that computed
+// union keeps every gain without trying to add branch-local counts.
+const COVERED_FLOOR = 769;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

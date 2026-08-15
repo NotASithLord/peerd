@@ -102,7 +102,7 @@ import {
   listProviders,
   // web actor model resolution: pin → local → provider default → inherit.
   // Pure; the SW resolves it when minting a web actor session.
-  resolveRunnerModel,
+  resolveRunnerTarget,
   // local WebGPU runner: the offscreen-engine bridge + the resident model id.
   setLocalGenerate, LOCAL_MODEL_ID,
   // live model inventory (Ollama /api/tags) for the model picker.
@@ -255,8 +255,6 @@ import {
   normalizeConfirmActions,
   confirmActionsFromRecord,
   // edit (SEARCH/REPLACE diff editing + review-diff snapshots, feature 02)
-  createBrowserSnapshotStore,
-  createCheckpointManager,
   // cost telemetry (feature 06): normalize for the state push + the
   // per-turn tracker (fold/persist/push/halt with all IO injected).
   // addUsage/limitExceeded also serve the script/model-call route's cost
@@ -328,7 +326,8 @@ import {
   createConversationRegistry,
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
   // registry (the 0-or-1-tab actor), + the self-fenced summary.
-  makeWebActorTabBindings, makeWebActorRegistry, safeWebActorSummaryOrigin, fenceWebActorSummary,
+  makeWebActorTabBindings, makeWebActorRegistry, retireStoppedRoamingWebActorDurably,
+  safeWebActorSummaryOrigin, fenceWebActorSummary,
   // PR #119: the code-REPL arm's host-side page-call handler + the pure
   // adopt-first-tab-on-goto decision.
   makePageCallHandler, resolvePageTab,
@@ -347,14 +346,14 @@ import {
   hasDurableSiteClientState,
   decideNumericTabAuthority, numericTabAuthorityRefusal,
   IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
-  isKnownIdp, isKnownIdpHost, knownIdpDomains, describeLandingStop, originPhrase, isUgcHost,
+  isKnownIdp, isKnownIdpHost, knownIdpDomains, describeLandingStop, landingStopCard, originPhrase, isUgcHost,
   isAddressableBrowserTab,
   finalActorTurnReply, finalAssistantText,
   groupResourceLossNotices,
   // The debug surface: the bundle assembler + the delegation-tree walk the
   // session/debugBundle route runs (pure; the SW supplies the reads).
   assembleDebugBundle, childSessionIdsOf,
-} from '/peerd-runtime/index.js';
+} from '/peerd-runtime/background.js';
 
 import {
   flattenCategorisedDenylist,
@@ -369,6 +368,8 @@ import { createVmClient } from './vm-client.js';
 import { createVmTabTracker } from './vm-tab-tracker.js';
 import { createJsClient } from './notebook-client.js';
 import { createJsTabTracker } from './notebook-tab-tracker.js';
+import { createPodClient } from './pod-client.js';
+import { createPodTabTracker } from './pod-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
 import { createScriptRunRegistry } from './script-runs.js';
 import { createContextSnapshots } from './context-snapshots.js';
@@ -387,9 +388,11 @@ import { makeUiPorts } from './ui-ports.js';
 import { createAppClient, APP_TAB_GROUP_TITLE } from './app-client.js';
 import { createPageActivityReporter } from './page-activity.js';
 import { createAppTabTracker } from './app-tab-tracker.js';
+import { createAppQuiescence } from './app-quiescence.js';
 import {
   createVmRegistry,
   createNotebookRegistry,
+  createPodRegistry,
   createAppRegistry,
   appFileCheckpointContent,
   // artifact export/import (.peerd envelopes — DESIGN-10)
@@ -418,7 +421,15 @@ import {
   needsWebWriteConfirm,
   // §11.5: the dormant App-bodies store's write gate (self-hosted DB).
   setAppBodyWriteGate,
-} from '/peerd-engine/index.js';
+  parseAppManifest,
+  createRepositoryService,
+  podGitRemoteOperation,
+} from '/peerd-engine/background.js';
+// MV3 ServiceWorkerGlobalScope rejects runtime import(). Keep the heavy vendor
+// statically reachable only from this host and inject it into the otherwise
+// operation-lazy repository service; unrelated peerd-engine consumers do not
+// inherit these bytes through the public barrel.
+import browserGit from '/vendor/isomorphic-git/index.js';
 import { createDebuggerPool } from './debugger-pool.js';
 import { normalizeSettingsPatch } from './settings-patch.js';
 import { makeSettingsStore } from './settings-store.js';
@@ -438,6 +449,7 @@ import { makeLocalModelState } from './local-model-state.js';
 import { makeProfileState } from './profile-state.js';
 import { makeOnboardingReconcile } from './onboarding-reconcile.js';
 import { makeModelCatalog } from './model-catalog.js';
+import { resolveComposerReadiness } from './provider-readiness.js';
 import { makeTabAffordances } from './tab-affordances.js';
 import { makeMintOnce } from './mint-once.js';
 import { makeDwebInboundRateCap } from './dweb-inbound-rate-cap.js';
@@ -452,6 +464,13 @@ import { makeDwebCustodyClient, makeRetryableCustodyReset } from './dweb-custody
 import {
   identityChangeBlockedByApps, makeDwebIdentityCustody,
 } from './dweb-identity-custody.js';
+import { makeDwebSelfCustody, hasEnrolledSelfCustody } from './dweb-self-custody.js';
+import { makeDwebSelfRoutes } from './routes/dweb-self.js';
+import {
+  shapeSessionsSurface, applySessionsSurface, shapeMemorySurface,
+  shapeSettingsSurface,
+  captureAppsSurface, applyAppsSurface, SurfaceApplyPartialError,
+} from '/peerd-runtime/background.js';
 import { makePrivateTransferOpenRoute, makePrivateTransferPort } from './private-transfer-port.js';
 import { downgradesActorConfirm, a2aConsentOutcome } from './a2a-consent.js';
 import { makeVaultRoutes } from './routes/vault.js';
@@ -470,6 +489,7 @@ import { makeSettingsRoutes } from './routes/settings.js';
 import { makeSessionMutationRoutes } from './routes/session-mutations.js';
 import { makeLocalModelRoutes } from './routes/local-model.js';
 import { makeDwebRoutes } from './routes/dweb.js';
+import { createDwebRollbackGuard } from './dweb-rollback-guard.js';
 import { makeToolboxRoutes } from './routes/toolbox.js';
 import { makeActorsRoutes } from './routes/actors.js';
 import { makeScriptRunControlRoutes } from './routes/script-run-control.js';
@@ -687,6 +707,8 @@ const DEFAULT_SETTINGS = CHANNEL_DEFAULTS;
 // room-hosting page. Store-safe: not the dweb module path. Mirrors
 // identity/keypair.js SECRET_NAME by convention.
 const DWEB_IDENTITY_SECRET = 'distributed/identity/v1';
+// Certificate-only enrolled devices must not let legacy public-network
+// startup turn the intentionally absent person root into a new identity.
 // Extended-thinking budget (tokens) when reasoningEnabled. Modest by
 // design — enough for a real plan, not a dissertation. The adapter
 // lifts max_tokens above this so the visible answer still has room.
@@ -712,6 +734,35 @@ const loadSettings = async () => {
   // Fallback guards against a channel-config missing the key — absence must
   // mean "default lock", never "never lock".
   vault.setAutoLockMs(settingsStore.get().vaultAutoLockMs ?? DEFAULT_AUTO_LOCK_MS);
+};
+let settingsHydrated = false;
+let settingsHydrationFailures = 0;
+/** @type {Promise<void>|null} */
+let settingsHydrationAttempt = null;
+/** @type {() => Promise<void>|void} */
+let onSettingsHydrationRecovered = () => {};
+const ensureSettingsReady = () => {
+  if (settingsHydrated) return Promise.resolve();
+  if (settingsHydrationAttempt) return settingsHydrationAttempt;
+  const attempt = loadSettings()
+    .then(() => {
+      const recovered = settingsHydrationFailures > 0;
+      settingsHydrated = true;
+      if (recovered) queueMicrotask(() => {
+        Promise.resolve(onSettingsHydrationRecovered()).catch((error) => {
+          console.warn('[sw] settings recovery reconciliation failed', error);
+        });
+      });
+    })
+    .catch((error) => {
+      settingsHydrationFailures += 1;
+      throw error;
+    })
+    .finally(() => {
+      settingsHydrationAttempt = null;
+    });
+  settingsHydrationAttempt = attempt;
+  return attempt;
 };
 
 /**
@@ -752,6 +803,7 @@ const resolveActiveProvider = () => {
  * case skips the vault/daemon probes entirely.
  */
 const ensureActiveProvider = async () => {
+  await ensureSettingsReady();
   const list = listProviders().filter((provider) =>
     provider.name !== 'local-webgpu' || offscreenAvailable);
   const name = settingsStore.get().providerName;
@@ -761,7 +813,10 @@ const ensureActiveProvider = async () => {
     if (p.keyless) {
       // Keyless usability is REAL readiness, not mere presence: a live daemon
       // (Ollama) must answer; the on-device model must be downloaded.
-      if (p.liveModels) usable = !!(await liveProviderModels(p.name));
+      if (p.liveModels) {
+        const live = await liveProviderModels(p.name);
+        usable = Array.isArray(live) && live.length > 0;
+      }
       else if (p.name === 'local-webgpu') usable = localModelState.available();
       else usable = true;
     } else {
@@ -1069,10 +1124,23 @@ const reconcileOnboardingLatch = makeOnboardingReconcile({ profileState, session
 
 // The per-chat model picker's catalog assembly (background/model-catalog.js).
 // localModelAvailable is a thunk because localModelState is created later.
-const { liveProviderModels, liveContextWindow, buildModelOptions } = makeModelCatalog({
+let providerConfigRevision = 0;
+const onProviderConfigChanged = () => { providerConfigRevision += 1; };
+const onLiveProviderModelsChanged = () => {
+  onProviderConfigChanged();
+  if (uiConnected()) void pushState().catch(() => {});
+};
+const {
+  liveProviderModels,
+  liveProviderModelStatus,
+  invalidateLiveProviderModels,
+  liveContextWindow,
+  buildModelOptions,
+} = makeModelCatalog({
   listProviders, listProviderModels, providerModelContextWindow,
   localModelId: LOCAL_MODEL_ID, localModelAvailable: () => localModelState.available(),
   settingsStore, vault, sessions, resolveActiveProvider, getSecret, safeFetch,
+  onLiveModelsChanged: onLiveProviderModelsChanged,
 });
 
 // ---------------------------------------------------------------------------
@@ -1253,7 +1321,7 @@ const drivenTabIds = () => {
   // Notebook worker is sealed, so App tabs are the ones with a real un-gated
   // network edge — but scoping all three keeps the rule uniform and costs a
   // rule condition entry, not a check per request.
-  for (const tracker of [vmTabTracker, jsTabTracker, appTabTracker]) {
+  for (const tracker of [vmTabTracker, jsTabTracker, podTabTracker, appTabTracker]) {
     for (const instanceId of tracker.listLive()) {
       const tabId = tracker.getTabId(instanceId);
       if (typeof tabId === 'number') ids.add(tabId);
@@ -1660,7 +1728,7 @@ registerFirefoxDrivenChildRequestGuard({
 //   * the orchestrator          — drives the user's own foreground tab on the
 //                                 user's own instruction. Locking it would mean
 //                                 peerd refusing to look at the page you are on.
-//   * the three engine kinds    — act on an instance, never a tab. No landing.
+//   * engine actors            : act on an instance, never a web tab. No landing.
 //   * the dweb actor            — no tab either.
 //   * an API actor (backing:'api') — already bound to ONE fixed origin by
 //                                 `withApiCredentials`, which is the same
@@ -1716,6 +1784,10 @@ const originStates = makeOriginStateStore({
   save: async (sessionId, state) => { await sessions.update(sessionId, { originState: state }); },
   onError: (message, error) => console.warn('[origin-lock]', message, error),
 });
+// Immediate heap guard for turns already queued on an actor slot. The durable
+// originState.retired tombstone below survives worker eviction; this set closes
+// the smaller window before that write completes (and fails closed if it does).
+const retiredActorSessions = new Set();
 
 /**
  * The origins peerd has LEARNED the user has an account on — grown from
@@ -1806,6 +1878,14 @@ const sensitivitySignals = () => ({
 const landingStopReports = new Map();
 
 /**
+ * The same stop, shaped for the transcript CARD (§4c) - landingStopCard's
+ * output, held beside the prose report and consumed at the same moment. Same
+ * authorship rule: every field is ours, none is the actor's.
+ * @type {Map<string, ReturnType<typeof landingStopCard>>}
+ */
+const landingStopCards = new Map();
+
+/**
  * A monotonic token per actor TURN, and the reason it has to exist.
  *
  * Aborting an offscreen actor run unwinds the worker but does NOT cancel the
@@ -1842,14 +1922,17 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
   const judgeLandingUnserialized = makeJudgeLanding({
       getState,
       saveState: (patch) => originStates.write(actorSessionId, patch),
-      onStop: (event) => {
+      onStop: async (event) => {
         // A judge that outlived its turn may not stop anything and may not file
         // anything. It still records the landing in the audit trail below — the
         // observation was real even when the turn it belonged to is gone.
         const current = isCurrentTurn();
-        if (current) landingStopReports.set(actorSessionId, describeLandingStop(/** @type {any} */ (event)));
-        // RELEASE THE TAB. Without this the stop is self-sealing and the actor is
-        // dead for good, which adversarial review demonstrated end to end:
+        if (current) {
+          landingStopReports.set(actorSessionId, describeLandingStop(/** @type {any} */ (event)));
+          landingStopCards.set(actorSessionId, landingStopCard(/** @type {any} */ (event)));
+        }
+        // RELEASE THE TAB. Without this the stop is self-sealing and a bound
+        // actor is dead for good:
         //
         //   navigate is the actor's ONLY way to change its tab's URL, and it
         //   calls resolveTargetTab FIRST — which judges the tab's CURRENT url.
@@ -1858,15 +1941,33 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
         //   request in the chat — about anything at all — gets the same handoff
         //   report, forever. For a per-tab actor it outlives the chat entirely.
         //
-        // Dropping the binding puts the actor back in the genuine 0-tab state,
-        // where navigate's adopt path opens a fresh tab. That is a RECOVERY, not
-        // a loosening: the new tab starts blank and its first landing is judged
-        // like any other, so a bound actor still cannot leave its origin and a
-        // roaming one still cannot enter a credentialed site. The refused tab
-        // itself is left open and untouched — the user may well want to look at
-        // it, and closing a tab out from under someone to enforce a policy they
-        // did not see would be its own kind of wrong.
+        // A bound actor returns to a genuine 0-tab state, where navigate's adopt
+        // path opens a fresh judged tab. A roaming actor is retired below instead:
+        // it has consumed page-controlled text, so its transcript must not cross
+        // the stop into the next `to:"web"` request. The refused tab itself is
+        // left open and untouched; the user may well want to look at it.
         if (current) {
+          const st = originStates.read(actorSessionId);
+          const retiringRoamingActor = st?.mode === 'roaming';
+          // Abort the current actor turn before any fallible persistence. A
+          // storage outage must never let the loop continue issuing tools on a
+          // landing the origin policy already refused.
+          try { turnSlots.stop(actorSessionId); }
+          catch (e) { console.warn('[origin-lock] stop failed', e); }
+          // Heap retirement + registry removal happen synchronously inside the
+          // helper. Its two durable fences are attempted independently, so a
+          // tombstone failure cannot suppress the routing-cache drop (or vice
+          // versa). Queued deliveries consult the heap fence at dequeue time.
+          const retirement = retiringRoamingActor
+            ? retireStoppedRoamingWebActorDurably({
+              registry: webActorRegistry,
+              actorSessionId,
+              originState: st,
+              markRetired: (sessionId) => { retiredActorSessions.add(sessionId); },
+              writeTombstone: () => originStates.write(actorSessionId, { retired: true }),
+              persistRouting: persistWebActors,
+            })
+            : null;
           const parkedTab = webActorTabBindings.tabFor(actorSessionId);
           if (typeof parkedTab === 'number' && webActorTabBindings.drop(parkedTab)) persistWebBindings();
           // The stop hands this tab back to the user (they may want to look at
@@ -1881,7 +1982,6 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
           // usually all that was needed. Only on the FIRST landing: after that
           // the origin is settled and an actor that wandered off it should stay
           // stopped rather than quietly re-home itself somewhere new.
-          const st = originStates.read(actorSessionId);
           if (st?.provisional) {
             // The store's key is `${chatId} ${origin}` (one space; neither half
             // can contain one), so splitting on the FIRST space recovers the pair.
@@ -1897,6 +1997,15 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
             // Keep the stopped state as a tombstone for calls already queued
             // in this turn. Null means unlocked, so forgetting it here would
             // let those calls proceed after the binding was removed.
+          }
+          if (retirement) {
+            const durable = await retirement;
+            if (durable.tombstone.status === 'rejected') {
+              console.warn('[origin-lock] actor retirement tombstone failed', durable.tombstone.reason);
+            }
+            if (durable.routing.status === 'rejected') {
+              console.warn('[origin-lock] actor retirement routing write failed', durable.routing.reason);
+            }
           }
         }
         auditLog.append({
@@ -1926,9 +2035,7 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
         // leaves the loop free to try the next tool against the same tab. Only
         // ever OUR turn — see landingTurnTokens for the turn this would
         // otherwise have aborted by accident.
-        if (current) {
-          try { turnSlots.stop(actorSessionId); } catch (e) { console.warn('[origin-lock] stop failed', e); }
-        }
+        // Current turns are stopped before fallible retirement work above.
       },
       isIdp: isKnownIdp,
       isCurrent: isCurrentTurn,
@@ -2422,6 +2529,11 @@ const buildToolContext = async (/** @type {any} */ {
     jsClient,
     jsRegistry,
     jsTabTracker,
+    // Pod kind: shell/WASI jobs run in sealed command Workers while this
+    // instance-pinned client and catalog own only tab lifecycle + metadata.
+    podClient,
+    podRegistry,
+    podTabTracker,
     // script — a HEADLESS sibling: the same sealed worker, hosted in the
     // offscreen doc (no tab). Defined after ensureOffscreen below.
     jsOffscreenClient,
@@ -2441,18 +2553,22 @@ const buildToolContext = async (/** @type {any} */ {
     // why: App kind — DOM-bearing artifact the agent built for the
     // user. appClient combines registry (metadata) + body store (IDB).
     appClient,
+    // why separate from appClient: both App and Notebook actors use the narrow
+    // repository surface without inheriting either engine client's wider API.
+    repositories,
     appRegistry,
     appTabTracker,
+    appQuiescence,
     // why: the dweb network surface for the dweb_share/discover/install tools —
     // the SAME ops the home UI uses, reaching the offscreen base host. Injected
     // ONLY when the dweb is on (DWEB_ENABLED + the setting), so on the store build
     // (and dweb-off) ctx.dweb is null and the tools (already hidden by exposure)
     // also no-op. share reads the app's OPFS bundle like export does.
-    dweb: (DWEB_ENABLED && settingsStore.get().dwebEnabled) ? {
+    dweb: (DWEB_ENABLED && settingsHydrated && settingsStore.get().dwebEnabled) ? {
       share: (/** @type {string} */ appId) => shareLocalApp(appId, undefined),
       discover: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/heard' }); },
       install: async (/** @type {any} */ { uri, name } = {}) => withDwebPublication(async (isCurrent) => {
-        if (!isCurrent() || !settingsStore.get().dwebEnabled) {
+        if (!isCurrent() || !settingsHydrated || !settingsStore.get().dwebEnabled) {
           return { ok: false, error: 'dweb-disabled', outcomeKind: 'pre-effect-failure' };
         }
         await ensureOffscreen();
@@ -2460,13 +2576,13 @@ const buildToolContext = async (/** @type {any} */ {
       }),
       peers: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }); },
       block: async (/** @type {any} */ { did, block = true, reason } = {}) => withDwebPublication(async (isCurrent) => {
-        if (!isCurrent() || !settingsStore.get().dwebEnabled) return { ok: false, error: 'dweb-disabled' };
+        if (!isCurrent() || !settingsHydrated || !settingsStore.get().dwebEnabled) return { ok: false, error: 'dweb-disabled' };
         await ensureOffscreen();
         if (block && typeof did === 'string') { a2aRevoke(did); conversationRegistry.closeDid(did); }
         return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason });
       }),
       setDiscovery: async (/** @type {any} */ { enabled } = {}) => withDwebPublication(async (isCurrent) => {
-        if (!isCurrent() || !settingsStore.get().dwebEnabled) return { ok: false, error: 'dweb-disabled' };
+        if (!isCurrent() || !settingsHydrated || !settingsStore.get().dwebEnabled) return { ok: false, error: 'dweb-disabled' };
         await ensureOffscreen();
         return browser.runtime.sendMessage({ type: 'dweb/base-host/set-discovery', enabled });
       }),
@@ -2783,6 +2899,9 @@ const broadcastBoundProjection = (display, message) => {
     ...message,
     rootSessionId: display.rootSessionId,
     parentSessionId: display.parentSessionId,
+    actorCorrelationId: display.actorCorrelationId,
+    actorProjectionEpoch: actorLiveProjection.epoch(),
+    actorProjectionRevision: actorLiveProjection.revision(),
   });
 };
 
@@ -3130,6 +3249,20 @@ const jsTabTracker = createJsTabTracker({
 });
 const jsClient = createJsClient({ registry: jsRegistry, tracker: jsTabTracker });
 
+// Pod is another tab-hosted engine instance, but its tab owns a shell/job host
+// instead of a Notebook editor evaluator. Files and catalog metadata survive a
+// stopped worker; cwd, environment, and live jobs deliberately do not.
+const podRegistry = createPodRegistry({ storage: idbKV('pods'), onActorArchive: archiveOrphanedActor });
+// A closed ephemeral Pod is invalid as soon as its host tab disappears, even
+// though its coordinated OPFS/catalog cleanup is asynchronous. This closes the
+// tiny reopen race where a fresh tab could otherwise adopt an id being deleted.
+const podsClosing = new Set();
+const podTabTracker = createPodTabTracker({
+  announce: trackerNote(podRegistry, 'Pod'),
+  onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('pod', id, tabId),
+  onDrop: (/** @type {string} */ id) => engineLiveness.drop('pod', id),
+});
+
 // App registry + tracker + client. Apps' files live in OPFS at
 // peerd-apps/<appId>/; the registry tracks metadata only.
 const appRegistry = createAppRegistry({ storage: idbKV('apps'), onActorArchive: archiveOrphanedActor });
@@ -3138,10 +3271,18 @@ const appTabTracker = createAppTabTracker({
   onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('app', id, tabId),
   onDrop: (/** @type {string} */ id) => engineLiveness.drop('app', id),
 });
+const repositories = createRepositoryService({
+  loadGit: async () => browserGit,
+  webFetch,
+  getSecret,
+  audit: (/** @type {any} */ event) => { auditLog.append(event).catch(() => {}); },
+});
+const podClient = createPodClient({ registry: podRegistry, tracker: podTabTracker });
 const appClient = createAppClient({
   registry: appRegistry,
   tracker: appTabTracker,
   beforeOpfsMutation: () => storeWriteGuard.assertWritable('app-manifests'),
+  repositories,
 });
 
 // Sessions that have ENGAGED the dweb — a dweb tool was called this turn-or-
@@ -3202,10 +3343,38 @@ const workspaceForScope = (/** @type {string} */ scope) => {
   }
   return null; // unknown scope kind (notebook snapshots: V1.x)
 };
-const checkpointMgr = createCheckpointManager({
-  store: createBrowserSnapshotStore(),
-  workspaceFor: workspaceForScope,
-});
+// Apps use their standard Git repository as the checkpoint substrate. This
+// preserves one version lineage for automatic turn captures, manual commits,
+// review diffs, restores, and remote publication instead of duplicating App
+// bytes into the legacy snapshot store.
+const checkpointMgr = {
+  capture: async (/** @type {{ scope: string, label?: string | null }} */ { scope, label }) => {
+    if (typeof scope !== 'string' || !scope.startsWith('app:')) return null;
+    const appId = scope.slice('app:'.length);
+    const result = await appQuiescence.run(appId, () => repositories.coordinate(
+      { kind: 'app', id: appId },
+      async () => {
+        const status = await repositories.statusApp(appId);
+        const paths = status.changed.slice(0, 3)
+          .map((/** @type {{path:string}} */ change) => change.path);
+        const automatic = paths.length
+          ? `agent turn: update ${paths.join(', ')}${status.changed.length > paths.length ? ', …' : ''}`
+          : 'agent turn';
+        return repositories.commitApp(appId, { message: label || automatic });
+      },
+    ));
+    return result?.oid ? { id: result.oid, scope } : null;
+  },
+  diffSince: async (/** @type {{ scope?: string | null, ref?: string | null }} */ { scope, ref }) => {
+    if (typeof scope !== 'string' || !scope.startsWith('app:')) return { files: [] };
+    const appId = scope.slice('app:'.length);
+    const status = await repositories.statusApp(appId);
+    const from = ref || status.oid;
+    if (!from) return { files: [] };
+    const result = await repositories.diffApp(appId, { from });
+    return { files: result.files, ref: from };
+  },
+};
 
 /**
  * Resolve the App scope to snapshot for a session, or null if the session
@@ -3458,6 +3627,11 @@ const withDwebIdentityMutation = (operation) => {
   return result;
 };
 
+// Self-membership writes and permanent-root mint/replacement are one custody
+// transaction domain. Otherwise a delayed enrollment record write and a
+// concurrent first mint can both observe an empty profile and split it.
+const withDwebSelfCustodyMutation = withDwebIdentityMutation;
+
 // App network publication, version replacement, and deletion share one keyed
 // lane. The App client's own queue protects OPFS mutations; this wider lane
 // keeps a publish from committing a served hash while deletion revokes a stale
@@ -3475,17 +3649,24 @@ const withAppLifecycle = async (appId, operation) => {
   }
 };
 
+// Every live-App repository boundary uses this one ordering:
+// lifecycle lane -> editor flush/freeze -> repository lane -> resume/reopen.
+// The editor flush itself writes through the repository lane, so moving it
+// inside repositories.coordinate/appClient.withWriteLock would deadlock.
+const appQuiescence = createAppQuiescence({ tracker: appTabTracker, withLifecycle: withAppLifecycle });
+
 const dwebPublicationFence = createDwebPublicationFence();
 const withDwebPublication = dwebPublicationFence.run;
 const invalidateDwebPublications = dwebPublicationFence.invalidate;
 
 const reseedSharedApps = makeReseedSharedApps({
   enabled: DWEB_ENABLED,
-  active: () => settingsStore.get().dwebEnabled,
+  active: () => settingsHydrated && settingsStore.get().dwebEnabled,
   locked: () => vault.isLocked(),
   appRegistry,
   withDwebPublication,
   withAppLifecycle,
+  repositories,
   sendMessage: (message) => browser.runtime.sendMessage(message),
 });
 
@@ -3498,16 +3679,31 @@ const canChangeDwebIdentity = async () => {
 };
 const dwebIdentityCustody = makeDwebIdentityCustody({
   enabled: DWEB_ENABLED,
-  active: () => settingsStore.get().dwebEnabled,
+  active: () => settingsHydrated && settingsStore.get().dwebEnabled,
   vault,
   auditLog,
   identitySecretName: DWEB_IDENTITY_SECRET,
   withIdentityMutation: withDwebIdentityMutation,
   canChangeIdentity: canChangeDwebIdentity,
+  canMintIdentity: async () => !await hasEnrolledSelfCustody(vault),
+});
+// The self-device secrets (device key, discovery secret, cached records)
+// ride the same verified port but a DIFFERENT handler with a closed
+// allowlist, so the parameterized path can never reach the person root.
+const dwebSelfCustody = makeDwebSelfCustody({
+  enabled: DWEB_ENABLED,
+  active: () => settingsHydrated && settingsStore.get().dwebEnabled,
+  vault,
+  identitySecretName: DWEB_IDENTITY_SECRET,
+  withCustodyMutation: withDwebSelfCustodyMutation,
 });
 const dwebCustodyClient = makeDwebCustodyClient({
   ensureOffscreen,
-  handleSecretRequest: dwebIdentityCustody.handle,
+  handleSecretRequest: (operation, args) => (
+    operation === 'self-get' || operation === 'self-set'
+      ? dwebSelfCustody.handle(operation, args)
+      : dwebIdentityCustody.handle(operation, args)
+  ),
 });
 /** @type {ReturnType<typeof makePrivateTransferPort> | null} */
 let privateTransferPort = null;
@@ -3848,6 +4044,24 @@ const applyWebExtract = (/** @type {any} */ resp, /** @type {unknown} */ extract
 // resolveRunnerModel; progress() is polled by Settings.
 const localModelState = makeLocalModelState();
 const localRunnerState = () => ({ available: localModelState.available(), model: LOCAL_MODEL_ID });
+/** @type {Promise<boolean>|null} */
+let localModelHydration = null;
+const hydrateLocalModelAvailability = async ({ force = false } = {}) => {
+  if (!localModelHostAvailable()) return false;
+  if (!force && localModelState.hydrated()) return localModelState.available();
+  if (localModelHydration) return localModelHydration;
+  localModelHydration = (async () => {
+    await ensureOffscreen();
+    const status = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'local-model/host/status' }));
+    if (!status) throw new Error('local model status unavailable');
+    if (localModelState.setAvailable(!!(status.available || status.downloaded))) {
+      onProviderConfigChanged();
+    }
+    return localModelState.available();
+  })();
+  try { return await localModelHydration; }
+  finally { localModelHydration = null; }
+};
 
 // genId → { tokens, waiters, done, error }: the async queue that turns the
 // offscreen's local-model/delta pushes into the adapter's async-generator.
@@ -3855,12 +4069,39 @@ let localGenSeq = 0;
 const localGens = new Map();
 const wakeLocalGen = (/** @type {any} */ s) => { const w = s.waiters.shift(); if (w) w(); };
 
-browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
+// The first UI can wake this large MV3 module graph before the unified route
+// dispatcher near the boot tail has registered. Chrome may otherwise retire
+// the worker while that unclaimed connect/message event is still waiting. This
+// early, first-party-only barrier holds one response channel open until every
+// privileged route is live; it returns no state or authority of its own.
+/** @type {() => void} */
+let markMessageDispatcherReady = () => {};
+const messageDispatcherReady = /** @type {Promise<void>} */ (new Promise((resolve) => {
+  markMessageDispatcherReady = () => resolve();
+}));
+
+browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ msg, /** @type {any} */ sender, /** @type {(reply: any) => void} */ sendResponse) => {
+  if (msg?.type === 'bootstrap/ready') {
+    if (!isTrustedSender(sender)) {
+      sendResponse({ ok: false, error: 'untrusted-sender' });
+      return false;
+    }
+    messageDispatcherReady.then(() => sendResponse({ ok: true }));
+    return true;
+  }
   if (msg?.type === 'local-model/delta') { const s = localGens.get(msg.genId); if (s) { s.tokens.push(msg.token); wakeLocalGen(s); } return undefined; }
   if (msg?.type === 'local-model/done') { const s = localGens.get(msg.genId); if (s) { s.done = true; s.error = msg.error ?? null; wakeLocalGen(s); } return undefined; }
-  if (msg?.type === 'local-model/progress') { localModelState.setProgress(msg.progress); uiPorts.broadcast({ type: 'local-model/progress', progress: msg.progress }); return undefined; }
+  if (msg?.type === 'local-model/progress') {
+    localModelState.setProgress(msg.progress);
+    if (msg.progress?.status === 'phase' && msg.progress?.phase === 'ready') {
+      if (localModelState.setAvailable(true)) onProviderConfigChanged();
+      void pushState().catch(() => {});
+    }
+    uiPorts.broadcast({ type: 'local-model/progress', progress: msg.progress });
+    return undefined;
+  }
   return undefined;
-});
+}));
 
 // The async-generator the local-webgpu adapter consumes. Sends a SERIALIZABLE
 // generate command to the offscreen (no AbortSignal — not serializable; v1 runs
@@ -3991,6 +4232,22 @@ const deliverConfirmationToActiveOwner = (prompt, deliver) => {
     console.warn('[sw] scoped confirmation delivery failed', error);
   });
 };
+// A confirm that settles ITSELF (timeout, abort/Stop, closed panel) is
+// invisible today - the modal just vanishes, or never existed. Keep the last
+// few self-settles per session so the transcript can say what happened, even
+// to a panel that opens later (UI redesign §4e). SW memory only: the prompts
+// themselves have the same lifetime, so this is the right blast radius.
+/** @type {Map<string, Array<{ id: string, at: number, answer: string, cause: string, via: string|null }>>} */
+const confirmSettleNotes = new Map();
+const CONFIRM_SETTLE_NOTES_CAP = 20;
+/** @param {string|null} sessionId @param {{ id: string, answer: string, cause: string, via: string|null }} note */
+const recordConfirmSettle = (sessionId, note) => {
+  if (!sessionId) return;
+  const list = confirmSettleNotes.get(sessionId) ?? [];
+  list.push({ ...note, at: Date.now() });
+  confirmSettleNotes.set(sessionId, list.slice(-CONFIRM_SETTLE_NOTES_CAP));
+};
+
 const confirmCoordinator = makeConfirmCoordinator({
   notifySidePanel: (prompt) => {
     if (!uiConnected()) return;
@@ -4005,10 +4262,16 @@ const confirmCoordinator = makeConfirmCoordinator({
   // Dismiss the modal on EVERY open surface when a prompt settles for ANY
   // reason — answer, 120s timeout, or session reset (DESIGN-12). Without this a
   // timed-out/reset prompt lingers, and a later click "approves" an action that
-  // was already auto-denied.
-  onSettled: (id, prompt) => {
+  // was already auto-denied. The outcome rides along so surfaces can render the
+  // settle as a transcript line; self-settles are also recorded for late joiners.
+  onSettled: (id, prompt, outcome) => {
+    if (outcome.cause !== 'answer') {
+      recordConfirmSettle(outcome.sessionId, {
+        id, answer: outcome.answer, cause: outcome.cause, via: outcome.via,
+      });
+    }
     deliverConfirmationToActiveOwner(prompt, () => {
-      try { uiPorts.broadcast({ type: 'confirm/resolved', id }); } catch { /* port closing */ }
+      try { uiPorts.broadcast({ type: 'confirm/resolved', id, outcome }); } catch { /* port closing */ }
     });
   },
   // Raise an action badge while a confirm is pending so a waiting agent is
@@ -4108,6 +4371,15 @@ const confirmAction = async (prompt, signal) => {
       // to be open when it asks.
       const ownerSessionId = sid ? await resolveLifecycleRootSession(sid) : null;
       const ownedPrompt = { ...prompt, ownerSessionId };
+      // No surface to ask → the coordinator fail-closes WITHOUT minting an id
+      // or broadcasting anything, so nothing else can ever tell the user this
+      // happened. Record it here - the badge they didn't see is not a record
+      // (§4e). Keyed on the OWNER chat, which is where the note renders.
+      if (!uiConnected()) {
+        recordConfirmSettle(ownerSessionId, {
+          id: crypto.randomUUID(), answer: 'no', cause: 'unreachable', via: null,
+        });
+      }
       // ...and TELL THE PANEL, so it can stop offering a button that grants
       // nothing. why this became load-bearing with #242: before the UGC override, a
       // default-config user (confirmActions OFF) never saw an actor confirm at all,
@@ -4161,6 +4433,23 @@ const sessionState = makeSessionState();
  * derived from the vault, never the secret itself.
  */
 const buildStateSnapshot = async () => {
+  // A cold MV3 worker can resume the vault and accept a UI port before the
+  // asynchronous chrome.storage settings read finishes. The snapshot must not
+  // observe channel defaults in that window: if the user selected a keyless
+  // provider (Ollama / Local WebGPU), the default Anthropic projection reports
+  // hasKey:false and strands the already-open composer until some unrelated
+  // mutation happens to push state again (issue #384).
+  //
+  let settingsAvailable = true;
+  try { await ensureSettingsReady(); }
+  catch {
+    // A transient storage failure must not turn channel defaults into a
+    // confirmed provider choice for the rest of this worker's lifetime. The
+    // full hydration gate retries storage AND reapplies boot-time consumers
+    // such as the vault lock policy; a raw store load would leave those stale.
+    try { await ensureSettingsReady(); }
+    catch { settingsAvailable = false; }
+  }
   await actorIsolationReady;
   const sessionId = await sessionCache.sessionGet('currentSessionId');
   // prfEnrolled is cheap to read (one kv.get) and the side panel uses it
@@ -4183,9 +4472,27 @@ const buildStateSnapshot = async () => {
         unlockedAt: 0,
         prfEnrolled: prf.enrolled,
         hasRecovery,
+        // §5g: WHY it locked ('idle'|'manual'|null) - the unlock screen's
+        // one added sentence renders only for an idle lock.
+        lockReason: vault.lockReason?.() ?? null,
       },
       session: { sessionId: null, messages: [], permission, customSystemPrompt: null, toolManifest: null },
-      providers: { current: resolveActiveProvider().name, hasKey: false, model: resolveActiveProvider().model, defaultRunnerModel: resolveActiveProvider().defaultRunnerModel },
+      providers: {
+        current: resolveActiveProvider().name,
+        hasKey: false,
+        model: resolveActiveProvider().model,
+        defaultRunnerModel: resolveActiveProvider().defaultRunnerModel,
+        configRevision: providerConfigRevision,
+      },
+      composer: {
+        provider: resolveActiveProvider().name,
+        model: resolveActiveProvider().model,
+        keyless: false,
+        credentialReady: false,
+        localReady: false,
+        canSend: false,
+        reason: 'vault-locked',
+      },
       capabilities: { actorExecution: { ...actorIsolation }, ...runtimeCapabilities },
       settings: { ...settingsStore.get() },
       pendingConfirm: null,
@@ -4207,20 +4514,46 @@ const buildStateSnapshot = async () => {
   // install carries the closed latch instead.
   await reconcileOnboardingLatch();
   const profile = await profileState.get();
-  // why: providers block drives the Settings UI (provider selector + key
-  // field), so it reflects the SELECTED provider (settings), and hasKey
-  // is checked against THAT provider's vault secret. Keyless providers
-  // (Ollama) are always "ready" — there is no key to have.
+  // providers remains the Settings/default-for-NEW-chats projection. Composer
+  // readiness is separate because an existing chat stays bound to the provider
+  // recorded on its session even after the user changes that future default.
   const activeProv = resolveActiveProvider();
-  let hasKey = activeProv.keyless;
-  if (!hasKey) {
-    try { hasKey = !!(await vault.getSecret(/** @type {string} */ (activeProv.vaultSecretName))); }
-    catch { hasKey = false; }
+  const composerProvider = session?.provider ?? activeProv.name;
+  const composerModel = session?.model ?? activeProv.model;
+  if (activeProv.name === 'local-webgpu' || composerProvider === 'local-webgpu') {
+    await hydrateLocalModelAvailability().catch(() => false);
   }
+  const providerRows = listProviders();
+  const ollamaModels = liveProviderModelStatus('ollama');
+  const defaultReadiness = await resolveComposerReadiness({
+    provider: activeProv.name,
+    model: activeProv.model,
+    providers: providerRows,
+    getSecret: (name) => vault.getSecret(name),
+    localModelAvailable: localModelState.available(),
+    ollamaModels,
+    settingsAvailable,
+  });
+  const composer = composerProvider === activeProv.name && composerModel === activeProv.model
+    ? Object.freeze({ ...defaultReadiness, model: composerModel })
+    : await resolveComposerReadiness({
+        provider: composerProvider,
+        model: composerModel,
+        providers: providerRows,
+        getSecret: (name) => vault.getSecret(name),
+        localModelAvailable: localModelState.available(),
+        ollamaModels,
+        settingsAvailable,
+       });
+  const hasKey = settingsAvailable && defaultReadiness.credentialReady;
+  // Take every awaited store read before capturing the in-memory projection.
+  // Provider tool-use ids can repeat, so an older snapshot must never cross an
+  // await and arrive after a newer correlated actor-start for the same id.
+  const vaultInitialized = await vault.isInitialized();
   const liveActors = actorLiveProjection.snapshot(/** @type {string | null} */ (sessionId));
   return {
     vault: {
-      initialized: await vault.isInitialized(),
+      initialized: vaultInitialized,
       locked: false,
       unlockedAt: vault.unlockedAt(),
       prfEnrolled: prf.enrolled,
@@ -4251,11 +4584,13 @@ const buildStateSnapshot = async () => {
       current: activeProv.name,
       hasKey,
       model: activeProv.model,
+      configRevision: providerConfigRevision,
       // why: the web actor's fast default for this provider — the Settings
       // "Web actor model" field shows it as the blank placeholder so "blank"
       // honestly reads as e.g. claude-haiku-4-5, not "inherit".
       defaultRunnerModel: activeProv.defaultRunnerModel,
     },
+    composer,
     capabilities: { actorExecution: { ...actorIsolation }, ...runtimeCapabilities },
     profile: {
       id: profile.id,
@@ -4269,10 +4604,16 @@ const buildStateSnapshot = async () => {
     pendingConfirm: confirmCoordinator.getPendingForOwner(
       typeof sessionId === 'string' ? sessionId : null,
     ),
+    // Self-settled confirms for THIS chat (timeout / stop / closed panel) - the
+    // panel folds these into its transcript notes so a settle that happened
+    // while no surface was open is still tellable (§4e).
+    confirmSettleNotes: sessionId ? (confirmSettleNotes.get(/** @type {string} */ (sessionId)) ?? []) : [],
     // Live actor projections are part of the fresh snapshot, not a lucky stream
     // of events seen only by panels that were already open. Every row is scoped
     // to this viewed root before it crosses the UI boundary.
     actors: liveActors.actors,
+    actorProjectionEpoch: liveActors.actorProjectionEpoch,
+    actorProjectionRevision: liveActors.actorProjectionRevision,
     spawned: liveActors.spawned,
     asyncTasks: liveActors.asyncTasks,
     // Per-session truth: is THIS chat's turn in flight? Lets the panel
@@ -4282,9 +4623,16 @@ const buildStateSnapshot = async () => {
   };
 };
 
+let statePushGeneration = 0;
 const pushState = async () => {
   if (!uiConnected()) return;
+  const generation = ++statePushGeneration;
   const state = await buildStateSnapshot();
+  // Snapshot assembly crosses vault/session/profile stores. A newer mutation can
+  // start and finish its push while an older build is still awaiting IO. Never
+  // let that older projection arrive last and strand every live surface on
+  // internally inconsistent provider/settings state.
+  if (generation !== statePushGeneration || !uiConnected()) return;
   const ownerSessionId = typeof state.session?.sessionId === 'string'
     ? state.session.sessionId : null;
   // why: buildStateSnapshot awaits several stores. A confirmation can arrive
@@ -4378,6 +4726,57 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
       return { ok: true };
     });
   }
+  if (msg?.type === 'pod/tab-adopt') {
+    if (typeof msg.podId !== 'string' || sender?.tab?.id == null) return false;
+    // A user may reopen a persistent Pod from its durable URL after the old
+    // host tab was closed. Re-adopt only that exact engine-tab URL and only an
+    // id still present in the registry; then pod/get-meta can stay instance-
+    // pinned while boot is in progress.
+    if (podTabTracker.parseIdFromUrl(sender.tab.url) !== msg.podId) return false;
+    if (podsClosing.has(msg.podId)) return Promise.resolve({ ok: false, error: 'pod-closing' });
+    return Promise.resolve(podRegistry.get(msg.podId)).then((record) => {
+      if (!record) return { ok: false, error: 'pod-not-found' };
+      const liveTabId = podTabTracker.getTabId(msg.podId);
+      if (liveTabId != null && liveTabId !== sender.tab.id) {
+        return { ok: false, error: 'pod-already-open' };
+      }
+      podTabTracker.onTabPending(msg.podId, sender.tab.id);
+      denylistNetGuard.sync();
+      return { ok: true };
+    });
+  }
+  if (msg?.type === 'app/tab-ready') {
+    if (typeof msg.appId !== 'string' || sender?.tab?.id == null) return false;
+    appTabTracker.onTabPending(msg.appId, sender.tab.id);
+    // Firefox currently has no proven manifest-sandbox host (its generated
+    // manifest intentionally omits Chrome's top-level `sandbox` key). Do not
+    // infer enforcement from its partial DNR API accepting a rule.
+    if (typeof browser.runtime.getBrowserInfo === 'function') {
+      appTabTracker.onTabFailed(msg.appId, new Error('Apps are not available in Firefox yet.'));
+      setTimeout(() => browser.tabs.remove(sender.tab.id).catch(() => {}), 250);
+      return Promise.resolve({
+        ok: false,
+        error: 'Apps are not available in Firefox yet. Use Chrome for isolated Apps.',
+      });
+    }
+    // App code is not delivered until its tab-scoped all-remote DNR rule is
+    // LIVE. CSP closes resource/connect paths, while DNR closes self-navigation
+    // that CSP cannot reliably govern. Unsupported/failing DNR therefore means
+    // the App host fails closed (not a best-effort degradation like denylist).
+    return denylistNetGuard.sync().then(() => {
+      const net = denylistNetGuard.state();
+      if (!net.supported || net.lastError) {
+        appTabTracker.onTabFailed(msg.appId, new Error('App network isolation is unavailable.'));
+        setTimeout(() => browser.tabs.remove(sender.tab.id).catch(() => {}), 250);
+        return {
+          ok: false,
+          error: 'Apps are unavailable because this browser cannot enforce their network isolation.',
+        };
+      }
+      appTabTracker.onTabReady(msg.appId, sender.tab.id);
+      return { ok: true };
+    });
+  }
   return false;
 });
 
@@ -4389,6 +4788,22 @@ browser.tabs.onRemoved.addListener((tabId) => {
   const closedVmId = vmTabTracker.onTabRemoved(tabId);
   if (closedVmId) vmClient.onTabClosed(closedVmId);
   jsTabTracker.onTabRemoved(tabId);
+  const closedPodId = podTabTracker.onTabRemoved(tabId);
+  if (closedPodId) {
+    // why: an ephemeral Pod's scope is the tab lifetime. Persistent Pods keep
+    // their catalog + OPFS tree and reopen stopped; ephemeral ones leave no
+    // durable workspace after a clean close. The repository coordinator makes
+    // this idempotent with an explicit pod_destroy racing the tab event.
+    podsClosing.add(closedPodId);
+    Promise.resolve(podRegistry.get(closedPodId)).then(async (record) => {
+      if (!record || record.persistent !== false) return;
+      await repositories.coordinate({ kind: 'pod', id: closedPodId }, async () => {
+        await repositories.destroy({ kind: 'pod', id: closedPodId }, { worktree: true });
+        await podRegistry.delete(closedPodId);
+      });
+    }).catch((error) => console.warn('[sw] ephemeral Pod cleanup failed', closedPodId, error))
+      .finally(() => podsClosing.delete(closedPodId));
+  }
   appTabTracker.onTabRemoved(tabId);
   // DESIGN-17 note: only the VM client owns a per-instance COMMAND QUEUE to
   // interrupt on tab-close (above). The Notebook/App clients have no such lane —
@@ -4583,7 +4998,7 @@ const prewalk = makePrewalkController({
   now: Date.now,
 });
 
-const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
+const turnDriver = makeTurnDriver({
   vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
   sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser,
   skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
@@ -4611,6 +5026,14 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   // wiring above uses, see the note at the postChatNote site).
   postChatNote: (/** @type {any} */ text, /** @type {any} */ action) => postChatNote(text, action),
 });
+const runAgentTurn = async (/** @type {any} */ args) => {
+  await ensureSettingsReady();
+  return turnDriver.runAgentTurn(args);
+};
+const maybeAutoResume = async (/** @type {string|null|undefined} */ sessionId) => {
+  await ensureSettingsReady();
+  return turnDriver.maybeAutoResume(sessionId);
+};
 
 // Build the goal runner now that runAgentTurn exists. Each goal turn is a
 // normal runAgentTurn on the MAIN session (turn 1 = the goal, later turns =
@@ -4713,11 +5136,9 @@ const notifyRoutineFired = () => {
 // turn. trusted:true — a routine is USER-authored first-party work, same posture
 // as goal mode; untrusted CONTENT it later pulls is still fenced behind actors.
 const fireRoutine = async (/** @type {any} */ routine) => {
-  // why settingsStore.load() first: a cold-unlock catch-up can reach here before
-  // loadSettings() (un-awaited at boot) has hydrated, so ensureActiveProvider
-  // would pick the channel-default provider instead of the user's. load() is
-  // idempotent — same guard the maybeAutoResume path uses.
-  await settingsStore.load().catch(() => {});
+  // Scheduled work must never select a provider from channel defaults while a
+  // cold worker is still loading the user's durable choice.
+  await ensureSettingsReady();
   const ap = await ensureActiveProvider();
   // why explicit ACT + confirm-off (NOT resolvePermission(null)): a routine runs
   // UNATTENDED with the panel closed. Inheriting the foreground chat's mode would
@@ -4792,6 +5213,7 @@ browser.runtime?.onStartup?.addListener(() => {
 const ACTOR_REGISTRY_BY_PREFIX = {
   vm: { reg: vmRegistry, kind: 'webvm' },
   notebook: { reg: jsRegistry, kind: 'notebook' },
+  pod: { reg: podRegistry, kind: 'pod' },
   app: { reg: appRegistry, kind: 'app' },
 };
 
@@ -4853,7 +5275,7 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
 };
 
 // DESIGN-17 — WEB actors (a fourth `kind:'web'` actor that owns one TAB).
-// Unlike the three engine kinds, a web actor has no registry record: the TAB
+// Unlike engine actors, a web actor has no registry record: the TAB
 // is the durable handle and the binding is tab→session, held here and mirrored to
 // session storage (ephemeral by design — on a cold miss we re-mint against the
 // live tab, whose DOM re-derives state). The address the orchestrator uses is the
@@ -4862,8 +5284,17 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
 // best-effort boot rehydrate, shared by the three actor registries below (a
 // missing/garbage stored value just starts empty). Ephemeral by design — every
 // one of these is a routing cache whose durable truth lives on the session record.
-const persistRegistry = (/** @type {string} */ key, /** @type {{ entries: () => any }} */ registry) =>
-  () => { sessionCache.sessionSet(key, registry.entries()).catch(() => {}); };
+const persistRegistry = (/** @type {string} */ key, /** @type {{ entries: () => any }} */ registry) => {
+  let lane = Promise.resolve();
+  return () => {
+    // Snapshot at mutation time, then serialize writes in that same order. An
+    // older bind write may never land after a newer retirement snapshot.
+    const snapshot = registry.entries();
+    const operation = lane.catch(() => {}).then(() => sessionCache.sessionSet(key, snapshot));
+    lane = operation.catch(() => {});
+    return operation;
+  };
+};
 // Returns the load promise (never rejects) so a caller whose state DEPENDS on
 // the rehydrated entries — the net guard's driven-tab set — can chain onto it
 // instead of guessing at the timing.
@@ -4906,7 +5337,7 @@ const webActorBindingsReady = hydrateRegistryForGuard(WEB_BINDINGS_KEY, webActor
 const webActorRegistry = makeWebActorRegistry();
 const WEB_ACTOR_KEY = 'webActorRegistry';
 const persistWebActors = persistRegistry(WEB_ACTOR_KEY, webActorRegistry);
-hydrateRegistry(WEB_ACTOR_KEY, webActorRegistry);
+const webActorRegistryReady = hydrateRegistry(WEB_ACTOR_KEY, webActorRegistry);
 
 // PR #119 — the code-REPL arm's SW route. A page.<method> call the code-surface
 // web actor makes inside its sealed worker rides here (offscreen job-runner →
@@ -5313,6 +5744,8 @@ onSessionMessageAppended = async (_sessionId, message) => {
 // to the read DOM tools (+ fetch_url, a read), so the gate refuses click/type for it.
 /** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void, backing?: 'tab' | 'api', actorType?: 'web' | 'dweb', ownedOrigin?: string, provisionalOrigin?: boolean }} o */
 const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorType = 'web', ownedOrigin, provisionalOrigin }) => {
+  await ensureSettingsReady();
+  await hydrateLocalModelAvailability().catch(() => false);
   const ownerChat = ownerChatId ? await sessions.get(ownerChatId) : null;
   const perm = await resolvePermission(/** @type {any} */ (ownerChat));
   // why: the web actor is peerd's page reader/operator — a narrow, high-frequency,
@@ -5322,9 +5755,16 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorTyp
   // default (Haiku) → inherit the chat model (''). Engine actors (webvm/notebook/
   // app, via mintActor) are UNCHANGED — they reason about code/shell and keep the
   // chat model.
-  const actorProviderName = ownerChat?.provider ?? resolveActiveProvider().name;
-  const runnerProvider = listProviders().find((p) => p.name === actorProviderName);
-  const webActorModel = resolveRunnerModel({ settings: settingsStore.get(), provider: runnerProvider, localRunner: localRunnerState() });
+  const ownerProviderName = ownerChat?.provider ?? resolveActiveProvider().name;
+  const runnerProvider = listProviders().find((p) => p.name === ownerProviderName);
+  const runnerTarget = resolveRunnerTarget({
+    settings: settingsStore.get(),
+    providerName: ownerProviderName,
+    provider: runnerProvider,
+    localRunner: localRunnerState(),
+  });
+  const actorProviderName = runnerTarget.provider || ownerProviderName;
+  const webActorModel = runnerTarget.model;
   const created = await sessions.create({
     kind: 'actor',
     ...(ownerChatId ? { parentSessionId: ownerChatId } : {}),
@@ -5471,12 +5911,23 @@ const mintWebActor = async (/** @type {string} */ ownerChatId) => mintWebSession
 // the bound session vanished (SW death cleared session storage). The owner is the SENDER
 // chat threaded by the messaging layer, not the ambient active chat.
 const resolveWebActor = async (/** @type {string | null | undefined} */ ownerOverride) => {
+  await webActorRegistryReady;
   const ownerChatId = ownerOverride ?? /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
   if (!ownerChatId) return null;
   let actorSessionId = webActorRegistry.resolve(ownerChatId);
-  if (actorSessionId && !(await sessions.get(actorSessionId))) {
+  let actorRecord = actorSessionId ? await sessions.get(actorSessionId) : null;
+  if (actorSessionId && (retiredActorSessions.has(actorSessionId)
+      || actorRecord?.originState?.retired === true)) {
+    retiredActorSessions.add(actorSessionId);
     webActorRegistry.drop(ownerChatId);
-    persistWebActors();
+    await persistWebActors().catch((error) => {
+      console.warn('[web-actor] stale retirement routing write failed', error);
+    });
+    actorSessionId = null;
+    actorRecord = null;
+  } else if (actorSessionId && !actorRecord) {
+    webActorRegistry.drop(ownerChatId);
+    await persistWebActors();
     // issue 251: the durable state died with the record, so the heap copy is now
     // the only thing asserting an owned origin — and the id will be reused by
     // nothing, so keeping it is pure leak. Drop it with the binding.
@@ -5589,7 +6040,7 @@ const bindDwebActor = (/** @type {string} */ sessionId) => {
   sessionCache.sessionSet(DWEB_ACTOR_KEY, sessionId).catch(() => {});
 };
 const dwebAgentOn = () => DWEB_ENABLED
-  && !!settingsStore.get().dwebEnabled && !!settingsStore.get().dwebAgentEnabled;
+  && settingsHydrated && !!settingsStore.get().dwebEnabled && !!settingsStore.get().dwebAgentEnabled;
 
 // Agent-inbox room membership. IDEMPOTENT: maybeStartBaseNetwork fires on every
 // unlock/resume, and each raw join op ref-counts the room (dweb-base ensureRoom)
@@ -5644,6 +6095,10 @@ const onSettingsChanging = (/** @type {any} */ patch) => {
 // Named onSettingsChanged so it wires to the settings route by shorthand (the
 // deps-wiring meta-test forbids key:value mis-wires).
 const onSettingsChanged = async (/** @type {any} */ patch) => {
+  if (Object.hasOwn(patch ?? {}, 'vaultAutoLockMs')) {
+    vault.setAutoLockMs(settingsStore.get().vaultAutoLockMs ?? DEFAULT_AUTO_LOCK_MS);
+  }
+  if (Object.hasOwn(patch ?? {}, 'ollamaHost')) invalidateLiveProviderModels('ollama');
   if (patch?.dwebEnabled === false) await stopBaseNetwork();
   else if (patch?.dwebEnabled === true) maybeStartBaseNetwork('settings-enabled');
   if (dwebAgentOn()) joinDwebAgentInbox().catch(() => {});
@@ -6411,6 +6866,8 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
       });
       if (uiConnected()) uiPorts.broadcast({
         type: 'turn/actor-start', ...display, sessionId: actorSessionId, fromIndex,
+        actorProjectionEpoch: actorLiveProjection.epoch(),
+        actorProjectionRevision: actorLiveProjection.revision(),
         grantedTools: tools.map((tool) => tool.name),
         messages: [], streaming: true, error: null, cost: null,
       });
@@ -6421,20 +6878,22 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
           if (ev.type === 'state') {
             const messages = Array.isArray(ev.session?.messages)
               ? ev.session.messages.slice(fromIndex) : [];
-            actorLiveProjection.patchBound(display, { messages });
-            broadcastBoundProjection(display, {
-              type: 'turn/actor-state', parentToolUseId: display.parentToolUseId,
-              session: ev.session, fromIndex, kind: display.kind,
-              instanceId: display.instanceId, name: display.name,
-              task: display.task, grantedTools: tools.map((tool) => tool.name),
-            });
+            if (actorLiveProjection.patchBound(display, { messages })) {
+              broadcastBoundProjection(display, {
+                type: 'turn/actor-state', parentToolUseId: display.parentToolUseId,
+                session: ev.session, fromIndex, kind: display.kind,
+                instanceId: display.instanceId, name: display.name,
+                task: display.task, grantedTools: tools.map((tool) => tool.name),
+              });
+            }
           }
           if (ev.type === 'error') {
-            actorLiveProjection.patchBound(display, { error: ev.error, streaming: false });
-            broadcastBoundProjection(display, {
-              type: 'turn/actor-error', parentToolUseId: display.parentToolUseId,
-              sessionId: actorSessionId, error: ev.error,
-            });
+            if (actorLiveProjection.patchBound(display, { error: ev.error, streaming: false })) {
+              broadcastBoundProjection(display, {
+                type: 'turn/actor-error', parentToolUseId: display.parentToolUseId,
+                sessionId: actorSessionId, error: ev.error,
+              });
+            }
           }
         } catch { /* display best-effort */ }
       }
@@ -6477,14 +6936,15 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
         details: { host: actorIsolation.host, kind, instanceId, code: r.code ?? 'unknown', performed: false },
       }).catch(() => {});
       if (display) {
-        actorLiveProjection.patchBound(display, { error, streaming: false });
-        broadcastBoundProjection(display, {
-          type: 'turn/actor-error', parentToolUseId: display.parentToolUseId, error,
-        });
-        broadcastBoundProjection(display, {
-          type: 'turn/actor-done', parentToolUseId: display.parentToolUseId,
-          sessionId: actorSessionId, ok: false, aborted: false,
-        });
+        if (actorLiveProjection.patchBound(display, { error, streaming: false })) {
+          broadcastBoundProjection(display, {
+            type: 'turn/actor-error', parentToolUseId: display.parentToolUseId, error,
+          });
+          broadcastBoundProjection(display, {
+            type: 'turn/actor-done', parentToolUseId: display.parentToolUseId,
+            sessionId: actorSessionId, ok: false, aborted: false,
+          });
+        }
       }
       return { result: error, stopped: true, isolationFailure: r };
     }
@@ -6517,11 +6977,12 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
         // that account TOKENS (the eval runner's ACTOR bucket) need the fields
         // costOf collapsed. Additive; the sidepanel reducer reads `cost` only.
         if (display) {
-          actorLiveProjection.patchBound(display, { cost });
-          broadcastBoundProjection(display, {
-            type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId,
-            cost, usage: r.usage,
-          });
+          if (actorLiveProjection.patchBound(display, { cost })) {
+            broadcastBoundProjection(display, {
+              type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId,
+              cost, usage: r.usage,
+            });
+          }
         }
       } catch { /* cost telemetry is best-effort */ }
     }
@@ -6536,6 +6997,11 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
       : (persistedAssistantError ?? executionError);
     const outcomeUnknown = terminalError != null
       && (!persistOk || r.outcomeKnown !== true);
+    // A graceful host-stamped failure before any actor tool crossed the
+    // privileged relay is a definite pre-effect refusal. Preserve that custody
+    // fact through the live card and durable reply instead of defaulting it to
+    // "performed" in actor-messaging.
+    const performed = terminalError != null ? outcomeUnknown : undefined;
     const turnOk = persistOk && persistedAssistantError == null && r.ok === true && r.aborted !== true;
     // This immutable settlement snapshot is captured while the actor still owns
     // its slot. A queued turn may append immediately after release, so metrics
@@ -6551,25 +7017,27 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
         extensionApisPresent: false, actorSessionId, kind, instanceId,
         ok: turnOk, aborted: r.aborted === true, persistOk,
         ...(terminalError && r.aborted !== true ? {
-          performed: outcomeUnknown,
+          performed,
           outcomeKnown: !outcomeUnknown,
         } : {}),
       },
     }).catch(() => {});
     if (display) {
-      if (terminalError) {
-        actorLiveProjection.patchBound(display, {
-          error: terminalError, outcomeKnown: !outcomeUnknown, streaming: false,
+      const displayCurrent = terminalError
+        ? actorLiveProjection.patchBound(display, {
+          error: terminalError, outcomeKnown: !outcomeUnknown, performed, streaming: false,
+        })
+        : actorLiveProjection.patchBound(display, {});
+      if (displayCurrent) {
+        if (terminalError) broadcastBoundProjection(display, {
+          type: 'turn/actor-error', parentToolUseId: display.parentToolUseId,
+          error: terminalError, outcomeKnown: !outcomeUnknown, performed,
         });
         broadcastBoundProjection(display, {
-          type: 'turn/actor-error', parentToolUseId: display.parentToolUseId,
-          error: terminalError, outcomeKnown: !outcomeUnknown,
+          type: 'turn/actor-done', parentToolUseId: display.parentToolUseId,
+          sessionId: actorSessionId, ok: turnOk, aborted: r.aborted === true,
         });
       }
-      broadcastBoundProjection(display, {
-        type: 'turn/actor-done', parentToolUseId: display.parentToolUseId,
-        sessionId: actorSessionId, ok: turnOk, aborted: r.aborted === true,
-      });
     }
     if (!persistOk) {
       return {
@@ -6587,6 +7055,7 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
         stopped: true,
         executionFailed: true,
         outcomeKnown: !outcomeUnknown,
+        performed,
         executionFailure: r,
         turnSnapshot,
       };
@@ -6753,6 +7222,7 @@ const actorMessaging = makeActorMessaging({
     // Invalidate old judges synchronously, then wait for their serialized
     // transitions to drain before this turn builds a tool context.
     landingStopReports.delete(actorSessionId);
+    landingStopCards.delete(actorSessionId);
     beginLandingTurn(actorSessionId);
     await originStates.serialize(actorSessionId, () => undefined);
     // DESIGN-19 mint-time injection: if this web/API actor's origin has a stored
@@ -6787,6 +7257,7 @@ const actorMessaging = makeActorMessaging({
       const ownedTab = kind === 'web' ? (actorTabId ?? webActorTabBindings.tabFor(actorSessionId) ?? null)
         : kind === 'webvm' ? vmTabTracker.getTabId(instanceId)
         : kind === 'notebook' ? jsTabTracker.getTabId(instanceId)
+        : kind === 'pod' ? podTabTracker.getTabId(instanceId)
         : kind === 'app' ? appTabTracker.getTabId(instanceId)
         : null;
       if (typeof ownedTab === 'number') setTabAnchor(ownedTab, parentToolUseId);
@@ -6799,7 +7270,7 @@ const actorMessaging = makeActorMessaging({
     // orchestrator keeps is still just the fenced reply (deliver()).
     const display = parentToolUseId
       ? {
-          parentToolUseId, parentSessionId, rootSessionId,
+          parentToolUseId, parentSessionId, rootSessionId, actorCorrelationId: correlationId,
           kind, instanceId, name, task: message,
         }
       : undefined;
@@ -6822,6 +7293,8 @@ const actorMessaging = makeActorMessaging({
     const actorSurface = contributorDecision?.resolved;
     /** @type {string | null} */
     let landingStopSnapshot = null;
+    /** @type {ReturnType<typeof landingStopCard> | null} */
+    let landingStopCardSnapshot = null;
     const captureLandingStop = () => {
       // The next queued turn clears this report at its own start. Consume it
       // while this turn still owns the actor slot.
@@ -6830,6 +7303,11 @@ const actorMessaging = makeActorMessaging({
         landingStopReports.delete(actorSessionId);
         landingStopSnapshot = report;
       }
+      const card = landingStopCards.get(actorSessionId);
+      if (card) {
+        landingStopCards.delete(actorSessionId);
+        landingStopCardSnapshot = card;
+      }
     };
     /**
      * If the origin lock stopped this actor mid-turn, its own reply is not the
@@ -6837,14 +7315,19 @@ const actorMessaging = makeActorMessaging({
      * actor may still have emitted text, and text written after the moment we
      * decided it was somewhere it shouldn't be is exactly what must not reach the
      * orchestrator. `stopped:true` marks the delivery failed, so the reply arrives
-     * as "this did not work, here is why" rather than as a result.
-     * @param {{ result: string, stopped?: boolean }} reply
-     * @returns {{ result: string, stopped?: boolean }}
+     * as "this did not work, here is why" rather than as a result. The card
+     * rides beside the prose so the transcript renders the slotted version (§4c).
+     * @param {{ result: string, stopped?: boolean, landingStop?: object }} reply
+     * @returns {{ result: string, stopped?: boolean, landingStop?: object }}
      */
     const withLandingStop = (reply) => {
       const report = landingStopSnapshot;
       if (!report) return reply;
-      return { result: report, stopped: true };
+      return {
+        result: report,
+        stopped: true,
+        ...(landingStopCardSnapshot ? { landingStop: landingStopCardSnapshot } : {}),
+      };
     };
     /**
      * Record only fixed enums/counters after the actor session has settled.
@@ -6954,6 +7437,11 @@ const actorMessaging = makeActorMessaging({
     const session = await sessions.get(sessionId);
     return (session?.messages ?? []).some((message) =>
       actorDeliveryIdsFromMessage(message).includes(deliveryId));
+  },
+  isActorSessionCurrent: async (actorSessionId) => {
+    if (retiredActorSessions.has(actorSessionId)) return false;
+    const actor = await sessions.get(actorSessionId);
+    return !!actor && actor.originState?.retired !== true;
   },
   turnSlots,
   getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
@@ -7165,6 +7653,116 @@ const handleToolsCommand = async (/** @type {string} */ arg) => {
 // 6. Message handlers — one-shot sendMessage routes
 // ---------------------------------------------------------------------------
 
+// --- same-user device sync: the SW's half (portable identity) --------------
+// The offscreen host moves opaque bytes between proven self devices; these
+// are the only functions that know what a surface MEANS. Hoisted as named
+// consts so the route wiring below stays shorthand-only (the routes-wiring
+// guard, tests/meta/sw-routes-wiring.test.ts).
+
+// App files ride the sync surfaces as base64 (JSON payloads) and land in
+// OPFS as bytes. Local to the SW: the offscreen host never decodes a
+// surface, it only moves and verifies it.
+const base64FileBytes = (/** @type {string} */ b64) => {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+};
+
+const dwebReady = async () => {
+  if (!DWEB_ENABLED) return false;
+  try { await ensureSettingsReady(); } catch { return false; }
+  return settingsStore.get().dwebEnabled === true;
+};
+
+/** @param {string} type @param {object} [payload] */
+const callBaseHost = (type, payload = {}) => browser.runtime.sendMessage({ type, ...payload });
+
+const applySelfSyncSettings = async (/** @type {any} */ patch) => {
+  // Defense in depth against a hostile/future sender: the dweb toggle owns
+  // the transport carrying this apply and can never be remotely restored.
+  const { dwebEnabled: _transportControl, ...portablePatch } = patch ?? {};
+  const normalized = normalizeImportedSettings(portablePatch);
+  if (Object.keys(normalized).length === 0) return { written: 0 };
+  onSettingsChanging(normalized);
+  await settingsStore.update(normalized);
+  try {
+    await onSettingsChanged(normalized);
+    pushState();
+  } catch (error) {
+    throw new SurfaceApplyPartialError('settings', {
+      written: Object.keys(normalized).length, sideEffectsCompleted: 0,
+    }, error);
+  }
+  return { written: Object.keys(normalized).length };
+};
+
+// Only the surfaces this build can shape from live stores are listed. An
+// absent name is reported as `unavailable` in the offer rather than
+// silently dropped: `workspaces` needs an OPFS walk through the engine
+// hosts, and `secrets` needs its own consent gate, so neither is here yet
+// and the offer says so honestly.
+const surfaceShapers = {
+  sessions: async () => shapeSessionsSurface({ sessions: await sessions.list() }),
+  memory: async () => shapeMemorySurface({ memory: await memory.exportAll() }),
+  settings: async () => shapeSettingsSurface({ settings: settingsStore.stored() }),
+  apps: async () => {
+    const records = await appRegistry.list();
+    return captureAppsSurface({ records, snapshotApp: async (/** @type {any} */ record) => {
+      // Files live in OPFS, not the registry row: snapshot each App.
+      // Fail the WHOLE surface if even one App cannot be captured. Silently
+      // omitting it would produce a hash-valid surface and a false-success
+      // restore result with no way for the receiver to know an App was lost.
+      const snapshot = await appClient.snapshotFilesBase64({ appId: record.id });
+      return {
+        id: record.id,
+        name: record.name,
+        entryFile: snapshot.record.entryFile,
+        fileKinds: snapshot.record.fileKinds,
+        files: Object.fromEntries(Object.entries(snapshot.files)
+          .map(([path, file]) => [path, /** @type {any} */ (file).base64])),
+      };
+    } });
+  },
+};
+
+// Idempotent by construction (self-sync-surfaces.js): an existing row on
+// this device wins, so a re-pull after an interruption cannot clobber
+// anything the user has since touched here.
+const surfaceAppliers = {
+  sessions: async (/** @type {any} */ payload) => applySessionsSurface(payload, {
+    existingIds: new Set((await sessions.list()).map((/** @type {any} */ s) => s.sessionId)),
+    putSession: async (/** @type {any} */ session) => { await sessions.importPortable(session); },
+  }),
+  memory: async (/** @type {any} */ payload) => {
+    if (!payload || payload.v !== 1 || !Object.hasOwn(payload, 'memory')) {
+      throw new Error('memory surface payload is malformed or unsupported');
+    }
+    return memory.importAll(payload.memory);
+  },
+  settings: async (/** @type {any} */ payload) => {
+    if (!payload || payload.v !== 1 || !payload.settings || typeof payload.settings !== 'object'
+        || Array.isArray(payload.settings)) {
+      throw new Error('settings surface payload is malformed or unsupported');
+    }
+    return applySelfSyncSettings(payload.settings);
+  },
+  apps: async (/** @type {any} */ payload) => applyAppsSurface(payload, {
+    existingHashes: new Set((await appRegistry.list())
+      .flatMap((/** @type {any} */ app) => [app.syncContentHash, app.dweb?.hash]).filter(Boolean)),
+    installApp: async (/** @type {any} */ app) => {
+      await appClient.create({
+        name: app.name,
+        syncContentHash: app.contentHash,
+        entryFile: app.entryFile,
+        fileKinds: app.fileKinds,
+        files: Object.fromEntries(Object.entries(app.files ?? {})
+          .map(([path, base64]) => [path, base64FileBytes(/** @type {string} */ (base64))])),
+      });
+    },
+  }),
+};
+
 // Goal-mode handles for the session routes, defined here so they wire as plain
 // SHORTHAND below (the route-wiring guard requires it — no key:value). goalRunner
 // is built above; ensureSession is the same lazy session-create the model turn
@@ -7214,11 +7812,19 @@ const ensureSession = ensureCurrentSession;
 
 const shareLocalApp = makeDwebShare({
   enabled: DWEB_ENABLED,
-  active: () => settingsStore.get().dwebEnabled,
+  active: () => settingsHydrated && settingsStore.get().dwebEnabled,
   withDwebPublication,
   withIdentityMutation: withDwebIdentityMutation,
   withAppLifecycle,
+  // makeDwebShare already owns the lifecycle lane. Flush before its App write
+  // lock, then hold the frozen editor through commit, snapshot, publication,
+  // and durable metadata persistence.
+  withAppWriteLock: (appId, operation) => appQuiescence.runUnlocked(
+    appId,
+    () => appClient.withWriteLock(appId, operation),
+  ),
   appRegistry,
+  repositories,
   prepareRuntime: async () => {
     await ensureDwebSuspensionRecovery();
     await ensureOffscreen();
@@ -7236,6 +7842,12 @@ const dwebTransfer = makeDwebTransfer({
   loadDweb,
   withIdentityMutation: withDwebIdentityMutation,
   canReplaceIdentity: canChangeDwebIdentity,
+  canAdoptIdentity: async (incomingDid) => {
+    const stored = await vault.getSecret('distributed/self-records/v1');
+    if (!stored) return true;
+    try { return JSON.parse(stored)?.certificate?.personDid === incomingDid; }
+    catch { return false; }
+  },
   stopIdentityRuntime: async (leaseId) => {
     if (!offscreenAvailable) return;
     await ensureDwebSuspensionRecovery();
@@ -7280,12 +7892,20 @@ const dwebTransfer = makeDwebTransfer({
 // Firefox has no service-worker WindowClient API, so its exact options sender
 // uses the private background-page Port fallback above.
 const privateTransferAuthorization = Symbol('private-transfer');
+const normalizeImportedSettings = (/** @type {any} */ patch) => normalizeSettingsPatch(patch, {
+  knownProviderNames: listProviders().map((/** @type {{ name: string }} */ provider) => provider.name),
+  reasoningEffortLevels: REASONING_EFFORT_LEVELS,
+  dwebEnabled: DWEB_ENABLED,
+  autoUpdateAvailable: Object.hasOwn(DEFAULT_SETTINGS, 'autoUpdateEnabled'),
+  normalizeVariant,
+  normalizeEngine,
+});
 const makeSystemRouteSet = () => makeSystemRoutes({
   vault, auditLog, sessions, pushState, kv, memory, buildStateSnapshot, closeSidePanel,
   uiPorts, loadUserEndpoints, inspectImport, applyImport, settingsStore, saveUserHook,
   CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError, dwebTransfer,
   onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
-  retryActorIsolation,
+  retryActorIsolation, normalizeImportedSettings, onProviderConfigChanged,
 });
 const makeSettingsRouteSet = () => makeSettingsRoutes({
   vault, auditLog, pushState, kv, memory, settingsStore,
@@ -7294,6 +7914,7 @@ const makeSettingsRouteSet = () => makeSettingsRoutes({
   buildExport, CHANNEL, exportHooks, skillRegistry, dwebTransfer,
   EXPORT_PASSPHRASE_MIN_LENGTH, isCustodySecretName,
   onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
+  ensureSettingsReady,
 });
 const systemMessageRoutes = makeSystemRouteSet();
 const settingsMessageRoutes = makeSettingsRouteSet();
@@ -7369,9 +7990,11 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     VaultLockedError,
   }),
   ...makeProviderRoutes({
-    vault, auditLog, pushState, settingsStore, listProviders, listProviderModels, listOpenRouterModels,
+    vault, auditLog, pushState, settingsStore, listProviders, liveProviderModels, listOpenRouterModels,
     OPENROUTER_POPULAR, callModel, getSecret, safeFetch, secretNameForProvider, maskKey,
-    buildModelOptions, ProviderHttpError, ProviderKeyMissingError, VaultLockedError,
+    buildModelOptions, onProviderConfigChanged, ensureSettingsReady,
+    hydrateLocalModelAvailability,
+    ProviderHttpError, ProviderKeyMissingError, VaultLockedError,
   }),
   ...makeHooksRoutes({
     auditLog, kv, listHooks, DEFAULT_HOOKS, parseHookMarkdown, saveUserHook, removeHook, exportHooks,
@@ -7415,12 +8038,14 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   }),
   ...makeEngineRoutes({
     vault, auditLog, pushState, browser, vmHttpFetch, appRegistry, vmRegistry, jsRegistry,
-    appClient, appTabTracker, opfsHelpers, NOTEBOOK_OPFS_ROOT, IMAGE_PIN_STORAGE_KEY,
+    podRegistry, podTabTracker, appClient, appTabTracker, appQuiescence, opfsHelpers,
+    NOTEBOOK_OPFS_ROOT, IMAGE_PIN_STORAGE_KEY,
     buildAppExport, buildNotebookExport, buildVmRecipeExport,
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
     listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
+    repositories, parseAppManifest, podGitRemoteOperation,
   }),
   ...systemMessageRoutes,
   // denylistNetGuard: an edit changes what the network backstop blocks, so the
@@ -7492,12 +8117,24 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     browser,
     localModelState,
     localModelHostAvailable,
+    pushState,
+    onProviderConfigChanged,
   }),
   ...makeDwebRoutes({
     vault, auditLog, kv, ensureOffscreen, browser,
-    appRegistry, appClient, appTabTracker, settingsStore, shareLocalApp,
+    appRegistry, appClient, appTabTracker, appQuiescence, settingsStore, shareLocalApp,
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
-    disableDweb, withDwebPublication, withAppLifecycle,
+    disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady,
+    repositories, isOffscreenSender, createDwebRollbackGuard,
+  }),
+
+  // --- same-user devices: shape/apply the sync surfaces (portable identity) ---
+  // The offscreen host moves the bytes; these are the only routes that know
+  // what a surface MEANS. Every collaborator is hoisted at the top of
+  // section 6, so this wiring stays shorthand-only.
+  ...makeDwebSelfRoutes({
+    dwebReady, isOffscreenSender, callBaseHost, auditLog,
+    surfaceShapers, surfaceAppliers,
   }),
 
   // --- git credentials (host-bound bearer tokens; same vault as API keys) ---
@@ -7532,6 +8169,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // resolver) + post-run rot bookkeeping ---
   ...makeToolboxRoutes({ toolboxStore }),
 })));
+markMessageDispatcherReady();
 
 // The toolbar icon + Alt+Shift+P front door (open the panel or home, per the
 // frontDoorView setting) lives in background/tab-affordances.js alongside the
@@ -7542,9 +8180,9 @@ loadUserEndpoints();
 // channel defaults until load() lands), and Chrome persists the behavior
 // browser-side, so by the time a click wakes a future cold SW the native
 // open already reflects the user's real choice.
-const settingsReady = loadSettings();
+const settingsReady = ensureSettingsReady();
 const dwebSettingsGate = createDwebSettingsGate({
-  ready: settingsReady,
+  ready: ensureSettingsReady,
   available: DWEB_ENABLED,
   active: () => !!settingsStore.get().dwebEnabled,
 });
@@ -7570,7 +8208,7 @@ const updateCheck = makeUpdateCheck({
   // update feed - same class as the voice model download; no secret, no
   // agent influence over the URL (see update-check.js's header).
   fetchFn: (url, init) => fetch(url, init),
-  ready: settingsReady,
+  ready: ensureSettingsReady,
   isEnabled: () => settingsStore.get().autoUpdateEnabled === true,
   // "peerd is doing work": live turn slots AND goal runs - a goal run holds
   // its slot only while an individual turn is in flight, so between
@@ -7624,6 +8262,18 @@ const updateCheck = makeUpdateCheck({
 });
 updateCheck.start();
 void updateCheck.checkNow('boot').catch(() => {});
+onSettingsHydrationRecovered = async () => {
+  await syncFrontDoorBehavior();
+  updateCheck.syncEnabled();
+  if (DWEB_ENABLED) {
+    if (settingsStore.get().dwebEnabled) {
+      maybeStartSelfDeviceHost('settings-recovered');
+      maybeStartBaseNetwork('settings-recovered');
+    }
+    else await stopBaseNetwork();
+  }
+  if (uiConnected()) await pushState();
+};
 
 // SW boot logging — we want a clear timeline of when the SW comes up
 // (cold start, extension reload, idle respawn). The console clears
@@ -7651,7 +8301,21 @@ setInterval(() => {
 // block or fail an unlock, so everything is swallowed to a warning. Gated
 // preview + setting; on the store build maybeStart is a no-op (DWEB_ENABLED
 // false) — and this file names no dweb module, so the store verifier stays clean.
+function maybeStartSelfDeviceHost(/** @type {string} */ reason) {
+  if (!DWEB_ENABLED || !settingsHydrated || !settingsStore.get().dwebEnabled || vault.isLocked()) return;
+  void ensureOffscreen()
+    .then(() => browser.runtime.sendMessage({ type: 'dweb/base-host/self-start' }))
+    .then((/** @type {any} */ reply) => {
+      if (reply?.ok && reply.running) console.log('[sw] self-device host ONLINE on', reason);
+      else if (reply?.reason !== 'not-enrolled') console.warn('[sw] self-device host start returned', reply);
+    })
+    .catch((e) => console.warn('[sw] self-device host auto-start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+}
+
 function maybeStartBaseNetwork(/** @type {string} */ reason) {
+  // This private host is independent of the public person-root base. Starting
+  // it first is what lets certificate-only enrolled devices cold-boot.
+  maybeStartSelfDeviceHost(reason);
   void dwebSettingsGate.startWhenEnabled(() => {
     if (dwebIdentityMutationActive) {
       dwebStartDeferredByIdentityMutation = true;
@@ -7672,7 +8336,12 @@ function maybeStartBaseNetwork(/** @type {string} */ reason) {
     }).then((/** @type {any} */ r) => {
       if (r?.ok && settingsStore.get().dwebEnabled) {
         console.log('[sw] dweb base network ONLINE', { did: r.did, peers: r.peers, present: r.present });
-        reseedSharedApps().catch((e) => console.warn('[sw] re-seed after start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+        // Resolve the previous publish transaction before announcing current
+        // catalog state. Otherwise an interrupted release can be reseeded next
+        // to bytes that its catalog commit never made durable.
+        reconcilePendingPublications()
+          .then(() => reseedSharedApps())
+          .catch((e) => console.warn('[sw] publication recovery/re-seed after start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
         // The dweb AGENT's inbox: join the reserved agent room (idempotent) so
         // inbound peer messages flow as dweb/base-room/event 'direct' events the
         // listener consumes. Opt-in — no join, no inbox, no wakes.
@@ -7680,6 +8349,30 @@ function maybeStartBaseNetwork(/** @type {string} */ reason) {
       } else if (r?.error !== 'dweb-disabled') console.warn('[sw] dweb base network start returned', r);
     });
   }).catch((e) => console.warn('[sw] dweb base network auto-start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+}
+
+// Complete the tiny publish→catalog two-phase commit after an MV3 restart.
+// A hash already present in the App registry committed successfully; anything
+// else is an interrupted release and is revoked before normal reseeding.
+async function reconcilePendingPublications() {
+  const pending = (await kv.get('dweb.pendingPublications.v1')) ?? {};
+  if (!Object.keys(pending).length) return;
+  const records = new Map((await appRegistry.list()).map((record) => [record.id, record]));
+  const remaining = { ...pending };
+  for (const [appId, publication] of Object.entries(pending)) {
+    const entry = /** @type {any} */ (publication);
+    const record = /** @type {any} */ (records.get(appId));
+    const committed = record?.dweb?.hash === entry.hash || record?.dweb?.published_hashes?.includes?.(entry.hash);
+    if (committed) { delete remaining[appId]; continue; }
+    try {
+      const result = /** @type {any} */ (await browser.runtime.sendMessage({
+        type: 'dweb/base-host/unshare-app', name: entry.name,
+        slug: entry.slug, publisher: entry.publisher, hash: entry.hash, hashes: [entry.hash],
+      }));
+      if (result?.ok) delete remaining[appId];
+    } catch { /* keep the journal for the next online start */ }
+  }
+  await kv.set('dweb.pendingPublications.v1', remaining);
 }
 
 // why: the offscreen base network's discovery Library AND content store are
@@ -7704,7 +8397,7 @@ ensureOffscreen().then(async () => {
   await ensureDwebSuspensionRecovery();
 }).catch((e) => console.error('[sw] boot ensureOffscreen failed', e));
 
-// Instance registry + tracker init for all three kinds: pull persisted
+// Instance registry + tracker init for all tab-hosted kinds: pull persisted
 // catalogs and re-discover live tabs (a SW restart while tabs are open
 // is common — Chrome kills the SW after 30s idle but leaves tabs alone).
 const engineTrackersReady = (async () => {
@@ -7713,10 +8406,12 @@ const engineTrackersReady = (async () => {
     await vmTabTracker.bootstrap();
     await jsRegistry.load();
     await jsTabTracker.bootstrap();
+    await podRegistry.load();
+    await podTabTracker.bootstrap();
     await appRegistry.load();
     await appTabTracker.bootstrap();
     console.log('[sw] instance registries initialized — live tabs:',
-      { vm: vmTabTracker.listLive(), js: jsTabTracker.listLive(), app: appTabTracker.listLive() });
+      { vm: vmTabTracker.listLive(), js: jsTabTracker.listLive(), pod: podTabTracker.listLive(), app: appTabTracker.listLive() });
     // §9 engine orphan reap — instances the liveness ledger says were
     // HOSTED before this SW start whose tabs did not survive. The
     // registry catalog (files, metadata) persists; the running process is
@@ -7727,10 +8422,11 @@ const engineTrackersReady = (async () => {
       const surviving = [
         ...vmTabTracker.listLive().map((/** @type {string} */ id) => `vm:${id}`),
         ...jsTabTracker.listLive().map((/** @type {string} */ id) => `notebook:${id}`),
+        ...podTabTracker.listLive().map((/** @type {string} */ id) => `pod:${id}`),
         ...appTabTracker.listLive().map((/** @type {string} */ id) => `app:${id}`),
       ];
       const lost = await engineLiveness.sweep({ surviving });
-      const REGISTRY_OF = { vm: vmRegistry, notebook: jsRegistry, app: appRegistry };
+      const REGISTRY_OF = { vm: vmRegistry, notebook: jsRegistry, pod: podRegistry, app: appRegistry };
       const lostResources = [];
       for (const entry of lost) {
         auditLog.append({
@@ -7739,6 +8435,11 @@ const engineTrackersReady = (async () => {
         }).catch(() => {});
         const registry = /** @type {any} */ (REGISTRY_OF)[entry.kind];
         const record = await Promise.resolve(registry?.get?.(entry.id)).catch(() => null);
+        if (entry.kind === 'pod' && record?.persistent === false) {
+          await repositories.destroy({ kind: 'pod', id: entry.id }, { worktree: true }).catch(() => {});
+          await podRegistry.delete(entry.id).catch(() => {});
+          continue;
+        }
         const owner = record?.ownerSessionId;
         if (!owner) continue; // no owner to tell; the audit entry stands
         lostResources.push({

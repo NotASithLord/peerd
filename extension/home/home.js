@@ -160,7 +160,10 @@ const handlePortMessage = (msg) => {
   // panel opens, hand Chat + Chats to it and drop to a tool view; when it closes,
   // take chat back to where we were.
   if (msg.type === 'surfaces') { applySidePanelOpen(!!msg.sidePanelOpen); return; }
-  const next = reduceChat(currentState, msg);
+  // §4e: tag which surface this fold is FOR, so the answering surface doesn't
+  // transcript-line its own click (mirrors the side panel).
+  const folded = msg.type === 'confirm/resolved' ? { ...msg, confirmSurface: 'home' } : msg;
+  const next = reduceChat(currentState, folded);
   if (next === currentState) return;
   currentState = next;
   if (msg.type === 'state') { booted = true; seedDwebApps(); }
@@ -257,7 +260,17 @@ const openAgentTab = (tabId, windowId) => {
   // why no dismiss: the agent-tab card PERSISTS after click — it tracks the live
   // agent tab so you can jump back any time; it clears itself when the tab closes.
 };
-const uiActions = { loadActor, confirmAnswer, dismissNotice, requestDebugger, openAgentTab };
+// Same §4c prefill contract as the side panel: a card action types the user's
+// likely next message into the composer and never sends it.
+let prefillNonce = 0;
+/** @param {string} text */
+const prefillComposer = (text) => {
+  if (typeof text !== 'string' || !text.trim()) return;
+  prefillNonce += 1;
+  currentState = { ...currentState, composerPrefill: { text, nonce: prefillNonce } };
+  m.redraw();
+};
+const uiActions = { loadActor, confirmAnswer, dismissNotice, requestDebugger, openAgentTab, prefillComposer };
 
 // Cache this tab's own window id at boot so "Pop to side" can pass a REAL
 // windowId synchronously inside the click gesture — sidePanel.open() rejects

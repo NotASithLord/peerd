@@ -2,7 +2,7 @@
   "name": "peerd",
   "private": true,
   "type": "module",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Browser-native AI agent harness. Solo dev — Bun is for tests + one-shot vendor scripts only; the extension itself runs no build step.",
   "license": "Apache-2.0",
   "homepage": "https://peerd.ai",
@@ -14,7 +14,8 @@
     "url": "https://github.com/NotASithLord/peerd/issues"
   },
   "scripts": {
-    "test": "bun test ./tests",
+    "test": "bun test ./tests --timeout 15000",
+    "test:functional:badge": "bun packaging/gen-functional-test-badge.ts",
     "test:watch": "bun test ./tests --watch",
     "red-team": "bun test ./tests/red-team",
     "red-team:report": "bun tests/red-team/report.ts",
@@ -29,9 +30,11 @@
     "test:e2e:goal": "bun scripts/cdp/run-e2e-verify.mjs --only=goal",
     "test:e2e:stop": "bun scripts/cdp/run-e2e-verify.mjs --only=stop",
     "test:e2e:error": "bun scripts/cdp/run-e2e-verify.mjs --only=error",
+    "test:e2e:passkey": "bun scripts/cdp/run-passkey-signup.mjs",
     "test:firefox": "bun scripts/firefox/run-runtime-tests.mjs",
     "test:e2e:visual": "bun scripts/cdp/run-e2e-verify.mjs --visual",
     "test:e2e:visual:update": "UPDATE_BASELINES=1 bun scripts/cdp/run-e2e-verify.mjs --visual",
+    "test:firefox:pod": "bun scripts/firefox/run-pod-smoke.mjs",
     "gallery": "bun scripts/cdp/build-gallery.mjs",
     "e2e:chrome": "bun scripts/cdp/ensure-chrome-for-testing.mjs",
     "eval:bench": "bun scripts/cdp/run-eval-bench.mjs",
@@ -49,6 +52,7 @@
     "feeds:check": "bun packaging/check-feeds.ts",
     "gen:dev": "bun packaging/gen-manifest.ts --channel=dev --browser=chrome && bun packaging/gen-channel-config.ts --channel=preview && bun packaging/gen-tscheck-badge.ts",
     "gen:badge": "bun packaging/gen-tscheck-badge.ts",
+    "gen:badge:functional": "bun packaging/gen-functional-test-badge.ts",
     "check:boundary": "bun packaging/check-dweb-boundary.ts",
     "check:tscheck": "bun packaging/check-tscheck.ts",
     "check:imports": "bun packaging/check-packaged-imports.ts",
@@ -86,9 +90,12 @@
     "globals": "^17.6.0",
     "puppeteer-core": "^25.5.0",
     "typescript": "^6.0.3",
-    "web-ext": "10.3.0"
+    "web-ext": "10.6.0"
   },
   "overrides": {
     "js-yaml": "4.3.1"
+  },
+  "patchedDependencies": {
+    "image-size@2.0.2": "patches/image-size@2.0.2.patch"
   }
 }

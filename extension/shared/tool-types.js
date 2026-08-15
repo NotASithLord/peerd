@@ -20,13 +20,14 @@
  *   time      — temporal grounding (clock)
  *   webvm     — CheerpX Linux instance
  *   notebook  — Notebook (Web Worker + OPFS)
+ *   pod      : Pod (sealed shell/WASI jobs + OPFS)
  *   app       — stored-HTML App in a sandboxed iframe
  *   actor  — orchestration: a child session running the agent loop
- *   engine    — cross-kind sandbox ops (sandbox_create spans webvm/notebook/app;
+ *   engine   : cross-kind sandbox ops (sandbox_create spans webvm/notebook/pod/app;
  *               its result stamps the concrete `kind` for the handle harvest)
  *   memory    — file-based AGENTS.md memory (read/confirm-gated write)
  *
- * @typedef {'inspect' | 'tab' | 'web' | 'time' | 'webvm' | 'notebook' | 'app' | 'engine' | 'spawned' | 'memory'} Primitive
+ * @typedef {'inspect' | 'tab' | 'web' | 'time' | 'webvm' | 'notebook' | 'pod' | 'app' | 'engine' | 'spawned' | 'memory'} Primitive
  */
 
 /**
@@ -104,6 +105,12 @@
  *   only after that message commits. Provider formatters ignore this field.
  * @property {string[]} [actorDeliveryIds] internal durable mailbox correlations
  *   for a tool that consumed multiple actor replies, such as script.
+ * @property {string} [actorCorrelationId] host-only actor correlation that does
+ *   not acknowledge the durable mailbox; provider formatters ignore it.
+ * @property {boolean} [actorTerminal] host-stamped actor completion state.
+ * @property {boolean} [actorOutcomeKnown] host-stamped outcome certainty.
+ * @property {boolean} [actorPerformed] host-stamped execution state.
+ * @property {boolean} [actorAborted] host-stamped user cancellation state.
  */
 
 /**
@@ -127,6 +134,11 @@
  *   never serialized to a provider.
  * @property {string[]} [actorDeliveryIds] internal durable mailbox correlations;
  *   never serialized to a provider.
+ * @property {string} [actorCorrelationId] host-only non-ack actor correlation.
+ * @property {boolean} [actorTerminal] host-stamped actor completion state.
+ * @property {boolean} [actorOutcomeKnown] host-stamped outcome certainty.
+ * @property {boolean} [actorPerformed] host-stamped execution state.
+ * @property {boolean} [actorAborted] host-stamped user cancellation state.
  */
 
 /** @typedef {ToolResultOk | ToolResultErr} ToolResult */
@@ -218,7 +230,7 @@
  * @property {string} name
  * @property {string} description
  * @property {Primitive} primitive    the RESOURCE/domain this tool exercises
- *   (tab / web / webvm / notebook / app / memory / inspect / actor). Answers
+ *   (tab / web / webvm / notebook / pod / app / memory / inspect / actor). Answers
  *   "what does it touch?".
  * @property {'inline'|'spawned'} [dispatch]   the EXECUTION mechanism —
  *   orthogonal to `primitive`. Absent/'inline' = runs in the dispatcher.
@@ -226,6 +238,7 @@
  *   mechanism without conflating it into the primitive. Answers "how is it run?".
  * @property {Record<string, any>} schema           JSON Schema for args
  * @property {SideEffect} sideEffect
+ * @property {'A'|'B'|'C'|'D'|'E'|'F'} [retryClass] optional explicit lifecycle retry class
  * @property {boolean} [dweb]   true = a dweb network tool (publish/discover/
  *   install). The exposure layer (filterByDwebEnabled) hides these from the agent
  *   unless the dweb is on, so on the store build they never surface.

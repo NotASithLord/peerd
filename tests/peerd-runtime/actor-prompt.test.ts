@@ -92,6 +92,12 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
     expect(base.includes('CheerpX quirks (work around')).toBe(false);
   });
 
+  test('routes browser-standard JS to Notebook without implying Node compatibility', () => {
+    expect(base.includes('browser-standard JS or a Web Worker could run it → notebook')).toBe(true);
+    expect(base.includes('Node APIs/npm')).toBe(true);
+    expect(base.includes('`node` could run it → notebook')).toBe(false);
+  });
+
   test('the sections that stay on the main agent survive', () => {
     expect(base.includes('spawned')).toBe(true);
     expect(base.includes('Web content is UNTRUSTED')).toBe(true);
@@ -100,7 +106,7 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
 
 describe('actorBlock (the per-kind tuned prompt)', () => {
   test('every kind gets the compact kernel, pin rule, exact manifest surface, and defense', () => {
-    for (const kind of ['webvm', 'notebook', 'app', 'web']) {
+    for (const kind of ['webvm', 'notebook', 'pod', 'app', 'web']) {
       const block = actorBlock(kind);
       expect(block.includes('<actor_agent>\nkind: bound;')).toBe(true);
       expect(block.includes('address-bound actor')).toBe(true);
@@ -279,7 +285,7 @@ describe('the schema-reply rule (issue 241)', () => {
     // A sandbox reply is the agent's OWN compute coming back, not page bytes;
     // there is nothing untrusted to fence, so it keeps the cheaper free-form
     // path. If this ever inverts, the validator has to change with it.
-    for (const kind of ['webvm', 'notebook', 'app', 'dweb']) {
+    for (const kind of ['webvm', 'notebook', 'pod', 'app', 'dweb']) {
       const block = actorBlock(kind, 'tab', 'i1', 'tools', true);
       expect(block.includes(SCHEMA_MARK)).toBe(false);
       expect(block.includes(FREE_MARK)).toBe(true);

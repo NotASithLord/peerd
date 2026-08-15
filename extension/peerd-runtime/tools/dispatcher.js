@@ -919,6 +919,7 @@ export const dispatchToolCall = async (call, ctx) => {
       recoveryRewrite = await ctx.lifecycle.settleTracking(tracking, {
         ok: result?.ok !== false,
         error: result?.ok === false ? String(result.error ?? '') : undefined,
+        aborted: result?.actorAborted === true,
         // A typed failure outcome a tool stamped on its result — the
         // deterministic path (lifecycle/failure-taxonomy.js).
         outcomeKind: /** @type {{ outcomeKind?: any }} */ (result)?.outcomeKind,
@@ -934,11 +935,60 @@ export const dispatchToolCall = async (call, ctx) => {
       ? [...new Set(result.actorDeliveryIds.filter(
         (id) => typeof id === 'string' && id.length > 0))]
       : [];
+    const hasActorHostState = typeof result?.actorCorrelationId === 'string'
+      || typeof result?.actorTerminal === 'boolean'
+      || typeof result?.actorOutcomeKnown === 'boolean'
+      || typeof result?.actorPerformed === 'boolean'
+      || typeof result?.actorAborted === 'boolean';
+    let actorHostState = {
+      ...(typeof result?.actorCorrelationId === 'string'
+        ? { actorCorrelationId: result.actorCorrelationId } : {}),
+      ...(typeof result?.actorTerminal === 'boolean'
+        ? { actorTerminal: result.actorTerminal } : {}),
+      ...(typeof result?.actorOutcomeKnown === 'boolean'
+        ? { actorOutcomeKnown: result.actorOutcomeKnown } : {}),
+      ...(typeof result?.actorPerformed === 'boolean'
+        ? { actorPerformed: result.actorPerformed } : {}),
+      ...(result?.actorAborted === true ? { actorAborted: true } : {}),
+    };
+    // The outer lifecycle owns the final custody verdict. An actor can report a
+    // locally-known policy stop while the message_actor dispatch itself loses
+    // durable proof; in that case the outer outcome_unknown must replace, not
+    // sit beside, the stale inner certainty/cancellation flags.
+    if (recoveryRewrite && hasActorHostState) {
+      const state = recoveryRewrite.recovery?.state;
+      if (state === 'outcome_unknown') {
+        actorHostState = {
+          ...actorHostState,
+          actorTerminal: true,
+          actorOutcomeKnown: false,
+          actorPerformed: true,
+          actorAborted: false,
+        };
+      } else if (state === 'interrupted') {
+        actorHostState = {
+          ...actorHostState,
+          actorTerminal: true,
+          actorOutcomeKnown: true,
+          actorPerformed: false,
+          actorAborted: false,
+        };
+      } else if (state === 'cancelled') {
+        actorHostState = {
+          ...actorHostState,
+          actorTerminal: true,
+          actorOutcomeKnown: true,
+          actorPerformed: false,
+          actorAborted: true,
+        };
+      }
+    }
     /** @type {ToolResult} */
     const settled = recoveryRewrite
       ? {
         ok: false,
         error: recoveryRewrite.error,
+        ...actorHostState,
         ...(actorDeliveryId ? { actorDeliveryId } : {}),
         ...(actorDeliveryIds.length > 0 ? { actorDeliveryIds } : {}),
       }

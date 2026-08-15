@@ -155,6 +155,74 @@ export const makeWebActorRegistry = () => {
   };
 };
 
+/**
+ * Retire every chat address that points at a stopped roaming web actor.
+ *
+ * A roaming actor has consumed page-controlled text. After an origin-policy
+ * stop, keeping its chat registry entry would let the next `to:"web"` request
+ * resume that same transcript and carry a prompt injection across the handoff.
+ * Bound/site actors are deliberately unaffected: their durable origin state is
+ * the authority boundary and their separate recovery rules apply.
+ *
+ * @param {ReturnType<typeof makeWebActorRegistry>} registry
+ * @param {string} actorSessionId
+ * @param {{ mode?: string, ownedOrigin?: string|null, provisional?: boolean } | null | undefined} originState
+ * @returns {string[]} owner chat ids whose address was retired
+ */
+export const retireStoppedRoamingWebActor = (registry, actorSessionId, originState) => {
+  if (originState?.mode !== 'roaming') return [];
+  const retired = [];
+  for (const [ownerChatId, sessionId] of registry.entries()) {
+    if (sessionId !== actorSessionId) continue;
+    if (registry.drop(ownerChatId)) retired.push(ownerChatId);
+  }
+  return retired;
+};
+
+/**
+ * Retire a roaming actor in heap and attempt both durable fences independently.
+ *
+ * The session tombstone and registry snapshot are deliberately sibling writes:
+ * either one is sufficient to stop a stale address from reviving after a
+ * worker restart. `allSettled` ensures one storage failure never suppresses the
+ * other attempt, while the synchronous heap mark and registry drop protect the
+ * current worker before either promise settles.
+ *
+ * @param {{
+ *   registry: ReturnType<typeof makeWebActorRegistry>,
+ *   actorSessionId: string,
+ *   originState: { mode?: string, ownedOrigin?: string|null, provisional?: boolean } | null | undefined,
+ *   markRetired: (actorSessionId: string) => void,
+ *   writeTombstone: () => Promise<unknown> | unknown,
+ *   persistRouting: () => Promise<unknown> | unknown,
+ * }} input
+ * @returns {Promise<{ retiredOwnerIds: string[], tombstone: PromiseSettledResult<unknown>, routing: PromiseSettledResult<unknown> }>}
+ */
+export const retireStoppedRoamingWebActorDurably = async ({
+  registry, actorSessionId, originState, markRetired, writeTombstone, persistRouting,
+}) => {
+  if (originState?.mode !== 'roaming') {
+    return {
+      retiredOwnerIds: [],
+      tombstone: { status: 'fulfilled', value: undefined },
+      routing: { status: 'fulfilled', value: undefined },
+    };
+  }
+  markRetired(actorSessionId);
+  const retiredOwnerIds = retireStoppedRoamingWebActor(registry, actorSessionId, originState);
+  // Invoke both thunks before awaiting either one. This also catches a
+  // synchronous storage adapter throw as a rejected sibling promise.
+  const attempt = (/** @type {() => Promise<unknown> | unknown} */ fn) => {
+    try { return Promise.resolve(fn()); }
+    catch (error) { return Promise.reject(error); }
+  };
+  const [tombstone, routing] = await Promise.allSettled([
+    attempt(writeTombstone),
+    retiredOwnerIds.length > 0 ? attempt(persistRouting) : Promise.resolve(),
+  ]);
+  return { retiredOwnerIds, tombstone, routing };
+};
+
 // ── DESIGN-18: the API actor (an origin actor with NO tab) ──────────────────
 //
 // An API integration is the SAME web actor (actorType:'web') reaching ONE origin

@@ -3,7 +3,7 @@
 // outages, offline work): run it before pushing, or install it as a
 // pre-push hook with scripts/install-hooks.sh.
 //
-//   bun run preflight          fast checks (~15s): generated-file drift,
+//   bun run preflight          release checks (~5m): generated-file drift,
 //                              ESLint, typecheck, dweb boundary, Bun tests
 //   bun run preflight -- --matrix   also build + verify all four artifacts
 //
@@ -78,7 +78,27 @@ const main = () => {
   // introduced upstream fails here instead of rotting the staged library silently.
   run('web target build (from live source)', 'bun', ['run', 'package:web']);
   run('web import-closure boundary', 'bun', ['run', 'check:web']);
-  run('bun tests', 'bun', ['test', './tests']);
+  // The functional badge comes from the actual passing JUnit aggregate. Treat
+  // it like the other generated artifacts, while restoring any preflight
+  // caller's existing bytes so this gate remains non-destructive.
+  const functionalBadge = join(REPO_ROOT, 'badges', 'functional-tests.json');
+  const functionalBadgeBefore = readFileSync(functionalBadge);
+  let functionalBadgeDrift = false;
+  try {
+    run('bun functional tests + passing-count badge', 'bun', ['run', 'test:functional:badge']);
+    try {
+      execFileSync('git', ['diff', '--quiet', '--exit-code', 'HEAD', '--', functionalBadge], { cwd: REPO_ROOT });
+    } catch { functionalBadgeDrift = true; }
+  } finally {
+    writeFileSync(functionalBadge, functionalBadgeBefore);
+  }
+  if (functionalBadgeDrift) {
+    console.error(
+      '\npreflight FAILED: badges/functional-tests.json is stale. '
+      + 'Run `bun run gen:badge:functional` and commit the regenerated badge.',
+    );
+    process.exit(1);
+  }
   if (args.matrix === true) {
     run('artifact matrix (store artifacts verified)', 'bun', ['packaging/package.ts', '--all', '--no-sign']);
     // Chrome-cost gate: boots every page of the real pruned build (both channels)

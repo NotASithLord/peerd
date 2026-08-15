@@ -37,6 +37,25 @@ const baseDeps = (over: Record<string, any> = {}) => ({
 });
 
 describe('dweb transfer host selection', () => {
+  test('identity adoption cannot split an existing self-device membership', async () => {
+    let writes = 0;
+    const transfer = makeDwebTransfer(baseDeps({
+      canAdoptIdentity: async (incomingDid: string) => incomingDid === 'did:key:zMemberRoot',
+      runCustodyOperation: async () => ({
+        adopted: true, material, did: 'did:key:zOtherRoot', incomingDid: 'did:key:zOtherRoot',
+        existingDid: 'did:key:zMemberRoot', reason: 'replaced',
+      }),
+      vault: {
+        isLocked: () => false,
+        getSecret: async () => material,
+        setSecret: async () => { writes++; },
+      },
+    }));
+    expect(await transfer.prepareRecord({}, 'passphrase', { replaceExisting: true }))
+      .toMatchObject({ adopted: false, reason: 'self-custody-mismatch' });
+    expect(writes).toBe(0);
+  });
+
   test('Chrome uses the offscreen host and fails loudly on a bad reply', async () => {
     const messages: any[] = [];
     const transfer = makeDwebTransfer(baseDeps({

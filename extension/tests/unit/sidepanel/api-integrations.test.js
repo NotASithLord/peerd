@@ -81,6 +81,8 @@ describe('options.api-integrations', () => {
     try {
       expect(root.textContent).toContain('Git credentials');
       expect(root.textContent).toContain('No git tokens yet');   // the git list's empty state
+      expect(root.textContent).toContain('No site clients yet'); // malformed/partial replies degrade safely
+      expect(root.textContent).toContain('Notebooks, and Pods');
       // Two forms now: API keys + git tokens, both under the one API-integrations section.
       expect(root.querySelectorAll('.provider-card-form').length).toBe(2);
     } finally { unmount(); }
@@ -90,6 +92,19 @@ describe('options.api-integrations', () => {
     const { root, unmount } = await mountView(makeSend({ 'origin-cred/list': () => ({ ok: true, integrations: [] }) }));
     try {
       expect(root.textContent).toContain('No API integrations yet');
+    } finally { unmount(); }
+  });
+
+  it('treats successful list replies without arrays as empty, never as renderer input', async () => {
+    const { root, unmount } = await mountView(makeSend({
+      'origin-cred/list': () => ({ ok: true }),
+      'git-cred/list': () => ({ ok: true }),
+      'site-client/list': () => ({ ok: true }),
+    }));
+    try {
+      expect(root.textContent).toContain('No API integrations yet');
+      expect(root.textContent).toContain('No git tokens yet');
+      expect(root.textContent).toContain('No site clients yet');
     } finally { unmount(); }
   });
 

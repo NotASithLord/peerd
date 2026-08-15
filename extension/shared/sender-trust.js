@@ -25,7 +25,7 @@
  * (`sender.id === runtimeId`) AND (b) running from our own packaged
  * origin (`sender.url` starts with `chrome-extension://<id>/`). That
  * admits every legitimate first-party surface — the side panel, the
- * offscreen document, and the vm/js/app tab pages (which legitimately
+ * offscreen document, and the vm/js/pod/app tab pages (which legitimately
  * carry a `sender.tab`) — and rejects:
  *   - a hypothetical content script (its `sender.url` is the WEB page,
  *     not our extension origin — this is the case the manifest currently
@@ -60,7 +60,7 @@ export const isFirstPartySender = (sender, { runtimeId, extensionOrigin } = {}) 
  * Is this sender specifically the OFFSCREEN DOCUMENT?
  *
  * why a second, narrower predicate: isFirstPartySender answers "one of ours",
- * which is every extension page — the side panel, the home tab, and the three
+ * which is every extension page: the side panel, the home tab, and the
  * engine tab pages that host agent-authored code. For most routes that is the
  * right question. For the few that carry an actor's authority (the offscreen
  * relay: tool dispatch on a pinned instance, and a model call the service
@@ -91,7 +91,7 @@ export const isOffscreenSender = (sender, { runtimeId, extensionOrigin, offscree
 };
 
 /**
- * Is this sender specifically the extension SERVICE WORKER?
+ * Is this sender specifically the browser-owned BACKGROUND HOST?
  *
  * why: runtime.sendMessage reaches extension contexts broadly. An engine tab is
  * first-party but hosts agent-authored or untrusted state, so exact source pins
@@ -101,13 +101,24 @@ export const isOffscreenSender = (sender, { runtimeId, extensionOrigin, offscree
  * still requires an exact options-page sender.
  *
  * @param {{ id?: string, url?: string, tab?: unknown, documentId?: string } | null | undefined} sender
- * @param {{ runtimeId?: string, extensionOrigin?: string, serviceWorkerUrl?: string }} [trust]
+ * Chrome presents the MV3 worker script URL. Firefox implements the same
+ * manifest entry as a generated background page and presents its exact
+ * `_generated_background_page.html` URL. Firefox's host is a real document and
+ * may therefore carry `documentId`; the exact generated URL plus absence of a
+ * tab is its boundary. Chrome's worker must carry neither tab nor document.
+ *
+ * @param {{ runtimeId?: string, extensionOrigin?: string, serviceWorkerUrl?: string, backgroundPageUrl?: string }} [trust]
  */
-export const isServiceWorkerSender = (sender, { runtimeId, extensionOrigin, serviceWorkerUrl } = {}) => {
+export const isServiceWorkerSender = (sender, {
+  runtimeId, extensionOrigin, serviceWorkerUrl, backgroundPageUrl,
+} = {}) => {
   if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
   if (typeof serviceWorkerUrl !== 'string' || serviceWorkerUrl.length === 0) return false;
-  if (sender && typeof sender === 'object' && ('tab' in sender || 'documentId' in sender)) return false;
-  return sender?.url === serviceWorkerUrl;
+  if (typeof backgroundPageUrl !== 'string' || backgroundPageUrl.length === 0) return false;
+  if (sender && typeof sender === 'object' && 'tab' in sender) return false;
+  if (sender?.url === backgroundPageUrl) return true;
+  return sender?.url === serviceWorkerUrl
+    && !(sender && typeof sender === 'object' && 'documentId' in sender);
 };
 
 /**

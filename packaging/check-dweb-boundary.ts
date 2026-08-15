@@ -8,11 +8,20 @@
 // no-restricted-imports pattern gives the same feedback in editors but
 // doesn't see dynamic import() — this does.
 //
-// What counts as a reference (comments in prose don't):
+// What counts as a reference:
 //   - a static import/export-from whose specifier names peerd-distributed
 //   - a dynamic import(...) whose literal names peerd-distributed
 //   - ANY string literal containing a /peerd-distributed/ path (catches
 //     fetch()/scripting paths and other indirect loads)
+//   - the bare module-directory name ANYWHERE, including in a comment
+//
+// why comments count: verify-store-artifact.ts greps the SHIPPED bytes for
+// the substring `peerd-distributed`, with no regard for quoting or syntax,
+// so a file that merely MENTIONS the path in a `// see …` comment fails the
+// store posture check. Without this pattern the two gates disagree and the
+// disagreement surfaces at package time in CI rather than here. Name the
+// module in prose ("the dweb module") and point at a file by its
+// module-relative path instead.
 //
 // Run: bun run check:boundary   (also part of `bun run package`)
 
@@ -30,6 +39,8 @@ const PATTERNS: Array<{ name: string; re: RegExp }> = [
   { name: 'side-effect import', re: /\bimport\s+['"][^'"]*peerd-distributed[^'"]*['"]/ },
   { name: 'dynamic import', re: /\bimport\(\s*['"][^'"]*peerd-distributed[^'"]*['"]/ },
   { name: 'path string literal', re: /['"]\/?peerd-distributed\/[^'"]*['"]/ },
+  // Last, so a real import above reports as an import rather than as this.
+  { name: 'bare mention (store verifier greps raw bytes)', re: /peerd-distributed/ },
 ];
 
 const walk = (dir: string, out: string[] = []): string[] => {

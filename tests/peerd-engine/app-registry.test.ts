@@ -26,6 +26,15 @@ describe('createAppRegistry', () => {
     expect(rec.entryFile).toBe('index.html');
   });
 
+  test('sync content identity is persisted only when it is a SHA-256 hex digest', async () => {
+    const reg = createAppRegistry({ storage: createStorageStub() });
+    const hash = 'a'.repeat(64);
+    expect((await reg.create({ name: 'portable', syncContentHash: hash } as any)).syncContentHash)
+      .toBe(hash);
+    expect(await reg.create({ name: 'bad', syncContentHash: 'not-a-hash' } as any))
+      .not.toHaveProperty('syncContentHash');
+  });
+
   test('a trusted install can reserve its final App id without overwriting another record', async () => {
     const reg = createAppRegistry({ storage: createStorageStub() });
     const id = 'app-12345678-abcd';

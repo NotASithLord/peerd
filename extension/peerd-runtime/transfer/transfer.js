@@ -54,6 +54,8 @@ import {
   BACKUP_ARGON2ID_PARAMS, BACKUP_ARGON2ID_SALT_BYTES,
   deriveBackupPassphraseBytes,
 } from '/shared/backup-passphrase.js';
+import { isCustodySecretName, portableSecretEntries } from './secret-policy.js';
+export { isCustodySecretName } from './secret-policy.js';
 
 export const EXPORT_VERSION = 2;
 export const EXPORT_FORMAT = 'peerd-export';
@@ -66,15 +68,6 @@ export const EXPORT_PASSPHRASE_MIN_LENGTH = 16;
 // record is carried as payload.dweb, and the device key is device-bound.
 // Enforced HERE (payload shaping), not in the route — mechanism, not
 // caller discipline. Store-safe names (kv strings, not module paths).
-const NON_EXPORTABLE_SECRET_PREFIXES = Object.freeze([
-  'distributed/identity/',
-  'distributed/device-key/',
-]);
-
-/** @param {string} name */
-export const isCustodySecretName = (name) =>
-  NON_EXPORTABLE_SECRET_PREFIXES.some((prefix) => name.startsWith(prefix));
-
 export class ExportPassphraseError extends Error {
   constructor() {
     super('wrong passphrase (or corrupted export file)');
@@ -280,9 +273,7 @@ const durabilitySection = (payload) => {
 export const buildExport = async ({
   channel, storedSettings, providerEndpoints, secrets, passphrase, memory, hooks, skills, dweb,
 }) => {
-  const portableSecrets = Object.fromEntries(
-    Object.entries(secrets ?? {}).filter(([name]) => !isCustodySecretName(name)),
-  );
+  const portableSecrets = portableSecretEntries(secrets);
   const secretNames = Object.keys(portableSecrets);
   if (secretNames.length > 0 && !passphrase) {
     throw new ExportPassphraseError();
@@ -404,6 +395,13 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
   /** @type {string[]} */
   const endpointUrls = (Array.isArray(payload.providerEndpoints?.endpoints) ? payload.providerEndpoints.endpoints : [])
     .map((/** @type {any} */ e) => String(e?.url ?? '')).filter(Boolean);
+  if (typeof settings.ollamaHost === 'string') {
+    try {
+      const configured = new URL(settings.ollamaHost.trim());
+      if ((configured.protocol === 'http:' || configured.protocol === 'https:')
+          && !endpointUrls.includes(configured.origin)) endpointUrls.push(configured.origin);
+    } catch { /* malformed settings are normalized or dropped before apply */ }
+  }
   if (endpointUrls.length > 0) {
     notices.push(`This import adds provider endpoint(s) the agent will send API traffic to: ${endpointUrls.join(', ')} — only proceed if you recognize them.`);
   }
@@ -462,7 +460,7 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
  * @param {'store'|'preview'} args.channel
  * @param {string[]} args.knownSettingKeys
  * @param {Object} args.io
- * @param {(patch: Record<string, any>) => Promise<void>} args.io.applySettings
+ * @param {(patch: Record<string, any>) => Promise<void|{count?: number, notices?: string[]}>} args.io.applySettings
  * @param {(endpoints: any) => Promise<void>} args.io.setProviderEndpoints
  * @param {(name: string, value: string) => Promise<void>} args.io.setSecret
  * @param {(payload: any) => Promise<{written: number, skipped: number}>} args.io.importMemory
@@ -631,8 +629,13 @@ export const applyImport = async ({
       if (known.has(k)) patch[k] = v;
     }
     if (Object.keys(patch).length > 0) {
-      await io.applySettings(patch);
-      imported.settings = Object.keys(patch).length;
+      const applied = await io.applySettings(patch);
+      const appliedResult = applied && typeof applied === 'object' ? applied : null;
+      const appliedCount = appliedResult?.count;
+      imported.settings = Number.isInteger(appliedCount)
+        ? /** @type {number} */ (appliedCount)
+        : Object.keys(patch).length;
+      if (Array.isArray(appliedResult?.notices)) summary.notices.push(...appliedResult.notices);
     }
 
     if (payload.providerEndpoints?.endpoints) {

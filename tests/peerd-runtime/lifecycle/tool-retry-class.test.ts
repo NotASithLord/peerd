@@ -91,7 +91,7 @@ describe('derivation from the declared taxonomy', () => {
   });
 
   test('a write on a workspace primitive is Class C', () => {
-    for (const primitive of ['webvm', 'notebook', 'app', 'engine', 'dweb']) {
+    for (const primitive of ['webvm', 'notebook', 'pod', 'app', 'engine', 'dweb']) {
       expect(retryClassForTool({ name: 'w', sideEffect: 'write', primitive })).toBe('C');
     }
   });
@@ -186,6 +186,7 @@ describe('spot checks against the real defs', () => {
     ['dweb_discover', 'B'],
     // C — deterministic local workspace writes.
     ['js_write_file', 'C'],
+    ['pod_write', 'C'],
     ['vm_write_file', 'C'],
     ['app_write_file', 'C'],
     ['dweb_block', 'C'],
@@ -197,10 +198,12 @@ describe('spot checks against the real defs', () => {
     ['navigate', 'E'],
     ['open_tab', 'E'],
     ['js_notebook', 'E'],
+    ['pod_exec', 'E'],
     ['script', 'E'],
     ['a2a_run', 'E'],
     ['message_actor', 'E'],
     ['vm_delete', 'E'],
+    ['pod_destroy', 'E'],
     ['app_delete', 'E'],
     // F — long-lived resources: recreate, never continue.
     ['sandbox_create', 'F'],

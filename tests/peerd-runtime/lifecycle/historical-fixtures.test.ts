@@ -407,6 +407,7 @@ describe.each(FIXTURES)('$name — the export envelope this release wrote', ({ d
     });
     if (!result.summary) throw new Error(`expected ok result: ${result.error}`);
     const expectedUrls = (envelope().providerEndpoints?.endpoints ?? []).map((e: Rec) => e.url);
+    if (envelope().settings?.ollamaHost) expectedUrls.push(new URL(envelope().settings.ollamaHost).origin);
     expect(result.summary.endpointUrls).toEqual(expectedUrls);
     expect(result.summary.hookIds).toEqual(envelope().hooks.map((h: Rec) => h.id));
   });
@@ -945,6 +946,7 @@ describe.each(NEW_FIXTURES)('$name — inspectImport over the export envelope', 
     });
     if (!result.summary) throw new Error(`expected ok result: ${result.error}`);
     const expectedUrls = (envelope().providerEndpoints?.endpoints ?? []).map((e: Rec) => e.url);
+    if (envelope().settings?.ollamaHost) expectedUrls.push(new URL(envelope().settings.ollamaHost).origin);
     expect(result.summary.endpointUrls).toEqual(expectedUrls);
     expect(result.summary.hookIds).toEqual(envelope().hooks.map((h: Rec) => h.id));
   });

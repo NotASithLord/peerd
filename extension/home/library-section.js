@@ -77,7 +77,7 @@ const slugify = (name) => (String(name || 'app').toLowerCase().replace(/[^a-z0-9
 // dweb slot). Either way our node is serving its bytes to peers — deleting stops
 // that, and the confirmation should say so.
 /** @param {App} [app] */
-const isSeeded = (app) => !!(app?.shared || app?.dweb);
+const isSeeded = (app) => !!(app?.shared || app?.dweb?.version_id || app?.dweb?.seed);
 
 /**
  * @param {string | undefined} filename
@@ -130,6 +130,18 @@ export const LibrarySection = {
     vnode.state.shareEditId = null;    // the app whose share dialog is open
     vnode.state.shareSlug = '';        // the editable namespace in that dialog
     vnode.state.updates = {};          // appId -> { uri, version_id, seq, … } when a newer version exists
+    vnode.state.repositoryOpenId = null;
+    vnode.state.repositories = {};     // appId -> { status, remote, commits }
+    vnode.state.remoteInput = '';
+    vnode.state.repositoryMessage = '';
+    vnode.state.repositoryBranch = '';
+    vnode.state.repositoryCheckout = '';
+    vnode.state.repositoryDiffs = {};   // `${appId}:${oid}` -> bounded diff result
+    vnode.state.repositoryDiffKey = null;
+    vnode.state.repositoryFocusId = null;
+    vnode.state.armedRestore = null;    // { appId, oid, expiresAt }: never arms another App
+    vnode.state.updateConflictId = null;
+    vnode.state.notice = null;
     LibrarySection.refresh(vnode);
   },
 
@@ -177,6 +189,7 @@ export const LibrarySection = {
     window.removeEventListener('focus', vnode.state._onVisible);
     if (vnode.state._updTimer) clearInterval(vnode.state._updTimer);
     if (vnode.state._listTimer) clearInterval(vnode.state._listTimer);
+    if (vnode.state._restoreTimer) clearTimeout(vnode.state._restoreTimer);
   },
 
   /** @param {{ state: any, attrs: { send: Send, dweb?: boolean } }} vnode */
@@ -309,6 +322,197 @@ export const LibrarySection = {
     m.redraw();
   },
 
+  /** Open/refresh the developer history panel without loading file bodies.
+   * @param {{ state: any, attrs: { send: Send } }} vnode @param {App} app */
+  async openRepository(vnode, app, refresh = false) {
+    const ui = vnode.state;
+    ui.menuOpenId = null;
+    ui.error = null;
+    if (!refresh) ui.notice = null;
+    if (ui.repositoryOpenId === app.id && !refresh) {
+      ui.repositoryOpenId = null;
+      ui.armedRestore = null;
+      ui.repositoryDiffKey = null;
+      ui.repositoryFocusId = null;
+      m.redraw();
+      focusLibraryAction(app.id, 'more');
+      return;
+    }
+    ui.repositoryOpenId = app.id;
+    ui.repositoryFocusId = refresh ? null : app.id;
+    // A cached diff compares the selected commit to a mutable working tree.
+    // Opening or refreshing Git is the synchronization boundary for edits made
+    // in the App tab and for every repository mutation below, so no prior
+    // commit-to-tree preview remains truthful past this point.
+    for (const key of Object.keys(ui.repositoryDiffs)) {
+      if (key.startsWith(`${app.id}:`)) delete ui.repositoryDiffs[key];
+    }
+    if (ui.repositoryDiffKey?.startsWith(`${app.id}:`)) ui.repositoryDiffKey = null;
+    ui.busyId = app.id;
+    try {
+      const [statusReply, historyReply] = await Promise.all([
+        vnode.attrs.send({ type: 'apps/repository/status', appId: app.id }),
+        vnode.attrs.send({ type: 'apps/repository/history', appId: app.id, depth: 20 }),
+      ]);
+      if (statusReply?.ok && historyReply?.ok) {
+        ui.repositories[app.id] = {
+          status: statusReply.status, remote: statusReply.remote ?? null,
+          branches: statusReply.branches ?? [], commits: historyReply.commits ?? [],
+        };
+        ui.remoteInput = statusReply.remote?.url ?? '';
+        // why: this field creates a new branch; echoing the current branch into
+        // it makes a disabled action look pre-filled and invites accidental
+        // edits. Existing-branch state belongs in the adjacent selector.
+        if (!refresh) ui.repositoryBranch = '';
+        ui.repositoryCheckout = statusReply.status?.branch ?? '';
+      } else ui.error = statusReply?.error ?? historyReply?.error ?? 'repository history failed';
+    } catch (error) {
+      ui.error = /** @type {{message?:string}} */ (error)?.message ?? 'repository history failed';
+    } finally {
+      ui.busyId = null;
+      m.redraw();
+    }
+  },
+
+  /** @param {{ state: any, attrs: { send: Send } }} vnode @param {App} app @param {string} [message] */
+  async checkpointRepository(vnode, app, message = 'manual checkpoint') {
+    const ui = vnode.state;
+    ui.error = null; ui.busyId = app.id;
+    try {
+      const r = await vnode.attrs.send({ type: 'apps/repository/commit', appId: app.id, message });
+      if (!r?.ok) { ui.error = r?.error ?? 'checkpoint failed'; return; }
+      ui.notice = r.result?.created ? 'Checkpoint saved.' : 'No changes to checkpoint.';
+      if (r.result?.created) ui.repositoryMessage = '';
+      await LibrarySection.openRepository(vnode, app, true);
+    } catch (error) {
+      ui.error = /** @type {{message?:string}} */ (error)?.message ?? 'checkpoint failed';
+    } finally {
+      ui.busyId = null;
+      m.redraw();
+    }
+  },
+
+  /** Load a bounded, text-only diff from a commit to the current working tree.
+   * @param {{ state: any, attrs: { send: Send } }} vnode @param {App} app @param {string} oid */
+  async repositoryDiff(vnode, app, oid) {
+    const ui = vnode.state;
+    const key = `${app.id}:${oid}`;
+    if (ui.repositoryDiffKey === key) { ui.repositoryDiffKey = null; m.redraw(); return; }
+    ui.repositoryDiffKey = key;
+    if (ui.repositoryDiffs[key]) { m.redraw(); return; }
+    ui.error = null; ui.busyId = app.id;
+    try {
+      const r = await vnode.attrs.send({ type: 'apps/repository/diff', appId: app.id, from: oid, to: null });
+      if (!r?.ok) ui.error = r?.error ?? 'diff failed';
+      else ui.repositoryDiffs[key] = r.diff;
+    } catch (error) {
+      ui.error = /** @type {{message?:string}} */ (error)?.message ?? 'diff failed';
+    } finally {
+      ui.busyId = null;
+      m.redraw();
+    }
+  },
+
+  /** @param {{ state: any, attrs: { send: Send } }} vnode @param {App} app */
+  async repositoryCreateBranch(vnode, app) {
+    const ui = vnode.state;
+    const name = ui.repositoryBranch.trim();
+    if (!name) return;
+    ui.error = null; ui.busyId = app.id;
+    try {
+      const r = await vnode.attrs.send({ type: 'apps/repository/branch', appId: app.id, name, checkout: true });
+      if (!r?.ok) ui.error = r?.error ?? 'branch failed';
+      else {
+        ui.notice = `Created and checked out ${name}.`;
+        ui.repositoryBranch = '';
+        await LibrarySection.openRepository(vnode, app, true);
+      }
+    } catch (error) {
+      ui.error = /** @type {{message?:string}} */ (error)?.message ?? 'branch failed';
+    } finally {
+      ui.busyId = null;
+      m.redraw();
+    }
+  },
+
+  /** @param {{ state: any, attrs: { send: Send } }} vnode @param {App} app */
+  async repositoryCheckoutBranch(vnode, app) {
+    const ui = vnode.state;
+    const name = ui.repositoryCheckout;
+    if (!name || name === ui.repositories[app.id]?.status?.branch) return;
+    ui.error = null; ui.busyId = app.id;
+    try {
+      const r = await vnode.attrs.send({ type: 'apps/repository/checkout', appId: app.id, name });
+      if (!r?.ok) ui.error = r?.error ?? 'checkout failed';
+      else {
+        ui.notice = `Checked out ${name}.`;
+        await LibrarySection.openRepository(vnode, app, true);
+      }
+    } catch (error) {
+      ui.error = /** @type {{message?:string}} */ (error)?.message ?? 'checkout failed';
+    } finally {
+      ui.busyId = null;
+      m.redraw();
+    }
+  },
+
+  /** Link/fetch/push stays an explicit user gesture; secrets never return here.
+   * @param {{ state: any, attrs: { send: Send } }} vnode @param {App} app
+   * @param {'link'|'fetch'|'push'} op */
+  async repositoryRemote(vnode, app, op) {
+    const ui = vnode.state;
+    ui.error = null; ui.notice = null; ui.busyId = app.id;
+    try {
+      const type = `apps/repository/${op}`;
+      const r = await vnode.attrs.send({ type, appId: app.id, ...(op === 'link' ? { url: ui.remoteInput.trim() } : {}) });
+      if (!r?.ok) ui.error = r?.error ?? `${op} failed`;
+      else {
+        ui.notice = op === 'push' ? 'Pushed without force.' : op === 'fetch'
+          ? 'Fetched remote history. Your working branch was not merged or changed.' : 'Remote linked.';
+        await LibrarySection.openRepository(vnode, app, true);
+      }
+    } catch (error) {
+      ui.error = /** @type {{message?:string}} */ (error)?.message ?? `${op} failed`;
+    } finally {
+      ui.busyId = null;
+      m.redraw();
+    }
+  },
+
+  /** @param {{ state: any, attrs: { send: Send } }} vnode @param {App} app @param {string} oid */
+  async restoreRepository(vnode, app, oid) {
+    const ui = vnode.state;
+    const now = Date.now();
+    const armed = ui.armedRestore;
+    if (!armed || armed.appId !== app.id || armed.oid !== oid || armed.expiresAt < now) {
+      ui.armedRestore = { appId: app.id, oid, expiresAt: now + 10000 };
+      if (ui._restoreTimer) clearTimeout(ui._restoreTimer);
+      ui._restoreTimer = setTimeout(() => {
+        if (ui.armedRestore?.appId === app.id && ui.armedRestore?.oid === oid) {
+          ui.armedRestore = null; m.redraw();
+        }
+      }, 10000);
+      m.redraw();
+      return;
+    }
+    ui.armedRestore = null; ui.error = null; ui.busyId = app.id;
+    try {
+      const r = await vnode.attrs.send({ type: 'apps/repository/restore', appId: app.id, to: oid });
+      if (!r?.ok) ui.error = r?.error ?? 'restore failed';
+      else if (r.result?.restored) ui.notice = r.result?.checkpointOid
+        ? `Restored as a new commit. Your previous working tree is preserved in safety checkpoint ${String(r.result.checkpointOid).slice(0, 10)}.`
+        : 'Restored as a new commit; the prior history is still available.';
+      else if (r.result?.checkpointOid) ui.notice = `The target already matched this branch. Your previous working tree is preserved in safety checkpoint ${String(r.result.checkpointOid).slice(0, 10)}.`;
+      else ui.notice = 'Already at that version.';
+      if (r?.ok) await LibrarySection.openRepository(vnode, app, true);
+    } catch (error) {
+      ui.error = /** @type {{message?:string}} */ (error)?.message ?? 'restore failed';
+    } finally {
+      ui.busyId = null;
+      m.redraw();
+    }
+  },
+
   // Open the share dialog. First share: the namespace is editable (pre-filled from
   // the name). Reshare: it's LOCKED to the slug already minted (changing it would
   // fork a new app and orphan everyone who installed this one).
@@ -339,59 +543,79 @@ export const LibrarySection = {
     vnode.state.error = null;
     vnode.state.shareEditId = null;
     vnode.state.busyId = app.id;
-    const r = await vnode.attrs.send({ type: 'dweb/base/share-app', appId: app.id, slug });
-    vnode.state.busyId = null;
-    if (r?.ok) {
-      vnode.state.sharedId = app.id;
-      // Reflect the minted version identity locally so the button shows "Shared ✓"
-      // and the next Share opens LOCKED to this slug (no refetch round-trip).
-      app.shared = true;
-      app.dweb = { ...(app.dweb || {}), slug: r.slug, dwapp_id: r.dwapp_id, version_id: r.hash, seq: r.seq, publisher: r.publisher, uri: r.uri };
-      if (r.warning === 'previous-version-cleanup-pending') {
-        vnode.state.warning = 'The update was shared. Older shared bytes will be cleaned up on the next share or delete.';
+    try {
+      const r = await vnode.attrs.send({ type: 'dweb/base/share-app', appId: app.id, slug });
+      if (r?.ok) {
+        vnode.state.sharedId = app.id;
+        // Reflect the minted version identity locally so the button shows "Shared ✓"
+        // and the next Share opens LOCKED to this slug (no refetch round-trip).
+        app.shared = true;
+        app.dweb = { ...(app.dweb || {}), slug: r.slug, dwapp_id: r.dwapp_id, version_id: r.hash, seq: r.seq, publisher: r.publisher, uri: r.uri };
+        if (r.warning === 'previous-version-cleanup-pending') {
+          vnode.state.warning = 'The update was shared. Older shared bytes will be cleaned up on the next share or delete.';
+        }
+      } else {
+        vnode.state.error = r?.error === 'dweb-disabled'
+          ? 'turn the base network on (unlock + dweb enabled) to share'
+          : (r?.error ?? 'share failed');
       }
-    } else {
-      vnode.state.error = r?.error === 'dweb-disabled'
-        ? 'turn the base network on (unlock + dweb enabled) to share'
-        : (r?.error ?? 'share failed');
+    } catch (error) {
+      vnode.state.error = /** @type {{message?:string}} */ (error)?.message ?? 'share failed';
+    } finally {
+      vnode.state.busyId = null;
+      m.redraw();
+      focusLibraryAction(app.id, 'share');
     }
-    m.redraw();
-    focusLibraryAction(app.id, 'share');
   },
 
   // Pull a newer announced version of an installed app, overwriting it in place.
   /**
    * @param {{ state: any, attrs: { send: Send } }} vnode
    * @param {App} app
+   * @param {'fork'|'replace'} [strategy]
    */
-  async updateApp(vnode, app) {
+  async updateApp(vnode, app, strategy) {
     const up = vnode.state.updates[app.id];
     if (!up) return;
     vnode.state.error = null;
     vnode.state.warning = null;
     vnode.state.busyId = app.id;
-    const r = await vnode.attrs.send({ type: 'dweb/base/update-app', appId: app.id, uri: up.uri, name: up.name, dwappId: up.dwapp_id, slug: up.slug, seq: up.seq });
-    vnode.state.busyId = null;
-    if (r?.ok) {
-      delete vnode.state.updates[app.id];      // cleared — we're now on the new version
-      if (r.app?.dweb) app.dweb = r.app.dweb;
-      const warnings = new Set(Array.isArray(r.warnings) ? r.warnings : []);
-      if (r.warning) warnings.add(r.warning);
-      const notices = [];
-      if (warnings.has('audit-write-failed')) {
-        notices.push('The update was installed, but its security audit entry could not be written.');
-      } else if (warnings.has('previous-version-cleanup-pending')) {
-        notices.push('The update was installed.');
+    let succeeded = false;
+    try {
+      const r = await vnode.attrs.send({ type: 'dweb/base/update-app', appId: app.id, uri: up.uri, name: up.name, dwappId: up.dwapp_id, slug: up.slug, seq: up.seq, publisher: up.publisher, ...(strategy ? { strategy } : {}) });
+      if (r?.ok) {
+        succeeded = true;
+        delete vnode.state.updates[app.id];      // cleared: we're now on the new version
+        if (r.app?.dweb) app.dweb = r.app.dweb;
+        vnode.state.updateConflictId = null;
+        vnode.state.notice = r.fork
+          ? `Kept your local work as “${r.fork.name}” and updated this app.`
+          : 'Updated to the verified peer release.';
+        if (r.fork) LibrarySection.quietRefresh(vnode);
+        const warnings = new Set(Array.isArray(r.warnings) ? r.warnings : []);
+        if (r.warning) warnings.add(r.warning);
+        const notices = [];
+        if (warnings.has('audit-write-failed')) {
+          notices.push('The update was installed, but its security audit entry could not be written.');
+        } else if (warnings.has('previous-version-cleanup-pending')) {
+          notices.push('The update was installed.');
+        }
+        if (warnings.has('previous-version-cleanup-pending')) {
+          notices.push('Older shared bytes will be cleaned up on the next update or delete.');
+        }
+        vnode.state.warning = notices.join(' ') || null;
+      } else if (r?.error === 'local-changes') {
+        vnode.state.updateConflictId = app.id;
+      } else {
+        vnode.state.error = r?.error ?? 'update failed';
       }
-      if (warnings.has('previous-version-cleanup-pending')) {
-        notices.push('Older shared bytes will be cleaned up on the next update or delete.');
-      }
-      vnode.state.warning = notices.join(' ') || null;
-    } else {
-      vnode.state.error = r?.error ?? 'update failed';
+    } catch (error) {
+      vnode.state.error = /** @type {{message?:string}} */ (error)?.message ?? 'update failed';
+    } finally {
+      vnode.state.busyId = null;
+      m.redraw();
+      focusLibraryAction(app.id, succeeded ? 'open' : 'update');
     }
-    m.redraw();
-    focusLibraryAction(app.id, r?.ok ? 'open' : 'update');
   },
 
   /** @param {{ state: any, attrs: { send: Send, dweb?: boolean } }} vnode */
@@ -431,6 +655,7 @@ export const LibrarySection = {
     }
     const banners = [
       ui.error ? m('p.error', { role: 'alert', 'aria-live': 'assertive' }, ui.error) : null,
+      ui.notice ? m('p.library-notice', { role: 'status', 'aria-live': 'polite' }, ui.notice) : null,
       ui.warning ? m('p.muted', { role: 'status', 'aria-live': 'polite' }, ui.warning) : null,
     ];
     if (ui.apps.length === 0) {
@@ -478,8 +703,9 @@ export const LibrarySection = {
     const armed = ui.armedDeleteId === app.id;
 
     const menuOpen = ui.menuOpenId === app.id;
+    const expanded = ui.repositoryOpenId === app.id || ui.updateConflictId === app.id;
 
-    return m('.library-card', { key: app.id, 'data-app-id': app.id }, [
+    return m('.library-card', { key: app.id, class: expanded ? 'is-expanded' : '', 'data-app-id': app.id }, [
       m('.library-head', [
         m('.library-avatar', { style: `background:${colorOf(colorKeyOf(app))}`, 'aria-hidden': 'true' }, (app.name || '?').trim().charAt(0) || '?'),
         m('div', { style: 'flex:1; min-width:0;' }, [
@@ -524,7 +750,12 @@ export const LibrarySection = {
       // A peer published a newer version of this installed app — flag it, the
       // Update button below pulls it.
       ui.updates[app.id]
-        ? m('.library-update-badge', '● new version available')
+        ? m('.library-update-badge', [
+            '● new version available',
+            ui.updates[app.id].changelog
+              ? m('.library-changelog', ui.updates[app.id].changelog)
+              : null,
+          ])
         : null,
       // One primary (Open) + a kebab for the secondary actions, so Rename/Export/
       // Delete stop competing with Open for attention. The kebab is ALWAYS shown
@@ -562,9 +793,32 @@ export const LibrarySection = {
         menuOpen
           ? m('.library-menu', {
               role: 'menu',
-              onkeydown: (/** @type {KeyboardEvent} */ e) => { if (e.key === 'Escape') { ui.menuOpenId = null; ui.armedDeleteId = null; m.redraw(); } },
+              oncreate: (/** @type {{dom:HTMLElement}} */ v) => {
+                const first = v.dom.querySelector('[role="menuitem"]:not(:disabled)');
+                if (first instanceof HTMLElement) first.focus({ preventScroll: true });
+              },
+              onkeydown: (/** @type {KeyboardEvent} */ e) => {
+                const menu = /** @type {HTMLElement} */ (e.currentTarget);
+                const items = Array.from(menu.querySelectorAll('[role="menuitem"]:not(:disabled)'));
+                const active = document.activeElement;
+                const index = active ? items.indexOf(active) : -1;
+                let target = null;
+                if (e.key === 'ArrowDown') target = items[(index + 1 + items.length) % items.length];
+                else if (e.key === 'ArrowUp') target = items[(index - 1 + items.length) % items.length];
+                else if (e.key === 'Home') target = items[0];
+                else if (e.key === 'End') target = items.at(-1);
+                else if (e.key === 'Escape') {
+                  ui.menuOpenId = null;
+                  ui.armedDeleteId = null;
+                  m.redraw();
+                  focusLibraryAction(app.id, 'more');
+                } else return;
+                e.preventDefault();
+                if (target instanceof HTMLElement) target.focus({ preventScroll: true });
+              },
             }, [
               m('button.library-menu-item', { role: 'menuitem', disabled: busy, onclick: () => { ui.menuOpenId = null; LibrarySection.startRename(vnode, app); } }, 'Rename'),
+              m('button.library-menu-item', { role: 'menuitem', disabled: busy, onclick: () => LibrarySection.openRepository(vnode, app) }, 'History & Git'),
               m('button.library-menu-item', { role: 'menuitem', disabled: busy, onclick: () => { ui.menuOpenId = null; LibrarySection.exportApp(vnode, app); } }, 'Export'),
               m('.library-menu-sep'),
               // Seeded (shared / installed dwapp) apps get a "you're seeding this"
@@ -586,6 +840,8 @@ export const LibrarySection = {
       // identity — changing it forks a new app). Shows the full peerd:// handle so
       // the user sees exactly what peers will discover.
       ui.shareEditId === app.id ? LibrarySection.shareDialog(vnode, app) : null,
+      ui.repositoryOpenId === app.id ? LibrarySection.repositoryPanel(vnode, app) : null,
+      ui.updateConflictId === app.id ? LibrarySection.updateConflict(vnode, app) : null,
     ]);
   },
 
@@ -606,6 +862,7 @@ export const LibrarySection = {
         value: locked ? app.dweb.slug : ui.shareSlug,
         disabled: locked,
         spellcheck: 'false',
+        'aria-label': locked ? `Dweb namespace for ${app.name} (locked)` : `Dweb namespace for ${app.name}`,
         oncreate: (/** @type {{ dom: HTMLInputElement }} */ v) => { if (!locked) v.dom.focus(); },
         oninput: (/** @type {{ target: HTMLInputElement }} */ e) => { ui.shareSlug = e.target.value; },
         onkeydown: (/** @type {KeyboardEvent} */ e) => {
@@ -617,6 +874,142 @@ export const LibrarySection = {
       m('.library-actions', { style: 'gap:6px;' }, [
         m('button.library-btn', { disabled: !slug, onclick: () => LibrarySection.shareApp(vnode, app) }, locked ? 'Publish update' : 'Share'),
         m('button.library-btn', { onclick: () => { LibrarySection.cancelShare(vnode); m.redraw(); } }, 'Cancel'),
+      ]),
+    ]);
+  },
+
+  /** @param {{ state: any, attrs: { send: Send } }} vnode @param {App} app */
+  repositoryPanel(vnode, app) {
+    const ui = vnode.state;
+    const repo = ui.repositories[app.id];
+    const panelAttrs = {
+      role: 'region', 'aria-label': `History and Git for ${app.name}`, tabindex: '-1',
+      'data-library-repository-id': app.id,
+      oncreate: (/** @type {{dom:HTMLElement}} */ v) => {
+        if (ui.repositoryFocusId !== app.id) return;
+        ui.repositoryFocusId = null;
+        v.dom.focus({ preventScroll: true });
+      },
+    };
+    if (!repo) return m('.library-repository', panelAttrs, m('p.muted', 'Loading repository…'));
+    const changed = repo.status?.changed ?? [];
+    const isArmed = (/** @type {string} */ oid) => ui.armedRestore?.appId === app.id
+      && ui.armedRestore?.oid === oid && ui.armedRestore?.expiresAt >= Date.now();
+    return m('.library-repository', panelAttrs, [
+      m('.library-repository-head', [
+        m('strong', 'History & Git'),
+        m('span.muted', `${repo.status?.branch ?? 'detached'} · ${String(repo.status?.oid ?? '').slice(0, 10) || 'empty'}`),
+        m('button.icon', {
+          title: 'Close history', 'aria-label': `Close Git history for ${app.name}`,
+          onclick: () => {
+            ui.repositoryOpenId = null; ui.armedRestore = null; ui.repositoryDiffKey = null;
+            ui.repositoryFocusId = null;
+            focusLibraryAction(app.id, 'more');
+          },
+        }, '×'),
+      ]),
+      changed.length
+        ? m('.library-repository-dirty', [
+            m('span', `${changed.length} uncommitted change${changed.length === 1 ? '' : 's'}`),
+            m('input', {
+              type: 'text', value: ui.repositoryMessage, maxlength: 160,
+              placeholder: 'What changed? (no secrets)',
+              'aria-label': `Checkpoint message for ${app.name}`,
+              disabled: ui.busyId === app.id,
+              oninput: (/** @type {{target:HTMLInputElement}} */ e) => { ui.repositoryMessage = e.target.value; },
+              onkeydown: (/** @type {KeyboardEvent} */ e) => {
+                if (e.key === 'Enter') LibrarySection.checkpointRepository(vnode, app, ui.repositoryMessage.trim() || 'manual checkpoint');
+              },
+            }),
+            m('button.library-btn', {
+              disabled: ui.busyId === app.id,
+              onclick: () => LibrarySection.checkpointRepository(vnode, app, ui.repositoryMessage.trim() || 'manual checkpoint'),
+            }, 'Checkpoint'),
+          ])
+        : m('p.muted.library-repository-clean', 'Working tree clean.'),
+      changed.length ? m('.library-change-list', changed.slice(0, 8).map((/** @type {any} */ row) => m('code', `${row.status}  ${row.path}`))) : null,
+      m('.library-branch-row', [
+        repo.branches?.length > 1 ? m('select', {
+          value: ui.repositoryCheckout,
+          'aria-label': `Existing Git branch for ${app.name}`,
+          disabled: ui.busyId === app.id || repo.status?.dirty,
+          onchange: (/** @type {{target:HTMLSelectElement}} */ e) => { ui.repositoryCheckout = e.target.value; },
+        }, repo.branches.map((/** @type {string} */ name) => m('option', { value: name }, name))) : null,
+        repo.branches?.length > 1 ? m('button.library-btn', {
+          disabled: !ui.repositoryCheckout || ui.repositoryCheckout === repo.status?.branch || repo.status?.dirty || ui.busyId === app.id,
+          onclick: () => LibrarySection.repositoryCheckoutBranch(vnode, app),
+        }, 'Switch') : null,
+        m('input', {
+          type: 'text', spellcheck: false, value: ui.repositoryBranch,
+          placeholder: 'feature/my-change', 'aria-label': `New branch name for ${app.name}`,
+          disabled: ui.busyId === app.id,
+          oninput: (/** @type {{target:HTMLInputElement}} */ e) => { ui.repositoryBranch = e.target.value; },
+        }),
+        m('button.library-btn', {
+          disabled: !ui.repositoryBranch.trim() || ui.repositoryBranch.trim() === repo.status?.branch || ui.busyId === app.id,
+          onclick: () => LibrarySection.repositoryCreateBranch(vnode, app),
+        }, 'New branch'),
+      ]),
+      m('.library-remote-row', [
+        m('input', {
+          type: 'url', spellcheck: false, placeholder: 'https://github.com/you/repo',
+          'aria-label': `Git remote URL for ${app.name}`,
+          value: ui.remoteInput,
+          oninput: (/** @type {{target:HTMLInputElement}} */ e) => { ui.remoteInput = e.target.value; },
+        }),
+        m('button.library-btn', { disabled: !ui.remoteInput.trim() || ui.busyId === app.id, onclick: () => LibrarySection.repositoryRemote(vnode, app, 'link') }, repo.remote ? 'Relink' : 'Link'),
+      ]),
+      repo.remote ? m('.library-remote-actions', [
+        m('span.muted', repo.remote.url),
+        m('button.library-btn', { disabled: ui.busyId === app.id, onclick: () => LibrarySection.repositoryRemote(vnode, app, 'fetch') }, 'Fetch'),
+        m('button.library-btn', { disabled: ui.busyId === app.id, onclick: () => LibrarySection.repositoryRemote(vnode, app, 'push') }, 'Push'),
+      ]) : m('p.muted.library-repository-clean', 'Link a new, empty HTTPS remote for backup. Add a host token under Settings → API integrations for private repositories.'),
+      m('p.muted.library-repository-help', [
+        'Fetch downloads remote history but never merges or overwrites this App. To import an existing repository, ask the agent to clone its URL as an App; repositories needing LFS, submodules, symlinks, or a large history belong in a WebVM.',
+      ]),
+      m('.library-commit-list', repo.commits.map((/** @type {any} */ commit) => {
+        const key = `${app.id}:${commit.oid}`;
+        const diff = ui.repositoryDiffs[key];
+        const open = ui.repositoryDiffKey === key;
+        return m('.library-commit-block', { key: commit.oid }, [
+          m('.library-commit', [
+            m('code', commit.oid.slice(0, 10)),
+            m('span.library-commit-message', [commit.safety ? m('span', { title: 'Private recovery checkpoint' }, 'safety · ') : null, commit.message || '(no message)']),
+            m('span.muted', fmtWhen(commit.timestamp)),
+            commit.safety ? null : m('button.library-btn', {
+              disabled: ui.busyId === app.id,
+              'aria-expanded': String(open),
+              'aria-label': `${open ? 'Hide' : 'Show'} changes since ${commit.message || commit.oid.slice(0, 10)}`,
+              onclick: () => LibrarySection.repositoryDiff(vnode, app, commit.oid),
+            }, open ? 'Hide diff' : 'Diff'),
+            m('button.library-btn', {
+              class: isArmed(commit.oid) ? 'is-armed' : '',
+              disabled: ui.busyId === app.id,
+              'aria-label': `${isArmed(commit.oid) ? 'Confirm restore' : 'Restore'} ${app.name} to ${commit.message || commit.oid.slice(0, 10)}`,
+              onclick: () => LibrarySection.restoreRepository(vnode, app, commit.oid),
+            }, isArmed(commit.oid) ? 'Restore?' : 'Restore'),
+          ]),
+          open ? m('.library-diff', { 'aria-live': 'polite' }, [
+            diff
+              ? [m('.muted.library-diff-summary', `${diff.files?.length ?? 0} changed file${diff.files?.length === 1 ? '' : 's'}${diff.truncated ? ' · preview truncated' : ''}`),
+                  m('pre', diff.patch || (diff.files?.length ? 'Binary or large-file changes cannot be previewed.' : 'No changes.'))]
+              : m('p.muted', 'Loading diff…'),
+          ]) : null,
+        ]);
+      })),
+    ]);
+  },
+
+  /** @param {{ state: any, attrs: { send: Send } }} vnode @param {App} app */
+  updateConflict(vnode, app) {
+    const ui = vnode.state;
+    return m('.library-update-conflict', { role: 'group', 'aria-live': 'assertive', 'aria-label': `Resolve update conflict for ${app.name}` }, [
+      m('strong', 'You changed this app locally.'),
+      m('p', 'The peer update will not overwrite those changes silently. Keep a local fork, or explicitly replace this copy with the verified release.'),
+      m('.library-actions', [
+        m('button.library-open', { disabled: ui.busyId === app.id, onclick: () => LibrarySection.updateApp(vnode, app, 'fork') }, 'Keep a fork & update'),
+        m('button.library-btn', { disabled: ui.busyId === app.id, onclick: () => LibrarySection.updateApp(vnode, app, 'replace') }, 'Replace local copy'),
+        m('button.library-btn', { onclick: () => { ui.updateConflictId = null; } }, 'Cancel'),
       ]),
     ]);
   },

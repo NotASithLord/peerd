@@ -205,7 +205,7 @@ describe('askOutcome — the timeout / system-refusal / actor-failure fork', () 
       .toEqual({ ok: true, reply: 'done: 42', failed: false });
   });
   test("a SYSTEM refusal (message_actor: prefix) rejects verbatim — policy is felt as policy", () => {
-    const refusal = 'message_actor: oneShot is sandbox-only (webvm/notebook/app) — …';
+    const refusal = 'message_actor: oneShot is sandbox-only (webvm/notebook/pod/app): …';
     expect(askOutcome({ ok: false, error: refusal }, { timedOut: false, timeoutMs: 5000, to: 'web' }))
       .toEqual({ ok: false, error: refusal });
   });

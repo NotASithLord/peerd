@@ -10,8 +10,8 @@ import { describe, it, expect } from '../../../framework.js';
 import {
   resolveEngine,
   detectVoiceCapability,
-  createBestTranscriber,
 } from '/peerd-runtime/voice/engine-picker.js';
+import { createBestTranscriber } from '/peerd-runtime/voice/transcriber-picker.js';
 
 describe('resolveEngine — web-speech is the default, moonshine the opt-in', () => {
   // [pref, webSpeech, moonshine] -> resolved engine

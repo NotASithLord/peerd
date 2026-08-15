@@ -38,6 +38,7 @@ const EXT = resolve(ROOT, 'extension');
 export const PASSPHRASE = 'correct-horse-battery-staple';
 export const NETWORK_GUARD_CONTROLLER_PORT = 18_763;
 export const READY_BUDGET_MS = 30_000; // extension load + SW boot + page mount
+const VAULT_READY_BUDGET_MS = 120_000; // production Argon2 under loaded CI/browser hosts
 export const POLL_MS = 250;
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -490,7 +491,14 @@ export async function launchPeerd({
   process.on('exit', cleanup);
   process.on('SIGINT', () => { cleanup(); process.exit(130); });
 
-  const port = await waitForCdpPort(profile);
+  let port;
+  try {
+    port = await waitForCdpPort(profile);
+  } catch (error) {
+    cleanup();
+    const diagnostics = chromeErr.trim();
+    throw new Error(`${error?.message ?? error}${diagnostics ? `\nChrome stderr:\n${diagnostics}` : ''}`);
+  }
   log('cdp port:', port);
 
   // Redirect downloads browser-wide to the temp dir (headless honors this CDP
@@ -709,7 +717,13 @@ export async function visualCheck(ctx, checks, name, opts = {}) {
  * @param {object} page  the page CDP connection from launchPeerd
  */
 export async function unlockAndReady(page, { provider = 'ollama', model = 'qwen3:8b' } = {}) {
-  const vault = await rpc(page, { type: 'vault/initialize', passphrase: PASSPHRASE });
+  // Vault initialization intentionally uses the production Argon2 parameters.
+  // Its budget is separate from ordinary extension boot/RPC readiness: loaded
+  // CI runners can spend well over 30 seconds in the browser worker without
+  // indicating a hung message channel.
+  const vault = await rpc(page, { type: 'vault/initialize', passphrase: PASSPHRASE }, {
+    timeoutMs: VAULT_READY_BUDGET_MS,
+  });
   if (!vault?.ok) throw new Error('vault/initialize failed: ' + JSON.stringify(vault));
   log('vault initialized + unlocked');
   await rpc(page, { type: 'onboarding/complete', peerName: 'peerd', facts: null });

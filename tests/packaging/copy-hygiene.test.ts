@@ -32,13 +32,14 @@ const makeRepository = (): string => {
   const root = mkdtempSync(join(tmpdir(), 'peerd-copy-hygiene-'));
   temporaryRoots.push(root);
   const git = (...args: string[]) => execFileSync('git', args, { cwd: root, stdio: 'ignore' });
-  git('init', '-b', 'main');
+  git('init');
+  git('checkout', '-b', 'main');
   git('config', 'user.name', 'Human Maintainer');
   git('config', 'user.email', 'human@example.test');
   writeFileSync(join(root, 'tracked.md'), `legacy ${DASH} allowed\n`);
   git('add', 'tracked.md');
   git('commit', '-m', 'initial');
-  git('switch', '-c', 'feature');
+  git('checkout', '-b', 'feature');
   return root;
 };
 
