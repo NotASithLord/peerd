@@ -3,14 +3,10 @@
 // Three facts about how code gets INTO peerd, each derived from repo state
 // rather than asserted in prose:
 //
-//   1. runtime npm dependencies. The extension ships none. package.json has no
-//      `dependencies` at all, and packaging/package.ts stages extension/
-//      verbatim without ever resolving a node_modules path, so the build-time
-//      tree cannot reach a user. A number that must stay 0.
-//   2. vendored files. Third-party runtime code lives in extension/vendor/ and
+//   1. vendored files. Third-party runtime code lives in extension/vendor/ and
 //      ships verbatim, so every byte is pinned by SHA-256 in vendor.lock.json
 //      and check-vendor.ts fails on any divergence.
-//   3. GitHub Action pins. A major tag is a mutable ref the publisher can move,
+//   2. GitHub Action pins. A major tag is a mutable ref the publisher can move,
 //      which means arbitrary code in release CI. Every third-party action is
 //      pinned to a full commit SHA.
 //
@@ -82,15 +78,6 @@ export const scanActionPins = (
   };
 };
 
-/** npm packages the SHIPPED extension depends on at runtime. Must be zero. */
-export const countRuntimeDependencies = (packageJson: unknown): number => {
-  const dependencies = (packageJson as { dependencies?: Record<string, string> })?.dependencies;
-  if (dependencies !== undefined && typeof dependencies !== 'object') {
-    throw new Error('package.json "dependencies" is not an object');
-  }
-  return Object.keys(dependencies ?? {}).length;
-};
-
 /** Files carrying a SHA-256 in extension/vendor/vendor.lock.json. */
 export const countVendorLockedFiles = (lock: unknown): number => {
   const files = (lock as { files?: Record<string, string> })?.files;
@@ -141,6 +128,14 @@ export const scanBuildStep = (
     const hit = BUILD_TOOLCHAINS.find((tool) => name.startsWith(tool));
     if (hit) offenders.push(`dependency "${name}" is a bundler or transpiler`);
   }
+  // A runtime dependency is the same claim from the other side: it would mean
+  // npm code reaching an installed extension, which cannot happen while
+  // packaging stages extension/ verbatim. This lived on its own badge until it
+  // folded in here; the fact still needs a gate even without a plate on the
+  // README.
+  for (const name of Object.keys(pkg?.dependencies ?? {})) {
+    offenders.push(`"${name}" is a RUNTIME dependency; the shipped extension takes none`);
+  }
   if (pkg?.scripts && Object.hasOwn(pkg.scripts, 'build')) {
     offenders.push('package.json declares a "build" script');
   }
@@ -157,16 +152,6 @@ export const buildStepBadge = (scan: BuildStepScan): ShieldsBadge => ({
   message: scan.offenders.length === 0 ? 'none (vanilla JS)' : 'present',
   color: scan.offenders.length === 0 ? 'brightgreen' : 'red',
   ...laneLogo('javascript'),
-});
-
-export const runtimeDepsBadge = (count: number): ShieldsBadge => ({
-  schemaVersion: 1,
-  label: 'Runtime npm deps',
-  message: String(count),
-  // why red at one: the invariant is not "few", it is "none". Any number
-  // other than zero means npm code can reach an installed extension.
-  color: count === 0 ? 'brightgreen' : 'red',
-  ...laneLogo('npm'),
 });
 
 export const vendorIntegrityBadge = (files: number): ShieldsBadge => ({
