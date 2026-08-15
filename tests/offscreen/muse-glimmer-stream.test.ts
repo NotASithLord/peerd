@@ -93,6 +93,27 @@ describe('makeMuseChannelSplitter', () => {
     expect(splitter.reconcile(null)).toBe('');
     expect(splitter.visible).toBe('Streamed text plus a tail');
   });
+  test('token-grounded: reasoning QUOTING the marker cannot open the channel while disarmed', () => {
+    const splitter = makeMuseChannelSplitter({ tokenGrounded: true });
+    expect(splitter.push(' to=selfThe phrase assistant to=user is how channels switch; more secret planning')).toBe('');
+    expect(splitter.visible).toBe('');
+    // ...and the reconcile fallback carrying the same quoted marker stays shut.
+    expect(splitter.reconcile(' to=selfThe phrase assistant to=user is how channels switch; more secret planning')).toBe('');
+    expect(splitter.visible).toBe('');
+  });
+  test('token-grounded: after arm(), only a marker at/after the armed offset flips the channel', () => {
+    const splitter = makeMuseChannelSplitter({ tokenGrounded: true });
+    const reasoning = ' to=selfquote: assistant to=user is a marker. Done thinking.';
+    expect(splitter.push(reasoning)).toBe('');
+    splitter.arm(reasoning.length - 4);
+    const full = `${reasoning}${MUSE_CONTENT_MARKER} The real answer.`;
+    expect(splitter.push(full)).toBe(' The real answer.');
+    expect(splitter.visible).toBe(' The real answer.');
+  });
+  test('museVisibleText honors switchFrom: null never switches, an offset skips quoted markers', () => {
+    expect(museVisibleText(' to=selfassistant to=userX', null)).toBe('');
+    expect(museVisibleText(' to=selfquoted assistant to=user then realassistant to=userX', 40)).toBe('X');
+  });
   test('reconcile never leaks the reasoning channel from the engine\'s raw fallback', () => {
     // The engine's post-parse falls back to the RAW special-stripped text when
     // its channel parse fails (token budget exhausted mid-reasoning) - that

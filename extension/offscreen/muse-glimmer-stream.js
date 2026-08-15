@@ -19,13 +19,18 @@
 // marker yet" a plain indexOf instead of a partial-match state machine, and the
 // per-yield delta is just the newly-visible suffix.
 //
-// ACCEPTED RISK: reasoning that happens to contain the literal string
-// 'assistant to=user' flips the channel early and streams the rest of the
-// reasoning as visible text. The Space's own UI makes the same text-level
-// split; disambiguating would need a specials-kept decode the engine does not
-// expose to its streaming callers. The FINAL message is immune either way -
-// the engine's post-parse works on the raw special tokens, and reconcile()
-// refuses a divergent final text rather than doubling it.
+// TOKEN GROUNDING (switchFrom): the switch marker is plain text once the
+// specials are stripped, so reasoning that merely QUOTES the words
+// 'assistant to=user' (e.g. echoing a prompt that contains them) would flip
+// the channel early and stream the rest of the reasoning as visible text.
+// The engine CAN disambiguate: generate() yields the token id per step, and
+// the runtime's tokenizer names the real <|eom|> id - so the engine arms the
+// splitter (`arm(offset)`) when that token actually goes by, and a marker
+// before the armed offset is quoted text, not a switch. Verified live: the
+// tokenizer resolves '<|eom|>' (id 200007) and the split matches the
+// engine's own post-parse. Callers that cannot token-ground (tests, an
+// unresolvable id) get the text-only behavior via the default armed-at-0
+// state.
 //
 // PURE on purpose: values in, values out, no engine imports - this is the
 // Bun-testable half of the muse generate path (tests/offscreen/).
@@ -46,9 +51,14 @@ const ALL_OPENERS = Object.freeze([...SELF_OPENERS, ...USER_OPENERS]);
  * direct testing; the stateful splitter below wraps it with delta emission.
  *
  * @param {string} text cumulative decoded stream (special tokens stripped)
+ * @param {number | null} [switchFrom] earliest offset the reasoning-to-visible
+ *   switch marker may match at (token-grounded by the caller); null means the
+ *   real switch has not happened yet, so a marker-looking substring is
+ *   reasoning QUOTING the marker and stays hidden. Default 0 = text-only
+ *   detection (the ungrounded fallback).
  * @returns {string} the visible-channel text revealed so far
  */
-export const museVisibleText = (text) => {
+export const museVisibleText = (text, switchFrom = 0) => {
   for (const opener of USER_OPENERS) {
     if (text.startsWith(opener)) return text.slice(opener.length);
   }
@@ -56,8 +66,11 @@ export const museVisibleText = (text) => {
     if (!text.startsWith(opener)) continue;
     // Reasoning first: nothing is visible until the COMPLETE content marker
     // has streamed past (a partial marker at the tail stays hidden - revealing
-    // on a partial match could leak marker fragments into the bubble).
-    const at = text.indexOf(MUSE_CONTENT_MARKER, opener.length);
+    // on a partial match could leak marker fragments into the bubble), and -
+    // when the caller token-grounds the switch - not before the offset where
+    // the real <|eom|> went by.
+    if (switchFrom === null) return '';
+    const at = text.indexOf(MUSE_CONTENT_MARKER, Math.max(opener.length, switchFrom));
     return at === -1 ? '' : text.slice(at + MUSE_CONTENT_MARKER.length);
   }
   // Too short to tell which channel opener this is yet? Hold everything back -
@@ -77,13 +90,29 @@ export const museVisibleText = (text) => {
  * returns the missing tail so the caller can flush it; if the stream already
  * said something different, it returns '' - deltas already sent cannot be
  * retracted, and re-appending a divergent full text would double the message.
+ *
+ * `tokenGrounded: true` starts with the switch DISARMED (marker text alone
+ * cannot flip the channel); the engine calls `arm(offset)` when it sees the
+ * real <|eom|> token id go by, with the cumulative-text length at that step.
+ *
+ * @param {{ tokenGrounded?: boolean }} [opts]
  */
-export const makeMuseChannelSplitter = () => {
+export const makeMuseChannelSplitter = ({ tokenGrounded = false } = {}) => {
   let emitted = '';
+  /** @type {number | null} */
+  let switchFrom = tokenGrounded ? null : 0;
   return {
+    /**
+     * The real channel switch is now known to start at/after `offset` in the
+     * cumulative text (small backoffs are fine; earlier text is reasoning).
+     * @param {number} offset
+     */
+    arm(offset) {
+      if (switchFrom === null) switchFrom = Math.max(0, offset);
+    },
     /** @param {string} cumulativeText @returns {string} newly visible delta */
     push(cumulativeText) {
-      const visible = museVisibleText(cumulativeText);
+      const visible = museVisibleText(cumulativeText, switchFrom);
       if (visible.length <= emitted.length) return '';
       const delta = visible.slice(emitted.length);
       emitted = visible;
@@ -97,8 +126,10 @@ export const makeMuseChannelSplitter = () => {
       // mid-reasoning), so `finalContent` can arrive channel-framed - flushing
       // it verbatim would dump the hidden reasoning channel into the chat.
       // Re-applying the visibility rule is a no-op for clean content and
-      // extracts only the visible part of a raw fallback.
-      const visible = museVisibleText(finalContent);
+      // extracts only the visible part of a raw fallback; the token-grounded
+      // switch offset carries over (the fallback IS the cumulative stream
+      // text, so offsets line up).
+      const visible = museVisibleText(finalContent, switchFrom);
       if (visible === '' || !visible.startsWith(emitted)) return '';
       const tail = visible.slice(emitted.length);
       emitted = visible;

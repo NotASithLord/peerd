@@ -578,8 +578,19 @@ export const generateLocal = async (req, onToken, { signal } = {}) => {
       // missed, taken from the engine's own authoritative post-parse (and
       // re-filtered through the same visibility rule, so a truncated
       // generation's raw fallback can never flush the reasoning channel).
-      const splitter = makeMuseChannelSplitter();
+      //
+      // TOKEN-GROUNDED switch: reasoning that merely QUOTES the words
+      // "assistant to=user" must not flip the channel - only the real <|eom|>
+      // token does. Watch for that token id in the stream and arm the splitter
+      // at (roughly) the cumulative-text offset where it went by; the 8-char
+      // backoff absorbs incremental-decode boundary flux. An unresolvable id
+      // falls back to text-only detection.
+      const eomId = museInstance.tokenizer?.token_to_id?.('<|eom|>') ?? null;
+      const splitter = makeMuseChannelSplitter({ tokenGrounded: eomId != null });
       for await (const step of museInstance.generate(messages, { maxNewTokens: req.maxTokens ?? 512, signal })) {
+        if (eomId != null && step?.token === eomId) {
+          splitter.arm(Math.max(0, String(step?.text ?? '').length - 8));
+        }
         const delta = splitter.push(String(step?.text ?? ''));
         if (delta) onToken(delta);
       }

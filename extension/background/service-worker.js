@@ -4156,7 +4156,15 @@ const generateLocalForAdapter = (/** @type {any} */ opts) => {
   if (hostAvailable) {
     if (opts.signal) opts.signal.addEventListener('abort', abortHostGeneration, { once: true });
     ensureOffscreen()
-      .then(() => browser.runtime.sendMessage({ type: 'local-model/host/generate', genId, model: opts.model, messages: opts.messages, system: opts.system, tools: opts.tools, maxTokens: 512 }))
+      .then(() => browser.runtime.sendMessage({
+        type: 'local-model/host/generate', genId, model: opts.model, messages: opts.messages, system: opts.system, tools: opts.tools,
+        // Token budget per ENGINE: the muse model spends its Harmony reasoning
+        // channel out of the same budget as the visible answer, and a measured
+        // live run showed the reasoning alone can exhaust 512 (leaving the
+        // visible reply empty). Generation still stops at end-of-turn, so the
+        // larger cap only costs tokens actually produced.
+        maxTokens: localModelSpec(opts.model ?? LOCAL_MODEL_ID)?.engine === 'muse-glimmer' ? 2048 : 512,
+      }))
       .catch((e) => { state.done = true; state.error = e; wakeLocalGen(state); });
   }
   return (async function* () {
