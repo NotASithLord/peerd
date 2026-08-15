@@ -285,13 +285,23 @@ export const ProvidersSection = {
       : 'your API key';
     const settingsProviderName = state.settings?.providerName ?? '';
     const localWebGpuAvailable = state.capabilities?.localWebGpuHost?.status === 'available';
-    // why: A provider is usable when it has its required key, Local WebGPU has a
-    // runtime host, or a keyless daemon is reachable. Keep an explicitly chosen
+    // why NOT localWebGpuAvailable here: that flag is a HOST fact, not readiness.
+    // It reports only that an offscreen document can be created, so it is true on
+    // every Chrome regardless of GPU or whether the on-device model was ever
+    // downloaded. models/options is the readiness signal: model-catalog drops
+    // local-webgpu until it is resident, so membership there means a first turn
+    // would actually run. Matches ensureActiveProvider, which binds a new chat on
+    // localModelState.available(); Settings must not name a default the SW would
+    // refuse to bind.
+    const localWebGpuReady = (ui.modelOptions ?? [])
+      .some((/** @type {any} */ o) => o.provider === 'local-webgpu');
+    // why: A provider is usable when it has its required key, the on-device model
+    // is resident, or a keyless daemon is reachable. Keep an explicitly chosen
     // Ollama usable through a transient outage so its warning does not replace
     // the configured default controls. A confirmed no-models result still blocks.
     /** @param {ProviderRow} p */
     const isUsable = (p) => (!p.keyless && !!p.hasKey)
-      || (p.name === 'local-webgpu' && localWebGpuAvailable)
+      || (p.name === 'local-webgpu' && localWebGpuReady)
       || (!!p.keyless && ui.connStatus[p.name] === 'connected')
       || (p.name === 'ollama'
         && settingsProviderName === p.name

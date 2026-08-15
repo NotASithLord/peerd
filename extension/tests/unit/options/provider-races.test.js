@@ -15,7 +15,13 @@ const settle = async () => {
 };
 
 describe('provider settings request ordering', () => {
-  it('auto-selects Local WebGPU when its runtime host is available', async () => {
+  // why both directions: `localWebGpuHost` is available on EVERY Chrome (it only
+  // reports that an offscreen document can be created), so gating selection on it
+  // would name a default that ensureActiveProvider then refuses to bind. Settings
+  // would read "Local WebGPU" while the composer still demanded an Anthropic key.
+  // Residency, reported through models/options, is the signal that matters.
+  /** @param {any[]} options models/options reply for a host-available Chrome */
+  const mountLocalWebGpu = (options) => {
     const root = document.createElement('div');
     document.body.appendChild(root);
     const state = {
@@ -31,11 +37,33 @@ describe('provider settings request ordering', () => {
           { name: 'local-webgpu', label: 'Local WebGPU', defaultModel: 'gemma-4-e2b', hasKey: true, keyless: true },
         ],
       };
-      if (msg.type === 'local-model/status') return { ok: true, downloaded: false };
-      if (msg.type === 'models/options') return { ok: true, options: [] };
+      if (msg.type === 'local-model/status') return { ok: true, downloaded: options.length > 0 };
+      if (msg.type === 'models/options') return { ok: true, options };
       return { ok: false };
     };
     m.mount(root, { view: () => m(ProvidersSection, { state, send }) });
+    return root;
+  };
+
+  it('does not select Local WebGPU while the on-device model is not resident', async () => {
+    const root = mountLocalWebGpu([]);
+    try {
+      await settle();
+      await settle();
+      // The host exists but the model was never downloaded, so nothing is usable:
+      // the honest empty state, not a default the first turn could not serve.
+      expect(root.querySelector('#provider')).toBe(null);
+      expect(root.textContent).toContain('Nothing is assumed');
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
+
+  it('auto-selects Local WebGPU once the on-device model is resident', async () => {
+    const root = mountLocalWebGpu([
+      { provider: 'local-webgpu', model: 'gemma-4-e2b', label: 'gemma-4-e2b' },
+    ]);
     try {
       await settle();
       await settle();
