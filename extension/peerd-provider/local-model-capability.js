@@ -29,26 +29,44 @@ const GB = 2 ** 30;
  * model's effective window, that LIVE value overrides this (see
  * setLocalModelInfo in local-webgpu.js).
  *
- * `repo` / `modelClass` / `dtype` are the LOAD RECIPE: the HF repo the weights
- * stream from, the Transformers.js class the engine instantiates, and the
- * quantization. why `modelClass` is a NAME, not a value: it doubles as the
- * runtime-support probe - the engine looks the class up on the vendored
- * Transformers.js module, so a model whose architecture that build doesn't
- * carry is detected as unrunnable BEFORE a multi-GB download starts, and
- * unlocks itself with no code edit once the vendor pin catches up
- * (scripts/vendor-transformers.sh). See engineSupportsSpec in
- * offscreen/local-model.js.
+ * `engine` names WHICH vendored runtime loads this model - the engine table in
+ * offscreen/local-model.js dispatches on it:
+ *   - 'transformers'  → Transformers.js + ONNX-Runtime-Web (ONNX exports).
+ *   - 'muse-glimmer'  → the vendored Muse Glimmer WebGPU GGUF runtime
+ *     (vendor/muse-glimmer/ - custom WGSL kernels, its own GGUF loader).
+ * why a field and not a heuristic: the runtimes have disjoint formats (ONNX vs
+ * GGUF), caches and APIs; which one a model needs is a fact about the model,
+ * so it lives on the spec.
+ *
+ * `repo` / `file` / `modelClass` / `dtype` are the LOAD RECIPE: the HF repo the
+ * weights stream from, the specific weight file inside it (GGUF engines only;
+ * null where the runtime resolves files itself), the Transformers.js class the
+ * engine instantiates ('transformers' only), and the quantization.
+ *
+ * `modelClass` is OPTIONAL and means "load through THIS exact class" - use it
+ * only to pin a narrower path than the architecture's default, the way Gemma
+ * pins the text-only causal LM to skip its vision and audio encoders. Leave it
+ * NULL for a model that should load through AutoModelForCausalLM: the engine
+ * then reads the repo's own config and asks the runtime whether it dispatches
+ * that architecture. why null is the better default: a class name is a guess
+ * about how someone published an export, and a wrong guess locks a model that
+ * would have run - the repo's config cannot be wrong about what it is. Either
+ * way the check happens BEFORE a multi-GB download and re-answers itself when
+ * the vendor pin moves (scripts/vendor-transformers.sh). See engineSupportsSpec
+ * in offscreen/local-model.js. (Non-transformers engines ignore it.)
  *
  * `cachePattern` matches the weight URLs Transformers.js writes into the Cache
  * API, so a model downloaded by a PREVIOUS install is detected as resident
- * without a re-download.
+ * without a re-download. (Cache-probe is a 'transformers' retrofit; the
+ * muse-glimmer engine postdates the persisted download record and relies on it.)
  *
  * `specVerified` is false while the hardware figures are derived from the
  * model card rather than a real on-device load. why it's a field and not a
  * comment: the Settings card renders the caveat, so an unverified number can
  * never quietly read as a measured one.
  *
- * @typedef {{ id: string, label: string, url: string, repo: string, modelClass: string,
+ * @typedef {{ id: string, label: string, url: string, engine: 'transformers' | 'muse-glimmer',
+ *   repo: string, file: string | null, modelClass: string | null,
  *   dtype: string, cachePattern: string, sizeGB: number, minStorageBufferBindingSizeGB: number,
  *   minBufferSizeGB: number, requiresShaderF16: boolean, contextWindow: number,
  *   specVerified: boolean, note?: string }} ModelSpec
@@ -58,7 +76,9 @@ export const MODEL_SPECS = Object.freeze({
     id: 'gemma-4-e2b',
     label: 'Gemma 4 E2B',
     url: 'https://huggingface.co/onnx-community/gemma-4-E2B-it-ONNX',
+    engine: /** @type {const} */ ('transformers'),
     repo: 'onnx-community/gemma-4-E2B-it-ONNX',
+    file: null,
     // TEXT-ONLY path: Gemma4ForCausalLM (not Gemma4ForConditionalGeneration) loads
     // embed_tokens + decoder and skips the vision/audio encoders the runner never uses.
     modelClass: 'Gemma4ForCausalLM',
@@ -72,39 +92,43 @@ export const MODEL_SPECS = Object.freeze({
     specVerified: true,
   }),
   // Muse Glimmer 30B (Meta, Apache-2.0) - the agentic on-device model behind
-  // webml-community/muse-glimmer-webgpu-kernels. Listed so the option exists the
-  // moment it can run, but it is NOT loadable on the currently vendored
-  // Transformers.js (4.2.0 - the latest published, and its `main` branch too -
-  // ships no `muse_glimmer` architecture, so `MuseGlimmerForCausalLM` is absent
-  // and the engine's support probe locks the card). Two things must land before
-  // this unlocks, and BOTH are upstream, not here:
-  //   1. a Transformers.js build carrying the architecture (re-run
-  //      scripts/vendor-transformers.sh - the probe flips on its own), and
-  //   2. a browser-loadable ONNX export; `repo` below is the conventional
-  //      onnx-community name for it and is UNCONFIRMED.
-  // The hardware figures are model-card arithmetic (30B ≈ 2B ViT + 28B decoder,
-  // ~17 GB at 4-bit), hence specVerified:false - and note that a tensor that size
-  // exceeds what WebGPU can bind on today's consumer hardware, which is exactly
-  // what judgeModelCapability will tell a user who runs the test.
+  // webml-community/muse-glimmer-webgpu-kernels. It does NOT load through
+  // Transformers.js (which is ONNX-only): the Space ships its own WebGPU GGUF
+  // runtime (custom WGSL kernels + GGUF loader), vendored at
+  // vendor/muse-glimmer/, and this entry loads through THAT engine. repo/file
+  // are the runtime's own defaults (its DEFAULT_MODEL_ID / DEFAULT_GGUF_FILE),
+  // so peerd streams exactly the artifact the Space runs.
+  //
+  // requiresShaderF16 is FALSE: the runtime's kernel manifests prefer f16
+  // variants but carry f32 fallbacks, and its own checkSupport (run in
+  // engineSupportsSpec before any download) is the authoritative per-device
+  // gate - a spec-level f16 refusal here would lock devices the runtime
+  // handles.
+  //
+  // Hardware figures are arithmetic, not a measured load (specVerified:false):
+  // the UD-Q2_K_XL file is ~12.4 GB and the KV cache adds ~0.1 MB/token
+  // (~1.7 GB at the engine's 16K cache), so ~14 GB of GPU memory is the honest
+  // floor. WebGPU exposes no total-VRAM signal, so the hardware test's binding
+  // check is a coarse screen - the download itself is the final arbiter, and a
+  // machine that cannot hold the weights fails at allocation with a clear
+  // error, not silently.
   'muse-glimmer-30b': Object.freeze({
     id: 'muse-glimmer-30b',
     label: 'Muse Glimmer 30B',
     url: 'https://huggingface.co/spaces/webml-community/muse-glimmer-webgpu-kernels',
-    repo: 'onnx-community/Muse-Glimmer-30B-ONNX',
-    modelClass: 'MuseGlimmerForCausalLM',
-    dtype: 'q4f16',
+    engine: /** @type {const} */ ('muse-glimmer'),
+    repo: 'unsloth/Muse-Glimmer-30B-GGUF',
+    file: 'Muse-Glimmer-30B-UD-Q2_K_XL.gguf',
+    modelClass: null,
+    dtype: 'q2_k_xl',
     cachePattern: 'muse-glimmer',
-    // ~29.6B params including the ~1.8B ViT-G/14 perception encoder; the model
-    // card puts the 4-bit language model "under 20 GB" and ships a 17 GB K-quant
-    // targeting 24 GB VRAM. We load the TEXT-ONLY causal path (the runner never
-    // sends images), so 17 is the figure to beat.
-    sizeGB: 17,
-    minStorageBufferBindingSizeGB: 4,
-    minBufferSizeGB: 18,
-    requiresShaderF16: true,
+    sizeGB: 12.4,
+    minStorageBufferBindingSizeGB: 2,
+    minBufferSizeGB: 14,
+    requiresShaderF16: false,
     contextWindow: 131_072,
     specVerified: false,
-    note: 'Sizes are from the model card, not a measured on-device load.',
+    note: 'Sizes are file-size arithmetic, not a measured on-device load.',
   }),
 });
 

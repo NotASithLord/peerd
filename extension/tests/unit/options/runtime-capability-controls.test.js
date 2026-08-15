@@ -82,8 +82,8 @@ describe('options runtime capability controls', () => {
           if (msg.type !== 'local-model/catalog') return { ok: false };
           statusCalls += 1;
           return statusCalls === 1
-            ? { ok: true, models: [{ model: 'gemma-4-e2b', loading: true, supported: true }] }
-            : { ok: true, models: [{ model: 'gemma-4-e2b', downloaded: true, supported: true }] };
+            ? { ok: true, models: [{ model: 'gemma-4-e2b', loading: true, supportState: 'supported' }] }
+            : { ok: true, models: [{ model: 'gemma-4-e2b', downloaded: true, supportState: 'supported' }] };
         },
         onReady: () => { readyNotices += 1; },
       }),
@@ -141,8 +141,8 @@ describe('options runtime capability controls', () => {
           return {
             ok: true,
             models: [
-              { model: 'gemma-4-e2b', downloaded: false, supported: true },
-              { model: 'muse-glimmer-30b', downloaded: false, supported: false, unsupportedReason: 'no MuseGlimmerForCausalLM in this build' },
+              { model: 'gemma-4-e2b', downloaded: false, supportState: 'supported' },
+              { model: 'muse-glimmer-30b', downloaded: false, supportState: 'unsupported', supportReason: 'This device cannot run Muse Glimmer 30B.' },
             ],
           };
         },
@@ -159,7 +159,7 @@ describe('options runtime capability controls', () => {
         return found;
       };
       const locked = row('Muse Glimmer');
-      expect(locked.textContent).toContain('no MuseGlimmerForCausalLM in this build');
+      expect(locked.textContent).toContain('This device cannot run Muse Glimmer 30B.');
       // A model the runtime cannot load offers no buttons at all: testing the
       // GPU for it would be theater, and Download must be unreachable.
       expect(locked.querySelectorAll('button').length).toBe(0);

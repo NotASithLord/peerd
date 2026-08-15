@@ -1,0 +1,31 @@
+muse-glimmer-webgpu-kernels  (self-contained WebGPU GGUF runtime for Muse Glimmer 30B)
+  for the local WebGPU runner's muse-glimmer engine (extension/offscreen/local-model.js).
+  from: https://huggingface.co/spaces/webml-community/muse-glimmer-webgpu-kernels
+  space commit: 24cb8aa (author: Xenova), file: index.html (sdk: static)
+
+what this is: the Space's inline ESM runtime bundle - custom WGSL kernels, a GGUF
+parser, K-quant/IQ transcoders, a graph compiler, and the MuseGlimmer30B model
+class (checkAvailability / load / generate / dispose). It is NOT Transformers.js:
+the Space ships its own specialized GGUF WebGPU runtime, and peerd vendors it as a
+second local engine alongside the vendored Transformers.js (which is ONNX-only).
+
+how it was extracted: the second <script type="module"> block of index.html, up to
+and including its export statement (export{... MuseGlimmer30B ...};). The page
+controller that follows the export (DOM wiring for the Space's own UI) is NOT
+included - importing it would crash in the offscreen document. The bundle has no
+static or dynamic imports (the Space's esm.sh imports live in the page's FIRST
+script block, which is page decoration only); Node builtin paths are stubbed to
+throw and are unreachable in the browser.
+
+provenance note: the bytes were transcribed from the page source supplied by the
+repo owner, because the build environment's egress policy blocks huggingface.co /
+hf.space. Verify against the live Space when re-vendoring.
+
+runtime facts (from the bundle):
+  DEFAULT_MODEL_ID  = unsloth/Muse-Glimmer-30B-GGUF
+  DEFAULT_GGUF_FILE = Muse-Glimmer-30B-UD-Q2_K_XL.gguf
+  weights cache: IndexedDB (gguf-cache-v1) + a Cache API header cache; weights
+  stream from huggingface.co via HTTP range requests (rides connect-src https:).
+
+files + SHA-256:
+f84ce421a0e1d5daf077f6b3c5c6b3112760d459facb98b038ed80ac693e5afe  muse-glimmer.js

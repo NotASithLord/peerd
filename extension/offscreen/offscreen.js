@@ -463,8 +463,11 @@ const onLocalModelMessage = (msg, sender, sendResponse) => {
         // on this response, not as a progress event the caller may never see.
         const pre = await localModelStatus({ model: msg.model, includeSupport: true });
         if (!pre.ok) { sendResponse(pre); return; }
-        if (pre.supported === false) {
-          sendResponse({ ok: false, error: pre.unsupportedReason, model: pre.model, supported: false });
+        // Only a DEFINITE 'unsupported' blocks the download. 'unknown' means we
+        // could not read the model's config, which is a reason to try and report
+        // honestly, not to refuse on a guess.
+        if (pre.supportState === 'unsupported') {
+          sendResponse({ ok: false, error: pre.supportReason, model: pre.model, supportState: 'unsupported' });
           return;
         }
         const busy = loadingModelId();

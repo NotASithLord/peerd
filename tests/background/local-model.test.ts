@@ -83,8 +83,8 @@ describe('local-model routes', () => {
       _reply: {
         ok: true,
         models: [
-          { model: 'gemma-4-e2b', downloaded: true, supported: true },
-          { model: 'muse-glimmer-30b', downloaded: false, supported: false },
+          { model: 'gemma-4-e2b', downloaded: true, supportState: 'supported' },
+          { model: 'muse-glimmer-30b', downloaded: false, supportState: 'unsupported' },
         ],
       },
     });
@@ -108,7 +108,7 @@ describe('local-model routes', () => {
     expect(state.available('muse-glimmer-30b')).toBe(true);
   });
   test('a refused init leaves the model un-resident', async () => {
-    const { deps, state } = setup({ _reply: { ok: false, error: 'no MuseGlimmerForCausalLM', model: 'muse-glimmer-30b', supported: false } });
+    const { deps, state } = setup({ _reply: { ok: false, error: 'This device cannot run Muse Glimmer 30B.', model: 'muse-glimmer-30b', supportState: 'unsupported' } });
     const res = await makeLocalModelRoutes(deps)['local-model/init']({ model: 'muse-glimmer-30b' });
     expect(res.ok).toBe(false);
     expect(state.available('muse-glimmer-30b')).toBe(false);

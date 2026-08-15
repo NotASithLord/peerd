@@ -105,7 +105,7 @@ import {
   resolveRunnerTarget,
   // local WebGPU runner: the offscreen-engine bridge, the default model id, and
   // the per-model spec table (labels for the picker, ids for residency).
-  setLocalGenerate, LOCAL_MODEL_ID, localModelSpec,
+  setLocalGenerate, setLocalModelInfo, LOCAL_MODEL_ID, localModelSpec,
   // live model inventory (Ollama /api/tags) for the model picker.
   listProviderModels,
   // OpenRouter live catalog + curated "popular" seed for the Settings model
@@ -4158,6 +4158,22 @@ const generateLocalForAdapter = (/** @type {any} */ opts) => {
   })();
 };
 setLocalGenerate(/** @type {any} */ (generateLocalForAdapter));
+
+// The adapter's live context-window seam. The engine's status reports the
+// EFFECTIVE window it will enforce (the muse engine caps its KV cache well
+// below the model's 131K nominal), and the trim layer must compress against
+// that real bound - the static MODEL_SPECS nominal stays the fallback when the
+// host is unavailable (fetchLocalContextWindow handles a null/throw here).
+// liveContextWindow memoizes the answer for the SW's lifetime, so this is one
+// offscreen round-trip per model per SW life, not one per turn.
+setLocalModelInfo(/** @type {any} */ (async (/** @type {string} */ model) => {
+  requireRuntimeCapability(runtimeCapabilities.localWebGpuHost, 'localWebGpuHost');
+  await ensureOffscreen();
+  const status = /** @type {{ contextWindow?: number } | null} */ (
+    await browser.runtime.sendMessage({ type: 'local-model/host/status', model }));
+  const win = status?.contextWindow;
+  return typeof win === 'number' && win > 0 ? win : null;
+}));
 
 // ---------------------------------------------------------------------------
 // 4. Side-panel port — state push + user actions

@@ -1,27 +1,35 @@
 // @ts-check
 // offscreen/local-model.js — the on-device inference engine (FEATURE-LOCAL-WEBGPU
-// B / M1). The registered on-device models run here in the OFFSCREEN doc via
-// Transformers.js + ONNX-Runtime-Web on WebGPU - never the SW (which idles out;
-// WebGPU + a resident model need a long-lived document). The SW's local-webgpu
-// adapter drives this over runtime messages; this module owns residency, download
-// bookkeeping and streaming generate.
+// B / M1). The registered on-device models run here in the OFFSCREEN doc - never
+// the SW (which idles out; WebGPU + a resident model need a long-lived document).
+// The SW's local-webgpu adapter drives this over runtime messages; this module
+// owns residency, download bookkeeping and streaming generate.
 //
-// VENDORED, not CDN: the offscreen CSP is `script-src 'self'`, so Transformers.js
-// + the ORT WASM are imported from /vendor/transformers/ (populated by
-// scripts/vendor-transformers.sh). `connect-src https:` lets the model weights
-// download from Hugging Face; Transformers.js caches them (Cache API) so the
-// ~2–3 GB download is one-time.
+// TWO ENGINES, dispatched on spec.engine (the registry decides which runtime a
+// model needs - see MODEL_SPECS):
+//   - 'transformers': Transformers.js + ONNX-Runtime-Web (ONNX exports, e.g.
+//     Gemma). Weights cache in the Cache API.
+//   - 'muse-glimmer': the vendored Muse Glimmer WebGPU GGUF runtime
+//     (vendor/muse-glimmer/ - custom WGSL kernels + its own GGUF loader).
+//     Weights cache in IndexedDB (gguf-cache-v1).
+//
+// VENDORED, not CDN: the offscreen CSP is `script-src 'self'`, so both runtimes
+// are imported from /vendor/ (Transformers.js via scripts/vendor-transformers.sh;
+// the muse runtime's provenance in vendor/muse-glimmer/SOURCE.txt).
+// `connect-src https:` lets the model weights download from Hugging Face; both
+// engines cache them so the multi-GB download is one-time.
 //
 // UNVERIFIED HERE: WebGPU + a multi-GB model can't run in CI - this is owner-
-// load-tested per model. The two things the load-test confirms: (1) the q4f16
-// WebGPU load succeeds on the target machine, (2) the model's tool-call output
+// load-tested per model. The two things the load-test confirms: (1) the WebGPU
+// load succeeds on the target machine, (2) the model's tool-call output
 // matches the adapter's <tool_call> parser (the §3.3 lever if not). Everything
 // else is mechanical message plumbing. What CI CAN check is the step before
-// that: whether the vendored runtime carries the architecture at all
+// that: whether the vendored runtime carries the model at all
 // (engineSupportsSpec, asserted live in the options-local-models E2E state).
 
 import browser from '/vendor/browser-polyfill.js';
 import { DEFAULT_LOCAL_MODEL_ID, listLocalModelSpecs, localModelSpec } from '/peerd-provider/index.js';
+import { makeMuseChannelSplitter } from './muse-glimmer-stream.js';
 
 // The load recipe per model (repo / Transformers.js class / dtype) lives in
 // peerd-provider's MODEL_SPECS, not here: adding an on-device model must be a
@@ -34,18 +42,38 @@ import { DEFAULT_LOCAL_MODEL_ID, listLocalModelSpecs, localModelSpec } from '/pe
 // weights stay in the browser cache, so the switch back is a load, not a
 // re-download.
 
-// why any: Transformers.js is a vendored, untyped WASM/ESM module (no .d.ts);
-// its AutoTokenizer / Gemma4ForCausalLM / env shapes are type-erased here.
+// why any: both runtimes are vendored, untyped ESM modules (no .d.ts);
+// their AutoTokenizer / MuseGlimmer30B / env shapes are type-erased here.
 /** @type {any} */
 let tx = null;        // the imported Transformers.js module (lazy — only on first init)
 /** @type {any} */
 let tokenizer = null;
 /** @type {any} */
 let model = null;
+/** @type {any} */
+let museModule = null;    // the imported muse-glimmer runtime (lazy - only on first use)
+/** @type {any} */
+let museInstance = null;  // a loaded MuseGlimmer30B (generate/dispose/lastAssistantMessage)
 /** @type {string | null} */
-let residentId = null;   // which spec.id `model`/`tokenizer` hold
+let residentId = null;   // which spec.id the loaded engine state belongs to
 /** @type {{ id: string, promise: Promise<{ available: boolean }> } | null} */
 let loading = null;
+
+// The muse engine's KV-cache budget in tokens - the EFFECTIVE context window it
+// enforces (generate refuses past it). why not the model's 131,072 nominal: the
+// cache costs ~0.1 MB/token on top of the ~12.4 GB weights, so the full window
+// would need ~14 GB of cache alone. 16K (~1.7 GB) is the Space's own default -
+// roomy for the runner task, survivable next to the weights. Reported to the
+// trim layer via localModelStatus.contextWindow so long sessions compress
+// against the REAL bound, not the nominal one.
+const MUSE_MAX_LENGTH = 16_384;
+
+/**
+ * Is this spec's engine state loaded in memory right now?
+ * @param {import('/peerd-provider/local-model-capability.js').ModelSpec} spec
+ */
+const residentReady = (spec) => residentId === spec.id
+  && (spec.engine === 'muse-glimmer' ? !!museInstance : (!!model && !!tokenizer));
 
 // "Weights are cached" — the in-memory model evaporates on every extension reload
 // (the offscreen doc is torn down) but the weights stay in the browser cache. We
@@ -94,6 +122,10 @@ const detectDownloaded = (async () => {
   let discovered = false;
   for (const spec of listLocalModelSpecs()) {
     if (downloadedIds.has(spec.id)) continue;
+    // The Cache-API probe is a 'transformers' RETROFIT (it matches .onnx URLs
+    // Transformers.js wrote before we kept records). The muse engine postdates
+    // the persisted record and caches in IndexedDB, so the record is the truth.
+    if (spec.engine !== 'transformers') continue;
     if (await probeCachedWeights(spec)) { downloadedIds.add(spec.id); discovered = true; }
   }
   if (discovered) persistDownloadedIds(); // memoize so next time is instant
@@ -114,48 +146,103 @@ const loadTransformers = async () => {
   return tx;
 };
 
-/** Is WebGPU + f16 available? The capability gate (mirrors voice/engine-picker). */
-export const probeWebgpu = async () => {
+const loadMuseGlimmer = async () => {
+  if (museModule) return museModule;
+  // The vendored Muse Glimmer runtime is fully self-contained (no imports, no
+  // DOM at module scope) - see vendor/muse-glimmer/SOURCE.txt for provenance.
+  museModule = await import('/vendor/muse-glimmer/muse-glimmer.js');
+  return museModule;
+};
+
+/**
+ * Is WebGPU available (+ shader-f16 where the model's dtype demands it)? The
+ * capability gate (mirrors voice/engine-picker). f16 is opt-out per spec: the
+ * muse engine's kernels carry f32 fallbacks, so requiring f16 there would
+ * refuse devices its own support check accepts.
+ * @param {{ requireF16?: boolean }} [opts]
+ */
+export const probeWebgpu = async ({ requireF16 = true } = {}) => {
   if (!navigator.gpu) return { ok: false, reason: 'WebGPU is unavailable in this browser.' };
   let adapter;
   try { adapter = await navigator.gpu.requestAdapter(); } catch { adapter = null; }
   if (!adapter) return { ok: false, reason: 'No WebGPU adapter (GPU blocked or unavailable).' };
-  if (!adapter.features.has('shader-f16')) return { ok: false, reason: 'GPU lacks shader-f16 (needed for q4f16).' };
+  if (requireF16 && !adapter.features.has('shader-f16')) return { ok: false, reason: 'GPU lacks shader-f16 (needed for q4f16).' };
   return { ok: true };
 };
 
 /**
- * Does the VENDORED Transformers.js carry this model's architecture? The spec
- * names the class it needs (`Gemma4ForCausalLM`, …) and we look it up on the
- * module - present means the build can load it, absent means it cannot, full
- * stop. why probe instead of a hand-kept flag: the answer changes when
- * scripts/vendor-transformers.sh re-pins the library, and a stale hand-kept
- * `true` would send a user into a multi-GB download that dies with
- * "Unsupported model type"; a stale `false` would hide a model that works.
- * This way the vendor bump IS the unlock.
+ * Can this spec's VENDORED engine actually run it here? Three verdicts, and
+ * the difference between the last two matters: 'unsupported' is a fact about
+ * the runtime (or this device), 'unknown' is our own ignorance and must not
+ * read as a refusal.
  *
- * Memoized per spec: the answer can't change without a reload, and the import
- * is 1.3 MB of parse we only pay when something actually asks.
- * @type {Map<string, { supported: boolean, reason: string }>}
+ * Per engine:
+ *   - 'transformers': (1) a pinned modelClass present on the module = loadable,
+ *     no network; (2) otherwise ASK THE MODEL WHAT IT IS - fetch its config (a
+ *     few KB, not the weights) and check the declared `model_type` against the
+ *     runtime's own dispatch table. why the config and not a hard-coded class
+ *     name: a class name is a GUESS about how an export was published, and a
+ *     wrong guess locks a model that would have run. The repo's config is
+ *     authoritative and the mapping is the runtime's own.
+ *   - 'muse-glimmer': the runtime's OWN checkAvailability - it probes the
+ *     WebGPU adapter, reads the GGUF header (a range request, not the weights)
+ *     and dry-runs its kernel support check against this device. Its verdict
+ *     is authoritative for both build and device; a network failure inside it
+ *     resolves optimistic ({ok:true}), matching the Space's behavior.
+ *
+ * Either way the vendor pin remains the gate, and a re-pin is the unlock.
+ * Successes and hard refusals are memoized; 'unknown' is NOT cached, so a probe
+ * that failed offline is retried rather than frozen into a lock.
+ *
+ * @typedef {{ state: 'supported'|'unsupported'|'unknown', reason: string }} SupportVerdict
+ * @type {Map<string, SupportVerdict>}
  */
 const supportCache = new Map();
-/** @param {import('/peerd-provider/local-model-capability.js').ModelSpec} spec */
+/**
+ * @param {import('/peerd-provider/local-model-capability.js').ModelSpec} spec
+ * @returns {Promise<SupportVerdict>}
+ */
 const engineSupportsSpec = async (spec) => {
   const hit = supportCache.get(spec.id);
   if (hit) return hit;
-  /** @type {{ supported: boolean, reason: string }} */
+  /** @type {SupportVerdict} */
   let verdict;
   try {
-    const t = await loadTransformers();
-    verdict = typeof t?.[spec.modelClass] === 'function'
-      ? { supported: true, reason: '' }
-      : {
-        supported: false,
-        reason: `This build's Transformers.js has no ${spec.modelClass} - the ${spec.label} architecture is not in the vendored runtime yet.`,
-      };
+    if (spec.engine === 'muse-glimmer') {
+      const mg = await loadMuseGlimmer();
+      const res = await mg.MuseGlimmer30B.checkAvailability(spec.repo, { file: spec.file });
+      verdict = res?.ok
+        ? { state: 'supported', reason: '' }
+        : { state: 'unsupported', reason: res?.reason || `This device cannot run ${spec.label}.` };
+    } else if (spec.modelClass) {
+      const t = await loadTransformers();
+      verdict = typeof t?.[spec.modelClass] === 'function'
+        ? { state: 'supported', reason: '' }
+        : {
+          state: 'unsupported',
+          reason: `This build's Transformers.js has no ${spec.modelClass}, so it cannot load ${spec.label} yet.`,
+        };
+    } else {
+      // Ask the repo what architecture it declares, then ask the runtime
+      // whether it dispatches that. AutoConfig fetches config.json only.
+      const t = await loadTransformers();
+      const config = await t.AutoConfig.from_pretrained(spec.repo);
+      const modelType = config?.model_type ?? null;
+      const mappings = t.AutoModelForCausalLM?.MODEL_CLASS_MAPPINGS ?? [];
+      const dispatches = !!modelType && mappings.some(
+        (/** @type {Map<string, unknown>} */ map) => typeof map?.has === 'function' && map.has(modelType));
+      verdict = dispatches
+        ? { state: 'supported', reason: '' }
+        : {
+          state: 'unsupported',
+          reason: `${spec.repo} declares architecture "${modelType ?? 'unknown'}", which this build's Transformers.js cannot load yet.`,
+        };
+    }
   } catch (e) {
-    // Import failure is not a verdict about the model - don't cache it.
-    return { supported: false, reason: `runtime unavailable: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+    // Import or config fetch failed (offline, repo unreachable, renamed). That
+    // is not a verdict about the model, so report it as UNKNOWN and don't cache.
+    const message = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
+    return { state: 'unknown', reason: `Could not check this model's architecture: ${message}` };
   }
   supportCache.set(spec.id, verdict);
   return verdict;
@@ -171,7 +258,9 @@ const engineSupportsSpec = async (spec) => {
  *
  * @typedef {{ ok: false, error: string, model: string }} LocalModelStatusError
  * @typedef {{ ok: true, available: boolean, downloaded: boolean, loading: boolean,
- *   model: string, label: string, supported?: boolean, unsupportedReason?: string }} LocalModelStatusOk
+ *   model: string, label: string, contextWindow: number,
+ *   supportState?: 'supported'|'unsupported'|'unknown',
+ *   supportReason?: string }} LocalModelStatusOk
  *
  * @param {{ model?: string, includeSupport?: boolean }} [opts]
  * @returns {Promise<LocalModelStatusOk | LocalModelStatusError>}
@@ -183,12 +272,21 @@ export const localModelStatus = async ({ model: modelId = DEFAULT_LOCAL_MODEL_ID
   const support = includeSupport ? await engineSupportsSpec(spec) : null;
   return {
     ok: /** @type {true} */ (true),
-    available: residentId === spec.id && !!model, // loaded in memory, ready to generate NOW
+    available: residentReady(spec), // loaded in memory, ready to generate NOW
     downloaded: downloadedIds.has(spec.id),       // weights cached (survives reloads) → loads fast from cache
     loading: loading?.id === spec.id,
     model: spec.id,
     label: spec.label,
-    ...(support ? { supported: support.supported, unsupportedReason: support.reason } : {}),
+    // The EFFECTIVE window the engine will enforce, not the nominal maximum:
+    // the muse engine caps its KV cache (MUSE_MAX_LENGTH; the loaded instance
+    // is the final word), so reporting 131K would make the trim layer compress
+    // too late and hit "context window is full" instead. The SW feeds this to
+    // the adapter's live-window seam (setLocalModelInfo).
+    contextWindow: spec.engine === 'muse-glimmer'
+      ? (residentReady(spec) && typeof museInstance?.contextLength === 'number'
+        ? museInstance.contextLength : Math.min(MUSE_MAX_LENGTH, spec.contextWindow))
+      : spec.contextWindow,
+    ...(support ? { supportState: support.state, supportReason: support.reason } : {}),
   };
 };
 
@@ -233,10 +331,12 @@ export const initLocalModel = async ({ model: modelId = DEFAULT_LOCAL_MODEL_ID }
   }
   if (loading) return loading.promise;
   if (model && residentId === spec.id) return { available: true };
-  // Refuse BEFORE the download: an architecture the vendored runtime doesn't
-  // carry fails deep inside from_pretrained after streaming gigabytes.
+  // Refuse BEFORE the download, but only on a DEFINITE no: an architecture the
+  // vendored runtime doesn't carry fails deep inside from_pretrained after
+  // streaming gigabytes. An 'unknown' verdict (config unreachable) is not a
+  // refusal - the load re-checks and fails cheaply at the config step anyway.
   const support = await engineSupportsSpec(spec);
-  if (!support.supported) throw new Error(support.reason);
+  if (support.state === 'unsupported') throw new Error(support.reason);
   // why narrate: a stall is otherwise invisible (the offscreen doc has no UI).
   // These log to the offscreen console (chrome://extensions → peerd → Inspect
   // views: offscreen.html) AND emit a 'phase' progress event the eval surfaces,
@@ -273,28 +373,68 @@ export const initLocalModel = async ({ model: modelId = DEFAULT_LOCAL_MODEL_ID }
   };
   /** @param {string} label @returns {(p: object) => void} */
   const tap = (label) => (p) => { console.log(`[local-model:${spec.id}] ${label}`, p); onProgress({ ...withOverall(p), model: spec.id }); };
+  // The muse runtime reports {status, kind, loaded, total, fraction, message}.
+  // Map its byte events onto the SAME aggregate-bar shape the transformers tap
+  // produces (overall/overallLoaded/overallTotal) and everything else onto
+  // 'phase' lines, so the Settings card renders both engines identically.
+  /** @param {any} p */
+  const museTap = (p) => {
+    if (p?.status === 'weights' && p?.kind === 'bytes' && typeof p.loaded === 'number') {
+      const total = typeof p.total === 'number' && p.total > 0 ? p.total : 0;
+      onProgress({
+        status: 'progress', file: spec.file ?? undefined, loaded: p.loaded,
+        ...(total ? {
+          total,
+          overall: Math.min(100, (p.loaded / total) * 100),
+          overallLoaded: p.loaded,
+          overallTotal: total,
+        } : {}),
+        model: spec.id,
+      });
+      return;
+    }
+    // Non-byte events are sparse (init/tokenizer/warmup/ready) - log those only;
+    // byte events fire per chunk and would flood the console.
+    console.log(`[local-model:${spec.id}] muse`, p);
+    onProgress({ status: 'phase', phase: String(p?.message ?? p?.status ?? 'working'), model: spec.id });
+  };
   const promise = (async () => {
     report('probing WebGPU');
-    const cap = await probeWebgpu();
+    const cap = await probeWebgpu({ requireF16: spec.requiresShaderF16 });
     if (!cap.ok) throw new Error(cap.reason);
     // Free the other model's VRAM before allocating this one's.
-    if (model && residentId !== spec.id) {
+    if ((model || museInstance) && residentId !== spec.id) {
       report(`unloading ${localModelSpec(residentId ?? '')?.label ?? residentId}`);
       await teardownLocalModel();
     }
-    report('loading transformers.js (vendored)');
-    const t = await loadTransformers();
-    report('loading tokenizer + config (small)');
-    tokenizer = await t.AutoTokenizer.from_pretrained(spec.repo, { progress_callback: tap('tokenizer') });
-    // The spec's class is the TEXT-ONLY causal-LM path where the architecture has
-    // one (Gemma4ForCausalLM loads embed_tokens + decoder and SKIPS the
-    // vision/audio encoders the multimodal class would pull - ~270 MB saved, and
-    // the runner never sends images/audio). device:'webgpu' is the supported
-    // hook; pre-created-device injection is the §6.2 open question.
-    report(`loading model weights (first run streams ~${spec.sizeGB} GB from HF - text-only)`);
-    model = await t[spec.modelClass].from_pretrained(spec.repo, {
-      dtype: spec.dtype, device: 'webgpu', progress_callback: tap('model'),
-    });
+    if (spec.engine === 'muse-glimmer') {
+      report('loading muse-glimmer runtime (vendored)');
+      const mg = await loadMuseGlimmer();
+      report(`loading model weights (first run streams ~${spec.sizeGB} GB from HF)`);
+      // maxLength = the KV-cache budget (see MUSE_MAX_LENGTH); the runtime
+      // clamps it to the model's own max_position_embeddings. The runtime
+      // handles download + IndexedDB cache + GPU upload + kernel warmup itself.
+      museInstance = await mg.MuseGlimmer30B.load(spec.repo, {
+        file: spec.file,
+        maxLength: Math.min(MUSE_MAX_LENGTH, spec.contextWindow),
+        onProgress: museTap,
+      });
+    } else {
+      report('loading transformers.js (vendored)');
+      const t = await loadTransformers();
+      report('loading tokenizer + config (small)');
+      tokenizer = await t.AutoTokenizer.from_pretrained(spec.repo, { progress_callback: tap('tokenizer') });
+      // The spec's class is the TEXT-ONLY causal-LM path where the architecture has
+      // one (Gemma4ForCausalLM loads embed_tokens + decoder and SKIPS the
+      // vision/audio encoders the multimodal class would pull - ~270 MB saved, and
+      // the runner never sends images/audio). device:'webgpu' is the supported
+      // hook; pre-created-device injection is the §6.2 open question.
+      report(`loading model weights (first run streams ~${spec.sizeGB} GB from HF - text-only)`);
+      const ModelClass = spec.modelClass ? t[spec.modelClass] : t.AutoModelForCausalLM;
+      model = await ModelClass.from_pretrained(spec.repo, {
+        dtype: spec.dtype, device: 'webgpu', progress_callback: tap('model'),
+      });
+    }
     residentId = spec.id;
     // Remember the weights are now cached, so a future reload skips the
     // re-download and just lazy-loads from cache.
@@ -307,7 +447,13 @@ export const initLocalModel = async ({ model: modelId = DEFAULT_LOCAL_MODEL_ID }
   try { return await promise; }
   catch (e) {
     console.error(`[local-model:${spec.id}] init FAILED:`, e);
-    tokenizer = null; model = null; residentId = null;
+    // Clear only THIS attempt's half-loaded state. If the failure happened
+    // before the teardown step (e.g. the WebGPU probe threw) a previous model
+    // is still resident and healthy - nulling its handles here would leak its
+    // GPU memory and un-register a working model.
+    if (residentId === null || residentId === spec.id) {
+      tokenizer = null; model = null; museInstance = null; residentId = null;
+    }
     throw e;
   }
   finally { loading = null; }
@@ -315,7 +461,8 @@ export const initLocalModel = async ({ model: modelId = DEFAULT_LOCAL_MODEL_ID }
 
 export const teardownLocalModel = async () => {
   try { await model?.dispose?.(); } catch { /* best-effort */ }
-  model = null; tokenizer = null; residentId = null;
+  try { museInstance?.dispose?.(); } catch { /* best-effort */ }
+  model = null; tokenizer = null; museInstance = null; residentId = null;
 };
 
 // Flatten a peerd InternalMessage[] to the chat-template's {role, content}
@@ -344,11 +491,24 @@ const toChat = (messages, system) => {
   return out;
 };
 
+// The muse runtime renders its chat template with tools:null (hard-coded), so
+// the tool inventory rides the SYSTEM TEXT instead - same output contract as
+// the templated transformers path: the model emits <tool_call>{json}</tool_call>
+// blocks the local-webgpu adapter parses.
+/** @param {readonly any[] | undefined} tools */
+const museToolsPreamble = (tools) => {
+  if (!tools || tools.length === 0) return '';
+  return 'You can call tools. To call one, reply with exactly:\n'
+    + '<tool_call>{"name": "<tool name>", "arguments": {}}</tool_call>\n'
+    + `Available tools (JSON):\n${JSON.stringify(tools)}`;
+};
+
 /**
  * Stream a generation. Calls `onToken(text)` per decoded chunk; resolves when
- * done. Tools are templated into the prompt (the model emits <tool_call> blocks
- * the adapter parses). Greedy decode for determinism (a runner wants the same
- * action for the same page).
+ * done. Tools reach the model per engine (templated in for transformers;
+ * system-text preamble for muse) and it emits <tool_call> blocks the adapter
+ * parses either way. Greedy decode where the engine exposes the knob (a runner
+ * wants the same action for the same page).
  *
  * `req.model` names WHICH on-device model to run. It is honored, never coerced:
  * a request for a model that isn't resident loads it (swapping out whatever
@@ -362,14 +522,32 @@ const toChat = (messages, system) => {
 export const generateLocal = async (req, onToken) => {
   await detectDownloaded;
   const wanted = req.model && localModelSpec(req.model) ? req.model : DEFAULT_LOCAL_MODEL_ID;
-  if (!model || !tokenizer || residentId !== wanted) {
+  const spec = localModelSpec(wanted);
+  if (!spec) throw new Error(`unknown local model: ${wanted}`);
+  if (!residentReady(spec)) {
     // Cached from a prior session but not loaded into this (fresh) offscreen doc,
     // or a different model is resident: load from cache on first use - no
     // re-download, no manual step.
     if (downloadedIds.has(wanted)) await initLocalModel({ model: wanted });
-    if (!model || !tokenizer || residentId !== wanted) {
-      throw new Error(`local model not loaded: ${localModelSpec(wanted)?.label ?? wanted}`);
+    if (!residentReady(spec)) {
+      throw new Error(`local model not loaded: ${spec?.label ?? wanted}`);
     }
+  }
+  if (spec.engine === 'muse-glimmer') {
+    const system = [req.system ?? '', museToolsPreamble(req.tools)].filter(Boolean).join('\n\n');
+    const messages = toChat(req.messages ?? [], system);
+    // The raw stream interleaves the model's reasoning channel with the visible
+    // one; the splitter forwards only the visible content (see
+    // muse-glimmer-stream.js). reconcile() flushes any tail the stream missed,
+    // from the engine's own authoritative post-parse.
+    const splitter = makeMuseChannelSplitter();
+    for await (const step of museInstance.generate(messages, { maxNewTokens: req.maxTokens ?? 512 })) {
+      const delta = splitter.push(String(step?.text ?? ''));
+      if (delta) onToken(delta);
+    }
+    const tail = splitter.reconcile(museInstance.lastAssistantMessage?.content ?? null);
+    if (tail) onToken(tail);
+    return;
   }
   const t = tx;
   const messages = toChat(req.messages ?? [], req.system ?? '');

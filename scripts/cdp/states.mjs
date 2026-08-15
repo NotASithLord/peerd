@@ -3339,18 +3339,28 @@ export const STATES = [
           return JSON.stringify(rows.map((row) => ({
             name: row.querySelector('.lm-name')?.textContent ?? '',
             state: row.querySelector('.lm-state')?.textContent ?? '',
-            buttons: [...row.querySelectorAll('button')].map((b) => b.textContent?.trim()),
+            buttons: [...row.querySelectorAll('button')].map((b) => ({ label: b.textContent?.trim() ?? '', disabled: b.disabled })),
           })));
         })()`);
         const rows = JSON.parse(cards || '[]');
         const gemma = rows.find((/** @type {any} */ r) => r.name.includes('Gemma'));
         const glimmer = rows.find((/** @type {any} */ r) => r.name.includes('Muse Glimmer'));
-        // The runnable model reaches the hardware gate; the unrunnable one is
-        // stopped at the runtime gate BEFORE any multi-GB download is offered.
-        rec.check('a runnable model offers its hardware test', !!gemma?.buttons?.some((/** @type {string} */ b) => /Test hardware/.test(b)));
-        rec.check('an unrunnable architecture is locked with a reason',
-          !!glimmer && /not in the vendored runtime yet|MuseGlimmerForCausalLM/.test(glimmer.state));
-        rec.check('an unrunnable architecture offers no download', glimmer?.buttons?.length === 0);
+        rec.check('a runnable model offers its hardware test',
+          !!gemma?.buttons?.some((/** @type {any} */ b) => /Test hardware/.test(b.label)));
+        // The muse card's runtime gate is decided by the vendored runtime's own
+        // device check, so its verdict is ENVIRONMENT-DEPENDENT (this harness
+        // machine may or may not expose WebGPU). Both legitimate postures are
+        // accepted; what must NEVER happen is an undecided/empty card, or a
+        // download reachable without a passing hardware test.
+        const glimmerLocked = !!glimmer && glimmer.buttons.length === 0 && /\S/.test(glimmer.state);
+        const glimmerTestable = !!glimmer && glimmer.buttons.some((/** @type {any} */ b) => /Test hardware/.test(b.label));
+        rec.check('the muse card reaches a decided posture (locked with a reason, or testable)',
+          glimmerLocked !== glimmerTestable, JSON.stringify(glimmer));
+        rec.check('no download is enabled before a passing hardware test',
+          rows.every((/** @type {any} */ r) => r.buttons.every((/** @type {any} */ b) => !/^Download/.test(b.label) || b.disabled)),
+          cards);
+        rec.check('an uninstalled 12 GB model never reads as installed',
+          !!glimmer && !/Installed|Downloaded/i.test(glimmer.state), JSON.stringify(glimmer));
 
         const focusCard = async () => {
           await evalIn(page, `document.querySelector('.provider-card-local')?.scrollIntoView({ block: 'center' })`);

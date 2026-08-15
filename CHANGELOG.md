@@ -17,11 +17,14 @@ and storage formats may move until the surface stabilizes.
   registry instead of a single hard-coded model, so a new on-device model is a
   registry entry rather than engine surgery. Weights already downloaded on an
   existing install continue to be recognised without re-downloading.
-- Muse Glimmer 30B is registered as an on-device model. It is listed and
-  explicitly locked: the vendored Transformers.js carries no `muse_glimmer`
-  architecture, and Settings says so instead of offering a download that would
-  fail after streaming gigabytes. The lock lifts on its own once a runtime
-  build carrying the architecture is vendored.
+- Muse Glimmer 30B runs on-device via a second local engine: the Muse Glimmer
+  WebGPU GGUF runtime (custom WGSL kernels, from the webml-community Space,
+  vendored with provenance and hash-locked). The engine streams the ~12.4 GB
+  Q2_K_XL GGUF from Hugging Face, caches it in IndexedDB, splits the model's
+  reasoning channel out of the visible stream, and reports the effective
+  context window it enforces to the trim layer. Which runtime a model needs is
+  a registry fact (`engine` on the model spec), and each model's support
+  verdict comes from its own engine's check - before any download.
 
 ### Changed
 

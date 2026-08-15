@@ -12,9 +12,10 @@
 // ONE CARD PER MODEL, each with its own test verdict, download state and
 // progress. Two gates stack, in this order - a model is offered for download
 // only when BOTH pass:
-//   1. RUNTIME: does the vendored Transformers.js carry this architecture at
-//      all? (the engine's support probe - see offscreen/local-model.js). A
-//      model it can't load says so plainly instead of failing mid-download.
+//   1. RUNTIME: can this model's vendored engine (Transformers.js or the muse
+//      GGUF runtime) load it here at all? (the engine's support probe - see
+//      offscreen/local-model.js). A model it can't load says so plainly
+//      instead of failing mid-download.
 //   2. HARDWARE: can THIS machine's GPU hold it? (the "Test" button).
 //
 // Brand rule: monochrome; capability carried by glyph (✓ / ✕ / 🔒), red only for
@@ -231,13 +232,15 @@ export const LocalModelsSection = {
     const ready = available || downloaded;
     const loading = !!entry?.loading || !!ui.downloading[spec.id];
     const verdict = ui.verdicts[spec.id];
-    // `supported` is absent until the catalog answers; treat only an explicit
-    // false as "cannot run" so a slow first reply doesn't flash a hard refusal.
-    const unsupported = entry?.supported === false;
+    // Only a DEFINITE 'unsupported' locks the card. The verdict is absent until
+    // the catalog answers, and 'unknown' means the support probe could not
+    // reach a verdict (offline, repo unreachable) - neither may flash a hard
+    // refusal for a model that would run.
+    const unsupported = entry?.supportState === 'unsupported';
     const canDownload = !!verdict?.capable && !ready && !loading && !unsupported;
 
     const stateLine = unsupported
-      ? m('.lm-state.muted', `🔒 ${entry.unsupportedReason || 'Not supported by this build’s runtime yet.'}`)
+      ? m('.lm-state.muted', `🔒 ${entry.supportReason || 'Not supported by this build’s runtime yet.'}`)
       : ready
         ? m('.lm-state.ok', available
           ? '✓ Downloaded + loaded - available in the Lab and selectable as a runner / main-loop model.'
@@ -256,7 +259,8 @@ export const LocalModelsSection = {
           spec.url ? m('a.lm-link', { href: spec.url, target: '_blank', rel: 'noopener noreferrer', title: 'View this model on Hugging Face' }, '↗ Hugging Face') : null,
         ]),
         m('span.lm-meta', [
-          `~${spec.sizeGB} GB · ${spec.dtype} · WebGPU · needs shader-f16 + ≥${spec.minStorageBufferBindingSizeGB} GB storage binding`,
+          // Claim only what THIS spec requires (f16 is per-model, not universal).
+          `~${spec.sizeGB} GB · ${spec.dtype} · WebGPU · needs ${spec.requiresShaderF16 ? 'shader-f16 + ' : ''}≥${spec.minStorageBufferBindingSizeGB} GB storage binding`,
           // An unmeasured spec must never read as a measured one.
           spec.specVerified ? null : m('span.lm-caveat', { title: spec.note ?? '' }, ' · figures unverified'),
         ]),
