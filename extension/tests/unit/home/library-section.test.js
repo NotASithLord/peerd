@@ -384,6 +384,13 @@ describe('home.library', () => {
       expect(need(root, '.library-card').classList.contains('is-expanded')).toBe(true);
       const panel = need(root, '.library-repository', HTMLElement);
       expect(panel.getAttribute('role')).toBe('region');
+      // why: the panel claims focus from its own oncreate, which only runs once
+      // the repository send has resolved and Mithril has committed that redraw.
+      // A fixed flush() is a bet on how many turns that takes. #405 polled the
+      // kebab-focus assertions in this file but not this one, and this is the one
+      // that kept turning Gecko shard 5/8 red with the uninformative
+      // `actual: {} / expected: {}` signature.
+      await focusSettles(() => document.activeElement === panel);
       expect(document.activeElement).toBe(panel);
       expect(root.textContent).toContain('1 uncommitted change');
       expect(root.textContent).toContain('checkpoint');
