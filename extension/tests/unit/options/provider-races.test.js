@@ -15,6 +15,112 @@ const settle = async () => {
 };
 
 describe('provider settings request ordering', () => {
+  // why both directions: `localWebGpuHost` is available on EVERY Chrome (it only
+  // reports that an offscreen document can be created), so gating selection on it
+  // would name a default that ensureActiveProvider then refuses to bind. Settings
+  // would read "Local WebGPU" while the composer still demanded an Anthropic key.
+  // Residency, reported through models/options, is the signal that matters.
+  /** @param {any[]} options models/options reply for a host-available Chrome */
+  const mountLocalWebGpu = (options) => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    const state = {
+      providers: { current: 'anthropic', hasKey: false, model: 'claude-sonnet' },
+      settings: { providerName: '', providerModel: '' },
+      capabilities: { localWebGpuHost: { status: 'available' } },
+    };
+    const send = async (/** @type {{ type: string }} */ msg) => {
+      if (msg.type === 'provider/status') return {
+        ok: true,
+        providers: [
+          { name: 'anthropic', label: 'Anthropic', defaultModel: 'claude-sonnet', hasKey: false, keyless: false },
+          { name: 'local-webgpu', label: 'Local WebGPU', defaultModel: 'gemma-4-e2b', hasKey: true, keyless: true },
+        ],
+      };
+      if (msg.type === 'local-model/status') return { ok: true, downloaded: options.length > 0 };
+      if (msg.type === 'models/options') return { ok: true, options };
+      return { ok: false };
+    };
+    m.mount(root, { view: () => m(ProvidersSection, { state, send }) });
+    return root;
+  };
+
+  it('does not select Local WebGPU while the on-device model is not resident', async () => {
+    const root = mountLocalWebGpu([]);
+    try {
+      await settle();
+      await settle();
+      // The host exists but the model was never downloaded, so nothing is usable:
+      // the honest empty state, not a default the first turn could not serve.
+      expect(root.querySelector('#provider')).toBe(null);
+      expect(root.textContent).toContain('Nothing is assumed');
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
+
+  it('auto-selects Local WebGPU once the on-device model is resident', async () => {
+    const root = mountLocalWebGpu([
+      { provider: 'local-webgpu', model: 'gemma-4-e2b', label: 'gemma-4-e2b' },
+    ]);
+    try {
+      await settle();
+      await settle();
+      const providerSelect = root.querySelector('#provider');
+      if (!(providerSelect instanceof HTMLSelectElement)) throw new Error('provider select missing');
+      expect(providerSelect.value).toBe('local-webgpu');
+      expect(root.textContent).toContain('Default model for new chats');
+      expect(root.textContent?.includes('Nothing is assumed')).toBe(false);
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
+
+  it('keeps a configured Ollama default editable when its daemon is unreachable', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    const state = {
+      providers: { current: 'ollama', hasKey: true, model: 'qwen3:8b' },
+      settings: { providerName: 'ollama', providerModel: '', ollamaHost: 'http://localhost:11434' },
+      capabilities: { localWebGpuHost: { status: 'unsupported' } },
+    };
+    const probe = deferred();
+    const send = async (/** @type {{ type: string }} */ msg) => {
+      if (msg.type === 'provider/status') return {
+        ok: true,
+        providers: [{
+          name: 'ollama', label: 'Ollama', defaultModel: 'qwen3:8b',
+          hasKey: true, keyless: true, liveModels: true,
+        }],
+      };
+      if (msg.type === 'provider/test') return probe.promise;
+      if (msg.type === 'models/options') return { ok: true, options: [] };
+      return { ok: false };
+    };
+    m.mount(root, { view: () => m(ProvidersSection, { state, send }) });
+    try {
+      await settle();
+      let providerSelect = root.querySelector('#provider');
+      if (!(providerSelect instanceof HTMLSelectElement)) throw new Error('provider select missing');
+      expect(providerSelect.value).toBe('ollama');
+      expect(root.textContent).toContain('Checking…');
+      expect(root.textContent?.includes('Nothing is assumed')).toBe(false);
+
+      probe.resolve({ ok: false, error: 'unreachable' });
+      await settle();
+      providerSelect = root.querySelector('#provider');
+      if (!(providerSelect instanceof HTMLSelectElement)) throw new Error('provider select missing after probe');
+      expect(providerSelect.value).toBe('ollama');
+      expect(root.textContent).toContain('Not reachable');
+      expect(root.textContent?.includes('Nothing is assumed')).toBe(false);
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
+
   it('describes the blank web-actor model as local-first Automatic policy', async () => {
     const root = document.createElement('div');
     document.body.appendChild(root);

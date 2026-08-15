@@ -31,6 +31,11 @@ export const composerUnavailableCopy = (composer, { compact = false } = {}) => {
       ? 'Provider settings are temporarily unavailable.'
       : 'Provider settings could not be loaded. Reopen peerd to retry.';
   }
+  if (composer?.reason === 'vault-locked') {
+    return compact
+      ? 'Vault is locked. Unlock it to send.'
+      : 'Vault is locked. Unlock it to start chatting.';
+  }
   if (composer?.reason === 'local-model-not-installed') {
     return compact
       ? 'Install the Local WebGPU model in Settings to send.'

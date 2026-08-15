@@ -272,7 +272,7 @@
 .library-refresh.is-spinning { animation: library-spin 0.85s linear infinite; }
 @keyframes library-spin { to { transform: rotate(360deg); } }
 /* "update available" for an installed dwapp — a quiet brand-cyan line. */
-.library-update-badge { font-size: 11px; margin: 2px 0 0; color: var(--fg); display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.library-update-badge { font-size: 11px; margin: 2px 0 0; color: var(--accent); display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
 .library-changelog { color: var(--fg-muted); line-height: 1.35; white-space: pre-wrap; }
 .library-notice { padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 12px; }
 

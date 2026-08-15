@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { resolveComposerReadiness } from '../../extension/background/provider-readiness.js';
+import { composerUnavailableCopy } from '../../extension/sidepanel/provider-readiness.js';
 
 const providers = [
   { name: 'anthropic', vaultSecretName: 'provider/anthropic' },
@@ -84,5 +85,13 @@ describe('composer provider readiness', () => {
       canSend: false,
       reason: 'settings-unavailable',
     });
+  });
+
+  test('a locked vault asks for unlock instead of an API key', () => {
+    const composer = { provider: 'ollama', reason: 'vault-locked' };
+    expect(composerUnavailableCopy(composer, { compact: true }))
+      .toBe('Vault is locked. Unlock it to send.');
+    expect(composerUnavailableCopy(composer))
+      .toBe('Vault is locked. Unlock it to start chatting.');
   });
 });
