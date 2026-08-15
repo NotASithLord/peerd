@@ -33,8 +33,12 @@ const main = () => {
   // badge changes whenever the tscheck coverage denominator moves (it did when
   // web/public joined the scan), and preflight passing while CI fails on badge
   // drift is exactly the out-of-sync trap this mirror exists to prevent.
-  const genFiles = ['extension/manifest.json', 'extension/shared/channel-config.js', 'badges/tscheck.json']
-    .map((p) => join(REPO_ROOT, p));
+  const genFiles = [
+    'extension/manifest.json', 'extension/shared/channel-config.js', 'badges/tscheck.json',
+    // The supply-chain badges ride gen:dev too: pure reads of package.json,
+    // vendor.lock.json and the workflows, so they drift exactly like a manifest.
+    'badges/runtime-deps.json', 'badges/vendor-integrity.json', 'badges/actions-pinned.json',
+  ].map((p) => join(REPO_ROOT, p));
   const before = genFiles.map((f) => readFileSync(f));
   run('regenerate dev manifest + channel-config', 'bun', ['run', 'gen:dev']);
   let drift = false;
@@ -73,6 +77,7 @@ const main = () => {
   // endpoints are well-formed and the two in-browser lanes still agree on how
   // many browser tests exist.
   run('coverage badges (well-formed; in-browser lanes agree)', 'bun', ['run', 'check:badges']);
+  run('action pins (every third-party action at a full commit SHA)', 'bun', ['run', 'check:actions']);
   run('source hygiene (no control bytes / tracked symlinks in source)', 'bun', ['run', 'check:hygiene']);
   run('copy hygiene (no new em dashes / assistant authorship markers)', 'bun', ['run', 'check:copy']);
   run('vendor integrity (extension/vendor/ matches vendor.lock.json)', 'bun', ['run', 'check:vendor']);

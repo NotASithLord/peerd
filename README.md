@@ -12,6 +12,9 @@
 [![In-Browser Gecko](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/NotASithLord/peerd/main/badges/inbrowser-gecko.json)](scripts/firefox/run-runtime-tests.mjs)
 [![E2E side panel](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/NotASithLord/peerd/main/badges/e2e-chrome.json)](scripts/cdp/run-e2e-verify.mjs)
 [![Red Team](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/NotASithLord/peerd/main/badges/red-team.json)](docs/security/RED-TEAM-RESULTS.md)
+[![Runtime npm deps](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/NotASithLord/peerd/main/badges/runtime-deps.json)](#dependencies-and-license)
+[![Vendored code](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/NotASithLord/peerd/main/badges/vendor-integrity.json)](extension/vendor/vendor.lock.json)
+[![Actions pinned](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/NotASithLord/peerd/main/badges/actions-pinned.json)](packaging/check-action-pins.ts)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Manifest V3](https://img.shields.io/badge/Manifest%20V3-Chrome%20%26%20Firefox-informational.svg)](#install)
 [![Security policy](https://img.shields.io/badge/security-policy-blue.svg)](SECURITY.md)
@@ -221,9 +224,24 @@ past decisions and planned work. They do not override current code.
 
 ## Dependencies and license
 
-Runtime dependencies are vendored under `extension/vendor/`. Their source,
-version, license, and integrity records live in the adjacent `SOURCE.txt` files
-and [`extension/vendor/vendor.lock.json`](extension/vendor/vendor.lock.json).
+The shipped extension has no npm runtime dependencies. `package.json` declares
+none, and packaging stages `extension/` verbatim without resolving a
+`node_modules` path, so the build-time tree cannot reach an installed browser.
+Third-party runtime code is vendored under `extension/vendor/` instead. Its
+source, version, and license live in the adjacent `SOURCE.txt` files, and every
+vendored byte is pinned by SHA-256 in
+[`extension/vendor/vendor.lock.json`](extension/vendor/vendor.lock.json), which
+`bun run check:vendor` verifies in CI and preflight.
+
+Two more supply-chain positions carry their own badges above, both regenerated
+by `bun run gen:dev` and drift-checked in CI. Every third-party GitHub Action
+runs at a full commit SHA, gated by
+[`check:actions`](packaging/check-action-pins.ts): a major tag is a mutable ref
+its publisher can move, which would mean arbitrary code in a job holding this
+checkout, and in the release workflow, the signing secrets. Newly resolved
+dependencies also sit out a quarantine window before they can enter the lock,
+set by `minimumReleaseAge` in [`bunfig.toml`](bunfig.toml), alongside a
+malware scan on install.
 
 peerd is licensed under the [Apache License 2.0](LICENSE). Vendored components
 retain their own licenses. CheerpX is a proprietary runtime provided by Leaning

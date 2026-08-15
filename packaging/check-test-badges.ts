@@ -19,6 +19,9 @@ import { GECKO_BADGE } from './gen-gecko-test-badge.ts';
 import { INBROWSER_CHROME_BADGE } from './gen-inbrowser-test-badge.ts';
 import { E2E_BADGE } from './gen-e2e-badge.ts';
 import { RED_TEAM_BADGE } from './gen-red-team-badge.ts';
+import {
+  ACTIONS_BADGE, RUNTIME_DEPS_BADGE, VENDOR_BADGE,
+} from './gen-supply-chain-badges.ts';
 import { laneCountProblem, type ShieldsBadge } from './test-badges.ts';
 
 /** Badges whose message is a "N/M passing" browser-lane count. */
@@ -27,6 +30,7 @@ const LANE_BADGES = [INBROWSER_CHROME_BADGE, GECKO_BADGE];
 /** Every committed badge, lane or not, that must parse as a Shields endpoint. */
 const ALL_BADGES = [
   ...LANE_BADGES, E2E_BADGE, RED_TEAM_BADGE, 'functional-tests.json', 'tscheck.json',
+  RUNTIME_DEPS_BADGE, VENDOR_BADGE, ACTIONS_BADGE,
 ];
 
 const readBadge = (file: string): ShieldsBadge => {
