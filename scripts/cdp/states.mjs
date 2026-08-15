@@ -274,16 +274,27 @@ const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPane
       `!!document.querySelector(${JSON.stringify(`${cardSelector} .library-repository .library-commit`)})`),
     { budgetMs: 20_000, pollMs: 80 });
     rec.check('visual fixture renders repository history', !!historyReady);
-    // Git commit IDs include the commit timestamp, so this visual fixture
-    // must normalize them before capture. The surrounding branch, history,
-    // controls, and layout remain production-rendered; only the inherently
-    // run-specific identifier is replaced.
+    // Git commit IDs include the commit timestamp, and the rows carry RELATIVE
+    // times, so this visual fixture must normalize both before capture. The
+    // surrounding branch, history, controls, and layout remain
+    // production-rendered; only the inherently run-specific values are replaced.
     const pinVisualState = () => evalIn(page, `(() => {
       const card = document.querySelector(${JSON.stringify(cardSelector)});
       const fixedOid = '0000000000';
+      const fixedWhen = 'just now';
       const head = card?.querySelector('.library-repository-head .muted');
       if (head) head.textContent = head.textContent.replace(/[0-9a-f]{10}$/i, fixedOid);
       for (const oid of card?.querySelectorAll('.library-commit code') ?? []) oid.textContent = fixedOid;
+      // why: fmtWhen rounds to the nearest minute, so 'just now' becomes '1m ago'
+      // at 30s, well inside this state's ~60s of waitFor budget. Unpinned, it
+      // flips either between runs (both themes drift) or between the two shots
+      // ~100ms apart (dark alone drifts, and the state flaps on dark forever).
+      for (const when of card?.querySelectorAll('.library-commit > span.muted') ?? []) when.textContent = fixedWhen;
+      // The app row renders fmtWhen as a bare leading text node followed by an
+      // optional ' · source' sibling, so replace that node rather than the box.
+      const meta = card?.querySelector('.library-meta');
+      const metaWhen = meta?.firstChild;
+      if (metaWhen?.nodeType === 3 && metaWhen.nodeValue.trim()) metaWhen.nodeValue = fixedWhen;
       const commit = card?.querySelector('.library-commit');
       const scroller = card?.closest('.home-content');
       if (${JSON.stringify(revealPanel)} && commit && scroller) {
@@ -308,12 +319,22 @@ const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPane
     };
     const visualState = revealPanel ? await settleNarrowCamera() : await pinVisualState();
     if (revealPanel) {
+      // why the explicit number guard: the rects are `?? null` on a miss, and
+      // `null >= null` coerces to `0 >= 0`, i.e. true. Without it a missing
+      // commit row or scroller passes this check silently.
+      const framed = [visualState?.commitTop, visualState?.commitBottom,
+        visualState?.scrollerTop, visualState?.scrollerBottom].every((v) => typeof v === 'number');
       rec.check('visual fixture keeps the narrow commit row in frame',
-        visualState?.commitTop >= visualState?.scrollerTop
-          && visualState?.commitBottom <= visualState?.scrollerBottom,
+        framed
+          && visualState.commitTop >= visualState.scrollerTop
+          && visualState.commitBottom <= visualState.scrollerBottom,
         JSON.stringify(visualState));
     }
-    await rec.visualPage(visualName, page, revealPanel ? { beforeShot: settleNarrowCamera } : {});
+    // why beforeShot on BOTH paths: the two theme captures are ~100ms apart, so
+    // the pinned oid and relative times have to be re-applied for the second one
+    // or whatever moved in that window lands in the dark shot alone.
+    await rec.visualPage(visualName, page,
+      { beforeShot: revealPanel ? settleNarrowCamera : pinVisualState });
   } finally {
     try { page?.close(); } catch { /* */ }
     if (appId) {
