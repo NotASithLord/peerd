@@ -397,8 +397,26 @@ describe('home.library', () => {
         const live = root.querySelector('.library-repository');
         return !!live && document.activeElement === live;
       };
+      // why a diagnosis string instead of toBe(true): this assertion has now
+      // flaked in Chrome AND Gecko across three different focus-claim
+      // implementations (the original one-shot oncreate, #412's claim-on-update,
+      // and its corrected retry), so the claim logic is not the whole story and
+      // `actual: false` tells us nothing. When it next fails, the actual value
+      // names WHERE focus went and whether the panel was even in the DOM, which
+      // is the evidence a real fix needs. Green runs are byte-identical to the
+      // old assertion.
+      const focusDiagnosis = () => {
+        if (panelFocused()) return 'panel-focused';
+        const active = document.activeElement;
+        const name = !active || active === document.body
+          ? 'body'
+          : `${active.tagName.toLowerCase()}`
+            + `${active.className ? `.${String(active.className).trim().split(/\s+/).join('.')}` : ''}`
+            + `${active.getAttribute('data-library-action') ? `[action=${active.getAttribute('data-library-action')}]` : ''}`;
+        return `focus-on:${name} panel-in-dom:${!!root.querySelector('.library-repository')}`;
+      };
       await focusSettles(panelFocused);
-      expect(panelFocused()).toBe(true);
+      expect(focusDiagnosis()).toBe('panel-focused');
       expect(root.textContent).toContain('1 uncommitted change');
       expect(root.textContent).toContain('checkpoint');
       clickText(root, '.library-commit button', 'Diff');
