@@ -98,6 +98,18 @@ const downloadEnvelope = (filename, envelope) => {
 /** @param {string} appId */
 const appCardSelector = (appId) => `.library-card[data-app-id="${CSS.escape(appId)}"]`;
 
+// why: restore intents can outlive their moment. requestAnimationFrame is
+// throttled in background documents, so a callback may land long after the
+// interaction that scheduled it. The token lets the newest intent supersede
+// older ones no matter which callback fires first, and lastRestoredTarget
+// distinguishes "our own previous restore parked focus here" (fine to move)
+// from a claim some OTHER surface made, like the History & Git panel's
+// oncreate focus. A stale restore must never steal that claim; that theft
+// was the race behind the flaky repository-focus test.
+let libraryRestoreToken = 0;
+/** @type {Element | null} */
+let lastRestoredTarget = null;
+
 /**
  * Move focus after Mithril has committed a mutation result. The fallback keeps
  * keyboard users inside the Library when the original card no longer exists.
@@ -105,12 +117,21 @@ const appCardSelector = (appId) => `.library-card[data-app-id="${CSS.escape(appI
  * @param {string} action
  */
 const focusLibraryAction = (appId, action) => {
+  const token = ++libraryRestoreToken;
   requestAnimationFrame(() => {
+    if (token !== libraryRestoreToken) return;   // a newer restore superseded this one
+    const active = document.activeElement;
+    const foreignClaim = active && active !== document.body
+      && active !== document.documentElement && active !== lastRestoredTarget;
+    if (foreignClaim) return;
     const card = appId ? document.querySelector(appCardSelector(appId)) : null;
     const target = card?.querySelector(`[data-library-action="${action}"]`)
       ?? document.querySelector('.library-search')
       ?? document.querySelector('.library-refresh');
-    if (target instanceof HTMLElement) target.focus({ preventScroll: true });
+    if (target instanceof HTMLElement) {
+      lastRestoredTarget = target;
+      target.focus({ preventScroll: true });
+    }
   });
 };
 
