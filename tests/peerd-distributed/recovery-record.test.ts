@@ -1,5 +1,5 @@
-// The portable identity record (docs/design/portable-identity/ 02):
-// build → open across independent credentials, structural validation,
+// The portable identity record: build → open across independent
+// credentials, structural validation,
 // the did-binding tamper check, and the adoption decision table an
 // import runs (existing did wins; same did merges; no credential → no
 // identity). This is the Phase-1 exit proof at the values level: the

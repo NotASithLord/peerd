@@ -322,7 +322,7 @@ describe('R6 import gates', () => {
   });
 });
 
-// The portable-identity section (docs/design/portable-identity/ 02): the
+// The portable-identity section: the
 // did travels ONLY as the capsule record in payload.dweb — never as a raw
 // seed in the secrets box — and the import side routes the dweb-side
 // adoption decision into user-visible notices.

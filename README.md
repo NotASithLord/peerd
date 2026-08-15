@@ -193,9 +193,6 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before changing code.
 - [`docs/store/`](docs/store/): store packaging, permissions, privacy, and reviewer notes
 - [`scripts/cdp/states.mjs`](scripts/cdp/states.mjs): E2E and visual states
 
-Design records under `docs/design/` are point-in-time proposals. They explain
-past decisions and planned work. They do not override current code.
-
 ## Dependencies and license
 
 Runtime dependencies are vendored under `extension/vendor/`. Their source,

@@ -1,8 +1,8 @@
 // @ts-check
 // peerd-distributed/identity/capsule.js — the identity capsule.
 //
-// The portable form of the persistent identity (docs/design/
-// portable-identity/ 01): the vault-random Ed25519 material sealed
+// The portable form of the persistent identity: the vault-random
+// Ed25519 material sealed
 // AES-GCM under a random capsule key (CapK). The capsule ciphertext can
 // travel anywhere — export file, hosted record, QR, a peer — because
 // opening it requires CapK, and CapK exists only wrapped under

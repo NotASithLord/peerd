@@ -420,8 +420,7 @@ gotchas to know going in:
   Chrome-preview only until Firefox has a mesh host. Other artifacts prune the
   module and CI verifies the package boundary. See the `peerd-distributed/` code.
 - **Portable identity, same-user device enrollment + P2P state sync**
-  (`peerd-distributed/identity/` + `self/`, doc:
-  `docs/design/portable-identity/06-device-enrollment.md`). The permanent
+  (`peerd-distributed/identity/` + `self/`). The permanent
   person did:key stays the root; nothing is derived from a passkey, biometric,
   or device. Under it: a per-install **device key** (never exported, under the
   export-excluded `distributed/device-key/` prefix) certified by the root; a
