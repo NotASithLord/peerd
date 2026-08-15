@@ -49,7 +49,7 @@ const ORDER = [
   'initial-screen', 'idle-unlocked', 'completed-turn', 'multi-turn-transcript',
   'busy-thinking', 'mode-plan', 'tool-card-expanded', 'goal-running',
   'error-turn', 'sessions-list', 'onboarding-provider',
-  'home-fulltab', 'home-library-git', 'options-fulltab',
+  'home-fulltab', 'home-library-git', 'home-library-git-narrow', 'options-fulltab',
 ];
 const LABELS = {
   'initial-screen': ['Vault gate', 'First-run setup — the lock mark crowns the wordmark.'],
@@ -65,10 +65,13 @@ const LABELS = {
   'onboarding-provider': ['Provider onboarding', 'First-run provider choice and encrypted-key setup.'],
   'home-fulltab': ['Home (full tab)', 'The large in-browser view — nav rail, app library.'],
   'home-library-git': ['App history and Git', 'App history and remote controls in the Library.'],
+  'home-library-git-narrow': ['App history and Git (narrow)', 'The Library panel at the installed sidebar width.'],
   'options-fulltab': ['Settings (full tab)', 'The full-tab options page — providers, security, memory.'],
+  'pod-tab-failed': ['Pod startup failure', 'The Pod tab explains a missing or invalid sandbox.'],
 };
 // States captured at the wide (full-tab) viewport rather than the 400px panel.
-const WIDE = new Set(['home-fulltab', 'home-library-git', 'options-fulltab']);
+const WIDE = new Set(['home-fulltab', 'home-library-git', 'options-fulltab', 'pod-tab-failed']);
+const NARROW = new Set(['home-library-git-narrow']);
 
 // The state registry and committed baseline inventory are one contract. Enforce
 // it here because this command already runs in CI: an orphan baseline otherwise
@@ -120,7 +123,9 @@ const shotPath = (state, theme) => {
 const section = (state, i) => {
   const [name, blurb] = LABELS[state] || [state, ''];
   const wide = WIDE.has(state);
-  const width = wide ? 460 : 380;
+  const narrow = NARROW.has(state);
+  const width = wide ? 460 : narrow ? 310 : 380;
+  const viewport = wide ? 'full tab · 1280' : narrow ? 'narrow full tab · 310' : '';
   const img = (theme) => {
     const src = shotPath(state, theme);
     return src ? `<img src="${src}" alt="${name} (${theme})" width="${width}">` : `_no ${theme} capture_`;
@@ -128,7 +133,7 @@ const section = (state, i) => {
   return [
     `### ${String(i + 1).padStart(2, '0')} · ${name}`,
     '',
-    `\`${state}\`${wide ? ' · `full tab · 1280`' : ''}${blurb ? ` — ${blurb}` : ''}`,
+    `\`${state}\`${viewport ? ` · \`${viewport}\`` : ''}${blurb ? ` - ${blurb}` : ''}`,
     '',
     '| light | dark |',
     '| --- | --- |',

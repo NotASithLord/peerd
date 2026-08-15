@@ -238,6 +238,127 @@ let lockDelegated = false;
 let lockReportBody = '';
 let lockFixtureUrl = '';
 
+const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPanel = false }) => {
+  const imported = await evalIn(ctx.page, `(async () => {
+    const { buildAppExport } = await import('/peerd-engine/index.js');
+    const envelope = await buildAppExport({
+      record: { name: 'Versioned App', entryFile: 'index.html', tags: ['visual-fixture'] },
+      files: { 'index.html': '<!doctype html><title>Versioned App</title><main>Hello</main>' },
+    });
+    return chrome.runtime.sendMessage({ type: 'import/apply', envelope });
+  })()`, true);
+  rec.check('visual fixture App imported with a Git repository', imported?.ok && imported?.kind === 'app', JSON.stringify(imported));
+  const appId = imported?.id ?? '';
+  const cardSelector = `.library-card[data-app-id="${appId}"]`;
+  let page = null;
+  try {
+    const branched = appId ? await evalIn(ctx.page,
+      `chrome.runtime.sendMessage({ type: 'apps/repository/branch', appId: ${JSON.stringify(appId)}, name: 'feature/visual', checkout: true })`, true) : null;
+    rec.check('visual fixture exposes existing-branch switching', branched?.ok === true, JSON.stringify(branched));
+    page = await openWidePage(ctx, 'home/home.html#library', { metrics });
+    const libraryReady = await waitFor(() => evalIn(page, `
+      document.querySelector('[data-home-view="library"]')?.getAttribute('aria-current') === 'page'
+        && !!document.querySelector('.library-grid')
+    `), { budgetMs: 15_000, pollMs: 80 });
+    rec.check('visual fixture opens the Library route', !!libraryReady);
+    const appReady = await waitFor(() => evalIn(page,
+      `!!document.querySelector(${JSON.stringify(cardSelector)})`),
+    { budgetMs: 20_000, pollMs: 80 });
+    rec.check('visual fixture App appears in the Library', !!appReady);
+    await evalIn(page, `document.querySelector(${JSON.stringify(cardSelector)})?.querySelector('.library-kebab')?.click()`);
+    const historyActionReady = await waitFor(() => evalIn(page, `!![...document.querySelector(${JSON.stringify(cardSelector)})?.querySelectorAll('.library-menu-item') ?? []].find((button) => button.textContent === 'History & Git')`),
+      { budgetMs: 5_000, pollMs: 50 });
+    rec.check('visual fixture exposes the History and Git action', !!historyActionReady);
+    await evalIn(page, `[...document.querySelector(${JSON.stringify(cardSelector)})?.querySelectorAll('.library-menu-item') ?? []].find((button) => button.textContent === 'History & Git')?.click()`);
+    const historyReady = await waitFor(() => evalIn(page,
+      `!!document.querySelector(${JSON.stringify(`${cardSelector} .library-repository .library-commit`)})`),
+    { budgetMs: 20_000, pollMs: 80 });
+    rec.check('visual fixture renders repository history', !!historyReady);
+    // Git commit IDs include the commit timestamp, and the rows carry RELATIVE
+    // times, so this visual fixture must normalize both before capture. The
+    // surrounding branch, history, controls, and layout remain
+    // production-rendered; only the inherently run-specific values are replaced.
+    const pinVisualState = () => evalIn(page, `(() => {
+      const card = document.querySelector(${JSON.stringify(cardSelector)});
+      const fixedOid = '0000000000';
+      const fixedWhen = 'just now';
+      const head = card?.querySelector('.library-repository-head .muted');
+      if (head) head.textContent = head.textContent.replace(/[0-9a-f]{10}$/i, fixedOid);
+      for (const oid of card?.querySelectorAll('.library-commit code') ?? []) oid.textContent = fixedOid;
+      // why: fmtWhen rounds to the nearest minute, so 'just now' becomes '1m ago'
+      // at 30s, well inside this state's ~60s of waitFor budget. Unpinned, it
+      // flips either between runs (both themes drift) or between the two shots
+      // ~100ms apart (dark alone drifts, and the state flaps on dark forever).
+      for (const when of card?.querySelectorAll('.library-commit > span.muted') ?? []) when.textContent = fixedWhen;
+      // The app row renders fmtWhen as a bare leading text node followed by an
+      // optional ' · source' sibling, so replace that node rather than the box.
+      const meta = card?.querySelector('.library-meta');
+      const metaWhen = meta?.firstChild;
+      if (metaWhen?.nodeType === 3 && metaWhen.nodeValue.trim()) metaWhen.nodeValue = fixedWhen;
+      const commit = card?.querySelector('.library-commit');
+      const scroller = card?.closest('.home-content');
+      if (${JSON.stringify(revealPanel)} && commit && scroller) {
+        const commitRect = commit.getBoundingClientRect();
+        const scrollerRect = scroller.getBoundingClientRect();
+        scroller.scrollTop += commitRect.top - scrollerRect.top
+          - Math.max(0, (scroller.clientHeight - commitRect.height) / 2);
+      }
+      const commitRect = commit?.getBoundingClientRect();
+      const scrollerRect = scroller?.getBoundingClientRect();
+      return {
+        commitTop: commitRect?.top ?? null,
+        commitBottom: commitRect?.bottom ?? null,
+        scrollerTop: scrollerRect?.top ?? null,
+        scrollerBottom: scrollerRect?.bottom ?? null,
+      };
+    })()`);
+    const settleNarrowCamera = async () => {
+      await pinVisualState();
+      await sleep(80);
+      return pinVisualState();
+    };
+    const visualState = revealPanel ? await settleNarrowCamera() : await pinVisualState();
+    if (revealPanel) {
+      // why the explicit number guard: the rects are `?? null` on a miss, and
+      // `null >= null` coerces to `0 >= 0`, i.e. true. Without it a missing
+      // commit row or scroller passes this check silently.
+      const framed = [visualState?.commitTop, visualState?.commitBottom,
+        visualState?.scrollerTop, visualState?.scrollerBottom].every((v) => typeof v === 'number');
+      rec.check('visual fixture keeps the narrow commit row in frame',
+        framed
+          && visualState.commitTop >= visualState.scrollerTop
+          && visualState.commitBottom <= visualState.scrollerBottom,
+        JSON.stringify(visualState));
+    }
+    // why: a peer notification landing mid-capture leaks an unread badge into the
+    // top bar. That is global chrome, nothing to do with this fixture, and it is
+    // exactly the drift that reaches the SECOND shot alone. home-fulltab already
+    // quiets them the same way before each theme.
+    const quietNotifications = async () => {
+      await evalIn(page, `import('/shared/peer-notifications.js')
+        .then(({ peerNotifications }) => peerNotifications.clear())`, true);
+      await waitFor(() => evalIn(page, `!document.querySelector('.notif-badge, .notif-banner')`),
+        { budgetMs: 2_000, pollMs: 25 });
+    };
+    // why beforeShot on BOTH paths: the two theme captures are ~100ms apart, so
+    // the pinned oid and relative times have to be re-applied for the second one
+    // or whatever moved in that window lands in the dark shot alone.
+    const beforeShot = async () => {
+      await quietNotifications();
+      return revealPanel ? settleNarrowCamera() : pinVisualState();
+    };
+    await rec.visualPage(visualName, page, { beforeShot });
+  } finally {
+    try { page?.close(); } catch { /* */ }
+    if (appId) {
+      const deleted = await evalIn(ctx.page,
+        `chrome.runtime.sendMessage({ type: 'apps/delete', appId: ${JSON.stringify(appId)} })`, true)
+        .catch(() => null);
+      rec.check('visual fixture App removed after capture', deleted?.ok === true, JSON.stringify(deleted));
+    }
+  }
+};
+
 export const STATES = [
   // --- visual: the pre-unlock setup screen (must capture BEFORE unlock) -------
   {
@@ -2793,7 +2914,15 @@ export const STATES = [
         // pathologically slow runner would drift it.
         await waitFor(() => evalIn(page, `document.querySelectorAll('.library-grid > *').length > 0`),
           { budgetMs: 10_000, pollMs: 100 }).catch(() => {});
-        await rec.visualPage('home-fulltab', page);
+        // why: live dweb notifications are unrelated to this quiet-instance
+        // contract and can arrive between the light and dark captures.
+        const pinQuietHome = async () => {
+          await evalIn(page, `import('/shared/peer-notifications.js')
+            .then(({ peerNotifications }) => peerNotifications.clear())`, true);
+          await waitFor(() => evalIn(page, `!document.querySelector('.notif-badge, .notif-banner')`),
+            { budgetMs: 2_000, pollMs: 25 });
+        };
+        await rec.visualPage('home-fulltab', page, { beforeShot: pinQuietHome });
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
@@ -2808,52 +2937,20 @@ export const STATES = [
     name: 'home-library-git', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
-      const imported = await evalIn(ctx.page, `(async () => {
-        const { buildAppExport } = await import('/peerd-engine/index.js');
-        const envelope = await buildAppExport({
-          record: { name: 'Versioned App', entryFile: 'index.html', tags: ['visual-fixture'] },
-          files: { 'index.html': '<!doctype html><title>Versioned App</title><main>Hello</main>' },
-        });
-        return chrome.runtime.sendMessage({ type: 'import/apply', envelope });
-      })()`, true);
-      rec.check('visual fixture App imported with a Git repository', imported?.ok && imported?.kind === 'app', JSON.stringify(imported));
-      const branched = imported?.id ? await evalIn(ctx.page,
-        `chrome.runtime.sendMessage({ type: 'apps/repository/branch', appId: ${JSON.stringify(imported.id)}, name: 'feature/visual', checkout: true })`, true) : null;
-      rec.check('visual fixture exposes existing-branch switching', branched?.ok === true, JSON.stringify(branched));
-      const page = await openWidePage(ctx, 'home/home.html#library');
-      try {
-        const libraryReady = await waitFor(() => evalIn(page, `
-          document.querySelector('[data-home-view="library"]')?.getAttribute('aria-current') === 'page'
-            && !!document.querySelector('.library-grid')
-        `), { budgetMs: 15_000, pollMs: 80 });
-        rec.check('visual fixture opens the Library route', !!libraryReady);
-        const appReady = await waitFor(() => evalIn(page,
-          `[...document.querySelectorAll('.library-name')].some((n) => n.textContent.includes('Versioned App'))`),
-        { budgetMs: 20_000, pollMs: 80 });
-        rec.check('visual fixture App appears in the Library', !!appReady);
-        await evalIn(page, `(() => {
-          const name = [...document.querySelectorAll('.library-name')].find((n) => n.textContent.includes('Versioned App'));
-          name?.closest('.library-card')?.querySelector('.library-kebab')?.click();
-        })()`);
-        const historyActionReady = await waitFor(() => evalIn(page, `!![...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')`),
-          { budgetMs: 5_000, pollMs: 50 });
-        rec.check('visual fixture exposes the History and Git action', !!historyActionReady);
-        await evalIn(page, `[...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')?.click()`);
-        const historyReady = await waitFor(() => evalIn(page, `!!document.querySelector('.library-repository .library-commit')`),
-          { budgetMs: 20_000, pollMs: 80 });
-        rec.check('visual fixture renders repository history', !!historyReady);
-        // Git commit IDs include the commit timestamp, so this visual fixture
-        // must normalize them before capture. The surrounding branch, history,
-        // controls, and layout remain production-rendered; only the inherently
-        // run-specific identifier is replaced.
-        await evalIn(page, `(() => {
-          const fixedOid = '0000000000';
-          const head = document.querySelector('.library-repository-head .muted');
-          if (head) head.textContent = head.textContent.replace(/[0-9a-f]{10}$/i, fixedOid);
-          for (const oid of document.querySelectorAll('.library-commit code')) oid.textContent = fixedOid;
-        })()`);
-        await rec.visualPage('home-library-git', page);
-      } finally { try { page.close(); } catch { /* */ } }
+      await captureHomeLibraryGit(ctx, rec, { visualName: 'home-library-git' });
+    },
+  },
+  // why: the dense History and Git panel has its own narrow breakpoint, so the
+  // installed sidebar width needs a companion pixel contract to the wide view.
+  {
+    name: 'home-library-git-narrow', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      await captureHomeLibraryGit(ctx, rec, {
+        visualName: 'home-library-git-narrow',
+        metrics: NARROW_PANEL_METRICS,
+        revealPanel: true,
+      });
     },
   },
 
@@ -3203,6 +3300,14 @@ export const STATES = [
       try {
         await waitFor(() => evalIn(page, `document.querySelector('#app')?.children.length > 0`),
           { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        // why: the keyless probe resolves just after mount; capture only its
+        // settled contract so light and dark cannot split across probe states.
+        const ollamaReady = await waitFor(() => evalIn(page, `(() => {
+          const card = [...document.querySelectorAll('.provider-card')]
+            .find((node) => node.querySelector('.provider-card-name')?.textContent === 'Ollama');
+          return card?.querySelector('.key-badge')?.textContent?.trim() === '✓ Connected';
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        if (!ollamaReady) throw new Error('options full-tab Ollama probe did not settle');
         await rec.visualPage('options-fulltab', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
@@ -3393,7 +3498,7 @@ export const STATES = [
   // --- visual: the STANDALONE TAB PAGES ---------------------------------------
   //
   // Coverage audit finding: every visual baseline photographed the side panel,
-  // home or options, so five shipped pages — the three engine tabs, the mic
+  // home or options, so six shipped pages - the four engine tabs, the mic
   // permission grant, and the eval runner — had NO pixel guard at all. These are
   // the cheap half of that gap: each renders fully with no instance, no seeding
   // and no model traffic, so they cost one openWidePage + a selector wait.
@@ -3402,7 +3507,7 @@ export const STATES = [
   // hash. That is deliberate rather than a shortcut: the fail card IS the screen
   // a user meets when an id is stale, an image pin mismatches, or cross-origin
   // isolation is unavailable, and it is the only explanation they get for why
-  // their VM/Notebook/App did not start. It is also the one state reachable
+  // their VM/Notebook/App/Pod did not start. It is also the one state reachable
   // without booting CheerpX. The booted terminal / editor / render states remain
   // uncovered and want their own states with a seeded instance.
   {
@@ -3710,6 +3815,34 @@ export const STATES = [
       // failure class so the light capture cannot race the module startup.
       const page = await openWidePage(ctx, 'engine-tabs/app-tab/index.html', { ready: '#boot.is-failed' });
       try { await rec.visualPage('app-tab-failed', page); }
+      finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'pod-tab-failed', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      // The boot card exists before startup settles. Wait for the production
+      // failure class so both theme captures contain the final no-id error state.
+      const page = await openWidePage(ctx, 'engine-tabs/pod-tab/index.html', { ready: '#pod-boot.is-failed' });
+      const pinVisualState = async () => {
+        // why: CDP keeps the pointer coordinates when targets change. A prior
+        // state can leave it over the pull-in chip and capture its hover border.
+        await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 0, y: 0 });
+        return evalIn(page, `(() => {
+          const pullIn = document.querySelector('.peerd-pull');
+          if (!pullIn) return false;
+          // why: Chrome can omit this fixed backdrop-filter layer during a
+          // theme compositor repaint. Pinning the blur keeps both shots exact.
+          pullIn.style.backdropFilter = 'none';
+          pullIn.style.webkitBackdropFilter = 'none';
+          pullIn.getBoundingClientRect();
+          return true;
+        })()`);
+      };
+      const visualReady = await waitFor(pinVisualState, { budgetMs: 5000 });
+      if (!visualReady) throw new Error('Pod failure controls did not settle');
+      try { await rec.visualPage('pod-tab-failed', page, { beforeShot: pinVisualState }); }
       finally { try { page.close(); } catch { /* */ } }
     },
   },

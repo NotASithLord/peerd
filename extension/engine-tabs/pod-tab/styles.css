@@ -1,7 +1,12 @@
 :root {
   color-scheme: dark light;
-  --bg: #0d1117; --elev: #161b22; --fg: #e6edf3; --muted: #8b949e;
-  --border: #30363d; --fail: #ff7b72;
+  --bg: #101112; --bg-elev: #151617; --fg: #F3F3EF; --fg-muted: #ABABA6;
+  --muted: #70716E; --border: #25272A; --fail: #c43030;
+  /* why a second failure token: --fail is Graphite's MARK red, which is what the
+     sibling engine tabs spend it on (spinner fill, borders). At 13px on --bg it
+     is 3.4:1, under AA, so terminal stderr needs an ink variant. Mirrors the
+     --accent / --accent-ink split the side panel already draws. */
+  --fail-ink: #ff7b72;
   --cyan: #00b7eb; --red: #ef4444; --amber: #f59e0b;
   --green: #22c55e; --magenta: #d946ef;
   --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
@@ -26,9 +31,12 @@ body { font: 13px/1.45 var(--mono); }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .boot-spinner { animation: none; } }
 .boot-card.is-failed .boot-spinner { background: var(--fail); animation: none; }
+.boot-card.is-failed { color: var(--fg-muted); }
+/* why: a Pod combines an editor and terminal, so its 42px identity strip keeps
+   the mixed workspace oriented while sibling engine-tab chrome remains an owner decision. */
 #pod-app { height: 100%; display: grid; grid-template-rows: 42px minmax(180px, 1fr) minmax(220px, .8fr); }
 #pod-app[hidden] { display: none; }
-header { display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--elev); }
+header { display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--bg-elev); }
 .sep, #pod-id, #pod-status { color: var(--muted); }
 .kind { color: var(--fg); font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
 .spacer { flex: 1; }
@@ -39,16 +47,36 @@ header { display: flex; align-items: center; gap: 8px; padding: 0 12px; border-b
 #terminal-output { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px 12px; }
 .entry { display: block; margin: 0 0 8px; }
 .entry-command { color: var(--fg); }
-.entry-stderr { color: var(--fail); }
+.entry-stderr { color: var(--fail-ink); }
 .entry-meta { color: var(--muted); font-size: 11px; }
-#terminal-form { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 6px 10px; border-top: 1px solid var(--border); background: var(--elev); }
+#terminal-form { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 6px 10px; border-top: 1px solid var(--border); background: var(--bg-elev); }
 #prompt-label { color: var(--muted); }
 #terminal-input { min-width: 0; border: 0; outline: 0; background: transparent; color: var(--fg); font: inherit; }
 button { border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--fg); padding: 5px 10px; font: inherit; cursor: pointer; }
 button:hover { border-color: var(--muted); }
 button:focus-visible, #terminal-input:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 #stop-button { font-weight: 600; }
+/* why: Pod keeps OS light-theme support while dark-only sibling engine tabs
+   remain an explicit owner decision. */
 @media (prefers-color-scheme: light) {
-  :root { --bg:#fff; --elev:#f5f5f5; --fg:#151515; --muted:#686868; --border:#d6d6d6; --fail:#b42318; }
+  :root { --bg:#fff; --bg-elev:#f5f5f5; --fg:#151515; --fg-muted:#686868; --muted:#686868; --border:#d6d6d6; --fail:#b42318; --fail-ink:#b42318; }
+  /* why: CodeMirror deliberately keeps its dark syntax theme. Keep its muted
+     chrome and the matching active file row legible inside the light shell. */
+  .pe-host { --pe-fg:#F3F3EF; --pe-fg-muted:#ABABA6; }
+  /* why `body `: peerd-engine/editor.js appends its stylesheet to document.head
+     at runtime, so its own `.pe-node.is-active` (same 0,2,0 specificity) would
+     win on source order and paint --pe-fg (#151515 in light) on the dark
+     --pe-bg-editor row. The descendant prefix outranks it. Same reason the
+     .peerd-pull rules below carry one. */
+  body .pe-node.is-active { color: #F3F3EF; }
+  .pe-node.is-active .pe-twirl,
+  .pe-node.is-active .pe-icon,
+  .pe-node.is-active .pe-close { color: #ABABA6; }
+  /* why: the shared pull-in affordance keeps a dark translucent surface, so it
+     needs Graphite's light ink even when the surrounding Pod shell is light. */
+  body .peerd-pull { color: #F3F3EF; }
+  body .peerd-pull .peerd-pull-glyph,
+  body .peerd-pull-hint { color: #ABABA6; }
+  body .peerd-pull-hint-cursor { background: #F3F3EF; }
   #terminal-pane { background: #fafafa; }
 }

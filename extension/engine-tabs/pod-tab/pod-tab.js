@@ -22,7 +22,10 @@ const MAX_JOB_OUTPUT = 512 * 1024;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const JOB_HISTORY = 16;
 const TERMINAL_ENTRY_HISTORY = 500;
-const workspace = opfsHelpers([POD_OPFS_ROOT, podId]);
+// why: keep invalid URLs inside the caught boot lane below. opfsHelpers validates
+// synchronously, so passing the empty hash would strand the page on "Starting Pod".
+// No workspace operation can run before validPodId is checked.
+const workspace = opfsHelpers([POD_OPFS_ROOT, validPodId ? podId : 'invalid-pod-id']);
 const firefoxRuntime = typeof browser.runtime.getBrowserInfo === 'function'
   ? browser.runtime.getBrowserInfo().then((info) => info.name === 'Firefox').catch(() => false)
   : Promise.resolve(false);
