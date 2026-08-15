@@ -1,6 +1,8 @@
 import { describe, test, expect } from 'bun:test';
 // @ts-ignore — JS module with JSDoc types
-import { MODEL_SPECS, judgeModelCapability } from '../../extension/peerd-provider/local-model-capability.js';
+import {
+  MODEL_SPECS, DEFAULT_LOCAL_MODEL_ID, listLocalModelSpecs, localModelSpec, judgeModelCapability,
+} from '../../extension/peerd-provider/local-model-capability.js';
 
 const SPEC = MODEL_SPECS['gemma-4-e2b'];
 
@@ -45,5 +47,47 @@ describe('judgeModelCapability (gemma-4-e2b)', () => {
   test('none: no probe data', () => {
     expect(judgeModelCapability(null as any, SPEC).confidence).toBe('none');
     expect(judgeModelCapability({ webgpu: false } as any, SPEC).confidence).toBe('none');
+  });
+});
+
+describe('the on-device model registry', () => {
+  test('every spec carries a complete load recipe - a half-declared model would fail deep inside from_pretrained', () => {
+    for (const spec of listLocalModelSpecs()) {
+      expect(spec.id).toBeTruthy();
+      expect(spec.label).toBeTruthy();
+      expect(spec.repo).toMatch(/^[\w.-]+\/[\w.-]+$/);   // an HF repo id, not a URL
+      expect(spec.modelClass).toMatch(/^[A-Z]\w+$/);      // a Transformers.js export name
+      expect(spec.dtype).toBeTruthy();
+      expect(spec.cachePattern).toBeTruthy();
+      expect(spec.sizeGB).toBeGreaterThan(0);
+      expect(typeof spec.specVerified).toBe('boolean');
+      // The cache probe pairs cachePattern with the weight-file suffix; a pattern
+      // that cannot match its own repo would re-download an installed model.
+      expect(new RegExp(spec.cachePattern, 'i').test(spec.repo)).toBe(true);
+    }
+  });
+
+  test('ids are unique and the default resolves to a real spec', () => {
+    const ids = listLocalModelSpecs().map((s) => s.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(localModelSpec(DEFAULT_LOCAL_MODEL_ID)?.id).toBe(DEFAULT_LOCAL_MODEL_ID);
+  });
+
+  test('the key and the id agree - the table is looked up both ways', () => {
+    for (const [key, spec] of Object.entries(MODEL_SPECS)) expect(spec.id as string).toBe(key);
+  });
+
+  test('an unknown id is undefined, never a silent fallback to another model', () => {
+    expect(localModelSpec('gemma-9-xxl')).toBeUndefined();
+    expect(localModelSpec('')).toBeUndefined();
+  });
+
+  test('the judge is spec-driven: a 30B model is refused on hardware that runs the small one', () => {
+    // 4 GB storage binding - a generous real-world limit that clears Gemma.
+    const laptop = { webgpu: true, shaderF16: true, maxStorageBufferBindingSizeGB: 3.9, maxBufferSizeGB: 8 };
+    expect(judgeModelCapability(laptop, MODEL_SPECS['gemma-4-e2b']).capable).toBe(true);
+    const big = judgeModelCapability(laptop, MODEL_SPECS['muse-glimmer-30b']);
+    expect(big.capable).toBe(false);
+    expect(big.reason).toContain('Muse Glimmer 30B');
   });
 });

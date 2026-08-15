@@ -103,8 +103,9 @@ import {
   // web actor model resolution: pin → local → provider default → inherit.
   // Pure; the SW resolves it when minting a web actor session.
   resolveRunnerTarget,
-  // local WebGPU runner: the offscreen-engine bridge + the resident model id.
-  setLocalGenerate, LOCAL_MODEL_ID,
+  // local WebGPU runner: the offscreen-engine bridge, the default model id, and
+  // the per-model spec table (labels for the picker, ids for residency).
+  setLocalGenerate, LOCAL_MODEL_ID, localModelSpec,
   // live model inventory (Ollama /api/tags) for the model picker.
   listProviderModels,
   // OpenRouter live catalog + curated "popular" seed for the Settings model
@@ -1138,7 +1139,8 @@ const {
   buildModelOptions,
 } = makeModelCatalog({
   listProviders, listProviderModels, providerModelContextWindow,
-  localModelId: LOCAL_MODEL_ID, localModelAvailable: () => localModelState.available(),
+  localModelIds: () => localModelState.availableModels(),
+  localModelLabel: (id) => localModelSpec(id)?.label ?? id,
   settingsStore, vault, sessions, resolveActiveProvider, getSecret, safeFetch,
   onLiveModelsChanged: onLiveProviderModelsChanged,
 });
@@ -4042,8 +4044,12 @@ const applyWebExtract = (/** @type {any} */ resp, /** @type {unknown} */ extract
 // Local-model residency + progress live in a store (background/local-model-state.js)
 // so the local-model/* routes reach them via deps. available() feeds
 // resolveRunnerModel; progress() is polled by Settings.
-const localModelState = makeLocalModelState();
-const localRunnerState = () => ({ available: localModelState.available(), model: LOCAL_MODEL_ID });
+const localModelState = makeLocalModelState({ defaultModel: LOCAL_MODEL_ID });
+// The runner takes whichever on-device model is actually usable - the default
+// when it's there, otherwise another downloaded one - never a model id that
+// isn't resident (that would fail on the first turn instead of falling through
+// to the cloud runner).
+const localRunnerState = () => ({ available: localModelState.available(), model: localModelState.residentModel() });
 /** @type {Promise<boolean>|null} */
 let localModelHydration = null;
 const hydrateLocalModelAvailability = async ({ force = false } = {}) => {
@@ -4052,11 +4058,18 @@ const hydrateLocalModelAvailability = async ({ force = false } = {}) => {
   if (localModelHydration) return localModelHydration;
   localModelHydration = (async () => {
     await ensureOffscreen();
-    const status = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'local-model/host/status' }));
-    if (!status) throw new Error('local model status unavailable');
-    if (localModelState.setAvailable(!!(status.available || status.downloaded))) {
-      onProviderConfigChanged();
+    // Seed EVERY on-device model's residency in one round-trip - a worker that
+    // only asked about the default would hide a second downloaded model from the
+    // picker until Settings happened to be opened. includeSupport is off: cold
+    // start shouldn't pay the Transformers.js import to answer "what's cached".
+    const catalog = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'local-model/host/catalog', includeSupport: false }));
+    if (!catalog?.models) throw new Error('local model status unavailable');
+    let changed = false;
+    for (const entry of catalog.models) {
+      if (typeof entry?.model !== 'string') continue;
+      if (localModelState.setModelAvailable(entry.model, !!(entry.available || entry.downloaded))) changed = true;
     }
+    if (changed) onProviderConfigChanged();
     return localModelState.available();
   })();
   try { return await localModelHydration; }
@@ -4094,7 +4107,10 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ ms
   if (msg?.type === 'local-model/progress') {
     localModelState.setProgress(msg.progress);
     if (msg.progress?.status === 'phase' && msg.progress?.phase === 'ready') {
-      if (localModelState.setAvailable(true)) onProviderConfigChanged();
+      // The engine stamps every progress event with the model it's about; an
+      // unstamped one can only be the default (older host, same worker).
+      const readyId = typeof msg.progress?.model === 'string' ? msg.progress.model : LOCAL_MODEL_ID;
+      if (localModelState.setModelAvailable(readyId, true)) onProviderConfigChanged();
       void pushState().catch(() => {});
     }
     uiPorts.broadcast({ type: 'local-model/progress', progress: msg.progress });
@@ -4124,7 +4140,7 @@ const generateLocalForAdapter = (/** @type {any} */ opts) => {
   localGens.set(genId, state);
   if (hostAvailable) {
     ensureOffscreen()
-      .then(() => browser.runtime.sendMessage({ type: 'local-model/host/generate', genId, messages: opts.messages, system: opts.system, tools: opts.tools, maxTokens: 512 }))
+      .then(() => browser.runtime.sendMessage({ type: 'local-model/host/generate', genId, model: opts.model, messages: opts.messages, system: opts.system, tools: opts.tools, maxTokens: 512 }))
       .catch((e) => { state.done = true; state.error = e; wakeLocalGen(state); });
   }
   return (async function* () {

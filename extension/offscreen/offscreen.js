@@ -42,7 +42,7 @@ import './doc-extract.js';
 // (same document — no route needed).
 import './web-extract.js';
 import { extractMarkdownLocal } from './web-extract-core.js';
-import { initLocalModel, generateLocal, localModelStatus, probeWebgpu, teardownLocalModel } from './local-model.js';
+import { initLocalModel, generateLocal, localModelStatus, localModelCatalog, loadingModelId, probeWebgpu, teardownLocalModel } from './local-model.js';
 import { isServiceWorkerSender, isTrustedSender } from '/shared/messaging.js';
 // The always-on base network (S1b). Self-registers a dweb/base-host/* handler;
 // inert on store builds (DWEB_ENABLED false + loadDweb stub). The lobby
@@ -442,21 +442,43 @@ const onLocalModelMessage = (msg, sender, sendResponse) => {
   (async () => {
     switch (msg.type) {
       case 'local-model/host/status':
-        sendResponse({ ok: true, ...(await localModelStatus()) });
+        // The status reply carries its own ok (false for an unknown model id).
+        sendResponse(await localModelStatus({ model: msg.model, includeSupport: !!msg.includeSupport }));
+        return;
+      case 'local-model/host/catalog':
+        // Every shipped model in one round-trip - what the Settings cards render.
+        sendResponse(await localModelCatalog({ includeSupport: msg.includeSupport !== false }));
         return;
       case 'local-model/host/probe':
         // probeWebgpu always carries its own `ok` (true/false) — spread it as-is.
         sendResponse(await probeWebgpu());
         return;
-      case 'local-model/host/init':
+      case 'local-model/host/init': {
         // Kick off the (minutes-long, ONE-TIME) load fire-and-forget — progress
         // streams via local-model/progress, status reflects completion. Respond
         // immediately so the SW route doesn't block for the whole download; the
         // caller polls local-model/status.
-        initLocalModel((p) => { try { browser.runtime.sendMessage({ type: 'local-model/progress', progress: p }); } catch { /* SW asleep */ } })
-          .catch((e) => { try { browser.runtime.sendMessage({ type: 'local-model/progress', progress: { status: 'error', message: /** @type {{ message?: string }} */ (e)?.message ?? String(e) } }); } catch { /* SW asleep */ } });
-        sendResponse({ ok: true, started: true, ...(await localModelStatus()) });
+        // why the pre-flight await: an unknown id / unsupported architecture /
+        // a load already in flight for another model must come back as a REFUSAL
+        // on this response, not as a progress event the caller may never see.
+        const pre = await localModelStatus({ model: msg.model, includeSupport: true });
+        if (!pre.ok) { sendResponse(pre); return; }
+        if (pre.supported === false) {
+          sendResponse({ ok: false, error: pre.unsupportedReason, model: pre.model, supported: false });
+          return;
+        }
+        const busy = loadingModelId();
+        if (busy && busy !== pre.model) {
+          sendResponse({ ok: false, error: `another model is still downloading (${busy}) - wait for it to finish first.`, model: pre.model });
+          return;
+        }
+        initLocalModel({ model: pre.model }, (p) => { try { browser.runtime.sendMessage({ type: 'local-model/progress', progress: p }); } catch { /* SW asleep */ } })
+          .catch((e) => {
+            try { browser.runtime.sendMessage({ type: 'local-model/progress', progress: { status: 'error', message: /** @type {{ message?: string }} */ (e)?.message ?? String(e), model: pre.model } }); } catch { /* SW asleep */ }
+          });
+        sendResponse({ ...(await localModelStatus({ model: pre.model })), started: true });
         return;
+      }
       case 'local-model/host/teardown':
         await teardownLocalModel();
         sendResponse({ ok: true });

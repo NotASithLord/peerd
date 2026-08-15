@@ -10,10 +10,14 @@
 const GB = 2 ** 30;
 
 /**
- * Per-model minimum hardware. Gemma-4-E2B: the load-bearing tensor is the 1.59 GB
- * embed table (Per-Layer Embeddings), so a single WebGPU storage binding must hold
- * it — hence ~1.8 GB (with headroom for intermediate activations). Apple Silicon +
- * discrete GPUs pass; many integrated GPUs cap storage bindings far below this.
+ * Per-model minimum hardware + the engine's load recipe. One entry per shipped
+ * on-device model; the offscreen engine, the Settings cards, the chat picker and
+ * the runner all read THIS table rather than hard-coding a model.
+ *
+ * Gemma-4-E2B: the load-bearing tensor is the 1.59 GB embed table (Per-Layer
+ * Embeddings), so a single WebGPU storage binding must hold it - hence ~1.8 GB
+ * (with headroom for intermediate activations). Apple Silicon + discrete GPUs
+ * pass; many integrated GPUs cap storage bindings far below this.
  *
  * `contextWindow` is the model's nominal context length (config
  * `max_position_embeddings`) — the canonical home for local-model metadata,
@@ -24,20 +28,100 @@ const GB = 2 ** 30;
  * Ollama's num_ctx — when the offscreen engine can report the resident
  * model's effective window, that LIVE value overrides this (see
  * setLocalModelInfo in local-webgpu.js).
- * @typedef {{ id: string, label: string, url: string, sizeGB: number, minStorageBufferBindingSizeGB: number, minBufferSizeGB: number, requiresShaderF16: boolean, contextWindow: number }} ModelSpec
+ *
+ * `repo` / `modelClass` / `dtype` are the LOAD RECIPE: the HF repo the weights
+ * stream from, the Transformers.js class the engine instantiates, and the
+ * quantization. why `modelClass` is a NAME, not a value: it doubles as the
+ * runtime-support probe - the engine looks the class up on the vendored
+ * Transformers.js module, so a model whose architecture that build doesn't
+ * carry is detected as unrunnable BEFORE a multi-GB download starts, and
+ * unlocks itself with no code edit once the vendor pin catches up
+ * (scripts/vendor-transformers.sh). See engineSupportsSpec in
+ * offscreen/local-model.js.
+ *
+ * `cachePattern` matches the weight URLs Transformers.js writes into the Cache
+ * API, so a model downloaded by a PREVIOUS install is detected as resident
+ * without a re-download.
+ *
+ * `specVerified` is false while the hardware figures are derived from the
+ * model card rather than a real on-device load. why it's a field and not a
+ * comment: the Settings card renders the caveat, so an unverified number can
+ * never quietly read as a measured one.
+ *
+ * @typedef {{ id: string, label: string, url: string, repo: string, modelClass: string,
+ *   dtype: string, cachePattern: string, sizeGB: number, minStorageBufferBindingSizeGB: number,
+ *   minBufferSizeGB: number, requiresShaderF16: boolean, contextWindow: number,
+ *   specVerified: boolean, note?: string }} ModelSpec
  */
 export const MODEL_SPECS = Object.freeze({
   'gemma-4-e2b': Object.freeze({
     id: 'gemma-4-e2b',
     label: 'Gemma 4 E2B',
     url: 'https://huggingface.co/onnx-community/gemma-4-E2B-it-ONNX',
+    repo: 'onnx-community/gemma-4-E2B-it-ONNX',
+    // TEXT-ONLY path: Gemma4ForCausalLM (not Gemma4ForConditionalGeneration) loads
+    // embed_tokens + decoder and skips the vision/audio encoders the runner never uses.
+    modelClass: 'Gemma4ForCausalLM',
+    dtype: 'q4f16',
+    cachePattern: 'gemma-4-e2b',
     sizeGB: 3.1,
     minStorageBufferBindingSizeGB: 1.8,
     minBufferSizeGB: 3.2,
     requiresShaderF16: true,
     contextWindow: 32_768,
+    specVerified: true,
+  }),
+  // Muse Glimmer 30B (Meta, Apache-2.0) - the agentic on-device model behind
+  // webml-community/muse-glimmer-webgpu-kernels. Listed so the option exists the
+  // moment it can run, but it is NOT loadable on the currently vendored
+  // Transformers.js (4.2.0 - the latest published, and its `main` branch too -
+  // ships no `muse_glimmer` architecture, so `MuseGlimmerForCausalLM` is absent
+  // and the engine's support probe locks the card). Two things must land before
+  // this unlocks, and BOTH are upstream, not here:
+  //   1. a Transformers.js build carrying the architecture (re-run
+  //      scripts/vendor-transformers.sh - the probe flips on its own), and
+  //   2. a browser-loadable ONNX export; `repo` below is the conventional
+  //      onnx-community name for it and is UNCONFIRMED.
+  // The hardware figures are model-card arithmetic (30B ≈ 2B ViT + 28B decoder,
+  // ~17 GB at 4-bit), hence specVerified:false - and note that a tensor that size
+  // exceeds what WebGPU can bind on today's consumer hardware, which is exactly
+  // what judgeModelCapability will tell a user who runs the test.
+  'muse-glimmer-30b': Object.freeze({
+    id: 'muse-glimmer-30b',
+    label: 'Muse Glimmer 30B',
+    url: 'https://huggingface.co/spaces/webml-community/muse-glimmer-webgpu-kernels',
+    repo: 'onnx-community/Muse-Glimmer-30B-ONNX',
+    modelClass: 'MuseGlimmerForCausalLM',
+    dtype: 'q4f16',
+    cachePattern: 'muse-glimmer',
+    // ~29.6B params including the ~1.8B ViT-G/14 perception encoder; the model
+    // card puts the 4-bit language model "under 20 GB" and ships a 17 GB K-quant
+    // targeting 24 GB VRAM. We load the TEXT-ONLY causal path (the runner never
+    // sends images), so 17 is the figure to beat.
+    sizeGB: 17,
+    minStorageBufferBindingSizeGB: 4,
+    minBufferSizeGB: 18,
+    requiresShaderF16: true,
+    contextWindow: 131_072,
+    specVerified: false,
+    note: 'Sizes are from the model card, not a measured on-device load.',
   }),
 });
+
+/** The model the runner/picker defaults to - the one that actually runs today. */
+export const DEFAULT_LOCAL_MODEL_ID = 'gemma-4-e2b';
+
+/** Every shipped on-device model, in display order. @returns {ModelSpec[]} */
+export const listLocalModelSpecs = () => Object.values(MODEL_SPECS);
+
+/**
+ * Look up one spec by model id (undefined for an unknown id - callers decide
+ * whether that's a refusal or a fall-back to the default).
+ * @param {string} id
+ * @returns {ModelSpec | undefined}
+ */
+export const localModelSpec = (id) =>
+  /** @type {Record<string, ModelSpec | undefined>} */ (MODEL_SPECS)[id];
 
 /**
  * @typedef {Object} LocalModelCapability

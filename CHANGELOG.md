@@ -10,6 +10,28 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Added
+
+- On-device WebGPU inference now supports more than one model. The engine,
+  residency tracking, chat picker, and Settings cards are driven by a model
+  registry instead of a single hard-coded model, so a new on-device model is a
+  registry entry rather than engine surgery. Weights already downloaded on an
+  existing install continue to be recognised without re-downloading.
+- Muse Glimmer 30B is registered as an on-device model. It is listed and
+  explicitly locked: the vendored Transformers.js carries no `muse_glimmer`
+  architecture, and Settings says so instead of offering a download that would
+  fail after streaming gigabytes. The lock lifts on its own once a runtime
+  build carrying the architecture is vendored.
+
+### Changed
+
+- A local model download is refused up front when the vendored runtime cannot
+  load its architecture, when another model is already downloading, or when the
+  model id is unknown - each with the reason, rather than a failure mid-transfer.
+- One on-device model is held in GPU memory at a time; requesting a different
+  one unloads the previous model first and loads from cache, never silently
+  answering from whichever model happened to be resident.
+
 ## [0.7.0] - 2026-08-12
 
 ### Added

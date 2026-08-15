@@ -3312,6 +3312,53 @@ export const STATES = [
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
+  // --- the on-device model cards ------------------------------------------
+  // options-fulltab captures the providers page from the top, which leaves the
+  // Local (WebGPU) card below the fold - so the multi-model list it now renders
+  // had no visual coverage at all. This state scrolls to that card and asserts
+  // the two gates it stacks: a model the vendored Transformers.js can load
+  // (offered, with a hardware test) and one it cannot (locked, no buttons).
+  // why the real stack and not a stub: the support verdict comes from looking
+  // the model class up on the actual vendored bundle in the offscreen document
+  // - the one thing the unit tier has to fake.
+  {
+    name: 'options-local-models', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html');
+      try {
+        const cardReady = await waitFor(() => evalIn(page, `(() => {
+          const card = document.querySelector('.provider-card-local .local-models');
+          return (card?.querySelectorAll('.lm-model').length ?? 0) >= 2
+            && [...card.querySelectorAll('.lm-state')].every((node) => !!node.textContent?.trim());
+        })()`), { budgetMs: 20_000, pollMs: 100 });
+        rec.check('local model cards render for every registered model', cardReady);
+
+        const cards = await evalIn(page, `(() => {
+          const rows = [...document.querySelectorAll('.provider-card-local .lm-model')];
+          return JSON.stringify(rows.map((row) => ({
+            name: row.querySelector('.lm-name')?.textContent ?? '',
+            state: row.querySelector('.lm-state')?.textContent ?? '',
+            buttons: [...row.querySelectorAll('button')].map((b) => b.textContent?.trim()),
+          })));
+        })()`);
+        const rows = JSON.parse(cards || '[]');
+        const gemma = rows.find((/** @type {any} */ r) => r.name.includes('Gemma'));
+        const glimmer = rows.find((/** @type {any} */ r) => r.name.includes('Muse Glimmer'));
+        // The runnable model reaches the hardware gate; the unrunnable one is
+        // stopped at the runtime gate BEFORE any multi-GB download is offered.
+        rec.check('a runnable model offers its hardware test', !!gemma?.buttons?.some((/** @type {string} */ b) => /Test hardware/.test(b)));
+        rec.check('an unrunnable architecture is locked with a reason',
+          !!glimmer && /not in the vendored runtime yet|MuseGlimmerForCausalLM/.test(glimmer.state));
+        rec.check('an unrunnable architecture offers no download', glimmer?.buttons?.length === 0);
+
+        const focusCard = async () => {
+          await evalIn(page, `document.querySelector('.provider-card-local')?.scrollIntoView({ block: 'center' })`);
+        };
+        await rec.visualPage('options-local-models', page, { beforeShot: focusCard });
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
   {
     name: 'options-voice-capabilities', kind: 'functional', phase: 'post-unlock',
     responder: null,

@@ -485,10 +485,17 @@
 .lm-link { font-size: 11px; color: var(--fg-muted); text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }
 .lm-link:hover { color: var(--fg); }
 .lm-meta { font-size: 11px; color: var(--fg-muted); }
+/* why italic and not a color: an unverified size is a caveat on the number next
+   to it, and the brand rule keeps accent color for the wordmark/orb. */
+.lm-caveat { font-style: italic; }
 .lm-state { font-size: 13px; margin: 10px 0; color: var(--fg-muted); }
 .lm-state.ok { color: var(--green); }
 .lm-state.bad { color: var(--danger); }
 .lm-actions { display: flex; gap: 8px; }
+/* One block per on-device model. The hairline separates stacked models without
+   boxing each one - the card already carries the border. */
+.lm-model + .lm-model { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+.lm-model:last-child .lm-actions:empty { display: none; }
 
 /* ── settings rows (P1) ─────────────────────────────────────────────────────
    One setting per row: label + state pill, a present-tense summary of where you

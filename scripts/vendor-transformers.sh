@@ -9,6 +9,14 @@
 # `env.backends.onnx.wasm.wasmPaths` at this dir. Only the MODEL WEIGHTS stream
 # from HF at runtime (connect-src https:), browser-cached like the voice model.
 #
+# THE PIN IS THE ARCHITECTURE GATE. Every on-device model in MODEL_SPECS names
+# the Transformers.js class it loads (`Gemma4ForCausalLM`, …), and the engine
+# looks that class up on the vendored module before offering a download - so a
+# registered model whose architecture this build lacks is LOCKED in Settings
+# with the reason, and bumping TX_VERSION to a build that carries it unlocks it
+# with no code change. After a bump, re-run the options-local-models E2E state:
+# it asserts the live verdict per model.
+#
 # Pinning (these MUST stay in lockstep — Gemma-4 needs gemma4 support, and the
 # ORT wasm/mjs pair must match the version Transformers.js bundles):
 #   - @huggingface/transformers 4.2.0  → first line that ships Gemma4ForConditional-

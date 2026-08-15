@@ -87,6 +87,7 @@ export const DEFAULT_CONTEXT_WINDOWS = Object.freeze({
 
   // ---- Local WebGPU (on-device; canonical value in MODEL_SPECS) ----
   'gemma-4-e2b': 32_768,
+  'muse-glimmer-30b': 131_072,
 });
 
 /**

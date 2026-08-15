@@ -79,11 +79,11 @@ describe('options runtime capability controls', () => {
       view: () => m(LocalModelsSection, {
         state: { capabilities: { localWebGpuHost: { status: 'available' } } },
         send: async (/** @type {any} */ msg) => {
-          if (msg.type !== 'local-model/status') return { ok: false };
+          if (msg.type !== 'local-model/catalog') return { ok: false };
           statusCalls += 1;
           return statusCalls === 1
-            ? { ok: true, loading: true }
-            : { ok: true, downloaded: true };
+            ? { ok: true, models: [{ model: 'gemma-4-e2b', loading: true, supported: true }] }
+            : { ok: true, models: [{ model: 'gemma-4-e2b', downloaded: true, supported: true }] };
         },
         onReady: () => { readyNotices += 1; },
       }),
@@ -111,8 +111,8 @@ describe('options runtime capability controls', () => {
     let calls = 0;
     const vnode = /** @type {any} */ ({
       state: {
-        status: null, downloading: false, pollTimer: null, removed: false,
-        readyNotified: false, statusGeneration: 0,
+        entries: null, downloading: {}, verdicts: {}, progress: null, error: null,
+        pollTimer: null, removed: false, readyNotified: false, statusGeneration: 0,
       },
       attrs: {
         state: { capabilities: { localWebGpuHost: { status: 'available' } } },
@@ -121,10 +121,54 @@ describe('options runtime capability controls', () => {
     });
     const oldRequest = LocalModelsSection.refreshStatus(vnode);
     const newRequest = LocalModelsSection.refreshStatus(vnode);
-    readyStatus.resolve({ ok: true, downloaded: true });
+    readyStatus.resolve({ ok: true, models: [{ model: 'gemma-4-e2b', downloaded: true }] });
     await newRequest;
-    oldStatus.resolve({ ok: true, downloaded: false });
+    oldStatus.resolve({ ok: true, models: [{ model: 'gemma-4-e2b', downloaded: false }] });
     await oldRequest;
-    expect(vnode.state.status.downloaded).toBe(true);
+    expect(vnode.state.entries['gemma-4-e2b'].downloaded).toBe(true);
+  });
+
+  it('locks a model the vendored runtime cannot load, and never offers its download', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    let initCalls = 0;
+    m.mount(root, {
+      view: () => m(LocalModelsSection, {
+        state: { capabilities: { localWebGpuHost: { status: 'available' } } },
+        send: async (/** @type {any} */ msg) => {
+          if (msg.type === 'local-model/init') { initCalls += 1; return { ok: false, error: 'nope' }; }
+          if (msg.type !== 'local-model/catalog') return { ok: false };
+          return {
+            ok: true,
+            models: [
+              { model: 'gemma-4-e2b', downloaded: false, supported: true },
+              { model: 'muse-glimmer-30b', downloaded: false, supported: false, unsupportedReason: 'no MuseGlimmerForCausalLM in this build' },
+            ],
+          };
+        },
+      }),
+    });
+    try {
+      await settle();
+      await settle();
+      const rows = [...root.querySelectorAll('.lm-model')];
+      expect(rows.length).toBe(2);
+      const row = (/** @type {string} */ name) => {
+        const found = rows.find((el) => (el.textContent ?? '').includes(name));
+        if (!found) throw new Error(`no card rendered for ${name}`);
+        return found;
+      };
+      const locked = row('Muse Glimmer');
+      expect(locked.textContent).toContain('no MuseGlimmerForCausalLM in this build');
+      // A model the runtime cannot load offers no buttons at all: testing the
+      // GPU for it would be theater, and Download must be unreachable.
+      expect(locked.querySelectorAll('button').length).toBe(0);
+      // ...while the runnable one still offers its hardware test.
+      expect(row('Gemma').querySelectorAll('button').length).toBeGreaterThan(0);
+      expect(initCalls).toBe(0);
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
   });
 });

@@ -21,12 +21,13 @@
 // (a) the SW wires the real offscreen RPC at boot, and (b) this module is fully
 // unit-testable with a mock token stream — no WebGPU needed to test the shim.
 
-import { MODEL_SPECS } from '../local-model-capability.js';
+import { MODEL_SPECS, DEFAULT_LOCAL_MODEL_ID } from '../local-model-capability.js';
 import { asWindow } from '../model-window.js';
 
-// The resident on-device model id (also the adapter's defaultRunnerModel). The
-// offscreen engine answers to it; pricing is $0.
-export const LOCAL_MODEL_ID = 'gemma-4-e2b';
+// The DEFAULT on-device model id (also the adapter's defaultRunnerModel) - not
+// the only one: the engine runs any model in MODEL_SPECS, and a call carries the
+// id it wants. Re-exported from the spec table so the default has ONE home.
+export const LOCAL_MODEL_ID = DEFAULT_LOCAL_MODEL_ID;
 
 /**
  * @typedef {import('../format/from-anthropic.js').ProviderEvent} ProviderEvent
