@@ -19,8 +19,8 @@
  * @param {() => Array<any>} deps.listProviders
  * @param {(name: string, opts: any) => Promise<Array<{model:string,label:string}> | null>} deps.listProviderModels
  * @param {(provider: string, model: string, opts: any) => Promise<number | null | undefined>} deps.providerModelContextWindow
- * @param {string} deps.localModelId              LOCAL_MODEL_ID (the WebGPU model's id)
- * @param {() => boolean} deps.localModelAvailable  is the local WebGPU model downloaded + resident?
+ * @param {() => string[]} deps.localModelIds       which WebGPU models are downloaded + resident here
+ * @param {(id: string) => string} deps.localModelLabel  display label for an on-device model id
  * @param {{ get: () => any }} deps.settingsStore
  * @param {{ getSecret: (name: string) => Promise<string | null> }} deps.vault
  * @param {{ get: (id: string) => Promise<any> }} deps.sessions
@@ -32,7 +32,7 @@
 export const makeModelCatalog = (deps) => {
   const {
     listProviders, listProviderModels, providerModelContextWindow,
-    localModelId, localModelAvailable, settingsStore, vault, sessions,
+    localModelIds, localModelLabel, settingsStore, vault, sessions,
     resolveActiveProvider, getSecret, safeFetch, onLiveModelsChanged,
   } = deps;
 
@@ -72,11 +72,15 @@ export const makeModelCatalog = (deps) => {
       { model: 'glm-4.6',      label: 'GLM-4.6' },
       { model: 'glm-4.5-air',  label: 'GLM-4.5 Air (fast · cheap)' },
     ],
-    // Local WebGPU — only surfaced once downloaded/resident (gated in buildModelOptions).
-    'local-webgpu': [
-      { model: localModelId, label: 'Gemma 4 E2B' },
-    ],
   });
+
+  // Local WebGPU is the one provider whose catalog is not a curated guess: the
+  // engine knows exactly which models are downloaded on THIS machine, so the
+  // picker offers those and nothing else (an un-downloaded local model would
+  // error on the first turn, not 404 - worse, because it looks selectable).
+  const localWebgpuCatalog = () => localModelIds()
+    .map((id) => ({ model: id, label: localModelLabel(id) }))
+    .filter((entry) => !!entry.model);
 
   // Live model inventory cache (providers with `liveModels`, i.e. Ollama
   // /api/tags). Short TTL: chat-view mounts call models/options freely, and
@@ -229,13 +233,14 @@ export const makeModelCatalog = (deps) => {
       // still surface that provider's models (and the current one) rather than
       // render an empty picker; the missing-key skip applies to fresh chats only.
       if (!hasKey && !lockProvider) continue;
-      // The local WebGPU model only appears once downloaded + resident (the
+      // A local WebGPU model only appears once downloaded + resident (the
       // offscreen engine reports `available`); otherwise selecting it would error
       // on the first turn ("local model not loaded"). Hardware capability is gated
       // earlier, at download time (Settings → WebGPU models).
-      if (p.name === 'local-webgpu' && !localModelAvailable()) continue;
+      if (p.name === 'local-webgpu' && localModelIds().length === 0) continue;
       let catalog = (/** @type {any} */ (MODEL_CATALOG))[p.name] ?? [{ model: p.defaultModel, label: p.defaultModel }];
       if (p.name === 'openrouter') catalog = openrouterChatCatalog();
+      if (p.name === 'local-webgpu') catalog = localWebgpuCatalog();
       if (p.liveModels) {
         const live = await liveProviderModels(p.name);
         if (Array.isArray(live) && live.length > 0) catalog = live;

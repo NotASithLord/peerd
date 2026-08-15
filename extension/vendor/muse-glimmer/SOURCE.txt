@@ -1,0 +1,49 @@
+muse-glimmer-webgpu-kernels  (self-contained WebGPU GGUF runtime for Muse Glimmer 30B)
+  for the local WebGPU runner's muse-glimmer engine (extension/offscreen/local-model.js).
+  from: https://huggingface.co/spaces/webml-community/muse-glimmer-webgpu-kernels
+  space commit: 24cb8aa (author: Xenova), file: index.html (sdk: static)
+
+what this is: the Space's inline ESM runtime bundle - custom WGSL kernels, a GGUF
+parser, K-quant/IQ transcoders, a graph compiler, and the MuseGlimmer30B model
+class (checkAvailability / load / generate / dispose). It is NOT Transformers.js:
+the Space ships its own specialized GGUF WebGPU runtime, and peerd vendors it as a
+second local engine alongside the vendored Transformers.js (which is ONNX-only).
+
+how it was extracted: the second <script type="module"> block of index.html, up to
+and including its export statement (export{... MuseGlimmer30B ...};). The page
+controller that follows the export (DOM wiring for the Space's own UI) is NOT
+included - importing it would crash in the offscreen document. The bundle has no
+static or dynamic imports (the Space's esm.sh imports live in the page's FIRST
+script block, which is page decoration only); Node builtin paths are stubbed to
+throw and are unreachable in the browser.
+
+provenance note: the bytes were first transcribed from the page source supplied
+by the repo owner (that build environment's egress policy blocked huggingface.co
+/ hf.space), then INDEPENDENTLY re-derived on 2026-08-15 by fetching the live
+Space over the network at the same space commit
+(24cb8aa5ba78c4fb9a3ac89cbdf8e7ee990fbe99, sha256(index.html as fetched) =
+17c643d6cc5e6a7ddbeae229bac44d7899906f5d041ad1c2c6aaff99639107da) and re-running
+the same extraction. Both derivations produce a byte-identical muse-glimmer.js
+(the SHA-256 below). The re-derived copy was also exercised live in a browser:
+checkAvailability returned {ok:true} on an Apple M4 (Chrome, 4 GB buffer limits,
+shader-f16) and {ok:false, reason:"No WebGPU adapter is available on this
+device."} in a GPU-less headless Chrome.
+
+runtime facts (from the bundle):
+  DEFAULT_MODEL_ID  = unsloth/Muse-Glimmer-30B-GGUF
+  DEFAULT_GGUF_FILE = Muse-Glimmer-30B-UD-Q2_K_XL.gguf
+  weights cache: IndexedDB (gguf-cache-v1) + a Cache API header cache; weights
+  stream from huggingface.co via HTTP range requests (rides connect-src https:).
+
+extra exports peerd does NOT use: the bundle also exports the Space's own UI
+helpers - createAssistantMarkdown (a markdown/KaTeX renderer which, when
+invoked, injects a <link> stylesheet from cdn.jsdelivr.net into document.head),
+highlightWgsl, and formatBytes. peerd calls only MuseGlimmer30B
+(checkAvailability/load/generate/dispose); none of the UI helpers are ever
+invoked, so that jsdelivr fetch is unreachable in peerd - disclosed here so the
+bundle's full capability surface is on record. They are retained (not stripped)
+because the vendored bytes are pinned to the independently re-derived,
+byte-identical extraction above; editing them would forfeit that provenance.
+
+files + SHA-256:
+f84ce421a0e1d5daf077f6b3c5c6b3112760d459facb98b038ed80ac693e5afe  muse-glimmer.js

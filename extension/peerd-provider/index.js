@@ -77,7 +77,12 @@ export {
 } from './adapters/local-webgpu.js';
 // Hardware gate for local WebGPU models: the probe (document contexts only) +
 // the pure capable/not judge + per-model min-specs. Powers the Settings "Test" button.
-export { MODEL_SPECS, probeLocalModelCapability, judgeModelCapability } from './local-model-capability.js';
+// The spec table is also the ENGINE's load recipe (repo/class/dtype), so a new
+// on-device model is a registry entry rather than engine surgery.
+export {
+  MODEL_SPECS, DEFAULT_LOCAL_MODEL_ID, listLocalModelSpecs, localModelSpec,
+  probeLocalModelCapability, judgeModelCapability,
+} from './local-model-capability.js';
 
 // "Which local model fits this machine?" — the probe (document contexts
 // only; reads navigator.gpu) + the pure recommendation logic + the tier

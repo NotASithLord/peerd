@@ -162,7 +162,7 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // and the UI redesign moved this floor from different bases. The release
 // candidate's merged scan reports 769 checked files; recording that computed
 // union keeps every gain without trying to add branch-local counts.
-const COVERED_FLOOR = 769;
+const COVERED_FLOOR = 775;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

@@ -33,15 +33,22 @@ describe('fetchLocalContextWindow', () => {
     expect(await fetchLocalContextWindow({ model: LOCAL_MODEL_ID })).toBe(8192);
   });
 
-  test('a bad/throwing engine value falls back to the spec, never throws', async () => {
+  test('a WIRED bridge that fails or answers badly yields null - never the static value', async () => {
+    // why: the caller caches a returned number for the SW's lifetime as if it
+    // were live. Handing it the static value on a transient bridge failure
+    // would freeze the nominal in place of the engine's enforced window; null
+    // leaves the miss uncached so the next turn retries.
     for (const bad of [0, -1, NaN, null, 'x' as any]) {
       setLocalModelInfo(() => bad as any);
-      expect(await fetchLocalContextWindow({ model: LOCAL_MODEL_ID }))
-        .toBe(MODEL_SPECS[LOCAL_MODEL_ID].contextWindow);
+      expect(await fetchLocalContextWindow({ model: LOCAL_MODEL_ID })).toBe(null);
     }
     setLocalModelInfo(() => { throw new Error('engine not ready'); });
-    expect(await fetchLocalContextWindow({ model: LOCAL_MODEL_ID }))
-      .toBe(MODEL_SPECS[LOCAL_MODEL_ID].contextWindow);
+    expect(await fetchLocalContextWindow({ model: LOCAL_MODEL_ID })).toBe(null);
+  });
+
+  test('the unwired fallback for a capped engine is the ENFORCED window, not the nominal', async () => {
+    expect(await fetchLocalContextWindow({ model: 'muse-glimmer-30b' }))
+      .toBe(MODEL_SPECS['muse-glimmer-30b'].enforcedContextWindow);
   });
 
   test('null for an unknown local model with no spec and no live value', async () => {
@@ -50,13 +57,19 @@ describe('fetchLocalContextWindow', () => {
 });
 
 describe('local-model schema parity', () => {
-  test('every MODEL_SPECS contextWindow matches the cold-start table entry', () => {
-    for (const [id, spec] of Object.entries(MODEL_SPECS)) {
+  test('every cold-start table entry matches the spec\'s ENFORCED window', () => {
+    for (const [id, spec] of Object.entries(MODEL_SPECS) as [string, { contextWindow: number, enforcedContextWindow?: number }][]) {
       expect(typeof spec.contextWindow).toBe('number');
       expect(spec.contextWindow).toBeGreaterThan(0);
+      if (spec.enforcedContextWindow !== undefined) {
+        // A declared engine cap must be a real cap, not an accidental raise.
+        expect(spec.enforcedContextWindow).toBeGreaterThan(0);
+        expect(spec.enforcedContextWindow).toBeLessThanOrEqual(spec.contextWindow);
+      }
       // The static table is the cold-start fallback; it must agree with the
-      // canonical spec so the first turn (live cache cold) isn't wrong.
-      expect(DEFAULT_CONTEXT_WINDOWS[id]).toBe(spec.contextWindow);
+      // bound the engine will actually enforce, so the first turn (live cache
+      // cold) budgets against reality.
+      expect(DEFAULT_CONTEXT_WINDOWS[id]).toBe(spec.enforcedContextWindow ?? spec.contextWindow);
     }
   });
 });
