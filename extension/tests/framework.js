@@ -214,9 +214,15 @@ export const countTests = () => {
 // chains a FURTHER rAF from inside a frame is not covered: one frame per
 // test is the cost ceiling (a second tick measurably doubled the suite),
 // so deferred effects that chain must precondition-check when they fire,
-// as focusLibraryAction does. The cap bounds the wait where frames are
-// throttled or absent; a callback the browser has not delivered by then
-// was equally undeliverable mid-test.
+// as focusLibraryAction does. The cap bounds the wait where frames stall,
+// which makes the whole guarantee CONDITIONAL on frames being delivered:
+// the headless CI lanes deliver them, so the drain flushes everything, but
+// a hidden runner tab suspends rAF entirely, so capped drains flush
+// nothing and the browser delivers the accumulated backlog at the next
+// visible frame, into whichever test is then current. The drain is
+// strictly monotone (a callback it cannot flush would have fired mid-test
+// anyway, only later), but it cannot protect a run whose frames stall;
+// effects that must stay safe there also precondition-check at fire time.
 const drainDeferredWork = async () => {
   await new Promise((resolve) => { setTimeout(resolve, 0); });
   if (typeof requestAnimationFrame !== 'function') return;
