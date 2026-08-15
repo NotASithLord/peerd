@@ -1,7 +1,7 @@
 import { describe, test, expect } from 'bun:test';
-// @ts-ignore — vendored, untyped ESM bundle
+// @ts-ignore - vendored, untyped ESM bundle
 import * as muse from '../../extension/vendor/muse-glimmer/muse-glimmer.js';
-// @ts-ignore — JS module with JSDoc types
+// @ts-ignore - JS module with JSDoc types
 import { MODEL_SPECS } from '../../extension/peerd-provider/local-model-capability.js';
 
 // The engine (offscreen/local-model.js) calls exactly this surface on the
