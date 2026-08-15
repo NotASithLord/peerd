@@ -63,7 +63,7 @@ describe('passphrase crypto', () => {
 
   test('wrong passphrase throws ExportPassphraseError', async () => {
     const box = await encryptWithPassphrase('right', { k: 'v' });
-    expect(decryptWithPassphrase('wrong', box)).rejects.toBeInstanceOf(ExportPassphraseError);
+    await expect(decryptWithPassphrase('wrong', box)).rejects.toBeInstanceOf(ExportPassphraseError);
   });
 
   test('rejects attacker-controlled KDF parameters before doing crypto', async () => {
@@ -106,7 +106,7 @@ describe('buildExport', () => {
   });
 
   test('refuses secrets without a passphrase', async () => {
-    expect(buildExport({
+    await expect(buildExport({
       channel: 'store', storedSettings: {}, providerEndpoints: null,
       secrets: { anthropic: 'sk-1' }, passphrase: '', memory: null, hooks: [], skills: [],
     })).rejects.toBeInstanceOf(ExportPassphraseError);

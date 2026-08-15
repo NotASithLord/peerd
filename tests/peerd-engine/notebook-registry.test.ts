@@ -34,7 +34,7 @@ describe('createNotebookRegistry', () => {
 
   test('setDefaultForSession throws for unknown id', async () => {
     const reg = createNotebookRegistry({ storage: createStorageStub() });
-    expect(reg.setDefaultForSession('chat-1', 'notebook-missing'))
+    await expect(reg.setDefaultForSession('chat-1', 'notebook-missing'))
       .rejects.toThrow('notebook not found');
   });
 });
