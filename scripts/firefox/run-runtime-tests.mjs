@@ -3749,15 +3749,31 @@ return {
       });
     })().catch((error) => done({ error: error?.message || String(error) }));
   `, [notebookId, slowUrl, slowStatusUrl]);
+  // why a bounded wait instead of reading the counter straight away: the count
+  // increments when the request REACHES this server, and the run that triggers
+  // it is being cancelled at the same moment. The in-page settle above does not
+  // cover the hop from Firefox's socket to this process, so a request already
+  // in flight read as "not yet counted" and turned the assertion below red on
+  // main with `requests: 1` where 2 was due. Waiting for the count to arrive
+  // keeps the assertion exact: it still demands the precise number, it just
+  // stops racing the network to check.
+  const slowModuleRequestsSettle = async (expected, budgetMs = 5_000) => {
+    const deadline = Date.now() + budgetMs;
+    while (providerServer.slowModuleRequests < expected && Date.now() < deadline) {
+      await delay(50);
+    }
+    return providerServer.slowModuleRequests;
+  };
+  const stoppedRequests = await slowModuleRequestsSettle(1);
   assert(stoppedFetch?.sawRequest === true
     && stoppedFetch?.abort?.stopped === true
     && stoppedFetch?.run?.result?.stopped === true
     && stoppedFetch.elapsedMs < 3_000
-    && providerServer.slowModuleRequests === 1
+    && stoppedRequests === 1
     && stoppedFetch.status === 'Notebook run stopped.'
     && !stoppedFetch.output.includes(REMOTE_MODULE_SLOW_PATH),
   'Stop cancels the Firefox host fetch operation without late resolver output',
-  JSON.stringify({ stoppedFetch, requests: providerServer.slowModuleRequests }));
+  JSON.stringify({ stoppedFetch, requests: stoppedRequests }));
   const timedOutFetch = await driver.executeAsync(`
     const [id, url] = arguments;
     const done = arguments[arguments.length - 1];
@@ -3783,15 +3799,16 @@ return {
       });
     })().catch((error) => done({ error: error?.message || String(error) }));
   `, [notebookId, slowUrl]);
+  const timedOutRequests = await slowModuleRequestsSettle(2);
   assert(/timed out/.test(timedOutFetch?.run?.result?.error ?? '')
     && timedOutFetch?.run?.result?.errorCode === 'notebook_run_timeout'
     && timedOutFetch?.run?.result?.stopped !== true
     && timedOutFetch.elapsedMs < 3_000
     && timedOutFetch.status === 'Notebook run timed out.'
-    && providerServer.slowModuleRequests === 2
+    && timedOutRequests === 2
     && !timedOutFetch.output.includes(REMOTE_MODULE_SLOW_PATH),
   'the Firefox import deadline cancels host work and recovers without late output',
-  JSON.stringify({ timedOutFetch, requests: providerServer.slowModuleRequests }));
+  JSON.stringify({ timedOutFetch, requests: timedOutRequests }));
   writeFileSync(join(OUTPUT, 'preview-notebook-remote-restricted.png'),
     Buffer.from(await driver.screenshot(), 'base64'));
 };
