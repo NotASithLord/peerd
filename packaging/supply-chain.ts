@@ -102,6 +102,63 @@ export const countVendorLockedFiles = (lock: unknown): number => {
   return count;
 };
 
+/**
+ * Toolchains that would mean the shipped code is not the code in the tree.
+ *
+ * Kept as name PREFIXES so a scoped or plugin package (@babel/core,
+ * vite-plugin-x, rollup-plugin-y) is caught by the same entry.
+ */
+export const BUILD_TOOLCHAINS = Object.freeze([
+  'webpack', 'rollup', 'esbuild', 'vite', 'parcel', 'browserify',
+  '@babel/', 'babel-', '@swc/', 'swc-', 'terser', 'uglify',
+]);
+
+export interface BuildStepScan { offenders: string[] }
+
+/**
+ * Prove the no-build-step invariant from the toolchain rather than asserting it.
+ *
+ * Three conditions, any of which would make "the browser runs what you wrote"
+ * false: a bundler or transpiler among the dependencies, a `build` script, or a
+ * TypeScript config that emits. tsc runs here as a CHECKER only, which is why
+ * noEmit is part of the claim rather than incidental.
+ */
+export const scanBuildStep = (
+  packageJson: unknown,
+  tsconfigText: string,
+): BuildStepScan => {
+  const pkg = packageJson as {
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+    scripts?: Record<string, string>;
+  };
+  const offenders: string[] = [];
+  const declared = [
+    ...Object.keys(pkg?.dependencies ?? {}),
+    ...Object.keys(pkg?.devDependencies ?? {}),
+  ];
+  for (const name of declared) {
+    const hit = BUILD_TOOLCHAINS.find((tool) => name.startsWith(tool));
+    if (hit) offenders.push(`dependency "${name}" is a bundler or transpiler`);
+  }
+  if (pkg?.scripts && Object.hasOwn(pkg.scripts, 'build')) {
+    offenders.push('package.json declares a "build" script');
+  }
+  // Comment-tolerant: tsconfig.json here is heavily commented JSONC.
+  if (!/"noEmit"\s*:\s*true/.test(tsconfigText)) {
+    offenders.push('tsconfig.json does not set noEmit: true, so tsc could emit');
+  }
+  return { offenders };
+};
+
+export const buildStepBadge = (scan: BuildStepScan): ShieldsBadge => ({
+  schemaVersion: 1,
+  label: 'Build step',
+  message: scan.offenders.length === 0 ? 'none (vanilla JS)' : 'present',
+  color: scan.offenders.length === 0 ? 'brightgreen' : 'red',
+  ...laneLogo('javascript'),
+});
+
 export const runtimeDepsBadge = (count: number): ShieldsBadge => ({
   schemaVersion: 1,
   label: 'Runtime npm deps',

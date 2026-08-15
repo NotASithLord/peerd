@@ -161,7 +161,7 @@ jobs:
       - name: Generated-file drift (dev manifest + channel-config + tscheck and supply-chain badges)
         run: |
           bun run gen:dev
-          git diff --exit-code extension/manifest.json extension/shared/channel-config.js badges/tscheck.json badges/runtime-deps.json badges/vendor-integrity.json badges/actions-pinned.json || {
+          git diff --exit-code extension/manifest.json extension/shared/channel-config.js badges/tscheck.json badges/runtime-deps.json badges/vendor-integrity.json badges/actions-pinned.json badges/no-build.json || {
             echo '::error::A generated file (manifest.json, channel-config.js, or a badges/*.json written by gen:dev) is out of sync with its generator. Run `bun run gen:dev` and commit.'
             exit 1
           }

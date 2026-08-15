@@ -114,6 +114,24 @@ const focusLibraryAction = (appId, action) => {
   });
 };
 
+/**
+ * Move focus to a freshly opened repository panel, at most once per open.
+ *
+ * The intent (`ui.repositoryFocusId`) is consumed on either of two conditions,
+ * and the distinction is the whole point:
+ *   - focus LANDED, so the job is done; or
+ *   - the panel now has its repository data, meaning the open finished and a
+ *     later steal would yank focus out from under a user who moved on.
+ * Anything else leaves the intent standing so the next render retries it.
+ *
+ * @param {any} ui @param {App} app @param {unknown} repo @param {HTMLElement} dom
+ */
+const claimRepositoryFocus = (ui, app, repo, dom) => {
+  if (ui.repositoryFocusId !== app.id) return;
+  dom.focus({ preventScroll: true });
+  if (document.activeElement === dom || repo) ui.repositoryFocusId = null;
+};
+
 export const LibrarySection = {
   /** @param {{ state: any, attrs: { send: Send, dweb?: boolean } }} vnode */
   oninit(vnode) {
@@ -173,7 +191,11 @@ export const LibrarySection = {
     // live rename / share dialog / armed delete would be clobbered by a swap).
     vnode.state._listTimer = setInterval(() => {
       const s = vnode.state;
-      if (document.hidden || s.menuOpenId || s.renamingId || s.shareEditId || s.armedDeleteId || s.busyId) return;
+      // repositoryFocusId joins the skip list for the same reason as the rest:
+      // a catalog swap mid-open re-renders the card that the pending focus is
+      // aimed at, and a focus intent is exactly as clobberable as a live rename.
+      if (document.hidden || s.menuOpenId || s.renamingId || s.shareEditId
+        || s.armedDeleteId || s.busyId || s.repositoryFocusId) return;
       LibrarySection.quietRefresh(vnode);
     }, 15000);
     // Returning to the tab should feel current at once, not after the next tick.
@@ -885,11 +907,15 @@ export const LibrarySection = {
     const panelAttrs = {
       role: 'region', 'aria-label': `History and Git for ${app.name}`, tabindex: '-1',
       'data-library-repository-id': app.id,
-      oncreate: (/** @type {{dom:HTMLElement}} */ v) => {
-        if (ui.repositoryFocusId !== app.id) return;
-        ui.repositoryFocusId = null;
-        v.dom.focus({ preventScroll: true });
-      },
+      // why claim on update too, and why consume only once focus LANDS: the
+      // panel renders first as a "Loading repository…" placeholder and again
+      // with its data, and a background quietRefresh can swap the catalog
+      // underneath it. A one-shot oncreate that nulled the intent before
+      // focusing spent it on whichever render happened to come first, so any
+      // later re-render dropped focus for good, leaving activeElement on the
+      // body. That is what kept Gecko shard 5/8 intermittently red.
+      oncreate: (/** @type {{dom:HTMLElement}} */ v) => claimRepositoryFocus(ui, app, repo, v.dom),
+      onupdate: (/** @type {{dom:HTMLElement}} */ v) => claimRepositoryFocus(ui, app, repo, v.dom),
     };
     if (!repo) return m('.library-repository', panelAttrs, m('p.muted', 'Loading repository…'));
     const changed = repo.status?.changed ?? [];

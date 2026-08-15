@@ -38,6 +38,7 @@ const main = () => {
     // The supply-chain badges ride gen:dev too: pure reads of package.json,
     // vendor.lock.json and the workflows, so they drift exactly like a manifest.
     'badges/runtime-deps.json', 'badges/vendor-integrity.json', 'badges/actions-pinned.json',
+    'badges/no-build.json',
   ].map((p) => join(REPO_ROOT, p));
   const before = genFiles.map((f) => readFileSync(f));
   run('regenerate dev manifest + channel-config', 'bun', ['run', 'gen:dev']);

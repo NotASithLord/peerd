@@ -1,3 +1,5 @@
+// @ts-check
+/// <reference lib="webworker" />
 // sw.js — app-shell service worker for the peerd web demo.
 //
 // The cache name and precache list are STAMPED AT PACKAGE TIME by
@@ -26,36 +28,44 @@
 // Bypasses stay as before: non-GET, non-http(s) (blob:/ws:/wss:/data:),
 // cross-origin (the wss peer, Google Fonts, HF weights), range requests. OPFS
 // is not HTTP, so the sealed-worker notebook is never intercepted.
+// why the cast: tsconfig's lib is DOM (this is one service worker in a
+// window-typed tree), so the global `self` resolves to Window. The reference
+// directive above brings the worker types in for this file; this names which
+// one `self` actually is at runtime.
+const worker = /** @type {ServiceWorkerGlobalScope} */ (/** @type {unknown} */ (self));
+
 const BUILD = '__PEERD_WEB_BUILD__';
 const UNBUILT = BUILD.startsWith('__');
+/** @type {string[]} */
 let PRECACHE = [];
 try { PRECACHE = JSON.parse('__PEERD_WEB_PRECACHE__'); } catch { /* unbuilt tree */ }
 
 const CACHE_SHELL = `peerd-web-${BUILD}`;
 const CACHE_VENDOR = 'peerd-web-vendor-v1';
 
-self.addEventListener('install', (e) => {
+worker.addEventListener('install', (e) => {
   // allSettled: a single 404 must not wedge installation of the new build.
   e.waitUntil(
     caches.open(CACHE_SHELL)
       .then((c) => Promise.allSettled(PRECACHE.map((u) => c.add(u))))
-      .then(() => self.skipWaiting())
+      .then(() => worker.skipWaiting())
   );
 });
 
-self.addEventListener('activate', (e) => {
+worker.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
       .then((keys) => Promise.all(
         keys.filter((k) => k !== CACHE_SHELL && k !== CACHE_VENDOR).map((k) => caches.delete(k))
       ))
-      .then(() => self.clients.claim())
+      .then(() => worker.clients.claim())
   );
 });
 
 // why !redirected: a redirected response (e.g. /index.html → /) stored in the
 // cache is rejected by respondWith for navigation requests — cache only the
 // canonical 200s.
+/** @param {string} cacheName @param {RequestInfo} req @param {Response} res */
 const putCache = (cacheName, req, res) => {
   if (res.ok && !res.redirected && res.type === 'basic') {
     const copy = res.clone();
@@ -67,12 +77,13 @@ const putCache = (cacheName, req, res) => {
 // scoped to the NAMED cache (not CacheStorage-wide caches.match): during an
 // update window an old SW must never answer from a newer build's cache or
 // vice versa — the cache name IS the build boundary.
+/** @param {string} cacheName @param {Request} req */
 const cacheFirst = (cacheName, req) =>
   caches.open(cacheName)
     .then((c) => c.match(req))
     .then((hit) => hit || fetch(req).then((res) => putCache(cacheName, req, res)));
 
-self.addEventListener('fetch', (e) => {
+worker.addEventListener('fetch', (e) => {
   // unbuilt dev tree: never intercept — plain network for everything.
   if (UNBUILT) return;
 
@@ -82,7 +93,7 @@ self.addEventListener('fetch', (e) => {
   // bypass: non-GET, non-http(s) (blob:/ws:/wss:/data:), cross-origin, ranges.
   if (req.method !== 'GET') return;
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
-  if (url.origin !== self.location.origin) return;
+  if (url.origin !== worker.location.origin) return;
   if (req.headers.has('range')) return;
 
   // navigations: THIS build's precached document ('/', the canonical copy —
@@ -99,8 +110,14 @@ self.addEventListener('fetch', (e) => {
   }
 
   // build.json is the freshness probe — never serve it stale.
+  // why the ?? Response.error(): a cache MISS here resolves undefined, and
+  // respondWith(undefined) throws inside the fetch handler rather than failing
+  // the request. Offline with nothing cached should surface as the network
+  // error it already was without this worker in the path.
   if (url.pathname === '/build.json') {
-    e.respondWith(fetch(req).catch(() => caches.open(CACHE_SHELL).then((c) => c.match(req))));
+    e.respondWith(fetch(req).catch(() => caches.open(CACHE_SHELL)
+      .then((c) => c.match(req))
+      .then((hit) => hit ?? Response.error())));
     return;
   }
 

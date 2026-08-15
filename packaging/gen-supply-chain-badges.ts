@@ -16,13 +16,14 @@ import { join } from 'node:path';
 import { REPO_ROOT } from './lib.ts';
 import { writeBadge } from './test-badges.ts';
 import {
-  actionsPinnedBadge, countRuntimeDependencies, countVendorLockedFiles,
-  runtimeDepsBadge, scanActionPins, vendorIntegrityBadge,
+  actionsPinnedBadge, buildStepBadge, countRuntimeDependencies, countVendorLockedFiles,
+  runtimeDepsBadge, scanActionPins, scanBuildStep, vendorIntegrityBadge,
 } from './supply-chain.ts';
 
 export const RUNTIME_DEPS_BADGE = 'runtime-deps.json';
 export const VENDOR_BADGE = 'vendor-integrity.json';
 export const ACTIONS_BADGE = 'actions-pinned.json';
+export const BUILD_STEP_BADGE = 'no-build.json';
 
 export const WORKFLOWS_DIR = join(REPO_ROOT, '.github', 'workflows');
 
@@ -37,15 +38,28 @@ export const readWorkflows = (): { file: string; text: string }[] =>
     }));
 
 const generate = () => {
-  const runtimeDeps = countRuntimeDependencies(
-    JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')),
+  const packageJson = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8'));
+  const runtimeDeps = countRuntimeDependencies(packageJson);
+  const buildStep = scanBuildStep(
+    packageJson,
+    readFileSync(join(REPO_ROOT, 'tsconfig.json'), 'utf8'),
   );
+  // why throw rather than publish a red plate: "no build step" is the premise
+  // the whole project rests on (load unpacked, refresh, the browser runs what
+  // you wrote). If it stops being true, that is a design decision someone must
+  // make deliberately, not a badge quietly turning red.
+  if (buildStep.offenders.length > 0) {
+    console.error('\nthe no-build-step invariant is broken:');
+    for (const offender of buildStep.offenders) console.error(`  ${offender}`);
+    process.exit(1);
+  }
   const vendorFiles = countVendorLockedFiles(
     JSON.parse(readFileSync(join(REPO_ROOT, 'extension', 'vendor', 'vendor.lock.json'), 'utf8')),
   );
   const scan = scanActionPins(readWorkflows());
 
   for (const [file, badge] of [
+    [BUILD_STEP_BADGE, buildStepBadge(buildStep)],
     [RUNTIME_DEPS_BADGE, runtimeDepsBadge(runtimeDeps)],
     [VENDOR_BADGE, vendorIntegrityBadge(vendorFiles)],
     [ACTIONS_BADGE, actionsPinnedBadge(scan)],

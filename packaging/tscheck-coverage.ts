@@ -10,11 +10,17 @@ import { EXTENSION_DIR, REPO_ROOT } from './lib.ts';
 // via .toString() and re-evaluated in a target page's classic-script world, so
 // they are exempt from the modern-JS rules AND from type checking. They don't
 // count toward the denominator.
+// This set must match the injected-classic-script exemption block in
+// eslint.config.js exactly; tests/meta/es5-injected-parity.test.ts fails when
+// they drift. why the test: fetch-tap-injected.js was exempted there and NOT
+// here, so an ES5 body that can never carry // @ts-check sat in this scan's
+// denominator, holding reported coverage at 99.7% with nothing to fix.
 export const ES5_INJECTED = new Set<string>([
   'peerd-runtime/dom/walk-injected.js',
   'peerd-runtime/dom/framework-state.js',
   'peerd-runtime/dom/activity-overlay-injected.js',
   'peerd-runtime/dom/pull-in-hint-injected.js',
+  'peerd-runtime/dom/fetch-tap-injected.js',
   'background/debugger-pool.js',
   'peerd-runtime/tools/defs/watch-changes.js',
 ]);

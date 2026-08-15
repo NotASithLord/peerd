@@ -1,9 +1,12 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
-  actionsPinnedBadge, countRuntimeDependencies, countVendorLockedFiles,
-  runtimeDepsBadge, scanActionPins, vendorIntegrityBadge,
+  actionsPinnedBadge, buildStepBadge, countRuntimeDependencies, countVendorLockedFiles,
+  runtimeDepsBadge, scanActionPins, scanBuildStep, vendorIntegrityBadge,
 } from '../../packaging/supply-chain.ts';
 import { readWorkflows } from '../../packaging/gen-supply-chain-badges.ts';
+import { REPO_ROOT } from '../../packaging/lib.ts';
 
 const SHA = 'bf7454d06d71f1098171f2acdf0cd4708d7b5920';
 
@@ -87,7 +90,46 @@ describe('vendor lock count', () => {
   });
 });
 
+describe('no-build-step invariant', () => {
+  const clean = { devDependencies: { eslint: '10', typescript: '6' }, scripts: { test: 'bun test' } };
+  const tsconfig = '{ /* comment */ "compilerOptions": { "noEmit": true } }';
+
+  test('reports none when nothing bundles, transpiles, emits, or builds', () => {
+    expect(scanBuildStep(clean, tsconfig).offenders).toEqual([]);
+    expect(buildStepBadge({ offenders: [] })).toMatchObject({
+      label: 'Build step', message: 'none (vanilla JS)', color: 'brightgreen',
+    });
+  });
+
+  test('catches a bundler or transpiler however it is scoped or prefixed', () => {
+    for (const name of ['webpack', '@babel/core', 'vite', 'esbuild', '@swc/core', 'terser']) {
+      const scan = scanBuildStep({ devDependencies: { [name]: '1' } }, tsconfig);
+      expect(scan.offenders.join(' ')).toContain(name);
+    }
+  });
+
+  test('catches a build script and a tsconfig that could emit', () => {
+    expect(scanBuildStep({ ...clean, scripts: { build: 'tsc' } }, tsconfig).offenders)
+      .toContain('package.json declares a "build" script');
+    expect(scanBuildStep(clean, '{ "compilerOptions": {} }').offenders.join(' '))
+      .toMatch(/noEmit/);
+  });
+
+  test('goes red rather than quietly claiming none', () => {
+    expect(buildStepBadge({ offenders: ['dependency "vite" is a bundler or transpiler'] }))
+      .toMatchObject({ message: 'present', color: 'red' });
+  });
+});
+
 describe('the live repo', () => {
+  test('genuinely has no build step', () => {
+    const scan = scanBuildStep(
+      JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')),
+      readFileSync(join(REPO_ROOT, 'tsconfig.json'), 'utf8'),
+    );
+    expect(scan.offenders).toEqual([]);
+  });
+
   test('every third-party action in every workflow is pinned to a full SHA', () => {
     // The gate itself (check:actions) enforces this in CI and preflight; asserting
     // it here means a bad pin also fails the fast local suite.
