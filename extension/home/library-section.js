@@ -114,6 +114,24 @@ const focusLibraryAction = (appId, action) => {
   });
 };
 
+/**
+ * Claim focus for a freshly opened repository panel.
+ *
+ * Called from both oncreate and onupdate, and safe to call repeatedly: it is a
+ * no-op unless this app's focus intent is still standing. The intent retires
+ * only when the panel has its repository DATA and focus landed on that node,
+ * which is what makes it survive the placeholder being replaced. Retiring on
+ * data (rather than never) also stops it stealing focus back from a user who
+ * moved on after the open finished.
+ *
+ * @param {any} ui @param {App} app @param {unknown} repo @param {HTMLElement} dom
+ */
+const claimRepositoryFocus = (ui, app, repo, dom) => {
+  if (ui.repositoryFocusId !== app.id) return;
+  dom.focus({ preventScroll: true });
+  if (repo && document.activeElement === dom) ui.repositoryFocusId = null;
+};
+
 export const LibrarySection = {
   /** @param {{ state: any, attrs: { send: Send, dweb?: boolean } }} vnode */
   oninit(vnode) {
@@ -885,11 +903,17 @@ export const LibrarySection = {
     const panelAttrs = {
       role: 'region', 'aria-label': `History and Git for ${app.name}`, tabindex: '-1',
       'data-library-repository-id': app.id,
-      oncreate: (/** @type {{dom:HTMLElement}} */ v) => {
-        if (ui.repositoryFocusId !== app.id) return;
-        ui.repositoryFocusId = null;
-        v.dom.focus({ preventScroll: true });
-      },
+      // why the intent survives the placeholder: this panel renders first as
+      // "Loading repository..." and again once the send resolves, and that
+      // second render can REPLACE the node rather than patch it. Nulling the
+      // intent on the first oncreate spent it on a node about to be discarded,
+      // so the replacement never claimed focus and activeElement fell back to
+      // the body. That is the flake behind "History & Git shows status/log and
+      // restore requires a second click", which has now failed in BOTH Chrome
+      // and Gecko. Claim on every render while the intent stands, and retire it
+      // only once the panel is showing DATA and focus actually landed there.
+      oncreate: (/** @type {{dom:HTMLElement}} */ v) => claimRepositoryFocus(ui, app, repo, v.dom),
+      onupdate: (/** @type {{dom:HTMLElement}} */ v) => claimRepositoryFocus(ui, app, repo, v.dom),
     };
     if (!repo) return m('.library-repository', panelAttrs, m('p.muted', 'Loading repository…'));
     const changed = repo.status?.changed ?? [];
