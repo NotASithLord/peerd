@@ -54,7 +54,6 @@ const EXCLUDED_FILES = Object.freeze(new Set([
   'badges/inbrowser-gecko.json',
   'badges/no-build.json',
   'badges/red-team.json',
-  'badges/runtime-deps.json',
   'badges/tscheck.json',
   'badges/vendor-integrity.json',
   'bun.lock',

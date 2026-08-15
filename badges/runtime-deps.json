@@ -1,8 +1,0 @@
-{
-  "schemaVersion": 1,
-  "label": "Runtime npm deps",
-  "message": "0",
-  "color": "brightgreen",
-  "namedLogo": "npm",
-  "logoColor": "white"
-}

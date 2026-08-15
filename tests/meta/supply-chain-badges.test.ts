@@ -2,8 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  actionsPinnedBadge, buildStepBadge, countRuntimeDependencies, countVendorLockedFiles,
-  runtimeDepsBadge, scanActionPins, scanBuildStep, vendorIntegrityBadge,
+  actionsPinnedBadge, buildStepBadge, countVendorLockedFiles,
+  scanActionPins, scanBuildStep, vendorIntegrityBadge,
 } from '../../packaging/supply-chain.ts';
 import { readWorkflows } from '../../packaging/gen-supply-chain-badges.ts';
 import { REPO_ROOT } from '../../packaging/lib.ts';
@@ -62,22 +62,6 @@ describe('action pin scanning', () => {
   });
 });
 
-describe('runtime dependency count', () => {
-  test('reports zero when package.json declares no dependencies at all', () => {
-    expect(countRuntimeDependencies({ devDependencies: { eslint: '1' } })).toBe(0);
-    expect(runtimeDepsBadge(0)).toMatchObject({ message: '0', color: 'brightgreen' });
-  });
-
-  test('goes red at the first runtime dependency, not at some threshold', () => {
-    expect(countRuntimeDependencies({ dependencies: { mithril: '2' } })).toBe(1);
-    expect(runtimeDepsBadge(1).color).toBe('red');
-  });
-
-  test('refuses a malformed dependencies field', () => {
-    expect(() => countRuntimeDependencies({ dependencies: 'nope' })).toThrow(/not an object/);
-  });
-});
-
 describe('vendor lock count', () => {
   test('counts the pinned files', () => {
     expect(countVendorLockedFiles({ files: { 'a/LICENSE': 'aa', 'a/index.js': 'bb' } })).toBe(2);
@@ -106,6 +90,13 @@ describe('no-build-step invariant', () => {
       const scan = scanBuildStep({ devDependencies: { [name]: '1' } }, tsconfig);
       expect(scan.offenders.join(' ')).toContain(name);
     }
+  });
+
+  test('catches a runtime dependency, which would ship npm code to a user', () => {
+    // This invariant used to carry its own badge; the no-build scan owns it now.
+    expect(scanBuildStep({ dependencies: { mithril: '2' } }, tsconfig).offenders.join(' '))
+      .toMatch(/"mithril" is a RUNTIME dependency/);
+    expect(scanBuildStep(clean, tsconfig).offenders).toEqual([]);
   });
 
   test('catches a build script and a tsconfig that could emit', () => {

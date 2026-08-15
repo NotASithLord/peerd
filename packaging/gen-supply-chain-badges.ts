@@ -1,6 +1,5 @@
 // Generate the three supply-chain badges from repo state.
 //
-//   badges/runtime-deps.json      npm packages the shipped extension needs
 //   badges/vendor-integrity.json  third-party runtime files pinned by SHA-256
 //   badges/actions-pinned.json    third-party GitHub Actions at a full SHA
 //
@@ -16,11 +15,10 @@ import { join } from 'node:path';
 import { REPO_ROOT } from './lib.ts';
 import { writeBadge } from './test-badges.ts';
 import {
-  actionsPinnedBadge, buildStepBadge, countRuntimeDependencies, countVendorLockedFiles,
-  runtimeDepsBadge, scanActionPins, scanBuildStep, vendorIntegrityBadge,
+  actionsPinnedBadge, buildStepBadge, countVendorLockedFiles,
+  scanActionPins, scanBuildStep, vendorIntegrityBadge,
 } from './supply-chain.ts';
 
-export const RUNTIME_DEPS_BADGE = 'runtime-deps.json';
 export const VENDOR_BADGE = 'vendor-integrity.json';
 export const ACTIONS_BADGE = 'actions-pinned.json';
 export const BUILD_STEP_BADGE = 'no-build.json';
@@ -39,7 +37,6 @@ export const readWorkflows = (): { file: string; text: string }[] =>
 
 const generate = () => {
   const packageJson = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8'));
-  const runtimeDeps = countRuntimeDependencies(packageJson);
   const buildStep = scanBuildStep(
     packageJson,
     readFileSync(join(REPO_ROOT, 'tsconfig.json'), 'utf8'),
@@ -60,7 +57,6 @@ const generate = () => {
 
   for (const [file, badge] of [
     [BUILD_STEP_BADGE, buildStepBadge(buildStep)],
-    [RUNTIME_DEPS_BADGE, runtimeDepsBadge(runtimeDeps)],
     [VENDOR_BADGE, vendorIntegrityBadge(vendorFiles)],
     [ACTIONS_BADGE, actionsPinnedBadge(scan)],
   ] as const) {
