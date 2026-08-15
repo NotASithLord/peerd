@@ -19,6 +19,14 @@
 // marker yet" a plain indexOf instead of a partial-match state machine, and the
 // per-yield delta is just the newly-visible suffix.
 //
+// ACCEPTED RISK: reasoning that happens to contain the literal string
+// 'assistant to=user' flips the channel early and streams the rest of the
+// reasoning as visible text. The Space's own UI makes the same text-level
+// split; disambiguating would need a specials-kept decode the engine does not
+// expose to its streaming callers. The FINAL message is immune either way -
+// the engine's post-parse works on the raw special tokens, and reconcile()
+// refuses a divergent final text rather than doubling it.
+//
 // PURE on purpose: values in, values out, no engine imports - this is the
 // Bun-testable half of the muse generate path (tests/offscreen/).
 
@@ -84,9 +92,16 @@ export const makeMuseChannelSplitter = () => {
     /** @param {string | null | undefined} finalContent @returns {string} */
     reconcile(finalContent) {
       if (typeof finalContent !== 'string' || finalContent === '') return '';
-      if (!finalContent.startsWith(emitted)) return '';
-      const tail = finalContent.slice(emitted.length);
-      emitted = finalContent;
+      // The engine's post-parse FALLS BACK to the raw special-stripped text
+      // when its channel parse fails (e.g. the token budget ran out
+      // mid-reasoning), so `finalContent` can arrive channel-framed - flushing
+      // it verbatim would dump the hidden reasoning channel into the chat.
+      // Re-applying the visibility rule is a no-op for clean content and
+      // extracts only the visible part of a raw fallback.
+      const visible = museVisibleText(finalContent);
+      if (visible === '' || !visible.startsWith(emitted)) return '';
+      const tail = visible.slice(emitted.length);
+      emitted = visible;
       return tail;
     },
     get visible() { return emitted; },

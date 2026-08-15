@@ -93,4 +93,20 @@ describe('makeMuseChannelSplitter', () => {
     expect(splitter.reconcile(null)).toBe('');
     expect(splitter.visible).toBe('Streamed text plus a tail');
   });
+  test('reconcile never leaks the reasoning channel from the engine\'s raw fallback', () => {
+    // The engine's post-parse falls back to the RAW special-stripped text when
+    // its channel parse fails (token budget exhausted mid-reasoning) - that
+    // fallback arrives channel-framed and must not reach the chat verbatim.
+    const truncatedMidReasoning = makeMuseChannelSplitter();
+    truncatedMidReasoning.push(' to=selfstep one of the hidden plan');
+    expect(truncatedMidReasoning.reconcile(' to=selfstep one of the hidden plan, step two')).toBe('');
+    expect(truncatedMidReasoning.visible).toBe('');
+    // A fallback that DID cross into the visible channel yields only the
+    // visible part, never the reasoning prefix or the marker text.
+    const truncatedMidContent = makeMuseChannelSplitter();
+    truncatedMidContent.push(' to=selfhidden');
+    const flushed = truncatedMidContent.reconcile(` to=selfhidden${MUSE_CONTENT_MARKER}The visible half`);
+    expect(flushed).toBe('The visible half');
+    expect(truncatedMidContent.visible).toBe('The visible half');
+  });
 });

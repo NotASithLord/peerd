@@ -65,11 +65,20 @@ const GB = 2 ** 30;
  * comment: the Settings card renders the caveat, so an unverified number can
  * never quietly read as a measured one.
  *
+ * `enforcedContextWindow` (optional) is the window the ENGINE actually
+ * enforces when it is smaller than the nominal `contextWindow` - the muse
+ * engine caps its KV cache well below the model's 131K nominal (the cache
+ * costs ~0.1 MB/token on top of the weights, so the full window would need
+ * ~14 GB of cache alone; 16K ~ 1.7 GB is the Space's own default). Everything
+ * that budgets real turns (the trim layer, the cold-start context table, the
+ * engine's load) must use THIS bound where present; the nominal stays for
+ * what the model could do on bigger silicon.
+ *
  * @typedef {{ id: string, label: string, url: string, engine: 'transformers' | 'muse-glimmer',
  *   repo: string, file: string | null, modelClass: string | null,
  *   dtype: string, cachePattern: string, sizeGB: number, minStorageBufferBindingSizeGB: number,
  *   minBufferSizeGB: number, requiresShaderF16: boolean, contextWindow: number,
- *   specVerified: boolean, note?: string }} ModelSpec
+ *   enforcedContextWindow?: number, specVerified: boolean, note?: string }} ModelSpec
  */
 export const MODEL_SPECS = Object.freeze({
   'gemma-4-e2b': Object.freeze({
@@ -127,6 +136,7 @@ export const MODEL_SPECS = Object.freeze({
     minBufferSizeGB: 14,
     requiresShaderF16: false,
     contextWindow: 131_072,
+    enforcedContextWindow: 16_384,
     specVerified: false,
     note: 'Sizes are file-size arithmetic, not a measured on-device load.',
   }),

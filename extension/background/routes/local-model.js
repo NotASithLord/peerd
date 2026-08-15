@@ -36,8 +36,11 @@ export const makeLocalModelRoutes = (deps) => {
   const recordAvailability = (reply) => {
     const id = typeof reply?.model === 'string' ? reply.model : null;
     if (!id) return;
-    // cached counts as usable (lazy-loads on first use)
+    // cached counts as usable (lazy-loads on first use)...
     const changed = localModelState.setModelAvailable(id, !!(reply.available || reply.downloaded));
+    // ...but RESIDENT means the engine says it is loaded right now - the
+    // distinction steers residentModel() away from evicting a live model.
+    localModelState.setModelResident?.(id, reply.available === true);
     if (changed) { onProviderConfigChanged?.(); pushState?.(); }
   };
 
@@ -61,7 +64,10 @@ export const makeLocalModelRoutes = (deps) => {
       });
       // Seed residency for EVERY model in one pass - this is the call Settings
       // makes on mount, so it is also the cheapest moment to correct the store.
-      if (Array.isArray(r?.models)) for (const entry of r.models) recordAvailability(entry);
+      if (Array.isArray(r?.models)) {
+        for (const entry of r.models) recordAvailability(entry);
+        localModelState.markHydrated?.(); // a FULL seed - the only kind that counts
+      }
       return r ? { ...r, progress: localModelState.progress() } : { ok: false };
     },
     'local-model/probe': async () => {

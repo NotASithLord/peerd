@@ -35,5 +35,15 @@ runtime facts (from the bundle):
   weights cache: IndexedDB (gguf-cache-v1) + a Cache API header cache; weights
   stream from huggingface.co via HTTP range requests (rides connect-src https:).
 
+extra exports peerd does NOT use: the bundle also exports the Space's own UI
+helpers - createAssistantMarkdown (a markdown/KaTeX renderer which, when
+invoked, injects a <link> stylesheet from cdn.jsdelivr.net into document.head),
+highlightWgsl, and formatBytes. peerd calls only MuseGlimmer30B
+(checkAvailability/load/generate/dispose); none of the UI helpers are ever
+invoked, so that jsdelivr fetch is unreachable in peerd - disclosed here so the
+bundle's full capability surface is on record. They are retained (not stripped)
+because the vendored bytes are pinned to the independently re-derived,
+byte-identical extraction above; editing them would forfeit that provenance.
+
 files + SHA-256:
 f84ce421a0e1d5daf077f6b3c5c6b3112760d459facb98b038ed80ac693e5afe  muse-glimmer.js

@@ -62,8 +62,17 @@ export const setLocalModelInfo = (fn) => { localModelContextWindow = fn; };
 /**
  * Live context window for the on-device model, unified with the API
  * providers' `contextWindow` seam (providerModelContextWindow). Prefers the
- * engine-reported value when the bridge is wired; otherwise the static
- * MODEL_SPECS nominal. Best-effort: any failure → null → static table.
+ * engine-reported value when the bridge is wired; the static MODEL_SPECS
+ * value (the engine-ENFORCED window where the spec declares one) is the
+ * bridge-not-wired fallback only.
+ *
+ * why a wired-but-failing bridge returns null instead of the static value:
+ * the caller (model-catalog's liveContextWindow) caches a returned number for
+ * the SW's lifetime as if it were live. Handing it the static value on a
+ * TRANSIENT bridge failure would freeze it in place and stop the retry that
+ * would have learned the engine's real answer; null leaves the miss uncached
+ * so the next turn asks again, while the trim layer meanwhile uses the same
+ * static table on its own (resolveContextWindow's fallback).
  *
  * @param {{ model?: string }} args
  * @returns {Promise<number | null>}
@@ -71,14 +80,14 @@ export const setLocalModelInfo = (fn) => { localModelContextWindow = fn; };
 export const fetchLocalContextWindow = async ({ model = LOCAL_MODEL_ID } = {}) => {
   if (typeof localModelContextWindow === 'function') {
     try {
-      const live = asWindow(await localModelContextWindow(model));
-      if (live !== null) return live;
-    } catch { /* fall through to the spec */ }
+      return asWindow(await localModelContextWindow(model));
+    } catch { return null; }
   }
   // MODEL_SPECS has no index signature; the cast lets an arbitrary model id
   // be looked up (?. handles the miss, returning a static-table null).
   const specs = /** @type {Record<string, import('../local-model-capability.js').ModelSpec | undefined>} */ (MODEL_SPECS);
-  return asWindow(specs[model]?.contextWindow);
+  const spec = specs[model];
+  return asWindow(spec?.enforcedContextWindow ?? spec?.contextWindow);
 };
 
 const TOOL_OPEN = '<tool_call>';

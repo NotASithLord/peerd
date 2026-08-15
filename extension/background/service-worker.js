@@ -4068,7 +4068,9 @@ const hydrateLocalModelAvailability = async ({ force = false } = {}) => {
     for (const entry of catalog.models) {
       if (typeof entry?.model !== 'string') continue;
       if (localModelState.setModelAvailable(entry.model, !!(entry.available || entry.downloaded))) changed = true;
+      localModelState.setModelResident(entry.model, entry.available === true);
     }
+    localModelState.markHydrated(); // a full-catalog seed - the only kind that may latch
     if (changed) onProviderConfigChanged();
     return localModelState.available();
   })();
@@ -4111,6 +4113,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ ms
       // unstamped one can only be the default (older host, same worker).
       const readyId = typeof msg.progress?.model === 'string' ? msg.progress.model : LOCAL_MODEL_ID;
       if (localModelState.setModelAvailable(readyId, true)) onProviderConfigChanged();
+      localModelState.setModelResident(readyId, true); // 'ready' = loaded in the heap NOW
       void pushState().catch(() => {});
     }
     uiPorts.broadcast({ type: 'local-model/progress', progress: msg.progress });
@@ -4138,7 +4141,20 @@ const generateLocalForAdapter = (/** @type {any} */ opts) => {
     error: hostError,
   };
   localGens.set(genId, state);
+  // Stop must actually stop a 30B on-device generation: the engine holds a
+  // generation lease per instance, so an orphaned run would block every
+  // follow-up local turn with "is already generating" until it exhausts its
+  // token budget. The host aborts by genId; fired when the caller's signal
+  // aborts AND from the generator's finally (a consumer that abandons the
+  // stream without a signal still releases the lease). Best-effort: aborting a
+  // settled run is a no-op on the host.
+  const abortHostGeneration = () => {
+    try {
+      browser.runtime.sendMessage({ type: 'local-model/host/abort', genId })?.catch?.(() => { /* offscreen gone */ });
+    } catch { /* messaging unavailable */ }
+  };
   if (hostAvailable) {
+    if (opts.signal) opts.signal.addEventListener('abort', abortHostGeneration, { once: true });
     ensureOffscreen()
       .then(() => browser.runtime.sendMessage({ type: 'local-model/host/generate', genId, model: opts.model, messages: opts.messages, system: opts.system, tools: opts.tools, maxTokens: 512 }))
       .catch((e) => { state.done = true; state.error = e; wakeLocalGen(state); });
@@ -4154,7 +4170,13 @@ const generateLocalForAdapter = (/** @type {any} */ opts) => {
         }
         await new Promise((resolve) => { state.waiters.push(/** @type {any} */ (resolve)); });
       }
-    } finally { localGens.delete(genId); }
+    } finally {
+      localGens.delete(genId);
+      if (hostAvailable) {
+        opts.signal?.removeEventListener?.('abort', abortHostGeneration);
+        abortHostGeneration();
+      }
+    }
   })();
 };
 setLocalGenerate(/** @type {any} */ (generateLocalForAdapter));

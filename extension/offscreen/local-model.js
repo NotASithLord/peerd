@@ -58,15 +58,23 @@ let museInstance = null;  // a loaded MuseGlimmer30B (generate/dispose/lastAssis
 let residentId = null;   // which spec.id the loaded engine state belongs to
 /** @type {{ id: string, promise: Promise<{ available: boolean }> } | null} */
 let loading = null;
+// Generations currently streaming from the resident engine. A resident swap or
+// teardown while one is live would destroy the GPU device under the stream, so
+// those paths refuse while this is non-zero (see initLocalModel + the host's
+// teardown handler).
+let activeGenerations = 0;
+/** Is any local generation currently streaming? */
+export const generationInFlight = () => activeGenerations > 0;
 
-// The muse engine's KV-cache budget in tokens - the EFFECTIVE context window it
-// enforces (generate refuses past it). why not the model's 131,072 nominal: the
-// cache costs ~0.1 MB/token on top of the ~12.4 GB weights, so the full window
-// would need ~14 GB of cache alone. 16K (~1.7 GB) is the Space's own default -
-// roomy for the runner task, survivable next to the weights. Reported to the
-// trim layer via localModelStatus.contextWindow so long sessions compress
-// against the REAL bound, not the nominal one.
-const MUSE_MAX_LENGTH = 16_384;
+/**
+ * The context window the ENGINE will actually enforce for this spec - the
+ * spec's `enforcedContextWindow` cap where one exists (muse: the KV-cache
+ * budget), else the nominal window. This is the number the trim layer must
+ * see; the nominal alone would let sessions run into "context window is full".
+ * @param {import('/peerd-provider/local-model-capability.js').ModelSpec} spec
+ */
+const effectiveWindow = (spec) =>
+  Math.min(spec.enforcedContextWindow ?? spec.contextWindow, spec.contextWindow);
 
 /**
  * Is this spec's engine state loaded in memory right now?
@@ -211,9 +219,15 @@ const engineSupportsSpec = async (spec) => {
     if (spec.engine === 'muse-glimmer') {
       const mg = await loadMuseGlimmer();
       const res = await mg.MuseGlimmer30B.checkAvailability(spec.repo, { file: spec.file });
-      verdict = res?.ok
-        ? { state: 'supported', reason: '' }
-        : { state: 'unsupported', reason: res?.reason || `This device cannot run ${spec.label}.` };
+      if (!res?.ok) {
+        // A muse refusal is DEVICE state (adapter missing/blocked, a kernel the
+        // GPU can't compile), not a fact about the build - and adapter requests
+        // can fail transiently. Report it honestly but do NOT memoize, so a
+        // recovered GPU un-locks on the next status read instead of staying
+        // frozen behind a stale verdict for the document's lifetime.
+        return { state: 'unsupported', reason: res?.reason || `This device cannot run ${spec.label}.` };
+      }
+      verdict = { state: 'supported', reason: '' };
     } else if (spec.modelClass) {
       const t = await loadTransformers();
       verdict = typeof t?.[spec.modelClass] === 'function'
@@ -278,14 +292,14 @@ export const localModelStatus = async ({ model: modelId = DEFAULT_LOCAL_MODEL_ID
     model: spec.id,
     label: spec.label,
     // The EFFECTIVE window the engine will enforce, not the nominal maximum:
-    // the muse engine caps its KV cache (MUSE_MAX_LENGTH; the loaded instance
-    // is the final word), so reporting 131K would make the trim layer compress
-    // too late and hit "context window is full" instead. The SW feeds this to
-    // the adapter's live-window seam (setLocalModelInfo).
-    contextWindow: spec.engine === 'muse-glimmer'
-      ? (residentReady(spec) && typeof museInstance?.contextLength === 'number'
-        ? museInstance.contextLength : Math.min(MUSE_MAX_LENGTH, spec.contextWindow))
-      : spec.contextWindow,
+    // the muse engine caps its KV cache (enforcedContextWindow; the loaded
+    // instance is the final word), so reporting 131K would make the trim layer
+    // compress too late and hit "context window is full" instead. The SW feeds
+    // this to the adapter's live-window seam (setLocalModelInfo).
+    contextWindow: residentReady(spec) && spec.engine === 'muse-glimmer'
+      && typeof museInstance?.contextLength === 'number'
+      ? museInstance.contextLength
+      : effectiveWindow(spec),
     ...(support ? { supportState: support.state, supportReason: support.reason } : {}),
   };
 };
@@ -330,13 +344,7 @@ export const initLocalModel = async ({ model: modelId = DEFAULT_LOCAL_MODEL_ID }
     throw new Error(`${localModelSpec(loading.id)?.label ?? loading.id} is still loading - wait for it to finish first.`);
   }
   if (loading) return loading.promise;
-  if (model && residentId === spec.id) return { available: true };
-  // Refuse BEFORE the download, but only on a DEFINITE no: an architecture the
-  // vendored runtime doesn't carry fails deep inside from_pretrained after
-  // streaming gigabytes. An 'unknown' verdict (config unreachable) is not a
-  // refusal - the load re-checks and fails cheaply at the config step anyway.
-  const support = await engineSupportsSpec(spec);
-  if (support.state === 'unsupported') throw new Error(support.reason);
+  if (residentReady(spec)) return { available: true };
   // why narrate: a stall is otherwise invisible (the offscreen doc has no UI).
   // These log to the offscreen console (chrome://extensions → peerd → Inspect
   // views: offscreen.html) AND emit a 'phase' progress event the eval surfaces,
@@ -399,11 +407,26 @@ export const initLocalModel = async ({ model: modelId = DEFAULT_LOCAL_MODEL_ID }
     onProgress({ status: 'phase', phase: String(p?.message ?? p?.status ?? 'working'), model: spec.id });
   };
   const promise = (async () => {
+    // Refuse BEFORE the download, but only on a DEFINITE no: an architecture the
+    // vendored runtime doesn't carry fails deep inside from_pretrained after
+    // streaming gigabytes. An 'unknown' verdict (config unreachable) is not a
+    // refusal - the load re-checks and fails cheaply at the config step anyway.
+    // why INSIDE the single-flight slot: this await spans a runtime import and
+    // possibly a network probe; run before the slot claim it would open a
+    // window where two concurrent init calls both pass the `loading` guard and
+    // both stream the full weights.
+    const support = await engineSupportsSpec(spec);
+    if (support.state === 'unsupported') throw new Error(support.reason);
     report('probing WebGPU');
     const cap = await probeWebgpu({ requireF16: spec.requiresShaderF16 });
     if (!cap.ok) throw new Error(cap.reason);
-    // Free the other model's VRAM before allocating this one's.
+    // Free the other model's VRAM before allocating this one's - but never
+    // under a live stream: disposing the engine destroys the GPU device the
+    // in-flight generate is reading from, killing the user's turn mid-answer.
     if ((model || museInstance) && residentId !== spec.id) {
+      if (generationInFlight()) {
+        throw new Error(`${localModelSpec(residentId ?? '')?.label ?? residentId} is answering right now - try again when the response finishes.`);
+      }
       report(`unloading ${localModelSpec(residentId ?? '')?.label ?? residentId}`);
       await teardownLocalModel();
     }
@@ -411,12 +434,13 @@ export const initLocalModel = async ({ model: modelId = DEFAULT_LOCAL_MODEL_ID }
       report('loading muse-glimmer runtime (vendored)');
       const mg = await loadMuseGlimmer();
       report(`loading model weights (first run streams ~${spec.sizeGB} GB from HF)`);
-      // maxLength = the KV-cache budget (see MUSE_MAX_LENGTH); the runtime
-      // clamps it to the model's own max_position_embeddings. The runtime
-      // handles download + IndexedDB cache + GPU upload + kernel warmup itself.
+      // maxLength = the KV-cache budget (the spec's enforcedContextWindow); the
+      // runtime clamps it to the model's own max_position_embeddings. The
+      // runtime handles download + IndexedDB cache + GPU upload + kernel
+      // warmup itself.
       museInstance = await mg.MuseGlimmer30B.load(spec.repo, {
         file: spec.file,
-        maxLength: Math.min(MUSE_MAX_LENGTH, spec.contextWindow),
+        maxLength: effectiveWindow(spec),
         onProgress: museTap,
       });
     } else {
@@ -443,6 +467,10 @@ export const initLocalModel = async ({ model: modelId = DEFAULT_LOCAL_MODEL_ID }
     report('ready');
     return { available: true };
   })();
+  // Claimed SYNCHRONOUSLY after the guards above - the IIFE has yielded at its
+  // first await by the time this line runs, and no other await sits between
+  // the `if (loading)` check and this assignment, so a concurrent init can
+  // never slip past the single-flight guard.
   loading = { id: spec.id, promise };
   try { return await promise; }
   catch (e) {
@@ -456,7 +484,7 @@ export const initLocalModel = async ({ model: modelId = DEFAULT_LOCAL_MODEL_ID }
     }
     throw e;
   }
-  finally { loading = null; }
+  finally { if (loading?.promise === promise) loading = null; }
 };
 
 export const teardownLocalModel = async () => {
@@ -518,8 +546,12 @@ const museToolsPreamble = (tools) => {
  *
  * @param {{ messages: readonly object[], system: string, tools?: readonly object[], maxTokens?: number, model?: string }} req
  * @param {(text: string) => void} onToken
+ * @param {{ signal?: AbortSignal }} [opts]
+ *   `signal` ends a muse generation early (the engine honors it per token,
+ *   releasing its generation lease). The transformers path ignores it for now
+ *   (v1 posture: runs to max_new_tokens).
  */
-export const generateLocal = async (req, onToken) => {
+export const generateLocal = async (req, onToken, { signal } = {}) => {
   await detectDownloaded;
   const wanted = req.model && localModelSpec(req.model) ? req.model : DEFAULT_LOCAL_MODEL_ID;
   const spec = localModelSpec(wanted);
@@ -527,42 +559,51 @@ export const generateLocal = async (req, onToken) => {
   if (!residentReady(spec)) {
     // Cached from a prior session but not loaded into this (fresh) offscreen doc,
     // or a different model is resident: load from cache on first use - no
-    // re-download, no manual step.
+    // re-download, no manual step. (Runs BEFORE this call claims a generation
+    // slot: the swap path refuses while a generation is live, and this call's
+    // own slot must not count against its own load.)
     if (downloadedIds.has(wanted)) await initLocalModel({ model: wanted });
     if (!residentReady(spec)) {
       throw new Error(`local model not loaded: ${spec?.label ?? wanted}`);
     }
   }
-  if (spec.engine === 'muse-glimmer') {
-    const system = [req.system ?? '', museToolsPreamble(req.tools)].filter(Boolean).join('\n\n');
-    const messages = toChat(req.messages ?? [], system);
-    // The raw stream interleaves the model's reasoning channel with the visible
-    // one; the splitter forwards only the visible content (see
-    // muse-glimmer-stream.js). reconcile() flushes any tail the stream missed,
-    // from the engine's own authoritative post-parse.
-    const splitter = makeMuseChannelSplitter();
-    for await (const step of museInstance.generate(messages, { maxNewTokens: req.maxTokens ?? 512 })) {
-      const delta = splitter.push(String(step?.text ?? ''));
-      if (delta) onToken(delta);
+  activeGenerations += 1;
+  try {
+    if (spec.engine === 'muse-glimmer') {
+      const system = [req.system ?? '', museToolsPreamble(req.tools)].filter(Boolean).join('\n\n');
+      const messages = toChat(req.messages ?? [], system);
+      // The raw stream interleaves the model's reasoning channel with the
+      // visible one; the splitter forwards only the visible content (see
+      // muse-glimmer-stream.js). reconcile() flushes any tail the stream
+      // missed, taken from the engine's own authoritative post-parse (and
+      // re-filtered through the same visibility rule, so a truncated
+      // generation's raw fallback can never flush the reasoning channel).
+      const splitter = makeMuseChannelSplitter();
+      for await (const step of museInstance.generate(messages, { maxNewTokens: req.maxTokens ?? 512, signal })) {
+        const delta = splitter.push(String(step?.text ?? ''));
+        if (delta) onToken(delta);
+      }
+      const tail = splitter.reconcile(museInstance.lastAssistantMessage?.content ?? null);
+      if (tail) onToken(tail);
+      return;
     }
-    const tail = splitter.reconcile(museInstance.lastAssistantMessage?.content ?? null);
-    if (tail) onToken(tail);
-    return;
+    const t = tx;
+    const messages = toChat(req.messages ?? [], req.system ?? '');
+    // apply_chat_template templates the tools in (we own <tool_call> parsing).
+    // tokenize:false → return the prompt string, then tokenize explicitly below.
+    const prompt = tokenizer.apply_chat_template(messages, {
+      add_generation_prompt: true,
+      tokenize: false,
+      tools: req.tools && req.tools.length ? req.tools : undefined,
+    });
+    const inputs = await tokenizer(prompt);
+    const streamer = new t.TextStreamer(tokenizer, {
+      skip_prompt: true,
+      skip_special_tokens: true,
+      callback_function: (/** @type {string} */ text) => { if (text) onToken(text); },
+    });
+    await model.generate({ ...inputs, max_new_tokens: req.maxTokens ?? 512, do_sample: false, streamer });
+  } finally {
+    activeGenerations -= 1;
   }
-  const t = tx;
-  const messages = toChat(req.messages ?? [], req.system ?? '');
-  // apply_chat_template templates the tools in (we own <tool_call> parsing).
-  // tokenize:false → return the prompt string, then tokenize explicitly below.
-  const prompt = tokenizer.apply_chat_template(messages, {
-    add_generation_prompt: true,
-    tokenize: false,
-    tools: req.tools && req.tools.length ? req.tools : undefined,
-  });
-  const inputs = await tokenizer(prompt);
-  const streamer = new t.TextStreamer(tokenizer, {
-    skip_prompt: true,
-    skip_special_tokens: true,
-    callback_function: (/** @type {string} */ text) => { if (text) onToken(text); },
-  });
-  await model.generate({ ...inputs, max_new_tokens: req.maxTokens ?? 512, do_sample: false, streamer });
 };

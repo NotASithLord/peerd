@@ -19,7 +19,7 @@ describe('local-model-state', () => {
     expect(s.available('gemma-4-e2b')).toBe(false);
     expect(s.available()).toBe(true); // another model is still usable
   });
-  test('residentModel prefers the default, else falls back to whatever is there', () => {
+  test('residentModel prefers the default among usable models when nothing is loaded', () => {
     const s = makeLocalModelState({ defaultModel: 'gemma-4-e2b' });
     expect(s.residentModel()).toBe('');
     s.setModelAvailable('muse-glimmer-30b', true);
@@ -27,11 +27,43 @@ describe('local-model-state', () => {
     s.setModelAvailable('gemma-4-e2b', true);
     expect(s.residentModel()).toBe('gemma-4-e2b');
   });
+  test('an actually-RESIDENT model outranks a merely-downloaded default', () => {
+    // why: routing the runner to the cached default would evict the live
+    // multi-GB model from GPU memory just to answer.
+    const s = makeLocalModelState({ defaultModel: 'gemma-4-e2b' });
+    s.setModelAvailable('gemma-4-e2b', true);       // cached, not loaded
+    s.setModelResident('muse-glimmer-30b', true);   // loaded in the heap NOW
+    expect(s.residentModel()).toBe('muse-glimmer-30b');
+    // ...but a resident default wins over a resident non-default.
+    s.setModelResident('gemma-4-e2b', true);
+    expect(s.residentModel()).toBe('gemma-4-e2b');
+    // Losing residency falls back to usability preference.
+    s.setModelResident('gemma-4-e2b', false);
+    s.setModelResident('muse-glimmer-30b', false);
+    expect(s.residentModel()).toBe('gemma-4-e2b');
+  });
+  test('resident implies usable; un-usable clears residency', () => {
+    const s = makeLocalModelState();
+    s.setModelResident('muse-glimmer-30b', true);
+    expect(s.available('muse-glimmer-30b')).toBe(true);
+    s.setModelAvailable('muse-glimmer-30b', false);
+    expect(s.residentModel()).toBe('');
+  });
   test('setModelAvailable reports whether anything actually changed', () => {
     const s = makeLocalModelState();
-    expect(s.setModelAvailable('gemma-4-e2b', false)).toBe(true); // first call hydrates
-    expect(s.setModelAvailable('gemma-4-e2b', false)).toBe(false);
+    expect(s.setModelAvailable('gemma-4-e2b', false)).toBe(false); // already absent
     expect(s.setModelAvailable('gemma-4-e2b', true)).toBe(true);
+    expect(s.setModelAvailable('gemma-4-e2b', true)).toBe(false);
+  });
+  test('hydration is an explicit full-seed claim, never a single-model side effect', () => {
+    // why: one model\'s ready event latching `hydrated` would make the SW skip
+    // the catalog seeding that surfaces every OTHER downloaded model.
+    const s = makeLocalModelState();
+    s.setModelAvailable('gemma-4-e2b', true);
+    s.setModelResident('gemma-4-e2b', true);
+    expect(s.hydrated()).toBe(false);
+    s.markHydrated();
+    expect(s.hydrated()).toBe(true);
   });
   test('progress round-trips', () => {
     const s = makeLocalModelState();
@@ -78,6 +110,13 @@ describe('local-model routes', () => {
     expect(state.available('gemma-4-e2b')).toBe(true);
     expect(state.availableModels()).toEqual(['gemma-4-e2b']);
   });
+  test('a status reply distinguishes RESIDENT from merely downloaded', async () => {
+    const { deps, state } = setup({ _reply: { ok: true, available: true, model: 'muse-glimmer-30b' } });
+    state.setModelAvailable('gemma-4-e2b', true); // cached default
+    await makeLocalModelRoutes(deps)['local-model/status']({ model: 'muse-glimmer-30b' });
+    // The live model wins runner resolution over the cached default.
+    expect(state.residentModel()).toBe('muse-glimmer-30b');
+  });
   test('catalog seeds residency for every model in one pass', async () => {
     const { deps, state } = setup({
       _reply: {
@@ -92,6 +131,8 @@ describe('local-model routes', () => {
     expect(res.models).toHaveLength(2);
     expect(state.available('gemma-4-e2b')).toBe(true);
     expect(state.available('muse-glimmer-30b')).toBe(false);
+    // A full-catalog seed is the one event allowed to mark the store hydrated.
+    expect(state.hydrated()).toBe(true);
   });
   test('status with no reply → { ok: false }', async () => {
     const { deps } = setup({ browser: { runtime: { sendMessage: async () => null } } });

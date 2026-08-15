@@ -112,8 +112,12 @@ export const LocalModelsSection = {
       vnode.state.entries = byId;
       vnode.state.error = null;
     } else {
-      vnode.state.entries = null;
+      // KEEP the last-known entries: a transient reply failure (SW mid-restart,
+      // offscreen napping) must not repaint an installed model as locked and
+      // re-offer buttons that act on stale state. The error renders as a hint
+      // line and the poll below retries until the catalog answers again.
       vnode.state.error = reply?.error ?? 'unavailable';
+      LocalModelsSection.schedulePoll(vnode);
     }
     vnode.state.progress = reply?.progress ?? vnode.state.progress;
 
@@ -153,6 +157,10 @@ export const LocalModelsSection = {
   /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode @param {any} spec */
   async download(vnode, spec) {
     if (vnode.attrs.state?.capabilities?.localWebGpuHost?.status !== 'available') return;
+    // A retry must not keep rendering the PREVIOUS attempt's failure.
+    if (vnode.state.progress?.model === spec.id && vnode.state.progress?.status === 'error') {
+      vnode.state.progress = null;
+    }
     vnode.state.downloading[spec.id] = true; m.redraw();
     const reply = await vnode.attrs.send({ type: 'local-model/init', model: spec.id }).catch(() => null);
     if (!reply?.ok) {
@@ -214,6 +222,11 @@ export const LocalModelsSection = {
       m('.local-models', [
         m('p.muted', 'Run a model fully on-device via WebGPU — free, private (page content never leaves your machine for the read step), and offline. '
           + 'Test your hardware first; if it passes, download once (then it’s browser-cached). One model is held in GPU memory at a time.'),
+        // A transient catalog failure while entries are already known: say so
+        // instead of silently rendering stale rows as fresh.
+        ui.error && ui.entries
+          ? m('.lm-state.muted', 'Status refresh failed - showing the last known state, retrying.')
+          : null,
         ...MODELS.map((spec) => LocalModelsSection.modelRow(vnode, spec)),
       ]),
     ]);
@@ -239,6 +252,14 @@ export const LocalModelsSection = {
     const unsupported = entry?.supportState === 'unsupported';
     const canDownload = !!verdict?.capable && !ready && !loading && !unsupported;
 
+    // A settled failure for THIS model (download refused / failed mid-stream).
+    // why its own branch: the error progress event arrives together with
+    // loading flipping false, so without it the card would silently revert to
+    // the hardware-pass line as if nothing happened - a failed 12 GB download
+    // the user never learns about. Cleared on the next Download click.
+    const failed = !ready && !loading && ui.progress?.model === spec.id && ui.progress?.status === 'error'
+      ? ui.progress : null;
+
     const stateLine = unsupported
       ? m('.lm-state.muted', `🔒 ${entry.supportReason || 'Not supported by this build’s runtime yet.'}`)
       : ready
@@ -246,8 +267,9 @@ export const LocalModelsSection = {
           ? '✓ Downloaded + loaded - available in the Lab and selectable as a runner / main-loop model.'
           : '✓ Downloaded (cached) - loads from cache on first use; already selectable in the Lab + model pickers.')
         : loading ? m('.lm-state', dlText({ ...entry, sizeGB: spec.sizeGB }, ui.progress))
-          : verdict ? m('.lm-state', { class: verdict.capable ? 'ok' : 'bad' }, `${verdict.capable ? '✓' : '✕'} ${verdict.reason}`)
-            : m('.lm-state.muted', '🔒 Locked - run a hardware test to check this model can run on this machine.');
+          : failed ? m('.lm-state.bad', `✕ ${failed.message || 'Download failed - try again.'}`)
+            : verdict ? m('.lm-state', { class: verdict.capable ? 'ok' : 'bad' }, `${verdict.capable ? '✓' : '✕'} ${verdict.reason}`)
+              : m('.lm-state.muted', '🔒 Locked - run a hardware test to check this model can run on this machine.');
 
     // why no `key`: these rows are a fixed-order registry list that never
     // reorders, and they are siblings of the unkeyed intro paragraph - Mithril

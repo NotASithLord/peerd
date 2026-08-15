@@ -42,7 +42,7 @@ import './doc-extract.js';
 // (same document — no route needed).
 import './web-extract.js';
 import { extractMarkdownLocal } from './web-extract-core.js';
-import { initLocalModel, generateLocal, localModelStatus, localModelCatalog, loadingModelId, probeWebgpu, teardownLocalModel } from './local-model.js';
+import { initLocalModel, generateLocal, generationInFlight, localModelStatus, localModelCatalog, loadingModelId, probeWebgpu, teardownLocalModel } from './local-model.js';
 import { isServiceWorkerSender, isTrustedSender } from '/shared/messaging.js';
 // The always-on base network (S1b). Self-registers a dweb/base-host/* handler;
 // inert on store builds (DWEB_ENABLED false + loadDweb stub). The lobby
@@ -431,6 +431,12 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (onJobAbort));
 // `local-model/host/*` are the SW→offscreen COMMANDS (distinct from the SW's own
 // dispatcher routes so the harness's local-model/status hits the SW, not also
 // here). Pushes BACK to the SW use local-model/delta|done|progress.
+
+// Live per-generation abort handles, keyed by the SW's genId (see the
+// generate + abort handlers below).
+/** @type {Map<string, AbortController>} */
+const localGenerationControllers = new Map();
+
 /**
  * @param {any} msg
  * @param {import('webextension-polyfill').Runtime.MessageSender} sender
@@ -483,20 +489,38 @@ const onLocalModelMessage = (msg, sender, sendResponse) => {
         return;
       }
       case 'local-model/host/teardown':
+        // Never destroy the GPU device under a live stream - the caller can
+        // retry once the turn settles.
+        if (generationInFlight()) {
+          sendResponse({ ok: false, error: 'a local generation is in progress - stop it first.' });
+          return;
+        }
         await teardownLocalModel();
         sendResponse({ ok: true });
         return;
       case 'local-model/host/generate': {
         const { genId } = msg;
+        // Per-generation abort handle: the SW's abort route (below) ends this
+        // run early so the engine's generation lease is released instead of
+        // running out a multi-thousand-token budget after the user hit Stop.
+        const controller = new AbortController();
+        if (typeof genId === 'string') localGenerationControllers.set(genId, controller);
         try {
-          await generateLocal(msg, (token) => { try { browser.runtime.sendMessage({ type: 'local-model/delta', genId, token }); } catch { /* SW asleep */ } });
+          await generateLocal(msg, (token) => { try { browser.runtime.sendMessage({ type: 'local-model/delta', genId, token }); } catch { /* SW asleep */ } }, { signal: controller.signal });
           try { browser.runtime.sendMessage({ type: 'local-model/done', genId }); } catch { /* SW asleep */ }
         } catch (e) {
           try { browser.runtime.sendMessage({ type: 'local-model/done', genId, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }); } catch { /* SW asleep */ }
+        } finally {
+          if (typeof genId === 'string') localGenerationControllers.delete(genId);
         }
         sendResponse({ ok: true });
         return;
       }
+      case 'local-model/host/abort':
+        // Idempotent: aborting a settled/unknown genId is a no-op.
+        localGenerationControllers.get(msg.genId)?.abort();
+        sendResponse({ ok: true });
+        return;
       default:
         sendResponse({ ok: false, error: `unknown local-model message: ${msg.type}` });
     }
