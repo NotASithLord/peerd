@@ -29,6 +29,24 @@ const withFastTease = async (fn) => {
   try { await fn(); } finally { Object.assign(TEASE, saved); }
 };
 
+// why poll instead of one fixed wait: the tease deletes on a timer, so "sleep
+// 45ms, assert it shrank" is really "assert this runner delivered enough timer
+// ticks in 45ms". A loaded CI box does not, and the test fails for a reason that
+// has nothing to do with the contract. Waiting for the shrink itself keeps the
+// meaning; a tease that never shrinks still fails, one budget later.
+/** @param {ParentNode} root @param {number} [budgetMs] */
+const teaseShrinks = async (root, budgetMs = 2000) => {
+  const spans = () => root.querySelectorAll('.peer-name-mirror span').length;
+  const deadline = performance.now() + budgetMs;
+  let n = spans();
+  while (n >= 5 && performance.now() < deadline) {
+    await wait(5);
+    m.redraw.sync();
+    n = spans();
+  }
+  return n;
+};
+
 // A minimal stand-in for the full ChatState — needsOnboarding only reads
 // vault + profile, so cast the fixture to the production type.
 /** @param {Record<string, any>} [over] */
@@ -186,9 +204,7 @@ describe('sidepanel.onboarding', () => {
         try {
           await passProviderStep(root);
           // Past holdFull + a few del steps: the mirror must have shrunk.
-          await wait(45);
-          m.redraw.sync();
-          const shrunk = root.querySelectorAll('.peer-name-mirror span').length;
+          const shrunk = await teaseShrinks(root);
           expect(shrunk < 5).toBe(true);
           // Skipping through the whole funnel against a half-deleted
           // DISPLAY still sends the full stored name — the tease is

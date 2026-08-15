@@ -43,7 +43,25 @@ const flush = async () => {
   m.redraw.sync();
 };
 
-const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+// why: the view moves focus from inside its OWN requestAnimationFrame
+// (focusLibraryAction), so awaiting a single frame races it - under CI load the
+// test's frame can run first and read the pre-move element. Poll to a deadline
+// instead. A genuine focus regression still fails the assertion that follows,
+// just one budget later.
+/**
+ * @param {() => boolean} landed
+ * @param {number} [budgetMs]
+ */
+const focusSettles = async (landed, budgetMs = 2000) => {
+  const deadline = performance.now() + budgetMs;
+  while (!landed() && performance.now() < deadline) {
+    await new Promise((resolve) => { setTimeout(resolve, 16); });
+  }
+};
+
+/** @param {string} action */
+const focusedAction = (action) => () =>
+  document.activeElement?.getAttribute('data-library-action') === action;
 
 /**
  * @param {FakeSend} send
@@ -128,7 +146,7 @@ describe('home.library', () => {
       expect(document.activeElement?.textContent).toBe('History & Git');
       document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       await flush();
-      await nextFrame();
+      await focusSettles(() => document.activeElement === trigger);
       expect(root.querySelector('.library-menu')).toBeFalsy();
       expect(document.activeElement).toBe(trigger);
     } finally { unmount(); }
@@ -160,7 +178,7 @@ describe('home.library', () => {
       confirm.focus();
       confirm.click();                                  // confirms
       await flush();
-      await nextFrame();
+      await focusSettles(focusedAction('open'));
       expect(send.calls.some((c) => c.type === 'apps/delete')).toBe(true);
       expect(document.activeElement?.getAttribute('data-library-action')).toBe('open');
       expect(document.activeElement?.closest('.library-card')?.textContent).toContain('Calculator');
@@ -184,7 +202,7 @@ describe('home.library', () => {
       confirm.focus();
       confirm.click();
       await flush();
-      await nextFrame();
+      await focusSettles(focusedAction('more'));
       expect(root.querySelector('[role="alert"]')?.textContent).toContain('local App was kept');
       expect(document.activeElement?.getAttribute('data-library-action')).toBe('more');
       expect(document.activeElement?.closest('.library-card')?.textContent).toContain('Snake Game');
@@ -226,7 +244,7 @@ describe('home.library', () => {
       await flush();
       clickText(root, '.library-share button', 'Share');
       await flush();
-      await nextFrame();
+      await focusSettles(focusedAction('share'));
       const call = send.calls.find((c) => c.type === 'dweb/base/share-app');
       expect(call?.slug).toBe('my-cool-app');    // slugified
       expect(document.activeElement?.getAttribute('data-library-action')).toBe('share');
@@ -266,7 +284,7 @@ describe('home.library', () => {
       expect(root.textContent).toContain('new version available');
       clickText(root, 'button', 'Update');
       await flush();
-      await nextFrame();
+      await focusSettles(focusedAction('open'));
       const call = send.calls.find((c) => c.type === 'dweb/base/update-app');
       expect(call?.appId).toBe('app-7');
       expect(call?.uri).toBe('peerd://x/v2');
@@ -380,7 +398,7 @@ describe('home.library', () => {
       expect(send.calls.some((c) => c.type === 'apps/repository/restore' && c.to === 'abcdef123456')).toBe(true);
       need(root, 'button[title="Close history"]').click();
       await flush();
-      await nextFrame();
+      await focusSettles(() => document.activeElement === trigger);
       expect(document.activeElement).toBe(trigger);
     } finally { unmount(); }
   });
