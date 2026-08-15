@@ -330,11 +330,24 @@ const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPane
           && visualState.commitBottom <= visualState.scrollerBottom,
         JSON.stringify(visualState));
     }
+    // why: a peer notification landing mid-capture leaks an unread badge into the
+    // top bar. That is global chrome, nothing to do with this fixture, and it is
+    // exactly the drift that reaches the SECOND shot alone. home-fulltab already
+    // quiets them the same way before each theme.
+    const quietNotifications = async () => {
+      await evalIn(page, `import('/shared/peer-notifications.js')
+        .then(({ peerNotifications }) => peerNotifications.clear())`, true);
+      await waitFor(() => evalIn(page, `!document.querySelector('.notif-badge, .notif-banner')`),
+        { budgetMs: 2_000, pollMs: 25 });
+    };
     // why beforeShot on BOTH paths: the two theme captures are ~100ms apart, so
     // the pinned oid and relative times have to be re-applied for the second one
     // or whatever moved in that window lands in the dark shot alone.
-    await rec.visualPage(visualName, page,
-      { beforeShot: revealPanel ? settleNarrowCamera : pinVisualState });
+    const beforeShot = async () => {
+      await quietNotifications();
+      return revealPanel ? settleNarrowCamera() : pinVisualState();
+    };
+    await rec.visualPage(visualName, page, { beforeShot });
   } finally {
     try { page?.close(); } catch { /* */ }
     if (appId) {
