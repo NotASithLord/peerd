@@ -22,6 +22,8 @@ describe('functional test badge', () => {
       label: 'Functional Tests',
       message: '42/42 passing',
       color: 'brightgreen',
+      namedLogo: 'bun',
+      logoColor: 'white',
     });
   });
 

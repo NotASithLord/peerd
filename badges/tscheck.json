@@ -2,5 +2,7 @@
   "schemaVersion": 1,
   "label": "types",
   "message": "99.7% // @ts-check",
-  "color": "green"
+  "color": "green",
+  "namedLogo": "typescript",
+  "logoColor": "white"
 }

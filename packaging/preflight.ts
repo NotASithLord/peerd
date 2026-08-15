@@ -68,6 +68,11 @@ const main = () => {
   // separate firefox-runtime CI job installs the Store XPI and runs it in Gecko.
   run('firefox package lint (AMO validator; no unguarded Chrome-only API)', 'bun', ['run', 'check:firefox']);
   run('doc path references (top-level docs point at real files)', 'bun', ['run', 'check:docpaths']);
+  // The browser lanes each regenerate their own badge in CI (they need Chrome or
+  // Firefox in the room). This is the part preflight CAN prove locally: the
+  // endpoints are well-formed and the two in-browser lanes still agree on how
+  // many browser tests exist.
+  run('coverage badges (well-formed; in-browser lanes agree)', 'bun', ['run', 'check:badges']);
   run('source hygiene (no control bytes / tracked symlinks in source)', 'bun', ['run', 'check:hygiene']);
   run('copy hygiene (no new em dashes / assistant authorship markers)', 'bun', ['run', 'check:copy']);
   run('vendor integrity (extension/vendor/ matches vendor.lock.json)', 'bun', ['run', 'check:vendor']);

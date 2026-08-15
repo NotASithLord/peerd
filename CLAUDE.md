@@ -160,6 +160,21 @@ prose orientation is this file, and the rest is the source itself.
     Rule of thumb: if a test would mock half the world to run, it
     wants the browser. If it operates on values in and values out,
     it wants Bun.
+    - **Every lane publishes its own count** as a committed Shields
+      endpoint under `badges/` (Bun suite, red-team catalog, in-browser
+      under Chrome, in-browser under Gecko, side-panel E2E).
+      Generators are `packaging/gen-*-badge.ts` on a pure core
+      (`packaging/test-badges.ts`); the CI job that RAN a lane
+      regenerates its badge and diffs it, so a published number is
+      always a run that happened. Never hand-edit one, and never quote
+      the counts in prose: the badge JSON is the live value.
+      `bun run check:badges` proves the endpoints are well-formed
+      without launching a browser. Note the two in-browser lanes do NOT
+      report the same total, and that is not drift: a few tests
+      register only where a live service worker answers
+      (`chrome.runtime.sendMessage`), so Chrome registers a slightly
+      larger graph than Gecko. Each lane asserts it executed every test
+      it registered, which is the property that matters.
     - **Live E2E + the verify loop** at `scripts/cdp/run-e2e-verify.mjs`
       (`bun run e2e:verify`). Loads the REAL unpacked extension in
       Chrome for Testing and drives the live side panel through every

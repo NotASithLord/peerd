@@ -85,6 +85,17 @@ jobs:
             echo '::error::badges/functional-tests.json is stale - run `bun run gen:badge:functional` and commit it.'
             exit 1
           }
+      # The red-team catalog is pure Bun (no browser), so its badge rides the
+      # same job. The suite above already gates every scenario; this records how
+      # many hostile probes the defenses blocked while doing it.
+      - name: Run the red-team catalog and generate its blocked-probe badge
+        run: bun run gen:badge:red-team
+      - name: Red-team badge in sync
+        run: |
+          git diff --exit-code badges/red-team.json || {
+            echo '::error::badges/red-team.json is stale - run `bun run gen:badge:red-team` and commit it (and `bun run red-team:report` to refresh the matrix).'
+            exit 1
+          }
 
   checks:
     name: lint + boundary + drift
@@ -110,6 +121,8 @@ jobs:
         run: bun run typecheck
       - name: Typecheck coverage floor (no regressions)
         run: bun run check:tscheck
+      - name: Coverage badges (well-formed; in-browser lanes agree on the graph)
+        run: bun run check:badges
       - name: Dweb import boundary
         run: bun run check:boundary
       - name: Packaged import graph (no pruned-but-imported file black-screens a page)
@@ -184,13 +197,19 @@ jobs:
         id: chrome
         with:
           chrome-version: stable
-      - name: Run in-browser suite over CDP
+      - name: Run in-browser suite over CDP and generate its passing-count badge
         # why bun, not node: the CDP harness imports only node:* builtins and
         # uses global WebSocket/fetch — all provided by bun — so the whole
         # toolchain stays Bun (no Node install). Verified 586/0 under bun.
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
-        run: bun scripts/cdp/run-inbrowser-tests.mjs
+        run: bun run gen:badge:inbrowser
+      - name: In-browser Chrome badge in sync
+        run: |
+          git diff --exit-code badges/inbrowser-chrome.json || {
+            echo '::error::badges/inbrowser-chrome.json is stale - run `bun run gen:badge:inbrowser` and commit it.'
+            exit 1
+          }
 
   # Runs the Firefox artifact, not only its manifest and AMO validator, then
   # runs the shared browser suite in Gecko. Chrome remains the visual authority.
@@ -228,10 +247,18 @@ jobs:
       - name: Check local TLS dependency
         run: openssl version
       - run: bun install --frozen-lockfile
-      - name: Run the packaged Store smoke and Gecko browser suite
+      - name: Run the packaged Store smoke and Gecko browser suite, badge its count
         env:
           FIREFOX_PATH: ${{ steps.firefox.outputs.firefox-path }}
-        run: bun run test:firefox
+        run: bun run gen:badge:gecko
+      - name: In-browser Gecko badge in sync
+        # The Gecko lane is the one badge a contributor cannot regenerate without
+        # Firefox installed locally, so this step is where its count is pinned.
+        run: |
+          git diff --exit-code badges/inbrowser-gecko.json || {
+            echo '::error::badges/inbrowser-gecko.json is stale - run `FIREFOX_PATH=... bun run gen:badge:gecko` and commit it (the count this job just measured is in the log above).'
+            exit 1
+          }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -358,7 +385,14 @@ jobs:
         # The verify runner (--functional) drives every functional state —
         # smoke, goal mode, stop, error — against ONE Chrome (env-independent;
         # visual states are excluded here as their baselines are per-machine).
-        run: bun run test:e2e:all
+        # The generator wraps that same run and records its states + checks.
+        run: bun run gen:badge:e2e
+      - name: E2E badge in sync
+        run: |
+          git diff --exit-code badges/e2e-chrome.json || {
+            echo '::error::badges/e2e-chrome.json is stale - run `bun run gen:badge:e2e` and commit it.'
+            exit 1
+          }
       - name: Run cold first-signup passkey regression
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
