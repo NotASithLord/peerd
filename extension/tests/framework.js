@@ -202,6 +202,30 @@ export const countTests = () => {
   return suites.reduce((total, suite) => total + countSuite(suite), 0);
 };
 
+// why: a test can finish with requestAnimationFrame or setTimeout(0) work
+// still pending (a scheduled focus restore, a queued redraw). Component code
+// schedules these at module level, so they outlive the test's unmount, and
+// without a drain they fire DURING the next test and mutate its DOM. That is
+// the cross-test flake class: it reproduces only when a callback lands in
+// exactly the wrong later test, which under CI load it eventually does. One
+// macrotask turn drains timer work; one frame tick then flushes every rAF
+// callback the test registered (rAF callbacks run in registration order)
+// while the finished test's DOM is still the current one. A callback that
+// chains a FURTHER rAF from inside a frame is not covered: one frame per
+// test is the cost ceiling (a second tick measurably doubled the suite),
+// so deferred effects that chain must precondition-check when they fire,
+// as focusLibraryAction does. The cap bounds the wait where frames are
+// throttled or absent; a callback the browser has not delivered by then
+// was equally undeliverable mid-test.
+const drainDeferredWork = async () => {
+  await new Promise((resolve) => { setTimeout(resolve, 0); });
+  if (typeof requestAnimationFrame !== 'function') return;
+  await Promise.race([
+    new Promise((resolve) => { requestAnimationFrame(() => resolve(undefined)); }),
+    new Promise((resolve) => { setTimeout(resolve, 50); }),
+  ]);
+};
+
 /**
  * @param {Suite} suite
  * @param {(name: string) => void} onTestStart
@@ -234,6 +258,7 @@ const runSuite = async (suite, onTestStart, parents, selected) => {
         },
       });
     }
+    await drainDeferredWork();
   }
   const nextParents = [...parents, suite.name];
   for (const c of suite.children) out.children.push(await runSuite(c, onTestStart, nextParents, selected));
