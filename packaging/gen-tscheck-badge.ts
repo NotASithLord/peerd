@@ -10,6 +10,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { REPO_ROOT } from './lib.ts';
 import { computeCoverage } from './tscheck-coverage.ts';
+import { laneLogo } from './test-badges.ts';
 
 const { count, total, pct } = computeCoverage();
 
@@ -22,6 +23,7 @@ const badge = {
   label: 'types',
   message: `${pctLabel} // @ts-check`,
   color,
+  ...laneLogo('typescript'),
 };
 
 const outDir = join(REPO_ROOT, 'badges');

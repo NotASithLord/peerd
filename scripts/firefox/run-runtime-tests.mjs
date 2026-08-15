@@ -5010,6 +5010,20 @@ const main = async () => {
       console.log(`  ✓ shard ${shardNumber}/${shardCount}: ${result.passed} tests in ${result.ms}ms`);
     }
     if (!only && !requestedShard) assert(executed === expectedTotal, 'Firefox shards executed every registered browser test once', `${executed}/${expectedTotal}`);
+    // why gated on a whole run: a shard or `only=` filter produces honest counts
+    // for a SUBSET, and packaging/gen-gecko-test-badge.ts publishes what it is
+    // handed. Writing nothing here makes a partial run fail the badge rather
+    // than advertise itself as full Gecko coverage.
+    if (process.env.PEERD_TEST_SUMMARY && !only && !requestedShard) {
+      writeFileSync(process.env.PEERD_TEST_SUMMARY, `${JSON.stringify({
+        lane: 'inbrowser-gecko',
+        passed,
+        failed: executed - passed,
+        total: expectedTotal,
+        ms: runtimeMs,
+        shards: shardCount,
+      }, null, 2)}\n`);
+    }
     console.log(`  ✓ ${passed} browser tests passed under Gecko in ${runtimeMs}ms`);
     console.log('Firefox Store smoke + Gecko suite OK');
   } catch (error) {

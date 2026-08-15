@@ -35,7 +35,7 @@ and storage formats may move until the surface stabilizes.
   one unloads the previous model first and loads from cache, never silently
   answering from whichever model happened to be resident.
 
-## [0.7.0] - 2026-08-12
+## [0.7.0] - 2026-08-15
 
 ### Added
 
@@ -84,6 +84,17 @@ and storage formats may move until the surface stabilizes.
   consistently across Chrome and Firefox.
 - Provider readiness survives worker restarts, preview updates avoid disrupting
   active work, and established vaults no longer regress into first-run setup.
+- Passkey signup could stall right after the biometric prompt: the first
+  message from the UI could reach the service worker before its route
+  dispatcher had registered, and the browser could then retire the worker with
+  that message still unclaimed. Early messages are now held until the
+  dispatcher is ready.
+- Settings no longer hides a configured Ollama provider during a temporary
+  outage, an available local WebGPU host can be chosen as the default, a
+  locked vault offers a direct unlock instead of misleading fallback copy, and
+  the Ollama recovery commands are safe to copy and paste.
+- An invalid Pod URL now reaches its visible failure state instead of leaving
+  the tab in an indeterminate one.
 
 ## [0.6.0] - 2026-08-08
 
