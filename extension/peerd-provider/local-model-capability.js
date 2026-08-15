@@ -227,17 +227,20 @@ export const judgeModelCapability = (cap, spec) => {
     if (spec.requiresShaderF16 && !cap.shaderF16) {
       return { capable: false, reason: `GPU lacks shader-f16 (${spec.label} needs it for q4f16).`, confidence: 'high' };
     }
-    // The decisive limit: can one storage binding hold the big embed tensor?
+    // The decisive limit: can one storage binding hold the biggest tensor?
+    // Only claim shader-f16 was part of the verdict when the spec required it
+    // (a requiresShaderF16:false model is judged on an f16-less device too).
+    const f16Note = spec.requiresShaderF16 ? ' + shader-f16' : '';
     if (typeof cap.maxStorageBufferBindingSizeGB === 'number') {
       const have = cap.maxStorageBufferBindingSizeGB;
       const need = spec.minStorageBufferBindingSizeGB;
       if (have >= need) {
-        return { capable: true, reason: `WebGPU + shader-f16, ${have.toFixed(1)} GB storage binding ≥ ${need} GB needed.`, confidence: 'high' };
+        return { capable: true, reason: `WebGPU${f16Note}, ${have.toFixed(1)} GB storage binding ≥ ${need} GB needed.`, confidence: 'high' };
       }
-      return { capable: false, reason: `WebGPU storage binding too small: ${have.toFixed(1)} GB < ${need} GB needed (the ${spec.label} embed tensor won't fit).`, confidence: 'high' };
+      return { capable: false, reason: `WebGPU storage binding too small: ${have.toFixed(1)} GB < ${need} GB needed (the biggest ${spec.label} tensor won't fit).`, confidence: 'high' };
     }
-    // WebGPU + f16 present but limits unreadable — likely fine, but say so.
-    return { capable: true, reason: `WebGPU + shader-f16 present (buffer limits unreported — likely OK).`, confidence: 'low' };
+    // WebGPU present (+ f16 when required) but limits unreadable: likely fine, but say so.
+    return { capable: true, reason: `WebGPU${f16Note} present (buffer limits unreported, likely OK).`, confidence: 'low' };
   }
 
   // No WebGPU → coarse RAM estimate only. WebGL/deviceMemory can't confirm the

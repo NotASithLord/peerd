@@ -105,6 +105,10 @@ describe('the on-device model registry', () => {
     // A no-f16 device must not be spec-refused: the vendored runtime's own
     // checkSupport is the authoritative per-device gate for this engine.
     const noF16 = { webgpu: true, shaderF16: false, maxStorageBufferBindingSizeGB: 4, maxBufferSizeGB: 16 };
-    expect(judgeModelCapability(noF16, MODEL_SPECS['muse-glimmer-30b']).capable).toBe(true);
+    const v = judgeModelCapability(noF16, MODEL_SPECS['muse-glimmer-30b']);
+    expect(v.capable).toBe(true);
+    // ...and the verdict must not CLAIM f16 was checked when the spec never
+    // required it (the reason renders on the Settings card as-is).
+    expect(v.reason.includes('shader-f16')).toBe(false);
   });
 });

@@ -17,9 +17,17 @@ static or dynamic imports (the Space's esm.sh imports live in the page's FIRST
 script block, which is page decoration only); Node builtin paths are stubbed to
 throw and are unreachable in the browser.
 
-provenance note: the bytes were transcribed from the page source supplied by the
-repo owner, because the build environment's egress policy blocks huggingface.co /
-hf.space. Verify against the live Space when re-vendoring.
+provenance note: the bytes were first transcribed from the page source supplied
+by the repo owner (that build environment's egress policy blocked huggingface.co
+/ hf.space), then INDEPENDENTLY re-derived on 2026-08-15 by fetching the live
+Space over the network at the same space commit
+(24cb8aa5ba78c4fb9a3ac89cbdf8e7ee990fbe99, sha256(index.html as fetched) =
+17c643d6cc5e6a7ddbeae229bac44d7899906f5d041ad1c2c6aaff99639107da) and re-running
+the same extraction. Both derivations produce a byte-identical muse-glimmer.js
+(the SHA-256 below). The re-derived copy was also exercised live in a browser:
+checkAvailability returned {ok:true} on an Apple M4 (Chrome, 4 GB buffer limits,
+shader-f16) and {ok:false, reason:"No WebGPU adapter is available on this
+device."} in a GPU-less headless Chrome.
 
 runtime facts (from the bundle):
   DEFAULT_MODEL_ID  = unsloth/Muse-Glimmer-30B-GGUF
