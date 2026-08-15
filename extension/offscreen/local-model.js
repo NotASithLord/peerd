@@ -470,8 +470,10 @@ export const initLocalModel = async ({ model: modelId = DEFAULT_LOCAL_MODEL_ID }
   // Claimed SYNCHRONOUSLY after the guards above - the IIFE has yielded at its
   // first await by the time this line runs, and no other await sits between
   // the `if (loading)` check and this assignment, so a concurrent init can
-  // never slip past the single-flight guard.
-  loading = { id: spec.id, promise };
+  // never slip past the single-flight guard. The cleanup below releases only
+  // its OWN claim (compared by record identity), never a successor's.
+  const claim = { id: spec.id, promise };
+  loading = claim;
   try { return await promise; }
   catch (e) {
     console.error(`[local-model:${spec.id}] init FAILED:`, e);
@@ -484,7 +486,7 @@ export const initLocalModel = async ({ model: modelId = DEFAULT_LOCAL_MODEL_ID }
     }
     throw e;
   }
-  finally { if (loading?.promise === promise) loading = null; }
+  finally { if (loading === claim) loading = null; }
 };
 
 export const teardownLocalModel = async () => {
