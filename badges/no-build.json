@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "label": "Build step",
+  "message": "none (vanilla JS)",
+  "color": "brightgreen",
+  "namedLogo": "javascript",
+  "logoColor": "white"
+}

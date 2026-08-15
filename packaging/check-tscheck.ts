@@ -162,7 +162,17 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // and the UI redesign moved this floor from different bases. The release
 // candidate's merged scan reports 769 checked files; recording that computed
 // union keeps every gain without trying to add branch-local counts.
-const COVERED_FLOOR = 775;
+// 769 → 775 happened TWICE from the same base, for unrelated reasons, and this
+// floor is their union rather than either branch's number.
+//   #408 brought the on-device WebGPU engine's checked files.
+//   This branch took coverage to 100% of the non-ES5 set: fetch-tap-injected.js
+//   is an ES5 injected body that eslint.config.js exempted and
+//   tscheck-coverage.ts did not, so it sat in the denominator with nothing to
+//   fix (the two lists now have a parity test), and web/public/sw.js was
+//   genuinely unchecked (annotating it turned up a real bug, a
+//   respondWith(undefined) on a cache miss).
+// The value below is a fresh scan of the merged tree, not an arithmetic guess.
+const COVERED_FLOOR = 776;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

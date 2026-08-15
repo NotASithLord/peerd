@@ -123,6 +123,11 @@ jobs:
         run: bun run check:tscheck
       - name: Coverage badges (well-formed; in-browser lanes agree on the graph)
         run: bun run check:badges
+      # A moved major tag is arbitrary code in a job holding this checkout, and
+      # in release CI, the signing secrets. The pins were already the rule and
+      # the comment; this is the gate.
+      - name: Action pins (every third-party action at a full commit SHA)
+        run: bun run check:actions
       - name: Dweb import boundary
         run: bun run check:boundary
       - name: Packaged import graph (no pruned-but-imported file black-screens a page)
@@ -153,11 +158,11 @@ jobs:
         run: bun run package:web
       - name: Web import-closure boundary
         run: bun run check:web
-      - name: Generated-file drift (dev manifest + channel-config + tscheck badge)
+      - name: Generated-file drift (dev manifest + channel-config + tscheck and supply-chain badges)
         run: |
           bun run gen:dev
-          git diff --exit-code extension/manifest.json extension/shared/channel-config.js badges/tscheck.json || {
-            echo '::error::A generated file (manifest.json, channel-config.js, or badges/tscheck.json) is out of sync with its generator — run `bun run gen:dev` and commit.'
+          git diff --exit-code extension/manifest.json extension/shared/channel-config.js badges/tscheck.json badges/runtime-deps.json badges/vendor-integrity.json badges/actions-pinned.json badges/no-build.json || {
+            echo '::error::A generated file (manifest.json, channel-config.js, or a badges/*.json written by gen:dev) is out of sync with its generator. Run `bun run gen:dev` and commit.'
             exit 1
           }
       # No visual images are tracked: each run renders its own reference from the

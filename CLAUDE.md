@@ -175,6 +175,14 @@ prose orientation is this file, and the rest is the source itself.
       (`chrome.runtime.sendMessage`), so Chrome registers a slightly
       larger graph than Gecko. Each lane asserts it executed every test
       it registered, which is the property that matters.
+    - **Supply-chain badges ride `gen:dev`, not a test lane** (runtime
+      npm deps, vendored files pinned, Actions SHA-pinned). Pure reads
+      of `package.json`, `vendor.lock.json` and `.github/workflows`
+      (`packaging/supply-chain.ts` + `gen-supply-chain-badges.ts`), so
+      they drift-check with the manifest rather than needing a browser.
+      Each one has a gate behind it: `check:vendor`, `check:actions`
+      (new: every third-party action at a full commit SHA), and the
+      no-npm-runtime invariant itself.
     - **Live E2E + the verify loop** at `scripts/cdp/run-e2e-verify.mjs`
       (`bun run e2e:verify`). Loads the REAL unpacked extension in
       Chrome for Testing and drives the live side panel through every
