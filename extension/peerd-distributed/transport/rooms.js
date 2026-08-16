@@ -61,6 +61,7 @@ const ANSWER_TIMEOUT_MS = 15_000;
  *   budget?: number,
  *   caps?: string[],
  *   kind?: string,
+ *   awaitInitialRendezvous?: boolean,
  * }} opts
  */
 export const joinRoom = async ({
@@ -76,6 +77,7 @@ export const joinRoom = async ({
   budget,
   caps = ['content', 'pubsub'],
   kind: peerKind,             // 'website' = observe-only visitor (own rendezvous cap pool); omitted/default = extension
+  awaitInitialRendezvous = true,
 } = /** @type {{ roomId: string, identity: import('./mesh.js').Identity }} */ ({})) => {
   const t = transport ?? createWebrtcTransport({ iceServers });
   const mesh = createRoomMesh({ roomId, identity, now, budget, audit });
@@ -360,34 +362,47 @@ export const joinRoom = async ({
     await Promise.allSettled(session.members.map(dial));
   };
 
+  /** @param {any} e */
+  const noteConnectFailure = (e) => {
+    if (left) return;
+    reconnectFailures += 1;
+    if (!outageSince) outageSince = Date.now();
+    const downMs = Date.now() - outageSince;
+    // Stay quiet while the backoff rides out the expected transient; warn
+    // once the outage has truly persisted, and only once per outage — a
+    // blip that recovers before OUTAGE_WARN_MS never surfaces a warning.
+    if (!outageWarned && downMs >= OUTAGE_WARN_MS) {
+      outageWarned = true;
+      dwarn('room', `rendezvous unreachable for ${Math.round(downMs / 1000)}s (${reconnectFailures} attempts): ${e?.message ?? e} — still retrying`);
+    } else {
+      dlog('room', `rendezvous reconnect failed (attempt ${reconnectFailures}): ${e?.message ?? e} — retrying`);
+    }
+    backoffMs = Math.min(backoffMs * 2, RECONNECT_MAX_MS); // grow only on a real failed attempt
+    scheduleReconnect();
+  };
+
   const scheduleReconnect = () => {
     if (left || reconnectTimer) return;
     setStatus('connecting');
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
-      connectRendezvous().catch((e) => {
-        reconnectFailures += 1;
-        if (!outageSince) outageSince = Date.now();
-        const downMs = Date.now() - outageSince;
-        // Stay quiet while the backoff rides out the expected transient; warn
-        // once the outage has truly persisted, and only once per outage — a
-        // blip that recovers before OUTAGE_WARN_MS never surfaces a warning.
-        if (!outageWarned && downMs >= OUTAGE_WARN_MS) {
-          outageWarned = true;
-          dwarn('room', `rendezvous unreachable for ${Math.round(downMs / 1000)}s (${reconnectFailures} attempts): ${e?.message ?? e} — still retrying`);
-        } else {
-          dlog('room', `rendezvous reconnect failed (attempt ${reconnectFailures}): ${e?.message ?? e} — retrying`);
-        }
-        backoffMs = Math.min(backoffMs * 2, RECONNECT_MAX_MS); // grow only on a real failed attempt
-        scheduleReconnect();
-      });
+      connectRendezvous().catch(noteConnectFailure);
     }, backoffMs);
   };
 
   // ---- assemble -----------------------------------------------------------
 
   dlog('room', `joining room "${roomId}" as ${short(identity.did)} via ${url}`);
-  if (url) await connectRendezvous();
+  if (url) {
+    const initialConnect = connectRendezvous();
+    // An always-on host can be useful before its bootstrap node answers: its
+    // identity, local mesh, invite/relay paths and lifecycle controls are all
+    // independent of rendezvous reachability. Callers that opt out of waiting
+    // get a live room in `connecting` state while the normal retry loop heals
+    // discovery in the background. Interactive joins keep the strict default.
+    if (awaitInitialRendezvous) await initialConnect;
+    else void initialConnect.catch(noteConnectFailure);
+  }
 
   mesh.start();
   dlog('room', `room "${roomId}" assembled — ${mesh.peers().length} live peer link(s)`);
