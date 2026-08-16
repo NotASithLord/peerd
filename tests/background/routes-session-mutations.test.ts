@@ -74,6 +74,20 @@ describe('session/reset + switch + archive auto-memory seams', () => {
     expect(calls.cacheCleared).toBe(true);
     expect(calls.extract).toEqual([['cur', 'switch']]);
   });
+  test('reset awaits the empty-chat projection before returning', async () => {
+    let release!: () => void;
+    const projected = new Promise<void>((resolve) => { release = resolve; });
+    const { deps } = baseDeps({ pushState: () => projected });
+    let returned = false;
+    const reset = makeSessionMutationRoutes(deps)['session/reset']()
+      .then(() => { returned = true; });
+
+    await Promise.resolve();
+    expect(returned).toBe(false);
+    release();
+    await reset;
+    expect(returned).toBe(true);
+  });
   test('switch sets cache + extracts from previous (only when different)', async () => {
     const { deps, calls } = baseDeps();
     await makeSessionMutationRoutes(deps)['session/switch']({ sessionId: 's2' });

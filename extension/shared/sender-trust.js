@@ -157,6 +157,28 @@ export const isSidepanelSender = (sender, { runtimeId, extensionOrigin, sidepane
 };
 
 /**
+ * Is this sender the side-panel document that may subscribe to live UI state?
+ *
+ * Port provenance differs from the human-action route above: Chrome can attach
+ * the owning tab to a tab-specific side panel connection, and the Mithril
+ * router contributes a hash to the document URL. Neither changes the document
+ * that receives state. Pin the path exactly, reject query/suffix variants, and
+ * deliberately accept either browser-owned provenance shape.
+ * @param {{ id?: string, url?: string, tab?: unknown } | null | undefined} sender
+ * @param {{ runtimeId?: string, extensionOrigin?: string, sidepanelUrl?: string }} [trust]
+ */
+export const isSidepanelPortSender = (sender, {
+  runtimeId, extensionOrigin, sidepanelUrl,
+} = {}) => {
+  if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
+  if (typeof sidepanelUrl !== 'string' || sidepanelUrl.length === 0) return false;
+  const url = /** @type {string} */ (sender?.url);
+  const hashAt = url.indexOf('#');
+  const documentUrl = hashAt === -1 ? url : url.slice(0, hashAt);
+  return !documentUrl.includes('?') && documentUrl === sidepanelUrl;
+};
+
+/**
  * Is this sender the full-tab Home SPA that owns human feedback and
  * instance-wide observability?
  *
@@ -176,4 +198,28 @@ export const isHomeSender = (sender, { runtimeId, extensionOrigin, homeUrl } = {
   const hashAt = url.indexOf('#');
   const documentUrl = hashAt === -1 ? url : url.slice(0, hashAt);
   return !documentUrl.includes('?') && documentUrl === homeUrl;
+};
+
+/**
+ * Is this sender one of the two tab-hosted documents allowed to open an eval
+ * stream: Home's embedded Lab or the standalone evaluation runner?
+ *
+ * why a named predicate: an eval port receives the same live session snapshots
+ * as Home and the side panel. Treating every first-party page as an eval host
+ * would let an engine tab subscribe merely by choosing the port name.
+ * @param {{ id?: string, url?: string, tab?: { id?: number } } | null | undefined} sender
+ * @param {{ runtimeId?: string, extensionOrigin?: string, homeUrl?: string, evalRunnerUrl?: string }} [trust]
+ */
+export const isEvalSender = (sender, {
+  runtimeId, extensionOrigin, homeUrl, evalRunnerUrl,
+} = {}) => {
+  if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
+  if (typeof homeUrl !== 'string' || homeUrl.length === 0) return false;
+  if (typeof evalRunnerUrl !== 'string' || evalRunnerUrl.length === 0) return false;
+  if (typeof sender?.tab?.id !== 'number') return false;
+  const url = /** @type {string} */ (sender.url);
+  const hashAt = url.indexOf('#');
+  const documentUrl = hashAt === -1 ? url : url.slice(0, hashAt);
+  return !documentUrl.includes('?')
+    && (documentUrl === homeUrl || documentUrl === evalRunnerUrl);
 };

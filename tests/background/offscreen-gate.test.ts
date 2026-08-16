@@ -30,4 +30,9 @@ describe('service worker — offscreen client gating (Firefox parity, #6)', () =
     expect(src).toMatch(/const pdfOffscreenClient\s*=\s*offscreenAvailable\s*\?\s*makeOffscreenPdfClient\(/);
     expect(src).toMatch(/makeOffscreenPdfClient\([\s\S]{0,200}?\)\s*:\s*null;/);
   });
+
+  test('toolbox parsing uses the offscreen resolver with a Firefox-only local fallback', () => {
+    expect(src).toMatch(/const toolboxParseCheck\s*=\s*offscreenAvailable\s*\?\s*makeOffscreenToolboxParseClient\(/);
+    expect(src).toMatch(/makeOffscreenToolboxParseClient\([\s\S]{0,220}?\)\s*:\s*localToolboxParseCheck;/);
+  });
 });

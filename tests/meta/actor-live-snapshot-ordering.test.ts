@@ -13,7 +13,7 @@ const sidepanel = readFileSync(join(EXTENSION_DIR, 'sidepanel/sidepanel.js'), 'u
 describe('actor live snapshot ordering', () => {
   test('captures the projection only after awaited reads and broadcasts without another await', () => {
     const start = serviceWorker.indexOf('const buildStateSnapshot = async () => {');
-    const end = serviceWorker.indexOf('const pushState = async () => {', start);
+    const end = serviceWorker.indexOf('const pushState = makeCoalescedStatePush({', start);
     const buildStateSnapshot = serviceWorker.slice(start, end);
     const vaultRead = buildStateSnapshot.indexOf(
       'const vaultInitialized = await vault.isInitialized();',

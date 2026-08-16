@@ -27,7 +27,7 @@ import { isTrustedSender } from '/shared/messaging.js';
 import {
   convertToDocument, sniffDocFormat,
   DocFetchError, DocParseError, UnsupportedDocFormatError, LegacyDocFormatError, ZipError,
-} from '/peerd-runtime/index.js';
+} from '/peerd-runtime/offscreen.js';
 
 // A hard ceiling on the bytes we will pull. Lower than the PDF reader's 75MB:
 // a PDF is often a scan whose size is pixels, whereas a .docx or .xlsx that

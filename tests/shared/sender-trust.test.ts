@@ -6,8 +6,9 @@
 
 import { describe, it, expect } from 'bun:test';
 import {
-  isFirstPartySender, isHomeSender, isOffscreenSender, isOptionsSender, isServiceWorkerSender,
-  isSidepanelSender,
+  isEvalSender, isFirstPartySender, isHomeSender, isOffscreenSender,
+  isOptionsSender, isServiceWorkerSender,
+  isSidepanelPortSender, isSidepanelSender,
 } from '../../extension/shared/sender-trust.js';
 
 const ID = 'abcdefghijklmnopabcdefghijklmnop';
@@ -203,6 +204,36 @@ describe('isSidepanelSender', () => {
   });
 });
 
+describe('isSidepanelPortSender', () => {
+  const sidepanelUrl = `${ORIGIN}sidepanel/sidepanel.html`;
+  const sidepanelTrust = { ...trust, sidepanelUrl };
+
+  it('accepts routed and tab-specific connections from the exact panel document', () => {
+    expect(isSidepanelPortSender(
+      { id: ID, url: `${sidepanelUrl}#!/chat` }, sidepanelTrust,
+    )).toBe(true);
+    expect(isSidepanelPortSender(
+      { id: ID, url: sidepanelUrl, tab: { id: 12 } }, sidepanelTrust,
+    )).toBe(true);
+  });
+
+  it('rejects query, suffix, engine-page, and wrong-origin connections', () => {
+    expect(isSidepanelPortSender(
+      { id: ID, url: `${sidepanelUrl}?forged=1` }, sidepanelTrust,
+    )).toBe(false);
+    expect(isSidepanelPortSender(
+      { id: ID, url: `${sidepanelUrl}.evil#!/chat` }, sidepanelTrust,
+    )).toBe(false);
+    expect(isSidepanelPortSender(
+      { id: ID, url: `${ORIGIN}engine-tabs/app-tab/index.html`, tab: { id: 9 } },
+      sidepanelTrust,
+    )).toBe(false);
+    expect(isSidepanelPortSender(
+      { id: ID, url: 'https://evil.example/sidepanel/sidepanel.html' }, sidepanelTrust,
+    )).toBe(false);
+  });
+});
+
 describe('isHomeSender', () => {
   const homeUrl = `${ORIGIN}home/home.html`;
   const homeTrust = { ...trust, homeUrl };
@@ -231,6 +262,35 @@ describe('isHomeSender', () => {
     expect(isHomeSender(
       { id: ID, url: 'https://evil.example/home/home.html', tab: { id: 12 } },
       homeTrust,
+    )).toBe(false);
+  });
+});
+
+describe('isEvalSender', () => {
+  const homeUrl = `${ORIGIN}home/home.html`;
+  const evalRunnerUrl = `${ORIGIN}eval/runner.html`;
+  const evalTrust = { ...trust, homeUrl, evalRunnerUrl };
+
+  it('accepts Home Lab and the standalone runner, including hash routes', () => {
+    expect(isEvalSender(
+      { id: ID, url: `${homeUrl}#lab`, tab: { id: 12 } }, evalTrust,
+    )).toBe(true);
+    expect(isEvalSender(
+      { id: ID, url: evalRunnerUrl, tab: { id: 13 } }, evalTrust,
+    )).toBe(true);
+  });
+
+  it('rejects engine pages, no-tab copies, queries, and suffix variants', () => {
+    expect(isEvalSender(
+      { id: ID, url: `${ORIGIN}engine-tabs/app-tab/index.html`, tab: { id: 9 } },
+      evalTrust,
+    )).toBe(false);
+    expect(isEvalSender({ id: ID, url: evalRunnerUrl }, evalTrust)).toBe(false);
+    expect(isEvalSender(
+      { id: ID, url: `${evalRunnerUrl}?forged=1`, tab: { id: 13 } }, evalTrust,
+    )).toBe(false);
+    expect(isEvalSender(
+      { id: ID, url: `${evalRunnerUrl}.evil`, tab: { id: 13 } }, evalTrust,
     )).toBe(false);
   });
 });

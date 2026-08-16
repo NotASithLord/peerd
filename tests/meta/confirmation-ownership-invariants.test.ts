@@ -24,7 +24,7 @@ describe('confirmation ownership wiring', () => {
   });
 
   test('state delivery refreshes and replays the destination chat prompt without an await gap', () => {
-    const start = serviceWorker.indexOf('const pushState = async () => {');
+    const start = serviceWorker.indexOf('const pushState = makeCoalescedStatePush({');
     const end = serviceWorker.indexOf('// Keepalive ports', start);
     const pushState = serviceWorker.slice(start, end);
     const refresh = pushState.indexOf(

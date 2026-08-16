@@ -74,14 +74,14 @@ describe('vendor lock count', () => {
   });
 });
 
-describe('no-build-step invariant', () => {
+describe('no-development-build-step invariant', () => {
   const clean = { devDependencies: { eslint: '10', typescript: '6' }, scripts: { test: 'bun test' } };
   const tsconfig = '{ /* comment */ "compilerOptions": { "noEmit": true } }';
 
-  test('reports none when nothing bundles, transpiles, emits, or builds', () => {
+  test('reports none when source development does not bundle, transpile, emit, or build', () => {
     expect(scanBuildStep(clean, tsconfig).offenders).toEqual([]);
     expect(buildStepBadge({ offenders: [] })).toMatchObject({
-      label: 'Build step', message: 'none (vanilla JS)', color: 'brightgreen',
+      label: 'Dev build step', message: 'none (source-direct)', color: 'brightgreen',
     });
   });
 
@@ -113,7 +113,7 @@ describe('no-build-step invariant', () => {
 });
 
 describe('the live repo', () => {
-  test('genuinely has no build step', () => {
+  test('genuinely has no development build step', () => {
     const scan = scanBuildStep(
       JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')),
       readFileSync(join(REPO_ROOT, 'tsconfig.json'), 'utf8'),

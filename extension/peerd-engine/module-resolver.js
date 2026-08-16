@@ -38,6 +38,9 @@ import {
   isRemoteModuleSpecifier,
   normalizeModuleSpecifier,
 } from './module-import-policy.js';
+import { TOOLBOX_SPECIFIER_PREFIX } from './module-specifiers.js';
+
+export { TOOLBOX_SPECIFIER_PREFIX } from './module-specifiers.js';
 
 /**
  * @typedef {{
@@ -74,7 +77,6 @@ import {
 // readToolboxModule and then transforms/blobs EXACTLY like a local OPFS module,
 // so a toolbox module may itself import peerd:std or other toolbox modules
 // (cycle detection below covers toolbox→toolbox loops too).
-export const TOOLBOX_SPECIFIER_PREFIX = 'peerd:toolbox/';
 
 /** @typedef {{ blobUrl: string, source: string }} ModuleEntry */
 

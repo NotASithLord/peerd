@@ -12,7 +12,6 @@ export {
   isBinaryAssetPath, isLosslessUtf8Text, MAX_MODEL_APP_FILE_BYTES,
 } from './app-assets.js';
 export { opfsHelpers } from './opfs.js';
-export { buildModule } from './module-resolver.js';
 export { IMAGE_PIN_STORAGE_KEY } from './image-pin.js';
 export {
   buildAppExport, buildNotebookExport, buildVmRecipeExport,
@@ -29,9 +28,10 @@ export {
   moduleImportPolicyMessage,
 } from './errors.js';
 export {
-  makeVmHttpFetch, makeGitCredentialRoutes, WEB_WRITE_CONFIRM_KEY,
-  needsWebWriteConfirm,
-} from './vm-net/index.js';
+  makeVmHttpFetch, WEB_WRITE_CONFIRM_KEY,
+} from './vm-net/vm-http-fetch.js';
+export { makeGitCredentialRoutes } from './vm-net/git-credential-routes.js';
+export { needsWebWriteConfirm } from './vm-net/http-bridge.js';
 export { setAppBodyWriteGate } from './app-store.js';
 export { buildAppManifest, parseAppManifest } from './app-manifest.js';
 export { createRepositoryService } from './repository/repository-service.js';

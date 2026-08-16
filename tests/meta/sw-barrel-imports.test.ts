@@ -15,7 +15,7 @@
 // (no `export *`), so a text parse is exact.
 
 import { describe, test, expect } from 'bun:test';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { init, parse } from 'es-module-lexer';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
@@ -37,13 +37,16 @@ const barrelExports = (src: string): Set<string> => {
   return out;
 };
 
-/** Names the SW imports specifically from its background runtime barrel. */
-const swBarrelImports = (src: string): string[] => {
+/** Names imported from one exact public entry point. */
+const namedImportsFrom = (src: string, specifier: string): string[] => {
   // [^}]* (not [\s\S]*?) so the match can't span EARLIER import blocks from other
   // modules — an import's braces never contain a '}', so this isolates exactly the
   // peerd-runtime statement.
   const names: string[] = [];
-  const matches = src.matchAll(/import\s*\{([^}]*)\}\s*from\s*['"]\/peerd-runtime\/background\.js['"]/g);
+  const escaped = specifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const matches = src.matchAll(new RegExp(
+    `import\\s*\\{([^}]*)\\}\\s*from\\s*['"]${escaped}['"]`, 'g',
+  ));
   for (const match of matches) {
     for (const raw of stripComments(match[1]).split(',')) {
       const name = raw.trim();
@@ -51,7 +54,7 @@ const swBarrelImports = (src: string): string[] => {
       names.push(name.split(/\s+as\s+/)[0].trim()); // `a as b` needs the barrel to export a
     }
   }
-  if (!names.length) throw new Error('could not find the SW import from /peerd-runtime/background.js');
+  if (!names.length) throw new Error(`could not find a named import from ${specifier}`);
   return names;
 };
 
@@ -87,13 +90,15 @@ const staticImportGraph = async (entry: string): Promise<Set<string>> => {
 describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
   const swSrc = readFileSync(join(EXTENSION_DIR, 'background', 'service-worker.js'), 'utf8');
   const barrelSrc = readFileSync(join(EXTENSION_DIR, 'peerd-runtime', 'background.js'), 'utf8');
+  const providerBarrelSrc = readFileSync(join(EXTENSION_DIR, 'peerd-provider', 'background.js'), 'utf8');
+  const egressBarrelSrc = readFileSync(join(EXTENSION_DIR, 'peerd-egress', 'background.js'), 'utf8');
   const universalSrc = readFileSync(join(EXTENSION_DIR, 'peerd-runtime', 'index.js'), 'utf8');
   const voicePickerSrc = readFileSync(
     join(EXTENSION_DIR, 'peerd-runtime', 'voice', 'engine-picker.js'),
     'utf8',
   );
   const exported = barrelExports(barrelSrc);
-  const imported = swBarrelImports(swSrc);
+  const imported = namedImportsFrom(swSrc, '/peerd-runtime/background.js');
 
   test('parsed a non-trivial import + export set (the regex actually matched)', () => {
     expect(imported.length).toBeGreaterThan(20);
@@ -103,6 +108,17 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
   test('every SW import from the barrel is exported by it (a miss = SW registration failure, status 15)', () => {
     const missing = imported.filter((n) => !exported.has(n));
     expect(missing).toEqual([]);
+  });
+
+  test('provider and egress worker imports are exported by their background surfaces', () => {
+    for (const [specifier, source] of [
+      ['/peerd-provider/background.js', providerBarrelSrc],
+      ['/peerd-egress/background.js', egressBarrelSrc],
+    ] as const) {
+      const available = barrelExports(source);
+      const missing = namedImportsFrom(swSrc, specifier).filter((name) => !available.has(name));
+      expect(missing).toEqual([]);
+    }
   });
 
   test('the SW-reachable runtime barrel excludes offscreen-only voice code', () => {
@@ -116,6 +132,10 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     expect(swSrc).not.toContain("from '/peerd-runtime/index.js'");
     expect(swSrc).toContain("from '/peerd-engine/background.js'");
     expect(swSrc).not.toContain("from '/peerd-engine/index.js'");
+    expect(swSrc).toContain("from '/peerd-provider/background.js'");
+    expect(swSrc).not.toContain("from '/peerd-provider/index.js'");
+    expect(swSrc).toContain("from '/peerd-egress/background.js'");
+    expect(swSrc).not.toContain("from '/peerd-egress/index.js'");
     expect(barrelSrc).not.toContain("from './voice/mic-button.js'");
     expect(voicePickerSrc).not.toContain("from './transcriber.js'");
     expect(swSrc).not.toContain('/vendor/moonshine-js/');
@@ -130,10 +150,48 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     expect(modules.size).toBeGreaterThan(100);
     expect(modules).not.toContain('peerd-runtime/index.js');
     expect(modules).not.toContain('peerd-engine/index.js');
+    expect(modules).not.toContain('peerd-provider/index.js');
+    expect(modules).not.toContain('peerd-egress/index.js');
     expect(modules).not.toContain('peerd-runtime/voice/mic-button.js');
     expect(modules).not.toContain('peerd-voice-host/index.js');
     expect(modules).not.toContain('peerd-engine/editor.js');
+    expect(modules).not.toContain('peerd-engine/module-resolver.js');
+    expect(modules).not.toContain('vendor/acorn/acorn.mjs');
+    expect(modules).not.toContain('peerd-runtime/doc/index.js');
+    expect(modules).not.toContain('peerd-runtime/doc/convert.js');
+    expect([...modules].some((file) => file.startsWith('peerd-runtime/doc/parse/'))).toBe(false);
+    expect(modules).not.toContain('peerd-runtime/pdf/index.js');
+    expect(modules).not.toContain('peerd-runtime/pdf/ocr-store.js');
+    expect(modules).not.toContain('peerd-engine/vm-net/index.js');
     expect([...modules].some((file) => file.includes('vendor/codemirror'))).toBe(false);
     expect([...modules].some((file) => file.includes('vendor/moonshine-js'))).toBe(false);
+  });
+
+  test('the cold worker graph and entry source stay inside the reviewed budget', async () => {
+    const entry = join(EXTENSION_DIR, 'background', 'service-worker.js');
+    const graph = await staticImportGraph(entry);
+    const bytes = [...graph].reduce((total, file) => total + statSync(file).size, 0);
+
+    // Ratchets, not performance claims. A deliberate worker dependency may
+    // raise them only with a fresh graph review and an updated measurement.
+    expect(graph.size).toBeLessThanOrEqual(450);
+    expect(bytes).toBeLessThanOrEqual(4_640_000);
+    expect(statSync(entry).size).toBeLessThanOrEqual(450_000);
+  });
+
+  test('the offscreen host uses its exact runtime and engine surfaces', async () => {
+    const entry = join(EXTENSION_DIR, 'offscreen', 'offscreen.js');
+    const source = readFileSync(entry, 'utf8');
+    const graph = await staticImportGraph(entry);
+    const modules = new Set([...graph].map((file) => relative(EXTENSION_DIR, file)));
+
+    expect(source).toContain("from '/peerd-runtime/offscreen.js'");
+    expect(modules).toContain('peerd-runtime/offscreen.js');
+    expect(modules).toContain('peerd-engine/offscreen.js');
+    expect(modules).toContain('peerd-engine/module-resolver.js');
+    expect(modules).toContain('vendor/acorn/acorn.mjs');
+    expect(modules).not.toContain('peerd-runtime/index.js');
+    expect(modules).not.toContain('peerd-engine/index.js');
+    expect([...modules].some((file) => file.includes('vendor/codemirror'))).toBe(false);
   });
 });

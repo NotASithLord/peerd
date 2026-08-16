@@ -171,8 +171,11 @@ import { computeCoverage } from './tscheck-coverage.ts';
 //   fix (the two lists now have a parity test), and web/public/sw.js was
 //   genuinely unchecked (annotating it turned up a real bug, a
 //   respondWith(undefined) on a cache miss).
+// 776 → 785: exact background/offscreen public surfaces plus the tested UI-port,
+// state-push, provider sub-call, session-cost, and origin-lock orchestration
+// extractions.
 // The value below is a fresh scan of the merged tree, not an arithmetic guess.
-const COVERED_FLOOR = 776;
+const COVERED_FLOOR = 786;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

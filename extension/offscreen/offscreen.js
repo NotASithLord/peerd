@@ -18,10 +18,13 @@
 //      on the first voice/init message; teardown drops it.
 
 import browser from '/vendor/browser-polyfill.js';
-import { createModelStore } from '/peerd-runtime/index.js';
+import { createModelStore } from '/peerd-runtime/offscreen.js';
 // Headless JS jobs (the script tool / engine.runJob): a sealed Worker hosted
 // here, no UI. See job-runner.js for its (deliberately seal-only) security note.
 import { runJob, abortJob } from './job-runner.js';
+// Toolbox writes use the same parser/resolver already linked by job-runner,
+// avoiding a duplicate Acorn graph in the MV3 service worker.
+import './toolbox-parse.js';
 // The heap split: EVERY offscreen agent loop — ephemeral spawned reasoners AND
 // bound actors (VM/Notebook/App/web) — runs in a dedicated Worker via this ONE host.
 import { runActor, abortActor } from './actor-runner.js';
@@ -444,7 +447,7 @@ const localGenerationControllers = new Map();
  */
 const onLocalModelMessage = (msg, sender, sendResponse) => {
   if (typeof msg?.type !== 'string' || !msg.type.startsWith('local-model/host/')) return undefined;
-  if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
+  if (!isServiceWorkerSender(sender)) { sendResponse({ ok: false, error: 'unauthorized-command-sender' }); return true; }
   (async () => {
     switch (msg.type) {
       case 'local-model/host/status':

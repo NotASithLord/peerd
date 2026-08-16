@@ -487,6 +487,7 @@
     "offscreen/doc-extract.js": 1,
     "offscreen/dweb-base.js": 1,
     "offscreen/offscreen.js": 4,
+    "offscreen/toolbox-parse.js": 1,
     "offscreen/web-extract.js": 1,
     "shared/peer-notifications.js": 1,
     "shared/pull-in-peerd.js": 1

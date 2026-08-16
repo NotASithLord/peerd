@@ -125,12 +125,13 @@ export const verifyStoreArtifact = async (artifactPath: string): Promise<void> =
         'engine-tabs/notebook-tab/notebook-tab.js',
       ]) {
         const source = readFileSync(join(tmp, host), 'utf8');
-        if (!source.includes('remoteModulesEnabled: REMOTE_MODULE_IMPORTS_ENABLED')) {
+        const compact = source.replace(/\s+/g, '');
+        if (!compact.includes('remoteModulesEnabled:REMOTE_MODULE_IMPORTS_ENABLED')) {
           failures.push(`${host} does not pass the remote module import policy into the resolver`);
         }
         const hasFetchGate = host === 'offscreen/job-runner.js'
-          ? source.includes('REMOTE_MODULE_IMPORTS_ENABLED && !a2a && profile.egress')
-          : source.includes('...(REMOTE_MODULE_IMPORTS_ENABLED ? {');
+          ? compact.includes('REMOTE_MODULE_IMPORTS_ENABLED&&!a2a&&profile.egress')
+          : compact.includes('...(REMOTE_MODULE_IMPORTS_ENABLED?{');
         if (!hasFetchGate) {
           failures.push(`${host} does not gate remote module fetch injection on package policy`);
         }

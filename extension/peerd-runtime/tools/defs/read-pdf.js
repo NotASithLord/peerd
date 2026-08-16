@@ -16,7 +16,8 @@
 
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { resolveTargetTab, originOfUrl, isDenylistedTab } from './dom-helpers.js';
-import { formatPdfBody, DEFAULT_MAX_CHARS, requireEngine } from '../../pdf/index.js';
+import { requireEngine } from '../../pdf/engines.js';
+import { formatPdfBody, DEFAULT_MAX_CHARS } from '../../pdf/extract-format.js';
 // read_pdf re-fetches bytes offscreen, so it applies the same shared lexical
 // private-network refusal as open-web egress. The denylist alone does not cover
 // loopback, LAN, or metadata targets.

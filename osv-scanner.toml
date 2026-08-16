@@ -4,8 +4,9 @@
 # reaches a user: the extension ships no npm runtime at all (a core project
 # invariant — see CLAUDE.md), third-party runtime code lives in
 # extension/vendor/ and is pinned separately by vendor.lock.json, and
-# packaging/package.ts stages extension/ verbatim without ever resolving a
-# node_modules path into an artifact. So an advisory here is a risk to the
+# packaging/package.ts never resolves a node_modules path into an artifact.
+# Its release-only cold-path compaction uses Bun's built-in parser and preserves
+# vendored bytes. So an advisory here is a risk to the
 # machine that BUILDS and SIGNS a release, not to an installed extension —
 # which still matters (that machine handles the signing key), just with a
 # different blast radius and a different set of realistic attackers.

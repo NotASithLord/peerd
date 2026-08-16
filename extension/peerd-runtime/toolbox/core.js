@@ -21,11 +21,10 @@
 // resolver's buildModule) is injected per the functional-core rule.
 
 import { wrapUntrusted } from '../tools/prompt-wrap.js';
-// why the deep import (not /peerd-engine/index.js): module-resolver.js is pure
-// and this keeps the bun-imported graph light — the same pattern as
-// tools/gates.js's deep denylist import. Lint allows deep imports from inside a
-// peerd-* module.
-import { TOOLBOX_SPECIFIER_PREFIX } from '../../peerd-engine/module-resolver.js';
+// Specifier shaping needs only this protocol constant. Importing the resolver
+// here would make every toolbox metadata/store consumer parse Acorn even when
+// it never validates or executes a module.
+import { TOOLBOX_SPECIFIER_PREFIX } from '../../peerd-engine/module-specifiers.js';
 
 // Flat namespace v1: lowercase, digits, hyphens — the name doubles as the
 // import specifier tail, so the shape is deliberately URL/identifier-safe and

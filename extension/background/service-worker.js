@@ -30,7 +30,9 @@
 import browser from '/vendor/browser-polyfill.js';
 import { makeDispatcher, isTrustedSender } from '/shared/messaging.js';
 import {
-  isHomeSender, isOffscreenSender as senderIsOffscreen, isOptionsSender, isSidepanelSender,
+  isEvalSender, isHomeSender, isOffscreenSender as senderIsOffscreen,
+  isOptionsSender, isSidepanelSender,
+  isSidepanelPortSender,
 } from '/shared/sender-trust.js';
 import { loadDweb } from '/shared/dweb-loader.js';
 import { makeSiteCaptureManager } from '/background/site-capture-manager.js';
@@ -43,6 +45,11 @@ import { makeActorIsolationStateStore } from './actor-isolation-state.js';
 import { actorDeliveryIdsFromMessage, makeActorRecoveryGate } from './actor-recovery-gate.js';
 import { createActorLiveProjection } from './actor-live-projection.js';
 import { answerWithSessionConfirmGrant } from './confirm-session-grants.js';
+import { isAuthorizedUiPortSender } from './ui-port-sender.js';
+import { makeCoalescedStatePush } from './state-push.js';
+import { makeSessionCostFolder } from './session-cost-fold.js';
+import { makeScriptModelCallRoute } from './script-model-call.js';
+import { makeOriginLockResolver } from './origin-lock-controller.js';
 
 import {
   // vault
@@ -91,7 +98,7 @@ import {
   idb as rawIdb,
   idbKV as rawIdbKV,
   sessionCache,
-} from '/peerd-egress/index.js';
+} from '/peerd-egress/background.js';
 
 
 
@@ -136,7 +143,7 @@ import {
   // exactly the "known-gating" the trim path wants (null is falsy → no
   // token trigger).
   contextWindowFor,
-} from '/peerd-provider/index.js';
+} from '/peerd-provider/background.js';
 
 import {
   createSessionStore,
@@ -363,7 +370,7 @@ import {
   PRIVATE_NETWORK_RULE_IDS,
   DENYLIST_RESOURCE_TYPES,
   CHROME_DNR_RESOURCE_TYPES,
-} from '/peerd-egress/index.js';
+} from '/peerd-egress/background.js';
 
 import { createVmClient } from './vm-client.js';
 import { createVmTabTracker } from './vm-tab-tracker.js';
@@ -372,6 +379,7 @@ import { createJsTabTracker } from './notebook-tab-tracker.js';
 import { createPodClient } from './pod-client.js';
 import { createPodTabTracker } from './pod-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
+import { makeOffscreenToolboxParseClient } from './offscreen-toolbox-parse-client.js';
 import { createScriptRunRegistry } from './script-runs.js';
 import { createContextSnapshots } from './context-snapshots.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
@@ -398,9 +406,6 @@ import {
   appFileCheckpointContent,
   // artifact export/import (.peerd envelopes — DESIGN-10)
   opfsHelpers as rawOpfsHelpers,
-  // design 06: the resolver transform, injected into the toolbox write-time
-  // parse check (functional core — the check itself lives in peerd-runtime).
-  buildModule,
   NOTEBOOK_OPFS_ROOT,
   IMAGE_PIN_STORAGE_KEY,
   buildAppExport,
@@ -1088,19 +1093,33 @@ const nukeSessionWorkspace = (/** @type {string} */ sid) =>
 // boundary structural. Injected as ctx.toolbox for the toolbox_* tools; the
 // resolution hosts read bodies via the toolbox/read route.
 const toolboxStore = createToolboxStore();
-// The write-time import-resolution check: the resolver transform run against a
-// candidate body, siblings read from the store. It validates syntax and import
-// resolution. makeBlobUrl inside is a stub because the SW has no
-// URL.createObjectURL, and the check never imports the result.
-const toolboxParseCheck = makeToolboxParseCheck({
-  buildModule,
-  remoteModulesEnabled: REMOTE_MODULE_IMPORTS_ENABLED,
-  readSibling: async (/** @type {string} */ name) => {
-    const body = await toolboxStore.getBody(name);
-    if (body == null) throw new Error(`unknown toolbox module '${name}' — write it first (toolbox_write)`);
-    return body;
-  },
-});
+// Chrome's MV3 worker cannot load the parser lazily, while the offscreen job
+// host already links it for sealed script resolution. Validate toolbox writes
+// there so Acorn is not parsed twice. Firefox has no offscreen document; its
+// background page can use import() safely, so it pays the parser cost only on
+// the first toolbox write. Both paths fail closed before any body is persisted.
+let localToolboxParseCheckPromise = null;
+const localToolboxParseCheck = async (/** @type {string} */ name, /** @type {string} */ body) => {
+  localToolboxParseCheckPromise ??= import('/peerd-engine/module-resolver.js')
+    .then(({ buildModule }) => makeToolboxParseCheck({
+      buildModule,
+      remoteModulesEnabled: REMOTE_MODULE_IMPORTS_ENABLED,
+      readSibling: async (siblingName) => {
+        const siblingBody = await toolboxStore.getBody(siblingName);
+        if (siblingBody == null) {
+          throw new Error(`unknown toolbox module '${siblingName}'; write it first (toolbox_write)`);
+        }
+        return siblingBody;
+      },
+    }));
+  return (await localToolboxParseCheckPromise)(name, body);
+};
+const toolboxParseCheck = offscreenAvailable
+  ? makeOffscreenToolboxParseClient({
+    ensureOffscreen: () => ensureOffscreen(),
+    sendMessage: (message) => browser.runtime.sendMessage(message),
+  })
+  : localToolboxParseCheck;
 
 // Profiles (ROADMAP "Profiles", deprioritized to the default-profile
 // shape). Exactly ONE record exists — 'default' — carrying peerName
@@ -1914,211 +1933,12 @@ const beginLandingTurn = (/** @type {string} */ actorSessionId) => {
 };
 
 /** Build the two lock closures for one actor session. Null for an unlocked kind. */
+/** Assigned after the live registries exist; every caller runs after module evaluation. */
+/** @type {{ current: ReturnType<typeof makeOriginLockResolver> | null }} */
+const originLockResolver = { current: null };
 const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) => {
-  if (!actorSessionId) return null;
-  const getState = () => originStates.read(actorSessionId);
-  // The turn this lock belongs to, captured at CONTEXT-BUILD time — the moment
-  // the dispatch it will judge was authorized.
-  const myTurn = landingTurnTokens.get(actorSessionId) ?? null;
-  const isCurrentTurn = () => myTurn === null || landingTurnTokens.get(actorSessionId) === myTurn;
-  const judgeLandingUnserialized = makeJudgeLanding({
-      getState,
-      saveState: (patch) => originStates.write(actorSessionId, patch),
-      onStop: async (event) => {
-        // A judge that outlived its turn may not stop anything and may not file
-        // anything. It still records the landing in the audit trail below — the
-        // observation was real even when the turn it belonged to is gone.
-        const current = isCurrentTurn();
-        if (current) {
-          landingStopReports.set(actorSessionId, describeLandingStop(/** @type {any} */ (event)));
-          landingStopCards.set(actorSessionId, landingStopCard(/** @type {any} */ (event)));
-        }
-        // RELEASE THE TAB. Without this the stop is self-sealing and a bound
-        // actor is dead for good:
-        //
-        //   navigate is the actor's ONLY way to change its tab's URL, and it
-        //   calls resolveTargetTab FIRST — which judges the tab's CURRENT url.
-        //   After a stop the tab is parked on the refused origin, so every later
-        //   navigate is refused on the landing it is trying to leave. The next
-        //   request in the chat — about anything at all — gets the same handoff
-        //   report, forever. For a per-tab actor it outlives the chat entirely.
-        //
-        // A bound actor returns to a genuine 0-tab state, where navigate's adopt
-        // path opens a fresh judged tab. A roaming actor is retired below instead:
-        // it has consumed page-controlled text, so its transcript must not cross
-        // the stop into the next `to:"web"` request. The refused tab itself is
-        // left open and untouched; the user may well want to look at it.
-        if (current) {
-          const st = originStates.read(actorSessionId);
-          const retiringRoamingActor = st?.mode === 'roaming';
-          // Abort the current actor turn before any fallible persistence. A
-          // storage outage must never let the loop continue issuing tools on a
-          // landing the origin policy already refused.
-          try { turnSlots.stop(actorSessionId); }
-          catch (e) { console.warn('[origin-lock] stop failed', e); }
-          // Heap retirement + registry removal happen synchronously inside the
-          // helper. Its two durable fences are attempted independently, so a
-          // tombstone failure cannot suppress the routing-cache drop (or vice
-          // versa). Queued deliveries consult the heap fence at dequeue time.
-          const retirement = retiringRoamingActor
-            ? retireStoppedRoamingWebActorDurably({
-              registry: webActorRegistry,
-              actorSessionId,
-              originState: st,
-              markRetired: (sessionId) => { retiredActorSessions.add(sessionId); },
-              writeTombstone: () => originStates.write(actorSessionId, { retired: true }),
-              persistRouting: persistWebActors,
-            })
-            : null;
-          const parkedTab = webActorTabBindings.tabFor(actorSessionId);
-          if (typeof parkedTab === 'number' && webActorTabBindings.drop(parkedTab)) persistWebBindings();
-          // The stop hands this tab back to the user (they may want to look at
-          // it), so peerd's group + pill come off with the binding. Without this
-          // a refused tab stays in peerd's group forever, still looking driven.
-          if (typeof parkedTab === 'number') pageActivity.release(parkedTab).catch(() => {});
-          // A SITE actor whose very first landing was refused is a dead handle:
-          // its owned origin is one the site does not actually serve, and the
-          // binding is durable, so retrying the same handle resumed the same
-          // doomed session and opened another orphaned tab. Dropping the binding
-          // makes a retry MINT afresh — which, with the www-fold allowance, is
-          // usually all that was needed. Only on the FIRST landing: after that
-          // the origin is settled and an actor that wandered off it should stay
-          // stopped rather than quietly re-home itself somewhere new.
-          if (st?.provisional) {
-            // The store's key is `${chatId} ${origin}` (one space; neither half
-            // can contain one), so splitting on the FIRST space recovers the pair.
-            let dropped = false;
-            for (const [key, sid] of siteActorBindings.entries()) {
-              if (sid !== actorSessionId) continue;
-              const gap = key.indexOf(' ');
-              if (gap < 0) continue;
-              siteActorBindings.drop(key.slice(0, gap), key.slice(gap + 1));
-              dropped = true;
-            }
-            if (dropped) persistSiteActors();
-            // Keep the stopped state as a tombstone for calls already queued
-            // in this turn. Null means unlocked, so forgetting it here would
-            // let those calls proceed after the binding was removed.
-          }
-          if (retirement) {
-            const durable = await retirement;
-            if (durable.tombstone.status === 'rejected') {
-              console.warn('[origin-lock] actor retirement tombstone failed', durable.tombstone.reason);
-            }
-            if (durable.routing.status === 'rejected') {
-              console.warn('[origin-lock] actor retirement routing write failed', durable.routing.reason);
-            }
-          }
-        }
-        auditLog.append({
-          type: 'actor_origin_stop',
-          sessionId: actorSessionId,
-          details: {
-            action: event.action,
-            from: event.from,
-            // NARROWED to an origin, exactly like the report — NOT the full
-            // landing URL, which an earlier version wrote here reasoning that
-            // the audit is "local, append-only, and read by a human ... the one
-            // place it can't be read by a model". That was wrong: `inspect`
-            // exposes audit_log to the MAIN agent and returns entries verbatim
-            // (only actor ERROR bodies are redacted). A hostile page that
-            // redirects a bound actor to an attacker-chosen URL therefore got
-            // ~2MB of attacker text into the orchestrator's context the moment
-            // it inspected its own audit trail — the exact channel
-            // origin-lock-report.js exists to close, reopened one door over.
-            to: originPhrase(event.to),
-            handoffTo: event.handoffTo ?? null,
-            // Marks a landing observed after its turn ended — kept because a
-            // stale judge firing is itself worth being able to see.
-            ...(current ? {} : { staleTurn: true }),
-          },
-        }).catch(() => {});
-        // End the actor's whole TURN, not just this tool call: a refusal alone
-        // leaves the loop free to try the next tool against the same tab. Only
-        // ever OUR turn — see landingTurnTokens for the turn this would
-        // otherwise have aborted by accident.
-        // Current turns are stopped before fallible retirement work above.
-      },
-      isIdp: isKnownIdp,
-      isCurrent: isCurrentTurn,
-      ...sensitivitySignals(),
-    });
-  const judgeLanding = (/** @type {string} */ url) => originStates.serialize(
-    actorSessionId,
-    () => {
-      if (!isCurrentTurn()) {
-        const error = new Error('stale_actor_turn');
-        error.name = 'AbortError';
-        throw error;
-      }
-      return judgeLandingUnserialized(url);
-    },
-  );
-  const authorizeSignInOriginUnserialized = makeSignInOriginAuthorizer({
-    getState,
-    getLiveLanding: () => liveSiteClientLandingFor(actorSessionId),
-    saveState: (patch) => originStates.write(actorSessionId, patch),
-    isKnownIdp: isKnownIdpHost,
-    isCurrent: isCurrentTurn,
-    onBound: (origin) => auditLog.append({
-      type: 'actor_origin_bound_for_sign_in',
-      sessionId: actorSessionId,
-      details: { origin },
-    }).then(() => undefined),
-  });
-  const authorizeSignInExcursionUnserialized = makeSignInExcursionAuthorizer({
-    getState,
-    getLiveLanding: () => liveSiteClientLandingFor(actorSessionId),
-    saveState: (patch) => originStates.write(actorSessionId, patch),
-    isKnownIdp,
-    isCurrent: isCurrentTurn,
-  });
-  const revokeSignInExcursionUnserialized = makeSignInExcursionRevoker({
-    getState,
-    getLiveLanding: () => liveSiteClientLandingFor(actorSessionId),
-    saveState: (patch) => originStates.write(actorSessionId, patch),
-    isKnownIdp,
-    isCurrent: isCurrentTurn,
-  });
-  return {
-    getState,
-    judgeLanding,
-    makeScope: (/** @type {() => string | undefined} */ getOrigin) =>
-      makeCredentialScope({ getState, getOrigin, ...sensitivitySignals() }),
-    canUseSiteClientOrigin: makeSiteClientOriginGuard({ getState, ...sensitivitySignals() }),
-    authorizeSiteClientOrigin: (/** @type {() => Promise<{ status: 'none' | 'unreadable' } | { status: 'live', url: string }>} */ getLiveLanding) =>
-      makeSiteClientOriginAuthorizer({
-        getState, getLiveLanding, judgeLanding,
-        ...sensitivitySignals(),
-      }),
-    authorizeSignInOrigin: (/** @type {string} */ origin, /** @type {AbortSignal | undefined} */ signal) => originStates.serialize(
-      actorSessionId,
-      () => authorizeSignInOriginUnserialized(origin, signal),
-    ),
-    authorizeSignInExcursion: (/** @type {string} */ origin, /** @type {AbortSignal | undefined} */ signal) => originStates.serialize(
-      actorSessionId,
-      () => authorizeSignInExcursionUnserialized(origin, signal),
-    ),
-    revokeSignInExcursion: (/** @type {string} */ origin, /** @type {AbortSignal | undefined} */ signal) => originStates.serialize(
-      actorSessionId,
-      () => revokeSignInExcursionUnserialized(origin, signal),
-    ),
-    terminateUnreadableSignIn: () => originStates.serialize(
-      actorSessionId,
-      () => {
-        if (!isCurrentTurn()) {
-          const error = new Error('stale_actor_turn');
-          error.name = 'AbortError';
-          throw error;
-        }
-        // A bound actor with active sign-in state may not resume when its tab
-        // disappears or becomes unreadable. This reserved synthetic landing is
-        // always outside the approved corridor, so the normal terminal path
-        // clears the grant, records the stop, and ends the turn.
-        return judgeLandingUnserialized('https://unreadable.invalid/');
-      },
-    ),
-  };
+  if (!originLockResolver.current) throw new Error('origin lock resolver is not initialized');
+  return originLockResolver.current(actorSessionId);
 };
 
 /**
@@ -3599,10 +3419,21 @@ const isActualSidepanelSender = (/** @type {any} */ sender) => isSidepanelSender
   extensionOrigin: browser.runtime?.getURL?.('') ?? '',
   sidepanelUrl: browser.runtime?.getURL?.('sidepanel/sidepanel.html') ?? '',
 });
+const isActualSidepanelPortSender = (/** @type {any} */ sender) => isSidepanelPortSender(sender, {
+  runtimeId: browser.runtime?.id,
+  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
+  sidepanelUrl: browser.runtime?.getURL?.('sidepanel/sidepanel.html') ?? '',
+});
 const isActualHomeSender = (/** @type {any} */ sender) => isHomeSender(sender, {
   runtimeId: browser.runtime?.id,
   extensionOrigin: browser.runtime?.getURL?.('') ?? '',
   homeUrl: browser.runtime?.getURL?.('home/home.html') ?? '',
+});
+const isActualEvalSender = (/** @type {any} */ sender) => isEvalSender(sender, {
+  runtimeId: browser.runtime?.id,
+  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
+  homeUrl: browser.runtime?.getURL?.('home/home.html') ?? '',
+  evalRunnerUrl: browser.runtime?.getURL?.('eval/runner.html') ?? '',
 });
 
 // Root creation and recovery share one serialized custody lane. Without it,
@@ -4103,6 +3934,13 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ ms
     }
     messageDispatcherReady.then(() => sendResponse({ ok: true }));
     return true;
+  }
+  if (msg?.type === 'local-model/delta' || msg?.type === 'local-model/done'
+      || msg?.type === 'local-model/progress') {
+    // These pushes mutate live generation queues and provider readiness. The
+    // offscreen host is their sole producer; another extension page choosing
+    // the same type must not be able to finish or poison a generation.
+    if (!isOffscreenSender(sender)) return undefined;
   }
   if (msg?.type === 'local-model/delta') { const s = localGens.get(msg.genId); if (s) { s.tokens.push(msg.token); wakeLocalGen(s); } return undefined; }
   if (msg?.type === 'local-model/done') { const s = localGens.get(msg.genId); if (s) { s.done = true; s.error = msg.error ?? null; wakeLocalGen(s); } return undefined; }
@@ -4685,27 +4523,23 @@ const buildStateSnapshot = async () => {
   };
 };
 
-let statePushGeneration = 0;
-const pushState = async () => {
-  if (!uiConnected()) return;
-  const generation = ++statePushGeneration;
-  const state = await buildStateSnapshot();
-  // Snapshot assembly crosses vault/session/profile stores. A newer mutation can
-  // start and finish its push while an older build is still awaiting IO. Never
-  // let that older projection arrive last and strand every live surface on
-  // internally inconsistent provider/settings state.
-  if (generation !== statePushGeneration || !uiConnected()) return;
-  const ownerSessionId = typeof state.session?.sessionId === 'string'
-    ? state.session.sessionId : null;
-  // why: buildStateSnapshot awaits several stores. A confirmation can arrive
-  // after its pending read but before this continuation runs, while a switching
-  // panel still identifies as the previous chat and correctly rejects the live
-  // event. Refresh at the delivery boundary, apply the destination state first,
-  // then replay its prompt synchronously so that race cannot hide authority UI.
-  const pendingConfirm = confirmCoordinator.getPendingForOwner(ownerSessionId);
-  uiPorts.broadcast({ type: 'state', state: { ...state, pendingConfirm } });
-  if (pendingConfirm) uiPorts.broadcast({ type: 'confirm/request', prompt: pendingConfirm });
-};
+const pushState = makeCoalescedStatePush({
+  isConnected: uiConnected,
+  build: buildStateSnapshot,
+  deliver: (state) => {
+    const ownerSessionId = typeof state.session?.sessionId === 'string'
+      ? state.session.sessionId : null;
+    // why: buildStateSnapshot awaits several stores. A confirmation can arrive
+    // after its pending read but before this continuation runs, while a switching
+    // panel still identifies as the previous chat and correctly rejects the live
+    // event. Refresh at the delivery boundary, apply the destination state first,
+    // then replay its prompt synchronously so that race cannot hide authority UI.
+    const pendingConfirm = confirmCoordinator.getPendingForOwner(ownerSessionId);
+    uiPorts.broadcast({ type: 'state', state: { ...state, pendingConfirm } });
+    if (pendingConfirm) uiPorts.broadcast({ type: 'confirm/request', prompt: pendingConfirm });
+  },
+  onError: (error) => console.warn('[state] push failed', error),
+});
 
 // Keepalive ports we hold references to so they're not GC'd. Recent
 // Chrome versions retain SW ports via their internal table, but holding
@@ -4923,6 +4757,14 @@ browser.runtime.onConnect.addListener((port) => {
     return;
   }
   if (port.name === 'sidepanel' || port.name === 'home' || port.name === 'eval') {
+    if (!isAuthorizedUiPortSender(port.name, port.sender, {
+      sidepanel: isActualSidepanelPortSender,
+      home: isActualHomeSender,
+      evaluation: isActualEvalSender,
+    })) {
+      try { port.disconnect(); } catch { /* already disconnected */ }
+      return;
+    }
     // The side panel and the full-page home are equal live surfaces (DESIGN-12);
     // the 'eval' surface (the Lab section + the standalone eval page) also needs
     // the turn/* stream. Register every one and stream session state to all.
@@ -4967,6 +4809,10 @@ browser.runtime.onConnect.addListener((port) => {
     return;
   }
   if (port.name === 'sw-keepalive') {
+    if (!isOffscreenSender(port.sender)) {
+      try { port.disconnect(); } catch { /* already disconnected */ }
+      return;
+    }
     console.log('[sw] keepalive port connected at', new Date().toISOString());
     keepalivePorts.add(/** @type {any} */ (port));
 
@@ -6019,6 +5865,21 @@ const SITE_ACTOR_KEY = 'siteActorBindings';
 const persistSiteActors = persistRegistry(SITE_ACTOR_KEY, siteActorBindings);
 hydrateRegistry(SITE_ACTOR_KEY, siteActorBindings);
 
+// Assemble after every live registry/turn collaborator exists. Runtime messages
+// cannot be dispatched until module evaluation reaches the boot-tail listener.
+originLockResolver.current = makeOriginLockResolver({
+  originStates, landingTurnTokens, landingStopReports, landingStopCards,
+  makeJudgeLanding, describeLandingStop, landingStopCard,
+  retireStoppedRoamingWebActorDurably, webActorRegistry,
+  retiredActorSessions, persistWebActors, turnSlots, webActorTabBindings,
+  persistWebBindings, pageActivity, siteActorBindings, persistSiteActors,
+  auditLog, originPhrase, isKnownIdp, isKnownIdpHost,
+  sensitivitySignals, makeSignInOriginAuthorizer,
+  makeSignInExcursionAuthorizer, makeSignInExcursionRevoker,
+  makeCredentialScope, makeSiteClientOriginGuard,
+  makeSiteClientOriginAuthorizer, liveSiteClientLandingFor,
+});
+
 // Mint a SITE actor: a tab-backed web actor BOUND to `origin` from birth.
 //
 // why the mode is decided HERE and not on first landing: a bound actor with no
@@ -6334,174 +6195,18 @@ const resolveReplyConsent = async (/** @type {string} */ convId, /** @type {stri
   return granted;
 };
 
-// Design 5's session cost fold, SERIALIZED per session. why a chain: the
-// sub-call route below is the first caller that is concurrent with ITSELF by
-// design (a script can Promise.all its provider.call fan-out), and a bare
-// get→setCost read-modify-write interleaves — two folds read the same tally
-// and the later write drops the earlier call's spend from the very tally the
-// spend-limit preflight reads. Entries self-evict once their chain drains.
-/** @type {Map<string, Promise<void>>} */
-const sessionCostFoldTails = new Map();
-const foldSessionCost = (/** @type {string} */ sessionId, /** @type {any} */ usage, /** @type {number} */ cost) => {
-  const tail = (sessionCostFoldTails.get(sessionId) ?? Promise.resolve())
-    .then(async () => {
-      const fresh = await sessions.get(sessionId);
-      await sessions.setCost(sessionId, addUsage(normalizeTally(fresh?.cost), usage, cost));
-    })
-    .catch(() => { /* a persist hiccup must not fail the call */ });
-  sessionCostFoldTails.set(sessionId, tail);
-  tail.then(() => { if (sessionCostFoldTails.get(sessionId) === tail) sessionCostFoldTails.delete(sessionId); });
-  return tail;
-};
+// Concurrent sub-calls and isolated actor turns share one serialized cost fold.
+const foldSessionCost = makeSessionCostFolder({ sessions, addUsage, normalizeTally });
 
-// The script/model-call route (design 5) — invoked by the offscreen relay for
-// each peerd.provider.call a provider-enabled `script` run makes. The custody
-// shape is actor/model-call's: getSecret + safeFetch are added HERE, so the
-// key never enters the worker or the offscreen document; ownerSessionId/runId
-// are TRUSTED job params (minted by the script tool SW-side) — the worker's
-// own words buy nothing. On top of that custody this route adds: the live-run
-// owner check, text-only arg validation, the per-run quota, the session
-// provider PIN + model gate, the spend-limit preflight, the cost fold, and the
-// Stop chain (the run's abort signal cancels an in-flight provider fetch).
-const scriptModelCallRoute = async (
-  /** @type {{ ownerSessionId?: string, runId?: string, args?: unknown }} */ msg,
-  /** @type {unknown} */ sender,
-) => {
-  try {
-    if (!isOffscreenSender(sender)) {
-      return { ok: false, error: 'provider: unauthorized relay' };
-    }
-    const owner = msg.ownerSessionId ? await sessions.get(msg.ownerSessionId) : null;
-    // Same posture as actors/call: v1 is the ORCHESTRATOR's surface only. An
-    // actor or spawned owner is refused even if a job param leaked — the
-    // sub-call lane must never hand a fenced context the user's paid key.
-    if (!owner || owner.kind === 'actor' || owner.kind === 'spawned') {
-      return { ok: false, error: 'provider: only a chat session holds the sub-call surface' };
-    }
-    // The LIVE-RUN check: the runId must be registered (script-runs.js) and
-    // bound to this owner — a call from a dead or foreign run is refused.
-    const runId = typeof msg.runId === 'string' ? msg.runId : '';
-    if (!runId
-      || scriptRuns.ownerFor(runId) !== msg.ownerSessionId
-      || scriptRuns.allows(runId, 'provider') !== true) {
-      return { ok: false, error: 'provider: unknown or finished run' };
-    }
-    /** @type {ReturnType<typeof validateProviderCallArgs>} */
-    let call;
-    try { call = validateProviderCallArgs(msg.args); }
-    catch (e) { return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }; }
-    // Quota BEFORE the call, counted before it flies (script-runs.js) —
-    // overflow is a structured refusal the script can catch and degrade on
-    // (ProviderQuotaError message), never a worker kill.
-    const quotaRefusal = providerQuotaError(scriptRuns.providerUsageFor(runId));
-    if (quotaRefusal) return { ok: false, error: quotaRefusal.message };
-    // Spend-limit preflight — cheap-call's posture: sub-calls spend against
-    // the OWNING session, so a session past the user's hard cap must not be
-    // pushed further by its own script.
-    // why no reservation: this reads owner.cost per-invocation with no hold, so
-    // a concurrent fan-out can collectively overshoot the limit between the read
-    // and each fold. That is DELIBERATE — the USD limit is a coarse safety lever,
-    // not a ledger; the tight bound on a single run's spend is the per-run
-    // call/token quota above (recordProviderCall), which the fan-out cannot dodge.
-    const spendLimit = settingsStore.get().spendLimitUsd;
-    if (limitExceeded(normalizeTally(owner.cost).cost, spendLimit)) {
-      return { ok: false, error: `provider quota exceeded: the session spend limit ($${spendLimit}) is reached` };
-    }
-    // The session PIN: the endpoint is ALWAYS the owning session's provider
-    // adapter — there is no provider arg, and an explicit `model` only picks a
-    // model WITHIN it. That is design 5's "cannot name an arbitrary endpoint"
-    // enforced by construction (registry.js resolves the adapter by name).
-    const provider = owner.provider;
-    const providerEntry = listProviders().find((p) => p.name === provider);
-    if (!providerEntry) {
-      return { ok: false, error: `provider: session provider not registered: ${provider}` };
-    }
-    const localProvider = !!providerEntry.keyless;
-    const pricingOverrides = /** @type {any} */ (settingsStore.get().pricingOverrides);
-    // The MODEL gate (design 5: an explicit model arg "must resolve within the
-    // user's configured providers or is refused"): a worker-chosen id must be
-    // the session's own model or one with a LOCAL RATE CARD (built-in table or
-    // Settings override). why pricing as the resolver: costOf() prices an
-    // unknown id at $0, so an unpriced model would spend real credits that the
-    // cost tally — and therefore the spend-limit preflight above — never sees.
-    // A keyless (local) provider genuinely costs $0 for any id, so it is
-    // exempt by the same rule.
-    const model = call.model || owner.model;
-    if (call.model && call.model !== owner.model && !localProvider && !hasPricing(call.model, pricingOverrides)) {
-      return { ok: false, error: `provider.call: unknown model '${call.model}' — use the session's model, or an id with a rate card (Settings → pricing overrides)` };
-    }
-    // Abort rides the RUN's controller (script-runs.js): Stop chains into it,
-    // and release() aborts it when the run ends — either kills this fetch.
-    const runSignal = scriptRuns.signalFor(runId);
-    if (runSignal?.aborted) return { ok: false, error: 'aborted' };
-    // Admission counts the call AND reserves its clamped maxTokens against the
-    // run's output meter (settled to the actual bill below) — so a concurrent
-    // fan-out is bounded by the run ceiling, not just the per-call clamp.
-    scriptRuns.recordProviderCall(runId, call.maxTokens);
-    /** @type {any[]} */
-    const events = [];
-    /** @type {string | undefined} */
-    let streamError;
-    try {
-      // The context inspector sees the sub-call like every delegated model
-      // call; identity from the trusted params, never a worker claim.
-      contextSnapshots.record({
-        provider, model, system: call.system ?? '', messages: call.messages,
-        maxTokens: call.maxTokens, sessionId: msg.ownerSessionId, label: 'script:sub-call',
-      });
-      for await (const ev of callModel(/** @type {any} */ ({
-        provider, model, system: call.system ?? '', messages: call.messages,
-        maxTokens: call.maxTokens, signal: runSignal ?? undefined, getSecret, safeFetch,
-        // issue #104: a remote Ollama daemon — same threading as turn-driver.
-        ollamaHost: settingsStore.get().ollamaHost,
-      }))) events.push(ev);
-    } catch (e) {
-      // A stream that THROWS mid-iteration (an aborted fetch, a network cut)
-      // may already have yielded billed usage events — capture the error and
-      // fall through to the same fold/cost path an error-EVENT stream takes,
-      // so no billed tokens escape the meter or the tally.
-      streamError = runSignal?.aborted ? 'aborted' : (/** @type {{ message?: string }} */ (e)?.message ?? String(e));
-    }
-    const folded = foldProviderEvents(events);
-    scriptRuns.settleProviderCall(runId, call.maxTokens, folded.usage?.outputTokens ?? 0);
-    // ONE usage shape on every return path — the job-runner meter sums
-    // input+output; cache-token detail stays inside the cost fold.
-    const usage = folded.usage ? { inputTokens: folded.usage.inputTokens, outputTokens: folded.usage.outputTokens } : null;
-    // Cost: fold ANY usage — an errored stream's billed tokens are still
-    // billed. Same fold as cheap-call: price locally, add into the owning
-    // session's persisted tally (the cost meter + next turn's hard-limit
-    // check see it), audit the sub_call so money moving leaves a record.
-    if (folded.usage) {
-      let cost = 0;
-      try { cost = costOf(/** @type {any} */ (model), folded.usage, pricingOverrides, { localProvider })?.cost ?? 0; }
-      catch { cost = 0; }
-      await foldSessionCost(/** @type {string} */ (msg.ownerSessionId), folded.usage, cost);
-      auditLog.append({
-        type: 'provider_sub_call', sessionId: msg.ownerSessionId,
-        details: { runId, provider, model, outputTokens: folded.usage.outputTokens, cost },
-      }).catch(() => {});
-    }
-    // A Stop that fired mid-stream must never deliver a completed answer, even
-    // if the provider flushed before the abort landed (actor/model-call's race
-    // guard 2, same reasoning).
-    if (runSignal?.aborted) return { ok: false, error: 'aborted', ...(usage ? { usage } : {}) };
-    if (streamError) return { ok: false, error: streamError, ...(usage ? { usage } : {}) };
-    if (folded.error) return { ok: false, error: folded.error, ...(usage ? { usage } : {}) };
-    return {
-      ok: true,
-      value: {
-        text: folded.text, model,
-        // stopReason surfaces truncation: a maxTokens-clipped generation
-        // ('max_tokens') must be distinguishable from a complete answer on a
-        // surface whose per-call clamp is this tight.
-        ...(folded.stopReason !== undefined ? { stopReason: folded.stopReason } : {}),
-        ...(usage ? { usage } : {}),
-      },
-    };
-  } catch (e) {
-    return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
-  }
-};
+// The sealed script worker receives no provider key. This extracted route adds
+// the key-bearing fetch boundary only after exact-host, live-run, quota, model,
+// and spend checks; see background/script-model-call.js.
+const scriptModelCallRoute = makeScriptModelCallRoute({
+  isOffscreenSender, sessions, scriptRuns, validateProviderCallArgs,
+  providerQuotaError, settingsStore, limitExceeded, normalizeTally,
+  listProviders, hasPricing, contextSnapshots, callModel, getSecret,
+  safeFetch, foldProviderEvents, costOf, foldSessionCost, auditLog,
+});
 
 // The a2a/call route — invoked by the offscreen relay for each mesh call the
 // a2a_run worker makes. ownerSessionId is TRUSTED (job param); we verify it is
