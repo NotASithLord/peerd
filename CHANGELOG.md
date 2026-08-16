@@ -10,31 +10,6 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
-### Added
-
-- On-device WebGPU inference now supports more than one model. The engine,
-  residency tracking, chat picker, and Settings cards are driven by a model
-  registry instead of a single hard-coded model, so a new on-device model is a
-  registry entry rather than engine surgery. Weights already downloaded on an
-  existing install continue to be recognised without re-downloading.
-- Muse Glimmer 30B runs on-device via a second local engine: the Muse Glimmer
-  WebGPU GGUF runtime (custom WGSL kernels, from the webml-community Space,
-  vendored with provenance and hash-locked). The engine streams the ~12.4 GB
-  Q2_K_XL GGUF from Hugging Face, caches it in IndexedDB, splits the model's
-  reasoning channel out of the visible stream, and reports the effective
-  context window it enforces to the trim layer. Which runtime a model needs is
-  a registry fact (`engine` on the model spec), and each model's support
-  verdict comes from its own engine's check - before any download.
-
-### Changed
-
-- A local model download is refused up front when the vendored runtime cannot
-  load its architecture, when another model is already downloading, or when the
-  model id is unknown - each with the reason, rather than a failure mid-transfer.
-- One on-device model is held in GPU memory at a time; requesting a different
-  one unloads the previous model first and loads from cache, never silently
-  answering from whichever model happened to be resident.
-
 ## [0.7.0] - 2026-08-15
 
 ### Added
@@ -53,6 +28,19 @@ and storage formats may move until the surface stabilizes.
   release gates, so this is not presented as an end-user enrollment feature yet.
 - Provider onboarding now verifies key shape and readiness before activation,
   with a first-run flow that does not reappear on established installations.
+- On-device WebGPU inference now supports more than one model. The engine,
+  residency tracking, chat picker, and Settings cards are driven by a model
+  registry instead of a single hard-coded model, so a new on-device model is a
+  registry entry rather than engine surgery. Weights already downloaded on an
+  existing install continue to be recognised without re-downloading.
+- Muse Glimmer 30B runs on-device via a second local engine: the Muse Glimmer
+  WebGPU GGUF runtime (custom WGSL kernels, from the webml-community Space,
+  vendored with provenance and hash-locked). The engine streams the ~12.4 GB
+  Q2_K_XL GGUF from Hugging Face, caches it in IndexedDB, splits the model's
+  reasoning channel out of the visible stream, and reports the effective
+  context window it enforces to the trim layer. Which runtime a model needs is
+  a registry fact (`engine` on the model spec), and each model's support
+  verdict comes from its own engine's check, before any download.
 
 ### Changed
 
@@ -68,6 +56,12 @@ and storage formats may move until the surface stabilizes.
 - Release automation, dependency observation, package integrity, Firefox
   validation, and update-feed monitoring use tighter provenance and lifecycle
   gates.
+- A local model download is refused up front when the vendored runtime cannot
+  load its architecture, when another model is already downloading, or when the
+  model id is unknown, each with the reason, rather than a failure mid-transfer.
+- One on-device model is held in GPU memory at a time; requesting a different
+  one unloads the previous model first and loads from cache, never silently
+  answering from whichever model happened to be resident.
 
 ### Fixed
 
@@ -95,6 +89,10 @@ and storage formats may move until the surface stabilizes.
   the Ollama recovery commands are safe to copy and paste.
 - An invalid Pod URL now reaches its visible failure state instead of leaving
   the tab in an indeterminate one.
+- A queued focus restore in the Library could land long after the interaction
+  that scheduled it and steal focus from whatever had claimed it since. Only
+  the newest restore now acts, and it moves focus only when focus is orphaned
+  or still parked where that restore left it.
 
 ## [0.6.0] - 2026-08-08
 
