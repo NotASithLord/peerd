@@ -10,6 +10,25 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-16
+
+### Changed
+
+- Removed obsolete root-level prototypes, generated update feeds, VM image
+  scaffolding, and superseded design notes. The remaining web shell now has one
+  packaging-owned template, with no change to the source-direct development
+  workflow or extension runtime behavior.
+- The hosted identity ceremony source and deployment checks now live with
+  `peerd-site`; the extension keeps the opener, protocol validation, and
+  cryptographic custody boundary.
+
+### Fixed
+
+- Releases publish their update-feed descriptors as immutable release assets
+  and dispatch `peerd-site` from an isolated required job. A missing token or
+  failed delivery is now visible and fails the release workflow instead of
+  silently leaving the public feeds stale.
+
 ## [0.7.1] - 2026-08-16
 
 ### Changed
