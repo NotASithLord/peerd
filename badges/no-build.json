@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "label": "Dev build step",
-  "message": "none (source-direct)",
+  "label": "App source",
+  "message": "no dev build · unbundled",
   "color": "brightgreen",
   "namedLogo": "javascript",
   "logoColor": "white"
