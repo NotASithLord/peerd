@@ -28,7 +28,7 @@ import { verifySignature } from './keypair.js';
 export const PASSKEY_BINDING_VERSION = 1;
 const BINDING_DOMAIN = 'peerd/passkey-binding/v1';
 
-// The canonical relying-party id (docs/design/portable-identity/04). Exactly
+// The canonical relying-party id. Exactly
 // the ceremony host: never the registrable suffix `peerd.ai`, which would
 // expose the credential to every sibling origin (a #360 closure blocker).
 export const CANONICAL_RP_ID = 'id.peerd.ai';

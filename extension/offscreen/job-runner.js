@@ -47,8 +47,8 @@ import { applyFetchExtract } from '/shared/fetch-extract.js';
 // The workspace's total-size SOFT budget: over it the run still executes but
 // writes are refused (the tool result carries a delete-files nudge). Soft +
 // cheap by design — one list() on mount, no bookkeeping store; OPFS's
-// origin-global quota is the hard backstop regardless. 200 MB is the design's
-// proposed order of magnitude (docs/design/js-superpower/01-script-workspace.md).
+// origin-global quota is the hard backstop regardless. 200 MB is the intended
+// order of magnitude, not a measured limit.
 const WORKSPACE_BUDGET_BYTES = 200 * 1024 * 1024;
 
 let jobSeq = 0;

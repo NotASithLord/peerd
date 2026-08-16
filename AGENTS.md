@@ -48,8 +48,8 @@ injected functions, not a persistent content script.) Outside
 rendezvous server shells sharing the pure signaling reducer). The
 peerd.ai site lives in its own repo now (`NotASithLord/peerd-site`); it
 vendors snapshots of the VM-demo runtime + the `peerd-distributed`
-transport, and the auto-update feeds are still generated here
-(`update-feeds/`), then copied there to deploy.
+transport. Release packaging generates auto-update feeds as release assets;
+the site repository downloads and deploys them.
 
 The brand IS the architecture. If you find yourself adding a sixth
 top-level peerd-* directory, stop and reconsider.

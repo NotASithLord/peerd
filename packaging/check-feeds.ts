@@ -86,7 +86,7 @@ const main = async () => {
   if (stale) {
     console.error(
       '\nFEEDS OUT OF SYNC — preview installs are not seeing the latest '
-      + 'release. Re-run the site deploy (scripts/deploy-site.sh) or check '
+      + 'release. Re-run peerd-site\'s sync-update-feeds workflow or check '
       + 'peerd.ai hosting.',
     );
     process.exit(1);

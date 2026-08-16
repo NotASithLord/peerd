@@ -31,7 +31,7 @@ const main = () => {
   // preflight is non-destructive either way.
   // why the badge too: CI's drift step diffs all three generated files; the
   // badge changes whenever the tscheck coverage denominator moves (it did when
-  // web/public joined the scan), and preflight passing while CI fails on badge
+  // the web-shell template joined the scan), and preflight passing while CI fails on badge
   // drift is exactly the out-of-sync trap this mirror exists to prevent.
   const genFiles = [
     'extension/manifest.json', 'extension/shared/channel-config.js', 'badges/tscheck.json',

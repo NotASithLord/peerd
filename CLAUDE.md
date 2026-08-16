@@ -45,14 +45,13 @@ the mic-permission grant page; `eval/` is the live end-to-end eval
 harness. (There is no `content/` directory — DOM work happens via
 injected functions, not a persistent content script.) Outside
 `extension/`, the repo also carries `signaling-node/` (the dweb
-rendezvous server shells sharing the pure signaling reducer) and
-`web-identity/` (the static `id.peerd.ai` ceremony page: the ONE hosted
-component of portable identity; a WebAuthn front-end with no storage and
-no network egress, deployed through the site repo). The
-peerd.ai site lives in its own repo now (`NotASithLord/peerd-site`); it
-vendors snapshots of the VM-demo runtime + the `peerd-distributed`
-transport, and the auto-update feeds are still generated here
-(`update-feeds/`), then copied there to deploy.
+rendezvous server shells sharing the pure signaling reducer). The peerd.ai
+site lives in its own repo (`NotASithLord/peerd-site`), which also owns and
+deploys the static `id.peerd.ai` WebAuthn ceremony page. This repo owns the
+extension-side ceremony protocol and authenticator verification under
+`peerd-distributed/`. The site repo vendors snapshots of the VM-demo runtime
+and the `peerd-distributed` transport. Release packaging generates auto-update
+feeds as release assets; the site repository downloads and deploys them.
 
 The brand IS the architecture. If you find yourself adding a sixth
 top-level peerd-* directory, stop and reconsider.
@@ -444,13 +443,13 @@ gotchas to know going in:
   Chrome-preview only until Firefox has a mesh host. Other artifacts prune the
   module and CI verifies the package boundary. See the `peerd-distributed/` code.
 - **Portable identity, same-user device enrollment + P2P state sync**
-  (`peerd-distributed/identity/` + `self/`, doc:
-  `docs/design/portable-identity/06-device-enrollment.md`). The permanent
+  (`peerd-distributed/identity/` + `self/`). The permanent
   person did:key stays the root; nothing is derived from a passkey, biometric,
   or device. Under it: a per-install **device key** (never exported, under the
   export-excluded `distributed/device-key/` prefix) certified by the root; a
   **passkey binding** making a WebAuthn credential at the canonical RP
-  (`id.peerd.ai`, page in `web-identity/`) an enrollment/recovery authority;
+  (`id.peerd.ai`, hosted page owned by `NotASithLord/peerd-site`) an
+  enrollment/recovery authority;
   and a **discovery secret**, distinct from every signing seed and vault key
   that derives **rotating HMAC rendezvous topics** so a person's devices find
   each other without advertising their did. Certificates + rosters are signed

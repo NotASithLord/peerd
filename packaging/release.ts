@@ -14,12 +14,10 @@
 //   3. signing credentials present (key.pem + AMO_JWT_*) — a release
 //      never ships unsigned preview artifacts (anti-rec §15)
 //   4. package:all WITH signing; store artifacts verify themselves
-//   5. regenerate update-feeds/ for this version; commit if changed
+//   5. generate the update-feed release assets
 //   6. tag vX.Y.Z; push main + tag
 //   7. gh release create peerd-preview-vX.Y.Z with .crx/.xpi/feeds
-//   8. site deploy (scripts/deploy-site.sh) when CLOUDFLARE_* env is set,
-//      so peerd.ai/updates/ serves the new feeds
-//   9. verify the live feeds advertise the new version
+//   8. dispatch peerd-site, whose workflow downloads and deploys the feeds
 //
 // Keep in sync with the workflow's release job — when Actions billing is
 // healthy, a tag push runs the same flow in CI; this script exists so
@@ -32,12 +30,11 @@
 // nothing here that has to precede AMO, and package:all stays one call.
 // If a future step is added here that CAN fail, put it before step 4.
 
-import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative, basename } from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { REPO_ROOT, ARTIFACTS_DIR, readVersion, parseArgs } from './lib.ts';
-import { fetchFeedVersions } from './check-feeds.ts';
 import { buildReleaseNotes } from './release-notes.ts';
 
 const run = (cmd: string, args: string[]) =>
@@ -141,46 +138,21 @@ const main = async () => {
   }
 
   step('regenerate update feeds');
-  // A dry run must be byte-for-byte side-effect-free, but gen-update-feeds
-  // unconditionally overwrites the feed files. Snapshot their EXACT current
-  // bytes first (works for tracked-dirty AND untracked files, which `git
-  // checkout --` would miss/destroy) and restore them after.
-  const feedFiles = ['update-feeds/chrome-preview.xml', 'update-feeds/firefox-preview.json']
-    .map((p) => join(REPO_ROOT, p));
-  const feedSnapshot: Record<string, Buffer | null> = {};
-  if (dryRun) {
-    for (const f of feedFiles) feedSnapshot[f] = existsSync(f) ? readFileSync(f) : null;
-  }
   run('bun', ['packaging/gen-update-feeds.ts', `--version=${version}`, `--repo=${repo}`]);
 
   if (dryRun) {
-    // Restore the pre-run bytes exactly (or delete a file that didn't exist
-    // before). The tree is now identical to how the dry run found it.
-    for (const f of feedFiles) {
-      const before = feedSnapshot[f];
-      if (before === null) rmSync(f, { force: true });
-      else writeFileSync(f, before);
-    }
     step('dry run complete');
     console.log(
-      'Built + verified everything; update-feeds/ restored to its pre-run\n'
-      + 'state. A real release would now:\n'
-      + `  commit update-feeds/, tag ${tag}, push main+tag,\n`
+      'Built + verified everything. A real release would now:\n'
+      + `  tag ${tag}, push main+tag,\n`
       + `  gh release view-or-create ${tag} (title peerd-preview-${tag}),\n`
-      + '  deploy the site, and verify the live feeds.',
+      + '  attach the feeds, and dispatch the site deployment.',
     );
     return;
   }
 
-  step('commit feeds + tag + push');
+  step('tag + push');
   if (!resuming) {
-    run('git', ['add', 'update-feeds/']);
-    try {
-      execFileSync('git', ['diff', '--cached', '--quiet'], { cwd: REPO_ROOT });
-      console.log('feeds unchanged');
-    } catch {
-      run('git', ['commit', '-m', `chore(release): update feeds for ${tag}`]);
-    }
     run('git', ['tag', tag]);
     // --atomic: main + tag push together or not at all, so a rejected push
     // can't leave the tag on origin without its commit (or vice versa).
@@ -217,8 +189,8 @@ const main = async () => {
   const sumsPath = writeSums('SHA256SUMS', [
     join(ARTIFACTS_DIR, 'peerd-preview-chrome.crx'),
     join(ARTIFACTS_DIR, 'peerd-preview-firefox.xpi'),
-    join(REPO_ROOT, 'update-feeds', 'chrome-preview.xml'),
-    join(REPO_ROOT, 'update-feeds', 'firefox-preview.json'),
+    join(ARTIFACTS_DIR, 'chrome-preview.xml'),
+    join(ARTIFACTS_DIR, 'firefox-preview.json'),
   ]);
   const storeSumsPath = writeSums('SHA256SUMS.store', [
     join(ARTIFACTS_DIR, 'peerd-store-chrome.zip'),
@@ -229,8 +201,8 @@ const main = async () => {
     join(ARTIFACTS_DIR, 'peerd-preview-firefox.xpi'),
     sumsPath,
     storeSumsPath,
-    join(REPO_ROOT, 'update-feeds', 'chrome-preview.xml'),
-    join(REPO_ROOT, 'update-feeds', 'firefox-preview.json'),
+    join(ARTIFACTS_DIR, 'chrome-preview.xml'),
+    join(ARTIFACTS_DIR, 'firefox-preview.json'),
   ];
   const releaseExists = (() => {
     try { execFileSync('gh', ['release', 'view', tag], { cwd: REPO_ROOT, stdio: 'ignore' }); return true; }
@@ -248,33 +220,17 @@ const main = async () => {
     ]);
   }
 
-  step('deploy peerd.ai (update feeds go live)');
-  if (process.env.CLOUDFLARE_API_TOKEN && process.env.CLOUDFLARE_ACCOUNT_ID) {
-    run('bash', [join(REPO_ROOT, 'scripts', 'deploy-site.sh')]);
-    step('verify live feeds');
-    // The release is ALREADY COMPLETE at this point (tag pushed, GitHub
-    // release created, site deployed). This poll is a courtesy check that
-    // the edge cache rolled over — its failure is a WARNING, never a
-    // release abort (a die() here would print "ABORTED" on a successful
-    // release). Poll past the ~5-min cache TTL (12 × 30s = 6 min).
-    let ok = false;
-    for (let i = 0; i < 12; i++) {
-      const live = await fetchFeedVersions();
-      if (live.chrome === version && live.firefox === version) { ok = true; break; }
-      console.log(`edge cache not rolled over yet (chrome=${live.chrome}, firefox=${live.firefox}); retrying in 30s…`);
-      await new Promise((r) => setTimeout(r, 30_000));
-    }
-    if (ok) console.log('live feeds verified');
-    else console.warn(
-      'NOTE: live feeds still show the old version after 6 min — usually just\n'
-      + 'a slow edge cache. The release itself succeeded. Confirm later with\n'
-      + '`bun run feeds:check`; if still stale, re-run scripts/deploy-site.sh.',
-    );
-  } else {
+  step('trigger peerd.ai feed deployment');
+  try {
+    run('gh', [
+      'api', '--method', 'POST', 'repos/NotASithLord/peerd-site/dispatches',
+      '-f', 'event_type=peerd-release', '-F', `client_payload[tag]=${tag}`,
+    ]);
+    console.log('peerd-site feed sync dispatched');
+  } catch {
     console.warn(
-      'CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID not set — site NOT\n'
-      + 'deployed. The new feeds are committed but peerd.ai still serves the\n'
-      + 'old ones; run scripts/deploy-site.sh, then `bun run feeds:check`.',
+      'could not dispatch peerd-site; its scheduled feed sync remains the fallback.\n'
+      + 'Confirm later with `bun run feeds:check`.',
     );
   }
 

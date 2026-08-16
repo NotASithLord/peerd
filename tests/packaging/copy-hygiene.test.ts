@@ -47,11 +47,9 @@ describe('copy path scope', () => {
   test('includes authored source and excludes generated or vendored text', () => {
     expect(isCopyPath('README.md')).toBe(true);
     expect(isCopyPath('extension/sidepanel/app.js')).toBe(true);
-    expect(isCopyPath('build/vm-image/Dockerfile')).toBe(true);
     expect(isCopyPath('tests/example.test.ts')).toBe(true);
     expect(isCopyPath('extension/vendor/library.js')).toBe(false);
     expect(isCopyPath('vendor/library.js')).toBe(false);
-    expect(isCopyPath('web-prototype/public/sw.js')).toBe(false);
     expect(isCopyPath('extension/manifest.json')).toBe(false);
     expect(isCopyPath('AGENTS.md')).toBe(false);
     expect(isCopyPath('CLAUDE.md')).toBe(false);

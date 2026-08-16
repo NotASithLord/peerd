@@ -1,7 +1,7 @@
 // @ts-check
 // peerd-distributed/identity/recovery-record.js — the portable identity
 // record: everything a fresh install needs to become this did EXCEPT the
-// credential itself (docs/design/portable-identity/ 02).
+// credential itself.
 //
 // Sensitive recovery ciphertext: the capsule is AES-GCM ciphertext and each
 // wrapper is AES-KW ciphertext under a credential-derived KEK, but a stolen

@@ -47,7 +47,8 @@ const hasDirective = (src: string): boolean =>
 export interface TscheckCoverage { count: number; total: number; pct: number; }
 
 /** Scan the extension + the web shell for // @ts-check coverage. Pure read;
- *  no side effects. why web/public too: it is in tsconfig's include and rides
+ *  no side effects. why the web-shell template too: it is in tsconfig's
+ *  include and rides
  *  the same opt-in ratchet — the scan must match the checked set or the floor
  *  can never grow to protect web files. */
 export const computeCoverage = (): TscheckCoverage => {

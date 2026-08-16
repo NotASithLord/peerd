@@ -2,9 +2,9 @@
 // peerd-distributed/identity/device-certificate.js, person-root-signed
 // device certificates and the revocation roster.
 //
-// The trust statement a certificate makes is deliberately minimal
-// (docs/design/portable-identity/03): "this device key is authorized to act
-// as a device belonging to this person did": no capabilities, no scopes.
+// The trust statement a certificate makes is deliberately minimal: "this
+// device key is authorized to act as a device belonging to this person did":
+// no capabilities, no scopes.
 // Anything richer belongs in a later, separately-reviewed record.
 //
 // Two record kinds, two signature domains:

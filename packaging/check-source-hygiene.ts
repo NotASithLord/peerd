@@ -23,7 +23,7 @@
 // Run: bun run check:hygiene   (also part of `bun run preflight` + the CI lint job)
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { REPO_ROOT } from './lib.ts';
 
@@ -106,6 +106,17 @@ const main = (): void => {
   const root = REPO_ROOT;
   const readBytes = (p: string): Uint8Array => readFileSync(join(root, p));
   const violations = trackedEntries(root)
+    // `git ls-files` includes an unstaged deletion. Ignore an entry that is
+    // absent from the worktree so the gate can run before a deletion is
+    // staged. Use lstat rather than existsSync: a tracked dangling symlink
+    // must remain visible to the symlink check above.
+    .filter((e) => {
+      try { lstatSync(join(root, e.path)); return true; }
+      catch (error: any) {
+        if (error?.code === 'ENOENT') return false;
+        throw error;
+      }
+    })
     .map((e) => classifyEntry(e.mode, e.path, readBytes))
     .filter((v): v is NonNullable<typeof v> => v !== null);
 

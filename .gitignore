@@ -76,12 +76,6 @@ scripts/cdp/bench-results/
 # Headless test output
 /test-output/
 
-# Marketing / landing-page build output. The site SOURCE is tracked in
-# /site/; scripts/deploy-site.sh assembles it (plus update-feeds/ and
-# the vendored CheerpX/xterm assets kept directly in dist/) into /dist/
-# for Cloudflare Pages.
-/dist/
-
 # Online-Mind2Web (gated dataset + exported trajectories/screenshots + the
 # upstream scorer repo cloned on demand by score.mjs)
 scripts/cdp/om2w/data/

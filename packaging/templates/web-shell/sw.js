@@ -1,12 +1,12 @@
 // @ts-check
 /// <reference lib="webworker" />
-// sw.js — app-shell service worker for the peerd web demo.
+// sw.js: app-shell service worker for the peerd web demo.
 //
 // The cache name and precache list are STAMPED AT PACKAGE TIME by
 // packaging/package-web.ts (the __PEERD_WEB_*__ tokens below): every build
 // gets its own shell cache, so a deploy atomically invalidates ALL staged
 // module files. why: the staged tree (/peerd-*/**, /shared/**) is rebuilt
-// fresh from extension source each deploy — a hand-bumped cache name (the old
+// fresh from extension source each deploy. A hand-bumped cache name (the old
 // prototype pattern) left returning visitors running STALE staged source,
 // silently defeating the target's inherits-upstream premise.
 //
@@ -20,8 +20,8 @@
 // /vendor/ lives in its own long-lived cache: it is multi-MB, changes rarely,
 // and re-downloading the model runtime on every deploy would punish visitors.
 //
-// Served UNBUILT (straight from web/public/), the tokens are left literal and
-// the fetch handler intercepts NOTHING — pure pass-through, so a dev serve is
+// Served UNBUILT (straight from this template directory), the tokens are left literal and
+// the fetch handler intercepts NOTHING: pure pass-through, so a dev serve is
 // always network-fresh (an un-stamped cache-first SW would freeze dev on
 // first-visit bytes forever).
 //
@@ -63,7 +63,7 @@ worker.addEventListener('activate', (e) => {
 });
 
 // why !redirected: a redirected response (e.g. /index.html → /) stored in the
-// cache is rejected by respondWith for navigation requests — cache only the
+// cache is rejected by respondWith for navigation requests; cache only the
 // canonical 200s.
 /** @param {string} cacheName @param {RequestInfo} req @param {Response} res */
 const putCache = (cacheName, req, res) => {
@@ -76,7 +76,7 @@ const putCache = (cacheName, req, res) => {
 
 // scoped to the NAMED cache (not CacheStorage-wide caches.match): during an
 // update window an old SW must never answer from a newer build's cache or
-// vice versa — the cache name IS the build boundary.
+// vice versa. The cache name IS the build boundary.
 /** @param {string} cacheName @param {Request} req */
 const cacheFirst = (cacheName, req) =>
   caches.open(cacheName)
@@ -84,7 +84,7 @@ const cacheFirst = (cacheName, req) =>
     .then((hit) => hit || fetch(req).then((res) => putCache(cacheName, req, res)));
 
 worker.addEventListener('fetch', (e) => {
-  // unbuilt dev tree: never intercept — plain network for everything.
+  // unbuilt dev tree: never intercept; plain network for everything.
   if (UNBUILT) return;
 
   const req = e.request;
@@ -96,7 +96,7 @@ worker.addEventListener('fetch', (e) => {
   if (url.origin !== worker.location.origin) return;
   if (req.headers.has('range')) return;
 
-  // navigations: THIS build's precached document ('/', the canonical copy —
+  // navigations: THIS build's precached document ('/', the canonical copy;
   // '/index.html' is a redirect on static hosts and is never cached), network
   // as first-visit/miss fallback. Freshness = the update cycle, not racing
   // the network per load.
@@ -109,7 +109,7 @@ worker.addEventListener('fetch', (e) => {
     return;
   }
 
-  // build.json is the freshness probe — never serve it stale.
+  // build.json is the freshness probe; never serve it stale.
   // why the ?? Response.error(): a cache MISS here resolves undefined, and
   // respondWith(undefined) throws inside the fetch handler rather than failing
   // the request. Offline with nothing cached should surface as the network
@@ -128,6 +128,6 @@ worker.addEventListener('fetch', (e) => {
   }
 
   // everything else same-origin (shell + staged modules): cache-first against
-  // THIS build's cache — immutable per deploy, invalidated by the next one.
+  // THIS build's cache, immutable per deploy and invalidated by the next one.
   e.respondWith(cacheFirst(CACHE_SHELL, req));
 });

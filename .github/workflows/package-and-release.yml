@@ -14,10 +14,8 @@
 #                     run everything.
 #   tag push v*     → additionally: signed preview artifacts, a GitHub
 #                     Release titled peerd-preview-v<X.Y.Z> with the
-#                     preview artifacts + update feeds attached, and a
-#                     best-effort mirror commit of update-feeds/ back to main
-#                     (non-fatal if branch protection rejects the push — the
-#                     feeds are authoritative as release assets either way).
+#                     preview artifacts + update feeds attached, then a
+#                     peerd-site dispatch to publish the feeds.
 #
 # Store uploads (Chrome Web Store / AMO) stay MANUAL — download the
 # verified store artifacts from the release run and submit them after QA.
@@ -28,7 +26,9 @@
 #   AMO_JWT_ISSUER    addons.mozilla.org API credentials used by
 #   AMO_JWT_SECRET    `web-ext sign` for the Firefox preview package
 #   PEERD_SITE_DISPATCH_TOKEN  fine-grained token scoped only to the private
-#                     NotASithLord/peerd-site repo with Contents:write
+#                     NotASithLord/peerd-site repo with Contents:write. The
+#                     isolated notify-site job fails visibly if it is absent
+#                     and can be retried without replaying AMO signing.
 
 name: package-and-release
 
@@ -912,7 +912,7 @@ jobs:
           # Basename-relative lines so `sha256sum -c SHA256SUMS` verifies
           # files downloaded from the release page directly.
           (cd artifacts && sha256sum peerd-preview-chrome.crx peerd-preview-firefox.xpi > SHA256SUMS)
-          (cd update-feeds && sha256sum chrome-preview.xml firefox-preview.json) >> artifacts/SHA256SUMS
+          (cd artifacts && sha256sum chrome-preview.xml firefox-preview.json) >> artifacts/SHA256SUMS
           (cd artifacts && sha256sum peerd-store-chrome.zip peerd-store-firefox.xpi > SHA256SUMS.store)
           echo '--- SHA256SUMS (release assets; verify with `sha256sum -c SHA256SUMS`) ---'
           cat artifacts/SHA256SUMS
@@ -933,8 +933,8 @@ jobs:
             artifacts/peerd-preview-firefox.xpi
             artifacts/SHA256SUMS
             artifacts/SHA256SUMS.store
-            update-feeds/chrome-preview.xml
-            update-feeds/firefox-preview.json
+            artifacts/chrome-preview.xml
+            artifacts/firefox-preview.json
           )
           # Notes come from the tag's CHANGELOG.md section (same helper the
           # local release path uses). A missing section fails the job here,
@@ -950,51 +950,34 @@ jobs:
               "${ASSETS[@]}"
           fi
 
-      - name: Trigger peerd.ai feed deployment
+  notify-site:
+    name: Notify peerd-site release hook
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Reuse the release environment's narrowly held cross-repository secret,
+    # but keep notification in its own job. If delivery fails after AMO and
+    # the GitHub release are complete, "re-run failed jobs" retries only this
+    # safe dispatch instead of attempting to publish the Firefox version again.
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner (audit egress)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Dispatch the exact released tag to peerd-site
         env:
           GH_TOKEN: ${{ secrets.PEERD_SITE_DISPATCH_TOKEN }}
         run: |
           set -euo pipefail
           if [ -z "$GH_TOKEN" ]; then
-            echo "::warning::PEERD_SITE_DISPATCH_TOKEN is not set; peerd-site's scheduled sync remains the fallback"
-            exit 0
+            echo "::error::PEERD_SITE_DISPATCH_TOKEN is not set in the release environment. Add a fine-grained token scoped to NotASithLord/peerd-site with Contents:write, then re-run this failed job."
+            exit 1
           fi
           gh api --method POST repos/NotASithLord/peerd-site/dispatches \
             -f event_type=peerd-release \
             -F "client_payload[tag]=$GITHUB_REF_NAME"
-
-      # The feeds are committed so the repo (and the peerd.ai site deploy,
-      # which serves update-feeds/ at /updates/) always reflects the
-      # latest release. See PACKAGING.md §"Update feeds".
-      - name: Commit regenerated update feeds to main
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # The tag checkout has the freshly generated feeds in its
-          # working tree; park them, move to main, then restore — a plain
-          # `git checkout main` would refuse to clobber modified files.
-          TMP="$(mktemp -d)"
-          cp update-feeds/chrome-preview.xml update-feeds/firefox-preview.json "$TMP/"
-          git checkout -- update-feeds/ || true
-          git fetch origin main
-          git checkout main
-          git pull --ff-only origin main
-          cp "$TMP"/chrome-preview.xml "$TMP"/firefox-preview.json update-feeds/
-          if ! git diff --quiet -- update-feeds/; then
-            git add update-feeds/
-            git commit -m "chore(release): update feeds for $GITHUB_REF_NAME"
-            # Best-effort mirror. Branch protection may reject a direct push to
-            # main (PR required) — but the feeds are ALREADY attached to the
-            # release as assets, so this commit must NEVER fail an
-            # otherwise-published release. On rejection, surface the actionable
-            # next step instead of failing the job. (To restore auto-commit,
-            # add github-actions[bot] to the branch-protection bypass list.)
-            if git push origin main 2>push.err; then
-              echo "update-feeds pushed to main"
-            else
-              echo "::warning::could not push update-feeds to main (branch protection?). Feeds ARE attached to release $GITHUB_REF_NAME — deploy peerd-site from the release assets, or merge update-feeds/ to main via PR."
-              cat push.err || true
-            fi
-          else
-            echo "feeds unchanged"
-          fi
+          echo "dispatched peerd release $GITHUB_REF_NAME to peerd-site"

@@ -2,12 +2,12 @@
 // peerd-distributed/self/ceremony-client.js: the extension side of the
 // id.peerd.ai ceremony relay.
 //
-// The pure half of the transport contract (web-identity/README.md): build a
-// request bound to a fresh nonce, and decide whether an inbound window
-// message is the genuine, matching reply. Everything imperative, opening
-// the tab, holding the window handle, timeouts, is the caller's (the SW /
-// side panel), so this decision logic is Bun-testable and adversarial cases
-// are cheap to cover.
+// The extension half of the transport contract: build a request bound to a
+// fresh nonce, and decide whether an inbound window message is the genuine,
+// matching reply. The hosted half is owned and deployed from identity/ in
+// NotASithLord/peerd-site. Everything imperative, opening the tab, holding
+// the window handle, timeouts, is the caller's (the SW / side panel), so this
+// decision logic is Bun-testable and adversarial cases are cheap to cover.
 //
 // The rules the acceptor enforces, each closing one #360 blocker:
 //   exact origin      the reply must come from the ceremony origin we

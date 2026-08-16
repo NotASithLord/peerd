@@ -23,6 +23,9 @@ import {
 import { createSyncSource } from '../../extension/peerd-distributed/self/host.js';
 import { buildSnapshotOffer, validateSnapshotManifest, SYNC_SURFACES, encodeSurfacePayload } from '../../extension/peerd-distributed/self/sync.js';
 import { ensureFounderCustody } from '../../extension/peerd-distributed/self/custody.js';
+import {
+  acceptCeremonyReply, buildCeremonyRequest, CEREMONY_ORIGIN,
+} from '../../extension/peerd-distributed/self/ceremony-client.js';
 import { STORE_REGISTRY, storeEntry } from '../../extension/peerd-runtime/lifecycle/store-registry.js';
 import { isCustodySecretName } from '../../extension/peerd-runtime/transfer/transfer.js';
 import { fabricateCredential, toB64 } from '../helpers/webauthn-fixtures';
@@ -140,27 +143,28 @@ describe('3-6: topic ≠ trust; DID claim ≠ authentication', () => {
 });
 
 describe('7-8: the hosted page holds no authority and sees no profile', () => {
-  test('7: passkey authentication alone gives the website no signing capability', () => {
-    const page = readFileSync(join(import.meta.dir, '..', '..', 'web-identity', 'ceremony.js'), 'utf8');
-    // The page never derives, wraps, signs, or stores anything; it relays raw
-    // authenticator output. (Full posture suite: tests/web/identity-ceremony-posture.)
-    for (const forbidden of ['deriveBits', 'deriveKey', 'importKey', 'HKDF', 'sign(']) {
-      expect(page).not.toContain(forbidden);
+  test('7: a ceremony request gives the website no profile or signing authority', () => {
+    const request = buildCeremonyRequest({
+      op: 'assert', challenge: new Uint8Array(32).fill(7),
+    });
+    expect(Object.keys(request).sort()).toEqual([
+      'challenge', 'nonce', 'op', 'peerd', 'purpose', 'rpId',
+    ]);
+    for (const forbidden of [
+      'seed', 'capsule', 'capsuleKey', 'root', 'privateKey', 'profile',
+      'settings', 'chats', 'permissions',
+    ]) {
+      expect(request).not.toHaveProperty(forbidden);
     }
   });
 
-  test('8: id.peerd.ai never receives the profile during peer sync', () => {
-    const page = readFileSync(join(import.meta.dir, '..', '..', 'web-identity', 'ceremony.js'), 'utf8');
-    // Structural: the page has no network egress at all (CSP connect-src
-    // 'none' + no fetch/XHR/WebSocket), so it cannot receive or forward
-    // anything, and the sync protocol is peer-to-peer by construction
-    // no frame in sync.js names an origin or URL.
-    for (const forbidden of ['fetch(', 'XMLHttpRequest', 'WebSocket']) {
-      expect(page).not.toContain(forbidden);
-    }
+  test('8: profile sync has no hosted-page transport', () => {
+    // The sync protocol is peer-to-peer by construction. No frame in sync.js
+    // names the ceremony origin, an HTTP endpoint, or any URL.
     const sync = readFileSync(
       join(import.meta.dir, '..', '..', 'extension', 'peerd-distributed', 'self', 'sync.js'), 'utf8');
     expect(sync).not.toContain('http');
+    expect(sync).not.toContain(CEREMONY_ORIGIN);
   });
 });
 
@@ -295,13 +299,27 @@ describe('15-16: discovery rotates; proofs do not replay', () => {
 });
 
 describe('17-18: no silent enrollment, no payload-driven custody writes', () => {
-  test('17: a webpage cannot trigger silent enrollment (gesture + extension origin + assertion)', () => {
-    const page = readFileSync(join(import.meta.dir, '..', '..', 'web-identity', 'ceremony.js'), 'utf8');
-    // Three independent barriers, all in code:
-    expect(page).toMatch(/runButton\.addEventListener\('click'/);            // user gesture
-    expect(page).toMatch(/if\s*\(!TRUSTED_EXTENSION_ORIGINS\.has\(event\.origin\)\)/); // pinned Peerd origin only
-    expect(page).toMatch(/window\.top\s*!==\s*window\.self/);                 // not embeddable
-    // And the grant additionally requires a sponsor-verified assertion:
+  test('17: a webpage cannot enroll through an unbound reply', () => {
+    const request = buildCeremonyRequest({
+      op: 'assert', purpose: 'approve-this-device',
+      challenge: new Uint8Array(32).fill(17),
+    });
+    const ceremonyWindow = {};
+    const reply = {
+      origin: CEREMONY_ORIGIN,
+      source: ceremonyWindow,
+      data: { peerd: 'ceremony-result', nonce: request.nonce, ok: false, error: 'NotAllowedError' },
+    };
+    expect(acceptCeremonyReply({ ...reply, origin: 'https://id.peerd.ai.example' }, {
+      request, ceremonyWindow,
+    }).defect).toBe('wrong-origin');
+    expect(acceptCeremonyReply({ ...reply, source: {} }, {
+      request, ceremonyWindow,
+    }).defect).toBe('wrong-window');
+    expect(acceptCeremonyReply({ ...reply, data: { ...reply.data, nonce: 'stale' } }, {
+      request, ceremonyWindow,
+    }).defect).toBe('nonce-mismatch');
+    // A bound result still grants nothing without a sponsor-verified assertion.
     const enroll = readFileSync(
       join(import.meta.dir, '..', '..', 'extension', 'peerd-distributed', 'self', 'enroll.js'), 'utf8');
     expect(enroll).toContain('verifyPasskeyAssertion');
