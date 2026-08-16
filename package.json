@@ -2,7 +2,7 @@
   "name": "peerd",
   "private": true,
   "type": "module",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Browser-native AI agent harness. Source runs directly with no development build step; Bun is used for tests and release tooling.",
   "license": "Apache-2.0",
   "homepage": "https://peerd.ai",

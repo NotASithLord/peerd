@@ -10,7 +10,26 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-08-15
+## [0.7.1] - 2026-08-16
+
+### Changed
+
+- The extension runtime is substantially lighter to start. The MV3 service
+  worker now loads exact background and offscreen module surfaces instead of
+  whole-module barrels, and Acorn-backed toolbox validation no longer sits in
+  the Chrome service worker's cold graph. That static graph drops from about
+  4.63 MB to 2.02 MB, and the combined service worker and offscreen cold graph
+  drops by about half, so the worker wakes with far less to parse.
+- Release staging compacts authored cold-path JavaScript in the disposable
+  packaging tree only, preserving modules, names, lazy imports, and vendored
+  bytes. Development is unchanged and still runs the source directly with no
+  build step.
+
+### Fixed
+
+- Privileged UI, keepalive, local-model, and toolbox-parser messaging is now
+  pinned to the exact document that owns it, so a message cannot be answered by
+  a surface that was never meant to handle it.
 
 ### Added
 
