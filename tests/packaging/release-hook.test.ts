@@ -11,7 +11,8 @@ describe('release feed publication hook', () => {
   test('dispatches the exact released tag from an isolated post-release job', () => {
     const notify = workflow.slice(workflow.indexOf('\n  notify-site:'));
     expect(notify).toContain('needs: release');
-    expect(notify).toContain('environment: release');
+    expect(notify).toContain('environment: release-notify');
+    expect(notify).not.toContain('environment: release\n');
     expect(notify).toContain('secrets.PEERD_SITE_DISPATCH_TOKEN');
     expect(notify).toContain('repos/NotASithLord/peerd-site/dispatches');
     expect(notify).toContain('-f event_type=peerd-release');

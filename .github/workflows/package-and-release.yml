@@ -20,15 +20,19 @@
 # Store uploads (Chrome Web Store / AMO) stay MANUAL — download the
 # verified store artifacts from the release run and submit them after QA.
 #
-# Secrets used by the release job (Settings → Secrets → Actions):
+# Signing secrets used by the release job (Settings → Secrets → Actions):
 #   CRX_PRIVATE_KEY   contents of key.pem (the CRX preview signing key —
 #                     same key forever, or every preview install breaks)
 #   AMO_JWT_ISSUER    addons.mozilla.org API credentials used by
 #   AMO_JWT_SECRET    `web-ext sign` for the Firefox preview package
+# Secret used by the notification job (Settings → Environments →
+# release-notify; leave that environment without required reviewers):
 #   PEERD_SITE_DISPATCH_TOKEN  fine-grained token scoped only to the private
 #                     NotASithLord/peerd-site repo with Contents:write. The
 #                     isolated notify-site job fails visibly if it is absent
-#                     and can be retried without replaying AMO signing.
+#                     and can be retried without replaying AMO signing. Its
+#                     separate unprotected environment scopes the credential
+#                     without asking for a second release approval.
 
 name: package-and-release
 
@@ -955,11 +959,13 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Reuse the release environment's narrowly held cross-repository secret,
-    # but keep notification in its own job. If delivery fails after AMO and
-    # the GitHub release are complete, "re-run failed jobs" retries only this
-    # safe dispatch instead of attempting to publish the Firefox version again.
-    environment: release
+    # why a separate unprotected environment: GitHub requests approval per job,
+    # even when two jobs use the same protected environment. This keeps the
+    # cross-repository credential scoped to its only consumer while one human
+    # approval authorizes the release chain once. Keeping notification in its
+    # own job means "re-run failed jobs" retries only this safe dispatch instead
+    # of attempting to publish the irreversible Firefox version again.
+    environment: release-notify
     permissions:
       contents: read
     steps:
@@ -974,7 +980,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$GH_TOKEN" ]; then
-            echo "::error::PEERD_SITE_DISPATCH_TOKEN is not set in the release environment. Add a fine-grained token scoped to NotASithLord/peerd-site with Contents:write, then re-run this failed job."
+            echo "::error::PEERD_SITE_DISPATCH_TOKEN is not set in the release-notify environment. Add a fine-grained token scoped to NotASithLord/peerd-site with Contents:write, then re-run this failed job."
             exit 1
           fi
           gh api --method POST repos/NotASithLord/peerd-site/dispatches \
