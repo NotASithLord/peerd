@@ -26,6 +26,10 @@ import {
   hasAmbiguousOutcomeWarning,
   hasOutcomeUnknownState,
 } from './outcome-unknown-oracle.mjs';
+import {
+  injectFirefoxKeepaliveLossFault,
+  injectFirefoxLifetimeProbe,
+} from './source-seams.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..', '..');
@@ -1618,14 +1622,8 @@ browser.runtime.onMessage.addListener((message) =>
 `, { flag: 'wx', mode: 0o600 });
   const serviceWorker = join(staging, 'background', 'service-worker.js');
   const source = readFileSync(serviceWorker, 'utf8');
-  const listenerLine = '    actorHostKeepAlive.onChanged(changes);';
-  if (source.split(listenerLine).length !== 2) {
-    throw new Error('Firefox lifetime probe seam no longer matches service-worker.js');
-  }
-  overwriteRegularFile(serviceWorker, `import './firefox-lifetime-probe.js';\n${source.replace(
-    listenerLine,
-    `    globalThis.peerdFirefoxLifetimeProbe?.record(changes);\n${listenerLine}`,
-  )}`);
+  overwriteRegularFile(serviceWorker,
+    `import './firefox-lifetime-probe.js';\n${injectFirefoxLifetimeProbe(source)}`);
   execFileSync('zip', ['-q', '-X', '-r', artifact, '.'], {
     cwd: staging,
     env: { ...process.env, TZ: 'UTC' },
@@ -1655,13 +1653,7 @@ browser.runtime.onMessage.addListener((message) => {
 `, { flag: 'wx', mode: 0o600 });
   const directHost = join(staging, 'background', 'direct-actor-host.js');
   const source = readFileSync(directHost, 'utf8');
-  const writeLine = '    const write = storage.set({ [key]: value });';
-  if (source.split(writeLine).length !== 2) {
-    throw new Error('Firefox keepalive fault seam no longer matches direct-actor-host.js');
-  }
-  overwriteRegularFile(directHost, source.replace(writeLine, `    const write = globalThis.peerdFirefoxKeepaliveLossFault?.consume()
-      ? Promise.reject(new Error('Firefox runtime test fault: keepalive heartbeat failed'))
-      : storage.set({ [key]: value });`));
+  overwriteRegularFile(directHost, injectFirefoxKeepaliveLossFault(source));
   const serviceWorker = join(staging, 'background', 'service-worker.js');
   const serviceWorkerSource = readFileSync(serviceWorker, 'utf8');
   overwriteRegularFile(serviceWorker, `import './firefox-keepalive-loss-probe.js';\n${serviceWorkerSource}`);

@@ -1,6 +1,6 @@
 // peerd packaging — the single entry point for the 2-channel × 2-browser
-// artifact matrix (spec §5). "Packaging" here is NOT a bundler pass — the
-// extension is vanilla JS with no build step. Packaging an artifact means:
+// artifact matrix (spec §5). Source development stays buildless and the
+// extension/ tree runs directly in the browser. Packaging an artifact means:
 //
 //   1. stage a copy of extension/
 //   2. prune what the channel must not ship:
@@ -11,14 +11,17 @@
 //                       packages and Firefox until it has a mesh host.
 //   3. generate shared/channel-config.js (channel flag + CHANNEL_DEFAULTS)
 //   4. generate the manifest for (channel, browser)
-//   5. zip to artifacts/peerd-<channel>-<browser>.{zip,xpi}
-//   6. store artifacts: run the no-dweb-strings verifier
-//   7. preview artifacts: sign when credentials are present (packaging/sign.ts)
+//   5. compact authored modules in the static SW/offscreen cold graphs
+//      (module graph/names/vendor bytes preserved; staging copy only)
+//   6. zip to artifacts/peerd-<channel>-<browser>.{zip,xpi}
+//   7. store artifacts: run the no-dweb-strings verifier
+//   8. preview artifacts: sign when credentials are present (packaging/sign.ts)
 //
 // Invocation:
 //   bun run package -- --channel=store --browser=chrome
 //   bun run package:all
-//   flags: --no-sign (skip signing even if keys exist), --skip-verify
+//   flags: --no-sign (skip signing even if keys exist), --skip-verify,
+//          --no-minify (diagnostic artifact; release commands never use it)
 
 import {
   cpSync, rmSync, mkdirSync, writeFileSync, copyFileSync,
@@ -36,6 +39,11 @@ import { dwebEnabledForTarget, genChannelConfigSource } from './gen-channel-conf
 import { verifyStoreArtifact } from './verify-store-artifact.ts';
 import { signPreviewArtifact } from './sign.ts';
 import { buildWebTarget } from './package-web.ts';
+import {
+  assertColdArtifactBudgets,
+  formatArtifactMinifyReport,
+  minifyColdArtifactModules,
+} from './minify-artifact-js.ts';
 
 // Paths (relative to extension/) that never ship in ANY artifact.
 // why eval/ is NOT here: the home page's Lab (home/eval-section.js) imports
@@ -114,8 +122,15 @@ const shouldCopy = (src: string, channel: Channel, browser: Browser): boolean =>
 };
 
 export const packageArtifact = async (
-  { channel, browser, version, sign = true, verify = true }:
-  { channel: Channel; browser: Browser; version: string; sign?: boolean; verify?: boolean },
+  { channel, browser, version, sign = true, verify = true, minify = true }:
+  {
+    channel: Channel;
+    browser: Browser;
+    version: string;
+    sign?: boolean;
+    verify?: boolean;
+    minify?: boolean;
+  },
 ): Promise<string> => {
   const staging = join(ARTIFACTS_DIR, 'staging', `${channel}-${browser}`);
   rmSync(staging, { recursive: true, force: true });
@@ -136,6 +151,12 @@ export const packageArtifact = async (
 
   const manifest = generateManifest({ channel, browser, version });
   writeFileSync(join(staging, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+
+  if (minify) {
+    const report = await minifyColdArtifactModules(staging, browser);
+    assertColdArtifactBudgets(report);
+    console.log(formatArtifactMinifyReport(report));
+  }
 
   // Package. AMO takes .xpi (a zip); Chrome Web Store takes .zip; the
   // Chrome preview .crx is produced from the zip by the signing step.
@@ -167,6 +188,7 @@ const main = async () => {
   const version = readVersion();
   const sign = args['no-sign'] !== true;
   const verify = args['skip-verify'] !== true;
+  const minify = args['no-minify'] !== true;
   mkdirSync(ARTIFACTS_DIR, { recursive: true });
 
   const pairs: Array<[Channel, Browser]> = [];
@@ -181,7 +203,7 @@ const main = async () => {
   }
 
   for (const [channel, browser] of pairs) {
-    await packageArtifact({ channel, browser, version, sign, verify });
+    await packageArtifact({ channel, browser, version, sign, verify, minify });
   }
   // --all means EVERY destination: after the 2×2 extension matrix, stage +
   // verify the web target too (a staged library tree, not a zip — no browser

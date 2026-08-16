@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "label": "Build step",
-  "message": "none (vanilla JS)",
+  "label": "Dev build step",
+  "message": "none (source-direct)",
   "color": "brightgreen",
   "namedLogo": "javascript",
   "logoColor": "white"

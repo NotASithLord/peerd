@@ -74,7 +74,11 @@ export const makeSessionMutationRoutes = (deps) => {
       }
       await sessionCache.sessionDelete('currentSessionId');
       sessionState.clear();
-      pushState();
+      // The caller may send the first message of the new chat immediately
+      // after this route resolves. Finish projecting the empty chat first so
+      // this reset snapshot cannot arrive after that turn's live events and
+      // wipe the new transcript back to the welcome screen.
+      await pushState();
       if (previousId) {
         autoMemory.maybeExtract(previousId, 'switch')
           .catch((/** @type {unknown} */ e) => console.warn('[sw] auto-memory extract failed', e));

@@ -16,6 +16,11 @@ import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { join, dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { packageArtifact } from './package.ts';
+import {
+  pathIsInside,
+  resolveStaticSpecifier,
+  staticImportSpecifiers,
+} from './static-module-graph.ts';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const version = String(JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')).version);
@@ -30,26 +35,11 @@ const walk = (dir: string, out: string[] = []): string[] => {
   return out;
 };
 
-// STATIC import specifiers only — `import … from "x"` / `import "x"`. Deliberately
-// excludes `import("x")` (dynamic, runtime-guarded). Two alternations: the
-// from-form and the bare side-effect form.
-// Static import specifiers, ANCHORED to line start (m flag) so a mid-line or
-// commented "import"/"from" can't bridge into a false match. The head allows
-// newlines (a static import can span lines: `import {\n a,\n b\n} from '/x'`) but
-// is bounded by `;` and quotes so it can't run across statements. `import(…)`
-// (dynamic) has a `(` after import + no `from`, so neither alternation matches —
-// dynamic imports are runtime-guarded and intentionally skipped.
-const STATIC_IMPORT = /^[ \t]*(?:import|export)\b[^;"']*?\bfrom\s*["']([^"']+)["']|^[ \t]*import\s*["']([^"']+)["']/gm;
-
-/** Resolve a module specifier to an on-disk path under the staged build root. */
-const resolveSpec = (spec: string, fromFile: string, root: string): string | null => {
-  if (spec.startsWith('/')) return join(root, spec);      // root-absolute (e.g. /vendor/…)
-  if (spec.startsWith('.')) return resolve(dirname(fromFile), spec);
-  return null;                                            // bare specifier — unused in this codebase
-};
-
 /** BFS an entry's static import graph; return every specifier that doesn't ship. */
-const unresolved = (entry: string, root: string): Array<{ spec: string; from: string }> => {
+const unresolved = async (
+  entry: string,
+  root: string,
+): Promise<Array<{ spec: string; from: string }>> => {
   const miss: Array<{ spec: string; from: string }> = [];
   if (!existsSync(entry)) return [{ spec: relative(root, entry), from: '(html entry)' }];
   const seen = new Set<string>([entry]);
@@ -58,14 +48,13 @@ const unresolved = (entry: string, root: string): Array<{ spec: string; from: st
     const file = queue.shift() as string;
     let src: string;
     try { src = readFileSync(file, 'utf8'); } catch { continue; }
-    STATIC_IMPORT.lastIndex = 0;
-    let mm: RegExpExecArray | null;
-    while ((mm = STATIC_IMPORT.exec(src))) {
-      const spec = mm[1] ?? mm[2];
-      if (!spec) continue;
-      const r = resolveSpec(spec, file, root);
+    for (const spec of await staticImportSpecifiers(src, relative(root, file))) {
+      const r = resolveStaticSpecifier(spec, file, root);
       if (!r) continue;
-      if (!existsSync(r)) { miss.push({ spec, from: relative(root, file) }); continue; }
+      if (!pathIsInside(root, r) || !existsSync(r)) {
+        miss.push({ spec, from: relative(root, file) });
+        continue;
+      }
       if (!seen.has(r)) { seen.add(r); queue.push(r); }
     }
   }
@@ -165,7 +154,7 @@ for (const channel of ['preview', 'store'] as const) {
     const entries = entryPoints(root);
     let chMiss = 0;
     for (const entry of entries) {
-      const miss = unresolved(entry, root);
+      const miss = await unresolved(entry, root);
       if (!miss.length) continue;
       failed = true;
       chMiss += miss.length;

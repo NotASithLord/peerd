@@ -30,7 +30,7 @@ import {
   MODULE_SYNTAX_ERROR_CODE, TOOLBOX_SPECIFIER_PREFIX,
   remoteModuleCapabilityBlockedMessage,
   UnsupportedNativeModuleImportError,
-} from '/peerd-engine/index.js';
+} from '/peerd-engine/offscreen.js';
 import {
   buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS,
   DEFAULT_WORKER_CAPS, REMOTE_MODULE_WORKER_CAPS,
@@ -41,7 +41,7 @@ import {
   ACTORS_TRACE_ERROR_MAX_CHARS, ACTORS_TRACE_TARGET_MAX_CHARS,
   actorsCallToOp, buildCodeClientSource, canonicalCodeTraceLabel,
   CODE_RUN_MAX_TRACE_OPS, MAX_FILE_CONTENT_CHARS,
-} from '/peerd-runtime/index.js';
+} from '/peerd-runtime/offscreen.js';
 import { applyFetchExtract } from '/shared/fetch-extract.js';
 
 // The workspace's total-size SOFT budget: over it the run still executes but

@@ -28,7 +28,7 @@
 // (engineSupportsSpec, asserted live in the options-local-models E2E state).
 
 import browser from '/vendor/browser-polyfill.js';
-import { DEFAULT_LOCAL_MODEL_ID, listLocalModelSpecs, localModelSpec } from '/peerd-provider/index.js';
+import { DEFAULT_LOCAL_MODEL_ID, listLocalModelSpecs, localModelSpec } from '/peerd-provider/offscreen.js';
 import { makeMuseChannelSplitter } from './muse-glimmer-stream.js';
 
 // The load recipe per model (repo / Transformers.js class / dtype) lives in

@@ -21,7 +21,7 @@
 
 import {
   ProviderHttpError, ProviderKeyMissingError, ProviderUsageLimitError, UnknownProviderError,
-} from '../../peerd-provider/index.js';
+} from '../../peerd-provider/background.js';
 import {
   ActorCredentialBoundaryError, ACTOR_CREDENTIAL_BOUNDARY_FAILURE, SessionNotFoundError,
 } from '../errors.js';

@@ -90,7 +90,7 @@ export const countVendorLockedFiles = (lock: unknown): number => {
 };
 
 /**
- * Toolchains that would mean the shipped code is not the code in the tree.
+ * Toolchains that would make source development depend on compilation.
  *
  * Kept as name PREFIXES so a scoped or plugin package (@babel/core,
  * vite-plugin-x, rollup-plugin-y) is caught by the same entry.
@@ -103,12 +103,12 @@ export const BUILD_TOOLCHAINS = Object.freeze([
 export interface BuildStepScan { offenders: string[] }
 
 /**
- * Prove the no-build-step invariant from the toolchain rather than asserting it.
+ * Prove the no-development-build-step invariant from the toolchain.
  *
- * Three conditions, any of which would make "the browser runs what you wrote"
- * false: a bundler or transpiler among the dependencies, a `build` script, or a
- * TypeScript config that emits. tsc runs here as a CHECKER only, which is why
- * noEmit is part of the claim rather than incidental.
+ * Three conditions would break the direct source loop: a bundler/transpiler
+ * dependency, a `build` script, or a TypeScript config that emits. tsc runs as
+ * a checker only. Release packaging may compact its disposable staging copy
+ * with Bun's built-in parser, but extension/ itself is never generated.
  */
 export const scanBuildStep = (
   packageJson: unknown,
@@ -129,8 +129,8 @@ export const scanBuildStep = (
     if (hit) offenders.push(`dependency "${name}" is a bundler or transpiler`);
   }
   // A runtime dependency is the same claim from the other side: it would mean
-  // npm code reaching an installed extension, which cannot happen while
-  // packaging stages extension/ verbatim. This lived on its own badge until it
+  // npm code reaching an installed extension. Packaging never resolves a
+  // node_modules path into the staged artifact. This lived on its own badge until it
   // folded in here; the fact still needs a gate even without a plate on the
   // README.
   for (const name of Object.keys(pkg?.dependencies ?? {})) {
@@ -148,8 +148,8 @@ export const scanBuildStep = (
 
 export const buildStepBadge = (scan: BuildStepScan): ShieldsBadge => ({
   schemaVersion: 1,
-  label: 'Build step',
-  message: scan.offenders.length === 0 ? 'none (vanilla JS)' : 'present',
+  label: 'Dev build step',
+  message: scan.offenders.length === 0 ? 'none (source-direct)' : 'present',
   color: scan.offenders.length === 0 ? 'brightgreen' : 'red',
   ...laneLogo('javascript'),
 });

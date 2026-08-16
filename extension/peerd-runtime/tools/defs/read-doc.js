@@ -22,7 +22,9 @@
 
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { originOfUrl, isDenylistedTab } from './dom-helpers.js';
-import { formatDocBody, formatDocHead, toMarkdown, DEFAULT_MAX_CHARS, CONVERTIBLE } from '../../doc/index.js';
+import { formatDocBody, formatDocHead, DEFAULT_MAX_CHARS } from '../../doc/format.js';
+import { toMarkdown } from '../../doc/markdown.js';
+import { CONVERTIBLE } from '../../doc/sniff.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
 // read_doc re-fetches bytes offscreen, so it applies the same shared lexical
 // private-network refusal as open-web egress. The denylist alone does not cover

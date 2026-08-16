@@ -31,7 +31,7 @@
 // only sideEffect 'mutate_external' is in scope; read/write tools that
 // touch no external origin skip entirely (`origins()` returns []).
 
-import { originOf } from '/peerd-egress/index.js';
+import { originOf } from '/peerd-egress/background.js';
 
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
 

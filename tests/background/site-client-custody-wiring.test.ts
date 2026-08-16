@@ -10,13 +10,17 @@ const source = readFileSync(
   join(import.meta.dir, '../../extension/background/service-worker.js'),
   'utf8',
 );
+const originLockController = readFileSync(
+  join(import.meta.dir, '../../extension/background/origin-lock-controller.js'),
+  'utf8',
+);
 
 describe('site-client custody service-worker wiring', () => {
   test('API and tab tool contexts receive their respective custody closures', () => {
     const contextStart = source.indexOf('const buildToolContext');
     const contextEnd = source.indexOf('// ── Tool dispatcher', contextStart);
     const context = source.slice(contextStart, contextEnd > contextStart ? contextEnd : undefined);
-    const lockFactory = source.slice(source.indexOf('const originLockFor'), contextStart);
+    const lockFactory = originLockController;
 
     expect(context).toContain('makeFixedSiteClientOriginGuard(ownedOrigin, { isKnownIdp: isKnownIdpHost })');
     expect(context).toContain('resCtx.idpTransitOnly = isKnownIdpHost(ownedOrigin)');

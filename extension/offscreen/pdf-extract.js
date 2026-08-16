@@ -32,7 +32,7 @@ import { isTrustedSender } from '/shared/messaging.js';
 import {
   chooseEngine, looksScanned, createOcrStore,
   PdfFetchError, PdfParseError,
-} from '/peerd-runtime/index.js';
+} from '/peerd-runtime/offscreen.js';
 
 // pdf.js is loaded LAZILY (dynamic import), not at module top level. The
 // offscreen document ALWAYS loads (voice + the SW keepalive port), but most

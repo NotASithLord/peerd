@@ -10,11 +10,12 @@ import { join } from 'node:path';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 
 const serviceWorker = readFileSync(join(EXTENSION_DIR, 'background/service-worker.js'), 'utf8');
+const statePushController = readFileSync(join(EXTENSION_DIR, 'background/state-push.js'), 'utf8');
 
 describe('settings hydration before UI state snapshots', () => {
   test('waits for persisted settings before reading session or provider state', () => {
     const start = serviceWorker.indexOf('const buildStateSnapshot = async () => {');
-    const end = serviceWorker.indexOf('const pushState = async () => {', start);
+    const end = serviceWorker.indexOf('const pushState = makeCoalescedStatePush({', start);
     const snapshot = serviceWorker.slice(start, end);
     const hydration = snapshot.indexOf('await ensureSettingsReady();');
     const sessionRead = snapshot.indexOf("sessionCache.sessionGet('currentSessionId')");
@@ -43,17 +44,13 @@ describe('settings hydration before UI state snapshots', () => {
   });
 
   test('older asynchronous snapshots cannot overwrite a newer state push', () => {
-    const start = serviceWorker.indexOf('const pushState = async () => {');
-    const end = serviceWorker.indexOf('// Keepalive ports', start);
-    const push = serviceWorker.slice(start, end);
-    const claimed = push.indexOf('const generation = ++statePushGeneration;');
-    const built = push.indexOf('const state = await buildStateSnapshot();');
-    const guarded = push.indexOf('generation !== statePushGeneration');
-    const broadcast = push.indexOf("uiPorts.broadcast({ type: 'state'");
+    const built = statePushController.indexOf('const state = await build();');
+    const guarded = statePushController.indexOf('if (dirty || !isConnected()) continue;');
+    const delivered = statePushController.indexOf('await deliver(state);');
 
-    expect(claimed).toBeGreaterThan(-1);
-    expect(built).toBeGreaterThan(claimed);
+    expect(built).toBeGreaterThan(-1);
     expect(guarded).toBeGreaterThan(built);
-    expect(broadcast).toBeGreaterThan(guarded);
+    expect(delivered).toBeGreaterThan(guarded);
+    expect(serviceWorker).toContain('build: buildStateSnapshot');
   });
 });

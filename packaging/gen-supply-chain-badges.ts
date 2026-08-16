@@ -41,12 +41,11 @@ const generate = () => {
     packageJson,
     readFileSync(join(REPO_ROOT, 'tsconfig.json'), 'utf8'),
   );
-  // why throw rather than publish a red plate: "no build step" is the premise
-  // the whole project rests on (load unpacked, refresh, the browser runs what
-  // you wrote). If it stops being true, that is a design decision someone must
-  // make deliberately, not a badge quietly turning red.
+  // why throw rather than publish a red plate: the source-direct development
+  // loop (load unpacked, refresh) is a project premise. Release staging can
+  // compact a disposable copy, but extension/ must never require generation.
   if (buildStep.offenders.length > 0) {
-    console.error('\nthe no-build-step invariant is broken:');
+    console.error('\nthe no-development-build-step invariant is broken:');
     for (const offender of buildStep.offenders) console.error(`  ${offender}`);
     process.exit(1);
   }

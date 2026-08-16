@@ -20,7 +20,7 @@
 import { openHome } from '/shared/open-home.js';
 import { decidePullIn } from './panel-affordance.js';
 import { pullInHintInjected } from '/peerd-runtime/background.js';
-import { matchesDenylist } from '/peerd-egress/index.js';
+import { matchesDenylist } from '/peerd-egress/background.js';
 import { shouldFollowAgentTab } from './watch-mode.js';
 import { allowedDocumentTarget } from './page-activity.js';
 import { classifyBrowserAutomationTarget } from '/peerd-runtime/background.js';

@@ -614,7 +614,10 @@ export const STATES = [
             return { tab, error: String(error) };
           }
         })()`, true);
-        await waitFor(() => controllerRequests > 0, { budgetMs: 5_000, pollMs: 25 });
+        // Cold Chrome can spend several seconds resolving the synthetic .test
+        // host before the first byte reaches this fixture. This probes routing,
+        // not latency; keep the budget above the measured cold-start tail.
+        await waitFor(() => controllerRequests > 0, { budgetMs: 15_000, pollMs: 25 });
         rec.check('the public-looking controller fixture resolves locally',
           controllerRequests > 0, JSON.stringify({ controllerRequests, fixtureTab }));
         if (typeof fixtureTab?.tab?.id === 'number') {
@@ -1741,17 +1744,24 @@ export const STATES = [
             && !audits.some((entry) => entry.type === 'actor_minted'
               && entry.details?.instanceId === String(numericTabAuthorityState.tabId)),
           JSON.stringify(audits.slice(-20)));
-        const disclosureBefore = await evalIn(ctx.page, `(() => {
+        const disclosureBefore = await waitFor(() => evalIn(ctx.page, `(() => {
           const header = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')]
-            .find((node) => node.querySelector('.tool-name')?.textContent === 'message_actor');
+            .filter((node) => node.querySelector('.tool-name')?.textContent === 'message_actor'
+              && node.innerText.includes('Read this page')
+              && node.innerText.includes('Not run'))
+            .at(-1);
           const collapsed = header?.innerText ?? '';
           const initiallyExpanded = header?.getAttribute('aria-expanded') ?? null;
+          if (!header || initiallyExpanded !== 'false' || !collapsed.includes('Not run')) return null;
           header?.click();
           return { collapsed, initiallyExpanded };
-        })()`);
+        })()`), { budgetMs: 15_000, pollMs: 50 });
         const disclosureAfter = await waitFor(() => evalIn(ctx.page, `(() => {
           const header = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')]
-            .find((node) => node.querySelector('.tool-name')?.textContent === 'message_actor');
+            .filter((node) => node.querySelector('.tool-name')?.textContent === 'message_actor'
+              && node.innerText.includes('Read this page')
+              && node.innerText.includes('Not run'))
+            .at(-1);
           const value = {
             detail: header?.parentElement?.querySelector('.actor-body .error-line')?.textContent ?? '',
             expanded: header?.getAttribute('aria-expanded') ?? null,
@@ -1765,7 +1775,9 @@ export const STATES = [
             && disclosureAfter?.detail === 'No actor work was started. Review the request before trying again.'
             && !disclosureAfter.detail.includes('actor_sensitive_tab_requires_site'),
           JSON.stringify({ disclosureBefore, disclosureAfter }));
-        await rec.shot('final');
+        // No screenshot here: Chrome 151 can deadlock Page.captureScreenshot
+        // on this side-panel target after the long network/identity prefix.
+        // The exact collapsed and expanded disclosure states are asserted above.
       } finally {
         await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
         if (Number.isInteger(numericTabAuthorityState.tabId)) {

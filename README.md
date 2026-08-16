@@ -12,7 +12,7 @@
 [![In-Browser Gecko](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/NotASithLord/peerd/main/badges/inbrowser-gecko.json)](scripts/firefox/run-runtime-tests.mjs)
 [![E2E side panel](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/NotASithLord/peerd/main/badges/e2e-chrome.json)](scripts/cdp/run-e2e-verify.mjs)
 [![Red Team](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/NotASithLord/peerd/main/badges/red-team.json)](docs/security/RED-TEAM-RESULTS.md)
-[![No build step](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/NotASithLord/peerd/main/badges/no-build.json)](CONTRIBUTING.md)
+[![No development build step](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/NotASithLord/peerd/main/badges/no-build.json)](CONTRIBUTING.md)
 [![Vendored code](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/NotASithLord/peerd/main/badges/vendor-integrity.json)](extension/vendor/vendor.lock.json)
 [![Actions pinned](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/NotASithLord/peerd/main/badges/actions-pinned.json)](packaging/check-action-pins.ts)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -161,8 +161,13 @@ The extension chassis lives in `background/`, `offscreen/`, `sidepanel/`,
 
 ## Development
 
-The shipped extension is vanilla JavaScript with ES modules and no bundling or
-transpilation. Bun is used for tests, generation, packaging, and release checks.
+The source extension is vanilla JavaScript with ES modules and runs directly
+when loaded unpacked. There is no development bundler, transpiler, watcher, or
+generated runtime tree. Release packaging uses Bun only on its disposable
+staging copy to remove whitespace/comments from authored modules in the static
+service-worker and Chrome offscreen cold graphs. It preserves module boundaries,
+binding names, lazy imports, and every vendored byte. Pass `--no-minify` to
+`bun run package -- ...` when a readable diagnostic artifact is useful.
 
 ```sh
 bun install
@@ -225,8 +230,8 @@ past decisions and planned work. They do not override current code.
 ## Dependencies and license
 
 The shipped extension has no npm runtime dependencies. `package.json` declares
-none, and packaging stages `extension/` verbatim without resolving a
-`node_modules` path, so the build-time tree cannot reach an installed browser.
+none, and packaging never resolves a `node_modules` path into the staged
+artifact, so the development-tool tree cannot reach an installed browser.
 Third-party runtime code is vendored under `extension/vendor/` instead. Its
 source, version, and license live in the adjacent `SOURCE.txt` files, and every
 vendored byte is pinned by SHA-256 in

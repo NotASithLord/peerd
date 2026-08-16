@@ -7,11 +7,13 @@ That requirement applies to every change. It is documented in the README,
 `CLAUDE.md`, and the manifest. **Do not add a backend call,
 telemetry, analytics, or an undeclared network service.**
 
-## The one thing to know: there is no build step
+## The one thing to know: there is no development build step
 
-peerd is vanilla JavaScript + ES modules. The browser runs the code exactly as
-written. There is no bundler, transpiler, or watch process. The dev loop is
-edit, then reload the extension.
+peerd is vanilla JavaScript + ES modules. Chrome runs `extension/` directly;
+there is no development bundler, transpiler, generated runtime tree, or watch
+process. The dev loop is edit, then reload the extension. Release packaging
+compacts only a disposable staging copy of authored cold-path modules. It does
+not bundle modules, mangle identifiers, rewrite vendor files, or change source.
 
 ## Setup
 

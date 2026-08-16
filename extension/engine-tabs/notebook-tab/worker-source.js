@@ -18,7 +18,7 @@ import {
   buildEntry,
   isRemoteSpecifier,
   remoteModuleCapabilityBlockedMessage,
-} from '/peerd-engine/index.js';
+} from '/peerd-engine/offscreen.js';
 
 // why absolute URLs: Chrome loads this graph natively. Firefox's package-selected
 // linker consumes the same URLs as trusted virtual entries and emits the seal
