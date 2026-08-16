@@ -26,7 +26,9 @@
 #   AMO_JWT_ISSUER    addons.mozilla.org API credentials used by
 #   AMO_JWT_SECRET    `web-ext sign` for the Firefox preview package
 #   PEERD_SITE_DISPATCH_TOKEN  fine-grained token scoped only to the private
-#                     NotASithLord/peerd-site repo with Contents:write
+#                     NotASithLord/peerd-site repo with Contents:write. The
+#                     isolated notify-site job fails visibly if it is absent
+#                     and can be retried without replaying AMO signing.
 
 name: package-and-release
 
@@ -948,15 +950,34 @@ jobs:
               "${ASSETS[@]}"
           fi
 
-      - name: Trigger peerd.ai feed deployment
+  notify-site:
+    name: Notify peerd-site release hook
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Reuse the release environment's narrowly held cross-repository secret,
+    # but keep notification in its own job. If delivery fails after AMO and
+    # the GitHub release are complete, "re-run failed jobs" retries only this
+    # safe dispatch instead of attempting to publish the Firefox version again.
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner (audit egress)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Dispatch the exact released tag to peerd-site
         env:
           GH_TOKEN: ${{ secrets.PEERD_SITE_DISPATCH_TOKEN }}
         run: |
           set -euo pipefail
           if [ -z "$GH_TOKEN" ]; then
-            echo "::warning::PEERD_SITE_DISPATCH_TOKEN is not set; peerd-site's scheduled sync remains the fallback"
-            exit 0
+            echo "::error::PEERD_SITE_DISPATCH_TOKEN is not set in the release environment. Add a fine-grained token scoped to NotASithLord/peerd-site with Contents:write, then re-run this failed job."
+            exit 1
           fi
           gh api --method POST repos/NotASithLord/peerd-site/dispatches \
             -f event_type=peerd-release \
             -F "client_payload[tag]=$GITHUB_REF_NAME"
+          echo "dispatched peerd release $GITHUB_REF_NAME to peerd-site"
