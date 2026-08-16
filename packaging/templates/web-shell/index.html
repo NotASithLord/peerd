@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>peerd web target</title>
   <!-- Minimal smoke shell for the `web` library target (packaging/web-target.ts).
-       It proves the staged module tree actually loads on a plain page — the
+       It proves the staged module tree actually loads on a plain page; the
        real demo UIs live on the archived shell branches, not here. -->
   <style>
     body { font: 15px/1.5 ui-monospace, monospace; color: #222; background: #fafafa; margin: 3rem auto; max-width: 42rem; padding: 0 1rem; }
@@ -17,7 +17,7 @@
   <h1>peerd web target</h1>
   <p id="status">loading staged modules…</p>
   <script type="module">
-    // Import real staged source — the generated channel config plus a live
+    // Import real staged source: the generated channel config plus a live
     // module through peerd-egress's public surface. If the curated tree is
     // not import-closed (or the browser-polyfill swap is missing), this
     // module graph 404s/throws and the smoke line never appears.
@@ -31,7 +31,7 @@
         'peerd web target: modules loaded\n'
         + `channel=${CHANNEL} dweb=${DWEB_ENABLED}`;
     } catch (error) {
-      status.textContent = `peerd web target: FAILED — ${error?.message ?? error}`;
+      status.textContent = `peerd web target: FAILED: ${error?.message ?? error}`;
       status.className = 'err';
     }
   </script>

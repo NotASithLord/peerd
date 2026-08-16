@@ -168,7 +168,7 @@ import { computeCoverage } from './tscheck-coverage.ts';
 //   This branch took coverage to 100% of the non-ES5 set: fetch-tap-injected.js
 //   is an ES5 injected body that eslint.config.js exempted and
 //   tscheck-coverage.ts did not, so it sat in the denominator with nothing to
-//   fix (the two lists now have a parity test), and web/public/sw.js was
+//   fix (the two lists now have a parity test), and the web-shell sw.js was
 //   genuinely unchecked (annotating it turned up a real bug, a
 //   respondWith(undefined) on a cache miss).
 // 776 → 785: exact background/offscreen public surfaces plus the tested UI-port,

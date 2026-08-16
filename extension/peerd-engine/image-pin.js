@@ -17,8 +17,7 @@
 // image's cheap identity — total byte size (from Content-Range) plus
 // the SHA-256 of its first 64 KiB — fetched by OUR code (one ranged
 // request) before the vendored device ever opens the URL. This targets
-// the failure mode that actually corrupts user data per
-// docs/engine/VM-IMAGE.md §4: the bytes behind the pinned image URL
+// the failure mode that actually corrupts user data: the bytes behind the pinned image URL
 // changing after per-VM overlays have cached base blocks (CheerpX has
 // NO invalidation mechanism — a changed base silently corrupts every
 // existing overlay). It does NOT defend against a malicious host that
@@ -80,7 +79,7 @@ export const parseContentRangeTotal = (header) => {
  *   'match'    — pin holds; safe to hand the URL to CheerpX.
  *   'mismatch' — the bytes behind the URL changed; the boot must FAIL
  *                (streaming a different base under existing overlays is
- *                silent filesystem corruption, VM-IMAGE.md §4 rule 1).
+ *                silent filesystem corruption).
  */
 export const evaluateImagePin = ({ pinned, observed }) => {
   if (!pinned) return { action: 'record' };

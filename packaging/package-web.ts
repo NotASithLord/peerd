@@ -12,7 +12,8 @@
 //      exported values still MATCH the real extension file (drift fails here)
 //   3. generate shared/channel-config.js (web flavor: CHANNEL="web",
 //      DWEB_ENABLED=false) and swap the dweb-loader stub
-//   4. overlay the hand-authored shell (web/public/) — REFUSING any path
+//   4. overlay the hand-authored shell (packaging/templates/web-shell/),
+//      REFUSING any path
 //      collision with staged source (shadowing = silent fork; fail loudly)
 //   5. stamp build.json ({version, buildId, gitHead}) and rewrite sw.js's
 //      __PEERD_WEB_*__ tokens (per-build cache name + generated precache list)
@@ -46,7 +47,7 @@ const isPruned = (rel: string): boolean =>
 
 // why the .DS_Store filter here too: staged source is filtered by isPruned,
 // but the shell overlay + the hash/precache walk must apply the same hygiene —
-// a Finder browse of web/public/ must not stage junk, pollute the precache,
+// a Finder browse of the web-shell template must not stage junk, pollute the precache,
 // or roll the buildId (local vs CI divergence for the same commit).
 const isJunk = (name: string): boolean => name === '.DS_Store';
 
@@ -111,9 +112,9 @@ const assertNoShellCollisions = (): void => {
     .filter((rel) => basename(rel) !== '.DS_Store' && existsSync(join(WEB_DIST, rel)));
   if (collisions.length > 0) {
     throw new Error(
-      'web shell collision — these web/public/ files would OVERWRITE staged extension source '
+      'web shell collision: these template files would OVERWRITE staged extension source '
       + '(shadowing = a silent fork of real modules):\n  ' + collisions.join('\n  ')
-      + '\nRename them under web/ or, if replacing source is intended, make it an explicit WEB_SWAPS template.',
+      + '\nRename the shell path or, if replacing source is intended, make it an explicit WEB_SWAPS template.',
     );
   }
 };
@@ -176,7 +177,7 @@ export const buildWebTarget = async (): Promise<void> => {
   const swPath = join(WEB_DIST, 'sw.js');
   const swSrc = readFileSync(swPath, 'utf8');
   if (!swSrc.includes('__PEERD_WEB_BUILD__') || !swSrc.includes('__PEERD_WEB_PRECACHE__')) {
-    throw new Error('web/public/sw.js is missing a __PEERD_WEB_*__ stamp token — the SW template drifted.');
+    throw new Error('web-shell/sw.js is missing a __PEERD_WEB_*__ stamp token; the SW template drifted.');
   }
   // quote-agnostic: match the PRECACHE token however it is quoted, then assert
   // NOTHING token-shaped survived — a quoting change in sw.js must fail the
@@ -187,7 +188,7 @@ export const buildWebTarget = async (): Promise<void> => {
     .replace('__PEERD_WEB_BUILD__', buildId)
     .replace(/['"`]__PEERD_WEB_PRECACHE__['"`]/, JSON.stringify(JSON.stringify(precache)));
   if (stamped.includes('__PEERD_WEB_BUILD__') || stamped.includes('__PEERD_WEB_PRECACHE__')) {
-    throw new Error('web/public/sw.js stamp did not apply — a __PEERD_WEB_*__ token is malformed in the SW template.');
+    throw new Error('web-shell/sw.js stamp did not apply; a __PEERD_WEB_*__ token is malformed in the SW template.');
   }
   writeFileSync(swPath, stamped);
 

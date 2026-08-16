@@ -1,5 +1,5 @@
-// The identity capsule + credential wrappers (docs/design/
-// portable-identity/ 01): seal/open round-trips, per-credential unlock,
+// The identity capsule + credential wrappers: seal/open round-trips,
+// per-credential unlock,
 // tamper and wrong-passphrase failure. Pure WebCrypto — Bun territory.
 
 import { describe, test, expect } from 'bun:test';

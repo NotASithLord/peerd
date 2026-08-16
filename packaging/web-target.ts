@@ -7,7 +7,8 @@
 // import-closed.
 //
 // The target is deliberately LIBRARY-LIKE: the staged modules plus a minimal
-// smoke shell (web/public/), no demo UI and no deploy pipeline. The archived
+// smoke shell (packaging/templates/web-shell/), no demo UI and no deploy
+// pipeline. The archived
 // demo shells live on their preserved branches, not here.
 //
 // why a page needs any divergence at all: three things in the extension tree
@@ -112,7 +113,7 @@ export const KNOWN_BROWSER_TOUCHES = new Set<string>([
 // package-web REFUSES the overlay if any shell path collides with a staged
 // file — shadowing real source would silently re-create the vendored-fork
 // drift this target exists to kill.
-export const WEB_SHELL_DIR = join(REPO_ROOT, 'web', 'public');
+export const WEB_SHELL_DIR = join(REPO_ROOT, 'packaging', 'templates', 'web-shell');
 export const WEB_DIST = join(REPO_ROOT, 'web-dist');
 
 // Static hosts commonly reject huge files (Cloudflare Pages caps uploads at

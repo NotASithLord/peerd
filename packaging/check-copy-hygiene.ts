@@ -39,8 +39,6 @@ const EXCLUDED_PREFIXES = Object.freeze([
   '.codex/',
   'extension/vendor/',
   'vendor/',
-  'web-prototype/public/',
-  'update-feeds/',
   'scripts/cdp/baselines/',
 ]);
 

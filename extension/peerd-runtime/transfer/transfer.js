@@ -38,8 +38,7 @@
 //                      identity/device-key secrets are structurally
 //                      excluded from the generic secrets box below —
 //                      the seed travels ONLY inside the capsule, the
-//                      device key never travels at all
-//                      (docs/design/portable-identity/ 02–03). (This
+//                      device key never travels at all. (This
 //                      comment says "the dweb module" because this file
 //                      ships in store packages and the artifact verifier
 //                      greps everything.)

@@ -95,7 +95,7 @@ export const createDwebClient = () => {
     createSyncReceiver,
     loadCoordinatorInputs,
 
-    // --- portable identity (docs/design/portable-identity/) --------------
+    // --- portable identity -----------------------------------------------
     // Record build/open runs in the channel's dweb crypto host (Chrome
     // offscreen page; Firefox background). The background owns the vault
     // reads/writes on either side and passes material through the one

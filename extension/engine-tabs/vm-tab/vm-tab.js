@@ -71,8 +71,7 @@ const STOCK_DEBIAN_IMAGE_HTTP = STOCK_DEBIAN_IMAGE.replace(/^wss:\/\//, 'https:/
 // export/import routes read the same key to carry the pin inside
 // vm-recipe envelopes (DESIGN-10). Pins stay global, not per-VM:
 // a published image URL must never change bytes for ANY consumer
-// (VM-IMAGE.md §4 rule 1) — a legitimate new image ships under a new
-// URL and pins fresh automatically.
+// A legitimate new image ships under a new URL and pins fresh automatically.
 
 /** @type {Record<string, any>} the tab owns these known-present elements */
 const DOM = {
@@ -1059,7 +1058,7 @@ const installWrappers = async () => {
 // CLOSED on the failure mode that destroys user data — the bytes behind
 // the pinned URL changing under existing per-VM overlays (CheerpX
 // caches base blocks by block number with NO invalidation; a changed
-// base silently corrupts every overlay — VM-IMAGE.md §4). It does NOT
+// base silently corrupts every overlay). It does NOT
 // defend a fully malicious host serving a faithful head + tampered
 // tail; that residual trust in disks.webvm.io is the documented gap.
 // ---------------------------------------------------------------------------
