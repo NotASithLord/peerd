@@ -148,8 +148,10 @@ export const scanBuildStep = (
 
 export const buildStepBadge = (scan: BuildStepScan): ShieldsBadge => ({
   schemaVersion: 1,
-  label: 'Dev build step',
-  message: scan.offenders.length === 0 ? 'none (source-direct)' : 'present',
+  label: 'App source',
+  message: scan.offenders.length === 0
+    ? 'no dev build · unbundled'
+    : 'build or bundling present',
   color: scan.offenders.length === 0 ? 'brightgreen' : 'red',
   ...laneLogo('javascript'),
 });

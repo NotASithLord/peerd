@@ -81,7 +81,7 @@ describe('no-development-build-step invariant', () => {
   test('reports none when source development does not bundle, transpile, emit, or build', () => {
     expect(scanBuildStep(clean, tsconfig).offenders).toEqual([]);
     expect(buildStepBadge({ offenders: [] })).toMatchObject({
-      label: 'Dev build step', message: 'none (source-direct)', color: 'brightgreen',
+      label: 'App source', message: 'no dev build · unbundled', color: 'brightgreen',
     });
   });
 
@@ -108,7 +108,7 @@ describe('no-development-build-step invariant', () => {
 
   test('goes red rather than quietly claiming none', () => {
     expect(buildStepBadge({ offenders: ['dependency "vite" is a bundler or transpiler'] }))
-      .toMatchObject({ message: 'present', color: 'red' });
+      .toMatchObject({ message: 'build or bundling present', color: 'red' });
   });
 });
 
