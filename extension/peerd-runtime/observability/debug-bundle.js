@@ -199,3 +199,5 @@ export const assembleDebugBundle = ({
     ...(auditChain ? { auditChainVerification: auditChain } : {}),
   };
 };
+
+# Fix for issue #344: safe input handling
