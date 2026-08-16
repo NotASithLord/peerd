@@ -369,13 +369,13 @@ export const joinRoom = async ({
     if (!outageSince) outageSince = Date.now();
     const downMs = Date.now() - outageSince;
     // Stay quiet while the backoff rides out the expected transient; warn
-    // once the outage has truly persisted, and only once per outage — a
+    // once the outage has truly persisted, and only once per outage. A
     // blip that recovers before OUTAGE_WARN_MS never surfaces a warning.
     if (!outageWarned && downMs >= OUTAGE_WARN_MS) {
       outageWarned = true;
-      dwarn('room', `rendezvous unreachable for ${Math.round(downMs / 1000)}s (${reconnectFailures} attempts): ${e?.message ?? e} — still retrying`);
+      dwarn('room', `rendezvous unreachable for ${Math.round(downMs / 1000)}s (${reconnectFailures} attempts): ${e?.message ?? e}; still retrying`);
     } else {
-      dlog('room', `rendezvous reconnect failed (attempt ${reconnectFailures}): ${e?.message ?? e} — retrying`);
+      dlog('room', `rendezvous reconnect failed (attempt ${reconnectFailures}): ${e?.message ?? e}; retrying`);
     }
     backoffMs = Math.min(backoffMs * 2, RECONNECT_MAX_MS); // grow only on a real failed attempt
     scheduleReconnect();
