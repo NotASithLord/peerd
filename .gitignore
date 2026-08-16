@@ -76,6 +76,16 @@ scripts/cdp/bench-results/
 # Headless test output
 /test-output/
 
+# Auto-update feeds: generated at release time by
+# packaging/gen-update-feeds.ts (which mkdir -p's the directory) and
+# published only as GitHub Release assets. peerd-site downloads those assets
+# and deploys them to peerd.ai/updates/, and update-feed-monitor.yml checks
+# the live feed against the latest release tag. why ignore rather than leave
+# untracked: a tracked feed is a second value nothing reads. The last one sat
+# at v0.6.0 through two releases while the assets were correct, because the
+# release workflow could never push its refresh past branch protection.
+/update-feeds/
+
 # Online-Mind2Web (gated dataset + exported trajectories/screenshots + the
 # upstream scorer repo cloned on demand by score.mjs)
 scripts/cdp/om2w/data/
