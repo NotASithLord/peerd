@@ -174,9 +174,11 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
 
     // Ratchets, not performance claims. A deliberate worker dependency may
     // raise them only with a fresh graph review and an updated measurement.
-    expect(graph.size).toBeLessThanOrEqual(450);
-    expect(bytes).toBeLessThanOrEqual(4_640_000);
-    expect(statSync(entry).size).toBeLessThanOrEqual(450_000);
+    // The reviewed App client maps one app_code surface through tiny internal
+    // adapters; no browser/network primitive enters the cold worker graph.
+    expect(graph.size).toBeLessThanOrEqual(457);
+    expect(bytes).toBeLessThanOrEqual(4_700_000);
+    expect(statSync(entry).size).toBeLessThanOrEqual(460_000);
   });
 
   test('the offscreen host uses its exact runtime and engine surfaces', async () => {

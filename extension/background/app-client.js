@@ -22,7 +22,6 @@ import {
   parseAppManifest,
 } from '/peerd-engine/background.js';
 import { base64ByteLength, fromBase64, toBase64 } from '/shared/bundle/bytes.js';
-import { MAX_NETWORK_BUNDLE_BYTES, packBundle } from '/shared/bundle/bundle.js';
 
 export const APP_TAB_GROUP_TITLE = 'peerd';
 
@@ -170,9 +169,14 @@ const opfsForApp = (appId, beforeMutation = () => {}) =>
  * @param {ReturnType<typeof import('/peerd-engine/background.js').createAppRegistry>} deps.registry
  * @param {ReturnType<typeof import('./app-tab-tracker.js').createAppTabTracker>} deps.tracker
  * @param {() => void | Promise<void>} [deps.beforeOpfsMutation]
+ * @param {(appId:string)=>void|Promise<void>} [deps.onManifestMutation]
+ * @param {(ownerSessionId:string,record:any)=>Promise<string>} [deps.resolveOwnerRoot]
  * @param {ReturnType<typeof import('/peerd-engine/background.js').createRepositoryService>} [deps.repositories]
  */
-export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => {}, repositories = undefined }) => {
+export const createAppClient = ({
+  registry, tracker, beforeOpfsMutation = () => {}, onManifestMutation = () => {},
+  resolveOwnerRoot = async (ownerSessionId) => ownerSessionId, repositories = undefined,
+}) => {
   // why injected: App files are a self-hosted durable surface. The lifecycle
   // schema guard must run at the physical OPFS boundary, including callers of
   // the exposed helper, without making the engine module import runtime policy.
@@ -518,6 +522,7 @@ export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => 
 
     if (!updated) return null;
     if (sessionId) await registry.setDefaultForSession(sessionId, id);
+    if (path === 'peerd.json') await onManifestMutation(id);
     tracker.reloadTab(id).catch(() => {});
     return updated;
   };
@@ -544,6 +549,7 @@ export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => 
         return rollbackMutation(error, rollbackBytes, id, rec);
       }
     });
+    if (path === 'peerd.json') await onManifestMutation(id);
     if (reload) tracker.reloadTab(id).catch(() => {});
     return { bytesWritten: replacement.size, kind: replacement.kind };
   };
@@ -575,7 +581,7 @@ export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => 
   const replaceFiles = async ({ appId, files, entryFile, fileKinds, metadata = {} }) => {
     const id = await resolveId({ appId });
     const normalized = normalizeFileMap(files, entryFile, fileKinds);
-    return withMutation(id, async () => {
+    const updated = await withMutation(id, async () => {
       const opfs = guardedOpfsForApp(id);
       const oldRecord = await registry.get(id);
       if (!oldRecord) throw new Error(`app not found: ${id}`);
@@ -599,14 +605,13 @@ export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => 
         await opfs.nuke();
         treeChanged = true;
         for (const { path, stored } of normalized.files) await opfs.write(path, stored);
-        const updated = await registry.update(id, {
+        const updatedRecord = await registry.update(id, {
           entryFile,
           fileKinds: normalized.fileKinds,
           ...(metadata.dweb && typeof metadata.dweb === 'object' ? { dweb: metadata.dweb } : {}),
         });
-        if (!updated) throw new Error(`app not found after file replacement: ${id}`);
-        tracker.reloadTab(id).catch(() => {});
-        return updated;
+        if (!updatedRecord) throw new Error(`app not found after file replacement: ${id}`);
+        return updatedRecord;
       } catch (writeError) {
         if (!treeChanged) throw writeError;
         try {
@@ -619,6 +624,9 @@ export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => 
         throw writeError;
       }
     });
+    await onManifestMutation(id);
+    tracker.reloadTab(id).catch(() => {});
+    return updated;
   };
 
   /**
@@ -673,6 +681,7 @@ export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => 
       };
       const updated = await registry.update(id, /** @type {any} */ (patch));
       if (!updated) throw new Error(`app not found after versioned replacement: ${id}`);
+      await onManifestMutation(id);
       tracker.reloadTab(id).catch(() => {});
       return { record: updated, oid: committed.oid ?? null, created: committed.created === true };
     } catch (cause) {
@@ -737,22 +746,12 @@ export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => 
   /** @param {{ appId: string }} args */
   const snapshotFilesBase64 = async (args) => {
     const snapshot = await snapshotFiles(args);
-    const packedBytes = packBundle({
-      entry: snapshot.record.entryFile,
-      files: snapshot.files,
-      fileKinds: snapshot.record.fileKinds,
-    }).byteLength;
-    if (packedBytes > MAX_NETWORK_BUNDLE_BYTES) {
-      throw new AppFileLimitError(
-        `App is too large to share after packing: ${packedBytes} > ${MAX_NETWORK_BUNDLE_BYTES} bytes`,
-      );
-    }
     /** @type {Record<string, { base64: string }>} */
     const files = Object.create(null);
     for (const [path, bytes] of Object.entries(snapshot.files)) {
       files[path] = { base64: toBase64(bytes) };
     }
-    return { ...snapshot, files, packedBytes };
+    return { ...snapshot, files };
   };
 
   /** @param {{ appId?: string, path: string, sessionId?: string, reload?: boolean }} args */
@@ -775,12 +774,23 @@ export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => 
         return rollbackMutation(error, () => opfs.write(path, backup), id, rec);
       }
     });
+    if (path === 'peerd.json') await onManifestMutation(id);
     if (reload) tracker.reloadTab(id).catch(() => {});
   };
 
   /** @param {{ appId?: string, sessionId?: string, focus?: boolean }} [opts] */
   const open = async ({ appId, sessionId, focus = true } = {}) => {
     const id = await resolveId({ sessionId, appId });
+    const record = await registry.get(id);
+    if (!record) throw new Error(`app not found: ${id}`);
+    // The App tab asks the SW to attach a manifest-defined actor during boot.
+    // Carry a durable, explicit owner into that handshake; actor minting must
+    // never consult whichever chat happens to be active at tab-ready time.
+    const ownerClaim = sessionId ?? record.ownerSessionId ?? null;
+    const ownerSessionId = ownerClaim ? await resolveOwnerRoot(ownerClaim, record) : null;
+    const ownerSuffix = ownerSessionId
+      ? `?owner=${encodeURIComponent(ownerSessionId)}`
+      : '';
     // why focus: a USER opening an App (Library → Open) brings its tab to the
     // foreground so they see it (DECISIONS #20). The AGENT opening one
     // (focus:false) opens in the BACKGROUND — the tracker drops a "go there" card
@@ -789,7 +799,12 @@ export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => 
     // Isolation failures and readiness timeouts both propagate. why: claiming
     // a background App opened when its host is not runnable leaves the model
     // and user with a dead card and hides a security-floor failure.
-    await tracker.ensureTab(id, { active: focus, groupTitle: APP_TAB_GROUP_TITLE });
+    await tracker.ensureTab(id, {
+      active: focus,
+      groupTitle: APP_TAB_GROUP_TITLE,
+      ...(ownerSessionId ? { ownerSessionId } : {}),
+      ...(ownerSuffix ? { hashSuffix: ownerSuffix } : {}),
+    });
     if (sessionId) await registry.setDefaultForSession(sessionId, id);
     return id;
   };
@@ -822,6 +837,7 @@ export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => 
     if (!repositories?.restoreApp) throw new Error('browser Git is unavailable');
     const id = await resolveId({ appId, sessionId });
     const result = await withMutation(id, () => repositories.restoreApp(id, { to }));
+    await onManifestMutation(id);
     tracker.reloadTab(id).catch(() => {});
     return result;
   };
@@ -831,6 +847,7 @@ export const createAppClient = ({ registry, tracker, beforeOpfsMutation = () => 
     if (!repositories?.checkout) throw new Error('browser Git is unavailable');
     const id = await resolveId({ appId, sessionId });
     const result = await withMutation(id, () => repositories.checkout({ kind: 'app', id }, { name }));
+    await onManifestMutation(id);
     tracker.reloadTab(id).catch(() => {});
     return result;
   };

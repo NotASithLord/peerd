@@ -10,6 +10,47 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-08-18
+
+### Added
+
+- App manifests can define a dedicated, code-first developer actor. Peerd binds
+  that actor to the exact App, owning root task, manifest revision, and caller
+  authority; the actor can use one sealed `app_code` program to observe, play,
+  and test the running App before editing its readable working tree.
+- Dweb App bundles have a signed version-2 transport with deterministic,
+  version-pinned compression before chunking. Descriptors commit to the
+  encoding, compressed and uncompressed sizes and hashes, and every decoded
+  file's kind, size, and hash. Existing version-1 bundles remain readable.
+
+### Changed
+
+- Installed Apps keep their readable source files and byte-exact binary assets
+  in the OPFS Git working tree. JavaScript can address separate textures and
+  audio through the narrow `peerd.assets` API, while compression stays outside
+  the working tree as a network transport concern.
+- Seeders retain and serve the verified compressed chunks that were signed,
+  without rebuilding or recompressing them. Isomorphic Git continues to see
+  only the decoded source and binary bytes.
+- Publisher-provided App actor instructions are rendered with package
+  provenance beneath Peerd's host policy instead of being represented as
+  user-authored `/system` instructions.
+
+### Fixed
+
+- App actor attachment, reuse, and runtime calls now reconcile manifest and
+  owner-authority changes, require an exact owner-bound tab, suspend across
+  edits, and preserve cancellation or unknown-outcome custody through the
+  sealed code runner.
+- Dweb room transitions are serialized and cancellation-aware, preventing a
+  delayed consent or late join result from leaking a room, resolving a newer
+  request, or corrupting the App bridge's current-room state.
+- Bundle admission verifies compressed chunks and their aggregate hash before
+  bounded streaming decompression. Per-file and total output ceilings reject
+  oversized descriptors, surplus output, and compression bombs.
+- Large canonical base64 files are validated in linear, constant-stack time,
+  allowing readable multi-megabyte App sources to round-trip reliably.
+
 ## [0.7.2] - 2026-08-16
 
 ### Changed
@@ -1088,6 +1129,9 @@ Initial **experimental preview**. The core buildout, integrated:
   CI gates (bun tests, strict typecheck, lint, dweb boundary, drift,
   in-browser CDP job, artifact matrix).
 
-[Unreleased]: https://github.com/NotASithLord/peerd/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/NotASithLord/peerd/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/NotASithLord/peerd/compare/v0.7.2...v0.7.3
+[0.7.2]: https://github.com/NotASithLord/peerd/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/NotASithLord/peerd/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/NotASithLord/peerd/compare/v0.6.0...v0.7.0
 [0.1.0]: https://github.com/NotASithLord/peerd/releases/tag/v0.1.0

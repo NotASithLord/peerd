@@ -54,9 +54,39 @@ export const fromBase64 = (s) => {
  */
 export const base64ByteLength = (s) => {
   if (typeof s !== 'string') throw new Error('base64 must be a string');
-  const canonical = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-  if (!canonical.test(s)) throw new Error('invalid base64');
-  const padding = s.endsWith('==') ? 2 : (s.endsWith('=') ? 1 : 0);
+  const length = s.length;
+  if ((length & 3) !== 0) throw new Error('invalid base64');
+
+  let padding = 0;
+  if (length && s.charCodeAt(length - 1) === 61) padding += 1; // =
+  if (length > 1 && s.charCodeAt(length - 2) === 61) padding += 1;
+  const dataLength = length - padding;
+
+  // why a character loop instead of one canonicality regex: V8's regexp
+  // engine can overflow its stack on the 8–12 MB source files real dwapps
+  // carry. This pass is constant-stack and does not allocate another string.
+  let lastValue = 0;
+  for (let index = 0; index < dataLength; index++) {
+    const code = s.charCodeAt(index);
+    let value = -1;
+    if (code >= 65 && code <= 90) value = code - 65; // A-Z
+    else if (code >= 97 && code <= 122) value = code - 71; // a-z
+    else if (code >= 48 && code <= 57) value = code + 4; // 0-9
+    else if (code === 43) value = 62; // +
+    else if (code === 47) value = 63; // /
+    if (value < 0) throw new Error('invalid base64');
+    lastValue = value;
+  }
+  for (let index = dataLength; index < length; index++) {
+    if (s.charCodeAt(index) !== 61) throw new Error('invalid base64');
+  }
+  // Canonical encodings zero the unused bits in the final data sextet. atob()
+  // accepts aliases such as AB== and AAB=; refusing them preserves one string
+  // representation per byte sequence for hashes and signed bundle metadata.
+  if ((padding === 2 && (lastValue & 0x0f) !== 0)
+      || (padding === 1 && (lastValue & 0x03) !== 0)) {
+    throw new Error('invalid base64');
+  }
   return (s.length / 4) * 3 - padding;
 };
 

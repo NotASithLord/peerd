@@ -17,7 +17,9 @@ import {
 	unpackBundle,
 	unpackBundleText,
 } from '../../extension/shared/bundle/bundle.js';
-import { utf8, fromUtf8, bytesEqual } from '../../extension/shared/bundle/bytes.js';
+import {
+	utf8, fromUtf8, bytesEqual, base64ByteLength,
+} from '../../extension/shared/bundle/bytes.js';
 
 describe('bundle codec', () => {
 	it('round-trips files through pack/unpack with bytes preserved', () => {
@@ -91,11 +93,38 @@ describe('bundle codec', () => {
 		expect(() => unpackBundle(orphanKind)).toThrow('file kind has no file');
 	});
 
+	it('accepts only canonical base64 padding and unused bits', () => {
+		expect(base64ByteLength('')).toBe(0);
+		expect(base64ByteLength('AA==')).toBe(1);
+		expect(base64ByteLength('AAA=')).toBe(2);
+		expect(base64ByteLength('AAAA')).toBe(3);
+		for (const encoded of ['A', 'A===', 'AA=A', 'AB==', 'AAB=', 'AAAA\n']) {
+			expect(() => base64ByteLength(encoded)).toThrow('invalid base64');
+		}
+	});
+
 	it('preserves prototype-looking paths as own keys', () => {
 		const files: Record<string, Uint8Array> = Object.create(null);
 		files.__proto__ = utf8('safe');
 		const unpacked = unpackBundle(packBundle({ files }));
 		expect(Object.hasOwn(unpacked.files, '__proto__')).toBe(true);
 		expect(fromUtf8(unpacked.files.__proto__)).toBe('safe');
+	});
+
+	it('validates and decodes a Charon-sized file without regexp stack growth', () => {
+		// Nine MiB decodes from exactly twelve MiB of canonical base64. Building
+		// the encoded form directly keeps this regression pinned to the reader
+		// that previously overflowed V8's regexp stack on bundle.js.
+		const decodedBytes = 9 * 1024 * 1024;
+		const encoded = 'A'.repeat((decodedBytes / 3) * 4);
+		const payload = utf8(JSON.stringify({ v: 1, entry: 'bundle.js', files: { 'bundle.js': encoded } }));
+		const unpacked = unpackBundle(payload, {
+			maxPackedBytes: 16 * 1024 * 1024,
+			maxDecodedBytes: 10 * 1024 * 1024,
+			maxFileBytes: 10 * 1024 * 1024,
+		});
+		expect(unpacked.files['bundle.js'].byteLength).toBe(decodedBytes);
+		expect(unpacked.files['bundle.js'][0]).toBe(0);
+		expect(unpacked.files['bundle.js'][decodedBytes - 1]).toBe(0);
 	});
 });

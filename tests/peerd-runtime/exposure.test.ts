@@ -134,7 +134,7 @@ describe('DESIGN-17 actor tier — the tool sets', () => {
       'js_notebook', 'js_write_file', 'js_read_file', 'js_delete',
       'pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write', 'pod_destroy',
       'app_update', 'app_write_file', 'app_read_file', 'app_list_files',
-      'app_delete_file', 'app_delete', 'edit_file',
+      'app_delete_file', 'app_delete', 'app_observe', 'app_act', 'app_code', 'edit_file',
       'repo_history', 'repo_version', 'repo_remote']) {
       expect(isActorOnlyTool(n)).toBe(true);
     }
@@ -150,6 +150,9 @@ describe('DESIGN-17 actor tier — the tool sets', () => {
       ['vm_boot', 'vm_delete', 'vm_import', 'vm_write_file'].sort());
     expect(isAllowedForActorType('app_update', 'app')).toBe(true);
     expect(isAllowedForActorType('app_read_file', 'app')).toBe(true); // reads allowed for its own
+    expect(isAllowedForActorType('app_observe', 'app')).toBe(true);
+    expect(isAllowedForActorType('app_act', 'app')).toBe(true);
+    expect(isAllowedForActorType('app_code', 'app')).toBe(true);
     expect(isAllowedForActorType('edit_file', 'app')).toBe(true);
     expect(isAllowedForActorType('edit_file', 'notebook')).toBe(true);
     expect(isAllowedForActorType('repo_history', 'app')).toBe(true);
@@ -188,6 +191,24 @@ describe('DESIGN-17 actor tier — the tool sets', () => {
     // The mutating tier leaves the main agent (delegated via message_actor);
     // message_actor + open_tab + non-instance tools stay.
     expect(filterActorSurface(all).map((t) => t.name)).toEqual(['remember', 'message_actor', 'open_tab']);
+  });
+});
+
+describe('App actor code-first runtime surface', () => {
+  test('collapses direct runtime verbs into app_code while preserving code-writing tools', () => {
+    const code = actorAllowedToolsFor('app', undefined, 'code');
+    expect(code.has('app_code')).toBe(true);
+    expect(code.has('app_observe')).toBe(false);
+    expect(code.has('app_act')).toBe(false);
+    expect(code.has('edit_file')).toBe(true);
+    expect(code.has('app_write_file')).toBe(true);
+  });
+
+  test('enforces the surface at the gate, not only in descriptors', () => {
+    const ctx = { exposure: 'actor', actorType: 'app', actorInstanceId: 'app-1', actorSurface: 'code' };
+    expect(rt({ name: 'app_code' }, { code: 'return app.observe()' }, ctx)).toBeNull();
+    expect(rt({ name: 'app_observe' }, {}, ctx)?.allowed).toBe(false);
+    expect(rt({ name: 'app_act' }, { action: 'move' }, ctx)?.allowed).toBe(false);
   });
 });
 

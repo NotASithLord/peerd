@@ -15,6 +15,7 @@ import {
 } from '../../extension/peerd-runtime/actor/capability-manifest.js';
 import { ACTORS_API_ACCEPTED_METHODS, ACTORS_API_METHODS } from '../../extension/peerd-runtime/actor/actors-api.js';
 import { PAGE_API_METHODS } from '../../extension/peerd-runtime/actor/page-api.js';
+import { APP_API_METHODS } from '../../extension/peerd-runtime/actor/app-api.js';
 import { MESH_API_METHODS } from '../../extension/peerd-runtime/actor/a2a-api.js';
 
 describe('declarative code-capability contract', () => {
@@ -22,11 +23,12 @@ describe('declarative code-capability contract', () => {
     expect([...ACTORS_API_METHODS]).toEqual(codeClientMethods('actors'));
     expect([...ACTORS_API_ACCEPTED_METHODS]).toEqual(codeClientMethods('actors', true));
     expect([...PAGE_API_METHODS]).toEqual(codeClientMethods('page'));
+    expect([...APP_API_METHODS]).toEqual(codeClientMethods('app').filter((name) => name !== 'wait'));
     expect([...MESH_API_METHODS]).toEqual(codeClientMethods('mesh'));
   });
 
   test('generated worker clients expose every declared method exactly once', () => {
-    for (const client of ['actors', 'page', 'mesh'] as const) {
+    for (const client of ['actors', 'page', 'app', 'mesh'] as const) {
       const source = buildCodeClientSource(client, { timeoutMs: 9_000 });
       expect(source).toContain(`globalThis.${CODE_CLIENT_MANIFESTS[client].global}`);
       for (const method of codeClientMethods(client, true)) {
@@ -53,6 +55,7 @@ describe('declarative code-capability contract', () => {
     expect(actors).toContain('actors.list()');
     expect(actors).not.toContain('actors.ask');
     expect(actors).not.toContain('actors.cast');
+    expect(codeClientReference('app')).toContain('app.wait(ms)');
   });
 
   test('code preference falls back honestly without its worker host or complete grant', () => {
@@ -101,7 +104,10 @@ describe('declarative code-capability contract', () => {
     expect(actorCodeSurfaceTools('webvm')).toEqual(['vm_boot']);
     expect(actorCodeSurfaceTools('notebook')).toEqual(['js_notebook']);
     expect(actorCodeSurfaceTools('pod')).toEqual(['pod_exec']);
-    expect(actorCodeSurfaceTools('app')).toEqual(['app_write_file']);
+    expect(actorCodeSurfaceTools('app')).toEqual([
+      'app_code', 'app_update', 'app_write_file', 'app_read_file', 'app_list_files',
+      'app_delete_file', 'app_delete', 'edit_file', 'repo_history', 'repo_version', 'repo_remote',
+    ]);
     expect(actorCodeSurfaceTools('dweb')).toEqual(['a2a_run']);
     expect(actorCodeSurfaceTools('mystery')).toEqual([]);
   });
@@ -112,7 +118,7 @@ describe('declarative code-capability contract', () => {
       expect(profile.codeTool.length).toBeGreaterThan(0);
       expect(profile.codeDecision.length).toBeGreaterThan(20);
     }
-    expect(ACTOR_CAPABILITY_MANIFESTS.app.client).toBeNull();
+    expect(ACTOR_CAPABILITY_MANIFESTS.app.client).toBe('app');
     expect(ACTOR_CAPABILITY_MANIFESTS.dweb.client).toBe('mesh');
   });
 

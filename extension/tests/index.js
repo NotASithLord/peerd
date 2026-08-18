@@ -9,6 +9,7 @@
 
 // --- shared ---
 import './unit/shared/util.test.js';
+import './unit/shared/bundle-transport.test.js';
 
 // --- peerd-egress ---
 import './unit/peerd-egress/audit-retention.test.js';

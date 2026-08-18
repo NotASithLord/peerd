@@ -54,6 +54,7 @@ export const manifestHash = async (manifest) =>
  *   mime?: string,
  *   entry?: string,
  *   meta?: Record<string, any>,
+ *   bundle?: import('./transport.js').BundleTransportDescriptor,
  *   now?: () => number,
  * }} opts     required — payload has no default; a zero-arg call crashes
  *   payload  — the bundle bytes
@@ -67,6 +68,7 @@ export const buildManifest = async ({
   mime = 'application/peerd-app',
   entry,
   meta,
+  bundle,
   now = Date.now,
 } = /** @type {{ payload: Uint8Array }} */ ({})) => {
   const pieces = chunkBytes(payload);
@@ -75,12 +77,13 @@ export const buildManifest = async ({
   );
 
   const manifest = {
-    v: 1,
+    v: bundle ? 2 : 1,
     type,
     mime,
     size: payload.length,
     ...(entry ? { entry } : {}),
     ...(meta ? { meta } : {}),
+    ...(bundle ? { bundle } : {}),
     chunks: chunkMeta,
     created: now(),
   };

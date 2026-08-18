@@ -58,6 +58,14 @@ export const CODE_CLIENT_MANIFESTS = Object.freeze({
     captureSite: { op: 'captureSite', signature: 'captureSite("start"|"stop")', effect: 'read', tool: 'site_capture', canonical: true, worker: "(action) => pageCall('captureSite', { action })" },
     login: { op: 'login', signature: 'login(selectorOrRef, options?)', effect: 'write', tool: 'login', canonical: true, worker: "(target, options) => pageCall('login', { target, options })" },
   }),
+  // The bound App actor's playtest hand. These methods map to the same
+  // exact-instance runtime gates as the direct primitives; app_code merely lets
+  // the actor compose an observe/act feedback loop in one sealed JS run.
+  app: client('app', 'app', {
+    observe: { op: 'observe', signature: 'observe()', effect: 'read', tool: 'app_observe', canonical: true, worker: "() => appCall('observe', {})" },
+    act: { op: 'act', signature: 'act(action, params?)', effect: 'write', tool: 'app_act', canonical: true, worker: "(action, params) => appCall('act', { action, params: params ?? {} })" },
+    wait: { op: 'wait', signature: 'wait(ms)', effect: 'read', canonical: true, worker: "(ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(5000, Number(ms) || 0))))" },
+  }),
   mesh: client('mesh', 'a2a', {
     peers: { op: 'peers', signature: 'peers()', effect: 'read', canonical: true, worker: "() => meshCall('peers', {})" },
     card: { op: 'card', signature: 'card(did)', effect: 'read', canonical: true, worker: "(did) => meshCall('card', { did })" },
@@ -119,6 +127,7 @@ const TRACE_METHODS = Object.freeze({
   actors: Object.freeze(new Set(codeClientMethods('actors', true))),
   a2a: Object.freeze(new Set(codeClientMethods('mesh', true))),
   page: Object.freeze(new Set(codeClientMethods('page', true))),
+  app: Object.freeze(new Set(codeClientMethods('app', true))),
   provider: Object.freeze(new Set(['call'])),
   toolbox: Object.freeze(new Set(['read'])),
   opfs: Object.freeze(new Set(['read', 'write', 'delete', 'list', 'compose-module'])),
@@ -163,7 +172,7 @@ export const renderCodeOpTrace = (trace) => trace.map((entry) => {
  * and prompt lore. Provider/site use specialized install shapes, while the
  * generic clients render their declared worker expressions. Dynamic site
  * origin data is JSON-encoded here and still validated/pinned by the host.
- * @param {'actors'|'page'|'mesh'|'provider'|'site'} clientName
+ * @param {'actors'|'page'|'app'|'mesh'|'provider'|'site'} clientName
  * @param {{ timeoutMs?: number, siteOrigin?: string }} [options]
  */
 export const buildCodeClientSource = (clientName, options = {}) => {
@@ -198,7 +207,11 @@ export const buildCodeClientSource = (clientName, options = {}) => {
     ? `, { timeoutMs: ${Math.max(1, Math.floor(options.timeoutMs))}, timeoutMessage: (payload) => '${local}.' + payload.method + ' timed out' }`
     : '';
   const assignments = methods.map(([name, method]) => `  ${name}: ${method.worker},`).join('\n');
-  const aliases = clientName === 'page' ? '\nglobalThis.peerd.page = __page;' : '';
+  const aliases = clientName === 'page'
+    ? '\nglobalThis.peerd.page = __page;'
+    : clientName === 'app'
+      ? '\nglobalThis.peerd.app = __app;'
+      : '';
   return [
     `const ${local}Relay = makeBridge('${manifest.bridge}'${timeout});`,
     `const ${local}Call = (method, args) => ${local}Relay({ method, args });`,
@@ -249,7 +262,11 @@ const ENGINE_TOOLS = Object.freeze({
   webvm: Object.freeze(['vm_boot', 'vm_write_file', 'vm_import', 'vm_delete']),
   notebook: Object.freeze(['js_notebook', 'js_write_file', 'js_read_file', 'js_delete', 'edit_file', 'repo_history', 'repo_version', 'repo_remote']),
   pod: Object.freeze(['pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write', 'pod_destroy', 'repo_history', 'repo_version', 'repo_remote']),
-  app: Object.freeze(['app_update', 'app_write_file', 'app_read_file', 'app_list_files', 'app_delete_file', 'app_delete', 'edit_file', 'repo_history', 'repo_version', 'repo_remote']),
+  app: Object.freeze([
+    'app_update', 'app_write_file', 'app_read_file', 'app_list_files',
+    'app_delete_file', 'app_delete', 'edit_file', 'repo_history',
+    'repo_version', 'repo_remote', 'app_observe', 'app_act', 'app_code',
+  ]),
 });
 
 export const WEB_ACTOR_DOM_TOOL_NAMES = Object.freeze([
@@ -291,7 +308,7 @@ export const ACTOR_CAPABILITY_MANIFESTS = Object.freeze({
   webvm: Object.freeze({ tools: ENGINE_TOOLS.webvm, codeTool: 'vm_boot', client: null, codeDecision: 'shell is the code surface; no second host-control client' }),
   notebook: Object.freeze({ tools: ENGINE_TOOLS.notebook, codeTool: 'js_notebook', client: null, codeDecision: 'the owned notebook worker is the code surface' }),
   pod: Object.freeze({ tools: ENGINE_TOOLS.pod, codeTool: 'pod_exec', client: null, codeDecision: 'the owned Pod shell is the code surface' }),
-  app: Object.freeze({ tools: ENGINE_TOOLS.app, codeTool: 'app_write_file', client: null, codeDecision: 'the actor writes the app artifact; a runtime control bridge would widen iframe authority' }),
+  app: Object.freeze({ tools: ENGINE_TOOLS.app, codeTool: 'app_code', client: 'app', codeDecision: 'app maps only to the same exact-instance runtime gates' }),
   web: Object.freeze({ tools: WEB_ACTOR_TOOL_NAMES, codeTool: 'page_code', client: 'page', codeDecision: 'page maps only to the same gated web tools' }),
   api: Object.freeze({ tools: WEB_API_TOOL_NAMES, codeTool: 'site_client_run', client: 'site', codeDecision: 'origin-pinned site client code; no arbitrary-origin client' }),
   dweb: Object.freeze({ tools: DWEB_ACTOR_TOOL_NAMES, codeTool: 'a2a_run', client: 'mesh', codeDecision: 'mesh-only worker; no egress or local actor delegation' }),

@@ -88,6 +88,10 @@ export { parsePeerdUri, formatPeerdUri } from './content/uri.js';
 export { buildManifest, verifyManifest, manifestHash } from './content/manifest.js';
 export { chunkBytes, sha256hex, CHUNK_SIZE } from './content/chunk.js';
 export { packBundle, unpackBundle, unpackBundleText } from './content/bundle.js';
+export {
+  packTransportBundle, unpackTransportBundle,
+  BUNDLE_TRANSPORT_VERSION, BUNDLE_TRANSPORT_ENCODING, BUNDLE_TRANSPORT_CODEC,
+} from './content/bundle.js';
 export { createContentStore } from './content/store.js';
 export { createContentResponder, fetchBundle } from './content/transfer.js';
 

@@ -16,7 +16,7 @@
 // loader stays pure logic over bytes.
 
 import { assertBundleWithinLimits, manifestHash, verifyManifest } from '../content/manifest.js';
-import { unpackBundle } from '../content/bundle.js';
+import { unpackTransportBundle } from '../content/bundle.js';
 import { chunkBytes, sha256hex } from '../content/chunk.js';
 import { parsePeerdUri } from '../content/uri.js';
 
@@ -110,12 +110,14 @@ export const installAppBundle = async ({ uri, manifest, payload, install, name, 
 
   let unpacked;
   try {
-    unpacked = unpackBundle(payload, {
-      maxPackedBytes: 50_000_000,
+    unpacked = await unpackTransportBundle({ manifest, payload, limits: {
+      // v2's canonical JSON/base64 container is larger than the decoded OPFS
+      // tree; transport.js owns its separately bounded framing ceiling.
       maxDecodedBytes: MAX_TOTAL_BYTES,
+      maxFileBytes: MAX_TOTAL_BYTES,
       maxFiles: MAX_FILES,
       maxPathChars: 512,
-    });
+    } });
   } catch (e) {
     throw new BundleRejectedError(`malformed bundle: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
   }

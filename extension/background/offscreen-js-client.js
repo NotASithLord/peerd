@@ -14,7 +14,7 @@
 export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
   /**
    * @param {string} code
-   * @param {{ timeoutMs?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, toolbox?: boolean, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, signal?: AbortSignal }} [opts]
+   * @param {{ timeoutMs?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, toolbox?: boolean, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, signal?: AbortSignal, onExecutionDispatch?: () => void }} [opts]
    *   a2a: expose the `mesh` agent-to-agent client; actors: expose the `actors`
    *   delegation client (the script surface for chat or a granted spawned actor).
    *   caps: capability profile for the
@@ -27,9 +27,9 @@ export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
    *   workspaceSessionId mounts the durable per-session workspace as the job's
    *   OPFS root (trusted job param — the tool derives it from ctx.session, the
    *   worker can never name its own root).
-   * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, endTurn?: boolean, endTurnContent?: string, endTurnOutcomeKind?: string, usedEgress?: boolean, usedRemoteModules?: boolean, usedActors?: boolean, actorDeliveryIds?: string[], usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean, cancelled?: boolean }>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
+   * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, endTurn?: boolean, endTurnContent?: string, endTurnOutcomeKind?: string, usedEgress?: boolean, usedRemoteModules?: boolean, usedActors?: boolean, usedApp?: boolean, actorDeliveryIds?: string[], usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean, cancelled?: boolean }>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
    */
-  execHeadless: async (code, { timeoutMs, a2a, ownerSessionId, actors, ownerToolUseId, runId, caps, siteFetch, toolbox, workspaceSessionId, signal } = {}) => {
+  execHeadless: async (code, { timeoutMs, a2a, ownerSessionId, actors, ownerToolUseId, runId, caps, siteFetch, toolbox, workspaceSessionId, signal, onExecutionDispatch } = {}) => {
     const wallMs = typeof timeoutMs === 'number' && Number.isFinite(timeoutMs)
       ? Math.max(1, Math.floor(timeoutMs)) : 30_000;
     // Epoch time crosses the SW→offscreen realm boundary; performance.now()
@@ -38,10 +38,33 @@ export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
     // spend the same advertised wall-clock.
     const startedAt = Date.now();
     const deadlineAt = startedAt + wallMs;
-    /** @template T @param {Promise<T>} promise @param {string} phase */
-    const withinDeadline = (promise, phase) => new Promise((resolve, reject) => {
+    /**
+     * Stamp whether the job crossed the only boundary after which its App/page
+     * effects may have landed. Callers must not infer "not run" from a naked
+     * Stop, deadline, or runtime-message rejection after this point.
+     * @param {unknown} cause @param {boolean} executionDispatched @param {string} fallback
+     */
+    const classifiedFailure = (cause, executionDispatched, fallback) => {
+      const source = /** @type {{name?:unknown,message?:unknown}} */ (cause);
+      const error = new Error(
+        typeof cause === 'string' && cause
+          ? cause
+          : (typeof source?.message === 'string' && source.message ? source.message : fallback),
+      );
+      if (typeof source?.name === 'string' && source.name) error.name = source.name;
+      return Object.assign(error, {
+        executionDispatched,
+        outcomeKnown: !executionDispatched,
+        outcomeKind: executionDispatched ? 'transport-lost' : 'pre-effect-failure',
+      });
+    };
+    /** @template T @param {Promise<T>} promise @param {string} phase @param {boolean} executionDispatched */
+    const withinDeadline = (promise, phase, executionDispatched) => new Promise((resolve, reject) => {
       const remaining = deadlineAt - Date.now();
-      if (remaining <= 0) { reject(new Error(`headless job timed out during ${phase}`)); return; }
+      if (remaining <= 0) {
+        reject(classifiedFailure(null, executionDispatched, `headless job timed out during ${phase}`));
+        return;
+      }
       let settled = false;
       /** @param {(value: any) => void} fn @param {any} value */
       const finish = (fn, value) => {
@@ -51,22 +74,35 @@ export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
         signal?.removeEventListener('abort', onAbort);
         fn(value);
       };
-      const onAbort = () => finish(reject, new Error(
+      const onAbort = () => finish(reject, classifiedFailure(
+        null,
+        executionDispatched,
         phase === 'offscreen startup' ? 'headless job aborted before dispatch' : `headless job aborted during ${phase}`,
       ));
-      const timer = setTimeout(() => finish(reject, new Error(`headless job timed out during ${phase}`)), remaining);
+      const timer = setTimeout(() => finish(
+        reject,
+        classifiedFailure(null, executionDispatched, `headless job timed out during ${phase}`),
+      ), remaining);
       signal?.addEventListener('abort', onAbort, { once: true });
       if (signal?.aborted) { onAbort(); return; }
-      promise.then((value) => finish(resolve, value), (error) => finish(reject, error));
+      promise.then(
+        (value) => finish(resolve, value),
+        (error) => finish(reject, classifiedFailure(error, executionDispatched, `headless job failed during ${phase}`)),
+      );
     });
-    await withinDeadline(ensureOffscreen(), 'offscreen startup');
+    let startup;
+    try { startup = Promise.resolve(ensureOffscreen()); }
+    catch (error) { throw classifiedFailure(error, false, 'offscreen startup failed'); }
+    await withinDeadline(startup, 'offscreen startup', false);
     // why: Stop may arrive while the offscreen document is still being
     // created. In that window job/abort has nowhere to leave its early-abort
     // tombstone, so launching after ensureOffscreen would orphan the worker
     // until its wall-clock. The signal is local-only (never cloned into the
     // message); there is no await between this check and dispatch.
-    if (signal?.aborted) throw new Error('headless job aborted before dispatch');
-    const reply = await withinDeadline(sendMessage({
+    if (signal?.aborted) {
+      throw classifiedFailure(null, false, 'headless job aborted before dispatch');
+    }
+    const message = {
       type: 'job/run', code, timeoutMs: wallMs, startedAt, deadlineAt,
       ...(a2a ? { a2a: true, ownerSessionId } : {}),
       ...(actors ? { actors: true, ownerSessionId, ownerToolUseId } : {}),
@@ -78,8 +114,18 @@ export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
       ...(caps ? { caps, ownerSessionId } : {}),
       ...(runId ? { runId } : {}),
       ...(workspaceSessionId ? { workspaceSessionId } : {}),
-    }), 'execution');
-    if (!reply?.ok) throw new Error(reply?.error ?? 'headless job failed');
+    };
+    // This is the execution custody commit point. Mark it immediately before
+    // handing the message to the browser transport; from here even a synchronous
+    // transport exception cannot prove that the receiver saw nothing.
+    try { onExecutionDispatch?.(); } catch { /* host-only observation hook */ }
+    let execution;
+    try { execution = Promise.resolve(sendMessage(message)); }
+    catch (error) { throw classifiedFailure(error, true, 'headless job dispatch failed'); }
+    const reply = await withinDeadline(execution, 'execution', true);
+    if (!reply?.ok) {
+      throw classifiedFailure(reply?.error, true, 'headless job failed');
+    }
     return reply.result;
   },
   /**

@@ -4,9 +4,10 @@ import { memoryPair } from '../../extension/peerd-distributed/transport/channel.
 import { createSession } from '../../extension/peerd-distributed/transport/session.js';
 import { createRoomMesh } from '../../extension/peerd-distributed/transport/mesh.js';
 import { createBaseNetwork } from '../../extension/peerd-distributed/base-network.js';
-import { packBundle, unpackBundle } from '../../extension/peerd-distributed/content/bundle.js';
+import { packBundle, unpackTransportBundle } from '../../extension/peerd-distributed/content/bundle.js';
 import { buildManifest } from '../../extension/peerd-distributed/content/manifest.js';
 import { installAppBundle } from '../../extension/peerd-distributed/apps/loader.js';
+import { BUNDLE_TRANSPORT_CODEC } from '../../extension/shared/bundle/transport.js';
 
 const tick = (ms = 25) => new Promise((r) => setTimeout(r, ms));
 const waitFor = async (predicate: () => boolean, timeoutMs = 1_000) => {
@@ -44,7 +45,17 @@ describe('the dweb app store (base-network content + discovery)', () => {
 
     const { manifest, payload } = await b.fetchApp(uri); // ch=2 over the base mesh
     expect(manifest.publisher).toBe(ia.did);             // signed by the publisher
-    const { entry, files } = unpackBundle(payload);
+    expect(manifest).toMatchObject({
+      v: 2,
+      size: payload.byteLength,
+      bundle: {
+        version: 2,
+        encoding: 'gzip',
+        codec: BUNDLE_TRANSPORT_CODEC,
+        compressedSize: payload.byteLength,
+      },
+    });
+    const { entry, files } = await unpackTransportBundle({ manifest, payload });
     expect(entry).toBe('index.html');
     expect(new TextDecoder().decode(files['index.html'])).toBe('<h1>hi from the dweb</h1>');
     a.close(); b.close();
@@ -399,7 +410,9 @@ describe('the dweb app store (base-network content + discovery)', () => {
 
     // B installs: fetch over the mesh, then re-seed so B becomes a provider.
     const fetched = await b.fetchApp(uri);
+    const fetchedBytes = Array.from(fetched.payload);
     await b.seedApp(fetched);
+    fetched.payload[0] ^= 0xff;       // seeding retained immutable exact chunks
     a.close();                       // the AUTHOR leaves the network entirely
 
     // C joins, links ONLY B (not the gone author), and still gets the bytes.
@@ -417,8 +430,10 @@ describe('the dweb app store (base-network content + discovery)', () => {
     await tick(40);
 
     const { manifest, payload } = await c.fetchApp(uri); // served by B, the installer-seeder
+    expect(Array.from(payload)).toEqual(fetchedBytes);   // exact stored gzip chunks, no recompression
     expect(manifest.publisher).toBe((a as any).did);     // still the original author's signed bundle
-    expect(new TextDecoder().decode(unpackBundle(payload).files['index.html'])).toBe('durable bytes');
+    const decoded = await unpackTransportBundle({ manifest, payload });
+    expect(new TextDecoder().decode(decoded.files['index.html'])).toBe('durable bytes');
     b.close(); c.close();
   });
 });

@@ -115,6 +115,13 @@
       border-top-color: var(--fail);
       animation: none;
     }
+    #actor-retry {
+      min-height: 34px; padding: 6px 14px;
+      border: 1px solid #777; border-radius: 4px;
+      background: #111; color: var(--fg); cursor: pointer;
+    }
+    #actor-retry[hidden] { display: none; }
+    #actor-retry:disabled { opacity: 0.5; cursor: default; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .muted { color: var(--fg-muted); margin: 0; max-width: 360px; text-align: center; padding: 0 20px; }
     #app-notice-stack {
@@ -143,6 +150,7 @@
   <div class="boot" id="boot">
     <div class="spinner"></div>
     <p class="muted" id="boot-msg">Loading…</p>
+    <button id="actor-retry" type="button" hidden>Retry actor</button>
   </div>
 
   <div class="frame-host">

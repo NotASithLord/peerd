@@ -104,6 +104,12 @@ export const RETRY_CLASS_OVERRIDES = Object.freeze(
     js_notebook: 'E',
     pod_exec: 'E',
     script: 'E',
+    // app_code can compose several game actions in one run. A timeout may have
+    // applied an earlier action, so replaying the body is never automatically safe.
+    app_code: 'E',
+    // A single custom App action may mutate an arbitrary game state and has no
+    // host idempotency key. Lost acknowledgement is therefore outcome-unknown.
+    app_act: 'E',
     // why: a2a_run's `dweb` primitive reads as workspace-local, but the mesh
     // bridge SENDS signed messages to other agents — the effect lands in a
     // peer's inbox, on another machine, and a duplicate cannot be recalled.

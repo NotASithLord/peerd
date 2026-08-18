@@ -49,7 +49,7 @@ export const makeEngineRoutes = (deps) => {
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
     listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
-    repositories, parseAppManifest, podGitRemoteOperation,
+    repositories, parseAppManifest, podGitRemoteOperation, getCurrentSessionId, onAppDeleted,
   } = deps;
   if (typeof awaitDenylistPolicy !== 'function') {
     throw new TypeError('makeEngineRoutes: awaitDenylistPolicy is required');
@@ -449,6 +449,7 @@ export const makeEngineRoutes = (deps) => {
         let meta = await appRegistry.get(appId);
         if (!meta) return { ok: false, error: 'app-not-found' };
         let runtimeDweb = meta.dweb ?? null;
+        let runtimeAgent = { kind: 'bound-app', profile: 'developer', surface: 'code' };
         try {
           const contract = parseAppManifest(await appClient.readFile({ appId, path: 'peerd.json' }));
           const paths = new Set((await appClient.listFiles({ appId })).map((/** @type {{path:string}} */ file) => file.path.replace(/^\/+/, '')));
@@ -456,6 +457,7 @@ export const makeEngineRoutes = (deps) => {
           runtimeDweb = contract.capabilities.includes('dweb') && DWEB_ENABLED
             ? (meta.dweb ?? { uri: null, publisher: null, hash: null, local: true })
             : null;
+          runtimeAgent = contract.agent;
           if (contract.entry !== meta.entryFile) meta = await appRegistry.update(appId, { entryFile: contract.entry });
         } catch (error) {
           if ((/** @type {{name?:string}} */ (error)).name !== 'NotFoundError') {
@@ -470,6 +472,7 @@ export const makeEngineRoutes = (deps) => {
           entryFile: meta.entryFile,
           fileKinds: meta.fileKinds ?? {},
           dweb: runtimeDweb,
+          agent: runtimeAgent,
         };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
@@ -567,7 +570,10 @@ export const makeEngineRoutes = (deps) => {
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
-        await appClient.open({ appId });
+        const sessionId = typeof getCurrentSessionId === 'function'
+          ? await getCurrentSessionId()
+          : null;
+        await appClient.open({ appId, ...(sessionId ? { sessionId } : {}) });
         return { ok: true };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
@@ -716,6 +722,7 @@ export const makeEngineRoutes = (deps) => {
             }
           }
           const deleted = await appClient.delete(appId);
+          if (deleted && typeof onAppDeleted === 'function') await onAppDeleted(appId);
           return deleted ? { ok: true } : { ok: false, error: 'app-not-found' };
         }));
         return result;

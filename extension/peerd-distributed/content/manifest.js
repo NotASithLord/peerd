@@ -26,15 +26,18 @@ import {
   manifestHash,
 } from '/shared/bundle/manifest.js';
 import { MAX_NETWORK_BUNDLE_BYTES } from '/shared/bundle/bundle.js';
+import { assertBundleTransportDescriptor } from '/shared/bundle/transport.js';
 import { verifySignature } from '../identity/keypair.js';
 
 /** @typedef {import('/shared/bundle/manifest.js').Manifest} Manifest */
 
-const DOMAIN = 'peerd/manifest/v1';
-
 /** @param {Manifest} manifest */
 const signingBytes = (manifest) =>
-  concat(utf8(DOMAIN), Uint8Array.from([0]), canonicalManifestBytes(manifest));
+  concat(
+    utf8(manifest.v === 2 ? 'peerd/manifest/v2' : 'peerd/manifest/v1'),
+    Uint8Array.from([0]),
+    canonicalManifestBytes(manifest),
+  );
 
 export { manifestHash };
 
@@ -118,6 +121,14 @@ export const assertBundleWithinLimits = (manifest) => {
   if (typeof manifest.size !== 'number' || !Number.isSafeInteger(manifest.size) || manifest.size < 0 || manifest.size !== declared) {
     throw new Error(`manifest size ${manifest?.size} does not match its chunk list (${declared})`);
   }
+  if (manifest.v === 2) {
+    assertBundleTransportDescriptor(manifest.bundle, {
+      compressedSize: manifest.size,
+      maxCompressedBytes: MAX_BUNDLE_BYTES,
+    });
+  } else if ((manifest.v !== undefined && manifest.v !== 1) || manifest.bundle !== undefined) {
+    throw new Error('manifest bundle transport version invalid');
+  }
 };
 
 /**
@@ -153,6 +164,7 @@ export const decodeCommittedChunk = (encoded, expectedSize) => {
  *   mime?: string,
  *   entry?: string,
  *   meta?: Record<string, any>,
+ *   bundle?: import('/shared/bundle/transport.js').BundleTransportDescriptor,
  *   identity?: { did: string, sign: (bytes: Uint8Array) => Promise<Uint8Array> } | null,
  *   now?: () => number,
  * }} opts     required — payload has no default; a zero-arg call crashes
@@ -166,11 +178,12 @@ export const buildManifest = async ({
   mime,
   entry,
   meta,
+  bundle,
   identity = null,
   now,
 } = /** @type {{ payload: Uint8Array }} */ ({})) => {
   const { manifest: unsigned, chunks } = await buildUnsignedManifest({
-    payload, type, mime, entry, meta, now,
+    payload, type, mime, entry, meta, bundle, now,
   });
 
   // why publisher rides the BASE before signing: the signature must

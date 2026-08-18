@@ -66,4 +66,15 @@ describe('App OPFS lifecycle posture', () => {
     expect(body.indexOf('registry.delete(appId)'))
       .toBeGreaterThan(body.indexOf('guardedOpfsForApp(appId).nuke()'));
   });
+
+  test('snapshotFilesBase64 does not reject compressible v2 payloads using the legacy v1 container size', async () => {
+    const source = await Bun.file('./extension/background/app-client.js').text();
+    const start = source.indexOf('const snapshotFilesBase64 = async');
+    const end = source.indexOf('const deleteFile = async', start);
+    const body = source.slice(start, end);
+    expect(body).not.toContain('packBundle');
+    expect(body).not.toContain('MAX_NETWORK_BUNDLE_BYTES');
+    expect(body).not.toContain('packedBytes');
+    expect(body).toContain('return { ...snapshot, files }');
+  });
 });

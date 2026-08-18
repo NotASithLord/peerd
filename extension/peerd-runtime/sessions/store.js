@@ -210,6 +210,10 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
    *   permissionMode?: string,
    *   confirmActions?: boolean,
    *   customSystemPrompt?: string,
+   *   appManifestDigest?: string,
+   *   appOwnerAuthorityDigest?: string,
+   *   appRole?: {source:'local'|'unsigned-import'|'dweb', publisher:string, manifestDigest:string, name?:string, instructions?:string},
+   *   actorSurface?: 'code',
    *   toolManifest?: import('../tools/manifests.js').ToolManifest | null,
    *   instanceId?: string,
    *   actorType?: 'webvm' | 'notebook' | 'pod' | 'app' | 'web' | 'dweb',
@@ -231,6 +235,10 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     permissionMode,
     confirmActions,
     customSystemPrompt,
+    appManifestDigest,
+    appOwnerAuthorityDigest,
+    appRole,
+    actorSurface,
     toolManifest,
     instanceId,
     actorType,
@@ -255,6 +263,26 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
       ...(typeof customSystemPrompt === 'string' && customSystemPrompt.trim().length > 0
         ? { customSystemPrompt }
         : {}),
+      ...(typeof appManifestDigest === 'string' && /^[0-9a-f]{64}$/.test(appManifestDigest)
+        ? { appManifestDigest }
+        : {}),
+      ...(typeof appOwnerAuthorityDigest === 'string' && /^[0-9a-f]{64}$/.test(appOwnerAuthorityDigest)
+        ? { appOwnerAuthorityDigest }
+        : {}),
+      ...(appRole && typeof appRole === 'object'
+          && (appRole.source === 'local' || appRole.source === 'unsigned-import' || appRole.source === 'dweb')
+          && typeof appRole.publisher === 'string'
+          && typeof appRole.manifestDigest === 'string'
+          && /^[0-9a-f]{64}$/.test(appRole.manifestDigest)
+        ? { appRole: {
+          source: appRole.source,
+          publisher: appRole.publisher.slice(0, 512),
+          manifestDigest: appRole.manifestDigest,
+          ...(typeof appRole.name === 'string' ? { name: appRole.name.slice(0, 80) } : {}),
+          ...(typeof appRole.instructions === 'string' ? { instructions: appRole.instructions.slice(0, 12_000) } : {}),
+        } }
+        : {}),
+      ...(actorType === 'app' && actorSurface === 'code' ? { actorSurface: 'code' } : {}),
       ...(normalizedManifest ? { toolManifest: normalizedManifest } : {}),
       ...(parentSessionId ? { parentSessionId } : {}),
       // Trusted-lineage hop verdict (actor/delegation-lineage.js): stamped by

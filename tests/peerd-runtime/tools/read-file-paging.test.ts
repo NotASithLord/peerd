@@ -107,6 +107,15 @@ describe('js_read_file self-paging', () => {
 });
 
 describe('app_read_file self-paging', () => {
+  test('finds exact anchors and offsets inside a large generated file', async () => {
+    const text = `${'x'.repeat(SPILL_PAGE_CHARS + 10)}function handleLobbyPacket(message) {}`;
+    const r = await appReadFileTool.execute(
+      { path: 'bundle.js', query: 'function handleLobbyPacket' }, appCtx(text) as any);
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.content).toContain(`"offset": ${SPILL_PAGE_CHARS + 10}`);
+    expect(r.content).toContain('function handleLobbyPacket(message)');
+  });
+
   test('an oversized file returns a bounded slice + a footer re-calling THIS tool', async () => {
     const big = 'B'.repeat(SPILL_PAGE_CHARS + 2000);
     const r = await appReadFileTool.execute({ path: 'index.html', appId: 'app-9' }, appCtx(big) as any);

@@ -108,6 +108,23 @@ export const createDwebBridge = ({
   /** @type {string | null} */
   let did = null;           // our base-network did (the offscreen's vault identity)
   let displayName = '';
+  /** @type {string | null} */
+  let roomClientId = null;
+  /** @type {string | null} */
+  let activeClientId = null;
+  // Once an iframe epoch has been replaced or disposed it can never become
+  // active again. Otherwise a late ordinary RPC from A can replace B, reclaim
+  // roomClientId, and make A's later dispose tear down B's adopted room.
+  // Refuse new epochs after a generous per-tab ceiling instead of evicting
+  // tombstones and making very old epochs replayable again.
+  const MAX_CLIENT_EPOCHS = 128;
+  /** @type {Set<string>} */
+  const retiredClientIds = new Set();
+  let admittedClientEpochs = 0;
+  let disposed = false;
+  let transitionTail = Promise.resolve();
+  /** @type {Map<string,{clientId:string,id:string,cancelled:boolean}>} */
+  const pending = new Map();
   /** @type {Set<string>} */
   const subbedTopics = new Set();
   /** @type {Array<() => void>} */
@@ -125,8 +142,32 @@ export const createDwebBridge = ({
 
   // One room op, relayed to the offscreen base host (which serves the room as a
   // namespaced sub-protocol on the shared mesh). roomId rides every op.
-  /** @param {string} op @param {Record<string, any>} [args] */
-  const room = (op, args = {}) => swCall('dweb/base/room', { op, roomId, ...args });
+  /** @param {string} op @param {Record<string, any>} [args] @param {string|null} [exactRoomId] */
+  const room = (op, args = {}, exactRoomId = roomId) => swCall('dweb/base/room', { op, roomId: exactRoomId, ...args });
+
+  /** @template T @param {()=>Promise<T>} operation */
+  const serializeTransition = (operation) => {
+    const current = transitionTail.catch(() => {}).then(operation);
+    transitionTail = current.then(() => undefined, () => undefined);
+    return current;
+  };
+
+  /** @param {{clientId:string,cancelled:boolean}} request */
+  const isCancelled = (request) => disposed || request.cancelled || activeClientId !== request.clientId;
+
+  /** @param {string} clientId */
+  const cancelClient = (clientId) => {
+    for (const request of pending.values()) {
+      if (request.clientId === clientId) request.cancelled = true;
+    }
+  };
+
+  /** @param {string} clientId */
+  const retireClient = (clientId) => {
+    cancelClient(clientId);
+    retiredClientIds.add(clientId);
+    if (activeClientId === clientId) activeClientId = null;
+  };
 
   // Grants are keyed by ROOM id, not just per-app: the consent dialog names a
   // specific room, so a remembered grant must authorize only THAT room — else
@@ -162,17 +203,21 @@ export const createDwebBridge = ({
 
   // The consent gate every join runs. A remembered grant skips the dialog,
   // never the audit. No rendezvous in the copy: connectivity is the base network.
-  /** @param {string} rid */
-  const consent = async (rid) => {
+  /** @param {string} rid @param {{clientId:string,cancelled:boolean}} request */
+  const consent = async (rid, request) => {
+    if (isCancelled(request)) throw new Error('cancelled');
     if (await grantStore.has(rid)) return true;
+    if (isCancelled(request)) throw new Error('cancelled');
     const okd = await confirmAction({
       kind: 'join',
       appName,
       detail: `join the dweb room “${rid}” — peers in the room will see your peer `
         + 'identity and the messages you publish',
     });
+    if (isCancelled(request)) throw new Error('cancelled');
     if (!okd) { audit('bridge_join_denied', { appId, appKey, roomId: rid }); return false; }
     await grantStore.grant(rid);
+    if (isCancelled(request)) throw new Error('cancelled');
     audit('bridge_join_granted', { appId, appKey, roomId: rid });
     return true;
   };
@@ -180,8 +225,8 @@ export const createDwebBridge = ({
   const ops = {
     hello: async () => ({ available: true, app: appName, launch, did, joined: roomId }),
 
-    /** @param {{ roomId?: string, name?: string }} [args] */
-    join: async ({ roomId: rid, name = '' } = {}) => {
+    /** @param {{ roomId?: string, name?: string }} [args] @param {{clientId:string,cancelled:boolean}} [request] */
+    join: async ({ roomId: rid, name = '' } = {}, request = { clientId: '', cancelled: true }) => {
       if (roomId) {
         if (roomId === rid) return { did, joined: roomId };
         throw new Error('already in a room — leave first (one room per app)');
@@ -190,11 +235,22 @@ export const createDwebBridge = ({
       const id = rid.trim();
       if (id.length > 64) throw new Error('room name too long (max 64 chars)');
       if (id === '__proto__' || id === 'constructor' || id === 'toString') throw new Error('reserved room name');
-      if (!(await consent(id))) throw new Error('denied');
-      displayName = String(name ?? '').slice(0, 40);
-      roomId = id; // set before the op so room() carries it; cleared on failure
-      const r = await room('join', { name: displayName });
-      if (!r?.ok) { roomId = null; throw new Error(r?.error ?? 'join failed'); }
+      if (!(await consent(id, request))) throw new Error('denied');
+      if (isCancelled(request)) throw new Error('cancelled');
+      const nextDisplayName = String(name ?? '').slice(0, 40);
+      // Do not publish shared state until the host proves the exact room joined.
+      const r = await room('join', { name: nextDisplayName }, id);
+      if (!r?.ok) throw new Error(r?.error ?? 'join failed');
+      if (isCancelled(request)) {
+        // The host may have incremented an offscreen room ref after the client
+        // disappeared. Exact-room rollback is mandatory; ambient roomId is
+        // still null and must never select another client's room.
+        await room('leave', {}, id).catch(() => {});
+        throw new Error('cancelled');
+      }
+      displayName = nextDisplayName;
+      roomId = id;
+      roomClientId = request.clientId;
       did = r.did;
       audit('room_joined', { roomId, did });
       return { did, joined: roomId, present: r.present };
@@ -203,8 +259,9 @@ export const createDwebBridge = ({
     leave: async () => {
       if (!roomId) return { left: false };
       const was = roomId;
-      await room('leave');
+      await room('leave', {}, was);
       roomId = null;
+      roomClientId = null;
       subbedTopics.clear();
       audit('room_left', { roomId: was });
       return { left: true };
@@ -317,23 +374,102 @@ export const createDwebBridge = ({
   let installInFlight = false;
   /** @param {any} m */
   const handleOp = async (m) => {
-    if (!m || m.peerd !== 'dweb' || typeof m.op !== 'string') return;
-    const op = /** @type {Record<string, (args?: any) => Promise<any>>} */ (ops)[m.op];
+    if (!m || typeof m !== 'object') return;
+    if (m.peerd === 'dweb:cancel') {
+      if (typeof m.clientId !== 'string' || typeof m.id !== 'string') return;
+      const request = pending.get(`${m.clientId}\0${m.id}`);
+      if (request) request.cancelled = true;
+      return;
+    }
+    if (m.peerd === 'dweb:dispose') {
+      if (typeof m.clientId !== 'string' || m.clientId.length < 8 || m.clientId.length > 128) return;
+      if (retiredClientIds.has(m.clientId)) return;
+      // An epoch that was never active owns no lifecycle state. Ignoring it
+      // also prevents hostile dispose spam from growing the retired set.
+      if (activeClientId !== m.clientId) return;
+      retireClient(m.clientId);
+      if (roomId && roomClientId === m.clientId) {
+        void serializeTransition(async () => {
+          if (!roomId || roomClientId !== m.clientId) return;
+          const was = roomId;
+          await room('leave', {}, was).catch(() => {});
+          roomId = null;
+          roomClientId = null;
+          did = null;
+          subbedTopics.clear();
+          audit('room_left', { roomId: was, reason: 'client-disposed' });
+        });
+      }
+      return;
+    }
+    if (m.peerd !== 'dweb' || typeof m.op !== 'string') return;
+    if (typeof m.clientId !== 'string' || m.clientId.length < 8 || m.clientId.length > 128
+      || typeof m.id !== 'string' || m.id.length < 8 || m.id.length > 128) {
+      return;
+    }
+    if (disposed) return;
+    if (retiredClientIds.has(m.clientId)) {
+      post({
+        peerd: 'dweb:result', id: m.id, clientId: m.clientId, ok: false,
+        error: 'retired client epoch',
+      });
+      return;
+    }
+    if (activeClientId !== m.clientId && admittedClientEpochs >= MAX_CLIENT_EPOCHS) {
+      post({
+        peerd: 'dweb:result', id: m.id, clientId: m.clientId, ok: false,
+        error: 'client epoch limit reached',
+      });
+      return;
+    }
+    if (activeClientId && activeClientId !== m.clientId) {
+      const priorClientId = activeClientId;
+      retireClient(priorClientId);
+      // A completed membership belongs to the bridge/App tab, not a dead
+      // iframe epoch. The replacement adopts it; late dispose from the old
+      // epoch can no longer tear down the replacement's room.
+      if (roomId && roomClientId === priorClientId) roomClientId = m.clientId;
+    }
+    if (activeClientId !== m.clientId) {
+      activeClientId = m.clientId;
+      admittedClientEpochs += 1;
+    }
+    const op = /** @type {Record<string, (args?: any) => Promise<any>>} */ (/** @type {unknown} */ (ops))[m.op];
     /** @param {boolean} ok @param {any} valueOrError */
     const reply = (ok, valueOrError) => post({
       peerd: 'dweb:result',
       id: m.id,
+      clientId: m.clientId,
       ok,
       ...(ok ? { value: valueOrError } : { error: String(valueOrError?.message ?? valueOrError) }),
     });
     if (!op) return reply(false, `unknown op: ${m.op}`);
     if (m.op === 'install-app' && installInFlight) return reply(false, 'an install request is already in progress');
+    const request = { clientId: m.clientId, id: m.id, cancelled: false };
+    const pendingKey = `${m.clientId}\0${m.id}`;
+    if (pending.has(pendingKey)) return reply(false, 'duplicate request id');
+    pending.set(pendingKey, request);
     try {
       if (m.op === 'install-app') installInFlight = true;
-      reply(true, await op(m.args ?? {}));
+      const value = m.op === 'join'
+        ? await serializeTransition(() => ops.join(m.args ?? {}, request))
+        : m.op === 'leave'
+          ? await serializeTransition(() => ops.leave())
+          : m.op === 'hello'
+            ? await op(m.args ?? {})
+            : await transitionTail.then(() => {
+              if (isCancelled(request)) throw new Error('cancelled');
+              return op(m.args ?? {});
+            });
+      if (!isCancelled(request)) reply(true, value);
+      else if (activeClientId === request.clientId) reply(false, 'cancelled');
     } catch (err) {
-      reply(false, err);
+      // A stale epoch receives no late result into a replacement client. Same-
+      // epoch cancellation gets a terminal rejection so its pending promise can
+      // settle if the frame is still alive.
+      if (activeClientId === request.clientId) reply(false, err);
     } finally {
+      pending.delete(pendingKey);
       if (m.op === 'install-app') installInFlight = false;
     }
   };
@@ -342,9 +478,19 @@ export const createDwebBridge = ({
 
   return {
     dispose() {
+      disposed = true;
+      if (activeClientId) cancelClient(activeClientId);
       offTransport();
       for (const off of disposers.splice(0)) off();
-      ops.leave().catch(() => {});
+      void serializeTransition(async () => {
+        if (!roomId) return;
+        const was = roomId;
+        await room('leave', {}, was).catch(() => {});
+        roomId = null;
+        roomClientId = null;
+        did = null;
+        subbedTopics.clear();
+      });
     },
   };
 };

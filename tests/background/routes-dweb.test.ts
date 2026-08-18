@@ -127,6 +127,27 @@ describe('dweb audit', () => {
 });
 
 describe('dweb app store', () => {
+  test('commons launch pins the required App actor owner without exposing it outside the hash', async () => {
+    let createArgs: any = null;
+    let tabArgs: any = null;
+    const { deps } = baseDeps({
+      getCurrentSessionId: async () => 'chat-owner',
+      appClient: {
+        create: async (args: any) => { createArgs = args; return { id: 'app-commons', ...args }; },
+      },
+      appTabTracker: {
+        ensureTab: async (id: string, options: any) => { tabArgs = { id, options }; return 41; },
+      },
+    });
+    expect(await makeDwebRoutes(deps)['dweb/open-commons']({
+      seed: { name: 'Commons', files: { 'index.html': 'x' }, dweb: { seed: 'commons' } },
+      room: 'room-1',
+    })).toEqual({ ok: true, appId: 'app-commons' });
+    expect(createArgs.sessionId).toBe('chat-owner');
+    expect(tabArgs.options.hashSuffix).toContain('room=room-1');
+    expect(tabArgs.options.hashSuffix).toContain('owner=chat-owner');
+  });
+
   test('privileged App storage arms accept only the exact offscreen host', async () => {
     let touched = false;
     const { deps } = baseDeps({

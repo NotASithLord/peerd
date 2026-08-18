@@ -40,6 +40,7 @@ import { sandboxCreateTool }          from './sandbox-create.js';
 import { jsNotebookTool }                 from './js-notebook.js';
 import { scriptTool }                  from './script.js';
 import { pageCodeTool }               from './page-code.js';
+import { appCodeTool }                from './app-code.js';
 import { jsWriteFileTool }            from './js-write-file.js';
 import { jsReadFileTool }             from './js-read-file.js';
 import { jsDeleteTool }               from './js-delete.js';
@@ -57,6 +58,8 @@ import { appWriteFileTool }           from './app-write-file.js';
 import { appReadFileTool }            from './app-read-file.js';
 import { appListFilesTool }           from './app-list-files.js';
 import { appDeleteFileTool }          from './app-delete-file.js';
+import { appObserveTool }             from './app-observe.js';
+import { appActTool }                 from './app-act.js';
 import { repositoryHistoryTool }      from './app-history.js';
 import { repositoryVersionTool }      from './app-version.js';
 import { repositoryRemoteTool }       from './app-remote.js';
@@ -142,6 +145,9 @@ export {
   appReadFileTool,
   appListFilesTool,
   appDeleteFileTool,
+  appCodeTool,
+  appObserveTool,
+  appActTool,
   repositoryHistoryTool,
   repositoryVersionTool,
   repositoryRemoteTool,
@@ -267,6 +273,9 @@ export const BUILTIN_TOOLS = Object.freeze([
   appReadFileTool,
   appListFilesTool,
   appDeleteFileTool,
+  appCodeTool,
+  appObserveTool,
+  appActTool,
   repositoryHistoryTool,
   repositoryVersionTool,
   repositoryRemoteTool,

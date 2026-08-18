@@ -27,7 +27,7 @@ describe('worker capability profile — the default (historical) surface', () =>
     // provider is the ONE spend-capable cap — off by default everywhere; the
     // script tool mints it per-run (design 5). distributed defaults ON (the tab
     // host answers it); the headless runner forces it off (design 7.3).
-    expect(DEFAULT_WORKER_CAPS).toEqual({ page: false, egress: true, subagent: true, opfs: true, provider: false, distributed: true });
+    expect(DEFAULT_WORKER_CAPS).toEqual({ app: false, page: false, egress: true, subagent: true, opfs: true, provider: false, distributed: true });
   });
 
   test('a default build has NO page bridge and only the provider throw-shim', async () => {
@@ -138,7 +138,7 @@ describe('worker capability profile for remote modules', () => {
 
     expect(usedRemoteModules).toBe(true);
     expect(REMOTE_MODULE_WORKER_CAPS).toEqual({
-      page: false, egress: false, subagent: false,
+      app: false, page: false, egress: false, subagent: false,
       opfs: false, provider: false, distributed: false,
     });
     expect(source).not.toContain("makeBridge('page'");

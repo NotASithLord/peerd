@@ -610,6 +610,37 @@ describe('app/vm meta + apps Library', () => {
       entryFile: 'index.html',
       fileKinds: {},
       dweb: null,
+      agent: { kind: 'bound-app', profile: 'developer', surface: 'code' },
+    });
+  });
+
+  test('app/get-meta returns the manifest-defined bound actor contract', async () => {
+    const r = makeEngineRoutes(baseDeps({
+      appClient: {
+        readFile: async () => JSON.stringify({
+          schema: 1,
+          kind: 'app',
+          entry: 'index.html',
+          agent: {
+            kind: 'bound-app',
+            name: 'Game developer',
+            instructions: 'Playtest before and after edits.',
+            profile: 'developer',
+            surface: 'code',
+            runtime: ['observe', 'act'],
+          },
+          capabilities: [],
+        }),
+        listFiles: async () => [{ path: '/index.html' }, { path: '/peerd.json' }],
+      },
+    }));
+    expect((await r['app/get-meta']({ appId: 'a1' })).agent).toEqual({
+      kind: 'bound-app',
+      profile: 'developer',
+      surface: 'code',
+      name: 'Game developer',
+      instructions: 'Playtest before and after edits.',
+      runtime: ['observe', 'act'],
     });
   });
   test('app/get-meta revokes a stale registry bridge when peerd.json removes dweb', async () => {
@@ -664,6 +695,16 @@ describe('apps/delete', () => {
     }));
     expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
     expect(unshared).toBe(false); // DWEB_ENABLED false → no offscreen round-trip
+  });
+  test('retires chat-scoped actor bindings after the App is deleted', async () => {
+    const retired: string[] = [];
+    const r = makeEngineRoutes(baseDeps({
+      appRegistry: { get: async () => ({ id: 'a1', name: 'A' }) },
+      appClient: { delete: async () => true },
+      onAppDeleted: async (appId: string) => { retired.push(appId); },
+    }));
+    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
+    expect(retired).toEqual(['a1']);
   });
   test('un-shares a shared app when dweb is on', async () => {
     let msg: any = null;

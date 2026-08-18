@@ -149,6 +149,9 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
     // (a missing chunk throws in the worker before we reach reassembly).
     const payload = concat(...manifest.chunks.map((c) => /** @type {Uint8Array} */ (byHash.get(c.hash))));
     if (payload.length !== manifest.size) throw new Error('reassembled size mismatch');
+    if (manifest.v === 2 && await sha256hex(payload) !== manifest.bundle.compressedHash) {
+      throw new Error('compressed bundle hash mismatch');
+    }
     return { manifest, payload, providers: clients.map((c) => c.did) };
   } finally {
     for (const { client } of clients) client.close();

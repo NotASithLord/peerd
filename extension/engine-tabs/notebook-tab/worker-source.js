@@ -54,13 +54,13 @@ export const NOTEBOOK_BUILTINS = { 'peerd:std': STD_MODULE_URL, 'peerd:wasi': WA
 // in-realm throw a touch of peerd.distributed.* would hang to the job
 // wall-clock (design 7.3).
 export const DEFAULT_WORKER_CAPS = Object.freeze({
-  page: false, egress: true, subagent: true, opfs: true, provider: false, distributed: true,
+  page: false, app: false, egress: true, subagent: true, opfs: true, provider: false, distributed: true,
 });
 
 // A static remote dependency shares one module realm with the entry code, so
 // authority cannot be attributed safely by call stack. Restrict the whole run.
 export const REMOTE_MODULE_WORKER_CAPS = Object.freeze({
-  page: false, egress: false, subagent: false, opfs: false, provider: false, distributed: false,
+  page: false, app: false, egress: false, subagent: false, opfs: false, provider: false, distributed: false,
 });
 
 /**
@@ -75,11 +75,11 @@ export const REMOTE_MODULE_WORKER_CAPS = Object.freeze({
  * @param {boolean} [opts.actors] expose the `actors` delegation client (capability-gated; the host relays actors-request → SW actors/call). Off by default.
  * @param {string} [opts.siteFetch] DESIGN-19: expose the `site` client PINNED to this origin (site.fetch → the host site-fetch-request relay → SW site-fetch/call). Off by default; when set, egress/opfs/subagent/page are all off (a site-client run's ONLY outward edge is the pinned fetch).
  * @param {number} [opts.actorsGuardMs] the actors bridge guard — passed from the timeout tower (actors-api.js ACTORS_BRIDGE_GUARD_MS) so it cannot drift below the per-ask cap.
- * @param {{ actors?: string, page?: string, mesh?: string, provider?: string, site?: string }} [opts.clientSources]
+ * @param {{ actors?: string, page?: string, app?: string, mesh?: string, provider?: string, site?: string }} [opts.clientSources]
  *   Trusted client installers generated from the runtime capability manifest.
  *   Fallback installers below preserve direct engine tests/Notebook embedding;
  *   production headless runs always pass the generated sources.
- * @param {{ page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean, distributed?: boolean }} [opts.caps]
+ * @param {{ page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean, distributed?: boolean }} [opts.caps]
  * @param {{args?:string[],stdin?:string,env?:Record<string,string>,cwd?:string}} [opts.podCommand]
  *   Pod's restricted JS command profile. It swaps in the stricter Pod seal and
  *   exposes only lexical args/stdin/env/cwd/pod helpers over the existing OPFS
@@ -392,6 +392,21 @@ const __page = {
 };
 globalThis.page = __page;
 globalThis.peerd.page = __page;
+`) : ''}
+// --- app.* (bound App runtime) proxy, capability-gated (caps.app) ---
+// The owner and App id never enter this realm. The offscreen host attaches the
+// run owner; the SW re-derives the bound instance and dispatches each method
+// through the App actor's ordinary gates.
+${profile.app ? (clientSources.app || `
+const appRelay = makeBridge('app', { timeoutMs: 30000, timeoutMessage: (p) => 'app.' + p.method + ' timed out' });
+const appCall = (method, args) => appRelay({ method, args });
+const __app = {
+  observe: () => appCall('observe', {}),
+  act: (action, params) => appCall('act', { action, params: params || {} }),
+  wait: (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(5000, Number(ms) || 0)))),
+};
+globalThis.app = __app;
+globalThis.peerd.app = __app;
 `) : ''}${siteFetch && !usedRemoteModules ? (clientSources.site || `
 // --- site.* (DESIGN-19 site client) proxy — ONE origin-pinned fetch ---
 // A site-client run's ONLY outward edge: site.fetch(path, { method, headers, body })

@@ -38,15 +38,19 @@ start — "Connecting…" forever). Keep all the JS in inline/classic <script> t
 exact message keys — peerd:'dweb' out, peerd:'dweb:result' / peerd:'dweb:event' in;
 NOT type:'dweb':
 
-  let seq = 0; const pend = new Map(); const subs = new Map();
+  const clientId = crypto.randomUUID(); const pend = new Map(); const subs = new Map();
   const call = (op, args = {}) => new Promise((res, rej) => {
-    const id = ++seq; pend.set(id, { res, rej });
-    parent.postMessage({ peerd: 'dweb', id, op, args }, '*');
+    const id = crypto.randomUUID(); pend.set(id, { res, rej });
+    parent.postMessage({ peerd: 'dweb', id, clientId, op, args }, '*');
   });
   const on = (ev, cb) => subs.set(ev, [...(subs.get(ev) || []), cb]);
   addEventListener('message', (e) => { const m = e.data; if (!m) return;
-    if (m.peerd === 'dweb:result') { const p = pend.get(m.id); if (p) { pend.delete(m.id); m.ok ? p.res(m.value) : p.rej(new Error(m.error)); } }
+    if (m.peerd === 'dweb:result' && m.clientId === clientId) { const p = pend.get(m.id); if (p) { pend.delete(m.id); m.ok ? p.res(m.value) : p.rej(new Error(m.error)); } }
     else if (m.peerd === 'dweb:event') (subs.get(m.event) || []).forEach((cb) => cb(m.data)); });
+  addEventListener('pagehide', () => {
+    for (const id of pend.keys()) parent.postMessage({ peerd:'dweb:cancel', clientId, id }, '*');
+    parent.postMessage({ peerd:'dweb:dispose', clientId }, '*');
+  });
 
 Ops (all via call): hello() -> {available, did, joined}. join({roomId, name}) ->
 the shared space (pick a roomId, e.g. the game name). leave(). publish({topic,

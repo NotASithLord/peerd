@@ -221,6 +221,7 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before changing code.
 - [`docs/security/THREAT-MODEL.md`](docs/security/THREAT-MODEL.md): trust boundaries and residual risks
 - [`docs/security/LIFECYCLE-CONTRACT.md`](docs/security/LIFECYCLE-CONTRACT.md): interruption behavior and recovery limits
 - [`docs/security/RED-TEAM-RESULTS.md`](docs/security/RED-TEAM-RESULTS.md): red-team coverage
+- [`docs/DWAPP-BUNDLE.md`](docs/DWAPP-BUNDLE.md): compressed dwapp transport, decoded working trees, and binary assets
 - [`docs/store/`](docs/store/): store packaging, permissions, privacy, and reviewer notes
 - [`scripts/cdp/states.mjs`](scripts/cdp/states.mjs): E2E and visual states
 

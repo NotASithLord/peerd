@@ -23,19 +23,22 @@ import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
 import { isServiceWorkerSender } from '/shared/messaging.js';
 
 const appId = location.hash.slice(1).split(/[?&]/)[0];
+const hashParams = new URLSearchParams(location.hash.slice(1).split('?')[1] ?? '');
 // Launch params ride the hash past the appId (`#<id>?room=…&url=…`) —
 // the dweb bridge hands them to the app at hello (deep-link into a room).
-const launchParams = (() => {
-  const q = location.hash.slice(1).split('?')[1] ?? '';
-  const p = new URLSearchParams(q);
-  return { room: p.get('room') ?? undefined, url: p.get('url') ?? undefined };
-})();
+const launchParams = {
+  room: hashParams.get('room') ?? undefined,
+  url: hashParams.get('url') ?? undefined,
+};
+// Actor ownership is host metadata and is never delivered to App code.
+const ownerSessionId = hashParams.get('owner') ?? undefined;
 // why the cast: these IDs are static in index.html and present at load; a single
 // non-null cast at the boundary keeps the call sites clean.
 /** @param {string} id @returns {HTMLElement} */
 const byId = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
 const boot    = byId('boot');
 const bootMsg = byId('boot-msg');
+const actorRetry = /** @type {HTMLButtonElement} */ (byId('actor-retry'));
 const frame   = /** @type {HTMLIFrameElement} */ (byId('app-frame'));
 const editorPanel = byId('editor-panel');
 const editorMount = byId('editor-mount');
@@ -46,11 +49,13 @@ const saveStatus = byId('app-save-status');
 const saveMessage = byId('app-save-message');
 const saveRetry = /** @type {HTMLButtonElement} */ (byId('app-save-retry'));
 
-/** @param {string} msg */
-const fail = (msg) => {
+/** @param {string} msg @param {{retryActor?:boolean}} [options] */
+const fail = (msg, { retryActor = false } = {}) => {
   boot.classList.remove('is-hidden');
   boot.classList.add('is-failed');
   bootMsg.textContent = `Failed: ${msg}`;
+  actorRetry.hidden = !retryActor;
+  actorRetry.disabled = false;
 };
 
 /** @type {HTMLElement | null} */
@@ -113,7 +118,7 @@ if (!appId) {
 }
 
 const opfs = opfsHelpers(['peerd-apps', appId]);
-/** @type {{ name: string, entryFile: string, fileKinds: Record<string, 'text' | 'binary'>, dweb: any } | null} */
+/** @type {{ name: string, entryFile: string, fileKinds: Record<string, 'text' | 'binary'>, dweb: any, agent: { kind: string, name?: string, instructions?: string, runtime?: string[] } } | null} */
 let appMeta = null;        // { name, entryFile }
 /** @type {Awaited<ReturnType<typeof createEditor>> | null} */
 let editorApi = null;
@@ -251,7 +256,7 @@ const withBuiltinLibs = async (files) => {
   return files;
 };
 
-/** @type {'idle' | 'awaiting-ready' | 'ready' | 'delivered'} */
+/** @type {'idle' | 'awaiting-ready' | 'ready' | 'delivered' | 'suspended' | 'poisoned'} */
 let runnerPhase = 'idle';
 // Watchdog timer for the runner-ready handshake — so a runner iframe that
 // throws / never loads doesn't strand the app on the boot screen forever.
@@ -281,6 +286,49 @@ let runnerStarted = false;
 let expectingBodyLoad = false;
 let linkPromptOpen = false;
 let runnerGeneration = 0;
+let agentCallSequence = 0;
+/** @type {Map<string, { resolve: (value: unknown) => void, timer: ReturnType<typeof setTimeout>, op: 'observe'|'act' }>} */
+const agentCallPending = new Map();
+const APP_AGENT_RESULT_MAX_CHARS = 100_000;
+
+/** @param {string} reason */
+const rejectAgentCalls = (reason) => {
+  for (const pending of agentCallPending.values()) {
+    clearTimeout(pending.timer);
+    pending.resolve({ ok: false, error: reason, outcomeKnown: false, outcomeKind: 'transport-lost' });
+  }
+  agentCallPending.clear();
+};
+
+// The service worker reaches the App's opt-in playtest API only through this
+// exact tab. The sandbox remains opaque and offline: this relay grants no
+// browser primitive, just request/reply with code already inside the App.
+browser.runtime.onMessage.addListener((/** @type {any} */ message, /** @type {any} */ sender) => {
+  if (!isServiceWorkerSender(sender)
+      || message?.type !== 'app/agent-call'
+      || message.appId !== appId) return false;
+  if (mode !== 'render' || runnerPhase !== 'delivered' || !frame.contentWindow) {
+    return Promise.resolve({ ok: false, error: 'app_runtime_not_ready', outcomeKnown: true, outcomeKind: 'pre-effect-failure' });
+  }
+  const op = message.op;
+  if ((op !== 'observe' && op !== 'act')
+      || (op === 'observe' && appMeta?.agent?.runtime?.includes('observe') !== true)
+      || (op === 'act' && appMeta?.agent?.runtime?.includes('act') !== true)) {
+    return Promise.resolve({ ok: false, error: 'app_runtime_operation_not_declared', outcomeKnown: true, outcomeKind: 'pre-effect-failure' });
+  }
+  const id = `${runnerGeneration}:${++agentCallSequence}`;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      agentCallPending.delete(id);
+      recoverPoisonedRunner();
+      resolve({ ok: false, error: 'app_runtime_call_timed_out_outcome_unknown', outcomeKnown: false, outcomeKind: 'transport-lost' });
+    }, 12_000);
+    agentCallPending.set(id, { resolve, timer, op });
+    frame.contentWindow?.postMessage({
+      peerd: 'app:agent:request', id, op, args: message.args ?? {},
+    }, '*');
+  });
+});
 
 const tryDeliver = () => {
   if (runnerPhase !== 'ready' || pendingBody == null) return;
@@ -292,7 +340,16 @@ const tryDeliver = () => {
   // trusted runner load.
   frame.sandbox.remove('allow-scripts');
   runnerPort?.postMessage(
-    { type: 'app-body', html: pendingBody, assets: pendingAssets, entry: appMeta?.entryFile },
+    {
+      type: 'app-body',
+      html: pendingBody,
+      assets: pendingAssets,
+      entry: appMeta?.entryFile,
+      agentRuntime: {
+        observe: appMeta?.agent?.runtime?.includes('observe') === true,
+        act: appMeta?.agent?.runtime?.includes('act') === true,
+      },
+    },
     Object.values(pendingAssets),
   );
   // Transfer detaches these parent-side buffers. Clear the queue immediately;
@@ -305,6 +362,7 @@ const tryDeliver = () => {
 };
 
 const startRunner = () => {
+  rejectAgentCalls('app_runtime_restarted');
   runnerPort?.close();
   runnerPort = null;
   runnerPhase = 'awaiting-ready';
@@ -319,6 +377,41 @@ const startRunner = () => {
       fail('the app runner did not start. Try reopening the app or reload this tab.');
     }
   }, 8000);
+};
+
+/** Stop the current App document before the editor becomes interactive. */
+const suspendRunnerForEdit = () => {
+  rejectAgentCalls('app_runtime_suspended_for_editing');
+  if (runnerWatchdog) { clearTimeout(runnerWatchdog); runnerWatchdog = null; }
+  runnerPort?.close();
+  runnerPort = null;
+  pendingBody = null;
+  pendingAssets = {};
+  runnerPhase = 'suspended';
+  runnerStarted = false;
+  expectingRunnerLoad = false;
+  expectingBodyLoad = false;
+  if (dwebBridge) { dwebBridge.dispose(); dwebBridge = null; }
+  // Replacing the document is the only way to stop a late async handler from
+  // the prior generation; hiding the iframe would leave it running.
+  frame.src = 'about:blank';
+};
+
+let poisonRecoveryScheduled = false;
+const recoverPoisonedRunner = () => {
+  if (poisonRecoveryScheduled) return;
+  poisonRecoveryScheduled = true;
+  runnerPhase = 'poisoned';
+  rejectAgentCalls('app_runtime_generation_poisoned');
+  setTimeout(() => {
+    poisonRecoveryScheduled = false;
+    if (mode !== 'render') return;
+    appMeta = null;
+    runnerPhase = 'idle';
+    renderMode().catch((error) => fail(
+      /** @type {{message?:string}} */ (error)?.message ?? String(error),
+    ));
+  }, 0);
 };
 
 const initializeRunnerChannel = () => {
@@ -351,17 +444,18 @@ const renderMode = async () => {
   // looked like a no-op even though the render happened underneath.
   editorPanel.hidden = true;
 
-  if (!appMeta) {
-    const meta = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'app/get-meta', appId }));
-    if (!meta?.ok) { fail(meta?.error ?? 'unknown error'); return; }
-    appMeta = {
-      name: meta.name,
-      entryFile: meta.entryFile,
-      fileKinds: copyFileKinds(meta.fileKinds),
-      dweb: meta.dweb ?? null,
-    };
-    attachDwebBridge(); // no-op unless this app is a dwapp on a dweb build
-  }
+  // Always refetch on entry. Edit mode can change peerd.json and a dweb update
+  // can replace the package while this tab remains alive.
+  const meta = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'app/get-meta', appId }));
+  if (!meta?.ok) { fail(meta?.error ?? 'unknown error'); return; }
+  appMeta = {
+    name: meta.name,
+    entryFile: meta.entryFile,
+    fileKinds: copyFileKinds(meta.fileKinds),
+    dweb: meta.dweb ?? null,
+    agent: meta.agent ?? { kind: 'bound-app' },
+  };
+  attachDwebBridge(); // no-op unless this app is a dwapp on a dweb build
 
   let textFiles, binaryAssets;
   try { ({ textFiles, binaryAssets } = await readForRender()); }
@@ -400,6 +494,55 @@ window.addEventListener('securitypolicyviolation', (event) => {
 
 window.addEventListener('message', (/** @type {MessageEvent} */ e) => {
   if (e.source !== frame.contentWindow) return;
+  if (e.data?.peerd === 'app:agent:result') {
+    const pending = agentCallPending.get(e.data.id);
+    if (!pending) return;
+    agentCallPending.delete(e.data.id);
+    clearTimeout(pending.timer);
+    if (e.data.ok !== true) {
+      // Only this trusted host's checks above can prove an act was refused
+      // before dispatch. Once posted into the App document, a handler may
+      // mutate and then throw (or forge an unclassified failure), so every
+      // rejected act has unknown outcome and retires this document generation.
+      const postDispatchActFailure = pending.op === 'act';
+      const outcomeUnknown = postDispatchActFailure
+        || e.data.outcomeKnown === false
+        || e.data.poisoned === true;
+      pending.resolve({
+        ok: false,
+        error: String(e.data.error || 'app_runtime_operation_failed').slice(0, 1_000),
+        ...(outcomeUnknown
+          ? { outcomeKnown: false, outcomeKind: 'transport-lost' }
+          : { outcomeKnown: true, outcomeKind: 'pre-effect-failure' }),
+      });
+      if (outcomeUnknown) recoverPoisonedRunner();
+      return;
+    }
+    try {
+      const value = e.data.value ?? null;
+      const encoded = JSON.stringify(value);
+      if (typeof encoded !== 'string' || encoded.length > APP_AGENT_RESULT_MAX_CHARS) {
+        pending.resolve({
+          ok: false,
+          error: 'app_runtime_result_too_large',
+          ...(pending.op === 'act'
+            ? { outcomeKnown: false, outcomeKind: 'transport-lost' }
+            : { outcomeKnown: true, outcomeKind: 'pre-effect-failure' }),
+        });
+        if (pending.op === 'act') recoverPoisonedRunner();
+      } else pending.resolve({ ok: true, value });
+    } catch {
+      pending.resolve({
+        ok: false,
+        error: 'app_runtime_result_not_serializable',
+        ...(pending.op === 'act'
+          ? { outcomeKnown: false, outcomeKind: 'transport-lost' }
+          : { outcomeKnown: true, outcomeKind: 'pre-effect-failure' }),
+      });
+      if (pending.op === 'act') recoverPoisonedRunner();
+    }
+    return;
+  }
   if (e.data?.type === 'app-policy-blocked' && runnerPhase === 'delivered') {
     const directive = typeof e.data.directive === 'string'
       ? e.data.directive.replace(/[^a-z-]/gi, '').slice(0, 40)
@@ -551,6 +694,7 @@ const attachDwebBridge = async () => {
 
 const editMode = async () => {
   mode = 'edit';
+  suspendRunnerForEdit();
   document.body.classList.remove('mode-render');
   document.body.classList.add('mode-edit');
   toggleBtn.textContent = 'View ▶';
@@ -564,6 +708,7 @@ const editMode = async () => {
       entryFile: meta.entryFile,
       fileKinds: copyFileKinds(meta.fileKinds),
       dweb: meta.dweb ?? null,
+      agent: meta.agent ?? { kind: 'bound-app' },
     };
     attachDwebBridge();
   }
@@ -659,6 +804,7 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pagehide', () => {
   flushEditorBeforeSuspension();
+  rejectAgentCalls('app_runtime_closed');
   runnerPort?.close();
   dwebBridge?.dispose();
 });
@@ -667,6 +813,19 @@ window.addEventListener('pagehide', () => {
 // Boot + toggle
 // ---------------------------------------------------------------------------
 
+/** @param {'app/tab-ready'|'app/actor-retry'} type */
+const attachRequiredActor = async (type) => /** @type {Promise<any>} */ (
+  browser.runtime.sendMessage({ type, appId, ownerSessionId })
+    .catch(() => ({
+      ok: false,
+      error: type === 'app/tab-ready'
+        ? 'The App isolation check did not respond.'
+        : 'The actor retry did not respond.',
+      actorRequired: type === 'app/actor-retry',
+      retryable: type === 'app/actor-retry',
+    }))
+);
+
 toggleBtn.addEventListener('click', async () => {
   try {
     if (mode === 'render') {
@@ -674,6 +833,12 @@ toggleBtn.addEventListener('click', async () => {
     } else {
       // When leaving edit mode, flush save + force a fresh render.
       if (editorApi) await editorApi.flushSave?.();
+      const attachment = await attachRequiredActor('app/actor-retry');
+      if (!attachment?.ok) {
+        fail(attachment?.error ?? 'The required App actor is unavailable.', { retryActor: true });
+        return;
+      }
+      appMeta = null;
       runnerPhase = 'idle';          // force the runner to re-emit ready
       await renderMode();
     }
@@ -686,9 +851,8 @@ toggleBtn.addEventListener('click', async () => {
 // edits flows via chrome.tabs.reload (in app-client.reloadTab); this
 // page re-runs, refetches OPFS + recomposes. No extra message
 // channel needed.
-const isolation = /** @type {{ ok?: boolean, error?: string }} */ (
-  await browser.runtime.sendMessage({ type: 'app/tab-ready', appId })
-    .catch(() => ({ ok: false, error: 'The App isolation check did not respond.' }))
+const isolation = /** @type {{ ok?: boolean, error?: string, actorRequired?: boolean, retryable?: boolean }} */ (
+  await attachRequiredActor('app/tab-ready')
 );
 
 // A peerd-owned tab carries the trigger to pull the side panel in — so you can
@@ -696,7 +860,26 @@ const isolation = /** @type {{ ok?: boolean, error?: string }} */ (
 mountPullInPeerd();
 
 if (!isolation?.ok) {
-  fail(isolation?.error ?? 'This browser cannot enforce App isolation.');
+  fail(isolation?.error ?? 'This browser cannot enforce App isolation.', {
+    retryActor: isolation?.actorRequired === true && isolation?.retryable === true,
+  });
 } else {
   renderMode();
 }
+
+actorRetry.addEventListener('click', async () => {
+  actorRetry.disabled = true;
+  boot.classList.remove('is-failed');
+  bootMsg.textContent = 'Attaching the required App actor…';
+  const reply = await attachRequiredActor('app/actor-retry');
+  if (!reply?.ok) {
+    fail(reply?.error ?? 'The required App actor is unavailable.', { retryActor: true });
+    return;
+  }
+  actorRetry.hidden = true;
+  boot.classList.remove('is-failed');
+  renderMode().catch((error) => fail(
+    /** @type {{message?:string}} */ (error)?.message ?? String(error),
+    { retryActor: true },
+  ));
+});

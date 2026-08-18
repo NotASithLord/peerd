@@ -375,6 +375,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         temporalBlock: isActor ? temporalBlock : '',
         skillsBlock,
         customSystemPrompt: promptSession?.customSystemPrompt,
+        appRole: promptSession?.appRole,
         // DESIGN-17: an actor gets a kind-specific tuned block appended. The base
         // template, including all security and defense text, survives verbatim.
         // DESIGN-18: backing distinguishes a tab-backed web actor (DOM lore) from an

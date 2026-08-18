@@ -93,6 +93,7 @@ export { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';
 export { createConversationRegistry } from './actor/conversation-registry.js';
 export { makeWebActorTabBindings, makeWebActorRegistry, retireStoppedRoamingWebActorDurably, safeWebActorSummaryOrigin, fenceWebActorSummary, makeApiActorBindings, normalizeApiOrigin, fenceApiActorSummary, siteHandleFor, parseSiteHandle } from './actor/web-actor.js';
 export { makePageCallHandler, resolvePageTab } from './actor/page-call-handler.js';
+export { makeAppCallHandler } from './actor/app-call-handler.js';
 export { makeOriginStateStore } from './actor/origin-state-store.js';
 export { makeLearnedOrigins } from './actor/learned-origins.js';
 export { makeJudgeLanding, makeCredentialScope, makeSignInOriginAuthorizer, makeSignInExcursionAuthorizer, makeSignInExcursionRevoker, makeSiteClientOriginGuard, makeSiteClientOriginAuthorizer, makeFixedSiteClientOriginGuard, authorizeSiteClientRelayOrigin, hasDurableSiteClientState } from './actor/origin-lock.js';

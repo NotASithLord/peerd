@@ -28,4 +28,20 @@ describe('App tab tracker quiescence', () => {
     await expect(() => tracker.quiesceTab('app-1'))
       .toThrow((error) => error?.message === 'save failed');
   });
+
+  it('pins an adopted App host to one owner root and refuses cross-chat reuse', async () => {
+    const tabs = /** @type {any} */ ({
+      get: async () => ({ id: 41 }),
+      sendMessage: async () => ({ ok: true }),
+      query: async () => [], create: async () => ({ id: 42 }),
+      reload: async () => {}, remove: async () => {},
+    });
+    const tracker = createAppTabTracker({ tabs });
+    tracker.onTabPending('app-1', 41, 'chat-a', 'root-a');
+    tracker.onTabReady('app-1', 41, 'chat-a', 'root-a');
+    expect(tracker.getOwnedTabId('app-1', 'root-a')).toBe(41);
+    expect(tracker.getOwnedTabId('app-1', 'root-b')).toBe(null);
+    await expect(() => tracker.ensureTab('app-1', { ownerSessionId: 'chat-b' }))
+      .toThrow((error) => error?.message === 'app-owned-by-another-chat');
+  });
 });

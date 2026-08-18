@@ -157,7 +157,7 @@ describe('restrictCtxCapabilities', () => {
     // sandbox_create keeps the dweb closure (its app arm reads ctx.dweb for the dwapp flag)
     expect('dweb' in restrictCtxCapabilities(fullCtx(), new Set(['sandbox_create']))).toBe(true);
     expect('dweb' in restrictCtxCapabilities(fullCtx(), new Set(['dweb_share']))).toBe(true);
-    for (const tool of ['script', 'a2a_run', 'page_code', 'site_client_run']) {
+    for (const tool of ['script', 'a2a_run', 'page_code', 'app_code', 'site_client_run']) {
       const narrowed = restrictCtxCapabilities(fullCtx(), new Set([tool]));
       expect('jsOffscreenClient' in narrowed).toBe(true);
       expect('scriptRuns' in narrowed).toBe(true);
