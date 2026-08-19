@@ -18,10 +18,10 @@ and storage formats may move until the surface stabilizes.
   that actor to the exact App, owning root task, manifest revision, and caller
   authority; the actor can use one sealed `app_code` program to observe,
   exercise, and test the running App before editing its readable working tree.
-  App authors define a bounded semantic observe/act adapter while the human
-  talks directly to the bound actor through a host-owned in-tab drawer. App code
-  can reveal that drawer on a user gesture but never receives prompt submission,
-  model access, provider credentials, or actor authority.
+  App authors define a bounded semantic observe/act adapter, while messages
+  entered through the host-owned in-tab drawer join that bound actor's same
+  continuing mailbox. App code can reveal the drawer on a user gesture but never
+  receives prompt submission, model access, provider credentials, or actor authority.
 - Dweb App bundles have a signed version-2 transport with deterministic,
   version-pinned compression before chunking. Descriptors commit to the
   encoding, compressed and uncompressed sizes and hashes, and every decoded
