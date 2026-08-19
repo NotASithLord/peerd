@@ -983,7 +983,26 @@ jobs:
             echo "::error::PEERD_SITE_DISPATCH_TOKEN is not set in the release-notify environment. Add a fine-grained token scoped to NotASithLord/peerd-site with Contents:write, then re-run this failed job."
             exit 1
           fi
-          gh api --method POST repos/NotASithLord/peerd-site/dispatches \
-            -f event_type=peerd-release \
-            -F "client_payload[tag]=$GITHUB_REF_NAME"
+          # why retry here: this is the only cross-repository handoff. Brief
+          # GitHub API failures should not require a human re-run, while the
+          # bounded loop still leaves a visible failure for the hourly repair
+          # workflow in peerd-site to reconcile after a longer outage.
+          dispatched=false
+          for attempt in 1 2 3; do
+            if gh api --method POST repos/NotASithLord/peerd-site/dispatches \
+              -f event_type=peerd-release \
+              -F "client_payload[tag]=$GITHUB_REF_NAME"; then
+              dispatched=true
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              delay=$((attempt * 10))
+              echo "::warning::peerd-site dispatch attempt $attempt failed; retrying in ${delay}s"
+              sleep "$delay"
+            fi
+          done
+          if [ "$dispatched" != true ]; then
+            echo "::error::peerd-site dispatch failed after 3 attempts; the hourly site reconciliation remains the repair path"
+            exit 1
+          fi
           echo "dispatched peerd release $GITHUB_REF_NAME to peerd-site"
