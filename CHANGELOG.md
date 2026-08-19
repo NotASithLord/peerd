@@ -42,6 +42,9 @@ and storage formats may move until the surface stabilizes.
 
 ### Fixed
 
+- Release publication now requires only one manual approval. The peerd.ai
+  notification job keeps its own narrowly scoped environment, so a failed
+  notification can be retried without repeating irreversible Firefox signing.
 - App actor attachment, reuse, and runtime calls now reconcile manifest and
   owner-authority changes, require an exact owner-bound tab, suspend across
   edits, and preserve cancellation or unknown-outcome custody through the
