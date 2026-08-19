@@ -117,6 +117,14 @@
       const AGENT_CALL_TIMEOUT_MS = 10_000;
       const AGENT_RESULT_MAX_CHARS = 100_000;
       const agentApi = Object.freeze({
+        // A sandboxed App may reveal the trusted host drawer only in direct
+        // response to a human gesture. It cannot provide a message, submit the
+        // form, observe the transcript, or invoke a model through this method.
+        open() {
+          if (navigator.userActivation?.isActive !== true) return false;
+          window.parent.postMessage({ peerd: 'app:agent:open' }, '*');
+          return true;
+        },
         expose(definition) {
           if (!definition || typeof definition !== 'object') {
             throw new TypeError('peerd.agent.expose requires an operation map');
@@ -135,8 +143,7 @@
       Object.defineProperty(window, 'peerd', {
         value: Object.freeze({
           assets: assetsApi,
-          ...(requestedAgentRuntime.observe === true || requestedAgentRuntime.act === true
-            ? { agent: agentApi } : {}),
+          agent: agentApi,
         }),
         writable: false,
         configurable: false,

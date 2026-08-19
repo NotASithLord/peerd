@@ -67,8 +67,8 @@
       font-weight: 700; font-size: 10px;
     }
 
-    /* Floating mode toggle (+ export) in the top-right corner. */
-    #mode-toggle, #export-btn {
+    /* Trusted host controls in the top-right corner. */
+    #mode-toggle, #export-btn, #actor-chat-toggle {
       position: fixed; top: 6px; right: 8px;
       z-index: 30;
       background: var(--bg-elev);
@@ -88,6 +88,67 @@
     #export-btn { right: 88px; }
     #export-btn:hover { opacity: 1; border-color: var(--fg-muted); }
     #export-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    #actor-chat-toggle { right: 172px; }
+    #actor-chat-toggle:hover, #actor-chat-toggle[aria-expanded="true"] {
+      opacity: 1; border-color: var(--accent);
+    }
+
+    /* Host-owned App actor drawer. It sits outside the sandboxed iframe: App
+       code can request that it open, but cannot read, populate, or submit it. */
+    #actor-chat-drawer {
+      position: fixed; top: 40px; right: 12px; bottom: 12px;
+      width: min(400px, calc(100vw - 24px));
+      z-index: 80;
+      display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
+      border: 1px solid var(--border-strong); border-radius: 10px;
+      background: color-mix(in srgb, var(--bg-elev) 97%, transparent);
+      color: var(--fg); box-shadow: 0 18px 60px rgba(0,0,0,.45);
+      font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      overflow: hidden;
+    }
+    #actor-chat-drawer[hidden] { display: none; }
+    .actor-chat-header {
+      display: flex; align-items: center; gap: 10px; padding: 11px 12px;
+      border-bottom: 1px solid var(--border); background: var(--bg-elev2);
+    }
+    .actor-chat-title { flex: 1; min-width: 0; }
+    .actor-chat-title strong, .actor-chat-title span { display: block; }
+    .actor-chat-title span { color: var(--fg-muted); font-size: 11px; }
+    #actor-chat-close {
+      border: 0; background: transparent; color: var(--fg-muted);
+      font-size: 20px; line-height: 1; cursor: pointer;
+    }
+    #actor-chat-messages {
+      overflow: auto; padding: 14px; display: flex; flex-direction: column;
+      gap: 10px; background: var(--bg);
+    }
+    .actor-chat-message {
+      max-width: 92%; padding: 9px 11px; border: 1px solid var(--border);
+      border-radius: 9px; white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    .actor-chat-message[data-role="user"] {
+      align-self: flex-end; background: color-mix(in srgb, var(--accent) 17%, var(--bg-elev));
+      border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+    }
+    .actor-chat-message[data-role="actor"] { align-self: flex-start; background: var(--bg-elev); }
+    .actor-chat-message[data-role="status"] { align-self: center; color: var(--fg-muted); font-size: 11px; }
+    .actor-chat-compose {
+      padding: 10px; border-top: 1px solid var(--border); background: var(--bg-elev2);
+    }
+    #actor-chat-input {
+      display: block; width: 100%; min-height: 72px; max-height: 180px; resize: vertical;
+      border: 1px solid var(--border-strong); border-radius: 7px;
+      background: var(--bg-editor); color: var(--fg); padding: 9px 10px;
+      font: inherit;
+    }
+    .actor-chat-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+    #actor-chat-status { flex: 1; color: var(--fg-muted); font-size: 11px; }
+    #actor-chat-send {
+      min-height: 30px; padding: 4px 12px; border: 1px solid var(--accent);
+      border-radius: 5px; background: var(--accent); color: #101112; cursor: pointer;
+      font-weight: 650;
+    }
+    #actor-chat-send:disabled { opacity: .5; cursor: default; }
 
     /* Boot overlay. */
     .boot {
@@ -175,6 +236,26 @@
     </div>
   </div>
 
+  <aside id="actor-chat-drawer" aria-label="App actor conversation" hidden>
+    <div class="actor-chat-header">
+      <div class="actor-chat-title">
+        <strong id="actor-chat-name">App actor</strong>
+        <span>Direct conversation · scoped to this App</span>
+      </div>
+      <button id="actor-chat-close" type="button" aria-label="Close App actor">×</button>
+    </div>
+    <div id="actor-chat-messages" role="log" aria-live="polite" aria-relevant="additions"></div>
+    <div class="actor-chat-compose">
+      <label for="actor-chat-input" class="muted" style="display:block;text-align:left;padding:0 0 6px;max-width:none">Message this App's actor</label>
+      <textarea id="actor-chat-input" maxlength="12000" placeholder="Ask about the App, its state, or a change you want…"></textarea>
+      <div class="actor-chat-actions">
+        <span id="actor-chat-status">Enter to send · Shift+Enter for a new line</span>
+        <button id="actor-chat-send" type="button">Send</button>
+      </div>
+    </div>
+  </aside>
+
+  <button id="actor-chat-toggle" type="button" title="Talk directly with this App's actor" aria-expanded="false">Actor ◇</button>
   <button id="export-btn" title="Download this app as a .peerd file">Export ⤓</button>
   <button id="mode-toggle" title="Toggle render / edit">Edit ✎</button>
 

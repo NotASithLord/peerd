@@ -1,5 +1,5 @@
 // @ts-check
-// One code-first gameplay/development feedback surface for a bound App actor.
+// One code-first runtime/development feedback surface for a bound App actor.
 
 import { clamp } from '/shared/util.js';
 import { formatRunResult } from './script.js';
@@ -17,7 +17,7 @@ export const appCodeTool = {
   name: 'app_code',
   primitive: 'app',
   description: [
-    'Playtest YOUR running App by writing JavaScript in a sealed worker.',
+    'Exercise YOUR running App by writing JavaScript in a sealed worker.',
     `Exact client: ${codeClientReference('app')}.`,
     'Compose short observe/act loops and return compact structured evidence.',
     'Every call is exact-instance pinned and crosses the same App runtime gate;',

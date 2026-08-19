@@ -50,6 +50,7 @@ import { makeCoalescedStatePush } from './state-push.js';
 import { makeSessionCostFolder } from './session-cost-fold.js';
 import { makeScriptModelCallRoute } from './script-model-call.js';
 import { makeOriginLockResolver } from './origin-lock-controller.js';
+import { makeAppActorChatHandler } from './app-actor-chat.js';
 
 import {
   // vault
@@ -7562,6 +7563,20 @@ const actorMessaging = makeActorMessaging({
   mailbox: actorMailbox,
   log: (/** @type {any[]} */ ...a) => console.warn('[actor]', ...a),
 });
+
+// App-native copilot: the exact trusted App parent tab collects human input
+// and addresses its already-bound actor directly. This is deliberately not the
+// side-panel orchestrator and is not reachable from the sandboxed App iframe.
+const handleAppActorChat = makeAppActorChatHandler({
+  isTrustedSender,
+  appTabTracker,
+  ensureAppActorBinding,
+  sessions,
+  messageActor: (request) => actorMessaging.messageActor(request),
+});
+browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} */ sender) =>
+  handleAppActorChat(msg, sender));
+
 // Human-feedback admission must see both the parent chat slot and any actor
 // delivery still settling for that chat. Keep these as explicit bindings so
 // route wiring remains shorthand-only and statically auditable.

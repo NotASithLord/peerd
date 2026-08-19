@@ -13,6 +13,30 @@ describe('App tab required-actor and runtime lifecycle contracts', () => {
     expect(html).toContain('id="actor-retry"');
   });
 
+  test('the App tab owns the direct actor conversation while App code can only reveal it', async () => {
+    const host = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
+    const html = await Bun.file('./extension/engine-tabs/app-tab/index.html').text();
+    const runner = await Bun.file('./extension/engine-tabs/app-tab/runner.html').text();
+    const attachIndex = host.indexOf("await attachRequiredActor('app/tab-ready')");
+    const directRouteIndex = host.indexOf("type: 'app/actor-chat'");
+    expect(attachIndex).toBeGreaterThan(-1);
+    expect(directRouteIndex).toBeGreaterThan(-1);
+    expect(html).toContain('id="actor-chat-drawer"');
+    expect(html).toContain('Direct conversation · scoped to this App');
+    expect(host).toContain("message.textContent = text");
+    expect(host).not.toContain('message.innerHTML =');
+
+    const agentApiStart = runner.indexOf('const agentApi = Object.freeze({');
+    const peerdGlobalStart = runner.indexOf("Object.defineProperty(window, 'peerd'", agentApiStart);
+    const agentApi = runner.slice(agentApiStart, peerdGlobalStart);
+    expect(agentApi).toContain('open()');
+    expect(agentApi).toContain('navigator.userActivation?.isActive');
+    expect(agentApi).toContain("{ peerd: 'app:agent:open' }");
+    expect(agentApi).toContain('expose(definition)');
+    expect(agentApi).not.toContain('request(');
+    expect(agentApi).not.toContain('provider');
+  });
+
   test('edit mode replaces the runner and manifest runtime methods gate playtesting', async () => {
     const source = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
     expect(source).toContain("mode !== 'render' || runnerPhase !== 'delivered'");

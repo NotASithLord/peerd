@@ -46,6 +46,12 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
     const top = base.slice(0, base.indexOf('Routing by responsibility'));
     expect(top.includes('app_write_file')).toBe(false);
     expect(top.includes("Hand the build-out to the App's")).toBe(true);
+    expect(top).toContain('short agent.name and durable agent.instructions');
+    expect(top).toContain('host-owned developer profile');
+    expect(top).toContain('semantic observe/act adapter');
+    expect(top).toContain('host-owned drawer');
+    expect(top).toContain('cannot\npopulate or submit it');
+    expect(top).toContain('Never put model credentials');
   });
 
   test('the direct-drive tool listing + progressive-disclosure prose are gone', () => {
@@ -412,8 +418,12 @@ describe('capability-derived actor profiles', () => {
 
     const app = actorBlock('app', undefined, 'app-1', 'code');
     expect(app).toContain(`client: ${codeClientReference('app')}`);
-    expect(app).toContain('Use app_code as the primary gameplay feedback loop');
+    expect(app).toContain('Use app_code as the primary live feedback loop');
     expect(app).toContain('observe → act →');
+    expect(app).toContain('window.peerd.agent.expose({ observe, act })');
+    expect(app).toContain('semantic operations such as replace-selection');
+    expect(app).toContain('window.peerd.agent.open()');
+    expect(app).toContain('sends every message entered there directly to this bound');
     expect(app).not.toContain('tools: app_observe');
 
     const mesh = actorBlock('dweb');
@@ -448,6 +458,26 @@ describe('capability-derived actor profiles', () => {
     const runnableNotebook = actorBlock('notebook', undefined, 'nb-1', 'tools', false, ['js_notebook']);
     expect(runnableNotebook).toContain('<code-style>');
     expect(runnableNotebook).toContain('<js-correctness>');
+  });
+
+  test('a new App without runtime grants still knows how to author a safe live co-pilot adapter', () => {
+    const noRuntimeTools = actorCapabilityManifest('app').tools
+      .filter((name) => !['app_observe', 'app_act', 'app_code'].includes(name));
+    const app = actorBlock('app', undefined, 'app-new', 'code', false, [...noRuntimeTools]);
+    expect(app).toContain('agent.runtime: ["observe", "act"]');
+    expect(app).toContain('window.peerd.agent.expose({ observe, act })');
+    expect(app).toContain('act receives `{ action, params }`');
+    expect(app).toContain('App code never gains prompt submission');
+    expect(app).toContain("the actor's tools, providers, or credentials");
+    expect(app).not.toContain('client: app.observe');
+  });
+
+  test('bound actors use one sender-neutral continuing-message contract', () => {
+    const app = actorBlock('app', undefined, 'app-1', 'code');
+    expect(app).toContain('continuing actor');
+    expect(app).toContain('reply directly to the sender');
+    expect(app).not.toContain('No human is in this conversation');
+    expect(app).not.toContain('directly chatting with you');
   });
 
   test('a narrowed web code prompt mentions the discrete site runner only when granted', () => {
@@ -517,6 +547,7 @@ describe('capability-derived actor profiles', () => {
       ['webvm', actorBlock('webvm'), SYSTEM_PROMPT_CHAR_CEILINGS.webvm],
       ['notebook', actorBlock('notebook'), SYSTEM_PROMPT_CHAR_CEILINGS.notebook],
       ['app', actorBlock('app'), SYSTEM_PROMPT_CHAR_CEILINGS.app],
+      ['appCode', actorBlock('app', undefined, 'app-1', 'code'), SYSTEM_PROMPT_CHAR_CEILINGS.app],
       ['web', actorBlock('web'), SYSTEM_PROMPT_CHAR_CEILINGS.web],
       ['webCode', actorBlock('web', 'tab', 'tab-1', 'code'), SYSTEM_PROMPT_CHAR_CEILINGS.webCode],
       ['api', actorBlock('web', 'api', 'https://api.example.com'), SYSTEM_PROMPT_CHAR_CEILINGS.api],

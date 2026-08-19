@@ -175,9 +175,10 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     // Ratchets, not performance claims. A deliberate worker dependency may
     // raise them only with a fresh graph review and an updated measurement.
     // The reviewed App client maps one app_code surface through tiny internal
-    // adapters; no browser/network primitive enters the cold worker graph.
-    expect(graph.size).toBeLessThanOrEqual(457);
-    expect(bytes).toBeLessThanOrEqual(4_700_000);
+    // adapters. The one added module is the exact-tab/owner App-message gate;
+    // no browser/network/provider primitive enters the cold worker graph.
+    expect(graph.size).toBeLessThanOrEqual(458);
+    expect(bytes).toBeLessThanOrEqual(4_705_000);
     expect(statSync(entry).size).toBeLessThanOrEqual(460_000);
   });
 

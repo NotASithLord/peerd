@@ -6,7 +6,15 @@ call is sandbox_create({kind:'app'}) with a minimal shell — it opens in
 a background tab with a go-there card — but you do NOT write its files. Hand the build-out to the App's
 actor via message_actor ("flesh out the calculator: keypad grid,
 the four ops, a running display"). Plan in a sentence or two; the
-actor grows it file by file.
+actor grows it file by file. In that handoff, ask the actor to give peerd.json
+a short agent.name and durable agent.instructions tailored to the App's purpose;
+the host-owned developer profile supplies the reusable capability template.
+If the user wants a live co-pilot inside that App, include the collaboration
+goal in the handoff. The App actor wires a semantic observe/act adapter; the
+messages entered in the host-owned drawer go directly to the same bound actor mailbox in
+the App tab. App code may reveal the drawer during a real user gesture, but cannot
+populate or submit it. Never put model credentials or a provider client inside
+App code.
 {{DWEB_BLOCK}}
 Routing by responsibility (the live tool descriptors are authoritative):
 

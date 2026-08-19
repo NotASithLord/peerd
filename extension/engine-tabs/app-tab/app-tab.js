@@ -48,6 +48,14 @@ const noticeStack = byId('app-notice-stack');
 const saveStatus = byId('app-save-status');
 const saveMessage = byId('app-save-message');
 const saveRetry = /** @type {HTMLButtonElement} */ (byId('app-save-retry'));
+const actorChatToggle = /** @type {HTMLButtonElement} */ (byId('actor-chat-toggle'));
+const actorChatDrawer = byId('actor-chat-drawer');
+const actorChatClose = /** @type {HTMLButtonElement} */ (byId('actor-chat-close'));
+const actorChatName = byId('actor-chat-name');
+const actorChatMessages = byId('actor-chat-messages');
+const actorChatInput = /** @type {HTMLTextAreaElement} */ (byId('actor-chat-input'));
+const actorChatSend = /** @type {HTMLButtonElement} */ (byId('actor-chat-send'));
+const actorChatStatus = byId('actor-chat-status');
 
 /** @param {string} msg @param {{retryActor?:boolean}} [options] */
 const fail = (msg, { retryActor = false } = {}) => {
@@ -111,6 +119,63 @@ const showNotice = (text, { persistent = false } = {}) => {
   notice.dataset.timer = '';
   if (!persistent) scheduleDismiss();
 };
+
+let actorChatBusy = false;
+/** @param {boolean} open */
+const setActorChatOpen = (open) => {
+  actorChatDrawer.hidden = !open;
+  actorChatToggle.setAttribute('aria-expanded', String(open));
+  if (open) actorChatInput.focus({ preventScroll: true });
+};
+
+/** @param {'user'|'actor'|'status'} role @param {string} text */
+const appendActorChatMessage = (role, text) => {
+  const message = document.createElement('div');
+  message.className = 'actor-chat-message';
+  message.dataset.role = role;
+  // Actor output is data, never trusted markup from either the model or App.
+  message.textContent = text;
+  actorChatMessages.append(message);
+  actorChatMessages.scrollTop = actorChatMessages.scrollHeight;
+};
+
+const sendActorChatMessage = async () => {
+  const prompt = actorChatInput.value.trim();
+  if (!prompt || actorChatBusy) return;
+  actorChatBusy = true;
+  actorChatSend.disabled = true;
+  actorChatInput.disabled = true;
+  actorChatStatus.textContent = 'Actor is working…';
+  appendActorChatMessage('user', prompt);
+  actorChatInput.value = '';
+  try {
+    const reply = /** @type {any} */ (await browser.runtime.sendMessage({
+      type: 'app/actor-chat', appId, message: prompt,
+    }));
+    if (reply?.ok === true && typeof reply.content === 'string') {
+      appendActorChatMessage('actor', reply.content);
+    } else {
+      appendActorChatMessage('status', String(reply?.error || 'The App actor did not reply.'));
+    }
+  } catch {
+    appendActorChatMessage('status', 'The App actor connection was interrupted. Inspect the App before retrying an action.');
+  } finally {
+    actorChatBusy = false;
+    actorChatSend.disabled = false;
+    actorChatInput.disabled = false;
+    actorChatStatus.textContent = 'Enter to send · Shift+Enter for a new line';
+    actorChatInput.focus({ preventScroll: true });
+  }
+};
+
+actorChatToggle.addEventListener('click', () => setActorChatOpen(Boolean(actorChatDrawer.hidden)));
+actorChatClose.addEventListener('click', () => setActorChatOpen(false));
+actorChatSend.addEventListener('click', sendActorChatMessage);
+actorChatInput.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  sendActorChatMessage();
+});
 
 if (!appId) {
   fail('No appId in URL hash.');
@@ -455,6 +520,7 @@ const renderMode = async () => {
     dweb: meta.dweb ?? null,
     agent: meta.agent ?? { kind: 'bound-app' },
   };
+  actorChatName.textContent = appMeta.agent?.name || `${appMeta.name || 'App'} actor`;
   attachDwebBridge(); // no-op unless this app is a dwapp on a dweb build
 
   let textFiles, binaryAssets;
@@ -494,6 +560,10 @@ window.addEventListener('securitypolicyviolation', (event) => {
 
 window.addEventListener('message', (/** @type {MessageEvent} */ e) => {
   if (e.source !== frame.contentWindow) return;
+  if (e.data?.peerd === 'app:agent:open' && runnerPhase === 'delivered') {
+    setActorChatOpen(true);
+    return;
+  }
   if (e.data?.peerd === 'app:agent:result') {
     const pending = agentCallPending.get(e.data.id);
     if (!pending) return;
@@ -710,6 +780,7 @@ const editMode = async () => {
       dweb: meta.dweb ?? null,
       agent: meta.agent ?? { kind: 'bound-app' },
     };
+    actorChatName.textContent = appMeta.agent?.name || `${appMeta.name || 'App'} actor`;
     attachDwebBridge();
   }
 
