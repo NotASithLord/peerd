@@ -17,6 +17,9 @@ describe('release feed publication hook', () => {
     expect(notify).toContain('repos/NotASithLord/peerd-site/dispatches');
     expect(notify).toContain('-f event_type=peerd-release');
     expect(notify).toContain('-F "client_payload[tag]=$GITHUB_REF_NAME"');
+    expect(notify).toContain('for attempt in 1 2 3');
+    expect(notify).toContain('sleep "$delay"');
+    expect(notify).toContain('dispatch failed after 3 attempts');
   });
 
   test('a missing hook credential is visible and retryable, never a green skip', () => {
