@@ -10,6 +10,14 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-08-18
+
+### Fixed
+
+- Release publication now requires only one manual approval. The peerd.ai
+  notification job keeps its own narrowly scoped environment, so a failed
+  notification can be retried without repeating irreversible Firefox signing.
+
 ## [0.7.2] - 2026-08-16
 
 ### Changed
