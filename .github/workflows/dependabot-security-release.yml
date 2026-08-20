@@ -39,11 +39,19 @@ concurrency:
 jobs:
   verify:
     name: verify and generate on a read-only runner
+    # why: route on the group's branch prefix so a routine version-update PR
+    # SKIPS instead of entering and hard-failing on a metadata boundary, which
+    # reported an unrelated reason ("maintainer-edited") on every such PR. This
+    # only ever narrows what enters; the authoritative eligibility check stays
+    # `dependabot-security.ts verify`, which fails closed unless the
+    # authenticated dependency-group is the ecosystem's SECURITY_GROUPS entry.
     if: >-
       github.event.action != 'closed' &&
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.event.pull_request.base.ref == 'main' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
+      (startsWith(github.event.pull_request.head.ref, 'dependabot/bun/bun-security-patches') ||
+        startsWith(github.event.pull_request.head.ref, 'dependabot/github_actions/actions-security-patches')) &&
       !contains(github.event.pull_request.labels.*.name, 'security-autorelease')
     runs-on: ubuntu-latest
     permissions:
@@ -193,6 +201,8 @@ jobs:
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.event.pull_request.base.ref == 'main' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
+      (startsWith(github.event.pull_request.head.ref, 'dependabot/bun/bun-security-patches') ||
+        startsWith(github.event.pull_request.head.ref, 'dependabot/github_actions/actions-security-patches')) &&
       !contains(github.event.pull_request.labels.*.name, 'security-autorelease')
     runs-on: ubuntu-latest
     timeout-minutes: 60
