@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { resolveComposerReadiness } from '../../extension/background/provider-readiness.js';
+import { pickUsableProvider, resolveComposerReadiness, resolveDisplayProvider } from '../../extension/background/provider-readiness.js';
 import { composerUnavailableCopy } from '../../extension/sidepanel/provider-readiness.js';
 
 const providers = [
@@ -93,5 +93,101 @@ describe('composer provider readiness', () => {
       .toBe('Vault is locked. Unlock it to send.');
     expect(composerUnavailableCopy(composer))
       .toBe('Vault is locked. Unlock it to start chatting.');
+  });
+});
+
+// The provider SELECTION seam (issue #384). resolveComposerReadiness above is
+// always handed a provider, so nothing here used to exercise which provider the
+// projection picks - the half where an Ollama-only install deadlocked.
+const selectable = [
+  { name: 'anthropic', vaultSecretName: 'provider/anthropic' },
+  { name: 'openai', vaultSecretName: 'provider/openai' },
+  { name: 'ollama', keyless: true, liveModels: true },
+  { name: 'local-webgpu', keyless: true },
+];
+
+const display = (opts: {
+  chosenName?: string, keys?: Record<string, string>,
+  localAvailable?: boolean, ollamaCount?: number | null,
+  hydrateLocal?: () => Promise<unknown>,
+} = {}) => resolveDisplayProvider({
+  providers: selectable,
+  chosenName: opts.chosenName ?? '',
+  getSecret: async (name) => opts.keys?.[name] ?? null,
+  localAvailable: () => opts.localAvailable ?? false,
+  liveModelCount: async () => (opts.ollamaCount === undefined ? null : opts.ollamaCount),
+  hydrateLocal: opts.hydrateLocal,
+});
+
+describe('active provider selection for the projection', () => {
+  test('an unchosen provider resolves to a reachable Ollama, not unkeyed Anthropic', async () => {
+    // The exact #384 report: Ollama connected with 7 models, no key anywhere.
+    expect(await display({ ollamaCount: 7 })).toBe('ollama');
+  });
+
+  test('an unchosen provider resolves to a resident local model with no daemon', async () => {
+    expect(await display({ ollamaCount: 0, localAvailable: true })).toBe('local-webgpu');
+  });
+
+  test('a keyless provider that is merely present is not usable', async () => {
+    // Presence is not readiness: no daemon models and no downloaded weights.
+    expect(await display({ ollamaCount: 0, localAvailable: false })).toBe('');
+    expect(await display({ ollamaCount: null, localAvailable: false })).toBe('');
+  });
+
+  test('a keyed provider still wins by registry order when it has a key', async () => {
+    expect(await display({ keys: { 'provider/anthropic': 'k' }, ollamaCount: 7 })).toBe('anthropic');
+    expect(await display({ keys: { 'provider/openai': 'k' }, ollamaCount: 7 })).toBe('openai');
+  });
+
+  test("an explicit choice is never second-guessed, so its own model survives", async () => {
+    // '' means "no override" - the caller reads settings, keeping providerModel.
+    expect(await display({ chosenName: 'openai', ollamaCount: 7 })).toBe('');
+  });
+
+  test('an unregistered stored provider is re-picked rather than honoured', async () => {
+    expect(await display({ chosenName: 'removed-adapter', ollamaCount: 7 })).toBe('ollama');
+  });
+
+  test('local availability is hydrated BEFORE it is read, only when unchosen', async () => {
+    let available = false;
+    let hydrated = 0;
+    const hydrateLocal = async () => { hydrated += 1; available = true; };
+    const resolved = await resolveDisplayProvider({
+      providers: selectable,
+      chosenName: '',
+      getSecret: async () => null,
+      localAvailable: () => available,
+      liveModelCount: async () => 0,
+      hydrateLocal,
+    });
+    expect(resolved).toBe('local-webgpu');
+    expect(hydrated).toBe(1);
+    // An explicit choice must not pay for the probe at all.
+    await display({ chosenName: 'ollama', hydrateLocal });
+    expect(hydrated).toBe(1);
+  });
+
+  test('a vault that throws leaves the provider unusable rather than selected', async () => {
+    expect(await resolveDisplayProvider({
+      providers: selectable,
+      chosenName: '',
+      getSecret: async () => { throw new Error('locked'); },
+      localAvailable: () => false,
+      liveModelCount: async () => 0,
+    })).toBe('');
+  });
+
+  test('the binder and the projection share one ordering rule', async () => {
+    // pickUsableProvider is what ensureActiveProvider persists from; if these
+    // two ever diverge, the composer gates on a provider the binder rejects.
+    const shared = await pickUsableProvider({
+      providers: selectable,
+      getSecret: async () => null,
+      localModelAvailable: false,
+      liveModelCount: async () => 7,
+    });
+    expect(shared).toBe('ollama');
+    expect(await display({ ollamaCount: 7 })).toBe(shared ?? '');
   });
 });

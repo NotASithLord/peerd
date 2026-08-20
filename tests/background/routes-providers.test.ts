@@ -194,3 +194,72 @@ describe('models/options + openrouter/models', () => {
     expect(await r['openrouter/models']()).toEqual({ ok: false, status: 401, error: 'invalid-key' });
   });
 });
+
+describe('keyless provider activation (issue #384)', () => {
+  const withSettings = (providerName: string, over: Record<string, any> = {}) => {
+    const settings = { providerName, providerModel: 'stale-model' };
+    const updates: any[] = [];
+    const deps = baseDeps({
+      settingsStore: {
+        get: () => settings,
+        update: async (patch: any) => { updates.push(patch); Object.assign(settings, patch); },
+      },
+      vault: { getSecret: async () => null, setSecret: async () => {} },
+      ...over,
+    });
+    return { routes: makeProviderRoutes(deps), updates, settings };
+  };
+
+  test('a validated daemon becomes active when nothing usable is selected', async () => {
+    // The reported flow: Ollama tested, 7 models, no key anywhere. Without this
+    // the empty default providerName survives and the composer stays gated.
+    const { routes, updates } = withSettings('');
+    expect(await routes['provider/test']({ provider: 'ollama' }))
+      .toEqual({ ok: true, reachable: true, models: 2 });
+    expect(updates).toEqual([{ providerName: 'ollama', providerModel: '' }]);
+  });
+
+  test('a working explicit selection is never overridden', async () => {
+    const { routes, updates } = withSettings('anthropic', {
+      vault: { getSecret: async () => 'sk-abc', setSecret: async () => {} },
+    });
+    await routes['provider/test']({ provider: 'ollama' });
+    expect(updates).toEqual([]);
+  });
+
+  test('an unusable selection yields the slot to the daemon that answered', async () => {
+    const { routes, updates } = withSettings('anthropic');
+    await routes['provider/test']({ provider: 'ollama' });
+    expect(updates).toEqual([{ providerName: 'ollama', providerModel: '' }]);
+  });
+
+  test('an unreachable or empty daemon activates nothing', async () => {
+    const unreachable = withSettings('', { liveProviderModels: async () => null });
+    expect(await unreachable.routes['provider/test']({ provider: 'ollama' }))
+      .toEqual({ ok: false, error: 'unreachable' });
+    expect(unreachable.updates).toEqual([]);
+
+    const empty = withSettings('', { liveProviderModels: async () => [] });
+    expect(await empty.routes['provider/test']({ provider: 'ollama' }))
+      .toEqual({ ok: false, reachable: true, error: 'no-models', models: 0 });
+    expect(empty.updates).toEqual([]);
+  });
+
+  test('activation lands before the state push the panel re-renders from', async () => {
+    // why: pushState is what re-runs the readiness projection. Pushing first
+    // would render the pre-adoption state and leave the composer gated until
+    // some later, unrelated push.
+    const order: string[] = [];
+    const settings = { providerName: '', providerModel: '' };
+    const routes = makeProviderRoutes(baseDeps({
+      settingsStore: {
+        get: () => settings,
+        update: async (patch: any) => { order.push('update'); Object.assign(settings, patch); },
+      },
+      vault: { getSecret: async () => null, setSecret: async () => {} },
+      pushState: () => order.push('push'),
+    }));
+    await routes['provider/test']({ provider: 'ollama' });
+    expect(order).toEqual(['update', 'push']);
+  });
+});
