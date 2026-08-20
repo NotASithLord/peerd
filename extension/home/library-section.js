@@ -162,6 +162,11 @@ export const LibrarySection = {
     vnode.state.repositoryFocusId = null;
     vnode.state.armedRestore = null;    // { appId, oid, expiresAt }: never arms another App
     vnode.state.updateConflictId = null;
+    vnode.state.gitImportOpen = false;
+    vnode.state.gitImportUrl = '';
+    vnode.state.gitImportName = '';
+    vnode.state.gitImportRef = '';
+    vnode.state.gitImportBusy = false;
     vnode.state.notice = null;
     LibrarySection.refresh(vnode);
   },
@@ -194,7 +199,8 @@ export const LibrarySection = {
     // live rename / share dialog / armed delete would be clobbered by a swap).
     vnode.state._listTimer = setInterval(() => {
       const s = vnode.state;
-      if (document.hidden || s.menuOpenId || s.renamingId || s.shareEditId || s.armedDeleteId || s.busyId) return;
+      if (document.hidden || s.menuOpenId || s.renamingId || s.shareEditId || s.armedDeleteId
+          || s.busyId || s.gitImportOpen || s.gitImportBusy) return;
       LibrarySection.quietRefresh(vnode);
     }, 15000);
     // Returning to the tab should feel current at once, not after the next tick.
@@ -341,6 +347,44 @@ export const LibrarySection = {
     if (r?.ok && r.envelope) downloadEnvelope(r.filename, r.envelope);
     else vnode.state.error = r?.error ?? 'export failed';
     m.redraw();
+  },
+
+  /** Clone a conforming App or dwapp repository through browser-native Git.
+   * @param {{ state: any, attrs: { send: Send } }} vnode */
+  async importGitApp(vnode) {
+    const ui = vnode.state;
+    const url = ui.gitImportUrl.trim();
+    if (!url || ui.gitImportBusy) return;
+    ui.error = null;
+    ui.notice = null;
+    ui.gitImportBusy = true;
+    m.redraw();
+    try {
+      const reply = await vnode.attrs.send({
+        type: 'apps/import-git',
+        url,
+        ...(ui.gitImportName.trim() ? { name: ui.gitImportName.trim() } : {}),
+        ...(ui.gitImportRef.trim() ? { ref: ui.gitImportRef.trim() } : {}),
+      });
+      if (!reply?.ok) {
+        ui.error = reply?.error ?? 'Git import failed';
+        return;
+      }
+      const opened = await vnode.attrs.send({ type: 'apps/open', appId: reply.record.id });
+      ui.gitImportOpen = false;
+      ui.gitImportUrl = '';
+      ui.gitImportName = '';
+      ui.gitImportRef = '';
+      ui.notice = opened?.ok
+        ? `Imported ${reply.record?.name ?? 'App'} from Git and opened it with its bound actor.`
+        : `Imported ${reply.record?.name ?? 'App'} from Git. Open it from Library to attach its actor. ${opened?.error ?? ''}`.trim();
+      LibrarySection.refresh(vnode);
+    } catch (error) {
+      ui.error = /** @type {{message?:string}} */ (error)?.message ?? 'Git import failed';
+    } finally {
+      ui.gitImportBusy = false;
+      m.redraw();
+    }
   },
 
   /** Open/refresh the developer history panel without loading file bodies.
@@ -647,6 +691,11 @@ export const LibrarySection = {
       m('p.muted', { style: 'margin:0; font-size:12px;' },
         ui.apps ? `${ui.apps.length} app${ui.apps.length === 1 ? '' : 's'}` : ''),
       m('.spacer', { style: 'flex:1;' }),
+      m('button.library-btn', {
+        type: 'button',
+        'aria-expanded': String(ui.gitImportOpen),
+        onclick: () => { ui.gitImportOpen = !ui.gitImportOpen; ui.error = null; },
+      }, ui.gitImportOpen ? 'Cancel import' : 'Import Git'),
       m('button.icon.library-star', {
         title: ui.favOnly ? 'Show all apps' : 'Show favorites only',
         'aria-pressed': String(ui.favOnly),
@@ -679,8 +728,44 @@ export const LibrarySection = {
       ui.notice ? m('p.library-notice', { role: 'status', 'aria-live': 'polite' }, ui.notice) : null,
       ui.warning ? m('p.muted', { role: 'status', 'aria-live': 'polite' }, ui.warning) : null,
     ];
+    const gitImport = ui.gitImportOpen ? m('form.library-git-import', {
+      onsubmit: (/** @type {SubmitEvent} */ event) => {
+        event.preventDefault();
+        LibrarySection.importGitApp(vnode);
+      },
+    }, [
+      m('strong', 'Import an App from Git'),
+      m('p.muted', 'Clone an HTTPS repository containing peerd.json or index.html. A conforming dwapp keeps its dweb capability and actor role.'),
+      m('div.library-git-import-row', [
+        m('input', {
+          type: 'url', required: true, spellcheck: false,
+          placeholder: 'https://github.com/you/my-app',
+          'aria-label': 'Git repository URL',
+          value: ui.gitImportUrl,
+          disabled: ui.gitImportBusy,
+          oninput: (/** @type {{target:HTMLInputElement}} */ event) => { ui.gitImportUrl = event.target.value; },
+        }),
+        m('input', {
+          type: 'text', spellcheck: false, placeholder: 'Branch or tag (optional)',
+          'aria-label': 'Git branch or tag',
+          value: ui.gitImportRef,
+          disabled: ui.gitImportBusy,
+          oninput: (/** @type {{target:HTMLInputElement}} */ event) => { ui.gitImportRef = event.target.value; },
+        }),
+        m('input', {
+          type: 'text', maxlength: 80, placeholder: 'Display name (optional)',
+          'aria-label': 'Imported App display name',
+          value: ui.gitImportName,
+          disabled: ui.gitImportBusy,
+          oninput: (/** @type {{target:HTMLInputElement}} */ event) => { ui.gitImportName = event.target.value; },
+        }),
+        m('button.library-open', { type: 'submit', disabled: ui.gitImportBusy || !ui.gitImportUrl.trim() },
+          ui.gitImportBusy ? 'Cloning…' : 'Clone App'),
+      ]),
+      m('p.muted.library-repository-help', 'Private repositories use the token for their Git host from Settings. Credentials never enter the App or its actor.'),
+    ]) : null;
     if (ui.apps.length === 0) {
-      return m('div', [header, ...banners, m('p.muted',
+      return m('div', [header, ...banners, gitImport, m('p.muted',
         'No apps yet. Ask the agent to build one — it will appear here automatically.')]);
     }
 
@@ -700,6 +785,7 @@ export const LibrarySection = {
     return m('div', [
       header,
       ...banners,
+      gitImport,
       m('input.library-search', {
         type: 'search',
         placeholder: 'Filter apps… (name, tag)',
@@ -892,6 +978,8 @@ export const LibrarySection = {
         },
       }),
       m('.muted', { style: 'font-size:11px; font-family:monospace; word-break:break-all; margin-bottom:6px;' }, `peerd://${pubSuffix}/${slug || '…'}`),
+      m('.muted', { style: 'font-size:11px; margin-bottom:6px;' },
+        'Sharing publishes every working-tree file, including data/*.json. Remove private data before continuing.'),
       m('.library-actions', { style: 'gap:6px;' }, [
         m('button.library-btn', { disabled: !slug, onclick: () => LibrarySection.shareApp(vnode, app) }, locked ? 'Publish update' : 'Share'),
         m('button.library-btn', { onclick: () => { LibrarySection.cancelShare(vnode); m.redraw(); } }, 'Cancel'),
@@ -986,7 +1074,7 @@ export const LibrarySection = {
         m('button.library-btn', { disabled: ui.busyId === app.id, onclick: () => LibrarySection.repositoryRemote(vnode, app, 'push') }, 'Push'),
       ]) : m('p.muted.library-repository-clean', 'Link a new, empty HTTPS remote for backup. Add a host token under Settings → API integrations for private repositories.'),
       m('p.muted.library-repository-help', [
-        'Fetch downloads remote history but never merges or overwrites this App. To import an existing repository, ask the agent to clone its URL as an App; repositories needing LFS, submodules, symlinks, or a large history belong in a WebVM.',
+        'Fetch downloads remote history but never merges or overwrites this App. Push checkpoints and sends every working-tree file, including data/*.json. Use Import Git for an existing App repository; repositories needing LFS, submodules, symlinks, or a large history belong in a WebVM.',
       ]),
       m('.library-commit-list', repo.commits.map((/** @type {any} */ commit) => {
         const key = `${app.id}:${commit.oid}`;

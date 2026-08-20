@@ -32,9 +32,10 @@ Actor context has three intentionally small layers:
    message in the actor's continuing conversation; the template does not change
    personality based on whether another actor or host UI supplied it.
 2. **Host profile.** A named, versioned template supplies kind-specific operating
-   knowledge and tools. Apps currently use `profile: "developer"` with the
-   code-first App surface. Packages select a host-supported profile; they do not
-   redefine its authority.
+   knowledge and tools. Apps currently use `profile: "developer"` as the name
+   of the code-and-history capability profile, not as a developer-only persona.
+   The same actor helps use, test, edit, and version its App. Packages select a
+   host-supported profile; they do not redefine its authority.
 3. **Manifest role.** `agent.name` and `agent.instructions` describe this actor's
    purpose in the App. The orchestrator should customize these when it delegates
    a new App build. This role is provenance-labelled package context subordinate
@@ -107,11 +108,57 @@ window.peerd?.agent?.expose({
 });
 ```
 
+Offline Apps can persist bounded JSON without receiving an OPFS handle:
+
+```js
+const documentState = await window.peerd.data.get('document') ?? { text: '' };
+await window.peerd.data.set('document', { text: editor.value, version: 2 });
+const savedKeys = await window.peerd.data.list();
+await window.peerd.data.delete('old-draft');
+```
+
+Keys are short safe names and map only to `data/<key>.json` in this App's
+working tree. Values are limited to 1 MB of JSON per write and the normal App
+file-count and total-size ceilings still apply. Debounce editor writes rather
+than saving every keystroke. Because these files are intentionally readable to
+Git, a Git push or dweb share includes them; the host UI says so before either
+operation. Do not put secrets there.
+
+The semantic adapter lives with the App tab, outside the service worker's cold
+import graph. Reads resolve against that tab's pinned OPFS root; writes reuse
+the existing exact-tab, repository-coordinated editor verbs. This is the default
+extension pattern: feature validation and workflow belong in the lazy document
+that presents the feature, while the worker keeps only small reusable authority
+verbs. New App APIs should compose those verbs, not add worker controllers. Git
+import follows the same split: Library owns clone/open UX and the worker exposes
+only the vault-gated repository bootstrap operation.
+
 This document editor is an example, not a special App kind. A game can expose
 lobby and movement actions; a diagrammer can expose nodes and layout commands;
 a tracker can expose rows, filters, and mutations. The durable primitive is the
 same: a bounded JSON observation and a small allowlisted semantic action
 vocabulary owned by the App.
+
+## Git and durable work
+
+Every App has a browser-native isomorphic-git repository beside its readable
+OPFS working tree. The actor can inspect status and history, create local
+checkpoints and branches, restore recoverably, and use a vault-bound HTTPS
+remote after host confirmation. A person can do the same from Library under
+**History & Git**. Library also exposes **Import Git**; the orchestrator uses the
+same primitive with `sandbox_create({ kind: "app", gitUrl, gitRef })`.
+
+A conforming Git repository places `peerd.json` and its entry file at the root.
+Cloning preserves its branch, commit graph, remote, text files, and binary bytes;
+opening it attaches the same root-pinned bound actor described above. A dwapp
+manifest retains its `dweb` capability when imported in a dweb-enabled build.
+
+Git versions bytes in the working tree, not arbitrary in-memory UI state. Apps
+can keep user documents or other durable content in the `peerd.data` files
+above, separated from JavaScript and assets, and checkpoint it at a meaningful
+user- or actor-requested boundary. Rendering or changing volatile state alone
+is never described as a save. Fetch never merges into the active branch, push
+never forces, and every remote operation remains host-confirmed.
 
 ## Agent feedback loop
 
@@ -150,3 +197,12 @@ sandbox.
 For a distributed App, use `kind: "dwapp"`, include the `dweb` capability, and
 keep the same actor contract. Bundle transport, binary assets, and decoded Git
 working-tree behavior are documented in [DWAPP-BUNDLE.md](DWAPP-BUNDLE.md).
+
+The `dweb` capability belongs to the App's narrow parent bridge; it does not
+silently add raw mesh tools to the App actor. A game actor, for example, sees
+and changes lobby state through its declared `observe`/`act` vocabulary while
+the dwapp code implements the authenticated room protocol. Peerd's separate
+`dweb` actor is the browser-wide mesh operator for discovery, install, share,
+moderation, and peer conversations. It uses the same common actor kernel and
+message contract with its own host-reviewed network profile. Authority never
+flows from one of these actors to the other merely because both concern P2P.

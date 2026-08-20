@@ -72,6 +72,13 @@ export const makeEngineRoutes = (deps) => {
     () => coordinateApp(appId, operation),
     { close: true },
   );
+  /** @param {unknown} appId @param {unknown} path @param {any} sender */
+  const ownsAppDataMutation = (appId, path, sender) => typeof appId === 'string'
+    && typeof path === 'string'
+    && /^data\/[a-z0-9][a-z0-9._-]{0,63}\.json$/i.test(path)
+    && sender?.tab?.id != null
+    && appTabTracker.getTabId(appId) === sender.tab.id
+    && appTabTracker.parseIdFromUrl?.(sender.tab.url) === appId;
 
   /** @param {unknown} value */
   const shellLine = (value) => `${String(value ?? '')}\n`;
@@ -481,10 +488,11 @@ export const makeEngineRoutes = (deps) => {
 
     // The App editor reads OPFS directly but sends every mutation through the
     // SW client so byte caps, kind metadata, and rollback stay one contract.
-    'app/editor-write': async ({ appId, path, content }) => {
+    'app/editor-write': async ({ appId, path, content, runtimeData = false }, sender) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       if (typeof path !== 'string') return { ok: false, error: 'path-required' };
       if (typeof content !== 'string') return { ok: false, error: 'content-required' };
+      if (runtimeData && !ownsAppDataMutation(appId, path, sender)) return { ok: false, error: 'app-data-unauthorized' };
       try {
         const result = await appClient.writeFile({ appId, path, content, reload: false });
         return { ok: true, ...result };
@@ -493,13 +501,15 @@ export const makeEngineRoutes = (deps) => {
       }
     },
 
-    'app/editor-delete': async ({ appId, path }) => {
+    'app/editor-delete': async ({ appId, path, runtimeData = false }, sender) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       if (typeof path !== 'string') return { ok: false, error: 'path-required' };
+      if (runtimeData && !ownsAppDataMutation(appId, path, sender)) return { ok: false, error: 'app-data-unauthorized' };
       try {
         await appClient.deleteFile({ appId, path, reload: false });
         return { ok: true };
       } catch (e) {
+        if (runtimeData && (/** @type {{name?:string}} */ (e))?.name === 'NotFoundError') return { ok: true };
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
     },
@@ -538,6 +548,19 @@ export const makeEngineRoutes = (deps) => {
         return { ok: true, apps: await appRegistry.list() };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+      }
+    },
+    'apps/import-git': async (options) => {
+      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
+      try {
+        const result = await appClient.createFromGit({
+          ...options,
+          sessionId: await getCurrentSessionId?.(),
+          allowDweb: DWEB_ENABLED,
+        });
+        return { ok: true, ...result };
+      } catch (e) {
+        return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) };
       }
     },
     'apps/favorite': async ({ appId, favorite }) => {

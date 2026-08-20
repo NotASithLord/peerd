@@ -52,7 +52,7 @@ export const repositoryRemoteTool = {
         tool: 'repo_remote', kind: `git_${args.op}`, sideEffect: args.op === 'push' ? 'mutate_external' : 'write',
         origins: [new URL(target).origin],
         summary: args.op === 'push'
-          ? `Push ${kind} ${id} to ${target} on ${args.branch || 'its current branch'}? This sends code and commit history to the remote.`
+          ? `Push ${kind} ${id} to ${target} on ${args.branch || 'its current branch'}? This sends working-tree files${kind === 'app' ? ', including file-backed App data' : ''}, and commit history to the remote.`
           : args.op === 'fetch'
             ? `Fetch repository metadata and objects for ${kind} ${id} from ${target}?`
             : `Link ${kind} ${id} to Git remote ${target}? Future fetch/push can use its vault-bound host token.`,

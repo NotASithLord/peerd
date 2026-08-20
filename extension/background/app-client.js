@@ -441,18 +441,40 @@ export const createAppClient = ({
         signal,
       });
       const opfs = guardedOpfsForApp(record.id);
-      const paths = new Set((await opfs.list()).map((file) => file.path.replace(/^\/+/, '')));
+      const listed = await opfs.list();
+      if (listed.length > MAX_APP_FILES) {
+        throw new AppFileLimitError(`App has too many files: ${listed.length} > ${MAX_APP_FILES}`);
+      }
+      const paths = new Set();
+      /** @type {Record<string, 'text' | 'binary'>} */
+      const fileKinds = Object.create(null);
+      let totalBytes = 0;
+      for (const file of listed) {
+        const path = validateAppPath(file.path.replace(/^\/+/, ''));
+        paths.add(path);
+        const bytes = await opfs.readBytes(path);
+        totalBytes += bytes.byteLength;
+        if (totalBytes > MAX_APP_TOTAL_BYTES) {
+          throw new AppFileLimitError(`App is too large: ${totalBytes} > ${MAX_APP_TOTAL_BYTES} bytes`);
+        }
+        fileKinds[path] = inferAppFileKind(path, bytes);
+      }
       let contract;
-      if (paths.has('peerd.json')) contract = parseAppManifest(await opfs.read('peerd.json'));
+      if (paths.has('peerd.json')) {
+        if (fileKinds['peerd.json'] !== 'text') throw new AppFileContentError('peerd.json must be text');
+        contract = parseAppManifest(await opfs.read('peerd.json'));
+      }
       else if (paths.has('index.html')) contract = parseAppManifest(JSON.stringify(buildAppManifest({ entry: 'index.html' })));
       else throw new Error('repository is not an App: add peerd.json or index.html');
       if (!paths.has(contract.entry)) throw new Error(`peerd.json entry is missing: ${contract.entry}`);
+      if (fileKinds[contract.entry] !== 'text') throw new AppFileContentError(`entryFile must be text: ${contract.entry}`);
       if (contract.capabilities.includes('dweb') && !allowDweb) throw new Error('this dwapp requires a preview build with the dweb enabled');
       const dwapp = contract.capabilities.includes('dweb')
         ? { uri: null, publisher: null, hash: null, local: true }
         : null;
       const updated = await registry.update(record.id, {
         entryFile: contract.entry,
+        fileKinds,
         ...(dwapp ? { dweb: dwapp } : {}),
       });
       if (sessionId) await registry.setDefaultForSession(sessionId, record.id);

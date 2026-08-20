@@ -1,25 +1,11 @@
 // @ts-check
-// Trusted App-tab human → bound App actor bridge.
-//
-// The sandbox cannot reach browser.runtime. Only the extension-owned parent
-// shell can call this handler, and every call is re-pinned to its URL, live tab,
-// owner root, and current manifest actor before one human-authored message is
-// admitted. The actor reply returns to host UI as plain data; no provider or
-// credential surface crosses into App code.
+// Trusted App parent -> bound actor. Re-pin the live tab, owner root, and
+// current manifest binding; App code never receives browser/provider access.
 
 const DEFAULT_MESSAGE_CHARS = 12_000;
 const DEFAULT_TIMEOUT_MS = 180_000;
 
-/**
- * @param {object} deps
- * @param {(sender: any) => boolean} deps.isTrustedSender
- * @param {{ parseIdFromUrl: (url?: string) => string|null, parseOwnerFromUrl: (url?: string) => string|null, getTabId: (appId:string) => number|null|undefined, getOwnedTabId: (appId:string, ownerRoot:string) => number|null|undefined }} deps.appTabTracker
- * @param {(appId:string, ownerSessionId:string) => Promise<string|null>} deps.ensureAppActorBinding
- * @param {{ get: (sessionId:string) => Promise<any> }} deps.sessions
- * @param {(req:any) => Promise<any>} deps.messageActor
- * @param {number} [deps.messageChars]
- * @param {number} [deps.timeoutMs]
- */
+/** @param {any} deps */
 export const makeAppActorChatHandler = ({
   isTrustedSender,
   appTabTracker,

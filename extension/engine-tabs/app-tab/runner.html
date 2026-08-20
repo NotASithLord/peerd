@@ -109,6 +109,44 @@
           return urlCache[key];
         },
       });
+      let dataRequestSequence = 0;
+      const dataPending = new Map();
+      const requestData = (op, key, json) => new Promise((resolve, reject) => {
+        const id = `data:${++dataRequestSequence}`;
+        const timer = setTimeout(() => {
+          dataPending.delete(id);
+          reject(new Error('App data request timed out'));
+        }, 12_000);
+        dataPending.set(id, { resolve, reject, timer });
+        window.parent.postMessage({
+          peerd: 'app:data:request', id, op,
+          ...(typeof key === 'string' ? { key } : {}),
+          ...(typeof json === 'string' ? { json } : {}),
+        }, '*');
+      });
+      const handleDataResult = (event) => {
+        if (event.source !== window.parent || event.data?.peerd !== 'app:data:result') return;
+        const pending = dataPending.get(event.data.id);
+        if (!pending) return;
+        dataPending.delete(event.data.id);
+        clearTimeout(pending.timer);
+        if (event.data.ok === true) pending.resolve(event.data.value);
+        else pending.reject(new Error(String(event.data.error || 'App data request failed').slice(0, 1_000)));
+      };
+      const dataApi = Object.freeze({
+        get: (key) => requestData('get', key),
+        set: (key, value) => {
+          let json;
+          try { json = JSON.stringify(value); }
+          catch { return Promise.reject(new TypeError('peerd.data.set value must be JSON-serializable')); }
+          if (typeof json !== 'string' || new TextEncoder().encode(json).byteLength > 1_000_000) {
+            return Promise.reject(new TypeError('peerd.data.set value is too large'));
+          }
+          return requestData('set', key, json);
+        },
+        delete: (key) => requestData('delete', key),
+        list: () => requestData('list'),
+      });
       const requestedAgentRuntime = msg.agentRuntime && typeof msg.agentRuntime === 'object'
         ? msg.agentRuntime : {};
       let agentHandlers = Object.freeze({});
@@ -143,6 +181,7 @@
       Object.defineProperty(window, 'peerd', {
         value: Object.freeze({
           assets: assetsApi,
+          data: dataApi,
           agent: agentApi,
         }),
         writable: false,
@@ -158,8 +197,9 @@
       // fine (we're about to return anyway).
       document.open();
       // document.open() replaces the old document and its listeners. Install
-      // observability before parsing App markup so synchronous violations from
-      // initial resources are visible to the trusted parent.
+      // the narrow host bridges and observability before parsing App markup so
+      // synchronous App calls and initial resource violations remain visible.
+      window.addEventListener('message', handleDataResult);
       window.addEventListener('securitypolicyviolation', (event) => {
         window.parent.postMessage({
           type: 'app-policy-blocked',

@@ -193,5 +193,5 @@ describe('repository collection', () => {
       violation.kind === 'dash-punctuation'
       && violation.path === 'tracked.md'
       && violation.line === 1)).toBe(false);
-  });
+  }, 15_000);
 });

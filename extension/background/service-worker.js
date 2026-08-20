@@ -7564,18 +7564,17 @@ const actorMessaging = makeActorMessaging({
   log: (/** @type {any[]} */ ...a) => console.warn('[actor]', ...a),
 });
 
-// App-native copilot: the exact trusted App parent tab collects human input
-// and addresses its already-bound actor directly. This is deliberately not the
-// side-panel orchestrator and is not reachable from the sandboxed App iframe.
+// App-native actor messaging: the exact trusted App parent tab collects a
+// message and addresses its already-bound actor directly. This is deliberately
+// not the side-panel orchestrator and is not reachable from the sandboxed App
+// iframe.
 const handleAppActorChat = makeAppActorChatHandler({
   isTrustedSender,
   appTabTracker,
   ensureAppActorBinding,
   sessions,
-  messageActor: (request) => actorMessaging.messageActor(request),
+  messageActor: (/** @type {any} */ request) => actorMessaging.messageActor(request),
 });
-browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} */ sender) =>
-  handleAppActorChat(msg, sender));
 
 // Human-feedback admission must see both the parent chat slot and any actor
 // delivery still settling for that chat. Keep these as explicit bindings so
@@ -8062,6 +8061,11 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // Nonsecret request for a MessageChannel transferred to the exact options
   // WindowClient. Backup passphrases and payloads use only that channel.
   'private-transfer/open': privateTransferOpenRoute,
+  // Host-owned App shell -> the App's root-pinned bound actor. Keep this in the
+  // unified dispatcher: an async stand-alone listener would return a Promise
+  // for unrelated messages and race their real route with a spurious `false`.
+  'app/actor-chat': (/** @type {any} */ msg, /** @type {any} */ sender) =>
+    handleAppActorChat(msg, sender),
   // The heap split: the offscreen→SW relays for the ONE agent-loop client — model-call
   // (getSecret + safeFetch added in the handler; the key never left the SW), the
   // SW-side pin+gate tool-dispatch, and the fire-and-forget loop-event (→ the actor/

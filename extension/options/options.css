@@ -243,6 +243,10 @@
    input[type=search] rule in styles.css carries the surface + magnifier; this
    just sizes it for the grid). */
 .library-search { width: 100%; margin: 0 0 14px; font-size: 13px; }
+.library-git-import { margin: 0 0 14px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); }
+.library-git-import > p { margin: 5px 0 8px; font-size: 11px; }
+.library-git-import-row { display: grid; grid-template-columns: minmax(14rem, 2fr) minmax(8rem, 1fr) minmax(8rem, 1fr) auto; gap: 6px; }
+.library-git-import-row input { min-width: 0; font-size: 11px; }
 
 .library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
 .library-card {
@@ -330,6 +334,7 @@
 .library-update-conflict strong { font-size: 12px; }
 .library-update-conflict p { margin: 5px 0 9px; color: var(--fg-muted); font-size: 11px; line-height: 1.4; }
 @media (max-width: 720px) {
+  .library-git-import-row { grid-template-columns: 1fr; }
   .library-repository-dirty, .library-remote-actions, .library-branch-row, .library-remote-row { flex-wrap: wrap; }
   .library-repository-dirty input, .library-branch-row input, .library-remote-row input { flex-basis: 100%; }
   .library-commit { grid-template-columns: 72px minmax(0, 1fr) auto auto; }

@@ -163,8 +163,11 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     expect(modules).not.toContain('peerd-runtime/pdf/index.js');
     expect(modules).not.toContain('peerd-runtime/pdf/ocr-store.js');
     expect(modules).not.toContain('peerd-engine/vm-net/index.js');
+    expect(modules).not.toContain('engine-tabs/app-tab/app-data-client.js');
     expect([...modules].some((file) => file.includes('vendor/codemirror'))).toBe(false);
     expect([...modules].some((file) => file.includes('vendor/moonshine-js'))).toBe(false);
+    expect(readFileSync(join(EXTENSION_DIR, 'background', 'routes', 'engine.js'), 'utf8'))
+      .not.toContain("'app/data/");
   });
 
   test('the cold worker graph and entry source stay inside the reviewed budget', async () => {
@@ -174,9 +177,9 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
 
     // Ratchets, not performance claims. A deliberate worker dependency may
     // raise them only with a fresh graph review and an updated measurement.
-    // The reviewed App client maps one app_code surface through tiny internal
-    // adapters. The one added module is the exact-tab/owner App-message gate;
-    // no browser/network/provider primitive enters the cold worker graph.
+    // App-native semantic APIs are document-side adapters over the existing
+    // authority verbs; they must not grow this graph. Privileged Git import is
+    // one small repository bootstrap verb, not a worker-side UI controller.
     expect(graph.size).toBeLessThanOrEqual(458);
     expect(bytes).toBeLessThanOrEqual(4_705_000);
     expect(statSync(entry).size).toBeLessThanOrEqual(460_000);

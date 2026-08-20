@@ -50,6 +50,7 @@ const baseDeps = (over: any = {}) => ({
   },
   appTabTracker: {
     reloadTab: async () => {}, getTabId: () => null,
+    parseIdFromUrl: () => null,
     quiesceTab: async () => true, resumeTab: async () => true,
     closeTab: async () => {}, ensureTab: async () => {},
   },
@@ -669,6 +670,95 @@ describe('app/vm meta + apps Library', () => {
   test('apps/list refused when locked', async () => {
     const r = makeEngineRoutes(baseDeps({ vault: { isLocked: () => true } }));
     expect(await r['apps/list']()).toEqual({ ok: false, error: 'vault-locked' });
+  });
+  test('apps/import-git instantiates a manifest App, preserves its repository, and opens it under the active root', async () => {
+    const calls: any[] = [];
+    const audit: any[] = [];
+    const contract = parseAppManifest(JSON.stringify({
+      schema: 1,
+      kind: 'dwapp',
+      entry: 'index.html',
+      agent: { kind: 'bound-app', profile: 'developer', surface: 'code' },
+      capabilities: ['dweb'],
+    }));
+    const repository = {
+      branch: 'release', oid: 'abc123',
+      remote: { url: 'https://github.com/example/notes.git', host: 'github.com' },
+    };
+    const app = { id: 'git-app', name: 'Notes', entryFile: 'index.html' };
+    const r = makeEngineRoutes(baseDeps({
+      DWEB_ENABLED: true,
+      getCurrentSessionId: async () => 'root-chat',
+      auditLog: { append: async (event: any) => { audit.push(event); } },
+      appClient: {
+        createFromGit: async (opts: any) => {
+          calls.push({ op: 'clone', opts });
+          return { record: app, repository, contract };
+        },
+        open: async (opts: any) => { calls.push({ op: 'open', opts }); },
+      },
+    }));
+    expect(await r['apps/import-git']({
+      url: ' https://github.com/example/notes ', name: ' Notes ', ref: 'release', depth: 900,
+    })).toEqual({ ok: true, record: app, repository, contract });
+    expect(calls).toEqual([
+      { op: 'clone', opts: {
+        url: ' https://github.com/example/notes ', name: ' Notes ', ref: 'release', depth: 900,
+        sessionId: 'root-chat', allowDweb: true,
+      } },
+    ]);
+    expect(audit).toEqual([]);
+  });
+  test('apps/import-git remains vault-gated', async () => {
+    const r = makeEngineRoutes(baseDeps({ vault: { isLocked: () => true } }));
+    expect(await r['apps/import-git']({ url: 'https://github.com/example/app' }))
+      .toEqual({ ok: false, error: 'vault-locked' });
+  });
+  test('apps/import-git delegates URL validation to the repository boundary', async () => {
+    const r = makeEngineRoutes(baseDeps({
+      appClient: { createFromGit: async () => { throw new Error('git URL required'); } },
+    }));
+    expect(await r['apps/import-git']({ url: '' })).toEqual({ ok: false, error: 'git URL required' });
+  });
+  test('App data mutations reuse exact-tab-pinned editor authority', async () => {
+    const sender = { tab: { id: 44, url: 'moz-extension://peerd/engine-tabs/app-tab/index.html#app-1' } };
+    const writes: any[] = [];
+    const r = makeEngineRoutes(baseDeps({
+      appTabTracker: {
+        getTabId: (id: string) => id === 'app-1' ? 44 : null,
+        parseIdFromUrl: (url: string) => url.endsWith('#app-1') ? 'app-1' : null,
+      },
+      appClient: {
+        writeFile: async ({ path, content, reload }: any) => {
+          expect(reload).toBe(false);
+          writes.push({ path, content });
+        },
+        deleteFile: async ({ path, reload }: any) => {
+          expect(reload).toBe(false);
+          writes.push({ path, delete: true });
+        },
+      },
+    }));
+    expect(await r['app/editor-write']({
+      appId: 'app-1', path: 'data/document.json', content: '{"text":"hello"}', runtimeData: true,
+    }, sender))
+      .toEqual({ ok: true });
+    expect(await r['app/editor-delete']({
+      appId: 'app-1', path: 'data/document.json', runtimeData: true,
+    }, sender))
+      .toEqual({ ok: true });
+    expect(writes).toEqual([
+      { path: 'data/document.json', content: '{"text":"hello"}' },
+      { path: 'data/document.json', delete: true },
+    ]);
+    expect(await r['app/editor-write']({
+      appId: 'app-1', path: '../peerd.json', content: '{}', runtimeData: true,
+    }, sender))
+      .toEqual({ ok: false, error: 'app-data-unauthorized' });
+    expect(await r['app/editor-write'](
+      { appId: 'app-1', path: 'data/document.json', content: '{}', runtimeData: true },
+      { tab: { id: 45, url: sender.tab.url } },
+    )).toEqual({ ok: false, error: 'app-data-unauthorized' });
   });
   test('apps/favorite requires a boolean', async () => {
     const r = makeEngineRoutes(baseDeps());

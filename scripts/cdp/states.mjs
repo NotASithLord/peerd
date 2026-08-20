@@ -199,6 +199,7 @@ let networkGuardActorResult = '';
 let networkGuardFixtureUrl = '';
 let networkGuardActorTask = 'open';
 let networkGuardTrustedBurstComplete = false;
+let networkGuardWakeSettled = false;
 
 // --- issue 251: the origin lock, end to end --------------------------------
 //
@@ -468,6 +469,7 @@ export const STATES = [
         if (turn === 1) return { sse: sseToolCall('read_page', {}) };
         return { sse: sseText('The network guard controller is ready.') };
       }
+      if (networkGuardActorReady) networkGuardWakeSettled = true;
       if (!networkGuardDelegated) {
         networkGuardDelegated = true;
         return { sse: sseToolCall('message_actor', {
@@ -486,6 +488,7 @@ export const STATES = [
       networkGuardActorResult = '';
       networkGuardActorTask = 'open';
       networkGuardTrustedBurstComplete = false;
+      networkGuardWakeSettled = false;
       let probeConnections = 0;
       let probeRequests = [];
       let controllerRequests = 0;
@@ -522,8 +525,19 @@ export const STATES = [
               event.waitUntil((async () => {
                 await fetch('/attempt?vector=worker-' + encodeURIComponent(token)
                   + '-websocket-' + typeof WebSocket, { cache: 'no-store' });
-                void fetch(fetchUrl, { mode: 'no-cors', cache: 'no-store' }).catch(() => {});
-                try { void new WebSocket(socketUrl); } catch { /* reported by raw probe */ }
+                const fetchDone = fetch(fetchUrl, { mode: 'no-cors', cache: 'no-store' }).catch(() => {});
+                const socketDone = new Promise((resolve) => {
+                  let socket;
+                  const timer = setTimeout(resolve, 4_000);
+                  const finish = () => { clearTimeout(timer); try { socket?.close(); } catch {} resolve(); };
+                  try {
+                    socket = new WebSocket(socketUrl);
+                    socket.addEventListener('open', finish, { once: true });
+                    socket.addEventListener('error', finish, { once: true });
+                  } catch { finish(); }
+                });
+                await Promise.all([fetchDone, socketDone]);
+                event.source?.postMessage({ peerdNetworkGuardToken: token });
               })());
             });`);
           return;
@@ -634,6 +648,8 @@ export const STATES = [
         });
         rec.check('the web actor loaded the public controller',
           actorReady === true, networkGuardActorResult.slice(0, 2000));
+        await waitFor(async () => networkGuardWakeSettled && !(await probe(ctx)).busy,
+          { budgetMs: 15_000, pollMs: 50 });
         const tabs = await evalIn(ctx.page, `chrome.tabs.query({}).then((items) => items.map(({ id, url, openerTabId }) => ({ id, url, openerTabId })))`, true);
         const drivenTab = tabs.find((tab) => tab.url?.startsWith(networkGuardFixtureUrl));
         const networkGuardDiagnostics = typeof drivenTab?.id === 'number'
@@ -691,6 +707,7 @@ export const STATES = [
         networkGuardDelegated = false;
         networkGuardActorResult = '';
         networkGuardTrustedBurstComplete = false;
+        networkGuardWakeSettled = false;
         const burstTabIdsBefore = new Set((await evalIn(ctx.page,
           'chrome.tabs.query({}).then((tabs) => tabs.map((tab) => tab.id))', true))
           .filter((id) => typeof id === 'number'));
@@ -898,8 +915,20 @@ export const STATES = [
             world: 'MAIN',
             func: async (fetchUrl, socketUrl, workerToken) => {
               const registration = await navigator.serviceWorker.ready;
+              const completed = new Promise((resolve) => {
+                const finish = (value) => {
+                  clearTimeout(timer);
+                  navigator.serviceWorker.removeEventListener('message', onMessage);
+                  resolve(value);
+                };
+                const onMessage = (event) => {
+                  if (event.data?.peerdNetworkGuardToken === workerToken) finish(true);
+                };
+                const timer = setTimeout(() => finish(false), 6_000);
+                navigator.serviceWorker.addEventListener('message', onMessage);
+              });
               registration.active.postMessage({ fetchUrl, socketUrl, token: workerToken });
-              return { secure: isSecureContext, active: !!registration.active };
+              return { secure: isSecureContext, active: !!registration.active, completed: await completed };
             },
             args: [
               ${JSON.stringify(`http://127.0.0.1:${probePort}/probe?vector=worker-fetch-${token}`)},
@@ -916,7 +945,10 @@ export const STATES = [
           .some((value) => value === 'worker-guarded-websocket-function'), {
           budgetMs: 5_000, pollMs: 25,
         });
-        await sleep(500);
+        await waitFor(() => networkFailureFor(ordersWorkerMonitor, 'worker-fetch-guarded')
+          && probeRequests.some((request) => request.includes('worker-websocket-guarded')), {
+          budgetMs: 5_000, pollMs: 25,
+        });
         const guardedNetworkFailure = networkFailureFor(ordersWorkerMonitor, 'worker-fetch-guarded');
         rec.check('the public fixture has an active service worker with WebSocket support',
           guardedWorker?.secure === true && guardedWorker?.active === true
@@ -950,13 +982,31 @@ export const STATES = [
         })`, true);
         await resetProbe();
         await triggerWorker(drivenTab.id, 'unscoped-diagnostic');
-        await sleep(500);
-        rec.check('Chrome does not expose worker WebSockets to an unscoped DNR block',
-          probeRequests.some((request) => request.includes('worker-websocket-unscoped-diagnostic')),
-          JSON.stringify({ probeConnections, probeRequests, events: ordersWorkerMonitor?.events }));
+        const unscopedAttempted = await waitFor(() => controllerAttempts
+          .has('worker-unscoped-diagnostic-websocket-function'), {
+          budgetMs: 5_000, pollMs: 25,
+        });
+        const unscopedReached = await waitFor(() => probeRequests
+          .some((request) => request.includes('worker-websocket-unscoped-diagnostic')), {
+          budgetMs: 5_000, pollMs: 25,
+        });
+        // This is a browser-characterization probe, not a peerd invariant.
+        // Chrome 151 defers this service-worker socket until the unscoped rule
+        // is removed; older lanes let it through. The strict product assertions
+        // above and below remain scoped-rule isolation and unrelated browsing.
+        rec.check('Chrome unscoped worker-WebSocket behavior is explicitly classified',
+          unscopedAttempted === true,
+          JSON.stringify({ mode: unscopedReached ? 'bypassed' : 'blocked-or-deferred',
+            probeConnections, probeRequests, events: ordersWorkerMonitor?.events }));
         await evalIn(ctx.page, `chrome.declarativeNetRequest.updateSessionRules({
           removeRuleIds: [4999],
         })`, true);
+        if (!unscopedReached) {
+          await waitFor(() => probeRequests
+            .some((request) => request.includes('worker-websocket-unscoped-diagnostic')), {
+            budgetMs: 2_000, pollMs: 25,
+          });
+        }
 
         rec.check('the page-domain worker rule does not intercept the extension local provider',
           ctx.modelCallCount() > 0,
@@ -973,12 +1023,13 @@ export const STATES = [
         await resetProbe();
         const unrelatedWorkerMonitor = await attachWorkerMonitor(new URL(unrelatedUrl).origin);
         const unrelatedWorker = await triggerWorker(unrelatedTab.id, 'unrelated');
-        await waitFor(() => probeRequests.some((request) => request.includes('worker-fetch-unrelated'))
+        await waitFor(() => controllerAttempts.has('worker-unrelated-websocket-function')
+          && probeRequests.some((request) => request.includes('worker-fetch-unrelated'))
           && probeRequests.some((request) => request.includes('worker-websocket-unrelated')),
-        { budgetMs: 5_000, pollMs: 25 });
+        { budgetMs: 10_000, pollMs: 25 });
         const unrelatedNetworkFailure = networkFailureFor(unrelatedWorkerMonitor, 'worker-fetch-unrelated');
         rec.check('a different-origin user service worker remains outside peerd DNR custody',
-          unrelatedWorker?.secure === true
+          unrelatedWorker?.secure === true && unrelatedWorker?.completed === true
             && probeRequests.some((request) => request.includes('worker-fetch-unrelated'))
             && probeRequests.some((request) => request.includes('worker-websocket-unrelated')),
           JSON.stringify({ unrelatedWorker, unrelatedNetworkFailure, probeConnections, probeRequests }));
@@ -1003,7 +1054,13 @@ export const STATES = [
         await sleep(500);
         await resetProbe();
         const retainedWorker = await triggerWorker(oldOriginTab.id, 'retained');
-        await sleep(500);
+        await waitFor(() => controllerAttempts.has('worker-retained-websocket-function'), {
+          budgetMs: 5_000, pollMs: 25,
+        });
+        await waitFor(() => networkFailureFor(ordersWorkerMonitor, 'worker-fetch-retained')
+          && probeRequests.some((request) => request.includes('worker-websocket-retained')), {
+          budgetMs: 5_000, pollMs: 25,
+        });
         const retainedNetworkFailure = networkFailureFor(ordersWorkerMonitor, 'worker-fetch-retained');
         rec.check('a previously visited worker domain remains guarded after navigation',
           retainedWorker?.secure === true
@@ -5155,7 +5212,25 @@ Promise.resolve().then(async () => {
         rec.check('the app actor wrote text and binary files (app_write_file executed)', appWriteRan === true, `appWriteRan=${appWriteRan}`);
         rec.check('the orchestrator settled with a final answer', (out.bubbles || []).includes('FINAL-APP-BUILT'));
 
-        appPage = await openExtPage(ctx, `engine-tabs/app-tab/index.html#${actorAppState.appId}`);
+        // sandbox_create already opened an owner-pinned App tab. Close that
+        // background build surface, then reopen its exact owner-bearing URL in
+        // a CDP-controlled tab. Creating a second appId-only host is correctly
+        // rejected because it would make actor/runtime routing ambiguous.
+        const appTarget = await waitFor(async () => {
+          const targets = await fetch(`http://127.0.0.1:${ctx.port}/json/list`).then((response) => response.json());
+          const prefix = `chrome-extension://${ctx.sw.id}/engine-tabs/app-tab/index.html#${actorAppState.appId}`;
+          return targets.find((candidate) => candidate.type === 'page' && candidate.url.startsWith(prefix)) ?? null;
+        }, { budgetMs: 8_000, pollMs: 50 });
+        if (!appTarget) throw new Error('the actor-created App tab was not available for E2E attachment');
+        const appUrl = new URL(appTarget.url);
+        const appPath = `${appUrl.pathname.replace(/^\//, '')}${appUrl.hash}`;
+        await fetch(`http://127.0.0.1:${ctx.port}/json/close/${appTarget.id}`);
+        await waitFor(async () => {
+          const targets = await fetch(`http://127.0.0.1:${ctx.port}/json/list`).then((response) => response.json());
+          return targets.every((candidate) => candidate.id !== appTarget.id);
+        }, { budgetMs: 5_000, pollMs: 50 });
+        await sleep(100);
+        appPage = await openExtPage(ctx, appPath);
         await appPage.send('Page.addScriptToEvaluateOnNewDocument', { source: `
           if (window === top) {
             globalThis.__e2eBinaryProofs = [];

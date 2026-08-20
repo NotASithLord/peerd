@@ -158,6 +158,8 @@ its `index.js`.
 
 The extension chassis lives in `background/`, `offscreen/`, `sidepanel/`,
 `engine-tabs/`, `permissions/`, `shared/`, and related support directories.
+Host placement and the cold-worker rule are documented in
+[`docs/EXTENSION-HOSTS.md`](docs/EXTENSION-HOSTS.md).
 
 ## Development
 

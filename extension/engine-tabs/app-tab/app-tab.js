@@ -21,6 +21,7 @@ import {
 import { loadDweb } from '/shared/dweb-loader.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
 import { isServiceWorkerSender } from '/shared/messaging.js';
+import { createAppDataClient } from './app-data-client.js';
 
 const appId = location.hash.slice(1).split(/[?&]/)[0];
 const hashParams = new URLSearchParams(location.hash.slice(1).split('?')[1] ?? '');
@@ -183,6 +184,11 @@ if (!appId) {
 }
 
 const opfs = opfsHelpers(['peerd-apps', appId]);
+const appData = createAppDataClient({
+  appId,
+  opfs,
+  send: (message) => browser.runtime.sendMessage(message),
+});
 /** @type {{ name: string, entryFile: string, fileKinds: Record<string, 'text' | 'binary'>, dweb: any, agent: { kind: string, name?: string, instructions?: string, runtime?: string[] } } | null} */
 let appMeta = null;        // { name, entryFile }
 /** @type {Awaited<ReturnType<typeof createEditor>> | null} */
@@ -560,6 +566,25 @@ window.addEventListener('securitypolicyviolation', (event) => {
 
 window.addEventListener('message', (/** @type {MessageEvent} */ e) => {
   if (e.source !== frame.contentWindow) return;
+  if (e.data?.peerd === 'app:data:request' && runnerPhase === 'delivered') {
+    const id = typeof e.data.id === 'string' && e.data.id.length <= 100 ? e.data.id : null;
+    const op = ['get', 'set', 'delete', 'list'].includes(e.data.op) ? e.data.op : null;
+    if (!id || !op) return;
+    appData.request(op, e.data.key, e.data.json).then((/** @type {any} */ reply) => {
+      frame.contentWindow?.postMessage({
+        peerd: 'app:data:result', id,
+        ok: reply?.ok === true,
+        ...(reply?.ok === true ? { value: reply.value }
+          : { error: String(reply?.error || 'App data request failed').slice(0, 1_000) }),
+      }, '*');
+    }).catch((error) => {
+      frame.contentWindow?.postMessage({
+        peerd: 'app:data:result', id, ok: false,
+        error: String(error?.message ?? error).slice(0, 1_000),
+      }, '*');
+    });
+    return;
+  }
   if (e.data?.peerd === 'app:agent:open' && runnerPhase === 'delivered') {
     setActorChatOpen(true);
     return;

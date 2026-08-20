@@ -246,10 +246,16 @@ describe('poisoned entries', () => {
 
 describe('bounded growth', () => {
   test('oldest terminal records are pruned past the cap; nonterminal ones survive', async () => {
-    const { adapter } = makeStorage();
-    let t = 0;
+    const { adapter, map } = makeStorage();
+    map.set(OPERATION_LOG_KEY, Object.fromEntries(
+      Array.from({ length: OPERATION_LOG_MAX_TERMINAL }, (_, i) => [`op-${i}`, {
+        ...beginInput, operationId: `op-${i}`, createdAt: i + 1, attempt: 1,
+        state: S.COMPLETED, dispatched: true,
+      }]),
+    ));
+    let t = OPERATION_LOG_MAX_TERMINAL;
     const log = createOperationLog({ storage: adapter, now: () => ++t });
-    for (let i = 0; i < OPERATION_LOG_MAX_TERMINAL + 5; i += 1) {
+    for (let i = OPERATION_LOG_MAX_TERMINAL; i < OPERATION_LOG_MAX_TERMINAL + 5; i += 1) {
       const id = `op-${i}`;
       await log.begin({ ...beginInput, operationId: id });
       await log.transition(id, S.RUNNING);
@@ -315,14 +321,24 @@ describe('bounded growth', () => {
         durable.set(key, structuredClone(value));
       },
     };
-    let t = 0;
+    // Other bounded-growth tests exercise the full begin/transition path.
+    // Seed this test's 500 settled records directly so it isolates write
+    // ordering instead of quadratically cloning the growing map for seconds.
+    durable.set(OPERATION_LOG_KEY, Object.fromEntries(
+      Array.from({ length: OPERATION_LOG_MAX_TERMINAL }, (_, i) => {
+        const operationId = `old-${i}`;
+        return [operationId, {
+          ...beginInput,
+          operationId,
+          createdAt: i + 1,
+          attempt: 1,
+          state: S.COMPLETED,
+          dispatched: true,
+        }];
+      }),
+    ));
+    let t = OPERATION_LOG_MAX_TERMINAL;
     const log = createOperationLog({ storage, now: () => ++t });
-    for (let i = 0; i < OPERATION_LOG_MAX_TERMINAL; i += 1) {
-      const id = `old-${i}`;
-      await log.begin({ ...beginInput, operationId: id });
-      await log.transition(id, S.RUNNING);
-      await log.transition(id, S.COMPLETED);
-    }
     await log.begin({ ...beginInput, operationId: 'new' });
     await log.transition('new', S.RUNNING);
     events.length = 0;
@@ -336,13 +352,20 @@ describe('bounded growth', () => {
   });
 
   test('outcome_unknown records are not pruned by the terminal cap — the uncertainty outlives ordinary history', async () => {
-    const { adapter } = makeStorage();
-    let t = 0;
+    const { adapter, map } = makeStorage();
+    map.set(OPERATION_LOG_KEY, Object.fromEntries([
+      ['op-unknown', {
+        ...beginInput, operationId: 'op-unknown', createdAt: 1, attempt: 1,
+        state: S.OUTCOME_UNKNOWN, dispatched: true,
+      }],
+      ...Array.from({ length: OPERATION_LOG_MAX_TERMINAL }, (_, i) => [`op-${i}`, {
+        ...beginInput, operationId: `op-${i}`, createdAt: i + 2, attempt: 1,
+        state: S.COMPLETED, dispatched: true,
+      }]),
+    ]));
+    let t = OPERATION_LOG_MAX_TERMINAL + 1;
     const log = createOperationLog({ storage: adapter, now: () => ++t });
-    await log.begin({ ...beginInput, operationId: 'op-unknown' });
-    await log.transition('op-unknown', S.RUNNING);
-    await log.transition('op-unknown', S.OUTCOME_UNKNOWN, { dispatched: true });
-    for (let i = 0; i < OPERATION_LOG_MAX_TERMINAL + 5; i += 1) {
+    for (let i = OPERATION_LOG_MAX_TERMINAL; i < OPERATION_LOG_MAX_TERMINAL + 5; i += 1) {
       const id = `op-${i}`;
       await log.begin({ ...beginInput, operationId: id });
       await log.transition(id, S.RUNNING);

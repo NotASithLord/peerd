@@ -422,8 +422,13 @@ describe('capability-derived actor profiles', () => {
     expect(app).toContain('observe → act →');
     expect(app).toContain('window.peerd.agent.expose({ observe, act })');
     expect(app).toContain('semantic operations such as replace-selection');
+    expect(app).toContain('window.peerd.data.get/set/delete/list');
+    expect(app).toContain('data/<key>.json');
     expect(app).toContain('window.peerd.agent.open()');
     expect(app).toContain('sends every message entered there directly to this bound');
+    expect(app).toContain('One actor handles use, help, and development');
+    expect(app).toContain('Use repo_history and repo_version for durable work');
+    expect(app).toContain('Never commit secrets or use remotes without');
     expect(app).not.toContain('tools: app_observe');
 
     const mesh = actorBlock('dweb');
