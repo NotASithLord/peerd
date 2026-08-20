@@ -245,6 +245,15 @@ describe('keyless provider activation (issue #384)', () => {
     expect(empty.updates).toEqual([]);
   });
 
+  test("onboarding's survey ping opts out, so no daemon activates itself", async () => {
+    // why: the provider step probes every reachable daemon on mount. Without
+    // the opt-out, merely OPENING the step would choose for the user.
+    const { routes, updates } = withSettings('');
+    expect(await routes['provider/test']({ provider: 'ollama', activate: false }))
+      .toEqual({ ok: true, reachable: true, models: 2 });
+    expect(updates).toEqual([]);
+  });
+
   test('activation lands before the state push the panel re-renders from', async () => {
     // why: pushState is what re-runs the readiness projection. Pushing first
     // would render the pre-adoption state and leave the composer gated until

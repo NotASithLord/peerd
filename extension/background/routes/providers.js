@@ -43,7 +43,7 @@ export const makeProviderRoutes = (deps) => {
     // endpoint, so an onboarding tester learns the key works BEFORE sending a real
     // message (instead of hitting a 401 on the first turn). The adapter's
     // connect-timeout applies, so the test itself can't hang.
-    'provider/test': async ({ provider }) => {
+    'provider/test': async ({ provider, activate }) => {
       if (!(await awaitSettings())) return { ok: false, error: 'settings-unavailable' };
       const adapter = listProviders().find((/** @type {any} */ p) => p.name === provider);
       // Keyless local provider (Ollama): "does the daemon answer" is the
@@ -62,7 +62,11 @@ export const makeProviderRoutes = (deps) => {
           // provider had no activation path at all, so a validated Ollama left
           // providerName at its empty default and the composer stayed gated on
           // an unkeyed Anthropic.
-          if (count > 0 && !(await activeProviderUsable())) {
+          // activate:false is onboarding's opt-out, the same one setKey takes.
+          // That step probes every reachable daemon on mount, and its contract
+          // is that nothing becomes active until the user picks - so a survey
+          // ping must not decide for them.
+          if (activate !== false && count > 0 && !(await activeProviderUsable())) {
             await settingsStore.update({ providerName: provider, providerModel: '' });
           }
           pushState();

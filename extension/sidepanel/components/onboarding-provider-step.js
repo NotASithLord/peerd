@@ -74,7 +74,7 @@ export const ProviderStep = {
       for (const p of vnode.state.rows ?? []) {
         if (p.keyless && p.liveModels) {
           vnode.state.conn[p.name] = 'checking';
-          vnode.attrs.send({ type: 'provider/test', provider: p.name })
+          vnode.attrs.send({ type: 'provider/test', provider: p.name, activate: false })
             .then((t) => { vnode.state.conn[p.name] = t?.ok ? 'connected' : 'down'; m.redraw(); })
             .catch(() => { vnode.state.conn[p.name] = 'down'; m.redraw(); });
         }
