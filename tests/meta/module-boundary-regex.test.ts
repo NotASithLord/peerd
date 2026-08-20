@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { EXTENSION_DIR, REPO_ROOT } from '../../packaging/lib.ts';
+import { readdirSync } from 'node:fs';
+import { EXTENSION_DIR } from '../../packaging/lib.ts';
 
 /**
  * `no-restricted-imports` is what makes "index.js is the public API per module"
@@ -19,16 +18,28 @@ const moduleNames = (): string[] => readdirSync(EXTENSION_DIR, { withFileTypes: 
   .filter((entry) => entry.isDirectory() && entry.name.startsWith('peerd-'))
   .map((entry) => entry.name);
 
-const boundaryRegex = (): RegExp => {
-  const config = readFileSync(join(REPO_ROOT, 'eslint.config.js'), 'utf8');
-  const match = /regex:\s*'((?:[^'\\]|\\.)*)'/.exec(config);
-  if (!match) throw new Error('no cross-module import regex in eslint.config.js');
-  return new RegExp(JSON.parse(`"${match[1].replace(/"/g, '\\"')}"`));
+const boundaryRegex = async (): Promise<RegExp> => {
+  // Read the LIVE config object rather than scraping the source. The rule's
+  // pattern is a JS string full of backslashes, and un-escaping it by hand is
+  // both fragile and a genuine incomplete-sanitization bug - importing gives
+  // the exact value ESLint itself enforces.
+  const config = (await import('../../eslint.config.js')).default as Array<{
+    rules?: Record<string, unknown>;
+  }>;
+  for (const block of config) {
+    const rule = block.rules?.['no-restricted-imports'];
+    if (!Array.isArray(rule)) continue;
+    const options = rule[1] as { patterns?: Array<{ regex?: string }> } | undefined;
+    for (const pattern of options?.patterns ?? []) {
+      if (pattern.regex?.includes('peerd-')) return new RegExp(pattern.regex);
+    }
+  }
+  throw new Error('no cross-module import regex in eslint.config.js');
 };
 
 describe('cross-module import boundary', () => {
-  test('every peerd-* module on disk is inside the gate', () => {
-    const regex = boundaryRegex();
+  test('every peerd-* module on disk is inside the gate', async () => {
+    const regex = await boundaryRegex();
     const names = moduleNames();
     expect(names.length).toBeGreaterThan(0);
     for (const name of names) {
@@ -36,13 +47,13 @@ describe('cross-module import boundary', () => {
     }
   });
 
-  test('a hyphenated module name does not escape the gate', () => {
+  test('a hyphenated module name does not escape the gate', async () => {
     // The exact shape that was slipping through.
-    expect(boundaryRegex().test('/peerd-voice-host/internal/deep.js')).toBe(true);
+    expect((await boundaryRegex()).test('/peerd-voice-host/internal/deep.js')).toBe(true);
   });
 
-  test('the declared public entry points stay reachable', () => {
-    const regex = boundaryRegex();
+  test('the declared public entry points stay reachable', async () => {
+    const regex = await boundaryRegex();
     for (const name of moduleNames()) {
       for (const entry of ['index.js', 'background.js', 'offscreen.js']) {
         expect(regex.test(`/${name}/${entry}`)).toBe(false);
