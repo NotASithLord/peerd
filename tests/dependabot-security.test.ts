@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -399,5 +399,73 @@ describe('Dependabot security automation policy', () => {
     expect(() => assertRecentUtcDate('2026-08-10', now)).not.toThrow();
     expect(() => assertRecentUtcDate('2026-08-09', now)).not.toThrow();
     expect(() => assertRecentUtcDate('2026-08-08', now)).toThrow('current UTC date');
+  });
+});
+
+// Minimal, dependency-free readers for the two policy manifests. why: these
+// gates live only in YAML, so nothing else in the suite would notice a
+// regression, and a real YAML parser is not a declared dependency here.
+const readRepoFile = (path: string): string[] =>
+  readFileSync(join(import.meta.dir, '..', path), 'utf8').split('\n');
+
+const jobCondition = (workflow: string, job: string): string => {
+  const lines = readRepoFile(join('.github/workflows', workflow));
+  const jobStart = lines.findIndex((line) => line === `  ${job}:`);
+  if (jobStart < 0) throw new Error(`${workflow} has no job ${job}`);
+  const keyIndex = lines.findIndex(
+    (line, index) => index > jobStart && /^    if:/.test(line),
+  );
+  const blockEnd = lines.findIndex(
+    (line, index) => index > jobStart && /^  \S/.test(line),
+  );
+  if (keyIndex < 0 || (blockEnd >= 0 && keyIndex > blockEnd)) {
+    throw new Error(`${workflow} job ${job} has no if condition`);
+  }
+  const condition = [lines[keyIndex].replace(/^    if:\s*>?-?\s*/, '')];
+  for (let index = keyIndex + 1; index < lines.length; index += 1) {
+    if (!/^ {5,}\S/.test(lines[index])) break;
+    condition.push(lines[index].trim());
+  }
+  return condition.join(' ').split(/\s+/).filter(Boolean).join(' ');
+};
+
+const securityUpdateGroups = (): string[] => {
+  const lines = readRepoFile('.github/dependabot.yml');
+  const groups: string[] = [];
+  let current = '';
+  for (const line of lines) {
+    const name = /^      ([\w-]+):\s*$/.exec(line);
+    if (name) current = name[1];
+    else if (current && /^\s+applies-to:\s*security-updates\s*$/.test(line)) {
+      groups.push(current);
+      current = '';
+    }
+  }
+  return groups;
+};
+
+describe('Dependabot workflow eligibility gates', () => {
+  test('the malware observation matrix job requires a non-empty candidate set', () => {
+    // why: a matrix expanding to zero entries fails the run instead of skipping
+    // the job, which reported every candidate-free scheduled sweep as red.
+    expect(jobCondition('dependabot-malware-observation.yml', 'observe'))
+      .toContain("needs.discover.outputs.matrix != '[]'");
+  });
+
+  test('the security release admits only the authenticated security groups', () => {
+    // why: without a group gate, routine version-update PRs enter the no-human
+    // release workflow and hard-fail on an unrelated metadata boundary.
+    for (const job of ['verify', 'publish']) {
+      const condition = jobCondition('dependabot-security-release.yml', job);
+      expect(condition).toContain("'dependabot/bun/bun-security-patches'");
+      expect(condition).toContain("'dependabot/github_actions/actions-security-patches'");
+    }
+  });
+
+  test('every security group declared in dependabot.yml is routable', () => {
+    const groups = securityUpdateGroups();
+    expect(groups.sort()).toEqual(['actions-security-patches', 'bun-security-patches']);
+    const condition = jobCondition('dependabot-security-release.yml', 'verify');
+    for (const group of groups) expect(condition).toContain(`/${group}'`);
   });
 });
