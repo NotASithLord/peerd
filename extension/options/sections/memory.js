@@ -17,6 +17,7 @@
 import m from '/vendor/mithril/mithril.js';
 import { countLines, ALWAYS_LOADED_LINE_BUDGET } from '/peerd-runtime/index.js';
 import { resetRow } from './reset-row.js';
+import { rowController } from '../components/settings-row.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
 /** @typedef {{ id?: string, kind: string, body?: string, workspace?: string, subpath?: string }} MemoryDoc */
@@ -75,6 +76,7 @@ export const MemoryView = {
     const suggestions = ui.suggestions ?? [];
     // Auto-memory defaults ON — absence of the key must not read as off.
     const autoMemoryOn = state?.settings?.autoMemoryEnabled !== false;
+    const { toggleRow } = rowController(ui);
 
     return m('.memory-pane', [
       m('p.muted', { style: 'font-size:12px; margin:0 0 10px;' }, [
@@ -146,24 +148,22 @@ export const MemoryView = {
 
       // Auto-memory toggle — relocated from "Agent behavior": the
       // switch belongs next to the suggestion queue it feeds.
-      m('.settings-divider'),
-      m('h3', 'Auto-memory'),
-      m('p', autoMemoryOn
-        ? 'On. When a chat wraps up (you archive it or switch away after a real conversation), peerd makes one small background model call to propose durable notes about you and your ongoing work. Proposals appear above for your approval — nothing is ever saved without it. Calls respect the session spend limit (Costs page).'
-        : 'Off. peerd never proposes memory notes from finished chats. You can still ask it to remember things, or edit memory directly on this page.'),
-      m('div', { style: 'display:flex; gap:8px; align-items:center;' }, [
-        m('button.secondary', {
-          type: 'button',
-          disabled: ui.autoMemoryBusy,
-          onclick: async () => {
-            if (ui.autoMemoryBusy) return;
-            ui.autoMemoryBusy = true;
-            await send({ type: 'settings/update', patch: { autoMemoryEnabled: !autoMemoryOn } });
-            ui.autoMemoryBusy = false;
-            m.redraw();
-          },
-        }, ui.autoMemoryBusy ? '…' : autoMemoryOn ? 'Disable auto-memory' : 'Enable auto-memory'),
-      ]),
+      // No .settings-divider here: the row draws its own top rule, and the two
+      // stacked 16px apart read as a rendering mistake rather than a section
+      // break.
+      toggleRow({
+        id: 'auto-memory',
+        label: 'Auto-memory',
+        on: autoMemoryOn,
+        busyKey: 'autoMemoryBusy',
+        summary: autoMemoryOn
+          ? 'peerd proposes notes when a chat wraps up. Nothing is saved without your approval.'
+          : 'peerd never proposes notes. You can still ask it to remember things, or edit memory here.',
+        why: autoMemoryOn
+          ? 'On. When a chat wraps up (you archive it or switch away after a real conversation), peerd makes one small background model call to propose durable notes about you and your ongoing work. Proposals appear above for your approval - nothing is ever saved without it. Calls respect the session spend limit (Costs page).'
+          : 'Off. peerd never proposes memory notes from finished chats. You can still ask it to remember things, or edit memory directly on this page.',
+        apply: () => send({ type: 'settings/update', patch: { autoMemoryEnabled: !autoMemoryOn } }),
+      }),
       resetRow(send, ['autoMemoryEnabled']),
     ]);
   },
