@@ -14,6 +14,7 @@ import { loadDweb } from '/shared/dweb-loader.js';
 import { DWEB_ENABLED } from '/shared/channel-config.js';
 import { openHome } from '/shared/open-home.js';
 import { resetRow } from './reset-row.js';
+import { settingsRow, toggleSwitch, rowController } from '../components/settings-row.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
 
@@ -37,19 +38,65 @@ export const DwebSection = {
   view: ({ attrs: { state, send }, state: ui }) => {
     // Preview-only key; undefined (and unrenderable) on store packages.
     const dwebEnabled = !!state.settings?.dwebEnabled;
+    const agentOn = !!state.settings?.dwebAgentEnabled;
+    const { whyOpen, toggleWhy, toggleRow } = rowController(ui);
 
-    return m('div', [
-      m('.dweb-banner', [
-        m('strong', 'Dweb preview. '),
-        'This is research-grade. The protocol may change; data formats '
-        + 'may evolve. Dweb traffic is opt-in per-tab.',
-      ]),
-      m('p', 'You’re running peerd with the dweb preview enabled. '
-        + 'The core extension is the same peerd that ships on the stores — '
-        + 'only this dweb overlay is preview.'),
-      m('h3', 'Participate in the dweb'),
-      m('p', dwebEnabled
-        ? 'ON — this peerd can join dweb rooms with other peerd instances '
+    // The network switch is NOT a plain toggleRow: it has a third state. When
+    // the setting persisted Off but the live network refused to stop, the
+    // stored value and the running network disagree, and the row has to say
+    // so rather than showing a clean OFF. The switch then RETRIES the stop
+    // instead of flipping - which is why the click target computes its own
+    // target rather than negating `dwebEnabled`.
+    const networkBusy = !!ui.dwebBusy;
+    const stopFailed = !!ui.dwebStopIncomplete;
+    const applyNetwork = async () => {
+      if (ui.dwebBusy) return;
+      const targetEnabled = stopFailed ? false : !dwebEnabled;
+      ui.dwebBusy = true;
+      ui.dwebError = null;
+      try {
+        const reply = await send({ type: 'settings/update', patch: { dwebEnabled: targetEnabled } });
+        if (reply?.ok) {
+          ui.dwebStopIncomplete = false;
+        } else if (!targetEnabled && reply?.settings?.dwebEnabled === false) {
+          ui.dwebStopIncomplete = true;
+          ui.dwebError = 'dweb is set to Off, but the live network could not be stopped. Restart peerd or try again.';
+        } else {
+          ui.dwebError = `Could not update dweb: ${reply?.error ?? 'unknown error'}. Try again.`;
+        }
+      } catch {
+        ui.dwebError = ui.dwebStopIncomplete
+          ? 'dweb is set to Off, but the live network could not be stopped. Restart peerd or try again.'
+          : 'Could not confirm the dweb change. Try again.';
+      } finally {
+        ui.dwebBusy = false;
+        m.redraw();
+      }
+    };
+    // Status belongs INSIDE the network row, not between the two rows: it is
+    // only meaningful while the network is on, and a loose paragraph between
+    // rows breaks the scan the row pattern exists to give.
+    const networkStatus = ui.dwebStatus ? m('p.hint', [
+      `Protocol phase ${ui.dwebStatus.phase ?? 'unknown'}. `,
+      ui.dwebStatus.did
+        ? ['Peer identity: ', m('code', ui.dwebStatus.did), '. ',
+          m('a', { href: '#!/transfer' }, 'Back up or restore this identity.')]
+        : 'Identity is vault-stored and created on first room join.',
+    ]) : null;
+    const networkRow = settingsRow({
+      id: 'dweb-network',
+      label: 'Participate in the dweb',
+      pill: networkBusy ? '\u2026' : dwebEnabled ? 'ON' : 'OFF',
+      badge: stopFailed ? 'STILL RUNNING' : null,
+      summary: networkBusy
+        ? 'Saving\u2026'
+        : stopFailed
+          ? 'Set to Off, but the live network is still running. Retry to stop it.'
+          : dwebEnabled
+            ? 'This peerd can join dweb rooms with other instances and run peer-to-peer dwapps.'
+            : 'Nothing connects anywhere. Enabling lets this peerd join dweb rooms over WebRTC.',
+      why: dwebEnabled
+        ? 'ON - this peerd can join dweb rooms with other peerd instances '
           + '(N-peer rooms over WebRTC) and run dwapps that chat and share '
           + 'data peer-to-peer. Connections are end-to-end between peers; '
           + 'the rendezvous node only relays opaque handshakes, and a room '
@@ -58,71 +105,53 @@ export const DwebSection = {
         : 'OFF. Enabling lets this peerd join dweb rooms with other peerd '
           + 'instances over WebRTC and run peer-to-peer dwapps. (On the '
           + 'preview package dweb is on by default; you turned it off.) '
-          + 'Nothing connects anywhere until you explicitly join a room.'),
-      m('div', { style: 'display:flex; gap:8px; align-items:center;' }, [
-        m('button.secondary', {
-          type: 'button',
-          disabled: ui.dwebBusy,
-          onclick: async () => {
-            if (ui.dwebBusy) return;
-            const targetEnabled = ui.dwebStopIncomplete ? false : !dwebEnabled;
-            ui.dwebBusy = true;
-            ui.dwebError = null;
-            try {
-              const reply = await send({ type: 'settings/update', patch: { dwebEnabled: targetEnabled } });
-              if (reply?.ok) {
-                ui.dwebStopIncomplete = false;
-              } else if (!targetEnabled && reply?.settings?.dwebEnabled === false) {
-                ui.dwebStopIncomplete = true;
-                ui.dwebError = 'dweb is set to Off, but the live network could not be stopped. Restart peerd or try again.';
-              } else {
-                ui.dwebError = `Could not update dweb: ${reply?.error ?? 'unknown error'}. Try again.`;
-              }
-            } catch {
-              ui.dwebError = ui.dwebStopIncomplete
-                ? 'dweb is set to Off, but the live network could not be stopped. Restart peerd or try again.'
-                : 'Could not confirm the dweb change. Try again.';
-            } finally {
-              ui.dwebBusy = false;
-              m.redraw();
-            }
-          },
-        }, ui.dwebBusy ? '…' : ui.dwebStopIncomplete
-          ? 'Retry stopping dweb'
-          : dwebEnabled ? 'Disable dweb' : 'Enable dweb'),
-      ]),
-      ui.dwebError ? m('p.error', { role: 'alert' }, ui.dwebError) : null,
-      ui.dwebStatus ? m('p.hint', [
-        `Protocol phase ${ui.dwebStatus.phase ?? '—'}. `,
-        ui.dwebStatus.did
-          ? ['Peer identity: ', m('code', ui.dwebStatus.did), '. ',
-            m('a', { href: '#!/transfer' }, 'Back up or restore this identity.')]
-          : 'Identity is vault-stored and created on first room join.',
-      ]) : null,
+          + 'Nothing connects anywhere until you explicitly join a room.',
+      open: whyOpen('dweb-network'),
+      onToggleWhy: toggleWhy('dweb-network'),
+      control: toggleSwitch({
+        on: dwebEnabled,
+        busy: networkBusy,
+        label: stopFailed
+          ? 'Participate in the dweb - retry stopping'
+          : `Participate in the dweb - ${dwebEnabled ? 'on' : 'off'}`,
+        onclick: applyNetwork,
+      }),
+      children: networkStatus,
+    });
 
-      // The dweb AGENT — the mesh-operator actor. Nested under the network
+    return m('div', [
+      m('.dweb-banner', [
+        m('strong', 'Dweb preview. '),
+        'This is research-grade. The protocol may change; data formats '
+        + 'may evolve. Dweb traffic is opt-in per-tab.',
+      ]),
+      m('p', 'You’re running peerd with the dweb preview enabled. '
+        + 'The core extension is the same peerd that ships on the stores - '
+        + 'only this dweb overlay is preview.'),
+      networkRow,
+      ui.dwebError ? m('p.error', { role: 'alert' }, ui.dwebError) : null,
+      // The dweb AGENT - the mesh-operator actor. Nested under the network
       // toggle (no network, no agent) and OPT-IN: an agent peers can wake is a
-      // posture the user chooses. Rendering follows the dependent-toggle idiom
-      // (behavior.js failover picker).
-      dwebEnabled ? m('div', { style: 'margin-top:14px; border-top:1px solid var(--hairline, #2a2a2a); padding-top:14px;' }, [
-        m('h3', 'dweb agent'),
-        m('p', 'A dedicated, isolated agent that operates the mesh for you: it '
+      // posture the user chooses.
+      dwebEnabled ? toggleRow({
+        id: 'dweb-agent',
+        label: 'dweb agent',
+        on: agentOn,
+        busyKey: 'dwebAgentBusy',
+        summary: agentOn
+          ? 'Addressable as "dweb" in chat (message_actor); joins the agent inbox on unlock.'
+          : 'The mesh tools are unavailable - they live on this agent, not the chat agent.',
+        why: 'A dedicated, isolated agent that operates the mesh for you: it '
           + 'holds the dweb tools (discover, share, install, block), keeps a '
           + 'ledger of peers and publishers, and monitors messages sent to '
-          + 'your agent — surfacing only what matters. It runs keyless in its '
+          + 'your agent - surfacing only what matters. It runs keyless in its '
           + 'own worker, can never be made to act by an inbound message, and '
-          + 'installs or shares only with your confirmation.'),
-        m('button.secondary', {
-          type: 'button',
-          onclick: async () => {
-            await send({ type: 'settings/update', patch: { dwebAgentEnabled: !state.settings?.dwebAgentEnabled } });
-            m.redraw();
-          },
-        }, state.settings?.dwebAgentEnabled ? 'Disable the dweb agent' : 'Enable the dweb agent'),
-        state.settings?.dwebAgentEnabled
-          ? m('p.hint', 'On — your agent is addressable as "dweb" in chat (message_actor) and joins the agent inbox on unlock.')
-          : m('p.hint', 'Off — the mesh tools are unavailable until enabled (they live on this agent, not the chat agent).'),
-      ]) : null,
+          + 'installs or shares only with your confirmation.',
+        apply: () => send({
+          type: 'settings/update',
+          patch: { dwebAgentEnabled: !agentOn },
+        }),
+      }) : null,
 
       // commons — the Phase 1 north-star dwapp — now lives in the Library as
       // a pre-loaded, dweb-tagged app (not a button here). Point there.
