@@ -29,18 +29,18 @@ Each maps to one letter and color in the brand wordmark:
 
 | Letter | Color | Module | Role |
 |---|---|---|---|
-| `p` | cyan    | `peerd-provider/`     | Model adapters (Anthropic, OpenRouter, OpenAI, Z.ai GLM, and keyless Ollama shipped; local WebGPU gated on the resident engine — `registry.js` is the live list) |
+| `p` | cyan    | `peerd-provider/`     | Model adapters (Anthropic, OpenRouter, OpenAI, Z.ai GLM keyed; Ollama and the on-device WebGPU runner keyless — `registry.js` is the live list) |
 | `e` | red     | `peerd-egress/`       | Security: vault, allowlist (`safeFetch`), denylist, audit |
-| `e` | amber   | `peerd-engine/`       | Execution instances — Sandboxes. Three kinds run in their own visible tab: WebVMs (CheerpX Linux), Notebooks (sealed JS worker + OPFS), Apps (opaque-origin iframe). A fourth, the **headless worker** (`script`), runs the Notebook's sealed worker offscreen with no tab — the agent's own quick compute. The sandbox is the isolate; a tab is one way to host it (taxonomy in the `peerd-engine/` code). |
+| `e` | amber   | `peerd-engine/`       | Execution instances — Sandboxes. FOUR kinds run in their own visible tab: WebVMs (CheerpX Linux), Notebooks (sealed JS worker + OPFS), Pods, Apps (opaque-origin iframe). A fifth, the **headless worker** (`script`), runs the Notebook's sealed worker offscreen with no tab — the agent's own quick compute, and the only kind with no registry because it persists no instances. Also here: browser-native Git (`repository/`, exported from `index.js`). The sandbox is the isolate; a tab is one way to host it (taxonomy in `registry-factory.js`). |
 | `r` | green   | `peerd-runtime/`      | Agent loop, tools + per-environment actors (`message_actor`), sessions, profiles, skills, memory, permissions (Plan/Act), review, goal mode (autonomous loop), composer, cost, transfer, voice, clock, web tool policy |
 | `d` | magenta | `peerd-distributed/` | The dweb. An always-on P2P base network (offscreen mesh + DHT + gossip), did:key identity, signed content addressing, the dwapp bridge, and a peer-to-peer app store that **users AND the agent** build, share, and run dwapps on. Chrome preview only until Firefox has a mesh host. |
 
 The extension *chassis* lives outside these modules: `background/`,
-`offscreen/`, `sidepanel/`, `engine-tabs/`, `permissions/`, `eval/`,
-`shared/`, `tests/`, `vendor/`, `icons/`. Each `peerd-engine` execution
-kind owns a dedicated tab page under `engine-tabs/` (`engine-tabs/vm-tab/`,
-`engine-tabs/notebook-tab/`, `engine-tabs/app-tab/`) — grouped so the
-three engine host surfaces sit together; `permissions/` hosts user-gesture surfaces such as
+`offscreen/`, `sidepanel/`, `home/`, `options/`, `engine-tabs/`,
+`permissions/`, `eval/`, `shared/`, `tests/`, `vendor/`, `icons/`. Each
+tab-hosted `peerd-engine` execution kind owns a dedicated page under
+`engine-tabs/` (`vm-tab/`, `notebook-tab/`, `pod-tab/`, `app-tab/`) — grouped so the
+four engine host surfaces sit together; `permissions/` hosts user-gesture surfaces such as
 the mic-permission grant page; `eval/` is the live end-to-end eval
 harness. (There is no `content/` directory — DOM work happens via
 injected functions, not a persistent content script.) Outside
@@ -53,15 +53,21 @@ extension-side ceremony protocol and authenticator verification under
 and the `peerd-distributed` transport. Release packaging generates auto-update
 feeds as release assets; the site repository downloads and deploys them.
 
-The brand IS the architecture. If you find yourself adding a sixth
-top-level peerd-* directory, stop and reconsider.
+The brand IS the architecture: the five letters are the five modules.
+There is one deliberate exception on disk - `peerd-voice-host/`, a lazily
+imported offscreen host - so the rule is not "count the directories" but
+"a new top-level peerd-* directory needs a reason the five letters cannot
+absorb". Stop and reconsider before adding one. Note the cross-module
+import gate matches on `peerd-[a-z-]+/`, hyphen included; a name that
+falls outside that pattern is a name outside the boundary.
 
 ---
 
 ## What to read, in order
 
 The code is the spec. There is no separate design-doc corpus; the
-prose orientation is this file, and the rest is the source itself.
+prose orientation is this file, four architecture notes under `docs/`,
+and the rest is the source itself.
 
 1. **`CLAUDE.md`** (this file) — orientation. Start here every session.
 2. **The module code** — `extension/peerd-provider/`, `peerd-egress/`,
@@ -69,7 +75,12 @@ prose orientation is this file, and the rest is the source itself.
    module's `index.js` is its universal public surface; read it first, then the
    files it exports. An explicit environment entry point such as
    `background.js` may expose a cold-start-safe subset for that host.
-3. **The code.** For concrete behavior (vault crypto, denylist matcher,
+3. **`docs/`** — the few places a decision does NOT live in one module:
+   `EXTENSION-HOSTS.md` (normative: which host runs what, and why a
+   surface belongs there), `APP-ACTORS.md`, `DWAPP-BUNDLE.md`,
+   `BROWSER-COMPATIBILITY.md`, plus `docs/security/` and `docs/store/`.
+   Read `EXTENSION-HOSTS.md` before adding any new host surface.
+4. **The code.** For concrete behavior (vault crypto, denylist matcher,
    agent loop, tool dispatcher, prompt-injection defenses, the manifest,
    the MV3 keepalive trick), read the source in the relevant module. It
    is authoritative; prose drifts, code does not.
@@ -285,13 +296,13 @@ exists today:
    Everything depends on this; build it first.
 3. **`peerd-provider`** — Anthropic + OpenRouter adapters. Schema
    conversions, streaming, error handling.
-4. **`peerd-engine`** — Sandboxes: four execution kinds (taxonomy in
-   the module code). Three are hosted in their own visible tab — WebVM
-   (CheerpX), Notebook (sealed JS worker + OPFS), App (opaque-origin
-   iframe) — each with a registry in `peerd-engine`, a runtime in its tab
-   page under `engine-tabs/` (`engine-tabs/vm-tab/`, `engine-tabs/notebook-tab/`,
-   `engine-tabs/app-tab/`), and a tab tracker + RPC
-   client in `background/`. The fourth, the **headless worker** (`script`),
+4. **`peerd-engine`** — Sandboxes: five execution kinds (taxonomy in
+   `registry-factory.js`). Four are hosted in their own visible tab —
+   WebVM (CheerpX), Notebook (sealed JS worker + OPFS), Pod, App
+   (opaque-origin iframe) — each with a registry in `peerd-engine`, a
+   runtime in its tab page under `engine-tabs/` (`vm-tab/`,
+   `notebook-tab/`, `pod-tab/`, `app-tab/`), and a tab tracker + RPC
+   client in `background/`. The fifth, the **headless worker** (`script`),
    runs the Notebook's sealed worker in the offscreen document with no tab
    (`offscreen/job-runner.js`) — the agent's own quick compute, same
    substrate as a Notebook, different host.
@@ -400,12 +411,12 @@ gotchas to know going in:
 - Voice — local transcription via Moonshine (WASM, SRI-pinned model
   download, OPFS-cached) with a Web Speech API fallback. Hosted in the
   offscreen doc (`peerd-runtime/voice/`).
-- Sandboxes — four execution kinds (taxonomy in the `peerd-engine/` code).
-  Three run in their
+- Sandboxes — five execution kinds (taxonomy in the `peerd-engine/` code).
+  Four run in their
   own browser tab — WebVM (CheerpX), Notebook (sealed JS worker + OPFS),
-  App (opaque-origin iframe) — each with its own registry + tab tracker +
-  RPC client. The fourth, the headless worker (`script`), is the same
-  sealed worker run offscreen with no tab, for the agent's own quick
+  Pod, App (opaque-origin iframe) — each with its own registry + tab
+  tracker + RPC client. The fifth, the headless worker (`script`), is the
+  same sealed worker run offscreen with no tab, for the agent's own quick
   compute (code mode).
 - Policy-gated dispatcher with full lineage attached to every tool
   result. The live stack is defined in `gates.js` plus the default
@@ -463,8 +474,9 @@ gotchas to know going in:
   CONTENTS sync to a proven self device); permission grants, audit history,
   device keys, and live engine handles are excluded on both. Routine mesh
   signing still uses the root: the wire verifier must accept
-  certificate-backed identity everywhere first (03-device-subkeys.md).
-- The **dweb actor** — a fifth bound-actor kind (`actorType:'dweb'`) and the
+  certificate-backed identity everywhere first.
+- The **dweb actor** — one more bound-actor kind (`actorType:'dweb'`; the live
+  set is `ACTOR_CAPABILITY_MANIFESTS`, not a number to memorize) and the
   first DAEMON actor: an opt-in (`dwebAgentEnabled`, Chrome-preview-only, default
   off), persistent, GLOBAL singleton addressable as `message_actor("dweb",…)`.
   It ABSORBS the dweb tools (they leave the orchestrator unconditionally —
