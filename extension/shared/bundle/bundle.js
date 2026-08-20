@@ -51,13 +51,14 @@ export const packBundle = ({ entry, files, fileKinds }) => {
 /**
  * @param {Uint8Array} payload
  * @param {{ maxPackedBytes?: number, maxDecodedBytes?: number,
- *   maxFiles?: number, maxPathChars?: number }} [limits]
+ *   maxFileBytes?: number, maxFiles?: number, maxPathChars?: number }} [limits]
  * @returns {{ entry: string | undefined, files: Record<string, Uint8Array>,
  *   fileKinds: Record<string, AppFileKind> }}
  */
 export const unpackBundle = (payload, limits = {}) => {
   const maxPackedBytes = limits.maxPackedBytes ?? DEFAULT_MAX_PACKED_BYTES;
   const maxDecodedBytes = limits.maxDecodedBytes ?? DEFAULT_MAX_DECODED_BYTES;
+  const maxFileBytes = limits.maxFileBytes ?? maxDecodedBytes;
   const maxFiles = limits.maxFiles ?? DEFAULT_MAX_FILES;
   const maxPathChars = limits.maxPathChars ?? DEFAULT_MAX_PATH_CHARS;
   if (!(payload instanceof Uint8Array)) throw new Error('bundle payload must be bytes');
@@ -85,7 +86,9 @@ export const unpackBundle = (payload, limits = {}) => {
     if (paths.length > maxFiles) throw new Error(`bundle has more than ${maxFiles} files`);
     const encoded = obj.files[path];
     if (typeof encoded !== 'string') throw new Error(`bundle file is not base64: ${path}`);
-    decodedBytes += base64ByteLength(encoded);
+    const fileBytes = base64ByteLength(encoded);
+    if (fileBytes > maxFileBytes) throw new Error(`bundle file exceeds ${maxFileBytes} decoded bytes: ${path}`);
+    decodedBytes += fileBytes;
     if (!Number.isSafeInteger(decodedBytes) || decodedBytes > maxDecodedBytes) {
       throw new Error(`bundle files exceed ${maxDecodedBytes} decoded bytes`);
     }
@@ -118,7 +121,7 @@ export const unpackBundle = (payload, limits = {}) => {
 /**
  * @param {Uint8Array} payload
  * @param {{ maxPackedBytes?: number, maxDecodedBytes?: number,
- *   maxFiles?: number, maxPathChars?: number }} [limits]
+ *   maxFileBytes?: number, maxFiles?: number, maxPathChars?: number }} [limits]
  */
 export const unpackBundleText = (payload, limits) => {
   const { entry, files, fileKinds } = unpackBundle(payload, limits);

@@ -200,6 +200,8 @@ describe('spot checks against the real defs', () => {
     ['js_notebook', 'E'],
     ['pod_exec', 'E'],
     ['script', 'E'],
+    ['app_code', 'E'],
+    ['app_act', 'E'],
     ['a2a_run', 'E'],
     ['message_actor', 'E'],
     ['vm_delete', 'E'],

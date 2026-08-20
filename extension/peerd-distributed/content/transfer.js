@@ -160,6 +160,11 @@ export const fetchBundle = async ({ uri, channel, onProgress, timeoutMs = 15000 
   // (a missing chunk throws in the worker before we reach reassembly).
   const payload = concat(...manifest.chunks.map((c) => /** @type {Uint8Array} */ (byHash.get(c.hash))));
   if (payload.length !== manifest.size) throw new Error('reassembled size mismatch');
+  // v2 commits the complete stored representation in addition to its chunks.
+  // Check it here, before the loader is allowed to start decompression.
+  if (manifest.v === 2 && await sha256hex(payload) !== manifest.bundle.compressedHash) {
+    throw new Error('compressed bundle hash mismatch');
+  }
 
   channel.setHandler(null);
   return { manifest, payload };

@@ -22,8 +22,42 @@ describe('offscreen JS client', () => {
     controller.abort();
     finishStartup();
 
-    await expect(pending).rejects.toThrow('headless job aborted before dispatch');
+    const error = await pending.catch((reason) => reason as any);
+    expect(error.message).toContain('headless job aborted before dispatch');
+    expect(error).toMatchObject({
+      executionDispatched: false,
+      outcomeKnown: true,
+      outcomeKind: 'pre-effect-failure',
+    });
     expect(sent).toEqual([]);
+  });
+
+  test('Stop and transport loss after job/run dispatch carry unknown-outcome custody', async () => {
+    for (const failure of ['abort', 'reject'] as const) {
+      const controller = new AbortController();
+      let dispatches = 0;
+      const client = makeOffscreenJsClient({
+        ensureOffscreen: async () => {},
+        sendMessage: (message: any) => {
+          dispatches += 1;
+          if (failure === 'abort') {
+            controller.abort();
+            return new Promise(() => {});
+          }
+          return Promise.reject(new Error('runtime port closed'));
+        },
+      });
+      const error = await client.execHeadless('return 1', {
+        timeoutMs: 1_000,
+        signal: controller.signal,
+      }).catch((reason) => reason as any);
+      expect(dispatches).toBe(1);
+      expect(error).toMatchObject({
+        executionDispatched: true,
+        outcomeKnown: false,
+        outcomeKind: 'transport-lost',
+      });
+    }
   });
 
   test('one wall-clock deadline is minted before startup and forwarded unchanged', async () => {

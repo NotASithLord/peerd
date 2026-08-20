@@ -72,6 +72,7 @@
     "check:invariants": "bun packaging/check-invariants.ts",
     "verify:store": "bun packaging/verify-store-artifact.ts",
     "feeds": "bun packaging/gen-update-feeds.ts",
+    "vendor:pako": "node scripts/vendor-pako-esm.mjs",
     "vendor:codemirror": "bun run scripts/vendor-codemirror.ts"
   },
   "devDependencies": {

@@ -190,9 +190,10 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   podClient:          ['pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write'],
   podRegistry:        ['sandbox_create', 'pod_destroy', 'actor_list'],
   podTabTracker:      ['sandbox_create', 'pod_destroy', 'actor_list', 'repo_version', 'repo_remote'],
-  jsOffscreenClient:  ['script', 'a2a_run', 'page_code', 'site_client_run'],
+  jsOffscreenClient:  ['script', 'a2a_run', 'page_code', 'app_code', 'site_client_run'],
   appClient:          ['sandbox_create', 'app_open', 'app_update', 'app_write_file',
     'app_read_file', 'app_list_files', 'app_delete_file', 'app_delete', 'app_search', 'edit_file'],
+  appAgentCall:       ['app_observe', 'app_act'],
   repositories:       ['sandbox_create', 'js_delete', 'pod_destroy', 'repo_history', 'repo_version', 'repo_remote'],
   appRegistry:        ['app_delete', 'edit_file', 'actor_list'],
   appTabTracker:      ['actor_list', 'repo_version'],
@@ -204,7 +205,7 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   // Every sealed code lane now mints the same owner-bound live-run lease. Keep
   // the registry exactly when one of those tools survived the grant; omitting a
   // lane fails loudly as `*_registry_unavailable`, never as an ungated relay.
-  scriptRuns:      ['script', 'a2a_run', 'page_code', 'site_client_run'],
+  scriptRuns:      ['script', 'a2a_run', 'page_code', 'app_code', 'site_client_run'],
   // DESIGN-17: the web actor's lazy tab-open hook (SW-injected for kind:'web' only).
   // navigate reads it to open/adopt the actor's tab when it owns none; kept for the
   // web actor (which has navigate), stripped from any kind whose toolset lacks it.

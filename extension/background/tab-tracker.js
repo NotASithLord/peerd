@@ -257,7 +257,7 @@ export const createTabTracker = ({
    * re-focuses it — so acting on an existing instance leaves the user put.
    *
    * @param {string} id
-   * @param {{ active?: boolean, groupTitle?: string }} [opts]
+   * @param {{ active?: boolean, groupTitle?: string, hashSuffix?: string }} [opts]
    * @returns {Promise<number>} tabId
    */
   const ensureTab = async (id, opts = {}) => {
@@ -286,7 +286,16 @@ export const createTabTracker = ({
       }
     }
 
-    const url = `${tabUrlPrefix}#${id}`;
+    // Launch context belongs in the fragment so it never leaves the extension
+    // origin. Refuse a second fragment or an unbounded value; callers supply an
+    // encoded query beginning with `?` (for example the App actor owner).
+    const hashSuffix = typeof opts.hashSuffix === 'string'
+      && opts.hashSuffix.startsWith('?')
+      && !opts.hashSuffix.includes('#')
+      && opts.hashSuffix.length <= 2_048
+      ? opts.hashSuffix
+      : '';
+    const url = `${tabUrlPrefix}#${id}${hashSuffix}`;
     const tab = await tabs.create({
       url,
       active: opts.active === true,

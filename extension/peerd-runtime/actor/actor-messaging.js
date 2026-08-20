@@ -723,7 +723,7 @@ export const makeActorMessaging = (deps) => {
   };
 
   /**
-   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitCapMs?: number, degradeToAsync?: boolean, via?: string, bareReply?: boolean, awaitSignal?: { aborted: boolean, reason?: unknown, addEventListener: (t: string, fn: () => void, opts?: object) => void, removeEventListener?: (t: string, fn: () => void) => void } }} req
+   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitCapMs?: number, degradeToAsync?: boolean, via?: string, bareReply?: boolean, trustedAppTab?: boolean, awaitSignal?: { aborted: boolean, reason?: unknown, addEventListener: (t: string, fn: () => void, opts?: object) => void, removeEventListener?: (t: string, fn: () => void) => void } }} req
    *   awaitReply — the ACTOR reply mode (PR #134): resolve the fenced reply
    *   into this call's result instead of a later-turn wake. Set by the
    *   message_actor tool for a `kind:'spawned'` sender.
@@ -739,7 +739,7 @@ export const makeActorMessaging = (deps) => {
    * @returns {Promise<{ ok: boolean, content?: string, error?: string, code?: string, performed?: boolean, outcomeKnown?: boolean, targetRead?: boolean, targetChanged?: boolean, retryable?: boolean, actorDeliveryId?: string, actorCorrelationId?: string, actorTerminal?: boolean, actorOutcomeKnown?: boolean, actorPerformed?: boolean, actorAborted?: boolean }>}
    */
   const messageActor = async (req) => {
-    const { to, message, senderSessionId, inbound, toolUseId, oneShot, awaitReply, awaitSignal, awaitCapMs, degradeToAsync, via, bareReply } = req;
+    const { to, message, senderSessionId, inbound, toolUseId, oneShot, awaitReply, awaitSignal, awaitCapMs, degradeToAsync, via, bareReply, trustedAppTab } = req;
     if (typeof to !== 'string' || !to.trim()) {
       return { ok: false, error: 'message_actor: `to` (a tab-hosted instance id) is required' };
     }
@@ -761,6 +761,16 @@ export const makeActorMessaging = (deps) => {
     // path costs nothing new); a walk failure yields [] — fail-closed, only the
     // foreground identity can then pass. The flag reverts to the strict
     // `=== active` identity gate if turned off.
+    // A direct App conversation is admitted only through the service worker's
+    // exact-tab checked host route. It is intentionally independent of whichever
+    // chat is foreground: the trusted App shell is another authorized message surface.
+    const directAppTab = trustedAppTab === true
+      && inbound !== true
+      && typeof senderSessionId === 'string' && senderSessionId.length > 0
+      && awaitReply === true && bareReply === true && via === 'app-native';
+    if (trustedAppTab === true && !directAppTab) {
+      return { ok: false, error: 'message_actor: invalid trusted App-tab delivery shape' };
+    }
     const active = await getActiveSessionId();
     /** @type {Array<import('./delegation-lineage.js').LineageHop>} */
     let ancestry = [];
@@ -768,9 +778,9 @@ export const makeActorMessaging = (deps) => {
       try { ancestry = await getAncestry(senderSessionId); }
       catch (e) { log('getAncestry failed (fail-closed)', e); ancestry = []; }
     }
-    const senderAllowed = ASYNC_ACTOR_ACTORS
+    const senderAllowed = directAppTab || (ASYNC_ACTOR_ACTORS
       ? mayMessageActor({ inbound: inbound === true, senderSessionId, activeSessionId: active, ancestry })
-      : (inbound !== true && !!senderSessionId && senderSessionId === active);
+      : (inbound !== true && !!senderSessionId && senderSessionId === active));
     if (!senderAllowed) {
       log('REFUSED', { reason: 'sender_gate', senderSessionId, inbound });
       return { ok: false, error: 'message_actor: only the active foreground chat, its first-party autonomous continuation (a goal turn, or reacting to an actor reply), or a trusted-lineage actor it spawned may message an actor; untrusted/background senders are blocked' };
@@ -825,6 +835,9 @@ export const makeActorMessaging = (deps) => {
       return { ok: false, error: `message_actor: no tab-hosted instance found for id '${to}' (use the create/list tools to find one)` };
     }
     const { instanceId, kind, name, actorSessionId } = actor;
+    if (directAppTab && kind !== 'app') {
+      return { ok: false, error: 'message_actor: trusted App-tab delivery resolved outside an App' };
+    }
 
     // oneShot is SANDBOX-ONLY (owner call 2026-07-05): it hands the actor's RAW
     // result straight back, skipping the summarize turn — and that turn is what
@@ -1048,6 +1061,12 @@ export const makeActorMessaging = (deps) => {
           capTimer = setTimeout(onCap, awaitCapMs);
         }
       });
+      // The trusted App drawer is the terminal awaited consumer; unlike a model
+      // tool result it has no parent-session commit hook. Close only the
+      // in-flight correlation here. The actor's own conversation remains durable.
+      if (directAppTab && settled.actorDeliveryId) {
+        await mailbox.remove(settled.actorDeliveryId).catch(() => {});
+      }
       return settled.failed
         ? {
           ok: false,

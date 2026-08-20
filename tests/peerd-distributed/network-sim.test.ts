@@ -55,14 +55,16 @@ describe('network simulation — real node actors at scale', () => {
     const A = nodes.slice(0, 4); const B = nodes.slice(4);
     net.partition(A, B);
     await A[0].node.gossip.publish('feed', { while: 'split' });
-    await tick(60);
+    await waitFor(() => A.slice(1).every((n) => got[n.label]
+      .some((message) => message?.while === 'split')));
     // A heard it, B did not (the split held)
     for (const n of A.slice(1)) expect(got[n.label]).toContainEqual({ while: 'split' });
     for (const n of B) expect(got[n.label]).not.toContainEqual({ while: 'split' });
 
     net.heal();
     await A[0].node.gossip.publish('feed', { after: 'heal' });
-    await tick(60);
+    await waitFor(() => nodes.slice(1).every((n) => got[n.label]
+      .some((message) => message?.after === 'heal')));
     // now everyone (both sides) hears the post-heal message
     for (const n of nodes.slice(1)) expect(got[n.label]).toContainEqual({ after: 'heal' });
     net.log('reconverged after heal');

@@ -99,6 +99,15 @@
  * deliberately do NOT inherit it (see actor/spawn.js).
  * @property {string} [customSystemPrompt]
  *
+ * Manifest-defined App role. Unlike customSystemPrompt this is publisher-
+ * provenance package metadata, not user-authored /system text. The digest is
+ * also part of the actor's durable authority identity: a changed peerd.json
+ * must never reconnect to the prior actor generation.
+ * @property {string} [appManifestDigest]
+ * @property {string} [appOwnerAuthorityDigest] durable fingerprint of effective allow + Plan/Act posture
+ * @property {{source:'local'|'unsigned-import'|'dweb', publisher:string, manifestDigest:string, name?:string, instructions?:string}} [appRole]
+ * @property {'code'} [actorSurface]            manifest-defined App actors use the code-first surface
+ *
  * Per-session tool exposure manifest (the /tools composer command;
  * tools/manifests.js). Absent = every registered tool stays exposed —
  * today's behavior. When present, the main turn's descriptor list and

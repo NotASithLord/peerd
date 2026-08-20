@@ -11,7 +11,7 @@ import { fetchUrlTool } from '../../extension/peerd-runtime/tools/defs/fetch-url
 import { readPageTool } from '../../extension/peerd-runtime/tools/defs/read-page.js';
 
 const names = [
-  'script', 'read_run_cache', 'page_code', 'site_client_run', 'read_pdf',
+  'script', 'read_run_cache', 'page_code', 'app_code', 'site_client_run', 'read_pdf',
   'read_doc', 'dweb_discover', 'a2a_run', 'message_actor',
 ];
 const descriptors = names.map((name) => ({ name }));

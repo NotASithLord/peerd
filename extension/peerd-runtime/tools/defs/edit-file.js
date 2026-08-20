@@ -20,6 +20,7 @@ import {
 } from '../../edit/errors.js';
 import { resolveCanWrite } from '../../edit/permissions-adapter.js';
 import { MAX_MODEL_APP_FILE_BYTES } from '/peerd-engine/background.js';
+import { MAX_NETWORK_BUNDLE_BYTES } from '/shared/bundle/bundle.js';
 
 const MAX_CONTENT_CHARS = 500_000;
 
@@ -209,8 +210,20 @@ export const editFileTool = {
       return { ok: false, error: `edit_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
 
-    const contentBytes = new TextEncoder().encode(result.content).byteLength;
-    const contentLimit = kind === 'app' ? MAX_MODEL_APP_FILE_BYTES : MAX_CONTENT_CHARS;
+    const encoder = new TextEncoder();
+    const contentBytes = encoder.encode(result.content).byteLength;
+    const existingBytes = fileExists ? encoder.encode(source).byteLength : 0;
+    // Imported/dweb Apps may legitimately contain a pre-built file larger than
+    // the model-facing creation cap (Charon's self-contained bundle is one).
+    // Anchored edits do not re-emit that file through the model, so retain it
+    // and permit at most one normal file-cap of growth. New/small files keep
+    // the strict authoring rail; the App client independently enforces 50 MB
+    // across the complete workspace at the physical OPFS boundary.
+    const contentLimit = kind === 'app'
+      ? (existingBytes > MAX_MODEL_APP_FILE_BYTES
+          ? Math.min(MAX_NETWORK_BUNDLE_BYTES, existingBytes + MAX_MODEL_APP_FILE_BYTES)
+          : MAX_MODEL_APP_FILE_BYTES)
+      : MAX_CONTENT_CHARS;
     const contentSize = kind === 'app' ? contentBytes : result.content.length;
     if (contentSize > contentLimit) {
       return { ok: false, error: `content_too_large: ${contentSize} > ${contentLimit}` };

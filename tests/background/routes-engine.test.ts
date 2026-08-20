@@ -50,6 +50,7 @@ const baseDeps = (over: any = {}) => ({
   },
   appTabTracker: {
     reloadTab: async () => {}, getTabId: () => null,
+    parseIdFromUrl: () => null,
     quiesceTab: async () => true, resumeTab: async () => true,
     closeTab: async () => {}, ensureTab: async () => {},
   },
@@ -610,6 +611,37 @@ describe('app/vm meta + apps Library', () => {
       entryFile: 'index.html',
       fileKinds: {},
       dweb: null,
+      agent: { kind: 'bound-app', profile: 'developer', surface: 'code' },
+    });
+  });
+
+  test('app/get-meta returns the manifest-defined bound actor contract', async () => {
+    const r = makeEngineRoutes(baseDeps({
+      appClient: {
+        readFile: async () => JSON.stringify({
+          schema: 1,
+          kind: 'app',
+          entry: 'index.html',
+          agent: {
+            kind: 'bound-app',
+            name: 'Game developer',
+            instructions: 'Playtest before and after edits.',
+            profile: 'developer',
+            surface: 'code',
+            runtime: ['observe', 'act'],
+          },
+          capabilities: [],
+        }),
+        listFiles: async () => [{ path: '/index.html' }, { path: '/peerd.json' }],
+      },
+    }));
+    expect((await r['app/get-meta']({ appId: 'a1' })).agent).toEqual({
+      kind: 'bound-app',
+      profile: 'developer',
+      surface: 'code',
+      name: 'Game developer',
+      instructions: 'Playtest before and after edits.',
+      runtime: ['observe', 'act'],
     });
   });
   test('app/get-meta revokes a stale registry bridge when peerd.json removes dweb', async () => {
@@ -639,6 +671,95 @@ describe('app/vm meta + apps Library', () => {
     const r = makeEngineRoutes(baseDeps({ vault: { isLocked: () => true } }));
     expect(await r['apps/list']()).toEqual({ ok: false, error: 'vault-locked' });
   });
+  test('apps/import-git instantiates a manifest App, preserves its repository, and opens it under the active root', async () => {
+    const calls: any[] = [];
+    const audit: any[] = [];
+    const contract = parseAppManifest(JSON.stringify({
+      schema: 1,
+      kind: 'dwapp',
+      entry: 'index.html',
+      agent: { kind: 'bound-app', profile: 'developer', surface: 'code' },
+      capabilities: ['dweb'],
+    }));
+    const repository = {
+      branch: 'release', oid: 'abc123',
+      remote: { url: 'https://github.com/example/notes.git', host: 'github.com' },
+    };
+    const app = { id: 'git-app', name: 'Notes', entryFile: 'index.html' };
+    const r = makeEngineRoutes(baseDeps({
+      DWEB_ENABLED: true,
+      getCurrentSessionId: async () => 'root-chat',
+      auditLog: { append: async (event: any) => { audit.push(event); } },
+      appClient: {
+        createFromGit: async (opts: any) => {
+          calls.push({ op: 'clone', opts });
+          return { record: app, repository, contract };
+        },
+        open: async (opts: any) => { calls.push({ op: 'open', opts }); },
+      },
+    }));
+    expect(await r['apps/import-git']({
+      url: ' https://github.com/example/notes ', name: ' Notes ', ref: 'release', depth: 900,
+    })).toEqual({ ok: true, record: app, repository, contract });
+    expect(calls).toEqual([
+      { op: 'clone', opts: {
+        url: ' https://github.com/example/notes ', name: ' Notes ', ref: 'release', depth: 900,
+        sessionId: 'root-chat', allowDweb: true,
+      } },
+    ]);
+    expect(audit).toEqual([]);
+  });
+  test('apps/import-git remains vault-gated', async () => {
+    const r = makeEngineRoutes(baseDeps({ vault: { isLocked: () => true } }));
+    expect(await r['apps/import-git']({ url: 'https://github.com/example/app' }))
+      .toEqual({ ok: false, error: 'vault-locked' });
+  });
+  test('apps/import-git delegates URL validation to the repository boundary', async () => {
+    const r = makeEngineRoutes(baseDeps({
+      appClient: { createFromGit: async () => { throw new Error('git URL required'); } },
+    }));
+    expect(await r['apps/import-git']({ url: '' })).toEqual({ ok: false, error: 'git URL required' });
+  });
+  test('App data mutations reuse exact-tab-pinned editor authority', async () => {
+    const sender = { tab: { id: 44, url: 'moz-extension://peerd/engine-tabs/app-tab/index.html#app-1' } };
+    const writes: any[] = [];
+    const r = makeEngineRoutes(baseDeps({
+      appTabTracker: {
+        getTabId: (id: string) => id === 'app-1' ? 44 : null,
+        parseIdFromUrl: (url: string) => url.endsWith('#app-1') ? 'app-1' : null,
+      },
+      appClient: {
+        writeFile: async ({ path, content, reload }: any) => {
+          expect(reload).toBe(false);
+          writes.push({ path, content });
+        },
+        deleteFile: async ({ path, reload }: any) => {
+          expect(reload).toBe(false);
+          writes.push({ path, delete: true });
+        },
+      },
+    }));
+    expect(await r['app/editor-write']({
+      appId: 'app-1', path: 'data/document.json', content: '{"text":"hello"}', runtimeData: true,
+    }, sender))
+      .toEqual({ ok: true });
+    expect(await r['app/editor-delete']({
+      appId: 'app-1', path: 'data/document.json', runtimeData: true,
+    }, sender))
+      .toEqual({ ok: true });
+    expect(writes).toEqual([
+      { path: 'data/document.json', content: '{"text":"hello"}' },
+      { path: 'data/document.json', delete: true },
+    ]);
+    expect(await r['app/editor-write']({
+      appId: 'app-1', path: '../peerd.json', content: '{}', runtimeData: true,
+    }, sender))
+      .toEqual({ ok: false, error: 'app-data-unauthorized' });
+    expect(await r['app/editor-write'](
+      { appId: 'app-1', path: 'data/document.json', content: '{}', runtimeData: true },
+      { tab: { id: 45, url: sender.tab.url } },
+    )).toEqual({ ok: false, error: 'app-data-unauthorized' });
+  });
   test('apps/favorite requires a boolean', async () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['apps/favorite']({ appId: 'a1', favorite: 'yes' })).toEqual({ ok: false, error: 'favorite-boolean-required' });
@@ -664,6 +785,16 @@ describe('apps/delete', () => {
     }));
     expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
     expect(unshared).toBe(false); // DWEB_ENABLED false → no offscreen round-trip
+  });
+  test('retires chat-scoped actor bindings after the App is deleted', async () => {
+    const retired: string[] = [];
+    const r = makeEngineRoutes(baseDeps({
+      appRegistry: { get: async () => ({ id: 'a1', name: 'A' }) },
+      appClient: { delete: async () => true },
+      onAppDeleted: async (appId: string) => { retired.push(appId); },
+    }));
+    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
+    expect(retired).toEqual(['a1']);
   });
   test('un-shares a shared app when dweb is on', async () => {
     let msg: any = null;

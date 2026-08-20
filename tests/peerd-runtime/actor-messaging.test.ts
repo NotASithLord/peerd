@@ -74,6 +74,29 @@ describe('message_actor — the sender gate (fail closed)', () => {
     const r = await messageActor({ to: 'app-1', message: 'hi', senderSessionId: null, inbound: false });
     expect(r.ok).toBe(false);
   });
+  test('admits exact trusted App-drawer messages outside the foreground chat through the ordinary actor turn', async () => {
+    const { messageActor, turnCalls } = harness();
+    const r = await messageActor({
+      to: 'app-1', message: 'revise this paragraph', senderSessionId: 'app-owner-root',
+      inbound: false, awaitReply: true, bareReply: true,
+      trustedAppTab: true, via: 'app-native',
+    });
+    expect(r).toMatchObject({ ok: true, content: 'built the thing' });
+    expect(turnCalls).toHaveLength(1);
+    expect(turnCalls[0]).toMatchObject({ parentSessionId: 'app-owner-root', rootSessionId: 'app-owner-root' });
+    expect(turnCalls[0]).not.toHaveProperty('humanInteractive');
+  });
+  test('trusted App-tab provenance is not a generic sender-gate bypass', async () => {
+    const { messageActor, turnsRun } = harness();
+    const r = await messageActor({
+      to: 'app-1', message: 'hi', senderSessionId: 'other',
+      trustedAppTab: true, via: 'app-native',
+      // Missing the exact awaited/raw reply shape.
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('invalid trusted App-tab');
+    expect(turnsRun).toEqual([]);
+  });
   test('refuses when the vault is locked', async () => {
     const { messageActor } = harness({ isVaultLocked: () => true });
     const r = await messageActor({ to: 'app-1', message: 'hi', senderSessionId: 'chat-1' });

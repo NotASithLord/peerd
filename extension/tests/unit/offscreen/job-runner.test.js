@@ -213,6 +213,53 @@ throw new Error('unrelated failure');`,
     expect(result.browserPolicies).toEqual([policy]);
   });
 
+  it('exposes only the exact App client and relays owner/run identity from trusted job params', async () => {
+    /** @type {Array<{type:string,payload:{method?:string,ownerSessionId?:string,runId?:string}}>} */
+    const calls = [];
+    const result = await runJob(
+      {
+        code: 'const before = await app.observe(); await app.act("move", { x: 1 }); await app.wait(1); return before;',
+        caps: { app: true, page: false, egress: false, subagent: false, opfs: false },
+        ownerSessionId: 'app-actor-1', runId: 'app-run-1',
+      },
+      {
+        sendToSW: async (/** @type {string} */ type, /** @type {{method?:string,ownerSessionId?:string,runId?:string}} */ payload) => {
+          calls.push({ type, payload });
+          if (payload.method === 'observe') return { ok: true, value: { screen: 'game' } };
+          return { ok: true, value: { accepted: true } };
+        },
+      },
+    );
+    expect(result.error).toBe(null);
+    expect(result.value).toEqual({ screen: 'game' });
+    expect(result.usedApp).toBe(true);
+    expect(calls.map((call) => call.type)).toEqual(['app/call', 'app/call']);
+    expect(calls.every((call) => call.payload.ownerSessionId === 'app-actor-1')).toBe(true);
+    expect(calls.every((call) => call.payload.runId === 'app-run-1')).toBe(true);
+    const codeTrace = /** @type {Array<{bridge:string,method:string}>} */ (result.codeTrace ?? []);
+    expect(codeTrace.map((entry) => `${entry.bridge}.${entry.method}`))
+      .toEqual(['app.observe', 'app.act']);
+  });
+
+  it('host-custodies an ambiguous App action even when worker code catches the rejection', async () => {
+    const result = await runJob(
+      {
+        code: 'try { await app.act("start-game"); } catch {} return "caught";',
+        caps: { app: true, page: false, egress: false, subagent: false, opfs: false },
+        ownerSessionId: 'app-actor-unknown', runId: 'app-run-unknown',
+      },
+      {
+        sendToSW: async () => ({
+          ok: false, error: 'ack lost', outcomeKnown: false, outcomeKind: 'transport-lost',
+        }),
+      },
+    );
+    expect(result.value).toBe('caught');
+    expect(result.appOutcomeUnknown).toBe(true);
+    expect(result.appOutcomeError).toBe('ack lost');
+    expect(String(result.error)).toContain('app action outcome unknown');
+  });
+
   it('terminates a page job when an inner host policy ends the actor turn', async () => {
     const result = await runJob(
       {
@@ -881,6 +928,7 @@ describe('headless remote module imports (audited resolver path)', () => {
           { type: 'provider-request', rid: 'forged-provider', args: { prompt: 'leak' } },
           { type: 'fetch-request', rid: 'forged-fetch', url: 'https://sink.example/', method: 'GET' },
           { type: 'page-request', rid: 'forged-page', method: 'snapshot', args: {} },
+          { type: 'app-request', rid: 'forged-app', method: 'observe', args: {} },
           { type: 'opfs-request', rid: 'forged-opfs', op: 'read', args: { path: 'canary.txt' } },
           { type: 'distributed-request', rid: 'forged-dweb', method: 'peers' },
           { type: 'site-fetch-request', rid: 'forged-site', pathOrUrl: '/', method: 'GET' },
@@ -905,7 +953,7 @@ describe('headless remote module imports (audited resolver path)', () => {
       {
         code: "import { probe } from 'https://mods.example/probe.js'; return probe();",
         actors: true,
-        caps: { page: true, egress: true, subagent: true, opfs: true, provider: true },
+        caps: { page: true, app: true, egress: true, subagent: true, opfs: true, provider: true },
         ownerSessionId: 'session-remote', runId: 'run-remote',
       },
       { sendToSW: servingSW({ 'https://mods.example/probe.js': probeSource }, calls) },
@@ -924,7 +972,7 @@ describe('headless remote module imports (audited resolver path)', () => {
     expect(attempts.actors).toContain('not defined');
     expect(calls.filter((call) => call.type === 'sw/web-fetch').length).toBe(1);
     expect(calls.some((call) => [
-      'actor/spawn', 'actors/call', 'script/model-call', 'page/call',
+      'actor/spawn', 'actors/call', 'script/model-call', 'page/call', 'app/call',
       'dweb/distributed/info', 'site-fetch/call', 'a2a/call',
     ].includes(call.type))).toBe(false);
   });

@@ -50,6 +50,7 @@ import { makeCoalescedStatePush } from './state-push.js';
 import { makeSessionCostFolder } from './session-cost-fold.js';
 import { makeScriptModelCallRoute } from './script-model-call.js';
 import { makeOriginLockResolver } from './origin-lock-controller.js';
+import { makeAppActorChatHandler } from './app-actor-chat.js';
 
 import {
   // vault
@@ -102,8 +103,18 @@ import {
 
 
 
-import { base64ToBytes, bytesToBase64 } from '/shared/util.js';
+import { base64ToBytes, bytesToBase64, sha256Hex } from '/shared/util.js';
 import { applyFetchExtract } from '/shared/fetch-extract.js';
+import {
+  appActorSessionMatches,
+  canonicalAppActorManifest,
+  canonicalAppOwnerAuthority,
+  manifestAppActorTools,
+  makeAppRole,
+  resolveAppTabOwnerClaim,
+  validateAppTabClaim,
+} from './app-actor-policy.js';
+import { relayAppRuntimeCall } from './app-runtime-deadline.js';
 
 import {
   listProviders,
@@ -338,7 +349,7 @@ import {
   safeWebActorSummaryOrigin, fenceWebActorSummary,
   // PR #119: the code-REPL arm's host-side page-call handler + the pure
   // adopt-first-tab-on-goto decision.
-  makePageCallHandler, resolvePageTab,
+  makePageCallHandler, resolvePageTab, makeAppCallHandler,
   // DESIGN-18: API-actor core — the origin-keyed bindings, the origin normalizer
   // (addressing + same-origin-lock anchor), and the "what I learned" self-fence.
   makeApiActorBindings, normalizeApiOrigin, fenceApiActorSummary,
@@ -2037,6 +2048,11 @@ const pageActivity = createPageActivityReporter({
   scripting: browser.scripting,
 });
 
+// A timed-out App operation may still be running in its old document. Keep the
+// entire tab generation poisoned until the replacement document completes the
+// full tab-ready handshake; this prevents outcome-unknown overlap.
+const poisonedAppRuntimeTabs = new Set();
+
 const buildToolContext = async (/** @type {any} */ {
   sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted,
   actorInstanceId, actorType, actorBacking, actorSurface, lifecycleTurnId,
@@ -2147,14 +2163,18 @@ const buildToolContext = async (/** @type {any} */ {
   // otherwise it's the live setting. Used BOTH to stamp ctx.actorSurface (gate +
   // descriptors) AND the capability strip below — the turn driver doesn't pass
   // actorSurface, so the strip can't read the raw param; it must use THIS.
-  const requestedActorSurface = actorSurface ?? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools');
-  const effectiveActorSurface = (actorType === 'web' && actorBacking !== 'api')
-    ? resolveWebActorSurface({
-      requested: requestedActorSurface,
-      allowedTools: toolAllow,
-      headlessAvailable: offscreenAvailable,
-    })
-    : undefined;
+  const requestedActorSurface = actorSurface ?? (actorType === 'app'
+    ? 'code'
+    : (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools'));
+  const effectiveActorSurface = actorType === 'app'
+    ? (requestedActorSurface === 'code' ? 'code' : 'tools')
+    : (actorType === 'web' && actorBacking !== 'api')
+      ? resolveWebActorSurface({
+        requested: requestedActorSurface,
+        allowedTools: toolAllow,
+        headlessAvailable: offscreenAvailable,
+      })
+      : undefined;
   const ctx = {
     // One browser-neutral execution-boundary value. Descriptor filtering is
     // model UX; this dispatch-time gate stamp is the authority backstop.
@@ -2199,9 +2219,8 @@ const buildToolContext = async (/** @type {any} */ {
     // DESIGN-18: a web actor's backing (the gate reads it to refuse DOM tools for an
     // API actor, which has no tab). Absent = tab backing (the DESIGN-17 default).
     ...(actorBacking ? { backing: actorBacking } : {}),
-    // PR #119: a TAB web actor's ACTION surface — 'tools' (discrete DOM tools) or
-    // 'code' (page_code REPL). An explicit arg wins (the page/call route forces
-    // 'tools' for its inner mapped-tool dispatch); otherwise it's the live setting.
+    // Code-first actor action surface. An explicit arg wins; web otherwise uses
+    // the live setting, while manifest-defined App actors default to code.
     // The gate reads ctx.actorSurface to pick the allow-set; absent = 'tools'.
     ...(effectiveActorSurface ? { actorSurface: effectiveActorSurface } : {}),
     // #241: the PROMPT half of the deterministic schema boundary. The turn driver
@@ -2375,6 +2394,39 @@ const buildToolContext = async (/** @type {any} */ {
     // why: App kind — DOM-bearing artifact the agent built for the
     // user. appClient combines registry (metadata) + body store (IDB).
     appClient,
+    // A manifest-declared App actor may dogfood its own runtime through two
+    // narrow request/reply tools. The tab tracker supplies the exact host tab;
+    // there is no ambient active-tab fallback and no raw DOM/browser handle.
+    ...(actorType === 'app' && actorInstanceId
+      ? {
+        appAgentCall: async (/** @type {'observe'|'act'} */ op, /** @type {object} */ args, /** @type {AbortSignal|undefined} */ signal) => {
+          const ownerRoot = activeSession?.parentSessionId;
+          if (!ownerRoot) return { ok: false, error: 'app_runtime_owner_unbound', outcomeKnown: true, outcomeKind: 'pre-effect-failure' };
+          const tabId = appTabTracker.getOwnedTabId(actorInstanceId, ownerRoot);
+          if (tabId == null) return { ok: false, error: 'app_runtime_tab_not_open_or_wrong_owner', outcomeKnown: true, outcomeKind: 'pre-effect-failure' };
+          try {
+            return await relayAppRuntimeCall({
+              tabId,
+              message: { type: 'app/agent-call', appId: actorInstanceId, op, args },
+              send: browser.tabs.sendMessage.bind(browser.tabs),
+              reload: async (ownedTabId) => {
+                appTabTracker.markReloading(actorInstanceId);
+                return browser.tabs.reload(ownedTabId);
+              },
+              poisoned: poisonedAppRuntimeTabs,
+              signal,
+            });
+          } catch (error) {
+            return {
+              ok: false,
+              error: `app_runtime_unreachable: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}`,
+              outcomeKnown: false,
+              outcomeKind: 'transport-lost',
+            };
+          }
+        },
+      }
+      : {}),
     // why separate from appClient: both App and Notebook actors use the narrow
     // repository surface without inheriting either engine client's wider API.
     repositories,
@@ -3104,6 +3156,8 @@ const appClient = createAppClient({
   registry: appRegistry,
   tracker: appTabTracker,
   beforeOpfsMutation: () => storeWriteGuard.assertWritable('app-manifests'),
+  onManifestMutation: (appId) => retireAppActorBindingsForApp(appId),
+  resolveOwnerRoot: (ownerSessionId, record) => resolveAppActorOwner(ownerSessionId, record),
   repositories,
 });
 
@@ -4574,6 +4628,70 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
 // on load; we resolve the pending readyPromise so any in-flight
 // ensureTab call returns. Closed tabs drop from the map via
 // chrome.tabs.onRemoved.
+/** @param {any} msg @param {any} sender */
+const attachAppTabActor = async (msg, sender) => {
+  const claim = validateAppTabClaim({
+    claimedAppId: msg?.appId,
+    urlAppId: appTabTracker.parseIdFromUrl(sender?.tab?.url),
+    senderTabId: sender?.tab?.id,
+    liveTabId: typeof msg?.appId === 'string' ? appTabTracker.getTabId(msg.appId) : null,
+  });
+  if (!claim.ok) return claim;
+  const { appId, tabId } = claim;
+  const record = await appRegistry.get(appId);
+  if (!record) return { ok: false, error: 'app-not-found' };
+  const hashQuery = String(sender?.tab?.url ?? '').split('#')[1]?.split('?')[1] ?? '';
+  const urlOwner = new URLSearchParams(hashQuery).get('owner');
+  const ownerClaim = resolveAppTabOwnerClaim({
+    claimedOwner: msg.ownerSessionId,
+    urlOwner: urlOwner && urlOwner.length <= 256 ? urlOwner : null,
+    recordOwner: record.ownerSessionId,
+  });
+  if (!ownerClaim.ok) return ownerClaim;
+  const ownerSessionId = ownerClaim.ownerSessionId;
+
+  if (msg.type === 'app/actor-retry') appTabTracker.markReloading(appId);
+  appTabTracker.onTabPending(appId, tabId, ownerSessionId);
+  if (typeof browser.runtime.getBrowserInfo === 'function') {
+    appTabTracker.onTabFailed(appId, new Error('Apps are not available in Firefox yet.'));
+    setTimeout(() => browser.tabs.remove(tabId).catch(() => {}), 250);
+    return { ok: false, error: 'Apps are not available in Firefox yet. Use Chrome for isolated Apps.' };
+  }
+
+  await denylistNetGuard.sync();
+  const net = denylistNetGuard.state();
+  if (!net.supported || net.lastError) {
+    appTabTracker.onTabFailed(appId, new Error('App network isolation is unavailable.'));
+    setTimeout(() => browser.tabs.remove(tabId).catch(() => {}), 250);
+    return {
+      ok: false,
+      error: 'Apps are unavailable because this browser cannot enforce their network isolation.',
+    };
+  }
+
+  try {
+    const actorSessionId = await ensureAppActorBinding(appId, ownerSessionId);
+    if (!actorSessionId) throw new Error('manifest-defined App actor could not be attached');
+    const actor = await sessions.get(actorSessionId);
+    if (!actor?.parentSessionId) throw new Error('manifest-defined App actor has no owner root');
+    appTabTracker.onTabReady(appId, tabId, ownerSessionId, actor.parentSessionId);
+    poisonedAppRuntimeTabs.delete(tabId);
+    return { ok: true, actorSessionId };
+  } catch (error) {
+    // The actor is required, not optional degradation. Keep the trusted shell
+    // open so it can show Retry, but drop this failed host from runnable state.
+    appTabTracker.onTabFailed(appId, error instanceof Error ? error : new Error(String(error)));
+    denylistNetGuard.sync();
+    console.warn('[app] required manifest actor attach failed', error);
+    return {
+      ok: false,
+      error: /** @type {{message?:string}} */ (error)?.message ?? String(error),
+      actorRequired: true,
+      retryable: true,
+    };
+  }
+};
+
 browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} */ sender) => {
   if (!isTrustedSender(sender)) return false;
   // Each tab-ready is a new tabId entering the driven set, so each one resyncs
@@ -4590,37 +4708,8 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
     denylistNetGuard.sync();
     return false;
   }
-  if (msg?.type === 'app/tab-ready') {
-    if (typeof msg.appId !== 'string' || sender?.tab?.id == null) return false;
-    appTabTracker.onTabPending(msg.appId, sender.tab.id);
-    // Firefox currently has no proven manifest-sandbox host (its generated
-    // manifest intentionally omits Chrome's top-level `sandbox` key). Do not
-    // infer enforcement from its partial DNR API accepting a rule.
-    if (typeof browser.runtime.getBrowserInfo === 'function') {
-      appTabTracker.onTabFailed(msg.appId, new Error('Apps are not available in Firefox yet.'));
-      setTimeout(() => browser.tabs.remove(sender.tab.id).catch(() => {}), 250);
-      return Promise.resolve({
-        ok: false,
-        error: 'Apps are not available in Firefox yet. Use Chrome for isolated Apps.',
-      });
-    }
-    // App code is not delivered until its tab-scoped all-remote DNR rule is
-    // LIVE. CSP closes resource/connect paths, while DNR closes self-navigation
-    // that CSP cannot reliably govern. Unsupported/failing DNR therefore means
-    // the App host fails closed (not a best-effort degradation like denylist).
-    return denylistNetGuard.sync().then(() => {
-      const net = denylistNetGuard.state();
-      if (!net.supported || net.lastError) {
-        appTabTracker.onTabFailed(msg.appId, new Error('App network isolation is unavailable.'));
-        setTimeout(() => browser.tabs.remove(sender.tab.id).catch(() => {}), 250);
-        return {
-          ok: false,
-          error: 'Apps are unavailable because this browser cannot enforce their network isolation.',
-        };
-      }
-      appTabTracker.onTabReady(msg.appId, sender.tab.id);
-      return { ok: true };
-    });
+  if (msg?.type === 'app/tab-ready' || msg?.type === 'app/actor-retry') {
+    return attachAppTabActor(msg, sender);
   }
   if (msg?.type === 'pod/tab-adopt') {
     if (typeof msg.podId !== 'string' || sender?.tab?.id == null) return false;
@@ -4641,42 +4730,11 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
       return { ok: true };
     });
   }
-  if (msg?.type === 'app/tab-ready') {
-    if (typeof msg.appId !== 'string' || sender?.tab?.id == null) return false;
-    appTabTracker.onTabPending(msg.appId, sender.tab.id);
-    // Firefox currently has no proven manifest-sandbox host (its generated
-    // manifest intentionally omits Chrome's top-level `sandbox` key). Do not
-    // infer enforcement from its partial DNR API accepting a rule.
-    if (typeof browser.runtime.getBrowserInfo === 'function') {
-      appTabTracker.onTabFailed(msg.appId, new Error('Apps are not available in Firefox yet.'));
-      setTimeout(() => browser.tabs.remove(sender.tab.id).catch(() => {}), 250);
-      return Promise.resolve({
-        ok: false,
-        error: 'Apps are not available in Firefox yet. Use Chrome for isolated Apps.',
-      });
-    }
-    // App code is not delivered until its tab-scoped all-remote DNR rule is
-    // LIVE. CSP closes resource/connect paths, while DNR closes self-navigation
-    // that CSP cannot reliably govern. Unsupported/failing DNR therefore means
-    // the App host fails closed (not a best-effort degradation like denylist).
-    return denylistNetGuard.sync().then(() => {
-      const net = denylistNetGuard.state();
-      if (!net.supported || net.lastError) {
-        appTabTracker.onTabFailed(msg.appId, new Error('App network isolation is unavailable.'));
-        setTimeout(() => browser.tabs.remove(sender.tab.id).catch(() => {}), 250);
-        return {
-          ok: false,
-          error: 'Apps are unavailable because this browser cannot enforce their network isolation.',
-        };
-      }
-      appTabTracker.onTabReady(msg.appId, sender.tab.id);
-      return { ok: true };
-    });
-  }
   return false;
 });
 
 browser.tabs.onRemoved.addListener((tabId) => {
+  poisonedAppRuntimeTabs.delete(tabId);
   // why the vmClient hop: a VM tab closing mid-command would otherwise
   // leave its pending RPCs stalling out the 90s message timeout. The
   // tracker maps tabId→vmId; the client owns the per-VM command lane
@@ -5136,6 +5194,25 @@ const ACTOR_REGISTRY_BY_PREFIX = {
 // message_actor calls racing to the same instance collapse onto ONE mint.
 const { mintOnce } = makeMintOnce();
 
+/** @param {any} ownerChat @param {any} contract */
+const deriveAppOwnerAuthority = async (ownerChat, contract) => {
+  const permission = await resolvePermission(ownerChat);
+  const allow = manifestAppActorTools({
+    contract,
+    hostTools: [...actorAllowedToolsFor('app')],
+    ownerAllowed: resolveManifestAllow(ownerChat?.toolManifest),
+  });
+  return {
+    permission,
+    toolManifest: { allow },
+    digest: await sha256Hex(canonicalAppOwnerAuthority({
+      allow,
+      permissionMode: permission.mode,
+      confirmActions: permission.confirmActions,
+    })),
+  };
+};
+
 // Start the actor process on demand: lazily mint an actor session for an
 // instance (on the first message_actor). Inherits the spawning chat's RESOLVED
 // Plan/Act posture — resolved + stored EXPLICITLY so it can't silently widen to the
@@ -5145,10 +5222,36 @@ const { mintOnce } = makeMintOnce();
 // and the actor session as the instance's session-default so id-less tools
 // (vm_write_file / vm_import / edit_file) resolve the bound instance. Lost session?
 // re-minted on the next message — let-it-crash / supervisor restart (resolveActor).
-const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @type {any} */ record) => {
-  const activeId = await sessionCache.sessionGet('currentSessionId');
+const mintActor = async (
+  /** @type {{ reg: any, kind: string }} */ entry,
+  /** @type {any} */ record,
+  /** @type {{ownerChatId?:string, contract?:any, manifestDigest?:string, ownerAuthority?:any, bindForward?:boolean}} */ options = {},
+) => {
+  const activeId = entry.kind === 'app'
+    ? options.ownerChatId
+    : await sessionCache.sessionGet('currentSessionId');
+  if (entry.kind === 'app' && !activeId) throw new Error('App actor owner is required');
   const ownerChat = activeId ? await sessions.get(/** @type {string} */ (activeId)) : null;
-  const perm = await resolvePermission(/** @type {any} */ (ownerChat));
+  if (entry.kind === 'app' && (!ownerChat || ownerChat.archivedAt)) {
+    throw new Error('App actor owner session is unavailable');
+  }
+  let perm = await resolvePermission(/** @type {any} */ (ownerChat));
+  let actorToolManifest = ownerChat?.toolManifest;
+  let appRole;
+  let appManifestDigest;
+  let appOwnerAuthorityDigest;
+  if (entry.kind === 'app') {
+    const contract = options.contract
+      ?? parseAppManifest(await appClient.readFile({ appId: record.id, path: 'peerd.json' }));
+    const ownerAuthority = options.ownerAuthority
+      ?? await deriveAppOwnerAuthority(ownerChat, contract);
+    perm = ownerAuthority.permission;
+    actorToolManifest = ownerAuthority.toolManifest;
+    appOwnerAuthorityDigest = ownerAuthority.digest;
+    appManifestDigest = options.manifestDigest
+      ?? await sha256Hex(canonicalAppActorManifest(contract));
+    appRole = makeAppRole({ contract, record, manifestDigest: appManifestDigest });
+  }
   const created = await sessions.create({
     kind: 'actor',
     ...(activeId ? { parentSessionId: /** @type {string} */ (activeId) } : {}),
@@ -5163,7 +5266,15 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
     // reach by delegating to an actor. A browse-only chat's actor is held to
     // browse-only's read DOM tools — the gate refuses click/type for it. null /
     // absent = no manifest = the actor keeps its full kind toolset.
-    ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
+    ...(actorToolManifest !== undefined ? { toolManifest: actorToolManifest } : {}),
+    ...(entry.kind === 'app' && appManifestDigest
+      ? { appManifestDigest }
+      : {}),
+    ...(entry.kind === 'app' && appOwnerAuthorityDigest
+      ? { appOwnerAuthorityDigest }
+      : {}),
+    ...(entry.kind === 'app' ? { actorSurface: 'code' } : {}),
+    ...(appRole ? { appRole } : {}),
   });
   // Order matters for crash-safety: bind the session-default FIRST, then the
   // forward pointer LAST. resolveActor re-mints whenever the forward pointer
@@ -5171,7 +5282,9 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
   // (re-mintable) instance rather than a pointed-but-unresolvable one — a present
   // actorSessionId now IMPLIES its session-default was written.
   await entry.reg.setDefaultForSession(created.sessionId, record.id);
-  await entry.reg.setActorSession(record.id, created.sessionId);
+  if (options.bindForward !== false) {
+    await entry.reg.setActorSession(record.id, created.sessionId);
+  }
   auditLog.append({ type: 'actor_minted', sessionId: created.sessionId, details: { instanceId: record.id, kind: entry.kind } }).catch(() => {});
   // Engine-actor prewalk: an engine actor is minted on the frontier (owner
   // chat) model; when enginePrewalkEnabled, arm it so it keeps that model for
@@ -5181,6 +5294,102 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
   await prewalk.armEngineActor(created.sessionId);
   return created.sessionId;
 };
+
+/** @param {string | null | undefined} ownerSessionId @param {any} record */
+const resolveAppActorOwner = async (ownerSessionId, record) => {
+  const explicitOwner = ownerSessionId || record?.ownerSessionId;
+  if (typeof explicitOwner !== 'string' || !explicitOwner) {
+    throw new Error('App has no explicit actor owner; reopen it from a chat');
+  }
+  let cursor = explicitOwner;
+  for (let hops = 0; hops < 32; hops += 1) {
+    const owner = await sessions.get(cursor).catch(() => null);
+    if (!owner || owner.archivedAt) throw new Error('App actor owner session is unavailable');
+    if (!owner.parentSessionId) return cursor;
+    cursor = owner.parentSessionId;
+  }
+  throw new Error('App actor owner lineage is too deep');
+};
+
+/** @param {string | null | undefined} actorSessionId */
+const retireStaleAppActor = async (actorSessionId) => {
+  if (!actorSessionId) return;
+  turnSlots.stop(actorSessionId);
+  await sessions.archive(actorSessionId).catch(() => {});
+};
+
+/** Bind an opened App to a caller/root-scoped, digest-exact actor. */
+/** @type {Map<string, Promise<string | null>>} */
+const appActorReconcileTails = new Map();
+/** @param {string} appId @param {string | null | undefined} ownerSessionId */
+async function ensureAppActorBinding(appId, ownerSessionId) {
+  await appActorBindingsReady;
+  const entry = ACTOR_REGISTRY_BY_PREFIX.app;
+  const ownerRecord = await entry.reg.get(appId);
+  if (!ownerRecord) return null;
+  const ownerChatId = await resolveAppActorOwner(ownerSessionId, ownerRecord);
+  const reconcileKey = `${ownerChatId}\0${appId}`;
+  const previous = appActorReconcileTails.get(reconcileKey) ?? Promise.resolve(null);
+  const operation = previous.catch(() => null).then(async () => {
+    // Re-read after the prior reconciliation: a package update that raced an
+    // earlier caller must bind the new manifest/provenance, never inherit that
+    // caller's stale registry snapshot.
+    const record = await entry.reg.get(appId);
+    if (!record) return null;
+    const contract = parseAppManifest(await appClient.readFile({ appId, path: 'peerd.json' }));
+    const manifestDigest = await sha256Hex(canonicalAppActorManifest(contract));
+    const role = makeAppRole({ contract, record, manifestDigest });
+    const ownerChat = await sessions.get(ownerChatId);
+    if (!ownerChat || ownerChat.archivedAt) throw new Error('App actor owner session is unavailable');
+    const ownerAuthority = await deriveAppOwnerAuthority(ownerChat, contract);
+    const expected = {
+      ownerChatId, appId, manifestDigest,
+      ownerAuthorityDigest: ownerAuthority.digest,
+      publisherSource: role.source,
+      publisher: role.publisher,
+    };
+
+    let actorSessionId = appActorBindings.resolve(ownerChatId, appId);
+    let actorRecord = actorSessionId ? await sessions.get(actorSessionId).catch(() => null) : null;
+    if (actorSessionId && !appActorSessionMatches(actorRecord, expected)) {
+      appActorBindings.drop(ownerChatId, appId);
+      await persistAppActors();
+      await retireStaleAppActor(actorSessionId);
+      actorSessionId = null;
+    }
+
+    // The binding is a session-storage cache; reconnect the durable exact actor
+    // after an SW/browser restart. Archive stale digest generations so the same
+    // wrong newest record cannot shadow the matching generation forever.
+    for (let attempts = 0; !actorSessionId && attempts < 8; attempts += 1) {
+      const durable = await sessions.findActorSession({
+        parentSessionId: ownerChatId, instanceId: appId, actorType: 'app',
+      });
+      if (!durable) break;
+      actorRecord = await sessions.get(durable).catch(() => null);
+      if (appActorSessionMatches(actorRecord, expected)) {
+        actorSessionId = durable;
+        break;
+      }
+      await retireStaleAppActor(durable);
+    }
+
+    if (!actorSessionId) {
+      const mintKey = `app:${ownerChatId}:${appId}:${manifestDigest}:${ownerAuthority.digest}`;
+      actorSessionId = await mintOnce(mintKey, () => mintActor(entry, record, {
+        ownerChatId, contract, manifestDigest, ownerAuthority, bindForward: false,
+      }));
+    }
+    appActorBindings.bind(ownerChatId, appId, actorSessionId);
+    await persistAppActors();
+    return actorSessionId;
+  });
+  appActorReconcileTails.set(reconcileKey, operation);
+  void operation.finally(() => {
+    if (appActorReconcileTails.get(reconcileKey) === operation) appActorReconcileTails.delete(reconcileKey);
+  }).catch(() => {});
+  return operation;
+}
 
 // DESIGN-17 — WEB actors (a fourth `kind:'web'` actor that owns one TAB).
 // Unlike engine actors, a web actor has no registry record: the TAB
@@ -5222,6 +5431,53 @@ const hydrateRegistryForGuard = (
     ok: false,
     error: `web_bindings_hydration_failed: ${error instanceof Error ? error.message : String(error)}`,
   }));
+
+// App actors are scoped by (root chat, app id), like API actors are scoped by
+// (root chat, origin). This routing cache is not authority: the durable actor
+// record must still match owner + instance + manifest digest on every resolve.
+const appActorBindings = makeApiActorBindings();
+const APP_ACTOR_BINDINGS_KEY = 'appActorBindings';
+const persistAppActors = persistRegistry(APP_ACTOR_BINDINGS_KEY, appActorBindings);
+const appActorBindingsReady = hydrateRegistry(APP_ACTOR_BINDINGS_KEY, appActorBindings);
+
+/** Retire every chat-scoped actor generation when its App is deleted. */
+const retireAppActorBindingsForApp = async (/** @type {string} */ appId) => {
+  await appActorBindingsReady;
+  const retired = [];
+  for (const [key, actorSessionId] of appActorBindings.entries()) {
+    const separator = key.indexOf('\0');
+    if (separator < 0 || key.slice(separator + 1) !== appId) continue;
+    const ownerChatId = key.slice(0, separator);
+    appActorBindings.drop(ownerChatId, appId);
+    retired.push(retireStaleAppActor(actorSessionId));
+  }
+  await persistAppActors().catch((error) => {
+    console.warn('[app] deleted actor binding cache could not be persisted', error);
+  });
+  await Promise.all(retired);
+};
+
+/** Re-derive every authority coordinate immediately before an App effect. */
+const validateCurrentAppActorGeneration = async (/** @type {any} */ actor) => {
+  if (!actor?.sessionId || !actor?.parentSessionId || !actor?.instanceId) return false;
+  await appActorBindingsReady;
+  const record = await appRegistry.get(actor.instanceId);
+  const owner = await sessions.get(actor.parentSessionId);
+  if (!record || !owner || owner.archivedAt) return false;
+  const contract = parseAppManifest(await appClient.readFile({ appId: actor.instanceId, path: 'peerd.json' }));
+  const manifestDigest = await sha256Hex(canonicalAppActorManifest(contract));
+  const role = makeAppRole({ contract, record, manifestDigest });
+  const ownerAuthority = await deriveAppOwnerAuthority(owner, contract);
+  return appActorBindings.resolve(actor.parentSessionId, actor.instanceId) === actor.sessionId
+    && appActorSessionMatches(actor, {
+      ownerChatId: actor.parentSessionId,
+      appId: actor.instanceId,
+      manifestDigest,
+      ownerAuthorityDigest: ownerAuthority.digest,
+      publisherSource: role.source,
+      publisher: role.publisher,
+    });
+};
 
 const webActorTabBindings = makeWebActorTabBindings();
 const WEB_BINDINGS_KEY = 'webActorTabBindings';
@@ -5325,6 +5581,60 @@ const pageCallRoute = {
       method: canonicalCodeTraceLabel('page', method).method, ok: outcome?.ok === true,
     });
     return outcome;
+  },
+};
+
+// The App actor's code surface follows the same least-authority shape as the
+// web actor's page bridge: the sealed worker can name only a high-level method.
+// Its owner/run identity comes from trusted job parameters, and this route
+// re-derives the exact App id from the bound actor session before translating
+// the operation back through the ordinary App tool gates.
+const appCallHandler = makeAppCallHandler({
+  dispatchToolCall: /** @type {any} */ (dispatchToolCall),
+  buildActorContext: ({ sessionId, appId }) => buildToolContext({
+    sessionId,
+    exposure: EXPOSURE_ACTOR,
+    actorType: 'app',
+    actorInstanceId: appId,
+    // The outer App actor owns the narrow code surface. Inner observe/act
+    // translations must be evaluated as ordinary tools or the code-surface
+    // filter would hide the exact primitives app_code is meant to compose.
+    actorSurface: 'tools',
+  }),
+});
+const appCallRoute = {
+  /** @param {{method?:string,args?:object,ownerSessionId?:string,runId?:string,rid?:string|number}} msg @param {any} sender */
+  'app/call': async ({ method, args, ownerSessionId, runId, rid } = {}, sender = undefined) => {
+    if (!isOffscreenSender(sender)) return { ok: false, error: 'app_call_unauthorized_relay' };
+    if (vault.isLocked()) return { ok: false, error: 'locked' };
+    if (typeof ownerSessionId !== 'string' || !ownerSessionId) {
+      return { ok: false, error: 'app_call_no_owner' };
+    }
+    if (typeof runId !== 'string' || scriptRuns.ownerFor(runId) !== ownerSessionId
+      || scriptRuns.allows(runId, 'app') !== true || scriptRuns.admitOp(runId, 'app') !== true) {
+      return { ok: false, error: 'app_call_unknown_finished_foreign_or_over_limit_run' };
+    }
+    const runSignal = scriptRuns.signalFor(runId);
+    if (runSignal?.aborted) return { ok: false, error: 'app_call_aborted' };
+    const owner = await sessions.get(ownerSessionId).catch(() => null);
+    if (runSignal?.aborted) return { ok: false, error: 'app_call_aborted' };
+    if (!owner || owner.kind !== 'actor' || owner.actorType !== 'app'
+      || owner.actorSurface !== 'code' || typeof owner.instanceId !== 'string' || !owner.instanceId) {
+      return { ok: false, error: 'app_call_not_bound_app_actor' };
+    }
+    if (owner.archivedAt || !await validateCurrentAppActorGeneration(owner)) {
+      await retireStaleAppActor(ownerSessionId);
+      return { ok: false, error: 'app_call_stale_actor_generation', outcomeKnown: true, outcomeKind: 'pre-effect-failure' };
+    }
+    if (runSignal?.aborted) return { ok: false, error: 'app_call_aborted', outcomeKnown: true, outcomeKind: 'pre-effect-failure' };
+    return appCallHandler({
+      method: /** @type {string} */ (method),
+      args,
+      sessionId: ownerSessionId,
+      appId: owner.instanceId,
+      rid,
+      signal: runSignal ?? undefined,
+    });
   },
 };
 
@@ -6580,13 +6890,15 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
     // advertised the TOOLS descriptors (no page_code) and taught the tools
     // lore, so the whole code arm silently degrades on the offscreen heap.
     const actorToolAllow = resolveManifestAllow(rec.toolManifest);
-    const actorSurface = latchedActorSurface ?? ((kind === 'web' && rec.backing !== 'api')
-      ? resolveWebActorSurface({
+    const actorSurface = latchedActorSurface ?? (kind === 'app'
+      ? rec.actorSurface ?? 'code'
+      : (kind === 'web' && rec.backing !== 'api')
+        ? resolveWebActorSurface({
         requested: settingsStore.get().webActorActionSurface,
         allowedTools: actorToolAllow,
         headlessAvailable: offscreenAvailable,
       })
-      : undefined);
+        : undefined);
     // #241 parity, and it is the load-bearing one: on Chrome EVERY actor turn
     // runs through this path, so a schemaReply stamped only in buildToolContext
     // would arm the validator while the actor was never told the format — every
@@ -6608,6 +6920,7 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
     const systemPrompt = await renderSystemPrompt({
       actorType: kind, backing: rec.backing, instanceId, actorSurface, schemaReply,
       temporalBlock, customSystemPrompt: rec.customSystemPrompt,
+      appRole: rec.appRole,
       effectiveTools: tools.map((tool) => tool.name),
       inbound: inbound === true,
     });
@@ -6972,6 +7285,17 @@ const actorMessaging = makeActorMessaging({
     if (!entry) return null;
     const record = await entry.reg.get(instanceId);
     if (!record) return null;
+    if (entry.kind === 'app') {
+      if (typeof opts.senderSessionId !== 'string' || !opts.senderSessionId) return null;
+      const actorSessionId = await ensureAppActorBinding(instanceId, opts.senderSessionId);
+      // Installed App names can be publisher-controlled. The orchestrator's
+      // actor address lead is trusted prose, so identify this actor by its
+      // exact App handle; package role/name stays in the provenance-tagged
+      // app_role block instead.
+      return actorSessionId
+        ? { instanceId, kind: entry.kind, actorSessionId }
+        : null;
+    }
     let actorSessionId = await entry.reg.getActorSession(instanceId);
     if (!actorSessionId) actorSessionId = await mintOnce(instanceId, () => mintActor(entry, record));
     return { instanceId, kind: entry.kind, actorSessionId, name: record.name };
@@ -7239,6 +7563,19 @@ const actorMessaging = makeActorMessaging({
   mailbox: actorMailbox,
   log: (/** @type {any[]} */ ...a) => console.warn('[actor]', ...a),
 });
+
+// App-native actor messaging: the exact trusted App parent tab collects a
+// message and addresses its already-bound actor directly. This is deliberately
+// not the side-panel orchestrator and is not reachable from the sandboxed App
+// iframe.
+const handleAppActorChat = makeAppActorChatHandler({
+  isTrustedSender,
+  appTabTracker,
+  ensureAppActorBinding,
+  sessions,
+  messageActor: (/** @type {any} */ request) => actorMessaging.messageActor(request),
+});
+
 // Human-feedback admission must see both the parent chat slot and any actor
 // delivery still settling for that chat. Keep these as explicit bindings so
 // route wiring remains shorthand-only and statically auditable.
@@ -7718,10 +8055,17 @@ const privateTransferOpenRoute = makePrivateTransferOpenRoute({
 // reach it through a store method (always-live) handed in via deps. A new route
 // belongs in a routes/ module too; if it needs mutable SW state, give that state
 // a store and inject it, rather than reaching for a module-level let.
+const getCurrentSessionId = () => sessionCache.sessionGet('currentSessionId');
+const onAppDeleted = retireAppActorBindingsForApp;
 browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // Nonsecret request for a MessageChannel transferred to the exact options
   // WindowClient. Backup passphrases and payloads use only that channel.
   'private-transfer/open': privateTransferOpenRoute,
+  // Host-owned App shell -> the App's root-pinned bound actor. Keep this in the
+  // unified dispatcher: an async stand-alone listener would return a Promise
+  // for unrelated messages and race their real route with a spurious `false`.
+  'app/actor-chat': (/** @type {any} */ msg, /** @type {any} */ sender) =>
+    handleAppActorChat(msg, sender),
   // The heap split: the offscreen→SW relays for the ONE agent-loop client — model-call
   // (getSecret + safeFetch added in the handler; the key never left the SW), the
   // SW-side pin+gate tool-dispatch, and the fire-and-forget loop-event (→ the actor/
@@ -7813,6 +8157,8 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
     listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
     repositories, parseAppManifest, podGitRemoteOperation,
+    getCurrentSessionId,
+    onAppDeleted,
   }),
   ...systemMessageRoutes,
   // denylistNetGuard: an edit changes what the network backstop blocks, so the
@@ -7893,6 +8239,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
     disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady,
     repositories, isOffscreenSender, createDwebRollbackGuard,
+    getCurrentSessionId,
   }),
 
   // --- same-user devices: shape/apply the sync surfaces (portable identity) ---
@@ -7919,6 +8266,11 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // A sealed-worker page.* call → the SAME gated dispatch the tool-call actor
   // uses, pinned to the actor's owned tab (owner + tab resolved trusted-side).
   ...(/** @type {any} */ (pageCallRoute)),
+
+  // --- manifest-bound App actor code bridge ---
+  // A sealed-worker app.* call is pinned to the run owner and to that actor's
+  // persisted instanceId; the worker cannot select another installed App.
+  ...(/** @type {any} */ (appCallRoute)),
 
   // --- DESIGN-19: the site-client run's ONLY egress (origin-pinned, confirmed) ---
   // A sealed-worker site.fetch call → the actor's session-scoped webFetch, pinned
@@ -8176,7 +8528,18 @@ const engineTrackersReady = (async () => {
     await podRegistry.load();
     await podTabTracker.bootstrap();
     await appRegistry.load();
-    await appTabTracker.bootstrap();
+    const appCandidates = await appTabTracker.bootstrap();
+    // Generic engine tabs can be re-adopted as ready. Apps cannot: their URL
+    // owner claim, network floor, manifest digest and required actor must all be
+    // reconciled again after every service-worker restart.
+    for (const candidate of appCandidates) {
+      const attached = await attachAppTabActor({
+        type: 'app/tab-ready',
+        appId: candidate.appId,
+        ownerSessionId: candidate.ownerSessionId,
+      }, { tab: { id: candidate.tabId, url: candidate.url } });
+      if (!attached?.ok) console.warn('[app] bootstrap candidate refused', candidate.appId, attached?.error);
+    }
     console.log('[sw] instance registries initialized — live tabs:',
       { vm: vmTabTracker.listLive(), js: jsTabTracker.listLive(), pod: podTabTracker.listLive(), app: appTabTracker.listLive() });
     // §9 engine orphan reap — instances the liveness ledger says were

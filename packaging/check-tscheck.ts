@@ -175,7 +175,7 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // state-push, provider sub-call, session-cost, and origin-lock orchestration
 // extractions.
 // The value below is a fresh scan of the merged tree, not an arithmetic guess.
-const COVERED_FLOOR = 786;
+const COVERED_FLOOR = 799;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

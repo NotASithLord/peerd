@@ -163,13 +163,14 @@
   'use strict';
 
   // --- bridge client -------------------------------------------------------
-  let seq = 0;
+  const clientId = crypto.randomUUID();
   const pending = new Map();
   const listeners = new Map();
   window.addEventListener('message', (e) => {
     const m = e.data;
     if (!m) return;
     if (m.peerd === 'dweb:result') {
+      if (m.clientId !== clientId) return;
       const p = pending.get(m.id);
       if (p) { pending.delete(m.id); m.ok ? p.res(m.value) : p.rej(new Error(m.error)); }
     } else if (m.peerd === 'dweb:event') {
@@ -177,9 +178,13 @@
     }
   });
   const dweb = (op, args) => new Promise((res, rej) => {
-    const id = ++seq;
+    const id = crypto.randomUUID();
     pending.set(id, { res, rej });
-    window.parent.postMessage({ peerd: 'dweb', id, op, args }, '*');
+    window.parent.postMessage({ peerd: 'dweb', id, clientId, op, args }, '*');
+  });
+  addEventListener('pagehide', () => {
+    for (const id of pending.keys()) parent.postMessage({ peerd: 'dweb:cancel', clientId, id }, '*');
+    parent.postMessage({ peerd: 'dweb:dispose', clientId }, '*');
   });
   const on = (event, cb) => {
     if (!listeners.has(event)) listeners.set(event, []);

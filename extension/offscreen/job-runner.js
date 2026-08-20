@@ -122,7 +122,7 @@ export const abortJob = (runId, owner) => {
 const MAX_RELAYING_JOBS = 2;
 let activeRelayingJobs = 0;
 const RELAYING_MESSAGE_TYPES = Object.freeze(new Set([
-  'sw/web-fetch', 'actor/spawn', 'actors/call', 'page/call',
+  'sw/web-fetch', 'actor/spawn', 'actors/call', 'page/call', 'app/call',
   'a2a/call', 'site-fetch/call', 'script/model-call',
 ]));
 
@@ -137,7 +137,7 @@ let activeJobs = 0;
  * Run one headless job. Resolves with the same shape js_notebook returns. Rejects
  * (as a result, not a throw) when too many jobs are already in flight.
  *
- * @param {{ code: string, timeoutMs?: number, startedAt?: number, deadlineAt?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, toolbox?: boolean, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, workspaceBudgetBytes?: number }} job
+ * @param {{ code: string, timeoutMs?: number, startedAt?: number, deadlineAt?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, toolbox?: boolean, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, workspaceBudgetBytes?: number }} job
  *   caps: capability profile (default DEFAULT_WORKER_CAPS — the historical
  *   script surface; the distributed cap is not a caller knob here — headless
  *   forces it off unconditionally); caps.page needs ownerSessionId — the actor
@@ -150,7 +150,7 @@ let activeJobs = 0;
  *   DIRECT-CALLER seam (tests) — offscreen.js never forwards it from a
  *   message, so the production budget cannot be picked over the wire.
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any>, abortRun?: (runId: string, ownerSessionId?: string) => Promise<unknown>, extractMarkdown?: import('/shared/fetch-extract.js').ExtractMarkdownFn, opfsForRoot?: typeof opfsHelpers }} deps
- * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, endTurn?: boolean, endTurnContent?: string, endTurnOutcomeKind?: string, usedEgress?: boolean, usedRemoteModules?: boolean, usedActors?: boolean, actorDeliveryIds?: string[], browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }>, usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<object>, codeTrace?: Array<object>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
+ * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, endTurn?: boolean, endTurnContent?: string, endTurnOutcomeKind?: string, usedEgress?: boolean, usedRemoteModules?: boolean, usedActors?: boolean, usedApp?: boolean, appOutcomeUnknown?:boolean, appOutcomeError?:string, actorDeliveryIds?: string[], browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }>, usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<object>, codeTrace?: Array<object>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
  */
 export const runJob = async (job, deps) => {
   if (activeJobs >= MAX_CONCURRENT_JOBS) {
@@ -162,7 +162,7 @@ export const runJob = async (job, deps) => {
   // would consume the two compute-reserved slots before it executes. Those
   // acquire lazily at their first outward relay through guardedSendToSW below.
   const isEagerRelayingRun = job.actors === true || job.a2a === true || !!job.siteFetch
-    || job.caps?.page === true || job.caps?.provider === true;
+    || job.caps?.page === true || job.caps?.app === true || job.caps?.provider === true;
   let holdsRelayLease = false;
   const relayRefusal = `headless job rejected: ${MAX_RELAYING_JOBS} capability-relaying runs already in flight — await their results before fanning out further`;
   const acquireRelayLease = () => {
@@ -197,7 +197,7 @@ export const runJob = async (job, deps) => {
 };
 
 /**
- * @param {{ code: string, timeoutMs?: number, startedAt?: number, deadlineAt?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, toolbox?: boolean, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, workspaceBudgetBytes?: number }} job
+ * @param {{ code: string, timeoutMs?: number, startedAt?: number, deadlineAt?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, toolbox?: boolean, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, workspaceBudgetBytes?: number }} job
  *   a2a: expose the `mesh` client (agent-to-agent); actors: expose the `actors`
  *   delegation client (the orchestrator's script surface); caps: capability
  *   profile (default DEFAULT_WORKER_CAPS; caps.page is the web actor's
@@ -254,7 +254,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
   // one-word answer (design 7.3). If a headless lane ever legitimately needs
   // base-network reads, that is a deliberate caps flag + host relay at that point.
   const profile = siteFetch
-    ? { page: false, egress: false, subagent: false, opfs: false, provider: false, distributed: false }
+    ? { page: false, app: false, egress: false, subagent: false, opfs: false, provider: false, distributed: false }
     : { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}), distributed: false };
   const jobId = `job-${Date.now().toString(36)}-${++jobSeq}`;
   // design js-superpower/06 — the toolbox resolution LANE GATE, enforced at
@@ -268,7 +268,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
   // page bridge and nothing else" lane — same promise a2a/site-client make — so
   // it is refused by an EXPLICIT denial, mirroring the a2a/siteFetch exclusion,
   // not merely by the toolbox flag being unset.
-  const toolboxOn = toolbox === true && !a2a && !siteFetch && !caps?.page;
+  const toolboxOn = toolbox === true && !a2a && !siteFetch && !caps?.page && !caps?.app;
   // The OPFS root: per-job EPHEMERAL scratch by default (peerd.self.* +
   // relative imports work within the run, then it's nuked) — or, for a
   // workspace run, the DURABLE per-session subtree, which survives the run
@@ -356,6 +356,14 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
   // at the host boundary; user code cannot launder it away by transforming the
   // value before return.
   let usedPage = false;
+  // App runtime state is publisher/App-authored data. Stamp it at the relay so
+  // transformed return values remain fenced when app_code reports them.
+  let usedApp = false;
+  let appOutcomeUnknown = false;
+  let appOutcomeError = '';
+  const appCustody = () => appOutcomeUnknown
+    ? { appOutcomeUnknown: true, appOutcomeError: appOutcomeError || 'App action outcome is unknown' }
+    : {};
   /** @type {Array<{ data: string, mediaType: string }>} */
   let pageImages = [];
   /** @type {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} */
@@ -484,6 +492,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           // timeout would reject user code while a confirmation-gated SW
           // dispatch remained alive and could mutate later.
           ...(profile.page ? { page: buildCodeClientSource('page', { timeoutMs: Math.ceil(remainingMs()) }) } : {}),
+          ...(profile.app ? { app: buildCodeClientSource('app', { timeoutMs: Math.ceil(remainingMs()) }) } : {}),
           ...(a2a ? { mesh: buildCodeClientSource('mesh', { timeoutMs: Math.ceil(remainingMs()) }) } : {}),
           ...(profile.provider ? { provider: buildCodeClientSource('provider') } : {}),
           ...(siteFetch ? { site: buildCodeClientSource('site', { siteOrigin: siteFetch, timeoutMs: Math.ceil(remainingMs()) }) } : {}),
@@ -576,7 +585,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
         abortHostOperations();
         try { worker.terminate(); } catch {}
         recordToolboxUse(false);
-        resolve({ value: undefined, consoleOutput: [], durationMs: timeoutMs, error: `job timed out after ${timeoutMs}ms`, usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+        resolve({ value: undefined, consoleOutput: [], durationMs: timeoutMs, error: `job timed out after ${timeoutMs}ms`, usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, usedApp, ...appCustody(), images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
       }, Math.ceil(remainingMs()));
       // Stop plumbing: a runId-carrying job can be terminated from the SW
       // (script tool abort). The trace survives — partial work stays visible.
@@ -585,7 +594,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           clearTimeout(timer);
           abortHostOperations();
           try { worker.terminate(); } catch {}
-          resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: 'job aborted (Stop)', usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+          resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: 'job aborted (Stop)', usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, usedApp, ...appCustody(), images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
         };
         liveJobs.set(runId, { kill, owner: ownerSessionId });
         // Stop already arrived while we were still building — honor it now.
@@ -847,6 +856,36 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           }
           return;
         }
+        if (m.type === 'app-request') {
+          // The worker cannot name its owner or App. Those identities ride from
+          // trusted job parameters and are re-derived again by the SW route.
+          if (!runtimeProfile.app || typeof ownerSessionId !== 'string' || !ownerSessionId || typeof runId !== 'string' || !runId) {
+            recordRefusedCodeOp('app', m.method);
+            worker.postMessage({ type: 'app-response', rid: m.rid, error: usedRemoteModules
+              ? remoteModuleCapabilityBlockedMessage('App runtime access')
+              : 'app capability is disabled for this job' });
+            return;
+          }
+          usedApp = true;
+          try {
+            const resp = await runCodeOp(
+              'app', m.method,
+              () => sendToSW('app/call', { method: m.method, args: m.args, ownerSessionId, runId, rid: m.rid }),
+              (response) => response?.ok === true,
+            );
+            if (resp?.outcomeKnown === false || resp?.outcomeKind === 'transport-lost' || resp?.outcomeKind === 'host-lost') {
+              appOutcomeUnknown = true;
+              appOutcomeError = String(resp?.error ?? 'App action outcome is unknown');
+            }
+            if (resp?.ok) worker.postMessage({ type: 'app-response', rid: m.rid, result: resp.value });
+            else worker.postMessage({ type: 'app-response', rid: m.rid, error: resp?.error ?? 'app call failed' });
+          } catch (error) {
+            appOutcomeUnknown = true;
+            appOutcomeError = /** @type {{message?:string}} */ (error)?.message ?? String(error);
+            worker.postMessage({ type: 'app-response', rid: m.rid, error: appOutcomeError });
+          }
+          return;
+        }
         if (m.type === 'page-request') {
           // PR #119: the code-REPL actor's page bridge. The OWNER identity rides
           // from the runJob params (the SW set it — trusted), NEVER from the
@@ -887,7 +926,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
                 ...(typeof resp.endTurnOutcomeKind === 'string'
                   ? { endTurnOutcomeKind: resp.endTurnOutcomeKind }
                   : {}),
-                usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage,
+                usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, usedApp, ...appCustody(),
                 images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget,
                 actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens,
               });
@@ -936,7 +975,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
               value: undefined, consoleOutput: [], durationMs: 0,
               error: `import resolution failed: ${error.message}`,
               errorCode: error.code,
-              usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(),
+              usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, usedApp, ...appCustody(), images: pageImages, ...pagePolicyCustody(),
               usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace,
               usedProvider, providerCalls, providerTokens,
             });
@@ -998,9 +1037,15 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           try { worker.terminate(); } catch {}
           // Map blob-URL stack frames back to job.js:<line> — the model reads
           // this error; a user-code line number is actionable, a blob one isn't.
-          const error = m.error ? mapWorkerError(m.error, blobUrl, bodyLine, 'job.js') : null;
+          const workerError = m.error ? mapWorkerError(m.error, blobUrl, bodyLine, 'job.js') : null;
+          // Host custody outranks catchable worker code. A worker may catch the
+          // app bridge rejection, but it cannot convert an ambiguous action
+          // acknowledgement into a successful app_code result.
+          const error = appOutcomeUnknown
+            ? `app action outcome unknown: ${appOutcomeError}`
+            : workerError;
           recordToolboxUse(!error);
-          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: Math.min(timeoutMs, Math.max(0, Date.now() - runStartedAt)), error, usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: Math.min(timeoutMs, Math.max(0, Date.now() - runStartedAt)), error, usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, usedApp, ...appCustody(), images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
         }
       });
 
@@ -1012,7 +1057,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           e.error?.stack || e.error?.message || e.message || 'worker crashed (no detail)',
           blobUrl, bodyLine, 'job.js');
         recordToolboxUse(false);
-        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}`, usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}`, usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, usedApp, ...appCustody(), images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
       });
     });
   } finally {

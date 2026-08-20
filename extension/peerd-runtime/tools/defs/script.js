@@ -54,6 +54,7 @@ const MAX_TIMEOUT_MS = 120_000;
  * @property {string[]} [actorDeliveryIds] durable mailbox correlations for
  *   actor replies consumed by this run; host-only, never part of formatted output
  * @property {boolean} [usedPage]     the run consumed page/DOM/pixel data through page.*
+ * @property {boolean} [usedApp]      the run consumed App-defined runtime data through app.*
  * @property {Array<{ data: string, mediaType: string }>} [images] host-captured page images (bounded by job-runner)
  * @property {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} [browserPolicies]
  *   host-captured child-navigation receipts from page calls; never user-code output
@@ -359,7 +360,7 @@ export const scriptTool = {
  * @param {RunResult} r
  */
 export const runIsFenced = (r) => !!(
-  r.usedEgress || r.usedRemoteModules || r.usedActors || r.usedPage || r.usedWorkspace
+  r.usedEgress || r.usedRemoteModules || r.usedActors || r.usedPage || r.usedApp || r.usedWorkspace
 );
 
 /**
@@ -373,6 +374,7 @@ export const runOriginLabel = (r) => {
     ...(r.usedRemoteModules ? ['remote modules'] : []),
     ...(r.usedActors ? ['actor replies'] : []),
     ...(r.usedPage ? ['page content'] : []),
+    ...(r.usedApp ? ['App runtime state'] : []),
     ...(r.usedWorkspace ? ['workspace files'] : []),
   ];
   return parts.length ? `script (${parts.join(' + ')})` : 'script';

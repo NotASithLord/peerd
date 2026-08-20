@@ -109,8 +109,81 @@
           return urlCache[key];
         },
       });
+      let dataRequestSequence = 0;
+      const dataPending = new Map();
+      const requestData = (op, key, json) => new Promise((resolve, reject) => {
+        const id = `data:${++dataRequestSequence}`;
+        const timer = setTimeout(() => {
+          dataPending.delete(id);
+          reject(new Error('App data request timed out'));
+        }, 12_000);
+        dataPending.set(id, { resolve, reject, timer });
+        window.parent.postMessage({
+          peerd: 'app:data:request', id, op,
+          ...(typeof key === 'string' ? { key } : {}),
+          ...(typeof json === 'string' ? { json } : {}),
+        }, '*');
+      });
+      const handleDataResult = (event) => {
+        if (event.source !== window.parent || event.data?.peerd !== 'app:data:result') return;
+        const pending = dataPending.get(event.data.id);
+        if (!pending) return;
+        dataPending.delete(event.data.id);
+        clearTimeout(pending.timer);
+        if (event.data.ok === true) pending.resolve(event.data.value);
+        else pending.reject(new Error(String(event.data.error || 'App data request failed').slice(0, 1_000)));
+      };
+      const dataApi = Object.freeze({
+        get: (key) => requestData('get', key),
+        set: (key, value) => {
+          let json;
+          try { json = JSON.stringify(value); }
+          catch { return Promise.reject(new TypeError('peerd.data.set value must be JSON-serializable')); }
+          if (typeof json !== 'string' || new TextEncoder().encode(json).byteLength > 1_000_000) {
+            return Promise.reject(new TypeError('peerd.data.set value is too large'));
+          }
+          return requestData('set', key, json);
+        },
+        delete: (key) => requestData('delete', key),
+        list: () => requestData('list'),
+      });
+      const requestedAgentRuntime = msg.agentRuntime && typeof msg.agentRuntime === 'object'
+        ? msg.agentRuntime : {};
+      let agentHandlers = Object.freeze({});
+      let agentCallTail = Promise.resolve();
+      let agentRuntimePoisoned = false;
+      const AGENT_CALL_TIMEOUT_MS = 10_000;
+      const AGENT_RESULT_MAX_CHARS = 100_000;
+      const agentApi = Object.freeze({
+        // A sandboxed App may reveal the trusted host drawer only in direct
+        // response to a human gesture. It cannot provide a message, submit the
+        // form, observe the transcript, or invoke a model through this method.
+        open() {
+          if (navigator.userActivation?.isActive !== true) return false;
+          window.parent.postMessage({ peerd: 'app:agent:open' }, '*');
+          return true;
+        },
+        expose(definition) {
+          if (!definition || typeof definition !== 'object') {
+            throw new TypeError('peerd.agent.expose requires an operation map');
+          }
+          const next = {};
+          if (requestedAgentRuntime.observe === true && typeof definition.observe === 'function') {
+            next.observe = definition.observe;
+          }
+          if (requestedAgentRuntime.act === true && typeof definition.act === 'function') {
+            next.act = definition.act;
+          }
+          agentHandlers = Object.freeze(next);
+          return Object.keys(next);
+        },
+      });
       Object.defineProperty(window, 'peerd', {
-        value: Object.freeze({ assets: assetsApi }),
+        value: Object.freeze({
+          assets: assetsApi,
+          data: dataApi,
+          agent: agentApi,
+        }),
         writable: false,
         configurable: false,
       });
@@ -124,8 +197,9 @@
       // fine (we're about to return anyway).
       document.open();
       // document.open() replaces the old document and its listeners. Install
-      // observability before parsing App markup so synchronous violations from
-      // initial resources are visible to the trusted parent.
+      // the narrow host bridges and observability before parsing App markup so
+      // synchronous App calls and initial resource violations remain visible.
+      window.addEventListener('message', handleDataResult);
       window.addEventListener('securitypolicyviolation', (event) => {
         window.parent.postMessage({
           type: 'app-policy-blocked',
@@ -134,6 +208,97 @@
       });
       document.write(html);
       document.close();
+
+      // App-defined playtest operations are intentionally narrower than DOM
+      // automation: a dwapp opts in through peerd.json, exposes handlers here,
+      // and receives only JSON-like arguments. Results return to the trusted
+      // parent as untrusted App data. The parent pins every request to this App
+      // actor and applies its own size/timeout limits.
+      window.addEventListener('message', (event) => {
+        if (event.source !== window.parent) return;
+        const request = event.data;
+        if (request?.peerd !== 'app:agent:request'
+            || typeof request.id !== 'string' || request.id.length > 100
+            || (request.op !== 'observe' && request.op !== 'act')) return;
+        const handler = agentHandlers[request.op];
+        if (agentRuntimePoisoned) {
+          window.parent.postMessage({
+            peerd: 'app:agent:result', id: request.id, ok: false, poisoned: true,
+            error: 'App runtime generation is poisoned after a timed-out operation',
+          }, '*');
+          return;
+        }
+        if (typeof handler !== 'function') {
+          window.parent.postMessage({
+            peerd: 'app:agent:result', id: request.id, ok: false,
+            error: `App did not expose ${request.op}`,
+          }, '*');
+          return;
+        }
+        const operation = agentCallTail.catch(() => {}).then(() => {
+          // A request may have queued before the prior request timed out. Check
+          // again at execution time so it cannot overlap the late old handler.
+          if (agentRuntimePoisoned) {
+            const error = new Error('App runtime generation is poisoned after a timed-out operation');
+            error.poisoned = true;
+            throw error;
+          }
+          return new Promise((resolve, reject) => {
+            let settled = false;
+            const timer = setTimeout(() => {
+              if (settled) return;
+              settled = true;
+              agentRuntimePoisoned = true;
+              const error = new Error('App runtime operation timed out; outcome unknown');
+              error.poisoned = true;
+              reject(error);
+            }, AGENT_CALL_TIMEOUT_MS);
+            Promise.resolve().then(() => handler(request.args ?? {})).then((value) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              resolve(value);
+            }, (error) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              reject(error);
+            });
+          });
+        });
+        agentCallTail = operation.then(() => undefined, () => undefined);
+        operation.then((value) => {
+          try {
+            const encoded = JSON.stringify(value ?? null);
+            if (typeof encoded !== 'string' || encoded.length > AGENT_RESULT_MAX_CHARS) {
+              throw new Error('App runtime result is not bounded JSON');
+            }
+            window.parent.postMessage({
+              peerd: 'app:agent:result', id: request.id, ok: true, value: JSON.parse(encoded),
+            }, '*');
+          } catch (error) {
+            if (request.op === 'act') agentRuntimePoisoned = true;
+            window.parent.postMessage({
+              peerd: 'app:agent:result', id: request.id, ok: false,
+              poisoned: request.op === 'act',
+              outcomeKnown: request.op === 'act' ? false : true,
+              outcomeKind: request.op === 'act' ? 'transport-lost' : 'pre-effect-failure',
+              error: String(error?.message ?? 'App runtime result could not be cloned').slice(0, 1000),
+            }, '*');
+          }
+        }, (error) => {
+          if (request.op === 'act') agentRuntimePoisoned = true;
+          window.parent.postMessage({
+            peerd: 'app:agent:result', id: request.id, ok: false,
+            poisoned: request.op === 'act' || error?.poisoned === true,
+            outcomeKnown: request.op === 'act' ? false : error?.poisoned !== true,
+            outcomeKind: request.op === 'act' || error?.poisoned === true
+              ? 'transport-lost'
+              : 'pre-effect-failure',
+            error: String(error?.message ?? error).slice(0, 1000),
+          }, '*');
+        });
+      });
 
       // Make ordinary media markup work without forcing every App to write a
       // bootstrap script. Script-created consumers and CSS still use the API.

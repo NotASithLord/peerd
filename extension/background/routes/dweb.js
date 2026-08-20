@@ -24,7 +24,7 @@ export const makeDwebRoutes = (deps) => {
     appRegistry, appClient, appTabTracker, appQuiescence, settingsStore, shareLocalApp,
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
     disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady, repositories,
-    isOffscreenSender, createDwebRollbackGuard,
+    isOffscreenSender, createDwebRollbackGuard, getCurrentSessionId,
   } = deps;
   const rollbackGuard = createDwebRollbackGuard({ kv });
 
@@ -314,16 +314,20 @@ export const makeDwebRoutes = (deps) => {
         return { ok: false, error: 'seed-required' };
       }
       try {
+        const ownerSessionId = typeof getCurrentSessionId === 'function'
+          ? await getCurrentSessionId()
+          : null;
         const apps = await appRegistry.list();
         let rec = apps.find((/** @type {any} */ a) => a.dweb?.seed === seedKey);
         if (!rec) {
           if (!seed.files || typeof seed.files !== 'object') return { ok: false, error: 'seed-files-required' };
-          rec = await appClient.create(seed);
+          rec = await appClient.create({ ...seed, ...(ownerSessionId ? { sessionId: ownerSessionId } : {}) });
           await auditLog.append({ type: 'dweb_seed_installed', details: { appId: rec.id } });
         }
         const params = new URLSearchParams();
         if (typeof room === 'string' && room) params.set('room', room);
         if (typeof url === 'string' && url) params.set('url', url);
+        if (ownerSessionId) params.set('owner', ownerSessionId);
         const suffix = params.size ? `?${params.toString()}` : '';
         await appTabTracker.ensureTab(rec.id, { active: true, groupTitle: APP_TAB_GROUP_TITLE, hashSuffix: suffix });
         return { ok: true, appId: rec.id };

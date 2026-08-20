@@ -480,7 +480,7 @@
   },
   "messageHostSites": {
     "background/service-worker.js": 3,
-    "engine-tabs/app-tab/app-tab.js": 2,
+    "engine-tabs/app-tab/app-tab.js": 3,
     "engine-tabs/notebook-tab/notebook-tab.js": 1,
     "engine-tabs/pod-tab/pod-tab.js": 1,
     "engine-tabs/vm-tab/vm-tab.js": 1,

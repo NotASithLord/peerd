@@ -19,7 +19,9 @@ export const appReadFileTool = {
     '`app_write_file({contentBase64})` when needed.',
     'Use to inspect current content before patching. A large file returns a',
     'bounded slice plus a paging note — re-call with offset to read on (no',
-    're-truncation). Without `appId`, targets the chat\'s current app.',
+    're-truncation). Pass `query` to find exact text and character offsets in',
+    'a large generated file before an anchored edit. Without `appId`, targets',
+    'the chat\'s current app.',
   ].join(' '),
   schema: {
     type: 'object',
@@ -28,6 +30,7 @@ export const appReadFileTool = {
       path: { type: 'string' },
       offset: { type: 'number', description: 'Start character offset. Default 0.' },
       limit: { type: 'number', description: `Max characters to return (capped at ${SPILL_PAGE_CHARS}). Default the cap.` },
+      query: { type: 'string', description: 'Optional exact substring to find; returns bounded snippets and offsets.' },
     },
     required: ['path'],
   },
@@ -47,6 +50,38 @@ export const appReadFileTool = {
         path: args.path,
         sessionId: ctx.session?.sessionId,
       });
+      if (args.query !== undefined) {
+        if (typeof args.query !== 'string' || !args.query || args.query.length > 500) {
+          return { ok: false, error: 'query_must_be_1_to_500_characters' };
+        }
+        const startAt = Math.max(0, Math.min(content.length, Math.trunc(Number(args.offset) || 0)));
+        const matches = [];
+        let cursor = startAt;
+        while (matches.length < 20) {
+          const found = content.indexOf(args.query, cursor);
+          if (found < 0) break;
+          const before = Math.max(0, found - 240);
+          const after = Math.min(content.length, found + args.query.length + 240);
+          matches.push({
+            offset: found,
+            snippet: `${before > 0 ? '…' : ''}${content.slice(before, after)}${after < content.length ? '…' : ''}`,
+          });
+          cursor = found + Math.max(1, args.query.length);
+        }
+        const more = matches.length === 20 && content.indexOf(args.query, cursor) >= 0;
+        return {
+          ok: true,
+          content: wrapUntrusted({
+            origin: `app:${args.appId ?? 'current'}/${args.path}`,
+            tool: 'app_read_file',
+            body: JSON.stringify({
+              query: args.query,
+              matches,
+              ...(more ? { nextOffset: cursor } : {}),
+            }, null, 2),
+          }),
+        };
+      }
       // Self-paging (the infinite-reread fix, mirroring js_read_file): the OPFS
       // file is the durable backing, so a big read returns a bounded slice and
       // the footer re-calls THIS tool at a new offset — no spill store, no

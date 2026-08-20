@@ -185,4 +185,20 @@ describe('edit_file — 3a–3d robustness surface', () => {
     // UTF-16 code units.
     expect(result.error).toContain('content_too_large: 500004 > 500000');
   });
+
+  test('anchored edits can retain a large imported dwapp file without re-emitting it', async () => {
+    const source = `${'a'.repeat(500_001)}\nconst protocol = 5;\n`;
+    let written = '';
+    const ctx = withInstance({
+      appClient: {
+        readFile: async () => source,
+        writeFile: async ({ content }: { content: string }) => { written = content; },
+      },
+    });
+    const edits = '<<<<<<< SEARCH\nconst protocol = 5;\n=======\nconst protocol = 6;\n>>>>>>> REPLACE\n';
+    const result: any = await editFileTool.execute({ path: 'bundle.js', edits }, ctx as any);
+    expect(result.ok).toBe(true);
+    expect(written.endsWith('const protocol = 6;\n')).toBe(true);
+    expect(new TextEncoder().encode(written).byteLength).toBeGreaterThan(500_000);
+  });
 });

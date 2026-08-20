@@ -9,6 +9,7 @@ import {
   opfsHelpers,
 } from '/peerd-engine/index.js';
 import { createAppClient } from '/background/app-client.js';
+import { createAppDataClient, MAX_APP_DATA_BYTES } from '../../../../engine-tabs/app-tab/app-data-client.js';
 
 const VALID_EMPTY_WASM = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
 const BINARY_TRIPWIRE = [0x00, 0xff, 0xc0, 0x80, 0x7f];
@@ -49,6 +50,50 @@ const memoryRegistry = () => {
 };
 
 describe('App storage binary contract', () => {
+  it('classifies a Git-imported working tree and keeps unknown binary assets byte-exact', async () => {
+    const registry = memoryRegistry();
+    /** @type {{ client: ReturnType<typeof createAppClient> | null }} */
+    const holder = { client: null };
+    const repositories = {
+      coordinate: async (/** @type {any} */ _ref, /** @type {() => Promise<any>} */ operation) => operation(),
+      clone: async (/** @type {any} */ ref, /** @type {any} */ options) => {
+        const files = holder.client?.opfsForApp(ref.id);
+        if (!files) throw new Error('App client is unavailable');
+        await files.write('peerd.json', JSON.stringify({
+          schema: 1, kind: 'app', entry: 'index.html',
+          agent: { kind: 'bound-app', profile: 'developer', surface: 'code' },
+          capabilities: [],
+        }));
+        await files.write('index.html', '<h1>Git App</h1>');
+        await files.write('model.custom', new Uint8Array(BINARY_TRIPWIRE));
+        return {
+          remote: { url: options.url, host: 'github.com' },
+          oid: 'abc123', branch: 'main', dirty: false,
+        };
+      },
+      destroy: async () => {},
+    };
+    const client = createAppClient({
+      registry: /** @type {any} */ (registry),
+      tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (repositories),
+    });
+    holder.client = client;
+    const result = await client.createFromGit({
+      url: 'https://github.com/example/app.git', allowDweb: false,
+    });
+    if (!result.record) throw new Error('Git import did not create an App record');
+    try {
+      expect(result.record.fileKinds['peerd.json']).toBe('text');
+      expect(result.record.fileKinds['index.html']).toBe('text');
+      expect(result.record.fileKinds['model.custom']).toBe('binary');
+      expect(Array.from(await client.readFileBytes({ appId: result.record.id, path: 'model.custom' })))
+        .toEqual(BINARY_TRIPWIRE);
+    } finally {
+      await client.opfsForApp(result.record.id).nuke();
+    }
+  });
+
   it('stores base64 as raw bytes and refuses text reads of binary assets', async () => {
     const registry = memoryRegistry();
     const client = createAppClient({
@@ -275,6 +320,69 @@ const runDirectRunner = () => new Promise((resolve, reject) => {
   document.body.appendChild(iframe);
 });
 
+/** @returns {Promise<any>} */
+const runDirectData = () => new Promise((resolve, reject) => {
+  const iframe = document.createElement('iframe');
+  iframe.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px';
+  const values = new Map();
+  /** @type {MessagePort | null} */
+  let runnerPort = null;
+  const cleanup = () => {
+    clearTimeout(timer);
+    runnerPort?.close();
+    window.removeEventListener('message', onMessage);
+    iframe.remove();
+  };
+  const timer = setTimeout(() => {
+    cleanup();
+    reject(new Error('runner data handshake timed out'));
+  }, 8000);
+  const html = `<script>
+    Promise.resolve().then(async () => {
+      await window.peerd.data.set('document', { text: 'hello', version: 1 });
+      const value = await window.peerd.data.get('document');
+      const keys = await window.peerd.data.list();
+      await window.peerd.data.delete('document');
+      const missing = await window.peerd.data.get('document');
+      parent.postMessage({ type: 'runner-data-result', value, keys, missing }, '*');
+    }).catch((error) => parent.postMessage({ type: 'runner-data-error', error: String(error) }, '*'));
+  <\/script>`;
+  /** @param {MessageEvent} event */
+  const onMessage = (event) => {
+    if (event.source !== iframe.contentWindow) return;
+    if (event.data?.peerd === 'app:data:request') {
+      const { id, op, key } = event.data;
+      /** @type {any} */ let value = true;
+      if (op === 'set') values.set(key, JSON.parse(event.data.json));
+      else if (op === 'get') value = values.get(key) ?? null;
+      else if (op === 'list') value = [...values.keys()].sort();
+      else if (op === 'delete') values.delete(key);
+      iframe.contentWindow?.postMessage({ peerd: 'app:data:result', id, ok: true, value }, '*');
+      return;
+    }
+    if (event.data?.type === 'runner-data-error') {
+      cleanup();
+      reject(new Error(event.data.error));
+    } else if (event.data?.type === 'runner-data-result') {
+      cleanup();
+      resolve(event.data);
+    }
+  };
+  window.addEventListener('message', onMessage);
+  iframe.addEventListener('load', () => {
+    const channel = new MessageChannel();
+    runnerPort = channel.port1;
+    runnerPort.addEventListener('message', (event) => {
+      if (event.data?.type !== 'runner-ready') return;
+      runnerPort?.postMessage({ type: 'app-body', html, entry: 'index.html', assets: {} });
+    });
+    runnerPort.start();
+    iframe.contentWindow?.postMessage({ type: 'runner-init' }, '*', [channel.port2]);
+  }, { once: true });
+  iframe.src = '/engine-tabs/app-tab/runner.html';
+  document.body.appendChild(iframe);
+});
+
 describe('App runner binary assets', () => {
   it('exposes transferred bytes and instantiates valid WASM', async () => {
     const result = await runDirectRunner();
@@ -283,6 +391,45 @@ describe('App runner binary assets', () => {
     expect(result.missing).toBe(null);
     expect(result.list).toEqual(['asset.bin', 'empty.wasm']);
     expect(result.exports).toEqual([]);
+  });
+});
+
+describe('App runner durable data', () => {
+  it('exposes a bounded JSON API without an OPFS handle', async () => {
+    const result = await runDirectData();
+    expect(result.value).toEqual({ text: 'hello', version: 1 });
+    expect(result.keys).toEqual(['document']);
+    expect(result.missing).toBe(null);
+  });
+
+  it('maps safe App-local JSON writes onto the existing mutation routes', async () => {
+    const root = ['peerd-apps', 'app-data-client-test'];
+    const opfs = opfsHelpers(root);
+    await opfs.nuke();
+    /** @type {any[]} */
+    const calls = [];
+    const data = createAppDataClient({
+      appId: 'app-data-client-test', opfs,
+      send: async (/** @type {any} */ message) => {
+        calls.push(message);
+        if (message.type === 'app/editor-write') await opfs.write(message.path, message.content);
+        else if (message.type === 'app/editor-delete') await opfs.delete(message.path);
+        return { ok: true };
+      },
+    });
+    expect(await data.request('set', 'document', '{"text":"hello"}')).toEqual({ ok: true, value: true });
+    expect(await data.request('get', 'document')).toEqual({ ok: true, value: { text: 'hello' } });
+    expect(await data.request('list')).toEqual({ ok: true, value: ['document'] });
+    expect(await data.request('set', '../escape', '{}')).toEqual({ ok: false, error: 'invalid App data key' });
+    expect(await data.request('set', 'large', `"${'x'.repeat(MAX_APP_DATA_BYTES)}"`))
+      .toEqual({ ok: false, error: 'App data value is too large' });
+    expect(await data.request('delete', 'document')).toEqual({ ok: true, value: true });
+    expect(await data.request('get', 'document')).toEqual({ ok: true, value: null });
+    expect(calls).toEqual([
+      { type: 'app/editor-write', appId: 'app-data-client-test', path: 'data/document.json', content: '{"text":"hello"}', runtimeData: true },
+      { type: 'app/editor-delete', appId: 'app-data-client-test', path: 'data/document.json', runtimeData: true },
+    ]);
+    await opfs.nuke();
   });
 });
 

@@ -213,6 +213,7 @@ export const WEB_ACTOR_DOM_TOOLS = WEB_ACTOR_DOM_TOOL_NAMES;
 // page interaction through page_code keeps ONE consistent tab. (page.snapshot()
 // still dispatches the snapshot tool via the route's inner tools-surface ctx.)
 export const WEB_ACTOR_CODE_TOOLS = Object.freeze(new Set(actorCodeSurfaceTools('web', 'tab')));
+export const APP_ACTOR_CODE_TOOLS = Object.freeze(new Set(actorCodeSurfaceTools('app')));
 
 // The POSITIVE allow-list an actor of each kind may call — its own kind's
 // operational surface (mutations + reads + edit_file). Everything else (other
@@ -273,6 +274,7 @@ export const actorAllowedToolsFor = (kind, backing, surface) => {
   // from a future policy version and must not inherit the full tab surface.
   if (kind === 'web' && backing !== undefined && backing !== 'tab') return new Set();
   if (kind === 'web' && surface === 'code') return WEB_ACTOR_CODE_TOOLS;
+  if (kind === 'app' && surface === 'code') return APP_ACTOR_CODE_TOOLS;
   return actorAllowedTools(kind);
 };
 

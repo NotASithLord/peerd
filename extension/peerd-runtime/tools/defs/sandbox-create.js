@@ -93,8 +93,8 @@ export const sandboxCreateTool = {
           + "dweb('join'/'publish'/'subscribe'/'dm-send'/…). REQUIRED for any app "
           + 'that talks to peers. Pair with dweb_guide.',
       },
-      gitUrl: { type: 'string', description: 'app/notebook/pod: HTTPS remote to clone.' },
-      gitRef: { type: 'string', description: 'app/notebook/pod: branch.' },
+      gitUrl: { type: 'string', description: 'app/notebook/pod: HTTPS remote to clone. For an App or dwapp, the repository peerd.json defines its entry, capabilities, and bound actor.' },
+      gitRef: { type: 'string', description: 'app/notebook/pod: branch or tag.' },
       gitDepth: { type: 'integer', description: 'app/notebook/pod: depth, 1–500.' },
       persistent: { type: 'boolean', description: 'pod only: preserve the named OPFS workspace when its tab stops (default true).' },
     },

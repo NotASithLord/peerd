@@ -125,6 +125,40 @@ describe('home.library', () => {
     } finally { unmount(); }
   });
 
+  it('imports a GitHub App from a discoverable Library form', async () => {
+    const send = makeSend({
+      'apps/import-git': (msg) => ({
+        ok: true,
+        record: { id: 'git-app', name: msg.name || 'Git App', entryFile: 'index.html' },
+      }),
+      'apps/open': () => ({ ok: true }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      clickText(root, 'button', 'Import Git');
+      await flush();
+      const url = need(root, 'input[aria-label="Git repository URL"]', HTMLInputElement);
+      const ref = need(root, 'input[aria-label="Git branch or tag"]', HTMLInputElement);
+      const name = need(root, 'input[aria-label="Imported App display name"]', HTMLInputElement);
+      url.value = 'https://github.com/example/notes';
+      ref.value = 'release';
+      name.value = 'Shared Notes';
+      url.dispatchEvent(new Event('input'));
+      ref.dispatchEvent(new Event('input'));
+      name.dispatchEvent(new Event('input'));
+      await flush();
+      clickText(root, 'button', 'Clone App');
+      await flush();
+      expect(send.calls.find((call) => call.type === 'apps/import-git')).toEqual({
+        type: 'apps/import-git',
+        url: 'https://github.com/example/notes',
+        ref: 'release',
+        name: 'Shared Notes',
+      });
+      expect(root.textContent).toContain('opened it with its bound actor');
+    } finally { unmount(); }
+  });
+
   it('favorites-only filter hides non-favorites', async () => {
     const { root, unmount } = await mountView(makeSend());
     try {
@@ -236,6 +270,7 @@ describe('home.library', () => {
       clickText(root, 'button', 'Share');   // opens the dialog (no dispatch yet)
       await flush();
       expect(send.calls.some((c) => c.type === 'dweb/base/share-app')).toBe(false);
+      expect(root.textContent).toContain('including data/*.json');
       const input = need(root, '.library-share input', HTMLInputElement);
       expect(input).toBeTruthy();
       expect(input.disabled).toBe(false);        // editable on first share

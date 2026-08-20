@@ -92,6 +92,7 @@ export const resolveRuntimeCapabilities = ({ offscreenDocument, dwebPackaged = f
 const TOOL_CAPABILITIES = Object.freeze({
   script: 'sealedJobs',
   page_code: 'sealedJobs',
+  app_code: 'sealedJobs',
   site_client_run: 'sealedJobs',
   a2a_run: 'dwebMesh',
   read_pdf: 'pdfReader',

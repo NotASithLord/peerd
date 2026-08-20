@@ -23,8 +23,8 @@ import {
   manifestHash,
   MAX_BUNDLE_BYTES,
 } from './content/manifest.js';
-import { packBundle } from './content/bundle.js';
-import { chunkBytes } from './content/chunk.js';
+import { packTransportBundle } from './content/bundle.js';
+import { chunkBytes, sha256hex as sha256ChunkHex } from './content/chunk.js';
 import { swarmFetch } from './content/swarm.js';
 import { formatPeerdUri, parsePeerdUri } from './content/uri.js';
 import { utf8, toHex } from '/shared/bundle/bytes.js';
@@ -164,7 +164,7 @@ export const createBaseNetwork = async ({
     for (const [path, content] of Object.entries(files)) {
       bytes[path] = typeof content === 'string' ? utf8(content) : new Uint8Array(content);
     }
-    const payload = packBundle({ entry, files: bytes, fileKinds });
+    const { payload, descriptor } = await packTransportBundle({ entry, files: bytes, fileKinds });
     const packedBytes = assertBundlePayloadWithinLimits(payload, maxBundleBytes);
     const manifestCreated = typeof created === 'number' && Number.isFinite(created) ? created : null;
     const { manifest, hash, chunks } = await buildManifest({
@@ -172,6 +172,7 @@ export const createBaseNetwork = async ({
       type: 'app',
       entry,
       identity,
+      bundle: descriptor,
       ...(release ? { meta: { release } } : {}),
       ...(manifestCreated !== null ? { now: () => manifestCreated } : {}),
     });
@@ -196,8 +197,24 @@ export const createBaseNetwork = async ({
   // re-attribution). Then announce ourselves as a provider.
   /** @param {{ manifest: any, payload: Uint8Array }} opts */
   const seedApp = async ({ manifest, payload }) => {
+    assertBundleWithinLimits(manifest);
+    if (!(payload instanceof Uint8Array) || payload.byteLength !== manifest.size) {
+      throw new Error('seed App payload does not match its signed manifest size');
+    }
     const hash = await manifestHash(manifest);
-    const chunks = chunkBytes(payload);
+    // Own immutable snapshots of the signed representation. `chunkBytes`
+    // returns views, so retaining them directly would let a caller mutate a
+    // successfully verified seed after admission and poison future serves.
+    const chunks = chunkBytes(payload).map((chunk) => new Uint8Array(chunk));
+    if (chunks.length !== manifest.chunks.length) {
+      throw new Error('seed App payload does not match its signed chunk count');
+    }
+    for (const [index, chunk] of chunks.entries()) {
+      const committed = manifest.chunks[index];
+      if (chunk.byteLength !== committed.size || await sha256ChunkHex(chunk) !== committed.hash) {
+        throw new Error(`seed App compressed chunk ${index} failed verification`);
+      }
+    }
     node.content.publish({ manifest, hash, chunks });
     announceProvider(formatPeerdUri({ did: manifest.publisher ?? identity.did, hash })).catch(() => {}); // background durability
     return hash;

@@ -11,3 +11,7 @@
 // (MIGRATION §3).
 
 export { packBundle, unpackBundle, unpackBundleText } from '/shared/bundle/bundle.js';
+export {
+  packTransportBundle, unpackTransportBundle,
+  BUNDLE_TRANSPORT_VERSION, BUNDLE_TRANSPORT_ENCODING, BUNDLE_TRANSPORT_CODEC,
+} from '/shared/bundle/transport.js';

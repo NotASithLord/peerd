@@ -49,7 +49,7 @@ export const makeEngineRoutes = (deps) => {
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
     listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
-    repositories, parseAppManifest, podGitRemoteOperation,
+    repositories, parseAppManifest, podGitRemoteOperation, getCurrentSessionId, onAppDeleted,
   } = deps;
   if (typeof awaitDenylistPolicy !== 'function') {
     throw new TypeError('makeEngineRoutes: awaitDenylistPolicy is required');
@@ -72,6 +72,13 @@ export const makeEngineRoutes = (deps) => {
     () => coordinateApp(appId, operation),
     { close: true },
   );
+  /** @param {unknown} appId @param {unknown} path @param {any} sender */
+  const ownsAppDataMutation = (appId, path, sender) => typeof appId === 'string'
+    && typeof path === 'string'
+    && /^data\/[a-z0-9][a-z0-9._-]{0,63}\.json$/i.test(path)
+    && sender?.tab?.id != null
+    && appTabTracker.getTabId(appId) === sender.tab.id
+    && appTabTracker.parseIdFromUrl?.(sender.tab.url) === appId;
 
   /** @param {unknown} value */
   const shellLine = (value) => `${String(value ?? '')}\n`;
@@ -449,6 +456,7 @@ export const makeEngineRoutes = (deps) => {
         let meta = await appRegistry.get(appId);
         if (!meta) return { ok: false, error: 'app-not-found' };
         let runtimeDweb = meta.dweb ?? null;
+        let runtimeAgent = { kind: 'bound-app', profile: 'developer', surface: 'code' };
         try {
           const contract = parseAppManifest(await appClient.readFile({ appId, path: 'peerd.json' }));
           const paths = new Set((await appClient.listFiles({ appId })).map((/** @type {{path:string}} */ file) => file.path.replace(/^\/+/, '')));
@@ -456,6 +464,7 @@ export const makeEngineRoutes = (deps) => {
           runtimeDweb = contract.capabilities.includes('dweb') && DWEB_ENABLED
             ? (meta.dweb ?? { uri: null, publisher: null, hash: null, local: true })
             : null;
+          runtimeAgent = contract.agent;
           if (contract.entry !== meta.entryFile) meta = await appRegistry.update(appId, { entryFile: contract.entry });
         } catch (error) {
           if ((/** @type {{name?:string}} */ (error)).name !== 'NotFoundError') {
@@ -470,6 +479,7 @@ export const makeEngineRoutes = (deps) => {
           entryFile: meta.entryFile,
           fileKinds: meta.fileKinds ?? {},
           dweb: runtimeDweb,
+          agent: runtimeAgent,
         };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
@@ -478,10 +488,11 @@ export const makeEngineRoutes = (deps) => {
 
     // The App editor reads OPFS directly but sends every mutation through the
     // SW client so byte caps, kind metadata, and rollback stay one contract.
-    'app/editor-write': async ({ appId, path, content }) => {
+    'app/editor-write': async ({ appId, path, content, runtimeData = false }, sender) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       if (typeof path !== 'string') return { ok: false, error: 'path-required' };
       if (typeof content !== 'string') return { ok: false, error: 'content-required' };
+      if (runtimeData && !ownsAppDataMutation(appId, path, sender)) return { ok: false, error: 'app-data-unauthorized' };
       try {
         const result = await appClient.writeFile({ appId, path, content, reload: false });
         return { ok: true, ...result };
@@ -490,13 +501,15 @@ export const makeEngineRoutes = (deps) => {
       }
     },
 
-    'app/editor-delete': async ({ appId, path }) => {
+    'app/editor-delete': async ({ appId, path, runtimeData = false }, sender) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       if (typeof path !== 'string') return { ok: false, error: 'path-required' };
+      if (runtimeData && !ownsAppDataMutation(appId, path, sender)) return { ok: false, error: 'app-data-unauthorized' };
       try {
         await appClient.deleteFile({ appId, path, reload: false });
         return { ok: true };
       } catch (e) {
+        if (runtimeData && (/** @type {{name?:string}} */ (e))?.name === 'NotFoundError') return { ok: true };
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
     },
@@ -537,6 +550,19 @@ export const makeEngineRoutes = (deps) => {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
     },
+    'apps/import-git': async (options) => {
+      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
+      try {
+        const result = await appClient.createFromGit({
+          ...options,
+          sessionId: await getCurrentSessionId?.(),
+          allowDweb: DWEB_ENABLED,
+        });
+        return { ok: true, ...result };
+      } catch (e) {
+        return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) };
+      }
+    },
     'apps/favorite': async ({ appId, favorite }) => {
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
@@ -567,7 +593,10 @@ export const makeEngineRoutes = (deps) => {
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
-        await appClient.open({ appId });
+        const sessionId = typeof getCurrentSessionId === 'function'
+          ? await getCurrentSessionId()
+          : null;
+        await appClient.open({ appId, ...(sessionId ? { sessionId } : {}) });
         return { ok: true };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
@@ -716,6 +745,7 @@ export const makeEngineRoutes = (deps) => {
             }
           }
           const deleted = await appClient.delete(appId);
+          if (deleted && typeof onAppDeleted === 'function') await onAppDeleted(appId);
           return deleted ? { ok: true } : { ok: false, error: 'app-not-found' };
         }));
         return result;
