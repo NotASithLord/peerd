@@ -156,10 +156,10 @@ export const DwebSection = {
       // commons — the Phase 1 north-star dwapp — now lives in the Library as
       // a pre-loaded, dweb-tagged app (not a button here). Point there.
       dwebEnabled ? m('div', { style: 'margin-top:14px; border-top:1px solid var(--hairline, #2a2a2a); padding-top:14px;' }, [
-        m('h3', 'commons — the dweb demo'),
+        m('h3', 'commons - the dweb demo'),
         m('p', 'A shared room with a chat for everyone plus private, '
           + 'peer-to-peer one-to-one chats. It ships pre-loaded in your '
-          + 'Library, tagged “dweb” — open it there. To try it, open it in '
+          + 'Library, tagged “dweb” - open it there. To try it, open it in '
           + 'two profiles (or two machines) and join the same room code.'),
         m('button.secondary', { type: 'button', onclick: () => openHome('library') }, 'Open Library'),
       ]) : null,

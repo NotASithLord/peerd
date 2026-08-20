@@ -148,7 +148,9 @@ export const MemoryView = {
 
       // Auto-memory toggle — relocated from "Agent behavior": the
       // switch belongs next to the suggestion queue it feeds.
-      m('.settings-divider'),
+      // No .settings-divider here: the row draws its own top rule, and the two
+      // stacked 16px apart read as a rendering mistake rather than a section
+      // break.
       toggleRow({
         id: 'auto-memory',
         label: 'Auto-memory',

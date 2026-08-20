@@ -3528,6 +3528,37 @@ export const STATES = [
     },
   },
   {
+    // Memory had no visual state at all, so the auto-memory switch - the one
+    // control on the page - was never photographed. It is also the row whose
+    // old hand-rolled busy dance had no `finally`, which is precisely the kind
+    // of state a still frame catches and an assertion does not.
+    name: 'options-memory', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html#!/memory');
+      try {
+        await waitFor(() => evalIn(page, `document.querySelectorAll('.set-row').length >= 1`),
+          { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        const row = await evalIn(page, `(() => {
+          const el = document.querySelector('.set-row');
+          const toggle = el?.querySelector('button[role="switch"]');
+          return {
+            label: el?.querySelector('.set-row-label')?.textContent ?? '',
+            pill: el?.querySelector('.set-pill')?.textContent ?? '',
+            named: toggle?.getAttribute('aria-label') ?? '',
+            headings: document.querySelectorAll('.memory-pane h3').length,
+          };
+        })()`);
+        rec.check('auto-memory reads as a row that states where you stand',
+          row?.label === 'Auto-memory'
+            && row?.pill === 'ON'
+            && / - (on|off)$/.test(row?.named ?? ''),
+          JSON.stringify(row));
+        await rec.visualPage('options-memory', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
     name: 'options-denylist', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
