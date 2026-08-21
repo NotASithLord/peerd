@@ -4,7 +4,7 @@
 // service worker's listener-registration path.
 
 export { createVault, purgeVaultBlob, DEFAULT_AUTO_LOCK_MS } from './vault/vault.js';
-export { deriveArgon2id } from './vault/argon2.js';
+export { deriveArgon2id } from '../shared/argon2id.js';
 export {
   VaultLockedError, VaultNotInitializedError, VaultAlreadyInitializedError,
   WrongPassphraseError, PrfNotEnrolledError, PrfUnlockFailedError,

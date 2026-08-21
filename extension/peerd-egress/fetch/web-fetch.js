@@ -28,7 +28,7 @@
 //     denylist + per-tool confirmation gates are the right knobs.
 
 import { EgressDeniedError } from './errors.js';
-import { isPrivateOrLocalHost } from './private-network.js';
+import { isPrivateOrLocalHost } from '../../shared/private-network.js';
 import { authOriginForRequestUrl, originSecretName, parseOriginAuth } from './origin-credentials.js';
 import { accessTokenHashFor, dpopJkt, signDpopProof } from '../dpop/keys.js';
 import { makeNonceCache, readDpopNonce, replayableRequest, shouldRetryWithNonce } from '../dpop/nonce.js';
