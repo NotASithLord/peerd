@@ -1,0 +1,212 @@
+import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { EXTENSION_DIR } from '../../packaging/lib.ts';
+import { makeVaultAuthorityClient } from '../../extension/background/vault-authority-client.js';
+import { serveVaultAuthority } from '../../extension/offscreen/vault-authority-runtime.js';
+import {
+  admitVaultAuthorityOffer,
+  parseVaultAuthorityCall,
+  parseVaultAuthorityStorageCall,
+  VAULT_AUTHORITY_PROTOCOL,
+  VAULT_AUTHORITY_CALL,
+  VAULT_AUTHORITY_READY,
+} from '../../extension/shared/vault-authority-protocol.js';
+
+const offscreenUrl = 'chrome-extension://test/offscreen/offscreen.html';
+const workerUrl = 'chrome-extension://test/offscreen/vault-authority-worker.js';
+
+const makeStorage = () => {
+  const local = new Map<string, any>();
+  const database = new Map<string, any>();
+  const session = new Map<string, any>();
+  return {
+    local,
+    database,
+    session,
+    kv: {
+      get: async (key: string) => local.get(key),
+      set: async (key: string, value: any) => { local.set(key, structuredClone(value)); },
+      delete: async (key: string) => { local.delete(key); },
+      list: async (prefix = '') => Object.fromEntries(
+        [...local].filter(([key]) => key.startsWith(prefix)),
+      ),
+    },
+    idb: {
+      get: async (store: string, key: IDBValidKey) => database.get(`${store}:${String(key)}`),
+      put: async (store: string, value: any) => {
+        database.set(`${store}:${String(value.key)}`, structuredClone(value));
+      },
+      del: async (store: string, key: IDBValidKey) => {
+        database.delete(`${store}:${String(key)}`);
+      },
+    },
+    sessionCache: {
+      sessionGet: async (key: string) => session.get(key),
+      sessionSet: async (key: string, value: any) => { session.set(key, structuredClone(value)); },
+      sessionDelete: async (key: string) => { session.delete(key); },
+    },
+  };
+};
+
+describe('sealed vault authority channel', () => {
+  test('runs passkey vault and secret custody through exact reverse storage only', async () => {
+    const storage = makeStorage();
+    let depth = 0;
+    let terminated = 0;
+    const client = makeVaultAuthorityClient({
+      offscreen: false,
+      offscreenUrl,
+      workerUrl,
+      kv: storage.kv,
+      idb: storage.idb,
+      sessionCache: storage.sessionCache,
+      newId: (() => { let value = 0; return () => `identity-${++value}`; })(),
+      withHost: async (operation) => {
+        depth += 1;
+        try { return await operation(); } finally { depth -= 1; }
+      },
+      createWorker: ((url: string, options: any) => ({
+        postMessage(bootstrap: any, ports: MessagePort[]) {
+          expect(url).toBe(workerUrl);
+          expect(options).toEqual({ type: 'module', name: 'peerd-vault-authority' });
+          void serveVaultAuthority({ port: ports[0], channelId: bootstrap.channelId });
+        },
+        terminate() { terminated += 1; },
+      })) as any,
+    });
+
+    expect((await client.status()).initialized).toBe(false);
+    const prfOutput = new Uint8Array(32).fill(5);
+    await client.initializeWithPrfOnly({
+      prfOutput,
+      credentialId: new Uint8Array([1, 2, 3, 4]),
+      prfSalt: new Uint8Array(32).fill(6),
+      transports: ['internal'],
+    });
+    expect(client.isLocked()).toBe(false);
+    expect((await client.status())).toMatchObject({
+      initialized: true, prfEnrolled: true, hasRecovery: false, locked: false,
+    });
+    await client.setSecret('provider:test', 'private-value');
+    expect(await client.getSecret('provider:test')).toBe('private-value');
+    expect(await client.listSecretNames()).toEqual(['provider:test']);
+    await client.setRecoveryPassphrase('private-recovery-passphrase');
+    const explicitLockEvents: any[] = [];
+    client.subscribe((event) => {
+      if (event?.type === 'locked') {
+        explicitLockEvents.push(event);
+        client.close();
+      }
+    });
+    await client.lock('manual');
+    // The route that issued an explicit lock owns host retirement after the
+    // result settles. A premature subscriber callback would close this call's
+    // channel and make the promise reject instead.
+    expect(explicitLockEvents).toEqual([]);
+    expect(client.isLocked()).toBe(true);
+    expect(storage.session.has('vault.unlocked.v1')).toBe(false);
+    expect(storage.database.has('vault:vault.v1')).toBe(true);
+    expect(depth).toBe(0);
+    client.close();
+    expect(terminated).toBe(1);
+    await client.unlock('private-recovery-passphrase');
+    expect(client.isLocked()).toBe(false);
+    expect((await client.status()).hasRecovery).toBe(true);
+    await client.lock('manual');
+    client.close();
+    expect(terminated).toBe(2);
+  });
+
+  test('protocol refuses unknown methods, storage operations, and forged provenance', () => {
+    expect(parseVaultAuthorityCall({
+      type: 'vault-authority/call', protocol: VAULT_AUTHORITY_PROTOCOL,
+      channelId: 'channel-123', requestId: 'request-123', method: 'vault.raw', args: null,
+    })).toBeNull();
+    expect(parseVaultAuthorityStorageCall({
+      type: 'vault-authority/storage', protocol: VAULT_AUTHORITY_PROTOCOL,
+      channelId: 'channel-123', requestId: 'request-123',
+      operation: 'storage.clear', args: [],
+    })).toBeNull();
+    const expected = 'chrome-extension://test/background/vault-kernel.js';
+    const event = (overrides: Record<string, any> = {}) => ({
+      isTrusted: true,
+      source: { scriptURL: expected },
+      data: {
+        type: 'peerd/vault-authority-channel', protocol: 1, channelId: 'channel-123',
+      },
+      ports: [{}],
+      ...overrides,
+    });
+    expect(admitVaultAuthorityOffer(event(), expected, true)).toMatchObject({ ok: true });
+    expect(admitVaultAuthorityOffer(event({ isTrusted: false }), expected, true))
+      .toMatchObject({ ok: false, reason: 'sender-invalid' });
+    expect(admitVaultAuthorityOffer(event({ ports: [{}, {}] }), expected, true))
+      .toMatchObject({ ok: false, reason: 'offer-invalid' });
+    expect(admitVaultAuthorityOffer(event(), expected, false))
+      .toMatchObject({ ok: false, reason: 'lease-inactive' });
+  });
+
+  test('bootstrap seals the realm before the fixed runtime import', () => {
+    const source = readFileSync(join(EXTENSION_DIR, 'offscreen/vault-authority-worker.js'), 'utf8');
+    expect(source).not.toMatch(/^\s*import\s/m);
+    const seal = source.indexOf("denyGlobal('postMessage')");
+    const runtime = source.indexOf("import('./vault-authority-runtime.js')");
+    expect(seal).toBeGreaterThan(0);
+    expect(runtime).toBeGreaterThan(seal);
+    for (const primitive of ['fetch', 'Worker', 'indexedDB', 'caches', 'BroadcastChannel']) {
+      expect(source).toContain(`'${primitive}'`);
+    }
+    const runtimeSource = readFileSync(
+      join(EXTENSION_DIR, 'offscreen/vault-authority-runtime.js'), 'utf8',
+    );
+    expect(runtimeSource).not.toMatch(/^\s*import .*argon2id/m);
+    expect(runtimeSource).toContain("import('../shared/argon2id.js')");
+  });
+
+  test('the fixed bootstrap and runtime are explicit packaged lazy entries', () => {
+    const source = readFileSync(join(EXTENSION_DIR, '..', 'packaging', 'lazy-entry-manifest.ts'), 'utf8');
+    expect(source).toContain("'offscreen/vault-authority-worker.js'");
+    expect(source).toContain("'offscreen/vault-authority-runtime.js'");
+  });
+
+  test('a never-settling dispatched credential commit is bounded and outcome-unknown', async () => {
+    const storage = makeStorage();
+    let calls = 0;
+    let terminated = 0;
+    const client = makeVaultAuthorityClient({
+      offscreen: false,
+      offscreenUrl,
+      workerUrl,
+      kv: storage.kv,
+      idb: storage.idb,
+      sessionCache: storage.sessionCache,
+      timeoutMs: 5,
+      withHost: async (operation) => operation(),
+      createWorker: (() => ({
+        postMessage(bootstrap: any, ports: MessagePort[]) {
+          const port = ports[0];
+          port.onmessage = (event) => {
+            if (event.data?.type === VAULT_AUTHORITY_CALL) calls += 1;
+          };
+          port.start();
+          port.postMessage({
+            type: VAULT_AUTHORITY_READY,
+            protocol: VAULT_AUTHORITY_PROTOCOL,
+            channelId: bootstrap.channelId,
+          });
+        },
+        terminate() { terminated += 1; },
+      })) as any,
+    });
+    await expect(client.initializeWithPrfOnly({
+      prfOutput: new Uint8Array(32),
+      credentialId: new Uint8Array([1]),
+      prfSalt: new Uint8Array(32),
+    })).rejects.toMatchObject({
+      code: 'vault-authority-timeout', outcomeKnown: false,
+    });
+    expect(calls).toBe(1);
+    expect(terminated).toBe(1);
+  });
+});

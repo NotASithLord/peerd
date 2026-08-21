@@ -5,7 +5,7 @@
 // identity). This is the Phase-1 exit proof at the values level: the
 // SAME did comes out on the other side.
 
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, setDefaultTimeout } from 'bun:test';
 import {
   buildIdentityRecord, openIdentityRecord, adoptIdentityRecord, validateIdentityRecord,
   RECORD_FORMAT, RECORD_VERSION,
@@ -13,6 +13,14 @@ import {
 import { mintKeypairMaterial, identityFromMaterial, verifySignature } from '../../extension/peerd-distributed/identity/keypair.js';
 import { generateCapsuleKey, sealCapsule } from '../../extension/peerd-distributed/identity/capsule.js';
 import { makePassphraseWrapper } from '../../extension/peerd-distributed/identity/credential-wrapper.js';
+
+// These are deliberately real passphrase KDF round-trips, not mocked crypto.
+// On a cold or contended release runner one derivation can exceed Bun's 5 s
+// generic unit-test default; several cases perform both wrap and unwrap. Give
+// the cryptographic functional oracle its own honest budget so CPU scheduling
+// does not turn a valid result into a flaky workflow failure. Startup latency
+// is measured separately by the packaged cold-start benchmark.
+setDefaultTimeout(30_000);
 
 describe('buildIdentityRecord / openIdentityRecord', () => {
   test('round-trips the SAME did through a passphrase wrapper', async () => {

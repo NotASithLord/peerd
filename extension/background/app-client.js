@@ -171,7 +171,7 @@ const opfsForApp = (appId, beforeMutation = () => {}) =>
  * @param {() => void | Promise<void>} [deps.beforeOpfsMutation]
  * @param {(appId:string)=>void|Promise<void>} [deps.onManifestMutation]
  * @param {(ownerSessionId:string,record:any)=>Promise<string>} [deps.resolveOwnerRoot]
- * @param {ReturnType<typeof import('/peerd-engine/background.js').createRepositoryService>} [deps.repositories]
+ * @param {ReturnType<typeof import('/peerd-engine/repository.js').createRepositoryService>} [deps.repositories]
  */
 export const createAppClient = ({
   registry, tracker, beforeOpfsMutation = () => {}, onManifestMutation = () => {},
@@ -659,10 +659,13 @@ export const createAppClient = ({
    *
    * @param {{ appId: string, files: Record<string, unknown>, entryFile: string,
    *   fileKinds?: Record<string, unknown>, message?: string,
-   *   metadataForOid?: (oid: string | null, oldRecord: import('/peerd-engine/app-registry.js').AppRecord) => Partial<import('/peerd-engine/app-registry.js').AppRecord> }} args
+   *   metadataForOid?: (oid: string | null, oldRecord: import('/peerd-engine/app-registry.js').AppRecord) => Partial<import('/peerd-engine/app-registry.js').AppRecord>,
+   *   isCurrent?: () => boolean,
+   *   afterCommit?: (record: import('/peerd-engine/app-registry.js').AppRecord) => Promise<void>|void }} args
    */
   const replaceVersionedFilesUnlocked = async ({
     appId, files, entryFile, fileKinds, message = 'replace App release', metadataForOid = () => ({}),
+    isCurrent = () => true, afterCommit = () => {},
   }) => {
     if (!repositories?.replaceWorkingTree) throw new Error('browser Git is unavailable');
     await beforeOpfsMutation();
@@ -692,10 +695,12 @@ export const createAppClient = ({
     for (const file of normalized.files) nextFiles[file.path] = file.stored;
 
     try {
+      if (!isCurrent()) throw new Error('dweb-custody-changed');
       const committed = await repositories.replaceWorkingTree(
         { kind: 'app', id },
         { files: nextFiles, message },
       );
+      if (!isCurrent()) throw new Error('dweb-custody-changed');
       const patch = {
         entryFile,
         fileKinds: normalized.fileKinds,
@@ -703,7 +708,10 @@ export const createAppClient = ({
       };
       const updated = await registry.update(id, /** @type {any} */ (patch));
       if (!updated) throw new Error(`app not found after versioned replacement: ${id}`);
+      if (!isCurrent()) throw new Error('dweb-custody-changed');
       await onManifestMutation(id);
+      await afterCommit(updated);
+      if (!isCurrent()) throw new Error('dweb-custody-changed');
       tracker.reloadTab(id).catch(() => {});
       return { record: updated, oid: committed.oid ?? null, created: committed.created === true };
     } catch (cause) {

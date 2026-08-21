@@ -1,0 +1,184 @@
+// @ts-check
+// Reviewed ownership overlay on the generated legacy dispatcher inventory.
+// Placement describes the eventual execution boundary; state is an independent
+// executable migration gate. Nothing is migrated merely by appearing here.
+
+import { LEGACY_SEMANTIC_ROUTE_INVENTORY } from './semantic-route-inventory.generated.js';
+import {
+  compileSemanticRouteClassification,
+  semanticDispatchCutoverReport,
+} from './semantic-dispatch-contract.js';
+
+const KERNEL_SOURCES = new Set([
+  'extension/background/routes/system-read.js',
+  'extension/background/routes/denylist.js',
+  'extension/background/routes/learned-origins.js',
+  'extension/background/routes/vault.js',
+  'extension/peerd-egress/fetch/origin-credential-routes.js',
+  'extension/peerd-engine/vm-net/git-credential-routes.js',
+]);
+
+const KERNEL_ROUTE_OVERRIDES = new Set([
+  'audit/voice-fetch',
+  'apps/favorite',
+  'apps/import-git',
+  'apps/list',
+  'apps/rename',
+  'apps/open',
+  'app/get-meta',
+  'lifecycle/assert-opfs-writable',
+  'app/editor-delete',
+  'app/editor-write',
+  'app/editor/delete',
+  'app/editor/list',
+  'app/editor/read',
+  'app/editor/write',
+  'apps/repository/diff',
+  'apps/repository/fetch',
+  'apps/repository/branch',
+  'apps/repository/checkout',
+  'apps/repository/commit',
+  'apps/repository/history',
+  'apps/repository/link',
+  'apps/repository/push',
+  'apps/repository/restore',
+  'apps/repository/status',
+  'commands/list',
+  'composer/files',
+  'composer/tabs',
+  'private-transfer/open',
+  'models/options',
+  'openrouter/models',
+  'onboarding/complete',
+  'permission/set',
+  'provider/setKey',
+  'provider/test',
+  'repository/kernel-fetch',
+  'git-cred/list',
+  'git-cred/set',
+  'git-cred/delete',
+  'session/list',
+  'session/setModel',
+  'session/contextSnapshots',
+  'session/get',
+  'settings/reset',
+  'settings/update',
+  'script-run/abort',
+  'sidepanel/close',
+  'site-client/delete',
+  'site-client/list',
+  'vm/get-meta',
+]);
+
+const MIGRATED_ROUTE_OVERRIDES = new Set([
+  'audit/voice-fetch',
+  'audit/list',
+  'apps/favorite',
+  'apps/import-git',
+  'apps/list',
+  'apps/rename',
+  'apps/open',
+  'app/get-meta',
+  'lifecycle/assert-opfs-writable',
+  'app/editor-delete',
+  'app/editor-write',
+  'app/editor/delete',
+  'app/editor/list',
+  'app/editor/read',
+  'app/editor/write',
+  'apps/repository/diff',
+  'apps/repository/fetch',
+  'apps/repository/branch',
+  'apps/repository/checkout',
+  'apps/repository/commit',
+  'apps/repository/history',
+  'apps/repository/link',
+  'apps/repository/push',
+  'apps/repository/restore',
+  'apps/repository/status',
+  'actors/count',
+  'actors/overview',
+  'contacts/forget',
+  'contacts/list',
+  'contacts/set',
+  'cost/total',
+  'commands/list',
+  'composer/files',
+  'composer/tabs',
+  'contributor/disable',
+  'contributor/enable',
+  'contributor/status',
+  'denylist/list',
+  'learned/clear',
+  'learned/forget',
+  'learned/list',
+  'memory/delete',
+  'memory/deleteAll',
+  'memory/export',
+  'memory/suggestions',
+  'memory/suggestions/approve',
+  'memory/suggestions/dismiss',
+  'memory/write',
+  'models/options',
+  'openrouter/models',
+  'onboarding/complete',
+  'permission/set',
+  'provider/setKey',
+  'provider/status',
+  'provider/test',
+  'repository/kernel-fetch',
+  'git-cred/list',
+  'git-cred/set',
+  'git-cred/delete',
+  'session/list',
+  'session/setModel',
+  'session/contextSnapshots',
+  'session/get',
+  'settings/reset',
+  'settings/update',
+  'sidepanel/close',
+  'state/get',
+  'surfaces/get',
+  'toolbox/read',
+  'toolbox/record',
+  'vault/disablePrf',
+  'vault/enrollPrf',
+  'vault/initialize',
+  'vault/initializeWithPasskey',
+  'vault/lock',
+  'vault/prfStatus',
+  'vault/setRecoveryPassphrase',
+  'vault/unlock',
+  'vault/unlockPrf',
+  'site-client/delete',
+  'site-client/list',
+  'vm/get-meta',
+]);
+
+/**
+ * Every non-kernel row is conservatively `split`: semantic coordination may
+ * move, while browser custody, provenance, credentials, egress, confirmation,
+ * and durable operation admission remain kernel calls. A later review may
+ * narrow a route to semantic-host, but never by generator default.
+ */
+export const SEMANTIC_ROUTE_CLASSIFICATIONS = Object.freeze(
+  LEGACY_SEMANTIC_ROUTE_INVENTORY.map((row) => Object.freeze({
+    ...row,
+    placement: /** @type {'kernel'|'split'} */ (
+      KERNEL_SOURCES.has(row.source) || KERNEL_ROUTE_OVERRIDES.has(row.route)
+        ? 'kernel' : 'split'
+    ),
+    state: /** @type {'migrated'|'unmigrated'} */ (
+      MIGRATED_ROUTE_OVERRIDES.has(row.route) ? 'migrated' : 'unmigrated'
+    ),
+  })),
+);
+
+export const SEMANTIC_ROUTE_CLASSIFICATION = compileSemanticRouteClassification(
+  SEMANTIC_ROUTE_CLASSIFICATIONS,
+);
+
+export const SEMANTIC_ROUTE_CUTOVER = semanticDispatchCutoverReport(
+  SEMANTIC_ROUTE_CLASSIFICATION,
+  LEGACY_SEMANTIC_ROUTE_INVENTORY,
+);

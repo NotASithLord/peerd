@@ -1,0 +1,125 @@
+import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { REPO_ROOT } from '../../packaging/lib.ts';
+import { vaultKernelManifest } from '../../scripts/cdp/vault-kernel-artifact.mjs';
+
+describe('test-only vault kernel package target', () => {
+  test('changes only the copied background entry for each browser', () => {
+    const source = {
+      manifest_version: 3,
+      name: 'peerd',
+      permissions: ['storage'],
+      background: { service_worker: 'background/service-worker.js', type: 'module' },
+    };
+    const chrome = vaultKernelManifest(source, 'chrome');
+    const firefox = vaultKernelManifest(source, 'firefox');
+    expect(chrome).toMatchObject({
+      name: 'peerd vault kernel floor',
+      permissions: ['storage'],
+      background: { service_worker: 'background/vault-kernel.js', type: 'module' },
+    });
+    expect(firefox).toMatchObject({
+      name: 'peerd vault kernel floor',
+      permissions: ['storage'],
+      background: { scripts: ['background/vault-kernel.js'], type: 'module' },
+    });
+    expect(source.background.service_worker).toBe('background/service-worker.js');
+  });
+
+  test('live manifest and release artifact inventory remain on the legacy entry', () => {
+    const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'manifests/base.json'), 'utf8'));
+    const release = readFileSync(join(REPO_ROOT, 'packaging/release.ts'), 'utf8');
+    expect(manifest.background).toEqual({
+      service_worker: 'background/service-worker.js', type: 'module',
+    });
+    expect(release).not.toContain('peerd-vault-kernel');
+  });
+
+  test('builder permits small controller adapters but excludes every feature implementation', () => {
+    const source = readFileSync(
+      join(REPO_ROOT, 'scripts/cdp/vault-kernel-artifact.mjs'), 'utf8',
+    );
+    expect(source).toContain("join(ARTIFACTS_DIR, 'staging', `vault-kernel-${browser}`)");
+    expect(source).toContain("path.startsWith('offscreen/')");
+    expect(source).toContain("path.includes('controller-turn')");
+    expect(source).toContain("path.includes('agent-loop')");
+    expect(source).toContain("path.includes('semantic-route-host')");
+    expect(source).toContain("`peerd-vault-kernel-${browser}.${extension}`");
+    expect(source).toContain('verify: true, minify: false');
+    expect(source).toContain('genBuildConfigSource(manifest, { dwebEnabled: false })');
+    expect(source).toContain('writeControllerBuildIdentity(staging)');
+    expect(source).not.toContain('generateManifest(');
+  });
+
+  test('release packaging requires the actual controller identity leaf before stamping', () => {
+    const source = readFileSync(join(REPO_ROOT, 'packaging/package.ts'), 'utf8');
+    const stampGuard = source.slice(
+      source.indexOf('const canStampController'),
+      source.indexOf('if (canStampController)'),
+    );
+    expect(stampGuard).toContain("join(staging, 'shared', 'controller-build.js')");
+    expect(stampGuard).not.toContain("join(staging, 'shared', 'structured-clone-size.js')");
+  });
+
+  test('Chrome passphrase floor proves demand-owned vault authority custody', () => {
+    const source = readFileSync(
+      join(REPO_ROOT, 'scripts/cdp/run-vault-kernel-passphrase.mjs'), 'utf8',
+    );
+    expect(source).toContain("claim: 'test-only-packaged-vault-authority-demand-floor'");
+    expect(source).toContain('offscreenContextsBeforeDemand');
+    expect(source).toContain('maxOffscreenContexts !== 1');
+    expect(source).toContain('retainedWhileUnlocked !== true');
+    expect(source).toContain('vault authority host survived lock');
+    expect(source).toContain("type: 'vault/initialize'");
+    expect(source).toContain("type: 'vault/unlock'");
+    expect(source).toContain(
+      "assertLiveKernelAssembly(bootstrap.assembly, 'store-chrome')",
+    );
+    expect(source).toContain('assembly.identity.bootId !== bootstrap.bootId');
+  });
+
+  test('physical floor is explicit about controller and recycle non-claims', () => {
+    const source = readFileSync(
+      join(REPO_ROOT, 'scripts/cdp/run-vault-kernel-passkey.mjs'), 'utf8',
+    );
+    expect(source).toContain("claim: 'test-only-packaged-vault-kernel-floor'");
+    expect(source).toContain('offscreenContextsAtCta');
+    expect(source).toContain('offscreenContextsAfterInitialize');
+    expect(source).toContain('controllerReadyClaimed: false');
+    expect(source).toContain('recycleClaimed: false');
+    expect(source).toContain("clock: 'host-monotonic-ms'");
+    expect(source).toContain(
+      "assertLiveKernelAssembly(bootstrap.assembly, 'store-chrome')",
+    );
+    expect(source).toContain('assembly.identity.bootId !== bootstrap.bootId');
+    expect(source).not.toContain('ownedRequiredEvents !== 5');
+    expect(source).not.toContain('semantic?.migrated !== 34');
+    expect(source).not.toContain('terminateServiceWorker');
+    expect(source).not.toContain('Target.closeTarget');
+  });
+
+  test('Firefox physical floor packages only in tmp and pins the native route contract', () => {
+    const source = readFileSync(
+      join(REPO_ROOT, 'scripts/firefox/vault-kernel-physical.mjs'), 'utf8',
+    );
+    expect(source).toContain("mkdtempSync(join(tmpdir(), 'peerd-vault-kernel-firefox-'))");
+    expect(source).toContain("scripts: ['background/vault-kernel.js']");
+    expect(source).toContain("HOME_URL = `moz-extension://${FIREFOX_UUID}/home/home.html");
+    expect(source).toContain('EVENT_PAGE_IDLE_MS = 45_000');
+    expect(source).toContain('afterIdleBoot.bootId === initialBoot.bootId');
+    expect(source).toContain('afterIdleBoot.kernelEpoch === initialBoot.kernelEpoch');
+    expect(source).toContain(
+      "assertLiveKernelAssembly(initialBoot?.assembly, 'store-firefox')",
+    );
+    expect(source).toContain(
+      "assertLiveKernelAssembly(afterIdleBoot?.assembly, 'store-firefox')",
+    );
+    expect(source).toContain('assembly.identity.bootId === value.bootId');
+    expect(source).not.toContain('ownedRequiredEvents === 5');
+    expect(source).not.toContain('semantic?.migrated === 34');
+    expect(source).not.toContain("join(ROOT, 'artifacts'");
+    expect(source).not.toContain('ARTIFACTS_DIR');
+    expect(source).not.toContain('packageArtifact(');
+  });
+});

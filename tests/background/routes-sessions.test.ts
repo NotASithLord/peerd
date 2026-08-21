@@ -1,5 +1,8 @@
 import { describe, test, expect } from 'bun:test';
-import { makeSessionRoutes } from '../../extension/background/routes/sessions.js';
+import {
+  makeSessionKernelRoutes,
+  makeSessionRoutes,
+} from '../../extension/background/routes/sessions.js';
 
 // session/agent/composer/actor routes — moved verbatim. Pin the slash-command
 // short-circuits in agent/send, the vault gates, actor list-filtering, and
@@ -51,6 +54,16 @@ const baseDeps = (over: any = {}) => {
   };
 };
 
+const sendId = (suffix: string) =>
+  `send.${Date.now().toString(36)}.${suffix.padEnd(20, '0')}`;
+const until = async (predicate: () => boolean, timeoutMs = 1000) => {
+  const started = Date.now();
+  while (!predicate()) {
+    if (Date.now() - started > timeoutMs) throw new Error('until-timeout');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+};
+
 describe('agent/send slash-command routing', () => {
   test('empty message rejected', async () => {
     const { deps } = baseDeps();
@@ -100,6 +113,27 @@ describe('agent/send slash-command routing', () => {
     expect(calls.system).toEqual(['be terse']);
     expect(calls.tools).toEqual(['research']);
   });
+  test('/system and /tools receive the exact session admitted by the receipt', async () => {
+    const bound: any[] = [];
+    const { deps } = baseDeps({
+      handleSystemCommand: async (arg: string, sessionId: string | null) => {
+        bound.push(['system', arg, sessionId]);
+      },
+      handleToolsCommand: async (arg: string, sessionId: string | null) => {
+        bound.push(['tools', arg, sessionId]);
+      },
+    });
+    await makeSessionRoutes(deps)['agent/send']({
+      text: '/system be exact', sessionId: 'a',
+    });
+    await makeSessionRoutes(deps)['agent/send']({
+      text: '/tools research', sessionId: 'a',
+    });
+    expect(bound).toEqual([
+      ['system', 'be exact', 'a'],
+      ['tools', 'research', 'a'],
+    ]);
+  });
   test('recovery pending refuses a model turn without halting its goal', async () => {
     const { deps, calls } = baseDeps({ actorRecoveryReady: async () => false });
     expect(await makeSessionRoutes(deps)['agent/send']({ text: 'hello' }))
@@ -121,6 +155,290 @@ describe('agent/send slash-command routing', () => {
   test('invalid attachment batch fails closed', async () => {
     const { deps } = baseDeps({ prepareUserAttachmentsWithDocs: async () => { throw new Error('bad file'); } });
     expect(await makeSessionRoutes(deps)['agent/send']({ text: 'hi', attachments: [{}] })).toEqual({ ok: false, error: 'bad file' });
+  });
+
+  test('one operation id dispatches exactly once across concurrency and worker succession', async () => {
+    const stored: Record<string, any> = {};
+    const sessionCache = {
+      sessionGet: async (key: string) => key === 'currentSessionId' ? 'a' : stored[key],
+      sessionSet: async (key: string, value: any) => { stored[key] = structuredClone(value); },
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const first = baseDeps({
+      sessionCache,
+      applyComposer: async ({ text }: any) => { await gate; return { text, refs: [], command: null }; },
+    });
+    const routes = makeSessionRoutes(first.deps);
+    const message = { text: 'once', operationId: sendId('concurrent'), sessionId: 'a' };
+    const a = routes['agent/send'](message);
+    const b = routes['agent/send'](message);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    release();
+    const concurrent = await Promise.all([a, b]);
+    expect(concurrent.every((result) => result.ok === true
+      && result.operationId === message.operationId)).toBe(true);
+    expect(first.calls.turns).toHaveLength(1);
+    await until(() => stored['agentSendReceipts.v1']?.[message.operationId]?.status === 'settled');
+
+    const successor = baseDeps({ sessionCache });
+    await expect(makeSessionRoutes(successor.deps)['agent/send']({
+      ...message,
+    })).resolves.toEqual({
+      ok: true, operationId: message.operationId, duplicate: true,
+    });
+    expect(successor.calls.turns).toHaveLength(0);
+
+    await expect(makeSessionRoutes(successor.deps)['agent/send']({
+      ...message, text: 'altered replay',
+    })).resolves.toMatchObject({
+      ok: false, error: 'agent-send-operation-id-conflict', outcomeKnown: true,
+    });
+    expect(successor.calls.turns).toHaveLength(0);
+  });
+
+  test('an accepted receipt after worker loss stays unknown and never replays', async () => {
+    const operationId = sendId('accepted-worker-loss');
+    const stored: Record<string, any> = {};
+    const sessionCache = {
+      sessionGet: async (key: string) => key === 'currentSessionId' ? 'a' : stored[key],
+      sessionSet: async (key: string, value: any) => { stored[key] = structuredClone(value); },
+    };
+    let release!: () => void;
+    const turn = new Promise<void>((resolve) => { release = resolve; });
+    const first = baseDeps({
+      sessionCache, runAgentTurn: async (args: any) => {
+        first.calls.turns.push(args);
+        await turn;
+      },
+    });
+    const message = { text: 'do it', operationId, sessionId: 'a' };
+    await expect(makeSessionRoutes(first.deps)['agent/send'](message))
+      .resolves.toMatchObject({ ok: true, operationId });
+    expect(stored['agentSendReceipts.v1'][operationId].status).toBe('accepted');
+
+    const successor = baseDeps({ sessionCache });
+    await expect(makeSessionRoutes(successor.deps)['agent/send'](message))
+      .resolves.toMatchObject({
+        ok: false, operationId, outcomeKnown: false, retryable: false,
+      });
+    expect(successor.calls.turns).toHaveLength(0);
+
+    release();
+    await until(() => stored['agentSendReceipts.v1'][operationId].status === 'settled');
+    await expect(makeSessionRoutes(successor.deps)['agent/send']({
+      checkOnly: true, operationId, sessionId: 'a',
+    })).resolves.toMatchObject({ ok: true, operationId, duplicate: true });
+  });
+
+  test('status-only Check never dispatches an absent operation or drops attachments', async () => {
+    const { deps, calls } = baseDeps({
+      sessionCache: {
+        sessionGet: async (key: string) => key === 'currentSessionId' ? 'a' : undefined,
+        sessionSet: async () => {},
+      },
+    });
+    const operationId = sendId('attachment-status');
+    await expect(makeSessionRoutes(deps)['agent/send']({
+      checkOnly: true, operationId, sessionId: 'a',
+    })).resolves.toMatchObject({
+      ok: false, error: 'agent-send-not-observed', outcomeKnown: false,
+    });
+    expect(calls.turns).toHaveLength(0);
+  });
+
+  test('same id with altered attachments conflicts before a second dispatch', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const stored: Record<string, any> = {};
+    const sessionCache = {
+      sessionGet: async (key: string) => key === 'currentSessionId' ? 'a' : stored[key],
+      sessionSet: async (key: string, value: any) => { stored[key] = structuredClone(value); },
+    };
+    const first = baseDeps({
+      sessionCache,
+      applyComposer: async ({ text }: any) => {
+        await gate;
+        return { text, refs: [], command: null };
+      },
+    });
+    const routes = makeSessionRoutes(first.deps);
+    const operationId = sendId('attachment-conflict');
+    const original = routes['agent/send']({
+      text: 'inspect', operationId, sessionId: 'a',
+      attachments: [{ name: 'a.txt', mediaType: 'text/plain', size: 1, data: 'YQ==' }],
+    });
+    await until(() => stored['agentSendReceipts.v1']?.[operationId]?.status === 'accepted');
+    await expect(routes['agent/send']({
+      text: 'inspect', operationId, sessionId: 'a', attachments: [],
+    })).resolves.toMatchObject({
+      ok: false, error: 'agent-send-operation-id-conflict', outcomeKnown: true,
+    });
+    release();
+    await expect(original).resolves.toMatchObject({ ok: true, operationId });
+    expect(first.calls.turns).toHaveLength(1);
+  });
+
+  test('receipt read failure and corruption fail closed without dispatch', async () => {
+    const operationId = sendId('receipt-read-fail');
+    const readFailure = baseDeps({
+      sessionCache: {
+        sessionGet: async (key: string) => {
+          if (key === 'currentSessionId') return 'a';
+          throw new Error('raw storage failure');
+        },
+        sessionSet: async () => {},
+      },
+    });
+    await expect(makeSessionRoutes(readFailure.deps)['agent/send']({
+      text: 'once', operationId, sessionId: 'a',
+    })).resolves.toMatchObject({
+      ok: false, error: 'agent-send-receipt-unavailable', outcomeKnown: false,
+    });
+    expect(readFailure.calls.turns).toHaveLength(0);
+
+    const corrupt = baseDeps({
+      sessionCache: {
+        sessionGet: async (key: string) => key === 'currentSessionId' ? 'a' : {
+          [operationId]: { status: 'settled', result: { ok: true, forged: true } },
+        },
+        sessionSet: async () => {},
+      },
+    });
+    await expect(makeSessionRoutes(corrupt.deps)['agent/send']({
+      text: 'once', operationId, sessionId: 'a',
+    })).resolves.toMatchObject({
+      ok: false, error: 'agent-send-receipt-unavailable', outcomeKnown: false,
+    });
+    expect(corrupt.calls.turns).toHaveLength(0);
+  });
+
+  test('receipt write loss after a slash effect is unknown and never replays it', async () => {
+    const operationId = sendId('settled-write-loss');
+    const stored: Record<string, any> = {};
+    let writes = 0;
+    let effects = 0;
+    const sessionCache = {
+      sessionGet: async (key: string) => key === 'currentSessionId'
+        ? 'a' : structuredClone(stored[key]),
+      sessionSet: async (key: string, value: any) => {
+        writes += 1;
+        if (writes > 1) throw new Error('settled receipt lost');
+        stored[key] = structuredClone(value);
+      },
+    };
+    const first = baseDeps({
+      sessionCache,
+      handleSystemCommand: async () => { effects += 1; },
+    });
+    const message = {
+      text: '/system exact', operationId, sessionId: 'a',
+    };
+    await expect(makeSessionRoutes(first.deps)['agent/send'](message))
+      .resolves.toMatchObject({ ok: false, outcomeKnown: false, operationId });
+    expect(effects).toBe(1);
+    expect(stored['agentSendReceipts.v1'][operationId].status).toBe('accepted');
+
+    const successor = baseDeps({
+      sessionCache,
+      handleSystemCommand: async () => { effects += 1; },
+    });
+    await expect(makeSessionRoutes(successor.deps)['agent/send'](message))
+      .resolves.toMatchObject({ ok: false, outcomeKnown: false, operationId });
+    expect(effects).toBe(1);
+  });
+
+  test('invalid input consumes only its exact fingerprint and cannot become a valid replay', async () => {
+    const stored: Record<string, any> = {};
+    const sessionCache = {
+      sessionGet: async (key: string) => key === 'currentSessionId' ? 'a' : stored[key],
+      sessionSet: async (key: string, value: any) => { stored[key] = structuredClone(value); },
+    };
+    const invalid = baseDeps({
+      sessionCache,
+      prepareUserAttachmentsWithDocs: async () => { throw new Error('bad attachment'); },
+    });
+    const operationId = sendId('invalid-input');
+    await expect(makeSessionRoutes(invalid.deps)['agent/send']({
+      text: 'send file', operationId, sessionId: 'a',
+      attachments: [{ name: 'bad.bin', data: 'YmFk' }],
+    })).resolves.toMatchObject({ ok: false, error: 'bad attachment', operationId });
+    expect(invalid.calls.turns).toHaveLength(0);
+
+    await expect(makeSessionRoutes(invalid.deps)['agent/send']({
+      text: 'send file', operationId, sessionId: 'a', attachments: [],
+    })).resolves.toMatchObject({
+      ok: false, error: 'agent-send-operation-id-conflict', outcomeKnown: true,
+    });
+    expect(invalid.calls.turns).toHaveLength(0);
+  });
+
+  test('full legacy receipt capacity refuses rather than evicting replay evidence', async () => {
+    const receipts: Record<string, any> = {};
+    for (let index = 0; index < 4096; index += 1) {
+      receipts[`legacy-operation-${String(index).padStart(8, '0')}`] = {
+        schema: 2, status: index === 0 ? 'accepted' : 'settled',
+        fingerprint: 'a'.repeat(64), sessionId: 'a',
+        result: index === 0 ? undefined : { ok: true },
+        issuedAt: 1, at: index + 1,
+      };
+    }
+    const stored: Record<string, any> = { 'agentSendReceipts.v1': receipts };
+    const full = baseDeps({
+      sessionCache: {
+        sessionGet: async (key: string) => key === 'currentSessionId' ? 'a' : stored[key],
+        sessionSet: async (key: string, value: any) => { stored[key] = value; },
+      },
+    });
+    await expect(makeSessionRoutes(full.deps)['agent/send']({
+      text: 'new', operationId: sendId('capacity'), sessionId: 'a',
+    })).resolves.toMatchObject({
+      ok: false, error: 'agent-send-receipt-unavailable', outcomeKnown: false,
+    });
+    expect(receipts['legacy-operation-00000000'].status).toBe('accepted');
+    expect(full.calls.turns).toHaveLength(0);
+  });
+
+  test('session pin rejects stale UI state and targets the admitted chat exactly', async () => {
+    const mismatch = baseDeps();
+    await expect(makeSessionRoutes(mismatch.deps)['agent/send']({
+      text: 'wrong chat', operationId: sendId('wrong-chat'), sessionId: 'b',
+    })).resolves.toMatchObject({
+      ok: false, error: 'agent-send-session-mismatch', outcomeKnown: true,
+    });
+    expect(mismatch.calls.turns).toHaveLength(0);
+
+    const stored: Record<string, any> = {};
+    const pinned = baseDeps({
+      sessionCache: {
+        sessionGet: async (key: string) => key === 'currentSessionId' ? 'a' : stored[key],
+        sessionSet: async (key: string, value: any) => { stored[key] = structuredClone(value); },
+      },
+    });
+    await makeSessionRoutes(pinned.deps)['agent/send']({
+      text: 'right chat', operationId: sendId('right-chat'), sessionId: 'a',
+    });
+    expect(pinned.calls.turns[0].sessionId).toBe('a');
+  });
+
+  test('slash-command receipt does not settle before its handler', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const stored: Record<string, any> = {};
+    const sessionCache = {
+      sessionGet: async (key: string) => key === 'currentSessionId' ? 'a' : stored[key],
+      sessionSet: async (key: string, value: any) => { stored[key] = structuredClone(value); },
+    };
+    const operationId = sendId('slash-await');
+    const slash = baseDeps({ sessionCache, runInit: async () => { await gate; } });
+    let settled = false;
+    const response = makeSessionRoutes(slash.deps)['agent/send']({
+      text: '/init', operationId, sessionId: 'a',
+    }).then((value: any) => { settled = true; return value; });
+    await until(() => stored['agentSendReceipts.v1']?.[operationId]?.status === 'accepted');
+    expect(settled).toBe(false);
+    release();
+    await expect(response).resolves.toMatchObject({ ok: true, handled: 'init', operationId });
   });
 });
 
@@ -153,30 +471,30 @@ describe('session read routes', () => {
   });
   test('session/list filters out spawned', async () => {
     const { deps } = baseDeps();
-    const res = await makeSessionRoutes(deps)['session/list']();
+    const res = await makeSessionKernelRoutes(deps)['session/list']();
     expect(res.sessions.map((s: any) => s.sessionId)).toEqual(['a']);
   });
   test('session/list locked → locked', async () => {
     const { deps } = baseDeps({ vault: { isLocked: () => true } });
-    expect(await makeSessionRoutes(deps)['session/list']()).toEqual({ ok: false, error: 'locked' });
+    expect(await makeSessionKernelRoutes(deps)['session/list']()).toEqual({ ok: false, error: 'locked' });
   });
   test('session/get requires an id', async () => {
     const { deps } = baseDeps();
-    expect(await makeSessionRoutes(deps)['session/get']({ sessionId: '' })).toEqual({ ok: false, error: 'sessionId-required' });
+    expect(await makeSessionKernelRoutes(deps)['session/get']({ sessionId: '' })).toEqual({ ok: false, error: 'sessionId-required' });
   });
   test('session/get unknown → session-not-found', async () => {
     const { deps } = baseDeps();
-    expect(await makeSessionRoutes(deps)['session/get']({ sessionId: 'zzz' })).toEqual({ ok: false, error: 'session-not-found' });
+    expect(await makeSessionKernelRoutes(deps)['session/get']({ sessionId: 'zzz' })).toEqual({ ok: false, error: 'session-not-found' });
   });
   test('composer/files maps to paths; [] when locked', async () => {
     const { deps } = baseDeps();
-    expect(await makeSessionRoutes(deps)['composer/files']()).toEqual({ ok: true, files: ['a.js', 'b.js'] });
+    expect(await makeSessionKernelRoutes(deps)['composer/files']()).toEqual({ ok: true, files: ['a.js', 'b.js'] });
     const locked = baseDeps({ vault: { isLocked: () => true } }).deps;
-    expect(await makeSessionRoutes(locked)['composer/files']()).toEqual({ ok: true, files: [] });
+    expect(await makeSessionKernelRoutes(locked)['composer/files']()).toEqual({ ok: true, files: [] });
   });
   test('composer/tabs flags denylisted + unsupported-scheme tabs as blocked', async () => {
     const { deps } = baseDeps();
-    const res = await makeSessionRoutes(deps)['composer/tabs']();
+    const res = await makeSessionKernelRoutes(deps)['composer/tabs']();
     const byId = Object.fromEntries(res.tabs.map((t: any) => [t.id, t]));
     expect(byId[1].blocked).toBe(false);                 // https://ok.com
     expect(byId[2].blocked).toBe(true);                  // denylisted host

@@ -58,12 +58,14 @@ const baseDeps = (over: any = {}) => ({
   opfsHelpers: () => ({ list: async () => [], read: async () => '', readBytes: async () => new Uint8Array(), write: async () => {} }),
   NOTEBOOK_OPFS_ROOT: 'peerd-notebooks',
   IMAGE_PIN_STORAGE_KEY: 'vm.imagePins',
-  buildAppExport: async () => ({ env: 'app' }),
-  buildNotebookExport: async () => ({ env: 'nb' }),
-  buildVmRecipeExport: async () => ({ env: 'vm' }),
-  openEnvelope: async () => ({ kind: 'app', name: 'X', entry: 'i.html', files: {}, meta: { tags: [] } }),
-  inspectEnvelope: async () => ({ ok: true, summary: 'x' }),
-  exportFilename: (name: string, kind: string) => `${name}.${kind}.peerd`,
+  artifactEngine: {
+    buildAppExport: async () => ({ env: 'app' }),
+    buildNotebookExport: async () => ({ env: 'nb' }),
+    buildVmRecipeExport: async () => ({ env: 'vm' }),
+    openEnvelope: async () => ({ kind: 'app', name: 'X', entry: 'i.html', files: {}, meta: { tags: [] } }),
+    inspectEnvelope: async () => ({ ok: true, summary: 'x' }),
+    exportFilename: (name: string, kind: string) => `${name}.${kind}.peerd`,
+  },
   ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
   settingsStore: { get: () => ({ dwebEnabled: false }) },
   DWEB_ENABLED: false,
@@ -233,7 +235,7 @@ describe('App repository quiescence', () => {
     ['apps/repository/restore', { appId: 'a1', to: 'old' }, 'restoreApp'],
     ['apps/repository/checkout', { appId: 'a1', name: 'feature' }, 'checkout'],
   ] as const) {
-    test(`${routeName} flushes and closes the App before taking its repository lock`, async () => {
+    test(`${routeName} flushes and fences the App before taking its repository lock`, async () => {
       const order: string[] = [];
       const tracker = {
         getTabId: () => 41,
@@ -272,9 +274,12 @@ describe('App repository quiescence', () => {
       deps.repositories.checkout = async () => { order.push('operation'); return { oid: 'new', branch: 'feature' }; };
       const result = await makeEngineRoutes(deps)[routeName](message);
       expect(result.ok).toBe(true);
+      const keepsVisible = repositoryMethod === 'commitApp' || repositoryMethod === 'push';
       const operationOrder = repositoryMethod === 'push'
-        ? ['lifecycle', 'flush', 'close', 'lock', 'checkpoint', 'operation', 'unlock', 'reopen', 'lifecycle-release']
-        : ['lifecycle', 'flush', 'close', 'lock', 'operation', 'unlock', 'reopen', 'lifecycle-release'];
+        ? ['lifecycle', 'flush', 'lock', 'checkpoint', 'operation', 'unlock', 'resume', 'lifecycle-release']
+        : keepsVisible
+          ? ['lifecycle', 'flush', 'lock', 'operation', 'unlock', 'resume', 'lifecycle-release']
+          : ['lifecycle', 'flush', 'close', 'lock', 'operation', 'unlock', 'reopen', 'lifecycle-release'];
       expect(order).toEqual(operationOrder);
     });
   }
@@ -300,9 +305,59 @@ describe('App repository quiescence', () => {
     });
     deps.repositories.commitApp = async () => { mutated = true; return {}; };
     const result = await makeEngineRoutes(deps)['apps/repository/commit']({ appId: 'a1' });
-    expect(result).toEqual({ ok: false, error: 'save failed' });
+    expect(result).toEqual({
+      ok: false, code: 'repository-operation-failed', outcomeKnown: true,
+      retryable: true, error: 'Peerd could not save the Git checkpoint. Try again.',
+    });
     expect(closed).toBe(false);
     expect(mutated).toBe(false);
+  });
+
+  test('lock refuses every Git route before repository IO and rechecks inside mutation custody', async () => {
+    let locked = true;
+    let calls = 0;
+    const deps = baseDeps({ vault: { isLocked: () => locked } });
+    for (const name of [
+      'statusApp', 'getAppRemote', 'branches', 'historyApp', 'diffApp', 'commitApp',
+      'restoreApp', 'branch', 'checkout', 'setRemote', 'fetch', 'push',
+    ]) deps.repositories[name] = async () => { calls += 1; return {}; };
+    const routes = makeEngineRoutes(deps);
+    for (const [type, message] of [
+      ['apps/repository/status', { appId: 'a1' }],
+      ['apps/repository/history', { appId: 'a1' }],
+      ['apps/repository/diff', { appId: 'a1' }],
+      ['apps/repository/commit', { appId: 'a1' }],
+      ['apps/repository/restore', { appId: 'a1', to: 'old' }],
+      ['apps/repository/branch', { appId: 'a1', name: 'next' }],
+      ['apps/repository/checkout', { appId: 'a1', name: 'next' }],
+      ['apps/repository/link', { appId: 'a1', url: 'https://example.com/a.git' }],
+      ['apps/repository/fetch', { appId: 'a1' }],
+      ['apps/repository/push', { appId: 'a1' }],
+    ] as const) expect(await routes[type](message)).toEqual({ ok: false, error: 'vault-locked' });
+    expect(calls).toBe(0);
+
+    locked = false;
+    deps.repositories.coordinate = async (_ref: any, operation: () => Promise<any>) => {
+      locked = true;
+      return operation();
+    };
+    const raced = await makeEngineRoutes(deps)['apps/repository/commit']({ appId: 'a1' });
+    expect(raced).toMatchObject({ ok: false, outcomeKnown: true, retryable: true });
+    expect(calls).toBe(0);
+  });
+
+  test('post-dispatch unknown Git custody survives the live route for reconcile-only UX', async () => {
+    const unknown = Object.assign(new Error('transport lost'), {
+      code: 'repository-host-timeout', outcomeKnown: false,
+    });
+    const deps = baseDeps();
+    deps.repositories.commitApp = async () => { throw unknown; };
+    expect(await makeEngineRoutes(deps)['apps/repository/commit']({ appId: 'a1' }))
+      .toEqual({
+        ok: false, code: 'repository-host-timeout', outcomeKnown: false,
+        retryable: false,
+        error: 'Peerd could not confirm the result of trying to save the Git checkpoint. Refresh Git history to reconcile before trying again.',
+      });
   });
 });
 
@@ -720,6 +775,23 @@ describe('app/vm meta + apps Library', () => {
     }));
     expect(await r['apps/import-git']({ url: '' })).toEqual({ ok: false, error: 'git URL required' });
   });
+
+  test('apps/import-git preserves an unknown repository outcome without exposing transport text', async () => {
+    const failure = Object.assign(new Error('raw repository channel text'), {
+      code: 'repository-host-timeout', outcomeKnown: false,
+    });
+    const r = makeEngineRoutes(baseDeps({
+      appClient: { createFromGit: async () => { throw failure; } },
+    }));
+    expect(await r['apps/import-git']({ url: 'https://github.com/example/app' }))
+      .toEqual({
+        ok: false,
+        code: 'repository-host-timeout',
+        outcomeKnown: false,
+        retryable: false,
+        error: 'Peerd could not confirm whether the Git import finished. Refresh and inspect the Library before trying again.',
+      });
+  });
   test('App data mutations reuse exact-tab-pinned editor authority', async () => {
     const sender = { tab: { id: 44, url: 'moz-extension://peerd/engine-tabs/app-tab/index.html#app-1' } };
     const writes: any[] = [];
@@ -921,6 +993,7 @@ describe('apps/delete', () => {
     }));
     expect(await r['apps/delete']({ appId: 'a1' })).toEqual({
       ok: false,
+      code: 'dweb-unshare-failed',
       error: 'Could not stop sharing, so your local App was kept. Try again when the dweb is available.',
     });
     expect(deleted).toBe(false);
@@ -944,7 +1017,10 @@ describe('export/artifact', () => {
     const raw = new Uint8Array([0xff, 0x00, 0xc0]);
     let exported: any = null;
     const r = makeEngineRoutes(baseDeps({
-      buildAppExport: async ({ files }: any) => { exported = files; return { env: 'app' }; },
+      artifactEngine: {
+        ...baseDeps().artifactEngine,
+        buildAppExport: async ({ files }: any) => { exported = files; return { env: 'app' }; },
+      },
       appClient: {
         snapshotFiles: async () => ({
           record: { name: 'App', entryFile: 'index.html', fileKinds: { 'index.html': 'text', 'model.custom': 'binary' } },
@@ -965,11 +1041,17 @@ describe('export/artifact', () => {
 
 describe('import/apply', () => {
   test('format error mapped to message', async () => {
-    const r = makeEngineRoutes(baseDeps({ openEnvelope: async () => { throw new EnvelopeFormatError('bad envelope'); } }));
+    const r = makeEngineRoutes(baseDeps({ artifactEngine: {
+      ...baseDeps().artifactEngine,
+      openEnvelope: async () => { throw new EnvelopeFormatError('bad envelope'); },
+    } }));
     expect(await r['import/apply']({ envelope: {} })).toEqual({ ok: false, error: 'bad envelope' });
   });
   test('integrity error mapped to message', async () => {
-    const r = makeEngineRoutes(baseDeps({ openEnvelope: async () => { throw new EnvelopeIntegrityError('hash mismatch'); } }));
+    const r = makeEngineRoutes(baseDeps({ artifactEngine: {
+      ...baseDeps().artifactEngine,
+      openEnvelope: async () => { throw new EnvelopeIntegrityError('hash mismatch'); },
+    } }));
     expect(await r['import/apply']({ envelope: {} })).toEqual({ ok: false, error: 'hash mismatch' });
   });
   test('app import mints a fresh id', async () => {
@@ -981,10 +1063,13 @@ describe('import/apply', () => {
     let received: any = null;
     const r = makeEngineRoutes(baseDeps({
       appClient: { create: async (opts: any) => { received = opts.files; return { id: 'imported' }; } },
-      openEnvelope: async () => ({
-        kind: 'app', name: 'X', entry: 'index.html', meta: { tags: [] },
-        files: { 'index.html': new TextEncoder().encode('<h1>x</h1>'), 'model.custom': raw },
-      }),
+      artifactEngine: {
+        ...baseDeps().artifactEngine,
+        openEnvelope: async () => ({
+          kind: 'app', name: 'X', entry: 'index.html', meta: { tags: [] },
+          files: { 'index.html': new TextEncoder().encode('<h1>x</h1>'), 'model.custom': raw },
+        }),
+      },
     }));
     expect((await r['import/apply']({ envelope: {} })).ok).toBe(true);
     expect(received['index.html']).toBeInstanceOf(Uint8Array);
@@ -994,10 +1079,13 @@ describe('import/apply', () => {
     let creates = 0;
     let writes = 0;
     const r = makeEngineRoutes(baseDeps({
-      openEnvelope: async () => ({
-        kind: 'notebook', name: 'Imported', entry: 'notebook.js', meta: { tags: [] },
-        files: { 'notebook.js': new TextEncoder().encode('return 1;') },
-      }),
+      artifactEngine: {
+        ...baseDeps().artifactEngine,
+        openEnvelope: async () => ({
+          kind: 'notebook', name: 'Imported', entry: 'notebook.js', meta: { tags: [] },
+          files: { 'notebook.js': new TextEncoder().encode('return 1;') },
+        }),
+      },
       jsRegistry: {
         get: async () => null,
         create: async () => { creates += 1; return { id: 'nNew' }; },
@@ -1014,7 +1102,10 @@ describe('import/apply', () => {
     expect(writes).toBe(0);
   });
   test('unexpected error rethrown (not swallowed)', async () => {
-    const r = makeEngineRoutes(baseDeps({ openEnvelope: async () => { throw new Error('weird'); } }));
+    const r = makeEngineRoutes(baseDeps({ artifactEngine: {
+      ...baseDeps().artifactEngine,
+      openEnvelope: async () => { throw new Error('weird'); },
+    } }));
     await expect(r['import/apply']({ envelope: {} })).rejects.toThrow('weird');
   });
 });

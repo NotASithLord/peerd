@@ -34,7 +34,8 @@ const main = () => {
   // the web-shell template joined the scan), and preflight passing while CI fails on badge
   // drift is exactly the out-of-sync trap this mirror exists to prevent.
   const genFiles = [
-    'extension/manifest.json', 'extension/shared/channel-config.js', 'badges/tscheck.json',
+    'extension/manifest.json', 'extension/shared/channel-config.js',
+    'extension/shared/build-config.js', 'badges/tscheck.json',
     // The supply-chain badges ride gen:dev too: pure reads of package.json,
     // vendor.lock.json and the workflows, so they drift exactly like a manifest.
     'badges/vendor-integrity.json', 'badges/actions-pinned.json',
@@ -54,7 +55,7 @@ const main = () => {
   if (drift) {
     console.error(
       '\npreflight FAILED: a generated file (extension/manifest.json, '
-      + 'shared/channel-config.js, or badges/tscheck.json) differs from '
+      + 'shared/channel-config.js, shared/build-config.js, or badges/tscheck.json) differs from '
       + '`bun run gen:dev` output vs HEAD. Run `bun run gen:dev` and commit '
       + 'the regenerated files (sources: manifests/*.json, '
       + 'packaging/default-settings.mjs, the // @ts-check coverage scan).',
@@ -65,7 +66,8 @@ const main = () => {
 
   run('eslint', 'npm', ['run', 'lint']);
   run('typecheck (bun suite + // @ts-check extension files)', 'bun', ['run', 'typecheck']);
-  run('typecheck coverage floor', 'bun', ['run', 'check:tscheck']);
+  run('complete typecheck coverage', 'bun', ['run', 'check:tscheck']);
+  run('cold-entry graph, policy, and artifact ratchets', 'bun', ['run', 'check:cold-static']);
   run('dweb boundary', 'bun', ['run', 'check:boundary']);
   run('packaged import graph (no pruned-but-imported file)', 'bun', ['run', 'check:imports']);
   // MUST follow check:imports, which is what stages the four channel×browser

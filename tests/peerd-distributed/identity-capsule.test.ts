@@ -2,7 +2,7 @@
 // per-credential unlock,
 // tamper and wrong-passphrase failure. Pure WebCrypto — Bun territory.
 
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, setDefaultTimeout } from 'bun:test';
 import {
   generateCapsuleKey, sealCapsule, openCapsule,
 } from '../../extension/peerd-distributed/identity/capsule.js';
@@ -10,6 +10,11 @@ import {
   makePassphraseWrapper, openPassphraseWrapper,
 } from '../../extension/peerd-distributed/identity/credential-wrapper.js';
 import { mintKeypairMaterial } from '../../extension/peerd-distributed/identity/keypair.js';
+
+// Exercise the production Argon2 parameters. Cold/contended CI runners can
+// legitimately spend longer than Bun's generic 5 s unit-test default on one
+// derivation; this is a functional crypto oracle, not the startup benchmark.
+setDefaultTimeout(30_000);
 
 describe('capsule', () => {
   test('seals and opens the same material', async () => {

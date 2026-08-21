@@ -21,6 +21,10 @@ import {
   resolveStaticSpecifier,
   staticImportSpecifiers,
 } from './static-module-graph.ts';
+import {
+  PACKAGED_LAZY_ASSET_ENTRIES,
+  PACKAGED_LAZY_MODULE_ENTRIES,
+} from './lazy-entry-manifest.ts';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const version = String(JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')).version);
@@ -84,15 +88,18 @@ const entryPoints = (root: string): string[] => {
       for (const s of bg.scripts) if (typeof s === 'string') entries.add(join(root, s));
     }
   } catch { /* no manifest — staging always writes one */ }
-  // Static Worker entry points loaded via `new Worker(getURL('…'))` — a STRING,
-  // so the <script src> / manifest scan above never sees them and their import
-  // graph would be a blind spot. Seed it explicitly so agent-loop.js + the worker
-  // core (which must ship + resolve in the package) get walked. The heap split
-  // uses ONE worker entry for every offscreen loop (reasoning + bound actors).
-  const WORKER_ENTRIES = ['offscreen/actor-worker.js'];
-  for (const w of WORKER_ENTRIES) { const p = join(root, w); if (existsSync(p)) entries.add(p); }
+  // Fixed module Workers and post-vault dynamic imports are not reachable from
+  // the cold static graph by design. Seed the reviewed inventory explicitly;
+  // unlike the old actor-worker special case, missing entries must fail instead
+  // of being silently skipped.
+  for (const lazyEntry of PACKAGED_LAZY_MODULE_ENTRIES) {
+    entries.add(join(root, lazyEntry));
+  }
   return [...entries];
 };
+
+const missingLazyAssets = (root: string): string[] =>
+  PACKAGED_LAZY_ASSET_ENTRIES.filter((entry) => !existsSync(join(root, entry)));
 
 /**
  * Manifest-declared asset paths that must ship in the pruned tree: icons,
@@ -163,7 +170,9 @@ for (const channel of ['preview', 'store'] as const) {
     }
     const assetMiss = missingManifestAssets(root);
     for (const a of assetMiss) { failed = true; console.error(`✗ [${channel}/${browser}] manifest asset missing — ${a}`); }
-    console.log(`[${channel}/${browser}] ${entries.length} entry points · ${chMiss} unresolved import(s) · ${assetMiss.length} missing manifest asset(s)`);
+    const lazyAssetMiss = missingLazyAssets(root);
+    for (const a of lazyAssetMiss) { failed = true; console.error(`✗ [${channel}/${browser}] lazy asset missing: ${a}`); }
+    console.log(`[${channel}/${browser}] ${entries.length} entry points · ${chMiss} unresolved import(s) · ${assetMiss.length} missing manifest asset(s) · ${lazyAssetMiss.length} missing lazy asset(s)`);
   }
 }
 

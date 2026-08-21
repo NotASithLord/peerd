@@ -169,9 +169,13 @@ export const makeProviderRoutes = (deps) => {
         // persists a clean key.
         const key = typeof plaintext === 'string' ? plaintext.trim() : '';
         if (key.length < 8) return { ok: false, error: 'key-too-short' };
-        await vault.setSecret(adapter.vaultSecretName, key);
+        const prior = typeof vault.getSecret === 'function'
+          ? await vault.getSecret(adapter.vaultSecretName) : null;
+        if (prior !== key) await vault.setSecret(adapter.vaultSecretName, key);
         onProviderConfigChanged?.();
-        auditLog.append({ type: 'provider_added', details: { provider } }).catch(() => {});
+        if (prior !== key) {
+          auditLog.append({ type: 'provider_added', details: { provider } }).catch(() => {});
+        }
         // Auto-activate the provider you just configured if the current
         // selection isn't usable yet — so a fresh install (empty default
         // providerName, no key) becomes ready the moment ANY provider is keyed,

@@ -3,6 +3,51 @@
 // status + log and, when requested, a bounded diff.
 
 const MAX_PATCH_CHARS = 40_000;
+const SAFE_REPOSITORY_ERROR_CODE = /^[a-z0-9][a-z0-9_-]{0,127}$/;
+
+/**
+ * Keep repository custody evidence intact at the model-facing tool boundary.
+ * Repository transports stamp post-dispatch loss with `outcomeKnown:false`;
+ * flattening that into an ordinary error invites an unsafe automatic retry.
+ *
+ * This lives in the already-loaded repository tool cluster so all three tools
+ * share one policy without adding another module to the legacy cold graph.
+ * @param {unknown} cause
+ * @param {'repo_history'|'repo_remote'|'repo_version'} tool
+ * @param {string} action
+ * @returns {import('/shared/tool-types.js').ToolResultErr}
+ */
+export const repositoryToolFailure = (cause, tool, action) => {
+  const detail = /** @type {{message?:unknown,code?:unknown,outcomeKnown?:unknown,outcomeKind?:unknown}} */ (cause);
+  const code = typeof detail?.code === 'string' && SAFE_REPOSITORY_ERROR_CODE.test(detail.code)
+    ? detail.code : null;
+  if (detail?.outcomeKnown === false) {
+    const outcomeKind = detail.outcomeKind === 'host-lost' ? 'host-lost' : 'transport-lost';
+    return {
+      ok: false,
+      error: `${tool}_outcome_unknown`,
+      content: `Peerd could not confirm whether ${action} finished. Run repo_history to reconcile the repository before taking another Git action. Do not retry automatically.`,
+      ...(code ? { code } : {}),
+      outcomeKnown: false,
+      outcomeKind,
+      retryable: false,
+      structured: {
+        ...(code ? { code } : {}),
+        outcomeKnown: false,
+        outcomeKind,
+        retryable: false,
+        reconciliation: 'repo_history',
+      },
+    };
+  }
+  const message = typeof detail?.message === 'string' ? detail.message : String(cause);
+  return {
+    ok: false,
+    error: `${tool}_failed: ${message}`,
+    ...(code ? { code } : {}),
+    ...(detail?.outcomeKnown === true ? { outcomeKnown: true, retryable: true } : {}),
+  };
+};
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const repositoryHistoryTool = {
@@ -58,7 +103,7 @@ export const repositoryHistoryTool = {
       }
       return { ok: true, content: JSON.stringify({ repository: ref, status, remote, commits, ...(diff ? { diff } : {}) }, null, 2) };
     } catch (e) {
-      return { ok: false, error: `repo_history_failed: ${/** @type {{message?:string}} */ (e)?.message ?? String(e)}` };
+      return repositoryToolFailure(e, 'repo_history', 'reading Git history');
     }
   },
 };

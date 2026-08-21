@@ -17,8 +17,15 @@
 export const makeLocalModelRoutes = (deps) => {
   const {
     ensureOffscreen, browser, localModelState, localModelHostAvailable, pushState,
-    onProviderConfigChanged,
+    onProviderConfigChanged, withHost, acquireResidentHost,
   } = deps;
+  const runBounded = typeof withHost === 'function' ? withHost
+    : async (/** @type {()=>Promise<any>} */ operation) => {
+      await ensureOffscreen();
+      return operation();
+    };
+  const acquireResident = typeof acquireResidentHost === 'function'
+    ? acquireResidentHost : ensureOffscreen;
   const unavailable = () => ({
     ok: false,
     error: 'runtime_capability_unavailable',
@@ -47,10 +54,9 @@ export const makeLocalModelRoutes = (deps) => {
   return {
     'local-model/status': async (msg) => {
       if (!localModelHostAvailable()) return unavailable();
-      await ensureOffscreen();
-      const r = await browser.runtime.sendMessage({
+      const r = await runBounded(() => browser.runtime.sendMessage({
         type: 'local-model/host/status', model: msg?.model, includeSupport: !!msg?.includeSupport,
-      });
+      }));
       recordAvailability(r);
       // include the last progress event so Settings (which keeps no port) can show
       // a phase hint while the model downloads.
@@ -58,10 +64,9 @@ export const makeLocalModelRoutes = (deps) => {
     },
     'local-model/catalog': async (msg) => {
       if (!localModelHostAvailable()) return unavailable();
-      await ensureOffscreen();
-      const r = await browser.runtime.sendMessage({
+      const r = await runBounded(() => browser.runtime.sendMessage({
         type: 'local-model/host/catalog', includeSupport: msg?.includeSupport !== false,
-      });
+      }));
       // Seed residency for EVERY model in one pass - this is the call Settings
       // makes on mount, so it is also the cheapest moment to correct the store.
       if (Array.isArray(r?.models)) {
@@ -72,12 +77,13 @@ export const makeLocalModelRoutes = (deps) => {
     },
     'local-model/probe': async () => {
       if (!localModelHostAvailable()) return unavailable();
-      await ensureOffscreen();
-      return (await browser.runtime.sendMessage({ type: 'local-model/host/probe' })) ?? { ok: false };
+      return (await runBounded(() => browser.runtime.sendMessage({
+        type: 'local-model/host/probe',
+      }))) ?? { ok: false };
     },
     'local-model/init': async (msg) => {
       if (!localModelHostAvailable()) return unavailable();
-      await ensureOffscreen();
+      await acquireResident();
       const r = await browser.runtime.sendMessage({ type: 'local-model/host/init', model: msg?.model });
       recordAvailability(r);
       return r ?? { ok: false };

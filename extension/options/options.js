@@ -1,46 +1,55 @@
 // @ts-check
 // Options page entry point — the full-tab settings surface.
 //
-// State strategy — deliberately NOT the side panel's long-lived port:
-// the singleton sidepanel port is load-bearing in the SW (confirm
-// coordinator, voice/vm chunk forwarders, goal events all assume THE
-// panel owns it), and nothing on this page needs live pushes — every
-// management pane self-fetches. So this page:
-//   1. fetches one snapshot via the `state/get` route on load,
-//   2. refetches on window focus / tab-visible (covers
-//      unlock-in-panel-then-return; sendMessage also revives a dead SW,
-//      so no keepalive is needed),
-//   3. folds mutation replies into the local snapshot (settings/update
-//      and settings/reset return the full settings object;
-//      permission/set returns a SUB-shape that folds into
-//      state.session.permission, not the root).
-// Coherence with an open panel is free in the other direction: those
-// same mutation routes call pushState() SW-side, so the panel live-syncs
-// with edits made here.
+// Options needs no streaming events. It reads one authoritative snapshot on
+// load/resume and folds mutation receipts locally; unknown effects reconcile
+// with one read and are never replayed.
 
 import m from '/vendor/mithril/mithril.js';
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
+import { normalizeColdStateSnapshot } from '/shared/kernel-state-shell.js';
+import { makeReconciledUiSender, makeUiRuntimeClient } from '/shared/ui-runtime-client.js';
 import { CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
 import { OptionsApp } from './components/options-app.js';
 import { callPrivateTransfer } from './private-transfer-session.js';
-import { makeOptionsSender } from './options-state-sync.js';
 
 // null until the first snapshot lands — the shell renders a loading
 // gate rather than guessing at vault state (a flash of "set up peerd"
 // on every open would be a lie for established installs).
 /** @type {any} */
 let currentState = null;
+let stateLoadFailed = false;
+/** @type {Promise<boolean>|null} */
+let stateFetchPromise = null;
+const uiRuntime = makeUiRuntimeClient({ browser });
 
-const fetchState = async () => {
-  try {
-    const r = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'state/get' }));
-    if (r?.ok && r.state) {
-      currentState = r.state;
+const fetchState = () => {
+  if (stateFetchPromise) return stateFetchPromise;
+  stateLoadFailed = false;
+  m.redraw();
+  stateFetchPromise = (async () => {
+    try {
+      const r = /** @type {any} */ (await uiRuntime.send({ type: 'state/get' }));
+      if (!r?.ok || !r.state) throw new Error('options-state-unavailable');
+      const state = normalizeColdStateSnapshot(r.state);
+      if (!state) throw new Error('options-state-invalid');
+      currentState = state;
+      stateLoadFailed = false;
+      m.redraw();
+      return true;
+    } catch (error) {
+      console.warn('[options] state fetch failed', error);
+      if (!currentState) {
+        stateLoadFailed = true;
+        m.redraw();
+      }
+      return false;
+    } finally {
+      stateFetchPromise = null;
       m.redraw();
     }
-  } catch (e) {
-    console.warn('[options] state fetch failed', e);
-  }
+  })();
+  return stateFetchPromise;
 };
 
 // Fold a mutation's reply into the snapshot so the page reflects the
@@ -108,11 +117,11 @@ const foldReply = (msg, reply) => {
  * @param {{ type: string } & Record<string, any>} msg
  * @returns {Promise<any>}
  */
-const send = makeOptionsSender({
-  sendRuntime: (msg) => browser.runtime.sendMessage(msg),
-  sendTransfer: callPrivateTransfer,
-  foldReply,
-  fetchState,
+const send = makeReconciledUiSender({
+  send: (msg) => msg.type.startsWith('transfer/') ? callPrivateTransfer(msg) : uiRuntime.send(msg),
+  fold: foldReply,
+  reconcile: fetchState,
+  afterReply: (msg, reply) => msg.type === 'transfer/import' && (reply?.ok || reply?.partial),
 });
 
 fetchState();
@@ -139,7 +148,13 @@ const SECTIONS = ['providers', 'behavior', 'voice', 'skills', 'hooks',
 const Root = {
   view: () => {
     const section = (m.route.get().replace(/^\//, '').split(/[/?]/)[0]) || 'providers';
-    return m(OptionsApp, { state: currentState, send, section });
+    return m(OptionsApp, {
+      state: currentState,
+      send,
+      section,
+      stateLoadFailed,
+      retryState: fetchState,
+    });
   },
 };
 /** @type {Record<string, typeof Root>} */

@@ -14,10 +14,6 @@ export {
 export { opfsHelpers } from './opfs.js';
 export { IMAGE_PIN_STORAGE_KEY } from './image-pin.js';
 export {
-  buildAppExport, buildNotebookExport, buildVmRecipeExport,
-  openEnvelope, inspectEnvelope, exportFilename,
-} from './export.js';
-export {
   ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
   VMNotReadyError, VMNetworkDeniedError, VMBootFailedError,
   VMRunTimeoutError, VMTabClosedError,
@@ -34,7 +30,10 @@ export { makeGitCredentialRoutes } from './vm-net/git-credential-routes.js';
 export { needsWebWriteConfirm } from './vm-net/http-bridge.js';
 export { setAppBodyWriteGate } from './app-store.js';
 export { buildAppManifest, parseAppManifest } from './app-manifest.js';
-export { createRepositoryService } from './repository/repository-service.js';
-export { normalizeGitRemote } from './repository/remote.js';
+export {
+  gitRemoteOwnsRequest,
+  normalizeGitRemote,
+  smartHttpAuthHeader,
+} from './repository/remote.js';
 export { createKeyedQueue } from './command-queue.js';
 export { parsePodShell, podGitRemoteIntents, podGitRemoteOperation } from './pod-shell.js';

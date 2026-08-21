@@ -22,6 +22,8 @@ import {
   ProviderUsageLimitError,
 } from '../errors.js';
 import { isUsageLimitResponse, apiErrorMessage } from '../error-classify.js';
+import { normalizeOpenRouterModels } from '../../shared/provider-authority-policy.js';
+export { OPENROUTER_POPULAR } from '../../shared/provider-authority-policy.js';
 
 const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 // The public models endpoint (same host, already allowlisted). Two readers:
@@ -177,44 +179,6 @@ const computeBackoffMs = (headers, attempt) => {
 
 export const _computeBackoffMsForTests = computeBackoffMs;
 
-// Curated "popular" seed — the default set the Settings model picker shows
-// BEFORE the user searches the full live catalog. why a curated list and not
-// a live "top N": OpenRouter's /models endpoint carries no popularity rank, so
-// "top 20" needs a concrete source. These ids are intersected with the live
-// catalog at render time, so any that a given account can't reach simply drop
-// out (never a 404 in the chat picker). Maintained by hand — see DECISIONS.
-export const OPENROUTER_POPULAR = Object.freeze([
-  // Current open-weights leaders for agentic tool-calling (mid-2026), surfaced
-  // first so a fresh OpenRouter user sees the best defaults before scrolling.
-  'z-ai/glm-5.1',
-  'z-ai/glm-5.2',
-  'moonshotai/kimi-k2.6',
-  'minimax/minimax-m2',
-  'qwen/qwen3-coder',
-  'anthropic/claude-haiku-4.5',
-  'google/gemini-3-flash',
-  'openai/gpt-4o',
-  'openai/gpt-4o-mini',
-  'openai/o4-mini',
-  'anthropic/claude-3.7-sonnet',
-  'anthropic/claude-3.5-sonnet',
-  'anthropic/claude-3.5-haiku',
-  'google/gemini-2.5-pro',
-  'google/gemini-2.5-flash',
-  'google/gemini-2.0-flash-001',
-  'meta-llama/llama-3.3-70b-instruct',
-  'meta-llama/llama-3.1-8b-instruct',
-  'deepseek/deepseek-chat',
-  'deepseek/deepseek-r1',
-  'mistralai/mistral-large',
-  'mistralai/mistral-nemo',
-  'qwen/qwen-2.5-72b-instruct',
-  'x-ai/grok-2',
-  'x-ai/grok-beta',
-  'cohere/command-r-plus',
-  'nousresearch/hermes-3-llama-3.1-70b',
-]);
-
 /**
  * Live model inventory from GET /api/v1/models — the whole gateway catalog,
  * id-sorted. Powers the Settings curation picker (and doubles as the key
@@ -257,21 +221,7 @@ export const listOpenRouterModels = async ({ safeFetch, getSecret, signal } = /*
     catch { excerpt = '<no body>'; }
     throw new ProviderHttpError('openrouter', res.status, excerpt);
   }
-  const data = await res.json();
-  // why any[]: /models JSON is provider-shaped + runtime-validated below, not
-  // a contract we own a type for.
-  /** @type {any[]} */
-  const models = Array.isArray(data?.data) ? data.data : [];
-  return models
-    .filter((entry) => typeof entry?.id === 'string' && entry.id.length > 0)
-    .map((entry) => ({
-      model: entry.id,
-      label: typeof entry.name === 'string' && entry.name.length ? entry.name : entry.id,
-      contextLength: Number(entry?.context_length) || 0,
-      promptPrice: Number(entry?.pricing?.prompt) || 0,
-      completionPrice: Number(entry?.pricing?.completion) || 0,
-    }))
-    .sort((a, b) => a.label.localeCompare(b.label));
+  return normalizeOpenRouterModels(await res.json());
 };
 
 /**

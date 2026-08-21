@@ -43,6 +43,40 @@ export const POLL_MS = 250;
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const log = (...a) => console.log('[e2e]', ...a);
+// Cross-process performance evidence must stay in one clock domain. Page
+// performance.now() values are useful diagnostics, but cannot be subtracted
+// from host launch or CDP milestone timestamps.
+export const hostMonotonicMs = () => Number(process.hrtime.bigint()) / 1_000_000;
+
+// Acceptance-only HTTPS routing seam. It is intentionally not a generic
+// browser-argument escape hatch: only an ephemeral numeric loopback HTTP proxy
+// and one certificate SPKI pin are accepted.
+export const normalizeAcceptanceProxyServer = (proxyServer) => {
+  if (proxyServer == null) return null;
+  if (!proxyServer || typeof proxyServer !== 'object'
+      || Object.keys(proxyServer).length !== 2
+      || typeof proxyServer.url !== 'string'
+      || typeof proxyServer.certificateSpkiSha256 !== 'string') {
+    throw new Error('acceptance proxy must contain only url and certificateSpkiSha256');
+  }
+  let url;
+  try { url = new URL(proxyServer.url); }
+  catch { throw new Error('acceptance proxy URL is invalid'); }
+  const port = Number(url.port);
+  if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1'
+      || url.username || url.password || url.pathname !== '/'
+      || url.search || url.hash || !Number.isInteger(port)
+      || port < 1024 || port > 65_535) {
+    throw new Error('acceptance proxy must be an uncredentialed numeric 127.0.0.1 port');
+  }
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(proxyServer.certificateSpkiSha256)) {
+    throw new Error('acceptance proxy certificate SPKI pin is invalid');
+  }
+  return Object.freeze({
+    url: `http://127.0.0.1:${port}`,
+    certificateSpkiSha256: proxyServer.certificateSpkiSha256,
+  });
+};
 
 // ---- OpenAI-compatible SSE builders (the Ollama adapter's from-openai.js) ----
 
@@ -196,11 +230,21 @@ export const VISUAL_STABLE_CSS =
   + 'canvas.code-stream{display:none!important}';
 
 const stableStyleSource = `(() => {
-  if (document.getElementById(${JSON.stringify(STABLE_STYLE_ID)})) return;
-  const s = document.createElement('style');
-  s.id = ${JSON.stringify(STABLE_STYLE_ID)};
-  s.textContent = ${JSON.stringify(VISUAL_STABLE_CSS)};
-  (document.head || document.documentElement).appendChild(s);
+  const install = () => {
+    if (document.getElementById(${JSON.stringify(STABLE_STYLE_ID)})) return true;
+    const parent = document.head || document.documentElement;
+    if (!parent) return false;
+    const s = document.createElement('style');
+    s.id = ${JSON.stringify(STABLE_STYLE_ID)};
+    s.textContent = ${JSON.stringify(VISUAL_STABLE_CSS)};
+    parent.appendChild(s);
+    return true;
+  };
+  if (install()) return;
+  const observer = new MutationObserver(() => {
+    if (install()) observer.disconnect();
+  });
+  observer.observe(document, { childList: true, subtree: true });
 })()`;
 
 /**
@@ -415,14 +459,40 @@ async function waitForCdpPort(profile) {
   throw new Error('CDP endpoint never came up');
 }
 
-// peerd's MV3 SW target — matched by service-worker.js so we never grab a
-// Chrome component extension. Returns { id, wsUrl }.
-async function findPeerdSw(port) {
+// Both names are accepted while the repository migrates, but callers that
+// claim production-cutover evidence must pass expectedBackgroundEntry. This
+// keeps ordinary source-tree E2E useful without allowing a legacy worker to
+// satisfy the new production lane by accident.
+export const PEERD_BACKGROUND_ENTRIES = Object.freeze([
+  'background/vault-kernel.js',
+  'background/vault-kernel-preview.js',
+  'background/service-worker.js',
+]);
+
+export const identifyPeerdBackgroundTarget = (target) => {
+  if (target?.type !== 'service_worker') return null;
+  const url = String(target?.url ?? '');
+  const extensionId = url.match(/^chrome-extension:\/\/([a-p]{32})\//)?.[1];
+  const entry = PEERD_BACKGROUND_ENTRIES.find((candidate) => url.endsWith(`/${candidate}`));
+  if (!extensionId || !entry || !target?.id || !target?.webSocketDebuggerUrl) return null;
+  return {
+    id: extensionId,
+    targetId: target.id,
+    wsUrl: target.webSocketDebuggerUrl,
+    url,
+    entry,
+  };
+};
+
+// peerd's MV3 background target, never an arbitrary Chrome component
+// extension. Returns the exact loaded script entry as part of the identity.
+export async function findPeerdSw(port) {
   const targets = await cdpList(port);
-  const sw = targets.find((t) => t.type === 'service_worker' && /\/background\/service-worker\.js/.test(String(t.url)));
-  if (!sw) return null;
-  const id = String(sw.url).match(/chrome-extension:\/\/([a-p]{32})\//)?.[1];
-  return id ? { id, targetId: sw.id, wsUrl: sw.webSocketDebuggerUrl } : null;
+  const matches = targets.map(identifyPeerdBackgroundTarget).filter(Boolean);
+  // A fresh-profile harness must never silently pick one of two matching
+  // background entries. Ambiguity is a hard failure at the caller's timeout,
+  // not permission to time or control an unrelated extension.
+  return matches.length === 1 ? matches[0] : null;
 }
 
 // ---- the high-level launch --------------------------------------------------
@@ -440,11 +510,27 @@ async function findPeerdSw(port) {
  * @param {string} [opts.tagsModel]  model name returned by GET /api/tags.
  * @param {boolean} [opts.interceptModel] attach Fetch interception to the
  *   service worker; false for physical lifecycle tests that must not pin it.
+ * @param {boolean} [opts.captureBootTimeline] prove and timestamp the visible
+ *   inline shell before accepting the evaluated module marker.
+ * @param {(page: object) => Promise<void>} [opts.beforePanelNavigate] install
+ *   target-scoped physical fixtures before page capability probes execute.
+ * @param {string} [opts.panelPath] extension page hosting the vault shell.
+ * @param {string} [opts.expectedBackgroundEntry] exact shipped worker entry.
+ *   Production-cutover evidence must set this to the exact target entry;
+ *   omitting it is intentionally only migration/dev compatibility.
+ * @param {{url:string,certificateSpkiSha256:string}} [opts.proxyServer]
+ *   acceptance-only loopback CONNECT proxy and exact fixture TLS identity.
+ * @param {boolean} [opts.webRtcLoopbackAcceptance] expose numeric loopback ICE
+ *   candidates for a physical same-host multi-profile WebRTC acceptance lane.
  */
 export async function launchPeerd({
   modelResponder, tagsModel = 'qwen3:8b', extensionDir = EXT,
-  interceptModel = true,
+  interceptModel = true, captureBootTimeline = false, beforePanelNavigate,
+  panelPath = 'sidepanel/sidepanel.html', expectedBackgroundEntry, proxyServer,
+  webRtcLoopbackAcceptance = false,
 } = {}) {
+  const launchStartedAt = hostMonotonicMs();
+  const acceptanceProxy = normalizeAcceptanceProxyServer(proxyServer);
   // extensionDir defaults to the raw source (the dev/e2e tree); pass a packaged
   // STAGING dir to load a PRUNED build instead (check-packaged-pages.ts) — the
   // only way to observe packaged-build-only breakage like the v0.2.0 home blank.
@@ -466,11 +552,20 @@ export async function launchPeerd({
     '--host-resolver-rules=MAP orders.peerd.test 127.0.0.1, MAP acme.peerd.test 127.0.0.1, MAP acct.peerd.test 127.0.0.1, MAP guard.peerd.test 127.0.0.1',
     // Product-boundary security tests must not pass because Chrome's separate
     // Local Network Access feature stopped the request first.
-    '--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets,LocalNetworkAccessForWorkers',
+    `--disable-features=${[
+      'LocalNetworkAccessChecks',
+      'LocalNetworkAccessChecksWebSockets',
+      'LocalNetworkAccessForWorkers',
+      ...(webRtcLoopbackAcceptance ? ['WebRtcHideLocalIpsWithMdns'] : []),
+    ].join(',')}`,
     '--disable-web-security',
     '--ip-address-space-overrides=127.0.0.0/8=public',
     `--unsafely-treat-insecure-origin-as-secure=http://orders.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT},http://acct.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT}`,
     '--disable-gpu', '--no-sandbox',
+    ...(acceptanceProxy ? [
+      `--proxy-server=${acceptanceProxy.url}`,
+      `--ignore-certificate-errors-spki-list=${acceptanceProxy.certificateSpkiSha256}`,
+    ] : []),
     ...DETERMINISM_FLAGS,
     `--user-data-dir=${profile}`,
     '--remote-debugging-port=0',
@@ -497,7 +592,14 @@ export async function launchPeerd({
   } catch (error) {
     cleanup();
     const diagnostics = chromeErr.trim();
-    throw new Error(`${error?.message ?? error}${diagnostics ? `\nChrome stderr:\n${diagnostics}` : ''}`);
+    const exit = chrome.signalCode
+      ? `Chrome exited by signal ${chrome.signalCode}`
+      : chrome.exitCode !== null ? `Chrome exited with code ${chrome.exitCode}` : '';
+    throw new Error([
+      error?.message ?? error,
+      exit,
+      diagnostics ? `Chrome stderr:\n${diagnostics}` : '',
+    ].filter(Boolean).join('\n'));
   }
   log('cdp port:', port);
 
@@ -520,7 +622,14 @@ export async function launchPeerd({
     }
     throw new Error('peerd service-worker target never appeared (extension failed to load).');
   }
+  if (expectedBackgroundEntry && sw.entry !== expectedBackgroundEntry) {
+    cleanup();
+    throw new Error(
+      `production worker cutover mismatch: expected ${expectedBackgroundEntry}, loaded ${sw.entry}`,
+    );
+  }
   log('extension id:', sw.id);
+  log('background entry:', sw.entry);
 
   // 2) attach to the SW and intercept the Ollama model call over CDP Fetch.
   // currentResponder is SWAPPABLE (ctx.setModelResponder) so a single Chrome can
@@ -529,49 +638,61 @@ export async function launchPeerd({
   let currentResponder = modelResponder || (() => ({ sse: sseText('e2e-smoke-ok') }));
   let modelCalls = 0;
   let remoteModuleRequests = 0;
-  const attachServiceWorker = async (target) => {
+  const handlePausedRequest = async (connection, params) => {
+    const { requestId, request } = params;
+    const url = String(request.url);
+    const fulfill = (contentType, bodyStr, status = 200) => connection.send('Fetch.fulfillRequest', {
+      requestId, responseCode: status,
+      responseHeaders: [{ name: 'content-type', value: contentType }],
+      body: Buffer.from(bodyStr).toString('base64'),
+    });
+    try {
+      if (url.includes('/v1/chat/completions')) {
+        const spec = await currentResponder(modelCalls++, request);
+        if (spec?.delayMs) await sleep(spec.delayMs);
+        if (spec?.sse != null) await fulfill('text/event-stream', spec.sse, spec.status ?? 200);
+        else if (spec?.status) await fulfill(spec.contentType ?? 'application/json', spec.body ?? '{}', spec.status);
+        else await fulfill('text/event-stream', sseText('e2e-smoke-ok'));
+      } else if (url.includes('/api/tags')) {
+        await fulfill('application/json', JSON.stringify({ models: [{ name: tagsModel, size: 1 }] }));
+      } else if (url === 'https://remote-module.test/store-policy-canary.js') {
+        remoteModuleRequests += 1;
+        await fulfill('application/javascript', "export const value = 'remote-canary-executed';");
+      } else if (url.includes('11434')) {
+        await fulfill('application/json', '{}');
+      } else {
+        await connection.send('Fetch.continueRequest', { requestId });
+      }
+    } catch { /* the worker, controller, or request may have been physically torn down */ }
+  };
+  const attachFetchTarget = async (targetId) => {
     if (!browserConn) throw new Error('browser CDP connection unavailable');
     const { sessionId } = await browserConn.send('Target.attachToTarget', {
-      targetId: target.targetId,
+      targetId,
       flatten: true,
     });
+    const events = [];
+    const onTargetEvent = (method, params, message) => {
+      if (message.sessionId !== sessionId) return;
+      if (method === 'Runtime.exceptionThrown') {
+        events.push('EXC ' + (params?.exceptionDetails?.exception?.description
+          || params?.exceptionDetails?.text));
+      }
+      if (method === 'Runtime.consoleAPICalled' && params?.type === 'error') {
+        events.push('ERR ' + (params.args || [])
+          .map((arg) => arg.value || arg.description || arg.type).join(' '));
+      }
+      if (method === 'Fetch.requestPaused') void handlePausedRequest(connection, params);
+    };
     const connection = {
       send: (method, params = {}) => browserConn.send(method, params, sessionId),
+      events,
       close: () => {
-        browserConn.off(onWorkerEvent);
+        browserConn.off(onTargetEvent);
         browserConn.send('Target.detachFromTarget', { sessionId }).catch(() => {});
       },
     };
-    const onWorkerEvent = async (method, params, message) => {
-      if (message.sessionId !== sessionId) return;
-      if (method !== 'Fetch.requestPaused') return;
-      const { requestId, request } = params;
-      const url = String(request.url);
-      const fulfill = (contentType, bodyStr, status = 200) => connection.send('Fetch.fulfillRequest', {
-        requestId, responseCode: status,
-        responseHeaders: [{ name: 'content-type', value: contentType }],
-        body: Buffer.from(bodyStr).toString('base64'),
-      });
-      try {
-        if (url.includes('/v1/chat/completions')) {
-          const spec = await currentResponder(modelCalls++, request);
-          if (spec?.delayMs) await sleep(spec.delayMs);
-          if (spec?.sse != null) await fulfill('text/event-stream', spec.sse, spec.status ?? 200);
-          else if (spec?.status) await fulfill(spec.contentType ?? 'application/json', spec.body ?? '{}', spec.status);
-          else await fulfill('text/event-stream', sseText('e2e-smoke-ok'));
-        } else if (url.includes('/api/tags')) {
-          await fulfill('application/json', JSON.stringify({ models: [{ name: tagsModel, size: 1 }] }));
-        } else if (url === 'https://remote-module.test/store-policy-canary.js') {
-          remoteModuleRequests += 1;
-          await fulfill('application/javascript', "export const value = 'remote-canary-executed';");
-        } else if (url.includes('11434')) {
-          await fulfill('application/json', '{}');
-        } else {
-          await connection.send('Fetch.continueRequest', { requestId });
-        }
-      } catch { /* the worker or request may have been physically torn down */ }
-    };
-    browserConn.on(onWorkerEvent);
+    browserConn.on(onTargetEvent);
     await connection.send('Runtime.runIfWaitingForDebugger');
     await connection.send('Fetch.enable', { patterns: [
       { urlPattern: '*11434*' },
@@ -579,12 +700,48 @@ export async function launchPeerd({
     ] });
     return connection;
   };
+  const attachServiceWorker = (target) => attachFetchTarget(target.targetId);
   let swConn = interceptModel ? await attachServiceWorker(sw) : null;
-  if (interceptModel) log('Fetch interception armed on the service worker');
+  const auxiliaryFetchConnections = new Map();
+  const auxiliaryFetchPending = new Set();
+  const extensionTarget = (targetInfo) => {
+    const url = String(targetInfo?.url ?? '');
+    return targetInfo?.targetId !== sw.targetId
+      && targetInfo?.type !== 'service_worker'
+      && (url.startsWith(`chrome-extension://${sw.id}/`)
+        || url.startsWith(`blob:chrome-extension://${sw.id}/`));
+  };
+  const armAuxiliaryFetch = async (targetInfo) => {
+    const targetId = targetInfo?.targetId;
+    if (!interceptModel || !targetId || !extensionTarget(targetInfo)
+        || auxiliaryFetchConnections.has(targetId) || auxiliaryFetchPending.has(targetId)) return;
+    auxiliaryFetchPending.add(targetId);
+    try {
+      const connection = await attachFetchTarget(targetId);
+      auxiliaryFetchConnections.set(targetId, connection);
+    } catch { /* the short-lived target may retire before attachment */ }
+    finally { auxiliaryFetchPending.delete(targetId); }
+  };
+  const onAuxiliaryTarget = (method, params) => {
+    if (method === 'Target.targetCreated' || method === 'Target.targetInfoChanged') {
+      void armAuxiliaryFetch(params?.targetInfo);
+    } else if (method === 'Target.targetDestroyed') {
+      const connection = auxiliaryFetchConnections.get(params?.targetId);
+      try { connection?.close(); } catch { /* target already retired */ }
+      auxiliaryFetchConnections.delete(params?.targetId);
+    }
+  };
+  if (interceptModel) {
+    browserConn.on(onAuxiliaryTarget);
+    await browserConn.send('Target.setDiscoverTargets', { discover: true });
+    const { targetInfos = [] } = await browserConn.send('Target.getTargets');
+    await Promise.all(targetInfos.map(armAuxiliaryFetch));
+    log('Fetch interception armed across extension worker/controller targets');
+  }
 
   // 3) open the side panel as a normal tab (chrome.sidePanel.open is not
   //    drivable over CDP; the same Mithril app + SW port load fine in a tab).
-  const panelUrl = `chrome-extension://${sw.id}/sidepanel/sidepanel.html`;
+  const panelUrl = `chrome-extension://${sw.id}/${String(panelPath).replace(/^\//, '')}`;
   // Create at about:blank FIRST, configure, THEN navigate — the deterministic
   // capture must be armed before the panel document boots (armDeterministic-
   // Capture explains why). Same shape openExtPage uses.
@@ -593,57 +750,192 @@ export async function launchPeerd({
   await page.send('Runtime.enable');
   await page.send('Page.enable');
   await armDeterministicCapture(page);
+  // A background target may throttle requestAnimationFrame indefinitely. The
+  // product shell's paint proof intentionally waits two frames, so foreground
+  // this side-panel-shaped tab before navigation just as a user-opened panel is
+  // foregrounded by Chrome.
+  await page.send('Page.bringToFront');
+  if (beforePanelNavigate) await beforePanelNavigate(page);
   await page.send('Page.navigate', { url: panelUrl });
 
+  let staticShellPaintedAt = null;
+  if (captureBootTimeline) {
+    const shellPainted = await waitFor(
+      () => evalIn(page, `(() => {
+        const root = document.querySelector('#app');
+        const rect = root?.getBoundingClientRect();
+        const style = root ? getComputedStyle(root) : null;
+        // The source sets this marker only after the static shell itself has a
+        // visible box. startVaultShell then synchronously replaces that node,
+        // so requiring the old node to survive until a host poll is a race.
+        return document.documentElement.dataset.peerdStaticShellPainted === 'true'
+          && !!root && !!rect && rect.width > 0 && rect.height > 0
+          && style?.visibility !== 'hidden' && style?.display !== 'none';
+      })()`),
+      { budgetMs: READY_BUDGET_MS, pollMs: 25 },
+    );
+    if (!shellPainted) {
+      const snapshot = await evalIn(page, `(() => {
+        const node = document.querySelector('#app > .boot-shell');
+        const rect = node?.getBoundingClientRect();
+        const style = node ? getComputedStyle(node) : null;
+        return {
+          url: location.href,
+          readyState: document.readyState,
+          dataset: { ...document.documentElement.dataset },
+          shell: node ? {
+            text: node.innerText,
+            width: rect?.width ?? 0,
+            height: rect?.height ?? 0,
+            display: style?.display,
+            visibility: style?.visibility,
+          } : null,
+        };
+      })()`).catch((cause) => ({ diagnosticError: String(cause) }));
+      const events = page.events.slice(-12);
+      cleanup();
+      throw new Error(
+        `visible static vault shell never painted\n${JSON.stringify({ snapshot, events }, null, 2)}`,
+      );
+    }
+    staticShellPaintedAt = hostMonotonicMs();
+  }
+
   const mounted = await waitFor(
-    () => evalIn(page, `document.readyState === 'complete' && !!document.querySelector('#app, body > *')`),
+    () => evalIn(page, `document.readyState === 'complete'
+      && document.documentElement.dataset.peerdBootModule === 'evaluated'
+      && !!document.documentElement.dataset.peerdBootStage`),
     { budgetMs: READY_BUDGET_MS },
   );
   if (!mounted) { cleanup(); throw new Error('side panel never mounted'); }
+  const bootModuleEvaluatedAt = hostMonotonicMs();
   log('side panel mounted');
 
   const screenshot = () => capturePage(page);
+  const serviceWorkerVersions = new Map();
+  let serviceWorkerTrackingEnabled = false;
+  const onServiceWorkerVersion = (method, { versions = [] } = {}) => {
+    if (method !== 'ServiceWorker.workerVersionUpdated') return;
+    for (const row of versions) {
+      if (typeof row?.versionId === 'string') serviceWorkerVersions.set(row.versionId, row);
+    }
+  };
+  const enableServiceWorkerTracking = async () => {
+    if (serviceWorkerTrackingEnabled) return;
+    serviceWorkerTrackingEnabled = true;
+    page.on(onServiceWorkerVersion);
+    await page.send('ServiceWorker.enable');
+  };
 
   const context = {
     sw, swConn, page, port, profile, screenshot,
-    close: () => {
+    bootTimeline: Object.freeze({
+      clock: 'host-monotonic-ms',
+      launchStartedAt,
+      staticShellPaintedAt,
+      bootModuleEvaluatedAt,
+      staticShellReadyMs: staticShellPaintedAt === null
+        ? null : staticShellPaintedAt - launchStartedAt,
+      bootModuleReadyMs: bootModuleEvaluatedAt - launchStartedAt,
+    }),
+    close: async () => {
+      const exited = chrome.exitCode !== null || chrome.signalCode !== null
+        ? Promise.resolve()
+        : new Promise((resolve) => chrome.once('exit', resolve));
+      try { page.off(onServiceWorkerVersion); } catch { /* */ }
       try { page.close(); } catch { /* */ }
       try { swConn?.close(); } catch { /* */ }
+      try { browserConn?.off(onAuxiliaryTarget); } catch { /* */ }
+      for (const connection of auxiliaryFetchConnections.values()) {
+        try { connection.close(); } catch { /* target already retired */ }
+      }
+      auxiliaryFetchConnections.clear();
       try { browserConn?.close(); } catch { /* */ }
       cleanup();
+      // Fresh-profile performance samples must not overlap a prior Chrome
+      // process that is still unwinding after SIGKILL. Overlap can starve the
+      // next MV3 worker and turns host contention into a false cold-tail claim.
+      await Promise.race([exited, sleep(5_000)]);
     },
     modelCallCount: () => modelCalls,
     remoteModuleRequestCount: () => remoteModuleRequests,
+    extensionTargetEvents: () => [...auxiliaryFetchConnections.entries()].map(
+      ([targetId, connection]) => ({ targetId, events: [...connection.events] }),
+    ),
     // Swap the model behaviour + reset the per-state call counter — lets one
     // Chrome run many states back-to-back (the single-Chrome verify path).
     setModelResponder: (fn) => { currentResponder = fn || (() => ({ sse: sseText('e2e-smoke-ok') })); modelCalls = 0; },
-    // Physically close the MV3 service-worker target. This is not a reload or
-    // an in-process lifecycle simulation. The old target must disappear before
-    // the method returns, so a caller cannot mistake a rejected close for a
-    // recovery test.
-    terminateServiceWorker: async () => {
-      const oldTargetId = context.sw.targetId;
-      if (!browserConn) throw new Error('browser CDP connection unavailable');
-      const closed = await browserConn.send('Target.closeTarget', { targetId: oldTargetId });
-      if (closed?.success !== true) throw new Error('CDP refused service-worker close');
+    // Authoritative MV3 retirement. Target.closeTarget is not sufficient
+    // evidence: it can close a debugger target without proving Chrome stopped
+    // the registered worker version. This uses the ServiceWorker domain,
+    // observes an exact running script URL, then requires the target to vanish.
+    stopServiceWorker: async () => {
+      const old = { ...context.sw };
+      await enableServiceWorkerTracking();
+      const currentVersion = await waitFor(() => [...serviceWorkerVersions.values()].find((row) =>
+        row.runningStatus === 'running' && String(row.scriptURL) === old.url),
+      { budgetMs: 5_000, pollMs: 25 });
+      if (!currentVersion) {
+        throw new Error(`ServiceWorker domain did not expose running ${old.entry}`);
+      }
+      // A surviving extension page can immediately wake the worker while it is
+      // being stopped. Navigate it away first; restartServiceWorker performs a
+      // fresh physical navigation through the same user-visible page target.
+      await page.send('Page.navigate', { url: 'about:blank' });
+      const away = await waitFor(() => evalIn(page, `location.href === 'about:blank'`), {
+        budgetMs: 5_000, pollMs: 10,
+      });
+      if (!away) throw new Error('panel page did not release the service worker');
+      try { swConn?.close(); } catch { /* */ }
+      swConn = null;
+      context.swConn = null;
+      await page.send('ServiceWorker.stopWorker', { versionId: currentVersion.versionId });
+      const stoppedVersion = await waitFor(() => {
+        const row = serviceWorkerVersions.get(currentVersion.versionId);
+        return row?.runningStatus === 'stopped' ? row : null;
+      }, { budgetMs: 8_000, pollMs: 25 });
+      if (!stoppedVersion) {
+        throw new Error(`ServiceWorker version ${currentVersion.versionId} remained running`);
+      }
       const gone = await waitFor(async () => {
         const current = await findPeerdSw(port);
-        return !current || current.targetId !== oldTargetId;
+        return !current || current.targetId !== old.targetId;
       }, { budgetMs: 8_000, pollMs: 50 });
       if (!gone) throw new Error('MV3 service-worker target did not terminate');
-      try { swConn?.close(); } catch { /* target already closed */ }
-      return oldTargetId;
+      return {
+        ...old,
+        versionId: currentVersion.versionId,
+        stoppedRunningStatus: stoppedVersion.runningStatus,
+      };
     },
-    // Wake the extension through the surviving panel, attach to the fresh
+    // Backward-compatible name, now backed by authoritative stopWorker rather
+    // than Target.closeTarget. New production acceptance should call the
+    // explicit stopServiceWorker method and retain the full old identity.
+    terminateServiceWorker: async () => (await context.stopServiceWorker()).targetId,
+    // Wake the extension through a fresh panel navigation, attach to the fresh
     // target, and restore wire-only model interception before returning.
-    restartServiceWorker: async (oldTargetId) => {
-      evalIn(page, `chrome.runtime.sendMessage({ type: 'state/get' }).catch(() => null)`, false)
-        .catch(() => {});
+    restartServiceWorker: async (oldWorker) => {
+      const oldTargetId = typeof oldWorker === 'string' ? oldWorker : oldWorker?.targetId;
+      if (!oldTargetId) throw new Error('old service-worker identity is required');
+      const navigation = await page.send('Page.navigate', { url: panelUrl });
+      if (navigation?.errorText) throw new Error(`panel wake navigation failed: ${navigation.errorText}`);
       const next = await waitFor(async () => {
         const candidate = await findPeerdSw(port);
         return candidate && candidate.targetId !== oldTargetId ? candidate : null;
       }, { budgetMs: READY_BUDGET_MS, pollMs: 50 });
       if (!next) throw new Error('MV3 service worker did not restart after wake');
+      if (expectedBackgroundEntry && next.entry !== expectedBackgroundEntry) {
+        throw new Error(
+          `restarted worker cutover mismatch: expected ${expectedBackgroundEntry}, loaded ${next.entry}`,
+        );
+      }
+      const pageReady = await waitFor(
+        () => evalIn(page, `document.readyState === 'complete'
+          && document.documentElement.dataset.peerdBootModule === 'evaluated'
+          && !!document.documentElement.dataset.peerdBootStage`),
+        { budgetMs: READY_BUDGET_MS, pollMs: 25 },
+      );
+      if (!pageReady) throw new Error('side panel did not remount after worker wake');
       swConn = interceptModel ? await attachServiceWorker(next) : null;
       context.sw = next;
       context.swConn = swConn;

@@ -27,7 +27,7 @@
 // that: whether the vendored runtime carries the model at all
 // (engineSupportsSpec, asserted live in the options-local-models E2E state).
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import { DEFAULT_LOCAL_MODEL_ID, listLocalModelSpecs, localModelSpec } from '/peerd-provider/offscreen.js';
 import { makeMuseChannelSplitter } from './muse-glimmer-stream.js';
 

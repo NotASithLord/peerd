@@ -19,6 +19,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { init, parse } from 'es-module-lexer';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
+import { LEGACY_COLD_SOURCE_RATCHETS } from '../../scripts/bench/cold-start-policy.mjs';
 
 const stripComments = (s: string): string => s.replace(/\/\/[^\n]*/g, '');
 
@@ -122,9 +123,9 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
   });
 
   test('the SW-reachable runtime barrel excludes offscreen-only voice code', () => {
-    // voice/index exposes the transcriber factory and reaches the multi-MB
-    // Moonshine bundle. The universal barrel must export only lightweight
-    // voice control/UI modules directly.
+    // The offscreen transcriber picker reaches the multi-MB Moonshine bundle.
+    // The universal barrel must export only lightweight voice control/UI
+    // modules directly.
     expect(universalSrc).not.toMatch(/from\s*['"]\.\/voice\/index\.js['"]/);
     expect(universalSrc).not.toContain('createBestTranscriber');
     expect(universalSrc).toContain("from './voice/settings.js'");
@@ -163,6 +164,14 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     expect(modules).not.toContain('peerd-runtime/pdf/index.js');
     expect(modules).not.toContain('peerd-runtime/pdf/ocr-store.js');
     expect(modules).not.toContain('peerd-engine/vm-net/index.js');
+    expect(modules).not.toContain('shared/messaging.js');
+    expect(modules).not.toContain('shared/background-entry.js');
+    expect(modules).not.toContain('peerd-runtime/clock/index.js');
+    expect(modules).not.toContain('peerd-runtime/dom/index.js');
+    expect(modules).not.toContain('peerd-runtime/permissions/index.js');
+    expect(modules).not.toContain('peerd-runtime/site-clients/index.js');
+    expect(modules).not.toContain('peerd-runtime/skills/index.js');
+    expect(modules).not.toContain('peerd-runtime/toolbox/index.js');
     expect(modules).not.toContain('engine-tabs/app-tab/app-data-client.js');
     expect([...modules].some((file) => file.includes('vendor/codemirror'))).toBe(false);
     expect([...modules].some((file) => file.includes('vendor/moonshine-js'))).toBe(false);
@@ -180,22 +189,30 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     // App-native semantic APIs are document-side adapters over the existing
     // authority verbs; they must not grow this graph. Privileged Git import is
     // one small repository bootstrap verb, not a worker-side UI controller.
-    expect(graph.size).toBeLessThanOrEqual(458);
-    expect(bytes).toBeLessThanOrEqual(4_705_000);
-    expect(statSync(entry).size).toBeLessThanOrEqual(460_000);
+    const budget = LEGACY_COLD_SOURCE_RATCHETS.kernel;
+    expect(graph.size).toBeLessThanOrEqual(budget.modules);
+    expect(bytes).toBeLessThanOrEqual(budget.graphBytes);
+    expect(statSync(entry).size).toBeLessThanOrEqual(budget.entryBytes);
   });
 
-  test('the offscreen host uses its exact runtime and engine surfaces', async () => {
+  test('the offscreen supervisor stays feature-light and uses exact lazy entry points', async () => {
     const entry = join(EXTENSION_DIR, 'offscreen', 'offscreen.js');
     const source = readFileSync(entry, 'utf8');
+    const supervisorChannels = readFileSync(
+      join(EXTENSION_DIR, 'offscreen', 'supervisor-channels.js'),
+      'utf8',
+    );
     const graph = await staticImportGraph(entry);
     const modules = new Set([...graph].map((file) => relative(EXTENSION_DIR, file)));
 
-    expect(source).toContain("from '/peerd-runtime/offscreen.js'");
-    expect(modules).toContain('peerd-runtime/offscreen.js');
-    expect(modules).toContain('peerd-engine/offscreen.js');
-    expect(modules).toContain('peerd-engine/module-resolver.js');
-    expect(modules).toContain('vendor/acorn/acorn.mjs');
+    expect(source).toContain("import('./job-runner.js')");
+    expect(source).toContain("import('./dweb-base.js')");
+    expect(source).toContain('registerServiceWorkerChannels');
+    expect(supervisorChannels).toContain("import('./actor-runner.js')");
+    expect(modules).not.toContain('peerd-runtime/offscreen.js');
+    expect(modules).not.toContain('peerd-engine/offscreen.js');
+    expect(modules).not.toContain('peerd-engine/module-resolver.js');
+    expect(modules).not.toContain('vendor/acorn/acorn.mjs');
     expect(modules).not.toContain('peerd-runtime/index.js');
     expect(modules).not.toContain('peerd-engine/index.js');
     expect([...modules].some((file) => file.includes('vendor/codemirror'))).toBe(false);

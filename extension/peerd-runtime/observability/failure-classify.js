@@ -16,11 +16,6 @@
 //
 // Pure (values in, values out) — bun-tested.
 
-import {
-  REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE,
-  UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE,
-} from '/peerd-engine/background.js';
-
 /**
  * The taxonomy. Small on purpose: a debugging user needs the NEIGHBORHOOD
  * of the failure (whose fault, roughly), not a per-error label — the raw
@@ -64,8 +59,10 @@ const RULES = [
   // tool_blocked is only the audit event's type and never reaches a card.
   { kind: 'policy', test: /^browser_[a-z0-9_]+\b/i },
   { kind: 'policy', test: /^message_actor:|^actor refused\b|^gate_blocked:|^hook_blocked:/i },
-  { kind: 'policy', test: new RegExp(
-    `^(${REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE}|${UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE}):`, 'i') },
+  // Serialized cross-realm codes are deliberately matched as literals here:
+  // importing the engine just to classify two strings would put its module
+  // surface on every UI and background cold path.
+  { kind: 'policy', test: /^(remote_module_imports_unavailable|unsupported_native_module_import):/i },
   { kind: 'policy', test: /\begress denied\b|\bdenylist\b|\bblocked by (policy|the allowlist|plan mode)\b|EgressDeniedError|NotebookEgressBlocked|\bUser declined\b|\bdeclined by (the )?user\b/i },
   { kind: 'auth', test: /\bvault is locked\b|VaultLockedError|\bunlock the vault\b/i },
   // why the 40[13] is anchored to the provider shape: bare "HTTP 403" also

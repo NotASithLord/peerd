@@ -5,9 +5,12 @@ describe('App tab required-actor and runtime lifecycle contracts', () => {
     const source = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
     const html = await Bun.file('./extension/engine-tabs/app-tab/index.html').text();
     expect(source).toContain("const ownerSessionId = hashParams.get('owner')");
-    expect(source).toContain('browser.runtime.sendMessage({ type, appId, ownerSessionId })');
-    expect(source).toContain("attachRequiredActor('app/tab-ready')");
-    expect(source).toContain("attachRequiredActor('app/actor-retry')");
+    expect(source).toContain('makeAppActorAttachRecovery');
+    expect(source).toContain('request: (type) => uiRuntime.send({ type, appId, ownerSessionId })');
+    expect(source).toContain('await actorAttachment.start()');
+    expect(source).toContain('await actorAttachment.retry()');
+    expect(source).toContain("actorRetry.textContent = unknown ? 'Recheck actor' : 'Retry actor'");
+    expect(source).toContain('Recheck the exact attachment without reopening the App.');
     expect(source).toContain('launch: launchParams');
     expect(source).not.toContain('launch: { ...launchParams, ownerSessionId }');
     expect(html).toContain('id="actor-retry"');
@@ -17,13 +20,19 @@ describe('App tab required-actor and runtime lifecycle contracts', () => {
     const host = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
     const html = await Bun.file('./extension/engine-tabs/app-tab/index.html').text();
     const runner = await Bun.file('./extension/engine-tabs/app-tab/runner.html').text();
-    const attachIndex = host.indexOf("await attachRequiredActor('app/tab-ready')");
+    const attachIndex = host.indexOf('await actorAttachment.start()');
     const directRouteIndex = host.indexOf("type: 'app/actor-chat'");
     expect(attachIndex).toBeGreaterThan(-1);
     expect(directRouteIndex).toBeGreaterThan(-1);
     expect(html).toContain('id="actor-chat-drawer"');
     expect(html).toContain('Direct conversation · scoped to this App');
     expect(host).toContain("message.textContent = text");
+    expect(host).toContain('actorChatUnconfirmed = true');
+    expect(host).toContain('Delivery unconfirmed · inspect the actor in peerd');
+    expect(host).toContain('makeUiRuntimeClient({ browser })');
+    expect(host).toContain("saveRetry.textContent = saveOutcomeUnknown ? 'Reload to reconcile' : 'Retry'");
+    expect(host).toContain('if (saveOutcomeUnknown)');
+    expect(host).not.toContain('browser.runtime.sendMessage');
     expect(host).not.toContain('message.innerHTML =');
 
     const agentApiStart = runner.indexOf('const agentApi = Object.freeze({');

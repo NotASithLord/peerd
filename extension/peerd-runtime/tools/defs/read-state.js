@@ -21,7 +21,7 @@ import {
   originOfUrl,
   scriptingTarget,
 } from './dom-helpers.js';
-import { readFrameworkStateInjected } from '../../dom/index.js';
+import { readFrameworkStateInjected } from '../../dom/framework-state.js';
 import { browserDocumentRefusalFrom } from '../browser-automation-policy.js';
 
 /**

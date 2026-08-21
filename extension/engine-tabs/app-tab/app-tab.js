@@ -9,7 +9,8 @@
 // The toggle is a small floating button (top-right) that swaps modes
 // without leaving the tab.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
+import { makeUiRuntimeClient } from '/shared/ui-runtime-client.js';
 import {
   composeApp,
   stripMetaRefresh,
@@ -22,6 +23,9 @@ import { loadDweb } from '/shared/dweb-loader.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
 import { isServiceWorkerSender } from '/shared/messaging.js';
 import { createAppDataClient } from './app-data-client.js';
+import { makeAppActorAttachRecovery } from './actor-attach-recovery.js';
+
+const uiRuntime = makeUiRuntimeClient({ browser });
 
 const appId = location.hash.slice(1).split(/[?&]/)[0];
 const hashParams = new URLSearchParams(location.hash.slice(1).split('?')[1] ?? '');
@@ -122,6 +126,7 @@ const showNotice = (text, { persistent = false } = {}) => {
 };
 
 let actorChatBusy = false;
+let actorChatUnconfirmed = false;
 /** @param {boolean} open */
 const setActorChatOpen = (open) => {
   actorChatDrawer.hidden = !open;
@@ -142,7 +147,7 @@ const appendActorChatMessage = (role, text) => {
 
 const sendActorChatMessage = async () => {
   const prompt = actorChatInput.value.trim();
-  if (!prompt || actorChatBusy) return;
+  if (!prompt || actorChatBusy || actorChatUnconfirmed) return;
   actorChatBusy = true;
   actorChatSend.disabled = true;
   actorChatInput.disabled = true;
@@ -150,22 +155,30 @@ const sendActorChatMessage = async () => {
   appendActorChatMessage('user', prompt);
   actorChatInput.value = '';
   try {
-    const reply = /** @type {any} */ (await browser.runtime.sendMessage({
+    const reply = /** @type {any} */ (await uiRuntime.send({
       type: 'app/actor-chat', appId, message: prompt,
     }));
     if (reply?.ok === true && typeof reply.content === 'string') {
       appendActorChatMessage('actor', reply.content);
+    } else if (reply?.outcomeKnown === false) {
+      actorChatUnconfirmed = true;
+      appendActorChatMessage('status', 'Peerd could not confirm whether the App actor received that message. Inspect its transcript in peerd before sending another.');
     } else {
-      appendActorChatMessage('status', String(reply?.error || 'The App actor did not reply.'));
+      appendActorChatMessage('status', 'The App actor did not reply. Try again.');
     }
-  } catch {
-    appendActorChatMessage('status', 'The App actor connection was interrupted. Inspect the App before retrying an action.');
+  } catch (cause) {
+    actorChatUnconfirmed = /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown === false;
+    appendActorChatMessage('status', actorChatUnconfirmed
+      ? 'Peerd could not confirm whether the App actor received that message. Inspect its transcript in peerd before sending another.'
+      : 'The App actor connection was interrupted. Try again.');
   } finally {
     actorChatBusy = false;
-    actorChatSend.disabled = false;
-    actorChatInput.disabled = false;
-    actorChatStatus.textContent = 'Enter to send · Shift+Enter for a new line';
-    actorChatInput.focus({ preventScroll: true });
+    actorChatSend.disabled = actorChatUnconfirmed;
+    actorChatInput.disabled = actorChatUnconfirmed;
+    actorChatStatus.textContent = actorChatUnconfirmed
+      ? 'Delivery unconfirmed · inspect the actor in peerd'
+      : 'Enter to send · Shift+Enter for a new line';
+    if (!actorChatUnconfirmed) actorChatInput.focus({ preventScroll: true });
   }
 };
 
@@ -187,7 +200,7 @@ const opfs = opfsHelpers(['peerd-apps', appId]);
 const appData = createAppDataClient({
   appId,
   opfs,
-  send: (message) => browser.runtime.sendMessage(message),
+  send: (message) => uiRuntime.send(/** @type {any} */ (message)),
 });
 /** @type {{ name: string, entryFile: string, fileKinds: Record<string, 'text' | 'binary'>, dweb: any, agent: { kind: string, name?: string, instructions?: string, runtime?: string[] } } | null} */
 let appMeta = null;        // { name, entryFile }
@@ -228,19 +241,32 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((
 }));
 /** @type {HTMLElement | null} */
 let saveReturnFocus = null;
-/** @param {string} path */
-const showSaveFailure = (path) => {
+let saveOutcomeUnknown = false;
+/** @param {unknown} reply @param {string} knownMessage */
+const replyFailure = (reply, knownMessage) => Object.assign(
+  new Error(/** @type {{outcomeKnown?:boolean}} */ (reply)?.outcomeKnown === false
+    ? 'Peerd could not confirm whether the change finished.' : knownMessage),
+  /** @type {object} */ (reply ?? {}),
+);
+/** @param {string} path @param {unknown} error */
+const showSaveFailure = (path, error) => {
   if (saveStatus.hidden && document.activeElement instanceof HTMLElement) {
     saveReturnFocus = document.activeElement;
   }
-  saveMessage.textContent = `Could not save ${path}. Your edits are still open. Reduce the file or free browser storage, then retry.`;
+  saveOutcomeUnknown = /** @type {{outcomeKnown?:boolean}} */ (error)?.outcomeKnown === false;
+  saveMessage.textContent = saveOutcomeUnknown
+    ? `Peerd could not confirm whether ${path} was saved. Your edits are still open. Reload the App to reconcile before saving again.`
+    : `Could not save ${path}. Your edits are still open. Reduce the file or free browser storage, then retry.`;
   saveStatus.hidden = false;
   saveRetry.disabled = false;
+  saveRetry.textContent = saveOutcomeUnknown ? 'Reload to reconcile' : 'Retry';
 };
 const clearSaveFailure = () => {
   const restoreFocus = saveStatus.contains(document.activeElement);
   saveStatus.hidden = true;
   saveRetry.disabled = false;
+  saveOutcomeUnknown = false;
+  saveRetry.textContent = 'Retry';
   if (restoreFocus) {
     if (saveReturnFocus?.isConnected) saveReturnFocus.focus({ preventScroll: true });
     else editorApi?.focus?.();
@@ -248,6 +274,10 @@ const clearSaveFailure = () => {
   saveReturnFocus = null;
 };
 saveRetry.addEventListener('click', async () => {
+  if (saveOutcomeUnknown) {
+    location.reload();
+    return;
+  }
   if (!editorApi) return;
   saveRetry.disabled = true;
   try {
@@ -517,8 +547,8 @@ const renderMode = async () => {
 
   // Always refetch on entry. Edit mode can change peerd.json and a dweb update
   // can replace the package while this tab remains alive.
-  const meta = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'app/get-meta', appId }));
-  if (!meta?.ok) { fail(meta?.error ?? 'unknown error'); return; }
+  const meta = /** @type {any} */ (await uiRuntime.send({ type: 'app/get-meta', appId }));
+  if (!meta?.ok) { fail('App metadata is temporarily unavailable.', { retryActor: true }); return; }
   appMeta = {
     name: meta.name,
     entryFile: meta.entryFile,
@@ -765,14 +795,19 @@ const attachDwebBridge = async () => {
       entryFile: appMeta.entryFile,
       frame,
       client,
-      swCall: (/** @type {string} */ type, /** @type {object} */ payload = {}) => browser.runtime.sendMessage({ type, ...payload }),
+      swCall: (/** @type {string} */ type, /** @type {object} */ payload = {}) => uiRuntime.send({ type, ...payload }),
       storage: browser.storage.local,
       confirmAction,
       // The offscreen base host pushes room events (feed/dm/presence) as
       // `dweb/base-room/event` runtime messages — every extension context gets
       // them, so the bridge listens here and filters to the room it joined.
       onHostEvent: (/** @type {(msg: any) => void} */ handler) => {
-        const fn = (/** @type {any} */ msg) => { if (msg?.type === 'dweb/base-room/event') handler(msg); };
+        const offscreenUrl = browser.runtime.getURL('offscreen/offscreen.html');
+        const fn = (/** @type {any} */ msg, /** @type {any} */ sender) => {
+          if (sender?.url !== offscreenUrl) return;
+          if (msg?.type === 'dweb/base-room/event'
+              || msg?.type === 'dweb/base-host/generation') handler(msg);
+        };
         browser.runtime.onMessage.addListener(fn);
         return () => browser.runtime.onMessage.removeListener(fn);
       },
@@ -796,8 +831,8 @@ const editMode = async () => {
   frame.hidden = true;
 
   if (!appMeta) {
-    const meta = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'app/get-meta', appId }));
-    if (!meta?.ok) { fail(meta?.error ?? 'unknown error'); return; }
+    const meta = /** @type {any} */ (await uiRuntime.send({ type: 'app/get-meta', appId }));
+    if (!meta?.ok) { fail('App metadata is temporarily unavailable.', { retryActor: true }); return; }
     appMeta = {
       name: meta.name,
       entryFile: meta.entryFile,
@@ -824,18 +859,18 @@ const editMode = async () => {
         { persistent: true },
       ),
       writeFile: async (path, content) => {
-        const reply = /** @type {any} */ (await browser.runtime.sendMessage({
+        const reply = /** @type {any} */ (await uiRuntime.send({
           type: 'app/editor-write', appId, path, content,
         }));
-        if (!reply?.ok) throw new Error(reply?.error ?? 'write failed');
+        if (!reply?.ok) throw replyFailure(reply, 'Could not save this file.');
         binaryFilePaths.delete(path);
         if (appMeta) appMeta.fileKinds[path] = 'text';
       },
       deleteFile: async (path) => {
-        const reply = /** @type {any} */ (await browser.runtime.sendMessage({
+        const reply = /** @type {any} */ (await uiRuntime.send({
           type: 'app/editor-delete', appId, path,
         }));
-        if (!reply?.ok) throw new Error(reply?.error ?? 'delete failed');
+        if (!reply?.ok) throw replyFailure(reply, 'Could not delete this file.');
         binaryFilePaths.delete(path);
         if (appMeta) delete appMeta.fileKinds[path];
       },
@@ -862,10 +897,10 @@ const exportApp = async () => {
   exportBtn.disabled = true;
   try {
     if (editorApi) await editorApi.flushSave?.();
-    const reply = /** @type {any} */ (await browser.runtime.sendMessage({
+    const reply = /** @type {any} */ (await uiRuntime.send({
       type: 'export/artifact', kind: 'app', id: appId,
     }));
-    if (!reply?.ok) throw new Error(reply?.error ?? 'export failed');
+    if (!reply?.ok) throw replyFailure(reply, 'Could not export this App.');
     const blob = new Blob([JSON.stringify(reply.envelope)], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -909,18 +944,20 @@ window.addEventListener('pagehide', () => {
 // Boot + toggle
 // ---------------------------------------------------------------------------
 
-/** @param {'app/tab-ready'|'app/actor-retry'} type */
-const attachRequiredActor = async (type) => /** @type {Promise<any>} */ (
-  browser.runtime.sendMessage({ type, appId, ownerSessionId })
-    .catch(() => ({
-      ok: false,
-      error: type === 'app/tab-ready'
-        ? 'The App isolation check did not respond.'
-        : 'The actor retry did not respond.',
-      actorRequired: type === 'app/actor-retry',
-      retryable: type === 'app/actor-retry',
-    }))
-);
+const actorAttachment = makeAppActorAttachRecovery({
+  request: (type) => uiRuntime.send({ type, appId, ownerSessionId }),
+});
+
+/** @param {any} reply @param {string} [knownFallback] */
+const showActorAttachFailure = (reply, knownFallback = 'The required App actor is unavailable.') => {
+  const unknown = reply?.outcomeKnown === false;
+  actorRetry.textContent = unknown ? 'Recheck actor' : 'Retry actor';
+  fail(unknown
+    ? 'Peerd could not confirm whether the App actor attached. Recheck the exact attachment without reopening the App.'
+    : reply?.error ?? knownFallback, {
+    retryActor: reply?.actorRequired === true && reply?.retryable === true,
+  });
+};
 
 toggleBtn.addEventListener('click', async () => {
   try {
@@ -929,9 +966,9 @@ toggleBtn.addEventListener('click', async () => {
     } else {
       // When leaving edit mode, flush save + force a fresh render.
       if (editorApi) await editorApi.flushSave?.();
-      const attachment = await attachRequiredActor('app/actor-retry');
+      const attachment = await actorAttachment.retry();
       if (!attachment?.ok) {
-        fail(attachment?.error ?? 'The required App actor is unavailable.', { retryActor: true });
+        showActorAttachFailure(attachment);
         return;
       }
       appMeta = null;
@@ -940,6 +977,12 @@ toggleBtn.addEventListener('click', async () => {
     }
   } catch (error) {
     console.warn('[app-tab] mode switch failed:', error);
+    fail(
+      /** @type {{outcomeKnown?:boolean}} */ (error)?.outcomeKnown === false
+        ? 'Peerd could not confirm the App state. Reopen the App to reconcile.'
+        : 'The App could not switch modes. Retry after peerd reconnects.',
+      { retryActor: /** @type {{outcomeKnown?:boolean}} */ (error)?.outcomeKnown !== false },
+    );
   }
 });
 
@@ -947,8 +990,8 @@ toggleBtn.addEventListener('click', async () => {
 // edits flows via chrome.tabs.reload (in app-client.reloadTab); this
 // page re-runs, refetches OPFS + recomposes. No extra message
 // channel needed.
-const isolation = /** @type {{ ok?: boolean, error?: string, actorRequired?: boolean, retryable?: boolean }} */ (
-  await attachRequiredActor('app/tab-ready')
+const isolation = /** @type {{ ok?: boolean, error?: string, actorRequired?: boolean, retryable?: boolean, outcomeKnown?:boolean }} */ (
+  await actorAttachment.start()
 );
 
 // A peerd-owned tab carries the trigger to pull the side panel in — so you can
@@ -956,23 +999,31 @@ const isolation = /** @type {{ ok?: boolean, error?: string, actorRequired?: boo
 mountPullInPeerd();
 
 if (!isolation?.ok) {
-  fail(isolation?.error ?? 'This browser cannot enforce App isolation.', {
-    retryActor: isolation?.actorRequired === true && isolation?.retryable === true,
-  });
+  showActorAttachFailure(isolation, 'This browser cannot enforce App isolation.');
 } else {
-  renderMode();
+  renderMode().catch((error) => fail(
+    /** @type {{outcomeKnown?:boolean}} */ (error)?.outcomeKnown === false
+      ? 'Peerd could not confirm the App state after worker recovery. Reopen the App to reconcile.'
+      : 'The App could not finish loading. Retry after peerd reconnects.',
+    { retryActor: /** @type {{outcomeKnown?:boolean}} */ (error)?.outcomeKnown !== false },
+  ));
 }
 
 actorRetry.addEventListener('click', async () => {
+  if (actorAttachment.pending()) return;
+  const operation = actorAttachment.nextOperation();
   actorRetry.disabled = true;
   boot.classList.remove('is-failed');
-  bootMsg.textContent = 'Attaching the required App actor…';
-  const reply = await attachRequiredActor('app/actor-retry');
+  bootMsg.textContent = operation === 'app/tab-ready'
+    ? 'Rechecking the exact App actor attachment…'
+    : 'Attaching the required App actor…';
+  const reply = await actorAttachment.retry();
   if (!reply?.ok) {
-    fail(reply?.error ?? 'The required App actor is unavailable.', { retryActor: true });
+    showActorAttachFailure(reply);
     return;
   }
   actorRetry.hidden = true;
+  actorRetry.textContent = 'Retry actor';
   boot.classList.remove('is-failed');
   renderMode().catch((error) => fail(
     /** @type {{message?:string}} */ (error)?.message ?? String(error),

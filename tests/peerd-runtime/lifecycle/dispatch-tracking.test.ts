@@ -12,6 +12,8 @@ import { classifyFailure } from '../../../extension/peerd-runtime/observability/
 import { registerTool, clearTools } from '../../../extension/peerd-runtime/tools/registry.js';
 import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/dispatcher.js';
 import { retryClassForTool } from '../../../extension/peerd-runtime/lifecycle/tool-retry-class.js';
+import { repositoryRemoteTool } from '../../../extension/peerd-runtime/tools/defs/app-remote.js';
+import { repositoryVersionTool } from '../../../extension/peerd-runtime/tools/defs/app-version.js';
 
 const S = OPERATION_STATES;
 
@@ -663,6 +665,58 @@ describe('the full dispatcher path', () => {
     expect((result as { error: string }).error).toStartWith('outcome_unknown:');
     expect((result.meta as any).recovery.category).toBe('verify_before_retry');
     expect((await log.get('sess-1:tu-1'))!.state).toBe(S.OUTCOME_UNKNOWN);
+  });
+
+  test('Git mutation host loss remains unknown through the full dispatcher path', async () => {
+    registerTool(repositoryRemoteTool as any);
+    registerTool(repositoryVersionTool as any);
+    for (const operation of ['checkpoint', 'restore', 'link', 'fetch', 'push'] as const) {
+      const { tracker, log } = makeTracker();
+      const failure = Object.assign(new Error('late host reply'), {
+        code: 'repository-host-timeout', outcomeKnown: false, outcomeKind: 'host-lost',
+      });
+      const repositories = {
+        coordinate: async (_ref: any, run: () => Promise<any>) => run(),
+        getRemote: async () => ({ url: 'https://github.com/owner/repo.git', host: 'github.com' }),
+        commit: async () => {
+          if (operation === 'checkpoint') throw failure;
+          return { created: true };
+        },
+        restore: async () => { throw failure; },
+        setRemote: async () => { throw failure; },
+        fetch: async () => { throw failure; },
+        push: async () => { throw failure; },
+      };
+      const remote = ['link', 'fetch', 'push'].includes(operation);
+      const name = remote ? 'repo_remote' : 'repo_version';
+      const args = operation === 'restore' ? { op: operation, to: 'abc123' }
+        : operation === 'link'
+          ? { op: operation, url: 'https://github.com/owner/repo' }
+          : { op: operation };
+      const id = `git-${operation}`;
+      const result = await dispatchToolCall(
+        { id, name, args },
+        {
+          ...baseCtx(), lifecycle: tracker,
+          exposure: 'actor', actorType: 'app', actorInstanceId: 'app-1', repositories,
+          session: { sessionId: 'sess-1', kind: 'actor' },
+          confirm: async () => 'yes_once',
+          appQuiescence: { run: async (_appId: string, run: () => Promise<any>) => run() },
+        } as any,
+      );
+      expect(result).toMatchObject({
+        ok: false,
+        code: 'repository-host-timeout',
+        outcomeKnown: false,
+        outcomeKind: 'host-lost',
+        retryable: false,
+      });
+      expect((result as { error: string }).error).toStartWith('outcome_unknown:');
+      expect((result.meta as any).recovery).toMatchObject({
+        state: S.OUTCOME_UNKNOWN, autoRetry: false, verificationRequired: true,
+      });
+      expect((await log.get(`sess-1:${id}`))!.state).toBe(S.OUTCOME_UNKNOWN);
+    }
   });
 
   test('re-dispatching the same tool_use id does NOT re-execute the tool', async () => {

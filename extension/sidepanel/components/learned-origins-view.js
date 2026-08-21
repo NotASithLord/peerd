@@ -26,6 +26,9 @@ const REASON_COPY = {
   'confirmed-write': 'you approved peerd sending data to it',
 };
 
+const UNKNOWN_MUTATION_COPY = 'Peerd could not confirm whether that change finished. '
+  + 'The list was refreshed before another change can be sent.';
+
 /**
  * @typedef {Object} LearnedState
  * @property {Array<{ host: string, reason: string }>|null} origins  null = loading
@@ -92,26 +95,32 @@ export const LearnedOriginsView = {
       // phantom row on screen with its confirm still armed underneath a message
       // saying the row was gone.
       const stale = r?.error === 'not-learned';
+      const uncertain = r?.outcomeKnown === false;
       ui.note = r?.ok
         ? { ok: true, text: typeof okText === 'function' ? okText(r) : okText }
         : { ok: false, text: stale
           ? 'That site was already removed somewhere else — refreshed the list.'
-          : r?.error ?? 'Action failed.' };
-      if (r?.ok || stale) {
+          : uncertain ? UNKNOWN_MUTATION_COPY : r?.error ?? 'Action failed.' };
+      if (r?.ok || stale || uncertain) {
         ui.confirm = null;
         ui.confirmAll = false;
         await LearnedOriginsView.refresh(vnode);
       }
       m.redraw();
       if (r?.ok) focusAfterRender('heading');
-      else if (stale) focusAfterRender(ui.origins?.length ? 'trigger' : 'heading');
+      else if (stale || uncertain) focusAfterRender(ui.origins?.length ? 'trigger' : 'heading');
       else focusAfterRender(msg.type === 'learned/clear' ? 'confirm-all' : 'confirm', /** @type {any} */ (msg).host ?? null);
       return r;
-    }).catch((e) => {
+    }).catch(async () => {
       ui.busy = false;
-      ui.note = { ok: false, text: /** @type {{ message?: string }} */ (e)?.message ?? 'Action failed.' };
+      // runtime.sendMessage rejection has crossed dispatch but has no receipt.
+      // Re-read the idempotent set before the user can send the change again.
+      ui.note = { ok: false, text: UNKNOWN_MUTATION_COPY };
+      ui.confirm = null;
+      ui.confirmAll = false;
+      await LearnedOriginsView.refresh(vnode);
       m.redraw();
-      focusAfterRender(msg.type === 'learned/clear' ? 'confirm-all' : 'confirm', /** @type {any} */ (msg).host ?? null);
+      focusAfterRender(ui.origins?.length ? 'trigger' : 'heading');
       return null;
     });
   },

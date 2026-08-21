@@ -4,6 +4,7 @@
 // credentials to the normalized remote host.
 
 import { normalizeGitRemote } from '/peerd-engine/repository/remote.js';
+import { repositoryToolFailure } from './app-history.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const repositoryRemoteTool = {
@@ -108,7 +109,7 @@ export const repositoryRemoteTool = {
         if (notebookQuiesced) await tracker.resumeTab?.(id).catch(() => {});
       }
     } catch (e) {
-      return { ok: false, error: `repo_remote_failed: ${/** @type {{message?:string}} */ (e)?.message ?? String(e)}` };
+      return repositoryToolFailure(e, 'repo_remote', `${String(args?.op ?? 'remote operation')} on the Git remote`);
     }
   },
 };

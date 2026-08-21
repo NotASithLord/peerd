@@ -44,6 +44,7 @@ const makeDeps = (vaultOver: Record<string, any> = {}) => {
     maybeAutoResumeAfterRecovery: () => {},
     isActualSidepanelSender: (sender: any) => sender?.surface === 'sidepanel',
     isActualHomeSender: (sender: any) => sender?.surface === 'home',
+    onLocked: async () => {},
     confirmCoordinator: {
       resolve: (claim: Record<string, unknown>, answer: string, via: string) => {
         calls.resolve = [claim, answer, via];
@@ -83,6 +84,27 @@ describe('vault routes — success paths', () => {
     const { r, calls } = routes();
     expect(await r['vault/lock']()).toEqual({ ok: true });
     expect(calls.pushState.length).toBe(1);
+  });
+
+  test('lock: settles an asynchronous authority realm before retiring its host', async () => {
+    const order: string[] = [];
+    let releaseLock = () => {};
+    const pendingLock = new Promise<void>((resolve) => { releaseLock = resolve; });
+    const { deps } = makeDeps({
+      lock: async () => {
+        order.push('lock:start');
+        await pendingLock;
+        order.push('lock:settled');
+      },
+    });
+    deps.onLocked = async () => { order.push('host:retired'); };
+    const handler = makeVaultRoutes(deps)['vault/lock'];
+    const result = handler();
+    await Promise.resolve();
+    expect(order).toEqual(['lock:start']);
+    releaseLock();
+    await expect(result).resolves.toEqual({ ok: true });
+    expect(order).toEqual(['lock:start', 'lock:settled', 'host:retired']);
   });
 
   test('unlockPrf: kicks base network with unlock-prf reason', async () => {

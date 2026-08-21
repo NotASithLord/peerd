@@ -81,6 +81,35 @@ describe('abortClosesPc — the D2 leak-fix invariant', () => {
 });
 
 describe('webrtc transport — the wired late-completion guard (D2)', () => {
+  test('same-machine dialing disables public STUN on the real peer connection', async () => {
+    instances.length = 0;
+    const publicIce = [{ urls: 'stun:stun.example.test:3478' }];
+    const t = createWebrtcTransport({
+      RTCPeerConnection: MockPC as any,
+      iceServers: publicIce,
+    });
+
+    const localReady = t.connect(
+      { did: 'local' },
+      { signaling: sigStub() as any, sameMachine: true },
+    );
+    const localPc = instances[0];
+    expect(localPc.config).toMatchObject({ iceServers: [] });
+    localPc.dc.readyState = 'open';
+    localPc.dc.onopen();
+    await localReady;
+
+    const remoteReady = t.connect(
+      { did: 'remote' },
+      { signaling: sigStub() as any, sameMachine: false },
+    );
+    const remotePc = instances[1];
+    expect(remotePc.config).toMatchObject({ iceServers: publicIce });
+    remotePc.dc.readyState = 'open';
+    remotePc.dc.onopen();
+    await remoteReady;
+  });
+
   test('a channel that opens before abort keeps its live pc', async () => {
     instances.length = 0;
     const t = createWebrtcTransport({ RTCPeerConnection: MockPC as any });

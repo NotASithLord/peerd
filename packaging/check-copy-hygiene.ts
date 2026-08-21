@@ -58,6 +58,7 @@ const EXCLUDED_FILES = Object.freeze(new Set([
   'docs/security/RED-TEAM-RESULTS.md',
   'extension/manifest.json',
   'extension/shared/channel-config.js',
+  'extension/shared/build-config.js',
   'packaging/security-baseline.json',
 ]));
 

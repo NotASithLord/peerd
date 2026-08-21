@@ -194,6 +194,31 @@ describe('sidepanel.learned-origins view', () => {
     } finally { unmount(); }
   });
 
+  it('an outcome-unknown mutation re-reads and disarms before another send', async () => {
+    /** @type {string[]} */
+    const sentTypes = [];
+    let listCalls = 0;
+    const { root, unmount } = mount((msg) => {
+      sentTypes.push(msg.type);
+      if (msg.type === 'learned/list') {
+        return { ok: true, origins: listCalls++ === 0 ? ORIGINS : ORIGINS.slice(1) };
+      }
+      return { ok: false, error: 'raw-private-transport', outcomeKnown: false };
+    });
+    try {
+      await settle();
+      buttons(root, 'Remove')[0].click();
+      await settle();
+      buttons(root, 'Remove')[0].click();
+      await settleFocus();
+      const text = root.textContent ?? '';
+      expect(sentTypes.filter((type) => type === 'learned/list').length).toBe(2);
+      expect(text.includes('list was refreshed')).toBe(true);
+      expect(text.includes('raw-private-transport')).toBe(false);
+      expect(text.includes('Remove this learned host?')).toBe(false);
+    } finally { unmount(); }
+  });
+
   it('Forget all reports HOW MANY it forgot, not just that it ran', async () => {
     const { root, unmount } = mount((msg) => (msg.type === 'learned/clear'
       ? { ok: true, origins: [], forgotten: 2 }

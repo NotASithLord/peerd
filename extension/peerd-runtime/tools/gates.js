@@ -51,7 +51,7 @@ import {
   PERMISSION_MODES,
   DEFAULT_CONFIRM_ACTIONS,
   normalizeMode,
-} from '../permissions/index.js';
+} from '../permissions/policy.js';
 import { ACTOR_ISOLATION_UNAVAILABLE_TOOLS, actorIsolationAvailable } from '../actor/isolation.js';
 import { runtimeCapabilityRefusal } from '../runtime-capabilities.js';
 

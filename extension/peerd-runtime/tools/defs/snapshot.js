@@ -19,7 +19,8 @@
 
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { resolveTargetTab, originOfUrl } from './dom-helpers.js';
-import { captureSnapshot, describeSource, diffSnapshots } from '../../dom/index.js';
+import { captureSnapshot, describeSource } from '../../dom/capture.js';
+import { diffSnapshots } from '../../dom/snapshot-diff.js';
 
 /** @typedef {import('../../dom/snapshot-diff.js').SnapRef} SnapRef */
 /**

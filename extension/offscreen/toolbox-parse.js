@@ -3,11 +3,10 @@
 // document performs only syntax/import-graph validation and reads existing
 // sibling bodies through the SW's execute-only toolbox/read route.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import { buildModule } from '/peerd-engine/offscreen.js';
 import { makeToolboxParseCheck } from '/peerd-runtime/offscreen.js';
 import { REMOTE_MODULE_IMPORTS_ENABLED } from '/shared/channel-config.js';
-import { isServiceWorkerSender } from '/shared/messaging.js';
 
 const parseCheck = makeToolboxParseCheck({
   buildModule,
@@ -25,22 +24,16 @@ const parseCheck = makeToolboxParseCheck({
 
 /**
  * @param {any} message
- * @param {import('webextension-polyfill').Runtime.MessageSender} sender
- * @param {(response: any) => void} sendResponse
+ * @returns {Promise<{ok:true}|{ok:false,error:string}>}
  */
-const onToolboxParseCheck = (message, sender, sendResponse) => {
-  if (message?.type !== 'toolbox/parse-check') return undefined;
-  if (!isServiceWorkerSender(sender)) {
-    sendResponse({ ok: false, error: 'unauthorized-command-sender' });
-    return true;
-  }
-  parseCheck(message.name, message.body)
-    .then(() => sendResponse({ ok: true }))
-    .catch((error) => sendResponse({
+export const handleToolboxParseCheck = async (message) => {
+  try {
+    await parseCheck(message.name, message.body);
+    return { ok: true };
+  } catch (error) {
+    return {
       ok: false,
       error: /** @type {{ message?: string }} */ (error)?.message ?? String(error),
-    }));
-  return true;
+    };
+  }
 };
-
-browser.runtime.onMessage.addListener(/** @type {any} */ (onToolboxParseCheck));

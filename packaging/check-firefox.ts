@@ -13,7 +13,7 @@
 //      there is no threshold to argue about — zero, always.
 //
 //   2. Chrome-only API usage is a RATCHET against a named allowlist, the same
-//      shape as check-tscheck.ts's coverage floor. peerd legitimately ships some
+//      shape as check-tscheck.ts's complete-coverage invariant. peerd legitimately ships some
 //      Chrome-only code into the Firefox package: the module is loaded but the
 //      call site is guarded by a runtime capability probe (`offscreenAvailable`,
 //      `debuggerApiAvailable()`, and friends), which is a pattern a static linter
@@ -30,7 +30,10 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { REPO_ROOT, ARTIFACTS_DIR, STORE_LOADER_TEMPLATE } from './lib.ts';
+import {
+  REPO_ROOT, ARTIFACTS_DIR, STORE_LOADER_TEMPLATE,
+  DWEB_ROUTES_DISABLED_TEMPLATE, DWEB_SELF_ROUTES_DISABLED_TEMPLATE,
+} from './lib.ts';
 
 /**
  * Chrome-only APIs we KNOWINGLY ship into the Firefox package, each behind a
@@ -113,6 +116,16 @@ const main = () => {
     if (!existsSync(loader)
         || !readFileSync(loader).equals(readFileSync(STORE_LOADER_TEMPLATE))) {
       problems.push(`  [${name}] dweb loader is not the inert package template`);
+    }
+    for (const [relativePath, templatePath] of [
+      ['background/routes/dweb.js', DWEB_ROUTES_DISABLED_TEMPLATE],
+      ['background/routes/dweb-self.js', DWEB_SELF_ROUTES_DISABLED_TEMPLATE],
+    ] as const) {
+      const packagedPath = join(dir, relativePath);
+      if (!existsSync(packagedPath)
+          || !readFileSync(packagedPath).equals(readFileSync(templatePath))) {
+        problems.push(`  [${name}] ${relativePath} is not the inert package template`);
+      }
     }
     const channelConfig = readFileSync(join(dir, 'shared', 'channel-config.js'), 'utf8');
     if (!channelConfig.includes('export const DWEB_ENABLED = false')

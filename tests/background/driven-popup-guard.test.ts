@@ -37,6 +37,28 @@ describe('driven popup network guard', () => {
     ]);
   });
 
+  test('the event receipt remains pending until child custody and resume settle', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const guard = makeDrivenPopupGuard({
+      sourceState: () => 'driven',
+      neutralize: async () => {},
+      adoptFromSource: async () => { await gate; return { ok: true, adopted: true }; },
+      classifyTarget: () => ({ allowed: true }),
+      resume: async () => {},
+    });
+    const receipt = guard.onNavigationTarget({
+      sourceTabId: 7, tabId: 9, url: 'https://example.com/popup',
+    });
+    let settled = false;
+    void receipt?.then(() => { settled = true; });
+    await tick();
+    expect(settled).toBe(false);
+    release();
+    await receipt;
+    expect(settled).toBe(true);
+  });
+
   test('never changes a child of a positively user-owned source', async () => {
     const events: string[] = [];
     const guard = makeDrivenPopupGuard({

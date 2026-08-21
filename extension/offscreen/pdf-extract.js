@@ -26,9 +26,8 @@
 // pdf.js parses in its own worker; a malformed/hostile PDF can at worst make the
 // parse fail, which we surface as an error.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import { base64ToBytes } from '/shared/util.js';
-import { isTrustedSender } from '/shared/messaging.js';
 import {
   chooseEngine, looksScanned, createOcrStore,
   PdfFetchError, PdfParseError,
@@ -297,7 +296,7 @@ const extractTextLayer = async (bytes) => {
  *
  * @param {{ source: object, opts?: { engine?: string, dev?: boolean } }} msg
  */
-const extractPdf = async (/** @type {{ source: any, opts?: { engine?: string, dev?: boolean } }} */ { source, opts = {} }) => {
+export const handlePdfExtract = async (/** @type {{ source: any, opts?: { engine?: string, dev?: boolean } }} */ { source, opts = {} }) => {
   // Stage label rides every failure so a manual run (offscreen DevTools, or the
   // error returned to read_pdf) pinpoints WHERE it broke: plan / fetch / parse / ocr.
   let stage = 'plan';
@@ -378,19 +377,3 @@ const extractPdf = async (/** @type {{ source: any, opts?: { engine?: string, de
     return { ok: false, error: `pdf_extract_failed[${stage}]: ${detail}`, stage };
   }
 };
-
-// Message route: SW → offscreen. A dedicated listener (mirrors job/run) so
-// voice and local-model handlers are untouched. Gated on isTrustedSender like
-// every sibling handler (job/run, local-model/*, voice) — fail-closed posture:
-// externally_connectable is unset today, so this is defense-in-depth, but the
-// gate is what keeps this from being an open fetch proxy if it's ever enabled.
-// why cast: the polyfill's OnMessageListener return-type is stricter than this
-// fire-and-respond handler (mirrors offscreen.js's job/voice listeners).
-browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ msg, /** @type {any} */ sender, /** @type {any} */ sendResponse) => {
-  if (msg?.type !== 'pdf/extract') return undefined;
-  if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
-  extractPdf(msg)
-    .then((out) => sendResponse(out))
-    .catch((e) => sendResponse({ ok: false, error: e?.name ? `${e.name}: ${e.message}` : (e?.message ?? String(e)) }));
-  return true;     // async sendResponse contract
-}));

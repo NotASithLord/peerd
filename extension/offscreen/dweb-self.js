@@ -27,7 +27,7 @@
 // in the coordinator's own dispatch, once inside the host), so a peer that
 // merely guessed a rendezvous topic reaches nothing.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import { loadDweb } from '/shared/dweb-loader.js';
 
 const log = (/** @type {any[]} */ ...a) => console.log('[offscreen/dweb-self]', ...a);

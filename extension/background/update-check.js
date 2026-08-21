@@ -142,6 +142,10 @@ export const latestGeckoUpdate = (feedJson, geckoId) => {
  *     },
  *     reload: () => void,
  *   },
+ *   updateAvailableEvent?: {
+ *     addListener: (fn: (details: {version:string}) => void) => void,
+ *     removeListener?: (fn: (details: {version:string}) => void) => void,
+ *   },
  *   fetchFn: (url: string, init?: RequestInit) => Promise<Response>,
  *   ready: Promise<unknown> | (() => Promise<unknown>),
  *   isEnabled: () => boolean,
@@ -170,6 +174,7 @@ export const latestGeckoUpdate = (feedJson, geckoId) => {
  */
 export const makeUpdateCheck = ({
   runtime, fetchFn, ready, isEnabled, busy, surfacesOpen, notify, sessionKv,
+  updateAvailableEvent = runtime.onUpdateAvailable,
   now = () => Date.now(),
   scheduleRetry = (fn, delayMs) => setTimeout(fn, delayMs),
   cancelRetry = (handle) => clearTimeout(/** @type {ReturnType<typeof setTimeout>} */ (handle)),
@@ -370,11 +375,11 @@ export const makeUpdateCheck = ({
 
   /** @param {{ version: string }} details */
   const onUpdateDownloadedListener = (details) => {
-    void onUpdateDownloaded(details?.version ?? '').catch(() => {});
+    return onUpdateDownloaded(details?.version ?? '').catch(() => {});
   };
 
   const syncEnabled = () => {
-    const events = runtime.onUpdateAvailable;
+    const events = updateAvailableEvent;
     if (!listenerEligible || !events) return;
     if (isEnabled() && !listenerRegistered) {
       events.addListener(onUpdateDownloadedListener);
@@ -410,13 +415,14 @@ export const makeUpdateCheck = ({
       // evaluation. The handler waits for stored settings; syncEnabled removes
       // it after hydration when OFF and safely finishes an event intercepted
       // during that short startup window.
-      runtime.onUpdateAvailable?.addListener(onUpdateDownloadedListener);
-      listenerRegistered = Boolean(runtime.onUpdateAvailable);
+      updateAvailableEvent?.addListener(onUpdateDownloadedListener);
+      listenerRegistered = Boolean(updateAvailableEvent);
       void awaitReady().then(syncEnabled).catch(() => {});
     },
 
     checkNow,
     syncEnabled,
+    recoverDownloaded: (/** @type {string} */ version) => onUpdateDownloaded(version),
 
     /**
      * A UI surface connected: replay an undelivered "update available"

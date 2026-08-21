@@ -3,6 +3,8 @@
 // Restore is recoverable (it writes a new commit) but force-confirms because it
 // replaces the live working tree.
 
+import { repositoryToolFailure } from './app-history.js';
+
 /** @type {import('/shared/tool-types.js').Tool} */
 export const repositoryVersionTool = {
   name: 'repo_version',
@@ -78,7 +80,7 @@ export const repositoryVersionTool = {
       operationSucceeded = true;
       return { ok: true, content: JSON.stringify({ repository: ref, op: args.op, result }, null, 2) };
     } catch (e) {
-      return { ok: false, error: `repo_version_failed: ${/** @type {{message?:string}} */ (e)?.message ?? String(e)}` };
+      return repositoryToolFailure(e, 'repo_version', `${String(args?.op ?? 'version operation')} in local Git history`);
     } finally {
       if (notebookQuiesced) {
         // checkout/restore replace bytes the live editor has cached; reload the

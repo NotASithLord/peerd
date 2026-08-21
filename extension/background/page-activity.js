@@ -128,7 +128,7 @@ export const restoreDrivenTab = async (tabId, placement, deps) => {
  * @param {string | null} [expectedOrigin]
  * @returns {Promise<{ tabId: number, documentIds: string[] } | null>}
  */
-export const allowedDocumentTarget = async (tabId, deps, policy = {}, expectedOrigin = null) => {
+export async function allowedDocumentTarget(tabId, deps, policy = {}, expectedOrigin = null) {
   try {
     const [injection] = await deps.scripting.executeScript({
       target: { tabId },
@@ -143,7 +143,7 @@ export const allowedDocumentTarget = async (tabId, deps, policy = {}, expectedOr
   } catch {
     return null;
   }
-};
+}
 
 /** @param {{ tabId: number, documentIds: string[] }} target @param {string} label @param {string} origin @param {ActivityDeps} deps */
 const showOnTarget = async (target, label, origin, deps) => {

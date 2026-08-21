@@ -8,7 +8,7 @@
 // Pure client + harmless on the store build (DWEB_ENABLED false → the offscreen
 // never emits, so the feed stays empty).
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 
 /**
  * A feed entry. `id`/`ts` are stamped by the offscreen emitter

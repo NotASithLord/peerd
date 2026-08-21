@@ -29,6 +29,7 @@ export {
 } from './denylist/dnr-rules.js';
 export { makeConfirmCoordinator } from './confirm/protocol.js';
 export { createAuditLog } from './audit/log.js';
+export { makeAgentSendCustody } from './storage/session-cache.js';
 
 import { realKV } from './storage/kv.js';
 import * as _idb from './storage/idb.js';

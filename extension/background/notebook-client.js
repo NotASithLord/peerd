@@ -7,7 +7,7 @@
 // chrome.tabs.sendMessage. Same shape as vm-client; different message
 // vocabulary.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import { createKeyedQueue } from '/peerd-engine/background.js';
 
 const MESSAGE_TIMEOUT_MS = 60_000;

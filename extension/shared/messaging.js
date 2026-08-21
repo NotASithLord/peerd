@@ -12,8 +12,9 @@
 //   - payload fields are JSON-serialisable (structured-clone-safe)
 //   - replies follow `{ ok: true, ... }` or `{ ok: false, error: string }`
 
-import browser from '../vendor/browser-polyfill.js';
-import { isFirstPartySender, isServiceWorkerSender as isServiceWorkerSenderCore } from './sender-trust.js';
+import browser from './browser-api.js';
+import { isServiceWorkerSender as isServiceWorkerSenderCore } from './sender-trust.js';
+import { backgroundModuleUrl } from './background-entry.js';
 
 /**
  * Send a fire-and-forget message to whatever context owns the receiver
@@ -52,77 +53,14 @@ export const send = (msg) => browser.runtime.sendMessage(msg);
  * @param {{ id?: string, url?: string } | undefined} sender
  * @returns {boolean}
  */
-export const isTrustedSender = (sender) => isFirstPartySender(sender, {
-  runtimeId: browser.runtime?.id,
-  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
-});
-
 /** Exact SW command-source pin for privileged offscreen receivers. */
 /** @param {{ id?: string, url?: string, tab?: unknown, documentId?: string } | undefined} sender */
 export const isServiceWorkerSender = (sender) => isServiceWorkerSenderCore(sender, {
   runtimeId: browser.runtime?.id,
   extensionOrigin: browser.runtime?.getURL?.('') ?? '',
-  serviceWorkerUrl: browser.runtime?.getURL?.('background/service-worker.js') ?? '',
+  serviceWorkerUrl: backgroundModuleUrl(browser),
   backgroundPageUrl: browser.runtime?.getURL?.('_generated_background_page.html') ?? '',
 });
-
-/**
- * Build a dispatcher from a `type → handler` table. Pass the result to
- * `browser.runtime.onMessage.addListener`.
- *
- * Untrusted senders (see isTrustedSender) are refused before any handler
- * runs. Handlers may return a value or a Promise; both are awaited and the
- * resolved value is sent back as the reply. If a handler throws, the
- * reply is `{ ok: false, error: e.message }` and the error is logged
- * to the console for debugging.
- *
- * @param {Record<string, (msg: any, sender: import('webextension-polyfill').Runtime.MessageSender) => any>} handlers
- */
-export const makeDispatcher = (handlers) =>
-  /**
-   * @param {any} msg                  heterogeneous — one of ~80 route shapes
-   * @param {import('webextension-polyfill').Runtime.MessageSender} sender
-   * @param {(response?: any) => void} sendResponse
-   */
-  (msg, sender, sendResponse) => {
-  if (!msg || typeof msg.type !== 'string') {
-    sendResponse({ ok: false, error: 'malformed-message' });
-    return false;
-  }
-  // Sender provenance — fail CLOSED for anything but a first-party
-  // extension context. Every route this dispatcher fans out to is
-  // privileged (vault/*, tool dispatch, actor/spawn, sw/web-fetch, …).
-  // The manifest currently exposes no external / content-script surface,
-  // so this never rejects a real caller today; it is the single chokepoint
-  // that keeps a FUTURE manifest change (a content script, an
-  // externally_connectable entry) from silently making every route
-  // web-reachable. See shared/sender-trust.js.
-  if (!isFirstPartySender(sender, {
-    runtimeId: browser.runtime?.id,
-    extensionOrigin: browser.runtime?.getURL?.('') ?? '',
-  })) {
-    console.warn('[messaging] rejected untrusted sender for', msg?.type,
-      '— url:', sender?.url ?? '(none)', 'id:', sender?.id ?? '(none)');
-    sendResponse({ ok: false, error: 'untrusted-sender' });
-    return false;
-  }
-  const handler = handlers[msg.type];
-  if (!handler) {
-    // Unknown type — not necessarily an error; multiple listeners may
-    // coexist and each only handles its own types. Return false so the
-    // runtime continues trying other listeners.
-    return false;
-  }
-  Promise.resolve()
-    .then(() => handler(msg, sender))
-    .then((reply) => sendResponse(reply ?? { ok: true }))
-    .catch((e) => {
-      console.error('[messaging] handler threw for', msg.type, e);
-      sendResponse({ ok: false, error: e?.message ?? String(e) });
-    });
-  // Return true to keep the message channel open for the async reply.
-  return true;
-};
 
 /**
  * Long-lived port helper. Wraps `browser.runtime.connect` with a

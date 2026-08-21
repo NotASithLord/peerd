@@ -14,7 +14,7 @@
 // agent can call type() with progressively longer prefixes.
 
 import { browserDocumentIdentity, resolveTargetTab, scriptingTarget } from './dom-helpers.js';
-import { summarizeMutations } from '../../dom/index.js';
+import { summarizeMutations } from '../../dom/action-result.js';
 import { browserDocumentRefusalFrom, formSubmissionRefusalFrom } from '../browser-automation-policy.js';
 
 /**

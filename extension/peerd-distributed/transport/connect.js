@@ -38,15 +38,12 @@
 //
 // 3. SAME MACHINE / LAN / REMOTE   transports/webrtc.js
 //    RTCPeerConnection + ICE. STUN and TURN are SUB-tiers inside this one
-//    rung (ARCHITECTURE §6.5), not separate locales. The same-machine
-//    loopback strategy (mDNS hostname → 127.0.0.1) lives inside the
-//    transport (transport/sdp.js), gated on opts.sameMachine — never here.
+//    rung (ARCHITECTURE §6.5), not separate locales. `sameMachine` disables
+//    public STUN configuration; host-candidate handling stays inside WebRTC.
 //    Needs a signaling callback (opts.signal) to swap offer/answer.
 //    TESTED:
 //      • same-machine WebRTC path — verified LIVE in the browser demo
 //        ("Test WebRTC transport" button) and two-window manual pairing.
-//      • the pure same-machine SDP rewrite (deMdnsSdp) — unit-tested in
-//        Bun (connect.test.ts).
 //      • cross-NAT — needs two devices on different networks (public STUN);
 //        symmetric-NAT-both-ends needs a TURN relay (Phase 1).
 //      Real RTCPeerConnection can't run in Bun, so the byte-level path is

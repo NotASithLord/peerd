@@ -10,6 +10,7 @@
 // returns no values).
 
 import m from '/vendor/mithril/mithril.js';
+import { mutationFailureCopy } from '../mutation-custody.js';
 
 export const GitCredentialsSection = {
   oninit(/** @type {any} */ vnode) {
@@ -17,45 +18,60 @@ export const GitCredentialsSection = {
     vnode.state.hostInput = '';
     vnode.state.tokenInput = '';
     vnode.state.busy = false;
+    vnode.state.uncertain = null; // exact { kind, host, token? } replay fence
     vnode.state.msg = null;       // { ok, text }
     GitCredentialsSection.load(vnode);
   },
 
-  load(/** @type {any} */ vnode) {
-    vnode.attrs.send({ type: 'git-cred/list' }).then((/** @type {any} */ r) => {
-      vnode.state.hosts = r?.ok && Array.isArray(r.hosts) ? r.hosts : [];
+  async load(/** @type {any} */ vnode) {
+    try {
+      const r = await vnode.attrs.send({ type: 'git-cred/list' });
+      if (r?.ok && Array.isArray(r.hosts)) vnode.state.hosts = r.hosts;
+      else if (vnode.state.hosts === null) vnode.state.hosts = [];
       if (r && !r.ok && r.error === 'locked') vnode.state.msg = { ok: false, text: 'Vault is locked — unlock in the peerd panel first.' };
       m.redraw();
-    }).catch(() => { vnode.state.hosts = []; m.redraw(); });
+      return r;
+    } catch {
+      if (vnode.state.hosts === null) vnode.state.hosts = [];
+      m.redraw(); return null;
+    }
   },
 
   view: (/** @type {{ attrs: { send: any }, state: any }} */ { attrs: { send }, state: ui }) => {
-    const errText = (/** @type {string} */ error) => error === 'locked'
-      ? 'Vault is locked — unlock in the peerd panel first.'
-      : error === 'bad-host' ? 'Enter a real host like github.com (no localhost or IPs).'
-      : error === 'bad-token' ? 'Paste a complete token (no spaces).'
-      : error ?? 'Something went wrong.';
+    const errText = (/** @type {unknown} */ reply, /** @type {string} */ action) =>
+      mutationFailureCopy(reply, {
+        action, fallback: 'The Git credential could not be changed.',
+        messages: {
+          locked: 'Vault is locked; unlock in the peerd panel first.',
+          'bad-host': 'Enter a real host like github.com (no localhost or IPs).',
+          'bad-token': 'Paste a complete token (no spaces).',
+        },
+      });
 
     const save = async () => {
-      if (ui.busy) return;
-      const host = ui.hostInput.trim();
-      const token = ui.tokenInput.trim();
+      if (ui.busy || (ui.uncertain && ui.uncertain.kind !== 'save')) return;
+      const host = ui.uncertain?.kind === 'save' ? ui.uncertain.host : ui.hostInput.trim();
+      const token = ui.uncertain?.kind === 'save' ? ui.uncertain.token : ui.tokenInput.trim();
       ui.msg = null;
       if (!host) { ui.msg = { ok: false, text: 'Enter a host (e.g. github.com).' }; m.redraw(); return; }
       if (token.length < 8) { ui.msg = { ok: false, text: 'Paste a complete token.' }; m.redraw(); return; }
       ui.busy = true; m.redraw();
       try {
-        const r = await send({ type: 'git-cred/set', host, token });
+        let r;
+        try { r = await send({ type: 'git-cred/set', host, token }); }
+        catch { r = { ok: false, outcomeKnown: false }; }
         if (r?.ok) {
+          ui.uncertain = null;
           ui.hostInput = ''; ui.tokenInput = '';
           ui.msg = { ok: true, text: `Saved for ${r.host}: encrypted in the vault.` };
-          const lr = await send({ type: 'git-cred/list' });
-          if (lr?.ok) ui.hosts = Array.isArray(lr.hosts) ? lr.hosts : [];
+          await GitCredentialsSection.load({ attrs: { send }, state: ui });
         } else {
-          ui.msg = { ok: false, text: errText(r?.error) };
+          ui.msg = { ok: false, text: errText(r, 'saving the Git credential') };
+          if (r?.outcomeKnown === false) {
+            ui.uncertain = { kind: 'save', host, token };
+            ui.msg = { ok: false, text: 'Peerd could not confirm the save. Finish the same save; do not change the host or token.' };
+          }
         }
-      } catch (error) {
-        ui.msg = { ok: false, text: /** @type {{message?:string}} */ (error)?.message ?? 'Could not save token.' };
       } finally {
         ui.busy = false;
         m.redraw();
@@ -63,18 +79,24 @@ export const GitCredentialsSection = {
     };
 
     const remove = async (/** @type {string} */ host) => {
-      if (ui.busy) return;
+      if (ui.busy || (ui.uncertain && (ui.uncertain.kind !== 'delete'
+          || ui.uncertain.host !== host))) return;
       ui.busy = true; ui.msg = null; m.redraw();
       try {
-        const r = await send({ type: 'git-cred/delete', host });
+        let r;
+        try { r = await send({ type: 'git-cred/delete', host }); }
+        catch { r = { ok: false, outcomeKnown: false }; }
         if (r?.ok) {
+          ui.uncertain = null;
           ui.hosts = (ui.hosts ?? []).filter((/** @type {string} */ h) => h !== host);
           ui.msg = { ok: true, text: `Removed ${host}.` };
         } else {
-          ui.msg = { ok: false, text: errText(r?.error) };
+          ui.msg = { ok: false, text: errText(r, 'removing the Git credential') };
+          if (r?.outcomeKnown === false) {
+            ui.uncertain = { kind: 'delete', host };
+            ui.msg = { ok: false, text: 'Peerd could not confirm the removal. Finish the same removal; do not start another credential change.' };
+          }
         }
-      } catch (error) {
-        ui.msg = { ok: false, text: /** @type {{message?:string}} */ (error)?.message ?? 'Could not remove token.' };
       } finally {
         ui.busy = false;
         m.redraw();
@@ -102,7 +124,13 @@ export const GitCredentialsSection = {
                   m('span.key-badge.key-set', '✓ Token saved'),
                 ]),
                 m('span', { style: 'margin-left:auto;' },
-                  m('button.linkish', { type: 'button', disabled: ui.busy, onclick: () => remove(host) }, 'Remove')),
+                  m('button.linkish', {
+                    type: 'button',
+                    disabled: ui.busy || (ui.uncertain && (ui.uncertain.kind !== 'delete'
+                      || ui.uncertain.host !== host)),
+                    onclick: () => remove(host),
+                  }, ui.uncertain?.kind === 'delete' && ui.uncertain.host === host
+                    ? 'Finish same removal' : 'Remove')),
               ]),
             ]))),
 
@@ -119,18 +147,21 @@ export const GitCredentialsSection = {
           m('input', {
             type: 'text', spellcheck: false, autocapitalize: 'none', autocomplete: 'off',
             'aria-label': 'Git credential host',
-            placeholder: 'github.com', value: ui.hostInput, disabled: ui.busy,
+            placeholder: 'github.com', value: ui.hostInput, disabled: ui.busy || !!ui.uncertain,
             oninput: (/** @type {any} */ e) => { ui.hostInput = e.target.value; },
             style: 'flex:0 0 11rem;',
           }),
           m('input', {
             type: 'password', spellcheck: false, autocomplete: 'off',
             'aria-label': 'Personal access token',
-            placeholder: 'paste token…', value: ui.tokenInput, disabled: ui.busy,
+            placeholder: 'paste token…', value: ui.tokenInput, disabled: ui.busy || !!ui.uncertain,
             oninput: (/** @type {any} */ e) => { ui.tokenInput = e.target.value; },
           }),
-          m('button', { type: 'submit', disabled: ui.busy || !ui.hostInput.trim() || !ui.tokenInput.trim() },
-            ui.busy ? '…' : 'Save'),
+          m('button', {
+            type: 'submit',
+            disabled: ui.busy || (ui.uncertain && ui.uncertain.kind !== 'save')
+              || (!ui.uncertain && (!ui.hostInput.trim() || !ui.tokenInput.trim())),
+          }, ui.busy ? '…' : ui.uncertain?.kind === 'save' ? 'Finish same save' : 'Save'),
         ]),
       ]),
       ui.msg ? m(`p.key-msg${ui.msg.ok ? '.ok' : '.err'}`, { role: ui.msg.ok ? 'status' : 'alert', 'aria-live': 'polite' }, ui.msg.text) : null,

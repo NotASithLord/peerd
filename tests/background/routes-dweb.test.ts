@@ -20,11 +20,11 @@ const baseDeps = (over: any = {}) => {
       delete: async () => true,
       snapshotFilesBase64: async () => ({ record: {}, files: {} }),
       withWriteLock: async (_appId: string, operation: () => Promise<any>) => operation(),
-      replaceVersionedFilesUnlocked: async (args: any) => ({
-        record: { id: args.appId, ...args.metadataForOid('new-base', { dweb: { git_oid: 'base' } }) },
-        oid: 'new-base',
-        created: true,
-      }),
+      replaceVersionedFilesUnlocked: async (args: any) => {
+        const record = { id: args.appId, ...args.metadataForOid('new-base', { dweb: { git_oid: 'base' } }) };
+        await args.afterCommit?.(record);
+        return { record, oid: 'new-base', created: true };
+      },
     },
     appTabTracker: {
       getTabId: () => null,
@@ -253,6 +253,55 @@ describe('dweb app store', () => {
     expect(result).toEqual({ ok: false, error: 'app disappeared while recording install lineage' });
     expect(deleted).toEqual(['app-new12345']);
   });
+  test('lock invalidation crossing an offscreen install callback removes the created App', async () => {
+    let generation = 7;
+    let releaseCreate = () => {};
+    let markStarted = () => {};
+    const createGate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const deleted: string[] = [];
+    const { deps } = baseDeps({
+      dwebPublicationGeneration: () => generation,
+      appClient: {
+        create: async (args: any) => {
+          markStarted();
+          await createGate;
+          return { id: args.appId, ...args };
+        },
+        delete: async (id: string) => { deleted.push(id); return true; },
+      },
+    });
+    const pending = makeDwebRoutes(deps)['dweb/app-install']({
+      appId: 'app-race12345', name: 'X', files: {}, entryFile: 'i.html',
+      dweb: { uri: 'u' }, publicationGeneration: 7,
+    }, offscreenSender);
+    await started;
+    generation = 8;
+    releaseCreate();
+    expect(await pending).toEqual({ ok: false, error: 'dweb-custody-changed' });
+    expect(deleted).toEqual(['app-race12345']);
+  });
+  test('install rolls back the exact created App when lock invalidates its publication generation', async () => {
+    let generation = 7;
+    const deleted: string[] = [];
+    const { deps, audits } = baseDeps({
+      dwebPublicationGeneration: () => generation,
+      appClient: {
+        create: async (args: any) => {
+          generation += 1;
+          return { id: args.appId, ...args };
+        },
+        delete: async (id: string) => { deleted.push(id); return true; },
+      },
+    });
+    const result = await makeDwebRoutes(deps)['dweb/app-install']({
+      appId: 'app-new12345', name: 'X', files: {}, entryFile: 'i.html',
+      dweb: { uri: 'u', publisher: 'p' }, publicationGeneration: 7,
+    }, offscreenSender);
+    expect(result).toEqual({ ok: false, error: 'dweb-custody-changed' });
+    expect(deleted).toEqual(['app-new12345']);
+    expect(audits.some((entry) => entry.type === 'dweb_app_installed')).toBe(false);
+  });
   test('share-app persists the version slot on success', async () => {
     const shared: any[] = [];
     const { deps } = baseDeps({
@@ -382,11 +431,46 @@ describe('dweb app store', () => {
     expect(res).toEqual({ ok: false, error: 'metadata store failed' });
     expect(audits.some((entry) => entry.type === 'dweb_app_updated')).toBe(false);
   });
+  test('lock invalidation crossing an offscreen update callback refuses the durable mutation', async () => {
+    let generation = 11;
+    let releaseReplace = () => {};
+    let markStarted = () => {};
+    const replaceGate = new Promise<void>((resolve) => { releaseReplace = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let committed = false;
+    const { deps } = baseDeps({
+      dwebPublicationGeneration: () => generation,
+      appClient: {
+        replaceVersionedFilesUnlocked: async (args: any) => {
+          markStarted();
+          await replaceGate;
+          if (!args.isCurrent()) throw new Error('dweb-custody-changed');
+          committed = true;
+          return { record: { id: 'a1' }, oid: 'new-base' };
+        },
+      },
+      appRegistry: { get: async () => ({ id: 'a1', dweb: { git_oid: 'base' } }) },
+    });
+    const pending = makeDwebRoutes(deps)['dweb/app-update']({
+      appId: 'a1', entryFile: 'index.html', files: {}, dweb: { version_id: 'v2' },
+      publicationGeneration: 11,
+    }, offscreenSender);
+    await started;
+    generation = 12;
+    releaseReplace();
+    expect(await pending).toEqual({ ok: false, error: 'dweb-custody-changed' });
+    expect(committed).toBe(false);
+  });
   test('a post-commit update audit failure still reports the committed version', async () => {
     let replaced = false;
     const { deps } = baseDeps({
       auditLog: { append: async () => { throw new Error('audit unavailable'); } },
-      appClient: { replaceVersionedFilesUnlocked: async () => { replaced = true; return { record: { id: 'a1', dweb: { hash: 'v2' } }, oid: 'new-base' }; } },
+      appClient: { replaceVersionedFilesUnlocked: async (args: any) => {
+        replaced = true;
+        const record = { id: 'a1', dweb: { hash: 'v2' } };
+        await args.afterCommit(record);
+        return { record, oid: 'new-base' };
+      } },
       appRegistry: { get: async () => ({ id: 'a1', dweb: { git_oid: 'base' } }) },
     });
     const result = await makeDwebRoutes(deps)['dweb/app-update']({
@@ -394,6 +478,28 @@ describe('dweb app store', () => {
     }, offscreenSender);
     expect(replaced).toBe(true);
     expect(result).toMatchObject({ ok: true, app: { id: 'a1' }, warning: 'audit-write-failed' });
+  });
+  test('update hands an exact publication fence to the atomic replacement transaction', async () => {
+    let generation = 11;
+    let entered = false;
+    const { deps, audits } = baseDeps({
+      dwebPublicationGeneration: () => generation,
+      appClient: { replaceVersionedFilesUnlocked: async (args: any) => {
+        entered = true;
+        expect(args.isCurrent()).toBe(true);
+        generation += 1;
+        if (!args.isCurrent()) throw new Error('dweb-custody-changed');
+        throw new Error('unreachable');
+      } },
+      appRegistry: { get: async () => ({ id: 'a1', dweb: { git_oid: 'base' } }) },
+    });
+    const result = await makeDwebRoutes(deps)['dweb/app-update']({
+      appId: 'a1', entryFile: 'index.html', files: {}, dweb: { version_id: 'v2' },
+      publicationGeneration: 11,
+    }, offscreenSender);
+    expect(entered).toBe(true);
+    expect(result).toEqual({ ok: false, error: 'dweb-custody-changed' });
+    expect(audits.some((entry) => entry.type === 'dweb_app_updated')).toBe(false);
   });
   test('records and replaces the latest room-published App hash', async () => {
     let patch: any = null;
@@ -557,8 +663,78 @@ describe('dweb app store', () => {
     expect((await makeDwebRoutes(deps)['dweb/base/updates']()).updates).toEqual({});
   });
   test('room relay strips the type and forwards args', async () => {
-    const { deps, sent } = baseDeps();
-    await makeDwebRoutes(deps)['dweb/base/room']({ type: 'dweb/base/room', op: 'join', roomId: 'r1' });
-    expect(sent[0]).toEqual({ type: 'dweb/base-host/room', op: 'join', roomId: 'r1' });
+    const { deps, sent } = baseDeps({
+      appTabTracker: {
+        parseIdFromUrl: () => 'app-one',
+        getTabId: () => 41,
+      },
+    });
+    const sender = {
+      url: 'chrome-extension://peerd/engine-tabs/app-tab/index.html#app-one',
+      documentId: 'document-one',
+      tab: { id: 41 },
+    };
+    await makeDwebRoutes(deps)['dweb/base/room']({
+      type: 'dweb/base/room', op: 'join', roomId: 'r1', appId: 'app-one',
+      roomAdmissionToken: 'room-admission-token-one',
+    }, sender as any);
+    expect(sent[0]).toEqual({
+      type: 'dweb/base-host/room', op: 'join', roomId: 'r1', appId: 'app-one',
+      roomAdmissionToken: 'room-admission-token-one',
+      appDocumentId: 'document-one', appTabId: 41,
+    });
+  });
+
+  test('room relay waits for cold App owner revalidation before checking the live tab', async () => {
+    let ready = false;
+    let release!: () => void;
+    const trackerReady = new Promise<void>((resolve) => { release = resolve; });
+    const { deps, sent } = baseDeps({
+      ensureAppTrackerReady: async () => trackerReady,
+      appTabTracker: {
+        parseIdFromUrl: () => 'app-one',
+        getTabId: () => (ready ? 41 : null),
+      },
+    });
+    const pending = makeDwebRoutes(deps)['dweb/base/room']({
+      op: 'join', roomId: 'r1', appId: 'app-one',
+      roomAdmissionToken: 'room-admission-token-one',
+    }, {
+      url: 'chrome-extension://peerd/engine-tabs/app-tab/index.html#app-one',
+      documentId: 'document-one', tab: { id: 41 },
+    } as any);
+    await Promise.resolve();
+    expect(sent).toEqual([]);
+    ready = true;
+    release();
+    expect(await pending).toMatchObject({ ok: true });
+    expect(sent).toEqual([
+      expect.objectContaining({
+        type: 'dweb/base-host/room', op: 'join', appId: 'app-one',
+        appDocumentId: 'document-one', appTabId: 41,
+      }),
+    ]);
+  });
+
+  test('room relay rejects a forged App, stale tab, or missing document before host start', async () => {
+    const { deps, sent } = baseDeps({
+      appTabTracker: {
+        parseIdFromUrl: () => 'app-one',
+        getTabId: () => 41,
+      },
+    });
+    const route = makeDwebRoutes(deps)['dweb/base/room'];
+    expect(await route({ op: 'join', roomId: 'r1', appId: 'app-two' }, {
+      url: 'chrome-extension://peerd/engine-tabs/app-tab/index.html#app-one',
+      documentId: 'document-one', tab: { id: 41 },
+    } as any)).toEqual({ ok: false, error: 'app-room-owner-mismatch' });
+    expect(await route({ op: 'join', roomId: 'r1', appId: 'app-one' }, {
+      url: 'chrome-extension://peerd/engine-tabs/app-tab/index.html#app-one',
+      documentId: 'document-one', tab: { id: 42 },
+    } as any)).toEqual({ ok: false, error: 'app-room-owner-mismatch' });
+    expect(await route({ op: 'join', roomId: 'r1', appId: 'app-one' }, {
+      url: 'chrome-extension://peerd/engine-tabs/app-tab/index.html#app-one', tab: { id: 41 },
+    } as any)).toEqual({ ok: false, error: 'app-room-owner-mismatch' });
+    expect(sent).toEqual([]);
   });
 });

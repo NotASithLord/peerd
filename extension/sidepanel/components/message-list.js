@@ -26,9 +26,7 @@ import m from '/vendor/mithril/mithril.js';
 import { renderMarkdown } from '/shared/markdown.js';
 import { stripUntrustedFences } from '/shared/util.js';
 import { CHANNEL } from '/shared/channel-config.js';
-import {
-  classifyFailure, contributorFeedbackTargets, formatBytes,
-} from '/peerd-runtime/index.js';
+import { classifyFailure, contributorFeedbackTargets, formatBytes } from '/peerd-runtime/ui.js';
 
 // `performed:false` is host custody metadata. Error bodies are not: provider,
 // actor, and page text can all flow into them. Keep the human recovery generic

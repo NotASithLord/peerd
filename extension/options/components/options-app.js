@@ -143,7 +143,7 @@ const gate = (heading, copy) => m('.options-gate', m('.options-gate-card', [
 /** @typedef {import('../sections/reset-row.js').Send} Send */
 
 export const OptionsApp = {
-  /** @param {{ state: any, attrs: { send: Send } }} vnode */
+  /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode */
   oninit(vnode) {
     // Pending auto-memory suggestions count — feeds the badge on the
     // Memory nav entry (the discoverability affordance that used to be
@@ -153,7 +153,7 @@ export const OptionsApp = {
     OptionsApp.refreshSuggestions(vnode);
   },
 
-  /** @param {{ state: any, attrs: { send: Send } }} vnode */
+  /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode */
   oncreate(vnode) {
     // why: approvals can also happen in-panel (or in another options
     // tab); re-pull the badge when the user comes back to this tab so
@@ -162,13 +162,20 @@ export const OptionsApp = {
     window.addEventListener('focus', vnode.state.onFocus);
   },
 
+  /** @param {{state:any,attrs:{state:any,send:Send}}} vnode @param {{attrs:{state:any}}} old */
+  onbeforeupdate(vnode, old) {
+    if (!old.attrs.state && vnode.attrs.state) OptionsApp.refreshSuggestions(vnode);
+    return true;
+  },
+
   /** @param {{ state: any }} vnode */
   onremove(vnode) {
     window.removeEventListener('focus', vnode.state.onFocus);
   },
 
-  /** @param {{ state: any, attrs: { send: Send } }} vnode */
+  /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode */
   refreshSuggestions(vnode) {
+    if (!vnode.attrs.state) return;
     vnode.attrs.send({ type: 'memory/suggestions' }).then((/** @type {any} */ r) => {
       vnode.state.suggestionsCount = r?.ok ? (r.suggestions?.length ?? 0) : 0;
       m.redraw();
@@ -178,7 +185,8 @@ export const OptionsApp = {
     });
   },
 
-  /** @param {{ state: any, attrs: { state: any, send: Send, section: string } }} vnode */
+  /** @param {{ state: any, attrs: { state: any, send: Send, section: string,
+   * stateLoadFailed?: boolean, retryState?:()=>unknown } }} vnode */
   view(vnode) {
     const { state, send, section } = vnode.attrs;
     const ui = vnode.state;
@@ -189,6 +197,17 @@ export const OptionsApp = {
     // on focus. ("the peerd panel", not "side panel": Firefox renders a
     // sidebar, and the phrase covers both.)
     if (!state) {
+      if (vnode.attrs.stateLoadFailed) {
+        return m('.options-gate', m('.options-gate-card', [
+          m(Wordmark),
+          m('h2', 'Peerd is restarting'),
+          m('p', 'Peerd did not finish starting this page.'),
+          m('button', {
+            type: 'button',
+            onclick: () => vnode.attrs.retryState?.(),
+          }, 'Retry'),
+        ]));
+      }
       return gate(null, 'Loading…');
     }
     if (!state.vault?.initialized) {

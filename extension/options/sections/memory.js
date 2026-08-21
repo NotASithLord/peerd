@@ -16,7 +16,7 @@
 
 import m from '/vendor/mithril/mithril.js';
 import { countLines, ALWAYS_LOADED_LINE_BUDGET } from '/peerd-runtime/index.js';
-import { resetRow } from './reset-row.js';
+import { mutationFailureCopy } from '../mutation-custody.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
 /** @typedef {{ id?: string, kind: string, body?: string, workspace?: string, subpath?: string }} MemoryDoc */
@@ -28,22 +28,43 @@ export const MemoryView = {
     vnode.state.suggestions = null;   // pending auto-memory suggestions
     vnode.state.memNote = null;       // { ok, text } banner for memory actions
     vnode.state.memBusy = false;
+    vnode.state.memUncertain = false;
+    vnode.state.autoMemoryBusy = false;
+    vnode.state.autoMemoryUncertain = false;
     MemoryView.refresh(vnode);
   },
 
   /** @param {{ state: any, attrs: { send: Send } }} vnode */
-  refresh(vnode) {
-    vnode.attrs.send({ type: 'memory/export' }).then((/** @type {any} */ r) => {
-      if (r?.ok) vnode.state.memoryDocs = orderDocs(r.payload?.docs ?? []);
-      else { vnode.state.memoryDocs = []; vnode.state.memNote = { ok: false, text: r?.error ?? 'failed to load memory' }; }
+  async refresh(vnode) {
+    let docsOk = false;
+    let suggestionsOk = false;
+    const docs = vnode.attrs.send({ type: 'memory/export' }).then((/** @type {any} */ r) => {
+      if (r?.ok) {
+        docsOk = true;
+        vnode.state.memoryDocs = orderDocs(r.payload?.docs ?? []);
+      } else {
+        if (vnode.state.memoryDocs === null) vnode.state.memoryDocs = [];
+        vnode.state.memNote = { ok: false, text: 'Memory could not be loaded.' };
+      }
       m.redraw();
-    }).catch(() => { vnode.state.memoryDocs = []; m.redraw(); });
+    }).catch(() => {
+      if (vnode.state.memoryDocs === null) vnode.state.memoryDocs = [];
+      m.redraw();
+    });
     // Pending auto-memory suggestions — the strip at the top of the
     // page (the count also feeds the badge on the Memory nav entry).
-    vnode.attrs.send({ type: 'memory/suggestions' }).then((/** @type {any} */ r) => {
-      vnode.state.suggestions = r?.ok ? (r.suggestions ?? []) : [];
+    const suggestions = vnode.attrs.send({ type: 'memory/suggestions' }).then((/** @type {any} */ r) => {
+      if (r?.ok) {
+        suggestionsOk = true;
+        vnode.state.suggestions = r.suggestions ?? [];
+      } else if (vnode.state.suggestions === null) vnode.state.suggestions = [];
       m.redraw();
-    }).catch(() => { vnode.state.suggestions = []; m.redraw(); });
+    }).catch(() => {
+      if (vnode.state.suggestions === null) vnode.state.suggestions = [];
+      m.redraw();
+    });
+    await Promise.all([docs, suggestions]);
+    return { docsOk, suggestionsOk };
   },
 
   /** @param {{ state: any, attrs: { state: any, send: Send, onSuggestionsChanged?: () => void } }} vnode */
@@ -61,13 +82,32 @@ export const MemoryView = {
      * @param {string} okText
      */
     const act = async (msg, okText) => {
-      if (ui.memBusy) return;
+      if (ui.memBusy || ui.memUncertain) return;
       ui.memBusy = true; ui.memNote = null; m.redraw();
-      const r = await send(msg);
-      ui.memBusy = false;
-      ui.memNote = r?.ok ? { ok: true, text: okText } : { ok: false, text: r?.error ?? 'Action failed.' };
-      if (r?.ok) { reload(); onSuggestionsChanged?.(); }
-      m.redraw();
+      try {
+        let r;
+        try { r = await send(msg); }
+        catch { r = { ok: false, outcomeKnown: false }; }
+        const unknown = r?.outcomeKnown === false;
+        ui.memUncertain = unknown;
+        ui.memNote = r?.ok
+          ? { ok: true, text: okText }
+          : { ok: false, text: mutationFailureCopy(r, {
+              action: 'changing memory', fallback: 'The memory change could not be completed.',
+            }) };
+        if (r?.ok || unknown) {
+          const receipt = await reload();
+          onSuggestionsChanged?.();
+          if (r?.ok) ui.memUncertain = false;
+          else if (msg.type !== 'memory/init' && receipt.docsOk && receipt.suggestionsOk) {
+            ui.memUncertain = false;
+            ui.memNote = { ok: false, text: 'The mutation receipt was lost. Current memory was refreshed; verify it before trying again.' };
+          }
+        }
+      } finally {
+        ui.memBusy = false;
+        m.redraw();
+      }
     };
 
     const docs = ui.memoryDocs;
@@ -96,12 +136,12 @@ export const MemoryView = {
             s.sessionTitle ? m('span.muted', `from “${s.sessionTitle}”`) : m('span'),
             m('.spacer'),
             m('button', {
-              disabled: ui.memBusy,
+              disabled: ui.memBusy || ui.memUncertain,
               'aria-label': `Approve suggestion: ${s.text}`,
               onclick: () => act({ type: 'memory/suggestions/approve', id: s.id }, 'Added to user memory.'),
             }, 'Approve'),
             m('button.secondary', {
-              disabled: ui.memBusy,
+              disabled: ui.memBusy || ui.memUncertain,
               'aria-label': `Dismiss suggestion: ${s.text}`,
               onclick: () => act({ type: 'memory/suggestions/dismiss', id: s.id }, 'Suggestion dismissed.'),
             }, 'Dismiss'),
@@ -111,20 +151,20 @@ export const MemoryView = {
 
       m('.memory-actions', [
         m('button.secondary', {
-          disabled: ui.memBusy,
+          disabled: ui.memBusy || ui.memUncertain,
           title: 'Scan the active workspace and draft a project AGENTS.md — the draft arrives in the peerd panel for you to confirm, so open the panel first',
           onclick: () => act({ type: 'memory/init' },
             '/init started — open the peerd panel and watch the chat for the draft to confirm.'),
         }, 'Draft project memory (/init)'),
         hasUserDoc ? null : m('button.secondary', {
-          disabled: ui.memBusy,
+          disabled: ui.memBusy || ui.memUncertain,
           onclick: () => act(
             { type: 'memory/write', scope: { kind: 'user' }, body: '# User memory\n\n- ' },
             'Created a user note — edit it below.'),
         }, 'New user note'),
         m('.spacer'),
         (Array.isArray(docs) && docs.length > 0) ? m('button.linkish.danger-text', {
-          disabled: ui.memBusy,
+          disabled: ui.memBusy || ui.memUncertain,
           onclick: () => {
             if (ui.memConfirmWipe) {
               act({ type: 'memory/deleteAll' }, 'All memory deleted.');
@@ -154,17 +194,57 @@ export const MemoryView = {
       m('div', { style: 'display:flex; gap:8px; align-items:center;' }, [
         m('button.secondary', {
           type: 'button',
-          disabled: ui.autoMemoryBusy,
+          disabled: ui.autoMemoryBusy || ui.autoMemoryUncertain,
           onclick: async () => {
-            if (ui.autoMemoryBusy) return;
+            if (ui.autoMemoryBusy || ui.autoMemoryUncertain) return;
             ui.autoMemoryBusy = true;
-            await send({ type: 'settings/update', patch: { autoMemoryEnabled: !autoMemoryOn } });
-            ui.autoMemoryBusy = false;
-            m.redraw();
+            try {
+              let reply;
+              try {
+                reply = await send({
+                  type: 'settings/update', patch: { autoMemoryEnabled: !autoMemoryOn },
+                });
+              } catch { reply = { ok: false, outcomeKnown: false }; }
+              if (reply?.ok) ui.autoMemoryUncertain = false;
+              else {
+                ui.autoMemoryUncertain = reply?.outcomeKnown === false;
+                ui.memNote = { ok: false, text: mutationFailureCopy(reply, {
+                  action: 'changing auto-memory', fallback: 'Auto-memory could not be changed.',
+                }) };
+              }
+            } finally {
+              ui.autoMemoryBusy = false;
+              m.redraw();
+            }
           },
         }, ui.autoMemoryBusy ? '…' : autoMemoryOn ? 'Disable auto-memory' : 'Enable auto-memory'),
       ]),
-      resetRow(send, ['autoMemoryEnabled']),
+      m('div', { style: 'margin-top:10px;' }, [
+        m('button.secondary', {
+          type: 'button',
+          style: 'font-size:12px;',
+          disabled: ui.autoMemoryBusy || ui.autoMemoryUncertain,
+          onclick: async () => {
+            if (ui.autoMemoryBusy || ui.autoMemoryUncertain) return;
+            ui.autoMemoryBusy = true;
+            try {
+              let reply;
+              try { reply = await send({ type: 'settings/reset', keys: ['autoMemoryEnabled'] }); }
+              catch { reply = { ok: false, outcomeKnown: false }; }
+              if (reply?.ok) ui.autoMemoryUncertain = false;
+              else {
+                ui.autoMemoryUncertain = reply?.outcomeKnown === false;
+                ui.memNote = { ok: false, text: mutationFailureCopy(reply, {
+                  action: 'resetting auto-memory', fallback: 'Auto-memory could not be reset.',
+                }) };
+              }
+            } finally {
+              ui.autoMemoryBusy = false;
+              m.redraw();
+            }
+          },
+        }, ui.autoMemoryBusy ? 'Saving…' : 'Reset section to defaults'),
+      ]),
     ]);
   },
 };
@@ -203,10 +283,11 @@ const MemoryDocCard = {
   oninit(vnode) {
     vnode.state.draft = vnode.attrs.doc.body ?? '';
     vnode.state.busy = false;
+    vnode.state.uncertain = false;
     vnode.state.msg = null;
     vnode.state.confirmDelete = false;
   },
-  /** @param {{ attrs: { doc: MemoryDoc, send: Send, onChanged?: () => void }, state: any }} vnode */
+  /** @param {{ attrs: { doc: MemoryDoc, send: Send, onChanged?: () => any }, state: any }} vnode */
   view: ({ attrs: { doc, send, onChanged }, state: ui }) => {
     const dirty = ui.draft !== (doc.body ?? '');
     const lines = countLines(ui.draft);
@@ -215,21 +296,60 @@ const MemoryDocCard = {
     const scope = { kind: doc.kind, workspace: doc.workspace, subpath: doc.subpath };
 
     const save = async () => {
-      if (ui.busy || !dirty) return;
+      if (ui.busy || ui.uncertain || !dirty) return;
       ui.busy = true; ui.msg = null; m.redraw();
-      const r = await send({ type: 'memory/write', scope, body: ui.draft });
-      ui.busy = false;
-      ui.msg = r?.ok ? { ok: true, text: 'Saved.' } : { ok: false, text: r?.error ?? 'Save failed.' };
-      if (r?.ok) onChanged?.();
-      m.redraw();
+      try {
+        let r;
+        try { r = await send({ type: 'memory/write', scope, body: ui.draft }); }
+        catch { r = { ok: false, outcomeKnown: false }; }
+        const unknown = r?.outcomeKnown === false;
+        ui.uncertain = unknown;
+        ui.msg = r?.ok
+          ? { ok: true, text: 'Saved.' }
+          : { ok: false, text: mutationFailureCopy(r, {
+              action: 'saving memory', fallback: 'Memory could not be saved.',
+            }) };
+        if (r?.ok || unknown) {
+          const receipt = await onChanged?.();
+          if (r?.ok) ui.uncertain = false;
+          else if (receipt?.docsOk) {
+            ui.uncertain = false;
+            ui.msg = { ok: false, text: 'The save receipt was lost. Current memory was refreshed; verify it before trying again.' };
+          }
+        }
+      } finally {
+        ui.busy = false;
+        m.redraw();
+      }
     };
 
     const del = async () => {
+      if (ui.busy || ui.uncertain) return;
       ui.busy = true; ui.msg = null; m.redraw();
-      const r = await send({ type: 'memory/delete', scope });
-      ui.busy = false;
-      if (r?.ok) { onChanged?.(); }
-      else { ui.msg = { ok: false, text: r?.error ?? 'Delete failed.' }; m.redraw(); }
+      try {
+        let r;
+        try { r = await send({ type: 'memory/delete', scope }); }
+        catch { r = { ok: false, outcomeKnown: false }; }
+        const unknown = r?.outcomeKnown === false;
+        ui.uncertain = unknown;
+        if (r?.ok || unknown) {
+          const receipt = await onChanged?.();
+          if (r?.ok) ui.uncertain = false;
+          else if (receipt?.docsOk) {
+            ui.uncertain = false;
+            ui.msg = { ok: false, text: 'The delete receipt was lost. Current memory was refreshed; verify it before trying again.' };
+          }
+        }
+        if (!r?.ok && ui.uncertain) ui.msg = { ok: false, text: mutationFailureCopy(r, {
+          action: 'deleting memory', fallback: 'Memory could not be deleted.',
+        }) };
+        else if (!r?.ok && !unknown) ui.msg = { ok: false, text: mutationFailureCopy(r, {
+          action: 'deleting memory', fallback: 'Memory could not be deleted.',
+        }) };
+      } finally {
+        ui.busy = false;
+        m.redraw();
+      }
     };
 
     return m('.memory-card', [
@@ -245,25 +365,25 @@ const MemoryDocCard = {
         // why: grow with content but cap so a long doc doesn't take over
         // the whole pane — the textarea scrolls past the cap.
         rows: Math.min(24, Math.max(5, lines + 1)),
-        disabled: ui.busy,
+        disabled: ui.busy || ui.uncertain,
         oninput: (/** @type {{ target: HTMLTextAreaElement }} */ e) => { ui.draft = e.target.value; },
       }),
       over ? m('p.memory-warn',
         `Over the ${ALWAYS_LOADED_LINE_BUDGET}-line always-loaded budget — trim it, or the loader truncates this scope.`) : null,
       m('.memory-card-actions', [
-        m('button', { disabled: ui.busy || !dirty, onclick: save }, ui.busy ? '…' : 'Save'),
+        m('button', { disabled: ui.busy || ui.uncertain || !dirty, onclick: save }, ui.busy ? '…' : 'Save'),
         dirty ? m('button.secondary', {
-          disabled: ui.busy,
+          disabled: ui.busy || ui.uncertain,
           onclick: () => { ui.draft = doc.body ?? ''; ui.msg = null; },
         }, 'Revert') : null,
         m('.spacer'),
         ui.confirmDelete
           ? m('span.memory-confirm', [
               m('span.muted', { style: 'font-size:12px;' }, 'Delete this scope?'),
-              m('button.linkish.danger-text', { disabled: ui.busy, onclick: del }, 'Yes'),
-              m('button.linkish', { disabled: ui.busy, onclick: () => { ui.confirmDelete = false; } }, 'No'),
+              m('button.linkish.danger-text', { disabled: ui.busy || ui.uncertain, onclick: del }, 'Yes'),
+              m('button.linkish', { disabled: ui.busy || ui.uncertain, onclick: () => { ui.confirmDelete = false; } }, 'No'),
             ])
-          : m('button.linkish.danger-text', { disabled: ui.busy, onclick: () => { ui.confirmDelete = true; } }, 'Delete'),
+          : m('button.linkish.danger-text', { disabled: ui.busy || ui.uncertain, onclick: () => { ui.confirmDelete = true; } }, 'Delete'),
       ]),
       ui.msg ? m(`p.key-msg${ui.msg.ok ? '.ok' : '.err'}`, ui.msg.text) : null,
     ]);

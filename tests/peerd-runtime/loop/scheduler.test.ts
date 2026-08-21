@@ -17,34 +17,46 @@ const settle = async (pred: () => boolean, tries = 200) => {
   for (let i = 0; i < tries && !pred(); i++) await new Promise((r) => setTimeout(r, 0));
 };
 
-function makeHarness(opts: { locked?: boolean } = {}) {
+function makeHarness(opts: {
+  locked?: boolean,
+  fireRoutine?: (routine: any) => Promise<any>,
+} = {}) {
   let clock = 1_000_000;
   let locked = opts.locked ?? false;
   const store = new Map<string, any>();
   const fired: any[] = [];
   const alarms: (number | null)[] = [];
+  const events: any[] = [];
   const running = new Set<string>();          // routineIds whose prior run is "still going"
   let idSeq = 0;
+  let failWrites = false;
 
   const scheduler = makeScheduler({
-    fireRoutine: async (routine: any) => { fired.push(routine); return { sessionId: `sess-${routine.id}` }; },
+    fireRoutine: opts.fireRoutine ?? (async (routine: any) => {
+      fired.push(routine); return { sessionId: `sess-${routine.id}` };
+    }),
     kv: {
-      get: async (k: string) => store.get(k),
-      set: async (k: string, v: any) => { store.set(k, v); },
+      get: async (k: string) => structuredClone(store.get(k)),
+      set: async (k: string, v: any) => {
+        if (failWrites) throw new Error('storage unavailable');
+        store.set(k, structuredClone(v));
+      },
     },
     isLocked: () => locked,
     isRunning: (routine: any) => running.has(routine.id),
     setAlarm: (when: number | null) => { alarms.push(when); },
+    onEvent: (event: any) => { events.push(event); },
     now: () => clock,
     makeId: () => `r${++idSeq}`,
   });
 
   return {
-    scheduler, store, fired, alarms, running,
+    scheduler, store, fired, alarms, events, running,
     advance: (ms: number) => { clock += ms; },
     now: () => clock,
     lock: () => { locked = true; },
     unlock: () => { locked = false; },
+    failWrites: (value = true) => { failWrites = value; },
     stored: () => store.get(SCHEDULE_ROUTINES_KEY) ?? {},
   };
 }
@@ -225,5 +237,133 @@ describe('makeScheduler — durability (load on boot)', () => {
     h.store.set(SCHEDULE_ROUTINES_KEY, { [r.id]: { ...r } });
     expect((await h.scheduler.load()).loaded).toBe(0);
     expect(h.scheduler.list()).toHaveLength(1);
+  });
+
+  it('keeps a pending firing through recycle and reports it outcome-unknown without replay', async () => {
+    const h1 = makeHarness();
+    const routine = (h1.scheduler.add({ prompt: 'x', every: '1h' }) as any).routine;
+    h1.store.set(SCHEDULE_ROUTINES_KEY, {
+      [routine.id]: {
+        ...routine,
+        lastRunAt: routine.nextRunAt,
+        nextRunAt: routine.nextRunAt + HOUR,
+        runCount: 1,
+        pendingRunAt: routine.nextRunAt,
+      },
+    });
+    const h2 = makeHarness();
+    h2.store.set(SCHEDULE_ROUTINES_KEY, h1.store.get(SCHEDULE_ROUTINES_KEY));
+    expect(await h2.scheduler.load()).toEqual({ loaded: 1 });
+    expect(h2.fired).toEqual([]);
+    expect(h2.scheduler.list()[0]).toMatchObject({
+      pendingRunAt: null,
+      lastOutcomeUnknownAt: routine.nextRunAt,
+      runCount: 1,
+    });
+    expect(h2.events).toContainEqual({
+      type: 'schedule/outcome-unknown', id: routine.id,
+    });
+    expect(h2.stored()[routine.id].pendingRunAt).toBeNull();
+  });
+});
+
+describe('makeScheduler — execution custody', () => {
+  it('never executes when the pending custody marker is not durable', async () => {
+    const calls: string[] = [];
+    const h = makeHarness({ fireRoutine: async (routine) => { calls.push(routine.id); } });
+    h.scheduler.add({ prompt: 'x', every: '1h' });
+    h.advance(HOUR + MIN);
+    h.failWrites();
+    expect(await h.scheduler.tick()).toMatchObject({ fired: 0 });
+    expect(calls).toEqual([]);
+    expect(h.scheduler.list()[0]).toMatchObject({
+      runCount: 0,
+      lastRunAt: null,
+      pendingRunAt: null,
+      nextRunAt: h.now() + LOCKED_BACKOFF_MS,
+    });
+    expect(h.events).toContainEqual({
+      type: 'schedule/retry', id: 'r1', code: 'schedule-storage-unavailable',
+    });
+  });
+
+  it('keeps tick pending until bounded execution admission settles', async () => {
+    let release = (_value: any) => {};
+    const admitted = new Promise((resolve) => { release = resolve; });
+    const h = makeHarness({ fireRoutine: async () => admitted });
+    h.scheduler.add({ prompt: 'x', every: '1h' });
+    h.advance(HOUR + MIN);
+    let settled = false;
+    const ticking = h.scheduler.tick().then((result) => { settled = true; return result; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    expect(h.scheduler.list()[0].pendingRunAt).toBe(h.now());
+    release({ sessionId: 'scheduled-session' });
+    expect(await ticking).toMatchObject({ fired: 1 });
+    expect(h.scheduler.list()[0]).toMatchObject({
+      pendingRunAt: null, lastSessionId: 'scheduled-session',
+    });
+  });
+
+  it('retries only a known pre-commit refusal without consuming the cadence slot', async () => {
+    const refusal = Object.assign(new Error('host did not accept custody'), {
+      code: 'controller-host-missing', outcomeKnown: true,
+    });
+    const h = makeHarness({ fireRoutine: async () => { throw refusal; } });
+    h.scheduler.add({ prompt: 'x', every: '1h' });
+    h.advance(HOUR + MIN);
+    await h.scheduler.tick();
+    expect(h.scheduler.list()[0]).toMatchObject({
+      runCount: 0,
+      lastRunAt: null,
+      pendingRunAt: null,
+      lastOutcomeUnknownAt: null,
+      nextRunAt: h.now() + LOCKED_BACKOFF_MS,
+    });
+    expect(h.events).toContainEqual({
+      type: 'schedule/retry', id: 'r1', code: 'controller-host-missing',
+    });
+  });
+
+  it('never replays a post-commit loss and makes the unknown outcome durable', async () => {
+    const loss = Object.assign(new Error('channel lost after commit'), {
+      code: 'controller-channel-lost', outcomeKnown: false,
+    });
+    const h = makeHarness({ fireRoutine: async () => { throw loss; } });
+    h.scheduler.add({ prompt: 'x', every: '1h' });
+    h.advance(HOUR + MIN);
+    await h.scheduler.tick();
+    const routine = h.scheduler.list()[0];
+    expect(routine).toMatchObject({
+      runCount: 1,
+      pendingRunAt: null,
+      lastOutcomeUnknownAt: h.now(),
+    });
+    expect(routine.nextRunAt).toBeGreaterThan(h.now());
+    expect(h.events).toContainEqual({ type: 'schedule/outcome-unknown', id: 'r1' });
+    expect(h.stored()[routine.id].lastOutcomeUnknownAt).toBe(h.now());
+  });
+
+  it('retains the pending marker when result persistence fails after host custody', async () => {
+    let h: ReturnType<typeof makeHarness>;
+    h = makeHarness({ fireRoutine: async () => {
+      h.failWrites();
+      return { sessionId: 'committed-session' };
+    } });
+    h.scheduler.add({ prompt: 'x', every: '1h' });
+    h.advance(HOUR + MIN);
+    await expect(h.scheduler.tick()).rejects.toThrow('storage unavailable');
+    const stored = h.stored().r1;
+    expect(stored.pendingRunAt).toBe(h.now());
+    expect(stored.lastSessionId).toBeNull();
+
+    const recovered = makeHarness();
+    recovered.store.set(SCHEDULE_ROUTINES_KEY, structuredClone(h.stored()));
+    await recovered.scheduler.load();
+    expect(recovered.fired).toEqual([]);
+    expect(recovered.scheduler.list()[0]).toMatchObject({
+      pendingRunAt: null,
+      lastOutcomeUnknownAt: h.now(),
+    });
   });
 });

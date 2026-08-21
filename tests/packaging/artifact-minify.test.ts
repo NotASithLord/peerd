@@ -63,7 +63,7 @@ describe('release artifact JavaScript minification', () => {
     write(root, 'offscreen/support.js', 'export const offscreenValue = 9;\n');
 
     const swBefore = readFileSync(join(root, 'background/service-worker.js'), 'utf8');
-    const report = await minifyColdArtifactModules(root, 'chrome');
+    const report = await minifyColdArtifactModules(root, 'chrome', 'store');
     const swAfter = readFileSync(join(root, 'background/service-worker.js'), 'utf8');
 
     expect(report.graphs.serviceWorker.afterBytes).toBeLessThan(report.graphs.serviceWorker.beforeBytes);
@@ -93,7 +93,7 @@ describe('release artifact JavaScript minification', () => {
     const offscreen = '// Firefox does not load this host\nexport const untouched = true;\n';
     write(root, 'offscreen/offscreen.js', offscreen);
 
-    const report = await minifyColdArtifactModules(root, 'firefox');
+    const report = await minifyColdArtifactModules(root, 'firefox', 'store');
 
     expect(report.graphs.offscreen).toBeUndefined();
     expect(readFileSync(join(root, 'offscreen/offscreen.js'), 'utf8')).toBe(offscreen);
@@ -105,8 +105,10 @@ describe('release artifact JavaScript minification', () => {
   });
 
   test('fails when an optimized cold graph exceeds its release budget', () => {
-    const budget = COLD_GRAPH_BUDGETS.serviceWorker;
+    const budget = COLD_GRAPH_BUDGETS.store.chrome.serviceWorker.graphBytes;
     expect(() => assertColdArtifactBudgets({
+      browser: 'chrome',
+      channel: 'store',
       transformedModules: 1,
       preservedModules: 0,
       beforeBytes: budget + 2,
@@ -114,11 +116,37 @@ describe('release artifact JavaScript minification', () => {
       graphs: {
         serviceWorker: {
           entry: 'background/service-worker.js',
+          entryBytes: 1,
           modules: 1,
           beforeBytes: budget + 2,
           afterBytes: budget + 1,
         },
       },
     })).toThrow(/budget/);
+  });
+
+  test('fails before browser launch when module or exact entry ratchets grow', () => {
+    const budget = COLD_GRAPH_BUDGETS.store.chrome.serviceWorker;
+    const report = {
+      browser: 'chrome' as const,
+      channel: 'store' as const,
+      transformedModules: 1,
+      preservedModules: 0,
+      beforeBytes: budget.graphBytes,
+      afterBytes: budget.graphBytes - 1,
+      graphs: {
+        serviceWorker: {
+          entry: 'background/service-worker.js',
+          entryBytes: budget.entryBytes + 1,
+          modules: Number(budget.modules),
+          beforeBytes: budget.graphBytes,
+          afterBytes: budget.graphBytes - 1,
+        },
+      },
+    };
+    expect(() => assertColdArtifactBudgets(report)).toThrow(/cold entry/);
+    report.graphs.serviceWorker.entryBytes = budget.entryBytes;
+    report.graphs.serviceWorker.modules = budget.modules + 1;
+    expect(() => assertColdArtifactBudgets(report)).toThrow(/modules/);
   });
 });

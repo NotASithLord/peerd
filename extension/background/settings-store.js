@@ -1,21 +1,4 @@
 // @ts-check
-// background/settings-store.js — per-profile settings behind a store, so every
-// reader gets the LIVE merged view via a method instead of closing over a
-// reassigned `let settings` singleton.
-//
-// why a store (step 2 of the SW decomposition): `settings` and `storedSettings`
-// were module-level lets replaced wholesale on every update/reset. Dozens of
-// read sites (the turn driver, buildToolContext, buildStateSnapshot,
-// buildModelOptions, the dweb routes, …) read them directly, and the settings
-// routes mutated them — which is why those routes had to stay inline. Behind a
-// store, a reader calls `.get()` (always current) and the routes call
-// `.update()` / `.reset()`.
-//
-// Migration semantics (Option A, PACKAGING.md) preserved exactly: `stored` holds
-// ONLY the keys the user explicitly set (what persists + exports); the merged
-// view is `{ ...defaults, ...stored }`, so a key absent from `stored` tracks the
-// channel default across releases, and reset FORGETS keys rather than writing
-// new values. Imports nothing (kv + defaults injected) → Bun-importable.
 
 /**
  * @param {{
@@ -29,11 +12,6 @@ export const makeSettingsStore = ({ kv, key, defaults }) => {
   let stored = {};
   /** The merged view consumers read: { ...defaults, ...stored }. */
   let merged = { ...defaults };
-  // Every read-modify-write runs behind the initial storage read and behind the
-  // previous mutation. A portless Options tab can wake a cold MV3 worker and
-  // send a write before boot hydration settles; multiple live surfaces can also
-  // write concurrently. Without one queue, either path can persist an older
-  // snapshot last and silently discard otherwise-successful settings changes.
   let hydrated = false;
   /** @type {Promise<unknown>} */
   let operationTail = Promise.resolve();
@@ -41,8 +19,6 @@ export const makeSettingsStore = ({ kv, key, defaults }) => {
   /** @template T @param {() => Promise<T>} operation @returns {Promise<T>} */
   const enqueue = (operation) => {
     const result = operationTail.then(operation, operation);
-    // A failed storage operation must reject its caller, but must not poison the
-    // queue forever. The next operation retries hydration/persistence normally.
     operationTail = result.then(() => undefined, () => undefined);
     return result;
   };
@@ -90,4 +66,106 @@ export const makeSettingsStore = ({ kv, key, defaults }) => {
       return merged;
     }),
   };
+};
+
+const LEARNED_KEY = 'learnedOrigins.v1';
+const MAX_LEARNED = 500;
+const LEARNED_REASONS = new Set(['password-field', 'confirmed-write']);
+const PUBLIC_HOST = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}$/;
+
+/** @param {unknown} input */
+export const normalizeKernelLearnedHost = (input) => {
+  let value = String(input ?? '').trim();
+  if (!value) return null;
+  if (!/^https?:\/\//i.test(value)) value = `https://${value}`;
+  try {
+    const parsed = new URL(value);
+    if (!['http:', 'https:'].includes(parsed.protocol)
+        || !PUBLIC_HOST.test(parsed.hostname)) return null;
+    return parsed.hostname;
+  } catch { return null; }
+};
+
+/** @param {unknown} value */
+const parseLearnedRecord = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return new Map();
+  const result = new Map();
+  for (const [raw, reason] of Object.entries(value)) {
+    const host = normalizeKernelLearnedHost(raw);
+    if (host && LEARNED_REASONS.has(reason) && !result.has(host)
+        && result.size < MAX_LEARNED) result.set(host, reason);
+  }
+  return result;
+};
+
+/** @param {Map<string, unknown>} learned */
+const learnedResponse = (learned) => ({
+  ok: true,
+  origins: [...learned].map(([host, reason]) => ({ host, reason }))
+    .sort((a, b) => a.host.localeCompare(b.host)),
+});
+
+/**
+ * @param {Object} deps
+ * @param {{get:(key:string)=>Promise<any>,set:(key:string,value:any)=>Promise<void>}} deps.kv
+ * @param {{append:(entry:any)=>Promise<any>}} deps.auditLog
+ * @param {(message:string,error:unknown)=>void} [deps.onError]
+ */
+export const makeKernelLearnedOriginRoutes = ({
+  kv, auditLog, onError = (message, error) => console.warn(message, error),
+}) => {
+  if (!kv || !auditLog) throw new TypeError('kernel-learned-origins-config-invalid');
+  let mutationTail = Promise.resolve();
+  const load = async () => {
+    try { return parseLearnedRecord(await kv.get(LEARNED_KEY)); }
+    catch (error) {
+      onError('[kernel] learned origins load failed', error);
+      return new Map();
+    }
+  };
+  /** @param {Map<string, unknown>} learned */
+  const save = async (learned) => {
+    try { await kv.set(LEARNED_KEY, Object.fromEntries(learned)); }
+    catch (cause) {
+      onError('[kernel] learned origins save failed', cause);
+      const error = /** @type {Error & {code?:string,outcomeKnown?:boolean,cause?:unknown}} */ (
+        new Error('The learned-origin change could not be confirmed.')
+      );
+      error.code = 'learned-origins-save-failed';
+      error.outcomeKnown = false;
+      error.cause = cause;
+      throw error;
+    }
+  };
+  /** @template T @param {()=>Promise<T>} operation */
+  const mutate = (operation) => {
+    const run = mutationTail.then(operation, operation);
+    mutationTail = run.then(() => {}, () => {});
+    return run;
+  };
+  const auditForgotten = (/** @type {string[]} */ hosts) => {
+    for (const host of hosts) {
+      auditLog.append({ type: 'origin_unlearned_sensitive', details: { host } }).catch(() => {});
+    }
+  };
+  return Object.freeze({
+    'learned/list': async () => learnedResponse(await load()),
+    'learned/forget': async (/** @type {any} */ { host, origin } = {}) => mutate(async () => {
+      const canonical = normalizeKernelLearnedHost(host ?? origin);
+      if (!canonical) return { ok: false, error: 'invalid-origin' };
+      const learned = await load();
+      if (!learned.delete(canonical)) return { ok: false, error: 'not-learned' };
+      await save(learned);
+      auditForgotten([canonical]);
+      return learnedResponse(learned);
+    }),
+    'learned/clear': async () => mutate(async () => {
+      const learned = await load();
+      const forgotten = [...learned.keys()];
+      learned.clear();
+      await save(learned);
+      auditForgotten(forgotten);
+      return { ...learnedResponse(learned), forgotten: forgotten.length };
+    }),
+  });
 };

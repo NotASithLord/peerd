@@ -20,7 +20,7 @@
 // composer's add-a-key-in-Settings empty state).
 
 import m from '/vendor/mithril/mithril.js';
-import { checkApiKeyFormat, KEY_PREFIX } from '/peerd-provider/index.js';
+import { checkApiKeyFormat, KEY_PREFIX } from '/peerd-provider/ui.js';
 
 /** @typedef {(msg: object) => Promise<any>} Send */
 
@@ -48,8 +48,11 @@ const DISPLAY_LABEL = Object.freeze({
  * @property {string} selected
  * @property {string} keyInput
  * @property {boolean} busy
+ * @property {'save'|'test'|'switch'|null} uncertain
  * @property {{ ok: boolean, text: string }|null} msg
- * @property {Record<string, 'checking'|'connected'|'down'>} conn
+ * @property {Record<string, 'checking'|'connected'|'empty'|'down'>} conn
+ * @property {boolean} statusError
+ * @property {number} statusGeneration
  */
 
 /** @typedef {{ state: ProviderStepState, attrs: { send: Send, onDone: () => void, busy?: boolean } }} ProviderStepVnode */
@@ -61,26 +64,50 @@ export const ProviderStep = {
     vnode.state.selected = 'anthropic';
     vnode.state.keyInput = '';
     vnode.state.busy = false;
+    vnode.state.uncertain = null;
     vnode.state.msg = null;
     vnode.state.conn = {};
-    vnode.attrs.send({ type: 'provider/status' }).then((r) => {
-      // A resolved-but-not-ok reply must not strand the step on 'Loading…'
-      // forever - the dispatcher turns route throws into { ok:false }, and
-      // an empty list still leaves the skip as the honest way forward.
-      if (!r?.ok) { vnode.state.rows = []; m.redraw(); return; }
-      vnode.state.rows = r.providers ?? [];
+    vnode.state.statusError = false;
+    vnode.state.statusGeneration = 0;
+    ProviderStep.loadStatus(vnode);
+  },
+
+  /** @param {ProviderStepVnode} vnode */
+  async loadStatus(vnode) {
+    const generation = ++vnode.state.statusGeneration;
+    vnode.state.statusError = false;
+    if (vnode.state.rows === null) m.redraw();
+    try {
+      const r = await vnode.attrs.send({ type: 'provider/status' });
+      if (generation !== vnode.state.statusGeneration) return;
+      if (!r?.ok || !Array.isArray(r.providers)) {
+        vnode.state.rows = null;
+        vnode.state.statusError = true;
+        m.redraw();
+        return;
+      }
+      vnode.state.rows = r.providers;
       // Quietly probe live keyless daemons (Ollama) so REACHED reflects a
       // daemon that actually answered - same posture as the options card.
       for (const p of vnode.state.rows ?? []) {
         if (p.keyless && p.liveModels) {
           vnode.state.conn[p.name] = 'checking';
           vnode.attrs.send({ type: 'provider/test', provider: p.name })
-            .then((t) => { vnode.state.conn[p.name] = t?.ok ? 'connected' : 'down'; m.redraw(); })
+            .then((t) => {
+              vnode.state.conn[p.name] = t?.ok ? 'connected'
+                : t?.reachable === true && t?.models === 0 ? 'empty' : 'down';
+              m.redraw();
+            })
             .catch(() => { vnode.state.conn[p.name] = 'down'; m.redraw(); });
         }
       }
       m.redraw();
-    }).catch(() => { vnode.state.rows = []; m.redraw(); });
+    } catch {
+      if (generation !== vnode.state.statusGeneration) return;
+      vnode.state.rows = null;
+      vnode.state.statusError = true;
+      m.redraw();
+    }
   },
 
   /** @param {ProviderStepVnode} vnode */
@@ -102,37 +129,58 @@ export const ProviderStep = {
         ui.busy = true;
         m.redraw();
         try {
-          const saved = await send({
-            type: 'provider/setKey', provider: selectedRow.name,
-            plaintext: check.value, activate: false,
-          });
-          if (!saved?.ok) {
-            ui.msg = { ok: false, text: saved?.error ?? 'Something went wrong.' };
-            return;
+          let phase = ui.uncertain ?? 'save';
+          const effect = async (/** @type {any} */ message) => {
+            try { return await send(message); }
+            catch { return { ok: false, outcomeKnown: false }; }
+          };
+          if (phase === 'save') {
+            const saved = await effect({
+              type: 'provider/setKey', provider: selectedRow.name,
+              plaintext: check.value, activate: false,
+            });
+            if (!saved?.ok) {
+              ui.uncertain = saved?.outcomeKnown === false ? 'save' : null;
+              ui.msg = { ok: false, text: ui.uncertain
+                ? 'Peerd could not confirm the save. Finish the same save before changing the key.'
+                : saved?.error === 'locked' ? 'Vault is locked; unlock it and try again.'
+                  : 'The provider key could not be saved.' };
+              return;
+            }
+            phase = 'test';
           }
           // The same one-token ping the options card runs after a save - the
           // user should leave this step knowing the key works, not hoping.
           // why verify BEFORE switching the active provider: a failed verify
           // must leave the previously configured provider in force, not a
           // half-configured one the next send trips over.
-          const test = await send({ type: 'provider/test', provider: selectedRow.name });
-          if (!test?.ok) {
-            ui.msg = {
-              ok: false,
-              text: test?.error === 'invalid-key'
-                ? 'Provider rejected the key (401). Double-check it.'
-                : `Saved, but the key could not be verified: ${test?.error ?? 'unknown error'}.`,
-            };
-            return;
+          if (phase === 'test') {
+            const test = await effect({ type: 'provider/test', provider: selectedRow.name });
+            if (!test?.ok) {
+              ui.uncertain = test?.outcomeKnown === false ? 'test' : null;
+              ui.msg = { ok: false, text: ui.uncertain
+                ? 'The key is saved, but Peerd could not confirm the test. Verify again when ready.'
+                : test?.error === 'invalid-key'
+                  ? 'Provider rejected the key (401). Double-check it.'
+                  : 'Saved, but the key could not be verified.' };
+              return;
+            }
+            phase = 'switch';
           }
-          const switched = await send({ type: 'settings/update', patch: { providerName: selectedRow.name, providerModel: '' } });
+          const switched = await effect({
+            type: 'settings/update', patch: { providerName: selectedRow.name, providerModel: '' },
+          });
           if (!switched?.ok) {
-            ui.msg = { ok: false, text: switched?.error ?? 'Something went wrong.' };
+            ui.uncertain = switched?.outcomeKnown === false ? 'switch' : null;
+            ui.msg = { ok: false, text: ui.uncertain
+              ? 'Peerd could not confirm the provider selection. Finish the same selection to continue.'
+              : 'The provider selection could not be saved.' };
             return;
           }
           // The plaintext has done its job - it lives encrypted in the vault
           // now, and must not linger in component state.
           ui.keyInput = '';
+          ui.uncertain = null;
           onDone();
         } finally {
           ui.busy = false;
@@ -141,14 +189,27 @@ export const ProviderStep = {
         return;
       }
       // Keyless (Ollama): nothing to store - just make it the provider.
+      if (ui.conn[selectedRow.name] === 'empty') {
+        ui.msg = { ok: false, text: 'Ollama is running, but it has no models. Pull a model before continuing.' };
+        return;
+      }
       ui.busy = true;
       m.redraw();
       try {
-        const switched = await send({ type: 'settings/update', patch: { providerName: selectedRow.name, providerModel: '' } });
+        let switched;
+        try {
+          switched = await send({
+            type: 'settings/update', patch: { providerName: selectedRow.name, providerModel: '' },
+          });
+        } catch { switched = { ok: false, outcomeKnown: false }; }
         if (!switched?.ok) {
-          ui.msg = { ok: false, text: switched?.error ?? 'Something went wrong.' };
+          ui.uncertain = switched?.outcomeKnown === false ? 'switch' : null;
+          ui.msg = { ok: false, text: ui.uncertain
+            ? 'Peerd could not confirm the provider selection. Finish the same selection to continue.'
+            : 'The provider selection could not be saved.' };
           return;
         }
+        ui.uncertain = null;
         onDone();
       } finally {
         ui.busy = false;
@@ -160,6 +221,7 @@ export const ProviderStep = {
     const chip = (p) => {
       if (p.keyless && !p.liveModels) return m('span.onb-provider-chip', 'NOT YET USABLE');
       if (p.keyless) {
+        if (ui.conn[p.name] === 'empty') return m('span.onb-provider-chip', 'NO MODELS');
         return ui.conn[p.name] === 'connected'
           ? m('span.onb-provider-chip.is-reached', [m('span.onb-provider-dot', { 'aria-hidden': 'true' }), 'REACHED'])
           : m('span.onb-provider-chip', 'NO KEY NEEDED');
@@ -173,14 +235,22 @@ export const ProviderStep = {
         'Your key is encrypted in the vault you just created and is sent ' +
         'only to the provider you choose. There is no peerd account.'),
       rows === null
-        ? m('p.muted', 'Loading…')
+        ? ui.statusError
+          ? m('.onb-provider-status-error', { role: 'alert' }, [
+              m('p', 'Peerd could not load provider choices. No key or setting was changed.'),
+              m('button', {
+                type: 'button',
+                onclick: () => ProviderStep.loadStatus(vnode),
+              }, 'Retry loading providers'),
+            ])
+          : m('p.muted', 'Loading…')
         : m('.onb-provider-rows', { role: 'radiogroup', 'aria-label': 'Provider' },
             rows.map((p) => m('button.onb-provider-row', {
               type: 'button',
               role: 'radio',
               'aria-checked': ui.selected === p.name ? 'true' : 'false',
               class: `${ui.selected === p.name ? 'is-selected' : ''} ${usable(p) ? '' : 'is-unusable'}`.trim(),
-              disabled: ui.busy || !usable(p),
+              disabled: ui.busy || !!ui.uncertain || !usable(p),
               onclick: () => { ui.selected = p.name; ui.msg = null; },
             }, [
               m('span.onb-provider-radio', { 'aria-hidden': 'true' }),
@@ -195,7 +265,7 @@ export const ProviderStep = {
           autocomplete: 'off',
           placeholder: KEY_PREFIX[ui.selected] ? `${KEY_PREFIX[ui.selected]}...` : 'your API key',
           value: ui.keyInput,
-          disabled: ui.busy,
+          disabled: ui.busy || !!ui.uncertain,
           oninput: (/** @type {Event} */ e) => { ui.keyInput = /** @type {HTMLInputElement} */ (e.target).value; },
           onkeydown: (/** @type {KeyboardEvent} */ e) => {
             if (e.key === 'Enter') { e.preventDefault(); saveAndContinue(); }
@@ -210,9 +280,12 @@ export const ProviderStep = {
         m('button', {
           // Disabled until a row is actually selectable - an enabled button
           // that silently no-ops during the status round-trip is a lie.
-          type: 'button', disabled: ui.busy || !selectedRow,
+          type: 'button', disabled: ui.busy || !selectedRow
+            || ui.conn[selectedRow.name] === 'empty',
           onclick: saveAndContinue,
-        }, ui.busy ? '…' : 'Save and continue'),
+        }, ui.busy ? '…' : ui.uncertain === 'save' ? 'Finish the same save'
+          : ui.uncertain === 'test' ? 'Verify again'
+            : ui.uncertain === 'switch' ? 'Finish selection' : 'Save and continue'),
         m('button.linklike.onboarding-skip', {
           type: 'button', disabled: ui.busy,
           // The skip contract: no writes - the user lands on the honest

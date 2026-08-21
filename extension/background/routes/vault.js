@@ -1,17 +1,4 @@
 // @ts-check
-// background/routes/vault.js — message-dispatcher routes for vault lifecycle
-// + the confirmation answer relay.
-//
-// These were inline in service-worker.js. They close over NO reassigned
-// module state — only stable collaborators (the vault, audit log, storage,
-// error classes, and a few SW helpers) — so they move out verbatim with those
-// collaborators injected through `deps`. The handler bodies are byte-identical
-// to the originals; only the surrounding closure became a destructure of deps.
-//
-// This module imports NOTHING (every collaborator is injected), which keeps it
-// Bun-importable and unit-testable. The static wiring meta-test
-// (tests/meta/sw-routes-wiring.test.ts) proves the SW provides every dep this
-// destructures; ESLint no-undef proves the SW's routeDeps names real bindings.
 
 /**
  * @param {Record<string, any>} deps
@@ -21,6 +8,7 @@ export const makeVaultRoutes = (deps) => {
   const {
     vault, auditLog, kv, idb, base64ToBytes,
     ensureOffscreen, maybeStartBaseNetwork, pushState, purgeVaultBlob,
+    onInitialized, onUnlocked, onLocked,
     confirmCoordinator, sessionCache, isActualSidepanelSender, isActualHomeSender,
     maybeAutoResumeAfterRecovery, resumeGoalRuns, resumeSchedules,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
@@ -28,18 +16,24 @@ export const makeVaultRoutes = (deps) => {
     VaultLockedError,
   } = deps;
 
+  const runInitialized = typeof onInitialized === 'function'
+    ? onInitialized
+    : () => ensureOffscreen?.();
+  const runUnlocked = typeof onUnlocked === 'function'
+    ? onUnlocked
+    : (/** @type {string} */ reason) => {
+      ensureOffscreen?.();
+      maybeStartBaseNetwork?.(reason);
+    };
+  const runLocked = typeof onLocked === 'function' ? onLocked : async () => {};
+
   return {
-    // --- vault ---
     'vault/initialize': async ({ passphrase }) => {
       try {
         await vault.initialize(passphrase);
         auditLog.append({ type: 'vault_initialized' }).catch(() => {});
-        // Bring up the offscreen doc on initialize too, not just unlock.
-        // Without this, a fresh first-run user creates a vault, navigates
-        // around, and the SW dies after 30s because no keepalive port
-        // exists — locking their just-created vault. See bug from
-        // V1 manual testing 2026-06-05.
-        ensureOffscreen().catch((/** @type {unknown} */ e) => console.error('[sw] ensureOffscreen failed', e));
+        Promise.resolve(runInitialized()).catch((/** @type {unknown} */ e) =>
+          console.error('[sw] post-initialize transition failed', e));
         return { ok: true };
       } catch (e) {
         if (e instanceof VaultAlreadyInitializedError) return { ok: false, error: 'already-initialized' };
@@ -51,27 +45,13 @@ export const makeVaultRoutes = (deps) => {
       try {
         await vault.unlock(passphrase);
         auditLog.append({ type: 'vault_unlocked' }).catch(() => {});
-        ensureOffscreen().catch((/** @type {unknown} */ e) => console.error('[sw] ensureOffscreen failed', e));
-        maybeStartBaseNetwork('unlock');
-        // Re-drive any goal run that paused on a mid-run auto-lock, THEN
-        // auto-resume the current chat. Order matters (symmetric to the #55
-        // SW-boot fix; #60): resumeGoalRuns() synchronously re-adds a paused run
-        // to the runner's map (goalActiveFor → true) before its drive() awaits,
-        // so chaining maybeAutoResume AFTER it guarantees the goalActiveFor guard
-        // in maybeAutoResume sees the goal run and bails. The opposite order let
-        // maybeAutoResume read goalActiveFor=false and re-drive the interrupted
-        // turn, contending the slot and spuriously HALTING the goal run.
-        // Idempotent; resumes ALL runs (a goal can run in a background chat).
+        Promise.resolve(runUnlocked('unlock')).catch((/** @type {unknown} */ e) =>
+          console.error('[sw] post-unlock transition failed', e));
         Promise.resolve(resumeGoalRuns?.())
           .catch(() => {})
-          // #72: then auto-resume the current chat if its last turn was
-          // interrupted (a cold SW wake unlocks here; finish what the eviction
-          // cut off). Fire-and-forget; gated + deduped in the helper.
           .then(() => sessionCache.sessionGet('currentSessionId'))
           .then((/** @type {any} */ cur) => maybeAutoResumeAfterRecovery(cur))
           .catch(() => {});
-        // Background scheduling: run any routine that came due while the vault
-        // was locked (tick() deferred it) now that the key is back.
         Promise.resolve(resumeSchedules?.()).catch(() => {});
         return { ok: true };
       } catch (e) {
@@ -82,12 +62,6 @@ export const makeVaultRoutes = (deps) => {
       }
     },
 
-    // Passkey-first first-run: create the vault keyed ONLY by the
-    // authenticator's PRF — no passphrase. The side panel runs the
-    // ceremony (navigator.credentials is unavailable in the SW) and ships
-    // the bytes here. A recovery passphrase can be added later from
-    // settings (vault/setRecoveryPassphrase). On failure we clear any
-    // partial vault so the sign-up flow re-shows cleanly.
     'vault/initializeWithPasskey': async ({ credentialId, prfSalt, prfOutput, transports }) => {
       if (typeof credentialId !== 'string'
           || typeof prfSalt !== 'string'
@@ -99,30 +73,23 @@ export const makeVaultRoutes = (deps) => {
           prfOutput:    base64ToBytes(prfOutput),
           credentialId: base64ToBytes(credentialId),
           prfSalt:      base64ToBytes(prfSalt),
-          // why no shape check here: transports are OPTIONAL routing hints;
-          // the vault sanitizes (array-of-short-strings or dropped). A bad
-          // shape must never fail an otherwise-good enrollment.
           transports,
         });
       } catch (e) {
         if (e instanceof VaultAlreadyInitializedError) return { ok: false, error: 'already-initialized' };
         console.error('[sw] initializeWithPasskey failed, rolling back', e);
-        vault.lock();
-        // why purgeVaultBlob (both backends): the blob lives in IDB now,
-        // with a possible legacy copy in chrome.storage.local mid-migration.
+        await vault.lock();
+        await runLocked();
         await purgeVaultBlob({ kv, idb });
         throw e;
       }
       auditLog.append({ type: 'vault_initialized', details: { prf: true, passkeyOnly: true } }).catch(() => {});
       auditLog.append({ type: 'vault_prf_enrolled' }).catch(() => {});
-      ensureOffscreen().catch((/** @type {unknown} */ e) => console.error('[sw] ensureOffscreen failed', e));
+      Promise.resolve(runInitialized()).catch((/** @type {unknown} */ e) =>
+        console.error('[sw] post-initialize transition failed', e));
       return { ok: true };
     },
 
-    // Add (or replace) the recovery passphrase on an already-unlocked
-    // vault. The passkey stays the primary factor; this is the optional
-    // fallback for device loss. Requires the vault unlocked (we wrap the
-    // live DK).
     'vault/setRecoveryPassphrase': async ({ passphrase }) => {
       if (typeof passphrase !== 'string' || passphrase.length < 8) {
         return { ok: false, error: 'invalid-passphrase' };
@@ -139,28 +106,14 @@ export const makeVaultRoutes = (deps) => {
     },
 
     'vault/lock': async () => {
-      vault.lock();
+      await vault.lock();
+      await runLocked();
       auditLog.append({ type: 'vault_locked' }).catch(() => {});
-      // why: without a push the panel keeps rendering the unlocked UI until
-      // the next unrelated state change — the Lock button must flip the
-      // panel to the vault gate immediately.
       pushState();
       return { ok: true };
     },
 
-    // --- vault: WebAuthn PRF (Touch ID) ---
-    //
-    // The side panel runs the WebAuthn ceremony because navigator.credentials
-    // is unavailable in the MV3 service worker context. The SW receives the
-    // raw 32-byte PRF output (base64) and lets the vault do the AES-KW work.
-    //
-    // We deliberately keep PRF bytes off the long-lived port. They flow in
-    // on a one-shot sendMessage and are consumed in the SW's microtask;
-    // they're never echoed back, persisted, or logged.
-
     'vault/prfStatus': async () => {
-      // Cheap query — no DK access required. UI calls this before the
-      // ceremony so it knows the credentialId + prfSalt to feed WebAuthn.
       const status = await vault.prfStatus();
       return { ok: true, ...status };
     },
@@ -176,8 +129,6 @@ export const makeVaultRoutes = (deps) => {
           prfOutput:    base64ToBytes(prfOutput),
           credentialId: base64ToBytes(credentialId),
           prfSalt:      base64ToBytes(prfSalt),
-          // Optional routing hints; vault-side sanitize, same as
-          // initializeWithPasskey above.
           transports,
         });
         auditLog.append({ type: 'vault_prf_enrolled' }).catch(() => {});
@@ -197,19 +148,13 @@ export const makeVaultRoutes = (deps) => {
       try {
         await vault.unlockWithPrf(base64ToBytes(prfOutput));
         auditLog.append({ type: 'vault_unlocked', details: { via: 'prf' } }).catch(() => {});
-        ensureOffscreen().catch((/** @type {unknown} */ e) => console.error('[sw] ensureOffscreen failed', e));
-        maybeStartBaseNetwork('unlock-prf');
-        // Re-drive paused goal runs BEFORE auto-resume — see the passphrase
-        // unlock path above (resume re-adds the run so the goalActiveFor guard in
-        // maybeAutoResume bails for a goal-owned session; #60). Idempotent.
+        Promise.resolve(runUnlocked('unlock-prf')).catch((/** @type {unknown} */ e) =>
+          console.error('[sw] post-unlock transition failed', e));
         Promise.resolve(resumeGoalRuns?.())
           .catch(() => {})
-          // #72: then auto-resume the current chat if its last turn was
-          // interrupted. Fire-and-forget; gated + deduped in the helper.
           .then(() => sessionCache.sessionGet('currentSessionId'))
           .then((/** @type {any} */ cur) => maybeAutoResumeAfterRecovery(cur))
           .catch(() => {});
-        // Background scheduling: drain routines that came due while locked.
         Promise.resolve(resumeSchedules?.()).catch(() => {});
         return { ok: true };
       } catch (e) {
@@ -234,16 +179,9 @@ export const makeVaultRoutes = (deps) => {
       }
     },
 
-    // --- confirmation ---
-    // The side panel posts the user's answer to a pending confirm prompt;
-    // we resolve the waiting Promise so the dispatcher proceeds (or blocks).
     'confirm/answer': async ({
       id, answer, ownerSessionId, sessionId, dispatchId,
     }, sender) => {
-      // A confirmation is a HUMAN authority route. Exact page provenance keeps
-      // engine tabs and other first-party extension contexts from answering,
-      // while the active-root check prevents a stale/background chat card from
-      // granting authority after the user switches away.
       const fromSidepanel = isActualSidepanelSender?.(sender) === true;
       const fromHome = isActualHomeSender?.(sender) === true;
       if (!fromSidepanel && !fromHome) {
@@ -253,10 +191,6 @@ export const makeVaultRoutes = (deps) => {
       if ((activeOwnerSessionId ?? null) !== (ownerSessionId ?? null)) {
         return { ok: false, error: 'confirm-answer-foreign-owner' };
       }
-      // resolve → settle → onSettled dismisses the prompt on the active
-      // owner surface (DESIGN-12), so no explicit broadcast is needed here.
-      // The verified sender provenance, not a caller-claimed string, rides the
-      // outcome so the other surface can say who decided (§4e).
       const resolved = confirmCoordinator.resolve({
         id, ownerSessionId, sessionId, dispatchId,
       }, answer, fromHome ? 'home' : 'sidepanel');

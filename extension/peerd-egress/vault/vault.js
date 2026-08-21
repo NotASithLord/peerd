@@ -100,11 +100,13 @@ import {
   hasPassphraseWrap, withPassphraseWrap,
 } from './kdf.js';
 import { bytesToBase64, base64ToBytes } from '/shared/util.js';
+import { DEFAULT_AUTO_LOCK_MS } from './constants.js';
+export { DEFAULT_AUTO_LOCK_MS } from './constants.js';
+export { purgeVaultBlob } from './purge.js';
 
 const VAULT_KEY = 'vault.v1';
 // IDB object store holding the blob (records: { key: VAULT_KEY, value }).
 const VAULT_STORE = 'vault';
-export const DEFAULT_AUTO_LOCK_MS = 45 * 60 * 1000;
 const SECRET_PREFIX = 'secret:';
 
 /**
@@ -1111,19 +1113,4 @@ export const createVault = (deps) => {
      * without poking the vault first (see session-cache.js header). */
     unlockedAt: () => unlockedAt,
   });
-};
-
-/**
- * Remove the vault blob from BOTH backends. This is the SW chassis's
- * rollback for a failed passkey-first initialization (a half-written
- * blob would wedge the vault in "initialized but un-unlockable") — kept
- * out of the vault instance so there is still no public reset on the
- * object that holds the DK. Best-effort on each backend (same posture
- * as the pre-migration rollback's swallowed kv.delete).
- *
- * @param {{ kv: import('../storage/kv.js').KV, idb?: IdbLike }} deps
- */
-export const purgeVaultBlob = async ({ kv, idb }) => {
-  await kv.delete(VAULT_KEY).catch(() => {});
-  if (idb) await idb.del(VAULT_STORE, VAULT_KEY).catch(() => {});
 };
