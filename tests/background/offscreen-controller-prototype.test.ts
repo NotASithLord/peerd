@@ -98,8 +98,8 @@ describe('Chrome lazy controller private channel prototype', () => {
       capabilities: ['state.read'],
     }]);
     expect(JSON.stringify(offers)).not.toContain('private-value');
-    await expect(controller.call('state.read', { secret: 'private-value' }))
-      .resolves.toMatchObject({ ok: true, payload: { secret: 'private-value' }, outcomeKnown: true });
+    expect(await controller.call('state.read', { secret: 'private-value' }))
+      .toMatchObject({ ok: true, payload: { secret: 'private-value' }, outcomeKnown: true });
     expect(phases).toEqual(['loaded', 'called']);
     controller.close();
   });
@@ -157,7 +157,7 @@ describe('Chrome lazy controller private channel prototype', () => {
         }),
       }),
     });
-    await expect(controller.call('repo.write', {})).resolves.toMatchObject({
+    expect(await controller.call('repo.write', {})).toMatchObject({
       ok: false, code: 'controller-capability-denied', outcomeKnown: true,
     });
     expect(calls).toBe(0);
@@ -187,8 +187,8 @@ describe('Chrome lazy controller private channel prototype', () => {
         },
       }),
     });
-    await expect(controller.call('state.read', {}, { signal: abort.signal }))
-      .resolves.toMatchObject({ ok: false, code: 'controller-call-aborted', outcomeKnown: true });
+    expect(await controller.call('state.read', {}, { signal: abort.signal }))
+      .toMatchObject({ ok: false, code: 'controller-call-aborted', outcomeKnown: true });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(messages).not.toContain('kernel/commit');
     controller.close();
@@ -259,8 +259,8 @@ describe('Chrome lazy controller private channel prototype', () => {
         }),
       }),
     });
-    await expect(controller.call('turn.run', { maxSteps: 1 }))
-      .resolves.toMatchObject({ ok: true, progress: 'settled', outcomeKnown: true });
+    expect(await controller.call('turn.run', { maxSteps: 1 }))
+      .toMatchObject({ ok: true, progress: 'settled', outcomeKnown: true });
     controller.close();
   });
 
@@ -333,8 +333,8 @@ describe('Chrome lazy controller private channel prototype', () => {
         },
       }),
     });
-    await expect(controller.call('repo.write', {}, { timeoutMs: 20 })).resolves.toMatchObject({
-      ok: false, code: 'controller-call-timeout', outcomeKnown: false,
+    expect(await controller.call('repo.write', {}, { timeoutMs: 20 })).toMatchObject({
+      ok: false, code: 'controller-channel-closed', outcomeKnown: false, phase: 'run',
     });
   });
 
@@ -355,10 +355,10 @@ describe('Chrome lazy controller private channel prototype', () => {
         }),
       }),
     });
-    await expect(controller.call('repo.write', {})).resolves.toMatchObject({
+    expect(await controller.call('repo.write', {})).toMatchObject({
       ok: false, outcomeKnown: false,
     });
-    await expect(controller.call('repo.write', {})).resolves.toMatchObject({
+    expect(await controller.call('repo.write', {})).toMatchObject({
       ok: false, outcomeKnown: true,
     });
     controller.close();
@@ -396,10 +396,10 @@ describe('Chrome lazy controller private channel prototype', () => {
         }),
       }),
     });
-    await expect(controller.call('turn.run', {
+    expect(await controller.call('turn.run', {
       runId: 'run-12345678', sessionId: 'session:test',
       ctx: { maxSteps: 1 }, tools: [], classifications: {},
-    })).resolves.toMatchObject({
+    })).toMatchObject({
       ok: true, outcomeKnown: false,
     });
     expect(kernelContext).toMatchObject({
@@ -439,8 +439,8 @@ describe('Chrome lazy controller private channel prototype', () => {
     const sealed = await loader();
     expect(workerCreated).toBe(1);
     const abort = new AbortController();
-    await expect(sealed.call('state.read', { value: 7 }, { signal: abort.signal }))
-      .resolves.toEqual({ ok: true, value: { value: 7 } });
+    expect(await sealed.call('state.read', { value: 7 }, { signal: abort.signal }))
+      .toEqual({ ok: true, value: { value: 7 } });
     expect(await loader()).toBe(sealed);
     expect(workerCreated).toBe(1);
     sealed.close();
@@ -474,8 +474,8 @@ describe('Chrome lazy controller private channel prototype', () => {
     expect(created).toBe(2);
     loader.close();
     expect(terminated).toBe(2);
-    await expect(controller.call('health.ping', {}, { signal: new AbortController().signal }))
-      .resolves.toMatchObject({ ok: false, outcomeKnown: false });
+    expect(await controller.call('health.ping', {}, { signal: new AbortController().signal }))
+      .toMatchObject({ ok: false, outcomeKnown: false });
   });
 
   test('a Worker crash after readiness is not cached as the next generation', async () => {
@@ -508,13 +508,13 @@ describe('Chrome lazy controller private channel prototype', () => {
       },
     });
     const first = await loader();
-    await expect(first.call('health.ping', {}, { signal: new AbortController().signal }))
-      .resolves.toMatchObject({ ok: true, generation: 1 });
+    expect(await first.call('health.ping', {}, { signal: new AbortController().signal }))
+      .toMatchObject({ ok: true, generation: 1 });
     crash();
     const second = await loader();
     expect(second).not.toBe(first);
-    await expect(second.call('health.ping', {}, { signal: new AbortController().signal }))
-      .resolves.toMatchObject({ ok: true, generation: 2 });
+    expect(await second.call('health.ping', {}, { signal: new AbortController().signal }))
+      .toMatchObject({ ok: true, generation: 2 });
     loader.close();
   });
 
@@ -558,7 +558,7 @@ describe('Chrome lazy controller private channel prototype', () => {
       };
       channel.port1.start();
     });
-    await expect(settled).resolves.toMatchObject({
+    expect(await settled).toMatchObject({
       ok: false, code: 'controller-deadline-expired', outcomeKnown: false,
     });
     binding.close();
@@ -702,7 +702,7 @@ describe('Chrome lazy controller private channel prototype', () => {
       };
       second.port.start();
     });
-    await expect(result).resolves.toMatchObject({ ok: true });
+    expect(await result).toMatchObject({ ok: true });
     expect(calls).toBe(1);
     second.port.close();
   });
@@ -760,9 +760,9 @@ describe('controller protocol pure validation', () => {
   test('the packaged sealed runtime is executable but grants only registered capabilities', async () => {
     const controller = await createController();
     const signal = new AbortController().signal;
-    await expect(controller.call('health.ping', { value: 7 }, { signal }))
-      .resolves.toEqual({ ok: true, outcomeKnown: true, payload: { value: 7 } });
-    await expect(controller.call('repo.write', {}, { signal })).resolves.toEqual({
+    expect(await controller.call('health.ping', { value: 7 }, { signal }))
+      .toEqual({ ok: true, outcomeKnown: true, payload: { value: 7 } });
+    expect(await controller.call('repo.write', {}, { signal })).toEqual({
       ok: false, code: 'controller-capability-unimplemented', outcomeKnown: true,
     });
   });

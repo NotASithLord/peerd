@@ -65,7 +65,7 @@ describe('Firefox direct controller adapter', () => {
       },
     });
     expect(phases).toEqual([]);
-    await expect(controller.call('state.read', { value: 7 })).resolves.toMatchObject({
+    expect(await controller.call('state.read', { value: 7 })).toMatchObject({
       ok: true,
       capability: 'state.read',
       payload: { value: 7 },
@@ -88,7 +88,7 @@ describe('Firefox direct controller adapter', () => {
         return { call: async () => ({ ok: true }) };
       },
     });
-    await expect(controller.call('repo.write', {})).resolves.toMatchObject({
+    expect(await controller.call('repo.write', {})).toMatchObject({
       ok: false,
       code: 'controller-capability-denied',
       outcomeKnown: true,
@@ -143,13 +143,13 @@ describe('Firefox direct controller adapter', () => {
       supportedCapabilities: ['state.read'],
       loader,
     });
-    await expect(controller.call('state.read', { sequence: 1 }))
-      .resolves.toMatchObject({ ok: true, generation: 1 });
+    expect(await controller.call('state.read', { sequence: 1 }))
+      .toMatchObject({ ok: true, generation: 1 });
     expect(created).toEqual([1]);
     await new Promise((resolve) => setTimeout(resolve, 15));
     expect(terminated).toEqual([1]);
-    await expect(controller.call('state.read', { sequence: 2 }))
-      .resolves.toMatchObject({ ok: true, generation: 2 });
+    expect(await controller.call('state.read', { sequence: 2 }))
+      .toMatchObject({ ok: true, generation: 2 });
     expect(created).toEqual([1, 2]);
     controller.close();
     expect(terminated).toEqual([1, 2]);
@@ -168,10 +168,10 @@ describe('Firefox direct controller adapter', () => {
       }),
     });
     const first = await makeEventPage(1);
-    await expect(first.call('state.read', {})).resolves.toMatchObject({ generation: 1 });
+    expect(await first.call('state.read', {})).toMatchObject({ generation: 1 });
     first.close();
     const second = await makeEventPage(2);
-    await expect(second.call('state.read', {})).resolves.toMatchObject({ generation: 2 });
+    expect(await second.call('state.read', {})).toMatchObject({ generation: 2 });
     expect(first.epoch).not.toBe(second.epoch);
     expect(terminated).toEqual([1]);
     second.close();
