@@ -7,15 +7,13 @@
 // session-state store). The routes here close over only stable collaborators.
 // Bodies verbatim, deps injected.
 
-import { makeAgentSendCustody } from '/peerd-egress/background.js';
-
 /**
  * @param {Record<string, any>} deps
  * @returns {Record<string, (msg?: any) => Promise<any>>}
  */
 export const makeSessionRoutes = (deps) => {
   const {
-    vault, auditLog, sessions, sessionCache, turnSlots,
+    vault, auditLog, sessions, sessionCache, turnSlots, makeAgentSendCustody,
     buildToolContext, applyComposer, commandSources, prepareUserAttachmentsWithDocs,
     convertDocAttachment,
     runAgentTurn, runInit, handleSystemCommand, handleToolsCommand,

@@ -3,6 +3,7 @@ import {
   makeSessionKernelRoutes,
   makeSessionRoutes,
 } from '../../extension/background/routes/sessions.js';
+import { makeAgentSendCustody } from '../../extension/peerd-egress/background.js';
 
 // session/agent/composer/actor routes — moved verbatim. Pin the slash-command
 // short-circuits in agent/send, the vault gates, actor list-filtering, and
@@ -24,6 +25,7 @@ const baseDeps = (over: any = {}) => {
       },
       sessionCache: { sessionGet: async () => 'a' },
       turnSlots: { stop: () => true },
+      makeAgentSendCustody,
       manifestLabel: () => null,
       buildToolContext: async () => ({}),
       applyComposer: async ({ text }: any) => ({ text: `${text}!`, refs: [], command: null }),

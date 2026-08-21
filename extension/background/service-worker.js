@@ -118,6 +118,7 @@ import {
   idb as rawIdb,
   idbKV as rawIdbKV,
   sessionCache,
+  makeAgentSendCustody,
 } from '/peerd-egress/background.js';
 
 
@@ -8237,7 +8238,7 @@ coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(/** @type 
     contextSnapshots,
   }),
   ...makeSessionRoutes({
-    vault, auditLog, sessions, sessionCache, turnSlots, buildToolContext,
+    vault, auditLog, sessions, sessionCache, turnSlots, makeAgentSendCustody, buildToolContext,
     applyComposer, commandSources, prepareUserAttachmentsWithDocs, runAgentTurn, runInit,
     // Attached-document conversion: the SAME offscreen reader read_doc uses,
     // fed inline bytes instead of a URL (doc-extract has always accepted a
