@@ -3,10 +3,11 @@ import {
   makeDispatcher,
   normalizeMessageFailureReply,
 } from '../../extension/shared/background-dispatcher.js';
+import browser from '../../extension/shared/browser-api.js';
 
 const sender = {
-  id: 'peerd-bun-test',
-  url: 'chrome-extension://peerd-bun-test/home/home.html',
+  id: browser.runtime.id,
+  url: browser.runtime.getURL('home/home.html'),
 };
 
 const dispatch = (handler: ReturnType<typeof makeDispatcher>, type: string) =>

@@ -5,13 +5,8 @@ let createPageActivityReporter: typeof import('../../extension/background/page-a
 let showPageActivity: typeof import('../../extension/background/page-activity.js').showPageActivity;
 
 beforeAll(async () => {
-  // The public background surface constructs its real KV adapter at import
-  // time. Model the browser-owned namespace even though this focused page
-  // activity test never performs a storage operation.
-  (globalThis as any).chrome = {
-    runtime: { id: 'test-extension' },
-    storage: { local: {} },
-  };
+  // The shared bootstrap provides the browser namespace; this suite injects
+  // every browser operation it executes.
   const module = await import('../../extension/background/page-activity.js');
   clearPageActivity = module.clearPageActivity;
   createPageActivityReporter = module.createPageActivityReporter;
