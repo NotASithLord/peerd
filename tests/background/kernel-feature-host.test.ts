@@ -83,6 +83,28 @@ describe('thin-kernel demand-only feature host', () => {
     expect(counts()).toEqual({ created: 1, closed: 0 });
   });
 
+  test('Firefox without the offscreen API refuses creation and makes teardown a no-op', async () => {
+    const { browser } = makeBrowser();
+    delete (browser as any).offscreen;
+    let runtimeDeps: any;
+    const runtime = {
+      ready: Promise.resolve(), disable: async () => {}, unlock: () => {},
+      reconcile: async () => [], lock: async () => [], resume: async () => ({
+        reconciled: [], transitioned: [],
+      }),
+    };
+    createKernelFeatureHost({
+      browser,
+      identity,
+      createRuntime: ((deps: any) => { runtimeDeps = deps; return runtime; }) as any,
+      loadFirefoxLifetime: async () => ({}) as any,
+    });
+
+    await expect(runtimeDeps.ensureOffscreen('controller'))
+      .rejects.toThrow('feature-lease-offscreen-unavailable');
+    await expect(runtimeDeps.closeOffscreen()).resolves.toBeUndefined();
+  });
+
   test('resume applies the hydrated dweb setting before reconciliation', async () => {
     const { browser } = makeBrowser();
     const calls: string[] = [];

@@ -70,7 +70,7 @@ describe('thin-kernel synchronous front door', () => {
     expect(harness.calls).toEqual(['panel:17']);
   });
 
-  test('keeps home preference, shortcut toggle, Firefox sidebar, and command filter exact', () => {
+  test('keeps home preference, shortcut toggle, Firefox sidebar, and command filter exact', async () => {
     const home = makeHarness({ frontDoorView: 'home' });
     home.action.emit({ windowId: 4 });
     expect(home.calls).toEqual(['home']);
@@ -82,6 +82,8 @@ describe('thin-kernel synchronous front door', () => {
 
     const firefox = makeHarness({ firefox: true });
     firefox.command.emit('pull-in-peerd', { windowId: 6 });
+    expect(firefox.calls).toEqual(['sidebar']);
+    expect(await firefox.api.syncNativeBehavior()).toBe(false);
     expect(firefox.calls).toEqual(['sidebar']);
   });
 

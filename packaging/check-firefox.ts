@@ -44,7 +44,17 @@ import {
  * Firefox takes the fallback path". Do not add one to silence a lint — add it
  * once the guard exists.
  */
-const GUARDED_CHROME_ONLY: readonly { api: string; file: string; why: string }[] = [
+export type GuardedChromeOnlyApi = {
+  api: string;
+  file: string;
+  why: string;
+  /** Whitespace-insensitive source fragments that prove the named guard and guarded call ship together. */
+  proof?: readonly string[];
+};
+
+export const FIREFOX_BUILD_NAMES = ['store-firefox', 'preview-firefox'] as const;
+
+export const GUARDED_CHROME_ONLY: readonly GuardedChromeOnlyApi[] = [
   // Chrome uses this for the actor-worker host and other document-only jobs.
   // Firefox starts the actor Worker directly from its extension background page.
   { api: 'offscreen.createDocument', file: 'background/service-worker.js', why: 'guarded by offscreenAvailable' },
@@ -66,6 +76,30 @@ const GUARDED_CHROME_ONLY: readonly { api: string; file: string; why: string }[]
   { api: 'tabs.group', file: 'background/tab-tracker.js', why: 'cosmetic grouping; degrades to ungrouped' },
   { api: 'tabGroups.query', file: 'background/tab-tracker.js', why: 'same' },
   { api: 'tabGroups.update', file: 'background/tab-tracker.js', why: 'same' },
+  // The native kernel is one buildless source graph for Chrome and Firefox.
+  // Every Chrome-only member below is capability-probed before use, and the
+  // package gate verifies the probe and guarded call in BOTH Firefox artifacts.
+  { api: 'offscreen.createDocument', file: 'background/kernel-feature-host.js',
+    why: 'ensureOffscreen refuses when the API is absent; Firefox uses direct background lifetimes',
+    proof: ["typeof offscreen?.createDocument !== 'function'", 'await offscreen.createDocument('] },
+  { api: 'offscreen.closeDocument', file: 'background/kernel-feature-host.js',
+    why: 'close is a no-op unless the capability exists',
+    proof: ["typeof browser.offscreen?.closeDocument === 'function'", 'await browser.offscreen.closeDocument()'] },
+  { api: 'sidePanel.open', file: 'background/kernel-front-door.js',
+    why: 'decidePullIn selects Firefox sidebarAction when sidePanel.open is absent',
+    proof: ["hasSidePanel: typeof browser.sidePanel?.open === 'function'", 'browser.sidePanel.open({ windowId })'] },
+  { api: 'sidePanel.setPanelBehavior', file: 'background/kernel-front-door.js',
+    why: 'native preference sync returns false when the capability is absent',
+    proof: ["typeof browser.sidePanel?.setPanelBehavior !== 'function'", 'await browser.sidePanel.setPanelBehavior('] },
+  { api: 'runtime.requestUpdateCheck', file: 'background/vault-kernel.js',
+    why: 'enabled only for a top-level Chrome update_url plus the runtime capability',
+    proof: ['!!kernelManifest.update_url', "typeof browser.runtime.requestUpdateCheck === 'function'"] },
+  { api: 'runtime.requestUpdateCheck', file: 'background/service-worker.js',
+    why: 'legacy cold listener is enabled only for a Chrome update_url plus the runtime capability',
+    proof: ['Boolean(coldManifest.update_url)', "typeof browser.runtime.requestUpdateCheck === 'function'"] },
+  { api: 'offscreen.closeDocument', file: 'background/service-worker.js',
+    why: 'legacy lease teardown is a no-op unless the close capability exists',
+    proof: ["offscreen?.closeDocument === 'function'", 'offscreen.closeDocument()'] },
 ];
 
 /** The two codes that mean "this API is not there on Firefox". */
@@ -95,19 +129,16 @@ const lint = (sourceDir: string): { errors: LintItem[]; warnings: LintItem[] } =
 const isGuarded = (item: LintItem): boolean =>
   GUARDED_CHROME_ONLY.some((g) => (item.message ?? '').includes(g.api) && item.file === g.file);
 
-const main = () => {
-  const builds = ['store-firefox', 'preview-firefox']
+export const main = () => {
+  const builds = FIREFOX_BUILD_NAMES
     .map((name) => ({ name, dir: join(ARTIFACTS_DIR, 'staging', name) }))
     .filter((b) => existsSync(b.dir));
-
-  if (builds.length === 0) {
-    console.error('FIREFOX LINT FAILED: no Firefox staging build found.\n'
-      + '  Run `bun packaging/package.ts --channel=store --browser=firefox` first\n'
-      + '  (CI builds all four channel×browser artifacts before this step).');
-    process.exit(1);
-  }
-
   const problems: string[] = [];
+  for (const name of FIREFOX_BUILD_NAMES) {
+    if (!builds.some((build) => build.name === name)) {
+      problems.push(`  [${name}] staging build is missing`);
+    }
+  }
   for (const { name, dir } of builds) {
     if (existsSync(join(dir, 'peerd-distributed'))) {
       problems.push(`  [${name}] dweb module is present without a Firefox mesh host`);
@@ -132,6 +163,20 @@ const main = () => {
         || channelConfig.includes('dwebEnabled:')
         || channelConfig.includes('dwebAgentEnabled:')) {
       problems.push(`  [${name}] channel config advertises dweb without a Firefox mesh host`);
+    }
+    for (const guarded of GUARDED_CHROME_ONLY) {
+      if (!guarded.proof) continue;
+      const guardedPath = join(dir, guarded.file);
+      if (!existsSync(guardedPath)) {
+        problems.push(`  [${name}] guarded API owner is missing: ${guarded.file}`);
+        continue;
+      }
+      const compact = readFileSync(guardedPath, 'utf8').replace(/\s+/g, '');
+      const missingProof = guarded.proof
+        .filter((fragment) => !compact.includes(fragment.replace(/\s+/g, '')));
+      if (missingProof.length > 0) {
+        problems.push(`  [${name}] ${guarded.api} guard proof is stale in ${guarded.file}`);
+      }
     }
     const { errors, warnings } = lint(dir);
     for (const e of errors) {
@@ -165,4 +210,4 @@ const main = () => {
   console.log(`firefox lint OK — ${builds.length} build(s), 0 errors, no unguarded Chrome-only APIs.`);
 };
 
-main();
+if (import.meta.main) main();
