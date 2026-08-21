@@ -20,6 +20,27 @@ const run = (label: string, cmd: string, args: string[]) => {
   execFileSync(cmd, args, { cwd: REPO_ROOT, stdio: 'inherit' });
 };
 
+type SyncRunner = typeof execFileSync;
+
+/** One pathspec-batched diff preserves the old any-file-drift verdict. */
+export const generatedFilesDifferFromHead = (
+  root: string,
+  files: string[],
+  runner: SyncRunner = execFileSync,
+): boolean => {
+  if (files.length === 0) return false;
+  try {
+    runner('git', ['diff', '--quiet', '--exit-code', 'HEAD', '--', ...files], {
+      cwd: root,
+      stdio: 'ignore',
+    });
+    return false;
+  } catch {
+    // Exit 1 means drift; command/path/repository errors also stay fail-closed.
+    return true;
+  }
+};
+
 const main = () => {
   const args = parseArgs(process.argv.slice(2));
 
@@ -43,12 +64,7 @@ const main = () => {
   ].map((p) => join(REPO_ROOT, p));
   const before = genFiles.map((f) => readFileSync(f));
   run('regenerate dev manifest + channel-config', 'bun', ['run', 'gen:dev']);
-  let drift = false;
-  for (const f of genFiles) {
-    try {
-      execFileSync('git', ['diff', '--quiet', '--exit-code', 'HEAD', '--', f], { cwd: REPO_ROOT });
-    } catch { drift = true; }
-  }
+  const drift = generatedFilesDifferFromHead(REPO_ROOT, genFiles);
   // Restore the pre-run bytes (whatever they were) — the generated output
   // we just wrote was only needed for the comparison above.
   genFiles.forEach((f, i) => writeFileSync(f, before[i]));
@@ -123,4 +139,4 @@ const main = () => {
   console.log('\npreflight OK');
 };
 
-main();
+if (import.meta.main) main();
