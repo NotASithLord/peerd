@@ -3,6 +3,11 @@
 // exposes one read-only record and retains every storage/mutation capability.
 
 import { makeContributorStore } from '/peerd-runtime/observability/contributor-store.js';
+import {
+  CONTRIBUTOR_CHANNEL_CALL, CONTRIBUTOR_CHANNEL_PROTOCOL,
+  CONTRIBUTOR_CHANNEL_REPLY, CONTRIBUTOR_CHANNEL_RESULT,
+  parseContributorOffer,
+} from '/shared/contributor-channel.js';
 
 /** @param {string} route @param {any} _message
  * @param {{kernelCall?:(operation:string,payload:unknown)=>Promise<any>}} options */
@@ -67,4 +72,58 @@ export const dispatchContributorSemanticRoute = async (route, _message, options)
       retryable: known,
     };
   }
+};
+
+/** Exact contributor channel admitted by the cold offscreen supervisor. */
+export const acceptContributorOffer = (
+  /** @type {any} */ event,
+  /** @type {{ownsLease?:(lease:any)=>boolean}} */ { ownsLease = () => false } = {},
+) => {
+  const offer = parseContributorOffer(event?.data);
+  const port = event?.ports?.[0];
+  if (!offer || event?.ports?.length !== 1 || !port || !ownsLease(offer.lease)) {
+    try { port?.close(); } catch {}
+    return false;
+  }
+  let nextRequest = 0;
+  const pending = new Map();
+  const finish = () => {
+    for (const item of pending.values()) item.resolve({ ok: false, outcomeKnown: false });
+    pending.clear();
+    try { port.close(); } catch {}
+  };
+  const kernelCall = (/** @type {string} */ operation, /** @type {unknown} */ payload) =>
+    new Promise((resolve) => {
+      const requestId = `c${++nextRequest}`;
+      pending.set(requestId, { resolve });
+      try { port.postMessage({
+        type: CONTRIBUTOR_CHANNEL_CALL, protocol: CONTRIBUTOR_CHANNEL_PROTOCOL,
+        channelId: offer.channelId, requestId, operation, payload,
+      }); } catch { finish(); }
+    });
+  port.onmessage = (/** @type {MessageEvent} */ messageEvent) => {
+    const packet = messageEvent.data;
+    if (packet?.type !== CONTRIBUTOR_CHANNEL_REPLY
+        || packet.protocol !== CONTRIBUTOR_CHANNEL_PROTOCOL
+        || packet.channelId !== offer.channelId || typeof packet.requestId !== 'string') {
+      finish(); return;
+    }
+    const item = pending.get(packet.requestId);
+    if (!item) { finish(); return; }
+    pending.delete(packet.requestId);
+    item.resolve(packet.result);
+  };
+  port.onmessageerror = finish;
+  port.addEventListener?.('close', finish, { once: true });
+  port.start();
+  dispatchContributorSemanticRoute(offer.route, {}, { kernelCall }).then(
+    (result) => {
+      try { port.postMessage({
+        type: CONTRIBUTOR_CHANNEL_RESULT, protocol: CONTRIBUTOR_CHANNEL_PROTOCOL,
+        channelId: offer.channelId, result,
+      }); } catch {}
+      finish();
+    }, finish,
+  );
+  return true;
 };

@@ -348,6 +348,7 @@ describe('vault authority kernel boot and UI contract', () => {
       'provider/test': async () => { calls.push('provider-test'); return { ok: true }; },
       'models/options': async () => { calls.push('models'); return { ok: true }; },
       'openrouter/models': async () => { calls.push('openrouter-models'); return { ok: true }; },
+      'local-model/catalog': async () => { calls.push('local-models'); return { ok: true }; },
       'memory/write': async () => { calls.push('memory-write'); return { ok: true }; },
       'settings/update': async () => { calls.push('settings'); return { ok: true }; },
       'session/get': async () => { calls.push('session'); return { ok: true }; },
@@ -446,6 +447,18 @@ describe('vault authority kernel boot and UI contract', () => {
       { firstParty: true, surface: 'offscreen' },
     )).toEqual({ ok: false, error: 'vault-route-unauthorized-sender' });
     expect(await invoke(
+      { type: 'local-model/catalog' },
+      { firstParty: true, surface: 'options' },
+    )).toEqual({ ok: true });
+    expect(await invoke(
+      { type: 'local-model/catalog' },
+      { firstParty: true, surface: 'sidepanel' },
+    )).toEqual({ ok: false, error: 'vault-route-unauthorized-sender' });
+    expect(await invoke(
+      { type: 'local-model/init', model: 'never-read' },
+      { firstParty: true, surface: 'offscreen' },
+    )).toEqual({ ok: false, error: 'vault-route-unauthorized-sender' });
+    expect(await invoke(
       { type: 'memory/write', scope: { kind: 'user' }, body: 'private' },
       { firstParty: true, surface: 'options' },
     )).toEqual({ ok: true });
@@ -513,7 +526,7 @@ describe('vault authority kernel boot and UI contract', () => {
     )).toEqual({ ok: false, error: 'vault-route-unauthorized-sender' });
     expect(calls).toEqual([
       'git', 'settings', 'provider', 'provider-test', 'provider-test',
-      'provider-status', 'provider-status', 'models', 'models', 'openrouter-models', 'memory-write',
+      'provider-status', 'provider-status', 'models', 'models', 'openrouter-models', 'local-models', 'memory-write',
       'session', 'permission', 'onboarding', 'import-git', 'set-model', 'editor', 'editor-alias',
     ]);
     expect(() => makeKernelRouteProvenance({

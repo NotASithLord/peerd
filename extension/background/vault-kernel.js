@@ -99,7 +99,7 @@ const kernelManifest = /** @type {any} */ (browser.runtime.getManifest());
 const kernelFirefox = !!kernelManifest.browser_specific_settings?.gecko;
 const targetAddon = /** @type {any} */ (globalThis)[Symbol.for('peerd.kernel.target-addon.v1')];
 if (targetAddon && (targetAddon.target !== 'preview-chrome'
-    || typeof targetAddon.update !== 'function' || typeof targetAddon.semantic !== 'function')) {
+    || typeof targetAddon.update !== 'function' || typeof targetAddon.contributor !== 'function')) {
   throw new Error('kernel-target-addon-invalid');
 }
 const kernelSelfHostedChrome = !!kernelManifest.update_url
@@ -574,14 +574,15 @@ const kernelLocal = createKernelLocalRoutes({
   ready: vaultReady, settingsStore, isAllowed: trusted,
   isOptions: optionsUi, isVoice: voiceUi, fetchFn: globalThis.fetch.bind(globalThis),
   sessions: kernelSessions, browser, localModels: !kernelFirefox,
+  featureHost, offscreenUrl,
 });
 const appFiles = kernelLocal.appFiles;
 const semanticRoutes = Object.freeze({
   ...createKernelSemanticRoutes({
     idb, kv, auditLog, vault, ready: vaultReady,
   }),
-  ...(targetAddon?.semantic({
-    kv, optionsUi, kernelIdentity, offscreenUrl, featureHost,
+  ...(targetAddon?.contributor({
+    kv, optionsUi, offscreenUrl, featureHost,
   }) ?? {}),
 });
 
@@ -702,6 +703,7 @@ const routes = {
   'provider/test': kernelLocal.providerTest,
   'models/options': kernelLocal.modelOptions,
   'openrouter/models': kernelLocal.openRouterModels,
+  ...kernelLocal.localModelRoutes,
   ...kernelActorRoutes,
   ...makeKernelComposerRoutes({
     browser, kv, idb, sessionCache, vault, denylist: denylistPolicy, appFiles,

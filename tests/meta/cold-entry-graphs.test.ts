@@ -131,9 +131,9 @@ describe('cold entry graphs', () => {
       entryBytes: preview.entryBytes, directImports: preview.directImports,
     }).toEqual(PREVIEW_KERNEL_SOURCE_RATCHET);
     expect([...preview.modulesSet].filter((file) => !common.modulesSet.has(file)).sort()).toEqual([
-      'background/kernel-controller-call.js',
       'background/kernel-update-addon.js',
       'background/vault-kernel-preview.js',
+      'shared/contributor-channel.js',
     ]);
     expect(common.modulesSet.has('background/kernel-update-addon.js')).toBe(false);
     const source = readFileSync(join(EXTENSION_DIR, previewKernelEntry), 'utf8');

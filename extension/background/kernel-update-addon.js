@@ -1,14 +1,10 @@
 // @ts-check
 
-import { callSemanticDemandOnce } from './kernel-controller-call.js';
-
-const DEMAND_REPLAYABLE = new Set([
-  'semantic-demand-startup-failed', 'semantic-demand-channel-lost',
-  'semantic-demand-timeout',
-]);
-const demandStopped = (/** @type {string} */ code, outcomeKnown = true) => ({
-  ok: false, code, outcomeKnown, phase: outcomeKnown ? 'startup' : 'run',
-});
+import {
+  CONTRIBUTOR_CHANNEL_CALL, CONTRIBUTOR_CHANNEL_OFFER,
+  CONTRIBUTOR_CHANNEL_PROTOCOL, CONTRIBUTOR_CHANNEL_REPLY,
+  CONTRIBUTOR_CHANNEL_RESULT, parseContributorOffer,
+} from '../shared/contributor-channel.js';
 
 export const KERNEL_UPDATE_CUSTODY_KEY = 'kernel.updateCustody.v1';
 const VERSION = /^\d+(?:\.\d+)*$/;
@@ -171,11 +167,9 @@ const createUpdateCustody = (/** @type {any} */ c) => createKernelUpdateCustody(
   log: (/** @type {any[]} */ ...args) => console.log('[kernel]', ...args),
 });
 
-export const createPreviewSemanticAuthority = (
-  /** @type {any} */ { kv, optionsDemandRoute: admit },
-) => {
-  if (!kv?.get || !kv?.set || !kv?.delete || !admit) {
-    throw new TypeError('kernel-preview-semantic-config-invalid');
+export const createPreviewContributorAuthority = (/** @type {any} */ { kv }) => {
+  if (!kv?.get || !kv?.set || !kv?.delete) {
+    throw new TypeError('kernel-preview-contributor-config-invalid');
   }
   const key = 'contributor_metrics.aggregate.v1';
   let tail = Promise.resolve();
@@ -220,73 +214,112 @@ export const createPreviewSemanticAuthority = (
     }
   };
   return Object.freeze({
-    routes: Object.freeze({
-      'contributor/disable': admit('E'),
-      'contributor/enable': admit('E'),
-      'contributor/status': admit('A'),
-    }),
     handle,
   });
 };
 
-const createPreviewSemanticRoutes = (/** @type {any} */ {
-  kv, optionsUi, kernelIdentity, offscreenUrl, featureHost,
+const createPreviewContributorRoutes = (/** @type {any} */ {
+  kv, optionsUi, offscreenUrl, featureHost,
 }) => {
-  if (typeof optionsUi !== 'function' || !kernelIdentity || typeof offscreenUrl !== 'string'
+  if (typeof optionsUi !== 'function' || typeof offscreenUrl !== 'string'
       || typeof featureHost?.runtime?.runWithLease !== 'function') {
-    throw new TypeError('kernel-preview-semantic-routes-invalid');
+    throw new TypeError('kernel-preview-contributor-routes-invalid');
   }
-  const descriptor = (/** @type {'A'|'E'} */ replayClass) => ({
-    senderClass: 'options', replayClass, acceptsSender: optionsUi,
+  const authority = createPreviewContributorAuthority({ kv });
+  const allowed = Object.freeze({
+    'contributor/status': Object.freeze({ 'semantic.contributor.read': 1 }),
+    'contributor/enable': Object.freeze({
+      'semantic.contributor.enable-read': 2, 'semantic.contributor.enable': 1,
+    }),
+    'contributor/disable': Object.freeze({
+      'semantic.contributor.clear': 1, 'semantic.contributor.disable-read': 1,
+    }),
   });
-  const authority = createPreviewSemanticAuthority({ kv, optionsDemandRoute: descriptor });
-  const routes = /** @type {Record<string,any>} */ (authority.routes);
-  const kernelCall = async (/** @type {string} */ operation,
-    /** @type {unknown} */ payload, /** @type {any} */ context) =>
-    await authority.handle(operation, payload, context)
-      ?? { ok: false, code: 'semantic-kernel-operation-denied', outcomeKnown: true };
   const dispatch = async (/** @type {string} */ route,
     /** @type {any} */ message, /** @type {any} */ sender) => {
-    const grant = routes[route];
-    if (!grant || message?.type !== route || !grant.acceptsSender(sender)) {
-      return demandStopped('semantic-demand-admission-denied');
+    if (!Object.hasOwn(allowed, route) || message?.type !== route || !optionsUi(sender)) {
+      return { ok: false, code: 'contributor-channel-admission-denied', outcomeKnown: true };
     }
-    const deadlineAt = Date.now() + 15_000;
-    const attempt = async () => {
-      const timeoutMs = Math.max(0, deadlineAt - Date.now());
-      if (timeoutMs < 1) return demandStopped('semantic-demand-timeout');
-      let entered = false;
-      const result = await featureHost.runtime.runWithLease('controller', async () => {
-        entered = true;
-        const clients = await /** @type {any} */ (globalThis).clients?.matchAll?.({
-          type: 'window', includeUncontrolled: true,
-        }) ?? [];
-        const exact = clients.filter((/** @type {any} */ client) => client?.url === offscreenUrl);
-        if (exact.length !== 1) return demandStopped('semantic-demand-startup-failed');
-        return callSemanticDemandOnce({
-          target: exact[0], identity: kernelIdentity,
-          payload: { protocol: 1, route, message },
-          authority: {
-            ownerId: 'peerd-authority-kernel', sessionId: null, instanceId: null,
-            origin: null, target: `semantic:${route}:options`,
-            replayClass: grant.replayClass,
-          },
-          kernelCall, timeoutMs,
+    let entered = false;
+    const result = await featureHost.runtime.runWithLease('controller', async (/** @type {any} */ lease) => {
+      entered = true;
+      const clients = await /** @type {any} */ (globalThis).clients?.matchAll?.({
+        type: 'window', includeUncontrolled: true,
+      }) ?? [];
+      const exact = clients.filter((/** @type {any} */ client) => client?.url === offscreenUrl);
+      if (exact.length !== 1) {
+        return { ok: false, code: 'contributor-channel-host-unavailable', outcomeKnown: true };
+      }
+      const channelId = crypto.randomUUID();
+      const offer = {
+        type: CONTRIBUTOR_CHANNEL_OFFER, protocol: CONTRIBUTOR_CHANNEL_PROTOCOL,
+        channelId, route, lease,
+      };
+      if (!parseContributorOffer(offer)) {
+        return { ok: false, code: 'contributor-channel-offer-invalid', outcomeKnown: true };
+      }
+      const { port1, port2 } = new MessageChannel();
+      return new Promise((resolve) => {
+        const deadlineAt = Date.now() + 15_000;
+        const counts = new Map();
+        let effectDispatched = false;
+        let settled = false;
+        const finish = (/** @type {any} */ value) => {
+          if (settled) return;
+          settled = true; clearTimeout(timer);
+          try { port1.close(); } catch {}
+          resolve(value);
+        };
+        const lost = () => finish({
+          ok: false, code: 'contributor-channel-lost',
+          outcomeKnown: !effectDispatched,
+          ...(effectDispatched ? { outcomeKind: 'unknown', retryable: false } : {}),
         });
-      }, { reason: 'preview-contributor-demand' });
-      return entered ? result : demandStopped('semantic-demand-startup-failed');
-    };
-    const first = await attempt();
-    return grant.replayClass === 'A' && first?.ok === false
-      && DEMAND_REPLAYABLE.has(first.code) && Date.now() < deadlineAt
-      ? attempt() : first;
+        const timer = setTimeout(lost, 15_000);
+        port1.onmessage = (event) => {
+          const packet = event.data;
+          if (packet?.protocol !== CONTRIBUTOR_CHANNEL_PROTOCOL
+              || packet.channelId !== channelId) { lost(); return; }
+          if (packet.type === CONTRIBUTOR_CHANNEL_RESULT) {
+            finish(packet.result ?? { ok: false, outcomeKnown: effectDispatched ? false : true });
+            return;
+          }
+          if (packet.type !== CONTRIBUTOR_CHANNEL_CALL
+              || typeof packet.requestId !== 'string' || typeof packet.operation !== 'string') {
+            lost(); return;
+          }
+          const limits = /** @type {any} */ (allowed)[route];
+          const used = counts.get(packet.operation) ?? 0;
+          if (used >= (limits[packet.operation] ?? 0)) { lost(); return; }
+          counts.set(packet.operation, used + 1);
+          if (packet.operation === 'semantic.contributor.enable'
+              || packet.operation === 'semantic.contributor.clear') effectDispatched = true;
+          Promise.resolve(authority.handle(packet.operation, packet.payload, {
+            authority: { target: `semantic:${route}:options` },
+            signal: { aborted: false }, deadlineAt,
+          })).then((value) => {
+            try { port1.postMessage({
+              type: CONTRIBUTOR_CHANNEL_REPLY, protocol: CONTRIBUTOR_CHANNEL_PROTOCOL,
+              channelId, requestId: packet.requestId,
+              result: value ?? { ok: false, outcomeKnown: true },
+            }); } catch { lost(); }
+          }, lost);
+        };
+        port1.onmessageerror = lost;
+        port1.addEventListener?.('close', lost, { once: true });
+        port1.start();
+        try { exact[0].postMessage(offer, [port2]); } catch { lost(); }
+      });
+    }, { reason: 'preview-contributor-demand' });
+    return entered ? result
+      : { ok: false, code: 'contributor-channel-host-unavailable', outcomeKnown: true };
   };
-  return Object.freeze(Object.fromEntries(Object.keys(routes).map((route) => [
+  return Object.freeze(Object.fromEntries(Object.keys(allowed).map((route) => [
     route, (/** @type {any} */ message, /** @type {any} */ sender) =>
       dispatch(route, message, sender),
   ])));
 };
 root[addonId] = Object.freeze({
   target: 'preview-chrome', update: createUpdateCustody,
-  semantic: createPreviewSemanticRoutes,
+  contributor: createPreviewContributorRoutes,
 });

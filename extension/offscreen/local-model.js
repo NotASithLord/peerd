@@ -28,6 +28,10 @@
 // (engineSupportsSpec, asserted live in the options-local-models E2E state).
 
 import browser from '/shared/browser-api.js';
+import {
+  LOCAL_MODEL_CHANNEL_PROTOCOL, LOCAL_MODEL_CHANNEL_RESULT,
+  parseLocalModelChannelOffer,
+} from '/shared/feature-lease-protocol.js';
 import { DEFAULT_LOCAL_MODEL_ID, listLocalModelSpecs, localModelSpec } from '/peerd-provider/offscreen.js';
 import { makeMuseChannelSplitter } from './muse-glimmer-stream.js';
 
@@ -312,6 +316,10 @@ export const localModelStatus = async ({ model: modelId = DEFAULT_LOCAL_MODEL_ID
  */
 export const loadingModelId = () => loading?.id ?? null;
 
+/** @type {unknown} */
+let lastProgress = null;
+export const localModelProgress = () => lastProgress;
+
 /**
  * Status for EVERY shipped model - what Settings renders its cards from, in one
  * round-trip instead of one call per model.
@@ -322,6 +330,51 @@ export const localModelCatalog = async ({ includeSupport = true } = {}) => ({
   models: await Promise.all(listLocalModelSpecs().map((spec) =>
     localModelStatus({ model: spec.id, includeSupport }))),
 });
+
+/** One admitted request from the exact service worker and model-host lease. */
+export const acceptLocalModelOffer = (
+  /** @type {any} */ event,
+  /** @type {{ownsLease?:(lease:any)=>boolean}} */ { ownsLease = () => false } = {},
+) => {
+  const offer = parseLocalModelChannelOffer(event?.data);
+  const port = event?.ports?.[0];
+  if (!offer || event?.ports?.length !== 1 || !port || !ownsLease(offer.lease)) {
+    try { port?.close(); } catch {}
+    return false;
+  }
+  const reply = (/** @type {any} */ result) => {
+    try { port.postMessage({
+      type: LOCAL_MODEL_CHANNEL_RESULT, protocol: LOCAL_MODEL_CHANNEL_PROTOCOL,
+      channelId: offer.channelId, outcomeKnown: true, ...result,
+    }); } catch {}
+    try { port.close(); } catch {}
+  };
+  const run = async () => {
+    if (offer.method === 'status') return {
+      ...(await localModelStatus(offer.args)), progress: localModelProgress(),
+    };
+    if (offer.method === 'catalog') return {
+      ...(await localModelCatalog(offer.args)), progress: localModelProgress(),
+    };
+    if (offer.method === 'probe') return probeWebgpu();
+    const pre = await localModelStatus({ model: offer.args.model, includeSupport: true });
+    if (!pre.ok || pre.supportState === 'unsupported') return pre;
+    const busy = loadingModelId();
+    if (busy && busy !== pre.model) return {
+      ok: false, error: `another model is still downloading (${busy})`, model: pre.model,
+    };
+    void initLocalModel({ model: pre.model }, (progress) => { lastProgress = progress; })
+      .catch((cause) => { lastProgress = {
+        status: 'error', model: pre.model,
+        message: cause instanceof Error ? cause.message : String(cause),
+      }; });
+    return { ...(await localModelStatus({ model: pre.model })), started: true };
+  };
+  Promise.resolve().then(run).then(reply, (cause) => reply({
+    ok: false, error: cause instanceof Error ? cause.message : String(cause),
+  }));
+  return true;
+};
 
 /**
  * Load a model (downloads weights on first call, then cached). Idempotent +

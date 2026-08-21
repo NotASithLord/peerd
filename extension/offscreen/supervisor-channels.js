@@ -14,6 +14,11 @@ import {
   admitVaultAuthorityOffer, VAULT_AUTHORITY_BOOTSTRAP,
   VAULT_AUTHORITY_PROTOCOL, VAULT_AUTHORITY_RESULT,
 } from '../shared/vault-authority-protocol.js';
+import {
+  LOCAL_MODEL_CHANNEL_PROTOCOL, LOCAL_MODEL_CHANNEL_RESULT,
+  parseLocalModelChannelOffer,
+} from '../shared/feature-lease-protocol.js';
+import { parseContributorOffer } from '../shared/contributor-channel.js';
 
 const ACTOR_CHANNEL_OFFER = 'peerd/actor-channel';
 const ACTOR_CHANNEL_PROTOCOL = 1;
@@ -54,16 +59,33 @@ export const admitRepositoryChannelOffer = (event, workerUrl, ownsLease) => {
     : { matched: true, ok: false, reason: 'lease-invalid', offer };
 };
 
+/** @param {any} event @param {string} workerUrl @param {(lease:any)=>boolean} ownsLease */
+export const admitLocalModelChannelOffer = (event, workerUrl, ownsLease) => {
+  if (event?.data?.type !== 'peerd/local-model-channel') {
+    return { matched: false, ok: false, offer: null };
+  }
+  const source = /** @type {{scriptURL?:unknown}|null} */ (event.source ?? null);
+  const offer = parseLocalModelChannelOffer(event.data);
+  const ok = event.isTrusted === true && source?.scriptURL === workerUrl
+    && event.ports?.length === 1 && !!event.ports[0] && !!offer
+    && ownsLease(offer.lease);
+  return { matched: true, ok, offer };
+};
+
 /**
  * @param {{
  *   getFeatureLeaseHost:()=>({isActive:(scope:string)=>boolean,ownsLease?:(scope:string,lease:any)=>boolean}|null),
  *   loadControllerBootstrap:()=>Promise<any>,
  *   loadRepositoryHost?:()=>Promise<any>,
+ *   loadLocalModelHost?:()=>Promise<any>,
+ *   loadContributorHost?:()=>Promise<any>,
  * }} deps
  */
 export const registerServiceWorkerChannels = ({
   getFeatureLeaseHost, loadControllerBootstrap,
   loadRepositoryHost = () => import('./repository-host.js'),
+  loadLocalModelHost = () => import('./local-model.js'),
+  loadContributorHost = () => import('./semantic-routes/contributor.js'),
 }) => {
   /** @type {Set<MessagePort>} */
   const actorPorts = new Set();
@@ -187,6 +209,55 @@ export const registerServiceWorkerChannels = ({
           } catch { /* invalid/closed */ }
           try { repositoryPort?.close(); } catch { /* invalid/closed */ }
         },
+      );
+      return;
+    }
+    const localModelAdmission = admitLocalModelChannelOffer(
+      event, backgroundScriptUrl,
+      (lease) => getFeatureLeaseHost()?.ownsLease?.('model-host', lease) === true,
+    );
+    if (localModelAdmission.matched) {
+      const localModelOffer = localModelAdmission.offer;
+      const port = event.ports?.[0];
+      if (!localModelAdmission.ok || !localModelOffer) {
+        try { port?.postMessage({
+          type: LOCAL_MODEL_CHANNEL_RESULT, protocol: LOCAL_MODEL_CHANNEL_PROTOCOL,
+          channelId: localModelOffer?.channelId ?? '', ok: false,
+          error: 'local-model-channel-refused', outcomeKnown: true,
+        }); } catch {}
+        try { port?.close(); } catch {}
+        return;
+      }
+      loadLocalModelHost().then(
+        ({ acceptLocalModelOffer }) => acceptLocalModelOffer(event, {
+          ownsLease: (/** @type {any} */ lease) => getFeatureLeaseHost()
+            ?.ownsLease?.('model-host', lease) === true,
+        }),
+        () => {
+          try { port?.postMessage({
+            type: LOCAL_MODEL_CHANNEL_RESULT, protocol: LOCAL_MODEL_CHANNEL_PROTOCOL,
+            channelId: localModelOffer.channelId, ok: false,
+            error: 'local-model-host-load-failed', outcomeKnown: true,
+          }); } catch {}
+          try { port?.close(); } catch {}
+        },
+      );
+      return;
+    }
+    const contributorOffer = parseContributorOffer(event.data);
+    if (event.data?.type === 'peerd/contributor-channel') {
+      const port = event.ports?.[0];
+      const source = /** @type {{scriptURL?:unknown}|null} */ (event.source ?? null);
+      const admitted = event.isTrusted === true && source?.scriptURL === backgroundScriptUrl
+        && event.ports?.length === 1 && !!contributorOffer
+        && getFeatureLeaseHost()?.ownsLease?.('controller', contributorOffer.lease) === true;
+      if (!admitted) { try { port?.close(); } catch {} return; }
+      loadContributorHost().then(
+        ({ acceptContributorOffer }) => acceptContributorOffer(event, {
+          ownsLease: (/** @type {any} */ lease) => getFeatureLeaseHost()
+            ?.ownsLease?.('controller', lease) === true,
+        }),
+        () => { try { port?.close(); } catch {} },
       );
       return;
     }

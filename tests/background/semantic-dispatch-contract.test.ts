@@ -54,9 +54,9 @@ describe('generated semantic route inventory', () => {
     ]);
     expect(SEMANTIC_ROUTE_CLASSIFICATION.size).toBe(161);
     expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.placement === 'kernel'))
-      .toHaveLength(72);
+      .toHaveLength(76);
     expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.placement === 'split'))
-      .toHaveLength(89);
+      .toHaveLength(85);
     expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.state === 'migrated')
       .map((row) => row.route)).toEqual([
       'actors/count', 'actors/overview',
@@ -78,6 +78,7 @@ describe('generated semantic route inventory', () => {
       'git-cred/delete', 'git-cred/list', 'git-cred/set',
       'learned/clear', 'learned/forget', 'learned/list',
       'lifecycle/assert-opfs-writable',
+      'local-model/catalog', 'local-model/init', 'local-model/probe', 'local-model/status',
       'memory/delete', 'memory/deleteAll', 'memory/export',
       'memory/suggestions', 'memory/suggestions/approve',
       'memory/suggestions/dismiss', 'memory/write',
@@ -102,7 +103,7 @@ describe('generated semantic route inventory', () => {
     expect(SEMANTIC_ROUTE_CUTOVER).toMatchObject({
       ready: false, expected: 161, classified: 161, missing: [], extra: [],
     });
-    expect(SEMANTIC_ROUTE_CUTOVER.unmigrated).toHaveLength(79);
+    expect(SEMANTIC_ROUTE_CUTOVER.unmigrated).toHaveLength(75);
   });
 
   test('does not let a candidate table hide missing, extra, or unmigrated routes', () => {

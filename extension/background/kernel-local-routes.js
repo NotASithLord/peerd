@@ -19,6 +19,13 @@ import {
   normalizeOpenRouterModels,
   providerAuthority,
 } from '../shared/provider-authority-policy.js';
+import {
+  LOCAL_MODEL_CHANNEL_OFFER,
+  LOCAL_MODEL_CHANNEL_PROTOCOL,
+  LOCAL_MODEL_CHANNEL_RESULT,
+  localModelMethodIsRead,
+  parseLocalModelChannelOffer,
+} from '../shared/feature-lease-protocol.js';
 
 const contactName = (/** @type {unknown} */ value) => typeof value === 'string'
   ? value.trim().replace(/\s+/g, ' ').slice(0, 64) || null : null;
@@ -223,6 +230,113 @@ const ollamaTagsUrl = (/** @type {any} */ value) => {
     return ['http:', 'https:'].includes(origin.protocol) && !origin.username && !origin.password
       ? new URL('/api/tags', origin.origin) : null;
   } catch { return null; }
+};
+
+/**
+ * One exact, lease-bound request to the lazy offscreen WebGPU owner. The
+ * service worker never imports the model engine and no extension-wide reply
+ * race is possible.
+ * @param {any} deps
+ */
+export const makeKernelLocalModelRoutes = ({
+  featureHost, offscreenUrl, pushState, available = true,
+  clientsApi = (/** @type {any} */ (globalThis)).clients,
+  createChannel = () => new MessageChannel(),
+  timeoutMs = 15_000, newId = () => crypto.randomUUID(),
+  setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout,
+}) => {
+  const unavailable = () => ({
+    ok: false, error: 'runtime_capability_unavailable', performed: false,
+    facility: 'localWebGpuHost', reasonCode: 'host_unsupported', retryable: false,
+    alternative: 'use_ollama',
+  });
+  let catalogSignature = '';
+  const call = async (/** @type {string} */ method, /** @type {any} */ args, /** @type {any} */ lease) => {
+    const matches = (await clientsApi.matchAll({ type: 'window', includeUncontrolled: true }))
+      .filter((/** @type {any} */ client) => client?.url === offscreenUrl);
+    if (matches.length !== 1) throw Object.assign(new Error('local model host unavailable'), {
+      outcomeKnown: true, code: 'local-model-host-unavailable',
+    });
+    const offer = {
+      type: LOCAL_MODEL_CHANNEL_OFFER, protocol: LOCAL_MODEL_CHANNEL_PROTOCOL,
+      channelId: newId(), method, args, lease,
+    };
+    if (!parseLocalModelChannelOffer(offer)) throw new Error('local model offer invalid');
+    const { port1, port2 } = createChannel();
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let dispatched = false;
+      const finish = (/** @type {any} */ value, /** @type {boolean} */ ok) => {
+        if (settled) return;
+        settled = true;
+        clearTimeoutFn(timer);
+        try { port1.close(); } catch {}
+        if (ok) resolve(value); else reject(value);
+      };
+      const lost = (/** @type {string} */ code) => finish(Object.assign(
+        new Error('local model host response was lost'), {
+          code, outcomeKnown: localModelMethodIsRead(method) || !dispatched,
+          ...(localModelMethodIsRead(method) || !dispatched ? {} : {
+            outcomeKind: 'unknown', retryable: false,
+          }),
+        },
+      ), false);
+      const timer = setTimeoutFn(() => lost('local-model-host-timeout'), timeoutMs);
+      port1.onmessage = (/** @type {MessageEvent} */ event) => {
+        const reply = event.data;
+        if (reply?.type !== LOCAL_MODEL_CHANNEL_RESULT
+            || reply.protocol !== LOCAL_MODEL_CHANNEL_PROTOCOL
+            || reply.channelId !== offer.channelId || typeof reply.ok !== 'boolean') return;
+        const { type: _type, protocol: _protocol, channelId: _channelId, ...result } = reply;
+        finish(result, true);
+      };
+      port1.onmessageerror = () => lost('local-model-host-reply-invalid');
+      port1.addEventListener?.('close', () => lost('local-model-host-channel-closed'), { once: true });
+      port1.start();
+      try { matches[0].postMessage(offer, [port2]); dispatched = true; }
+      catch { lost('local-model-host-dispatch-failed'); }
+    });
+  };
+  const run = async (/** @type {string} */ method, /** @type {any} */ args = {}) => {
+    if (!available) return unavailable();
+    let entered = false;
+    const result = await featureHost.runtime.runWithLease('model-host', async (/** @type {any} */ lease) => {
+      entered = true;
+      return call(method, args, lease);
+    }, { reason: 'local-model-demand' });
+    return entered ? result : result?.ok === false ? result : unavailable();
+  };
+  const init = async (/** @type {any} */ args = {}) => {
+    if (!available) return unavailable();
+    const lease = await featureHost.runtime.acquire('model-host', {
+      reason: 'local-model-resident',
+    });
+    if (!lease?.ok) return lease;
+    return call('init', args, lease);
+  };
+  const observe = async (/** @type {string} */ method, /** @type {any} */ args = {}) => {
+    const reply = await run(method, args);
+    if (reply?.ok && (method === 'catalog' || method === 'status')) {
+      const rows = method === 'catalog' ? reply.models : [reply];
+      const signature = JSON.stringify(rows?.map((/** @type {any} */ row) =>
+        [row?.model, !!row?.downloaded, !!row?.available, !!row?.loading]));
+      if (signature !== catalogSignature) {
+        catalogSignature = signature;
+        void Promise.resolve(pushState()).catch(() => {});
+      }
+    }
+    return reply;
+  };
+  return Object.freeze({
+    'local-model/status': (/** @type {any} */ message = {}) => observe('status', {
+      model: message.model, includeSupport: message.includeSupport === true,
+    }),
+    'local-model/catalog': (/** @type {any} */ message = {}) => observe('catalog', {
+      includeSupport: message.includeSupport !== false,
+    }),
+    'local-model/probe': () => run('probe'),
+    'local-model/init': (/** @type {any} */ message = {}) => init({ model: message.model }),
+  });
 };
 
 /** @param {any} deps */
@@ -497,10 +611,11 @@ export const createKernelProviderTestRoute = ({
  * ready:Promise<any>,settingsStore:any,pushState:Function,
  * isAllowed:(sender:unknown)=>boolean,isOptions:(sender:unknown)=>boolean,
  * isVoice:(sender:unknown)=>boolean,fetchFn?:typeof fetch,
- * sessions?:any,browser?:any,localModels?:boolean}} deps */
+ * sessions?:any,browser?:any,localModels?:boolean,featureHost?:any,offscreenUrl?:string}} deps */
 export const createKernelLocalRoutes = ({
   vault, idb, auditLog, sessionCache, repositories, ready, settingsStore, pushState,
   isAllowed, isOptions, isVoice, fetchFn, sessions, browser, localModels,
+  featureHost, offscreenUrl,
 }) => {
   const appFiles = createKernelAppFileReader({
     idb, sessionCache, appFiles: /** @type {any} */ (repositories.appFiles),
@@ -590,6 +705,9 @@ export const createKernelLocalRoutes = ({
     vmMeta: makeKernelVmMetaRoute({ ready, idb, settingsStore, isAllowed }),
     siteClients: createKernelSiteClientRoutes({ isAllowed: isOptions }),
     voiceAudit: makeKernelVoiceAuditRoute({ auditLog, isAllowed: isVoice }),
+    localModelRoutes: makeKernelLocalModelRoutes({
+      featureHost, offscreenUrl, pushState, available: localModels,
+    }),
     providerSetKey: async (/** @type {any} */ message = {}) => {
       const result = await providerSetKey(message);
       if (result.ok) {
