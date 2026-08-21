@@ -16,4 +16,4 @@ if (total === 0 || count !== total) {
   process.exit(1);
 }
 
-console.log(`typecheck coverage OK — ${count}/${total} extension files (${pct}%) carry // @ts-check`);
+console.log(`typecheck coverage OK: ${count}/${total} extension files (${pct}%) carry // @ts-check`);

@@ -12,7 +12,7 @@ import {
   VAULT_AUTHORITY_STORAGE_RESULT,
   parseVaultAuthorityCall,
 } from '../shared/vault-authority-protocol.js';
-import { createVault } from '../peerd-egress/vault/vault.js';
+import { createVault } from '../peerd-egress/offscreen.js';
 
 // Passkey-only users never compile the vendored Argon graph. The fixed KDF
 // entry is separately packaging- and digest-bound.

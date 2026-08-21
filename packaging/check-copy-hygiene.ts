@@ -203,6 +203,40 @@ export const extractAddedLines = (patch: string): AddedLine[] => {
   return added;
 };
 
+export const extractAddedLinesByPath = (patch: string): Map<string, AddedLine[]> => {
+  const added = new Map<string, AddedLine[]>();
+  let path: string | null = null;
+  let currentLine = 0;
+  let inHunk = false;
+  for (const line of patch.split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      path = null;
+      inHunk = false;
+      continue;
+    }
+    if (line.startsWith('+++ ')) {
+      path = line === '+++ /dev/null' ? null : normalizePath(line.slice(4));
+      continue;
+    }
+    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk) {
+      currentLine = Number.parseInt(hunk[1], 10);
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk || path === null) continue;
+    if (line.startsWith('+')) {
+      const lines = added.get(path) ?? [];
+      lines.push({ line: currentLine, text: line.slice(1) });
+      added.set(path, lines);
+      currentLine++;
+    } else if (!line.startsWith('-') && !line.startsWith('\\')) {
+      currentLine++;
+    }
+  }
+  return added;
+};
+
 export const scanCommitMetadata = (commit: CommitMetadata): CopyViolation[] => {
   const path = `commit:${commit.sha.slice(0, 12)}`;
   const identity = [
@@ -294,11 +328,13 @@ export const collectRepositoryViolations = (
   const changed = gitPaths(root, [
     'diff', '--name-only', '--diff-filter=ACMR', '-z', mergeBase, '--',
   ]).filter(isCopyPath);
+  const addedByPath = changed.length === 0 ? new Map<string, AddedLine[]>()
+    : extractAddedLinesByPath(gitText(root, [
+      'diff', '--no-color', '--no-ext-diff', '--no-prefix', '--unified=0',
+      mergeBase, '--', ...changed,
+    ]));
   for (const path of changed) {
-    const patch = gitText(root, [
-      'diff', '--no-color', '--no-ext-diff', '--unified=0', mergeBase, '--', path,
-    ]);
-    for (const added of extractAddedLines(patch)) {
+    for (const added of addedByPath.get(path) ?? []) {
       violations.push(...scanCopyLine(path, added.line, added.text, { dash: true }));
     }
   }

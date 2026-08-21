@@ -71,7 +71,7 @@ export const makeDispatcher = (handlers) =>
   }
   if (!isTrustedSender(sender)) {
     console.warn('[messaging] rejected untrusted sender for', msg?.type,
-      '— url:', sender?.url ?? '(none)', 'id:', sender?.id ?? '(none)');
+      '(url:', sender?.url ?? '(none)', 'id:', sender?.id ?? '(none)', ')');
     sendResponse({ ok: false, error: 'untrusted-sender' });
     return false;
   }

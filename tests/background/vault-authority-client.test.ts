@@ -160,6 +160,8 @@ describe('sealed vault authority channel', () => {
     const runtimeSource = readFileSync(
       join(EXTENSION_DIR, 'offscreen/vault-authority-runtime.js'), 'utf8',
     );
+    expect(runtimeSource).toContain("from '../peerd-egress/offscreen.js'");
+    expect(runtimeSource).not.toContain("from '../peerd-egress/vault/");
     expect(runtimeSource).not.toMatch(/^\s*import .*argon2id/m);
     expect(runtimeSource).toContain("import('../shared/argon2id.js')");
   });

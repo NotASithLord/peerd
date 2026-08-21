@@ -267,7 +267,7 @@ describe('makeScheduler — durability (load on boot)', () => {
   });
 });
 
-describe('makeScheduler — execution custody', () => {
+describe('makeScheduler execution custody', () => {
   it('never executes when the pending custody marker is not durable', async () => {
     const calls: string[] = [];
     const h = makeHarness({ fireRoutine: async (routine) => { calls.push(routine.id); } });
