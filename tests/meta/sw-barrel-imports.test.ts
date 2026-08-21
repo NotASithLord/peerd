@@ -175,6 +175,7 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     expect(modules).not.toContain('peerd-egress/vault/argon2.js');
     expect(modules).not.toContain('peerd-egress/fetch/private-network.js');
     expect(modules).not.toContain('peerd-runtime/composer/wrap.js');
+    expect(modules).not.toContain('peerd-engine/vm-net/git-credentials.js');
     expect(modules).not.toContain('engine-tabs/app-tab/app-data-client.js');
     expect([...modules].some((file) => file.includes('vendor/codemirror'))).toBe(false);
     expect([...modules].some((file) => file.includes('vendor/moonshine-js'))).toBe(false);
