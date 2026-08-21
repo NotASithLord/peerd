@@ -1,6 +1,14 @@
 // @ts-check
 
-import { createKernelSemanticDemand } from './kernel-semantic-demand.js';
+import { callSemanticDemandOnce } from './kernel-controller-call.js';
+
+const DEMAND_REPLAYABLE = new Set([
+  'semantic-demand-startup-failed', 'semantic-demand-channel-lost',
+  'semantic-demand-timeout',
+]);
+const demandStopped = (/** @type {string} */ code, outcomeKnown = true) => ({
+  ok: false, code, outcomeKnown, phase: outcomeKnown ? 'startup' : 'run',
+});
 
 export const KERNEL_UPDATE_CUSTODY_KEY = 'kernel.updateCustody.v1';
 const VERSION = /^\d+(?:\.\d+)*$/;
@@ -128,7 +136,6 @@ export const createKernelUpdateCustody = (/** @type {any} */ {
     onQuiet: apply,
     onSettingsChanged: () => checkNow(),
     checkNow,
-    snapshot: read,
   });
 };
 
@@ -233,24 +240,50 @@ const createPreviewSemanticRoutes = (/** @type {any} */ {
     senderClass: 'options', replayClass, acceptsSender: optionsUi,
   });
   const authority = createPreviewSemanticAuthority({ kv, optionsDemandRoute: descriptor });
-  const demand = createKernelSemanticDemand({
-    routes: authority.routes,
-    clientOptions: {
-      kernelIdentity,
-      offscreenUrl,
-      listWindowClients: async () => /** @type {any} */ (globalThis).clients?.matchAll?.({
-        type: 'window', includeUncontrolled: true,
-      }) ?? [],
-      withControllerLease: (/** @type {()=>Promise<any>} */ operation) =>
-        featureHost.runtime.runWithLease('controller', operation, {
-          reason: 'preview-contributor-demand',
-        }),
-    },
-  });
-  demand.registerKernelHandler('preview-contributor-authority', authority.handle);
-  return Object.freeze(Object.fromEntries(demand.routes.map((route) => [route,
-    (/** @type {any} */ message, /** @type {any} */ sender) =>
-      demand.dispatch(route, message, sender),
+  const routes = /** @type {Record<string,any>} */ (authority.routes);
+  const kernelCall = async (/** @type {string} */ operation,
+    /** @type {unknown} */ payload, /** @type {any} */ context) =>
+    await authority.handle(operation, payload, context)
+      ?? { ok: false, code: 'semantic-kernel-operation-denied', outcomeKnown: true };
+  const dispatch = async (/** @type {string} */ route,
+    /** @type {any} */ message, /** @type {any} */ sender) => {
+    const grant = routes[route];
+    if (!grant || message?.type !== route || !grant.acceptsSender(sender)) {
+      return demandStopped('semantic-demand-admission-denied');
+    }
+    const deadlineAt = Date.now() + 15_000;
+    const attempt = async () => {
+      const timeoutMs = Math.max(0, deadlineAt - Date.now());
+      if (timeoutMs < 1) return demandStopped('semantic-demand-timeout');
+      let entered = false;
+      const result = await featureHost.runtime.runWithLease('controller', async () => {
+        entered = true;
+        const clients = await /** @type {any} */ (globalThis).clients?.matchAll?.({
+          type: 'window', includeUncontrolled: true,
+        }) ?? [];
+        const exact = clients.filter((/** @type {any} */ client) => client?.url === offscreenUrl);
+        if (exact.length !== 1) return demandStopped('semantic-demand-startup-failed');
+        return callSemanticDemandOnce({
+          target: exact[0], identity: kernelIdentity,
+          payload: { protocol: 1, route, message },
+          authority: {
+            ownerId: 'peerd-authority-kernel', sessionId: null, instanceId: null,
+            origin: null, target: `semantic:${route}:options`,
+            replayClass: grant.replayClass,
+          },
+          kernelCall, timeoutMs,
+        });
+      }, { reason: 'preview-contributor-demand' });
+      return entered ? result : demandStopped('semantic-demand-startup-failed');
+    };
+    const first = await attempt();
+    return grant.replayClass === 'A' && first?.ok === false
+      && DEMAND_REPLAYABLE.has(first.code) && Date.now() < deadlineAt
+      ? attempt() : first;
+  };
+  return Object.freeze(Object.fromEntries(Object.keys(routes).map((route) => [
+    route, (/** @type {any} */ message, /** @type {any} */ sender) =>
+      dispatch(route, message, sender),
   ])));
 };
 root[addonId] = Object.freeze({

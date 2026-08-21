@@ -1,8 +1,16 @@
 import { describe, expect, test } from 'bun:test';
-import { createPreviewSemanticAuthority } from '../../extension/background/kernel-update-addon.js';
+import {
+  createPreviewSemanticAuthority,
+} from '../../extension/background/kernel-update-addon.js';
+import { bindControllerChannel } from '../../extension/offscreen/controller-shell.js';
+import { CONTROLLER_BUILD_DIGEST } from '../../extension/shared/build-config.js';
 import { dispatchContributorSemanticRoute } from '../../extension/offscreen/semantic-routes/contributor.js';
 import { emptyContributorLocalState } from '../../extension/peerd-runtime/observability/contributor-metrics.js';
 import { createSemanticDemandQuota } from '../../extension/shared/semantic-demand-policy.js';
+
+const createLivePreviewRoutes = (globalThis as any)[
+  Symbol.for('peerd.kernel.target-addon.v1')
+].semantic;
 
 const enabledRecord = () => ({
   version: 1,
@@ -131,5 +139,88 @@ describe('demand-loaded Contributor Metrics status', () => {
       authority: { target: 'semantic:contributor/enable:options' },
       signal: { aborted: false }, deadlineAt: Date.now() + 1_000,
     })).toMatchObject({ ok: false, outcomeKnown: false });
+  });
+
+  test('live Preview routes admit Options, retry Class A once, and never replay Class E', async () => {
+    const surface = { id: 'options' };
+    const offscreenUrl = 'chrome-extension://id/offscreen/offscreen.html';
+    const identity = {
+      schema: 1 as const, buildId: `0.7.3:${CONTROLLER_BUILD_DIGEST}`,
+      bootId: 'boot-preview-routes', kernelEpoch: 'kernel-preview-routes',
+    };
+    const good = {
+      url: offscreenUrl,
+      postMessage: (offer: any, ports: MessagePort[]) => bindControllerChannel({
+        port: ports[0], channelId: offer.channelId, buildDigest: offer.buildDigest,
+        kernelEpoch: offer.kernelEpoch, kernelIdentity: offer.kernelIdentity,
+        hostEpoch: 'host-preview-routes', offeredCaps: offer.capabilities,
+        supportedCaps: ['semantic.dispatch'],
+        loadController: async () => ({
+          call: async (_capability: string, value: any, options: any) => ({
+            ok: true, outcomeKnown: true,
+            semanticResult: await dispatchContributorSemanticRoute(
+              value.route, value.message, { kernelCall: options.kernelCall },
+            ),
+          }),
+        }),
+      }),
+    };
+    const lost = {
+      url: offscreenUrl,
+      postMessage: (offer: any, ports: MessagePort[]) => {
+        const port = ports[0];
+        let sequence = 0;
+        const send = (message: any) => port.postMessage({
+          protocol: 2, channelId: offer.channelId, buildDigest: offer.buildDigest,
+          kernelEpoch: offer.kernelEpoch, hostEpoch: 'host-preview-loss',
+          sequence: ++sequence, ...message,
+        });
+        port.onmessage = (event) => {
+          const message = event.data;
+          if (message.type === 'kernel/open') send({ type: 'controller/accepted',
+            requestId: message.requestId, grantId: message.grantId });
+          else if (message.type === 'kernel/commit') {
+            sequence += 1;
+            send({ type: 'controller/committed', requestId: message.requestId,
+              grantId: message.grantId });
+          }
+        };
+        port.start();
+        send({ type: 'controller/ready', capabilities: ['semantic.dispatch'] });
+      },
+    };
+    let matches = 0;
+    const priorClients = (globalThis as any).clients;
+    (globalThis as any).clients = {
+      matchAll: async () => (++matches === 1 ? [lost] : [good]),
+    };
+    try {
+      const routes = createLivePreviewRoutes({
+        kv: { get: async () => enabledRecord(), set: async () => {}, delete: async () => {} },
+        optionsUi: (sender: unknown) => sender === surface,
+        kernelIdentity: identity, offscreenUrl,
+        featureHost: { runtime: { runWithLease: async (_scope: string,
+          operation: () => Promise<any>) => operation() } },
+      });
+      await expect(routes['contributor/status']({
+        type: 'contributor/status',
+      }, {})).resolves.toMatchObject({
+        ok: false, code: 'semantic-demand-admission-denied', outcomeKnown: true,
+      });
+      expect(matches).toBe(0);
+      await expect(routes['contributor/status']({
+        type: 'contributor/status',
+      }, surface)).resolves.toMatchObject({ ok: true, status: { enabled: true } });
+      expect(matches).toBe(2);
+      matches = 0;
+      await expect(routes['contributor/enable']({
+        type: 'contributor/enable',
+      }, surface)).resolves.toMatchObject({
+        ok: false, code: 'semantic-demand-channel-lost', outcomeKnown: false,
+      });
+      expect(matches).toBe(1);
+    } finally {
+      (globalThis as any).clients = priorClients;
+    }
   });
 });

@@ -131,7 +131,7 @@ describe('cold entry graphs', () => {
       entryBytes: preview.entryBytes, directImports: preview.directImports,
     }).toEqual(PREVIEW_KERNEL_SOURCE_RATCHET);
     expect([...preview.modulesSet].filter((file) => !common.modulesSet.has(file)).sort()).toEqual([
-      'background/kernel-semantic-demand.js',
+      'background/kernel-controller-call.js',
       'background/kernel-update-addon.js',
       'background/vault-kernel-preview.js',
     ]);
