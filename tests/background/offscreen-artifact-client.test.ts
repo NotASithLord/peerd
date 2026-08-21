@@ -371,7 +371,8 @@ describe('demand-only artifact codec channel', () => {
       timeoutMs: 5,
     });
     await expect(blackhole.inspectEnvelope({})).rejects.toMatchObject({
-      name: 'ArtifactHostTimeoutError',
+      name: 'ArtifactHostTransportError',
+      message: 'artifact host channel closed',
     });
     expect(depth).toBe(0);
 

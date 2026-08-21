@@ -6,8 +6,9 @@ import browser from '../shared/browser-api.js';
 import { BACKGROUND_MODULE_PATH } from '../shared/build-config.js';
 import { ARTIFACT_CHANNEL_PROTOCOL, admitArtifactChannelOffer } from '../shared/artifact-offer.js';
 import {
+  REPOSITORY_CHANNEL_OFFER,
   REPOSITORY_CHANNEL_PROTOCOL,
-  admitRepositoryChannelOffer,
+  parseRepositoryChannelOffer,
 } from '../shared/repository-channel.js';
 import {
   admitVaultAuthorityOffer, VAULT_AUTHORITY_BOOTSTRAP,
@@ -32,6 +33,25 @@ export const isServiceWorkerSender = (sender) => {
       || (sender && 'tab' in sender)) return false;
   if (sender?.url === backgroundPageUrl) return true;
   return sender?.url === backgroundScriptUrl && !(sender && 'documentId' in sender);
+};
+
+/** @param {any} event @param {string} workerUrl @param {(lease:any)=>boolean} ownsLease */
+export const admitRepositoryChannelOffer = (event, workerUrl, ownsLease) => {
+  if (event?.data?.type !== REPOSITORY_CHANNEL_OFFER) {
+    return { matched: false, ok: false, reason: 'not-repository-offer', offer: null };
+  }
+  const source = /** @type {{scriptURL?:unknown}|null} */ (event.source ?? null);
+  const offer = parseRepositoryChannelOffer(event.data);
+  if (event.isTrusted !== true || source?.scriptURL !== workerUrl) {
+    return { matched: true, ok: false, reason: 'sender-invalid', offer };
+  }
+  if (!Array.isArray(event.ports) || event.ports.length !== 1 || !event.ports[0]) {
+    return { matched: true, ok: false, reason: 'port-invalid', offer };
+  }
+  if (!offer) return { matched: true, ok: false, reason: 'offer-invalid', offer: null };
+  return ownsLease(offer.lease)
+    ? { matched: true, ok: true, reason: null, offer }
+    : { matched: true, ok: false, reason: 'lease-invalid', offer };
 };
 
 /**

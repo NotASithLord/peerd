@@ -205,22 +205,3 @@ export const parseRepositoryChannelOffer = (value) => {
     lease: Object.freeze({ ...lease }),
   });
 };
-
-/** @param {any} event @param {string} workerUrl @param {(lease:any)=>boolean} ownsLease */
-export const admitRepositoryChannelOffer = (event, workerUrl, ownsLease) => {
-  if (event?.data?.type !== REPOSITORY_CHANNEL_OFFER) {
-    return { matched: false, ok: false, reason: 'not-repository-offer', offer: null };
-  }
-  const source = /** @type {{scriptURL?:unknown}|null} */ (event.source ?? null);
-  const offer = parseRepositoryChannelOffer(event.data);
-  if (event.isTrusted !== true || source?.scriptURL !== workerUrl) {
-    return { matched: true, ok: false, reason: 'sender-invalid', offer };
-  }
-  if (!Array.isArray(event.ports) || event.ports.length !== 1 || !event.ports[0]) {
-    return { matched: true, ok: false, reason: 'port-invalid', offer };
-  }
-  if (!offer) return { matched: true, ok: false, reason: 'offer-invalid', offer: null };
-  return ownsLease(offer.lease)
-    ? { matched: true, ok: true, reason: null, offer }
-    : { matched: true, ok: false, reason: 'lease-invalid', offer };
-};

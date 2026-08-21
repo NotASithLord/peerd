@@ -16,10 +16,10 @@ import {
   REPOSITORY_CHANNEL_RESULT,
   REPOSITORY_KERNEL_FETCH,
   REPOSITORY_KERNEL_FETCH_RESULT,
-  admitRepositoryChannelOffer,
   parseRepositoryChannelOffer,
   repositoryMethodIsMutating,
 } from '../../extension/shared/repository-channel.js';
+import { admitRepositoryChannelOffer } from '../../extension/offscreen/supervisor-channels.js';
 import { acceptRepositoryOffer } from '../../extension/offscreen/repository-host.js';
 import { createRepositoryAppFileService } from '../../extension/offscreen/repository-app-files.js';
 
@@ -429,8 +429,8 @@ describe('operation-lazy offscreen repository split', () => {
       withHost: (operation: any) => operation(lease),
       offscreenUrl,
       kernelFetch: async () => ({ ok: true }),
-      appReadTimeoutMs: 4,
-      appEffectTimeoutMs: 6,
+      appReadTimeoutMs: 100,
+      appEffectTimeoutMs: 150,
       retireHost: async (reason: string) => { retirements.push(reason); },
       newId: () => `repository-app-timeout-${++nextId}`,
       listWindowClients: async () => [{
@@ -478,8 +478,20 @@ describe('operation-lazy offscreen repository split', () => {
       .toMatchObject({ matched: true, ok: true, reason: null });
     expect(admitRepositoryChannelOffer({ ...event, isTrusted: false }, workerUrl, () => true))
       .toMatchObject({ matched: true, ok: false, reason: 'sender-invalid' });
+    expect(admitRepositoryChannelOffer({
+      ...event, source: { scriptURL: `${workerUrl}.attacker` },
+    }, workerUrl, () => true)).toMatchObject({
+      matched: true, ok: false, reason: 'sender-invalid',
+    });
     expect(admitRepositoryChannelOffer({ ...event, ports: [] }, workerUrl, () => true))
       .toMatchObject({ matched: true, ok: false, reason: 'port-invalid' });
+    expect(admitRepositoryChannelOffer({ ...event, ports: [port, port] }, workerUrl, () => true))
+      .toMatchObject({ matched: true, ok: false, reason: 'port-invalid' });
+    expect(admitRepositoryChannelOffer({
+      ...event, data: { ...offer, unexpected: true },
+    }, workerUrl, () => true)).toMatchObject({
+      matched: true, ok: false, reason: 'offer-invalid', offer: null,
+    });
   });
 
   test('Firefox loads one local repository controller only on first use', async () => {
@@ -890,10 +902,14 @@ describe('operation-lazy offscreen repository split', () => {
     expect([...graph].some((file) => file.includes('/vendor/isomorphic-git/'))).toBe(false);
     expect([...graph].some((file) => file.endsWith('/repository/repository-service.js'))).toBe(false);
     expect([...graph].some((file) => file.endsWith('/offscreen/repository-app-files.js'))).toBe(false);
+    expect([...graph].some((file) => readFileSync(file, 'utf8')
+      .includes('admitRepositoryChannelOffer'))).toBe(false);
     const sw = readFileSync(entry, 'utf8');
     const offscreen = readFileSync(join(root, 'offscreen/offscreen.js'), 'utf8');
+    const supervisor = readFileSync(join(root, 'offscreen/supervisor-channels.js'), 'utf8');
     expect(sw).not.toContain("import browserGit from '/vendor/isomorphic-git/index.js'");
     expect(offscreen).toContain("import('./repository-host.js')");
+    expect(supervisor).toContain('export const admitRepositoryChannelOffer');
   });
 
   test('has one private repository transport and no broadcast compatibility path', () => {
