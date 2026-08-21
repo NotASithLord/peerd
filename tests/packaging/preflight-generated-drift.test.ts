@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { generatedFilesDifferFromHead } from '../../packaging/preflight.ts';
+import {
+  generatedFilesDifferFromHead,
+  regenerateDevIdentity,
+} from '../../packaging/preflight.ts';
+import { EXTENSION_DIR } from '../../packaging/lib.ts';
 
 describe('preflight generated-file drift batching', () => {
   test('checks every generated path in one Git process', () => {
@@ -28,5 +32,14 @@ describe('preflight generated-file drift batching', () => {
   test('an empty generated set preserves the old no-drift, no-process result', () => {
     const runner = (() => { throw new Error('must not run'); }) as any;
     expect(generatedFilesDifferFromHead('/repo', [], runner)).toBe(false);
+  });
+
+  test('regeneration stamps the controller identity before returning', async () => {
+    const calls: string[] = [];
+    await regenerateDevIdentity(
+      () => { calls.push('generate'); },
+      async (root) => { calls.push(`stamp:${root}`); return 'digest'; },
+    );
+    expect(calls).toEqual(['generate', `stamp:${EXTENSION_DIR}`]);
   });
 });

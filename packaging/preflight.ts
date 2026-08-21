@@ -13,7 +13,8 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { REPO_ROOT, parseArgs } from './lib.ts';
+import { EXTENSION_DIR, REPO_ROOT, parseArgs } from './lib.ts';
+import { writeControllerBuildIdentity } from './controller-build-identity.ts';
 
 const run = (label: string, cmd: string, args: string[]) => {
   console.log(`\n── preflight: ${label} ──`);
@@ -21,6 +22,17 @@ const run = (label: string, cmd: string, args: string[]) => {
 };
 
 type SyncRunner = typeof execFileSync;
+type IdentityStamper = typeof writeControllerBuildIdentity;
+
+export const regenerateDevIdentity = async (
+  generate: () => void = () => run(
+    'regenerate dev manifest + channel-config', 'bun', ['run', 'gen:dev'],
+  ),
+  stamp: IdentityStamper = writeControllerBuildIdentity,
+) => {
+  generate();
+  await stamp(EXTENSION_DIR);
+};
 
 /** One pathspec-batched diff preserves the old any-file-drift verdict. */
 export const generatedFilesDifferFromHead = (
@@ -41,7 +53,7 @@ export const generatedFilesDifferFromHead = (
   }
 };
 
-const main = () => {
+const main = async () => {
   const args = parseArgs(process.argv.slice(2));
 
   // Drift check. gen:dev rewrites the two generated files, so snapshot
@@ -63,7 +75,7 @@ const main = () => {
     'badges/no-build.json',
   ].map((p) => join(REPO_ROOT, p));
   const before = genFiles.map((f) => readFileSync(f));
-  run('regenerate dev manifest + channel-config', 'bun', ['run', 'gen:dev']);
+  await regenerateDevIdentity();
   const drift = generatedFilesDifferFromHead(REPO_ROOT, genFiles);
   // Restore the pre-run bytes (whatever they were) — the generated output
   // we just wrote was only needed for the comparison above.
@@ -139,4 +151,4 @@ const main = () => {
   console.log('\npreflight OK');
 };
 
-if (import.meta.main) main();
+if (import.meta.main) await main();

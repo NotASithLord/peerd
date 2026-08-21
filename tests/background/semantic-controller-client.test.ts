@@ -52,6 +52,13 @@ describe('production semantic controller slice', () => {
       cpSync(EXTENSION_DIR, root, { recursive: true });
       const structuredClonePath = join(root, 'shared', 'structured-clone-size.js');
       const structuredCloneBefore = readFileSync(structuredClonePath, 'utf8');
+      for (const name of CONTROLLER_BUILD_STAMP_MODULES) {
+        const path = join(root, 'shared', name);
+        writeFileSync(path, readFileSync(path, 'utf8').replace(
+          /(CONTROLLER_BUILD_DIGEST\s*=\s*['"])[a-f0-9]{64}(['"])/,
+          `$1${'0'.repeat(64)}$2`,
+        ));
+      }
       const digest = await writeControllerBuildIdentity(root);
 
       expect(digest).toMatch(/^[a-f0-9]{64}$/);

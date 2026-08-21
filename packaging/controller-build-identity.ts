@@ -79,11 +79,13 @@ export const controllerBuildDigest = async (root: string): Promise<string> => {
     let bytes = readFileSync(file);
     if (CONTROLLER_BUILD_STAMP_PATHS.has(rel)) {
       const source = bytes.toString('utf8');
+      if (!/CONTROLLER_BUILD_DIGEST\s*=\s*['"][a-f0-9]{64}['"]/.test(source)) {
+        throw new Error('controller build digest stamp is missing');
+      }
       const normalized = source.replace(
         /(CONTROLLER_BUILD_DIGEST\s*=\s*['"])[a-f0-9]{64}(['"])/,
         `$1${'0'.repeat(64)}$2`,
       );
-      if (normalized === source) throw new Error('controller build digest stamp is missing');
       bytes = Buffer.from(normalized);
     }
     hash.update(rel);
