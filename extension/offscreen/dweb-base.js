@@ -22,6 +22,7 @@ import { DWEB_ENABLED } from '/shared/channel-config.js';
 import { loadDweb } from '/shared/dweb-loader.js';
 import { isServiceWorkerSender } from '/shared/messaging.js';
 import { makeStartStopBarrier } from '/offscreen/start-stop-barrier.js';
+import { makeDwebCustodyHost } from '/offscreen/dweb-custody-host.js';
 import { createContentOwnership } from '/offscreen/content-ownership.js';
 import { rollbackSharePublication } from '/offscreen/share-publication.js';
 import { createShareRollbackStore } from '/offscreen/share-rollback-store.js';
@@ -412,6 +413,11 @@ const runCustodyOperation = async (operation, args) => {
   throw new Error('unknown identity custody operation');
 };
 
+const custodyHost = makeDwebCustodyHost({
+  runOperation: runCustodyOperation,
+  readState: baseLifecycle.snapshot,
+});
+
 const scheduleCustodyReconnect = () => {
   if (!custodyIntended || custodyReconnectTimer !== null) return;
   custodyReconnectTimer = setTimeout(() => {
@@ -430,10 +436,6 @@ const connectCustodyPort = () => {
       waiter.resolve(port);
     }
     custodyWaiters.clear();
-    /** @param {any} response */
-    const respond = (response) => {
-      try { port.postMessage(response); } catch { /* disconnect rejects the SW-side request */ }
-    };
     port.onMessage.addListener((/** @type {any} */ message) => {
       if (message?.type === 'custody/secret-response'
           && typeof message.requestId === 'string') {
@@ -445,19 +447,8 @@ const connectCustodyPort = () => {
         else entry.reject(new Error(message.error ?? 'identity secret operation failed'));
         return;
       }
-      if (message?.type !== 'custody/request'
-          || typeof message.requestId !== 'string'
-          || !['export', 'adopt', 'suspend', 'resume', 'reset'].includes(message.operation)) return;
-      Promise.resolve(runCustodyOperation(message.operation, message.args ?? {}))
-        .then((result) => respond({
-          type: 'custody/response', requestId: message.requestId, ok: true, result,
-        }))
-        .catch((cause) => respond({
-          type: 'custody/response', requestId: message.requestId, ok: false,
-          error: /** @type {{ code?: string, message?: string }} */ (cause)?.code
-            ?? /** @type {{ message?: string }} */ (cause)?.message ?? 'host-failed',
-        }));
     });
+    custodyHost.attach(port);
     port.onDisconnect.addListener(() => {
       if (custodyPort === port) {
         custodyPort = null;

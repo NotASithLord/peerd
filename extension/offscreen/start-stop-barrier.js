@@ -137,5 +137,12 @@ export const makeStartStopBarrier = ({ getActive, create, activate, close }) => 
   // unrelated operations must never be able to release a live owner's lease.
   const resetSuspension = () => { suspensionOwner = null; };
 
-  return { start, stop, resume, resetSuspension };
+  // Read-only custody reconciliation after a lost Port reply. No caller may
+  // infer this state from whether start/stop happens to succeed: a different
+  // lease owner must remain distinguishable from an already-released lease.
+  const snapshot = () => Object.freeze({
+    suspensionOwner, stopping, pending: pending !== null, active: !!getActive(),
+  });
+
+  return { start, stop, resume, resetSuspension, snapshot };
 };

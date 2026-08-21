@@ -3741,7 +3741,10 @@ const dwebSelfCustody = makeDwebSelfCustody({
 });
 const dwebCustodyClient = makeDwebCustodyClient({
   ensureOffscreen: ensureDwebFeature,
-  handleSecretRequest: (operation, args) => (
+  handleSecretRequest: (
+    /** @type {'get'|'set'|'self-get'|'self-set'} */ operation,
+    /** @type {any} */ args,
+  ) => (
     operation === 'self-get' || operation === 'self-set'
       ? dwebSelfCustody.handle(operation, args)
       : dwebIdentityCustody.handle(operation, args)
