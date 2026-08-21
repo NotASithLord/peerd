@@ -120,7 +120,8 @@ describe('cold entry graphs', () => {
     expect(measured.modulesSet.has('background/semantic-demand-client.js')).toBe(false);
     expect(measured.modulesSet.has('shared/semantic-demand-policy.js')).toBe(false);
     expect(measured.modulesSet.has('peerd-engine/app-manifest.js')).toBe(true);
-    expect(measured.modulesSet.has('peerd-runtime/semantic.js')).toBe(true);
+    expect(measured.modulesSet.has('peerd-runtime/semantic.js')).toBe(false);
+    expect(measured.modulesSet.has('peerd-runtime/contacts/aggregate.js')).toBe(true);
   });
 
   test('Preview Chrome alone owns the downloaded-update graph', async () => {

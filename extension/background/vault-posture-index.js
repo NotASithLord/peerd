@@ -9,8 +9,6 @@ import {
   VAULT_POSTURE_SCHEMA,
 } from '../shared/vault-posture-contract.js';
 
-export { parseVaultPostureIndex, VAULT_POSTURE_INDEX_KEY };
-
 /**
  * @param {Object} deps
  * @param {{get:(key:string)=>Promise<any>,set:(key:string,value:any)=>Promise<void>}} deps.kv

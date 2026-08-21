@@ -9,8 +9,6 @@ export const makeUiPorts = () => {
     add: (port) => { ports.add(port); },
     /** @param {UiPort} port */
     remove: (port) => ports.delete(port),
-    /** @param {UiPort} port */
-    has: (port) => ports.has(port),
     get size() { return ports.size; },
     /** @param {string} name */
     hasNamed: (name) => {

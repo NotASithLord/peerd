@@ -76,7 +76,6 @@ export const createKernelDenylistPolicy = ({
         categories,
       });
     },
-    available: () => available,
   });
 };
 

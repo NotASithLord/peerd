@@ -22,7 +22,6 @@ describe('lazy native-kernel denylist policy', () => {
     });
     expect(reads).toBe(0);
     expect(fetches).toBe(0);
-    expect(policy.available()).toBe(false);
     expect(policy.blocks('example.com')).toBe(true);
   });
 
@@ -62,7 +61,6 @@ describe('lazy native-kernel denylist policy', () => {
       });
       expect(await policy.ready()).toMatchObject({ ok: false });
       expect(policy.blocks('example.com')).toBe(true);
-      expect(policy.available()).toBe(false);
     }
   });
 

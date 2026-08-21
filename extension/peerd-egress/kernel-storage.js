@@ -29,7 +29,7 @@ export {
 import * as rawIdb from './storage/idb.js';
 import { realKV } from './storage/kv.js';
 import {
-  makeAgentSendCustody, sessionDelete, sessionGet, sessionSet,
+  sessionDelete, sessionGet, sessionSet,
 } from './storage/session-cache.js';
 
 export const kv = {
@@ -41,4 +41,3 @@ export const kv = {
 };
 export const idb = rawIdb;
 export const sessionCache = { sessionGet, sessionSet, sessionDelete };
-export { makeAgentSendCustody };

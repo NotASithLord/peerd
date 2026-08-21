@@ -9,7 +9,7 @@ import { createKernelMemoryAuthority } from './kernel-memory-authority.js';
 import { kernelAppCatalogRows } from './kernel-app-catalog.js';
 import { makeContactsRoutes } from './routes/contacts.js';
 import { makeToolboxRoutes } from './routes/toolbox.js';
-import { mergeContacts } from '../peerd-runtime/semantic.js';
+import { mergeContacts } from '../peerd-runtime/contacts/aggregate.js';
 import {
   maskProviderKey,
   LOCAL_MODEL_LABELS,

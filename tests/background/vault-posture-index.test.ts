@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import {
   createVaultPostureIndex,
+} from '../../extension/background/vault-posture-index.js';
+import {
   parseVaultPostureIndex,
   VAULT_POSTURE_INDEX_KEY,
-} from '../../extension/background/vault-posture-index.js';
+} from '../../extension/shared/vault-posture-contract.js';
 
 const makeKv = () => {
   const values = new Map<string, any>();
