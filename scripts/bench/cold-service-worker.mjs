@@ -695,6 +695,12 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
         }
       });
       await page.send('ServiceWorker.enable', {}, remaining());
+      const activated = await waitFor(() => [...serviceWorkerVersions.values()].find((row) =>
+        row?.status === 'activated'
+        && typeof row?.scriptURL === 'string'
+        && row.scriptURL.endsWith(backgroundEntry)), remaining(), 5);
+      if (!activated) throw new Error('Chrome packaged service worker did not activate');
+      console.log(`  worker version activated in ${round(hostNowMs() - launchStarted)}ms`);
     }
     await enableChromePrfFixture(page);
     // CDP cannot open Chrome's browser-owned side panel. The native floor uses
