@@ -240,7 +240,11 @@ describe('test-only vault kernel package target', () => {
     const stampAt = source.indexOf('await writeControllerBuildIdentity(staging)');
     const bundleAt = source.indexOf('await bundleChromeNativeKernel(staging, chromeBackgroundEntry)');
     const packageAt = source.indexOf('// Package. AMO takes .xpi');
-    expect(source).toContain('if (minify && isChromeNativeKernelEntry(chromeBackgroundEntry))');
+    expect(source).toContain(
+      'const nativeChromeKernel = isChromeNativeKernelEntry(chromeBackgroundEntry)',
+    );
+    expect(source).toContain('if (minify && nativeChromeKernel)');
+    expect(source).toContain('nativeChromeKernel ? COLD_START_TARGETS.chrome : undefined');
     expect(stampAt).toBeGreaterThan(0);
     expect(bundleAt).toBeGreaterThan(stampAt);
     expect(packageAt).toBeGreaterThan(bundleAt);
@@ -268,7 +272,6 @@ describe('test-only vault kernel package target', () => {
         await packageArtifact({
           sourceRoot, artifactRoot, channel: 'store', browser,
           version: '0.7.3', sign: false, verify: false, minify: true,
-          coldBudgetMode: 'measure-only',
         });
         const staging = join(artifactRoot, 'staging', `store-${browser}`);
         const manifest = JSON.parse(readFileSync(join(staging, 'manifest.json'), 'utf8'));

@@ -275,10 +275,22 @@ export const packageArtifact = async (
   );
   writeFileSync(join(staging, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 
+  const chromeBackgroundEntry = browser === 'chrome'
+    ? manifest.background?.service_worker : null;
+  const nativeChromeKernel = isChromeNativeKernelEntry(chromeBackgroundEntry);
+
   if (minify) {
     const report = await minifyColdArtifactModules(staging, browser, channel);
-    if (coldBudgetMode === 'enforce') assertColdArtifactBudgets(report);
+    if (coldBudgetMode === 'enforce') {
+      assertColdArtifactBudgets(
+        report,
+        nativeChromeKernel ? COLD_START_TARGETS.chrome : undefined,
+      );
+    }
     console.log(formatArtifactMinifyReport(report));
+    if (coldBudgetMode === 'enforce' && nativeChromeKernel) {
+      console.log('cold graph budget: native Chrome target');
+    }
     if (coldBudgetMode === 'measure-only') {
       console.log('cold graph budget: measure-only historical base (candidate ratchet not applied)');
     }
@@ -297,9 +309,7 @@ export const packageArtifact = async (
     throw new Error('candidate artifact is missing the complete controller build-identity graph');
   }
 
-  const chromeBackgroundEntry = browser === 'chrome'
-    ? manifest.background?.service_worker : null;
-  if (minify && isChromeNativeKernelEntry(chromeBackgroundEntry)) {
+  if (minify && nativeChromeKernel) {
     const bundled = await bundleChromeNativeKernel(staging, chromeBackgroundEntry);
     const targetBytes = coldBudgetMode === 'enforce'
       ? COLD_START_TARGETS.chrome.serviceWorker.graphBytes

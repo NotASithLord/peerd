@@ -39,6 +39,12 @@ export interface ArtifactMinifyReport {
   };
 }
 
+export type ColdGraphBudgets = Partial<Record<'serviceWorker' | 'offscreen', Readonly<{
+  modules: number;
+  graphBytes: number;
+  entryBytes: number;
+}>>>;
+
 // These are artifact byte budgets for the complete static graphs, including
 // byte-identical vendor modules. Values come from the executable cold-start
 // policy; packaging cannot maintain a looser shadow budget.
@@ -197,7 +203,10 @@ export const minifyColdArtifactModules = async (
   };
 };
 
-export const assertColdArtifactBudgets = (report: ArtifactMinifyReport): void => {
+export const assertColdArtifactBudgets = (
+  report: ArtifactMinifyReport,
+  budgets: ColdGraphBudgets = COLD_GRAPH_BUDGETS[report.channel][report.browser],
+): void => {
   for (const [name, stats] of Object.entries(report.graphs) as Array<
     ['serviceWorker' | 'offscreen', ColdGraphStats]
   >) {
@@ -206,14 +215,7 @@ export const assertColdArtifactBudgets = (report: ArtifactMinifyReport): void =>
         `${name} cold graph did not shrink (${stats.beforeBytes} -> ${stats.afterBytes} bytes)`,
       );
     }
-    const browserBudgets = COLD_GRAPH_BUDGETS[report.channel][report.browser] as Partial<
-      Record<'serviceWorker' | 'offscreen', {
-        modules: number;
-        graphBytes: number;
-        entryBytes: number;
-      }>
-    >;
-    const budget = browserBudgets[name];
+    const budget = budgets[name];
     if (!budget) {
       throw new Error(`${report.browser} has no reviewed ${name} cold-graph budget`);
     }

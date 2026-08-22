@@ -7,6 +7,7 @@ import {
   COLD_GRAPH_BUDGETS,
   minifyColdArtifactModules,
 } from '../../packaging/minify-artifact-js.ts';
+import { COLD_START_TARGETS } from '../../scripts/bench/cold-start-budgets.js';
 import { staticImportSpecifiers } from '../../packaging/static-module-graph.ts';
 
 const temporaryRoots: string[] = [];
@@ -148,5 +149,28 @@ describe('release artifact JavaScript minification', () => {
     report.graphs.serviceWorker.entryBytes = budget.entryBytes;
     report.graphs.serviceWorker.modules = budget.modules + 1;
     expect(() => assertColdArtifactBudgets(report)).toThrow(/modules/);
+  });
+
+  test('an exact native entry can use the final target without weakening legacy ratchets', () => {
+    const report = {
+      browser: 'chrome' as const,
+      channel: 'store' as const,
+      transformedModules: 73,
+      preservedModules: 0,
+      beforeBytes: 500_000,
+      afterBytes: 340_000,
+      graphs: {
+        serviceWorker: {
+          entry: 'background/vault-kernel.js', entryBytes: 25_000,
+          modules: 73, beforeBytes: 447_000, afterBytes: 287_000,
+        },
+        offscreen: {
+          entry: 'offscreen/offscreen.js', entryBytes: 15_000,
+          modules: 12, beforeBytes: 84_000, afterBytes: 53_000,
+        },
+      },
+    };
+    expect(() => assertColdArtifactBudgets(report)).toThrow();
+    expect(() => assertColdArtifactBudgets(report, COLD_START_TARGETS.chrome)).not.toThrow();
   });
 });
