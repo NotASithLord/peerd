@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { makeKernelOpfsPostureRoute } from '../../extension/background/kernel-local-routes.js';
+import { makeKernelOpfsPostureRoute } from '../../extension/background/kernel-utility-routes.js';
 
 describe('native kernel OPFS posture route', () => {
   test('refuses provenance before readiness or storage authority', async () => {

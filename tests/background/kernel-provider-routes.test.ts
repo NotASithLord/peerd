@@ -86,18 +86,11 @@ describe('native UI-base provider/composer projection', () => {
   const makeLocal = (overrides: Record<string, any> = {}) => {
     let settings = overrides.settings ?? { providerName: 'anthropic', providerModel: '' };
     const pushes: string[] = [];
-    const appFiles = Object.fromEntries([
-      'listApp', 'listAppInfo', 'readText', 'readBytes', 'write', 'writeText', 'deleteFile',
-    ].map((name) => [name, async () => name.startsWith('list') ? [] : undefined]));
     const routes = createKernelLocalRoutes({
       vault: overrides.vault ?? { getSecret: async () => null },
-      idb: { get: async () => undefined },
       auditLog: { append: async () => {} },
-      sessionCache: { sessionGet: async () => null },
-      repositories: { appFiles, coordinate: async (_ref: any, fn: Function) => fn() },
       ready: Promise.resolve(), settingsStore: { get: () => settings, update: async () => {} },
       pushState: () => { pushes.push('state'); },
-      isAllowed: () => true, isOptions: () => true, isVoice: () => true,
       sessions: { getMetadata: async () => null },
       browser: { storage: { local: { get: async () => overrides.local ?? {} } } },
       fetchFn: overrides.fetchFn ?? (async () => new Response('{}', { status: 500 })),

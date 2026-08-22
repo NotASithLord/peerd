@@ -1,7 +1,9 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
 import { useFakeIndexedDB } from '../setup.ts';
-import { createKernelSiteClientRoutes } from '../../extension/background/kernel-site-client-routes.js';
-import { makeKernelVoiceAuditRoute } from '../../extension/background/kernel-local-routes.js';
+import {
+  createKernelSiteClientRoutes,
+  makeKernelVoiceAuditRoute,
+} from '../../extension/background/kernel-utility-routes.js';
 import { createSiteClientStore } from '../../extension/peerd-runtime/site-clients/store.js';
 
 beforeAll(async () => { await useFakeIndexedDB(); });

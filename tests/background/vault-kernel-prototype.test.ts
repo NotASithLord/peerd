@@ -117,6 +117,9 @@ describe('minimal vault authority-kernel prototype', () => {
   test('entry keeps tiny local projections cheaper than their bridge and excludes controller work', async () => {
     const source = readFileSync(join(import.meta.dir, '../../extension/background/vault-kernel.js'), 'utf8');
     const core = readFileSync(join(import.meta.dir, '../../extension/background/vault-kernel-core.js'), 'utf8');
+    const composer = readFileSync(join(import.meta.dir, '../../extension/background/kernel-composer-routes.js'), 'utf8');
+    const local = readFileSync(join(import.meta.dir, '../../extension/background/kernel-local-routes.js'), 'utf8');
+    const utility = readFileSync(join(import.meta.dir, '../../extension/background/kernel-utility-routes.js'), 'utf8');
     for (const route of [
       'vault/prfStatus',
       'vault/initializeWithPasskey', 'vault/initialize',
@@ -137,6 +140,26 @@ describe('minimal vault authority-kernel prototype', () => {
     expect(source).toContain('createKernelFrontDoor');
     expect(source).toContain('createKernelPortRouter');
     expect(source).toContain('createKernelLocalRoutes');
+    expect(source).toContain('createKernelAppFileReader');
+    expect(source).toContain('makeKernelAppEditorRoutes');
+    expect(source).toContain('createKernelSiteClientRoutes');
+    expect(source).toContain('makeKernelOpfsPostureRoute');
+    expect(source).toContain('makeKernelVmMetaRoute');
+    expect(source).toContain('makeKernelVoiceAuditRoute');
+    expect(source).not.toContain('kernelLocal.appFiles');
+    expect(source).not.toContain('kernelLocal.appEditorRoutes');
+    expect(source).not.toContain('kernelLocal.opfsPostureRoute');
+    expect(source).not.toContain('kernelLocal.vmMeta');
+    expect(source).not.toContain('kernelLocal.siteClients');
+    expect(source).not.toContain('kernelLocal.voiceAudit');
+    expect(local).not.toContain('createKernelAppFileReader');
+    expect(local).not.toContain('createKernelSiteClientRoutes');
+    expect(local).not.toContain('makeKernelOpfsPostureRoute');
+    expect(local).not.toContain('makeKernelVmMetaRoute');
+    expect(local).not.toContain('makeKernelVoiceAuditRoute');
+    expect(composer).not.toContain('makeKernelAppEditorRoutes');
+    expect(utility).toContain("from './kernel-app-file-reader.js'");
+    expect(utility).toContain("from './kernel-site-client-routes.js'");
     expect(source).not.toContain('createKernelSemanticDemand');
     expect(source).toContain('createKernelSemanticRoutes');
     expect(source).toContain('currentVaultKernelAssemblyReport');

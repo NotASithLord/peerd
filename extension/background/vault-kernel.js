@@ -63,6 +63,14 @@ import {
   createKernelLocalRoutes,
   createKernelSemanticRoutes,
 } from './kernel-local-routes.js';
+import {
+  createKernelAppFileReader,
+  createKernelSiteClientRoutes,
+  makeKernelAppEditorRoutes,
+  makeKernelOpfsPostureRoute,
+  makeKernelVmMetaRoute,
+  makeKernelVoiceAuditRoute,
+} from './kernel-utility-routes.js';
 import { createKernelProviderProjection } from './kernel-provider-projection.js';
 import {
   createDeferredRepositoryClient,
@@ -578,13 +586,40 @@ const repositories = /** @type {any} */ (kernelFirefox
     retireHost: (/** @type {string} */ reason) => featureHost.runtime.retireActiveHost(reason),
   }));
 const kernelLocal = createKernelLocalRoutes({
-  vault, idb, auditLog, sessionCache, repositories, pushState,
-  ready: vaultReady, settingsStore, isAllowed: trusted,
-  isOptions: optionsUi, isVoice: voiceUi, fetchFn: globalThis.fetch.bind(globalThis),
+  vault, auditLog, pushState,
+  ready: vaultReady, settingsStore, fetchFn: globalThis.fetch.bind(globalThis),
   sessions: kernelSessions, browser, localModels: !kernelFirefox,
   featureHost, offscreenUrl, providerProjection,
 });
-const appFiles = kernelLocal.appFiles;
+const appFiles = createKernelAppFileReader({
+  idb, sessionCache, appFiles: /** @type {any} */ (repositories.appFiles),
+});
+const appEditorRoutes = makeKernelAppEditorRoutes({
+  vault,
+  catalog: appCatalog,
+  files: appFiles,
+  repositories,
+  isAppSender: appUi,
+  reloadApp: reloadOpenApp,
+});
+const opfsPostureRoute = makeKernelOpfsPostureRoute({
+  ready: vaultReady,
+  assertWritable: () => writeGuard.assertWritable('opfs-workspaces'),
+  isAllowed: (sender) => {
+    const source = /** @type {any} */ (sender);
+    const senderUrl = source?.url ?? source?.tab?.url;
+    const notebook = typeof source?.tab?.id === 'number' && typeof senderUrl === 'string'
+      && senderUrl.split(/[?#]/, 1)[0] === notebookTabUrl;
+    return notebook || isOffscreenSender(source, {
+      runtimeId, extensionOrigin, offscreenUrl,
+    });
+  },
+});
+const vmMetaRoute = makeKernelVmMetaRoute({
+  ready: vaultReady, idb, settingsStore, isAllowed: trusted,
+});
+const siteClientRoutes = createKernelSiteClientRoutes({ isAllowed: optionsUi });
+const voiceAuditRoute = makeKernelVoiceAuditRoute({ auditLog, isAllowed: voiceUi });
 const semanticRoutes = Object.freeze({
   ...createKernelSemanticRoutes({
     idb, kv, auditLog, vault, ready: vaultReady,
@@ -645,25 +680,13 @@ const routes = {
     }),
   }),
   ...systemReadRoutes,
-  'lifecycle/assert-opfs-writable': kernelLocal.opfsPostureRoute({
-    ready: vaultReady,
-    assertWritable: () => writeGuard.assertWritable('opfs-workspaces'),
-    isAllowed: (sender) => {
-      const source = /** @type {any} */ (sender);
-      const senderUrl = source?.url ?? source?.tab?.url;
-      const notebook = typeof source?.tab?.id === 'number' && typeof senderUrl === 'string'
-        && senderUrl.split(/[?#]/, 1)[0] === notebookTabUrl;
-      return notebook || isOffscreenSender(source, {
-        runtimeId, extensionOrigin, offscreenUrl,
-      });
-    },
-  }),
+  'lifecycle/assert-opfs-writable': opfsPostureRoute,
   ...makeKernelAppCatalogRoutes({
     vault, idb, catalog: appCatalog, reloadApp: reloadOpenApp,
     browser, appTabUrl, sessionCache, isAppSender: appUi,
     appFiles, dwebEnabled: DWEB_ENABLED,
   }),
-  'vm/get-meta': kernelLocal.vmMeta,
+  'vm/get-meta': vmMetaRoute,
   ...makeKernelRepositoryReadRoutes({
     browser,
     vault,
@@ -678,13 +701,7 @@ const routes = {
   ...makeKernelGitCredentialRoutes({
     vault, auditLog, isLockedError: (/** @type {unknown} */ cause) => cause instanceof VaultLockedError,
   }),
-  ...kernelLocal.appEditorRoutes({
-    vault,
-    catalog: appCatalog,
-    repositories,
-    isAppSender: appUi,
-    reloadApp: reloadOpenApp,
-  }),
+  ...appEditorRoutes,
   'repository/kernel-fetch': async () => ({
     ok: false, error: 'repository-private-channel-required', outcomeKnown: true,
   }),
@@ -698,7 +715,7 @@ const routes = {
     resolvePermission: resolveKernelPermission, pushState,
   }),
   ...semanticRoutes,
-  ...kernelLocal.siteClients,
+  ...siteClientRoutes,
   'onboarding/complete': async (message = {}) => {
     await vaultReady;
     if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
@@ -706,7 +723,7 @@ const routes = {
     if (result.ok) await pushState();
     return result;
   },
-  'audit/voice-fetch': kernelLocal.voiceAudit,
+  'audit/voice-fetch': voiceAuditRoute,
   'provider/setKey': kernelLocal.providerSetKey,
   'provider/test': kernelLocal.providerTest,
   'models/options': kernelLocal.modelOptions,

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { makeKernelVmMetaRoute } from '../../extension/background/kernel-local-routes.js';
+import { makeKernelVmMetaRoute } from '../../extension/background/kernel-utility-routes.js';
 
 const sender = { id: 'peerd', url: 'chrome-extension://peerd/engine-tabs/vm-tab/index.html' };
 
