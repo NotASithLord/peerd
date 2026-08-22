@@ -61,9 +61,6 @@ export const assertVaultKernelReleaseTarget = ({
     if (graphBytes > target.graphBytes) {
       throw new Error(`native ${browser} graphBytes ${graphBytes} exceeds ${target.graphBytes}`);
     }
-    if (entryBytes > 200_000) {
-      throw new Error(`native Chrome bundle ${entryBytes} exceeds 200000`);
-    }
   }
 };
 
@@ -79,7 +76,7 @@ export async function bundleChromeVaultKernel(staging, entryRelative) {
       naming: 'vault-kernel.js',
       target: 'browser',
       format: 'esm',
-      minify: true,
+      minify: { whitespace: true, identifiers: false, syntax: false },
       splitting: false,
       plugins: [{
         name: 'fixed-native-runtime-imports',

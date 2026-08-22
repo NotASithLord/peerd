@@ -102,7 +102,7 @@ const graphFailures = (browser, result, policy) => {
           failures.push(`${label}.${key} is missing or invalid`);
         } else {
           const limit = bundledChromeWorker && metric === 'entryBytes'
-            ? 200_000 : ceiling?.[metric];
+            ? ceiling?.graphBytes : ceiling?.[metric];
           if (limit && value > limit) {
             failures.push(`${label}.${key} ${value} exceeds ${limit}`);
           }

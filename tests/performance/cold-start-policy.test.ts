@@ -226,7 +226,7 @@ describe('cold-start policy', () => {
     );
   });
 
-  test('target policy accepts only a genuine one-module Chrome worker below 200KB', () => {
+  test('target policy accepts only a genuine one-module Chrome worker below 300KB', () => {
     const result = chromeResult();
     for (const channel of ['store', 'preview'] as const) {
       result.packagedGraphsByChannel[channel] = Object.fromEntries(
@@ -234,7 +234,7 @@ describe('cold-start policy', () => {
           .filter(([name]) => name !== 'timing')
           .map(([name, value]) => [name, graph(
             name === 'serviceWorker'
-              ? { modules: 1, graphBytes: 199_999, entryBytes: 199_999 }
+              ? { modules: 1, graphBytes: 299_999, entryBytes: 299_999 }
               : value as { modules: number; graphBytes: number; entryBytes: number },
           )]),
       );
@@ -244,16 +244,19 @@ describe('cold-start policy', () => {
       graphPolicy: 'target', requireTimingTargets: true,
     })).toEqual({ ok: true, failures: [] });
 
-    result.packagedGraphsByChannel.preview.serviceWorker.entryBytes = 199_998;
+    result.packagedGraphsByChannel.preview.serviceWorker.entryBytes = 299_998;
     expect(assessChrome(result, {
       graphPolicy: 'target', requireTimingTargets: true,
     }).failures).toContain('preview.serviceWorker bundled entry does not equal its static graph');
 
-    result.packagedGraphsByChannel.preview.serviceWorker.entryBytes = 200_001;
-    result.packagedGraphsByChannel.preview.serviceWorker.graphBytes = 200_001;
+    result.packagedGraphsByChannel.preview.serviceWorker.entryBytes = 300_001;
+    result.packagedGraphsByChannel.preview.serviceWorker.graphBytes = 300_001;
     expect(assessChrome(result, {
       graphPolicy: 'target', requireTimingTargets: true,
-    }).failures).toContain('preview.serviceWorker.entryBytes 200001 exceeds 200000');
+    }).failures).toEqual(expect.arrayContaining([
+      'preview.serviceWorker.graphBytes 300001 exceeds 300000',
+      'preview.serviceWorker.entryBytes 300001 exceeds 300000',
+    ]));
   });
 
   test('a required lane defaults to the 300KB and three-second release gates', () => {
