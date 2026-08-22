@@ -66,7 +66,26 @@ const KERNEL_TIMING_KEYS = Object.freeze([
   'moduleEvaluationMs', 'replyAfterBundleStartMs', 'replyAfterModuleMs',
   'replyFromWorkerTimeOriginMs', 'vaultReadyAfterModuleMs',
 ]);
+const HOST_QUIESCENCE_KEYS = Object.freeze([
+  'busyFraction', 'clock', 'failures', 'load1', 'load1PerCpu', 'logicalCpus',
+  'maxBusyFraction', 'maxLoad1PerCpu', 'ok', 'schema', 'windowMs',
+]);
 const timingClose = (left, right) => Math.abs(left - right) <= 0.1;
+
+const validHostQuiescence = (value) => exactKeys(value, HOST_QUIESCENCE_KEYS)
+  && value.schema === 1
+  && value.clock === 'host-cpu-times'
+  && value.windowMs === NATIVE_FLOOR_CONTRACT.hostQuiescenceWindowMs
+  && Number.isInteger(value.logicalCpus) && value.logicalCpus > 0
+  && finite(value.load1) && value.load1 >= 0
+  && finite(value.load1PerCpu) && value.load1PerCpu >= 0
+  && finite(value.busyFraction) && value.busyFraction >= 0 && value.busyFraction <= 1
+  && value.maxLoad1PerCpu === NATIVE_FLOOR_CONTRACT.hostLoad1PerCpuMax
+  && value.maxBusyFraction === NATIVE_FLOOR_CONTRACT.hostBusyFractionMax
+  && value.load1PerCpu <= value.maxLoad1PerCpu
+  && value.busyFraction <= value.maxBusyFraction
+  && value.ok === true
+  && Array.isArray(value.failures) && value.failures.length === 0;
 
 const validateNativeKernelSample = (failures, label, sample) => {
   const timing = sample?.kernelTiming;
@@ -129,6 +148,22 @@ const nativeFloorFailures = (result) => {
   }
   const fresh = result?.freshProfile?.rawSamples ?? [];
   const wakes = result?.forcedColdWake?.rawSamples ?? [];
+  const hostQuiescence = result?.freshProfile?.hostQuiescence;
+  if (!Array.isArray(hostQuiescence)
+      || hostQuiescence.length !== metadata.freshProcesses) {
+    failures.push('chrome native-floor host quiescence evidence is incomplete');
+  } else {
+    hostQuiescence.forEach((sample, index) => {
+      const { sampleIndex, ...evidence } = sample ?? {};
+      if (sampleIndex !== index + 1 || !validHostQuiescence(evidence)) {
+        failures.push(`chrome native-floor host quiescence sample ${index + 1} is invalid`);
+      }
+      const raw = fresh.find((candidate) => candidate?.sampleIndex === sampleIndex);
+      if (raw && !sameSummary(raw.hostQuiescence, evidence)) {
+        failures.push(`chrome native-floor host quiescence sample ${index + 1} is not bound to its fresh run`);
+      }
+    });
+  }
   const bootIds = new Set();
   const kernelEpochs = new Set();
   fresh.forEach((sample, index) => {

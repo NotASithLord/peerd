@@ -13,7 +13,7 @@ import {
   createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
   rmSync, statSync, writeFileSync,
 } from 'node:fs';
-import { cpus, homedir, release as osRelease, tmpdir, totalmem } from 'node:os';
+import { cpus, homedir, loadavg, release as osRelease, tmpdir, totalmem } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { packageArtifact } from '../../packaging/package.ts';
@@ -58,6 +58,66 @@ const within = (promise, budgetMs, label) => new Promise((resolveValue, rejectVa
 const onPath = (name) => (process.env.PATH ?? '').split(delimiter)
   .map((directory) => join(directory, name))
   .find((path) => { try { return statSync(path).isFile(); } catch { return false; } });
+
+const cpuTimeTotals = (rows) => rows.reduce((total, row) => {
+  const times = row?.times;
+  if (!times || typeof times !== 'object') return total;
+  const values = Object.values(times);
+  if (values.some((value) => !Number.isFinite(value) || value < 0)) return total;
+  return {
+    idle: total.idle + Number(times.idle ?? 0),
+    total: total.total + values.reduce((sum, value) => sum + Number(value), 0),
+  };
+}, { idle: 0, total: 0 });
+
+export const assessHostQuiescence = ({ before, after, load1, logicalCpus, windowMs }) => {
+  const idleDelta = after?.idle - before?.idle;
+  const totalDelta = after?.total - before?.total;
+  const load1PerCpu = load1 / logicalCpus;
+  const busyFraction = 1 - (idleDelta / totalDelta);
+  const valid = [idleDelta, totalDelta, load1, logicalCpus, windowMs, load1PerCpu, busyFraction]
+    .every(Number.isFinite)
+    && idleDelta >= 0 && totalDelta > 0 && logicalCpus > 0 && windowMs > 0
+    && busyFraction >= 0 && busyFraction <= 1;
+  const failures = valid ? [
+    load1PerCpu > NATIVE_FLOOR_CONTRACT.hostLoad1PerCpuMax
+      ? `load1PerCpu ${round(load1PerCpu)} exceeds ${NATIVE_FLOOR_CONTRACT.hostLoad1PerCpuMax}` : null,
+    busyFraction > NATIVE_FLOOR_CONTRACT.hostBusyFractionMax
+      ? `busyFraction ${round(busyFraction)} exceeds ${NATIVE_FLOOR_CONTRACT.hostBusyFractionMax}` : null,
+  ].filter(Boolean) : ['host CPU evidence is invalid'];
+  return Object.freeze({
+    schema: 1,
+    clock: 'host-cpu-times',
+    windowMs,
+    logicalCpus,
+    load1: round(load1),
+    load1PerCpu: round(load1PerCpu),
+    busyFraction: round(busyFraction),
+    maxLoad1PerCpu: NATIVE_FLOOR_CONTRACT.hostLoad1PerCpuMax,
+    maxBusyFraction: NATIVE_FLOOR_CONTRACT.hostBusyFractionMax,
+    ok: failures.length === 0,
+    failures: Object.freeze(failures),
+  });
+};
+
+export const measureHostQuiescence = async ({
+  readCpus = cpus,
+  readLoad1 = () => loadavg()[0],
+  wait = sleep,
+  windowMs = NATIVE_FLOOR_CONTRACT.hostQuiescenceWindowMs,
+} = {}) => {
+  const firstRows = readCpus();
+  const before = cpuTimeTotals(firstRows);
+  await wait(windowMs);
+  const secondRows = readCpus();
+  return assessHostQuiescence({
+    before,
+    after: cpuTimeTotals(secondRows),
+    load1: readLoad1(),
+    logicalCpus: secondRows.length,
+    windowMs,
+  });
+};
 
 const options = Object.fromEntries(process.argv.slice(2).map((arg) => {
   const [key, value = true] = arg.replace(/^--/, '').split('=', 2);
@@ -632,6 +692,10 @@ const enableChromePrfFixture = async (page) => {
   });
 };
 
+export const exactChromeWorkerVersion = (versions, scriptURL, expected = {}) =>
+  [...versions].find((row) => row?.scriptURL === scriptURL
+    && Object.entries(expected).every(([key, value]) => row?.[key] === value)) ?? null;
+
 const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
   const backgroundEntry = packagedBackgroundEntry(extensionDir, 'chrome');
   const profile = mkdtempSync(join(tmpdir(), 'peerd-cold-chrome-profile-'));
@@ -649,6 +713,9 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
   const child = spawn(binary, chromeArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = '';
   const workerErrors = [];
+  const serviceWorkerVersions = new Map();
+  const workerVersionTimeline = [];
+  let expectedWorkerScriptURL = null;
   let workerStartupProbe = null;
   child.stderr.on('data', (chunk) => { stderr += String(chunk); });
   let browserConnection;
@@ -661,6 +728,7 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
     console.log(`  CDP ready in ${round(cdpReadyMs)}ms`);
     const firstWorker = await waitFor(() => findChromeWorker(port, backgroundEntry), remaining());
     if (!firstWorker) throw new Error(`Chrome worker target did not appear\n${stderr}`);
+    expectedWorkerScriptURL = `chrome-extension://${firstWorker.extensionId}/${backgroundEntry}`;
     const workerTargetMs = hostNowMs() - launchStarted;
     console.log(`  worker target ready in ${round(workerTargetMs)}ms`);
     // Browser launch remains reported, but the worker watchdog starts at the
@@ -703,7 +771,6 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       throw new Error(`Chrome ${version.Browser ?? 'unknown'} does not match pin ${pinnedVersion}`);
     }
     browserConnection = await within(attach(version.webSocketDebuggerUrl), remaining(), 'Chrome browser attach');
-    const serviceWorkerVersions = new Map();
     const created = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' })).json();
     page = await within(attach(created.webSocketDebuggerUrl), remaining(), 'Chrome page attach');
     await page.send('Runtime.enable', {}, remaining());
@@ -719,7 +786,16 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       });
       page.on('ServiceWorker.workerVersionUpdated', ({ versions = [] }) => {
         for (const row of versions) {
-          if (typeof row?.versionId === 'string') serviceWorkerVersions.set(row.versionId, row);
+          if (typeof row?.versionId !== 'string' || row?.scriptURL !== expectedWorkerScriptURL) continue;
+          serviceWorkerVersions.set(row.versionId, row);
+          workerVersionTimeline.push({
+            observedFromLaunchMs: round(hostNowMs() - launchStarted),
+            versionId: row.versionId,
+            status: row?.status ?? null,
+            runningStatus: row?.runningStatus ?? null,
+            errorMessage: row?.errorMessage ?? null,
+          });
+          if (workerVersionTimeline.length > 64) workerVersionTimeline.shift();
         }
       });
       await page.send('ServiceWorker.enable', {}, remaining());
@@ -732,25 +808,11 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
     const navigationFromLaunchMs = hostNowMs() - launchStarted;
     const navigation = await page.send('Page.navigate', { url: panelUrl }, remaining());
     if (navigation?.errorText) throw new Error(`Chrome panel navigation failed: ${navigation.errorText}`);
-    if (wakeSamples > 0) {
-      // A newly registered extension worker can remain `new/starting` until its
-      // first real extension client arrives. Home is that client; verify exact
-      // activation after navigation without manufacturing a debugger event.
-      const activated = await waitFor(() => [...serviceWorkerVersions.values()].find((row) =>
-        row?.status === 'activated'
-        && typeof row?.scriptURL === 'string'
-        && row.scriptURL.endsWith(backgroundEntry)), remaining(), 5);
-      if (!activated) {
-        const versions = [...serviceWorkerVersions.values()].map((row) => ({
-          status: row?.status,
-          runningStatus: row?.runningStatus,
-          scriptURL: row?.scriptURL,
-          errorMessage: row?.errorMessage,
-        }));
-        throw new Error(`Chrome packaged service worker did not activate: ${JSON.stringify(versions)}`);
-      }
-      console.log(`  worker version activated in ${round(hostNowMs() - launchStarted)}ms`);
-    }
+    // ServiceWorker.workerVersionUpdated is diagnostic here. Chrome can leave
+    // that observer at `new/starting` after the exact extension page and worker
+    // are already exchanging authenticated messages. Bootstrap, assembly and
+    // the visible CTA are the authoritative fresh-sample proof. The forced-stop
+    // lane below still requires an exact running -> stopped transition.
     const pageReady = await waitFor(async () => {
       const evaluated = await page.send('Runtime.evaluate', {
         expression: `location.href === ${JSON.stringify(panelUrl)} && document.readyState !== 'loading'`,
@@ -812,6 +874,9 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
     const vaultGateReadyFromNavigationMs = Math.max(
       0, vaultGateReadyFromLaunchMs - navigationFromLaunchMs,
     );
+    const activatedVersion = exactChromeWorkerVersion(
+      serviceWorkerVersions.values(), expectedWorkerScriptURL, { status: 'activated' },
+    );
     console.log(`  native worker to actionable UI in ${round(vaultGateReadyFromWorkerTargetMs)}ms`);
     let workerAgeAtProbeMs = null;
     if (diagnostic) {
@@ -844,9 +909,9 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       try {
         current = await findChromeWorker(port, backgroundEntry);
         if (!current) throw new Error('Chrome worker disappeared before forced termination');
-        const currentVersion = [...serviceWorkerVersions.values()].find((row) =>
-          row.runningStatus === 'running'
-          && String(row.scriptURL) === `chrome-extension://${current.extensionId}/${backgroundEntry}`);
+        const currentVersion = await waitFor(() => exactChromeWorkerVersion(
+          serviceWorkerVersions.values(), expectedWorkerScriptURL, { runningStatus: 'running' },
+        ), 8_000, 5);
         if (!currentVersion) throw new Error('Chrome ServiceWorker domain did not expose the running version');
         await page.send('Page.navigate', { url: 'about:blank' }, 5_000);
         const away = await waitFor(async () => {
@@ -991,6 +1056,8 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       vaultGateReadyFromLaunchMs,
       vaultGateReadyFromWorkerTargetMs,
       vaultGateReadyFromNavigationMs,
+      workerActivationObservedByActionable: !!activatedVersion,
+      workerVersionTimeline,
       kernelTiming: bootstrap.reply?.timing ?? null,
       assemblyIdentity,
       assembly: assembly?.report ?? null,
@@ -1002,6 +1069,8 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
         ? `Chrome worker errors: ${JSON.stringify(workerErrors.slice(-5))}` : null,
       workerStartupProbe
         ? `Chrome startup worker probe: ${JSON.stringify(workerStartupProbe)}` : null,
+      workerVersionTimeline.length > 0
+        ? `Chrome exact worker version timeline: ${JSON.stringify(workerVersionTimeline)}` : null,
     ].filter(Boolean);
     throw new Error(`${error?.message ?? String(error)}${details.length ? `\n${details.join('\n')}` : ''}`);
   } finally {
@@ -1019,6 +1088,18 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
 
 const runChromeSample = async (prepared, sample, role = 'candidate') => {
   console.log(`Chrome ${role} fresh profile ${sample + 1}/${chromeProcesses}`);
+  const hostQuiescence = nativeFloor ? await measureHostQuiescence() : null;
+  if (hostQuiescence && !hostQuiescence.ok) {
+    const failure = {
+      sample: sample + 1,
+      kind: 'host-overloaded',
+      elapsedMs: 0,
+      error: `host-overloaded: ${hostQuiescence.failures.join('; ')}`,
+      hostQuiescence,
+    };
+    console.log(`  ${role} fresh profile ${sample + 1}/${chromeProcesses}: ${failure.error}`);
+    return { failure };
+  }
   const started = hostNowMs();
   try {
     const processResult = await runChromeProcess({
@@ -1029,6 +1110,7 @@ const runChromeSample = async (prepared, sample, role = 'candidate') => {
     processResult.clock = 'host-monotonic';
     processResult.diagnosticWorkerClock = 'realm-performance';
     processResult.boundary = COLD_START_PHASES.chrome.freshProfile.boundary;
+    if (hostQuiescence) processResult.hostQuiescence = hostQuiescence;
     processResult.wakes.forEach((wakeSample) => {
       wakeSample.sampleIndex = sample + 1;
       wakeSample.clock = 'host-monotonic';
@@ -1041,6 +1123,7 @@ const runChromeSample = async (prepared, sample, role = 'candidate') => {
       sample: sample + 1,
       elapsedMs: hostNowMs() - started,
       error: error?.message ?? String(error),
+      ...(hostQuiescence ? { hostQuiescence } : {}),
     };
     console.log(`  ${role} fresh profile ${sample + 1}/${chromeProcesses}: failed after ${round(failure.elapsedMs)}ms`);
     return { failure };
@@ -1060,6 +1143,11 @@ const buildChromeResult = async (measurement, prepared, processes, processFailur
     boundary: COLD_START_PHASES.chrome.freshProfile.boundary,
     failures: processFailures,
     rawSamples: processes,
+    ...(nativeFloor ? {
+      hostQuiescence: [...processes, ...processFailures]
+        .map((row) => ({ sampleIndex: row.sampleIndex ?? row.sample, ...row.hostQuiescence }))
+        .sort((left, right) => left.sampleIndex - right.sampleIndex),
+    } : {}),
   };
   for (const metric of freshMetrics) freshProfile[metric] = summarize(processes.map((row) => row[metric]));
   const forcedColdWake = {

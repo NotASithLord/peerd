@@ -41,6 +41,9 @@ export const NATIVE_FLOOR_CONTRACT = Object.freeze({
   freshProcesses: 3,
   confirmedStopWakes: 3,
   bundledStaticModules: 1,
+  hostQuiescenceWindowMs: 1_000,
+  hostLoad1PerCpuMax: 0.75,
+  hostBusyFractionMax: 0.35,
   liveManifestClaimed: false,
 });
 

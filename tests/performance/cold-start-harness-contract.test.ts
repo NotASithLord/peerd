@@ -14,6 +14,51 @@ describe('cold-start browser harness contract', () => {
     expect(module.interleavedRoleOrder(2)).toEqual(['candidate', 'base']);
   });
 
+  test('measures a fixed CPU window and fails closed on a busy host', async () => {
+    const { assessHostQuiescence, measureHostQuiescence } = await import(
+      '../../scripts/bench/cold-service-worker.mjs'
+    );
+    const quiet = assessHostQuiescence({
+      before: { idle: 100, total: 1_000 },
+      after: { idle: 900, total: 2_000 },
+      load1: 5,
+      logicalCpus: 10,
+      windowMs: 1_000,
+    });
+    expect(quiet.ok).toBe(true);
+    expect(quiet.busyFraction).toBe(0.2);
+    expect(quiet.load1PerCpu).toBe(0.5);
+
+    let read = 0;
+    let waited = 0;
+    const measured = await measureHostQuiescence({
+      readCpus: () => [{
+        model: 'test', speed: 1,
+        times: read++ === 0
+          ? { idle: 100, user: 900, nice: 0, sys: 0, irq: 0 }
+          : { idle: 500, user: 1_500, nice: 0, sys: 0, irq: 0 },
+      }],
+      readLoad1: () => 1,
+      wait: async (ms: number) => { waited = ms; },
+    });
+    expect(waited).toBe(1_000);
+    expect(measured.ok).toBe(false);
+    expect(measured.failures.join(' ')).toContain('busyFraction');
+  });
+
+  test('matches only the exact service-worker script and state', async () => {
+    const { exactChromeWorkerVersion } = await import(
+      '../../scripts/bench/cold-service-worker.mjs'
+    );
+    const scriptURL = 'chrome-extension://abc/background/vault-kernel.js';
+    const exact = { scriptURL, status: 'activated', runningStatus: 'running' };
+    const sibling = { ...exact, scriptURL: `${scriptURL}?forged` };
+    expect(exactChromeWorkerVersion([sibling, exact], scriptURL, {
+      runningStatus: 'running',
+    })).toBe(exact);
+    expect(exactChromeWorkerVersion([sibling], scriptURL, { status: 'activated' })).toBeNull();
+  });
+
   test('derives the worker target from the exact packaged manifest entry', async () => {
     const module = await import('../../scripts/bench/cold-service-worker.mjs');
     const root = mkdtempSync(join(tmpdir(), 'peerd-cold-entry-contract-'));
@@ -139,9 +184,11 @@ describe('cold-start browser harness contract', () => {
       expect(text).toContain('assemblyIdentity');
       expect(text).toContain('inspectNativeFloorAssembly(bootstrap.reply?.assembly)');
       expect(text).toContain('deadlineAt = hostNowMs() + coldTimeoutMs');
-      expect(text).toContain("row?.status === 'activated'");
-      expect(text).toContain("row.scriptURL.endsWith(backgroundEntry)");
-      expect(text).toContain('Home is that client; verify exact');
+      expect(text).toContain('Bootstrap, assembly and');
+      expect(text).toContain('exactChromeWorkerVersion(');
+      expect(text).toContain("{ runningStatus: 'running' }");
+      expect(text).toContain("kind: 'host-overloaded'");
+      expect(text).not.toContain("row.scriptURL.endsWith(backgroundEntry)");
       expect(text).not.toContain("worker.send('Runtime.runIfWaitingForDebugger'");
       expect(text).toContain("location.href === 'about:blank'");
       expect(text).toContain("requireClean: lane === 'release' || nativeFloor");

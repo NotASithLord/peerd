@@ -154,6 +154,20 @@ const kernelTiming = () => ({
   replyFromWorkerTimeOriginMs: 200,
 });
 
+const hostQuiescence = () => ({
+  schema: 1,
+  clock: 'host-cpu-times',
+  windowMs: NATIVE_FLOOR_CONTRACT.hostQuiescenceWindowMs,
+  logicalCpus: 10,
+  load1: 2,
+  load1PerCpu: 0.2,
+  busyFraction: 0.1,
+  maxLoad1PerCpu: NATIVE_FLOOR_CONTRACT.hostLoad1PerCpuMax,
+  maxBusyFraction: NATIVE_FLOOR_CONTRACT.hostBusyFractionMax,
+  ok: true,
+  failures: [],
+});
+
 const nativeResult = () => {
   const result: any = chromeResult({ lane: 'local' });
   result.nativeFloor = NATIVE_FLOOR_CONTRACT;
@@ -184,6 +198,7 @@ const nativeResult = () => {
     { vaultGateReadyFromWakeMs: 1_000 },
   );
   result.freshProfile.rawSamples.forEach((sample: any, index: number) => {
+    sample.hostQuiescence = hostQuiescence();
     sample.kernelTiming = kernelTiming() as any;
     const identity = {
       schema: 1, buildId: 'native-build-identity',
@@ -195,6 +210,10 @@ const nativeResult = () => {
       cutoverReady: false, semantic: { migrated: 86, total: 161, ready: false },
     } as any;
   });
+  result.freshProfile.hostQuiescence = result.freshProfile.rawSamples.map((sample: any) => ({
+    sampleIndex: sample.sampleIndex,
+    ...sample.hostQuiescence,
+  }));
   result.forcedColdWake.rawSamples.forEach((sample: any, index: number) => {
     sample.stoppedRunningStatus = 'stopped';
     sample.kernelTiming = kernelTiming() as any;
@@ -297,6 +316,18 @@ describe('cold-start policy', () => {
     incomplete.freshProfile.attempted = 2;
     expect(assessNative(incomplete).failures)
       .toContain('chrome freshProfile attempted 2; lane requires exactly 3');
+
+    const missingHostEvidence = nativeResult();
+    missingHostEvidence.freshProfile.hostQuiescence.pop();
+    expect(assessNative(missingHostEvidence).failures)
+      .toContain('chrome native-floor host quiescence evidence is incomplete');
+
+    const overloaded = nativeResult();
+    overloaded.freshProfile.hostQuiescence[0].busyFraction = 0.9;
+    overloaded.freshProfile.hostQuiescence[0].ok = false;
+    overloaded.freshProfile.hostQuiescence[0].failures = ['busy'];
+    expect(assessNative(overloaded).failures)
+      .toContain('chrome native-floor host quiescence sample 1 is invalid');
   });
 
   test('native floor caps every worker-origin reply at the checked-in timing ceiling', () => {
