@@ -607,20 +607,6 @@ const enableChromePrfFixture = async (page) => {
   });
 };
 
-const resumeChromeWorker = async (target, budgetMs) => {
-  const worker = await within(
-    attach(target.webSocketDebuggerUrl), budgetMs, 'Chrome worker resume attach',
-  );
-  try {
-    // A remote-debugging Chrome can expose a new extension worker paused in
-    // `starting`. This only releases that CDP pause; all elapsed time remains
-    // inside the measured browser-launch or confirmed-stop boundary.
-    await worker.send('Runtime.runIfWaitingForDebugger', {}, budgetMs);
-  } finally {
-    worker.close();
-  }
-};
-
 const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
   const backgroundEntry = packagedBackgroundEntry(extensionDir, 'chrome');
   const profile = mkdtempSync(join(tmpdir(), 'peerd-cold-chrome-profile-'));
@@ -652,7 +638,6 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
     if (!firstWorker) throw new Error(`Chrome worker target did not appear\n${stderr}`);
     const workerTargetMs = hostNowMs() - launchStarted;
     console.log(`  worker target ready in ${round(workerTargetMs)}ms`);
-    await resumeChromeWorker(firstWorker, remaining());
     if (diagnostic) {
       const startupWorker = await within(
         attach(firstWorker.webSocketDebuggerUrl), 1_000, 'Chrome startup worker attach',
@@ -710,6 +695,18 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
         }
       });
       await page.send('ServiceWorker.enable', {}, remaining());
+    }
+    await enableChromePrfFixture(page);
+    // CDP cannot open Chrome's browser-owned side panel. The native floor uses
+    // Home, its exact tab-owned human surface, so provenance remains real.
+    const surfacePath = nativeFloor ? 'home/home.html' : 'sidepanel/sidepanel.html';
+    const panelUrl = `chrome-extension://${firstWorker.extensionId}/${surfacePath}`;
+    const navigation = await page.send('Page.navigate', { url: panelUrl }, remaining());
+    if (navigation?.errorText) throw new Error(`Chrome panel navigation failed: ${navigation.errorText}`);
+    if (wakeSamples > 0) {
+      // A newly registered extension worker can remain `new/starting` until its
+      // first real extension client arrives. Home is that client; verify exact
+      // activation after navigation without manufacturing a debugger event.
       const activated = await waitFor(() => [...serviceWorkerVersions.values()].find((row) =>
         row?.status === 'activated'
         && typeof row?.scriptURL === 'string'
@@ -725,13 +722,6 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       }
       console.log(`  worker version activated in ${round(hostNowMs() - launchStarted)}ms`);
     }
-    await enableChromePrfFixture(page);
-    // CDP cannot open Chrome's browser-owned side panel. The native floor uses
-    // Home, its exact tab-owned human surface, so provenance remains real.
-    const surfacePath = nativeFloor ? 'home/home.html' : 'sidepanel/sidepanel.html';
-    const panelUrl = `chrome-extension://${firstWorker.extensionId}/${surfacePath}`;
-    const navigation = await page.send('Page.navigate', { url: panelUrl }, remaining());
-    if (navigation?.errorText) throw new Error(`Chrome panel navigation failed: ${navigation.errorText}`);
     const pageReady = await waitFor(async () => {
       const evaluated = await page.send('Runtime.evaluate', {
         expression: `location.href === ${JSON.stringify(panelUrl)} && document.readyState !== 'loading'`,
@@ -857,11 +847,7 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       const wakeNavigation = await page.send('Page.navigate', { url: panelUrl }, wakeRemaining());
       if (wakeNavigation?.errorText) throw new Error(`Chrome wake panel navigation failed: ${wakeNavigation.errorText}`);
       const targetPromise = waitFor(() => findChromeWorker(port, backgroundEntry), wakeRemaining(), 2)
-        .then(async (target) => {
-          const elapsedMs = hostNowMs() - started;
-          if (target) await resumeChromeWorker(target, wakeRemaining());
-          return { target, elapsedMs };
-        });
+        .then((target) => ({ target, elapsedMs: hostNowMs() - started }));
       const wakePageReady = await waitFor(async () => {
         const ready = await page.send('Runtime.evaluate', {
           expression: `location.href === ${JSON.stringify(panelUrl)} && document.readyState !== 'loading'`,
