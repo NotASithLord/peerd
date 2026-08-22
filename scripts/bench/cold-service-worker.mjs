@@ -623,6 +623,7 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
   if (unsafeNoSandbox) chromeArgs.splice(3, 0, '--no-sandbox');
   const child = spawn(binary, chromeArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = '';
+  const workerErrors = [];
   child.stderr.on('data', (chunk) => { stderr += String(chunk); });
   let browserConnection;
   let page;
@@ -648,6 +649,14 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
     await page.send('Runtime.enable', {}, remaining());
     await page.send('Page.enable', {}, remaining());
     if (wakeSamples > 0) {
+      page.on('ServiceWorker.workerErrorReported', (error) => {
+        workerErrors.push({
+          errorMessage: error?.errorMessage,
+          sourceURL: error?.sourceURL,
+          lineNumber: error?.lineNumber,
+          columnNumber: error?.columnNumber,
+        });
+      });
       page.on('ServiceWorker.workerVersionUpdated', ({ versions = [] }) => {
         for (const row of versions) {
           if (typeof row?.versionId === 'string') serviceWorkerVersions.set(row.versionId, row);
@@ -895,6 +904,10 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       kernelTiming: bootstrap.reply?.timing ?? null,
       wakes, wakeFailures,
     };
+  } catch (error) {
+    const detail = workerErrors.length > 0
+      ? `\nChrome worker errors: ${JSON.stringify(workerErrors.slice(-5))}` : '';
+    throw new Error(`${error?.message ?? String(error)}${detail}`);
   } finally {
     try { page?.close(); } catch { /* browser is closing */ }
     try { browserConnection?.close(); } catch { /* browser is closing */ }
