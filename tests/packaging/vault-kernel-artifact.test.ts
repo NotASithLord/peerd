@@ -9,7 +9,6 @@ import {
   assertVaultKernelReleaseTarget,
   bundleChromeVaultKernel,
   NATIVE_CHROME_PRUNED_IMPORTS,
-  vaultKernelClassicManifest,
   vaultKernelManifest,
 } from '../../scripts/cdp/vault-kernel-artifact.mjs';
 
@@ -37,11 +36,6 @@ describe('test-only vault kernel package target', () => {
       permissions: ['storage'],
       background: { scripts: ['background/vault-kernel.js'], type: 'module' },
     });
-    expect(vaultKernelClassicManifest(preview)).toMatchObject({
-      name: 'peerd vault kernel preview floor',
-      background: { service_worker: 'background/vault-kernel-preview.js' },
-    });
-    expect(vaultKernelClassicManifest(preview).background).not.toHaveProperty('type');
     expect(source.background.service_worker).toBe('background/service-worker.js');
   });
 
@@ -69,7 +63,7 @@ describe('test-only vault kernel package target', () => {
     })).toThrow('graphBytes 300001 exceeds 300000');
   });
 
-  test('Chrome ships one classic bundle and prunes both Firefox runtime edges', async () => {
+  test('Chrome ships one module bundle and prunes both Firefox runtime edges', async () => {
     const staging = mkdtempSync(join(tmpdir(), 'peerd-native-kernel-bundle-'));
     const background = join(staging, 'background');
     mkdirSync(background, { recursive: true });
@@ -79,9 +73,9 @@ describe('test-only vault kernel package target', () => {
       "const kernelFirefox = 'chrome' === 'firefox';",
       "class ExactNamedError extends Error { constructor() { super(); this.name = 'ExactNamedError'; } }",
       'globalThis.__peerdBundleErrorName = new ExactNamedError().name;',
-      'export const value = answer;',
-      "export const firefox = kernelFirefox ? () => import('./firefox-storage-keepalive.js') : undefined;",
-      "export const repository = kernelFirefox ? () => import('./repository-local-client.js') : undefined;",
+      'globalThis.__peerdBundleValue = answer;',
+      "globalThis.__peerdBundleFirefox = kernelFirefox ? () => import('./firefox-storage-keepalive.js') : undefined;",
+      "globalThis.__peerdBundleRepository = kernelFirefox ? () => import('./repository-local-client.js') : undefined;",
       '',
     ].join('\n'));
     try {
@@ -89,7 +83,7 @@ describe('test-only vault kernel package target', () => {
       const output = readFileSync(join(background, 'vault-kernel.js'), 'utf8');
       expect(NATIVE_CHROME_PRUNED_IMPORTS).toHaveLength(2);
       expect(result.runtimeImports).toEqual([]);
-      expect(output.trimStart().startsWith('(()=>')).toBe(true);
+      expect(output.trimStart().startsWith('(()=>')).toBe(false);
       expect(output).not.toContain('export{');
       expect(output).not.toContain("from'./dep.js'");
       expect(output).not.toContain('from"./dep.js"');
@@ -97,7 +91,11 @@ describe('test-only vault kernel package target', () => {
         .map((match) => match[2]).sort()).toEqual([]);
       Function(output)();
       expect((globalThis as any).__peerdBundleErrorName).toBe('ExactNamedError');
+      expect((globalThis as any).__peerdBundleValue).toBe(42);
       delete (globalThis as any).__peerdBundleErrorName;
+      delete (globalThis as any).__peerdBundleValue;
+      delete (globalThis as any).__peerdBundleFirefox;
+      delete (globalThis as any).__peerdBundleRepository;
       expect(result.bytes).toBeLessThan(2_000);
     } finally {
       rmSync(staging, { recursive: true, force: true });

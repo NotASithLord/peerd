@@ -43,11 +43,6 @@ export const vaultKernelManifest = (manifest, browser, channel = 'store') => ({
     : { service_worker: nativeEntry(browser, channel), type: 'module' },
 });
 
-export const vaultKernelClassicManifest = (manifest) => ({
-  ...manifest,
-  background: { service_worker: manifest.background.service_worker },
-});
-
 export const assertVaultKernelReleaseTarget = ({
   browser, modules, graphBytes, entryBytes, bundled = false,
 }) => {
@@ -80,7 +75,7 @@ export async function bundleChromeVaultKernel(staging, entryRelative) {
       outdir: scratch,
       naming: 'vault-kernel.js',
       target: 'browser',
-      format: 'iife',
+      format: 'esm',
       minify: { whitespace: true, identifiers: true, syntax: true },
       keepNames: true,
       splitting: false,
@@ -151,10 +146,6 @@ export async function buildVaultKernelArtifact({
   await writeControllerBuildIdentity(staging);
   if (releaseMinify && browser === 'chrome') {
     await bundleChromeVaultKernel(staging, nativeEntry(browser, channel));
-    writeFileSync(
-      manifestPath,
-      `${JSON.stringify(vaultKernelClassicManifest(manifest), null, 2)}\n`,
-    );
   }
 
   const entry = join(staging, nativeEntry(browser, channel));
