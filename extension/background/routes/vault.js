@@ -1,5 +1,40 @@
 // @ts-check
 
+/** @param {Record<string, any>} deps */
+export const makeLegacyVaultUnlockEffect = ({
+  onUnlocked, resumeGoalRuns, sessionCache, maybeAutoResumeAfterRecovery, resumeSchedules,
+}) => (/** @type {string} */ reason) => {
+  Promise.resolve(onUnlocked(reason)).catch((/** @type {unknown} */ error) =>
+    console.error('[sw] post-unlock transition failed', error));
+  Promise.resolve(resumeGoalRuns())
+    .catch(() => {})
+    .then(() => sessionCache.sessionGet('currentSessionId'))
+    .then((/** @type {any} */ current) => maybeAutoResumeAfterRecovery(current))
+    .catch(() => {});
+  Promise.resolve(resumeSchedules()).catch(() => {});
+};
+
+/** @param {Record<string, any>} deps */
+export const makeConfirmAnswerRoute = ({
+  confirmCoordinator, sessionCache, isActualSidepanelSender, isActualHomeSender,
+}) => async (/** @type {any} */ {
+  id, answer, ownerSessionId, sessionId, dispatchId,
+}, /** @type {unknown} */ sender) => {
+  const fromSidepanel = isActualSidepanelSender(sender) === true;
+  const fromHome = isActualHomeSender(sender) === true;
+  if (!fromSidepanel && !fromHome) {
+    return { ok: false, error: 'confirm-answer-unauthorized-sender' };
+  }
+  const activeOwnerSessionId = await sessionCache.sessionGet('currentSessionId');
+  if ((activeOwnerSessionId ?? null) !== (ownerSessionId ?? null)) {
+    return { ok: false, error: 'confirm-answer-foreign-owner' };
+  }
+  const resolved = confirmCoordinator.resolve({
+    id, ownerSessionId, sessionId, dispatchId,
+  }, answer, fromHome ? 'home' : 'sidepanel');
+  return resolved ? { ok: true } : { ok: false, error: 'confirm-answer-stale-or-foreign' };
+};
+
 /**
  * @param {Record<string, any>} deps
  * @returns {Record<string, (msg?: any, sender?: unknown) => Promise<any>>}
@@ -7,32 +42,27 @@
 export const makeVaultRoutes = (deps) => {
   const {
     vault, auditLog, kv, idb, base64ToBytes,
-    ensureOffscreen, maybeStartBaseNetwork, pushState, purgeVaultBlob,
-    onInitialized, onUnlocked, onLocked,
-    confirmCoordinator, sessionCache, isActualSidepanelSender, isActualHomeSender,
-    maybeAutoResumeAfterRecovery, resumeGoalRuns, resumeSchedules,
+    pushState, purgeVaultBlob, onInitialized, onUnlocked, onLocked,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,
     VaultLockedError,
   } = deps;
 
-  const runInitialized = typeof onInitialized === 'function'
-    ? onInitialized
-    : () => ensureOffscreen?.();
-  const runUnlocked = typeof onUnlocked === 'function'
-    ? onUnlocked
-    : (/** @type {string} */ reason) => {
-      ensureOffscreen?.();
-      maybeStartBaseNetwork?.(reason);
-    };
-  const runLocked = typeof onLocked === 'function' ? onLocked : async () => {};
+  const prfPayload = (/** @type {any} */ input) =>
+    typeof input?.credentialId === 'string' && typeof input?.prfSalt === 'string'
+      && typeof input?.prfOutput === 'string' ? {
+        prfOutput: base64ToBytes(input.prfOutput),
+        credentialId: base64ToBytes(input.credentialId),
+        prfSalt: base64ToBytes(input.prfSalt),
+        transports: input.transports,
+      } : null;
 
   return {
     'vault/initialize': async ({ passphrase }) => {
       try {
         await vault.initialize(passphrase);
         auditLog.append({ type: 'vault_initialized' }).catch(() => {});
-        Promise.resolve(runInitialized()).catch((/** @type {unknown} */ e) =>
+        Promise.resolve(onInitialized()).catch((/** @type {unknown} */ e) =>
           console.error('[sw] post-initialize transition failed', e));
         return { ok: true };
       } catch (e) {
@@ -45,14 +75,8 @@ export const makeVaultRoutes = (deps) => {
       try {
         await vault.unlock(passphrase);
         auditLog.append({ type: 'vault_unlocked' }).catch(() => {});
-        Promise.resolve(runUnlocked('unlock')).catch((/** @type {unknown} */ e) =>
+        Promise.resolve(onUnlocked('unlock')).catch((/** @type {unknown} */ e) =>
           console.error('[sw] post-unlock transition failed', e));
-        Promise.resolve(resumeGoalRuns?.())
-          .catch(() => {})
-          .then(() => sessionCache.sessionGet('currentSessionId'))
-          .then((/** @type {any} */ cur) => maybeAutoResumeAfterRecovery(cur))
-          .catch(() => {});
-        Promise.resolve(resumeSchedules?.()).catch(() => {});
         return { ok: true };
       } catch (e) {
         if (e instanceof WrongPassphraseError) return { ok: false, error: 'wrong-passphrase' };
@@ -62,30 +86,22 @@ export const makeVaultRoutes = (deps) => {
       }
     },
 
-    'vault/initializeWithPasskey': async ({ credentialId, prfSalt, prfOutput, transports }) => {
-      if (typeof credentialId !== 'string'
-          || typeof prfSalt !== 'string'
-          || typeof prfOutput !== 'string') {
-        return { ok: false, error: 'invalid-prf-payload' };
-      }
+    'vault/initializeWithPasskey': async (input) => {
       try {
-        await vault.initializeWithPrfOnly({
-          prfOutput:    base64ToBytes(prfOutput),
-          credentialId: base64ToBytes(credentialId),
-          prfSalt:      base64ToBytes(prfSalt),
-          transports,
-        });
+        const payload = prfPayload(input);
+        if (!payload) return { ok: false, error: 'invalid-prf-payload' };
+        await vault.initializeWithPrfOnly(payload);
       } catch (e) {
         if (e instanceof VaultAlreadyInitializedError) return { ok: false, error: 'already-initialized' };
         console.error('[sw] initializeWithPasskey failed, rolling back', e);
         await vault.lock();
-        await runLocked();
+        await onLocked();
         await purgeVaultBlob({ kv, idb });
         throw e;
       }
       auditLog.append({ type: 'vault_initialized', details: { prf: true, passkeyOnly: true } }).catch(() => {});
       auditLog.append({ type: 'vault_prf_enrolled' }).catch(() => {});
-      Promise.resolve(runInitialized()).catch((/** @type {unknown} */ e) =>
+      Promise.resolve(onInitialized()).catch((/** @type {unknown} */ e) =>
         console.error('[sw] post-initialize transition failed', e));
       return { ok: true };
     },
@@ -107,7 +123,7 @@ export const makeVaultRoutes = (deps) => {
 
     'vault/lock': async () => {
       await vault.lock();
-      await runLocked();
+      await onLocked();
       auditLog.append({ type: 'vault_locked' }).catch(() => {});
       pushState();
       return { ok: true };
@@ -118,19 +134,11 @@ export const makeVaultRoutes = (deps) => {
       return { ok: true, ...status };
     },
 
-    'vault/enrollPrf': async ({ credentialId, prfSalt, prfOutput, transports }) => {
-      if (typeof credentialId !== 'string'
-          || typeof prfSalt !== 'string'
-          || typeof prfOutput !== 'string') {
-        return { ok: false, error: 'invalid-prf-payload' };
-      }
+    'vault/enrollPrf': async (input) => {
       try {
-        await vault.enrollPrf({
-          prfOutput:    base64ToBytes(prfOutput),
-          credentialId: base64ToBytes(credentialId),
-          prfSalt:      base64ToBytes(prfSalt),
-          transports,
-        });
+        const payload = prfPayload(input);
+        if (!payload) return { ok: false, error: 'invalid-prf-payload' };
+        await vault.enrollPrf(payload);
         auditLog.append({ type: 'vault_prf_enrolled' }).catch(() => {});
         pushState();
         return { ok: true };
@@ -148,14 +156,8 @@ export const makeVaultRoutes = (deps) => {
       try {
         await vault.unlockWithPrf(base64ToBytes(prfOutput));
         auditLog.append({ type: 'vault_unlocked', details: { via: 'prf' } }).catch(() => {});
-        Promise.resolve(runUnlocked('unlock-prf')).catch((/** @type {unknown} */ e) =>
+        Promise.resolve(onUnlocked('unlock-prf')).catch((/** @type {unknown} */ e) =>
           console.error('[sw] post-unlock transition failed', e));
-        Promise.resolve(resumeGoalRuns?.())
-          .catch(() => {})
-          .then(() => sessionCache.sessionGet('currentSessionId'))
-          .then((/** @type {any} */ cur) => maybeAutoResumeAfterRecovery(cur))
-          .catch(() => {});
-        Promise.resolve(resumeSchedules?.()).catch(() => {});
         return { ok: true };
       } catch (e) {
         if (e instanceof PrfNotEnrolledError) return { ok: false, error: 'prf-not-enrolled' };
@@ -177,25 +179,6 @@ export const makeVaultRoutes = (deps) => {
         if (e instanceof RecoveryPassphraseNotSetError) return { ok: false, error: 'recovery-not-set' };
         throw e;
       }
-    },
-
-    'confirm/answer': async ({
-      id, answer, ownerSessionId, sessionId, dispatchId,
-    }, sender) => {
-      const fromSidepanel = isActualSidepanelSender?.(sender) === true;
-      const fromHome = isActualHomeSender?.(sender) === true;
-      if (!fromSidepanel && !fromHome) {
-        return { ok: false, error: 'confirm-answer-unauthorized-sender' };
-      }
-      const activeOwnerSessionId = await sessionCache.sessionGet('currentSessionId');
-      if ((activeOwnerSessionId ?? null) !== (ownerSessionId ?? null)) {
-        return { ok: false, error: 'confirm-answer-foreign-owner' };
-      }
-      const resolved = confirmCoordinator.resolve({
-        id, ownerSessionId, sessionId, dispatchId,
-      }, answer, fromHome ? 'home' : 'sidepanel');
-      if (!resolved) return { ok: false, error: 'confirm-answer-stale-or-foreign' };
-      return { ok: true };
     },
   };
 };

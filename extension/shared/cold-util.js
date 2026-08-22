@@ -21,6 +21,18 @@ export const base64ToBytes = (value) => {
   return out;
 };
 
+/** Serialize operations without letting one rejection poison the lane. */
+export const makeSerialLane = () => {
+  let tail = Promise.resolve();
+  return /** @template T @param {() => Promise<T>|T} operation @returns {Promise<T>} */ (
+    operation,
+  ) => {
+    const run = tail.then(operation);
+    tail = run.then(() => undefined, () => undefined);
+    return run;
+  };
+};
+
 /** @param {number} n */
 const randomBytesDefault = (n) => crypto.getRandomValues(new Uint8Array(n));
 

@@ -250,14 +250,6 @@ export const VAULT_KERNEL_HUMAN_ROUTE_NAMES = Object.freeze([
 
 /**
  */
-export const makeDeferredVaultEffects = () => Object.freeze({
-  ensureOffscreen: async () => {},
-  maybeStartBaseNetwork: () => {},
-  maybeAutoResumeAfterRecovery: () => {},
-  resumeGoalRuns: async () => {},
-  resumeSchedules: async () => {},
-});
-
 /** Exact document ownership; handler-pinned routes stay outside. @param {any} deps */
 export const makeKernelRouteProvenance = ({ humanUi, optionsUi, appUi, voiceUi, vaultRoutes }) => {
   /** @type {Map<string,(sender:any,message:any)=>boolean>} */
@@ -304,8 +296,7 @@ export const makeKernelRouteProvenance = ({ humanUi, optionsUi, appUi, voiceUi, 
  * @param {{ ready: Promise<unknown>, deps: Record<string, any> }} input
  */
 export const makeVaultKernelRoutes = ({ ready, deps }) => {
-  // Defaults keep semantic/network work absent.
-  const legacy = makeVaultRoutes({ ...makeDeferredVaultEffects(), ...deps });
+  const legacy = makeVaultRoutes(deps);
   return Object.freeze(Object.fromEntries(VAULT_KERNEL_ROUTE_NAMES.map((name) => [
     name,
     async (message = {}) => {

@@ -155,7 +155,7 @@ const kernelTiming = () => ({
 });
 
 const nativeResult = () => {
-  const result = chromeResult({ lane: 'local' });
+  const result: any = chromeResult({ lane: 'local' });
   result.nativeFloor = NATIVE_FLOOR_CONTRACT;
   Object.assign(result.measurement, {
     runtimeTarget: 'native-floor', runtimeSurface: 'home',
@@ -183,7 +183,7 @@ const nativeResult = () => {
     COLD_START_PHASES.chrome.forcedColdWake, NATIVE_FLOOR_CONTRACT.confirmedStopWakes,
     { vaultGateReadyFromWakeMs: 1_000 },
   );
-  result.freshProfile.rawSamples.forEach((sample, index) => {
+  result.freshProfile.rawSamples.forEach((sample: any, index: number) => {
     sample.kernelTiming = kernelTiming() as any;
     const identity = {
       schema: 1, buildId: 'native-build-identity',
@@ -195,7 +195,7 @@ const nativeResult = () => {
       cutoverReady: false, semantic: { migrated: 86, total: 161, ready: false },
     } as any;
   });
-  result.forcedColdWake.rawSamples.forEach((sample, index) => {
+  result.forcedColdWake.rawSamples.forEach((sample: any, index: number) => {
     sample.stoppedRunningStatus = 'stopped';
     sample.kernelTiming = kernelTiming() as any;
     const identity = {
@@ -217,6 +217,14 @@ const assessNative = (result: ReturnType<typeof nativeResult>) =>
   });
 
 describe('cold-start policy', () => {
+  test('gates fresh Chrome UX from navigation while retaining worker timing evidence', () => {
+    const phase = COLD_START_PHASES.chrome.freshProfile;
+
+    expect(phase.usableMetric).toBe('vaultGateReadyFromNavigationMs');
+    expect(phase.metrics).toContain('vaultGateReadyFromWorkerTargetMs');
+    expect(phase.metrics).toContain('vaultGateReadyFromNavigationMs');
+  });
+
   test('accepts complete Store and Preview evidence at the no-growth ratchet', () => {
     expect(assessChrome(chromeResult())).toEqual({ ok: true, failures: [] });
   });
@@ -380,13 +388,13 @@ describe('cold-start policy', () => {
       graphPolicy: 'target', requireTimingTargets: true,
     })).toEqual({ ok: true, failures: [] });
     result.freshProfile.rawSamples.forEach((sample) => {
-      sample.vaultGateReadyFromWorkerTargetMs = 3_001;
+      sample.vaultGateReadyFromNavigationMs = 3_001;
     });
-    result.freshProfile.vaultGateReadyFromWorkerTargetMs = summarizeRaw(Array(7).fill(3_001));
+    result.freshProfile.vaultGateReadyFromNavigationMs = summarizeRaw(Array(7).fill(3_001));
     expect(assessChrome(result, {
       graphPolicy: 'target', requireTimingTargets: true,
     }).failures).toContain(
-      'freshProfile.vaultGateReadyFromWorkerTargetMs.max 3001ms exceeds 3000ms',
+      'freshProfile.vaultGateReadyFromNavigationMs.max 3001ms exceeds 3000ms',
     );
   });
 

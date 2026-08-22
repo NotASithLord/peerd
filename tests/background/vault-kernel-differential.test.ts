@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { makeVaultRoutes } from '../../extension/background/routes/vault.js';
 import {
-  makeDeferredVaultEffects,
   makeKernelRouteProvenance,
   makeVaultKernelMessageHandler,
   makeVaultKernelRoutes,
@@ -85,6 +84,12 @@ const errors = {
   VaultLockedError,
 };
 
+const deferredVaultEffects = {
+  onInitialized: async () => {},
+  onUnlocked: async () => {},
+  onLocked: async () => {},
+};
+
 const makeLane = (
   kind: 'legacy'|'kernel',
   vaultOver: Record<string, any> = {},
@@ -110,12 +115,13 @@ const makeLane = (
     purgeVaultBlob,
     sessionCache,
     pushState: () => { pushes.push('state'); },
+    ...deferredVaultEffects,
     ...errors,
     ...depsOver,
   };
   const routes = kind === 'kernel'
     ? makeVaultKernelRoutes({ ready: Promise.resolve(), deps })
-    : makeVaultRoutes({ ...deps, ...makeDeferredVaultEffects() });
+    : makeVaultRoutes(deps);
   return { routes, vault, kv, sessionCache, audit, pushes };
 };
 
@@ -224,11 +230,11 @@ describe('vault authority kernel differential parity', () => {
         auditLog: { append: async () => {} },
         kv: {}, idb: {}, base64ToBytes,
         purgeVaultBlob: async () => { calls[kind].purge += 1; },
-        sessionCache: {}, pushState: () => {}, ...errors,
+        sessionCache: {}, pushState: () => {}, ...deferredVaultEffects, ...errors,
       };
       return kind === 'kernel'
         ? makeVaultKernelRoutes({ ready: Promise.resolve(), deps })
-        : makeVaultRoutes({ ...deps, ...makeDeferredVaultEffects() });
+        : makeVaultRoutes(deps);
     };
     const message = { credentialId: 'AQ==', prfSalt: 'Ag==', prfOutput: 'Aw==' };
     await expect(make('legacy')['vault/initializeWithPasskey'](message)).rejects.toThrow('hardware');

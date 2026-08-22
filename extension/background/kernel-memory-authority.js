@@ -6,19 +6,14 @@ import {
   normalizeMemoryScope,
   validMemorySuggestion,
 } from '../shared/memory-authority-policy.js';
+import { makeSerialLane } from '../shared/cold-util.js';
 
 const STORE = 'agents_memory';
 const failure = (/** @type {string} */ error) => /** @type {any} */ ({ ok: false, error });
 
 /** @param {any} deps */
 export const createKernelMemoryAuthority = ({ idb, kv, auditLog, now = Date.now }) => {
-  let effectTail = Promise.resolve();
-  /** @template T @param {()=>Promise<T>} operation */
-  const effect = (operation) => {
-    const task = effectTail.then(operation, operation);
-    effectTail = task.then(() => {}, () => {});
-    return task;
-  };
+  const effect = makeSerialLane();
   const suggestions = async () => {
     const stored = await kv.get(MEMORY_SUGGESTIONS_KEY);
     return Array.isArray(stored?.pending)

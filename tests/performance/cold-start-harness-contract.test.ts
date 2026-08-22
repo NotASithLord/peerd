@@ -40,7 +40,7 @@ describe('cold-start browser harness contract', () => {
     );
     const candidate = {
       identity: {
-        schema: 1, buildId: `0.7.3:${'a'.repeat(64)}`,
+        schema: 1 as const, buildId: `0.7.3:${'a'.repeat(64)}`,
         bootId: 'native-floor-boot', kernelEpoch: 'native-floor-epoch',
       },
       target: { firefox: false, selfHostedChrome: false },

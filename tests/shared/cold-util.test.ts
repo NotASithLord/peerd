@@ -23,4 +23,21 @@ describe('cold utility leaf', () => {
     );
     expect(uuid).toBe('01234567-89ab-7abb-8cdd-eeff01020304');
   });
+
+  test('serial lanes preserve order and recover after a rejected operation', async () => {
+    const lane = cold.makeSerialLane();
+    const order: string[] = [];
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const first = lane(async () => { order.push('first'); await blocked; });
+    const second = lane(() => { order.push('second'); });
+
+    await Promise.resolve();
+    expect(order).toEqual(['first']);
+    release();
+    await Promise.all([first, second]);
+    await expect(lane(async () => { throw new Error('expected'); })).rejects.toThrow('expected');
+    await lane(() => { order.push('third'); });
+    expect(order).toEqual(['first', 'second', 'third']);
+  });
 });

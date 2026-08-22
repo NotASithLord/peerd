@@ -2,6 +2,7 @@
 // Native App metadata authority; bytes and repository work stay demand-owned.
 
 import { parseAppManifest } from '/peerd-engine/app-manifest.js';
+import { makeSerialLane } from '../shared/cold-util.js';
 
 export const KERNEL_APP_CATALOG_KEY = 'apps.v1';
 
@@ -61,13 +62,7 @@ export const createKernelAppCatalog = ({
     throw new TypeError('kernel-app-catalog-idb-invalid');
   }
   const read = () => idb.get('apps', KERNEL_APP_CATALOG_KEY);
-  let mutationTail = Promise.resolve();
-  /** @template T @param {()=>Promise<T>} operation */
-  const mutate = (operation) => {
-    const run = mutationTail.then(operation);
-    mutationTail = run.then(() => {}, () => {});
-    return run;
-  };
+  const mutate = makeSerialLane();
   /** @param {string} appId @param {Record<string,unknown>} patch */
   const patchApp = (appId, patch) => mutate(async () => {
     const state = parseKernelAppCatalogRow(await read());

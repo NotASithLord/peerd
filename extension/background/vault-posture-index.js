@@ -8,6 +8,7 @@ import {
   VAULT_POSTURE_INDEX_KEY,
   VAULT_POSTURE_SCHEMA,
 } from '../shared/vault-posture-contract.js';
+import { makeSerialLane } from '../shared/cold-util.js';
 
 /**
  * @param {Object} deps
@@ -25,12 +26,7 @@ export const createVaultPostureIndex = ({
   }
   /** @type {ReturnType<typeof parseVaultPostureIndex>} */
   let current = null;
-  let tail = Promise.resolve();
-  const serialized = (/** @type {()=>Promise<any>} */ operation) => {
-    const run = tail.then(operation, operation);
-    tail = run.then(() => {}, () => {});
-    return run;
-  };
+  const serialized = makeSerialLane();
   const read = async () => {
     current = parseVaultPostureIndex(await kv.get(VAULT_POSTURE_INDEX_KEY));
     return current;

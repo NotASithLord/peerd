@@ -729,6 +729,7 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
     // Home, its exact tab-owned human surface, so provenance remains real.
     const surfacePath = nativeFloor ? 'home/home.html' : 'sidepanel/sidepanel.html';
     const panelUrl = `chrome-extension://${firstWorker.extensionId}/${surfacePath}`;
+    const navigationFromLaunchMs = hostNowMs() - launchStarted;
     const navigation = await page.send('Page.navigate', { url: panelUrl }, remaining());
     if (navigation?.errorText) throw new Error(`Chrome panel navigation failed: ${navigation.errorText}`);
     if (wakeSamples > 0) {
@@ -807,6 +808,9 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
     const assemblyIdentity = assembly?.identity ?? null;
     const vaultGateReadyFromWorkerTargetMs = Math.max(
       0, vaultGateReadyFromLaunchMs - workerTargetMs,
+    );
+    const vaultGateReadyFromNavigationMs = Math.max(
+      0, vaultGateReadyFromLaunchMs - navigationFromLaunchMs,
     );
     console.log(`  native worker to actionable UI in ${round(vaultGateReadyFromWorkerTargetMs)}ms`);
     let workerAgeAtProbeMs = null;
@@ -980,11 +984,13 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       browserProduct: version.Browser ?? 'unknown',
       browserProtocolVersion: version['Protocol-Version'] ?? 'unknown',
       cdpReadyMs, workerTargetMs, workerAgeAtProbeMs,
+      navigationFromLaunchMs,
       staticShellFromLaunchMs, bootModuleFromLaunchMs,
       bootstrapFromLaunchMs: bootstrap.elapsedMs,
       stateFromLaunchMs: state.elapsedMs,
       vaultGateReadyFromLaunchMs,
       vaultGateReadyFromWorkerTargetMs,
+      vaultGateReadyFromNavigationMs,
       kernelTiming: bootstrap.reply?.timing ?? null,
       assemblyIdentity,
       assembly: assembly?.report ?? null,

@@ -9,6 +9,7 @@ import {
   kernelIdentityMatches,
   parseKernelIdentity,
 } from '../shared/kernel-identity.js';
+import { makeSerialLane } from '../shared/cold-util.js';
 
 export const KERNEL_COLD_RECEIPTS_KEY = 'kernel.coldReceipts.v1';
 const SCHEMA = 1;
@@ -111,7 +112,6 @@ export const createKernelColdReceipts = ({
   }
   /** @type {any} */
   let queue = emptyQueue(canonicalIdentity);
-  let tail = Promise.resolve();
   /** @type {Promise<any>|null} */
   let recovery = null;
   /** @type {Map<string,{owner:string,raw:any,listener:Function|null,facade:any}>} */
@@ -131,11 +131,9 @@ export const createKernelColdReceipts = ({
     }
     await persist();
   });
-  const serialized = (/** @type {()=>Promise<any>} */ operation) => {
-    const run = tail.then(() => hydrate).then(operation);
-    tail = run.then(() => {}, () => {});
-    return run;
-  };
+  const lane = makeSerialLane();
+  const serialized = (/** @type {()=>Promise<any>} */ operation) =>
+    lane(() => hydrate.then(operation));
   const assertOwner = async () => {
     const stored = await store.get(KERNEL_COLD_RECEIPTS_KEY);
     if (!kernelIdentityMatches(canonicalIdentity, stored?.ownerIdentity)) {

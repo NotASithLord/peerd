@@ -2,7 +2,6 @@
 import { createKernelToolboxStore } from './kernel-toolbox-store.js';
 import { createKernelMemoryAuthority } from './kernel-memory-authority.js';
 import { kernelAppCatalogRows } from './kernel-app-catalog.js';
-import { createKernelProviderProjection } from './kernel-provider-projection.js';
 import { makeContactsRoutes } from './routes/contacts.js';
 import { makeToolboxRoutes } from './routes/toolbox.js';
 import { mergeContacts } from '../peerd-runtime/contacts/aggregate.js';
@@ -551,21 +550,19 @@ export const createKernelProviderTestRoute = ({
  * ready:Promise<any>,settingsStore:any,pushState:()=>Promise<any>|any,
  * fetchFn?:typeof fetch,
  * sessions?:any,browser?:any,localModels?:boolean,featureHost?:any,offscreenUrl?:string,
- * providerProjection?:ReturnType<typeof createKernelProviderProjection>}} deps */
+ * providerProjection:{view:(session?:any,locked?:boolean)=>Promise<any>,
+ * observeOllamaStatus:(status:any)=>void,bumpRevision:()=>void}}} deps */
 export const createKernelLocalRoutes = ({
   vault, auditLog, ready, settingsStore, pushState,
   fetchFn, sessions, browser, localModels,
-  featureHost, offscreenUrl, providerProjection: providedProviderProjection,
+  featureHost, offscreenUrl, providerProjection,
 }) => {
-  const providerProjection = providedProviderProjection ?? createKernelProviderProjection({
-    settingsStore, vault, browser, localModels, pushState,
-  });
+  if (!providerProjection) throw new TypeError('providerProjection is required');
   const openRouterModels = createKernelOpenRouterModelsRoute({ ready, vault, fetchFn });
   const onOllamaStatus = providerProjection.observeOllamaStatus;
   const providerTest = createKernelProviderTestRoute({
     ready, vault, settingsStore, auditLog, fetchFn, onOllamaStatus,
   });
-  const bumpProviderRevision = providerProjection.bumpRevision;
   const providerSetKey = makeKernelProviderSetKeyRoute({
     vault, settingsStore, auditLog, pushState: () => {},
   });
@@ -576,7 +573,7 @@ export const createKernelLocalRoutes = ({
     providerSetKey: async (/** @type {any} */ message = {}) => {
       const result = await providerSetKey(message);
       if (result.ok) {
-        bumpProviderRevision();
+        providerProjection.bumpRevision();
         await Promise.resolve(pushState());
       }
       return result;
@@ -586,8 +583,6 @@ export const createKernelLocalRoutes = ({
     }),
     openRouterModels: openRouterModels.route,
     providerTest: providerTest.route,
-    providerView: providerProjection.view,
-    bumpProviderRevision,
     abortProviderTests: () => { providerTest.abortAll(); openRouterModels.abortAll(); },
   });
 };

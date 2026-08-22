@@ -5,6 +5,7 @@ import {
   kernelIdentityMatches,
   parseKernelIdentity,
 } from '../shared/kernel-identity.js';
+import { makeSerialLane } from '../shared/cold-util.js';
 
 export const FEATURE_LEASE_INTENT_KEY = 'feature-leases.intent.v1';
 export const FEATURE_LEASE_SCOPES = Object.freeze([
@@ -121,7 +122,7 @@ export const createFeatureLeaseCoordinator = ({
   let locked = !vaultUnlocked;
   /** @type {FeatureLeaseIntentDocument} */
   let document = emptyDocument(canonicalIdentity);
-  let storeTail = Promise.resolve();
+  const serializeStore = makeSerialLane();
 
   const ready = store.get(FEATURE_LEASE_INTENT_KEY).then(async (stored) => {
     document = parseDocument(stored, canonicalIdentity);
@@ -133,7 +134,7 @@ export const createFeatureLeaseCoordinator = ({
   });
 
   const mutateDocument = (/** @type {(current: any) => any} */ mutate) => {
-    const operation = storeTail.then(async () => {
+    return serializeStore(async () => {
       const stored = await store.get(FEATURE_LEASE_INTENT_KEY);
       if (!ownsDocument(stored)) {
         throw new Error('feature-lease-kernel-retired');
@@ -142,8 +143,6 @@ export const createFeatureLeaseCoordinator = ({
       await store.set(FEATURE_LEASE_INTENT_KEY, document);
       return document;
     });
-    storeTail = operation.then(() => {}, () => {});
-    return operation;
   };
   const assertOwner = async () => {
     const stored = await store.get(FEATURE_LEASE_INTENT_KEY);

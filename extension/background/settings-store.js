@@ -1,5 +1,7 @@
 // @ts-check
 
+import { makeSerialLane } from '../shared/cold-util.js';
+
 /**
  * @param {{
  *   kv: { get: (k: string) => Promise<any>, set: (k: string, v: any) => Promise<any> },
@@ -13,15 +15,8 @@ export const makeSettingsStore = ({ kv, key, defaults }) => {
   /** The merged view consumers read: { ...defaults, ...stored }. */
   let merged = { ...defaults };
   let hydrated = false;
-  /** @type {Promise<unknown>} */
-  let operationTail = Promise.resolve();
+  const enqueue = makeSerialLane();
   const recompute = () => { merged = { ...defaults, ...stored }; };
-  /** @template T @param {() => Promise<T>} operation @returns {Promise<T>} */
-  const enqueue = (operation) => {
-    const result = operationTail.then(operation, operation);
-    operationTail = result.then(() => undefined, () => undefined);
-    return result;
-  };
   const hydrate = async () => {
     if (hydrated) return merged;
     const s = await kv.get(key);
@@ -115,7 +110,7 @@ export const makeKernelLearnedOriginRoutes = ({
   kv, auditLog, onError = (message, error) => console.warn(message, error),
 }) => {
   if (!kv || !auditLog) throw new TypeError('kernel-learned-origins-config-invalid');
-  let mutationTail = Promise.resolve();
+  const mutate = makeSerialLane();
   const load = async () => {
     try { return parseLearnedRecord(await kv.get(LEARNED_KEY)); }
     catch (error) {
@@ -136,12 +131,6 @@ export const makeKernelLearnedOriginRoutes = ({
       error.cause = cause;
       throw error;
     }
-  };
-  /** @template T @param {()=>Promise<T>} operation */
-  const mutate = (operation) => {
-    const run = mutationTail.then(operation, operation);
-    mutationTail = run.then(() => {}, () => {});
-    return run;
   };
   const auditForgotten = (/** @type {string[]} */ hosts) => {
     for (const host of hosts) {

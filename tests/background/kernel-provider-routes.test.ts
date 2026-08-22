@@ -7,6 +7,7 @@ import {
   makeKernelModelOptionsRoute,
   makeKernelProviderSetKeyRoute,
 } from '../../extension/background/kernel-local-routes.js';
+import { createKernelProviderProjection } from '../../extension/background/kernel-provider-projection.js';
 import {
   PROVIDER_AUTHORITY,
   OPENROUTER_POPULAR,
@@ -86,24 +87,37 @@ describe('native UI-base provider/composer projection', () => {
   const makeLocal = (overrides: Record<string, any> = {}) => {
     let settings = overrides.settings ?? { providerName: 'anthropic', providerModel: '' };
     const pushes: string[] = [];
-    const routes = createKernelLocalRoutes({
-      vault: overrides.vault ?? { getSecret: async () => null },
-      auditLog: { append: async () => {} },
-      ready: Promise.resolve(), settingsStore: { get: () => settings, update: async () => {} },
-      pushState: () => { pushes.push('state'); },
-      sessions: { getMetadata: async () => null },
-      browser: { storage: { local: { get: async () => overrides.local ?? {} } } },
-      fetchFn: overrides.fetchFn ?? (async () => new Response('{}', { status: 500 })),
-      localModels: true,
+    const vault = overrides.vault ?? { getSecret: async () => null };
+    const settingsStore = { get: () => settings, update: async () => {} };
+    const browser = { storage: { local: { get: async () => overrides.local ?? {} } } };
+    const pushState = () => { pushes.push('state'); };
+    const providerProjection = createKernelProviderProjection({
+      settingsStore, vault, browser, localModels: true, pushState,
     });
-    return { routes, pushes, setSettings: (next: any) => { settings = next; } };
+    const routes = createKernelLocalRoutes({
+      vault,
+      auditLog: { append: async () => {} },
+      ready: Promise.resolve(), settingsStore, pushState,
+      sessions: { getMetadata: async () => null },
+      browser,
+      fetchFn: overrides.fetchFn ?? (async () => new Response('{}', { status: 500 })),
+      localModels: true, providerProjection,
+    });
+    return { routes, providerProjection, pushes,
+      setSettings: (next: any) => { settings = next; } };
   };
 
+  test('fails fast when the shared provider projection is not injected', () => {
+    expect(() => createKernelLocalRoutes({
+      vault: {}, auditLog: {}, ready: Promise.resolve(), settingsStore: {}, pushState: () => {},
+    } as any)).toThrow('providerProjection is required');
+  });
+
   test('uses the session-bound provider and model instead of future defaults', async () => {
-    const { routes } = makeLocal({
+    const { providerProjection } = makeLocal({
       vault: { getSecret: async (name: string) => name === 'openrouter_api_key' ? 'key' : null },
     });
-    expect(await routes.providerView({ provider: 'openrouter', model: 'bound/model' }, false))
+    expect(await providerProjection.view({ provider: 'openrouter', model: 'bound/model' }, false))
       .toMatchObject({
         providers: { current: 'anthropic' },
         composer: { provider: 'openrouter', model: 'bound/model', canSend: true },
@@ -111,40 +125,40 @@ describe('native UI-base provider/composer projection', () => {
   });
 
   test('never treats an uninstalled local model as ready', async () => {
-    const { routes } = makeLocal({
+    const { providerProjection } = makeLocal({
       settings: { providerName: 'local-webgpu', providerModel: 'gemma-4-e2b' }, local: {},
     });
-    expect((await routes.providerView(null, false)).composer).toMatchObject({
+    expect((await providerProjection.view(null, false)).composer).toMatchObject({
       localReady: false, canSend: false, reason: 'local-model-not-installed',
     });
   });
 
   test('feeds exact Ollama inventory into composer readiness and state refresh', async () => {
-    const { routes, pushes } = makeLocal({
+    const { routes, providerProjection, pushes } = makeLocal({
       settings: { providerName: 'ollama', providerModel: 'wanted:latest' },
       fetchFn: async () => new Response(JSON.stringify({ models: [] })),
     });
-    expect((await routes.providerView(null, false)).composer.canSend).toBe(true);
+    expect((await providerProjection.view(null, false)).composer.canSend).toBe(true);
     await routes.modelOptions();
     expect(pushes).toEqual(['state']);
-    expect((await routes.providerView(null, false)).composer).toMatchObject({
+    expect((await providerProjection.view(null, false)).composer).toMatchObject({
       ollamaReady: false, canSend: false, reason: 'ollama-no-models',
     });
   });
 
   test('blocks a missing Ollama selection, warns on unreachable, and invalidates old hosts', async () => {
-    const { routes, setSettings } = makeLocal({
+    const { routes, providerProjection, setSettings } = makeLocal({
       settings: { providerName: 'ollama', providerModel: 'wanted:latest',
         ollamaHost: 'http://one.local:11434' },
       fetchFn: async () => new Response(JSON.stringify({ models: [{ name: 'other:latest' }] })),
     });
     await routes.modelOptions();
-    expect((await routes.providerView(null, false)).composer).toMatchObject({
+    expect((await providerProjection.view(null, false)).composer).toMatchObject({
       canSend: false, reason: 'ollama-model-missing',
     });
     setSettings({ providerName: 'ollama', providerModel: 'wanted:latest',
       ollamaHost: 'http://two.local:11434' });
-    expect((await routes.providerView(null, false)).composer).toMatchObject({
+    expect((await providerProjection.view(null, false)).composer).toMatchObject({
       canSend: true, reason: null, warning: null,
     });
 
@@ -154,7 +168,7 @@ describe('native UI-base provider/composer projection', () => {
       fetchFn: async () => new Response('', { status: 503 }),
     });
     await unreachable.routes.modelOptions();
-    expect((await unreachable.routes.providerView(null, false)).composer).toMatchObject({
+    expect((await unreachable.providerProjection.view(null, false)).composer).toMatchObject({
       canSend: true, reason: null, warning: 'ollama-unreachable',
     });
   });

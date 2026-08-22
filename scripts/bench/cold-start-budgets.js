@@ -53,16 +53,20 @@ export const COLD_START_PHASES = Object.freeze({
       requiredKey: 'fresh', completedKey: 'completed',
       boundary: 'browser-process-launch',
       // Browser process launch is recorded, but it is not service-worker work.
-      // The UX gate starts when Chrome exposes the new worker realm.
-      usableMetric: 'vaultGateReadyFromWorkerTargetMs',
+      // The UX gate starts at the first navigation that asks the extension to render.
+      usableMetric: 'vaultGateReadyFromNavigationMs',
       metrics: Object.freeze([
-        'cdpReadyMs', 'workerTargetMs', 'staticShellFromLaunchMs',
+        'cdpReadyMs', 'workerTargetMs', 'navigationFromLaunchMs',
+        'staticShellFromLaunchMs',
         'bootModuleFromLaunchMs', 'bootstrapFromLaunchMs',
         'stateFromLaunchMs', 'vaultGateReadyFromLaunchMs',
-        'vaultGateReadyFromWorkerTargetMs',
+        'vaultGateReadyFromWorkerTargetMs', 'vaultGateReadyFromNavigationMs',
       ]),
       ordering: Object.freeze([
-        Object.freeze(['cdpReadyMs', 'workerTargetMs', 'staticShellFromLaunchMs']),
+        Object.freeze([
+          'cdpReadyMs', 'workerTargetMs', 'navigationFromLaunchMs',
+          'staticShellFromLaunchMs',
+        ]),
         Object.freeze(['staticShellFromLaunchMs', 'bootModuleFromLaunchMs', 'vaultGateReadyFromLaunchMs']),
         Object.freeze(['bootstrapFromLaunchMs', 'stateFromLaunchMs']),
       ]),

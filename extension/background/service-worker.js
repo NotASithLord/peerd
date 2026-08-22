@@ -498,7 +498,11 @@ import {
 } from '/peerd-runtime/background.js';
 import { makePrivateTransferOpenRoute, makePrivateTransferPort } from './private-transfer-port.js';
 import { downgradesActorConfirm, a2aConsentOutcome } from './a2a-consent.js';
-import { makeVaultRoutes } from './routes/vault.js';
+import {
+  makeConfirmAnswerRoute,
+  makeLegacyVaultUnlockEffect,
+  makeVaultRoutes,
+} from './routes/vault.js';
 import { makeProviderRoutes } from './routes/providers.js';
 import { makeHooksRoutes } from './routes/hooks.js';
 import { makeSkillsRoutes } from './routes/skills.js';
@@ -8158,6 +8162,12 @@ const privateTransferOpenRoute = makePrivateTransferOpenRoute({
 const getCurrentSessionId = () => sessionCache.sessionGet('currentSessionId');
 const onAppDeleted = retireAppActorBindingsForApp;
 const ensureAppTrackerReady = () => engineTrackersReady;
+const legacyVaultUnlockEffect = makeLegacyVaultUnlockEffect({
+  onUnlocked, resumeGoalRuns, sessionCache, maybeAutoResumeAfterRecovery, resumeSchedules,
+});
+const confirmAnswerRoute = makeConfirmAnswerRoute({
+  confirmCoordinator, sessionCache, isActualSidepanelSender, isActualHomeSender,
+});
 coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(/** @type {any} */ (makeDispatcher({
   // Nonsecret request for a MessageChannel transferred to the exact options
   // WindowClient. Backup passphrases and payloads use only that channel.
@@ -8196,13 +8206,11 @@ coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(/** @type 
   // (owner/run-verified, quota-capped, the key added SW-side).
   'script/model-call': (/** @type {any} */ msg, /** @type {any} */ sender) =>
     scriptModelCallRoute(msg, sender),
+  'confirm/answer': confirmAnswerRoute,
   ...makeVaultRoutes({
-    vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
-    onInitialized, onUnlocked, onLocked,
-    pushState, purgeVaultBlob, confirmCoordinator, sessionCache,
-    isActualSidepanelSender, isActualHomeSender,
-    maybeAutoResumeAfterRecovery, resumeGoalRuns,
-    resumeSchedules,
+    vault, auditLog, kv, idb, base64ToBytes,
+    onInitialized, onUnlocked: legacyVaultUnlockEffect, onLocked,
+    pushState, purgeVaultBlob,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,
     VaultLockedError,

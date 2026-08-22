@@ -10,6 +10,7 @@ import {
   FEATURE_LEASE_HOST_PROTOCOL,
   OFFSCREEN_FEATURE_LEASE_SCOPES,
 } from '../shared/feature-lease-protocol.js';
+import { makeSerialLane } from '../shared/cold-util.js';
 
 const OFFSCREEN_SCOPES = new Set(OFFSCREEN_FEATURE_LEASE_SCOPES);
 
@@ -91,7 +92,7 @@ export const createProductionFeatureLeaseRuntime = ({
   const scopedUsers = new Map();
   /** @type {Set<string>} */
   const durableScopes = new Set();
-  let hostLifecycleTail = Promise.resolve();
+  const withHostLifecycle = makeSerialLane();
   /** @type {Map<string, number>} */
   const recoveryTokens = new Map();
   /** @type {string|null} */
@@ -99,13 +100,6 @@ export const createProductionFeatureLeaseRuntime = ({
   const cancelRecovery = (/** @type {string} */ scope) => {
     recoveryTokens.set(scope, (recoveryTokens.get(scope) ?? 0) + 1);
   };
-  /** @template T @param {()=>Promise<T>|T} operation @returns {Promise<T>} */
-  const withHostLifecycle = (operation) => {
-    const run = hostLifecycleTail.then(operation, operation);
-    hostLifecycleTail = run.then(() => {}, () => {});
-    return run;
-  };
-
   const waitForOffscreenClosed = async () => {
     // Wait for physical disappearance before binding a replacement realm.
     for (let attempt = 0; attempt < 40; attempt += 1) {
