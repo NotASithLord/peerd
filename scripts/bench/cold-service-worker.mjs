@@ -699,7 +699,15 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
         row?.status === 'activated'
         && typeof row?.scriptURL === 'string'
         && row.scriptURL.endsWith(backgroundEntry)), remaining(), 5);
-      if (!activated) throw new Error('Chrome packaged service worker did not activate');
+      if (!activated) {
+        const versions = [...serviceWorkerVersions.values()].map((row) => ({
+          status: row?.status,
+          runningStatus: row?.runningStatus,
+          scriptURL: row?.scriptURL,
+          errorMessage: row?.errorMessage,
+        }));
+        throw new Error(`Chrome packaged service worker did not activate: ${JSON.stringify(versions)}`);
+      }
       console.log(`  worker version activated in ${round(hostNowMs() - launchStarted)}ms`);
     }
     await enableChromePrfFixture(page);
