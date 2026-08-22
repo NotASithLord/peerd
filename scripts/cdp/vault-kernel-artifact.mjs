@@ -81,7 +81,8 @@ export async function bundleChromeVaultKernel(staging, entryRelative) {
       naming: 'vault-kernel.js',
       target: 'browser',
       format: 'iife',
-      minify: { whitespace: true, identifiers: false, syntax: true },
+      minify: { whitespace: true, identifiers: true, syntax: true },
+      keepNames: true,
       splitting: false,
       plugins: [{
         name: 'fixed-native-runtime-imports',

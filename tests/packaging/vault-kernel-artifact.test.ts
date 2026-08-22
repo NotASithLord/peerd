@@ -77,6 +77,8 @@ describe('test-only vault kernel package target', () => {
     writeFileSync(join(background, 'vault-kernel.js'), [
       "import { answer } from './dep.js';",
       "const kernelFirefox = 'chrome' === 'firefox';",
+      "class ExactNamedError extends Error { constructor() { super(); this.name = 'ExactNamedError'; } }",
+      'globalThis.__peerdBundleErrorName = new ExactNamedError().name;',
       'export const value = answer;',
       "export const firefox = kernelFirefox ? () => import('./firefox-storage-keepalive.js') : undefined;",
       "export const repository = kernelFirefox ? () => import('./repository-local-client.js') : undefined;",
@@ -93,6 +95,9 @@ describe('test-only vault kernel package target', () => {
       expect(output).not.toContain('from"./dep.js"');
       expect([...output.matchAll(/\bimport\((['"])([^'"]+)\1\)/g)]
         .map((match) => match[2]).sort()).toEqual([]);
+      Function(output)();
+      expect((globalThis as any).__peerdBundleErrorName).toBe('ExactNamedError');
+      delete (globalThis as any).__peerdBundleErrorName;
       expect(result.bytes).toBeLessThan(2_000);
     } finally {
       rmSync(staging, { recursive: true, force: true });
