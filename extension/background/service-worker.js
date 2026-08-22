@@ -4514,7 +4514,10 @@ const sessionState = makeSessionState();
  * derived from the vault, never the secret itself.
  */
 const buildStateSnapshot = makeStateSnapshotBuilder({
-  actorIsolation, actorIsolationReady, actorLiveProjection,
+  // why a getter: actorIsolation is reassigned when the isolation state load
+  // settles; a value capture would freeze the pre-load placeholder into every
+  // snapshot and pause actor work in the UI forever.
+  getActorIsolation: () => actorIsolation, actorIsolationReady, actorLiveProjection,
   confirmCoordinator, confirmSettleNotes, ensureSettingsReady,
   hydrateLocalModelAvailability, listProviders, liveProviderModelStatus,
   localModelState, normalizeTally, profileState, providerConfigRevision,

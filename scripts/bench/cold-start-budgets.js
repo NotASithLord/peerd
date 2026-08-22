@@ -217,8 +217,9 @@ export const LEGACY_COLD_SOURCE_RATCHETS = Object.freeze({
   // 4_316_649 -> 4_319_311: the legacy-lane fixes that made every turn's
   // controller handshake and lease lifecycle survive host replacement (state
   // contract retryable placeholder, connect retry, leased-client refcount,
-  // scope-tightened realm retirement).
-  kernel: Object.freeze({ modules: 456, graphBytes: 4_319_311, entryBytes: 467_968, directImports: 111 }),
+  // scope-tightened realm retirement), plus the live actor-isolation getter
+  // that unfroze the snapshot's capability projection.
+  kernel: Object.freeze({ modules: 456, graphBytes: 4_319_560, entryBytes: 467_968, directImports: 111 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity

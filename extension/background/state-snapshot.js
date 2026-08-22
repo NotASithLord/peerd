@@ -5,7 +5,7 @@
 
 /** @param {Record<string,any>} deps */
 export const makeStateSnapshotBuilder = (deps) => {
-  const { actorIsolation, actorIsolationReady, actorLiveProjection, confirmCoordinator, confirmSettleNotes, ensureSettingsReady, hydrateLocalModelAvailability, isTurnBusy, listProviders, liveProviderModelStatus, localModelState, normalizeTally, profileState, providerConfigRevision, reconcileOnboardingLatch, resolveActiveProvider, resolveComposerReadiness, resolvePermission, runtimeCapabilities, sessionCache, sessions, settingsStore, vault } = deps;
+  const { getActorIsolation, actorIsolationReady, actorLiveProjection, confirmCoordinator, confirmSettleNotes, ensureSettingsReady, hydrateLocalModelAvailability, isTurnBusy, listProviders, liveProviderModelStatus, localModelState, normalizeTally, profileState, providerConfigRevision, reconcileOnboardingLatch, resolveActiveProvider, resolveComposerReadiness, resolvePermission, runtimeCapabilities, sessionCache, sessions, settingsStore, vault } = deps;
   return async () => {
     // A cold MV3 worker can resume the vault and accept a UI port before the
     // asynchronous chrome.storage settings read finishes. The snapshot must not
@@ -67,7 +67,7 @@ export const makeStateSnapshotBuilder = (deps) => {
           canSend: false,
           reason: 'vault-locked',
         },
-        capabilities: { actorExecution: { ...actorIsolation }, ...runtimeCapabilities },
+        capabilities: { actorExecution: { ...getActorIsolation() }, ...runtimeCapabilities },
         settings: { ...settingsStore.get() },
         pendingConfirm: null,
         streaming: false,
@@ -165,7 +165,7 @@ export const makeStateSnapshotBuilder = (deps) => {
         defaultRunnerModel: activeProv.defaultRunnerModel,
       },
       composer,
-      capabilities: { actorExecution: { ...actorIsolation }, ...runtimeCapabilities },
+      capabilities: { actorExecution: { ...getActorIsolation() }, ...runtimeCapabilities },
       profile: {
         id: profile.id,
         peerName: profile.peerName,
