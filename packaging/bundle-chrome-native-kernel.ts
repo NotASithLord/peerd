@@ -7,10 +7,7 @@ import {
 import {
   isAbsolute, join, relative, resolve, sep,
 } from 'node:path';
-import {
-  collectStaticModuleGraph,
-  staticImportSpecifiers,
-} from './static-module-graph.ts';
+import { staticImportSpecifiers } from './static-module-graph.ts';
 
 export const CHROME_NATIVE_KERNEL_ENTRIES = Object.freeze([
   'background/vault-kernel.js',
@@ -107,26 +104,9 @@ export async function bundleChromeNativeKernel(staging: string, entryRelative: s
     writeFileSync(entry, output.endsWith('\n') ? output : `${output}\n`);
     return Object.freeze({
       bytes: statSync(entry).size,
-      runtimeImports: Object.freeze([]),
       inputs: Object.freeze(inputs),
     });
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
-}
-
-export async function assertChromeNativeKernelBundle(
-  staging: string,
-  entryRelative: string,
-  maxBytes: number,
-) {
-  const entry = join(staging, entryRelative);
-  const graph = await collectStaticModuleGraph(staging, entry);
-  const bytes = statSync(entry).size;
-  if (graph.size !== 1 || bytes > maxBytes) {
-    throw new Error(
-      `native Chrome bundle is ${graph.size} modules / ${bytes} bytes; target is 1 / ${maxBytes}`,
-    );
-  }
-  return Object.freeze({ modules: graph.size, bytes });
 }

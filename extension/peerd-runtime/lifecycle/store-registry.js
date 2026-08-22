@@ -98,15 +98,6 @@ export const storeEntry = (name) => STORE_REGISTRY.find((entry) => entry.store =
 /** @returns {readonly StoreEntry[]} */
 export const portableStores = () => STORE_REGISTRY.filter((entry) => entry.portable);
 
-/** @returns {readonly StoreEntry[]} */
-export const personPortableStores = () => STORE_REGISTRY.filter((entry) => entry.personPortable);
-
-/** @returns {Record<string, string>} */
-export const syncSurfaceStores = () => Object.fromEntries(
-  STORE_REGISTRY
-    .filter((entry) => entry.personPortable && entry.syncSurface)
-    .map((entry) => [/** @type {string} */ (entry.syncSurface), entry.store]),
-);
 
 /** @returns {string[]} */
 export const omittedDeviceBoundStores = () =>

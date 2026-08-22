@@ -19,12 +19,7 @@ import { dwebEnabledForTarget } from '../../packaging/gen-channel-config.ts';
 import { minifyColdArtifactModules } from '../../packaging/minify-artifact-js.ts';
 import { writeControllerBuildIdentity } from '../../packaging/controller-build-identity.ts';
 import { COLD_START_TARGETS } from '../bench/cold-start-budgets.js';
-import {
-  bundleChromeNativeKernel,
-  NATIVE_CHROME_PRUNED_IMPORTS,
-} from '../../packaging/bundle-chrome-native-kernel.ts';
-
-export { NATIVE_CHROME_PRUNED_IMPORTS };
+import { bundleChromeNativeKernel } from '../../packaging/bundle-chrome-native-kernel.ts';
 
 const SOURCE_DATE = new Date(946684800 * 1000);
 const entriesSorted = (root) => readdirSync(root, { recursive: true })

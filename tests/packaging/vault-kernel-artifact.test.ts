@@ -9,12 +9,12 @@ import { REPO_ROOT } from '../../packaging/lib.ts';
 import {
   bundleChromeNativeKernel,
   isChromeNativeKernelEntry,
+  NATIVE_CHROME_PRUNED_IMPORTS,
 } from '../../packaging/bundle-chrome-native-kernel.ts';
 import { packageArtifact } from '../../packaging/package.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import {
   assertVaultKernelReleaseTarget,
-  NATIVE_CHROME_PRUNED_IMPORTS,
   vaultKernelManifest,
 } from '../../scripts/cdp/vault-kernel-artifact.mjs';
 
@@ -95,7 +95,6 @@ describe('test-only vault kernel package target', () => {
       const result = await bundleChromeNativeKernel(staging, 'background/vault-kernel.js');
       const output = readFileSync(join(background, 'vault-kernel.js'), 'utf8');
       expect(NATIVE_CHROME_PRUNED_IMPORTS).toHaveLength(2);
-      expect(result.runtimeImports).toEqual([]);
       expect(result.inputs).toEqual([
         'background/dep.js',
         'background/vault-kernel.js',

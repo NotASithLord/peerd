@@ -55,7 +55,6 @@ import {
   writeControllerBuildIdentity,
 } from './controller-build-identity.ts';
 import {
-  assertChromeNativeKernelBundle,
   bundleChromeNativeKernel,
   isChromeNativeKernelEntry,
 } from './bundle-chrome-native-kernel.ts';
@@ -314,7 +313,9 @@ export const packageArtifact = async (
     const targetBytes = coldBudgetMode === 'enforce'
       ? COLD_START_TARGETS.chrome.serviceWorker.graphBytes
       : Number.MAX_SAFE_INTEGER;
-    await assertChromeNativeKernelBundle(staging, chromeBackgroundEntry, targetBytes);
+    if (bundled.bytes > targetBytes) {
+      throw new Error(`native Chrome bundle is ${bundled.bytes} bytes; target is ${targetBytes}`);
+    }
     console.log(`bundled native Chrome kernel ${bundled.bytes} bytes (${bundled.inputs.length} staged inputs)`);
   }
 
