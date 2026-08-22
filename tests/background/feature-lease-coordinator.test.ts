@@ -22,10 +22,15 @@ const generation = (buildId = 'build-aaaa', kernelEpoch = 'kernel-aaaa') => ({
 
 const makeStore = () => {
   const values = new Map<string, any>();
+  let setCalls = 0;
   return {
     values,
+    get setCalls() { return setCalls; },
     async get(key: string) { return structuredClone(values.get(key)); },
-    async set(key: string, value: any) { values.set(key, structuredClone(value)); },
+    async set(key: string, value: any) {
+      setCalls += 1;
+      values.set(key, structuredClone(value));
+    },
   };
 };
 
@@ -146,7 +151,7 @@ describe('post-vault feature lease coordinator', () => {
       },
       stop: (lease: any) => receipt(lease),
     };
-    const { coordinator } = setup({ dispatchers: hosts.dispatchers });
+    const { coordinator, store } = setup({ dispatchers: hosts.dispatchers });
     const abort = new AbortController();
     const running = coordinator.acquire('recovery', {
       reason: 'vault-resume', hostEpoch: 'recovery-host-a', signal: abort.signal,
@@ -268,10 +273,11 @@ describe('post-vault feature lease coordinator', () => {
       },
       stop: (lease: any) => receipt(lease),
     };
-    const { coordinator } = setup({ dispatchers: hosts.dispatchers });
+    const { coordinator, store } = setup({ dispatchers: hosts.dispatchers });
     await coordinator.acquire('controller', { hostEpoch: 'controller-host' });
     const starting = coordinator.acquire('dweb', { hostEpoch: 'dweb-host' });
     while (!dwebDispatched) await Promise.resolve();
+    const writesBeforeLock = store.setCalls;
     const locking = coordinator.lock();
     expect(coordinator.snapshot().locked).toBe(true);
     expect(coordinator.snapshot().leases.controller.status).toBe('revoked');
@@ -279,6 +285,7 @@ describe('post-vault feature lease coordinator', () => {
     dwebGate.resolve(receipt(dwebLease));
     expect(await starting).toMatchObject({ outcomeKnown: false });
     await locking;
+    expect(store.setCalls - writesBeforeLock).toBe(1);
     expect(coordinator.snapshot().leases.dweb.status).toBe('revoked');
 
     coordinator.unlock();

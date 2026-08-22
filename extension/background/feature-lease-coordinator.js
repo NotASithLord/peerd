@@ -311,8 +311,9 @@ export const createFeatureLeaseCoordinator = ({
     return operation;
   };
 
-  const revoke = (/** @type {string} */ scope,
-    /** @type {string} */ reason = 'feature-disabled') => {
+  const revokeWithIntent = (/** @type {string} */ scope,
+    /** @type {string} */ reason = 'feature-disabled',
+    /** @type {Promise<any>|null} */ sharedIntentWrite = null) => {
     const state = states.get(scope);
     if (!state) return Promise.resolve(outcome(false, 'feature-lease-scope-invalid', true));
     const lease = Object.freeze({
@@ -334,7 +335,10 @@ export const createFeatureLeaseCoordinator = ({
     state.dispatched = false;
     return (async () => {
       await ready;
-      try { await persistDesired(scope, false, lease.reason); }
+      try {
+        if (sharedIntentWrite) await sharedIntentWrite;
+        else await persistDesired(scope, false, lease.reason);
+      }
       catch {
         return outcome(false, 'feature-lease-revoke-intent-uncertain', false, { scope });
       }
@@ -360,11 +364,20 @@ export const createFeatureLeaseCoordinator = ({
       }
     })();
   };
+  const revoke = (/** @type {string} */ scope,
+    /** @type {string} */ reason = 'feature-disabled') =>
+    revokeWithIntent(scope, reason);
 
   const lock = () => {
     locked = true;
-    // Each revoke invalidates before its first await.
-    return Promise.all(FEATURE_LEASE_SCOPES.map((scope) => revoke(scope, 'vault-lock')));
+    // Every revoke invalidates before its first await. They then share one
+    // durable clear instead of serially rewriting the same empty document.
+    const clearIntents = ready.then(() => mutateDocument((current) => ({
+      ...current, intents: [],
+    })));
+    return Promise.all(FEATURE_LEASE_SCOPES.map(
+      (scope) => revokeWithIntent(scope, 'vault-lock', clearIntents),
+    ));
   };
   const unlock = () => { locked = false; };
   const disable = (/** @type {string} */ scope) => {
