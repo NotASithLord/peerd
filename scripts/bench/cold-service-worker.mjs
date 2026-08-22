@@ -745,21 +745,43 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
     const wakes = [];
     const wakeFailures = [];
     for (let sample = 0; sample < wakeSamples; sample += 1) {
-      const current = await findChromeWorker(port, backgroundEntry);
-      if (!current) throw new Error('Chrome worker disappeared before forced termination');
-      const currentVersion = [...serviceWorkerVersions.values()].find((row) =>
-        row.runningStatus === 'running'
-        && String(row.scriptURL) === `chrome-extension://${current.extensionId}/${backgroundEntry}`);
-      if (!currentVersion) throw new Error('Chrome ServiceWorker domain did not expose the running version');
-      await page.send('Page.navigate', { url: 'about:blank' }, 5_000);
-      await page.send('ServiceWorker.stopWorker', { versionId: currentVersion.versionId }, 5_000);
-      const stoppedVersion = await waitFor(() => {
-        const row = serviceWorkerVersions.get(currentVersion.versionId);
-        return row?.runningStatus === 'stopped' ? row : null;
-      }, 8_000, 5);
-      if (!stoppedVersion) throw new Error('Chrome ServiceWorker version remained running');
-      const gone = await waitFor(async () => !(await findChromeWorker(port, backgroundEntry)), 8_000, 5);
-      if (!gone) throw new Error('Chrome service worker did not terminate');
+      const retirementStarted = hostNowMs();
+      let current;
+      let stoppedVersion;
+      try {
+        current = await findChromeWorker(port, backgroundEntry);
+        if (!current) throw new Error('Chrome worker disappeared before forced termination');
+        const currentVersion = [...serviceWorkerVersions.values()].find((row) =>
+          row.runningStatus === 'running'
+          && String(row.scriptURL) === `chrome-extension://${current.extensionId}/${backgroundEntry}`);
+        if (!currentVersion) throw new Error('Chrome ServiceWorker domain did not expose the running version');
+        await page.send('Page.navigate', { url: 'about:blank' }, 5_000);
+        const away = await waitFor(async () => {
+          const reply = await page.send('Runtime.evaluate', {
+            expression: `location.href === 'about:blank'`, returnByValue: true,
+          }, 1_000);
+          return reply?.result?.value === true;
+        }, 5_000, 10);
+        if (!away) throw new Error('Chrome extension surface did not release the worker');
+        await page.send('ServiceWorker.stopWorker', { versionId: currentVersion.versionId }, 5_000);
+        stoppedVersion = await waitFor(() => {
+          const row = serviceWorkerVersions.get(currentVersion.versionId);
+          return row?.runningStatus === 'stopped' ? row : null;
+        }, 8_000, 5);
+        if (!stoppedVersion) throw new Error('Chrome ServiceWorker version remained running');
+        const gone = await waitFor(
+          async () => !(await findChromeWorker(port, backgroundEntry)), 8_000, 5,
+        );
+        if (!gone) throw new Error('Chrome service worker did not terminate');
+      } catch (error) {
+        wakeFailures.push({
+          elapsedMs: hostNowMs() - retirementStarted,
+          targetAppeared: false,
+          error: error?.message ?? String(error),
+        });
+        console.log(`  forced wake ${sample + 1}/${wakeSamples}: retirement failed`);
+        break;
+      }
       const started = hostNowMs();
       const wakeDeadlineAt = started + coldTimeoutMs;
       const wakeRemaining = () => Math.max(1, wakeDeadlineAt - hostNowMs());
@@ -787,7 +809,7 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
             && style.visibility !== 'hidden' && style.display !== 'none');
         }));
       })`, wakeRemaining());
-      if (!wakePainted) throw new Error('Chrome wake side-panel shell was not visibly painted');
+      if (!wakePainted) throw new Error('Chrome wake extension shell was not visibly painted');
       const staticShellFromWakeMs = hostNowMs() - started;
       try {
         const wakeBootstrapPromise = sendChromeRuntimeMessage(page, { type: 'bootstrap/ready' }, wakeRemaining())
