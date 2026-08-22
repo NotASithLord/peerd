@@ -106,6 +106,7 @@ describe('cold-start browser harness contract', () => {
       expect(text).toContain("extensionDir: prepared.store.extensionDir");
       expect(text).toContain('wakeSamples: sample < chromeWakes ? 1 : 0');
       expect(text).toContain('vaultGateReadyFromWorkerTargetMs');
+      expect(text).toContain('deadlineAt = hostNowMs() + coldTimeoutMs');
       expect(text).toContain("row?.status === 'activated'");
       expect(text).toContain("row.scriptURL.endsWith(backgroundEntry)");
       expect(text).toContain('Home is that client; verify exact');

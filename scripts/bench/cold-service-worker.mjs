@@ -612,7 +612,7 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
   const profile = mkdtempSync(join(tmpdir(), 'peerd-cold-chrome-profile-'));
   const binary = chromeBinary();
   const launchStarted = hostNowMs();
-  const deadlineAt = launchStarted + coldTimeoutMs;
+  let deadlineAt = launchStarted + coldTimeoutMs;
   const remaining = () => Math.max(1, deadlineAt - hostNowMs());
   const chromeArgs = [
     '--headless=new', '--no-first-run', '--no-default-browser-check',
@@ -638,6 +638,9 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
     if (!firstWorker) throw new Error(`Chrome worker target did not appear\n${stderr}`);
     const workerTargetMs = hostNowMs() - launchStarted;
     console.log(`  worker target ready in ${round(workerTargetMs)}ms`);
+    // Browser launch remains reported, but the worker watchdog starts at the
+    // same exact realm boundary as the enforced 3s service-worker UX metric.
+    deadlineAt = hostNowMs() + coldTimeoutMs;
     if (diagnostic) {
       const startupWorker = await within(
         attach(firstWorker.webSocketDebuggerUrl), 1_000, 'Chrome startup worker attach',
