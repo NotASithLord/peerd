@@ -2,16 +2,7 @@ import { describe, test, expect } from 'bun:test';
 import {
   isCloudMetadataHost,
   isPrivateOrLocalHost,
-} from '../../extension/peerd-egress/fetch/private-network.js';
-import {
-  isCloudMetadataHost as sharedIsCloudMetadataHost,
-  isPrivateOrLocalHost as sharedIsPrivateOrLocalHost,
 } from '../../extension/shared/private-network.js';
-
-test('the egress compatibility surface re-exports the shared policy', () => {
-  expect(isPrivateOrLocalHost).toBe(sharedIsPrivateOrLocalHost);
-  expect(isCloudMetadataHost).toBe(sharedIsCloudMetadataHost);
-});
 
 describe('isPrivateOrLocalHost — BLOCKS private / loopback / link-local', () => {
   const blocked = [
