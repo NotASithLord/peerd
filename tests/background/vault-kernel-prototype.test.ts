@@ -162,7 +162,7 @@ describe('minimal vault authority-kernel prototype', () => {
     expect(utility).toContain("from './kernel-site-client-routes.js'");
     expect(source).not.toContain('createKernelSemanticDemand');
     expect(source).toContain('createKernelSemanticRoutes');
-    expect(source).toContain('currentVaultKernelAssemblyReport');
+    expect(source).toContain('createVaultKernelAssemblyReport');
     expect(source).toContain('identity: kernelIdentity');
     expect(source).toContain('CONTROLLER_BUILD_DIGEST');
     expect(source).toContain('bindReply: generation.bindCurrent');
@@ -191,7 +191,7 @@ describe('minimal vault authority-kernel prototype', () => {
     expect(graph).not.toContain('background/kernel-semantic-demand.js');
     expect(graph).not.toContain('background/semantic-demand-client.js');
     expect(graph).not.toContain('shared/semantic-demand-policy.js');
-    expect(graph).toContain('background/kernel-command-reader.js');
+    expect(graph).not.toContain('background/kernel-command-reader.js');
     expect(graph).toContain('background/kernel-app-file-reader.js');
     expect(graph).not.toContain('peerd-runtime/skills/registry.js');
     expect(graph).not.toContain('peerd-runtime/skills/store.js');

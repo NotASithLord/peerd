@@ -338,39 +338,3 @@ export const makeRefCountedFirefoxBackgroundLifetime = ({ start, stop }) => {
   return Object.freeze({ acquire, release, run, createHandle, fail,
     snapshot: () => ({ active: tokens.size, lost: failure !== null }) });
 };
-
-/**
- * @param {Object} deps
- * @param {any} deps.browser
- * @param {{event:(key:string, raw:any, owner:string)=>any}} deps.registry
- * @param {(error:Error)=>void} [deps.onLost]
- * @param {typeof makeStorageSessionKeepAlive} [deps.makeKeepAlive]
- */
-export const attachFirefoxStorageKeepAlive = ({
-  browser,
-  registry,
-  onLost = () => {},
-  makeKeepAlive = makeStorageSessionKeepAlive,
-}) => {
-  if (!browser?.storage?.session
-      || typeof registry?.event !== 'function') {
-    throw new TypeError('firefox-storage-keepalive-config-invalid');
-  }
-  const lifetime = makeKeepAlive({
-    storage: browser.storage.session,
-    key: FIREFOX_ACTOR_KEEPALIVE_KEY,
-    intervalMs: FIREFOX_ACTOR_KEEPALIVE_MS,
-    ackTimeoutMs: FIREFOX_ACTOR_KEEPALIVE_ACK_MS,
-    onLost,
-  });
-  const event = registry.event(
-    'storage.session.onChanged',
-    browser.storage.session.onChanged,
-    'kernel-firefox-actor-lifetime',
-  );
-  if (!event) throw new Error('firefox-storage-keepalive-event-unavailable');
-  event.addListener((/** @type {Record<string, any>} */ changes) => {
-    lifetime.onChanged(changes);
-  });
-  return Object.freeze(lifetime);
-};

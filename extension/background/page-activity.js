@@ -160,51 +160,6 @@ const clearOnTarget = async (target, deps) => {
 };
 
 /**
- * Show (or update) the in-page pill.
- *
- * why re-inject on every call rather than holding a port: the pill dies with the
- * document, and the actor navigates constantly. A per-call injection is
- * self-healing — the first action after a navigation rebuilds it — where a port
- * would need reconnect bookkeeping to reach the same place.
- *
- * @param {number} tabId
- * @param {string} label   the phrase from describeToolActivity
- * @param {string} origin  the origin being driven, shown under the phrase
- * @param {ActivityDeps} deps
- * @param {ActivityPolicy} [policy]
- * @returns {Promise<boolean>}
- */
-export const showPageActivity = async (tabId, label, origin, deps, policy = {}) => {
-  try {
-    const target = await allowedDocumentTarget(tabId, deps, policy);
-    if (!target) return false;
-    await showOnTarget(target, label, origin, deps);
-    return true;
-  } catch {
-    // A restricted page (chrome://, the Web Store, a PDF viewer) refuses
-    // injection. Nothing to do — the tab-group marking still stands.
-    return false;
-  }
-};
-
-/**
- * Remove the in-page pill.
- * @param {number} tabId
- * @param {ActivityDeps} deps
- * @returns {Promise<boolean>}
- */
-export const clearPageActivity = async (tabId, deps) => {
-  try {
-    const target = await allowedDocumentTarget(tabId, deps);
-    if (!target) return false;
-    await clearOnTarget(target, deps);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-/**
  * Build the activity reporter the tool dispatcher calls around every
  * `primitive:'tab'` call.
  *

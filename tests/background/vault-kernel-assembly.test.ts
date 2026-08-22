@@ -13,7 +13,6 @@ import {
 } from '../../extension/background/kernel-port-router.js';
 import {
   createVaultKernelAssemblyReport,
-  currentVaultKernelAssemblyReport,
 } from '../../extension/background/vault-kernel-assembly.js';
 import {
   coldPortNamesFor,
@@ -122,7 +121,7 @@ describe('thin vault-kernel Port assembly', () => {
 
 describe('executable vault-kernel cutover report', () => {
   test('inventories all events and Ports but defaults every executable owner fail-closed', () => {
-    const store = currentVaultKernelAssemblyReport({ identity: IDENTITY });
+    const store = createVaultKernelAssemblyReport({ identity: IDENTITY });
     expect(store.events.map((entry) => entry.key))
       .toEqual(LEGACY_COLD_EVENTS.map((entry) => entry.key));
     expect(store.ports.map((entry) => entry.name))
@@ -155,8 +154,8 @@ describe('executable vault-kernel cutover report', () => {
       .toMatchObject({ status: 'partial', owner: 'kernel-message-router' });
     expect(partial.missingRequiredEvents).toContain('runtime.onMessage');
 
-    const firefox = currentVaultKernelAssemblyReport({ identity: IDENTITY, firefox: true });
-    const preview = currentVaultKernelAssemblyReport({
+    const firefox = createVaultKernelAssemblyReport({ identity: IDENTITY, firefox: true });
+    const preview = createVaultKernelAssemblyReport({
       identity: IDENTITY, selfHostedChrome: true,
     });
     expect(firefox.counts.requiredEvents).toBe(15);
@@ -255,8 +254,8 @@ test('test-only entry uses one identity and kernel-local receipts without wideni
   expect(source).not.toContain('browser.runtime.onConnect.addListener');
   expect(source).toContain('await vaultReady; return kv.get(key)');
   expect(source).toContain('await vaultReady; await kv.set(key, value)');
-  expect(source).toContain('currentVaultKernelAssemblyReport');
-  expect(source).toContain('export const vaultKernelAssembly');
+  expect(source).toContain('createVaultKernelAssemblyReport');
+  expect(source).not.toContain('export const vaultKernelAssembly');
   expect(source).toContain('assembly: assemblyReport()');
   expect(source).not.toContain('adoptPort');
 

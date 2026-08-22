@@ -8,7 +8,7 @@ export { createNotebookRegistry, NOTEBOOK_OPFS_ROOT, NOTEBOOK_TAB_PATH } from '.
 export { createPodRegistry, POD_TAB_PATH } from './pod-registry.js';
 export { createAppRegistry, APP_TAB_PATH } from './app-registry.js';
 export {
-  appFileCheckpointContent, inferAppFileKind, isBinaryAppFile,
+  inferAppFileKind, isBinaryAppFile,
   isBinaryAssetPath, isLosslessUtf8Text, MAX_MODEL_APP_FILE_BYTES,
 } from './app-assets.js';
 export { opfsHelpers } from './opfs.js';
@@ -28,7 +28,6 @@ export {
 } from './vm-net/vm-http-fetch.js';
 export { makeGitCredentialRoutes } from './vm-net/git-credential-routes.js';
 export { needsWebWriteConfirm } from './vm-net/http-bridge.js';
-export { setAppBodyWriteGate } from './app-store.js';
 export { buildAppManifest, parseAppManifest } from './app-manifest.js';
 export {
   gitRemoteOwnsRequest,

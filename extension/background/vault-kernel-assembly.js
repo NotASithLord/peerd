@@ -103,5 +103,3 @@ export const createVaultKernelAssemblyReport = (deps) => {
     cutoverReady: missingRequiredEvents.length === 0 && incompletePorts.length === 0,
   });
 };
-
-export const currentVaultKernelAssemblyReport = createVaultKernelAssemblyReport;

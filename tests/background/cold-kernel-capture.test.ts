@@ -55,6 +55,24 @@ const makeStore = () => {
   };
 };
 
+const LEGACY_LISTENER_SITES = Object.freeze({
+  'runtime.onMessage': 6,
+  'runtime.onConnect': 1,
+  'runtime.onStartup': 1,
+  'runtime.onUpdateAvailable': 2,
+  'alarms.onAlarm': 1,
+  'storage.session.onChanged': 1,
+  'tabs.onCreated': 1,
+  'tabs.onUpdated': 6,
+  'tabs.onRemoved': 8,
+  'tabs.onActivated': 2,
+  'windows.onFocusChanged': 1,
+  'webNavigation.onCreatedNavigationTarget': 1,
+  'webRequest.onBeforeRequest': 1,
+  'action.onClicked': 1,
+  'commands.onCommand': 1,
+});
+
 const authorityFor = (calls: string[] = []) => Object.fromEntries(
   LEGACY_COLD_EVENTS.filter((entry) =>
     entry.placement === 'kernel-authority' || entry.placement === 'kernel-immediate')
@@ -155,14 +173,11 @@ describe('cold-listener inventory differential', () => {
     // Debugger listeners are deliberately lazy: their first attach cannot be a
     // cold wake because a live debugger operation already owns a semantic host.
     const deferred = ['debugger.onDetach', 'debugger.onEvent'];
-    const legacyEvents = LEGACY_COLD_EVENTS.filter((entry) => entry.legacySites > 0);
     expect([...actual.keys()].sort()).toEqual([
-      ...legacyEvents.map((entry) => entry.key), ...deferred,
+      ...Object.keys(LEGACY_LISTENER_SITES), ...deferred,
     ].sort());
-    expect(Object.fromEntries(legacyEvents.map((entry) => [entry.key, entry.legacySites])))
-      .toEqual(Object.fromEntries(legacyEvents.map((entry) => [
-        entry.key, actual.get(entry.key) ?? 0,
-      ])));
+    expect(Object.fromEntries(Object.keys(LEGACY_LISTENER_SITES)
+      .map((key) => [key, actual.get(key) ?? 0]))).toEqual(LEGACY_LISTENER_SITES);
     expect(actual.has('runtime.onInstalled')).toBe(false);
     // Catch a new generic `event.addListener(...)` too, not only receivers the
     // AST can name as `browser.*`. Any listener-site change requires an explicit
@@ -174,9 +189,6 @@ describe('cold-listener inventory differential', () => {
       // The extracted kernel owner contains both the authenticated heartbeat
       // and exact disconnect retirement listeners.
       'background/feature-lease-keepalive.js': 2,
-      // Firefox's direct Worker lifetime is an explicit session-storage wake
-      // adapter; the event family itself is classified above.
-      'background/firefox-storage-keepalive.js': 1,
       'background/private-transfer-port.js': 2,
       'background/service-worker.js': 20,
       'background/tab-affordances.js': 10,

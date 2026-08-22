@@ -435,7 +435,6 @@ import {
   createNotebookRegistry,
   createPodRegistry,
   createAppRegistry,
-  appFileCheckpointContent,
   opfsHelpers as rawOpfsHelpers,
   NOTEBOOK_OPFS_ROOT,
   IMAGE_PIN_STORAGE_KEY,
@@ -450,8 +449,6 @@ import {
   // DESIGN-19: the shared non-GET web-write predicate (site-fetch/call gates a
   // non-GET through the same web:write confirm as fetch_url / call_api).
   needsWebWriteConfirm,
-  // §11.5: the dormant App-bodies store's write gate (self-hosted DB).
-  setAppBodyWriteGate,
   parseAppManifest,
   podGitRemoteOperation,
 } from '/peerd-engine/background.js';
@@ -543,9 +540,8 @@ const coldEvent = coldListeners.event;
 // stamp than this build supports) is enforced at the one chokepoint all
 // writes share — no per-store wiring, no store left out. The blocked set
 // starts empty (zero overhead until a store is actually blocked) and is
-// filled inside the lifecycle boot chain below. Two self-hosted databases
-// (peerd-skills, peerd-app-bodies) sit outside the adapters — the registry
-// marks them and their enforcement is a per-module follow-up.
+// filled inside the lifecycle boot chain below. The self-hosted skills database
+// sits outside the adapters, so the registry installs its verdict directly.
 const storeWriteGuard = makeWriteGuard();
 const kv = storeWriteGuard.wrapKv(rawKv);
 const idb = storeWriteGuard.wrapIdb(rawIdb);
@@ -556,12 +552,6 @@ const idbKV = (/** @type {string} */ store) =>
 // occurs; transfer import/export has no reference to these keys.
 const contributorStore = makeContributorStore({ kv });
 const CONTRIBUTOR_METRICS_AVAILABLE = CHANNEL === 'preview' || CHANNEL === 'dev';
-// The two SELF-HOSTED databases (own IDB, unreachable through the wrapped
-// adapters) get the same verdict via injected gates: skills below at its
-// construction, App bodies here (dormant store, gate installed anyway so a
-// future consumer can never ship ungated).
-setAppBodyWriteGate(() => storeWriteGuard.assertWritable('app-manifests'));
-
 // ---------------------------------------------------------------------------
 // 1. Layer 1 instances
 // ---------------------------------------------------------------------------
@@ -3089,17 +3079,6 @@ const OFFSCREEN_URL = 'offscreen/offscreen.html';
 // a discrete tab; the registry persists metadata, the tracker maps
 // vmId → live tabId (in memory, rebuilt at SW startup), and the
 // client wraps chrome.tabs.sendMessage with vmId resolution.
-/** Delete an IDB database (a VM's disk overlay). Resolves on success;
- *  rejects if the delete is blocked (e.g. another tab still holds it
- *  open — caller should close VM tabs first). */
-const deleteIDBDatabase = (/** @type {string} */ name) => new Promise((resolve, reject) => {
-  if (typeof indexedDB === 'undefined') return resolve(false);
-  const req = indexedDB.deleteDatabase(name);
-  req.onsuccess = () => resolve(true);
-  req.onerror = () => reject(req.error ?? new Error('deleteDatabase failed'));
-  req.onblocked = () => reject(new Error(`deleteDatabase blocked: ${name} (close VM tab first)`));
-});
-
 // DESIGN-17: archive an actor session orphaned by its instance's deletion.
 // Fired by registry.remove() (so it covers BOTH the *_delete tools and the
 // Library UI route uniformly). Archiving only sets archivedAt — safe even on a
@@ -3326,47 +3305,9 @@ const commandSources = mergeSources([
   localStoreSource(commandStore),
   skillRegistrySource(skillRegistry),
 ]);
-// --- Feature 02: checkpoint manager over content-addressed snapshots ----
-//
-// The "workspace" we snapshot is an App's OPFS subtree, read directly in
-// the SW via appClient.opfsForApp (no tab needed — browser-native, cheap
-// per turn). Scopes are `app:<appId>`. A workspaceFor(scope) returns a
-// read/write/delete adapter the manager uses for capture + restore.
-//
-// Notebook scratch is also OPFS but only reachable through its tab's
-// worker; snapshotting it would require spawning a tab per turn, so it's
-// a documented V1.x gap (DEV-NOTES.md). The manager already accepts any
-// scope, so adding a `notebook:<id>` adapter later is purely additive.
+// App checkpoints use the App's Git repository as their single version
+// lineage. Notebook scratch has no checkpoint scope.
 const SNAPSHOT_SCOPE_APP = (/** @type {string} */ appId) => `app:${appId}`;
-const appWorkspaceAdapter = (/** @type {string} */ appId) => {
-  return {
-    readAll: async () => {
-      const snapshot = await appClient.snapshotFiles({ appId });
-      /** @type {Record<string,string>} */
-      const out = Object.create(null);
-      for (const [path, bytes] of Object.entries(snapshot.files)) {
-        out[path] = await appFileCheckpointContent(
-          path,
-          bytes,
-          snapshot.record.fileKinds?.[path],
-        );
-      }
-      return out;
-    },
-    writeFile: async (/** @type {string} */ path, /** @type {any} */ content) => {
-      await appClient.writeFile({ appId, path, content, reload: false });
-    },
-    deleteFile: async (/** @type {string} */ path) => {
-      await appClient.deleteFile({ appId, path, reload: false });
-    },
-  };
-};
-const workspaceForScope = (/** @type {string} */ scope) => {
-  if (typeof scope === 'string' && scope.startsWith('app:')) {
-    return appWorkspaceAdapter(scope.slice('app:'.length));
-  }
-  return null; // unknown scope kind (notebook snapshots: V1.x)
-};
 // Apps use their standard Git repository as the checkpoint substrate. This
 // preserves one version lineage for automatic turn captures, manual commits,
 // review diffs, restores, and remote publication instead of duplicating App

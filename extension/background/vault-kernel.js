@@ -78,7 +78,7 @@ import {
   makeRepositoryKernelFetch,
 } from './repository-client.js';
 import {
-  currentVaultKernelAssemblyReport,
+  createVaultKernelAssemblyReport,
   SEMANTIC_CUTOVER_SUMMARY,
 } from './vault-kernel-assembly.js';
 import {
@@ -633,7 +633,7 @@ const semanticRoutes = Object.freeze({
 });
 
 const assemblyReport = () => Object.freeze({
-  ...currentVaultKernelAssemblyReport({
+  ...createVaultKernelAssemblyReport({
     identity: kernelIdentity,
     firefox: kernelFirefox,
     selfHostedChrome: kernelSelfHostedChrome,
@@ -820,5 +820,3 @@ void kernelReady.then(() => coldReceipts.recover()).catch((error) => {
 void kernelUpdateCustody?.start().catch((/** @type {unknown} */ error) => {
   console.error('[kernel] update custody start failed', error);
 });
-
-export const vaultKernelAssembly = assemblyReport();

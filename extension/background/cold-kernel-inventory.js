@@ -7,7 +7,6 @@
  * @typedef {Object} ColdEventInventory
  * @property {string} key
  * @property {ColdPlacement} placement
- * @property {number} legacySites
  * @property {boolean} [common]
  * @property {boolean} [firefox]
  * @property {boolean} [selfHostedChrome]
@@ -22,39 +21,28 @@
  */
 /** @type {ReadonlyArray<Readonly<ColdEventInventory>>} */
 export const LEGACY_COLD_EVENTS = Object.freeze([
-  Object.freeze({ key: 'runtime.onMessage', placement: 'transient-host', common: true, legacySites: 6 }),
-  Object.freeze({ key: 'runtime.onConnect', placement: 'transient-host', common: true, legacySites: 1 }),
-  Object.freeze({ key: 'runtime.onStartup', placement: 'durable-hint', common: true, legacySites: 1 }),
+  Object.freeze({ key: 'runtime.onMessage', placement: 'transient-host', common: true }),
+  Object.freeze({ key: 'runtime.onConnect', placement: 'transient-host', common: true }),
+  Object.freeze({ key: 'runtime.onStartup', placement: 'durable-hint', common: true }),
   // New native-kernel owner: a fresh install writes only the nonsecret false
   // vault posture marker; updates with no marker reconcile through authority.
-  Object.freeze({ key: 'runtime.onInstalled', placement: 'kernel-immediate', common: true, legacySites: 0 }),
+  Object.freeze({ key: 'runtime.onInstalled', placement: 'kernel-immediate', common: true }),
   // Two code sites manage one live preview listener across settings hydration.
-  Object.freeze({ key: 'runtime.onUpdateAvailable', placement: 'kernel-authority', selfHostedChrome: true, legacySites: 2 }),
-  Object.freeze({ key: 'alarms.onAlarm', placement: 'durable-hint', common: true, legacySites: 1 }),
+  Object.freeze({ key: 'runtime.onUpdateAvailable', placement: 'kernel-authority', selfHostedChrome: true }),
+  Object.freeze({ key: 'alarms.onAlarm', placement: 'durable-hint', common: true }),
   // Firefox event pages use session-storage activity as the direct Worker
   // lifetime signal. Chrome's controller lives behind an offscreen lease and
   // never registers this listener.
-  Object.freeze({ key: 'storage.session.onChanged', placement: 'durable-hint', firefox: true, legacySites: 1 }),
-  Object.freeze({ key: 'tabs.onCreated', placement: 'kernel-authority', common: true, legacySites: 1 }),
-  Object.freeze({ key: 'tabs.onUpdated', placement: 'kernel-authority', common: true, legacySites: 6 }),
-  Object.freeze({ key: 'tabs.onRemoved', placement: 'kernel-authority', common: true, legacySites: 8 }),
-  Object.freeze({ key: 'tabs.onActivated', placement: 'durable-hint', common: true, legacySites: 2 }),
-  Object.freeze({ key: 'windows.onFocusChanged', placement: 'durable-hint', common: true, legacySites: 1 }),
-  Object.freeze({ key: 'webNavigation.onCreatedNavigationTarget', placement: 'kernel-authority', common: true, legacySites: 1 }),
-  Object.freeze({ key: 'webRequest.onBeforeRequest', placement: 'kernel-authority', firefox: true, legacySites: 1 }),
-  Object.freeze({ key: 'action.onClicked', placement: 'kernel-immediate', common: true, legacySites: 1 }),
-  Object.freeze({ key: 'commands.onCommand', placement: 'kernel-immediate', common: true, legacySites: 1 }),
-]);
-
-// Message classes are evidence for the central listener. The wildcard is the
-// unified dispatcher: adding a route does not require adding another listener.
-export const LEGACY_MESSAGE_CLASSES = Object.freeze([
-  Object.freeze({ match: 'bootstrap/ready', handling: 'kernel-immediate', persisted: false }),
-  Object.freeze({ match: 'local-model/{delta,done,progress}', handling: 'transient-host', persisted: false }),
-  Object.freeze({ match: '{voice,vm}/{stream-event}', handling: 'transient-host', persisted: false }),
-  Object.freeze({ match: '{vm,js,app,pod}/tab-lifecycle', handling: 'transient-host', persisted: false }),
-  Object.freeze({ match: 'dweb/base-room/event', handling: 'transient-host', persisted: false }),
-  Object.freeze({ match: '*', handling: 'transient-host-rpc', persisted: false }),
+  Object.freeze({ key: 'storage.session.onChanged', placement: 'durable-hint', firefox: true }),
+  Object.freeze({ key: 'tabs.onCreated', placement: 'kernel-authority', common: true }),
+  Object.freeze({ key: 'tabs.onUpdated', placement: 'kernel-authority', common: true }),
+  Object.freeze({ key: 'tabs.onRemoved', placement: 'kernel-authority', common: true }),
+  Object.freeze({ key: 'tabs.onActivated', placement: 'durable-hint', common: true }),
+  Object.freeze({ key: 'windows.onFocusChanged', placement: 'durable-hint', common: true }),
+  Object.freeze({ key: 'webNavigation.onCreatedNavigationTarget', placement: 'kernel-authority', common: true }),
+  Object.freeze({ key: 'webRequest.onBeforeRequest', placement: 'kernel-authority', firefox: true }),
+  Object.freeze({ key: 'action.onClicked', placement: 'kernel-immediate', common: true }),
+  Object.freeze({ key: 'commands.onCommand', placement: 'kernel-immediate', common: true }),
 ]);
 
 /**

@@ -26,7 +26,7 @@ const safeString = (/** @type {unknown} */ value, /** @type {number} */ max = 12
   typeof value === 'string' && value.length <= max ? value : null;
 
 /** @param {string} key @param {any[]} args */
-export const sanitizeKernelColdEvent = (key, args) => {
+const sanitizeKernelColdEvent = (key, args) => {
   if (key === 'runtime.onStartup') return {};
   if (key === 'alarms.onAlarm') return {
     name: safeString(args[0]?.name, 256),

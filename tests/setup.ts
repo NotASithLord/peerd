@@ -60,9 +60,8 @@ plugin({
   },
 });
 
-// fake-indexeddb gives us a real in-memory IDB so app-store.ts (which
-// uses standard IDB) can be tested without a browser. Pulled in
-// lazily so tests that don't touch IDB don't pay the import cost.
+// fake-indexeddb gives direct-IDB owners a real in-memory database. It loads
+// lazily so tests that do not touch IDB do not pay the import cost.
 let fakeIDB: any = null;
 export const useFakeIndexedDB = async () => {
   if (!fakeIDB) {
