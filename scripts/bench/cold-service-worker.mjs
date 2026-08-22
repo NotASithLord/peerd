@@ -76,6 +76,7 @@ if (!['release', 'native-floor'].includes(runtimeTarget)) {
   throw new Error('--runtime-target must be release or native-floor');
 }
 const nativeFloor = runtimeTarget === 'native-floor';
+const runtimeSurface = nativeFloor ? 'home' : 'sidepanel-tab';
 const intOption = (name, fallback, minimum) => {
   if (options[name] === undefined) return fallback;
   const parsed = Number(options[name]);
@@ -655,7 +656,10 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       await page.send('ServiceWorker.enable', {}, remaining());
     }
     await enableChromePrfFixture(page);
-    const panelUrl = `chrome-extension://${firstWorker.extensionId}/sidepanel/sidepanel.html`;
+    // CDP cannot open Chrome's browser-owned side panel. The native floor uses
+    // Home, its exact tab-owned human surface, so provenance remains real.
+    const surfacePath = nativeFloor ? 'home/home.html' : 'sidepanel/sidepanel.html';
+    const panelUrl = `chrome-extension://${firstWorker.extensionId}/${surfacePath}`;
     const navigation = await page.send('Page.navigate', { url: panelUrl }, remaining());
     if (navigation?.errorText) throw new Error(`Chrome panel navigation failed: ${navigation.errorText}`);
     const pageReady = await waitFor(async () => {
@@ -665,7 +669,7 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       });
       return evaluated?.result?.value === true;
     }, remaining());
-    if (!pageReady) throw new Error('Chrome side panel did not load');
+    if (!pageReady) throw new Error('Chrome extension surface did not load');
     const shellPaintMarker = await waitChromeExpression(page,
       `document.documentElement.dataset.peerdStaticShellPainted === 'true'`, remaining());
     if (!shellPaintMarker) throw new Error('Chrome static vault shell did not paint');
@@ -678,9 +682,9 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
           && style.visibility !== 'hidden' && style.display !== 'none');
       }));
     })`, remaining());
-    if (!painted) throw new Error('Chrome side-panel shell was not visibly painted');
+    if (!painted) throw new Error('Chrome extension shell was not visibly painted');
     const staticShellFromLaunchMs = hostNowMs() - launchStarted;
-    console.log(`  static side-panel shell ready in ${round(staticShellFromLaunchMs)}ms`);
+    console.log(`  static extension shell ready in ${round(staticShellFromLaunchMs)}ms`);
 
     const bootstrapPromise = sendChromeRuntimeMessage(page, { type: 'bootstrap/ready' }, remaining())
       .then((reply) => {
@@ -940,6 +944,7 @@ const buildChromeResult = async (measurement, prepared, processes, processFailur
     artifact: {
       channel: 'store',
       runtimeTarget,
+      runtimeSurface,
       archiveSha256: store.archiveSha256,
       treeSha256: store.treeSha256,
       channels: Object.fromEntries(['store', 'preview'].map((channel) => [channel, {
@@ -1506,6 +1511,7 @@ export const main = async () => {
     options: {
       browser: browserChoice,
       runtimeTarget,
+      runtimeSurface,
       enforcement: laneContract.enforcement,
       graphPolicy,
       requireTimingTargets,
@@ -1520,7 +1526,7 @@ export const main = async () => {
     },
     host,
     note: nativeFloor
-      ? 'Local native-floor diagnostic: Chrome runs the exact release-minified copied Store kernel artifact named by archiveSha256, records the separate Store and Preview native graphs, and proves one fresh worker start plus one confirmed worker stop/wake against the 3-second extension target. Full browser launch remains reported but is not charged to the service worker. This does not change or claim the live release manifest.'
+      ? 'Local native-floor diagnostic: Chrome runs the exact release-minified copied Store kernel artifact named by archiveSha256, records the separate Store and Preview native graphs, and proves one fresh worker start plus one confirmed worker stop/wake against the 3-second extension target. CDP cannot open the browser-owned side panel, so the runtime CTA is measured on the exact tab-owned Home authority surface. Full browser launch remains reported but is not charged to the service worker. This does not change or claim the live release manifest.'
       : 'Every browser runs the exact unsigned Store artifact named by archiveSha256 and records both Store and Preview cold graphs against their own immutable archive/tree digests. Browser launch/install to visible shell, bootstrap, state and actionable-vault clocks are host-monotonic; page/worker clocks are diagnostic only and no benchmark source is injected into the extension.',
     results: {},
     ...(comparisonSources ? { baseResults: {}, pairAssessments: {} } : {}),
