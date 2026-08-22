@@ -125,6 +125,9 @@ export const createFeatureLeaseCoordinator = ({
 
   const ready = store.get(FEATURE_LEASE_INTENT_KEY).then(async (stored) => {
     document = parseDocument(stored, canonicalIdentity);
+    if (!vaultUnlocked && document.intents.length > 0) {
+      document = { ...document, intents: [] };
+    }
     await store.set(FEATURE_LEASE_INTENT_KEY, document);
     return true;
   });
@@ -372,9 +375,9 @@ export const createFeatureLeaseCoordinator = ({
     locked = true;
     // Every revoke invalidates before its first await. They then share one
     // durable clear instead of serially rewriting the same empty document.
-    const clearIntents = ready.then(() => mutateDocument((current) => ({
-      ...current, intents: [],
-    })));
+    const clearIntents = ready.then(() => document.intents.length === 0
+      ? document
+      : mutateDocument((current) => ({ ...current, intents: [] })));
     return Promise.all(FEATURE_LEASE_SCOPES.map(
       (scope) => revokeWithIntent(scope, 'vault-lock', clearIntents),
     ));

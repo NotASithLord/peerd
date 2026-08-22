@@ -294,6 +294,33 @@ describe('post-vault feature lease coordinator', () => {
       .toMatchObject({ code: 'feature-lease-disabled', outcomeKnown: true });
   });
 
+  test('locked successor claims its generation and clears stale intent in one write', async () => {
+    const store = makeStore();
+    const first = setup({ store, identity: generation('build-aaaa', 'kernel-old') });
+    await first.coordinator.acquire('schedule', {
+      reason: 'vault-resume', hostEpoch: 'schedule-host-old',
+    });
+    expect(store.values.get(FEATURE_LEASE_INTENT_KEY).intents).toHaveLength(1);
+
+    const writesBeforeReady = store.setCalls;
+    const second = setup({
+      store,
+      identity: generation('build-aaaa', 'kernel-new'),
+      vaultUnlocked: false,
+    });
+    await second.coordinator.ready;
+    expect(store.setCalls - writesBeforeReady).toBe(1);
+    expect(store.values.get(FEATURE_LEASE_INTENT_KEY)).toMatchObject({
+      ownerKernelEpoch: 'kernel-new',
+      intents: [],
+    });
+
+    const writesBeforeLock = store.setCalls;
+    await second.coordinator.lock();
+    expect(store.setCalls - writesBeforeLock).toBe(0);
+    expect(second.coordinator.snapshot().locked).toBe(true);
+  });
+
   test('crash/restart replays only nonsecret intent under a fresh kernel and host epoch', async () => {
     const store = makeStore();
     const first = setup({ store, identity: generation('build-aaaa', 'kernel-old') });
