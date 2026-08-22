@@ -13,7 +13,11 @@ import { kernelTabOrigin } from './kernel-denylist-policy.js';
 // Public constructor for this exact composer-policy family. Keeping the entry
 // on one reviewed edge prevents each small cold adapter from consuming another
 // top-level import while its own native module remains independently measured.
-export { createKernelDenylistPolicy } from './kernel-denylist-policy.js';
+export {
+  createKernelDenylistNetworkCustody,
+  createKernelDenylistPolicy,
+  makeKernelDenylistRoutes,
+} from './kernel-denylist-policy.js';
 
 const COMMAND_PREFIX = 'peerd.commands.';
 const SKILLS_DB = 'peerd-skills';

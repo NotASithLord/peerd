@@ -61,23 +61,114 @@ export const createKernelDenylistPolicy = ({
   };
   const blocks = (/** @type {string} */ hostname) => !available
     || matchesDenylist(hostname, store.patterns());
+  const snapshot = async () => {
+    await ready();
+    const overlay = store.overlay();
+    return Object.freeze({
+      ok: true,
+      patterns: Object.freeze([...store.patterns()]),
+      added: Object.freeze([...overlay.added]),
+      disabled: Object.freeze([...overlay.disabled]),
+      categories,
+    });
+  };
   return Object.freeze({
     ready,
     blocks,
     patterns: store.patterns,
-    snapshot: async () => {
+    snapshot,
+    // why edits await ready() first: mutating before the seed + overlay
+    // hydrate would let load() replace the in-memory overlay mid-edit. The
+    // seed outcome itself is not a gate — like the legacy editor, overlay
+    // writes stay durable even when this boot's seed fetch failed.
+    add: async (/** @type {unknown} */ pattern) => {
       await ready();
-      const overlay = store.overlay();
-      return Object.freeze({
-        ok: true,
-        patterns: Object.freeze([...store.patterns()]),
-        added: Object.freeze([...overlay.added]),
-        disabled: Object.freeze([...overlay.disabled]),
-        categories,
-      });
+      return store.add(pattern);
+    },
+    remove: async (/** @type {unknown} */ pattern) => {
+      await ready();
+      return store.remove(pattern);
     },
   });
 };
+
+// The complete session-rule id set the denylist network backstop may own,
+// expressed compactly so the cold graph does not evaluate the 23 KB rule-math
+// module. A meta-test proves this projection equals exactly the ids
+// peerd-egress/denylist/dnr-rules.js derives.
+const range = (/** @type {number} */ from, /** @type {number} */ to) =>
+  Array.from({ length: to - from + 1 }, (_ignored, index) => from + index);
+export const OWNED_DENYLIST_SESSION_RULE_IDS = Object.freeze([
+  ...range(1, 30), ...range(104, 130),
+]);
+
+/**
+ * Compact kernel custody of the denylist's declarativeNetRequest backstop.
+ *
+ * why remove-only is currently correct: every rule the full math can build is
+ * scoped to a driven tab, App tab, or custodied initiator domain, and the
+ * native kernel has not migrated tab custody — its driven set is empty by
+ * construction, for which the legacy guard also emits "remove every owned id,
+ * add nothing". The tab-custody migration slice must replace this leaf with
+ * scoped rule construction; keeping the sync edge live here means a denylist
+ * edit cannot silently drop the resync obligation before then.
+ * @param {Object} deps
+ * @param {any} [deps.dnr] the chrome.declarativeNetRequest namespace
+ */
+export const createKernelDenylistNetworkCustody = ({ dnr }) => {
+  const supported = typeof dnr?.updateSessionRules === 'function';
+  /** @type {string|null} */ let lastError = null;
+  let queue = Promise.resolve();
+  const sync = () => {
+    if (!supported) return Promise.resolve();
+    queue = queue.then(async () => {
+      try {
+        await dnr.updateSessionRules({
+          removeRuleIds: [...OWNED_DENYLIST_SESSION_RULE_IDS],
+        });
+        lastError = null;
+      } catch (cause) {
+        lastError = cause instanceof Error ? cause.message : String(cause);
+      }
+    });
+    return queue;
+  };
+  return Object.freeze({
+    sync,
+    status: () => Object.freeze({ supported, lastError }),
+  });
+};
+
+/**
+ * The denylist editor's mutation routes — the kernel-owned counterpart of the
+ * legacy Logs-view editor. Every edit resyncs the network backstop and is
+ * audited before the shared snapshot reply.
+ * @param {Object} deps
+ * @param {{snapshot:()=>Promise<any>,add:(pattern:unknown)=>Promise<any>,
+ *   remove:(pattern:unknown)=>Promise<any>}} deps.policy
+ * @param {{sync:()=>Promise<void>}} deps.networkCustody
+ * @param {{append:(entry:{type:string,details?:Record<string,any>})=>Promise<any>}} deps.auditLog
+ */
+export const makeKernelDenylistRoutes = ({ policy, networkCustody, auditLog }) => Object.freeze({
+  'denylist/add': async (/** @type {{pattern?:unknown}} */ { pattern } = {}) => {
+    const result = await policy.add(pattern);
+    if (!result.ok) return result;
+    void networkCustody.sync();
+    auditLog.append({
+      type: 'denylist_added', details: { pattern: result.pattern, seed: result.seed },
+    }).catch(() => {});
+    return policy.snapshot();
+  },
+  'denylist/remove': async (/** @type {{pattern?:unknown}} */ { pattern } = {}) => {
+    const result = await policy.remove(pattern);
+    if (!result.ok) return result;
+    void networkCustody.sync();
+    auditLog.append({
+      type: 'denylist_removed', details: { pattern: result.pattern, seed: result.seed },
+    }).catch(() => {});
+    return policy.snapshot();
+  },
+});
 
 /** @param {string} url */
 export const kernelTabOrigin = (url) => {

@@ -114,6 +114,8 @@ const MIGRATED_ROUTE_OVERRIDES = new Set([
   'contributor/enable',
   'contributor/status',
   'denylist/list',
+  'denylist/add',
+  'denylist/remove',
   'learned/clear',
   'learned/forget',
   'learned/list',

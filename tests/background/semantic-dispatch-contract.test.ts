@@ -74,7 +74,7 @@ describe('generated semantic route inventory', () => {
       'contacts/forget', 'contacts/list', 'contacts/set',
       'contributor/disable', 'contributor/enable', 'contributor/status',
       'cost/total',
-      'denylist/list',
+      'denylist/add', 'denylist/list', 'denylist/remove',
       'git-cred/delete', 'git-cred/list', 'git-cred/set',
       'learned/clear', 'learned/forget', 'learned/list',
       'lifecycle/assert-opfs-writable',
@@ -103,7 +103,7 @@ describe('generated semantic route inventory', () => {
     expect(SEMANTIC_ROUTE_CUTOVER).toMatchObject({
       ready: false, expected: 161, classified: 161, missing: [], extra: [],
     });
-    expect(SEMANTIC_ROUTE_CUTOVER.unmigrated).toHaveLength(75);
+    expect(SEMANTIC_ROUTE_CUTOVER.unmigrated).toHaveLength(73);
   });
 
   test('does not let a candidate table hide missing, extra, or unmigrated routes', () => {

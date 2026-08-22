@@ -47,8 +47,10 @@ import {
   makeKernelAppCatalogRoutes,
 } from './kernel-app-catalog.js';
 import {
+  createKernelDenylistNetworkCustody,
   createKernelDenylistPolicy,
   makeKernelComposerRoutes,
+  makeKernelDenylistRoutes,
 } from './kernel-composer-routes.js';
 import { createKernelFrontDoor } from './kernel-front-door.js';
 import { attachKernelLifecycleEvents } from './kernel-lifecycle-events.js';
@@ -743,6 +745,13 @@ const routes = {
   ...kernelActorRoutes,
   ...makeKernelComposerRoutes({
     browser, kv, idb, sessionCache, vault, denylist: denylistPolicy, appFiles,
+  }),
+  ...makeKernelDenylistRoutes({
+    policy: denylistPolicy,
+    networkCustody: createKernelDenylistNetworkCustody({
+      dnr: /** @type {any} */ (browser).declarativeNetRequest,
+    }),
+    auditLog,
   }),
 };
 
