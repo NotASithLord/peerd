@@ -49,6 +49,18 @@ describe('test-only vault kernel package target', () => {
     expect(() => assertVaultKernelReleaseTarget({
       browser: 'chrome', modules: 0, graphBytes: 1, entryBytes: 1,
     })).toThrow('invalid native modules');
+    expect(() => assertVaultKernelReleaseTarget({
+      browser: 'chrome', modules: 1, graphBytes: 200_000, entryBytes: 200_000,
+      bundled: true,
+    })).not.toThrow();
+    expect(() => assertVaultKernelReleaseTarget({
+      browser: 'chrome', modules: 2, graphBytes: 190_000, entryBytes: 190_000,
+      bundled: true,
+    })).toThrow('exactly one static module');
+    expect(() => assertVaultKernelReleaseTarget({
+      browser: 'chrome', modules: 1, graphBytes: 200_001, entryBytes: 200_001,
+      bundled: true,
+    })).toThrow('bundle 200001 exceeds 200000');
   });
 
   test('Chrome ships one bundle with only the two fixed Firefox runtime edges', async () => {

@@ -43,13 +43,26 @@ export const vaultKernelManifest = (manifest, browser, channel = 'store') => ({
     : { service_worker: nativeEntry(browser, channel), type: 'module' },
 });
 
-export const assertVaultKernelReleaseTarget = ({ browser, modules, graphBytes, entryBytes }) => {
+export const assertVaultKernelReleaseTarget = ({
+  browser, modules, graphBytes, entryBytes, bundled = false,
+}) => {
   const target = COLD_START_TARGETS[browser]?.serviceWorker;
   if (!target) throw new Error(`no native cold target for ${browser}`);
   for (const [name, value] of Object.entries({ modules, graphBytes, entryBytes })) {
     if (!Number.isInteger(value) || value <= 0) throw new Error(`invalid native ${name}: ${value}`);
-    if (value > target[name]) {
+    if (!bundled && value > target[name]) {
       throw new Error(`native ${browser} ${name} ${value} exceeds ${target[name]}`);
+    }
+  }
+  if (bundled) {
+    if (modules !== 1 || entryBytes !== graphBytes) {
+      throw new Error('native Chrome bundle must be exactly one static module');
+    }
+    if (graphBytes > target.graphBytes) {
+      throw new Error(`native ${browser} graphBytes ${graphBytes} exceeds ${target.graphBytes}`);
+    }
+    if (entryBytes > 200_000) {
+      throw new Error(`native Chrome bundle ${entryBytes} exceeds 200000`);
     }
   }
 };
@@ -166,6 +179,7 @@ export async function buildVaultKernelArtifact({
   if (releaseMinify) {
     assertVaultKernelReleaseTarget({
       browser, modules: graph.length, graphBytes: bytes, entryBytes,
+      bundled: browser === 'chrome',
     });
   }
   const sha256 = createHash('sha256').update(readFileSync(artifact)).digest('hex');
