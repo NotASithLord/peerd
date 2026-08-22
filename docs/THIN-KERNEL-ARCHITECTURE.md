@@ -16,11 +16,13 @@ reply inside 100 seconds. Firefox uses an event page rather than Chrome's MV3
 worker; a corrected installed-addon probe is much faster, but it still pays for
 the same eager graph.
 
-Combining the current graph into one file is not the answer. Chrome prototypes
-of both readable and minified one-file builds failed to reply inside 45-100
-seconds. A Firefox one-file build likewise failed its 30-second liveness budget.
-The work is dominated by eager compilation, evaluation, construction, and boot
-side effects, not just module linking.
+Combining the legacy graph into one file is not the answer. Chrome prototypes
+of both readable and minified legacy one-file builds failed to reply inside
+45-100 seconds. A Firefox legacy one-file build likewise failed its 30-second
+liveness budget. That work was dominated by eager compilation, evaluation,
+construction, and boot side effects, not just module linking. Packaging the
+already-thin Chrome kernel is different: it removes module-loader overhead
+without pulling lazy feature implementations back into the worker.
 
 The first production extraction makes that distinction concrete. Moving the
 repository/isomorphic-git owner behind an operation-lazy host and removing the
@@ -144,12 +146,15 @@ The minimal side-panel and Home shell own first paint, vault status, and the
 unlock/enrollment CTA. Chat, Library, App development, and provider UI load
 only after that shell is actionable.
 
-No release bundle is part of this architecture. The authority kernel remains a
-small native module graph, and every demand-loaded entry is a fixed literal in
-the packaged lazy-entry inventory. Semantic dispatch is split again by route
-family: loading actor views does not evaluate contacts, toolbox, Git, artifact,
-model, or future route clusters. Each cluster has its own static dependency
-closure and is included independently in the controller build digest. A new
+The authority kernel remains a small native source-module graph. Chrome
+packages only that reviewed static closure into one ESM file; Firefox keeps the
+same source as native modules for its event-page and direct-Worker seams. Every
+demand-loaded entry remains a fixed literal in the packaged lazy-entry
+inventory and stays outside the Chrome kernel bundle. Semantic dispatch is
+split again by route family: loading actor views does not evaluate contacts,
+toolbox, Git, artifact, model, or future route clusters. Each cluster has its
+own static dependency closure and is included independently in the controller
+build digest. A new
 feature grows one reviewed cluster instead of a central background or a second
 offscreen monolith.
 
@@ -188,11 +193,13 @@ returns startup, alarm, Firefox session-change, and Preview update Promises to
 the cold fan-in so durable receipts settle only after their injected current-
 state consumer completes. Neither module imports a route or feature barrel.
 
-## Native module scalability rule
+## Source-module scalability and Chrome packaging
 
-The service worker is not bundled. Module count is treated as a real browser
-cost, but it is not reduced by merging unrelated feature code into one source
-file. The binding rule is instead:
+Source stays modular and module count remains a real architecture cost. It is
+not reduced by merging unrelated feature code into one source file. After
+target pruning, cold-graph compaction, and controller-identity stamping,
+packaging emits the Chrome kernel as exactly one file with no static or runtime
+imports. Firefox ships the modular graph unchanged. The binding rule is:
 
 1. One small authority adapter per feature family. It may validate provenance,
    read or write the exact kernel-owned store, and mint a route-bound grant.
@@ -235,9 +242,11 @@ bytes remain demand-loaded.
 
 It also owns vault/session/system reads, App catalog list/favorite metadata,
 and a lazy fail-closed denylist projection for the composer tab picker. The
-current native graph is 76 modules, 442,710 authored bytes, a 28,013-byte
-entry, and 26 direct imports; all 69 routes marked migrated are executable
-from that entry. Their fixed host
+current native graph is 73 modules, 445,542 authored bytes, a 30,540-byte
+entry, and 26 direct imports; all 86 routes marked migrated are executable
+from that entry. The release transform produces a one-module Store Chrome
+kernel of 183,385 bytes and a one-module Preview Chrome kernel of 191,281
+bytes. Their fixed host
 implementations remain absent from the static service-worker closure. The
 generated ledger still blocks manifest cutover for every unavailable route; a
 working pilot cluster does not weaken that all-route gate.
@@ -318,9 +327,9 @@ retained read-only until an explicit migration exists.
 6. Move parsers, dweb catalogs, local model, and remaining controllers into
    feature-specific Workers or document adapters.
 7. Remove the legacy background graph, unconditional offscreen creation, and
-   perpetual heartbeat. Keep the already-small kernel as native modules; the
-   release may minify individual files but must not combine feature clusters
-   into the cold entry.
+   perpetual heartbeat. Keep the kernel modular in source, package Chrome's
+   static closure as one file, and keep Firefox modular. Neither transform may
+   combine lazy feature clusters into the cold entry.
 
 Each slice must pass route-inventory parity, base-versus-candidate fixtures,
 real Chrome and Firefox extension tests, and crash/cancel/restart fault tests.
@@ -328,10 +337,10 @@ No timing improvement can waive an authority or lifecycle failure.
 
 Cold authority modules keep executable contracts, JSDoc types, and short local
 rationales in source. Longer design histories and repeated section narration
-live in this document instead: Chrome fetches and parses authored module bytes
-on every cold worker generation, so prose embedded throughout the authority
-graph is part of the startup cost. This is source modularity, not a minifier or
-bundle exception; feature implementations and their documentation remain lazy,
+live in this document instead: Chrome parses the packaged kernel on every cold
+worker generation, so prose embedded throughout the authority graph remains a
+startup cost. Source modularity and the one-file Chrome release are
+complementary; feature implementations and their documentation remain lazy,
 independently addressed files.
 
 ## Required budgets
@@ -352,9 +361,11 @@ reach actionable UI within 3 seconds, and the packaged service-worker graph
 must remain at or below the 300 KB release ceiling. The 200 KB figure is an
 aspirational simplification goal, not an enforcement threshold. A 10-second
 watchdog terminates failed probes; it is never summarized as performance.
-Full browser launch is retained as a diagnostic; the 3-second clock begins at
-the worker target or add-on install boundary. Forced worker wake is separately
-labeled on the host monotonic clock; realm-relative worker age is diagnostic only. Each
+Full browser launch is retained as a diagnostic. Chrome fresh UX is gated from
+the first extension-surface navigation, Firefox from add-on install, and a
+separate worker-origin clock covers Chrome compilation, evaluation, and reply.
+A one-second CPU/load preflight rejects an overloaded host before Chrome starts.
+Forced worker wake is separately labeled on the host monotonic clock. Each
 graph is bound to its own immutable archive and unpacked-tree digest, and the
 harness proves those bytes did not change during measurement.
 
@@ -369,6 +380,15 @@ PR/main/release lanes enforce the absolute 3-second/300-KB safety gate while a
 reviewed physical paired run remains necessary to change the target-cutover
 flag. There are no partial sample sets, selective retries, mutable input trees,
 or self-reported candidate baselines.
+
+The clean local native-floor run at commit `8c94df2` completed three independent
+Chrome profiles and three exact `running -> stopped -> gone -> new identity`
+wakes. Store Chrome was 183,385 bytes. Raw maxima were 157.19 ms from navigation
+to actionable Home, 735.44 ms from worker target to actionable Home, 694.5 ms
+from the worker time origin to the bound bootstrap reply, and 120.48 ms from
+confirmed stop to actionable Home. All six boot/kernel identities were unique;
+the host preflights measured 9-12% CPU busy time. This proves the package shape
+and timing floor, not the still-incomplete 86/161 live cutover ledger.
 
 The existing passkey signup driver remains the Chrome end-to-end WebAuthn PRF
 authority. It must run against the exact packaged artifact and report vault

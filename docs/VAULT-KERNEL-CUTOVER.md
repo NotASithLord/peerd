@@ -42,9 +42,10 @@ cache only while unlocked; the kernel owns exact storage calls, posture, audit,
 sender provenance, and lease lifecycle. Argon2 is a fixed second-level import,
 so passkey-only users never compile the vendored implementation.
 
-The latest packaged native Chrome graph is 47 modules / 288,716 authored bytes
+The latest native Chrome source graph is 73 modules / 445,542 authored bytes
 and excludes the vault implementation, keys, Argon2 adapter, and vendored
-Argon2 source. The Chrome passphrase lane observed zero offscreen contexts
+Argon2 source. Its release transform is one 183,385-byte Store Chrome module;
+Preview Chrome is one 191,281-byte module. The Chrome passphrase lane observed zero offscreen contexts
 before demand, exactly one authority host while unlocked, zero after lock, then
 one fresh host after unlock. Initialize completed in 581.5 ms and the
 post-lock unlock in 408.9 ms on pinned Chrome 151.0.7922.47. A packaged passkey
@@ -83,7 +84,7 @@ The following are explicit blockers, not optional optimizations:
 | Full port dispatcher | `private-transfer`, `eval`, `sw-keepalive`, `dweb-custody`, plus rich sidepanel/Home streams | Preserve exact sender/port provenance, disconnect behavior and bounded startup holding. Secret-bearing ports cannot queue or replay. |
 | Browser wake listeners | startup, alarms, tab/window/navigation events, and Firefox blocking request guard | Preview Chrome update custody, install, action/commands, focus, and Firefox session-lifetime ownership are native. Complete the remaining inventory synchronously and prove replay/coalescing rules before switching the manifest. |
 | Custody and egress authority | Stop/lock, confirmations, write guard, browser verbs, redirect-safe fetch, credential injection, DPoP/device keys and audit | Keep these in the authority kernel; do not delegate raw keys or broad browser APIs to the controller. |
-| Live generation cutover | reject stale rich-controller replies and pending grants in the production dispatcher | The test kernel now provides schema/build/boot/epoch fencing and successor reconciliation. Thread that identity through the eventual live controller client and every privileged port before switching the manifest. Chrome `ServiceWorker.stopWorker` remains unproven for this test artifact; no release oracle claims it yet. |
+| Live generation cutover | reject stale rich-controller replies and pending grants in the production dispatcher | The test kernel provides schema/build/boot/epoch fencing and successor reconciliation. The native floor now proves three exact Chrome `ServiceWorker.stopWorker` transitions with six unique identities, but the incomplete live dispatcher/Port/route ledger still blocks the manifest flip. Thread identity through every remaining privileged channel before switching it. |
 | Dweb continuity | discovery, inbound actor work, lobby/seeding and leases with panels closed | Add explicit bounded leases or persisted rejoin/reseed recovery; ordinary feature-Worker lifetime is not durable. |
 
 The complete listener/message/port inventory is executable in

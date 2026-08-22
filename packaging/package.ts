@@ -14,9 +14,10 @@
 //   4. generate the manifest for (channel, browser)
 //   5. compact authored modules in the static SW/offscreen cold graphs
 //      (module graph/names/vendor bytes preserved; staging copy only)
-//   6. zip to artifacts/peerd-<channel>-<browser>.{zip,xpi}
-//   7. store artifacts: run the no-dweb-strings verifier
-//   8. preview artifacts: sign when credentials are present (packaging/sign.ts)
+//   6. bundle an already-selected native Chrome kernel into one import-free file
+//   7. zip to artifacts/peerd-<channel>-<browser>.{zip,xpi}
+//   8. store artifacts: run the no-dweb-strings verifier
+//   9. preview artifacts: sign when credentials are present (packaging/sign.ts)
 //
 // Invocation:
 //   bun run package -- --channel=store --browser=chrome
@@ -53,6 +54,12 @@ import {
   CONTROLLER_BUILD_ENTRIES,
   writeControllerBuildIdentity,
 } from './controller-build-identity.ts';
+import {
+  assertChromeNativeKernelBundle,
+  bundleChromeNativeKernel,
+  isChromeNativeKernelEntry,
+} from './bundle-chrome-native-kernel.ts';
+import { COLD_START_TARGETS } from '../scripts/bench/cold-start-budgets.js';
 
 // Paths (relative to extension/) that never ship in ANY artifact.
 // why eval/ is NOT here: the home page's Lab (home/eval-section.js) imports
@@ -288,6 +295,17 @@ export const packageArtifact = async (
     console.log('controller build identity: absent from historical base; no candidate stamp injected');
   } else {
     throw new Error('candidate artifact is missing the complete controller build-identity graph');
+  }
+
+  const chromeBackgroundEntry = browser === 'chrome'
+    ? manifest.background?.service_worker : null;
+  if (minify && isChromeNativeKernelEntry(chromeBackgroundEntry)) {
+    const bundled = await bundleChromeNativeKernel(staging, chromeBackgroundEntry);
+    const targetBytes = coldBudgetMode === 'enforce'
+      ? COLD_START_TARGETS.chrome.serviceWorker.graphBytes
+      : Number.MAX_SAFE_INTEGER;
+    await assertChromeNativeKernelBundle(staging, chromeBackgroundEntry, targetBytes);
+    console.log(`bundled native Chrome kernel ${bundled.bytes} bytes (${bundled.inputs.length} staged inputs)`);
   }
 
   // Package. AMO takes .xpi (a zip); Chrome Web Store takes .zip; the

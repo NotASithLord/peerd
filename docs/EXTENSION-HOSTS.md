@@ -61,11 +61,14 @@ packaged service-worker graph at or below the 300 KB release ceiling. The
 gate. They measure the packaged
 vault shell, boot-module evaluation, real `bootstrap/ready`, vault-ready
 `state/get`, and the actionable fingerprint CTA on one host-monotonic clock.
-Fresh samples retain full browser-process/WebDriver-session launch diagnostics,
-but the extension budget begins at Chrome's worker-target or Firefox's add-on
-install boundary. Forced Chrome and idle-discard Firefox wakes use separate
-post-stop or post-idle navigation boundaries. A wake result cannot stand in
-for a fresh extension start.
+Fresh samples retain full browser-process/WebDriver-session launch diagnostics.
+Chrome's actionable-UX budget begins at the first extension-surface navigation,
+Firefox's at add-on install, and Chrome also caps the exact worker-origin
+bootstrap reply. Native-floor Chrome samples take a one-second CPU/load
+preflight before launch; a noisy host fails as `host-overloaded` instead of
+being mislabeled as slow extension code. Forced Chrome and idle-discard Firefox
+wakes use separate post-stop or post-idle navigation boundaries. A wake result
+cannot stand in for a fresh extension start.
 The separate packaged passkey regression owns ceremony and durable-commit
 coverage. See [Thin background architecture](./THIN-KERNEL-ARCHITECTURE.md) for
 placement, lifecycle, rollout, and acceptance budgets.

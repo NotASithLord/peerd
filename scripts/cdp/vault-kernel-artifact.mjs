@@ -5,30 +5,28 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  chmodSync, cpSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync,
+  chmodSync, cpSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync,
   utimesSync, writeFileSync,
 } from 'node:fs';
-import {
-  isAbsolute, join, relative, resolve, sep,
-} from 'node:path';
+import { join, relative } from 'node:path';
 import { ARTIFACTS_DIR, REPO_ROOT, readVersion } from '../../packaging/lib.ts';
 import { packageArtifact } from '../../packaging/package.ts';
 import {
   collectStaticModuleGraph,
-  staticImportSpecifiers,
 } from '../../packaging/static-module-graph.ts';
 import { genBuildConfigSource } from '../../packaging/gen-build-config.ts';
 import { dwebEnabledForTarget } from '../../packaging/gen-channel-config.ts';
 import { minifyColdArtifactModules } from '../../packaging/minify-artifact-js.ts';
 import { writeControllerBuildIdentity } from '../../packaging/controller-build-identity.ts';
 import { COLD_START_TARGETS } from '../bench/cold-start-budgets.js';
+import {
+  bundleChromeNativeKernel,
+  NATIVE_CHROME_PRUNED_IMPORTS,
+} from '../../packaging/bundle-chrome-native-kernel.ts';
+
+export { NATIVE_CHROME_PRUNED_IMPORTS };
 
 const SOURCE_DATE = new Date(946684800 * 1000);
-export const NATIVE_CHROME_PRUNED_IMPORTS = Object.freeze([
-  './firefox-storage-keepalive.js',
-  './repository-local-client.js',
-]);
-
 const entriesSorted = (root) => readdirSync(root, { recursive: true })
   .map((entry) => String(entry).split('\\').join('/'))
   .sort();
@@ -66,94 +64,6 @@ export const assertVaultKernelReleaseTarget = ({
   }
 };
 
-export async function bundleChromeVaultKernel(staging, entryRelative) {
-  const entry = join(staging, entryRelative);
-  const scratch = join(staging, '.vault-kernel-bundle');
-  const stagingRoot = realpathSync(staging);
-  rmSync(scratch, { recursive: true, force: true });
-  const runtimeImports = new Set();
-  try {
-    const result = await Bun.build({
-      entrypoints: [entry],
-      outdir: scratch,
-      naming: 'vault-kernel.js',
-      target: 'browser',
-      format: 'esm',
-      banner: 'globalThis[Symbol.for("peerd.kernel.bundle-start.v1")]=globalThis.performance?.now?.()??Date.now();',
-      minify: { whitespace: true, identifiers: true, syntax: true },
-      keepNames: true,
-      splitting: false,
-      metafile: true,
-      plugins: [{
-        name: 'fixed-native-bundle-inputs',
-        setup(build) {
-          build.onResolve({
-            filter: /^\.\/(?:firefox-storage-keepalive|repository-local-client)\.js$/,
-          }, (args) => ({ path: args.path, namespace: 'chrome-unreachable-runtime' }));
-          build.onLoad({ namespace: 'chrome-unreachable-runtime', filter: /.*/ }, () => ({
-            contents: 'export {};\n',
-            loader: 'js',
-          }));
-          // Browser-root imports name the extension root, not the checkout.
-          // Without this resolver Bun applies the repository tsconfig and can
-          // silently mix authored dev files into the copied Store/Preview tree.
-          build.onResolve({ filter: /^\// }, (args) => {
-            if (!args.importer) return undefined;
-            const target = resolve(stagingRoot, args.path.slice(1));
-            const fromStaging = relative(stagingRoot, target);
-            if (fromStaging === '..' || fromStaging.startsWith(`..${sep}`)
-                || isAbsolute(fromStaging)) {
-              throw new Error(`native Chrome bundle root import escaped staging: ${args.path}`);
-            }
-            return { path: target };
-          });
-        },
-      }],
-    });
-    if (!result.success || result.outputs.length !== 1) {
-      throw new Error(`native Chrome bundle failed: ${result.logs.join('\n')}`);
-    }
-    const inputs = [];
-    const leakedInputs = [];
-    const bundledInputs = Object.keys(result.metafile?.inputs ?? {});
-    if (bundledInputs.length === 0) throw new Error('native Chrome bundle input ledger missing');
-    for (const input of bundledInputs) {
-      if (input.startsWith('chrome-unreachable-runtime:')) continue;
-      const absolute = realpathSync(resolve(input));
-      const fromStaging = relative(stagingRoot, absolute);
-      if (fromStaging === '..' || fromStaging.startsWith(`..${sep}`)
-          || isAbsolute(fromStaging)) {
-        leakedInputs.push(input);
-      } else {
-        inputs.push(fromStaging.split('\\').join('/'));
-      }
-    }
-    if (leakedInputs.length > 0) {
-      throw new Error(`native Chrome bundle input escaped staging: ${leakedInputs.sort().join(', ')}`);
-    }
-    inputs.sort();
-    const output = readFileSync(result.outputs[0].path, 'utf8');
-    const staticImports = await staticImportSpecifiers(output, entryRelative);
-    if (staticImports.length !== 0) {
-      throw new Error(`native Chrome bundle retained static imports: ${staticImports.join(', ')}`);
-    }
-    const dynamicImports = [...output.matchAll(/\bimport\((['"])([^'"]+)\1\)/g)]
-      .map((match) => match[2]).sort();
-    const expected = [...runtimeImports].sort();
-    if (JSON.stringify(dynamicImports) !== JSON.stringify(expected)) {
-      throw new Error(`native Chrome runtime imports changed: ${dynamicImports.join(', ')}`);
-    }
-    writeFileSync(entry, output.endsWith('\n') ? output : `${output}\n`);
-    return Object.freeze({
-      bytes: statSync(entry).size,
-      runtimeImports: Object.freeze(expected),
-      inputs: Object.freeze(inputs),
-    });
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-}
-
 export async function buildVaultKernelArtifact({
   browser = 'chrome', channel = 'store', releaseMinify = false,
 } = {}) {
@@ -186,7 +96,7 @@ export async function buildVaultKernelArtifact({
   if (releaseMinify) await minifyColdArtifactModules(staging, browser, channel);
   await writeControllerBuildIdentity(staging);
   if (releaseMinify && browser === 'chrome') {
-    await bundleChromeVaultKernel(staging, nativeEntry(browser, channel));
+    await bundleChromeNativeKernel(staging, nativeEntry(browser, channel));
   }
 
   const entry = join(staging, nativeEntry(browser, channel));

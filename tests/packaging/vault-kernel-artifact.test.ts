@@ -1,19 +1,31 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { genBuildConfigSource } from '../../packaging/gen-build-config.ts';
 import { REPO_ROOT } from '../../packaging/lib.ts';
 import {
+  bundleChromeNativeKernel,
+  isChromeNativeKernelEntry,
+} from '../../packaging/bundle-chrome-native-kernel.ts';
+import { packageArtifact } from '../../packaging/package.ts';
+import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
+import {
   assertVaultKernelReleaseTarget,
-  bundleChromeVaultKernel,
   NATIVE_CHROME_PRUNED_IMPORTS,
   vaultKernelManifest,
 } from '../../scripts/cdp/vault-kernel-artifact.mjs';
 
 describe('test-only vault kernel package target', () => {
+  test('release bundling recognizes only the two native Chrome entries', () => {
+    expect(isChromeNativeKernelEntry('background/vault-kernel.js')).toBe(true);
+    expect(isChromeNativeKernelEntry('background/vault-kernel-preview.js')).toBe(true);
+    expect(isChromeNativeKernelEntry('background/service-worker.js')).toBe(false);
+    expect(isChromeNativeKernelEntry('background/vault-kernel.js?forged')).toBe(false);
+  });
+
   test('changes only the copied background entry for each browser', () => {
     const source = {
       manifest_version: 3,
@@ -80,7 +92,7 @@ describe('test-only vault kernel package target', () => {
       '',
     ].join('\n'));
     try {
-      const result = await bundleChromeVaultKernel(staging, 'background/vault-kernel.js');
+      const result = await bundleChromeNativeKernel(staging, 'background/vault-kernel.js');
       const output = readFileSync(join(background, 'vault-kernel.js'), 'utf8');
       expect(NATIVE_CHROME_PRUNED_IMPORTS).toHaveLength(2);
       expect(result.runtimeImports).toEqual([]);
@@ -159,7 +171,7 @@ describe('test-only vault kernel package target', () => {
         '',
       ].join('\n'));
       try {
-        const result = await bundleChromeVaultKernel(staging, target.entry);
+        const result = await bundleChromeNativeKernel(staging, target.entry);
         expect(result.inputs).toEqual([
           target.entry,
           'shared/build-config.js',
@@ -203,7 +215,7 @@ describe('test-only vault kernel package target', () => {
     expect(source).toContain("`peerd-vault-kernel-${channel}-${browser}.${extension}`");
     expect(source).toContain("verify: channel === 'store', minify: false");
     expect(source).toContain('minifyColdArtifactModules(staging, browser, channel)');
-    expect(source).toContain('bundleChromeVaultKernel(staging, nativeEntry(browser, channel))');
+    expect(source).toContain('bundleChromeNativeKernel(staging, nativeEntry(browser, channel))');
     expect(source).toContain('assertVaultKernelReleaseTarget({');
     expect(source).toContain('dwebEnabled: dwebEnabledForTarget(channel, browser), channel, browser');
     expect(source).toContain('writeControllerBuildIdentity(staging)');
@@ -225,7 +237,54 @@ describe('test-only vault kernel package target', () => {
     );
     expect(stampGuard).toContain("join(staging, 'shared', 'controller-build.js')");
     expect(stampGuard).not.toContain("join(staging, 'shared', 'structured-clone-size.js')");
+    const stampAt = source.indexOf('await writeControllerBuildIdentity(staging)');
+    const bundleAt = source.indexOf('await bundleChromeNativeKernel(staging, chromeBackgroundEntry)');
+    const packageAt = source.indexOf('// Package. AMO takes .xpi');
+    expect(source).toContain('if (minify && isChromeNativeKernelEntry(chromeBackgroundEntry))');
+    expect(stampAt).toBeGreaterThan(0);
+    expect(bundleAt).toBeGreaterThan(stampAt);
+    expect(packageAt).toBeGreaterThan(bundleAt);
   });
+
+  test('release packaging bundles native Chrome and leaves native Firefox modular', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'peerd-native-package-path-'));
+    const sourceRoot = join(root, 'source');
+    const artifactRoot = join(root, 'artifacts');
+    try {
+      mkdirSync(sourceRoot, { recursive: true });
+      cpSync(join(REPO_ROOT, 'extension'), join(sourceRoot, 'extension'), { recursive: true });
+      cpSync(join(REPO_ROOT, 'manifests'), join(sourceRoot, 'manifests'), { recursive: true });
+      mkdirSync(join(sourceRoot, 'packaging'), { recursive: true });
+      cpSync(
+        join(REPO_ROOT, 'packaging', 'default-settings.mjs'),
+        join(sourceRoot, 'packaging', 'default-settings.mjs'),
+      );
+      const basePath = join(sourceRoot, 'manifests', 'base.json');
+      const base = JSON.parse(readFileSync(basePath, 'utf8'));
+      base.background.service_worker = 'background/vault-kernel.js';
+      writeFileSync(basePath, `${JSON.stringify(base, null, 2)}\n`);
+
+      for (const browser of ['chrome', 'firefox'] as const) {
+        await packageArtifact({
+          sourceRoot, artifactRoot, channel: 'store', browser,
+          version: '0.7.3', sign: false, verify: false, minify: true,
+          coldBudgetMode: 'measure-only',
+        });
+        const staging = join(artifactRoot, 'staging', `store-${browser}`);
+        const manifest = JSON.parse(readFileSync(join(staging, 'manifest.json'), 'utf8'));
+        const entryRelative = browser === 'chrome'
+          ? manifest.background.service_worker : manifest.background.scripts[0];
+        const graph = await collectStaticModuleGraph(staging, join(staging, entryRelative));
+        expect(entryRelative).toBe('background/vault-kernel.js');
+        expect(graph.size > 1).toBe(browser === 'firefox');
+        if (browser === 'chrome') {
+          expect(statSync(join(staging, entryRelative)).size).toBeLessThan(300_000);
+        }
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   test('Chrome passphrase floor proves demand-owned vault authority custody', () => {
     const source = readFileSync(
