@@ -226,6 +226,36 @@ describe('cold-start policy', () => {
     );
   });
 
+  test('target policy accepts only a genuine one-module Chrome worker below 200KB', () => {
+    const result = chromeResult();
+    for (const channel of ['store', 'preview'] as const) {
+      result.packagedGraphsByChannel[channel] = Object.fromEntries(
+        Object.entries(COLD_START_TARGETS.chrome)
+          .filter(([name]) => name !== 'timing')
+          .map(([name, value]) => [name, graph(
+            name === 'serviceWorker'
+              ? { modules: 1, graphBytes: 199_999, entryBytes: 199_999 }
+              : value as { modules: number; graphBytes: number; entryBytes: number },
+          )]),
+      );
+    }
+    result.packagedGraphs = result.packagedGraphsByChannel.store;
+    expect(assessChrome(result, {
+      graphPolicy: 'target', requireTimingTargets: true,
+    })).toEqual({ ok: true, failures: [] });
+
+    result.packagedGraphsByChannel.preview.serviceWorker.entryBytes = 199_998;
+    expect(assessChrome(result, {
+      graphPolicy: 'target', requireTimingTargets: true,
+    }).failures).toContain('preview.serviceWorker bundled entry does not equal its static graph');
+
+    result.packagedGraphsByChannel.preview.serviceWorker.entryBytes = 200_001;
+    result.packagedGraphsByChannel.preview.serviceWorker.graphBytes = 200_001;
+    expect(assessChrome(result, {
+      graphPolicy: 'target', requireTimingTargets: true,
+    }).failures).toContain('preview.serviceWorker.entryBytes 200001 exceeds 200000');
+  });
+
   test('a required lane defaults to the 300KB and three-second release gates', () => {
     const result = chromeResult();
     expect(assessColdStartResult('chrome', result, { lane: 'pr' }).failures)

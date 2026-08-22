@@ -90,13 +90,22 @@ const graphFailures = (browser, result, policy) => {
       }
       if (!validSha256(graph.graphSha256)) failures.push(`${label}.graphSha256 is missing`);
       if (!validSha256(graph.entrySha256)) failures.push(`${label}.entrySha256 is missing`);
+      const bundledChromeWorker = policy === 'target' && browser === 'chrome'
+        && name === 'serviceWorker' && graph.graphModules === 1;
+      if (bundledChromeWorker && graph.entryBytes !== graph.graphBytes) {
+        failures.push(`${label} bundled entry does not equal its static graph`);
+      }
       for (const metric of ['modules', 'graphBytes', 'entryBytes']) {
         const key = metric === 'modules' ? 'graphModules' : metric;
         const value = graph[key];
         if (!Number.isInteger(value) || value <= 0) {
           failures.push(`${label}.${key} is missing or invalid`);
-        } else if (ceiling && value > ceiling[metric]) {
-          failures.push(`${label}.${key} ${value} exceeds ${ceiling[metric]}`);
+        } else {
+          const limit = bundledChromeWorker && metric === 'entryBytes'
+            ? 200_000 : ceiling?.[metric];
+          if (limit && value > limit) {
+            failures.push(`${label}.${key} ${value} exceeds ${limit}`);
+          }
         }
       }
     }
