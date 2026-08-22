@@ -1,9 +1,14 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import {
+  mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { REPO_ROOT } from '../../packaging/lib.ts';
 import {
   assertVaultKernelReleaseTarget,
+  bundleChromeVaultKernel,
+  NATIVE_CHROME_RUNTIME_IMPORTS,
   vaultKernelManifest,
 } from '../../scripts/cdp/vault-kernel-artifact.mjs';
 
@@ -46,6 +51,32 @@ describe('test-only vault kernel package target', () => {
     })).toThrow('invalid native modules');
   });
 
+  test('Chrome ships one bundle with only the two fixed Firefox runtime edges', async () => {
+    const staging = mkdtempSync(join(tmpdir(), 'peerd-native-kernel-bundle-'));
+    const background = join(staging, 'background');
+    mkdirSync(background, { recursive: true });
+    writeFileSync(join(background, 'dep.js'), 'export const answer = 42;\n');
+    writeFileSync(join(background, 'vault-kernel.js'), [
+      "import { answer } from './dep.js';",
+      'export const value = answer;',
+      "export const firefox = () => import('./firefox-storage-keepalive.js');",
+      "export const repository = () => import('./repository-local-client.js');",
+      '',
+    ].join('\n'));
+    try {
+      const result = await bundleChromeVaultKernel(staging, 'background/vault-kernel.js');
+      const output = readFileSync(join(background, 'vault-kernel.js'), 'utf8');
+      expect(result.runtimeImports).toEqual([...NATIVE_CHROME_RUNTIME_IMPORTS].sort());
+      expect(output).not.toContain("from'./dep.js'");
+      expect(output).not.toContain('from"./dep.js"');
+      expect([...output.matchAll(/\bimport\((['"])([^'"]+)\1\)/g)]
+        .map((match) => match[2]).sort()).toEqual([...NATIVE_CHROME_RUNTIME_IMPORTS].sort());
+      expect(result.bytes).toBeLessThan(1_000);
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+    }
+  });
+
   test('live manifest and release artifact inventory remain on the legacy entry', () => {
     const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'manifests/base.json'), 'utf8'));
     const release = readFileSync(join(REPO_ROOT, 'packaging/release.ts'), 'utf8');
@@ -67,6 +98,7 @@ describe('test-only vault kernel package target', () => {
     expect(source).toContain("`peerd-vault-kernel-${channel}-${browser}.${extension}`");
     expect(source).toContain("verify: channel === 'store', minify: false");
     expect(source).toContain('minifyColdArtifactModules(staging, browser, channel)');
+    expect(source).toContain('bundleChromeVaultKernel(staging, nativeEntry(browser, channel))');
     expect(source).toContain('assertVaultKernelReleaseTarget({');
     expect(source).toContain('dwebEnabled: dwebEnabledForTarget(channel, browser), channel, browser');
     expect(source).toContain('writeControllerBuildIdentity(staging)');

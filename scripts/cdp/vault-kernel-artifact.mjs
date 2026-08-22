@@ -11,7 +11,10 @@ import {
 import { join, relative } from 'node:path';
 import { ARTIFACTS_DIR, REPO_ROOT, readVersion } from '../../packaging/lib.ts';
 import { packageArtifact } from '../../packaging/package.ts';
-import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
+import {
+  collectStaticModuleGraph,
+  staticImportSpecifiers,
+} from '../../packaging/static-module-graph.ts';
 import { genBuildConfigSource } from '../../packaging/gen-build-config.ts';
 import { dwebEnabledForTarget } from '../../packaging/gen-channel-config.ts';
 import { minifyColdArtifactModules } from '../../packaging/minify-artifact-js.ts';
@@ -19,6 +22,10 @@ import { writeControllerBuildIdentity } from '../../packaging/controller-build-i
 import { COLD_START_TARGETS } from '../bench/cold-start-budgets.js';
 
 const SOURCE_DATE = new Date(946684800 * 1000);
+export const NATIVE_CHROME_RUNTIME_IMPORTS = Object.freeze([
+  './firefox-storage-keepalive.js',
+  './repository-local-client.js',
+]);
 
 const entriesSorted = (root) => readdirSync(root, { recursive: true })
   .map((entry) => String(entry).split('\\').join('/'))
@@ -46,6 +53,50 @@ export const assertVaultKernelReleaseTarget = ({ browser, modules, graphBytes, e
     }
   }
 };
+
+export async function bundleChromeVaultKernel(staging, entryRelative) {
+  const entry = join(staging, entryRelative);
+  const scratch = join(staging, '.vault-kernel-bundle');
+  rmSync(scratch, { recursive: true, force: true });
+  const runtimeImports = new Set(NATIVE_CHROME_RUNTIME_IMPORTS);
+  try {
+    const result = await Bun.build({
+      entrypoints: [entry],
+      outdir: scratch,
+      naming: 'vault-kernel.js',
+      target: 'browser',
+      format: 'esm',
+      minify: true,
+      splitting: false,
+      plugins: [{
+        name: 'fixed-native-runtime-imports',
+        setup(build) {
+          build.onResolve({
+            filter: /^\.\/(?:firefox-storage-keepalive|repository-local-client)\.js$/,
+          }, (args) => ({ path: args.path, external: true }));
+        },
+      }],
+    });
+    if (!result.success || result.outputs.length !== 1) {
+      throw new Error(`native Chrome bundle failed: ${result.logs.join('\n')}`);
+    }
+    const output = readFileSync(result.outputs[0].path, 'utf8');
+    const staticImports = await staticImportSpecifiers(output, entryRelative);
+    if (staticImports.length !== 0) {
+      throw new Error(`native Chrome bundle retained static imports: ${staticImports.join(', ')}`);
+    }
+    const dynamicImports = [...output.matchAll(/\bimport\((['"])([^'"]+)\1\)/g)]
+      .map((match) => match[2]).sort();
+    const expected = [...runtimeImports].sort();
+    if (JSON.stringify(dynamicImports) !== JSON.stringify(expected)) {
+      throw new Error(`native Chrome runtime imports changed: ${dynamicImports.join(', ')}`);
+    }
+    writeFileSync(entry, output.endsWith('\n') ? output : `${output}\n`);
+    return Object.freeze({ bytes: statSync(entry).size, runtimeImports: expected });
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
 
 export async function buildVaultKernelArtifact({
   browser = 'chrome', channel = 'store', releaseMinify = false,
@@ -78,6 +129,9 @@ export async function buildVaultKernelArtifact({
   );
   if (releaseMinify) await minifyColdArtifactModules(staging, browser, channel);
   await writeControllerBuildIdentity(staging);
+  if (releaseMinify && browser === 'chrome') {
+    await bundleChromeVaultKernel(staging, nativeEntry(browser, channel));
+  }
 
   const entry = join(staging, nativeEntry(browser, channel));
   const graph = [...await collectStaticModuleGraph(staging, entry)].sort();
