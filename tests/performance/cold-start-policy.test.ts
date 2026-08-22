@@ -110,7 +110,10 @@ const chromeResult = ({
     freshProfile: summarizedGroup(
       COLD_START_PHASES.chrome.freshProfile,
       contract.fresh,
-      { vaultGateReadyFromLaunchMs: 2_000 },
+      {
+        vaultGateReadyFromLaunchMs: 5_000,
+        vaultGateReadyFromWorkerTargetMs: 2_000,
+      },
     ),
     forcedColdWake: summarizedGroup(
       COLD_START_PHASES.chrome.forcedColdWake,
@@ -212,11 +215,15 @@ describe('cold-start policy', () => {
     expect(assessChrome(result, {
       graphPolicy: 'target', requireTimingTargets: true,
     })).toEqual({ ok: true, failures: [] });
-    result.freshProfile.rawSamples.forEach((sample) => { sample.vaultGateReadyFromLaunchMs = 10_001; });
-    result.freshProfile.vaultGateReadyFromLaunchMs = summarizeRaw(Array(7).fill(10_001));
+    result.freshProfile.rawSamples.forEach((sample) => {
+      sample.vaultGateReadyFromWorkerTargetMs = 3_001;
+    });
+    result.freshProfile.vaultGateReadyFromWorkerTargetMs = summarizeRaw(Array(7).fill(3_001));
     expect(assessChrome(result, {
       graphPolicy: 'target', requireTimingTargets: true,
-    }).failures).toContain('freshProfile.vaultGateReadyFromLaunchMs.max 10001ms exceeds 3000ms');
+    }).failures).toContain(
+      'freshProfile.vaultGateReadyFromWorkerTargetMs.max 3001ms exceeds 3000ms',
+    );
   });
 
   test('a required lane defaults to the 300KB and three-second release gates', () => {
@@ -240,18 +247,19 @@ describe('cold-start policy', () => {
       .toContain('forcedColdWake.vaultGateReadyFromWakeMs.max 3001ms exceeds 3000ms');
   });
 
-  test('Firefox fresh usability includes full WebDriver/browser launch time', () => {
+  test('Firefox records browser launch but gates extension install-to-ready time', () => {
     const partial = {
       freshProfile: {
         attempted: 1,
-        vaultGateReadyFromSessionMs: summarizeRaw([3_001]),
+        vaultGateReadyFromSessionMs: summarizeRaw([9_000]),
+        vaultGateReadyFromInstallMs: summarizeRaw([3_001]),
       },
       idleDiscardWake: { attempted: 0 },
     };
     expect(assessColdStartResult('firefox', partial, {
       lane: 'local', graphPolicy: 'target', requireTimingTargets: true,
     }).failures).toContain(
-      'freshProfile.vaultGateReadyFromSessionMs.max 3001ms exceeds 3000ms',
+      'freshProfile.vaultGateReadyFromInstallMs.max 3001ms exceeds 3000ms',
     );
   });
 

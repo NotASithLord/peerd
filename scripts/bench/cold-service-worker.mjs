@@ -637,7 +637,7 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
     console.log(`  worker target ready in ${round(workerTargetMs)}ms`);
     const version = await fetch(`http://127.0.0.1:${port}/json/version`).then((reply) => reply.json());
     const pinnedVersion = readFileSync(join(ROOT, 'scripts', 'cdp', 'chrome-version.txt'), 'utf8').trim();
-    if (lane !== 'local' && !String(version.Browser ?? '').includes(pinnedVersion)) {
+    if (!String(version.Browser ?? '').includes(pinnedVersion)) {
       throw new Error(`Chrome ${version.Browser ?? 'unknown'} does not match pin ${pinnedVersion}`);
     }
     browserConnection = await within(attach(version.webSocketDebuggerUrl), remaining(), 'Chrome browser attach');
@@ -682,19 +682,6 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
     const staticShellFromLaunchMs = hostNowMs() - launchStarted;
     console.log(`  static side-panel shell ready in ${round(staticShellFromLaunchMs)}ms`);
 
-    const currentWorker = await findChromeWorker(port, backgroundEntry);
-    if (!currentWorker) throw new Error('Chrome worker disappeared during first panel load');
-    const worker = await within(attach(currentWorker.webSocketDebuggerUrl), remaining(), 'Chrome worker attach');
-    let workerAgeAtProbeMs;
-    try {
-      await worker.send('Runtime.enable', {}, remaining());
-      const timing = await worker.send('Runtime.evaluate', {
-        expression: '({ readyMs: performance.now(), timeOrigin: performance.timeOrigin })',
-        returnByValue: true,
-      }, remaining());
-      workerAgeAtProbeMs = timing?.result?.value?.readyMs;
-    } finally { worker.close(); }
-
     const bootstrapPromise = sendChromeRuntimeMessage(page, { type: 'bootstrap/ready' }, remaining())
       .then((reply) => {
         if (reply?.ok !== true) throw new Error(`Chrome bootstrap/ready failed: ${JSON.stringify(reply)}`);
@@ -725,6 +712,29 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
     const [bootstrap, state, bootModuleFromLaunchMs, vaultGateReadyFromLaunchMs] = await within(Promise.all([
       bootstrapPromise, statePromise, bootModulePromise, vaultGatePromise,
     ]), remaining(), 'Chrome fresh sample');
+    const vaultGateReadyFromWorkerTargetMs = Math.max(
+      0, vaultGateReadyFromLaunchMs - workerTargetMs,
+    );
+    console.log(`  native worker to actionable UI in ${round(vaultGateReadyFromWorkerTargetMs)}ms`);
+    let workerAgeAtProbeMs = null;
+    if (diagnostic) {
+      const currentWorker = await findChromeWorker(port, backgroundEntry);
+      if (currentWorker) {
+        const worker = await within(
+          attach(currentWorker.webSocketDebuggerUrl), 500, 'Chrome diagnostic worker attach',
+        ).catch(() => null);
+        if (worker) {
+          try {
+            await worker.send('Runtime.enable', {}, 500);
+            const timing = await worker.send('Runtime.evaluate', {
+              expression: 'performance.now()', returnByValue: true,
+            }, 500);
+            workerAgeAtProbeMs = timing?.result?.value ?? null;
+          } catch { /* realm-relative age is diagnostic only */ }
+          finally { worker.close(); }
+        }
+      }
+    }
     if (diagnostic) {
       console.log(`  vault diagnostic: ${JSON.stringify(state.reply.state?.vault)}`);
     }
@@ -808,15 +818,22 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
         const { target, elapsedMs: workerTargetFromWakeMs } = targetResult;
         if (!target) throw new Error('Chrome wake produced no service-worker target');
         if (target.targetId === current.targetId) throw new Error('Chrome reused the terminated worker target');
-        const wakeWorker = await attach(target.webSocketDebuggerUrl);
-        let wakeGraphReadyMs;
-        try {
-          await wakeWorker.send('Runtime.enable');
-          const timing = await wakeWorker.send('Runtime.evaluate', {
-            expression: 'performance.now()', returnByValue: true,
-          }, coldTimeoutMs);
-          wakeGraphReadyMs = timing?.result?.value;
-        } finally { wakeWorker.close(); }
+        let wakeGraphReadyMs = null;
+        if (diagnostic) {
+          const wakeWorker = await within(
+            attach(target.webSocketDebuggerUrl), 500, 'Chrome diagnostic wake attach',
+          ).catch(() => null);
+          if (wakeWorker) {
+            try {
+              await wakeWorker.send('Runtime.enable', {}, 500);
+              const timing = await wakeWorker.send('Runtime.evaluate', {
+                expression: 'performance.now()', returnByValue: true,
+              }, 500);
+              wakeGraphReadyMs = timing?.result?.value ?? null;
+            } catch { /* realm-relative age is diagnostic only */ }
+            finally { wakeWorker.close(); }
+          }
+        }
         wakes.push({
           stoppedRunningStatus: stoppedVersion.runningStatus,
           workerAgeAtProbeMs: wakeGraphReadyMs,
@@ -847,6 +864,7 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       bootstrapFromLaunchMs: bootstrap.elapsedMs,
       stateFromLaunchMs: state.elapsedMs,
       vaultGateReadyFromLaunchMs,
+      vaultGateReadyFromWorkerTargetMs,
       wakes, wakeFailures,
     };
   } finally {
@@ -1502,7 +1520,7 @@ export const main = async () => {
     },
     host,
     note: nativeFloor
-      ? 'Local native-floor diagnostic: Chrome runs the exact release-minified copied Store kernel artifact named by archiveSha256, records the separate Store and Preview native graphs, and proves one fresh launch plus one confirmed worker stop/wake against the 3-second target. This does not change or claim the live release manifest.'
+      ? 'Local native-floor diagnostic: Chrome runs the exact release-minified copied Store kernel artifact named by archiveSha256, records the separate Store and Preview native graphs, and proves one fresh worker start plus one confirmed worker stop/wake against the 3-second extension target. Full browser launch remains reported but is not charged to the service worker. This does not change or claim the live release manifest.'
       : 'Every browser runs the exact unsigned Store artifact named by archiveSha256 and records both Store and Preview cold graphs against their own immutable archive/tree digests. Browser launch/install to visible shell, bootstrap, state and actionable-vault clocks are host-monotonic; page/worker clocks are diagnostic only and no benchmark source is injected into the extension.',
     results: {},
     ...(comparisonSources ? { baseResults: {}, pairAssessments: {} } : {}),

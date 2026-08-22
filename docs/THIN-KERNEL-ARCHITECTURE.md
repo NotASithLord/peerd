@@ -347,13 +347,14 @@ authority-boundary change.
 
 The static graph, lazy-entry closure, and benchmark-policy tests are in ordinary
 preflight and CI. A separate secretless packaged-browser job is required by the
-release job and runs on ready PRs, main, and release tags. Every raw sample must
+release job and runs on ready PRs, main, and release tags. Every extension-start sample must
 reach actionable UI within 3 seconds, and the packaged service-worker graph
 must remain at or below the 300 KB release ceiling. The 200 KB figure is an
 aspirational simplification goal, not an enforcement threshold. A 10-second
 watchdog terminates failed probes; it is never summarized as performance.
-Fresh browser launch and forced worker wake are separately labeled boundaries
-on the host monotonic clock; realm-relative worker age is diagnostic only. Each
+Full browser launch is retained as a diagnostic; the 3-second clock begins at
+the worker target or add-on install boundary. Forced worker wake is separately
+labeled on the host monotonic clock; realm-relative worker age is diagnostic only. Each
 graph is bound to its own immutable archive and unpacked-tree digest, and the
 harness proves those bytes did not change during measurement.
 

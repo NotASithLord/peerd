@@ -37,12 +37,14 @@ export const COLD_START_PHASES = Object.freeze({
     freshProfile: Object.freeze({
       requiredKey: 'fresh', completedKey: 'completed',
       boundary: 'browser-process-launch',
-      usableMetric: 'vaultGateReadyFromLaunchMs',
+      // Browser process launch is recorded, but it is not service-worker work.
+      // The UX gate starts when Chrome exposes the new worker realm.
+      usableMetric: 'vaultGateReadyFromWorkerTargetMs',
       metrics: Object.freeze([
         'cdpReadyMs', 'workerTargetMs', 'staticShellFromLaunchMs',
         'bootModuleFromLaunchMs', 'bootstrapFromLaunchMs',
         'stateFromLaunchMs', 'vaultGateReadyFromLaunchMs',
-        'workerAgeAtProbeMs',
+        'vaultGateReadyFromWorkerTargetMs',
       ]),
       ordering: Object.freeze([
         Object.freeze(['cdpReadyMs', 'workerTargetMs', 'staticShellFromLaunchMs']),
@@ -57,7 +59,7 @@ export const COLD_START_PHASES = Object.freeze({
       metrics: Object.freeze([
         'workerTargetFromWakeMs', 'staticShellFromWakeMs',
         'bootModuleFromWakeMs', 'bootstrapFromWakeMs', 'stateFromWakeMs',
-        'vaultGateReadyFromWakeMs', 'workerAgeAtProbeMs',
+        'vaultGateReadyFromWakeMs',
       ]),
       ordering: Object.freeze([
         Object.freeze(['staticShellFromWakeMs', 'bootModuleFromWakeMs', 'vaultGateReadyFromWakeMs']),
@@ -69,7 +71,9 @@ export const COLD_START_PHASES = Object.freeze({
     freshProfile: Object.freeze({
       requiredKey: 'fresh', completedKey: 'completed',
       boundary: 'webdriver-session-launch',
-      usableMetric: 'vaultGateReadyFromSessionMs',
+      // WebDriver/browser launch remains visible evidence, while the extension
+      // budget begins at the exact add-on install boundary.
+      usableMetric: 'vaultGateReadyFromInstallMs',
       metrics: Object.freeze([
         'webdriverSessionMs', 'addonInstallMs', 'staticShellFromInstallMs',
         'bootModuleFromInstallMs', 'bootstrapFromInstallMs',

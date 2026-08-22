@@ -104,6 +104,7 @@ describe('cold-start browser harness contract', () => {
       expect(text).toContain("coldBudgetMode: 'native-target'");
       expect(text).toContain("extensionDir: prepared.store.extensionDir");
       expect(text).toContain('wakeSamples: sample < chromeWakes ? 1 : 0');
+      expect(text).toContain('vaultGateReadyFromWorkerTargetMs');
       expect(text).toContain("requireClean: lane === 'release' || nativeFloor");
       expect(text).not.toContain('runNativeFloorChromeProcess');
     });

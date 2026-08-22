@@ -55,15 +55,17 @@ graph hashes to
 Missing and timed-out samples are failures, never inputs silently omitted from
 a percentile. The 10-second watchdog exists only to terminate a failed probe;
 it is not a performance allowance. Required ready-PR, main, and release lanes
-require every raw sample to reach actionable UI within 3 seconds and keep the
+require every extension-start boundary to reach actionable UI within 3 seconds and keep the
 packaged service-worker graph at or below the 300 KB release ceiling. The
 200 KB figure is an architectural simplification goal, not a second hidden
 gate. They measure the packaged
 vault shell, boot-module evaluation, real `bootstrap/ready`, vault-ready
 `state/get`, and the actionable fingerprint CTA on one host-monotonic clock.
-Fresh samples are explicitly labeled from browser-process/WebDriver-session
-launch; forced Chrome and idle-discard Firefox wakes use separate post-stop or
-post-idle navigation boundaries. A wake result cannot stand in for launch.
+Fresh samples retain full browser-process/WebDriver-session launch diagnostics,
+but the extension budget begins at Chrome's worker-target or Firefox's add-on
+install boundary. Forced Chrome and idle-discard Firefox wakes use separate
+post-stop or post-idle navigation boundaries. A wake result cannot stand in
+for a fresh extension start.
 The separate packaged passkey regression owns ceremony and durable-commit
 coverage. See [Thin background architecture](./THIN-KERNEL-ARCHITECTURE.md) for
 placement, lifecycle, rollout, and acceptance budgets.
