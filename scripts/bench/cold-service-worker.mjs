@@ -815,7 +815,7 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
         const wakeBootstrapPromise = sendChromeRuntimeMessage(page, { type: 'bootstrap/ready' }, wakeRemaining())
           .then((reply) => {
             if (reply?.ok !== true) throw new Error(`Chrome wake bootstrap failed: ${JSON.stringify(reply)}`);
-            return hostNowMs() - started;
+            return { reply, elapsedMs: hostNowMs() - started };
           });
         const wakeStatePromise = wakeBootstrapPromise.then(async () => {
           const reply = await sendChromeRuntimeMessage(page, { type: 'state/get' }, wakeRemaining());
@@ -836,7 +836,7 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
             if (!ready) throw new Error('Chrome wake vault boot module did not evaluate');
             return hostNowMs() - started;
           });
-        const [targetResult, bootstrapFromWakeMs, stateFromWakeMs,
+        const [targetResult, wakeBootstrap, stateFromWakeMs,
           vaultGateReadyFromWakeMs, bootModuleFromWakeMs] = await within(Promise.all([
           targetPromise, wakeBootstrapPromise, wakeStatePromise, wakeGatePromise,
           wakeBootModulePromise,
@@ -866,9 +866,10 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
           workerTargetFromWakeMs,
           staticShellFromWakeMs,
           bootModuleFromWakeMs,
-          bootstrapFromWakeMs,
+          bootstrapFromWakeMs: wakeBootstrap.elapsedMs,
           stateFromWakeMs,
           vaultGateReadyFromWakeMs,
+          kernelTiming: wakeBootstrap.reply?.timing ?? null,
         });
         console.log(`  forced wake ${sample + 1}/${wakeSamples}: actionable in ${round(vaultGateReadyFromWakeMs)}ms`);
       } catch (error) {
@@ -891,6 +892,7 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       stateFromLaunchMs: state.elapsedMs,
       vaultGateReadyFromLaunchMs,
       vaultGateReadyFromWorkerTargetMs,
+      kernelTiming: bootstrap.reply?.timing ?? null,
       wakes, wakeFailures,
     };
   } finally {
