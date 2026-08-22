@@ -75,15 +75,15 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     notFound: (sessionId) => new SessionNotFoundError(sessionId),
     onMessageAppended,
   });
-  const {
-    serialize: serializeSession,
-    update: updateSessionRecord,
-    assemble,
-    readMessages,
-    present,
-    presentMetadata,
-    isRealUserMessage,
-  } = turnSessions.records;
+  // why property access, not destructuring: Bun 1.4's transpiler miscompiles
+  // free variables captured through this factory's multiply nested async
+  // closures (a destructured `readMessages` arrived undefined inside
+  // importPortable's serialized closure). Reading through the stable
+  // `records` object sidesteps the broken capture path and keeps the same
+  // shared queue + migration semantics.
+  const turnRecords = turnSessions.records;
+  const serializeSession = turnRecords.serialize;
+  const updateSessionRecord = turnRecords.update;
 
   /**
    * Create and persist a fresh session record.
@@ -210,7 +210,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
       ...(originState && typeof originState === 'object' ? { originState } : {}),
     };
     await idb.put(STORE, record);
-    return present(record, []);
+    return turnRecords.present(record, []);
   };
 
   // Same-user transfer imports an existing conversation identity rather
@@ -248,7 +248,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
 
     return serializeSession(sessionId, async () => {
       const existing = await idb.get(STORE, sessionId);
-      if (existing) return /** @type {Session} */ (await assemble(existing));
+      if (existing) return /** @type {Session} */ (await turnRecords.assemble(existing));
 
       const sourceMessages = Array.isArray(portable.messages) ? portable.messages : [];
       /** @type {string[]} */
@@ -271,7 +271,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
         const message = { ...pickPortable(source, PORTABLE_MESSAGE_FIELDS), id };
         await idb.put(MSGS, { id, sessionId, seq: msgIndex.length, message });
         msgIndex.push(id);
-        if (isRealUserMessage(message)) latestNonSyntheticUserMessageId = id;
+        if (turnRecords.isRealUserMessage(message)) latestNonSyntheticUserMessageId = id;
       }
 
       const record = {
@@ -294,7 +294,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
           : {}),
       };
       await idb.put(STORE, record);
-      return present(record, await readMessages(msgIndex));
+      return turnRecords.present(record, await turnRecords.readMessages(msgIndex));
     });
   };
 
@@ -321,14 +321,14 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     }
     const out = records.map((record) => {
       if (!record.messagesV2) {
-        return present(record, Array.isArray(record.messages) ? record.messages : []);
+        return turnRecords.present(record, Array.isArray(record.messages) ? record.messages : []);
       }
       const rows = bySession.get(record.sessionId) ?? [];
       const byId = new Map(rows.map((row) => [row.id, row.message]));
       const messages = (record.msgIndex ?? [])
         .map((/** @type {string} */ id) => byId.get(id))
         .filter(Boolean);
-      return present(record, messages);
+      return turnRecords.present(record, messages);
     });
     // Stable order: newest first. UUIDv7 keys sort chronologically.
     return out.sort((a, b) => b.createdAt - a.createdAt);
@@ -344,7 +344,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
   const listMetadata = async () => {
     const records = await idb.getAll(STORE);
     return records
-      .map(presentMetadata)
+      .map(turnRecords.presentMetadata)
       .sort((a, b) => b.createdAt - a.createdAt);
   };
 
@@ -356,7 +356,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
    */
   const getMetadata = async (sessionId) => {
     const record = await idb.get(STORE, sessionId);
-    return record ? presentMetadata(record) : undefined;
+    return record ? turnRecords.presentMetadata(record) : undefined;
   };
 
   /**
@@ -372,7 +372,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     const messageId = record.latestNonSyntheticUserMessageId;
     if (typeof messageId !== 'string' || !messageId) return undefined;
     const message = (await idb.get(MSGS, messageId))?.message;
-    return isRealUserMessage(message) ? message : undefined;
+    return turnRecords.isRealUserMessage(message) ? message : undefined;
   };
 
   const archive = (/** @type {string} */ sessionId) => updateSessionRecord(
