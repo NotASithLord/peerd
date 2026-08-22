@@ -6,7 +6,7 @@ import {
   repositoryMethodIsKnown,
   repositoryMethodIsMutating,
   repositoryMethodMayFetch,
-} from '../shared/repository-channel.js';
+} from '../shared/feature-lease-protocol.js';
 import { makeRepositoryFacade, repositoryKey } from './repository-client.js';
 
 /**

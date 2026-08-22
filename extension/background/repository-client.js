@@ -3,23 +3,25 @@
 
 import {
   REPOSITORY_CHANNEL_CANCEL,
-  REPOSITORY_CHANNEL_MAX_BYTES,
-  REPOSITORY_CHANNEL_OFFER,
-  REPOSITORY_CHANNEL_PROTOCOL,
   REPOSITORY_CHANNEL_RESULT,
   REPOSITORY_KERNEL_FETCH,
   REPOSITORY_KERNEL_FETCH_RESULT,
   REPOSITORY_MAX_KERNEL_FETCHES,
-  REPOSITORY_METHODS,
   decodeRepositoryRpcValue,
   encodeRepositoryRpcValue,
+} from '../shared/repository-channel.js';
+import {
+  REPOSITORY_CHANNEL_MAX_BYTES,
+  REPOSITORY_CHANNEL_OFFER,
+  REPOSITORY_CHANNEL_PROTOCOL,
+  REPOSITORY_METHODS,
   parseRepositoryChannelOffer,
   repositoryChannelPayloadFits,
-  repositoryMethodIsKnown,
   repositoryMethodIsAppFile,
+  repositoryMethodIsKnown,
   repositoryMethodIsMutating,
   repositoryMethodMayFetch,
-} from '../shared/repository-channel.js';
+} from '../shared/feature-lease-protocol.js';
 import { base64ToBytes, bytesToBase64 } from '../shared/cold-util.js';
 export { decodeRepositoryRpcValue, encodeRepositoryRpcValue };
 

@@ -245,6 +245,8 @@ describe('cold entry graphs', () => {
       'offscreen/web-extract.js',
       'offscreen/web-extract-core.js',
       'offscreen/dweb-base.js',
+      'shared/repository-channel.js',
+      'shared/cold-util.js',
       'peerd-engine/export.js',
       'peerd-engine/repository/repository-service.js',
       'vendor/isomorphic-git/index.js',

@@ -6,17 +6,13 @@ import browser from '../shared/browser-api.js';
 import { BACKGROUND_MODULE_PATH } from '../shared/build-config.js';
 import { ARTIFACT_CHANNEL_PROTOCOL, admitArtifactChannelOffer } from '../shared/artifact-offer.js';
 import {
-  REPOSITORY_CHANNEL_OFFER,
-  REPOSITORY_CHANNEL_PROTOCOL,
-  parseRepositoryChannelOffer,
-} from '../shared/repository-channel.js';
-import {
   admitVaultAuthorityOffer, VAULT_AUTHORITY_BOOTSTRAP,
   VAULT_AUTHORITY_PROTOCOL, VAULT_AUTHORITY_RESULT,
 } from '../shared/vault-authority-protocol.js';
 import {
   LOCAL_MODEL_CHANNEL_PROTOCOL, LOCAL_MODEL_CHANNEL_RESULT,
-  parseLocalModelChannelOffer,
+  REPOSITORY_CHANNEL_OFFER, REPOSITORY_CHANNEL_PROTOCOL,
+  parseLocalModelChannelOffer, parseRepositoryChannelOffer,
 } from '../shared/feature-lease-protocol.js';
 import { parseContributorOffer } from '../shared/contributor-channel.js';
 

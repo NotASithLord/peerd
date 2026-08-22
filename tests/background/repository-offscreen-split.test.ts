@@ -11,14 +11,16 @@ import {
 import { createLazyLocalRepositoryClient } from '../../extension/background/repository-local-client.js';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import {
-  REPOSITORY_CHANNEL_PROTOCOL,
   REPOSITORY_CHANNEL_CANCEL,
   REPOSITORY_CHANNEL_RESULT,
   REPOSITORY_KERNEL_FETCH,
   REPOSITORY_KERNEL_FETCH_RESULT,
+} from '../../extension/shared/repository-channel.js';
+import {
+  REPOSITORY_CHANNEL_PROTOCOL,
   parseRepositoryChannelOffer,
   repositoryMethodIsMutating,
-} from '../../extension/shared/repository-channel.js';
+} from '../../extension/shared/feature-lease-protocol.js';
 import { admitRepositoryChannelOffer } from '../../extension/offscreen/supervisor-channels.js';
 import { acceptRepositoryOffer } from '../../extension/offscreen/repository-host.js';
 import { createRepositoryAppFileService } from '../../extension/offscreen/repository-app-files.js';

@@ -3,13 +3,10 @@
 
 import { base64ToBytes, bytesToBase64 } from './cold-util.js';
 
-export const REPOSITORY_CHANNEL_OFFER = 'peerd/repository-channel';
-export const REPOSITORY_CHANNEL_PROTOCOL = 1;
 export const REPOSITORY_KERNEL_FETCH = 'repository/kernel-fetch';
 export const REPOSITORY_KERNEL_FETCH_RESULT = 'repository/kernel-fetch-result';
 export const REPOSITORY_CHANNEL_RESULT = 'repository/result';
 export const REPOSITORY_CHANNEL_CANCEL = 'repository/cancel';
-export const REPOSITORY_CHANNEL_MAX_BYTES = 80 * 1024 * 1024;
 export const REPOSITORY_MAX_KERNEL_FETCHES = 8;
 export const GIT_SECRET_PREFIX = 'git:';
 const GIT_HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}$/;
@@ -136,72 +133,5 @@ export const createGitCredentialRoutes = ({ vault, isLockedError, audit }) => {
         return { ok: true };
       });
     }),
-  });
-};
-export const REPOSITORY_METHODS = Object.freeze([
-  'init', 'stage', 'commit', 'status', 'branches', 'history', 'diff', 'restore',
-  'branch', 'checkout', 'setRemote', 'getRemote', 'fetch', 'push', 'clone',
-  'snapshot', 'matches', 'fork', 'replaceWorkingTree', 'destroy',
-  'appRead', 'appList', 'appInspect', 'appWrite', 'appDelete',
-]);
-const METHODS = new Set(REPOSITORY_METHODS);
-const MUTATING_METHODS = new Set([
-  'init', 'stage', 'commit', 'restore', 'branch', 'checkout', 'setRemote',
-  'fetch', 'push', 'clone', 'fork', 'replaceWorkingTree', 'destroy',
-  'snapshot', 'matches',
-  'appWrite', 'appDelete',
-]);
-const NETWORK_METHODS = new Set(['fetch', 'push', 'clone']);
-const APP_FILE_METHODS = new Set(['appRead', 'appList', 'appInspect', 'appWrite', 'appDelete']);
-const OFFER_KEYS = 'args\nchannelId\nlease\nmethod\nprotocol\ntype';
-const safeId = (/** @type {unknown} */ value, /** @type {number} */ max = 256) =>
-  typeof value === 'string' && value.length >= 8 && value.length <= max
-  && !/[\u0000-\u001f\u007f]/.test(value);
-
-export const repositoryMethodIsKnown = (/** @type {unknown} */ method) => typeof method === 'string'
-  && METHODS.has(method);
-export const repositoryMethodIsMutating = (/** @type {unknown} */ method) => typeof method === 'string'
-  && MUTATING_METHODS.has(method);
-export const repositoryMethodMayFetch = (/** @type {unknown} */ method) => typeof method === 'string'
-  && NETWORK_METHODS.has(method);
-export const repositoryMethodIsAppFile = (/** @type {unknown} */ method) => typeof method === 'string'
-  && APP_FILE_METHODS.has(method);
-
-/** @param {unknown} value @param {number} [maxBytes] */
-export const repositoryChannelPayloadFits = (
-  value,
-  maxBytes = REPOSITORY_CHANNEL_MAX_BYTES,
-) => {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) return false;
-  try {
-    return new TextEncoder().encode(JSON.stringify(value)).byteLength <= maxBytes;
-  } catch { return false; }
-};
-
-/** @param {unknown} value */
-export const parseRepositoryChannelOffer = (value) => {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const message = /** @type {Record<string,any>} */ (value);
-  const lease = message.lease;
-  if (Object.keys(message).sort().join('\n') !== OFFER_KEYS
-      || message.type !== REPOSITORY_CHANNEL_OFFER
-      || message.protocol !== REPOSITORY_CHANNEL_PROTOCOL
-      || !safeId(message.channelId) || !repositoryMethodIsKnown(message.method)
-      || !Array.isArray(message.args) || message.args.length > 8
-      || !lease || typeof lease !== 'object' || Array.isArray(lease)
-      || lease.scope !== 'controller' || !safeId(lease.leaseId)
-      || !Number.isSafeInteger(lease.generation) || lease.generation <= 0
-      || !safeId(lease.buildId) || !safeId(lease.kernelEpoch)
-      || !safeId(lease.hostEpoch)
-      || (lease.schema !== undefined && lease.schema !== 1)
-      || (lease.bootId !== undefined && !safeId(lease.bootId))) return null;
-  if (!repositoryChannelPayloadFits(message.args)) return null;
-  return Object.freeze({
-    type: REPOSITORY_CHANNEL_OFFER,
-    protocol: REPOSITORY_CHANNEL_PROTOCOL,
-    channelId: message.channelId,
-    method: message.method,
-    args: message.args,
-    lease: Object.freeze({ ...lease }),
   });
 };

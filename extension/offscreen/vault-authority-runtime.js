@@ -238,9 +238,3 @@ export const serveVaultAuthority = async ({ port, channelId }) => {
   // Keep the bootstrap alive for the lifetime of the private Port.
   await new Promise((resolve) => port.addEventListener('close', resolve, { once: true }));
 };
-
-export const VAULT_AUTHORITY_STORAGE_SCOPE = Object.freeze({
-  kvKeys: [VAULT_KEY, 'secret:*'],
-  idb: { store: VAULT_STORE, key: VAULT_KEY },
-  sessionKeys: [SESSION_DK_KEY],
-});

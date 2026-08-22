@@ -77,10 +77,3 @@ export const makeKernelStateCustody = () => {
 
   return Object.freeze({ adopt, beginReplacement, capture });
 };
-
-/** @param {Record<string, any>} state */
-export const projectColdAuthorityPosture = (state) => ({
-  hydrated: state.hydrated === true,
-  vault: { ...state.vault }, settings: { ...state.settings },
-  actorExecution: { ...state.capabilities.actorExecution },
-});

@@ -312,7 +312,7 @@ export const LEGACY_SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/routes/vault.js"
+    "source": "service-worker.js"
   },
   {
     "route": "contacts/forget",

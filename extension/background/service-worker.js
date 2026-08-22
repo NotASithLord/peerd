@@ -8103,8 +8103,8 @@ const privateTransferOpenRoute = makePrivateTransferOpenRoute({
 const getCurrentSessionId = () => sessionCache.sessionGet('currentSessionId');
 const onAppDeleted = retireAppActorBindingsForApp;
 const ensureAppTrackerReady = () => engineTrackersReady;
-const legacyVaultUnlockEffect = makeLegacyVaultUnlockEffect({
-  onUnlocked, resumeGoalRuns, sessionCache, maybeAutoResumeAfterRecovery, resumeSchedules,
+const onUnlocked = makeLegacyVaultUnlockEffect({
+  onUnlocked: onVaultUnlocked, resumeGoalRuns, sessionCache, maybeAutoResumeAfterRecovery, resumeSchedules,
 });
 const confirmAnswerRoute = makeConfirmAnswerRoute({
   confirmCoordinator, sessionCache, isActualSidepanelSender, isActualHomeSender,
@@ -8150,7 +8150,7 @@ coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(/** @type 
   'confirm/answer': confirmAnswerRoute,
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes,
-    onInitialized, onUnlocked: legacyVaultUnlockEffect, onLocked,
+    onInitialized, onUnlocked, onLocked,
     pushState, purgeVaultBlob,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,
@@ -8531,7 +8531,7 @@ function onInitialized() {
   });
 }
 
-function onUnlocked(/** @type {string} */ reason) {
+function onVaultUnlocked(/** @type {string} */ reason) {
   void featureLeases.runTransition('unlock', {
     dwebEnabled: DWEB_ENABLED && settingsHydrated && settingsStore.get().dwebEnabled,
   }).catch((error) => console.warn('[sw] post-unlock lease transition failed', error));

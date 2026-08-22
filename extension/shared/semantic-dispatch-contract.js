@@ -9,7 +9,6 @@ import {
   structuredClonePayloadFits,
 } from './structured-clone-size.js';
 
-export const SEMANTIC_DISPATCH_CAPABILITY = 'semantic.dispatch';
 export { SEMANTIC_DISPATCH_PROTOCOL };
 export const SEMANTIC_DISPATCH_MAX_REQUEST_BYTES = 256 * 1024;
 export const SEMANTIC_DISPATCH_MAX_RESULT_BYTES = 256 * 1024;

@@ -6,10 +6,8 @@
 
 import { controllerPayloadBytes } from './structured-clone-size.js';
 
-export const SEMANTIC_DEMAND_CAPABILITY = 'semantic.dispatch';
 export const SEMANTIC_DEMAND_MAX_BYTES = 256 * 1024;
 export const SEMANTIC_DEMAND_MAX_CONCURRENT = 3;
-export const SEMANTIC_DEMAND_TIMEOUT_MS = 30_000;
 
 const POLICIES = Object.freeze({
   'toolbox/read': Object.freeze({ 'semantic.toolbox.get-body': 1 }),

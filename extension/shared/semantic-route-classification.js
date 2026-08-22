@@ -20,6 +20,7 @@ const KERNEL_SOURCES = new Set([
 
 const KERNEL_ROUTE_OVERRIDES = new Set([
   'audit/voice-fetch',
+  'confirm/answer',
   'apps/favorite',
   'apps/import-git',
   'apps/list',
