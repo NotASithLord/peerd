@@ -60,6 +60,7 @@ import { createKernelFeatureHost } from './kernel-feature-host.js';
 import { createKernelPortRouter } from './kernel-port-router.js';
 import {
   makeKernelGitCredentialRoutes,
+  makeKernelOriginCredentialRoutes,
   makeKernelRepositoryReadRoutes,
 } from './kernel-repository-read-routes.js';
 import {
@@ -714,6 +715,10 @@ const routes = {
   }),
   ...makeKernelGitCredentialRoutes({
     vault, auditLog, isLockedError: (/** @type {unknown} */ cause) => cause instanceof VaultLockedError,
+  }),
+  ...makeKernelOriginCredentialRoutes({
+    vault, auditLog, idb,
+    isLockedError: (/** @type {unknown} */ cause) => cause instanceof VaultLockedError,
   }),
   ...appEditorRoutes,
   'repository/kernel-fetch': async () => ({

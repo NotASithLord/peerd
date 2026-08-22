@@ -140,26 +140,22 @@ export const createKernelDenylistNetworkCustody = ({ dnr }) => {
  * @param {{sync:()=>Promise<void>}} deps.networkCustody
  * @param {{append:(entry:{type:string,details?:Record<string,any>})=>Promise<any>}} deps.auditLog
  */
-export const makeKernelDenylistRoutes = ({ policy, networkCustody, auditLog }) => Object.freeze({
-  'denylist/add': async (/** @type {{pattern?:unknown}} */ { pattern } = {}) => {
-    const result = await policy.add(pattern);
-    if (!result.ok) return result;
-    void networkCustody.sync();
-    auditLog.append({
-      type: 'denylist_added', details: { pattern: result.pattern, seed: result.seed },
-    }).catch(() => {});
-    return policy.snapshot();
-  },
-  'denylist/remove': async (/** @type {{pattern?:unknown}} */ { pattern } = {}) => {
-    const result = await policy.remove(pattern);
-    if (!result.ok) return result;
-    void networkCustody.sync();
-    auditLog.append({
-      type: 'denylist_removed', details: { pattern: result.pattern, seed: result.seed },
-    }).catch(() => {});
-    return policy.snapshot();
-  },
-});
+export const makeKernelDenylistRoutes = ({ policy, networkCustody, auditLog }) => {
+  const edit = (/** @type {'add'|'remove'} */ operation, /** @type {string} */ auditType) =>
+    async (/** @type {{pattern?:unknown}} */ { pattern } = {}) => {
+      const result = await policy[operation](pattern);
+      if (!result.ok) return result;
+      void networkCustody.sync();
+      auditLog.append({
+        type: auditType, details: { pattern: result.pattern, seed: result.seed },
+      }).catch(() => {});
+      return policy.snapshot();
+    };
+  return Object.freeze({
+    'denylist/add': edit('add', 'denylist_added'),
+    'denylist/remove': edit('remove', 'denylist_removed'),
+  });
+};
 
 /** @param {string} url */
 export const kernelTabOrigin = (url) => {

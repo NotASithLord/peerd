@@ -85,6 +85,7 @@ describe('generated semantic route inventory', () => {
       'models/options',
       'onboarding/complete',
       'openrouter/models',
+      'origin-cred/delete', 'origin-cred/list', 'origin-cred/set',
       'permission/set',
       'provider/setKey', 'provider/status', 'provider/test',
       'repository/kernel-fetch',
@@ -104,7 +105,7 @@ describe('generated semantic route inventory', () => {
     expect(SEMANTIC_ROUTE_CUTOVER).toMatchObject({
       ready: false, expected: 161, classified: 161, missing: [], extra: [],
     });
-    expect(SEMANTIC_ROUTE_CUTOVER.unmigrated).toHaveLength(70);
+    expect(SEMANTIC_ROUTE_CUTOVER.unmigrated).toHaveLength(67);
   });
 
   test('does not let a candidate table hide missing, extra, or unmigrated routes', () => {

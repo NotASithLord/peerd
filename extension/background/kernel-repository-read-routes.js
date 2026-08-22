@@ -4,6 +4,12 @@
 import {
   createGitCredentialRoutes,
 } from '../shared/repository-channel.js';
+import {
+  ensureDpopJkt,
+  loadDpopJkt,
+  makeDpopKeyStore,
+  makeOriginCredentialRoutes,
+} from '../peerd-egress/kernel-storage.js';
 
 /** @param {unknown} cause @param {string} action @param {boolean} [known] */
 const failed = (cause, action, known) => {
@@ -25,6 +31,40 @@ export const makeKernelGitCredentialRoutes = ({ vault, auditLog, isLockedError }
   return createGitCredentialRoutes({
     vault, isLockedError,
     audit: (event) => { void auditLog.append(event).catch(() => {}); },
+  });
+};
+
+/**
+ * Origin API-key custody (Settings -> API integrations) with the full DPoP
+ * key lifecycle: provisioning mints the nonextractable keypair, listing reads
+ * the public jkt without minting, revoking retires both credential halves.
+ * why learnKeyedOrigin is a seam: the legacy worker feeds the origin lock's
+ * live sensitivity cache off this exact audit event; the web-actor migration
+ * slice must plug its cache in here or a mid-session credential stays
+ * classified ORDINARY (issue 251).
+ * @param {any} deps
+ */
+export const makeKernelOriginCredentialRoutes = ({
+  vault, auditLog, isLockedError, idb,
+  learnKeyedOrigin = (/** @type {string} */ _origin) => {},
+}) => {
+  const dpopKeyStore = makeDpopKeyStore({ get: idb.get, put: idb.put, del: idb.del });
+  const dpopKeyDeps = {
+    ...dpopKeyStore,
+    audit: (/** @type {any} */ event) => { void auditLog.append(event).catch(() => {}); },
+  };
+  return makeOriginCredentialRoutes({
+    vault, isLockedError,
+    ensureDpopKey: (origin) => ensureDpopJkt(origin, dpopKeyDeps),
+    readDpopJkt: (origin) => loadDpopJkt(origin, dpopKeyStore),
+    deleteDpopKey: (origin) => dpopKeyStore.remove(origin),
+    audit: (event) => {
+      void auditLog.append(event).catch(() => {});
+      if (event?.type === 'origin_credential_added'
+          && typeof event?.details?.origin === 'string') {
+        learnKeyedOrigin(event.details.origin);
+      }
+    },
   });
 };
 

@@ -282,6 +282,7 @@ export const makeKernelRouteProvenance = ({ humanUi, optionsUi, appUi, voiceUi, 
   ], humanUi);
   add([
     'git-cred/list', 'git-cred/set', 'git-cred/delete', 'openrouter/models',
+    'origin-cred/list', 'origin-cred/set', 'origin-cred/delete',
     'local-model/status', 'local-model/catalog', 'local-model/probe', 'local-model/init',
     'site-client/list', 'site-client/delete',
     'memory/export', 'memory/deleteAll', 'memory/write', 'memory/delete',

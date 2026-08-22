@@ -150,7 +150,10 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
   // smuggling a rich feature graph back into first wake. 450 KB -> 460 KB:
   // the reviewed denylist-editor/DNR-custody and skills metadata-authority
   // adapters (route migration; no feature implementation pulled cold).
-  kernel: Object.freeze({ modules: 76, graphBytes: 460_000, entryBytes: 40_000, directImports: 26 }),
+  // 76 -> 80 modules, 460 KB -> 500 KB: origin-credential custody with the
+  // full DPoP key lifecycle — credential injection and nonextractable key
+  // custody are kernel-owned duties, not demand-loadable feature code.
+  kernel: Object.freeze({ modules: 80, graphBytes: 500_000, entryBytes: 40_000, directImports: 26 }),
   sidepanel: Object.freeze({ modules: 75, graphBytes: 650_000, entryBytes: 50_000 }),
   home: Object.freeze({ modules: 75, graphBytes: 650_000, entryBytes: 50_000 }),
   offscreen: Object.freeze({ modules: 25, graphBytes: 200_000, entryBytes: 40_000 }),
@@ -230,14 +233,14 @@ export const COLD_START_TARGETS = Object.freeze({
     // 200 KB remains the simplification goal, not a reason to add brittle
     // indirection. The release guard permits the current straightforward ESM
     // design only while it remains below 300 KB and meets the 3-second gate.
-    serviceWorker: Object.freeze({ modules: 76, graphBytes: 300_000, entryBytes: 30_000 }),
+    serviceWorker: Object.freeze({ modules: 80, graphBytes: 300_000, entryBytes: 30_000 }),
     sidepanel: Object.freeze({ modules: 75, graphBytes: 300_000, entryBytes: 50_000 }),
     home: Object.freeze({ modules: 75, graphBytes: 300_000, entryBytes: 50_000 }),
     offscreen: Object.freeze({ modules: 25, graphBytes: 100_000, entryBytes: 25_000 }),
     timing: Object.freeze({ usableMaxMs: 3_000 }),
   }),
   firefox: Object.freeze({
-    serviceWorker: Object.freeze({ modules: 76, graphBytes: 300_000, entryBytes: 30_000 }),
+    serviceWorker: Object.freeze({ modules: 80, graphBytes: 300_000, entryBytes: 30_000 }),
     sidepanel: Object.freeze({ modules: 75, graphBytes: 300_000, entryBytes: 50_000 }),
     home: Object.freeze({ modules: 75, graphBytes: 300_000, entryBytes: 50_000 }),
     timing: Object.freeze({ usableMaxMs: 3_000 }),

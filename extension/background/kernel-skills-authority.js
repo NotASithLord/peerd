@@ -96,16 +96,16 @@ export const createKernelSkillsAuthority = ({
   };
 
   const remove = async (/** @type {string} */ name) => {
-    const existing = await transact(META_STORE, 'readonly', (transaction) =>
-      settled(transaction.objectStore(META_STORE).get(name)));
-    if (!existing) return false;
-    canWrite?.();
-    await transact([META_STORE, BODY_STORE], 'readwrite', (transaction) => {
+    const removed = await transact([META_STORE, BODY_STORE], 'readwrite', async (transaction) => {
+      const meta = await settled(transaction.objectStore(META_STORE).get(name));
+      if (!meta) return false;
+      canWrite?.();
       transaction.objectStore(META_STORE).delete(name);
       transaction.objectStore(BODY_STORE).delete(name);
+      return true;
     });
-    audit({ type: 'skill_removed', details: { name } }).catch(() => {});
-    return true;
+    if (removed) audit({ type: 'skill_removed', details: { name } }).catch(() => {});
+    return removed;
   };
 
   const routes = Object.freeze({
