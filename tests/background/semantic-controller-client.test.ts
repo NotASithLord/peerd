@@ -87,6 +87,7 @@ describe('production semantic controller slice', () => {
       'offscreen/artifact-worker.js',
       'background/offscreen-artifact-client.js',
       'background/repository-client.js',
+      'background/controller-turn-bridge.js',
     ];
     for (const entry of governed) expect(CONTROLLER_BUILD_ENTRIES).toContain(entry as any);
 
@@ -96,6 +97,19 @@ describe('production semantic controller slice', () => {
       const before = await controllerBuildDigest(root);
       const repositoryHost = join(root, 'offscreen', 'repository-host.js');
       writeFileSync(repositoryHost, `${readFileSync(repositoryHost, 'utf8')}\n// identity mutation\n`);
+      expect(await controllerBuildDigest(root)).not.toBe(before);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('build identity binds the kernel reverse-turn authority', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'peerd-controller-turn-identity-'));
+    try {
+      cpSync(EXTENSION_DIR, root, { recursive: true });
+      const before = await controllerBuildDigest(root);
+      const bridge = join(root, 'background', 'controller-turn-bridge.js');
+      writeFileSync(bridge, `${readFileSync(bridge, 'utf8')}\n// identity mutation\n`);
       expect(await controllerBuildDigest(root)).not.toBe(before);
     } finally {
       rmSync(root, { recursive: true, force: true });

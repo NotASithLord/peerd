@@ -26,6 +26,10 @@ export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
   'background/repository-client.js',
   'background/offscreen-controller-client.js',
   'background/direct-controller-client.js',
+  // Kernel-side reverse authority for turn.run is shared by legacy today and
+  // native later. It is not a child of a controller client, so bind it as an
+  // explicit root rather than letting authority drift behind a stale host.
+  'background/controller-turn-bridge.js',
   'offscreen/controller-shell.js',
   'offscreen/controller-bootstrap.js',
   'offscreen/controller-worker.js',
