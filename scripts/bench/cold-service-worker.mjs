@@ -31,7 +31,9 @@ import {
   COLD_START_LANES,
   COLD_START_PHASES,
   COLD_START_TARGET_CUTOVER,
+  NATIVE_FLOOR_CONTRACT,
 } from './cold-start-policy.mjs';
+import { parseKernelIdentity } from '../../extension/shared/kernel-identity.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..', '..');
@@ -77,6 +79,7 @@ if (!['release', 'native-floor'].includes(runtimeTarget)) {
 }
 const nativeFloor = runtimeTarget === 'native-floor';
 const runtimeSurface = nativeFloor ? 'home' : 'sidepanel-tab';
+const coldBudgetMode = nativeFloor ? 'native-target' : 'enforce';
 const intOption = (name, fallback, minimum) => {
   if (options[name] === undefined) return fallback;
   const parsed = Number(options[name]);
@@ -94,8 +97,10 @@ const boolOption = (name, fallback = false) => {
 const lane = String(options.lane ?? 'local');
 const laneContract = COLD_START_LANES[lane];
 if (!laneContract) throw new Error('--lane must be local, pr, main, or release');
-const chromeWakes = intOption('chrome-wakes', laneContract.chrome.wakes, 0);
-const chromeProcesses = intOption('chrome-processes', laneContract.chrome.fresh, 1);
+const chromeWakes = intOption('chrome-wakes', nativeFloor
+  ? NATIVE_FLOOR_CONTRACT.confirmedStopWakes : laneContract.chrome.wakes, 0);
+const chromeProcesses = intOption('chrome-processes', nativeFloor
+  ? NATIVE_FLOOR_CONTRACT.freshProcesses : laneContract.chrome.fresh, 1);
 const firefoxProcesses = intOption('firefox-processes', laneContract.firefox.fresh ?? 1, 1);
 const firefoxWakes = intOption('firefox-wakes', laneContract.firefox.wakes, 0);
 const firefoxIdleMs = intOption('firefox-idle-ms', laneContract.firefox.idleMs, 1);
@@ -132,8 +137,9 @@ if (nativeFloor) {
   }
   if (allowFailures) throw new Error('--runtime-target=native-floor cannot allow failures');
   if (unsafeNoSandbox) throw new Error('--runtime-target=native-floor requires the Chrome sandbox');
-  if (chromeProcesses !== 1 || chromeWakes !== 1) {
-    throw new Error('--runtime-target=native-floor requires exactly one fresh launch and one wake');
+  if (chromeProcesses !== NATIVE_FLOOR_CONTRACT.freshProcesses
+      || chromeWakes !== NATIVE_FLOOR_CONTRACT.confirmedStopWakes) {
+    throw new Error('--runtime-target=native-floor requires exactly three fresh launches and three wakes');
   }
   if (options['graph-policy'] !== undefined && requestedGraphPolicy !== 'target') {
     throw new Error('--runtime-target=native-floor requires target graph policy');
@@ -208,6 +214,25 @@ const treeSha256 = (root) => {
     digest.update('\0');
   }
   return digest.digest('hex');
+};
+
+const plainRecord = (value) => value !== null && typeof value === 'object'
+  && !Array.isArray(value);
+const exactKeys = (value, keys) => plainRecord(value)
+  && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
+
+// The migration floor must prove which kernel ran without pretending the
+// intentionally incomplete route/event/port ledger is cutover-ready.
+export const inspectNativeFloorAssembly = (candidate) => {
+  if (!plainRecord(candidate)) throw new Error('native-floor assembly is invalid');
+  const assembly = /** @type {Record<string, any>} */ (candidate);
+  const identity = parseKernelIdentity(assembly.identity);
+  if (!identity) throw new Error('native-floor assembly identity is invalid');
+  if (!exactKeys(assembly.target, ['firefox', 'selfHostedChrome'])
+      || assembly.target.firefox !== false || assembly.target.selfHostedChrome !== false) {
+    throw new Error('native-floor assembly target posture is invalid');
+  }
+  return Object.freeze({ identity, report: candidate });
 };
 
 const materializeGitSource = (commitSha, destination) => {
@@ -778,6 +803,8 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
     const [bootstrap, state, bootModuleFromLaunchMs, vaultGateReadyFromLaunchMs] = await within(Promise.all([
       bootstrapPromise, statePromise, bootModulePromise, vaultGatePromise,
     ]), remaining(), 'Chrome fresh sample');
+    const assembly = nativeFloor ? inspectNativeFloorAssembly(bootstrap.reply?.assembly) : null;
+    const assemblyIdentity = assembly?.identity ?? null;
     const vaultGateReadyFromWorkerTargetMs = Math.max(
       0, vaultGateReadyFromLaunchMs - workerTargetMs,
     );
@@ -906,6 +933,8 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
         const { target, elapsedMs: workerTargetFromWakeMs } = targetResult;
         if (!target) throw new Error('Chrome wake produced no service-worker target');
         if (target.targetId === current.targetId) throw new Error('Chrome reused the terminated worker target');
+        const wakeAssembly = nativeFloor
+          ? inspectNativeFloorAssembly(wakeBootstrap.reply?.assembly) : null;
         let wakeGraphReadyMs = null;
         if (diagnostic) {
           const wakeWorker = await within(
@@ -932,6 +961,8 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
           stateFromWakeMs,
           vaultGateReadyFromWakeMs,
           kernelTiming: wakeBootstrap.reply?.timing ?? null,
+          assemblyIdentity: wakeAssembly?.identity ?? null,
+          assembly: wakeAssembly?.report ?? null,
         });
         console.log(`  forced wake ${sample + 1}/${wakeSamples}: actionable in ${round(vaultGateReadyFromWakeMs)}ms`);
       } catch (error) {
@@ -955,6 +986,8 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       vaultGateReadyFromLaunchMs,
       vaultGateReadyFromWorkerTargetMs,
       kernelTiming: bootstrap.reply?.timing ?? null,
+      assemblyIdentity,
+      assembly: assembly?.report ?? null,
       wakes, wakeFailures,
     };
   } catch (error) {
@@ -1034,6 +1067,7 @@ const buildChromeResult = async (measurement, prepared, processes, processFailur
   return {
     browser: 'chrome',
     version: processes[0]?.browserProduct ?? 'unknown',
+    nativeFloor: nativeFloor ? NATIVE_FLOOR_CONTRACT : null,
     measurement,
     artifact: {
       channel: 'store',
@@ -1051,6 +1085,9 @@ const buildChromeResult = async (measurement, prepared, processes, processFailur
       harnessSha256: await harnessSha256(),
       coldBudgetMode: store.coldBudgetMode,
       packageVersion: store.packageVersion,
+      sourceCommitSha: measurement.sourceCommitSha,
+      sourceDirty: measurement.sourceDirty,
+      nativeFloor: nativeFloor ? NATIVE_FLOOR_CONTRACT : null,
     },
     packagedGraphs: store.graphs,
     packagedGraphsByChannel: Object.fromEntries(['store', 'preview']
@@ -1406,6 +1443,8 @@ const buildFirefoxResult = async (
     measurement,
     artifact: {
       channel: 'store',
+      runtimeTarget,
+      runtimeSurface,
       archiveSha256: store.archiveSha256,
       treeSha256: store.treeSha256,
       channels: Object.fromEntries(['store', 'preview'].map((channel) => [channel, {
@@ -1423,6 +1462,9 @@ const buildFirefoxResult = async (
       harnessSha256: await harnessSha256(),
       coldBudgetMode: store.coldBudgetMode,
       packageVersion: store.packageVersion,
+      sourceCommitSha: measurement.sourceCommitSha,
+      sourceDirty: measurement.sourceDirty,
+      nativeFloor: null,
     },
     packagedGraphs: store.graphs,
     packagedGraphsByChannel: Object.fromEntries(['store', 'preview']
@@ -1562,6 +1604,9 @@ export const main = async () => {
         clock: 'host-monotonic:node-hrtime',
         lane,
         runtimeTarget,
+        runtimeSurface,
+        coldBudgetMode: role === 'candidate' ? coldBudgetMode : 'measure-only',
+        nativeFloor: null,
         sourceCommitSha: source.commitSha,
         sourcePackageVersion: source.packageVersion,
         sourceDirty: false,
@@ -1577,6 +1622,9 @@ export const main = async () => {
         clock: 'host-monotonic:node-hrtime',
         lane,
         runtimeTarget,
+        runtimeSurface,
+        coldBudgetMode,
+        nativeFloor: nativeFloor ? NATIVE_FLOOR_CONTRACT : null,
         sourceCommitSha: commitSha,
         sourcePackageVersion: VERSION,
         sourceDirty: dirty,
@@ -1590,6 +1638,9 @@ export const main = async () => {
     packageVersion: VERSION,
     lane,
     runtimeTarget,
+    runtimeSurface,
+    coldBudgetMode,
+    nativeFloor: nativeFloor ? NATIVE_FLOOR_CONTRACT : null,
     commitSha,
     baseCommitSha,
     dirty,
@@ -1606,6 +1657,7 @@ export const main = async () => {
       browser: browserChoice,
       runtimeTarget,
       runtimeSurface,
+      coldBudgetMode,
       enforcement: laneContract.enforcement,
       graphPolicy,
       requireTimingTargets,
@@ -1620,7 +1672,7 @@ export const main = async () => {
     },
     host,
     note: nativeFloor
-      ? 'Local native-floor diagnostic: Chrome runs the exact release-minified copied Store kernel artifact named by archiveSha256, records the separate Store and Preview native graphs, and proves one fresh worker start plus one confirmed worker stop/wake against the 3-second extension target. CDP cannot open the browser-owned side panel, so the runtime CTA is measured on the exact tab-owned Home authority surface. Full browser launch remains reported but is not charged to the service worker. This does not change or claim the live release manifest.'
+      ? 'Local native-floor diagnostic: Chrome runs the exact one-module release-minified copied Store kernel artifact named by archiveSha256 in three independent fresh profiles, with one confirmed-stop wake per profile. Every raw sample binds the native assembly identity and exact worker-relative timing schema while host-monotonic raw maxima remain gated at three seconds. Store runs physically; Preview contributes a separately hashed native graph. CDP cannot open the browser-owned side panel, so the runtime CTA is measured on the exact tab-owned Home authority surface. Full browser launch remains reported but is not charged to the service worker. This does not change or claim the live release manifest.'
       : 'Every browser runs the exact unsigned Store artifact named by archiveSha256 and records both Store and Preview cold graphs against their own immutable archive/tree digests. Browser launch/install to visible shell, bootstrap, state and actionable-vault clocks are host-monotonic; page/worker clocks are diagnostic only and no benchmark source is injected into the extension.',
     results: {},
     ...(comparisonSources ? { baseResults: {}, pairAssessments: {} } : {}),

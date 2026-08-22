@@ -5,10 +5,12 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  chmodSync, cpSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync,
+  chmodSync, cpSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync,
   utimesSync, writeFileSync,
 } from 'node:fs';
-import { join, relative } from 'node:path';
+import {
+  isAbsolute, join, relative, resolve, sep,
+} from 'node:path';
 import { ARTIFACTS_DIR, REPO_ROOT, readVersion } from '../../packaging/lib.ts';
 import { packageArtifact } from '../../packaging/package.ts';
 import {
@@ -67,6 +69,7 @@ export const assertVaultKernelReleaseTarget = ({
 export async function bundleChromeVaultKernel(staging, entryRelative) {
   const entry = join(staging, entryRelative);
   const scratch = join(staging, '.vault-kernel-bundle');
+  const stagingRoot = realpathSync(staging);
   rmSync(scratch, { recursive: true, force: true });
   const runtimeImports = new Set();
   try {
@@ -80,8 +83,9 @@ export async function bundleChromeVaultKernel(staging, entryRelative) {
       minify: { whitespace: true, identifiers: true, syntax: true },
       keepNames: true,
       splitting: false,
+      metafile: true,
       plugins: [{
-        name: 'fixed-native-runtime-imports',
+        name: 'fixed-native-bundle-inputs',
         setup(build) {
           build.onResolve({
             filter: /^\.\/(?:firefox-storage-keepalive|repository-local-client)\.js$/,
@@ -90,12 +94,44 @@ export async function bundleChromeVaultKernel(staging, entryRelative) {
             contents: 'export {};\n',
             loader: 'js',
           }));
+          // Browser-root imports name the extension root, not the checkout.
+          // Without this resolver Bun applies the repository tsconfig and can
+          // silently mix authored dev files into the copied Store/Preview tree.
+          build.onResolve({ filter: /^\// }, (args) => {
+            if (!args.importer) return undefined;
+            const target = resolve(stagingRoot, args.path.slice(1));
+            const fromStaging = relative(stagingRoot, target);
+            if (fromStaging === '..' || fromStaging.startsWith(`..${sep}`)
+                || isAbsolute(fromStaging)) {
+              throw new Error(`native Chrome bundle root import escaped staging: ${args.path}`);
+            }
+            return { path: target };
+          });
         },
       }],
     });
     if (!result.success || result.outputs.length !== 1) {
       throw new Error(`native Chrome bundle failed: ${result.logs.join('\n')}`);
     }
+    const inputs = [];
+    const leakedInputs = [];
+    const bundledInputs = Object.keys(result.metafile?.inputs ?? {});
+    if (bundledInputs.length === 0) throw new Error('native Chrome bundle input ledger missing');
+    for (const input of bundledInputs) {
+      if (input.startsWith('chrome-unreachable-runtime:')) continue;
+      const absolute = realpathSync(resolve(input));
+      const fromStaging = relative(stagingRoot, absolute);
+      if (fromStaging === '..' || fromStaging.startsWith(`..${sep}`)
+          || isAbsolute(fromStaging)) {
+        leakedInputs.push(input);
+      } else {
+        inputs.push(fromStaging.split('\\').join('/'));
+      }
+    }
+    if (leakedInputs.length > 0) {
+      throw new Error(`native Chrome bundle input escaped staging: ${leakedInputs.sort().join(', ')}`);
+    }
+    inputs.sort();
     const output = readFileSync(result.outputs[0].path, 'utf8');
     const staticImports = await staticImportSpecifiers(output, entryRelative);
     if (staticImports.length !== 0) {
@@ -108,7 +144,11 @@ export async function bundleChromeVaultKernel(staging, entryRelative) {
       throw new Error(`native Chrome runtime imports changed: ${dynamicImports.join(', ')}`);
     }
     writeFileSync(entry, output.endsWith('\n') ? output : `${output}\n`);
-    return Object.freeze({ bytes: statSync(entry).size, runtimeImports: expected });
+    return Object.freeze({
+      bytes: statSync(entry).size,
+      runtimeImports: Object.freeze(expected),
+      inputs: Object.freeze(inputs),
+    });
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

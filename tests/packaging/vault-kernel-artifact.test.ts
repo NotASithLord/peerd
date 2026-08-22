@@ -4,6 +4,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { genBuildConfigSource } from '../../packaging/gen-build-config.ts';
 import { REPO_ROOT } from '../../packaging/lib.ts';
 import {
   assertVaultKernelReleaseTarget,
@@ -83,6 +84,10 @@ describe('test-only vault kernel package target', () => {
       const output = readFileSync(join(background, 'vault-kernel.js'), 'utf8');
       expect(NATIVE_CHROME_PRUNED_IMPORTS).toHaveLength(2);
       expect(result.runtimeImports).toEqual([]);
+      expect(result.inputs).toEqual([
+        'background/dep.js',
+        'background/vault-kernel.js',
+      ]);
       expect(output).toContain('peerd.kernel.bundle-start.v1');
       expect(output.trimStart().startsWith('(()=>')).toBe(false);
       expect(output).not.toContain('export{');
@@ -103,6 +108,77 @@ describe('test-only vault kernel package target', () => {
       expect(result.bytes).toBeLessThan(2_000);
     } finally {
       rmSync(staging, { recursive: true, force: true });
+    }
+  });
+
+  test('Chrome bundles only staged Store and Preview target identity', async () => {
+    const targets = [
+      {
+        channel: 'store' as const,
+        entry: 'background/vault-kernel.js',
+        digest: 'a'.repeat(64),
+        dwebEnabled: false,
+        advancedAutomationEnabled: false,
+        webActorActionSurface: 'tools',
+      },
+      {
+        channel: 'preview' as const,
+        entry: 'background/vault-kernel-preview.js',
+        digest: 'b'.repeat(64),
+        dwebEnabled: true,
+        advancedAutomationEnabled: true,
+        webActorActionSurface: 'code',
+      },
+    ];
+    for (const target of targets) {
+      const staging = mkdtempSync(join(tmpdir(), `peerd-native-${target.channel}-bundle-`));
+      const background = join(staging, 'background');
+      const shared = join(staging, 'shared');
+      mkdirSync(background, { recursive: true });
+      mkdirSync(shared, { recursive: true });
+      const manifest = {
+        version: '0.7.3',
+        background: { service_worker: target.entry, type: 'module' },
+      };
+      const buildConfig = genBuildConfigSource(manifest, {
+        browser: 'chrome', channel: target.channel,
+        dwebEnabled: target.dwebEnabled,
+      }).replace('0'.repeat(64), target.digest);
+      writeFileSync(join(shared, 'build-config.js'), buildConfig);
+      writeFileSync(join(staging, target.entry), [
+        'import {',
+        '  BACKGROUND_MODULE_PATH, BROWSER, CHANNEL, CHANNEL_DEFAULTS,',
+        '  CONTROLLER_BUILD_DIGEST, DWEB_ENABLED,',
+        "} from '/shared/build-config.js';",
+        'globalThis.__peerdNativeBundleTarget = {',
+        '  background: BACKGROUND_MODULE_PATH, browser: BROWSER, channel: CHANNEL,',
+        '  digest: CONTROLLER_BUILD_DIGEST, dwebEnabled: DWEB_ENABLED,',
+        '  advancedAutomationEnabled: CHANNEL_DEFAULTS.advancedAutomationEnabled,',
+        '  webActorActionSurface: CHANNEL_DEFAULTS.webActorActionSurface,',
+        '};',
+        '',
+      ].join('\n'));
+      try {
+        const result = await bundleChromeVaultKernel(staging, target.entry);
+        expect(result.inputs).toEqual([
+          target.entry,
+          'shared/build-config.js',
+        ].sort());
+        Function(readFileSync(join(staging, target.entry), 'utf8'))();
+        expect((globalThis as any).__peerdNativeBundleTarget).toEqual({
+          background: target.entry,
+          browser: 'chrome',
+          channel: target.channel,
+          digest: target.digest,
+          dwebEnabled: target.dwebEnabled,
+          advancedAutomationEnabled: target.advancedAutomationEnabled,
+          webActorActionSurface: target.webActorActionSurface,
+        });
+      } finally {
+        delete (globalThis as any).__peerdNativeBundleTarget;
+        delete (globalThis as any)[Symbol.for('peerd.kernel.bundle-start.v1')];
+        rmSync(staging, { recursive: true, force: true });
+      }
     }
   });
 
@@ -132,6 +208,13 @@ describe('test-only vault kernel package target', () => {
     expect(source).toContain('dwebEnabled: dwebEnabledForTarget(channel, browser), channel, browser');
     expect(source).toContain('writeControllerBuildIdentity(staging)');
     expect(source).not.toContain('generateManifest(');
+  });
+
+  test('bundled kernel timing keeps the worker-origin reply marker', () => {
+    const source = readFileSync(
+      join(REPO_ROOT, 'extension/background/vault-kernel.js'), 'utf8',
+    );
+    expect(source).toContain('replyFromWorkerTimeOriginMs');
   });
 
   test('release packaging requires the actual controller identity leaf before stamping', () => {

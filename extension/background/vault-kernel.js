@@ -668,24 +668,28 @@ const assemblyReport = () => Object.freeze({
 
 /** @type {Record<string, (message?: any, sender?: any) => Promise<any>|any>} */
 const routes = {
-  'bootstrap/ready': async () => ({
-    ok: true,
-    kernel: true,
-    assembly: assemblyReport(),
-    timing: Object.freeze({
-      clock: 'worker-performance-now-diagnostic',
-      moduleEvaluationMs: Math.max(0, kernelModuleEvaluatedAt),
-      bundleExecutionBeforeKernelMs: Number.isFinite(kernelBundleStartedAt)
-        ? Math.max(0, kernelModuleEvaluatedAt - kernelBundleStartedAt) : null,
-      vaultReadyAfterModuleMs: kernelVaultReadyAt === null
-        ? null : Math.max(0, kernelVaultReadyAt - kernelModuleEvaluatedAt),
-      kernelReadyAfterModuleMs: kernelReadyAt === null
-        ? null : Math.max(0, kernelReadyAt - kernelModuleEvaluatedAt),
-      replyAfterModuleMs: Math.max(0, kernelClockNow() - kernelModuleEvaluatedAt),
-      replyAfterBundleStartMs: Number.isFinite(kernelBundleStartedAt)
-        ? Math.max(0, kernelClockNow() - kernelBundleStartedAt) : null,
-    }),
-  }),
+  'bootstrap/ready': async () => {
+    const replyFromWorkerTimeOriginMs = kernelClockNow();
+    return {
+      ok: true,
+      kernel: true,
+      assembly: assemblyReport(),
+      timing: Object.freeze({
+        clock: 'worker-performance-now-diagnostic',
+        moduleEvaluationMs: Math.max(0, kernelModuleEvaluatedAt),
+        bundleExecutionBeforeKernelMs: Number.isFinite(kernelBundleStartedAt)
+          ? Math.max(0, kernelModuleEvaluatedAt - kernelBundleStartedAt) : null,
+        vaultReadyAfterModuleMs: kernelVaultReadyAt === null
+          ? null : Math.max(0, kernelVaultReadyAt - kernelModuleEvaluatedAt),
+        kernelReadyAfterModuleMs: kernelReadyAt === null
+          ? null : Math.max(0, kernelReadyAt - kernelModuleEvaluatedAt),
+        replyAfterModuleMs: Math.max(0, replyFromWorkerTimeOriginMs - kernelModuleEvaluatedAt),
+        replyAfterBundleStartMs: Number.isFinite(kernelBundleStartedAt)
+          ? Math.max(0, replyFromWorkerTimeOriginMs - kernelBundleStartedAt) : null,
+        replyFromWorkerTimeOriginMs: Math.max(0, replyFromWorkerTimeOriginMs),
+      }),
+    };
+  },
   ...systemReadRoutes,
   'lifecycle/assert-opfs-writable': opfsPostureRoute,
   ...makeKernelAppCatalogRoutes({

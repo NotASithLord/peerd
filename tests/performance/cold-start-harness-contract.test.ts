@@ -34,6 +34,32 @@ describe('cold-start browser harness contract', () => {
     expect(() => module.packagedBackgroundEntry(root, 'chrome')).toThrow();
   });
 
+  test('native floor accepts honest migration assembly but rejects identity or target forgery', async () => {
+    const { inspectNativeFloorAssembly } = await import(
+      '../../scripts/bench/cold-service-worker.mjs'
+    );
+    const candidate = {
+      identity: {
+        schema: 1, buildId: `0.7.3:${'a'.repeat(64)}`,
+        bootId: 'native-floor-boot', kernelEpoch: 'native-floor-epoch',
+      },
+      target: { firefox: false, selfHostedChrome: false },
+      cutoverReady: false,
+      semantic: { schema: 2, total: 161, migrated: 86, ready: false },
+      missingRequiredEvents: ['runtime.onStartup'],
+    };
+    const accepted = inspectNativeFloorAssembly(candidate);
+    expect(accepted.report).toBe(candidate);
+    expect(accepted.identity).toEqual(candidate.identity);
+    expect(candidate.cutoverReady).toBe(false);
+    expect(() => inspectNativeFloorAssembly({
+      ...candidate, identity: { ...candidate.identity, forged: true },
+    })).toThrow('assembly identity is invalid');
+    expect(() => inspectNativeFloorAssembly({
+      ...candidate, target: { firefox: false, selfHostedChrome: true },
+    })).toThrow('assembly target posture is invalid');
+  });
+
   test('does not silently switch a required lane onto the not-yet-required pair gate', () => {
     const run = spawnSync(process.execPath, [
       harness, '--lane=pr', '--comparison=interleaved-candidate-base', '--help',
@@ -76,14 +102,16 @@ describe('cold-start browser harness contract', () => {
     }
   });
 
-  test('native floor is one fixed clean Chrome fresh-and-wake target', () => {
+  test('native floor is one fixed clean Chrome three-profile fresh-and-wake target', () => {
     const base = [harness, '--lane=local', '--browser=chrome', '--runtime-target=native-floor'];
     const accepted = spawnSync(process.execPath, [...base, '--help'], { encoding: 'utf8' });
     expect(accepted.status).toBe(0);
 
     const attacks = [
-      ['--chrome-wakes=0', 'requires exactly one fresh launch and one wake'],
-      ['--chrome-processes=2', 'requires exactly one fresh launch and one wake'],
+      ['--chrome-wakes=2', 'requires exactly three fresh launches and three wakes'],
+      ['--chrome-wakes=4', 'requires exactly three fresh launches and three wakes'],
+      ['--chrome-processes=2', 'requires exactly three fresh launches and three wakes'],
+      ['--chrome-processes=4', 'requires exactly three fresh launches and three wakes'],
       ['--graph-policy=ratchet', 'requires target graph policy'],
       ['--require-timing-targets=false', 'requires the timing target'],
       ['--allow-failures=true', 'cannot allow failures'],
@@ -102,10 +130,14 @@ describe('cold-start browser harness contract', () => {
       expect(text).toContain("for (const channel of ['store', 'preview'])");
       expect(text).toContain('releaseMinify: true');
       expect(text).toContain("coldBudgetMode: 'native-target'");
+      expect(text).toContain('NATIVE_FLOOR_CONTRACT.freshProcesses');
+      expect(text).toContain('NATIVE_FLOOR_CONTRACT.confirmedStopWakes');
       expect(text).toContain("nativeFloor ? 'home/home.html' : 'sidepanel/sidepanel.html'");
       expect(text).toContain("extensionDir: prepared.store.extensionDir");
       expect(text).toContain('wakeSamples: sample < chromeWakes ? 1 : 0');
       expect(text).toContain('vaultGateReadyFromWorkerTargetMs');
+      expect(text).toContain('assemblyIdentity');
+      expect(text).toContain('inspectNativeFloorAssembly(bootstrap.reply?.assembly)');
       expect(text).toContain('deadlineAt = hostNowMs() + coldTimeoutMs');
       expect(text).toContain("row?.status === 'activated'");
       expect(text).toContain("row.scriptURL.endsWith(backgroundEntry)");
