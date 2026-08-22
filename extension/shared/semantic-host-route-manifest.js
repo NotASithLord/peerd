@@ -32,6 +32,9 @@ export const SEMANTIC_HOST_ROUTE_CLASSIFICATIONS = Object.freeze([
   row('memory/suggestions/dismiss', 'extension/background/routes/memory.js'),
   row('memory/write', 'extension/background/routes/memory.js'),
   row('provider/status', 'extension/background/routes/providers.js'),
+  row('skills/list', 'extension/background/routes/skills.js'),
+  row('skills/remove', 'extension/background/routes/skills.js'),
+  row('skills/setEnabled', 'extension/background/routes/skills.js'),
   row('toolbox/read'),
   row('toolbox/record'),
 ]);

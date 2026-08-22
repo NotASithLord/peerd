@@ -18,6 +18,7 @@ export {
   createKernelDenylistPolicy,
   makeKernelDenylistRoutes,
 } from './kernel-denylist-policy.js';
+export { createKernelSkillsAuthority } from './kernel-skills-authority.js';
 
 const COMMAND_PREFIX = 'peerd.commands.';
 const SKILLS_DB = 'peerd-skills';

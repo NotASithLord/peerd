@@ -36,6 +36,11 @@ const memory = (/** @type {string} */ route) => (
   /** @type {any} */ options,
 ) => import('./semantic-routes/memory.js')
   .then((module) => module.dispatchMemorySemanticRoute(route, message, options));
+const skills = (/** @type {string} */ route) => (
+  /** @type {any} */ message,
+  /** @type {any} */ options,
+) => import('./semantic-routes/skills.js')
+  .then((module) => module.dispatchSkillsSemanticRoute(route, message, options));
 const runtime = createSemanticDispatchRuntime({
   classifications: SEMANTIC_HOST_ROUTE_CLASSIFICATIONS,
   handlers: {
@@ -55,6 +60,9 @@ const runtime = createSemanticDispatchRuntime({
     'memory/suggestions/dismiss': memory('memory/suggestions/dismiss'),
     'memory/write': memory('memory/write'),
     'provider/status': providers('provider/status'),
+    'skills/list': skills('skills/list'),
+    'skills/remove': skills('skills/remove'),
+    'skills/setEnabled': skills('skills/setEnabled'),
     'toolbox/read': toolbox('toolbox/read'),
     'toolbox/record': toolbox('toolbox/record'),
   },

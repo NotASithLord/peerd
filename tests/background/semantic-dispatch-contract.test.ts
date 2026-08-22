@@ -92,6 +92,7 @@ describe('generated semantic route inventory', () => {
       'settings/reset', 'settings/update',
       'sidepanel/close',
       'site-client/delete', 'site-client/list',
+      'skills/list', 'skills/remove', 'skills/setEnabled',
       'state/get',
       'surfaces/get',
       'toolbox/read', 'toolbox/record',
@@ -103,7 +104,7 @@ describe('generated semantic route inventory', () => {
     expect(SEMANTIC_ROUTE_CUTOVER).toMatchObject({
       ready: false, expected: 161, classified: 161, missing: [], extra: [],
     });
-    expect(SEMANTIC_ROUTE_CUTOVER.unmigrated).toHaveLength(73);
+    expect(SEMANTIC_ROUTE_CUTOVER.unmigrated).toHaveLength(70);
   });
 
   test('does not let a candidate table hide missing, extra, or unmigrated routes', () => {

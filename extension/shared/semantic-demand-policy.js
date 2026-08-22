@@ -34,6 +34,9 @@ const POLICIES = Object.freeze({
   'memory/suggestions': Object.freeze({ 'semantic.memory.suggestions': 1 }),
   'memory/suggestions/approve': Object.freeze({ 'semantic.memory.approve': 1 }),
   'memory/suggestions/dismiss': Object.freeze({ 'semantic.memory.dismiss': 1 }),
+  'skills/list': Object.freeze({ 'semantic.skills.list': 1 }),
+  'skills/setEnabled': Object.freeze({ 'semantic.skills.set-enabled': 1 }),
+  'skills/remove': Object.freeze({ 'semantic.skills.remove': 1 }),
 });
 
 const refusal = (/** @type {string} */ code, /** @type {boolean} */ known = true) =>

@@ -146,9 +146,11 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
   // Native ESM cluster seams are deliberate: the kernel statically owns only
   // small authority adapters while sealed feature implementations remain
   // fixed-literal lazy entries. A 76-module ceiling preserves that modular
-  // shape; the 450 KB byte and 26 direct-edge ceilings still prevent a facade
-  // from smuggling a rich feature graph back into first wake.
-  kernel: Object.freeze({ modules: 76, graphBytes: 450_000, entryBytes: 40_000, directImports: 26 }),
+  // shape; the byte and 26 direct-edge ceilings still prevent a facade from
+  // smuggling a rich feature graph back into first wake. 450 KB -> 460 KB:
+  // the reviewed denylist-editor/DNR-custody and skills metadata-authority
+  // adapters (route migration; no feature implementation pulled cold).
+  kernel: Object.freeze({ modules: 76, graphBytes: 460_000, entryBytes: 40_000, directImports: 26 }),
   sidepanel: Object.freeze({ modules: 75, graphBytes: 650_000, entryBytes: 50_000 }),
   home: Object.freeze({ modules: 75, graphBytes: 650_000, entryBytes: 50_000 }),
   offscreen: Object.freeze({ modules: 25, graphBytes: 200_000, entryBytes: 40_000 }),

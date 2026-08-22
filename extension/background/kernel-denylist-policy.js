@@ -77,10 +77,8 @@ export const createKernelDenylistPolicy = ({
     blocks,
     patterns: store.patterns,
     snapshot,
-    // why edits await ready() first: mutating before the seed + overlay
-    // hydrate would let load() replace the in-memory overlay mid-edit. The
-    // seed outcome itself is not a gate — like the legacy editor, overlay
-    // writes stay durable even when this boot's seed fetch failed.
+    // why edits await ready(): a later load() must not replace the overlay
+    // mid-edit; the seed outcome itself is not a gate (legacy parity).
     add: async (/** @type {unknown} */ pattern) => {
       await ready();
       return store.add(pattern);
@@ -92,10 +90,8 @@ export const createKernelDenylistPolicy = ({
   });
 };
 
-// The complete session-rule id set the denylist network backstop may own,
-// expressed compactly so the cold graph does not evaluate the 23 KB rule-math
-// module. A meta-test proves this projection equals exactly the ids
-// peerd-egress/denylist/dnr-rules.js derives.
+// why a compact projection: the cold graph must not evaluate the 23 KB
+// rule-math module; a meta-test pins these ids to dnr-rules.js.
 const range = (/** @type {number} */ from, /** @type {number} */ to) =>
   Array.from({ length: to - from + 1 }, (_ignored, index) => from + index);
 export const OWNED_DENYLIST_SESSION_RULE_IDS = Object.freeze([
@@ -103,15 +99,11 @@ export const OWNED_DENYLIST_SESSION_RULE_IDS = Object.freeze([
 ]);
 
 /**
- * Compact kernel custody of the denylist's declarativeNetRequest backstop.
- *
- * why remove-only is currently correct: every rule the full math can build is
- * scoped to a driven tab, App tab, or custodied initiator domain, and the
- * native kernel has not migrated tab custody — its driven set is empty by
- * construction, for which the legacy guard also emits "remove every owned id,
- * add nothing". The tab-custody migration slice must replace this leaf with
- * scoped rule construction; keeping the sync edge live here means a denylist
- * edit cannot silently drop the resync obligation before then.
+ * Compact DNR backstop custody. why remove-only is currently correct: every
+ * buildable rule is scoped to driven/App tabs or custodied initiators, and
+ * kernel tab custody is unmigrated — the empty driven set yields exactly
+ * "remove every owned id". The tab-custody slice must replace this leaf;
+ * details in docs/THIN-KERNEL-ARCHITECTURE.md.
  * @param {Object} deps
  * @param {any} [deps.dnr] the chrome.declarativeNetRequest namespace
  */
@@ -140,9 +132,8 @@ export const createKernelDenylistNetworkCustody = ({ dnr }) => {
 };
 
 /**
- * The denylist editor's mutation routes — the kernel-owned counterpart of the
- * legacy Logs-view editor. Every edit resyncs the network backstop and is
- * audited before the shared snapshot reply.
+ * Denylist editor mutations (legacy Logs-view parity): resync backstop,
+ * audit, snapshot reply.
  * @param {Object} deps
  * @param {{snapshot:()=>Promise<any>,add:(pattern:unknown)=>Promise<any>,
  *   remove:(pattern:unknown)=>Promise<any>}} deps.policy

@@ -49,6 +49,7 @@ import {
 import {
   createKernelDenylistNetworkCustody,
   createKernelDenylistPolicy,
+  createKernelSkillsAuthority,
   makeKernelComposerRoutes,
   makeKernelDenylistRoutes,
 } from './kernel-composer-routes.js';
@@ -746,6 +747,11 @@ const routes = {
   ...makeKernelComposerRoutes({
     browser, kv, idb, sessionCache, vault, denylist: denylistPolicy, appFiles,
   }),
+  ...createKernelSkillsAuthority({
+    canWrite: () => writeGuard.assertWritable('skills'),
+    audit: auditLog.append,
+    pushState,
+  }).routes,
   ...makeKernelDenylistRoutes({
     policy: denylistPolicy,
     networkCustody: createKernelDenylistNetworkCustody({
