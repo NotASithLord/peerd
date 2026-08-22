@@ -108,6 +108,8 @@ describe('cold-start browser harness contract', () => {
       expect(text).toContain('vaultGateReadyFromWorkerTargetMs');
       expect(text).toContain("row?.status === 'activated'");
       expect(text).toContain("row.scriptURL.endsWith(backgroundEntry)");
+      expect(text).toContain("worker.send('Runtime.runIfWaitingForDebugger'");
+      expect(text).toContain('if (target) await resumeChromeWorker(target, wakeRemaining())');
       expect(text).toContain("location.href === 'about:blank'");
       expect(text).toContain("requireClean: lane === 'release' || nativeFloor");
       expect(text).not.toContain('runNativeFloorChromeProcess');
