@@ -241,12 +241,35 @@ enabled skill descriptions, and App file paths: command/skill bodies and App
 bytes remain demand-loaded.
 
 It also owns vault/session/system reads, App catalog list/favorite metadata,
-and a lazy fail-closed denylist projection for the composer tab picker. The
-current native graph is 73 modules, 445,542 authored bytes, a 30,540-byte
-entry, and 26 direct imports; all 86 routes marked migrated are executable
-from that entry. The release transform produces a one-module Store Chrome
-kernel of 183,385 bytes and a one-module Preview Chrome kernel of 191,281
-bytes. Their fixed host
+and a lazy fail-closed denylist projection for the composer tab picker. Four
+further route families now execute natively: the denylist editor (edits over
+the same store the policy reads, audited, with a compact DNR network-custody
+leaf), skills management (a metadata-only authority over the peerd-skills
+meta tier — parsing and installs stay demand-loaded, with a matching sealed
+host cluster), origin API-key custody with the complete DPoP key lifecycle
+(provision mints the nonextractable keypair, list reads the public jkt
+without minting, revoke retires both halves; the issue-251 learned-origin
+seam is an injected callback the web-actor slice must fill), and the shared
+Git-credential factory. The DPoP module split along its own pure/shell
+pattern so key custody never evaluates proof shaping: byte/JWK primitives in
+`dpop/jwk.js`, proof signing in the boundary-only `dpop/sign.js`.
+
+The denylist network-custody leaf is deliberately remove-only for now: every
+rule the full dnr-rules math can build is scoped to a driven tab, App tab,
+or custodied initiator domain, and the native kernel has not migrated tab
+custody — its driven set is empty by construction, for which the legacy
+guard also emits "remove every owned id, add nothing". A meta-test pins the
+compact owned-id projection to `peerd-egress/denylist/dnr-rules.js`, and the
+tab-custody migration slice must replace the leaf with scoped rule
+construction; keeping the sync edge live means a denylist edit cannot
+silently drop the resync obligation before then.
+
+The exact graph and ledger numbers live in the executable sources — module,
+byte, entry, and direct-import ceilings in
+[cold-start-budgets.js](../scripts/bench/cold-start-budgets.js), the live
+cutover counts in `SEMANTIC_CUTOVER_SUMMARY` and the reviewed route
+classification. The release transform still produces one-module Store and
+Preview Chrome kernels whose fixed host
 implementations remain absent from the static service-worker closure. The
 generated ledger still blocks manifest cutover for every unavailable route; a
 working pilot cluster does not weaken that all-route gate.
