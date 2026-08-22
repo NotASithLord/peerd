@@ -8,7 +8,7 @@ import { REPO_ROOT } from '../../packaging/lib.ts';
 import {
   assertVaultKernelReleaseTarget,
   bundleChromeVaultKernel,
-  NATIVE_CHROME_RUNTIME_IMPORTS,
+  NATIVE_CHROME_PRUNED_IMPORTS,
   vaultKernelClassicManifest,
   vaultKernelManifest,
 } from '../../scripts/cdp/vault-kernel-artifact.mjs';
@@ -69,28 +69,30 @@ describe('test-only vault kernel package target', () => {
     })).toThrow('graphBytes 300001 exceeds 300000');
   });
 
-  test('Chrome ships one bundle with only the two fixed Firefox runtime edges', async () => {
+  test('Chrome ships one classic bundle and prunes both Firefox runtime edges', async () => {
     const staging = mkdtempSync(join(tmpdir(), 'peerd-native-kernel-bundle-'));
     const background = join(staging, 'background');
     mkdirSync(background, { recursive: true });
     writeFileSync(join(background, 'dep.js'), 'export const answer = 42;\n');
     writeFileSync(join(background, 'vault-kernel.js'), [
       "import { answer } from './dep.js';",
+      "const kernelFirefox = 'chrome' === 'firefox';",
       'export const value = answer;',
-      "export const firefox = () => import('./firefox-storage-keepalive.js');",
-      "export const repository = () => import('./repository-local-client.js');",
+      "export const firefox = kernelFirefox ? () => import('./firefox-storage-keepalive.js') : undefined;",
+      "export const repository = kernelFirefox ? () => import('./repository-local-client.js') : undefined;",
       '',
     ].join('\n'));
     try {
       const result = await bundleChromeVaultKernel(staging, 'background/vault-kernel.js');
       const output = readFileSync(join(background, 'vault-kernel.js'), 'utf8');
-      expect(result.runtimeImports).toEqual([...NATIVE_CHROME_RUNTIME_IMPORTS].sort());
+      expect(NATIVE_CHROME_PRUNED_IMPORTS).toHaveLength(2);
+      expect(result.runtimeImports).toEqual([]);
       expect(output.trimStart().startsWith('(()=>')).toBe(true);
       expect(output).not.toContain('export{');
       expect(output).not.toContain("from'./dep.js'");
       expect(output).not.toContain('from"./dep.js"');
       expect([...output.matchAll(/\bimport\((['"])([^'"]+)\1\)/g)]
-        .map((match) => match[2]).sort()).toEqual([...NATIVE_CHROME_RUNTIME_IMPORTS].sort());
+        .map((match) => match[2]).sort()).toEqual([]);
       expect(result.bytes).toBeLessThan(2_000);
     } finally {
       rmSync(staging, { recursive: true, force: true });

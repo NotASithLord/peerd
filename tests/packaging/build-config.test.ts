@@ -21,6 +21,7 @@ describe('generated build identity', () => {
     }, { dwebEnabled: true });
     expect(source).toContain('export const EXTENSION_VERSION = "0.7.3";');
     expect(source).toContain('export const BACKGROUND_MODULE_PATH = "background/vault-kernel.js";');
+    expect(source).toContain('export const BROWSER = "chrome";');
     expect(source).toContain('export const CHANNEL = "preview";');
     expect(source).toContain('export const DWEB_ENABLED = true;');
     expect(source).toContain('export const CHANNEL_DEFAULTS = Object.freeze(');

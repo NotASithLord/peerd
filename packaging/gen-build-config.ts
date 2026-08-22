@@ -40,6 +40,8 @@ export const genBuildConfigSource = (
 
 export const EXTENSION_VERSION = ${JSON.stringify(version)};
 export const BACKGROUND_MODULE_PATH = ${JSON.stringify(backgroundEntry)};
+/** @type {'chrome'|'firefox'} */
+export const BROWSER = ${JSON.stringify(browser)};
 export const CHANNEL = ${JSON.stringify(channel)};
 export const DWEB_ENABLED = ${dwebEnabled ? 'true' : 'false'};
 export const CHANNEL_DEFAULTS = Object.freeze(${settingsDefaults});

@@ -22,7 +22,7 @@ import { writeControllerBuildIdentity } from '../../packaging/controller-build-i
 import { COLD_START_TARGETS } from '../bench/cold-start-budgets.js';
 
 const SOURCE_DATE = new Date(946684800 * 1000);
-export const NATIVE_CHROME_RUNTIME_IMPORTS = Object.freeze([
+export const NATIVE_CHROME_PRUNED_IMPORTS = Object.freeze([
   './firefox-storage-keepalive.js',
   './repository-local-client.js',
 ]);
@@ -73,7 +73,7 @@ export async function bundleChromeVaultKernel(staging, entryRelative) {
   const entry = join(staging, entryRelative);
   const scratch = join(staging, '.vault-kernel-bundle');
   rmSync(scratch, { recursive: true, force: true });
-  const runtimeImports = new Set(NATIVE_CHROME_RUNTIME_IMPORTS);
+  const runtimeImports = new Set();
   try {
     const result = await Bun.build({
       entrypoints: [entry],
@@ -81,14 +81,18 @@ export async function bundleChromeVaultKernel(staging, entryRelative) {
       naming: 'vault-kernel.js',
       target: 'browser',
       format: 'iife',
-      minify: { whitespace: true, identifiers: false, syntax: false },
+      minify: { whitespace: true, identifiers: false, syntax: true },
       splitting: false,
       plugins: [{
         name: 'fixed-native-runtime-imports',
         setup(build) {
           build.onResolve({
             filter: /^\.\/(?:firefox-storage-keepalive|repository-local-client)\.js$/,
-          }, (args) => ({ path: args.path, external: true }));
+          }, (args) => ({ path: args.path, namespace: 'chrome-unreachable-runtime' }));
+          build.onLoad({ namespace: 'chrome-unreachable-runtime', filter: /.*/ }, () => ({
+            contents: 'export {};\n',
+            loader: 'js',
+          }));
         },
       }],
     });

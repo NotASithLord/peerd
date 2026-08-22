@@ -5,7 +5,9 @@
 
 export const EXTENSION_VERSION = "0.7.3";
 export const BACKGROUND_MODULE_PATH = "background/service-worker.js";
+/** @type {'chrome'|'firefox'} */
+export const BROWSER = "chrome";
 export const CHANNEL = "preview";
 export const DWEB_ENABLED = true;
 export const CHANNEL_DEFAULTS = Object.freeze({"voiceEnabled":false,"voiceVariant":"base","voiceEngine":"auto","voiceSilenceMs":1500,"voiceOnboardingDismissed":false,"ocrEnabled":false,"devMode":false,"reasoningEnabled":true,"reasoningEffort":"medium","webActorActionSurface":"code","providerName":"","providerModel":"","ollamaHost":"http://localhost:11434","openrouterModels":[],"advancedAutomationEnabled":true,"watchAgentTab":false,"frontDoorView":"panel","runnerModel":"","prewalkEnabled":false,"enginePrewalkEnabled":false,"prewalkExecutorModel":"","spendLimitUsd":0,"pricingOverrides":{},"confirmWebWrites":true,"schemaValidatedReplies":false,"autoMemoryEnabled":true,"autoResumeInterruptedTurns":true,"providerFailoverEnabled":true,"providerFallbacks":[],"vaultAutoLockMs":2700000,"auditLogMaxEntries":20000,"autoUpdateEnabled":true,"dwebEnabled":true,"dwebAgentEnabled":false});
-export const CONTROLLER_BUILD_DIGEST = '0629fa0a93460654d8b9980aea394169557b4d196cdc768b79a3cf4b54f69747';
+export const CONTROLLER_BUILD_DIGEST = '9a91710430326811eb47b9a3d919a2874553dd842396faf569b81de8a7f53b92';

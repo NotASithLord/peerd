@@ -11,7 +11,7 @@ import {
 } from '/shared/sender-trust.js';
 import { createKernelIdentity } from '/shared/kernel-identity.js';
 import {
-  CHANNEL_DEFAULTS, CONTROLLER_BUILD_DIGEST, DWEB_ENABLED,
+  BROWSER, CHANNEL_DEFAULTS, CONTROLLER_BUILD_DIGEST, DWEB_ENABLED,
 } from '/shared/build-config.js';
 import browser from '/shared/browser-api.js';
 import { base64ToBytes } from '/shared/cold-util.js';
@@ -96,7 +96,7 @@ let kernelReadyAt = null;
 
 const runtimeId = browser.runtime.id;
 const kernelManifest = /** @type {any} */ (browser.runtime.getManifest());
-const kernelFirefox = !!kernelManifest.browser_specific_settings?.gecko;
+const kernelFirefox = BROWSER === 'firefox';
 const targetAddon = /** @type {any} */ (globalThis)[Symbol.for('peerd.kernel.target-addon.v1')];
 if (targetAddon && (targetAddon.target !== 'preview-chrome'
     || typeof targetAddon.update !== 'function' || typeof targetAddon.contributor !== 'function')) {
