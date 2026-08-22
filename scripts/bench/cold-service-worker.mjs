@@ -624,6 +624,7 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
   const child = spawn(binary, chromeArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = '';
   const workerErrors = [];
+  let workerStartupProbe = null;
   child.stderr.on('data', (chunk) => { stderr += String(chunk); });
   let browserConnection;
   let page;
@@ -637,6 +638,37 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
     if (!firstWorker) throw new Error(`Chrome worker target did not appear\n${stderr}`);
     const workerTargetMs = hostNowMs() - launchStarted;
     console.log(`  worker target ready in ${round(workerTargetMs)}ms`);
+    if (diagnostic) {
+      const startupWorker = await within(
+        attach(firstWorker.webSocketDebuggerUrl), 1_000, 'Chrome startup worker attach',
+      ).catch(() => null);
+      if (startupWorker) {
+        const exceptions = [];
+        startupWorker.on('Runtime.exceptionThrown', (event) => {
+          exceptions.push(event?.exceptionDetails?.exception?.description
+            ?? event?.exceptionDetails?.text ?? 'unknown worker exception');
+        });
+        try {
+          await startupWorker.send('Runtime.enable', {}, 1_000);
+          const probe = await startupWorker.send('Runtime.evaluate', {
+            expression: `({
+              workerAgeMs: performance.now(),
+              runtimeReady: !!globalThis.chrome?.runtime,
+              messageListenerReady: globalThis.chrome?.runtime?.onMessage?.hasListeners?.() === true
+            })`,
+            returnByValue: true,
+          }, 1_000);
+          workerStartupProbe = {
+            value: probe?.result?.value ?? null,
+            exception: probe?.exceptionDetails?.exception?.description
+              ?? probe?.exceptionDetails?.text ?? null,
+            exceptions,
+          };
+        } finally {
+          startupWorker.close();
+        }
+      }
+    }
     const version = await fetch(`http://127.0.0.1:${port}/json/version`).then((reply) => reply.json());
     const pinnedVersion = readFileSync(join(ROOT, 'scripts', 'cdp', 'chrome-version.txt'), 'utf8').trim();
     if (!String(version.Browser ?? '').includes(pinnedVersion)) {
@@ -905,9 +937,13 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       wakes, wakeFailures,
     };
   } catch (error) {
-    const detail = workerErrors.length > 0
-      ? `\nChrome worker errors: ${JSON.stringify(workerErrors.slice(-5))}` : '';
-    throw new Error(`${error?.message ?? String(error)}${detail}`);
+    const details = [
+      workerErrors.length > 0
+        ? `Chrome worker errors: ${JSON.stringify(workerErrors.slice(-5))}` : null,
+      workerStartupProbe
+        ? `Chrome startup worker probe: ${JSON.stringify(workerStartupProbe)}` : null,
+    ].filter(Boolean);
+    throw new Error(`${error?.message ?? String(error)}${details.length ? `\n${details.join('\n')}` : ''}`);
   } finally {
     try { page?.close(); } catch { /* browser is closing */ }
     try { browserConnection?.close(); } catch { /* browser is closing */ }
