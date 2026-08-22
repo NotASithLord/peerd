@@ -745,12 +745,11 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
         if (!ready) throw new Error('Chrome vault boot module did not evaluate');
         return hostNowMs() - launchStarted;
       });
-    const vaultGatePromise = waitChromeExpression(page, `(() => {
+    const vaultGatePromise = bootModulePromise.then(() => waitChromeExpression(page, `(() => {
       if (document.documentElement.dataset.peerdBootStage !== 'vault-ready') return false;
       return [...document.querySelectorAll('.gate-card button')].some((button) =>
         !button.disabled && /create vault/i.test(button.textContent || ''));
-    })()`, remaining())
-      .then((ready) => {
+    })()`, remaining())).then((ready) => {
         if (!ready) throw new Error('Chrome vault gate never became actionable');
         return hostNowMs() - launchStarted;
       });
@@ -863,20 +862,20 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
           if (reply?.ok !== true || !reply.state) throw new Error(`Chrome wake state failed: ${JSON.stringify(reply)}`);
           return hostNowMs() - started;
         });
-        const wakeGatePromise = waitChromeExpression(page, `(() => {
-          if (document.documentElement.dataset.peerdBootStage !== 'vault-ready') return false;
-          return [...document.querySelectorAll('.gate-card button')].some((button) =>
-            !button.disabled && /create vault/i.test(button.textContent || ''));
-        })()`, wakeRemaining()).then((ready) => {
-          if (!ready) throw new Error('Chrome wake vault gate never became actionable');
-          return hostNowMs() - started;
-        });
         const wakeBootModulePromise = waitChromeExpression(page,
           `document.documentElement.dataset.peerdBootModule === 'evaluated'`, wakeRemaining())
           .then((ready) => {
             if (!ready) throw new Error('Chrome wake vault boot module did not evaluate');
             return hostNowMs() - started;
           });
+        const wakeGatePromise = wakeBootModulePromise.then(() => waitChromeExpression(page, `(() => {
+          if (document.documentElement.dataset.peerdBootStage !== 'vault-ready') return false;
+          return [...document.querySelectorAll('.gate-card button')].some((button) =>
+            !button.disabled && /create vault/i.test(button.textContent || ''));
+        })()`, wakeRemaining())).then((ready) => {
+          if (!ready) throw new Error('Chrome wake vault gate never became actionable');
+          return hostNowMs() - started;
+        });
         const [targetResult, wakeBootstrap, stateFromWakeMs,
           vaultGateReadyFromWakeMs, bootModuleFromWakeMs] = await within(Promise.all([
           targetPromise, wakeBootstrapPromise, wakeStatePromise, wakeGatePromise,

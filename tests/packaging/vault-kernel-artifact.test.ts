@@ -9,6 +9,7 @@ import {
   assertVaultKernelReleaseTarget,
   bundleChromeVaultKernel,
   NATIVE_CHROME_RUNTIME_IMPORTS,
+  vaultKernelClassicManifest,
   vaultKernelManifest,
 } from '../../scripts/cdp/vault-kernel-artifact.mjs';
 
@@ -36,6 +37,11 @@ describe('test-only vault kernel package target', () => {
       permissions: ['storage'],
       background: { scripts: ['background/vault-kernel.js'], type: 'module' },
     });
+    expect(vaultKernelClassicManifest(preview)).toMatchObject({
+      name: 'peerd vault kernel preview floor',
+      background: { service_worker: 'background/vault-kernel-preview.js' },
+    });
+    expect(vaultKernelClassicManifest(preview).background).not.toHaveProperty('type');
     expect(source.background.service_worker).toBe('background/service-worker.js');
   });
 
@@ -79,11 +85,13 @@ describe('test-only vault kernel package target', () => {
       const result = await bundleChromeVaultKernel(staging, 'background/vault-kernel.js');
       const output = readFileSync(join(background, 'vault-kernel.js'), 'utf8');
       expect(result.runtimeImports).toEqual([...NATIVE_CHROME_RUNTIME_IMPORTS].sort());
+      expect(output.trimStart().startsWith('(()=>')).toBe(true);
+      expect(output).not.toContain('export{');
       expect(output).not.toContain("from'./dep.js'");
       expect(output).not.toContain('from"./dep.js"');
       expect([...output.matchAll(/\bimport\((['"])([^'"]+)\1\)/g)]
         .map((match) => match[2]).sort()).toEqual([...NATIVE_CHROME_RUNTIME_IMPORTS].sort());
-      expect(result.bytes).toBeLessThan(1_000);
+      expect(result.bytes).toBeLessThan(2_000);
     } finally {
       rmSync(staging, { recursive: true, force: true });
     }
