@@ -75,4 +75,37 @@ describe('cold-start browser harness contract', () => {
       expect(run.stderr).toContain(message);
     }
   });
+
+  test('native floor is one fixed clean Chrome fresh-and-wake target', () => {
+    const base = [harness, '--lane=local', '--browser=chrome', '--runtime-target=native-floor'];
+    const accepted = spawnSync(process.execPath, [...base, '--help'], { encoding: 'utf8' });
+    expect(accepted.status).toBe(0);
+
+    const attacks = [
+      ['--chrome-wakes=0', 'requires exactly one fresh launch and one wake'],
+      ['--chrome-processes=2', 'requires exactly one fresh launch and one wake'],
+      ['--graph-policy=ratchet', 'requires target graph policy'],
+      ['--require-timing-targets=false', 'requires the timing target'],
+      ['--allow-failures=true', 'cannot allow failures'],
+      ['--comparison=interleaved-candidate-base', 'does not support comparison mode'],
+    ];
+    for (const [attack, message] of attacks) {
+      const run = spawnSync(process.execPath, [...base, attack, '--help'], { encoding: 'utf8' });
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain(message);
+    }
+  });
+
+  test('native floor reuses the release runner and binds two release-minified graphs', () => {
+    const source = Bun.file(harness).text();
+    return source.then((text) => {
+      expect(text).toContain("for (const channel of ['store', 'preview'])");
+      expect(text).toContain('releaseMinify: true');
+      expect(text).toContain("coldBudgetMode: 'native-target'");
+      expect(text).toContain("extensionDir: prepared.store.extensionDir");
+      expect(text).toContain('wakeSamples: sample < chromeWakes ? 1 : 0');
+      expect(text).toContain("requireClean: lane === 'release' || nativeFloor");
+      expect(text).not.toContain('runNativeFloorChromeProcess');
+    });
+  });
 });

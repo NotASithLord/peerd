@@ -13,7 +13,10 @@ import { ARTIFACTS_DIR, REPO_ROOT, readVersion } from '../../packaging/lib.ts';
 import { packageArtifact } from '../../packaging/package.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import { genBuildConfigSource } from '../../packaging/gen-build-config.ts';
+import { dwebEnabledForTarget } from '../../packaging/gen-channel-config.ts';
+import { minifyColdArtifactModules } from '../../packaging/minify-artifact-js.ts';
 import { writeControllerBuildIdentity } from '../../packaging/controller-build-identity.ts';
+import { COLD_START_TARGETS } from '../bench/cold-start-budgets.js';
 
 const SOURCE_DATE = new Date(946684800 * 1000);
 
@@ -21,40 +24,62 @@ const entriesSorted = (root) => readdirSync(root, { recursive: true })
   .map((entry) => String(entry).split('\\').join('/'))
   .sort();
 
-export const vaultKernelManifest = (manifest, browser) => ({
+const nativeEntry = (browser, channel) => browser === 'chrome' && channel === 'preview'
+  ? 'background/vault-kernel-preview.js'
+  : 'background/vault-kernel.js';
+
+export const vaultKernelManifest = (manifest, browser, channel = 'store') => ({
   ...manifest,
-  name: `${manifest.name} vault kernel floor`,
+  name: `${manifest.name} vault kernel ${channel} floor`,
   background: browser === 'firefox'
-    ? { scripts: ['background/vault-kernel.js'], type: 'module' }
-    : { service_worker: 'background/vault-kernel.js', type: 'module' },
+    ? { scripts: [nativeEntry(browser, channel)], type: 'module' }
+    : { service_worker: nativeEntry(browser, channel), type: 'module' },
 });
 
-export async function buildVaultKernelArtifact({ browser = 'chrome' } = {}) {
+export const assertVaultKernelReleaseTarget = ({ browser, modules, graphBytes, entryBytes }) => {
+  const target = COLD_START_TARGETS[browser]?.serviceWorker;
+  if (!target) throw new Error(`no native cold target for ${browser}`);
+  for (const [name, value] of Object.entries({ modules, graphBytes, entryBytes })) {
+    if (!Number.isInteger(value) || value <= 0) throw new Error(`invalid native ${name}: ${value}`);
+    if (value > target[name]) {
+      throw new Error(`native ${browser} ${name} ${value} exceeds ${target[name]}`);
+    }
+  }
+};
+
+export async function buildVaultKernelArtifact({
+  browser = 'chrome', channel = 'store', releaseMinify = false,
+} = {}) {
   if (!['chrome', 'firefox'].includes(browser)) throw new Error(`unsupported browser: ${browser}`);
+  if (!['store', 'preview'].includes(channel)) throw new Error(`unsupported channel: ${channel}`);
   const version = readVersion();
   await packageArtifact({
-    // This is a source-readable test target, not a release artifact. Its own
-    // graph is measured below; it must not consume or mutate the live
-    // monolith's temporary release-minification budget while that graph is
-    // concurrently being dismantled.
-    channel: 'store', browser, version, sign: false, verify: true, minify: false,
+    // Start from the readable target package, then transform only this copied
+    // native floor when releaseMinify is requested. The live artifact and its
+    // legacy ratchet remain untouched.
+    channel, browser, version, sign: false, verify: channel === 'store', minify: false,
   });
-  const source = join(ARTIFACTS_DIR, 'staging', `store-${browser}`);
-  const staging = join(ARTIFACTS_DIR, 'staging', `vault-kernel-${browser}`);
+  const source = join(ARTIFACTS_DIR, 'staging', `${channel}-${browser}`);
+  const staging = join(ARTIFACTS_DIR, 'staging', `vault-kernel-${channel}-${browser}`);
   rmSync(staging, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
   cpSync(source, staging, { recursive: true });
 
   const manifestPath = join(staging, 'manifest.json');
-  const manifest = vaultKernelManifest(JSON.parse(readFileSync(manifestPath, 'utf8')), browser);
+  const manifest = vaultKernelManifest(
+    JSON.parse(readFileSync(manifestPath, 'utf8')), browser, channel,
+  );
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   writeFileSync(
     join(staging, 'shared', 'build-config.js'),
-    genBuildConfigSource(manifest, { dwebEnabled: false }),
+    genBuildConfigSource(manifest, {
+      dwebEnabled: dwebEnabledForTarget(channel, browser), channel, browser,
+    }),
   );
+  if (releaseMinify) await minifyColdArtifactModules(staging, browser, channel);
   await writeControllerBuildIdentity(staging);
 
-  const entry = join(staging, 'background', 'vault-kernel.js');
+  const entry = join(staging, nativeEntry(browser, channel));
   const graph = [...await collectStaticModuleGraph(staging, entry)].sort();
   const graphRelative = graph.map((path) => relative(staging, path).split('\\').join('/'));
   const forbidden = graphRelative.filter((path) =>
@@ -73,7 +98,9 @@ export async function buildVaultKernelArtifact({ browser = 'chrome' } = {}) {
     utimesSync(path, SOURCE_DATE, SOURCE_DATE);
   }
   const extension = browser === 'firefox' ? 'xpi' : 'zip';
-  const artifact = join(ARTIFACTS_DIR, `peerd-vault-kernel-${browser}.${extension}`);
+  const artifact = join(
+    ARTIFACTS_DIR, `peerd-vault-kernel-${channel}-${browser}.${extension}`,
+  );
   rmSync(artifact, { force: true });
   execFileSync('zip', ['-q', '-X', artifact, '-@'], {
     cwd: staging,
@@ -81,9 +108,15 @@ export async function buildVaultKernelArtifact({ browser = 'chrome' } = {}) {
     env: { ...process.env, TZ: 'UTC' },
   });
   const bytes = graph.reduce((total, path) => total + statSync(path).size, 0);
+  const entryBytes = statSync(entry).size;
+  if (releaseMinify) {
+    assertVaultKernelReleaseTarget({
+      browser, modules: graph.length, graphBytes: bytes, entryBytes,
+    });
+  }
   const sha256 = createHash('sha256').update(readFileSync(artifact)).digest('hex');
   return Object.freeze({
-    browser,
+    browser, channel, releaseMinify,
     version,
     staging,
     artifact,
@@ -92,6 +125,7 @@ export async function buildVaultKernelArtifact({ browser = 'chrome' } = {}) {
     artifactBytes: statSync(artifact).size,
     graphModules: graph.length,
     graphBytes: bytes,
+    entryBytes,
     graph: graphRelative,
   });
 }
@@ -99,5 +133,10 @@ export async function buildVaultKernelArtifact({ browser = 'chrome' } = {}) {
 if (import.meta.main) {
   const browser = process.argv.find((value) => value.startsWith('--browser='))?.split('=')[1]
     ?? 'chrome';
-  console.log(JSON.stringify(await buildVaultKernelArtifact({ browser }), null, 2));
+  const channel = process.argv.find((value) => value.startsWith('--channel='))?.split('=')[1]
+    ?? 'store';
+  const releaseMinify = process.argv.includes('--release-minify');
+  console.log(JSON.stringify(
+    await buildVaultKernelArtifact({ browser, channel, releaseMinify }), null, 2,
+  ));
 }

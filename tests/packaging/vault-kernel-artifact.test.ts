@@ -2,7 +2,10 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { REPO_ROOT } from '../../packaging/lib.ts';
-import { vaultKernelManifest } from '../../scripts/cdp/vault-kernel-artifact.mjs';
+import {
+  assertVaultKernelReleaseTarget,
+  vaultKernelManifest,
+} from '../../scripts/cdp/vault-kernel-artifact.mjs';
 
 describe('test-only vault kernel package target', () => {
   test('changes only the copied background entry for each browser', () => {
@@ -12,19 +15,35 @@ describe('test-only vault kernel package target', () => {
       permissions: ['storage'],
       background: { service_worker: 'background/service-worker.js', type: 'module' },
     };
-    const chrome = vaultKernelManifest(source, 'chrome');
+    const chrome = vaultKernelManifest(source, 'chrome', 'store');
+    const preview = vaultKernelManifest(source, 'chrome', 'preview');
     const firefox = vaultKernelManifest(source, 'firefox');
     expect(chrome).toMatchObject({
-      name: 'peerd vault kernel floor',
+      name: 'peerd vault kernel store floor',
       permissions: ['storage'],
       background: { service_worker: 'background/vault-kernel.js', type: 'module' },
     });
+    expect(preview.background).toEqual({
+      service_worker: 'background/vault-kernel-preview.js', type: 'module',
+    });
     expect(firefox).toMatchObject({
-      name: 'peerd vault kernel floor',
+      name: 'peerd vault kernel store floor',
       permissions: ['storage'],
       background: { scripts: ['background/vault-kernel.js'], type: 'module' },
     });
     expect(source.background.service_worker).toBe('background/service-worker.js');
+  });
+
+  test('release-minified floor cannot exceed the native service-worker target', () => {
+    expect(() => assertVaultKernelReleaseTarget({
+      browser: 'chrome', modules: 76, graphBytes: 300_000, entryBytes: 30_000,
+    })).not.toThrow();
+    expect(() => assertVaultKernelReleaseTarget({
+      browser: 'chrome', modules: 76, graphBytes: 300_001, entryBytes: 30_000,
+    })).toThrow('graphBytes 300001 exceeds 300000');
+    expect(() => assertVaultKernelReleaseTarget({
+      browser: 'chrome', modules: 0, graphBytes: 1, entryBytes: 1,
+    })).toThrow('invalid native modules');
   });
 
   test('live manifest and release artifact inventory remain on the legacy entry', () => {
@@ -40,14 +59,16 @@ describe('test-only vault kernel package target', () => {
     const source = readFileSync(
       join(REPO_ROOT, 'scripts/cdp/vault-kernel-artifact.mjs'), 'utf8',
     );
-    expect(source).toContain("join(ARTIFACTS_DIR, 'staging', `vault-kernel-${browser}`)");
+    expect(source).toContain("`vault-kernel-${channel}-${browser}`");
     expect(source).toContain("path.startsWith('offscreen/')");
     expect(source).toContain("path.includes('controller-turn')");
     expect(source).toContain("path.includes('agent-loop')");
     expect(source).toContain("path.includes('semantic-route-host')");
-    expect(source).toContain("`peerd-vault-kernel-${browser}.${extension}`");
-    expect(source).toContain('verify: true, minify: false');
-    expect(source).toContain('genBuildConfigSource(manifest, { dwebEnabled: false })');
+    expect(source).toContain("`peerd-vault-kernel-${channel}-${browser}.${extension}`");
+    expect(source).toContain("verify: channel === 'store', minify: false");
+    expect(source).toContain('minifyColdArtifactModules(staging, browser, channel)');
+    expect(source).toContain('assertVaultKernelReleaseTarget({');
+    expect(source).toContain('dwebEnabled: dwebEnabledForTarget(channel, browser), channel, browser');
     expect(source).toContain('writeControllerBuildIdentity(staging)');
     expect(source).not.toContain('generateManifest(');
   });
