@@ -76,6 +76,7 @@ export async function bundleChromeVaultKernel(staging, entryRelative) {
       naming: 'vault-kernel.js',
       target: 'browser',
       format: 'esm',
+      banner: 'globalThis[Symbol.for("peerd.kernel.bundle-start.v1")]=globalThis.performance?.now?.()??Date.now();',
       minify: { whitespace: true, identifiers: true, syntax: true },
       keepNames: true,
       splitting: false,

@@ -83,6 +83,7 @@ describe('test-only vault kernel package target', () => {
       const output = readFileSync(join(background, 'vault-kernel.js'), 'utf8');
       expect(NATIVE_CHROME_PRUNED_IMPORTS).toHaveLength(2);
       expect(result.runtimeImports).toEqual([]);
+      expect(output).toContain('peerd.kernel.bundle-start.v1');
       expect(output.trimStart().startsWith('(()=>')).toBe(false);
       expect(output).not.toContain('export{');
       expect(output).not.toContain("from'./dep.js'");
@@ -92,10 +93,13 @@ describe('test-only vault kernel package target', () => {
       Function(output)();
       expect((globalThis as any).__peerdBundleErrorName).toBe('ExactNamedError');
       expect((globalThis as any).__peerdBundleValue).toBe(42);
+      expect((globalThis as any)[Symbol.for('peerd.kernel.bundle-start.v1')])
+        .toBeGreaterThanOrEqual(0);
       delete (globalThis as any).__peerdBundleErrorName;
       delete (globalThis as any).__peerdBundleValue;
       delete (globalThis as any).__peerdBundleFirefox;
       delete (globalThis as any).__peerdBundleRepository;
+      delete (globalThis as any)[Symbol.for('peerd.kernel.bundle-start.v1')];
       expect(result.bytes).toBeLessThan(2_000);
     } finally {
       rmSync(staging, { recursive: true, force: true });
