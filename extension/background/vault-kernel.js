@@ -63,6 +63,7 @@ import {
   createKernelLocalRoutes,
   createKernelSemanticRoutes,
 } from './kernel-local-routes.js';
+import { createKernelProviderProjection } from './kernel-provider-projection.js';
 import {
   createDeferredRepositoryClient,
   createOffscreenRepositoryClient,
@@ -339,6 +340,13 @@ coldReceipts.registerRecovery({
 });
 void vaultReady.then(() => frontDoor.syncNativeBehavior()).catch(() => {});
 
+const providerProjection = createKernelProviderProjection({
+  settingsStore,
+  vault,
+  browser,
+  localModels: !kernelFirefox,
+  pushState: () => pushState(),
+});
 let stateProjectionGeneration = 0;
 const stateSnapshot = async () => {
   const projectionGeneration = ++stateProjectionGeneration;
@@ -386,7 +394,7 @@ const stateSnapshot = async () => {
       onboardingComplete: durableProfile.onboardingComplete,
     };
   }
-  const providerView = await kernelLocal.providerView(
+  const providerView = await providerProjection.view(
     authority.locked ? null : currentSession, authority.locked,
   );
   return buildVaultKernelState({
@@ -433,7 +441,7 @@ const kernelSettingsRoutes = makeKernelSettingsRoutes({
   },
   onChanged: async (patch) => {
     if (Object.hasOwn(patch, 'providerName') || Object.hasOwn(patch, 'providerModel')) {
-      kernelLocal.bumpProviderRevision();
+      providerProjection.bumpRevision();
     }
     if (Object.hasOwn(patch, 'vaultAutoLockMs')) {
       autoLockMs = settingsStore.get().vaultAutoLockMs ?? DEFAULT_AUTO_LOCK_MS;
@@ -574,7 +582,7 @@ const kernelLocal = createKernelLocalRoutes({
   ready: vaultReady, settingsStore, isAllowed: trusted,
   isOptions: optionsUi, isVoice: voiceUi, fetchFn: globalThis.fetch.bind(globalThis),
   sessions: kernelSessions, browser, localModels: !kernelFirefox,
-  featureHost, offscreenUrl,
+  featureHost, offscreenUrl, providerProjection,
 });
 const appFiles = kernelLocal.appFiles;
 const semanticRoutes = Object.freeze({

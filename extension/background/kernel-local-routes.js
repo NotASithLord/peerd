@@ -7,6 +7,7 @@ import { createKernelToolboxStore } from './kernel-toolbox-store.js';
 import { createKernelSiteClientRoutes } from './kernel-site-client-routes.js';
 import { createKernelMemoryAuthority } from './kernel-memory-authority.js';
 import { kernelAppCatalogRows } from './kernel-app-catalog.js';
+import { createKernelProviderProjection } from './kernel-provider-projection.js';
 import { makeContactsRoutes } from './routes/contacts.js';
 import { makeToolboxRoutes } from './routes/toolbox.js';
 import { mergeContacts } from '../peerd-runtime/contacts/aggregate.js';
@@ -608,94 +609,31 @@ export const createKernelProviderTestRoute = ({
 };
 
 /** @param {{vault:any,idb:any,auditLog:any,sessionCache:any,repositories:any,
- * ready:Promise<any>,settingsStore:any,pushState:Function,
+ * ready:Promise<any>,settingsStore:any,pushState:()=>Promise<any>|any,
  * isAllowed:(sender:unknown)=>boolean,isOptions:(sender:unknown)=>boolean,
  * isVoice:(sender:unknown)=>boolean,fetchFn?:typeof fetch,
- * sessions?:any,browser?:any,localModels?:boolean,featureHost?:any,offscreenUrl?:string}} deps */
+ * sessions?:any,browser?:any,localModels?:boolean,featureHost?:any,offscreenUrl?:string,
+ * providerProjection?:ReturnType<typeof createKernelProviderProjection>}} deps */
 export const createKernelLocalRoutes = ({
   vault, idb, auditLog, sessionCache, repositories, ready, settingsStore, pushState,
   isAllowed, isOptions, isVoice, fetchFn, sessions, browser, localModels,
-  featureHost, offscreenUrl,
+  featureHost, offscreenUrl, providerProjection: providedProviderProjection,
 }) => {
+  const providerProjection = providedProviderProjection ?? createKernelProviderProjection({
+    settingsStore, vault, browser, localModels, pushState,
+  });
   const appFiles = createKernelAppFileReader({
     idb, sessionCache, appFiles: /** @type {any} */ (repositories.appFiles),
   });
   const openRouterModels = createKernelOpenRouterModelsRoute({ ready, vault, fetchFn });
-  /** @type {{known:boolean,reachable:boolean,count:number|null,models:string[]|null,host:string}|null} */
-  let ollamaStatus = null;
-  let ollamaStatusKey = '';
-  let configRevision = 0;
-  const onOllamaStatus = (/** @type {any} */ status) => {
-    const next = { ...status, host: String(settingsStore.get().ollamaHost ?? '') };
-    const key = JSON.stringify(next);
-    if (key === ollamaStatusKey) return;
-    ollamaStatusKey = key;
-    ollamaStatus = next;
-    configRevision += 1;
-    void Promise.resolve(pushState()).catch(() => {});
-  };
+  const onOllamaStatus = providerProjection.observeOllamaStatus;
   const providerTest = createKernelProviderTestRoute({
     ready, vault, settingsStore, auditLog, fetchFn, onOllamaStatus,
   });
-  const bumpProviderRevision = () => { configRevision += 1; };
+  const bumpProviderRevision = providerProjection.bumpRevision;
   const providerSetKey = makeKernelProviderSetKeyRoute({
     vault, settingsStore, auditLog, pushState: () => {},
   });
-  const providerView = async (/** @type {any} */ session = null,
-    /** @type {boolean} */ locked = false) => {
-    const settings = settingsStore.get();
-    const defaults = providerAuthority(settings.providerName) ?? providerAuthority('anthropic')
-      ?? PROVIDER_AUTHORITY[0];
-    const defaultModel = typeof settings.providerModel === 'string' && settings.providerModel.trim()
-      ? settings.providerModel.trim() : defaults.defaultModel;
-    const selected = providerAuthority(session?.provider ?? defaults.name);
-    const composerModel = typeof session?.model === 'string' && session.model.trim()
-      ? session.model : selected?.name === defaults.name ? defaultModel : selected?.defaultModel ?? '';
-    const credential = async (/** @type {any} */ policy) => {
-      if (locked || !policy) return false;
-      if (policy.secretName === null) return true;
-      try { return !!(await vault.getSecret(policy.secretName)); } catch { return false; }
-    };
-    const defaultCredential = await credential(defaults);
-    const composerCredential = selected?.name === defaults.name
-      ? defaultCredential : await credential(selected);
-    let localReady = selected?.name !== 'local-webgpu';
-    if (!localReady && localModels) {
-      try {
-        const raw = (await browser.storage.local.get('localModelDownloaded'))?.localModelDownloaded;
-        localReady = raw === true || Array.isArray(raw) && raw.includes(composerModel);
-      } catch { localReady = false; }
-    }
-    const liveOllama = ollamaStatus?.host === String(settings.ollamaHost ?? '') ? ollamaStatus : null;
-    const ollamaNoModels = selected?.name === 'ollama'
-      && liveOllama?.known && liveOllama.reachable && liveOllama.count === 0;
-    const ollamaModelMissing = selected?.name === 'ollama'
-      && liveOllama?.known && liveOllama.reachable
-      && Array.isArray(liveOllama.models) && liveOllama.models.length > 0
-      && !liveOllama.models.includes(composerModel)
-      && !(!composerModel.split('/').at(-1)?.includes(':')
-        && liveOllama.models.includes(`${composerModel}:latest`));
-    const ollamaReady = selected?.name !== 'ollama' || (!ollamaNoModels && !ollamaModelMissing);
-    const reason = locked ? 'vault-locked' : !selected ? 'unknown-provider'
-      : !composerCredential ? 'missing-key'
-        : !localReady ? 'local-model-not-installed'
-          : ollamaNoModels ? 'ollama-no-models'
-            : ollamaModelMissing ? 'ollama-model-missing' : null;
-    return {
-      providers: {
-        current: defaults.name, hasKey: defaultCredential, model: defaultModel,
-        defaultRunnerModel: defaults.defaultRunnerModel, configRevision,
-      },
-      composer: {
-        provider: selected?.name ?? String(session?.provider ?? ''), model: composerModel,
-        keyless: selected?.secretName === null, credentialReady: composerCredential,
-        localReady, ollamaReady, canSend: reason === null, reason,
-        warning: reason === null && selected?.name === 'ollama'
-          && liveOllama?.known && liveOllama.reachable === false
-          ? 'ollama-unreachable' : null,
-      },
-    };
-  };
   return Object.freeze({
     appFiles,
     appEditorRoutes: (/** @type {any} */ deps) => makeKernelAppEditorRoutes({
@@ -721,7 +659,7 @@ export const createKernelLocalRoutes = ({
     }),
     openRouterModels: openRouterModels.route,
     providerTest: providerTest.route,
-    providerView,
+    providerView: providerProjection.view,
     bumpProviderRevision,
     abortProviderTests: () => { providerTest.abortAll(); openRouterModels.abortAll(); },
   });
