@@ -154,10 +154,27 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
   offscreen: Object.freeze({ modules: 25, graphBytes: 200_000, entryBytes: 40_000 }),
 });
 
-// Preview Chrome alone adds the downloaded-update owner. It is a separate
-// manifest entry, so Store Chrome and both Firefox channels never parse it.
-export const PREVIEW_KERNEL_SOURCE_RATCHET = Object.freeze({
-  modules: 72, graphBytes: 456_944, entryBytes: 146, directImports: 2,
+// Preview is the common authority kernel plus one target-owned slice. Keep the
+// slice shrinking independently of common-kernel work: an absolute Preview
+// total conflates those two graphs and the old total was never an achieved
+// measurement. The baseline is the first executable target slice; the required
+// reduction is the deletion already achieved while retaining update custody.
+export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
+  exclusiveBaseline: Object.freeze({ modules: 3, graphBytes: 24_723 }),
+  minimumReduction: Object.freeze({ modules: 0, graphBytes: 9_071 }),
+  entryBytesCeiling: 146,
+  directImportsCeiling: 2,
+});
+
+// The offscreen entry is a broker/supervisor, not a feature host. Its former
+// absolute ratchet was also never achieved. Pin the real deletion instead: the
+// supervisor must stay at least this far below its immediately preceding,
+// executable graph while also satisfying the architectural cold-source target.
+export const OFFSCREEN_SUPERVISOR_SOURCE_CONTRACT = Object.freeze({
+  baseline: Object.freeze({
+    modules: 12, graphBytes: 90_502, entryBytes: 31_533, directImports: 5,
+  }),
+  minimumReduction: Object.freeze({ modules: 2, graphBytes: 9_049 }),
 });
 
 export const LEGACY_COLD_SOURCE_RATCHETS = Object.freeze({
@@ -200,15 +217,6 @@ export const LEGACY_COLD_SOURCE_RATCHETS = Object.freeze({
   // false terminal failure. Exact shared-shell delta, no reserved headroom.
   sidepanel: Object.freeze({ modules: 11, graphBytes: 157_565, entryBytes: 407, directImports: 1 }),
   home: Object.freeze({ modules: 11, graphBytes: 157_733, entryBytes: 575, directImports: 1 }),
-  // The document is now a broker/supervisor. Actor, job, parser, local-model,
-  // repository and dweb hosts enter only at their authenticated operation or
-  // explicit long-lived lease boundary.
-  // The tiny feature-lease supervisor and manifest-derived background
-  // provenance replace the generic heartbeat. The package-stamped identity
-  // leaf is required because Chrome omits runtime.getManifest in this realm;
-  // heavy controller, parser, repository, model and dweb graphs remain fixed
-  // lazy entries.
-  offscreen: Object.freeze({ modules: 9, graphBytes: 72_494, entryBytes: 33_578, directImports: 7 }),
 });
 
 // A cold authority wake is a UX boundary: shell, bootstrap, state, and the

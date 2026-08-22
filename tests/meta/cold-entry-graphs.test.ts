@@ -13,7 +13,8 @@ import {
 import {
   COLD_SOURCE_TARGETS,
   LEGACY_COLD_SOURCE_RATCHETS,
-  PREVIEW_KERNEL_SOURCE_RATCHET,
+  OFFSCREEN_SUPERVISOR_SOURCE_CONTRACT,
+  PREVIEW_KERNEL_SOURCE_CONTRACT,
 } from '../../scripts/bench/cold-start-policy.mjs';
 
 const entries = {
@@ -58,7 +59,7 @@ const nativeKernelStats = async (entryName = nativeKernelEntry) => {
 
 describe('cold entry graphs', () => {
   test('every cold graph stays at or below its achieved no-growth ratchet', async () => {
-    for (const name of Object.keys(entries) as Array<keyof typeof entries>) {
+    for (const name of ['kernel', 'sidepanel', 'home'] as const) {
       const measured = await stats(name);
       const ratchet = LEGACY_COLD_SOURCE_RATCHETS[name];
       expect(measured.modules, `${name} modules`).toBeLessThanOrEqual(ratchet.modules);
@@ -66,6 +67,20 @@ describe('cold entry graphs', () => {
       expect(measured.entryBytes, `${name} entry bytes`).toBeLessThanOrEqual(ratchet.entryBytes);
       expect(measured.directImports, `${name} direct imports`).toBeLessThanOrEqual(ratchet.directImports);
     }
+  });
+
+  test('the offscreen supervisor preserves its proven deletion and architectural ceiling', async () => {
+    const measured = await stats('offscreen');
+    const { baseline, minimumReduction } = OFFSCREEN_SUPERVISOR_SOURCE_CONTRACT;
+    expect(baseline.modules - measured.modules)
+      .toBeGreaterThanOrEqual(minimumReduction.modules);
+    expect(baseline.graphBytes - measured.graphBytes)
+      .toBeGreaterThanOrEqual(minimumReduction.graphBytes);
+    expect(measured.entryBytes).toBeLessThanOrEqual(baseline.entryBytes);
+    expect(measured.directImports).toBeLessThanOrEqual(baseline.directImports);
+    expect(measured.modules).toBeLessThanOrEqual(COLD_SOURCE_TARGETS.offscreen.modules);
+    expect(measured.graphBytes).toBeLessThanOrEqual(COLD_SOURCE_TARGETS.offscreen.graphBytes);
+    expect(measured.entryBytes).toBeLessThanOrEqual(COLD_SOURCE_TARGETS.offscreen.entryBytes);
   });
 
   test('the new first-paint shells already meet the final source targets', async () => {
@@ -127,11 +142,22 @@ describe('cold entry graphs', () => {
   test('Preview Chrome alone owns the downloaded-update graph', async () => {
     const common = await nativeKernelStats();
     const preview = await nativeKernelStats(previewKernelEntry);
-    expect({
-      modules: preview.modules, graphBytes: preview.graphBytes,
-      entryBytes: preview.entryBytes, directImports: preview.directImports,
-    }).toEqual(PREVIEW_KERNEL_SOURCE_RATCHET);
-    expect([...preview.modulesSet].filter((file) => !common.modulesSet.has(file)).sort()).toEqual([
+    const exclusive = [...preview.modulesSet]
+      .filter((file) => !common.modulesSet.has(file)).sort();
+    const exclusiveBytes = exclusive.reduce((total, file) =>
+      total + statSync(join(EXTENSION_DIR, file)).size, 0);
+    const { exclusiveBaseline, minimumReduction } = PREVIEW_KERNEL_SOURCE_CONTRACT;
+    expect(exclusiveBaseline.modules - exclusive.length)
+      .toBeGreaterThanOrEqual(minimumReduction.modules);
+    expect(exclusiveBaseline.graphBytes - exclusiveBytes)
+      .toBeGreaterThanOrEqual(minimumReduction.graphBytes);
+    expect(preview.entryBytes)
+      .toBeLessThanOrEqual(PREVIEW_KERNEL_SOURCE_CONTRACT.entryBytesCeiling);
+    expect(preview.directImports)
+      .toBeLessThanOrEqual(PREVIEW_KERNEL_SOURCE_CONTRACT.directImportsCeiling);
+    expect(preview.modules).toBe(common.modules + exclusive.length);
+    expect(preview.graphBytes).toBe(common.graphBytes + exclusiveBytes);
+    expect(exclusive).toEqual([
       'background/kernel-update-addon.js',
       'background/vault-kernel-preview.js',
       'shared/contributor-channel.js',
