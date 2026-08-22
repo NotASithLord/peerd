@@ -445,7 +445,14 @@ export const createProductionFeatureLeaseRuntime = ({
   const runTransition = async (/** @type {'initialize'|'unlock'|'resume'} */ transition,
     /** @type {{dwebEnabled?:boolean}} */ options = {}) => {
     const results = await withHostLifecycle(() => runTransitionUnsafe(transition, options));
-    if (results.some((result) => result?.outcomeKnown === false)) {
+    // why only offscreen scopes force realm retirement: an unknown start for a
+    // worker-local scope (goal, recovery, schedule) says nothing about the
+    // physical host's realm — retiring the shared document for it destroys
+    // every live offscreen lease (a mid-turn controller included) and feeds a
+    // loss/retire loop, because the retirement itself fails the next
+    // transition's worker-local starts with host-lost.
+    if (results.some((result) => result?.outcomeKnown === false
+        && OFFSCREEN_SCOPES.has(result?.scope))) {
       await retireActiveHost('feature-transition-start-outcome-unknown');
     }
     return results;

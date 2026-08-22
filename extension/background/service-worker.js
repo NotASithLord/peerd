@@ -3537,12 +3537,17 @@ const actorIsolationState = makeActorIsolationStateStore({
   storage: browser.storage.local,
   protocol: ACTOR_WORKER_PROTOCOL,
 });
+// why retryable:true — the kernel state contract requires every
+// temporarily_unavailable capability to be retryable (the surfaces refuse a
+// non-retryable transient as malformed and drop the whole snapshot, which
+// left the panel unhydrated behind the vault gate). This placeholder IS
+// retryable: it resolves as soon as the isolation state load settles.
 let actorIsolation = actorIsolationAvailable(baseActorIsolation)
   ? {
     status: /** @type {const} */ ('temporarily_unavailable'),
     host: baseActorIsolation.host,
     reason: 'Actor isolation state is loading.',
-    retryable: false,
+    retryable: true,
   }
   : baseActorIsolation;
 const actorIsolationReady = actorIsolationAvailable(baseActorIsolation)

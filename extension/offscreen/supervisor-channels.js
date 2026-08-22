@@ -329,5 +329,10 @@ export const registerServiceWorkerChannels = ({
       }))
       .catch(() => { try { actorPort.close(); } catch { /* already gone */ } });
   });
+  // why startMessages: client.postMessage deliveries are buffered until the
+  // page either assigns .onmessage or explicitly starts the queue —
+  // addEventListener alone never drains it, so the controller offer would
+  // wait forever and every turn would time out its handshake.
+  navigator.serviceWorker?.startMessages?.();
   return Object.freeze({ actorPorts, vaultAuthorityWorkers });
 };

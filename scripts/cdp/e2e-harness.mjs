@@ -694,6 +694,7 @@ export async function launchPeerd({
     };
     browserConn.on(onTargetEvent);
     await connection.send('Runtime.runIfWaitingForDebugger');
+    await connection.send('Runtime.enable').catch(() => {});
     await connection.send('Fetch.enable', { patterns: [
       { urlPattern: '*11434*' },
       { urlPattern: 'https://remote-module.test/*' },
@@ -703,6 +704,7 @@ export async function launchPeerd({
   const attachServiceWorker = (target) => attachFetchTarget(target.targetId);
   let swConn = interceptModel ? await attachServiceWorker(sw) : null;
   const auxiliaryFetchConnections = new Map();
+  const retiredTargetEvents = [];
   const auxiliaryFetchPending = new Set();
   const extensionTarget = (targetInfo) => {
     const url = String(targetInfo?.url ?? '');
@@ -727,6 +729,9 @@ export async function launchPeerd({
       void armAuxiliaryFetch(params?.targetInfo);
     } else if (method === 'Target.targetDestroyed') {
       const connection = auxiliaryFetchConnections.get(params?.targetId);
+      if (connection?.events?.length) {
+        retiredTargetEvents.push({ targetId: params?.targetId, events: [...connection.events] });
+      }
       try { connection?.close(); } catch { /* target already retired */ }
       auxiliaryFetchConnections.delete(params?.targetId);
     }
@@ -859,9 +864,12 @@ export async function launchPeerd({
     },
     modelCallCount: () => modelCalls,
     remoteModuleRequestCount: () => remoteModuleRequests,
-    extensionTargetEvents: () => [...auxiliaryFetchConnections.entries()].map(
-      ([targetId, connection]) => ({ targetId, events: [...connection.events] }),
-    ),
+    extensionTargetEvents: () => [
+      ...[...auxiliaryFetchConnections.entries()].map(
+        ([targetId, connection]) => ({ targetId, events: [...connection.events] }),
+      ),
+      ...retiredTargetEvents.map((entry) => ({ ...entry, retired: true })),
+    ],
     // Swap the model behaviour + reset the per-state call counter — lets one
     // Chrome run many states back-to-back (the single-Chrome verify path).
     setModelResponder: (fn) => { currentResponder = fn || (() => ({ sse: sseText('e2e-smoke-ok') })); modelCalls = 0; },

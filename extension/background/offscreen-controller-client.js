@@ -445,6 +445,17 @@ export const makeSemanticControllerClient = ({
   const hasSemanticAuthority = typeof authorizeSemanticCall === 'function'
     && typeof handleSemanticKernelCall === 'function';
   const ownsLeaseBoundary = typeof withLease === 'function';
+  // why a leased-user count: the Chrome lease is per bounded operation, but
+  // the CLIENT channel is shared. Retiring it when one operation settles
+  // while a concurrent leased operation (a live turn) is still on the wire
+  // severs that operation mid-flight as outcome-unknown. Only the last user
+  // out retires the realm.
+  let leasedUsers = 0;
+  const enterLeased = () => { leasedUsers += 1; };
+  const exitLeased = () => {
+    leasedUsers = Math.max(0, leasedUsers - 1);
+    if (leasedUsers === 0 && ownsLeaseBoundary && active) retire(active);
+  };
   /** @type {<T>(operation:()=>Promise<T>,options?:{outcomeKnownOnLoss?:boolean,code?:string})=>Promise<T>} */
   const withControllerLease = firefoxDirect && typeof withDirectLifetime === 'function'
     ? withDirectLifetime
@@ -494,7 +505,16 @@ export const makeSemanticControllerClient = ({
         workerUrl: browser.runtime.getURL('offscreen/controller-worker.js'),
       });
     }
-    return connectOffscreenController({
+    // why two bounded attempts: lease settlement retires the offscreen
+    // document, so a connect can race the successor document's creation — the
+    // offer then lands on the dying WindowClient (or none) and the handshake
+    // starves. The first attempt fails fast; the one retry re-runs
+    // ensureOffscreen + findHost against the then-current exact host with a
+    // FRESH channel. A same-epoch re-offer is safe precisely because the
+    // failed offer never bound: the host refuses a repeated epoch, so a
+    // half-established channel cannot be silently duplicated.
+    /** @param {number} handshakeMs */
+    const attempt = (handshakeMs) => connectOffscreenController({
       ensureOffscreen,
       capabilities: [...semanticCapabilities],
       buildDigest: CONTROLLER_BUILD_DIGEST,
@@ -502,10 +522,19 @@ export const makeSemanticControllerClient = ({
       authorizeCall: authorizeControllerCall,
       handleKernelCall: hasTurnAuthority || hasSemanticAuthority
         ? handleControllerKernelCall : undefined,
+      handshakeTimeoutMs: handshakeMs,
       findHost: async () => selectExactControllerHost(
         await listWindowClients(), browser.runtime.getURL(offscreenUrl),
       ),
     });
+    try {
+      return await attempt(2_000);
+    } catch (cause) {
+      const code = /** @type {{code?:string}} */ (cause)?.code;
+      if (code !== 'handshake-failed' && code !== 'host-missing') throw cause;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return attempt(10_000);
+    }
   };
 
   const getClient = async () => {
@@ -567,8 +596,9 @@ export const makeSemanticControllerClient = ({
   };
   const renderSystemPrompt = (/** @type {Record<string, unknown>} */ ctx) =>
     withControllerLease(async () => {
+      enterLeased();
       try { return await renderSystemPromptUnleased(ctx); }
-      finally { if (ownsLeaseBoundary && active) retire(active); }
+      finally { exitLeased(); }
     });
 
   const callTurnUnleased = async (
@@ -613,13 +643,26 @@ export const makeSemanticControllerClient = ({
     /** @type {{signal?:AbortSignal,timeoutMs?:number}} */ options = {},
   ) => {
     try {
-      return await withControllerLease(async () => {
-        try { return await callTurnUnleased(payload, options); }
-        finally { if (ownsLeaseBoundary && active) retire(active); }
-      }, {
-        outcomeKnownOnLoss: false,
-        code: 'controller-firefox-turn-lifetime-lost',
-      });
+      // why one startup retry: a bounded lease elsewhere can retire and
+      // replace the shared offscreen host between this lease's claim and the
+      // channel handshake, stranding the offer on the dying document. A
+      // startup-phase failure proves nothing was dispatched (Class A), so one
+      // fresh lease + connect against the successor host is replay-safe.
+      let attempts = 0;
+      for (;;) {
+        const result = await withControllerLease(async () => {
+          enterLeased();
+          try { return await callTurnUnleased(payload, options); }
+          finally { exitLeased(); }
+        }, {
+          outcomeKnownOnLoss: false,
+          code: 'controller-firefox-turn-lifetime-lost',
+        });
+        attempts += 1;
+        if (result?.code !== 'controller-turn-startup-failed' || attempts > 1
+            || options.signal?.aborted) return result;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
     } catch (cause) {
       return {
         ok: false,
@@ -650,15 +693,26 @@ export const makeSemanticControllerClient = ({
       retire(client);
       return { ok: false, code: 'semantic-dispatch-transport-failed', outcomeKnown: false };
     } finally {
-      if (ownsLeaseBoundary && active) retire(active);
+      exitLeased();
     }
   };
   const callSemantic = async (/** @type {unknown} */ payload) => {
     try {
-      return await withControllerLease(() => callSemanticUnleased(payload), {
-        outcomeKnownOnLoss: false,
-        code: 'controller-firefox-semantic-lifetime-lost',
-      });
+      // Same replay-safe startup retry as callTurn: a startup failure proves
+      // the semantic dispatch never left the kernel.
+      let attempts = 0;
+      for (;;) {
+        const result = await withControllerLease(() => {
+          enterLeased();
+          return callSemanticUnleased(payload);
+        }, {
+          outcomeKnownOnLoss: false,
+          code: 'controller-firefox-semantic-lifetime-lost',
+        });
+        attempts += 1;
+        if (result?.code !== 'semantic-dispatch-startup-failed' || attempts > 1) return result;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
     } catch (cause) {
       return {
         ok: false,

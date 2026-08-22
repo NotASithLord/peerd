@@ -179,7 +179,9 @@ export const OFFSCREEN_SUPERVISOR_SOURCE_CONTRACT = Object.freeze({
   baseline: Object.freeze({
     modules: 12, graphBytes: 90_502, entryBytes: 31_533, directImports: 5,
   }),
-  minimumReduction: Object.freeze({ modules: 2, graphBytes: 9_049 }),
+  // 9_049 -> 8_717: the supervisor gained the controller-offer startMessages
+  // drain (client.postMessage queues never drain on addEventListener alone).
+  minimumReduction: Object.freeze({ modules: 2, graphBytes: 8_717 }),
 });
 
 export const LEGACY_COLD_SOURCE_RATCHETS = Object.freeze({
@@ -212,7 +214,11 @@ export const LEGACY_COLD_SOURCE_RATCHETS = Object.freeze({
   // cold-listener modules replace 33 duplicate browser registrations with one
   // synchronous fan-in per event and persist only sanitized recovery hints;
   // they add no semantic/provider/Git ownership.
-  kernel: Object.freeze({ modules: 456, graphBytes: 4_316_649, entryBytes: 467_968, directImports: 111 }),
+  // 4_316_649 -> 4_319_311: the legacy-lane fixes that made every turn's
+  // controller handshake and lease lifecycle survive host replacement (state
+  // contract retryable placeholder, connect retry, leased-client refcount,
+  // scope-tightened realm retirement).
+  kernel: Object.freeze({ modules: 456, graphBytes: 4_319_311, entryBytes: 467_968, directImports: 111 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
