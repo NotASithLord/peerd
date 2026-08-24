@@ -61,6 +61,7 @@ export const assertVaultKernelReleaseTarget = ({
 
 export async function buildVaultKernelArtifact({
   browser = 'chrome', channel = 'store', releaseMinify = false,
+  artifactRoot = ARTIFACTS_DIR,
 } = {}) {
   if (!['chrome', 'firefox'].includes(browser)) throw new Error(`unsupported browser: ${browser}`);
   if (!['store', 'preview'].includes(channel)) throw new Error(`unsupported channel: ${channel}`);
@@ -70,9 +71,10 @@ export async function buildVaultKernelArtifact({
     // native floor when releaseMinify is requested. The live artifact and its
     // legacy ratchet remain untouched.
     channel, browser, version, sign: false, verify: channel === 'store', minify: false,
+    artifactRoot,
   });
-  const source = join(ARTIFACTS_DIR, 'staging', `${channel}-${browser}`);
-  const staging = join(ARTIFACTS_DIR, 'staging', `vault-kernel-${channel}-${browser}`);
+  const source = join(artifactRoot, 'staging', `${channel}-${browser}`);
+  const staging = join(artifactRoot, 'staging', `vault-kernel-${channel}-${browser}`);
   rmSync(staging, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
   cpSync(source, staging, { recursive: true });
@@ -114,7 +116,7 @@ export async function buildVaultKernelArtifact({
   }
   const extension = browser === 'firefox' ? 'xpi' : 'zip';
   const artifact = join(
-    ARTIFACTS_DIR, `peerd-vault-kernel-${channel}-${browser}.${extension}`,
+    artifactRoot, `peerd-vault-kernel-${channel}-${browser}.${extension}`,
   );
   rmSync(artifact, { force: true });
   execFileSync('zip', ['-q', '-X', artifact, '-@'], {

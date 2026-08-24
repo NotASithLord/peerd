@@ -174,6 +174,8 @@ describe('cold-start browser harness contract', () => {
     return source.then((text) => {
       expect(text).toContain("for (const channel of ['store', 'preview'])");
       expect(text).toContain('releaseMinify: true');
+      expect(text).toContain("mkdtempSync(join(tmpdir(), 'peerd-cold-native-artifacts-'))");
+      expect(text).toContain('releaseMinify: true, artifactRoot');
       expect(text).toContain("coldBudgetMode: 'native-target'");
       expect(text).toContain('NATIVE_FLOOR_CONTRACT.freshProcesses');
       expect(text).toContain('NATIVE_FLOOR_CONTRACT.confirmedStopWakes');
