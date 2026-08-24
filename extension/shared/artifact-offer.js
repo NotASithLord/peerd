@@ -10,6 +10,7 @@ export const ARTIFACT_CHANNEL_OPERATIONS = Object.freeze([
 ]);
 const OPERATIONS = new Set(ARTIFACT_CHANNEL_OPERATIONS);
 const OFFER_KEYS = 'args\nchannelId\noperation\nprotocol\ntype';
+const LEASED_OFFER_KEYS = 'args\nchannelId\nlease\noperation\nprotocol\ntype';
 
 /** @param {unknown} operation */
 export const artifactChannelOperationAllowed = (operation) =>
@@ -19,7 +20,8 @@ export const artifactChannelOperationAllowed = (operation) =>
 export const parseArtifactChannelOffer = (value) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const message = /** @type {Record<string,unknown>} */ (value);
-  if (Object.keys(message).sort().join('\n') !== OFFER_KEYS
+  const keys = Object.keys(message).sort().join('\n');
+  if ((keys !== OFFER_KEYS && keys !== LEASED_OFFER_KEYS)
       || message.type !== ARTIFACT_CHANNEL_OFFER
       || message.protocol !== ARTIFACT_CHANNEL_PROTOCOL
       || typeof message.channelId !== 'string'
@@ -34,11 +36,12 @@ export const parseArtifactChannelOffer = (value) => {
     channelId: message.channelId,
     operation: /** @type {string} */ (message.operation),
     args: message.args,
+    ...(keys === LEASED_OFFER_KEYS ? { lease: message.lease } : {}),
   });
 };
 
-/** @param {any} event @param {string} workerUrl @param {boolean} leaseActive */
-export const admitArtifactChannelOffer = (event, workerUrl, leaseActive) => {
+/** @param {any} event @param {string} workerUrl @param {boolean|((lease:unknown)=>boolean)} ownsLease */
+export const admitArtifactChannelOffer = (event, workerUrl, ownsLease) => {
   if (event?.data?.type !== ARTIFACT_CHANNEL_OFFER) {
     return { matched: false, ok: false, reason: 'not-artifact-offer', offer: null };
   }
@@ -54,7 +57,7 @@ export const admitArtifactChannelOffer = (event, workerUrl, leaseActive) => {
   if (!artifactChannelOperationAllowed(offer.operation)) {
     return { matched: true, ok: false, reason: 'operation-denied', offer };
   }
-  return leaseActive
+  return (typeof ownsLease === 'function' ? ownsLease(offer.lease) : ownsLease)
     ? { matched: true, ok: true, reason: null, offer }
     : { matched: true, ok: false, reason: 'lease-inactive', offer };
 };

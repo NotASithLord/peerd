@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { makeSessionCostFolder } from '../../extension/background/session-cost-fold.js';
+import { makeSessionCostFolder } from '../../extension/background/service-worker-control-plane.js';
 
 describe('session cost fold', () => {
   test('serializes concurrent read-modify-writes for one session', async () => {

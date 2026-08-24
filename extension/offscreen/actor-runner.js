@@ -15,7 +15,7 @@ import {
 const MAX_CONCURRENT = 4;
 let active = 0;
 let seq = 0;
-/** @type {Map<string, Worker>} */
+/** @type {Map<string, { worker: Worker, stop: () => void }>} */
 const liveWorkers = new Map();
 // actor/abort can beat actor/run while the offscreen command messages cross.
 // Keep a short, bounded tombstone so that ordering race cannot launch a Worker
@@ -97,22 +97,28 @@ const consumeEarlyAbort = (runId) => {
 
 /** @param {string} runId */
 export const abortActor = (runId) => {
-  const w = liveWorkers.get(runId);
-  if (w) { try { w.postMessage({ type: 'abort' }); } catch { /* gone */ } }
+  const live = liveWorkers.get(runId);
+  if (live) {
+    try { live.worker.postMessage({ type: 'abort' }); } catch { /* gone */ }
+    live.stop();
+  }
   else rememberEarlyAbort(runId);
 };
 
 /**
  * Run one BOUND-actor turn in a dedicated Worker.
  * @param {{ runId?: string, relayToken?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabOrigin?: string, origin?: string, inbound?: boolean, preflightReply?: string }} job
- * @param {{ workerUrl: string, sendToSW: (type: string, payload: object) => Promise<any>, createWorker?: (url: string) => Worker, startupMs?: number }} deps
- * @returns {Promise<{ ok: boolean, started?: boolean, phase?: string, code?: string, finalText?: string, newMessages?: any[], usage?: object, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean, outcomeKnown?: boolean }>}
+ * @param {{ workerUrl: string, sendToSW: (type: string, payload: object) => Promise<any>, onRelayDrain?: () => void, createWorker?: (url: string) => Worker, startupMs?: number, relayDrainMs?: number, maxLoopEvents?: number }} deps
+ * @returns {Promise<{ ok: boolean, started?: boolean, phase?: string, code?: string, finalText?: string, newMessages?: any[], usage?: object, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean, performed?: boolean, outcomeKnown?: boolean, retryable?: boolean }>}
  */
 export const runActor = async (job, {
   workerUrl,
   sendToSW,
+  onRelayDrain = () => {},
   createWorker = (url) => new Worker(url, { type: 'module' }),
   startupMs = ACTOR_WORKER_STARTUP_MS,
+  relayDrainMs = 5_000,
+  maxLoopEvents = 256,
 }) => {
   const runId = job.runId ?? `aw-${++seq}`;
   if (consumeEarlyAbort(runId)) {
@@ -133,6 +139,8 @@ export const runActor = async (job, {
   // ignores whatever the payload claims.
   const relayToken = job.relayToken;
   const budgetMs = Number.isFinite(job.budgetMs) && /** @type {number} */ (job.budgetMs) > 0 ? /** @type {number} */ (job.budgetMs) : 10 * 60_000;
+  const loopEventLimit = Number.isFinite(maxLoopEvents) && maxLoopEvents > 0
+    ? Math.floor(maxLoopEvents) : 256;
   /** @type {Worker | null} */
   let worker = null;
   const canaryName = `__peerd_actor_host_${Math.random().toString(36).slice(2)}`;
@@ -140,33 +148,121 @@ export const runActor = async (job, {
   try {
     Object.defineProperty(globalThis, canaryName, { value: canaryValue, configurable: true });
     worker = createWorker(workerUrl);
-    liveWorkers.set(runId, worker);
     const w = worker;
     return await new Promise((resolve) => {
       let settled = false;
       let started = false;
       let relayedToolRequests = 0;
+      let relayedUnknown = false;
+      /** @type {boolean | undefined} */
+      let relayedPerformed = undefined;
+      let pendingToolRelays = 0;
+      let pendingModelRelays = 0;
+      let relayedLoopEvents = 0;
+      let relayedModelUnknown = false;
+      /** @type {string | null} */
+      let relayedModelFailure = null;
+      /** @type {any} */
+      let terminal = null;
       /** @type {'awaiting-ready'|'awaiting-probe'|'ready'} */
       let readiness = 'awaiting-ready';
       let budgetTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
+      let relayDrainTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
       const probeId = `probe-${runId}`;
       const finish = (/** @type {any} */ value) => {
         if (settled) return;
         settled = true;
         clearTimeout(startupTimer);
         if (budgetTimer) clearTimeout(budgetTimer);
+        if (relayDrainTimer) clearTimeout(relayDrainTimer);
         try { w.terminate(); } catch { /* gone */ }
         try { delete globalThis[/** @type {keyof typeof globalThis} */ (canaryName)]; } catch { /* best effort */ }
         resolve(value);
       };
-      const protocolFailure = (/** @type {string} */ error) => finish({
+      const settleTerminal = () => {
+        if (!terminal || pendingToolRelays > 0 || pendingModelRelays > 0) return;
+        if (relayedUnknown) {
+          finish({
+            ok: false, started: true,
+            code: 'actor_tool_outcome_unknown',
+            error: 'outcome_unknown: Verify the target before retrying.',
+            finalText: terminal.finalText ?? '', newMessages: terminal.newMessages ?? [],
+            usage: terminal.usage, stopReason: terminal.stopReason,
+            toolCalls: relayedToolRequests,
+            ...(relayedPerformed === true ? { performed: true } : {}),
+            outcomeKnown: false, retryable: false,
+          });
+          return;
+        }
+        if (relayedModelUnknown) {
+          finish({
+            ok: false, started: true,
+            code: 'actor_model_outcome_unknown',
+            error: 'outcome_unknown: Verify before retrying.',
+            finalText: terminal.finalText ?? '', newMessages: terminal.newMessages ?? [],
+            usage: terminal.usage, stopReason: terminal.stopReason,
+            toolCalls: relayedToolRequests,
+            ...(relayedPerformed === true ? { performed: true } : {}),
+            outcomeKnown: false, retryable: false,
+          });
+          return;
+        }
+        if (relayedModelFailure && terminal.ok) {
+          terminal = { ...terminal, ok: false, error: relayedModelFailure, outcomeKnown: true };
+        }
+        finish(relayedToolRequests > 0
+          ? {
+              ...terminal,
+              ...(typeof relayedPerformed === 'boolean' ? { performed: relayedPerformed } : {}),
+              outcomeKnown: terminal.outcomeKnown !== false,
+            }
+          : terminal);
+      };
+      const requestFinish = (/** @type {any} */ value) => {
+        if (settled || terminal) return;
+        terminal = value;
+        clearTimeout(startupTimer);
+        if (budgetTimer) clearTimeout(budgetTimer);
+        if (pendingToolRelays > 0 || pendingModelRelays > 0) {
+          relayDrainTimer = setTimeout(() => {
+            const toolUnknown = pendingToolRelays > 0 || relayedUnknown;
+            finish({
+              ok: false, started: true,
+              code: toolUnknown ? 'actor_tool_outcome_unknown' : 'actor_model_outcome_unknown',
+              error: toolUnknown
+                ? 'outcome_unknown: Verify the target before retrying.'
+                : 'outcome_unknown: Verify before retrying.',
+              finalText: terminal?.finalText ?? '', newMessages: terminal?.newMessages ?? [],
+              usage: terminal?.usage, stopReason: terminal?.stopReason,
+              toolCalls: relayedToolRequests,
+              ...(relayedPerformed === true ? { performed: true } : {}),
+              outcomeKnown: false, retryable: false,
+            });
+          }, Math.max(1, relayDrainMs));
+          try { onRelayDrain(); } catch { /* host watchdog is best-effort */ }
+        }
+        settleTerminal();
+      };
+      const protocolFailure = (/** @type {string} */ error) => requestFinish({
         ok: false, started, phase: started ? 'run' : 'startup',
         code: 'actor_worker_protocol_error', error,
       });
-      const startupTimer = setTimeout(() => finish({
+      const startupTimer = setTimeout(() => requestFinish({
         ok: false, started: false, phase: 'startup',
         code: 'actor_worker_start_timeout', error: `actor worker did not become ready within ${startupMs}ms`,
       }), startupMs);
+      liveWorkers.set(runId, {
+        worker: w,
+        stop: () => requestFinish(started
+          ? {
+              ok: true, started: true, phase: 'run', finalText: '', newMessages: [],
+              stopReason: 'aborted', toolCalls: relayedToolRequests,
+            }
+          : {
+              ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+              error: 'actor aborted before worker start', outcomeKnown: true,
+            }),
+      });
 
       w.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         const m = /** @type {any} */ (ev.data);
@@ -189,13 +285,13 @@ export const runActor = async (job, {
           readiness = 'ready';
           clearTimeout(startupTimer);
           if (job.probeOnly === true) {
-            finish({
+            requestFinish({
               ok: true, started: false, phase: 'startup', code: 'actor_worker_ready',
               workerType: 'dedicated', realmVerified: true, extensionApisPresent: false,
             });
             return;
           }
-          budgetTimer = setTimeout(() => finish({
+          budgetTimer = setTimeout(() => requestFinish({
             ok: false, started: true, phase: 'run', code: 'actor_worker_timeout', aborted: true,
             error: `actor timed out after ${budgetMs}ms`,
           }), budgetMs);
@@ -209,20 +305,35 @@ export const runActor = async (job, {
           protocolFailure(`actor worker sent '${String(m.type)}' before readiness`);
           return;
         }
+        if (terminal) return;
         if (m.type === 'model-request') {
+          pendingModelRelays += 1;
           try {
             const resp = await sendToSW('actor/model-call', {
               ...(relayToken ? { relayToken } : {}), args: m.args,
             });
-            if (resp?.ok) w.postMessage({ type: 'model-response', rid: m.rid, events: resp.events ?? [] });
-            else w.postMessage({ type: 'model-error', rid: m.rid, error: resp?.error ?? 'model call failed' });
-          } catch (e) { w.postMessage({ type: 'model-error', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }); }
+            if (resp?.outcomeKnown === false) relayedModelUnknown = true;
+            if (!resp?.ok) relayedModelFailure ??= resp?.error ?? 'model call failed';
+            if (!terminal) {
+              if (resp?.ok) w.postMessage({ type: 'model-response', rid: m.rid, events: resp.events ?? [] });
+              else w.postMessage({ type: 'model-error', rid: m.rid, error: resp?.error ?? 'model call failed' });
+            }
+          } catch (e) {
+            const detail = /** @type {{ message?: string, outcomeKnown?: boolean }} */ (e);
+            relayedModelUnknown ||= detail?.outcomeKnown !== true;
+            relayedModelFailure ??= detail?.message ?? String(e);
+            if (!terminal) w.postMessage({ type: 'model-error', rid: m.rid, error: detail?.message ?? String(e) });
+          } finally {
+            pendingModelRelays -= 1;
+            settleTerminal();
+          }
           return;
         }
         if (m.type === 'tool-request') {
           // Count at the privileged relay boundary. The Worker result is not
           // trusted to report whether an external action may have started.
           relayedToolRequests += 1;
+          pendingToolRelays += 1;
           try {
             // The SW pins the bound instance + gates + dispatches (never trusts the
             // worker's call args) and returns the ToolResult. The relay grant keys
@@ -231,11 +342,48 @@ export const runActor = async (job, {
             const reply = await sendToSW('actor/tool-dispatch', {
               ...(relayToken ? { relayToken } : {}), call: m.call,
             });
-            w.postMessage({ type: 'tool-response', rid: m.rid, reply });
-          } catch (e) { w.postMessage({ type: 'tool-response', rid: m.rid, reply: { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) } }); }
+            const result = reply?.result;
+            if (reply?.outcomeKnown === false || result?.outcomeKnown === false) relayedUnknown = true;
+            const performed = typeof reply?.performed === 'boolean'
+              ? reply.performed
+              : typeof result?.performed === 'boolean'
+                ? result.performed
+                : reply?.ok === true && result?.ok === true
+                  ? true
+                  : reply?.ok === false && reply?.outcomeKnown !== false
+                    ? false
+                    : undefined;
+            if (performed === true || (performed === false && relayedPerformed !== true)) {
+              relayedPerformed = performed;
+            }
+            if (!terminal) w.postMessage({ type: 'tool-response', rid: m.rid, reply });
+          } catch (e) {
+            const detail = /** @type {{ message?: string, code?: string, outcomeKnown?: boolean, performed?: boolean }} */ (e);
+            relayedUnknown ||= detail?.outcomeKnown !== true;
+            if (detail?.performed === true || (detail?.performed === false && relayedPerformed !== true)) {
+              relayedPerformed = detail.performed;
+            }
+            if (!terminal) {
+              w.postMessage({
+                type: 'tool-response', rid: m.rid,
+                reply: {
+                  ok: false, error: detail?.message ?? String(e),
+                  ...(typeof detail?.code === 'string' ? { code: detail.code } : {}),
+                  outcomeKnown: detail?.outcomeKnown === true,
+                  ...(typeof detail?.performed === 'boolean' ? { performed: detail.performed } : {}),
+                  ...(detail?.outcomeKnown === true ? {} : { retryable: false }),
+                },
+              });
+            }
+          } finally {
+            pendingToolRelays -= 1;
+            settleTerminal();
+          }
           return;
         }
         if (m.type === 'loop-event') {
+          if (relayedLoopEvents >= loopEventLimit) return;
+          relayedLoopEvents += 1;
           sendToSW('actor/loop-event', {
             ...(relayToken ? { relayToken } : {}), event: m.event,
           }).catch(() => {});
@@ -248,30 +396,27 @@ export const runActor = async (job, {
           // `aborted` for its OWN wall-clock timeout below.
           if (r.error) {
             const toolCalls = relayedToolRequests;
-            finish({
+            requestFinish({
               ok: false, started: true, error: r.error,
               finalText: r.finalText ?? '', newMessages: r.newMessages ?? [],
               usage: r.usage, stopReason: r.stopReason, toolCalls,
-              // A graceful provider failure before any tool request has a known
-              // outcome. Worker/protocol crashes use the separate error path and
-              // remain unknown because their partial state cannot be trusted.
-              outcomeKnown: relayedToolRequests === 0,
+              outcomeKnown: true,
             });
           }
-          else finish({ ok: true, started: true, finalText: r.finalText ?? '', newMessages: r.newMessages ?? [], usage: r.usage, stopReason: r.stopReason, toolCalls: relayedToolRequests });
+          else requestFinish({ ok: true, started: true, finalText: r.finalText ?? '', newMessages: r.newMessages ?? [], usage: r.usage, stopReason: r.stopReason, toolCalls: relayedToolRequests });
         }
         if (m.type === 'error') {
-          finish({ ok: false, started: true, phase: 'run', code: 'actor_worker_error', error: m.error ?? 'actor worker error' });
+          requestFinish({ ok: false, started: true, phase: 'run', code: 'actor_worker_error', error: m.error ?? 'actor worker error' });
         }
       });
       w.addEventListener('error', (/** @type {any} */ e) => {
-        finish({
+        requestFinish({
           ok: false, started, phase: started ? 'run' : 'startup', code: 'actor_worker_crashed',
           error: `actor worker crashed: ${e?.message ?? 'no detail'}`,
         });
       });
       w.addEventListener('messageerror', () => {
-        finish({
+        requestFinish({
           ok: false, started, phase: started ? 'run' : 'startup', code: 'actor_worker_message_error',
           error: 'actor worker sent a message that could not be decoded',
         });

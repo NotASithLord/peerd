@@ -7,8 +7,8 @@ afterStaticShellPaint(() => {
     portName: 'sidepanel',
     appSelector: '.app-shell',
     loadApplication: async () => {
-      const application = await import('./sidepanel.js');
-      application.startSidepanel();
+      const app = await import('./sidepanel.js');
+      return app.startSidepanel;
     },
   });
 });

@@ -33,6 +33,25 @@ export const makeSerialLane = () => {
   };
 };
 
+/**
+ * @template T
+ * @param {()=>Promise<T>|T} operation
+ * @param {number} timeoutMs
+ * @param {()=>unknown} timeout
+ * @param {typeof setTimeout} [setTimer]
+ * @param {typeof clearTimeout} [clearTimer]
+ */
+export const withDeadline = (operation, timeoutMs, timeout,
+  setTimer = setTimeout, clearTimer = clearTimeout) => {
+  /** @type {ReturnType<typeof setTimeout>} */ let timer;
+  return /** @type {Promise<T>} */ (Promise.race([
+    Promise.resolve().then(operation),
+    new Promise((_, reject) => {
+      timer = setTimer(() => reject(timeout()), timeoutMs);
+    }),
+  ]).finally(() => clearTimer(timer)));
+};
+
 /** @param {number} n */
 const randomBytesDefault = (n) => crypto.getRandomValues(new Uint8Array(n));
 

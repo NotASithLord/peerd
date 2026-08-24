@@ -105,6 +105,7 @@ export const runControllerTurn = async (payload, options) => {
   const withToolSlot = makeToolBackpressure(options.signal);
   const runId = input.runId;
   let nestedUnknown = false;
+  let abortFinalized = false;
   const rpc = (/** @type {string} */ operation, /** @type {unknown} */ value) =>
     turnValue(kernelCall, operation, { runId, value }, () => { nestedUnknown = true; });
   /** @type {Set<Promise<unknown>>} */
@@ -117,6 +118,13 @@ export const runControllerTurn = async (payload, options) => {
   let classifications = /** @type {Record<string, any>} */ ({ ...input.classifications });
   /** @type {string|null} */
   let modelId = null;
+  const cancelModel = async () => {
+    const closing = modelId;
+    modelId = null;
+    if (closing && !options.signal.aborted) {
+      await rpc('turn.model.cancel', { modelId: closing }).catch(() => {});
+    }
+  };
   const callModel = async function* (/** @type {Record<string, any>} */ args) {
     const {
       getSecret: _getSecret, safeFetch: _safeFetch, signal: _signal, ...modelRequest
@@ -130,11 +138,7 @@ export const runControllerTurn = async (payload, options) => {
         if (next?.done === true) return;
         yield next?.event;
       }
-    } finally {
-      const closing = modelId;
-      modelId = null;
-      if (closing) await rpc('turn.model.cancel', { modelId: closing }).catch(() => {});
-    }
+    } finally { await cancelModel(); }
   };
   const sessions = {
     get: async (/** @type {string} */ sessionId) => parseJson(
@@ -174,30 +178,49 @@ export const runControllerTurn = async (payload, options) => {
         return typeof refreshed?.toolsJson === 'string'
           ? parseJson(refreshed.toolsJson, 'turn tools') : [];
       },
-      toolDispatch: (/** @type {unknown} */ call) => withToolSlot(
-        async () => parseJson(await rpc('turn.tool.dispatch', {
+      toolDispatch: (/** @type {unknown} */ call) => withToolSlot(async () => {
+        const result = parseJson(await rpc('turn.tool.dispatch', {
           callJson: JSON.stringify(call),
-        }), 'tool result'),
-      ),
+        }), 'tool result');
+        if (result?.outcomeKnown === false) nestedUnknown = true;
+        return result;
+      }),
+      finalizeAbort: async (/** @type {any} */ value) => {
+        await rpc('turn.abort.finalize', value);
+        abortFinalized = true;
+      },
       classifyToolCall: (/** @type {string} */ name) => classifications[name] ?? null,
       enrichTrimSummary: (/** @type {unknown} */ request) => {
         trackAdvisory(rpc('turn.trim.enrich', { request })).catch(() => {});
       },
     })) {
-      await rpc('turn.event', { eventJson: JSON.stringify(event) });
+      try { await rpc('turn.event', { eventJson: JSON.stringify(event) }); }
+      catch (cause) {
+        if (!options.signal.aborted) throw cause;
+      }
     }
     if (advisory.size > 0) await Promise.allSettled([...advisory]);
     await rpc('turn.finalize', {});
     if (nestedUnknown) throw new Error('a dispatched kernel operation has an unknown outcome');
+    if (options.signal.aborted && !abortFinalized) {
+      throw Object.assign(new Error('controller turn aborted before finalization'), {
+        outcomeKnown: false,
+      });
+    }
     return { ok: true, outcomeKnown: true };
   } catch (cause) {
+    const detail = /** @type {{code?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
     return {
       ok: false,
-      code: options.signal.aborted ? 'controller-call-aborted' : 'turn-run-failed',
-      outcomeKnown: options.signal.aborted ? false : !nestedUnknown,
+      code: detail?.outcomeKnown === false && typeof detail.code === 'string' ? detail.code
+        : options.signal.aborted ? 'controller-call-aborted'
+        : detail?.code ?? 'turn-run-failed',
+      outcomeKnown: detail?.outcomeKnown === false ? false
+        : options.signal.aborted && !abortFinalized ? false : !nestedUnknown,
+      ...(detail?.retryable === false ? { retryable: false } : {}),
       error: cause instanceof Error ? cause.message : String(cause),
     };
   } finally {
-    if (modelId) await rpc('turn.model.cancel', { modelId }).catch(() => {});
+    await cancelModel();
   }
 };

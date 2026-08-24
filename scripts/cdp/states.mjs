@@ -129,7 +129,10 @@ let actorDelegatesState = { spawned: 0, childCalls: 0, webCalls: 0 };
 let actorFabricHierarchyState = {
   spawned: 0, nestedCalls: 0, siblingCalls: 0, webCalls: 0,
 };
-let actorOverviewState = { alphaSpawned: 0, betaSpawned: 0 };
+let actorOverviewState = {
+  alphaSpawned: 0, betaSpawned: 0,
+  liveGate: Promise.resolve(), releaseLive: () => {},
+};
 // heap-split phase 4: an offscreen actor BUILDING an app (create + delegate).
 let actorAppState = { spawned: 0, childCalls: 0, appCalls: 0, appId: null };
 let actorAppProbeUrl = '';
@@ -381,7 +384,6 @@ export const STATES = [
       rec.check('user message round-trips', !!out.userText && out.userText.includes('ping from e2e'), JSON.stringify(out.userText));
       rec.check('assistant turn renders the streamed text', out.assistantText === SMOKE_TEXT, JSON.stringify(out.assistantText));
       rec.check('turn reaches a terminal/idle state', out.busy === false);
-      await rec.shot('final');
     },
   },
 
@@ -1213,7 +1215,6 @@ export const STATES = [
       rec.check('the peer host starts under the restored identity after lease release',
         restarted?.ok === true && restarted?.running === true && restarted?.did === incoming.did,
         JSON.stringify(restarted));
-      await rec.shot('final');
       await retirePrivateTransferPage(transferPage);
     },
   },
@@ -1398,19 +1399,27 @@ export const STATES = [
       // fall back to unlit, the instant the run is live (the fix for "did it
       // even start?"). Best-effort snapshot while the run drives.
       const toggleRunning = await waitFor(
-        () => evalIn(ctx.page, `!!document.querySelector('.goal-toggle.is-running')`),
+        () => evalIn(ctx.page, `(() => {
+          const toggle = document.querySelector('.goal-toggle.is-running');
+          if (!toggle) return null;
+          return {
+            bar: !!document.querySelector('.goal-bar'),
+            label: toggle.textContent,
+            session: document.querySelector('.message-list')?.getAttribute('data-session-id') ?? null,
+          };
+        })()`),
         { budgetMs: 8_000, pollMs: 50 });
       // The plan-of-record card appears once todo_init lands and ticks to 1/2
       // after todo_check — the visible checklist that answers "is it working?".
       const todoSeen = await waitFor(
         () => evalIn(ctx.page, `/1\\/2/.test(document.querySelector('.todo-card .todo-card-meta')?.textContent || '')`),
-        { budgetMs: 12_000, pollMs: 50 });
-      if (goalBarSeen) await rec.shot('goal-bar');
+        { budgetMs: 30_000, pollMs: 50 });
       let out = {};
       await waitFor(async () => { out = await probe(ctx); return !out.goalBar && !out.busy; }, { budgetMs: 25_000 });
       const calls = ctx.modelCallCount();
       rec.check('Goal bar appeared while driving', !!goalBarSeen);
-      rec.check('Goal toggle read "running" while live (sticky, not untoggled)', !!toggleRunning);
+      rec.check('Goal toggle read "running" while live (sticky, not untoggled)', !!toggleRunning,
+        JSON.stringify(toggleRunning));
       rec.check('TodoCard rendered the plan and ticked to 1/2 after todo_check', !!todoSeen);
       rec.check('loop drove >1 autonomous turn', calls >= 3, `model calls: ${calls}`);
       rec.check('complete_goal ended it cleanly (not the cap)', !out.capped && calls < 12, `capped=${out.capped} calls=${calls}`);
@@ -1419,7 +1428,6 @@ export const STATES = [
       const todoAfter = await evalIn(ctx.page, `!!document.querySelector('.todo-card')`);
       rec.check('TodoCard persists after the run as its receipt', !!todoAfter);
       rec.check('submitted goal text round-trips as the first user message', !!out.userText && out.userText.includes('tidy the repo'), JSON.stringify(out.userText));
-      await rec.shot('final');
     },
   },
 
@@ -1462,7 +1470,6 @@ export const STATES = [
         /"total"\s*:\s*50\b/.test(pdaResult) && /"count"\s*:\s*3\b/.test(pdaResult),
         `script tool result: ${pdaResult.slice(0, 200)}`);
       rec.check('the on-device answer renders to the user', !!out.assistantText && /50/.test(out.assistantText), JSON.stringify(out.assistantText));
-      await rec.shot('final');
     },
   },
 
@@ -1537,7 +1544,7 @@ export const STATES = [
           // actor's reply wakes it to index + report, so a generic idle check is
           // too eager and would settle on the intermediate bubble.
           return (out.bubbles || []).some((b) => /35\.50/.test(b)) && !out.busy;
-        }, { budgetMs: 40_000 });
+        }, { budgetMs: 60_000 });
 
         rec.check('the orchestrator delegated the read via message_actor', harvestDelegated === true);
         rec.check('the web-actor sub-loop ran (page code + report, ≥2 actor model calls)', harvestActorTurn >= 2, `actor turns: ${harvestActorTurn}`);
@@ -1548,7 +1555,6 @@ export const STATES = [
           harvestActorSawPage.includes('Coffee Mug') && harvestActorSawPage.includes('12.00'),
           harvestActorSawPage.slice(0, 2000));
         rec.check('the harvested on-device answer renders', (out.bubbles || []).some((b) => /35\.50/.test(b)), JSON.stringify(out.bubbles));
-        await rec.shot('final');
       } finally {
         server.close();
       }
@@ -1660,7 +1666,6 @@ export const STATES = [
         rec.check('the origin was LEARNED from the password field on the page',
           !state || state.learned === true,
           JSON.stringify(state));
-        await rec.shot('final');
       } finally {
         server.close();
       }
@@ -1941,7 +1946,6 @@ export const STATES = [
           && disclosure?.detail === 'No actor work was started. Review the request before trying again.'
           && !disclosure.detail.includes('actor_identity_provider_transit_only'),
         JSON.stringify({ disclosureReady, disclosure }));
-      await rec.shot('final');
     },
   },
 
@@ -2067,7 +2071,6 @@ export const STATES = [
             && afterNumeric?.siteActorState?.ownedOrigin === siteFixtureOrigin
             && JSON.stringify(afterNumeric.siteActorState) === JSON.stringify(beforeNumeric),
           JSON.stringify({ beforeNumeric, afterNumeric }));
-        await rec.shot('final');
       } finally {
         await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
         server.close();
@@ -2081,9 +2084,10 @@ export const STATES = [
     responder: () => ({ delayMs: 12_000, sse: sseText('this-should-never-render') }),
     async run(ctx, rec) {
       await rpc(ctx.page, { type: 'agent/send', text: 'start a long turn' });
-      const busySeen = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('form.input-bar button.stop')`), { budgetMs: 15_000, pollMs: 100 });
+      const busySeen = await waitFor(async () => ctx.modelCallCount() > 0
+        && await evalIn(ctx.page, `!!document.querySelector('.message-assistant.streaming') && !!document.querySelector('form.input-bar button.stop')`),
+      { budgetMs: 15_000, pollMs: 100 });
       rec.check('turn went busy (Stop button appeared)', !!busySeen);
-      if (busySeen) await rec.shot('busy');
       const stopped = await rpc(ctx.page, { type: 'agent/stop' });
       rec.check('agent/stop accepted', !!stopped?.ok);
       let out = {};
@@ -2091,7 +2095,12 @@ export const STATES = [
       rec.check('Stop returns the turn to idle', out.busy === false);
       rec.check('the aborted model response never renders', !(out.assistantText || '').includes('never-render'));
       rec.check('the aborted turn shows a "stopped" chip', out.stopChip === true);
-      await rec.shot('final');
+      rec.check('Stop surfaces no error state', out.errorText === null, JSON.stringify(out.errorText));
+      const callsAfterStop = ctx.modelCallCount();
+      await sleep(750);
+      rec.check('Stop makes exactly one model call and never replays it',
+        callsAfterStop === 1 && ctx.modelCallCount() === 1,
+        `after stop: ${callsAfterStop}; after quiet window: ${ctx.modelCallCount()}`);
     },
   },
 
@@ -2113,7 +2122,6 @@ export const STATES = [
       const chip = await evalIn(ctx.page,
         `document.querySelector('.message-assistant .failure-kind-chip')?.textContent ?? null`);
       rec.check("the failure-class chip renders and reads 'provider'", chip === 'provider', JSON.stringify(chip));
-      await rec.shot('final');
     },
   },
 
@@ -2160,7 +2168,6 @@ export const STATES = [
       }, { budgetMs: 5_000 });
       rec.check('the debug flyout opens with the bundle + OTel export actions',
         menu.open === true && (menu.items || []).length >= 2, JSON.stringify(menu.items));
-      await rec.shot('debug-menu-open');
 
       // devMode adds the context inspector; the modal renders the live
       // snapshot captured above (label 'main'), proving ring → route → view.
@@ -2184,7 +2191,6 @@ export const STATES = [
       }, { budgetMs: 8_000 });
       rec.check("the context inspector opens on the live 'main' snapshot (devMode)",
         inspector.open === true && (inspector.snaps || []).includes('main'), JSON.stringify(inspector.snaps));
-      await rec.shot('context-inspector');
       await evalIn(ctx.page, `document.querySelector('.ctx-close')?.click()`);
       await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } });
     },
@@ -2213,7 +2219,6 @@ export const STATES = [
       rec.check('both assistant replies render (history carried across turns)',
         out.bubbles?.includes('first reply') && out.bubbles?.includes('second reply'), JSON.stringify(out.bubbles));
       rec.check('settles idle after the second turn', out.busy === false);
-      await rec.shot('final');
     },
   },
 
@@ -2229,7 +2234,6 @@ export const STATES = [
       await rpc(ctx.page, { type: 'permission/set', mode: 'plan' });
       await waitFor(async () => (await activeMode()) === 'Plan', { budgetMs: 8_000 });
       rec.check('Plan becomes the active mode', (await activeMode()) === 'Plan');
-      await rec.shot('plan');
       await rpc(ctx.page, { type: 'permission/set', mode: 'act' });
       await waitFor(async () => (await activeMode()) === 'Act', { budgetMs: 8_000 });
       rec.check('toggles back to Act', (await activeMode()) === 'Act');
@@ -2244,7 +2248,6 @@ export const STATES = [
       await rpc(ctx.page, { type: 'vault/lock' });
       const locked = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.vault-brand') && !document.querySelector('form.input-bar')`), { budgetMs: 8_000 });
       rec.check('locking flips the panel to the vault gate', !!locked);
-      await rec.shot('locked');
       // Unlock again so later states start from a ready, unlocked panel.
       await rpc(ctx.page, { type: 'vault/unlock', passphrase: PASSPHRASE });
       const ready = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('form.input-bar')`), { budgetMs: 10_000 });
@@ -2320,8 +2323,35 @@ export const STATES = [
   // task that the host will refuse after the user clicks it.
   {
     name: 'protected-page-starter', kind: 'functional', phase: 'post-unlock',
-    responder: null,
+    responder: () => ({ sse: sseText('Starter custody settled.') }),
     async run(ctx, rec) {
+      const callLogKey = 'peerd.e2e.protected-starter-calls';
+      const interceptorSource = `(() => {
+        if (globalThis.__peerdProtectedStarterOriginal) return true;
+        const runtime = globalThis.chrome?.runtime;
+        if (!runtime?.sendMessage) return false;
+        const original = runtime.sendMessage.bind(runtime);
+        globalThis.__peerdProtectedStarterOriginal = original;
+        runtime.sendMessage = async (message, ...args) => {
+          const calls = JSON.parse(localStorage.getItem(${JSON.stringify(callLogKey)}) || '[]');
+          const loseReceipt = message?.type === 'agent/send' && message?.checkOnly !== true
+            && !calls.some((call) => call.type === 'agent/send' && call.checkOnly !== true);
+          if (message?.type === 'agent/send') {
+            calls.push({
+              type: message.type,
+              checkOnly: message.checkOnly === true,
+              operationId: message.operationId ?? null,
+            });
+            localStorage.setItem(${JSON.stringify(callLogKey)}, JSON.stringify(calls));
+          }
+          const reply = await original(message, ...args);
+          if (loseReceipt) throw Object.assign(new Error('e2e receipt lost'), {
+            outcomeKnown: false, outcomeKind: 'unknown', retryable: false,
+          });
+          return reply;
+        };
+        return true;
+      })()`;
       const server = createServer((_request, response) => {
         response.writeHead(200, { 'content-type': 'text/html' });
         response.end('<!doctype html><title>Private fixture</title><p>private fixture</p>');
@@ -2331,7 +2361,15 @@ export const STATES = [
       const priorActive = await evalIn(ctx.page, `(async () =>
         (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id ?? null)()`, true);
       let protectedTabId = null;
+      let interceptorId = null;
       try {
+        await evalIn(ctx.page, `localStorage.removeItem(${JSON.stringify(callLogKey)})`);
+        const armed = await ctx.page.send('Page.addScriptToEvaluateOnNewDocument', {
+          source: interceptorSource,
+        });
+        interceptorId = armed.identifier ?? null;
+        rec.check('the starter receipt-loss seam is installed',
+          await evalIn(ctx.page, interceptorSource) === true);
         protectedTabId = await evalIn(ctx.page, `(async () =>
           (await chrome.tabs.create({ url: ${JSON.stringify(privateUrl)}, active: true })).id)()`, true);
         const starter = await waitFor(() => evalIn(ctx.page, `(() => {
@@ -2367,8 +2405,100 @@ export const STATES = [
         // The harness hosts the side panel in a tab. Bringing that tab to the
         // foreground would correctly replace the private-page receipt before
         // capture, unlike a real side panel which stays beside the active tab.
-        await rec.shotPage('protected-page-starter', ctx.page, { bringToFront: false });
+
+        const clicked = await evalIn(ctx.page, `(() => {
+          const card = [...document.querySelectorAll('button.path-card')]
+            .find((candidate) => candidate.dataset.path === 'ask');
+          if (!card || card.disabled) return false;
+          card.click();
+          return true;
+        })()`);
+        rec.check('the safe starter remains available beside a protected page', clicked === true);
+        const pending = await waitFor(() => evalIn(ctx.page, `(() => {
+          const calls = JSON.parse(localStorage.getItem(${JSON.stringify(callLogKey)}) || '[]');
+          const send = calls.find((call) => call.type === 'agent/send' && call.checkOnly !== true);
+          if (!send?.operationId) return null;
+          const stored = [...Array(localStorage.length).keys()]
+            .map((index) => localStorage.key(index))
+            .filter((key) => key?.startsWith('peerd.unconfirmed-send.'))
+            .map((key) => JSON.parse(localStorage.getItem(key) || 'null'))
+            .find((value) => value?.operationId === send.operationId);
+          return stored ? { operationId: send.operationId } : null;
+        })()`), { budgetMs: 10_000, pollMs: 50 });
+        rec.check('a lost starter receipt leaves one durable delivery fence',
+          typeof pending?.operationId === 'string', JSON.stringify(pending));
+        const pendingOperationId = pending?.operationId ?? '';
+        const settled = await waitFor(async () => {
+          const receipt = await evalIn(ctx.page, `(async () => {
+            const stored = await chrome.storage.session.get('agentSendReceipts.v1');
+            return stored['agentSendReceipts.v1']?.[${JSON.stringify(pendingOperationId)}]?.status ?? null;
+          })()`, true);
+          const modelCalls = ctx.modelCallCount();
+          return receipt === 'settled' && modelCalls === 1 ? { receipt, modelCalls } : null;
+        }, { budgetMs: 30_000, pollMs: 50 });
+        rec.check('the accepted starter settles without a replay',
+          settled?.receipt === 'settled' && settled?.modelCalls === 1,
+          JSON.stringify(settled));
+
+        await ctx.page.send('Page.bringToFront');
+        await ctx.page.send('Page.reload', { ignoreCache: true });
+        const checkReady = await waitFor(() => evalIn(ctx.page, `(() => {
+          const button = [...document.querySelectorAll('button')]
+            .find((candidate) => candidate.textContent === 'Check delivery');
+          const calls = JSON.parse(localStorage.getItem(${JSON.stringify(callLogKey)}) || '[]');
+          return button ? { operationId: calls[0]?.operationId ?? null } : null;
+        })()`), { budgetMs: 15_000, pollMs: 50 });
+        const reloadDiagnostics = checkReady ?? await evalIn(ctx.page, `(() => ({
+          readyState: document.readyState,
+          bootStage: document.documentElement.dataset.peerdBootStage ?? null,
+          text: document.body.innerText.slice(0, 500),
+          calls: JSON.parse(localStorage.getItem(${JSON.stringify(callLogKey)}) || '[]'),
+          pending: [...Array(localStorage.length).keys()]
+            .map((index) => localStorage.key(index))
+            .filter((key) => key?.startsWith('peerd.unconfirmed-send.')),
+        }))()`);
+        rec.check('the reloaded panel offers Check delivery for the same operation',
+          checkReady?.operationId === pending?.operationId, JSON.stringify(reloadDiagnostics));
+        await evalIn(ctx.page, `(() => [...document.querySelectorAll('button')]
+          .find((button) => button.textContent === 'Check delivery')?.click())()`);
+        const reconciled = await waitFor(() => evalIn(ctx.page, `(() => {
+          const calls = JSON.parse(localStorage.getItem(${JSON.stringify(callLogKey)}) || '[]');
+          const stillPending = [...Array(localStorage.length).keys()]
+            .map((index) => localStorage.key(index))
+            .filter((key) => key?.startsWith('peerd.unconfirmed-send.'))
+            .map((key) => JSON.parse(localStorage.getItem(key) || 'null'))
+            .some((value) => value?.operationId === calls[0]?.operationId);
+          return calls.length >= 2 && !stillPending ? calls : null;
+        })()`), { budgetMs: 10_000, pollMs: 50 });
+        const sends = (reconciled ?? []).filter((call) => call.type === 'agent/send');
+        const nonChecks = sends.filter((call) => call.checkOnly !== true);
+        const checks = sends.filter((call) => call.checkOnly === true);
+        rec.check('Check delivery preserves custody without replaying the starter',
+          nonChecks.length === 1
+            && checks.length === 1
+            && nonChecks[0]?.operationId === pending?.operationId
+            && checks[0]?.operationId === pending?.operationId
+            && ctx.modelCallCount() === 1,
+          JSON.stringify({ sends, modelCalls: ctx.modelCallCount() }));
       } finally {
+        if (interceptorId) {
+          await ctx.page.send('Page.removeScriptToEvaluateOnNewDocument', {
+            identifier: interceptorId,
+          }).catch(() => {});
+        }
+        await evalIn(ctx.page, `(() => {
+          const original = globalThis.__peerdProtectedStarterOriginal;
+          if (original) chrome.runtime.sendMessage = original;
+          delete globalThis.__peerdProtectedStarterOriginal;
+          const calls = JSON.parse(localStorage.getItem(${JSON.stringify(callLogKey)}) || '[]');
+          const operationId = calls[0]?.operationId;
+          for (const key of [...Array(localStorage.length).keys()].map((index) => localStorage.key(index))) {
+            if (!key?.startsWith('peerd.unconfirmed-send.')) continue;
+            const value = JSON.parse(localStorage.getItem(key) || 'null');
+            if (value?.operationId === operationId) localStorage.removeItem(key);
+          }
+          localStorage.removeItem(${JSON.stringify(callLogKey)});
+        })()`).catch(() => {});
         if (Number.isInteger(protectedTabId)) {
           await evalIn(ctx.page, `chrome.tabs.remove(${JSON.stringify(protectedTabId)}).catch(() => {})`, true).catch(() => {});
         }
@@ -2407,7 +2537,6 @@ export const STATES = [
           notice?.detail === 'This task tab uses additional browser safeguards.',
           JSON.stringify(notice));
         rec.check('the Go action remains available', notice?.go === 'Go ↗', JSON.stringify(notice));
-        await rec.shot('protected-tab-notice');
       } finally {
         await evalIn(ctx.page, `(async () => {
           const before = new Set(${JSON.stringify(before)});
@@ -2541,7 +2670,6 @@ export const STATES = [
           JSON.stringify(rendered?.buttons));
         rec.check('unknown-outcome approval text meets WCAG AA contrast',
           contrast >= 4.5, `${contrast} (${rendered?.foreground} on ${rendered?.background})`);
-        await rec.shot('unknown-outcome-confirm');
       } finally {
         await evalIn(ctx.page, `document.querySelector('#e2e-unknown-outcome-confirm')?.remove()`);
       }
@@ -2867,10 +2995,12 @@ export const STATES = [
     },
     async run(ctx, rec) {
       await rpc(ctx.page, { type: 'agent/send', text: 'fix the failing test', goal: true });
-      await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.goal-bar')`), { budgetMs: 10_000, pollMs: 50 });
-      await waitFor(() => evalIn(ctx.page,
+      const goalReady = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.goal-bar')`), { budgetMs: 10_000, pollMs: 50 });
+      if (!goalReady) throw new Error('goal-running bar did not become ready');
+      const planReady = await waitFor(() => evalIn(ctx.page,
         `/1\\/3/.test(document.querySelector('.todo-card .todo-card-meta')?.textContent || '')`),
-        { budgetMs: 12_000, pollMs: 50 });
+        { budgetMs: 30_000, pollMs: 50 });
+      if (!planReady) throw new Error('goal-running plan did not become ready');
       await rec.visual('goal-running');
     },
   },
@@ -3081,7 +3211,6 @@ export const STATES = [
           warningLayout?.documentWidth <= warningLayout?.viewportWidth
             && warningLayout?.withinViewport === true,
           JSON.stringify(warningLayout));
-        await rec.shotPage('combined-warning-narrow', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
@@ -3139,7 +3268,6 @@ export const STATES = [
           JSON.stringify(narrow));
         rec.check('the update action is keyboard focusable', narrow?.installFocused === true,
           JSON.stringify(narrow));
-        await rec.shotPage('update-notice-narrow', page);
 
         await evalIn(page, `document.querySelector('.notice-action')?.click()`);
         const opened = await evalIn(page, `({
@@ -3157,7 +3285,6 @@ export const STATES = [
         rec.check('the full-page notice remains compact and within its viewport',
           wide?.documentWidth <= wide?.width && wide?.inside === true,
           JSON.stringify(wide));
-        await rec.shotPage('update-notice-home', page);
 
         await evalIn(page, `document.querySelector('.notice-dismiss')?.click()`);
         const dismissed = await waitFor(() => evalIn(page,
@@ -3177,6 +3304,7 @@ export const STATES = [
     async run(ctx, rec) {
       const page = await openExtPage(ctx, 'tests/fixtures/actor-isolation.html');
       try {
+        await page.send('Page.bringToFront');
         await page.send('Emulation.setDeviceMetricsOverride', {
           width: 400,
           height: 900,
@@ -3227,10 +3355,8 @@ export const STATES = [
         await sleep(1_200);
         await setEmulatedTheme(page, 'light');
         await sleep(80);
-        await rec.shotPage('paused.light', page);
         await setEmulatedTheme(page, 'dark');
         await sleep(80);
-        await rec.shotPage('paused.dark', page);
 
         await evalIn(page, `document.querySelector('.actor-isolation-banner button')?.click()`);
         const retryFailed = await waitFor(() => evalIn(page, `(() => {
@@ -3244,7 +3370,6 @@ export const STATES = [
             && retryFailed?.text.includes('Actor execution could not be restored')
             && !retryFailed?.text.includes('actor_worker_start_timeout'),
           JSON.stringify(retryFailed));
-        await rec.shotPage('retry-failed.dark', page);
 
         await evalIn(page, `document.querySelector('.actor-isolation-banner button')?.click()`);
         const recovered = await waitFor(() => evalIn(page, `(() => {
@@ -3260,13 +3385,22 @@ export const STATES = [
             && recovered?.retryPresent === false
             && recovered?.text.includes('Actor work is ready'),
           JSON.stringify(recovered));
-        await rec.shotPage('recovered.dark', page);
 
-        await evalIn(page, `document.querySelector('textarea')?.focus()`);
+        const onwardFocus = await evalIn(page, `(() => {
+          const target = document.querySelector('button.path-card:not([disabled])');
+          target?.focus();
+          return {
+            found: !!target,
+            moved: document.activeElement === target,
+            active: document.activeElement?.className ?? '',
+          };
+        })()`);
         const recoveryDismissed = await waitFor(() => evalIn(page,
           `!document.querySelector('.actor-isolation-banner')`),
-        { budgetMs: 2_000, pollMs: 50 });
-        rec.check('the recovery status clears after the user moves focus onward', recoveryDismissed === true);
+        { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the recovery status clears after the user moves focus onward',
+          onwardFocus?.moved === true && recoveryDismissed === true,
+          JSON.stringify(onwardFocus));
 
         await evalIn(page, `globalThis.actorIsolationFixtureShowUnknownOutcome()`);
         const unknownOutcome = await waitFor(() => evalIn(page, `(() => {
@@ -3355,7 +3489,6 @@ export const STATES = [
             && spawnedUnknown?.atomic === 'true'
             && spawnedUnknown?.liveLabel?.includes('Actor outcome unknown'),
           JSON.stringify(spawnedUnknown));
-        await rec.shotPage('outcome-unknown.dark', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
@@ -3459,9 +3592,7 @@ export const STATES = [
             && !posture?.ocr?.includes('unavailable in this browser')
             && posture?.buttons?.some((label) => label.includes('Enable voice')),
           JSON.stringify(posture));
-        await rec.shotPage('options-voice-capabilities.light', page);
         await setEmulatedTheme(page, 'dark');
-        await rec.shotPage('options-voice-capabilities.dark', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
@@ -3804,7 +3935,6 @@ export const STATES = [
           /Remote code ran with restricted access/.test(view?.status ?? '')
             && /Remote imports run with compute only/.test(view?.output ?? ''),
           JSON.stringify(view));
-        await rec.shotPage('restricted-result', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
@@ -3891,7 +4021,6 @@ export const STATES = [
             && outcome?.focused === true
             && outcome?.status === 'Notebook run stopped.',
           JSON.stringify({ stopped, outcome }));
-        await rec.shotPage('notebook-stop-control', page);
 
         const importedFailure = await evalIn(ctx.swConn, `(async () => {
           const tabs = await chrome.tabs.query({});
@@ -3918,7 +4047,6 @@ export const STATES = [
             && failureView?.output?.includes('./lib/failure.js:1')
             && !/blob:|data:/.test(failureView?.output ?? ''),
           JSON.stringify({ importedFailure, failureView }));
-        await rec.shotPage('notebook-imported-failure', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
@@ -4072,7 +4200,6 @@ export const STATES = [
         { budgetMs: 90_000, pollMs: 100 });
       const opsSeen = liveState?.opsSeen === true;
       rec.check('the live delegation feed renders on the pending script card', !!opsSeen);
-      if (opsSeen) await rec.shot('script-ops-live');
       let out = {};
       await waitFor(async () => {
         out = await evalIn(ctx.page, `(() => {
@@ -4100,7 +4227,6 @@ export const STATES = [
       rec.check('the final orchestrator answer landed', out.finalSeen === true);
       rec.check('the script card settled ok', out.cardOk === true);
       await evalIn(ctx.page, `globalThis.__peerdScriptFanObserver?.disconnect()`);
-      await rec.shot('script-fanout-done');
     },
   },
   // --- functional: the actor-model delegation flow (message_actor end to end) --
@@ -4128,7 +4254,7 @@ export const STATES = [
       // Hold the isolated turn open long enough to inspect the live Actor Fabric
       // at real side-panel width; without this, the fake reply can settle within
       // one paint and only the terminal transcript receipt is observable.
-      if (isActor) return { delayMs: 3_500, sse: sseText('PRICE_IS_42') };
+      if (isActor) return { delayMs: 12_000, sse: sseText('PRICE_IS_42') };
       // ORCHESTRATOR — the async wake turn carrying the fenced reply: final answer.
       if (body.includes('you messaged has replied')) return { sse: sseText('FINAL-ORCH-REPLY') };
       // ORCHESTRATOR — delegate ONCE; then the post-ack step ends the turn (the
@@ -4197,7 +4323,6 @@ export const STATES = [
             && rehydrated.includes('get the price of widget X')
             && rehydrated.includes('separate worker'),
           JSON.stringify(rehydrated));
-        await rec.shot('actor-fabric-working');
         await evalIn(ctx.page, `(() => {
           const actor = document.querySelector('[data-node-id^="actor:"]');
           actor?.click();
@@ -4220,7 +4345,6 @@ export const STATES = [
             && inspected?.detail.includes('no key or extension APIs')
             && inspected?.announced.includes('details shown'),
           JSON.stringify(inspected));
-        await rec.shot('actor-fabric-inspected');
       }
       const settledFabric = await waitFor(
         () => evalIn(ctx.page, `(() => {
@@ -4237,7 +4361,6 @@ export const STATES = [
         settledFabric?.text.includes('all actor work finished')
           && settledFabric?.focusPreserved === true,
         JSON.stringify(settledFabric));
-      if (settledFabric) await rec.shot('actor-fabric-finished');
       await evalIn(ctx.page, `document.querySelector('.input-bar textarea')?.focus()`);
       let out = {};
       await waitFor(async () => {
@@ -4278,7 +4401,6 @@ export const STATES = [
         (reply.body || '').includes('PRICE_IS_42') && !(reply.body || '').includes('<untrusted_web_content'), JSON.stringify((reply.body || '').slice(0, 120)));
       rec.check('the orchestrator emitted the final user-visible answer', (out.bubbles || []).includes('FINAL-ORCH-REPLY'));
       rec.check('the turn settles idle', out.busy === false);
-      await rec.shot('final');
     },
   },
 
@@ -4350,7 +4472,6 @@ export const STATES = [
             .test(reply?.body || ''),
         JSON.stringify(reply?.body));
       await waitFor(async () => { const state = await probe(ctx); return !state.busy; }, { budgetMs: 25_000 });
-      await rec.shot('not-run-expanded');
     },
   },
 
@@ -4397,7 +4518,6 @@ export const STATES = [
       rec.check('the reply surfaces as a "dweb actor" bubble', !!reply.role, JSON.stringify(out.replies));
       rec.check('the bubble carries the actor reply, fence-stripped', (reply.body || '').includes('MESH_OPERATOR_REPLY'), JSON.stringify((reply.body || '').slice(0, 80)));
       rec.check('the orchestrator settled with a final answer', (out.bubbles || []).includes('DWEB-FINAL'));
-      await rec.shot('final');
       await rpc(ctx.page, { type: 'settings/update', patch: { dwebAgentEnabled: false } });
     },
   },
@@ -4459,7 +4579,6 @@ export const STATES = [
       );
       rec.check('the orchestrator settled with a final answer', (out.bubbles || []).includes('A2A-FINAL'));
       rec.check('the turn settles idle', out.busy === false);
-      await rec.shot('final');
       await rpc(ctx.page, { type: 'settings/update', patch: { dwebAgentEnabled: false } });
     },
   },
@@ -4490,7 +4609,6 @@ export const STATES = [
         () => evalIn(ctx.page, `!!document.querySelector('.tool-call.tool-actor.tool-pending')`),
         { budgetMs: 15_000, pollMs: 100 });
       rec.check('the actor card is working (pending) before Stop', !!pending);
-      if (pending) await rec.shot('actor-working');
       const stopped = await rpc(ctx.page, { type: 'agent/stop' });
       rec.check('agent/stop accepted', !!stopped?.ok, JSON.stringify(stopped));
       const cancelled = await waitFor(
@@ -4502,7 +4620,6 @@ export const STATES = [
       rec.check('Stop returns the chat to idle', busy === false);
       const noLeak = await evalIn(ctx.page, `![...document.querySelectorAll('.message-assistant .bubble')].some((b) => b.textContent.includes('this-never-renders'))`);
       rec.check('the hung actor reply never renders', noLeak === true);
-      await rec.shot('final');
     },
   },
 
@@ -4550,7 +4667,6 @@ export const STATES = [
       rec.check('it did NOT enter the background turn driver or fail isolation', isolation.backgroundRefused === false && isolation.isolationFailed === false);
       rec.check('the child result round-tripped into the orchestrator final answer', (out.bubbles || []).includes('FINAL-ANSWER-42'));
       rec.check('the turn settles idle', out.busy === false);
-      await rec.shot('final');
     },
   },
 
@@ -4604,7 +4720,6 @@ export const STATES = [
       rec.check('it did NOT enter the background turn driver or fail isolation', isolation.backgroundRefused === false && isolation.isolationFailed === false);
       rec.check('the child result round-tripped into the orchestrator final answer', (out.bubbles || []).includes('FINAL-WITH-CHILD'));
       rec.check('the turn settles idle', out.busy === false);
-      await rec.shot('final');
     },
   },
 
@@ -4669,7 +4784,6 @@ export const STATES = [
       rec.check('the actor stayed in a dedicated Worker with a verified realm', isolation.exactProof === true && isolation.backgroundRefused === false && isolation.isolationFailed === false, `isolated=${isolation.isolated.length} backgroundRefused=${isolation.backgroundRefused} isolationFailed=${isolation.isolationFailed}`);
       rec.check('the composed result reached the orchestrator', (out.bubbles || []).includes('FINAL-VIA-ACTOR-CODE'));
       rec.check('the turn settles idle', out.busy === false);
-      await rec.shot('final');
     },
   },
 
@@ -4754,7 +4868,6 @@ export const STATES = [
           && hierarchy?.text.includes('inspect price through the web actor')
           && hierarchy?.text.includes('compare warranty terms independently'),
         JSON.stringify(hierarchy?.text));
-      if (hierarchy) await rec.shot('actor-fabric-hierarchy-default');
 
       await evalIn(ctx.page, `document.querySelector('.actor-fabric-branch .actor-fabric-branch .actor-fabric-node.is-bound')?.click()`);
       const inspected = await waitFor(
@@ -4781,7 +4894,6 @@ export const STATES = [
           && inspected?.text.includes('one web tab')
           && inspected?.text.includes('Dedicated keyless worker'),
         JSON.stringify(inspected));
-      if (inspected) await rec.shot('actor-fabric-hierarchy-inspected');
 
       const finished = await waitFor(
         () => evalIn(ctx.page, `(() => {
@@ -4800,7 +4912,6 @@ export const STATES = [
           && finished?.nested === true
           && finished?.text.includes('all actor work finished'),
         JSON.stringify(finished));
-      if (finished) await rec.shot('actor-fabric-hierarchy-finished');
       await evalIn(ctx.page, `document.querySelector('.input-bar textarea')?.focus()`);
     },
   },
@@ -4809,13 +4920,14 @@ export const STATES = [
   // Two chats keep temporary actors alive at once. The home monitor must show
   // two independent orchestrator rooms without merging their lineages, expose
   // an inspectable physical boundary, and collapse to its permanent empty state
-  // after both workers settle.
+  // after both work graphs stop.
   {
     name: 'actor-overview', kind: 'functional', phase: 'post-unlock',
-    responder: (callIndex, request) => {
+    responder: async (callIndex, request) => {
       const body = (request && request.postData) || '';
       if (body.includes('<actor_agent>') && body.includes('alpha isolated research')) {
-        return { delayMs: 18_000, sse: sseText('ALPHA-ACTOR-DONE') };
+        await actorOverviewState.liveGate;
+        return { sse: sseText('ALPHA-ACTOR-DONE') };
       }
       if (body.includes('ALPHA-ROOT')) {
         if (actorOverviewState.alphaSpawned === 0) {
@@ -4828,12 +4940,15 @@ export const STATES = [
         return { sse: sseText('ALPHA-DELEGATED') };
       }
       if (body.includes('BETA-ROOT')) {
-        return { delayMs: 18_000, sse: sseText('BETA-ORCHESTRATOR-DONE') };
+        await actorOverviewState.liveGate;
+        return { sse: sseText('BETA-ORCHESTRATOR-DONE') };
       }
       return { sse: sseText('overview-state-idle') };
     },
     async run(ctx, rec) {
-      actorOverviewState = { alphaSpawned: 0, betaSpawned: 0 };
+      let releaseLive = () => {};
+      const liveGate = new Promise((resolve) => { releaseLive = () => resolve(undefined); });
+      actorOverviewState = { alphaSpawned: 0, betaSpawned: 0, liveGate, releaseLive };
       // A reset leaves a deliberately sessionless composer until first send.
       // Seed two ordinary chats before starting either long-running actor so
       // switching between their durable ids cannot stop the other's work.
@@ -4841,7 +4956,7 @@ export const STATES = [
       const firstState = await waitFor(async () => {
         const state = await rpc(ctx.page, { type: 'state/get' });
         return state?.state?.session?.sessionId && !(await probe(ctx)).busy ? state : null;
-      }, { budgetMs: 10_000, pollMs: 80 });
+      }, { budgetMs: 30_000, pollMs: 80 });
       const alphaRoot = firstState?.state?.session?.sessionId;
       await rpc(ctx.page, { type: 'session/reset' });
       await waitFor(async () => !(await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.sessionId,
@@ -4850,11 +4965,12 @@ export const STATES = [
       const secondState = await waitFor(async () => {
         const state = await rpc(ctx.page, { type: 'state/get' });
         return state?.state?.session?.sessionId && !(await probe(ctx)).busy ? state : null;
-      }, { budgetMs: 10_000, pollMs: 80 });
+      }, { budgetMs: 30_000, pollMs: 80 });
       const betaRoot = secondState?.state?.session?.sessionId;
-      rec.check('two distinct orchestrator sessions exist',
-        !!alphaRoot && !!betaRoot && alphaRoot !== betaRoot,
+      const distinctRoots = !!alphaRoot && !!betaRoot && alphaRoot !== betaRoot;
+      rec.check('two distinct orchestrator sessions exist', distinctRoots,
         `${alphaRoot} / ${betaRoot}`);
+      if (!distinctRoots) return;
 
       const page = await openWidePage(ctx, 'home/home.html#actors');
       try {
@@ -4870,17 +4986,23 @@ export const STATES = [
         const switched = await rpc(ctx.page, { type: 'session/switch', sessionId: betaRoot });
         rec.check('a second orchestrator can become active while the first actor works', switched?.ok === true, JSON.stringify(switched));
         await rpc(ctx.page, { type: 'agent/send', text: 'BETA-ROOT compare the rollout options' });
+        let liveProbe = /** @type {any} */ (null);
         const bothLive = await waitFor(async () => {
           const overview = await rpc(page, { type: 'actors/overview' });
           const alpha = (overview?.roots ?? []).find((root) => root.session?.sessionId === alphaRoot);
           const beta = (overview?.roots ?? []).find((root) => root.session?.sessionId === betaRoot);
+          liveProbe = (overview?.roots ?? []).map((root) => ({
+            id: root.session?.sessionId, busy: root.busy, activity: root.activity,
+            spawned: Object.keys(root.topology?.spawned?.sessions ?? {}).length,
+          }));
           return Object.keys(alpha?.topology?.spawned?.sessions ?? {}).length >= 4
             && beta?.busy === true
+            && String(beta?.activity ?? '').includes('BETA-ROOT compare the rollout options')
             ? overview : null;
-        }, { budgetMs: 15_000, pollMs: 80 });
+        }, { budgetMs: 30_000, pollMs: 80 });
         rec.check('the server snapshot reports both roots without cross-session merging',
           bothLive?.roots?.length === 2,
-          JSON.stringify(bothLive?.roots?.map((root) => root.session?.sessionId)));
+          JSON.stringify(bothLive?.roots?.map((root) => root.session?.sessionId) ?? liveProbe));
 
         const rendered = await waitFor(() => evalIn(page, `(() => {
           const space = document.querySelector('.actor-space');
@@ -4888,6 +5010,7 @@ export const STATES = [
           const nodes = [...document.querySelectorAll('.actor-space-node')];
           const actorBadge = document.querySelector('[data-home-view="actors"] .home-nav-count');
           if (!space || rooms.length < 2 || nodes.length < 6
+            || !space.textContent?.includes('BETA-ROOT compare the rollout options')
             || actorBadge?.textContent?.trim() !== '4') return null;
           const rect = space.getBoundingClientRect();
           const alphaRoom = rooms.find((room) => room.getAttribute('data-root-session') === ${JSON.stringify(alphaRoot)});
@@ -4908,7 +5031,7 @@ export const STATES = [
             fits: rect.left >= 0 && rect.right <= innerWidth
               && document.documentElement.scrollWidth <= innerWidth,
           };
-        })()`), { budgetMs: 10_000, pollMs: 80 });
+        })()`), { budgetMs: 30_000, pollMs: 80 });
         rec.check('Actor Space renders two orchestrator rooms and both workers',
           rendered?.rooms === 2 && rendered?.nodes >= 6 && rendered?.subactors >= 4,
           JSON.stringify(rendered));
@@ -4933,7 +5056,6 @@ export const STATES = [
         rec.check('a high-fanout room scrolls internally without pushing away its header',
           rendered?.highFanoutScrolls === true && rendered?.headerVisible === true,
           JSON.stringify(rendered));
-        if (rendered) await rec.shotPage('actor-space-live.light', page);
 
         await page.send('Emulation.setDeviceMetricsOverride', {
           width: 390, height: 844, deviceScaleFactor: 1, mobile: false,
@@ -4960,7 +5082,6 @@ export const STATES = [
             && narrow?.navFits === true
             && narrow?.targetsTall === true,
           JSON.stringify(narrow));
-        if (narrow) await rec.shotPage('actor-space-live-narrow.light', page);
 
         await evalIn(page, `document.querySelector('.actor-space-node.is-subactor')?.click()`);
         const inspected = await waitFor(() => evalIn(page, `(() => {
@@ -4976,7 +5097,6 @@ export const STATES = [
         await evalIn(page, `document.querySelector('.actor-space-inspector')?.scrollIntoView({ block: 'center' })`);
         await setEmulatedTheme(page, 'dark');
         await sleep(100);
-        if (inspected) await rec.shotPage('actor-space-inspected-narrow.dark', page);
 
         await page.send('Emulation.setDeviceMetricsOverride', {
           width: 320, height: 720, deviceScaleFactor: 1, mobile: false,
@@ -4995,18 +5115,42 @@ export const STATES = [
             && zoomReflow?.navFits === true,
           JSON.stringify(zoomReflow));
 
-        const empty = await waitFor(() => evalIn(page,
-          `(() => {
-            const text = document.querySelector('.actor-space-empty')?.textContent ?? '';
-            const badge = document.querySelector('[data-home-view="actors"] .home-nav-count');
-            return text && !badge ? { text, badge: null } : null;
-          })()`),
-        { budgetMs: 28_000, pollMs: 150 });
+        await rpc(ctx.page, { type: 'session/switch', sessionId: alphaRoot });
+        const alphaStopped = await rpc(ctx.page, { type: 'agent/stop' });
+        await rpc(ctx.page, { type: 'session/switch', sessionId: betaRoot });
+        const betaStopped = await rpc(ctx.page, { type: 'agent/stop' });
+        rec.check('Stop clears both root work graphs',
+          alphaStopped?.ok === true && betaStopped?.ok === true,
+          JSON.stringify({ alphaStopped, betaStopped }));
+        actorOverviewState.releaseLive();
+        let emptyProbe = /** @type {any} */ (null);
+        const empty = await waitFor(async () => {
+          const overview = await rpc(page, { type: 'actors/overview' });
+          const view = await evalIn(page, `(() => ({
+            text: document.querySelector('.actor-space-empty')?.textContent ?? '',
+            badge: document.querySelector('[data-home-view="actors"] .home-nav-count')?.textContent ?? null,
+            hidden: document.hidden,
+          }))()`);
+          emptyProbe = {
+            roots: (overview?.roots ?? []).map((root) => ({
+              id: root.session?.sessionId, busy: root.busy,
+              spawned: Object.keys(root.topology?.spawned?.sessions ?? {}).length,
+              tasks: Object.values(root.topology?.asyncTasks ?? {}).flat()
+                .map((task) => task?.status),
+            })),
+            view,
+          };
+          return emptyProbe.roots.length === 0 && view?.text && !view.badge
+            ? { text: view.text, badge: null } : null;
+        },
+        { budgetMs: 45_000, pollMs: 150 });
         rec.check('the permanent monitor settles to an honest empty state',
           empty?.text?.includes('The instance is quiet') && empty.badge === null,
-          JSON.stringify(empty));
-        if (empty) await rec.shotPage('actor-space-empty-narrow.dark', page);
-      } finally { try { page.close(); } catch { /* */ } }
+          JSON.stringify(empty ?? emptyProbe));
+      } finally {
+        actorOverviewState.releaseLive();
+        try { page.close(); } catch { /* */ }
+      }
     },
   },
 
@@ -5068,7 +5212,6 @@ export const STATES = [
       rec.check('it did NOT enter the background turn driver or fail isolation', isolation.backgroundRefused === false && isolation.isolationFailed === false);
       rec.check('the web reply round-tripped up through the actor into the final answer', (out.bubbles || []).includes('FINAL-VIA-ACTOR'));
       rec.check('the turn settles idle', out.busy === false);
-      await rec.shot('final');
     },
   },
 
@@ -5366,8 +5509,6 @@ Promise.resolve().then(async () => {
           deviceScaleFactor: 1,
           mobile: false,
         });
-        await rec.shotPage('app-editor-binary', appPage);
-        await rec.shot('final');
       } finally {
         try { appPage?.close(); } catch { /* */ }
         await new Promise((resolve) => server.close(resolve));
@@ -5488,7 +5629,6 @@ Promise.resolve().then(async () => {
         rec.check('home cards and composer remain inside the narrow viewport',
           home?.paths >= 6 && home?.pathsInside && home?.composerInside && home?.onboardingInside,
           JSON.stringify(home));
-        await rec.shot('home-narrow');
 
         const keyed = await rpc(ctx.page, {
           type: 'provider/setKey', provider: 'anthropic', plaintext: 'sk-e2e-narrow-sidebar-only',

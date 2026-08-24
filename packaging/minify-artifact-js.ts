@@ -1,12 +1,5 @@
-// Release-artifact-only JavaScript optimization.
-//
-// Source in extension/ remains browser-loadable as written. This helper runs
-// only against the disposable package staging tree and preserves the ES-module
-// graph: no bundling, identifier mangling, syntax folding, or dependency
-// injection. It removes whitespace/comments from authored modules that are in
-// the static service-worker or Chrome offscreen cold graphs. Lazy modules stay
-// readable and lazy. Vendored and generated policy-boundary bytes are retained
-// exactly so their provenance and artifact assertions remain meaningful.
+// Release-artifact-only JavaScript optimization. Modules stay separate and
+// imports stay exact; lazy, vendor, and generated policy bytes stay untouched.
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { extname, join, relative } from 'node:path';
@@ -135,25 +128,35 @@ export const minifyColdArtifactModules = async (
     beforeSizes.set(file, byteLength(source));
   }
 
-  const transpiler = new Bun.Transpiler({
-    loader: 'js',
-    target: 'browser',
-    minifyWhitespace: true,
-    // Bun's Transpiler enables some syntax optimization independently of
-    // whitespace compaction. Disable each one explicitly: this release pass
-    // must not fold constants, remove code/imports, or tree-shake modules.
-    deadCodeElimination: false,
-    inline: false,
-    treeShaking: false,
-    trimUnusedImports: false,
-  });
   const outputs = new Map<string, string>();
   let transformedModules = 0;
+  const compactWhitespace = new Bun.Transpiler({
+    loader: 'js', target: 'browser', minifyWhitespace: true,
+    deadCodeElimination: false, inline: false, treeShaking: false,
+    trimUnusedImports: false,
+  });
 
   for (const file of allModules) {
     if (!shouldTransform(staging, file, browser, channel)) continue;
     const source = beforeSource.get(file) as string;
-    const output = `${transpiler.transformSync(source).trimEnd()}\n`;
+    const built = await Bun.build({
+      entrypoints: [file],
+      target: 'browser',
+      format: 'esm',
+      external: ['*'],
+      minify: {
+        whitespace: true,
+        syntax: true,
+        identifiers: file === serviceWorkerEntry || file === offscreenEntry,
+      },
+    });
+    if (!built.success || built.outputs.length !== 1) {
+      throw new Error(`release minification failed for ${relative(staging, file)}`);
+    }
+    const candidate = `${(await built.outputs[0].text()).trimEnd()}\n`;
+    const whitespace = `${compactWhitespace.transformSync(source).trimEnd()}\n`;
+    const output = [source, whitespace, candidate]
+      .reduce((smallest, value) => byteLength(value) < byteLength(smallest) ? value : smallest);
     const beforeImports = await staticImportSpecifiers(source, relative(staging, file));
     const afterImports = await staticImportSpecifiers(output, relative(staging, file));
     if (JSON.stringify(afterImports) !== JSON.stringify(beforeImports)) {

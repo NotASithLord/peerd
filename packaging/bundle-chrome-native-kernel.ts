@@ -31,7 +31,7 @@ export async function bundleChromeNativeKernel(staging: string, entryRelative: s
   const stagingRoot = realpathSync(staging);
   rmSync(scratch, { recursive: true, force: true });
   try {
-    const buildConfig: Parameters<typeof Bun.build>[0] & { keepNames: boolean } = {
+    const buildConfig: Parameters<typeof Bun.build>[0] = {
       entrypoints: [entry],
       outdir: scratch,
       naming: 'vault-kernel.js',
@@ -39,7 +39,6 @@ export async function bundleChromeNativeKernel(staging: string, entryRelative: s
       format: 'esm',
       banner: 'globalThis[Symbol.for("peerd.kernel.bundle-start.v1")]=globalThis.performance?.now?.()??Date.now();',
       minify: { whitespace: true, identifiers: true, syntax: true },
-      keepNames: true,
       splitting: false,
       metafile: true,
       plugins: [{

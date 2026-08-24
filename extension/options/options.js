@@ -7,6 +7,7 @@
 
 import m from '/vendor/mithril/mithril.js';
 import browser from '/shared/browser-api.js';
+import { recoverColdPortState } from '/shared/cold-port-recovery.js';
 import { normalizeColdStateSnapshot } from '/shared/kernel-state-shell.js';
 import { makeReconciledUiSender, makeUiRuntimeClient } from '/shared/ui-runtime-client.js';
 import { CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
@@ -29,10 +30,20 @@ const fetchState = () => {
   m.redraw();
   stateFetchPromise = (async () => {
     try {
-      const r = /** @type {any} */ (await uiRuntime.send({ type: 'state/get' }));
-      if (!r?.ok || !r.state) throw new Error('options-state-unavailable');
-      const state = normalizeColdStateSnapshot(r.state);
-      if (!state) throw new Error('options-state-invalid');
+      /** @type {any} */ let state = null;
+      const recovered = await recoverColdPortState({
+        browser,
+        isCurrent: () => true,
+        isHydrated: () => false,
+        adoptState: (raw) => {
+          state = normalizeColdStateSnapshot(raw);
+          return !!state;
+        },
+        requestTimeoutMs: 4_000,
+        overallTimeoutMs: 20_000,
+        maxAttempts: 4,
+      });
+      if (!recovered || !state) throw new Error('options-state-unavailable');
       currentState = state;
       stateLoadFailed = false;
       m.redraw();

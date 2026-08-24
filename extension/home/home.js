@@ -16,7 +16,11 @@
 import m from '/vendor/mithril/mithril.js';
 import browser from '/shared/browser-api.js';
 import { makeUiStatePort } from '/shared/cold-port-recovery.js';
-import { makeUiRuntimeClient } from '/shared/ui-runtime-client.js';
+import {
+  makeReconciledUiSender, makeUiRuntimeClient, settleUiEffect,
+  redrawForRuntimeMessage,
+} from '/shared/ui-runtime-client.js';
+import { makeConfirmationAnswer } from '/sidepanel/confirmation-answer.js';
 import { CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
 import { loadDweb } from '/shared/dweb-loader.js';
 import { openOptions } from '/shared/open-options.js';
@@ -162,7 +166,7 @@ const handlePortMessage = (msg) => {
   if (next === currentState) return msg.type === 'state';
   currentState = next;
   if (msg.type === 'state') { booted = true; seedDwebApps(); }
-  m.redraw();
+  redrawForRuntimeMessage(m.redraw, msg);
   return true;
 };
 
@@ -185,8 +189,10 @@ const statePort = makeUiStatePort({
   onStatusChange: () => m.redraw(),
 });
 const reconcileState = () => statePort.reconcile(() => uiRuntime.send({ type: 'state/get' }));
-/** @param {{ type: string } & Record<string, any>} msg @returns {Promise<any>} */
-const send = (msg) => uiRuntime.send(msg);
+const send = makeReconciledUiSender({
+  send: (/** @type {any} */ msg) => uiRuntime.send(msg),
+  fold: () => {}, reconcile: reconcileState, afterReply: () => false,
+});
 
 // ---- chat-component uiActions (the subset home needs; no voice) -----------
 /** @type {Set<string>} */
@@ -205,21 +211,15 @@ const loadActor = (sessionId) => {
     }
   }).catch(() => { actorFetchInFlight.delete(sessionId); });
 };
-/**
- * @param {{ id: string, ownerSessionId?: string|null, sessionId?: string|null,
- *   dispatchId?: string|null }} prompt
- * @param {string} answer
- */
-const confirmAnswer = (prompt, answer) => {
-  send({
-    type: 'confirm/answer', id: prompt.id, answer,
-    ownerSessionId: prompt.ownerSessionId ?? null,
-    sessionId: prompt.sessionId ?? null,
-    dispatchId: prompt.dispatchId ?? null,
-  });
-  currentState = { ...currentState, pendingConfirm: null };
-  m.redraw();
-};
+const confirmAnswer = makeConfirmationAnswer({
+  send,
+  reconcile: reconcileState,
+  getState: () => currentState,
+  setState: (/** @type {import('/sidepanel/chat-reducer.js').ChatState} */ state) => {
+    currentState = state;
+  },
+  redraw: () => m.redraw(),
+});
 /** @param {string} id */
 const dismissNotice = (id) => {
   currentState = { ...currentState, notices: currentState.notices.filter((/** @type {any} */ n) => n.id !== id) };
@@ -297,7 +297,7 @@ const popToSide = () => {
 };
 // Bring the chat back from the panel into home (the inverse of pop-to-side / the
 // "go to tab" card). The panel's own close button does the same.
-const bringChatHome = () => send({ type: 'sidepanel/close' });
+const bringChatHome = () => settleUiEffect(send({ type: 'sidepanel/close' }));
 
 // Actor Space spans every session, but its room action still lands on one
 // concrete chat. When home owns chat, navigate there; when the side panel owns
@@ -320,7 +320,9 @@ const openActorSession = async (sessionId) => {
 let homeWasHidden = (typeof document !== 'undefined' && document.hidden);
 const onVisibility = () => {
   const hidden = document.hidden;
-  if (homeWasHidden && !hidden && sidePanelOpen && !panelStickyByPop) send({ type: 'sidepanel/close' });
+  if (homeWasHidden && !hidden && sidePanelOpen && !panelStickyByPop) {
+    settleUiEffect(send({ type: 'sidepanel/close' }));
+  }
   homeWasHidden = hidden;
 };
 
@@ -751,7 +753,8 @@ const HomeApp = {
       // Manual lock — for stepping away. The SW pushes the locked state, which
       // flips home back to the vault gate.
       m('button.home-nav-item.home-rail-action.home-rail-lock', {
-        'aria-label': 'Lock', onclick: () => send({ type: 'vault/lock' }),
+        'aria-label': 'Lock',
+        onclick: () => settleUiEffect(send({ type: 'vault/lock' })),
       }, [
         m('span.home-action-icon', { 'aria-hidden': 'true' }, railIcon('lock')),
         m('span.home-action-label', 'Lock'),

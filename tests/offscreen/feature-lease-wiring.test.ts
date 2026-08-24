@@ -3,6 +3,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 import { createVault } from '../../extension/peerd-egress/vault/vault.js';
+import {
+  makeUiForwarder, makeVoiceControlPlane,
+} from '../../extension/background/service-worker-control-plane.js';
+import { createServiceWorkerChannels } from '../../extension/offscreen/supervisor-channels.js';
+import { backgroundScriptUrl } from '../../extension/offscreen/sender-checks.js';
 
 const source = (path: string) => readFileSync(join(EXTENSION_DIR, path), 'utf8');
 
@@ -10,19 +15,13 @@ const installVoiceRelay = ({
   acquire,
   revoke,
   sendHost,
+  hostTimeoutMs,
 }: {
   acquire: () => Promise<void>;
   revoke: () => Promise<void>;
   sendHost: (message: any) => Promise<any>;
+  hostTimeoutMs?: number;
 }) => {
-  const worker = source('background/service-worker.js');
-  const start = worker.indexOf('const VOICE_COMMANDS = new Set([');
-  const end = worker.indexOf('// Tab tracker wiring.', start);
-  if (start < 0 || end < 0) throw new Error('voice-relay-source-boundary-missing');
-  let listener: ((message: any, sender: any, respond: (reply: any) => void) => boolean) | null = null;
-  const onMessage = {
-    addListener(value: typeof listener) { listener = value; },
-  };
   let active = false;
   const calls: string[] = [];
   const featureLeases = {
@@ -42,38 +41,27 @@ const installVoiceRelay = ({
   };
   const browser = {
     runtime: {
-      onMessage,
       sendMessage: async (message: any) => {
         calls.push(`host:${message.type}`);
         return sendHost(message);
       },
     },
   };
-  const evaluate = new Function(
-    'coldEvent',
-    'browser',
-    'featureLeases',
-    'acquireFeatureLease',
-    'isActualSidepanelSender',
-    'isActualOptionsSender',
-    `${worker.slice(start, end)}\nreturn { teardownVoiceFeature };`,
-  );
-  const api = evaluate(
-    (_name: string, event: any) => event,
+  const api = makeVoiceControlPlane({
     browser,
     featureLeases,
-    acquireFeatureLease,
-    () => true,
-    () => false,
-  );
-  if (!listener) throw new Error('voice-relay-listener-not-installed');
+    acquire: acquireFeatureLease,
+    isSidepanelSender: () => true,
+    isOptionsSender: () => false,
+    hostTimeoutMs,
+  });
   const dispatch = (message: any) => new Promise<any>((resolve) => {
-    expect(listener?.(message, { url: 'sidepanel' }, resolve)).toBe(true);
+    expect(api.onMessage(message, { url: 'sidepanel' }, resolve)).toBe(true);
   });
   return {
     calls,
     dispatch,
-    disableVoice: () => api.teardownVoiceFeature(),
+    disableVoice: () => api.teardown(),
     active: () => active,
   };
 };
@@ -85,17 +73,242 @@ const deferred = () => {
 };
 
 describe('offscreen production feature-lease wiring', () => {
+  test('voice events accept only their exact owning contexts', () => {
+    const delivered: string[] = [];
+    const forward = makeUiForwarder({
+      isOffscreenSender: (sender: any) => sender?.owner === 'offscreen',
+      isMicSender: (sender: any) => sender?.owner === 'mic',
+      deliver: (message: any) => { delivered.push(message.type); },
+    });
+    for (const type of ['voice/chunk', 'voice/auto-stop', 'voice/error']) {
+      forward({ type }, { owner: 'sibling' });
+      forward({ type }, { owner: 'offscreen' });
+    }
+    forward({ type: 'voice/permission-result' }, { owner: 'offscreen' });
+    forward({ type: 'voice/permission-result' }, { owner: 'mic' });
+    expect(delivered).toEqual([
+      'voice/chunk', 'voice/auto-stop', 'voice/error', 'voice/permission-result',
+    ]);
+  });
+
   test('the offscreen shell has no unconditional generic keepalive', () => {
     const shell = source('offscreen/offscreen.js');
     expect(shell).not.toContain("'sw-keepalive'");
     expect(shell).not.toContain("type: 'heartbeat'");
     expect(shell).toContain('FEATURE_LEASE_KEEPALIVE_PORT');
     expect(shell).toContain("feature-lease/host-");
-    expect(shell).toContain("rejectWithoutLease('dweb'");
+    expect(shell).toContain("claimLease('dweb'");
     expect(source('offscreen/supervisor-channels.js'))
       .toContain("ownsLease?.('controller', lease) === true");
-    expect(shell).toContain("rejectWithoutLease('dom-host'");
-    expect(shell).toContain("rejectWithoutLease('media-host'");
+    expect(shell).toContain("claimLease('dom-host'");
+    expect(shell).toContain("claimLease('media-host'");
+  });
+
+  test('a revoked controller claim cannot escape a delayed bootstrap load', async () => {
+    const oldLease = { scope: 'controller', leaseId: 'controller-old' };
+    const nextLease = { scope: 'controller', leaseId: 'controller-next' };
+    let current: unknown = oldLease;
+    let loads = 0;
+    let accepts = 0;
+    let closes = 0;
+    let release!: (module: any) => void;
+    const loading = new Promise<any>((resolve) => { release = resolve; });
+    const channels = createServiceWorkerChannels({
+      getFeatureLeaseHost: () => ({
+        isActive: () => current !== null,
+        ownsLease: (scope: string, candidate: unknown) =>
+          scope === 'controller' && candidate === current,
+      }),
+      loadControllerBootstrap: async () => {
+        loads += 1;
+        return loading;
+      },
+    });
+    channels.onMessage({
+      data: { type: 'peerd/controller-channel', lease: oldLease },
+      ports: [{ close: () => { closes += 1; } }],
+    } as unknown as MessageEvent);
+    for (let attempt = 0; attempt < 5 && loads === 0; attempt += 1) await Promise.resolve();
+    expect(loads).toBe(1);
+    current = nextLease;
+    release({ acceptControllerOffer: () => { accepts += 1; } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect({ accepts, closes }).toEqual({ accepts: 0, closes: 1 });
+  });
+
+  test('actor offers require their exact generation across a delayed host load', async () => {
+    const oldLease = { scope: 'controller', leaseId: 'actor-old' };
+    const nextLease = { scope: 'controller', leaseId: 'actor-next' };
+    let current: unknown = nextLease;
+    let loads = 0;
+    let binds = 0;
+    let closes = 0;
+    let release!: (module: any) => void;
+    const loading = new Promise<any>((resolve) => { release = resolve; });
+    const channels = createServiceWorkerChannels({
+      getFeatureLeaseHost: () => ({
+        isActive: () => current !== null,
+        ownsLease: (scope: string, candidate: unknown) =>
+          scope === 'controller' && candidate === current,
+      }),
+      loadControllerBootstrap: async () => ({}),
+      loadActorHost: async () => {
+        loads += 1;
+        return loading;
+      },
+    });
+    const offer = (lease: unknown) => ({
+      isTrusted: true,
+      source: { scriptURL: backgroundScriptUrl },
+      data: { type: 'peerd/actor-channel', protocol: 1, channelId: 'actor-channel-one', lease },
+      ports: [{
+        close: () => { closes += 1; },
+        addEventListener: () => {},
+      }],
+    } as unknown as MessageEvent);
+
+    channels.onMessage(offer(oldLease));
+    await Promise.resolve();
+    expect({ loads, binds, closes }).toEqual({ loads: 0, binds: 0, closes: 1 });
+
+    current = oldLease;
+    channels.onMessage(offer(oldLease));
+    for (let attempt = 0; attempt < 5 && loads === 0; attempt += 1) await Promise.resolve();
+    expect(loads).toBe(1);
+    current = nextLease;
+    release([
+      { bindActorChannel: () => { binds += 1; } },
+      { runActor: () => {}, abortActor: () => {} },
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect({ binds, closes }).toEqual({ binds: 0, closes: 2 });
+  });
+
+  test('frozen controller and actor loads close cleanly and recover without late binding', async () => {
+    const lease = { scope: 'controller', leaseId: 'controller-live' };
+    let controllerLoads = 0;
+    let actorLoads = 0;
+    let controllerAccepts = 0;
+    let actorBinds = 0;
+    let resolveController!: (module: any) => void;
+    let resolveActor!: (module: any) => void;
+    const controllerModule = new Promise<any>((resolve) => { resolveController = resolve; });
+    const actorModule = new Promise<any>((resolve) => { resolveActor = resolve; });
+    const channels = createServiceWorkerChannels({
+      getFeatureLeaseHost: () => ({
+        isActive: () => true,
+        ownsLease: (scope: string, candidate: unknown) =>
+          scope === 'controller' && candidate === lease,
+      }),
+      moduleLoadTimeoutMs: 2,
+      loadControllerBootstrap: () => {
+        controllerLoads += 1;
+        return controllerModule;
+      },
+      loadActorHost: () => {
+        actorLoads += 1;
+        return actorModule;
+      },
+    });
+    const port = () => {
+      const state = { closes: 0, messages: [] as any[] };
+      return {
+        state,
+        value: {
+          close: () => { state.closes += 1; },
+          postMessage: (message: any) => { state.messages.push(message); },
+          addEventListener: () => {},
+        },
+      };
+    };
+    const controllerOffer = (channelPort: any, channelId: string) => ({
+      data: {
+        type: 'peerd/controller-channel', protocol: 2, channelId,
+        buildDigest: 'digest', kernelEpoch: 'kernel', lease,
+      },
+      ports: [channelPort],
+    } as unknown as MessageEvent);
+    const actorOffer = (channelPort: any, channelId: string) => ({
+      isTrusted: true,
+      source: { scriptURL: backgroundScriptUrl },
+      data: { type: 'peerd/actor-channel', protocol: 1, channelId, lease },
+      ports: [channelPort],
+    } as unknown as MessageEvent);
+
+    const frozenController = port();
+    const frozenActor = port();
+    channels.onMessage(controllerOffer(frozenController.value, 'controller-frozen'));
+    channels.onMessage(actorOffer(frozenActor.value, 'actor-frozen'));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(frozenController.state.messages).toEqual([expect.objectContaining({
+      type: 'controller/unavailable', code: 'controller-host-load-failed',
+    })]);
+    expect(frozenController.state.closes).toBe(1);
+    expect(frozenActor.state.closes).toBe(1);
+
+    resolveController({ acceptControllerOffer: () => { controllerAccepts += 1; } });
+    resolveActor([
+      { bindActorChannel: () => { actorBinds += 1; } },
+      { runActor: () => {}, abortActor: () => {} },
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect({ controllerAccepts, actorBinds }).toEqual({ controllerAccepts: 0, actorBinds: 0 });
+
+    const recoveredController = port();
+    const recoveredActor = port();
+    channels.onMessage(controllerOffer(recoveredController.value, 'controller-recovered'));
+    channels.onMessage(actorOffer(recoveredActor.value, 'actor-recovered'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect({ controllerLoads, actorLoads }).toEqual({ controllerLoads: 1, actorLoads: 1 });
+    expect({ controllerAccepts, actorBinds }).toEqual({ controllerAccepts: 1, actorBinds: 1 });
+    expect({
+      controllerCloses: recoveredController.state.closes,
+      actorCloses: recoveredActor.state.closes,
+    }).toEqual({ controllerCloses: 0, actorCloses: 0 });
+  });
+
+  test('vault authority checks exact custody again before Worker creation', () => {
+    const oldLease = { scope: 'vault-authority', leaseId: 'vault-old' };
+    const nextLease = { scope: 'vault-authority', leaseId: 'vault-next' };
+    let current: unknown = nextLease;
+    let checks = 0;
+    let workers = 0;
+    let closes = 0;
+    const channels = createServiceWorkerChannels({
+      getFeatureLeaseHost: () => ({
+        isActive: () => current !== null,
+        ownsLease: (scope: string, candidate: unknown) => {
+          checks += 1;
+          const owned = scope === 'vault-authority'
+            && (candidate as any)?.leaseId === (current as any)?.leaseId;
+          if (owned && checks === 1) current = nextLease;
+          return owned;
+        },
+      }),
+      loadControllerBootstrap: async () => ({}),
+      createVaultAuthorityWorker: () => {
+        workers += 1;
+        return {} as Worker;
+      },
+    });
+    const offer = (lease: unknown) => ({
+      isTrusted: true,
+      source: { scriptURL: backgroundScriptUrl },
+      data: {
+        type: 'peerd/vault-authority-channel', protocol: 1,
+        channelId: 'vault-channel-one', lease,
+      },
+      ports: [{ close: () => { closes += 1; }, postMessage: () => {} }],
+    } as unknown as MessageEvent);
+
+    channels.onMessage(offer(oldLease));
+    expect({ workers, closes }).toEqual({ workers: 0, closes: 1 });
+
+    current = oldLease;
+    checks = 0;
+    channels.onMessage(offer(oldLease));
+    expect(checks).toBe(2);
+    expect({ workers, closes }).toEqual({ workers: 0, closes: 2 });
   });
 
   test('the production kernel adapter imports only the tiny shared protocol', () => {
@@ -108,7 +321,9 @@ describe('offscreen production feature-lease wiring', () => {
   test('the live worker owns lease authority and has no unconditional offscreen boot', () => {
     const worker = source('background/service-worker.js');
     const keepalive = source('background/feature-lease-keepalive.js');
-    expect(worker).toContain('createProductionFeatureLeaseRuntime({');
+    const control = source('background/service-worker-control-plane.js');
+    expect(worker).toContain('createFeatureLeaseControlPlane({');
+    expect(control).toContain('createProductionFeatureLeaseRuntime({');
     expect(worker).toContain('FEATURE_LEASE_KEEPALIVE_PORT');
     expect(worker).toContain('attachFeatureLeaseKeepalive({');
     expect(keepalive).toContain("type: 'feature-lease/heartbeat-ack'");
@@ -129,11 +344,10 @@ describe('offscreen production feature-lease wiring', () => {
 
   test('every rich Chrome feature enters through a named bounded or durable lease', () => {
     const worker = source('background/service-worker.js');
-    expect(worker).toContain('...(offscreenAvailable ? {\n    withControllerLease:');
-    expect(worker).toContain("withControllerLease: (operation) => withFeatureLease(");
-    expect(worker).toMatch(
-      /withHost:\s*\([^\n]*operation\)\s*=>\s*withFeatureLease\(\s*'controller'/,
-    );
+    expect(worker).toContain('withControllerLease: (/** @type {()=>any} */ operation) => withFeatureLease(');
+    expect(worker).toContain('firefoxDirect: !offscreenAvailable');
+    expect(worker).toContain('withDirectLifetime: (/** @type {()=>any} */ operation');
+    expect(worker).toContain('withHost: (/** @type {(lease:any)=>Promise<any>} */ operation) => withFeatureLease(');
     expect(worker).toContain("const withHost = (operation) => withFeatureLease(\n  'model-host'");
     expect(worker).toContain("const acquireResidentHost = () => acquireFeatureLease(\n  'model-host'");
     expect(worker).not.toMatch(/withFeatureLease\(\s*'controller',[\s\S]{0,180}local-model\/host\//);
@@ -145,12 +359,12 @@ describe('offscreen production feature-lease wiring', () => {
   });
 
   test('voice media is accepted only from human UI and teardown revokes the durable hold', () => {
-    const worker = source('background/service-worker.js');
-    expect(worker).toContain('isActualSidepanelSender(sender)');
-    expect(worker).toContain('isActualOptionsSender(sender)');
-    expect(worker).toContain('__peerdVoiceRelay: voiceRelayToken');
-    expect(worker).toContain("msg.type === 'voice/teardown'");
-    expect(worker).toContain("featureLeases.revoke('media-host', 'feature-disabled')");
+    const voice = source('background/service-worker-control-plane.js');
+    expect(voice).toContain('deps.isSidepanelSender(sender)');
+    expect(voice).toContain('deps.isOptionsSender(sender)');
+    expect(voice).toContain('__peerdVoiceRelay: relayToken');
+    expect(voice).toContain("msg.type === 'voice/teardown'");
+    expect(voice).toContain("deps.featureLeases.revoke('media-host', 'feature-disabled')");
   });
 
   test('voice teardown queues behind a pending init and then revokes the activated media lease', async () => {
@@ -189,6 +403,28 @@ describe('offscreen production feature-lease wiring', () => {
     });
     expect(relay.calls).toEqual(['acquire', 'host:voice/listen', 'revoke']);
     expect(relay.active()).toBe(false);
+  });
+
+  test('a stuck voice relay releases teardown and admits a clean restart', async () => {
+    let starts = 0;
+    const relay = installVoiceRelay({
+      acquire: async () => {},
+      revoke: async () => {},
+      hostTimeoutMs: 5,
+      sendHost: async (message) => {
+        if (message.type === 'voice/init' && starts++ === 0) return new Promise(() => {});
+        return { ok: true };
+      },
+    });
+
+    const initializing = relay.dispatch({ type: 'voice/init', engine: 'moonshine' });
+    const tearingDown = relay.dispatch({ type: 'voice/teardown' });
+    expect(await initializing).toEqual({ ok: false, error: 'voice-host-timeout' });
+    expect(await tearingDown).toEqual({ ok: true, inactive: true });
+    expect(relay.active()).toBe(false);
+    expect(await relay.dispatch({ type: 'voice/init', engine: 'moonshine' }))
+      .toEqual({ ok: true });
+    expect(relay.active()).toBe(true);
   });
 
   test('a non-UI voice-OFF transition tears down and revokes the initialized media feature', async () => {

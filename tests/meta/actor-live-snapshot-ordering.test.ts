@@ -14,6 +14,16 @@ const serviceWorker = readFileSync(join(EXTENSION_DIR, 'background/service-worke
 const stateSnapshot = readFileSync(join(EXTENSION_DIR, 'background/state-snapshot.js'), 'utf8');
 
 describe('actor live snapshot ordering', () => {
+  test('tab trackers defer the later-bound note sink until an event arrives', () => {
+    const tracker = serviceWorker.indexOf('const trackerNote =');
+    const note = serviceWorker.indexOf('noteAgentTab, broadcastAgentTab', tracker);
+    expect(tracker).toBeGreaterThan(-1);
+    expect(note).toBeGreaterThan(tracker);
+    expect(serviceWorker.slice(tracker, note)).toContain(
+      'makeTrackerNote(registry, kind, (tabId, value) => noteAgentTab(tabId, value))',
+    );
+  });
+
   test('captures the projection only after awaited reads and broadcasts without another await', () => {
     const vaultRead = stateSnapshot.indexOf(
       'const vaultInitialized = await vault.isInitialized();',

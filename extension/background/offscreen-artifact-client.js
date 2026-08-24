@@ -14,6 +14,7 @@ import {
   artifactOperationPolicy,
   parseArtifactChannelOffer,
 } from '/shared/artifact-channel.js';
+import { makeBoundedModuleLoader } from '/shared/bounded-module-load.js';
 
 export {
   ARTIFACT_CHANNEL_OFFER,
@@ -41,13 +42,14 @@ const asError = (value) => {
  * @param {Object} deps
  * @param {boolean} deps.offscreen
  * @param {string} deps.offscreenUrl
- * @param {<T>(operation:()=>Promise<T>)=>Promise<T>} deps.withHost
+ * @param {<T>(operation:(lease?:unknown)=>Promise<T>)=>Promise<T>} deps.withHost
  * @param {(reason:string)=>Promise<any>} [deps.retireHost]
  * @param {() => Promise<any[]>} [deps.listWindowClients]
  * @param {() => Promise<any>} [deps.importLocal]
  * @param {<T>(operation:()=>Promise<T>,options?:{outcomeKnownOnLoss?:boolean,code?:string})=>Promise<T>} [deps.withLocalLifetime]
  * @param {() => string} [deps.newId]
  * @param {number} [deps.timeoutMs]
+ * @param {number} [deps.localLoadTimeoutMs]
  * @param {() => MessageChannel} [deps.createChannel]
  * @param {typeof setTimeout} [deps.setTimeoutFn]
  * @param {typeof clearTimeout} [deps.clearTimeoutFn]
@@ -66,10 +68,16 @@ export const makeArtifactEngineClient = ({
   withLocalLifetime = (operation) => operation(),
   newId = () => crypto.randomUUID(),
   timeoutMs,
+  localLoadTimeoutMs = 10_000,
   createChannel = () => new MessageChannel(),
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
 }) => {
+  const loadLocal = makeBoundedModuleLoader(importLocal, {
+    timeoutMs: localLoadTimeoutMs,
+    loadCode: 'artifact-local-load-failed',
+    timeoutCode: 'artifact-local-load-timeout',
+  });
   /** @type {Set<string>} */
   const issuedChannelIds = new Set();
   /** @type {string[]} */
@@ -86,7 +94,7 @@ export const makeArtifactEngineClient = ({
   };
   const callLocal = async (/** @type {string} */ operation, /** @type {any[]} */ args) =>
     withLocalLifetime(async () => {
-      const module = await importLocal();
+      const module = await loadLocal();
       const fn = module?.[operation];
       if (typeof fn !== 'function') throw new Error('artifact operation unavailable');
       return fn(...args);
@@ -96,7 +104,7 @@ export const makeArtifactEngineClient = ({
     });
   const callOffscreen = async (/** @type {string} */ operation, /** @type {any[]} */ args) => {
     try {
-      return await withHost(async () => {
+      return await withHost(async (lease) => {
       const matches = (await listWindowClients()).filter((client) => client?.url === offscreenUrl);
       if (matches.length !== 1) throw new Error('artifact host unavailable or ambiguous');
       const channelId = newId();
@@ -106,6 +114,7 @@ export const makeArtifactEngineClient = ({
         channelId,
         operation,
         args,
+        lease,
       }) || !rememberChannelId(channelId)) {
         throw new Error('artifact channel identity invalid or reused');
       }
@@ -166,6 +175,7 @@ export const makeArtifactEngineClient = ({
             channelId,
             operation,
             args,
+            lease,
           }, [port2]);
         } catch (cause) {
           finish({

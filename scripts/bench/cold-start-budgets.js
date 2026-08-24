@@ -151,7 +151,7 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
   // the reviewed denylist-editor/DNR-custody and skills metadata-authority
   // adapters (route migration; no feature implementation pulled cold).
   // 76 -> 80 modules, 460 KB -> 500 KB: origin-credential custody with the
-  // full DPoP key lifecycle — credential injection and nonextractable key
+  // full DPoP key lifecycle. Credential injection and nonextractable key
   // custody are kernel-owned duties, not demand-loadable feature code.
   kernel: Object.freeze({ modules: 80, graphBytes: 500_000, entryBytes: 40_000, directImports: 26 }),
   sidepanel: Object.freeze({ modules: 75, graphBytes: 650_000, entryBytes: 50_000 }),

@@ -6,6 +6,7 @@
 
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
+const ABORT_CLEANUP_OPERATIONS = new Set(['turn.abort.finalize', 'turn.finalize']);
 
 /** @param {unknown} value @returns {value is Record<string, any>} */
 const isRecord = (value) => value !== null
@@ -168,8 +169,9 @@ export const makeControllerTurnBridge = ({
   const rehydrateImages = (/** @type {any} */ run, /** @type {unknown} */ images) =>
     Array.isArray(images) ? images.map((image) => isRecord(image)
       ? rehydrateData(run, image, 'tool-image') : image) : images;
-  const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, any>} */ args) => ({
-    ...args,
+const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, any>} */ args) => ({
+  ...args,
+  signal: run.signal,
     messages: Array.isArray(args.messages) ? args.messages.map((message) => {
       if (!isRecord(message)) return message;
       return {
@@ -254,17 +256,30 @@ export const makeControllerTurnBridge = ({
     /** @type {boolean} */ concurrencySafe,
     /** @type {() => Promise<any>} */ dispatch,
   ) => {
+    const invoke = () => {
+      if (run.signal.aborted) throw Object.assign(
+        new DOMException('controller turn stopped before tool dispatch', 'AbortError'),
+        { code: 'turn-tool-not-dispatched' },
+      );
+      return dispatch();
+    };
     if (concurrencySafe) {
-      const promise = Promise.resolve(run.dispatchBarrier).then(dispatch);
+      const promise = Promise.resolve(run.dispatchBarrier).then(invoke);
       run.activeSafeDispatches.add(promise);
+      run.activeDispatches.add(promise);
       try { return await promise; }
-      finally { run.activeSafeDispatches.delete(promise); }
+      finally {
+        run.activeSafeDispatches.delete(promise);
+        run.activeDispatches.delete(promise);
+      }
     }
     const prior = run.dispatchBarrier;
     const safeBefore = [...run.activeSafeDispatches];
-    const promise = Promise.allSettled([prior, ...safeBefore]).then(dispatch);
+    const promise = Promise.allSettled([prior, ...safeBefore]).then(invoke);
     run.dispatchBarrier = promise.catch(() => {});
-    return promise;
+    run.activeDispatches.add(promise);
+    try { return await promise; }
+    finally { run.activeDispatches.delete(promise); }
   };
   const recordModelEvent = (/** @type {any} */ run, /** @type {any} */ event) => {
     if (event?.type === 'tool-use-start'
@@ -304,8 +319,9 @@ export const makeControllerTurnBridge = ({
       ok: false, code: 'turn-run-authority-mismatch', outcomeKnown: true,
     };
     const { run, value } = parsed;
-    if (context.signal.aborted) return {
-      ok: false, code: 'turn-run-aborted', outcomeKnown: false,
+    if ((context.signal.aborted || run.signal.aborted)
+        && !ABORT_CLEANUP_OPERATIONS.has(operation)) return {
+      ok: false, code: 'turn-run-aborted', outcomeKnown: true,
     };
     const sameSession = () => value.sessionId === run.sessionId;
     try {
@@ -313,32 +329,55 @@ export const makeControllerTurnBridge = ({
         case 'turn.session.get':
           if (!sameSession()) return failed('session authority mismatch', true);
           try {
+            const session = await run.ctx.sessions.get(run.sessionId);
+            if (run.ctx.resume === true && run.currentAssistantId === null) {
+              const trailing = session?.messages?.at?.(-1);
+              run.resumeAssistantId = trailing?.role === 'assistant'
+                && trailing?.streaming === true && typeof trailing.id === 'string'
+                ? trailing.id : null;
+            }
             return known(externalizeSessionWire(
-              run, await run.ctx.sessions.get(run.sessionId),
+              run, session,
             ));
           }
           catch (cause) { return failed(cause, true); }
         case 'turn.session.append':
           if (!sameSession()) return failed('session authority mismatch', true);
           try {
+            const message = /** @type {any} */ (rehydrateMessage(
+              run, jsonUnwire(value.messageJson, 'session message'),
+            ));
             const session = await run.ctx.sessions.appendMessage(
-              run.sessionId, rehydrateMessage(
-                run, jsonUnwire(value.messageJson, 'session message'),
-              ),
+              run.sessionId, message,
             );
+            run.resumeAssistantId = null;
+            if (message?.role === 'assistant' && typeof message.id === 'string') {
+              run.currentAssistantId = message.id;
+            }
             return known(externalizeSessionWire(run, session));
           } catch (cause) { return unknown(run, cause); }
         case 'turn.session.update-assistant':
+          {
           if (!sameSession() || typeof value.messageId !== 'string') {
+            return failed('session authority mismatch', true);
+          }
+          let patch;
+          try { patch = jsonUnwire(value.patchJson, 'session patch'); }
+          catch (cause) { return failed(cause, true); }
+          const resumeFinalize = value.messageId === run.resumeAssistantId
+            && isRecord(patch) && Object.keys(patch).length === 1
+            && patch.streaming === false;
+          if (value.messageId !== run.currentAssistantId && !resumeFinalize) {
             return failed('session authority mismatch', true);
           }
           try {
             await run.ctx.sessions.updateAssistantMessage(
-              run.sessionId, value.messageId,
-              jsonUnwire(value.patchJson, 'session patch'),
+              run.sessionId, value.messageId, patch,
             );
+            if (resumeFinalize) run.resumeAssistantId = null;
             return known(null);
           } catch (cause) { return unknown(run, cause); }
+          }
         case 'turn.session.set-trim':
           if (!sameSession()) return failed('session authority mismatch', true);
           try {
@@ -396,7 +435,7 @@ export const makeControllerTurnBridge = ({
             return known({ done: false, event: next.value });
           } catch (cause) {
             run.models.delete(value.modelId);
-            return unknown(run, cause);
+            return failed(cause, true);
           }
         }
         case 'turn.model.cancel': {
@@ -427,14 +466,55 @@ export const makeControllerTurnBridge = ({
             );
             if (result?.outcomeKnown === false) run.nestedUnknown = true;
             return known(jsonWire(externalizeToolResult(run, result)));
-          } catch (cause) { return unknown(run, cause); }
+          } catch (cause) {
+            return /** @type {{code?:string}} */ (cause)?.code === 'turn-tool-not-dispatched'
+              ? failed(cause, true) : unknown(run, cause);
+          }
         }
         case 'turn.event':
           await run.events.push(rehydrateEvent(
             run, jsonUnwire(value.eventJson, 'turn event'),
           ));
           return known(null);
+        case 'turn.abort.finalize': {
+          const outcomeUnknown = value.outcomeKnown === false;
+          if (!sameSession() || typeof value.messageId !== 'string'
+              || value.messageId !== run.currentAssistantId
+              || (value.content !== undefined && typeof value.content !== 'string')
+              || (outcomeUnknown && (typeof value.error !== 'string'
+                || typeof value.code !== 'string' || value.retryable !== false))) {
+            return failed('abort finalization authority mismatch', true);
+          }
+          if (run.abortFinalized) return failed('abort already finalized', true);
+          run.abortFinalized = true;
+          run.currentAssistantId = null;
+          try {
+            await run.ctx.sessions.updateAssistantMessage(run.sessionId, value.messageId, {
+              ...(value.content === undefined ? {} : { content: value.content }),
+              streaming: false,
+              ...(outcomeUnknown ? {
+                error: value.error,
+                errorCode: value.code,
+                outcomeKnown: false,
+                retryable: false,
+              } : { stopReason: 'aborted' }),
+            });
+            await run.events.push(outcomeUnknown ? {
+              type: 'error', sessionId: run.sessionId, messageId: value.messageId,
+              error: value.error, code: value.code,
+              outcomeKnown: false, retryable: false,
+            } : {
+              type: 'stop', sessionId: run.sessionId,
+              messageId: value.messageId, stopReason: 'aborted',
+            });
+            return known(null);
+          } catch (cause) { return unknown(run, cause); }
+        }
         case 'turn.finalize':
+          if (run.signal.aborted && run.activeDispatches.size > 0) {
+            return unknown(run, 'a dispatched operation remained active after Stop');
+          }
+          await Promise.allSettled([run.dispatchBarrier, ...run.activeSafeDispatches]);
           return run.nestedUnknown
             ? unknown(run, 'a kernel operation crossed dispatch without a known outcome')
             : known(null);
@@ -458,11 +538,13 @@ export const makeControllerTurnBridge = ({
     ctx.signal?.addEventListener?.('abort', onAbort, { once: true });
     if (ctx.signal?.aborted) localAbort.abort();
     const run = {
-      runId, sessionId: ctx.sessionId, ctx, events,
+      runId, sessionId: ctx.sessionId, ctx, events, signal: localAbort.signal,
       opaque: new Map(), models: new Map(), modelToolCalls: new Map(),
       tools: [], toolNames: new Set(), classifications: {}, system: null,
-      nestedUnknown: false,
-      dispatchBarrier: Promise.resolve(), activeSafeDispatches: new Set(),
+      nestedUnknown: false, abortFinalized: false,
+      currentAssistantId: null, resumeAssistantId: null,
+      dispatchBarrier: Promise.resolve(),
+      activeDispatches: new Set(), activeSafeDispatches: new Set(),
     };
     setTools(run, ctx.tools);
     const cleanCtx = controllerCtx(ctx);
@@ -493,6 +575,7 @@ export const makeControllerTurnBridge = ({
         Object.assign(error, {
           code: result?.code ?? 'controller-turn-failed',
           outcomeKnown: result?.outcomeKnown === true,
+          ...(result?.retryable === false ? { retryable: false } : {}),
         });
         throw error;
       }

@@ -117,7 +117,7 @@ export const createKernelFeatureHost = ({
     sessionCache: storage.sessionCache,
     errorTypes: vaultErrorTypes,
     withHost: async (operation, context = { method: 'status' }) => {
-      if (!vaultAuthorityOffscreen) return operation();
+      if (!vaultAuthorityOffscreen) return operation(null);
       if (unlockMethods.has(context.method)) {
         const acquired = await runtime.acquire('vault-authority', {
           reason: 'feature-demand',
@@ -126,7 +126,7 @@ export const createKernelFeatureHost = ({
           throw new Error(acquired?.code ?? 'vault-authority-host-unavailable');
         }
         try {
-          return await operation();
+          return await operation(acquired.lease);
         } finally {
           if (vaultAuthority.isLocked()) {
             vaultAuthority.close();
@@ -134,7 +134,7 @@ export const createKernelFeatureHost = ({
           }
         }
       }
-      return runtime.runWithLease('vault-authority', () => operation(), {
+      return runtime.runWithLease('vault-authority', operation, {
         reason: 'feature-demand',
       });
     },

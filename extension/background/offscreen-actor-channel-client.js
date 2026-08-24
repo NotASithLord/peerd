@@ -9,6 +9,7 @@
 // The offscreen host imports the shared wire constants independently.
 const ACTOR_CHANNEL_PROTOCOL = 1;
 const ACTOR_CHANNEL_OFFER = 'peerd/actor-channel';
+
 export { makeSemanticControllerClient } from './offscreen-controller-client.js';
 
 export class ActorChannelError extends Error {
@@ -52,6 +53,8 @@ export const selectExactActorHostClient = (
  * @param {() => string} [deps.newChannelId]
  * @param {number} [deps.handshakeTimeoutMs]
  * @param {number} [deps.abortTimeoutMs]
+ * @param {number} [deps.maxLoopEventsPerRun]
+ * @param {number} [deps.maxEffectRelaysPerRun]
  * @param {(job: any) => number} [deps.runTimeoutMsFor]
  * @param {typeof setTimeout} [deps.setTimeoutFn]
  * @param {typeof clearTimeout} [deps.clearTimeoutFn]
@@ -63,6 +66,8 @@ export const makeOffscreenActorChannelClient = ({
   newChannelId = () => crypto.randomUUID(),
   handshakeTimeoutMs = 10_000,
   abortTimeoutMs = 5_000,
+  maxLoopEventsPerRun = 256,
+  maxEffectRelaysPerRun = 228,
   runTimeoutMsFor = (job) => Number.isFinite(job?.budgetMs) && job.budgetMs > 0
     ? job.budgetMs + abortTimeoutMs
     : 30 * 60_000,
@@ -71,10 +76,15 @@ export const makeOffscreenActorChannelClient = ({
 }) => {
   /**
    * @param {any} job
-   * @param {{ signal?: AbortSignal, relay: (type: string, payload: any) => any|Promise<any> }} options
+   * @param {{ signal?: AbortSignal, lease:any,
+   *   relay: (type: string, payload: any) => any|Promise<any> }} options
    */
-  const run = async (job, { signal, relay }) => {
+  const run = async (job, { signal, lease, relay }) => {
     if (signal?.aborted) return abortedResult();
+    if (!lease || typeof lease !== 'object' || Array.isArray(lease)) return {
+      ok: false, started: false, phase: 'startup', code: 'actor_lease_invalid',
+      error: 'actor host lease is invalid', outcomeKnown: true,
+    };
     try { await ensureOffscreen(); }
     catch (cause) {
       return {
@@ -94,6 +104,12 @@ export const makeOffscreenActorChannelClient = ({
     const { port1, port2 } = createChannel();
     /** @type {Map<string, Promise<any>>} */
     const relayReplies = new Map();
+    const loopEventLimit = Number.isFinite(maxLoopEventsPerRun) && maxLoopEventsPerRun > 0
+      ? Math.floor(maxLoopEventsPerRun) : 256;
+    const effectRelayLimit = Number.isFinite(maxEffectRelaysPerRun) && maxEffectRelaysPerRun > 0
+      ? Math.floor(maxEffectRelaysPerRun) : 228;
+    let loopEvents = 0;
+    let effectRelays = 0;
     let state = /** @type {'offered'|'ready'|'opened'|'accepted'|'committed'|'settled'} */ ('offered');
     let settle = (/** @type {any} */ _value) => {};
     let handshakeTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
@@ -108,6 +124,7 @@ export const makeOffscreenActorChannelClient = ({
       if (abortTimer) clearTimeoutFn(abortTimer);
       if (runTimer) clearTimeoutFn(runTimer);
       signal?.removeEventListener('abort', onAbort);
+      relayReplies.clear();
       try { port1.close(); } catch { /* already closed */ }
       settle(value);
     };
@@ -177,17 +194,52 @@ export const makeOffscreenActorChannelClient = ({
       if (message.type !== 'actor/relay' || state !== 'committed'
           || typeof message.requestId !== 'string'
           || typeof message.relayType !== 'string') return;
+      const readOnlyEvent = message.relayType === 'actor/loop-event';
       // A duplicate request shares the first dispatch promise. Even though the
       // MessageChannel is private, transport retries must never repeat a tool.
       let pending = relayReplies.get(message.requestId);
       if (!pending) {
+        if (readOnlyEvent && loopEvents >= loopEventLimit) {
+          try {
+            post({
+              type: 'actor/relay-response', requestId: message.requestId,
+              result: { ok: true, coalesced: true },
+            });
+          } catch { /* run timeout owns settlement */ }
+          return;
+        }
+        if (!readOnlyEvent && effectRelays >= effectRelayLimit) {
+          try {
+            post({
+              type: 'actor/relay-response', requestId: message.requestId,
+              result: {
+                ok: false, code: 'actor_relay_limit',
+                error: 'actor relay budget exhausted', outcomeKnown: true, performed: false,
+              },
+            });
+          } catch { /* run timeout owns settlement */ }
+          return;
+        }
+        if (readOnlyEvent) loopEvents += 1;
+        else effectRelays += 1;
         pending = Promise.resolve(relay(message.relayType, message.payload ?? {}))
-          .catch((cause) => ({
-            ok: false, error: cause instanceof Error ? cause.message : String(cause),
-          }));
+          .catch((cause) => {
+            const detail = /** @type {{code?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
+            const outcomeKnown = detail?.outcomeKnown === true;
+            return {
+              ok: false,
+              error: cause instanceof Error ? cause.message : String(cause),
+              ...(typeof detail?.code === 'string' ? { code: detail.code } : {}),
+              outcomeKnown,
+              ...(outcomeKnown ? {} : { retryable: false }),
+            };
+          });
         relayReplies.set(message.requestId, pending);
       }
       pending.then((reply) => {
+        if (readOnlyEvent && relayReplies.get(message.requestId) === pending) {
+          relayReplies.delete(message.requestId);
+        }
         if (state !== 'committed') return;
         try { post({ type: 'actor/relay-response', requestId: message.requestId, result: reply }); }
         catch { /* run timeout or restart owns settlement */ }
@@ -207,7 +259,7 @@ export const makeOffscreenActorChannelClient = ({
     }), { once: true });
     try {
       target.postMessage({
-        type: ACTOR_CHANNEL_OFFER, protocol: ACTOR_CHANNEL_PROTOCOL, channelId,
+        type: ACTOR_CHANNEL_OFFER, protocol: ACTOR_CHANNEL_PROTOCOL, channelId, lease,
       }, [port2]);
       port1.start();
       armHandshakeTimeout('ready');

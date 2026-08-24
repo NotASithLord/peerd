@@ -10,9 +10,16 @@ import {
   FEATURE_LEASE_HOST_PROTOCOL,
   OFFSCREEN_FEATURE_LEASE_SCOPES,
 } from '../shared/feature-lease-protocol.js';
-import { makeSerialLane } from '../shared/cold-util.js';
+import { makeSerialLane, withDeadline } from '../shared/cold-util.js';
 
 const OFFSCREEN_SCOPES = new Set(OFFSCREEN_FEATURE_LEASE_SCOPES);
+const LEASE_KEYS = Object.freeze([
+  'schema', 'scope', 'leaseId', 'generation', 'buildId', 'bootId',
+  'kernelEpoch', 'hostEpoch',
+]);
+const leaseCapability = (/** @type {any} */ result) => Object.freeze(
+  Object.fromEntries(LEASE_KEYS.map((key) => [key, result[key]])),
+);
 
 /** @param {any} lease @param {any} result */
 const localReceipt = (lease, result) => ({ ok: true, ...lease, result });
@@ -62,27 +69,16 @@ export const createProductionFeatureLeaseRuntime = ({
     throw new TypeError('feature-lease-host-timeout-invalid');
   }
   /** @template T @param {()=>Promise<T>|T} operation @param {number} timeoutMs @param {string} phase */
-  const withinHostDeadline = (operation, timeoutMs, phase) => new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (/** @type {unknown} */ value, /** @type {boolean} */ ok) => {
-      if (settled) return;
-      settled = true;
-      clearTimeoutFn(timer);
-      if (ok) resolve(/** @type {T} */ (value)); else reject(value);
-    };
-    const timer = setTimeoutFn(() => {
+  const withinHostDeadline = (operation, timeoutMs, phase) => withDeadline(
+    operation, timeoutMs, () => {
       const error = /** @type {Error & {code?:string,outcomeKnown?:boolean}} */ (
         new Error(`feature lease host ${phase} timed out`)
       );
       error.code = `feature-lease-host-${phase}-timeout`;
       error.outcomeKnown = phase === 'status';
-      finish(error, false);
-    }, timeoutMs);
-    Promise.resolve().then(operation).then(
-      (value) => finish(value, true),
-      (cause) => finish(cause, false),
-    );
-  });
+      return error;
+    }, setTimeoutFn, clearTimeoutFn,
+  );
   const hostStatus = (/** @type {()=>Promise<any>|any} */ operation) =>
     withinHostDeadline(operation, hostStatusTimeoutMs, 'status');
   const hostEffect = (/** @type {()=>Promise<any>|any} */ operation,
@@ -256,6 +252,9 @@ export const createProductionFeatureLeaseRuntime = ({
     if (present === false) return false;
     const status = present === true ? await readHost(false).catch(() => null) : null;
     if (status && (status.leases?.length ?? 0) > 0) return false;
+    if (!status && Object.values(coordinator.snapshot().leases).some(
+      (lease) => ['starting', 'active', 'unknown'].includes(lease.status),
+    )) return false;
     const exactEpoch = status?.hostEpoch ?? residentHostEpoch;
     // The serialized prior authenticated epoch remains exact after stop ACK.
     return typeof exactEpoch === 'string' ? retirePhysicalHostUnsafe(exactEpoch) : false;
@@ -359,18 +358,17 @@ export const createProductionFeatureLeaseRuntime = ({
         return lease;
       }
       acquired = true;
-      return await operation(lease);
+      return await operation(leaseCapability(lease));
     } finally {
       const remaining = Math.max(0, (scopedUsers.get(scope) ?? 1) - 1);
       if (remaining === 0) scopedUsers.delete(scope);
       else scopedUsers.set(scope, remaining);
       if (acquired && remaining === 0) {
         await withHostLifecycle(async () => {
-          // Recheck queued durable promotion before bounded release.
           if (!durableScopes.has(scope)) {
             await revokeUnsafe(scope, 'feature-disabled');
           }
-        });
+        }).catch(() => {});
       }
     }
   };
@@ -401,7 +399,9 @@ export const createProductionFeatureLeaseRuntime = ({
       result = await coordinator.acquire(scope, { ...options, durable: true });
     }
     if (result?.ok && OFFSCREEN_SCOPES.has(scope)) durableScopes.add(scope);
-    return result;
+    return result?.ok
+      ? Object.freeze({ ...result, lease: leaseCapability(result) })
+      : result;
   };
 
   const runTransitionUnsafe = async (/** @type {'initialize'|'unlock'|'resume'} */ transition,
@@ -447,7 +447,7 @@ export const createProductionFeatureLeaseRuntime = ({
     const results = await withHostLifecycle(() => runTransitionUnsafe(transition, options));
     // why only offscreen scopes force realm retirement: an unknown start for a
     // worker-local scope (goal, recovery, schedule) says nothing about the
-    // physical host's realm — retiring the shared document for it destroys
+    // physical host's realm. Retiring the shared document for it destroys
     // every live offscreen lease (a mid-turn controller included) and feeds a
     // loss/retire loop, because the retirement itself fails the next
     // transition's worker-local starts with host-lost.
@@ -465,7 +465,7 @@ export const createProductionFeatureLeaseRuntime = ({
   };
 
   // Unknown post-dispatch custody retires the exact host before lane reuse.
-  const retireActiveHost = (/** @type {string} */ _reason = 'feature-host-poisoned') => {
+  const retireActiveHost = (/** @type {string|undefined} */ _reason) => {
     const snapshot = coordinator.snapshot();
     const live = Object.entries(snapshot.leases)
       .find(([scope, state]) => OFFSCREEN_SCOPES.has(scope)

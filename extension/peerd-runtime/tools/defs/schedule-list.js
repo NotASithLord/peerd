@@ -38,6 +38,8 @@ export const scheduleListTool = {
       enabled: r.enabled !== false,
       nextRunAt: new Date(r.nextRunAt).toISOString(),
       lastRunAt: r.lastRunAt ? new Date(r.lastRunAt).toISOString() : null,
+      lastOutcomeUnknownAt: r.lastOutcomeUnknownAt
+        ? new Date(r.lastOutcomeUnknownAt).toISOString() : null,
       runCount: r.runCount ?? 0,
     }));
     return { ok: true, content: JSON.stringify(rows, null, 2) };

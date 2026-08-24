@@ -260,13 +260,14 @@ export const scenario: Scenario = {
         }),
       });
       const actorResult = await client.run({ runId: 'red-team-run', message: 'private-marker' }, {
+        lease: { scope: 'controller', leaseId: 'red-team-actor-lease' },
         relay: async () => ({ ok: true }),
       });
       const offerIsNonsecret = !JSON.stringify(publicOffer).includes('private-marker');
       const endpointReceivedJob = privateJob?.message === 'private-marker';
       probes.push(offerIsNonsecret && endpointReceivedJob && actorResult?.ok
         ? blocked('observe an actor job from a first-party engine tab',
-          'the targeted channel offer carries no job or authority; the job moves only over the transferred endpoint')
+          'the targeted offer carries no job; only its exact generation-bound lease')
         : leaked('observe an actor job from a first-party engine tab',
           `offerIsNonsecret=${offerIsNonsecret} endpointReceivedJob=${endpointReceivedJob}`));
     }

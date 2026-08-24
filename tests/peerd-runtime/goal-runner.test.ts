@@ -19,6 +19,86 @@ const settle = async (pred: () => boolean, tries = 500) => {
 type TurnArgs = { sessionId: string; userText: string; synthetic: boolean; trusted?: boolean };
 
 describe('makeGoalRunner — the goal loop', () => {
+  it('announces a run before controller acquisition settles', async () => {
+    const events: any[] = [];
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let runner: ReturnType<typeof makeGoalRunner>;
+    runner = makeGoalRunner({
+      withRun: async (operation) => { await gate; await operation(); },
+      runTurn: async () => { runner.halt('s-starting'); },
+      onEvent: (event) => events.push(event),
+    });
+
+    await runner.start({ sessionId: 's-starting', goal: 'finish' });
+    expect(events).toEqual([expect.objectContaining({
+      type: 'goal/state', sessionId: 's-starting', phase: 'running',
+      active: true, iteration: 0,
+    })]);
+    release();
+    await settle(() => runner.get('s-starting') === null);
+  });
+
+  it('holds one run bracket across every autonomous turn and releases it once', async () => {
+    let entered = 0;
+    let exited = 0;
+    let depth = 0;
+    let turns = 0;
+    let releaseBracket = () => {};
+    const bracketReleased = new Promise<void>((resolve) => { releaseBracket = resolve; });
+    let runner: ReturnType<typeof makeGoalRunner>;
+    runner = makeGoalRunner({
+      withRun: async (operation) => {
+        entered += 1;
+        depth += 1;
+        try { await operation(); }
+        finally {
+          depth -= 1;
+          exited += 1;
+          releaseBracket();
+        }
+      },
+      runTurn: async () => {
+        expect(depth).toBe(1);
+        turns += 1;
+        if (turns === 3) runner.complete('s-bracket');
+      },
+    });
+
+    await runner.start({ sessionId: 's-bracket', goal: 'finish' });
+    await bracketReleased;
+
+    expect({ entered, exited, depth, turns }).toEqual({ entered: 1, exited: 1, depth: 0, turns: 3 });
+    expect(runner.get('s-bracket')).toBe(null);
+  });
+
+  it('terminally cleans a run when its bracket rejects before entry', async () => {
+    const kv = makeKv();
+    const events: any[] = [];
+    const ends: any[] = [];
+    let turns = 0;
+    const runner = makeGoalRunner({
+      withRun: async () => { throw new Error('controller unavailable'); },
+      runTurn: async () => { turns += 1; },
+      onEvent: (event) => events.push(event),
+      onRunEnd: (sid, info) => ends.push({ sid, ...info }),
+      kv,
+    });
+
+    await runner.start({ sessionId: 's-rejected', goal: 'finish' });
+    await settle(() => runner.get('s-rejected') === null);
+
+    expect(turns).toBe(0);
+    expect(events.at(-1)).toMatchObject({
+      type: 'goal/state', phase: 'halted', active: false,
+    });
+    expect(ends).toEqual([{
+      sid: 's-rejected', phase: 'halted', summary: null,
+      reason: 'controller unavailable',
+    }]);
+    expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
+  });
+
   it('runs turn 1 as the visible goal, later turns as synthetic continuations, until complete_goal', async () => {
     const calls: TurnArgs[] = [];
     const events: any[] = [];

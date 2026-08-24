@@ -213,7 +213,8 @@ export const createFeatureLeaseCoordinator = ({
         }
       }
       return outcome(true, 'feature-lease-active', true, {
-        scope, leaseId: state.leaseId, coalesced: true,
+        scope, leaseId: state.leaseId, generation: state.generation,
+        ...canonicalIdentity, hostEpoch, coalesced: true,
       });
     }
     if (state.status === 'starting') {
@@ -279,9 +280,7 @@ export const createFeatureLeaseCoordinator = ({
       }
       state.status = 'active';
       state.controller = null;
-      return outcome(true, 'feature-lease-started', true, {
-        scope, leaseId: lease.leaseId, hostEpoch,
-      });
+      return outcome(true, 'feature-lease-started', true, lease);
     } catch (error) {
       if (crossedDispatch) return finishUnknown(state, lease, 'feature-lease-host-lost');
       try { if (state.durable) await persistDesired(scope, false, 'feature-disabled'); }

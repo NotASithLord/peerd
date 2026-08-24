@@ -122,6 +122,7 @@ import './unit/sidepanel/attachments.test.js';
 import './unit/sidepanel/composer-readiness.test.js';
 import './unit/sidepanel/message-list.test.js';
 import './unit/sidepanel/protected-tab-starter.test.js';
+import './unit/sidepanel/vault-shell.test.js';
 import './unit/sidepanel/failure-chip.test.js';
 import './unit/sidepanel/actor-isolation.test.js';
 import './unit/sidepanel/actor-fabric.test.js';

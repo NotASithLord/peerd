@@ -486,8 +486,9 @@ export const makeEngineRoutes = (deps) => {
     'app/get-meta': async ({ appId }) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
-        let meta = await appRegistry.get(appId);
+        const meta = await appRegistry.get(appId);
         if (!meta) return { ok: false, error: 'app-not-found' };
+        let runtimeEntryFile = meta.entryFile;
         let runtimeDweb = meta.dweb ?? null;
         let runtimeAgent = { kind: 'bound-app', profile: 'developer', surface: 'code' };
         try {
@@ -498,7 +499,7 @@ export const makeEngineRoutes = (deps) => {
             ? (meta.dweb ?? { uri: null, publisher: null, hash: null, local: true })
             : null;
           runtimeAgent = contract.agent;
-          if (contract.entry !== meta.entryFile) meta = await appRegistry.update(appId, { entryFile: contract.entry });
+          runtimeEntryFile = contract.entry;
         } catch (error) {
           if ((/** @type {{name?:string}} */ (error)).name !== 'NotFoundError') {
             return { ok: false, error: /** @type {{message?:string}} */ (error)?.message ?? String(error) };
@@ -509,7 +510,7 @@ export const makeEngineRoutes = (deps) => {
         return {
           ok: true,
           name: meta.name,
-          entryFile: meta.entryFile,
+          entryFile: runtimeEntryFile,
           fileKinds: meta.fileKinds ?? {},
           dweb: runtimeDweb,
           agent: runtimeAgent,
@@ -857,7 +858,6 @@ export const makeEngineRoutes = (deps) => {
         } else {
           return { ok: false, error: 'unknown-kind' };
         }
-        auditLog.append({ type: 'artifact_exported', details: { kind, id, name: record.name } }).catch(() => {});
         return { ok: true, filename: exportFilename(record.name, kind), envelope };
       } catch (e) {
         // why cast: the error class arrives via the `any` deps bag, so

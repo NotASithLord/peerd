@@ -1,4 +1,4 @@
-// Kernel skills metadata authority — must preserve the legacy registry
+// Kernel skills metadata authority: must preserve the legacy registry
 // routes' observable behavior (replies, stored rows, audit) without parsing
 // or installing a skill. Both lanes run against the same fake-indexeddb
 // database, matching production where they share `peerd-skills`.

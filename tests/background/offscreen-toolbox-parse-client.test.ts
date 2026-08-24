@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { makeOffscreenToolboxParseClient } from '../../extension/background/offscreen-toolbox-parse-client.js';
+import { makeOffscreenToolboxParseClient } from '../../extension/background/service-worker-control-plane.js';
 
 describe('offscreen toolbox parse client', () => {
   test('starts the exact host and forwards the candidate without rewriting it', async () => {

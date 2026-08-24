@@ -14,8 +14,11 @@
 import m from '/vendor/mithril/mithril.js';
 import browser from '/shared/browser-api.js';
 import { makeUiStatePort } from '/shared/cold-port-recovery.js';
-import { makeUiRuntimeClient } from '/shared/ui-runtime-client.js';
+import {
+  makeReconciledUiSender, makeUiRuntimeClient, redrawForRuntimeMessage,
+} from '/shared/ui-runtime-client.js';
 import { App } from './components/app.js';
+import { makeConfirmationAnswer } from './confirmation-answer.js';
 import { classifyBrowserAutomationTarget, createVoiceManager } from '/peerd-runtime/ui.js';
 import { findDenylistMatch } from '/peerd-egress/ui.js';
 import {
@@ -56,7 +59,7 @@ const handlePortMessage = (raw) => {
   // Side-panel-only: the voice manager doesn't survive the panel, so re-enable
   // it on a full snapshot when the persisted setting says it was on.
   if (msg.type === 'state') maybeRestoreVoice(currentState);
-  m.redraw();
+  redrawForRuntimeMessage(m.redraw, msg);
   return true;
 };
 
@@ -76,8 +79,11 @@ const statePort = makeUiStatePort({
   onDisconnect: resetAfterDisconnect,
   onStatusChange: () => m.redraw(),
 });
-/** @param {{type:string}&Record<string,any>} msg @returns {Promise<any>} */
-const send = (msg) => uiRuntime.send(msg);
+const reconcileState = () => statePort.reconcile(() => uiRuntime.send({ type: 'state/get' }));
+const send = makeReconciledUiSender({
+  send: (/** @type {any} */ msg) => uiRuntime.send(msg),
+  fold: () => {}, reconcile: reconcileState, afterReply: () => false,
+});
 
 // Lazy-load an actor session for a nested transcript. Used when the
 // user expands an actor_create card whose child wasn't streamed live
@@ -167,28 +173,13 @@ const onGlobalKeydown = (e) => {
 const root = document.getElementById('app');
 if (!root) throw new Error('sidepanel: #app missing from HTML');
 
-// UI-only state actions. Distinct from `send` (which posts to the SW);
-// these mutate side-panel-local state and trigger a redraw.
-// (VM management actions were removed with the chip — VM tabs live in
-// the Chrome tab strip; agent vm_* tools do everything else.)
-// Answer a pending confirmation prompt: post the user's choice to the SW
-// (which resolves the dispatcher's waiting Promise) and clear the prompt
-// locally so the modal dismisses immediately.
-/**
- * @param {{ id: string, ownerSessionId?: string|null, sessionId?: string|null,
- *   dispatchId?: string|null }} prompt
- * @param {string} answer
- */
-const confirmAnswer = (prompt, answer) => {
-  send({
-    type: 'confirm/answer', id: prompt.id, answer,
-    ownerSessionId: prompt.ownerSessionId ?? null,
-    sessionId: prompt.sessionId ?? null,
-    dispatchId: prompt.dispatchId ?? null,
-  });
-  currentState = { ...currentState, pendingConfirm: null };
-  m.redraw();
-};
+const confirmAnswer = makeConfirmationAnswer({
+  send,
+  reconcile: reconcileState,
+  getState: () => currentState,
+  setState: (/** @type {ChatState} */ state) => { currentState = state; },
+  redraw: () => m.redraw(),
+});
 
 // Dismiss a transient system notice (e.g. an /init progress banner).
 /** @param {number} id */

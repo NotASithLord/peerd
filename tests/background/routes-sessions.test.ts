@@ -10,12 +10,13 @@ import { makeAgentSendCustody } from '../../extension/peerd-egress/background.js
 // the no-active-session guards.
 
 const baseDeps = (over: any = {}) => {
-  const calls: any = { runInit: 0, goal: [], halted: [], system: [], tools: [], turns: [] };
+  const calls: any = { runInit: 0, goal: [], halted: [], system: [], tools: [], turns: [], sequence: [] };
   return {
     calls,
     deps: {
       vault: { isLocked: () => false },
       auditLog: { append: async () => {}, list: async () => [] },
+      pushState: async () => { calls.sequence.push('publish'); },
       sessions: {
         list: async () => [
           { sessionId: 'a', messages: [{ when: 1 }], createdAt: 0, provider: 'p', model: 'm', toolManifest: null },
@@ -33,7 +34,7 @@ const baseDeps = (over: any = {}) => {
       prepareUserAttachmentsWithDocs: async ({ text }: any) => ({ text, attachments: [] }),
       runAgentTurn: async (a: any) => { calls.turns.push(a); },
       runInit: async () => { calls.runInit += 1; },
-      startGoalRun: async (req: any) => { calls.goal.push(req); },
+      startGoalRun: async (req: any) => { calls.sequence.push('start'); calls.goal.push(req); },
       haltGoalRun: (sid: string) => { calls.halted.push(sid); },
       ensureSession: async () => 'a',
       actorRecoveryReady: async () => true,
@@ -66,6 +67,26 @@ const until = async (predicate: () => boolean, timeoutMs = 1000) => {
   }
 };
 
+test('session/debugBundle is observational', async () => {
+  let writes = 0;
+  const { deps } = baseDeps({
+    auditLog: {
+      append: async () => { writes += 1; },
+      list: async () => [],
+      verify: async () => ({ ok: true }),
+    },
+    browser: { runtime: { getManifest: () => ({ version: '1.0.0' }) } },
+    settingsStore: { get: () => ({ auditLogMaxEntries: 100 }) },
+    contextSnapshots: { snapshotsForMany: () => [], limits: () => ({}) },
+    assembleDebugBundle: (input: any) => input,
+    childSessionIdsOf: () => [],
+    CHANNEL: 'store',
+  });
+  await expect(makeSessionRoutes(deps)['session/debugBundle']({ sessionId: 'a' }))
+    .resolves.toMatchObject({ ok: true });
+  expect(writes).toBe(0);
+});
+
 describe('agent/send slash-command routing', () => {
   test('empty message rejected', async () => {
     const { deps } = baseDeps();
@@ -82,6 +103,7 @@ describe('agent/send slash-command routing', () => {
     expect(await makeSessionRoutes(deps)['agent/send']({ text: 'build a drum machine', goal: true }))
       .toEqual({ ok: true, handled: 'goal' });
     expect(calls.goal).toEqual([{ sessionId: 'a', goal: 'build a drum machine' }]);
+    expect(calls.sequence).toEqual(['publish', 'start']);
     expect(calls.turns.length).toBe(0);
   });
   test('recovery pending refuses a goal before creating or starting it', async () => {

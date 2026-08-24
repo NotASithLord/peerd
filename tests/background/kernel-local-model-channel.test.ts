@@ -25,7 +25,7 @@ const makeRoutes = (handle: (offer: any, port: MessagePort) => void, overrides: 
       },
       acquire: async (scope: string) => {
         calls.push(`durable:${scope}`);
-        return { ok: true, ...lease };
+        return { ok: true, ...lease, lease };
       },
     } },
     offscreenUrl,

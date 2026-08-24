@@ -366,4 +366,23 @@ describe('makeScheduler execution custody', () => {
       lastOutcomeUnknownAt: h.now(),
     });
   });
+
+  it('releases every concurrent firing when result persistence fails', async () => {
+    let h: ReturnType<typeof makeHarness>;
+    const fired: string[] = [];
+    h = makeHarness({ fireRoutine: async (routine) => {
+      fired.push(routine.id);
+      if (fired.length <= 2) h.failWrites();
+      return { sessionId: `session-${routine.id}` };
+    } });
+    h.scheduler.add({ prompt: 'one', every: '1h' });
+    h.scheduler.add({ prompt: 'two', every: '1h' });
+    h.advance(HOUR + MIN);
+    await expect(h.scheduler.tick()).rejects.toThrow('storage unavailable');
+
+    h.failWrites(false);
+    h.advance(HOUR);
+    await h.scheduler.tick();
+    expect(fired).toEqual(['r1', 'r2', 'r1', 'r2']);
+  });
 });

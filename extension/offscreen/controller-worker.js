@@ -26,6 +26,7 @@ const denyNavigator = (/** @type {string} */ name, /** @type {unknown} */ value)
 denyNavigator('sendBeacon', undefined);
 for (const name of ['storage', 'serviceWorker', 'locks']) denyNavigator(name, undefined);
 const globals = /** @type {Record<string, unknown>} */ (globalThis);
+const ABORT_CLEANUP_OPERATIONS = new Set(['turn.abort.finalize', 'turn.finalize']);
 if (typeof globals.browser !== 'undefined') sealFailures.push('browser');
 if (typeof globals.chrome !== 'undefined') sealFailures.push('chrome');
 
@@ -110,7 +111,7 @@ const onBootstrap = async (/** @type {MessageEvent} */ event) => {
       const kernelCalls = new Map();
       calls.set(message.requestId, { abort, kernelCalls });
       const kernelCall = (/** @type {string} */ operation, /** @type {unknown} */ payload) => {
-        if (abort.signal.aborted) {
+        if (abort.signal.aborted && !ABORT_CLEANUP_OPERATIONS.has(operation)) {
           return Promise.resolve({ ok: false, code: 'controller-call-aborted', outcomeKnown: false });
         }
         const rpcId = crypto.randomUUID();

@@ -209,11 +209,14 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
 
     expect(source).toContain("import('./job-runner.js')");
     expect(source).toContain("import('./dweb-base.js')");
-    expect(source).toContain('registerServiceWorkerChannels');
+    expect(source).toContain("import('./supervisor-channels.js')");
+    expect(source).toContain('createServiceWorkerChannels');
     expect(supervisorChannels).toContain("import('./actor-runner.js')");
     expect(modules).not.toContain('peerd-runtime/offscreen.js');
     expect(modules).not.toContain('peerd-engine/offscreen.js');
     expect(modules).not.toContain('peerd-engine/module-resolver.js');
+    expect(modules).not.toContain('offscreen/supervisor-channels.js');
+    expect(modules).not.toContain('offscreen/feature-lease-host.js');
     expect(modules).not.toContain('vendor/acorn/acorn.mjs');
     expect(modules).not.toContain('peerd-runtime/index.js');
     expect(modules).not.toContain('peerd-engine/index.js');

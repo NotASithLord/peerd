@@ -62,6 +62,32 @@ describe('cold UI Port recovery', () => {
     expect(adopted).toEqual({ hydrated: true, generation: 2 });
   });
 
+  test('continues bounded startup probes after two dropped messages', async () => {
+    const calls: string[] = [];
+    let attempts = 0;
+    let adopted: unknown = null;
+    const browser = { runtime: { sendMessage: async ({ type }: {type:string}) => {
+      calls.push(type);
+      attempts += 1;
+      if (attempts <= 2) return new Promise(() => {});
+      if (type === 'bootstrap/ready') return { ok: true };
+      return { ok: true, state: { hydrated: true, generation: 3 } };
+    } } };
+    await expect(recoverColdPortState({
+      browser,
+      isCurrent: () => true,
+      isHydrated: () => adopted !== null,
+      adoptState: (state) => { adopted = state; },
+      requestTimeoutMs: 2,
+      overallTimeoutMs: 20,
+      maxAttempts: 4,
+    })).resolves.toBe(true);
+    expect(calls).toEqual([
+      'bootstrap/ready', 'bootstrap/ready', 'bootstrap/ready', 'state/get',
+    ]);
+    expect(adopted).toEqual({ hydrated: true, generation: 3 });
+  });
+
   test('rich state Port validates and orders deferred snapshots before delivery', async () => {
     const ports: ReturnType<typeof fakePort>[] = [];
     const delivered: any[] = [];

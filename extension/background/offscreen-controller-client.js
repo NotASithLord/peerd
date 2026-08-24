@@ -14,11 +14,15 @@ import {
 } from '../shared/structured-clone-size.js';
 import {
   controllerKernelConcurrentCap,
+  controllerOperationAllowedAfterCancel,
   controllerOuterPayloadCap,
   controllerRenewalIdleCap,
   createControllerKernelQuota,
 } from '../shared/controller-kernel-quota.js';
 import { parseKernelIdentity } from '../shared/kernel-identity.js';
+import {
+  makeBoundedModuleLoader, STARTUP_UNAVAILABLE_USER_FAILURE,
+} from '../shared/bounded-module-load.js';
 
 export class ControllerChannelError extends Error {
   /** @param {string} message @param {string} code */
@@ -53,6 +57,7 @@ const stopped = (/** @type {string} */ code, /** @type {boolean} */ known) => ({
  * @param {() => Promise<{ postMessage: (message: any, transfer: Transferable[]) => void } | null>} deps.findHost
  * @param {string[]} deps.capabilities
  * @param {string} deps.buildDigest
+ * @param {unknown} [deps.lease]
  * @param {import('../shared/kernel-identity.js').KernelIdentity} [deps.kernelIdentity]
  * @param {(capability: string, payload: unknown) => unknown} deps.authorizeCall
  * @param {(operation: string, payload: unknown, context: {
@@ -65,6 +70,7 @@ const stopped = (/** @type {string} */ code, /** @type {boolean} */ known) => ({
  * @param {() => string} [deps.newId]
  * @param {number} [deps.handshakeTimeoutMs]
  * @param {number} [deps.callTimeoutMs]
+ * @param {number} [deps.cancelSettleTimeoutMs]
  * @param {typeof setTimeout} [deps.setTimeoutFn]
  * @param {typeof clearTimeout} [deps.clearTimeoutFn]
  */
@@ -73,6 +79,7 @@ export const connectOffscreenController = async ({
   findHost,
   capabilities,
   buildDigest,
+  lease,
   kernelIdentity: injectedIdentity,
   authorizeCall,
   handleKernelCall,
@@ -80,6 +87,7 @@ export const connectOffscreenController = async ({
   newId = () => crypto.randomUUID(),
   handshakeTimeoutMs = 10_000,
   callTimeoutMs = 60_000,
+  cancelSettleTimeoutMs = 2_000,
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
 }) => {
@@ -113,6 +121,7 @@ export const connectOffscreenController = async ({
    *   capability: string,
    *   authority: NonNullable<ReturnType<typeof parseControllerAuthority>>,
    *   nestedUnknown: boolean,
+   *   cancelled: boolean,
    *   reverse: Map<string, {controller:AbortController,operation:string,payload:unknown}>,
    *   quota: ReturnType<typeof createControllerKernelQuota>,
    * }>} */
@@ -161,6 +170,7 @@ export const connectOffscreenController = async ({
     try { port1.close(); } catch { /* already closed */ }
   };
   const renewCall = (/** @type {string} */ requestId, /** @type {any} */ call) => {
+    if (call.cancelled) return;
     const idleMs = controllerRenewalIdleCap(call.capability);
     if (idleMs <= 0) return;
     const deadlineAt = Date.now() + idleMs;
@@ -216,6 +226,17 @@ export const connectOffscreenController = async ({
           || call.reverse.has(message.rpcId)
           || call.reverse.size >= controllerKernelConcurrentCap(call.capability)) {
         close();
+        return;
+      }
+      if (call.cancelled
+          && !controllerOperationAllowedAfterCancel(call.capability, message.operation)) {
+        try {
+          post({
+            type: 'kernel/kernel-result', requestId: message.requestId,
+            grantId: call.grantId, rpcId: message.rpcId,
+            result: stopped('controller-call-aborted', true),
+          });
+        } catch { close(); }
         return;
       }
       const admitted = call.quota.admit(message.operation, message.payload);
@@ -310,6 +331,7 @@ export const connectOffscreenController = async ({
       buildDigest,
       kernelEpoch,
       ...(kernelIdentity ? { kernelIdentity } : {}),
+      ...(lease ? { lease } : {}),
       capabilities: offeredCaps,
     }, [port2]);
   } catch (cause) {
@@ -362,11 +384,17 @@ export const connectOffscreenController = async ({
       const onAbort = () => {
         const active = calls.get(requestId);
         if (!active) return;
+        active.cancelled = true;
         try { post({ type: 'kernel/cancel', requestId, grantId: active.grantId }); } catch { /* host gone */ }
-        finish(requestId, stopped(
-          'controller-call-aborted',
-          active.phase === CONTROLLER_PHASE.OPENED || active.phase === CONTROLLER_PHASE.ACCEPTED,
-        ));
+        if (active.phase === CONTROLLER_PHASE.OPENED
+            || active.phase === CONTROLLER_PHASE.ACCEPTED) {
+          finish(requestId, stopped('controller-call-aborted', true));
+          return;
+        }
+        clearTimeoutFn(active.timer);
+        active.timer = setTimeoutFn(() => {
+          finish(requestId, stopped('controller-call-aborted', false));
+        }, cancelSettleTimeoutMs);
       };
       calls.set(requestId, {
         phase: CONTROLLER_PHASE.OPENED,
@@ -379,6 +407,7 @@ export const connectOffscreenController = async ({
         capability,
         authority,
         nestedUnknown: false,
+        cancelled: false,
         reverse: new Map(),
         quota: createControllerKernelQuota(capability, payload),
       });
@@ -410,8 +439,11 @@ const PROMPT_CAPABILITIES = Object.freeze(['prompt.render']);
  * @param {(operation:string,payload:unknown,context:any)=>Promise<any>|any} [deps.handleTurnKernelCall]
  * @param {(payload:unknown)=>unknown} [deps.authorizeSemanticCall]
  * @param {(operation:string,payload:unknown,context:any)=>Promise<any>|any} [deps.handleSemanticKernelCall]
- * @param {<T>(operation:()=>Promise<T>)=>Promise<T>} [deps.withControllerLease]
- * @param {<T>(operation:()=>Promise<T>,options?:{outcomeKnownOnLoss?:boolean,code?:string})=>Promise<T>} [deps.withDirectLifetime]
+ * @param {<T>(operation:(lease?:unknown)=>Promise<T>)=>Promise<T>} [deps.withControllerLease]
+ * @param {<T>(operation:()=>Promise<T>,options?:{outcomeKnownOnLoss?:boolean,code?:string,onLost?:(error:Error)=>void,lossGraceMs?:number})=>Promise<T>} [deps.withDirectLifetime]
+ * @param {typeof import('./direct-controller-client.js').connectDirectController} [deps.connectDirectController]
+ * @param {()=>Promise<typeof import('./direct-controller-client.js')>} [deps.loadDirectController]
+ * @param {number} [deps.directLoadTimeoutMs]
  * @param {(reason:string)=>Promise<any>} [deps.retireHost]
  * @param {() => Promise<any[]>} [deps.listWindowClients]
  * @param {(input: string | URL | Request, init?: RequestInit) => Promise<Response>} deps.fetchFn
@@ -429,6 +461,9 @@ export const makeSemanticControllerClient = ({
   handleSemanticKernelCall,
   withControllerLease: withLease,
   withDirectLifetime,
+  connectDirectController: directConnector,
+  loadDirectController: directModuleLoader = () => import('./direct-controller-client.js'),
+  directLoadTimeoutMs = 10_000,
   retireHost = async () => {},
   fetchFn,
   listWindowClients = async () => {
@@ -444,7 +479,7 @@ export const makeSemanticControllerClient = ({
     && typeof handleTurnKernelCall === 'function';
   const hasSemanticAuthority = typeof authorizeSemanticCall === 'function'
     && typeof handleSemanticKernelCall === 'function';
-  const ownsLeaseBoundary = typeof withLease === 'function';
+  const ownsLeaseBoundary = !firefoxDirect && typeof withLease === 'function';
   // why a leased-user count: the Chrome lease is per bounded operation, but
   // the CLIENT channel is shared. Retiring it when one operation settles
   // while a concurrent leased operation (a live turn) is still on the wire
@@ -456,7 +491,8 @@ export const makeSemanticControllerClient = ({
     leasedUsers = Math.max(0, leasedUsers - 1);
     if (leasedUsers === 0 && ownsLeaseBoundary && active) retire(active);
   };
-  /** @type {<T>(operation:()=>Promise<T>,options?:{outcomeKnownOnLoss?:boolean,code?:string})=>Promise<T>} */
+  /** @type {<T>(operation:()=>Promise<T>,options?:{outcomeKnownOnLoss?:boolean,code?:string,onLost?:(error:Error)=>void,lossGraceMs?:number})=>Promise<T>} */
+  /** @type {<T>(operation:(lease?:unknown)=>Promise<T>,options?:any)=>Promise<T>} */
   const withControllerLease = firefoxDirect && typeof withDirectLifetime === 'function'
     ? withDirectLifetime
     : ownsLeaseBoundary
@@ -467,6 +503,14 @@ export const makeSemanticControllerClient = ({
     ...(hasSemanticAuthority ? ['semantic.dispatch'] : []),
     ...(hasTurnAuthority ? ['turn.run'] : []),
   ]);
+  const loadDirectConnector = makeBoundedModuleLoader(
+    directModuleLoader,
+    {
+      timeoutMs: directLoadTimeoutMs,
+      loadCode: 'controller-direct-load-failed',
+      timeoutCode: 'controller-direct-load-timeout',
+    },
+  );
   /** @type {Promise<any> | null} */
   let connecting = null;
   /** @type {any | null} */
@@ -491,9 +535,10 @@ export const makeSemanticControllerClient = ({
       : hasTurnAuthority ? handleTurnKernelCall(operation, payload, context)
         : { ok: false, code: 'kernel-operation-denied', outcomeKnown: true };
 
-  const connect = async () => {
+  const connect = async (/** @type {unknown} */ lease) => {
     if (firefoxDirect) {
-      const { connectDirectController } = await import('./direct-controller-client.js');
+      const connectDirectController = directConnector
+        ?? (await loadDirectConnector()).connectDirectController;
       return connectDirectController({
         capabilities: [...semanticCapabilities],
         supportedCapabilities: [...semanticCapabilities],
@@ -506,7 +551,7 @@ export const makeSemanticControllerClient = ({
       });
     }
     // why two bounded attempts: lease settlement retires the offscreen
-    // document, so a connect can race the successor document's creation — the
+    // document, so a connect can race the successor document's creation. The
     // offer then lands on the dying WindowClient (or none) and the handshake
     // starves. The first attempt fails fast; the one retry re-runs
     // ensureOffscreen + findHost against the then-current exact host with a
@@ -518,6 +563,7 @@ export const makeSemanticControllerClient = ({
       ensureOffscreen,
       capabilities: [...semanticCapabilities],
       buildDigest: CONTROLLER_BUILD_DIGEST,
+      lease,
       ...(kernelIdentity ? { kernelIdentity } : {}),
       authorizeCall: authorizeControllerCall,
       handleKernelCall: hasTurnAuthority || hasSemanticAuthority
@@ -537,15 +583,26 @@ export const makeSemanticControllerClient = ({
     }
   };
 
-  const getClient = async () => {
+  let connectionGeneration = 0;
+  const getClient = async (/** @type {unknown} */ lease) => {
     if (active) return active;
-    connecting ??= connect().then((client) => {
-      active = client;
-      return client;
-    }).catch(async (cause) => {
-      if (!firefoxDirect) await retireHost('controller-host-startup-failed');
-      throw cause;
-    }).finally(() => { connecting = null; });
+    if (!connecting) {
+      const generation = connectionGeneration;
+      const pending = connect(lease).then((client) => {
+        if (generation !== connectionGeneration) {
+          try { client.close(); } catch {}
+          throw new ControllerChannelError('controller generation retired', 'generation-retired');
+        }
+        active = client;
+        return client;
+      }).catch(async (cause) => {
+        if (generation === connectionGeneration && !firefoxDirect) {
+          await retireHost('controller-host-startup-failed');
+        }
+        throw cause;
+      }).finally(() => { if (connecting === pending) connecting = null; });
+      connecting = pending;
+    }
     return connecting;
   };
 
@@ -553,6 +610,12 @@ export const makeSemanticControllerClient = ({
     if (active !== client) return;
     try { client.close(); } catch { /* already retired */ }
     active = null;
+  };
+  const retireActiveOnLifetimeLoss = () => {
+    connectionGeneration += 1;
+    connecting = null;
+    const client = active;
+    if (client) retire(client);
   };
 
   const loadPromptAssets = () => {
@@ -573,13 +636,14 @@ export const makeSemanticControllerClient = ({
     return promptAssets;
   };
 
-  const renderSystemPromptUnleased = async (/** @type {Record<string, unknown>} */ ctx) => {
+  const renderSystemPromptUnleased = async (/** @type {Record<string, unknown>} */ ctx,
+    /** @type {unknown} */ lease) => {
     const assets = await loadPromptAssets();
     let last;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       let client = null;
       try {
-        client = await getClient();
+        client = await getClient(lease);
         const result = await client.call(
           'prompt.render', { ctx, ...assets }, { timeoutMs: 15_000 },
         );
@@ -595,14 +659,19 @@ export const makeSemanticControllerClient = ({
     );
   };
   const renderSystemPrompt = (/** @type {Record<string, unknown>} */ ctx) =>
-    withControllerLease(async () => {
+    withControllerLease(async (/** @type {unknown} */ lease) => {
       enterLeased();
-      try { return await renderSystemPromptUnleased(ctx); }
+      try { return await renderSystemPromptUnleased(ctx, lease); }
       finally { exitLeased(); }
+    }, {
+      outcomeKnownOnLoss: true,
+      code: 'controller-firefox-prompt-lifetime-lost',
+      onLost: retireActiveOnLifetimeLoss,
     });
 
   const callTurnUnleased = async (
     /** @type {unknown} */ payload,
+    /** @type {unknown} */ lease,
     /** @type {{signal?:AbortSignal,timeoutMs?:number}} */ options = {},
   ) => {
     if (!hasTurnAuthority) {
@@ -612,12 +681,13 @@ export const makeSemanticControllerClient = ({
       };
     }
     let client;
-    try { client = await getClient(); }
+    try { client = await getClient(lease); }
     catch (cause) {
       return {
         ok: false,
-        code: 'controller-turn-startup-failed',
-        error: cause instanceof Error ? cause.message : String(cause),
+        code: /** @type {{code?:string}} */ (cause)?.code === 'controller-direct-load-timeout'
+          ? 'controller-direct-load-timeout' : 'controller-turn-startup-failed',
+        error: STARTUP_UNAVAILABLE_USER_FAILURE,
         outcomeKnown: true,
         phase: 'startup',
       };
@@ -650,13 +720,15 @@ export const makeSemanticControllerClient = ({
       // fresh lease + connect against the successor host is replay-safe.
       let attempts = 0;
       for (;;) {
-        const result = await withControllerLease(async () => {
+        const result = await withControllerLease(async (/** @type {unknown} */ lease) => {
           enterLeased();
-          try { return await callTurnUnleased(payload, options); }
+          try { return await callTurnUnleased(payload, lease, options); }
           finally { exitLeased(); }
         }, {
           outcomeKnownOnLoss: false,
           code: 'controller-firefox-turn-lifetime-lost',
+          onLost: retireActiveOnLifetimeLoss,
+          lossGraceMs: 2_000,
         });
         attempts += 1;
         if (result?.code !== 'controller-turn-startup-failed' || attempts > 1
@@ -675,14 +747,20 @@ export const makeSemanticControllerClient = ({
     }
   };
 
-  const callSemanticUnleased = async (/** @type {unknown} */ payload) => {
+  const callSemanticUnleased = async (/** @type {unknown} */ payload,
+    /** @type {unknown} */ lease) => {
     if (!hasSemanticAuthority) {
       return { ok: false, code: 'semantic-dispatch-authority-unavailable', outcomeKnown: true };
     }
     let client;
-    try { client = await getClient(); }
-    catch {
-      return { ok: false, code: 'semantic-dispatch-startup-failed', outcomeKnown: true };
+    try { client = await getClient(lease); }
+    catch (cause) {
+      return {
+        ok: false,
+        code: /** @type {{code?:string}} */ (cause)?.code === 'controller-direct-load-timeout'
+          ? 'controller-direct-load-timeout' : 'semantic-dispatch-startup-failed',
+        outcomeKnown: true,
+      };
     }
     try {
       const result = await client.call('semantic.dispatch', payload, { timeoutMs: 30_000 });
@@ -692,8 +770,6 @@ export const makeSemanticControllerClient = ({
     } catch {
       retire(client);
       return { ok: false, code: 'semantic-dispatch-transport-failed', outcomeKnown: false };
-    } finally {
-      exitLeased();
     }
   };
   const callSemantic = async (/** @type {unknown} */ payload) => {
@@ -702,12 +778,14 @@ export const makeSemanticControllerClient = ({
       // the semantic dispatch never left the kernel.
       let attempts = 0;
       for (;;) {
-        const result = await withControllerLease(() => {
+        const result = await withControllerLease(async (/** @type {unknown} */ lease) => {
           enterLeased();
-          return callSemanticUnleased(payload);
+          try { return await callSemanticUnleased(payload, lease); }
+          finally { exitLeased(); }
         }, {
           outcomeKnownOnLoss: false,
           code: 'controller-firefox-semantic-lifetime-lost',
+          onLost: retireActiveOnLifetimeLoss,
         });
         attempts += 1;
         if (result?.code !== 'semantic-dispatch-startup-failed' || attempts > 1) return result;
@@ -722,14 +800,28 @@ export const makeSemanticControllerClient = ({
       };
     }
   };
+  // why the outer leased user: a raw host lease keeps the document alive, but
+  // zero client users still retires its channel and sealed Worker between turns.
+  const withRun = (/** @type {()=>Promise<void>} */ operation) =>
+    withControllerLease(async () => {
+      enterLeased();
+      try { await operation(); }
+      finally { exitLeased(); }
+    }, {
+      outcomeKnownOnLoss: false,
+      code: 'controller-firefox-run-lifetime-lost',
+      onLost: retireActiveOnLifetimeLoss,
+    });
 
   return Object.freeze({
     renderSystemPrompt,
     callTurn,
     callSemantic,
+    withRun,
     close: () => {
-      if (active) retire(active);
+      connectionGeneration += 1;
       connecting = null;
+      if (active) retire(active);
     },
   });
 };

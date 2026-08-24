@@ -3,7 +3,6 @@
 // demand-only loading. No operation implementation is statically reachable.
 
 import browser from '../shared/browser-api.js';
-import { BACKGROUND_MODULE_PATH } from '../shared/build-config.js';
 import { ARTIFACT_CHANNEL_PROTOCOL, admitArtifactChannelOffer } from '../shared/artifact-offer.js';
 import {
   admitVaultAuthorityOffer, VAULT_AUTHORITY_BOOTSTRAP,
@@ -14,27 +13,14 @@ import {
   REPOSITORY_CHANNEL_OFFER, REPOSITORY_CHANNEL_PROTOCOL,
   parseLocalModelChannelOffer, parseRepositoryChannelOffer,
 } from '../shared/feature-lease-protocol.js';
-import { parseContributorOffer } from '../shared/contributor-channel.js';
+import { makeBoundedModuleLoader } from '../shared/bounded-module-load.js';
+import {
+  backgroundScriptUrl, isServiceWorkerSender, isTrustedSender,
+} from './sender-checks.js';
 
 const ACTOR_CHANNEL_OFFER = 'peerd/actor-channel';
 const ACTOR_CHANNEL_PROTOCOL = 1;
-const backgroundScriptUrl = browser.runtime.getURL(BACKGROUND_MODULE_PATH);
-const runtimeId = browser.runtime?.id;
-const extensionOrigin = browser.runtime?.getURL?.('') ?? '';
-const backgroundPageUrl = browser.runtime?.getURL?.('_generated_background_page.html') ?? '';
-
-/** @param {{id?:string,url?:string}|null|undefined} sender */
-export const isTrustedSender = (sender) => !!sender && !!runtimeId
-  && sender.id === runtimeId && !!extensionOrigin
-  && typeof sender.url === 'string' && sender.url.startsWith(extensionOrigin);
-
-/** @param {{id?:string,url?:string,tab?:unknown,documentId?:string}|null|undefined} sender */
-export const isServiceWorkerSender = (sender) => {
-  if (!isTrustedSender(sender) || !backgroundScriptUrl || !backgroundPageUrl
-      || (sender && 'tab' in sender)) return false;
-  if (sender?.url === backgroundPageUrl) return true;
-  return sender?.url === backgroundScriptUrl && !(sender && 'documentId' in sender);
-};
+export { isServiceWorkerSender, isTrustedSender } from './sender-checks.js';
 
 /** @param {any} event @param {string} workerUrl @param {(lease:any)=>boolean} ownsLease */
 export const admitRepositoryChannelOffer = (event, workerUrl, ownsLease) => {
@@ -75,29 +61,63 @@ export const admitLocalModelChannelOffer = (event, workerUrl, ownsLease) => {
  *   loadRepositoryHost?:()=>Promise<any>,
  *   loadLocalModelHost?:()=>Promise<any>,
  *   loadContributorHost?:()=>Promise<any>,
+ *   loadArtifactHost?:()=>Promise<any>,
+ *   loadActorHost?:()=>Promise<any>,
+ *   actorPorts?:Set<MessagePort>,
+ *   vaultAuthorityWorkers?:Set<Worker>,
+ *   createVaultAuthorityWorker?:()=>Worker,
+ *   moduleLoadTimeoutMs?:number,
  * }} deps
  */
-export const registerServiceWorkerChannels = ({
+export const createServiceWorkerChannels = ({
   getFeatureLeaseHost, loadControllerBootstrap,
   loadRepositoryHost = () => import('./repository-host.js'),
   loadLocalModelHost = () => import('./local-model.js'),
   loadContributorHost = () => import('./semantic-routes/contributor.js'),
+  loadArtifactHost = () => import('./artifact-host.js'),
+  loadActorHost = () => Promise.all([
+    import('./actor-channel-host.js'), import('./actor-runner.js'),
+  ]),
+  actorPorts = new Set(),
+  vaultAuthorityWorkers = new Set(),
+  moduleLoadTimeoutMs = 10_000,
+  createVaultAuthorityWorker = () => new Worker(
+    browser.runtime.getURL('offscreen/vault-authority-worker.js'),
+    { type: 'module', name: 'peerd-vault-authority' },
+  ),
 }) => {
-  /** @type {Set<MessagePort>} */
-  const actorPorts = new Set();
-  /** @type {Set<Worker>} */
-  const vaultAuthorityWorkers = new Set();
+  const bounded = (/** @type {()=>Promise<any>} */ load, /** @type {string} */ code) =>
+    makeBoundedModuleLoader(load, {
+      timeoutMs: moduleLoadTimeoutMs,
+      loadCode: `${code}-load-failed`, timeoutCode: `${code}-load-timeout`,
+    });
+  const loadController = bounded(loadControllerBootstrap, 'controller-host');
+  const loadRepository = bounded(loadRepositoryHost, 'repository-host');
+  const loadLocalModel = bounded(loadLocalModelHost, 'local-model-host');
+  const loadContributor = bounded(loadContributorHost, 'contributor-host');
+  const loadArtifact = bounded(loadArtifactHost, 'artifact-host');
+  const loadActor = bounded(loadActorHost, 'actor-host');
+  const loadContributorOffer = makeBoundedModuleLoader(
+    () => import('../shared/contributor-channel.js').then((module) => module.parseContributorOffer),
+  );
   // Chrome actor jobs arrive over a standard MessageChannel transferred by the
   // service worker directly to this exact offscreen WindowClient. This avoids
   // runtime messaging and runtime Port fan-out to other extension frames.
-  navigator.serviceWorker?.addEventListener('message', (event) => {
+  const onMessage = (/** @type {MessageEvent} */ event) => {
     if (event.data?.type === 'peerd/controller-channel' && event.ports?.length === 1) {
-      if (!getFeatureLeaseHost()?.isActive('controller')) {
+      const lease = event.data.lease;
+      if (getFeatureLeaseHost()?.ownsLease?.('controller', lease) !== true) {
         event.ports[0].close();
         return;
       }
-      loadControllerBootstrap().then(
-        ({ acceptControllerOffer }) => acceptControllerOffer(event),
+      loadController().then(
+        ({ acceptControllerOffer }) => {
+          if (getFeatureLeaseHost()?.ownsLease?.('controller', lease) !== true) {
+            event.ports[0].close();
+            return;
+          }
+          acceptControllerOffer(event);
+        },
         () => {
           try {
             event.ports[0].postMessage({
@@ -119,7 +139,7 @@ export const registerServiceWorkerChannels = ({
     const vaultAuthorityAdmission = admitVaultAuthorityOffer(
       event,
       backgroundScriptUrl,
-      getFeatureLeaseHost()?.isActive('vault-authority') === true,
+      (lease) => getFeatureLeaseHost()?.ownsLease?.('vault-authority', lease) === true,
     );
     if (vaultAuthorityAdmission.matched) {
       const port = event.ports?.[0];
@@ -141,9 +161,13 @@ export const registerServiceWorkerChannels = ({
         }
         return;
       }
-      const worker = new Worker(browser.runtime.getURL('offscreen/vault-authority-worker.js'), {
-        type: 'module', name: 'peerd-vault-authority',
-      });
+      if (getFeatureLeaseHost()?.ownsLease?.(
+        'vault-authority', vaultAuthorityAdmission.offer.lease,
+      ) !== true) {
+        try { port.close(); } catch { /* already closed */ }
+        return;
+      }
+      const worker = createVaultAuthorityWorker();
       vaultAuthorityWorkers.add(worker);
       worker.addEventListener('error', () => {
         vaultAuthorityWorkers.delete(worker);
@@ -186,7 +210,7 @@ export const registerServiceWorkerChannels = ({
         try { repositoryPort?.close(); } catch { /* invalid/closed */ }
         return;
       }
-      loadRepositoryHost().then(
+      loadRepository().then(
         ({ acceptRepositoryOffer }) => acceptRepositoryOffer(event, {
           ownsLease: (/** @type {any} */ lease) => getFeatureLeaseHost()
             ?.ownsLease?.('controller', lease) === true,
@@ -224,7 +248,7 @@ export const registerServiceWorkerChannels = ({
         try { port?.close(); } catch {}
         return;
       }
-      loadLocalModelHost().then(
+      loadLocalModel().then(
         ({ acceptLocalModelOffer }) => acceptLocalModelOffer(event, {
           ownsLease: (/** @type {any} */ lease) => getFeatureLeaseHost()
             ?.ownsLease?.('model-host', lease) === true,
@@ -240,27 +264,29 @@ export const registerServiceWorkerChannels = ({
       );
       return;
     }
-    const contributorOffer = parseContributorOffer(event.data);
     if (event.data?.type === 'peerd/contributor-channel') {
       const port = event.ports?.[0];
-      const source = /** @type {{scriptURL?:unknown}|null} */ (event.source ?? null);
-      const admitted = event.isTrusted === true && source?.scriptURL === backgroundScriptUrl
-        && event.ports?.length === 1 && !!contributorOffer
-        && getFeatureLeaseHost()?.ownsLease?.('controller', contributorOffer.lease) === true;
-      if (!admitted) { try { port?.close(); } catch {} return; }
-      loadContributorHost().then(
-        ({ acceptContributorOffer }) => acceptContributorOffer(event, {
-          ownsLease: (/** @type {any} */ lease) => getFeatureLeaseHost()
-            ?.ownsLease?.('controller', lease) === true,
-        }),
-        () => { try { port?.close(); } catch {} },
-      );
+      loadContributorOffer().then((parseContributorOffer) => {
+        const contributorOffer = parseContributorOffer(event.data);
+        const source = /** @type {{scriptURL?:unknown}|null} */ (event.source ?? null);
+        const admitted = event.isTrusted === true && source?.scriptURL === backgroundScriptUrl
+          && event.ports?.length === 1 && !!contributorOffer
+          && getFeatureLeaseHost()?.ownsLease?.('controller', contributorOffer.lease) === true;
+        if (!admitted) { try { port?.close(); } catch {} return; }
+        loadContributor().then(
+          ({ acceptContributorOffer }) => acceptContributorOffer(event, {
+            ownsLease: (/** @type {any} */ lease) => getFeatureLeaseHost()
+              ?.ownsLease?.('controller', lease) === true,
+          }),
+          () => { try { port?.close(); } catch {} },
+        );
+      }, () => { try { port?.close(); } catch {} });
       return;
     }
     const artifactAdmission = admitArtifactChannelOffer(
       event,
       backgroundScriptUrl,
-      getFeatureLeaseHost()?.isActive('dom-host') === true,
+      (lease) => getFeatureLeaseHost()?.ownsLease?.('dom-host', lease) === true,
     );
     if (artifactAdmission.matched) {
       const artifactPort = event.ports?.[0];
@@ -291,8 +317,16 @@ export const registerServiceWorkerChannels = ({
         }
         return;
       }
-      import('./artifact-host.js').then(
-        ({ acceptArtifactOffer }) => acceptArtifactOffer(event),
+      loadArtifact().then(
+        ({ acceptArtifactOffer }) => {
+          if (getFeatureLeaseHost()?.ownsLease?.(
+            'dom-host', artifactAdmission.offer?.lease,
+          ) !== true) {
+            try { artifactPort?.close(); } catch {}
+            return;
+          }
+          acceptArtifactOffer(event);
+        },
         () => {
           try {
             artifactPort?.postMessage({
@@ -315,24 +349,33 @@ export const registerServiceWorkerChannels = ({
         || typeof event.data?.channelId !== 'string'
         || event.ports?.length !== 1) return;
     const actorPort = event.ports[0];
-    if (!getFeatureLeaseHost()?.isActive('controller')) {
+    const actorLease = event.data.lease;
+    if (getFeatureLeaseHost()?.ownsLease?.('controller', actorLease) !== true) {
       actorPort.close();
       return;
     }
     actorPorts.add(actorPort);
     actorPort.addEventListener('close', () => actorPorts.delete(actorPort), { once: true });
-    Promise.all([import('./actor-channel-host.js'), import('./actor-runner.js')])
-      .then(([{ bindActorChannel }, { runActor, abortActor }]) => bindActorChannel({
-        port: actorPort, channelId: event.data.channelId,
-        run: runActor, abort: abortActor,
-        workerUrl: browser.runtime.getURL('offscreen/actor-worker.js'),
-      }))
+    loadActor()
+      .then(([{ bindActorChannel }, { runActor, abortActor }]) => {
+        if (getFeatureLeaseHost()?.ownsLease?.('controller', actorLease) !== true) {
+          try { actorPort.close(); } catch { /* already gone */ }
+          return;
+        }
+        bindActorChannel({
+          port: actorPort, channelId: event.data.channelId,
+          run: runActor, abort: abortActor,
+          workerUrl: browser.runtime.getURL('offscreen/actor-worker.js'),
+        });
+      })
       .catch(() => { try { actorPort.close(); } catch { /* already gone */ } });
-  });
-  // why startMessages: client.postMessage deliveries are buffered until the
-  // page either assigns .onmessage or explicitly starts the queue —
-  // addEventListener alone never drains it, so the controller offer would
-  // wait forever and every turn would time out its handshake.
+  };
+  return Object.freeze({ onMessage, actorPorts, vaultAuthorityWorkers });
+};
+
+export const registerServiceWorkerChannels = (/** @type {Parameters<typeof createServiceWorkerChannels>[0]} */ deps) => {
+  const channels = createServiceWorkerChannels(deps);
+  navigator.serviceWorker?.addEventListener('message', channels.onMessage);
   navigator.serviceWorker?.startMessages?.();
-  return Object.freeze({ actorPorts, vaultAuthorityWorkers });
+  return channels;
 };

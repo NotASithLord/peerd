@@ -29,13 +29,18 @@ export class VaultAuthorityChannelError extends Error {
 
 /** @param {unknown} value */
 const errorMessage = (value) => value instanceof Error ? value.message : String(value);
+const sameLease = (/** @type {any} */ left, /** @type {any} */ right) => !!left && !!right
+  && left.schema === right.schema && left.scope === right.scope && left.leaseId === right.leaseId
+  && left.generation === right.generation && left.buildId === right.buildId
+  && left.bootId === right.bootId && left.kernelEpoch === right.kernelEpoch
+  && left.hostEpoch === right.hostEpoch;
 
 /**
  * @param {Object} deps
  * @param {boolean} deps.offscreen
  * @param {string} deps.offscreenUrl
  * @param {string} deps.workerUrl
- * @param {<T>(operation:()=>Promise<T>,context?:{method:string})=>Promise<T>} deps.withHost
+ * @param {<T>(operation:(lease:any)=>Promise<T>,context?:{method:string})=>Promise<T>} deps.withHost
  * @param {{get:(key:string)=>Promise<any>,set:(key:string,value:any)=>Promise<void>,delete:(key:string)=>Promise<void>,list:(prefix?:string)=>Promise<Record<string,any>>}} deps.kv
  * @param {{get:(store:string,key:IDBValidKey)=>Promise<any>,put:(store:string,value:any)=>Promise<void>,del:(store:string,key:IDBValidKey)=>Promise<void>}} deps.idb
  * @param {{sessionGet:(key:string)=>Promise<any>,sessionSet:(key:string,value:any)=>Promise<void>,sessionDelete:(key:string)=>Promise<void>}} deps.sessionCache
@@ -69,7 +74,7 @@ export const makeVaultAuthorityClient = ({
       || typeof offscreenUrl !== 'string' || typeof workerUrl !== 'string'
       || timeoutMs <= 0) throw new TypeError('vault-authority-client-config-invalid');
 
-  /** @type {null|{channelId:string,port:MessagePort,worker:Worker|null,ready:Promise<void>,close:()=>void}} */
+  /** @type {null|{channelId:string,port:MessagePort,worker:Worker|null,lease:any,ready:Promise<void>,close:()=>void}} */
   let active = null;
   /** @type {Map<string,{resolve:(value:any)=>void,reject:(cause:unknown)=>void,dispatched:boolean,method:string,timer:ReturnType<typeof setTimeout>}>} */
   const pending = new Map();
@@ -166,7 +171,10 @@ export const makeVaultAuthorityClient = ({
     try { prior.worker?.terminate(); } catch { /* stopped */ }
   };
 
-  const connect = async () => {
+  const connect = async (/** @type {any} */ lease) => {
+    if (active && offscreen && !sameLease(active.lease, lease)) {
+      retire('vault authority lease changed', active);
+    }
     if (active) {
       await active.ready;
       return active;
@@ -178,8 +186,9 @@ export const makeVaultAuthorityClient = ({
         type: VAULT_AUTHORITY_OFFER,
         protocol: VAULT_AUTHORITY_PROTOCOL,
         channelId,
+        lease,
       };
-      if (!parseVaultAuthorityOffer(offer)) {
+      if (offscreen && !parseVaultAuthorityOffer(offer)) {
         throw new Error('vault-authority-channel-identity-invalid');
       }
       const { port1, port2 } = createChannel();
@@ -194,9 +203,9 @@ export const makeVaultAuthorityClient = ({
         resolveReady = resolve;
         rejectReady = reject;
       });
-      /** @type {{channelId:string,port:MessagePort,worker:Worker|null,ready:Promise<void>,close:()=>void}} */
+      /** @type {{channelId:string,port:MessagePort,worker:Worker|null,lease:any,ready:Promise<void>,close:()=>void}} */
       const connection = {
-        channelId, port: port1, worker, ready,
+        channelId, port: port1, worker, lease, ready,
         close: () => retire('vault authority channel closed', connection),
       };
       active = connection;
@@ -314,8 +323,8 @@ export const makeVaultAuthorityClient = ({
   };
 
   const call = (/** @type {string} */ method, /** @type {unknown} */ args = null) =>
-    withHost(async () => {
-      const connection = await connect();
+    withHost(async (lease) => {
+      const connection = await connect(lease);
       const requestId = `call-${++sequence}-${newId()}`;
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {

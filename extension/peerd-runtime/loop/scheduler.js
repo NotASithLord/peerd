@@ -207,10 +207,10 @@ export const makeScheduler = ({
           totals.fired += 1;
         }
         const settled = await Promise.all(dispatches.map((entry) => entry.result));
+        for (const { routine } of dispatches) firing.delete(routine.id);
         for (let index = 0; index < dispatches.length; index += 1) {
           const { routine, priorLastRunAt, priorRunCount } = dispatches[index];
           const outcome = settled[index];
-          firing.delete(routine.id);
           if (routines.get(routine.id) !== routine) continue;
           routine.pendingRunAt = null;
           if (outcome.ok) {
@@ -231,8 +231,8 @@ export const makeScheduler = ({
             }
             console.error('[schedule] fireRoutine threw', detail);
           }
-          await persist();
         }
+        if (dispatches.length > 0) await persist();
         // More due than we fired (throttle or skips) → re-arm; the past-due
         // nextWakeAt makes the alarm fire again to drain the rest.
         reschedule();

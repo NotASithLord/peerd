@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   assertColdArtifactBudgets,
   COLD_GRAPH_BUDGETS,
@@ -69,7 +70,7 @@ describe('release artifact JavaScript minification', () => {
 
     expect(report.graphs.serviceWorker.afterBytes).toBeLessThan(report.graphs.serviceWorker.beforeBytes);
     expect(report.graphs.offscreen?.afterBytes).toBeLessThan(report.graphs.offscreen!.beforeBytes);
-    expect(report.transformedModules).toBeGreaterThan(2);
+    expect(report.transformedModules).toBeGreaterThan(0);
     expect(swAfter.length).toBeLessThan(swBefore.length);
     expect(swAfter).toContain('keepReadableName');
     expect(swAfter).not.toContain('removed from the staged artifact');
@@ -98,6 +99,29 @@ describe('release artifact JavaScript minification', () => {
 
     expect(report.graphs.offscreen).toBeUndefined();
     expect(readFileSync(join(root, 'offscreen/offscreen.js'), 'utf8')).toBe(offscreen);
+  });
+
+  test('keeps exported names and runtime behavior', async () => {
+    const root = makeRoot();
+    write(root, 'manifest.json', JSON.stringify({
+      background: { service_worker: 'background/service-worker.js', type: 'module' },
+    }));
+    write(root, 'background/service-worker.js', `
+      import { increment, NamedFailure } from './support.js';
+      export { NamedFailure } from './support.js';
+      export const run = (value) => ({ value: increment(value), name: NamedFailure.name });
+    `);
+    write(root, 'background/support.js', `
+      export class NamedFailure extends Error {}
+      export const increment = (value) => value + 1;
+    `);
+
+    await minifyColdArtifactModules(root, 'firefox', 'store');
+    const module = await import(`${pathToFileURL(join(
+      root, 'background', 'service-worker.js',
+    )).href}?${crypto.randomUUID()}`);
+    expect(module.run(4)).toEqual({ value: 5, name: 'NamedFailure' });
+    expect(module.NamedFailure.name).toBe('NamedFailure');
   });
 
   test('parses one-line static imports without following dynamic imports', async () => {

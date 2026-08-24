@@ -13,6 +13,7 @@ import {
   payloadFitsControllerCap,
 } from '/shared/structured-clone-size.js';
 import {
+  controllerOperationAllowedAfterCancel,
   controllerOuterPayloadCap,
   controllerRenewalIdleCap,
   createControllerKernelQuota,
@@ -417,6 +418,7 @@ export const bindControllerChannel = ({
     if (message.type === 'kernel/renew') {
       const idleCap = controllerRenewalIdleCap(operation.capability);
       if (operation.phase !== 'committed' || idleCap <= 0
+          || operation.abort?.signal.aborted
           || !Number.isSafeInteger(message.deadlineAt)
           || message.deadlineAt < operation.deadlineAt
           || message.deadlineAt > now() + idleCap + 1_000) {
@@ -473,6 +475,10 @@ export const bindControllerChannel = ({
         deadlineAt: operation.deadlineAt,
         kernelCall: (kernelOperation, payload) => {
           if (operation.phase !== 'committed'
+              || (operation.abort?.signal.aborted
+                && !controllerOperationAllowedAfterCancel(
+                  operation.capability, kernelOperation,
+                ))
               || operation.kernelCalls.size >= operation.quota.pendingCap
               || operation.deadlineAt <= now()
               || typeof kernelOperation !== 'string'

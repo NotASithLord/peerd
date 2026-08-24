@@ -58,7 +58,8 @@ describe('runtime Port receiver exclusivity', () => {
     expect(dispatcher).not.toContain('actorClient?.routes');
     expect(offscreen).not.toMatch(/['"]actor\/(?:run|abort)['"]/);
     expect(serviceWorker).toContain('makeOffscreenActorChannelClient');
-    expect(offscreen).toContain('registerServiceWorkerChannels');
+    expect(offscreen).toContain("import('./supervisor-channels.js')");
+    expect(offscreen).toContain('createServiceWorkerChannels');
     expect(supervisorChannels).toContain("event.data?.type !== ACTOR_CHANNEL_OFFER");
     expect(supervisorChannels).toContain('bindActorChannel');
   });

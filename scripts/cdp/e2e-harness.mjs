@@ -342,6 +342,7 @@ export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready } 
   await page.send('Emulation.setDeviceMetricsOverride', metrics);
   await setEmulatedTheme(page, 'light');
   await page.send('Page.addScriptToEvaluateOnNewDocument', { source: stableStyleSource });
+  await page.send('Page.bringToFront');
   await page.send('Page.navigate', { url });
   // why `ready` is overridable: the default probe waits for a Mithril mount at
   // `#app`, which is right for the SPA pages and WRONG for every standalone tab
@@ -353,7 +354,18 @@ export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready } 
     ? `document.readyState !== 'loading' && !!document.querySelector(${JSON.stringify(ready)})`
     : `document.readyState === 'complete' && !!document.querySelector('#app > *')`;
   const mounted = await waitFor(() => evalIn(page, probe), { budgetMs: READY_BUDGET_MS });
-  if (!mounted) { try { page.close(); } catch { /* */ } throw new Error(`wide page never mounted: ${path}`); }
+  if (!mounted) {
+    const state = await evalIn(page, `({
+      href: location.href,
+      readyState: document.readyState,
+      visibilityState: document.visibilityState,
+      title: document.title,
+      body: document.body?.innerText?.slice(0, 500) ?? null,
+      app: document.querySelector('#app')?.innerHTML?.slice(0, 500) ?? null,
+    })`).catch((error) => ({ error: String(error) }));
+    try { page.close(); } catch { /* */ }
+    throw new Error(`wide page never mounted: ${path} ${JSON.stringify({ state, events: page.events })}`);
+  }
   return page;
 }
 
@@ -374,6 +386,9 @@ export async function attach(wsUrl, onEvent) {
     }
     if (m.method === 'Runtime.consoleAPICalled' && m.params?.type === 'error') {
       events.push('ERR ' + (m.params.args || []).map((a) => a.value || a.description || a.type).join(' '));
+    }
+    if (m.method === 'Runtime.consoleAPICalled' && m.params?.type === 'warning') {
+      events.push('WARN ' + (m.params.args || []).map((a) => a.value || a.description || a.type).join(' '));
     }
     // Failed / 4xx-5xx subresource loads. Only populated when Network.enable was
     // sent on this connection (openExtPage does, for the packaged-page boot check).

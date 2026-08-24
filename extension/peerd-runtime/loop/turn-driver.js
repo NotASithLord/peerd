@@ -43,8 +43,8 @@ import {
   filterByRuntimeCapabilities, runtimeCapabilityPromptBlock, runtimeCapabilityRefusal,
 } from '../runtime-capabilities.js';
 
-// Cold-local copy of the pure context renderer. The public copy remains beside
-// system-prompt for tests; importing it here would relink all rich actor lore.
+const UNKNOWN_TURN_ERROR = 'Turn outcome unknown. Check the session before retrying.';
+
 /** @param {{url:string,title?:string}} tab */
 const foregroundBlock = ({ url, title }) => [
   '<active_tab>',
@@ -67,7 +67,7 @@ const protectedBlock = (reason) => [
 ].join('\n');
 /** @param {{temporalBlock?:string,activeTab?:{url:string,title?:string}|null,
  * protectedTab?:'private_network'|'sensitive_site'|null}} [args] */
-const buildTemporalContext = ({ temporalBlock, activeTab, protectedTab } = {}) => {
+export const buildTemporalContext = ({ temporalBlock, activeTab, protectedTab } = {}) => {
   const parts = /** @type {string[]} */ ([]);
   if (typeof temporalBlock === 'string' && temporalBlock.length > 0) parts.push(temporalBlock);
   if (activeTab && typeof activeTab.url === 'string' && activeTab.url.length > 0) {
@@ -900,7 +900,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
           {
           const outcomeUnknown = ev.outcomeKnown === false;
           const visibleError = outcomeUnknown
-            ? 'The turn connection was interrupted after work may have started. peerd is reconciling the session; do not retry automatically yet.'
+            ? UNKNOWN_TURN_ERROR
             : ev.error;
           uiPorts.broadcast({
             type: 'turn/error',
@@ -955,13 +955,31 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       : (/** @type {{ message?: string }} */ (e))?.message ?? 'unknown-error';
     const detail = /** @type {{code?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (e);
     const outcomeUnknown = detail?.outcomeKnown === false;
-    const error = outcomeUnknown
-      ? 'The turn connection was interrupted after work may have started. peerd is reconciling the session; do not retry automatically yet.'
-      : technicalError;
+    const error = outcomeUnknown ? UNKNOWN_TURN_ERROR : technicalError;
     turnOk = false;
+    let messageId;
+    if (outcomeUnknown) {
+      try {
+        const durable = await sessions.get(sessionId);
+        const trailing = [...(durable?.messages ?? [])].reverse().find(
+          (message) => message?.role === 'assistant' && message?.streaming === true,
+        );
+        if (typeof trailing?.id === 'string') {
+          messageId = trailing.id;
+          lastSession = await sessions.updateAssistantMessage(sessionId, messageId, {
+            streaming: false,
+            error,
+            ...(typeof detail?.code === 'string' ? { errorCode: detail.code } : {}),
+            outcomeKnown: false,
+            retryable: false,
+          });
+          if (uiConnected()) uiPorts.broadcast({ type: 'turn/state', session: lastSession });
+        }
+      } catch {}
+    }
     if (uiConnected()) {
       uiPorts.broadcast({
-        type: 'turn/error', sessionId, error,
+        type: 'turn/error', sessionId, messageId, error,
         ...(typeof detail?.code === 'string' ? { code: detail.code } : {}),
         ...(typeof detail?.outcomeKnown === 'boolean' ? { outcomeKnown: detail.outcomeKnown } : {}),
         ...(outcomeUnknown ? { retryable: false } : {}),

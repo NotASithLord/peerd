@@ -577,6 +577,33 @@ describe('reduceChat', () => {
     });
   });
 
+  test('a known performed receipt overrides an aborted pulse', () => {
+    const started = reduceChat(withSession('chat-A'), {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'tu-performed',
+      sessionId: 'actor-web', fromIndex: 0, kind: 'web', instanceId: 'web',
+    });
+    const settled = reduceChat(started, {
+      type: 'turn/state', session: { sessionId: 'chat-A', messages: [
+        { id: 'call', role: 'assistant', toolUses: [{
+          id: 'tu-performed', name: 'message_actor', input: { to: 'web' },
+        }] },
+        { id: 'accepted', role: 'user', toolResults: [{
+          tool_use_id: 'tu-performed', is_error: false, content: 'accepted',
+          actorCorrelationId: 'delivery-performed',
+        }] },
+        { id: 'receipt', role: 'user', synthetic: true, content: 'fenced failure', actorReply: {
+          kind: 'web', instanceId: 'web', parentToolUseId: 'tu-performed',
+          actorDeliveryId: 'delivery-performed', failed: true, aborted: true,
+          performed: true, outcomeKnown: true,
+        } },
+      ] },
+    });
+    expect(settled.actors['tu-performed']).toMatchObject({
+      streaming: false, aborted: false, performed: true, outcomeKnown: true,
+      error: 'the actor turn did not complete',
+    });
+  });
+
   test('a failed receipt is known unless the host explicitly marks it unknown', () => {
     const viewing = withSession('chat-A');
     const started = reduceChat(viewing, {

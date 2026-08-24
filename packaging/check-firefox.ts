@@ -96,10 +96,7 @@ export const GUARDED_CHROME_ONLY: readonly GuardedChromeOnlyApi[] = [
     proof: ['!!kernelManifest.update_url', "typeof browser.runtime.requestUpdateCheck === 'function'"] },
   { api: 'runtime.requestUpdateCheck', file: 'background/service-worker.js',
     why: 'legacy cold listener is enabled only for a Chrome update_url plus the runtime capability',
-    proof: ['Boolean(coldManifest.update_url)', "typeof browser.runtime.requestUpdateCheck === 'function'"] },
-  { api: 'offscreen.closeDocument', file: 'background/service-worker.js',
-    why: 'legacy lease teardown is a no-op unless the close capability exists',
-    proof: ["offscreen?.closeDocument === 'function'", 'offscreen.closeDocument()'] },
+    proof: ['selfHostedChrome:Boolean(', '.update_url)&&typeof', ".runtime.requestUpdateCheck==='function'"] },
 ];
 
 /** The two codes that mean "this API is not there on Firefox". */
@@ -171,9 +168,11 @@ export const main = () => {
         problems.push(`  [${name}] guarded API owner is missing: ${guarded.file}`);
         continue;
       }
-      const compact = readFileSync(guardedPath, 'utf8').replace(/\s+/g, '');
+      const compact = readFileSync(guardedPath, 'utf8').replace(/\s+/g, '').replaceAll('"', "'");
       const missingProof = guarded.proof
-        .filter((fragment) => !compact.includes(fragment.replace(/\s+/g, '')));
+        .filter((fragment) => !compact.includes(
+          fragment.replace(/\s+/g, '').replaceAll('"', "'"),
+        ));
       if (missingProof.length > 0) {
         problems.push(`  [${name}] ${guarded.api} guard proof is stale in ${guarded.file}`);
       }

@@ -556,7 +556,8 @@ const reconcileActorTerminals = (actors, messages) => {
     }
     // Uncertainty outranks a cancellation pulse: Stop can race with a dispatched
     // effect, and showing "cancelled" would hide that the target may have changed.
-    const aborted = terminal.aborted === true && terminal.outcomeKnown !== false;
+    const aborted = terminal.aborted === true
+      && terminal.outcomeKnown !== false && terminal.performed !== true;
     const failed = terminal.failed === true && !aborted;
     const error = failed
       ? terminal.outcomeKnown === false

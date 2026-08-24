@@ -10,10 +10,12 @@
 
 import { describe, test, expect } from 'bun:test';
 import {
+  buildTemporalContext as buildTurnTemporalContext,
   inboundActorCallAllowed,
   makeTurnDriver,
   safeForegroundTabContext,
 } from '/peerd-runtime/loop/turn-driver.js';
+import { buildTemporalContext } from '/peerd-runtime/loop/system-prompt.js';
 import { ACTOR_CREDENTIAL_BOUNDARY_FAILURE } from '/peerd-runtime/errors.js';
 import { runUserTurn } from '/peerd-runtime/loop/agent-loop.js';
 
@@ -36,6 +38,19 @@ test('makeTurnDriver returns the two entry points', () => {
 });
 
 describe('foreground tab prompt context', () => {
+  test('keeps the cold renderer byte-identical to the canonical renderer', () => {
+    const cases = [
+      {},
+      { temporalBlock: '<time>now</time>' },
+      { activeTab: { url: 'https://example.com', title: 'Example' } },
+      { protectedTab: 'private_network' as const },
+      { temporalBlock: '<time>now</time>', protectedTab: 'sensitive_site' as const },
+    ];
+    for (const value of cases) {
+      expect(buildTurnTemporalContext(value)).toBe(buildTemporalContext(value));
+    }
+  });
+
   test('uses only the public origin and drops hostile title/path bytes', () => {
     expect(safeForegroundTabContext({
       url: 'https://example.com/reset?token=secret',
@@ -289,6 +304,10 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     runUserTurn: dynamicIsolation ? runUserTurn : async function* (ctx: any) {
       loopCtx = ctx;
       if (turnUnknown) {
+        session.messages.push({
+          role: 'assistant', id: 'assistant-unknown', content: 'partial', streaming: true,
+        });
+        yield { type: 'state', session: { ...session, messages: [...session.messages] } };
         const failure = Object.assign(new Error('controller-call-timeout'), {
           code: 'controller-call-timeout', outcomeKnown: false, retryable: false,
         });
@@ -350,6 +369,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     loopCtx: () => loopCtx,
     toolContextArgs: () => toolContextArgs,
     lateProviderContinuation: () => lateProviderContinuation,
+    session,
   };
 };
 
@@ -454,8 +474,13 @@ describe('runAgentTurn credential custody', () => {
       code: 'controller-call-timeout',
       outcomeKnown: false,
       retryable: false,
-      error: expect.stringContaining('may have started'),
+      messageId: 'assistant-unknown',
+      error: expect.stringContaining('outcome unknown'),
     }));
+    expect(fixture.session.messages.at(-1)).toMatchObject({
+      id: 'assistant-unknown', streaming: false, outcomeKnown: false, retryable: false,
+      error: expect.stringContaining('outcome unknown'),
+    });
     expect(fixture.broadcasts.some((message) => message.error === 'controller-call-timeout')).toBe(false);
   });
 
