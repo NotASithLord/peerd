@@ -479,16 +479,11 @@
     "peerd-runtime/tools/hooks/compile.js": 1
   },
   "messageHostSites": {
-    "background/service-worker.js": 3,
     "engine-tabs/app-tab/app-tab.js": 3,
     "engine-tabs/notebook-tab/notebook-tab.js": 1,
     "engine-tabs/pod-tab/pod-tab.js": 1,
     "engine-tabs/vm-tab/vm-tab.js": 1,
-    "offscreen/doc-extract.js": 1,
-    "offscreen/dweb-base.js": 1,
-    "offscreen/offscreen.js": 4,
-    "offscreen/toolbox-parse.js": 1,
-    "offscreen/web-extract.js": 1,
+    "offscreen/offscreen.js": 8,
     "shared/peer-notifications.js": 1,
     "shared/pull-in-peerd.js": 1
   }

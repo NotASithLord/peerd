@@ -21,8 +21,10 @@ import {
   probeGpuCapability,
   recommendOllamaModel,
 } from '/peerd-provider/index.js';
-import { resetRow } from './reset-row.js';
 import { LocalModelsSection } from './local-models.js';
+import {
+  isUnknownMutationOutcome, mutationFailureCopy,
+} from '../mutation-custody.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
 /** @typedef {{ name: string, label: string, defaultModel?: string, defaultRunnerModel?: string, hasKey?: boolean, keyless?: boolean, liveModels?: boolean, keyPreview?: string }} ProviderRow */
@@ -84,7 +86,9 @@ export const ProvidersSection = {
     vnode.state.keyBusy = {};       // name -> bool
     vnode.state.keyMsg = {};        // name -> { ok, text }
     vnode.state.keyEditing = {};    // name -> bool (Replace revealed the field)
+    vnode.state.keyUncertain = {};  // name -> save receipt lost; status must reconcile
     vnode.state.providerStatus = null;  // [{ name, label, defaultModel, hasKey }]
+    vnode.state.providerStatusError = false;
     // name -> 'checking' | 'connected' | 'down' — the LIVE reachability of a
     // keyless daemon (Ollama). Drives the badge so green means "actually
     // connected", never just "no key needed".
@@ -97,7 +101,11 @@ export const ProvidersSection = {
     vnode.state.probeGeneration = {};
     vnode.state.ollamaHostSave = null;
     vnode.state.ollamaHostSaving = false;
+    vnode.state.ollamaHostUncertain = false;
     vnode.state.ollamaHostSaveGeneration = 0;
+    vnode.state.settingsBusy = false;
+    vnode.state.settingsUncertain = false;
+    vnode.state.settingsMsg = null;
     vnode.state.providerStatusGeneration = 0;
     vnode.state.observedConfigRevision = vnode.attrs.state?.providers?.configRevision ?? 0;
     ProvidersSection.loadProviderStatus(vnode);
@@ -118,9 +126,15 @@ export const ProvidersSection = {
   async loadProviderStatus(vnode) {
     const generation = vnode.state.providerStatusGeneration + 1;
     vnode.state.providerStatusGeneration = generation;
+    vnode.state.providerStatusError = false;
     try {
       const r = await vnode.attrs.send({ type: 'provider/status' });
-      if (vnode.state.providerStatusGeneration !== generation || !r?.ok) return;
+      if (vnode.state.providerStatusGeneration !== generation) return;
+      if (!r?.ok || !Array.isArray(r.providers)) {
+        vnode.state.providerStatusError = true;
+        m.redraw();
+        return null;
+      }
       vnode.state.providerStatus = r.providers;
       m.redraw();
       // Auto-probe keyless providers that expose a live daemon (Ollama): the
@@ -130,7 +144,13 @@ export const ProvidersSection = {
       for (const p of r.providers) {
         if (p.keyless && p.liveModels) ProvidersSection.probeConnection(vnode, p.name);
       }
-    } catch { /* a later revision/focus retries */ }
+      return r;
+    } catch {
+      if (vnode.state.providerStatusGeneration !== generation) return null;
+      vnode.state.providerStatusError = true;
+      m.redraw();
+      return null;
+    }
   },
 
   // Quietly ping a keyless daemon (provider/test) and record reachability for
@@ -179,6 +199,32 @@ export const ProvidersSection = {
     const actorExecution = state.capabilities?.actorExecution;
     const actorUnavailable = actorExecution && actorExecution.status !== 'available';
 
+    /**
+     * @param {{ type: string } & Record<string, any>} message
+     * @param {string} action
+     */
+    const saveSetting = async (message, action) => {
+      if (ui.settingsBusy || ui.settingsUncertain) return false;
+      ui.settingsBusy = true;
+      ui.settingsMsg = null;
+      m.redraw();
+      try {
+        let reply;
+        try { reply = await send(message); }
+        catch { reply = { ok: false, outcomeKnown: false }; }
+        if (reply?.ok) return true;
+        ui.settingsUncertain = isUnknownMutationOutcome(reply);
+        ui.settingsMsg = mutationFailureCopy(reply, {
+          action,
+          fallback: 'The provider setting could not be saved.',
+        });
+        return false;
+      } finally {
+        ui.settingsBusy = false;
+        m.redraw();
+      }
+    };
+
     // Save a key for ONE provider, independently of the others. The paste
     // sanity check is the shared checkApiKeyFormat (peerd-provider) - the
     // onboarding provider step applies the identical rule (§5h).
@@ -195,32 +241,38 @@ export const ProvidersSection = {
       const value = check.value;
       ui.keyBusy[name] = true;
       m.redraw();
-      const reply = await send({ type: 'provider/setKey', provider: name, plaintext: value });
-      ui.keyBusy[name] = false;
-      if (reply?.ok) {
-        ui.keyInput[name] = '';
-        ui.keyEditing[name] = false;   // collapse the editor back to the badge
-        ui.keyMsg[name] = { ok: true, text: 'Saved — encrypted in the vault.' };
-        // Refresh the badges so this provider flips to "Key saved".
-        await ProvidersSection.loadProviderStatus({ attrs: { state, send }, state: ui });
-        // Auto-verify so the user never has to click Test (the ask). For
-        // OpenRouter the model panel below loads the live catalog — that load
-        // IS the verification (and populates the curation list). Bump its
-        // reload token BEFORE the redraw so the panel (mounting now the key
-        // exists) loads exactly once, not twice. For the others, a 1-token
-        // ping confirms in the card.
-        if (name === 'openrouter') ui.orReloadToken = (ui.orReloadToken ?? 0) + 1;
+      try {
+        let reply;
+        try { reply = await send({ type: 'provider/setKey', provider: name, plaintext: value }); }
+        catch { reply = { ok: false, outcomeKnown: false }; }
+        if (reply?.ok) {
+          ui.keyUncertain[name] = false;
+          ui.keyInput[name] = '';
+          ui.keyEditing[name] = false;   // collapse the editor back to the badge
+          ui.keyMsg[name] = { ok: true, text: 'Saved; encrypted in the vault.' };
+          // Refresh the badges so this provider flips to "Key saved".
+          await ProvidersSection.loadProviderStatus({ attrs: { state, send }, state: ui });
+          // Auto-verify so the user never has to click Test (the ask). For
+          // OpenRouter the model panel below loads the live catalog; that load
+          // IS the verification (and populates the curation list).
+          if (name === 'openrouter') ui.orReloadToken = (ui.orReloadToken ?? 0) + 1;
+          m.redraw();
+          if (name !== 'openrouter') {
+            ui.keyBusy[name] = false;
+            await testKey(name);
+          }
+        } else {
+          const uncertain = isUnknownMutationOutcome(reply);
+          ui.keyUncertain[name] = uncertain;
+          ui.keyMsg[name] = { ok: false, text: mutationFailureCopy(reply, {
+            action: 'saving the provider key', fallback: 'The provider key could not be saved.',
+            messages: { locked: 'Vault is locked; unlock in the peerd panel first.' },
+          }) };
+        }
+      } finally {
+        ui.keyBusy[name] = false;
         m.redraw();
-        if (name !== 'openrouter') await testKey(name);
-      } else {
-        ui.keyMsg[name] = {
-          ok: false,
-          text: reply?.error === 'locked'
-            ? 'Vault is locked — unlock in the peerd panel first.'
-            : reply?.error ?? 'Something went wrong.',
-        };
       }
-      m.redraw();
     };
 
     // Validate a SAVED key with a 1-token ping on the real provider endpoint,
@@ -238,7 +290,9 @@ export const ProvidersSection = {
       const generation = (ui.probeGeneration[name] ?? 0) + 1;
       ui.probeGeneration[name] = generation;
       ui.keyBusy[name] = true; ui.keyMsg[name] = null; m.redraw();
-      const reply = await send({ type: 'provider/test', provider: name });
+      let reply;
+      try { reply = await send({ type: 'provider/test', provider: name }); }
+      catch { reply = { ok: false, outcomeKnown: false }; }
       ui.keyBusy[name] = false;
       if (ui.probeGeneration[name] !== generation) { m.redraw(); return; }
       // Keep the badge in sync with an explicit Test (keyless daemons only — the
@@ -246,6 +300,8 @@ export const ProvidersSection = {
       ui.connStatus[name] = reply?.ok ? 'connected'
         : reply?.reachable && reply?.error === 'no-models' ? 'no-models'
           : 'down';
+      const uncertain = isUnknownMutationOutcome(reply);
+      if (uncertain) ui.keyUncertain[name] = true;
       ui.keyMsg[name] = reply?.ok
         ? {
             ok: true,
@@ -255,13 +311,14 @@ export const ProvidersSection = {
           }
         : {
             ok: false,
-            text: reply?.error === 'invalid-key' ? 'Provider rejected the key (401). Double-check it.'
+            text: uncertain ? 'Peerd could not confirm the provider test. Refresh before testing again.'
+              : reply?.error === 'invalid-key' ? 'Provider rejected the key (401). Double-check it.'
               : reply?.error === 'no-key' ? 'No key saved for this provider yet.'
               : reply?.error === 'locked' ? 'Vault is locked — unlock in the peerd panel first.'
               : reply?.error === 'no-models' ? 'Ollama is running, but it has no models installed. Get one with: ollama pull qwen3:8b'
               : name === 'ollama' && reply?.error === 'unreachable'
                 ? 'Couldn’t reach Ollama. Start it with: ollama serve'
-              : `Couldn’t reach the provider: ${reply?.error ?? 'unknown error'}.`,
+              : 'Couldn’t reach the provider.',
           };
       if (name === 'ollama' && (reply?.ok || reply?.reachable)) ui.modelOptionsKey = '';
       m.redraw();
@@ -347,7 +404,8 @@ export const ProvidersSection = {
     /** @param {ProviderRow} p */
     const renderProviderCard = (p) => {
       const editing = !!ui.keyEditing[p.name];
-      const busy = !!ui.keyBusy[p.name] || (p.name === 'ollama' && ui.ollamaHostSaving);
+      const busy = !!ui.keyBusy[p.name] || !!ui.keyUncertain[p.name]
+        || (p.name === 'ollama' && (ui.ollamaHostSaving || ui.ollamaHostUncertain));
       const msg = ui.keyMsg[p.name];
       const draft = ui.keyInput[p.name] ?? '';
       const showForm = !p.keyless && (editing || !p.hasKey);
@@ -381,6 +439,7 @@ export const ProvidersSection = {
                 }, busy ? '…' : 'Test'),
                 p.keyless ? null : m('button.linkish', {
                   type: 'button',
+                  disabled: busy,
                   onclick: () => { ui.keyEditing[p.name] = true; ui.keyMsg[p.name] = null; m.redraw(); },
                 }, 'Replace'),
               ])
@@ -420,6 +479,12 @@ export const ProvidersSection = {
         // Card-level message (Save OR Test) — shows whether the form is open or
         // collapsed (Test runs while the card is collapsed).
         msg ? m(`p.key-msg${msg.ok ? '.ok' : '.err'}`, msg.text) : null,
+        ui.keyUncertain[p.name] && !p.keyless && draft
+          ? m('button.secondary', {
+              type: 'button', disabled: !!ui.keyBusy[p.name],
+              onclick: () => saveKey(p.name),
+            }, 'Finish the same save')
+          : null,
         p.name === 'ollama' ? [
           m('.input-row', [
             m('label', { for: 'ollama-host' }, 'Ollama host'),
@@ -427,23 +492,34 @@ export const ProvidersSection = {
               id: 'ollama-host',
               type: 'text',
               spellcheck: false,
-              disabled: ui.ollamaHostSaving,
+              disabled: ui.ollamaHostSaving || ui.ollamaHostUncertain,
               placeholder: 'http://localhost:11434',
               value: state.settings?.ollamaHost ?? '',
               onchange: async (/** @type {{ target: HTMLInputElement }} */ e) => {
+                if (ui.ollamaHostSaving || ui.ollamaHostUncertain) return;
                 const value = e.target.value.trim();
                 const generation = ++ui.ollamaHostSaveGeneration;
                 ui.ollamaHostSaving = true;
                 m.redraw();
                 const save = (async () => {
-                  const reply = value
-                    ? await send({ type: 'settings/update', patch: { ollamaHost: value } })
-                    : await send({ type: 'settings/reset', keys: ['ollamaHost'] });
+                  let reply;
+                  try {
+                    reply = value
+                      ? await send({ type: 'settings/update', patch: { ollamaHost: value } })
+                      : await send({ type: 'settings/reset', keys: ['ollamaHost'] });
+                  } catch {
+                    reply = { ok: false, outcomeKnown: false };
+                  }
                   if (generation !== ui.ollamaHostSaveGeneration) return;
                   if (!reply?.ok) {
-                    ui.keyMsg.ollama = { ok: false, text: 'Enter a full http:// or https:// Ollama URL.' };
+                    ui.ollamaHostUncertain = isUnknownMutationOutcome(reply);
+                    ui.keyMsg.ollama = { ok: false, text: mutationFailureCopy(reply, {
+                      action: 'saving the Ollama host',
+                      fallback: 'Enter a full http:// or https:// Ollama URL.',
+                    }) };
                     return;
                   }
+                  ui.ollamaHostUncertain = false;
                   ui.keyMsg.ollama = null;
                   ui.modelOptionsKey = '';
                   ProvidersSection.probeConnection({ state: ui, attrs: { send } }, 'ollama');
@@ -476,6 +552,13 @@ export const ProvidersSection = {
         + 'its GLM models (GLM-5.2, …) from a direct OpenAI-compatible '
         + 'endpoint. Ollama runs models on a daemon you control: keyless '
         + 'with no per-token API cost. Using localhost keeps inference on this machine.'),
+      ui.providerStatusError ? m('.settings-inline-error', { role: 'alert' }, [
+        m('p', 'Peerd could not refresh provider status. Existing choices remain unchanged.'),
+        m('button', {
+          type: 'button',
+          onclick: () => ProvidersSection.loadProviderStatus({ attrs: { state, send }, state: ui }),
+        }, 'Retry provider status'),
+      ]) : null,
       // The on-device WebGPU model is a full provider now — its card hosts the
       // hardware-test → download → ready flow inline (the old split-out
       // "On-device models" section is folded in here), with a status-driven
@@ -515,12 +598,15 @@ export const ProvidersSection = {
           m('label', { for: 'provider' }, 'Provider'),
           m('select', {
             id: 'provider',
+            disabled: ui.settingsBusy || ui.settingsUncertain,
             value: effectiveProvider,
             onchange: async (/** @type {{ target: HTMLSelectElement }} */ e) => {
               // Reset the model override on switch so the new provider's
               // default applies until the user picks one.
-              await send({ type: 'settings/update', patch: { providerName: e.target.value, providerModel: '' } });
-              m.redraw();
+              await saveSetting(
+                { type: 'settings/update', patch: { providerName: e.target.value, providerModel: '' } },
+                'changing the default provider',
+              );
             },
           }, selectableProviderRows.map((p) => m('option', { value: p.name }, p.label))),
         ]),
@@ -528,10 +614,13 @@ export const ProvidersSection = {
           m('label', { for: 'model' }, 'Model'),
           m('select', {
             id: 'model',
+            disabled: ui.settingsBusy || ui.settingsUncertain,
             value: providerModel,
             onchange: async (/** @type {{ target: HTMLSelectElement }} */ e) => {
-              await send({ type: 'settings/update', patch: { providerModel: e.target.value } });
-              m.redraw();
+              await saveSetting(
+                { type: 'settings/update', patch: { providerModel: e.target.value } },
+                'changing the default model',
+              );
             },
           }, [
             // Blank = the provider's own default model.
@@ -566,13 +655,16 @@ export const ProvidersSection = {
             'aria-describedby': actorUnavailable ? 'runner-model-hint runner-model-status' : 'runner-model-hint',
             type: 'text',
             spellcheck: false,
+            disabled: ui.settingsBusy || ui.settingsUncertain,
             // Blank is an automatic policy, not a fixed provider model: an
             // installed Local WebGPU runner wins, then the provider fast model.
             placeholder: 'Automatic',
             value: state.settings?.runnerModel ?? '',
             onchange: async (/** @type {{ target: HTMLInputElement }} */ e) => {
-              await send({ type: 'settings/update', patch: { runnerModel: e.target.value } });
-              m.redraw();
+              await saveSetting(
+                { type: 'settings/update', patch: { runnerModel: e.target.value } },
+                'changing the web actor model',
+              );
             },
           }),
         ]),
@@ -591,7 +683,18 @@ export const ProvidersSection = {
               ? 'Actor work is paused. You can set this now; it will apply after actor execution recovers.'
               : 'This browser cannot run actors. You can still save this setting for a browser that can.')
           : null,
-        resetRow(send, ['providerName', 'providerModel', 'runnerModel']),
+        m('div', { style: 'margin-top:10px;' }, [
+          m('button.secondary', {
+            type: 'button',
+            style: 'font-size:12px;',
+            disabled: ui.settingsBusy || ui.settingsUncertain,
+            onclick: () => saveSetting(
+              { type: 'settings/reset', keys: ['providerName', 'providerModel', 'runnerModel'] },
+              'resetting the provider settings',
+            ),
+          }, ui.settingsBusy ? 'Saving…' : 'Reset section to defaults'),
+        ]),
+        ui.settingsMsg ? m('p.error.hint', ui.settingsMsg) : null,
 
         m('p.muted.settings-footer', [
           'Default model: ', m('code', defaultProvRow?.defaultModel ?? 'provider default'),
@@ -624,6 +727,9 @@ const OllamaRecommendation = {
     vnode.state.loading = true;
     vnode.state.rec = null;
     vnode.state.applied = false;
+    vnode.state.busy = false;
+    vnode.state.uncertain = false;
+    vnode.state.error = null;
     probeGpuCapability()
       .then((cap) => { vnode.state.rec = recommendOllamaModel(cap); })
       .catch(() => { vnode.state.rec = null; })
@@ -642,16 +748,34 @@ const OllamaRecommendation = {
     const useButton = (model) => m('button.secondary', {
       type: 'button',
       style: 'font-size:12px;',
-      disabled: ui.applied,
+      disabled: ui.applied || ui.busy || ui.uncertain,
       onclick: async () => {
-        await send({ type: 'settings/update', patch: { providerModel: model } });
-        ui.applied = true;
+        if (ui.busy || ui.uncertain) return;
+        ui.busy = true;
+        ui.error = null;
         m.redraw();
+        try {
+          let reply;
+          try { reply = await send({ type: 'settings/update', patch: { providerModel: model } }); }
+          catch { reply = { ok: false, outcomeKnown: false }; }
+          if (reply?.ok) ui.applied = true;
+          else {
+            ui.uncertain = isUnknownMutationOutcome(reply);
+            ui.error = mutationFailureCopy(reply, {
+              action: 'setting the recommended model',
+              fallback: 'The recommended model could not be saved.',
+            });
+          }
+        } finally {
+          ui.busy = false;
+          m.redraw();
+        }
       },
-    }, ui.applied ? '✓ Set as default model' : 'Use as default model');
+    }, ui.applied ? '✓ Set as default model' : ui.busy ? 'Saving…' : 'Use as default model');
 
     return m('.ollama-recommend', [
       m('h3', 'Recommended local model'),
+      ui.error ? m('p.error.hint', ui.error) : null,
       ui.loading
         ? m('p.hint', 'Sizing up this machine…')
         : !rec || rec.confidence === 'none'
@@ -715,6 +839,9 @@ const OpenRouterModels = {
     vnode.state.popular = [];         // curated seed ids
     vnode.state.query = '';
     vnode.state.selected = null;      // working Set of chosen ids (seeded once)
+    vnode.state.saving = false;
+    vnode.state.uncertain = false;
+    vnode.state.saveError = null;
     vnode.state.loadedToken = vnode.attrs.reloadToken ?? 0;
     OpenRouterModels.load(vnode);
   },
@@ -745,7 +872,7 @@ const OpenRouterModels = {
       } else {
         vnode.state.error = r?.error === 'invalid-key'
           ? 'OpenRouter rejected the key — double-check it above.'
-          : `Couldn’t reach OpenRouter: ${r?.error ?? 'unknown error'}.`;
+          : 'Couldn’t reach OpenRouter.';
       }
       m.redraw();
     }).catch(() => {
@@ -758,13 +885,36 @@ const OpenRouterModels = {
    * @param {{ state: any, attrs: { send: Send } }} vnode
    * @param {string} id
    */
-  toggle(vnode, id) {
+  async toggle(vnode, id) {
+    if (vnode.state.saving || vnode.state.uncertain) return;
     const sel = vnode.state.selected;
+    const previous = new Set(sel);
     if (sel.has(id)) sel.delete(id);
     else sel.add(id);
-    // Persist immediately — the chat picker reads settings.openrouterModels.
-    vnode.attrs.send({ type: 'settings/update', patch: { openrouterModels: [...sel] } });
+    vnode.state.saving = true;
+    vnode.state.saveError = null;
     m.redraw();
+    try {
+      let reply;
+      try {
+        reply = await vnode.attrs.send({
+          type: 'settings/update', patch: { openrouterModels: [...sel] },
+        });
+      } catch {
+        reply = { ok: false, outcomeKnown: false };
+      }
+      if (!reply?.ok) {
+        vnode.state.uncertain = isUnknownMutationOutcome(reply);
+        vnode.state.saveError = mutationFailureCopy(reply, {
+          action: 'saving the OpenRouter model selection',
+          fallback: 'The OpenRouter model selection could not be saved.',
+        });
+        if (!vnode.state.uncertain) vnode.state.selected = previous;
+      }
+    } finally {
+      vnode.state.saving = false;
+      m.redraw();
+    }
   },
   /** @param {{ state: any, attrs: { send: Send } }} vnode */
   view(vnode) {
@@ -806,6 +956,7 @@ const OpenRouterModels = {
         m('strong', `${sel.size} selected`),
         ` · ${all.length} available on OpenRouter.`,
       ]),
+      ui.saveError ? m('p.error.hint', ui.saveError) : null,
       m('input.or-search', {
         type: 'search',
         spellcheck: false,
@@ -817,6 +968,7 @@ const OpenRouterModels = {
         m('label.or-model-row', { key: mdl.model }, [
           m('input', {
             type: 'checkbox',
+            disabled: ui.saving || ui.uncertain,
             checked: sel.has(mdl.model),
             onchange: () => OpenRouterModels.toggle(vnode, mdl.model),
           }),

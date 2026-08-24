@@ -3,7 +3,7 @@
 // serialization mirror Notebook, while background jobs intentionally bypass
 // the queue after dispatch so two Workers may run independently.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import { createKeyedQueue } from '/peerd-engine/background.js';
 
 export const POD_TAB_GROUP_TITLE = 'peerd';

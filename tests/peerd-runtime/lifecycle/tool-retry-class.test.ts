@@ -9,32 +9,8 @@ import {
 } from '../../../extension/peerd-runtime/lifecycle/tool-retry-class.js';
 import { isRetryClass } from '../../../extension/peerd-runtime/lifecycle/retry-class.js';
 
-// why the stub + dynamic import: the tool defs are BROWSER modules — the
-// barrels transitively pull in vendor/browser-polyfill.js, which throws unless
-// `chrome.runtime.id` exists. A static import would hoist above any assignment
-// in this file, so the globals are planted first and the inventory is pulled in
-// with top-level `await import`. Only the surface the defs touch AT MODULE LOAD
-// is stubbed; nothing here executes a tool.
-(globalThis as unknown as { chrome: unknown }).chrome = {
-  runtime: {
-    id: 'peerd-test',
-    getURL: (path: string) => `chrome-extension://peerd-test/${path}`,
-    getManifest: () => ({ version: '0.0.0' }),
-    onMessage: { addListener: () => {} },
-    sendMessage: async () => undefined,
-  },
-  storage: {
-    local: { get: async () => ({}), set: async () => {}, remove: async () => {} },
-    session: { get: async () => ({}), set: async () => {} },
-  },
-  tabs: {
-    query: async () => [],
-    onUpdated: { addListener: () => {} },
-    onRemoved: { addListener: () => {} },
-  },
-  alarms: { onAlarm: { addListener: () => {} } },
-};
-
+// The shared test bootstrap owns the browser identity. Replacing the global in
+// one suite is unsafe because browser-api.js intentionally binds by identity.
 const { BUILTIN_TOOLS } = await import('../../../extension/peerd-runtime/tools/defs/index.js');
 const { WEB_TOOLS } = await import('../../../extension/peerd-runtime/tools/web/index.js');
 const { CLOCK_TOOLS } = await import('../../../extension/peerd-runtime/clock/index.js');

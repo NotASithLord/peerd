@@ -27,7 +27,7 @@
 // click handler — no await before it, or the activation is dropped (same
 // constraint as home's popToSide).
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 
 // why a typed accessor: the Chrome-only sidePanel namespace isn't on the
 // webextension-polyfill `Browser` type (the polyfill proxies it to chrome.*

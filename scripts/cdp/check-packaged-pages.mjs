@@ -50,6 +50,19 @@ const htmlPages = (root) =>
   walk(root).filter((f) => f.endsWith('.html')).map((f) => relative(root, f)).sort();
 // Mithril mount pages get the strict treatment.
 const isAppPage = (root, page) => readFileSync(join(root, page), 'utf8').includes('id="app"');
+const appReadyProbe = (page) => {
+  if (page === 'sidepanel/sidepanel.html' || page === 'home/home.html') {
+    const selector = page === 'sidepanel/sidepanel.html'
+      ? '.app-shell' : '.home-shell, .options-gate';
+    return `document.readyState === 'complete'
+      && document.documentElement.dataset.peerdBootModule === 'evaluated'
+      && ((document.documentElement.dataset.peerdBootStage === 'vault-ready'
+          && !!document.querySelector('.gate-card button:not([disabled])'))
+        || (document.documentElement.dataset.peerdBootStage === 'app-ready'
+          && !!document.querySelector(${JSON.stringify(selector)})))`;
+  }
+  return `(document.getElementById('app')?.childElementCount || 0) > 0`;
+};
 
 // A same-origin (chrome-extension://) load failure = a file the packaged build
 // references but didn't ship. Ignore favicon (Chrome auto-requests it; extensions
@@ -163,6 +176,51 @@ const packagedRemoteImportProbe = async (remoteUrl, channel) => {
   return { enabled: REMOTE_MODULE_IMPORTS_ENABLED, fetchCalls, urls, refusals };
 };
 
+// Exact packaged regression for the operation-lazy repository split. It must
+// cross SW -> authenticated offscreen loader -> dynamic isomorphic-git -> OPFS
+// and return without putting the vendor back in the cold worker graph.
+const packagedRepositoryProbe = async () => {
+  // Repository/App data is a post-vault capability. Exercise it from the same
+  // unlocked posture a real user has after first-run instead of weakening the
+  // lease coordinator merely to make a locked smoke profile convenient.
+  const vaultState = await chrome.runtime.sendMessage({ type: 'state/get' });
+  if (!vaultState?.vault?.initialized) {
+    const initialized = await chrome.runtime.sendMessage({
+      type: 'vault/initialize', passphrase: 'packaged-probe-only-32-bytes!',
+    });
+    if (!initialized?.ok) return { ok: false, phase: 'vault-initialize', initialized };
+  } else if (vaultState?.vault?.locked) {
+    const unlocked = await chrome.runtime.sendMessage({
+      type: 'vault/unlock', passphrase: 'packaged-probe-only-32-bytes!',
+    });
+    if (!unlocked?.ok) return { ok: false, phase: 'vault-unlock', unlocked };
+  }
+  const { buildAppExport } = await import('/peerd-engine/index.js');
+  const envelope = await buildAppExport({
+    record: { name: 'Packaged Git Probe', entryFile: 'index.html', tags: ['ci-probe'] },
+    files: {
+      'index.html': '<!doctype html><title>Packaged Git Probe</title><main>ready</main>',
+      'assets/raw.bin': new Uint8Array([0, 1, 2, 255]),
+    },
+  });
+  const imported = await chrome.runtime.sendMessage({ type: 'import/apply', envelope });
+  if (!imported?.ok || imported.kind !== 'app') return { ok: false, phase: 'import', imported };
+  const appId = imported.id;
+  try {
+    const status = await chrome.runtime.sendMessage({ type: 'apps/repository/status', appId });
+    const branch = await chrome.runtime.sendMessage({
+      type: 'apps/repository/branch', appId, name: 'ci/repository-host', checkout: true,
+    });
+    const history = await chrome.runtime.sendMessage({
+      type: 'apps/repository/history', appId, depth: 5,
+    });
+    return { ok: status?.ok === true && !!status.status?.oid && branch?.ok === true
+      && history?.ok === true && history.commits?.length >= 1, status, branch, history };
+  } finally {
+    await chrome.runtime.sendMessage({ type: 'apps/delete', appId }).catch(() => {});
+  }
+};
+
 let failed = false;
 for (const channel of ['preview', 'store']) {
   await packageArtifact({ channel, browser: 'chrome', version, sign: false, verify: false });
@@ -224,15 +282,29 @@ for (const channel of ['preview', 'store']) {
       try { policyPage?.close(); } catch { /* */ }
     }
 
+    try {
+      const repository = await evalIn(ctx.page, `(${packagedRepositoryProbe.toString()})()`, true);
+      if (!repository?.ok) {
+        failed = true;
+        log(`  ✗ [${channel}] packaged lazy repository probe: ${JSON.stringify(repository)}`);
+      } else log(`  ✓ [${channel}] packaged lazy repository + binary OPFS probe`);
+    } catch (error) {
+      failed = true;
+      log(`  ✗ [${channel}] packaged lazy repository probe failed: ${error?.message ?? error}`);
+    }
+
     for (const page of pages) {
       const app = isAppPage(root, page);
       let p = null; let mounted = true; let openErr = null;
       try {
         p = await openExtPage(ctx, page);
         const ready = app
-          ? `(document.getElementById('app')?.childElementCount || 0) > 0`
+          ? appReadyProbe(page)
           : `document.readyState === 'complete'`;
-        mounted = await waitFor(() => evalIn(p, ready), { budgetMs: 12_000, pollMs: 200 });
+        const budgetMs = page === 'sidepanel/sidepanel.html' || page === 'home/home.html'
+          ? 60_000
+          : 12_000;
+        mounted = await waitFor(() => evalIn(p, ready), { budgetMs, pollMs: 200 });
         await sleep(SETTLE_MS);
       } catch (e) { openErr = e?.message ?? String(e); }
       const netFails = p ? sameOriginNetFails(p.events) : [];

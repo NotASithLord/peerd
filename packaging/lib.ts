@@ -33,6 +33,9 @@ export type ConfigChannel = (typeof CONFIG_CHANNELS)[number];
 // extension and web pipelines cannot drift on which file is "the" template.
 export const TEMPLATES_DIR = join(dirname(fileURLToPath(import.meta.url)), 'templates');
 export const STORE_LOADER_TEMPLATE = join(TEMPLATES_DIR, 'dweb-loader.store.js');
+export const DWEB_ROUTES_DISABLED_TEMPLATE = join(TEMPLATES_DIR, 'routes-dweb.disabled.js');
+export const DWEB_SELF_ROUTES_DISABLED_TEMPLATE = join(TEMPLATES_DIR, 'routes-dweb-self.disabled.js');
+export const DEBUGGER_UNAVAILABLE_TEMPLATE = join(TEMPLATES_DIR, 'debugger-pool.unavailable.js');
 
 /** The version single source of truth is package.json. Never hand-edit
  *  versions in manifests — they are generated. */

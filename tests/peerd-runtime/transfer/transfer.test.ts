@@ -13,6 +13,13 @@ import {
 
 const KNOWN_KEYS = ['devMode', 'reasoningEnabled', 'providerName', 'spendLimitUsd'];
 
+// These are correctness tests, not KDF performance gates. The production
+// Argon2id parameters intentionally allocate 64 MiB and can exceed Bun's 5 s
+// default when the full suite runs several crypto workers concurrently. Keep
+// the timeout local to the genuinely KDF-heavy cases; benchmark policy owns
+// latency assertions separately.
+const KDF_TEST_TIMEOUT_MS = 30_000;
+
 const bytesToB64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 const makeLegacySecretsBox = async (passphrase: string, value: unknown) => {
   const salt = crypto.getRandomValues(new Uint8Array(16));
@@ -59,12 +66,12 @@ describe('passphrase crypto', () => {
     });
     const back = await decryptWithPassphrase('correct horse', box);
     expect(back).toEqual({ anthropic: 'sk-ant-xyz' });
-  });
+  }, KDF_TEST_TIMEOUT_MS);
 
   test('wrong passphrase throws ExportPassphraseError', async () => {
     const box = await encryptWithPassphrase('right', { k: 'v' });
     await expect(decryptWithPassphrase('wrong', box)).rejects.toBeInstanceOf(ExportPassphraseError);
-  });
+  }, KDF_TEST_TIMEOUT_MS);
 
   test('rejects attacker-controlled KDF parameters before doing crypto', async () => {
     const box = await encryptWithPassphrase('right', { k: 'v' });
@@ -72,7 +79,7 @@ describe('passphrase crypto', () => {
       .rejects.toBeInstanceOf(ExportPassphraseError);
     await expect(decryptWithPassphrase('right', { ...box, iterations: 600_000 }))
       .rejects.toBeInstanceOf(ExportPassphraseError);
-  });
+  }, KDF_TEST_TIMEOUT_MS);
 
   test('imports legacy PBKDF2 backups without emitting new PBKDF2 boxes', async () => {
     const legacy = await makeLegacySecretsBox('old backup passphrase', { anthropic: 'sk-old' });
@@ -81,7 +88,7 @@ describe('passphrase crypto', () => {
     const current = await encryptWithPassphrase('new backup passphrase', { anthropic: 'sk-new' });
     expect(JSON.stringify(current)).not.toContain('PBKDF2');
     expect(current.kdf).toBe('Argon2id');
-  });
+  }, KDF_TEST_TIMEOUT_MS);
 });
 
 describe('buildExport', () => {
@@ -103,7 +110,7 @@ describe('buildExport', () => {
     expect(payload.secrets?.kdf).toBe('Argon2id');
     expect(JSON.stringify(payload.secrets)).not.toContain('PBKDF2');
     expect(JSON.stringify(payload)).not.toContain('sk-1'); // never plaintext
-  });
+  }, KDF_TEST_TIMEOUT_MS);
 
   test('refuses secrets without a passphrase', async () => {
     await expect(buildExport({
@@ -228,7 +235,7 @@ describe('applyImport', () => {
     });
     expect(res.ok).toBe(true);
     expect(calls.setSecret).toEqual([['anthropic', 'sk-2']]);
-  });
+  }, KDF_TEST_TIMEOUT_MS);
 });
 
 // R6 — transfer import is an untrusted-deserialization surface. The three
@@ -347,7 +354,7 @@ describe('dweb identity section', () => {
     expect(payload.dweb).toEqual({ identityRecord: record });
     const secrets = await decryptWithPassphrase('pw123456', payload.secrets as any);
     expect(Object.keys(secrets)).toEqual(['anthropic']); // seed/device key filtered by mechanism
-  });
+  }, KDF_TEST_TIMEOUT_MS);
 
   test('inspectImport: store drops with the §10 notice; preview names the identity restore', () => {
     const store = inspectImport({ payload: makePayload({ dweb: { identityRecord: record } }), channel: 'store', knownSettingKeys: KNOWN_KEYS });
@@ -647,5 +654,5 @@ describe('dweb identity section', () => {
     expect(writes).toEqual([['anthropic', 'sk-safe']]);
     if (!res.ok || !('notices' in res)) throw new Error('expected notices');
     expect((res.notices as string[]).join(' ')).toContain('protected identity/device');
-  });
+  }, KDF_TEST_TIMEOUT_MS);
 });

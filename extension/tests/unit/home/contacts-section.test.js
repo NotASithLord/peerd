@@ -42,11 +42,11 @@ const makeSend = (overrides = {}) => {
 
 const flush = async () => { await new Promise((r) => setTimeout(r, 0)); m.redraw.sync(); };
 
-/** @param {FakeSend} send */
-const mountView = async (send) => {
+/** @param {FakeSend} send @param {number} [requestTimeoutMs] */
+const mountView = async (send, requestTimeoutMs) => {
   const root = document.createElement('div');
   document.body.appendChild(root);
-  m.mount(root, { view: () => m(ContactsSection, { send }) });
+  m.mount(root, { view: () => m(ContactsSection, { send, requestTimeoutMs }) });
   await flush();
   await flush();          // second tick — live-info promise resolves after list
   return { root, unmount: () => { m.mount(root, null); root.remove(); } };
@@ -145,6 +145,98 @@ describe('home.contacts', () => {
     const { root, unmount } = await mountView(send);
     try {
       expect(root.textContent).toContain('No known peers yet');
+    } finally { unmount(); }
+  });
+
+  it('turns a cold-host list timeout into bounded Retry without a loading wedge', async () => {
+    let lists = 0;
+    const send = makeSend({
+      'contacts/list': () => {
+        lists += 1;
+        return lists === 1
+          ? { ok: false, code: 'semantic-demand-timeout', outcomeKnown: true }
+          : { ok: true, contacts: [] };
+      },
+      'dweb/distributed/info': () => ({ ok: true, peers: [] }),
+    });
+    const { root, unmount } = await mountView(send, 20);
+    try {
+      expect(root.textContent).toContain('Contacts took too long to load. Nothing was changed.');
+      expect(root.textContent).toContain('Retry');
+      expect(root.textContent.includes('Loading contacts…')).toBe(false);
+      expect(root.textContent.includes('No known peers yet')).toBe(false);
+      clickText(root, 'button', 'Retry');
+      await flush();
+      await flush();
+      expect(lists).toBe(2);
+      expect(root.textContent).toContain('No known peers yet');
+      expect(root.textContent.includes('Retry')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('bounds a runtime message that never settles and leaves explicit Retry', async () => {
+    const send = makeSend({
+      'contacts/list': () => new Promise(() => {}),
+      'dweb/distributed/info': () => ({ ok: true, peers: [] }),
+    });
+    const { root, unmount } = await mountView(send, 10);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      m.redraw.sync();
+      expect(root.textContent).toContain('Nothing was changed.');
+      expect(root.textContent).toContain('Retry');
+      expect(root.textContent.includes('Loading contacts…')).toBe(false);
+      expect(send.calls.filter((call) => call.type === 'contacts/list').length).toBe(1);
+    } finally { unmount(); }
+  });
+
+  it('reconciles but never replays a host-lost contacts/set mutation', async () => {
+    const send = makeSend({
+      'contacts/set': () => ({
+        ok: false, code: 'semantic-demand-channel-lost',
+        outcomeKnown: false, outcomeKind: 'unknown', retryable: false,
+      }),
+      'dweb/distributed/info': () => ({ ok: true, peers: [] }),
+    });
+    const { root, unmount } = await mountView(send, 20);
+    try {
+      clickText(rowWith(root, 'Alice'), 'button', 'Activity');
+      await flush();
+      clickText(rowWith(root, 'Alice'), 'button', '☆ Favorite');
+      await flush();
+      await flush();
+      expect(send.calls.filter((call) => call.type === 'contacts/set').length).toBe(1);
+      expect(send.calls.filter((call) => call.type === 'contacts/list').length).toBe(2);
+      expect(root.textContent).toContain('could not confirm whether updating this favorite finished');
+      expect(root.textContent).toContain('read-only contacts refresh to reconcile');
+      expect([...root.querySelectorAll('button')].some((button) =>
+        button.textContent === 'Retry' || button.textContent === 'Retry update')).toBe(false);
+      expect(need(rowWith(root, 'Alice'), '.contact-detail-actions button', HTMLButtonElement).disabled)
+        .toBe(true);
+      clickText(rowWith(root, 'Alice'), 'button', 'I checked this contact; allow changes');
+      await flush();
+      expect(need(rowWith(root, 'Alice'), '.contact-detail-actions button', HTMLButtonElement).disabled)
+        .toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('reconciles but never replays a rejected contacts/forget mutation', async () => {
+    const send = makeSend({
+      'contacts/forget': () => Promise.reject(new Error('event page discarded')),
+      'dweb/distributed/info': () => ({ ok: true, peers: [] }),
+    });
+    const { root, unmount } = await mountView(send, 20);
+    try {
+      clickText(rowWith(root, 'Alice'), 'button', 'Activity');
+      await flush();
+      clickText(rowWith(root, 'Alice'), 'button', 'Forget');
+      await flush();
+      await flush();
+      expect(send.calls.filter((call) => call.type === 'contacts/forget').length).toBe(1);
+      expect(send.calls.filter((call) => call.type === 'contacts/list').length).toBe(2);
+      expect(root.textContent).toContain('could not confirm whether forgetting this contact finished');
+      expect(root.textContent).toContain('Review the current state before trying again.');
+      expect(root.textContent.includes('Loading contacts…')).toBe(false);
     } finally { unmount(); }
   });
 });

@@ -7,7 +7,7 @@
 // re-enter as instructions. Web-actor-only, same tier as site_client_run.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { normalizeSiteOrigin, stalenessHeader } from '../../site-clients/index.js';
+import { normalizeSiteOrigin, stalenessHeader } from '../../site-clients/core.js';
 import { siteClientOriginRefusal } from './site-client-origin.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */

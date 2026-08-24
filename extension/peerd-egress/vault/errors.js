@@ -10,7 +10,7 @@ import { TypedError } from '/shared/errors.js';
  * No vault has been initialized yet — UI should show first-run flow.
  */
 export class VaultNotInitializedError extends TypedError {
-  constructor() { super('Vault has not been initialized.'); }
+  constructor() { super('Vault has not been initialized.'); this.name = 'VaultNotInitializedError'; }
 }
 
 /**
@@ -19,7 +19,7 @@ export class VaultNotInitializedError extends TypedError {
  * silently overwrite.
  */
 export class VaultAlreadyInitializedError extends TypedError {
-  constructor() { super('Vault is already initialized.'); }
+  constructor() { super('Vault is already initialized.'); this.name = 'VaultAlreadyInitializedError'; }
 }
 
 /**
@@ -27,7 +27,7 @@ export class VaultAlreadyInitializedError extends TypedError {
  * unlocking first. UI should prompt for passphrase.
  */
 export class VaultLockedError extends TypedError {
-  constructor() { super('Vault is locked.'); }
+  constructor() { super('Vault is locked.'); this.name = 'VaultLockedError'; }
 }
 
 /**
@@ -36,7 +36,7 @@ export class VaultLockedError extends TypedError {
  * one error so the side-channel doesn't leak which it was.
  */
 export class WrongPassphraseError extends TypedError {
-  constructor() { super('Wrong passphrase.'); }
+  constructor() { super('Wrong passphrase.'); this.name = 'WrongPassphraseError'; }
 }
 
 /**
@@ -45,7 +45,7 @@ export class WrongPassphraseError extends TypedError {
  * fall back to the passphrase prompt.
  */
 export class PrfNotEnrolledError extends TypedError {
-  constructor() { super('No platform authenticator is enrolled for this vault.'); }
+  constructor() { super('No platform authenticator is enrolled for this vault.'); this.name = 'PrfNotEnrolledError'; }
 }
 
 /**
@@ -56,7 +56,7 @@ export class PrfNotEnrolledError extends TypedError {
  * into this single error to avoid a side-channel.
  */
 export class PrfUnlockFailedError extends TypedError {
-  constructor() { super('Touch ID unlock failed.'); }
+  constructor() { super('Touch ID unlock failed.'); this.name = 'PrfUnlockFailedError'; }
 }
 
 /**
@@ -68,7 +68,7 @@ export class PrfUnlockFailedError extends TypedError {
  * UI should not invite retries.
  */
 export class KdfUnavailableError extends TypedError {
-  constructor() { super('This vault uses a key-derivation scheme this build cannot run.'); }
+  constructor() { super('This vault uses a key-derivation scheme this build cannot run.'); this.name = 'KdfUnavailableError'; }
 }
 
 /**
@@ -78,5 +78,5 @@ export class KdfUnavailableError extends TypedError {
  * passkey" instead of implying the user typed it wrong.
  */
 export class RecoveryPassphraseNotSetError extends TypedError {
-  constructor() { super('No recovery passphrase has been set for this vault.'); }
+  constructor() { super('No recovery passphrase has been set for this vault.'); this.name = 'RecoveryPassphraseNotSetError'; }
 }

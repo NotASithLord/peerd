@@ -33,6 +33,7 @@
 // other browser-extension storage.
 
 import { uuidv7 } from '/shared/util.js';
+import { createSessionTurnStore } from '/shared/session-turn-store.js';
 import { SessionNotFoundError } from '../errors.js';
 // why: the store persists ONE canonical manifest shape so every consumer
 // (descriptor filter, exposure gate, actor inheritance, UI chips)
@@ -69,131 +70,20 @@ const MSGS = 'session_messages';
  */
 export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppended = async () => {} }) => {
   const generateId = makeId ?? (() => uuidv7(now));
-
-  // Session metadata uses read-modify-write updates. Serialize every operation
-  // that can write that record, including a legacy read that migrates it. A
-  // message append and a cost/model/archive update must not both read the same
-  // metadata snapshot and let the later put erase the other's msgIndex or field.
-  /** @type {Map<string, Promise<unknown>>} */
-  const sessionChains = new Map();
-  /**
-   * @template T
-   * @param {string} sessionId
-   * @param {() => Promise<T>} operation
-   * @returns {Promise<T>}
-   */
-  const enqueueSessionOperation = (sessionId, operation) => {
-    const previous = sessionChains.get(sessionId) ?? Promise.resolve();
-    const current = previous.catch(() => {}).then(operation);
-    sessionChains.set(sessionId, current);
-    void current.finally(() => {
-      if (sessionChains.get(sessionId) === current) sessionChains.delete(sessionId);
-    }).catch(() => {});
-    return current;
-  };
-
-  /** @param {string} sessionId @param {InternalMessage} message */
-  const notifyMessageAppended = async (sessionId, message) => {
-    try { await onMessageAppended(sessionId, message); }
-    catch { /* the append is already durable; recovery can retry the receipt */ }
-  };
-
-  // ---- message-record helpers -------------------------------------------
-
-  // why a stable fallback id: every message the loop writes carries a
-  // uuidv7 id, but a hand-crafted/legacy message might not — keying it by
-  // `${sessionId}#${seq}` keeps it addressable instead of colliding on
-  // `undefined`.
-  const messageKey = (/** @type {string} */ sessionId, /** @type {any} */ message, /** @type {number} */ seq) =>
-    (typeof message?.id === 'string' && message.id) ? message.id : `${sessionId}#${seq}`;
-
-  /** Batched read of message records by id, in the same order as `ids`.
-   * @param {string[]} ids */
-  const readMessages = async (ids) => {
-    if (!Array.isArray(ids) || ids.length === 0) return [];
-    const rows = typeof idb.getMany === 'function'
-      ? await idb.getMany(MSGS, ids)
-      : await Promise.all(ids.map((id) => idb.get(MSGS, id)));
-    // Drop any holes (a record that somehow went missing) rather than
-    // surfacing `undefined` into the messages array — a missing message is
-    // recoverable degradation; a malformed array is not.
-    return rows.filter(Boolean).map((/** @type {any} */ row) => row.message);
-  };
-
-  // why: default the actor fields at read time rather than migrating.
-  // Sessions written before spawned landed have no kind/depth, so we
-  // backfill the defaults here so every consumer sees a consistent shape.
-  const withKindDefaults = (/** @type {any} */ record) => {
-    if (record.kind !== undefined && record.depth !== undefined) return record;
-    return { ...record, kind: record.kind ?? 'chat', depth: record.depth ?? 0 };
-  };
-
-  // Strip the v2 internals (msgIndex / messagesV2) and attach the assembled
-  // `messages` array, so callers see the classic Session shape.
-  const present = (/** @type {any} */ record, /** @type {any[]} */ messages) => {
-    const {
-      msgIndex: _i,
-      messagesV2: _v,
-      messages: _m,
-      latestNonSyntheticUserMessageId: _latest,
-      ...rest
-    } = record;
-    return withKindDefaults({ ...rest, messages });
-  };
-
-  // Metadata-only readers must never accidentally expose conversation bodies
-  // in their caller-facing result. This shape is also safe for legacy v1 records:
-  // their inline `messages` array is dropped without triggering migration.
-  const presentMetadata = (/** @type {any} */ record) => {
-    const {
-      msgIndex: _i,
-      messagesV2: _v,
-      messages: _m,
-      latestNonSyntheticUserMessageId: _latest,
-      ...rest
-    } = record;
-    return withKindDefaults(rest);
-  };
-
-  /** @param {any} message */
-  const isRealUserMessage = (message) => message?.role === 'user'
-    && message.synthetic !== true
-    && typeof message.content === 'string' && message.content.trim().length > 0;
-
-  // Externalize a pre-v2 record's inline messages into the message store and
-  // rewrite it in v2 shape. Idempotent; a no-op once `messagesV2` is set.
-  const migrate = async (/** @type {any} */ record) => {
-    if (record.messagesV2) return record;
-    const inline = Array.isArray(record.messages) ? record.messages : [];
-    const msgIndex = [];
-    for (let seq = 0; seq < inline.length; seq++) {
-      const message = inline[seq];
-      const id = messageKey(record.sessionId, message, seq);
-      await idb.put(MSGS, { id, sessionId: record.sessionId, seq, message });
-      msgIndex.push(id);
-    }
-    const { messages: _drop, ...rest } = record;
-    const migrated = { ...rest, msgIndex, messagesV2: true };
-    await idb.put(STORE, migrated);
-    return migrated;
-  };
-
-  // Internal: the raw v2 metadata record (migrating a legacy one on the
-  // way through). Writers mutate THIS and re-put it — never the assembled
-  // shape, so messages never get re-inlined onto the session blob.
-  const getRecord = async (/** @type {string} */ sessionId) => {
-    const raw = await idb.get(STORE, sessionId);
-    if (!raw) return undefined;
-    return raw.messagesV2 ? raw : migrate(raw);
-  };
-
-  const assemble = async (/** @type {any} */ record) => {
-    if (!record) return undefined;
-    const messages = record.messagesV2
-      ? await readMessages(record.msgIndex)
-      : (Array.isArray(record.messages) ? record.messages : []);
-    return present(record, messages);
-  };
+  const turnSessions = createSessionTurnStore({
+    idb,
+    notFound: (sessionId) => new SessionNotFoundError(sessionId),
+    onMessageAppended,
+  });
+  // why property access, not destructuring: Bun 1.4's transpiler miscompiles
+  // free variables captured through this factory's multiply nested async
+  // closures (a destructured `readMessages` arrived undefined inside
+  // importPortable's serialized closure). Reading through the stable
+  // `records` object sidesteps the broken capture path and keeps the same
+  // shared queue + migration semantics.
+  const turnRecords = turnSessions.records;
+  const serializeSession = turnRecords.serialize;
+  const updateSessionRecord = turnRecords.update;
 
   /**
    * Create and persist a fresh session record.
@@ -320,7 +210,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
       ...(originState && typeof originState === 'object' ? { originState } : {}),
     };
     await idb.put(STORE, record);
-    return present(record, []);
+    return turnRecords.present(record, []);
   };
 
   // Same-user transfer imports an existing conversation identity rather
@@ -356,9 +246,9 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     const sessionId = typeof portable?.sessionId === 'string' ? portable.sessionId.trim() : '';
     if (!sessionId) throw new TypeError('portable sessionId is required');
 
-    return enqueueSessionOperation(sessionId, async () => {
+    return serializeSession(sessionId, async () => {
       const existing = await idb.get(STORE, sessionId);
-      if (existing) return /** @type {Session} */ (await assemble(existing));
+      if (existing) return /** @type {Session} */ (await turnRecords.assemble(existing));
 
       const sourceMessages = Array.isArray(portable.messages) ? portable.messages : [];
       /** @type {string[]} */
@@ -381,7 +271,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
         const message = { ...pickPortable(source, PORTABLE_MESSAGE_FIELDS), id };
         await idb.put(MSGS, { id, sessionId, seq: msgIndex.length, message });
         msgIndex.push(id);
-        if (isRealUserMessage(message)) latestNonSyntheticUserMessageId = id;
+        if (turnRecords.isRealUserMessage(message)) latestNonSyntheticUserMessageId = id;
       }
 
       const record = {
@@ -404,15 +294,9 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
           : {}),
       };
       await idb.put(STORE, record);
-      return present(record, await readMessages(msgIndex));
+      return turnRecords.present(record, await turnRecords.readMessages(msgIndex));
     });
   };
-
-  /** @returns {Promise<Session | undefined>} */
-  const get = (/** @type {string} */ sessionId) => enqueueSessionOperation(
-    sessionId,
-    async () => assemble(await getRecord(sessionId)),
-  );
 
   /**
    * @returns {Promise<Session[]>}
@@ -437,14 +321,14 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     }
     const out = records.map((record) => {
       if (!record.messagesV2) {
-        return present(record, Array.isArray(record.messages) ? record.messages : []);
+        return turnRecords.present(record, Array.isArray(record.messages) ? record.messages : []);
       }
       const rows = bySession.get(record.sessionId) ?? [];
       const byId = new Map(rows.map((row) => [row.id, row.message]));
       const messages = (record.msgIndex ?? [])
         .map((/** @type {string} */ id) => byId.get(id))
         .filter(Boolean);
-      return present(record, messages);
+      return turnRecords.present(record, messages);
     });
     // Stable order: newest first. UUIDv7 keys sort chronologically.
     return out.sort((a, b) => b.createdAt - a.createdAt);
@@ -460,7 +344,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
   const listMetadata = async () => {
     const records = await idb.getAll(STORE);
     return records
-      .map(presentMetadata)
+      .map(turnRecords.presentMetadata)
       .sort((a, b) => b.createdAt - a.createdAt);
   };
 
@@ -472,7 +356,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
    */
   const getMetadata = async (sessionId) => {
     const record = await idb.get(STORE, sessionId);
-    return record ? presentMetadata(record) : undefined;
+    return record ? turnRecords.presentMetadata(record) : undefined;
   };
 
   /**
@@ -488,16 +372,13 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     const messageId = record.latestNonSyntheticUserMessageId;
     if (typeof messageId !== 'string' || !messageId) return undefined;
     const message = (await idb.get(MSGS, messageId))?.message;
-    return isRealUserMessage(message) ? message : undefined;
+    return turnRecords.isRealUserMessage(message) ? message : undefined;
   };
 
-  const archive = (/** @type {string} */ sessionId) => enqueueSessionOperation(sessionId, async () => {
-    const record = await getRecord(sessionId);
-    if (!record) throw new SessionNotFoundError(sessionId);
-    const updated = { ...record, archivedAt: now() };
-    await idb.put(STORE, updated);
-    return assemble(updated);
-  });
+  const archive = (/** @type {string} */ sessionId) => updateSessionRecord(
+    sessionId,
+    (record) => ({ ...record, archivedAt: now() }),
+  );
 
   /**
    * Metadata-only lookup of a live actor session by its self-description — used to
@@ -523,81 +404,16 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
   };
 
   /**
-   * Append a message: write its own record, push its id to the session's
-   * order index, persist the (small) session record. Auto-derives the title
-   * from the first user message. Returns the assembled session.
-   *
-   * @param {string} sessionId
-   * @param {InternalMessage} message
-   */
-  const appendMessage = (sessionId, message) => enqueueSessionOperation(sessionId, async () => {
-    const record = await getRecord(sessionId);
-    if (!record) throw new SessionNotFoundError(sessionId);
-    const seq = record.msgIndex.length;
-    const id = messageKey(sessionId, message, seq);
-    // why idempotent by message id: crash recovery writes stable-id receipts.
-    // If the message and index both landed before a background loss, the retry
-    // must return the existing session instead of appending the same receipt a
-    // second time. The message row is written before the index below, so an id in
-    // msgIndex also proves its body was already stored.
-    if (record.msgIndex.includes(id)) {
-      await notifyMessageAppended(sessionId, message);
-      return assemble(record);
-    }
-    await idb.put(MSGS, { id, sessionId, seq, message });
-    const updated = {
-      ...record,
-      msgIndex: [...record.msgIndex, id],
-      ...(isRealUserMessage(message) ? { latestNonSyntheticUserMessageId: id } : {}),
-    };
-    if (!record.title && message.role === 'user' && typeof message.content === 'string') {
-      const cleaned = message.content.replace(/\s+/g, ' ').trim();
-      if (cleaned) updated.title = cleaned.slice(0, 60);
-    }
-    await idb.put(STORE, updated);
-    await notifyMessageAppended(sessionId, message);
-    return assemble(updated);
-  });
-
-  /**
-   * Patch the streaming assistant message in place (matched by id). This is
-   * the per-delta hot path — it touches ONLY the one message record, never
-   * the session blob, so a delta is an O(1) write regardless of session
-   * length and can't race a cost/summary write on the session record.
-   *
-   * Returns nothing: the loop ignores the return on this path (it re-reads
-   * via get() at finalize), and assembling the full session per delta would
-   * reintroduce an O(n) read on every token.
-   *
-   * @param {string} sessionId
-   * @param {string} messageId
-   * @param {Partial<InternalMessage>} patch
-   */
-  const updateAssistantMessage = async (sessionId, messageId, patch) => {
-    // why no session-record read on this path: the assistant stub was
-    // appended (and the session migrated) earlier this turn, so the message
-    // record exists. A missing record means the id is stale — no-op rather
-    // than resurrect it.
-    const row = await idb.get(MSGS, messageId);
-    if (!row) return;
-    row.message = { ...row.message, ...patch };
-    await idb.put(MSGS, row);
-  };
-
-  /**
    * Shallow-patch arbitrary top-level fields on a session and persist.
    * Used by the Plan/Act permission UI and session/setModel.
    *
    * @param {string} sessionId
    * @param {Record<string, unknown>} patch
    */
-  const update = (sessionId, patch) => enqueueSessionOperation(sessionId, async () => {
-    const record = await getRecord(sessionId);
-    if (!record) throw new SessionNotFoundError(sessionId);
-    const updated = { ...record, ...patch };
-    await idb.put(STORE, updated);
-    return assemble(updated);
-  });
+  const update = (sessionId, patch) => updateSessionRecord(
+    sessionId,
+    (record) => ({ ...record, ...patch }),
+  );
 
   /**
    * Set or CLEAR the session's user-authored system-prompt augmentation
@@ -608,15 +424,11 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
    * @param {string} sessionId
    * @param {string | null | undefined} text
    */
-  const setCustomSystemPrompt = (sessionId, text) => enqueueSessionOperation(sessionId, async () => {
-    const record = await getRecord(sessionId);
-    if (!record) throw new SessionNotFoundError(sessionId);
+  const setCustomSystemPrompt = (sessionId, text) => updateSessionRecord(sessionId, (record) => {
     const { customSystemPrompt: _removed, ...rest } = record;
-    const updated = (typeof text === 'string' && text.trim().length > 0)
+    return (typeof text === 'string' && text.trim().length > 0)
       ? { ...rest, customSystemPrompt: text }
       : rest;
-    await idb.put(STORE, updated);
-    return assemble(updated);
   });
 
   /**
@@ -625,14 +437,10 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
    * @param {string} sessionId
    * @param {import('../tools/manifests.js').ToolManifest | null | undefined} manifest
    */
-  const setToolManifest = (sessionId, manifest) => enqueueSessionOperation(sessionId, async () => {
-    const record = await getRecord(sessionId);
-    if (!record) throw new SessionNotFoundError(sessionId);
+  const setToolManifest = (sessionId, manifest) => updateSessionRecord(sessionId, (record) => {
     const { toolManifest: _removed, ...rest } = record;
     const normalized = normalizeToolManifest(manifest);
-    const updated = normalized ? { ...rest, toolManifest: normalized } : rest;
-    await idb.put(STORE, updated);
-    return assemble(updated);
+    return normalized ? { ...rest, toolManifest: normalized } : rest;
   });
 
   /**
@@ -643,13 +451,10 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
    * @param {string} sessionId
    * @param {import('../cost/accumulator.js').CostTally} cost
    */
-  const setCost = (sessionId, cost) => enqueueSessionOperation(sessionId, async () => {
-    const record = await getRecord(sessionId);
-    if (!record) throw new SessionNotFoundError(sessionId);
-    const updated = { ...record, cost };
-    await idb.put(STORE, updated);
-    return assemble(updated);
-  });
+  const setCost = (sessionId, cost) => updateSessionRecord(
+    sessionId,
+    (record) => ({ ...record, cost }),
+  );
 
   /**
    * Set or CLEAR the session's prewalk state (loop/prewalk.js). null removes
@@ -662,50 +467,32 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
    * @param {import('../loop/prewalk.js').PrewalkState | null} state
    * @param {{ provider?: string, model?: string }} [modelPatch]
    */
-  const setPrewalk = (sessionId, state, modelPatch) => enqueueSessionOperation(sessionId, async () => {
-    const record = await getRecord(sessionId);
-    if (!record) throw new SessionNotFoundError(sessionId);
+  const setPrewalk = (sessionId, state, modelPatch) => updateSessionRecord(sessionId, (record) => {
     const { prewalk: _removed, ...rest } = record;
-    const updated = {
+    return {
       ...rest,
       ...(modelPatch ?? {}),
       ...(state ? { prewalk: state } : {}),
     };
-    await idb.put(STORE, updated);
-    return assemble(updated);
-  });
-
-  /**
-   * Persist the session's rolling trim-summary state.
-   *
-   * @param {string} sessionId
-   * @param {import('../loop/rolling-summary.js').TrimSummaryState} state
-   */
-  const setTrimSummary = (sessionId, state) => enqueueSessionOperation(sessionId, async () => {
-    const record = await getRecord(sessionId);
-    if (!record) throw new SessionNotFoundError(sessionId);
-    const updated = { ...record, trimSummary: state };
-    await idb.put(STORE, updated);
-    return assemble(updated);
   });
 
   return Object.freeze({
     create,
     importPortable,
-    get,
+    get: turnSessions.get,
     list,
     listMetadata,
     getMetadata,
     getLatestNonSyntheticUserMessage,
     findActorSession,
     archive,
-    appendMessage,
-    updateAssistantMessage,
+    appendMessage: turnSessions.appendMessage,
+    updateAssistantMessage: turnSessions.updateAssistantMessage,
     update,
     setCustomSystemPrompt,
     setToolManifest,
     setCost,
     setPrewalk,
-    setTrimSummary,
+    setTrimSummary: turnSessions.setTrimSummary,
   });
 };

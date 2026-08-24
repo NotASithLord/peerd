@@ -6,33 +6,57 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
+import {
+  INITIAL_STATE, resetChatAfterRuntimeLoss,
+} from '../../extension/sidepanel/chat-reducer.js';
 
 const serviceWorker = readFileSync(join(EXTENSION_DIR, 'background/service-worker.js'), 'utf8');
-const sidepanel = readFileSync(join(EXTENSION_DIR, 'sidepanel/sidepanel.js'), 'utf8');
+const stateSnapshot = readFileSync(join(EXTENSION_DIR, 'background/state-snapshot.js'), 'utf8');
 
 describe('actor live snapshot ordering', () => {
   test('captures the projection only after awaited reads and broadcasts without another await', () => {
-    const start = serviceWorker.indexOf('const buildStateSnapshot = async () => {');
-    const end = serviceWorker.indexOf('const pushState = makeCoalescedStatePush({', start);
-    const buildStateSnapshot = serviceWorker.slice(start, end);
-    const vaultRead = buildStateSnapshot.indexOf(
+    const vaultRead = stateSnapshot.indexOf(
       'const vaultInitialized = await vault.isInitialized();',
     );
-    const actorCapture = buildStateSnapshot.indexOf(
+    const actorCapture = stateSnapshot.indexOf(
       'const liveActors = actorLiveProjection.snapshot(',
     );
 
+    expect(serviceWorker).toContain('const buildStateSnapshot = makeStateSnapshotBuilder({');
+    expect(serviceWorker).toContain('actorLiveProjection,');
     expect(vaultRead).toBeGreaterThan(-1);
     expect(actorCapture).toBeGreaterThan(vaultRead);
-    expect(buildStateSnapshot.slice(actorCapture)).not.toContain('await ');
+    expect(stateSnapshot.slice(actorCapture)).not.toContain('await ');
   });
 
-  test('disconnect resets the worker epoch and revision with the live actor projection', () => {
-    const start = sidepanel.indexOf('const handlePortDisconnect = () => {');
-    const end = sidepanel.indexOf('connectPort();', start);
-    const disconnect = sidepanel.slice(start, end);
-    expect(disconnect).toContain('actors: INITIAL_STATE.actors');
-    expect(disconnect).toContain('actorProjectionEpoch: INITIAL_STATE.actorProjectionEpoch');
-    expect(disconnect).toContain('actorProjectionRevision: INITIAL_STATE.actorProjectionRevision');
+  test('disconnect reset drops worker-owned live projections and keeps durable posture', () => {
+    const prior = {
+      ...INITIAL_STATE,
+      hydrated: true,
+      projection: { authorityEpoch: 'old', generation: 9 },
+      vault: { ...INITIAL_STATE.vault, initialized: true, locked: false, unlockedAt: 42 },
+      providers: { ...INITIAL_STATE.providers, current: 'openai', hasKey: true },
+      pendingConfirm: { id: 'stale' },
+      streaming: true,
+      actorProjectionEpoch: 'actor-old',
+      actorProjectionRevision: 17,
+      actors: { stale: { streaming: true } },
+      spawned: { byToolUse: { stale: 'child' }, sessions: {} },
+      asyncTasks: { stale: { status: 'running' } },
+    } as any;
+    const reset = resetChatAfterRuntimeLoss(prior) as any;
+    expect(reset).toMatchObject({
+      hydrated: false,
+      projection: null,
+      vault: { initialized: true, locked: true, unlockedAt: 0 },
+      providers: { current: 'openai', hasKey: false },
+      pendingConfirm: null,
+      streaming: false,
+      actorProjectionEpoch: INITIAL_STATE.actorProjectionEpoch,
+      actorProjectionRevision: INITIAL_STATE.actorProjectionRevision,
+    });
+    expect(reset.actors).toBe(INITIAL_STATE.actors);
+    expect(reset.spawned).toBe(INITIAL_STATE.spawned);
+    expect(reset.asyncTasks).toBe(INITIAL_STATE.asyncTasks);
   });
 });

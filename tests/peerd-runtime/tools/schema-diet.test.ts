@@ -11,10 +11,9 @@
 
 import { describe, test, expect } from 'bun:test';
 
-// sandbox_create's import graph touches the webextension-polyfill (via
-// notebook-client), which throws unless a chrome global is present — stub it,
-// then dynamic-import, exactly as the runtime provides it.
-(globalThis as any).chrome = { runtime: { id: 'test' } };
+// The shared test bootstrap provides the browser identity required by the
+// sandbox_create import graph. Do not replace it here: browser-api.js binds the
+// object by identity, so a file-local replacement can poison later suites.
 const { messageActorTool } = await import('../../../extension/peerd-runtime/tools/defs/message-actor.js');
 const { scriptTool } = await import('../../../extension/peerd-runtime/tools/defs/script.js');
 const { sandboxCreateTool } = await import('../../../extension/peerd-runtime/tools/defs/sandbox-create.js');

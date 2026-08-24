@@ -23,7 +23,7 @@
 //     promptly with VMTabClosedError instead of stalling out the 90s
 //     message timeout.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import { bytesToBase64 } from '/shared/util.js';
 import {
   VMNotReadyError,

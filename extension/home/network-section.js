@@ -370,6 +370,12 @@ const fact = (k, v) => m('.peerd-net-fact', [
   m('span.peerd-net-fact-v', v),
 ]);
 
+/** @param {unknown} result @param {'start'|'stop'} action */
+const lifecycleFailure = (result, action) =>
+  /** @type {{outcomeKnown?:boolean}} */ (result)?.outcomeKnown === false
+    ? `Peerd could not confirm whether the network ${action} finished. Its current status was re-read; check it before trying again.`
+    : `Peerd could not ${action} the network. Check your connection and try again.`;
+
 /**
  * The Network section, mounted on the home page (DWEB_ENABLED only).
  * @returns {object} a Mithril component; attrs: { send }
@@ -382,21 +388,48 @@ export const NetworkSection = () => {
   let error = null;
   let starting = false;
   let stopping = false;
+  /** @type {'start'|'stop'|null} */
+  let transitionUnknown = null;
+  /** @type {Promise<boolean> | null} */
+  let refreshInFlight = null;
+  let refreshEpoch = 0;
+  let appliedEpoch = 0;
   /** @type {ReturnType<typeof setInterval> | number} */
   let timer = 0;
   let dead = false;      // set on unmount — an in-flight poll must not redraw
 
   /** @param {Send} send */
-  const refresh = async (send) => {
-    try {
-      const r = await send({ type: 'dweb/distributed/info' });
-      if (r && r.ok === false) { error = r.error || 'unavailable'; info = null; }
-      else { info = r; error = null; }
-    } catch (e) {
-      error = /** @type {{ message?: string }} */ (e)?.message || String(e);
-    }
-    loading = false;
-    if (!dead) m.redraw();
+  const refresh = (send) => {
+    if (refreshInFlight) return refreshInFlight;
+    const epoch = ++refreshEpoch;
+    refreshInFlight = (async () => {
+      try {
+        const r = await send({ type: 'dweb/distributed/info' });
+        if (r?.ok === false || typeof r?.running !== 'boolean') {
+          throw new Error('network-status-unavailable');
+        }
+        if (epoch >= appliedEpoch) {
+          appliedEpoch = epoch;
+          info = r;
+          error = null;
+          const expected = transitionUnknown === 'start' ? true
+            : transitionUnknown === 'stop' ? false : null;
+          if (expected === null || r.running === expected) transitionUnknown = null;
+        }
+        return true;
+      } catch (cause) {
+        if (epoch >= appliedEpoch) {
+          error = 'Peerd could not refresh network status. Retry the status check.';
+        }
+        void cause;
+        return false;
+      } finally {
+        loading = false;
+        refreshInFlight = null;
+        if (!dead) m.redraw();
+      }
+    })();
+    return refreshInFlight;
   };
 
   /** @param {Send} send */
@@ -412,8 +445,15 @@ export const NetworkSection = () => {
     let startErr = null;
     try {
       const r = await send({ type: 'dweb/base/start' });
-      if (r && r.ok === false) startErr = r.error || 'start failed';
-    } catch (e) { startErr = /** @type {{ message?: string }} */ (e)?.message || String(e); }
+      if (r && r.ok === false) {
+        transitionUnknown = r.outcomeKnown === false ? 'start' : null;
+        startErr = lifecycleFailure(r, 'start');
+      }
+    } catch (cause) {
+      transitionUnknown = 'start';
+      startErr = lifecycleFailure({ outcomeKnown: false }, 'start');
+      void cause;
+    }
     starting = false;
     await refresh(send);
     if (startErr) { error = startErr; if (!dead) m.redraw(); }
@@ -429,8 +469,15 @@ export const NetworkSection = () => {
     let stopErr = null;
     try {
       const r = await send({ type: 'dweb/base/stop' });
-      if (r && r.ok === false) stopErr = r.error || 'stop failed';
-    } catch (e) { stopErr = /** @type {{ message?: string }} */ (e)?.message || String(e); }
+      if (r && r.ok === false) {
+        transitionUnknown = r.outcomeKnown === false ? 'stop' : null;
+        stopErr = lifecycleFailure(r, 'stop');
+      }
+    } catch (cause) {
+      transitionUnknown = 'stop';
+      stopErr = lifecycleFailure({ outcomeKnown: false }, 'stop');
+      void cause;
+    }
     stopping = false;
     await refresh(send);
     if (stopErr) { error = stopErr; if (!dead) m.redraw(); }
@@ -452,14 +499,34 @@ export const NetworkSection = () => {
       if (loading && !info) {
         return m('.peerd-net', m('.peerd-net-empty', 'Finding your way into the network…'));
       }
-      if (!info || info.running === false) {
+      if (!info) {
+        return m('.peerd-net', m('.peerd-net-offline', [
+          m('p', error ?? 'Network status is unavailable.'),
+          m('button.peerd-net-btn', {
+            disabled: !!refreshInFlight,
+            onclick: () => refresh(send),
+          }, refreshInFlight ? 'Checking…' : 'Retry status'),
+        ]));
+      }
+      if (info.running === false) {
         return m('.peerd-net', m('.peerd-net-offline', [
           m('p', error && error !== 'unavailable'
             ? `The network isn’t live yet (${error}).`
             : 'The network isn’t live yet. It comes up on unlock and stays on in the background, '
               + 'so your apps keep their connections even with no tab open.'),
-          m('button.peerd-net-btn', { disabled: starting, onclick: () => start(send) },
-            starting ? 'Starting…' : 'Start the network'),
+          transitionUnknown === 'start' ? m.fragment({}, [
+            m('button.peerd-net-btn', {
+              disabled: starting || !!refreshInFlight,
+              onclick: () => refresh(send),
+            }, refreshInFlight ? 'Checking…' : 'Recheck network status'),
+            m('button.peerd-net-btn.secondary', {
+              disabled: starting || !!refreshInFlight,
+              onclick: () => start(send),
+            }, starting ? 'Finishing…' : 'Finish same start'),
+          ]) : m('button.peerd-net-btn', {
+            disabled: starting || !!refreshInFlight,
+            onclick: () => start(send),
+          }, starting ? 'Starting…' : 'Start the network'),
         ]));
       }
       // The bootstrap node rides the graph as a normal node (no status badge) —
@@ -493,8 +560,18 @@ export const NetworkSection = () => {
         // Kill switch — symmetric to "Start the network" in the offline view.
         // Drops every live connection and persists dweb off (won't auto-restart
         // on unlock) — docs/specs/FEATURE-FIRST-CLASS-MESSAGING.md §2.
-        m('button.peerd-net-btn', {
-          disabled: stopping,
+        transitionUnknown === 'stop' ? m.fragment({}, [
+          m('button.peerd-net-btn', {
+            disabled: stopping || !!refreshInFlight,
+            style: 'margin-top:10px; font-size:12px; opacity:.75;',
+            onclick: () => refresh(send),
+          }, refreshInFlight ? 'Checking…' : 'Recheck network status'),
+          m('button.peerd-net-btn.secondary', {
+            disabled: stopping || !!refreshInFlight,
+            onclick: () => stop(send),
+          }, stopping ? 'Finishing…' : 'Finish same stop'),
+        ]) : m('button.peerd-net-btn', {
+          disabled: stopping || !!refreshInFlight,
           style: 'margin-top:10px; font-size:12px; opacity:.75;',
           onclick: () => stop(send),
         }, stopping ? 'Stopping…' : 'Stop the network'),

@@ -184,7 +184,9 @@ describe('options.memory-suggestions', () => {
         need(root, 'button[aria-label^="Approve suggestion: Works at Hydra"]').click();
         await flush();
         await flush();
-        expect(root.querySelector('.key-msg.err')?.textContent).toContain('vault-locked');
+        expect(root.querySelector('.key-msg.err')?.textContent)
+          .toContain('The memory change could not be completed.');
+        expect(root.textContent.includes('vault-locked')).toBe(false);
         // Still rendered — nothing was resolved.
         expect(root.querySelectorAll('.memory-suggestion').length).toBe(2);
       } finally { unmount(); }

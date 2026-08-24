@@ -29,7 +29,7 @@
 //   - That's the difference between page_eval (fails on Gmail) and
 //     page_exec (works on Gmail). Same code, different channel.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import { shapeSketch } from '/peerd-runtime/background.js';
 import {
   createNetworkCaptureRegistry,

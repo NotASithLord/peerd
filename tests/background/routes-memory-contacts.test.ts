@@ -147,4 +147,26 @@ describe('contacts routes', () => {
     const r = makeContactsRoutes(deps());
     expect(await r['contacts/forget']({ did: 'nope' })).toEqual({ ok: false, error: 'contact-not-found' });
   });
+  test('post-dispatch contact failures are unknown and never expose storage details', async () => {
+    const raw = 'private-idb-transaction-42';
+    const set = makeContactsRoutes(deps({
+      contacts: { upsert: async () => { throw new Error(raw); } },
+    }));
+    const setReply = await set['contacts/set']({ did: 'd1', name: 'A' });
+    expect(setReply).toMatchObject({
+      ok: false, code: 'contact-set-outcome-unknown', outcomeKnown: false,
+      outcomeKind: 'unknown', retryable: false,
+    });
+    expect(setReply.error).not.toContain(raw);
+
+    const forget = makeContactsRoutes(deps({
+      contacts: { remove: async () => { throw new Error(raw); } },
+    }));
+    const forgetReply = await forget['contacts/forget']({ did: 'd1' });
+    expect(forgetReply).toMatchObject({
+      ok: false, code: 'contact-forget-outcome-unknown', outcomeKnown: false,
+      retryable: false,
+    });
+    expect(forgetReply.error).not.toContain(raw);
+  });
 });

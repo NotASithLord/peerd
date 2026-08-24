@@ -1,7 +1,7 @@
 // @ts-check
 // One owner for the options page's private backup/restore transport.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import { makePrivateTransferClient } from './private-transfer-client.js';
 
 const serviceWorkerChannels = typeof navigator.serviceWorker?.addEventListener === 'function';

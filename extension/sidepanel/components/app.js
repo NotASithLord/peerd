@@ -28,16 +28,34 @@ const icon = (name, size = 16) =>
   m('svg.ic', { width: size, height: size, viewBox: '0 0 24 24', 'aria-hidden': 'true' },
     m('use', { href: `#ic-${name}` }));
 
+export const StateRuntimeFailure = {
+  /** @param {{attrs:{retry?:()=>void,lead?:any}}} vnode */
+  view: ({ attrs }) => [
+    attrs.lead ?? null,
+    m('h2', 'Peerd is taking longer to start'),
+    m('p', 'No action was run. Retry the secure background connection.'),
+    m('button.primary', { type: 'button', onclick: attrs.retry }, 'Retry'),
+  ],
+};
+
 export const App = {
   /**
    * @param {{ attrs: {
    *   state: ChatState, send: Send, voiceManager: any,
-   *   uiActions: UiActions, view: string, optionsActive: boolean,
+ *   uiActions: UiActions, view: string, optionsActive: boolean,
+ *   stateFailed?: boolean, retryState?: () => void,
    *   activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive',
    * } }} vnode
    */
   view: ({ attrs }) => {
-    const { state, send, voiceManager, uiActions, view, optionsActive, activeTabStatus } = attrs;
+    const {
+      state, send, voiceManager, uiActions, view, optionsActive, activeTabStatus,
+      stateFailed, retryState,
+    } = attrs;
+    if (stateFailed) return m('div.app-shell', [
+      null,
+      m('.body', m('.placeholder', m(StateRuntimeFailure, { retry: retryState }))),
+    ]);
     const unlocked = state.vault.initialized && !state.vault.locked;
     // First-run onboarding is a HOME-page blocker (home.js), not a side-panel
     // route — the panel is reached by popping it from an onboarded home.

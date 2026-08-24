@@ -92,6 +92,7 @@ import './unit/peerd-engine/repository.test.js';
 import './unit/offscreen/job-runner.test.js';
 import './unit/offscreen/job-runner-workspace.test.js';
 import './unit/offscreen/job-runner-toolbox.test.js';
+import './unit/offscreen/controller-worker.test.js';
 
 // --- background (SW chassis: tab trackers + RPC clients + live SW routes) ---
 import './unit/background/vm-tab-close.test.js';
@@ -134,12 +135,15 @@ import './unit/options/behavior-rows.test.js';
 import './unit/options/activity-tool-failed.test.js';
 import './unit/options/dweb-section.test.js';
 import './unit/options/runtime-capability-controls.test.js';
+import './unit/options/state-recovery.test.js';
 import './unit/options/provider-races.test.js';
+import './unit/options/git-credentials.test.js';
 import './unit/options/transfer-identity.test.js';
 import './unit/options/contributor-metrics.test.js';
 
 // --- home (chassis): the full-tab Library page ---
 import './unit/home/library-section.test.js';
+import './unit/home/discover-section.test.js';
 import './unit/home/actors-section.test.js';
 import './unit/home/contacts-section.test.js';
 import './unit/home/network-section.test.js';

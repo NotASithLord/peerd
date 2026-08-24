@@ -9,7 +9,7 @@
 
 import m from '/vendor/mithril/mithril.js';
 import { LINUX_PATH, HTML5_PATH } from '/vendor/simple-icons/brand-paths.js';
-import { manifestLabel, bundleToOtlp, detectVoiceCapability } from '/peerd-runtime/index.js';
+import { manifestLabel, bundleToOtlp, detectVoiceCapability } from '/peerd-runtime/ui.js';
 import { openOptions } from '/shared/open-options.js';
 import { mapError, errorSettingsTarget } from '../error-display.js';
 import { MessageList } from './message-list.js';
@@ -366,6 +366,9 @@ export const ChatView = {
  * @property {boolean} locked
  * @property {string|undefined} fetchedKey
  * @property {number} requestGeneration
+ * @property {boolean} changing
+ * @property {string|null} error
+ * @property {{value:string,message:Record<string,any>}|null} unconfirmed
  */
 
 /** @typedef {{ state: ModelPickerState, attrs: { send: Send, sessionId?: string|null, optionsKey?: string } }} ModelPickerVnode */
@@ -378,6 +381,9 @@ const ModelPicker = {
     vnode.state.locked = false;      // mid-session: provider fixed, model-only
     vnode.state.fetchedKey = undefined;
     vnode.state.requestGeneration = 0;
+    vnode.state.changing = false;
+    vnode.state.error = null;
+    vnode.state.unconfirmed = null;
     ModelPicker.fetch(vnode);
   },
   /** @param {ModelPickerVnode} vnode */
@@ -408,40 +414,86 @@ const ModelPicker = {
         || ModelPicker.keyOf(vnode) !== requestedKey) return;
       if (r?.ok) {
         vnode.state.options = r.options;
-        vnode.state.selected = r.selected;
         vnode.state.locked = !!r.sessionProvider;
+        if (vnode.state.unconfirmed) {
+          if (r.selected === vnode.state.unconfirmed.value) {
+            vnode.state.selected = r.selected;
+            vnode.state.unconfirmed = null;
+            vnode.state.error = null;
+          }
+        } else vnode.state.selected = r.selected;
         m.redraw();
       }
     }).catch(() => {});
   },
+  /** @param {ModelPickerVnode} vnode @param {string} value @param {Record<string,any>} message */
+  async apply(vnode, value, message) {
+    const ui = vnode.state;
+    if (ui.changing) return;
+    const previous = ui.selected;
+    ui.changing = true;
+    ui.selected = value;
+    ui.error = null;
+    m.redraw();
+    try {
+      const reply = await vnode.attrs.send(message);
+      if (reply?.ok) {
+        ui.selected = value;
+        ui.unconfirmed = null;
+      } else if (reply?.outcomeKnown === false) {
+        ui.unconfirmed = { value, message };
+        ui.error = 'Peerd could not confirm the model change. Finish the same change or wait for it to reconcile.';
+      } else {
+        ui.selected = previous;
+        ui.error = 'Peerd could not change the model. Try again.';
+      }
+    } catch (cause) {
+      if (/** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true) {
+        ui.selected = previous;
+        ui.error = 'Peerd could not change the model. Try again.';
+      } else {
+        ui.unconfirmed = { value, message };
+        ui.error = 'Peerd could not confirm the model change. Finish the same change or wait for it to reconcile.';
+      }
+    } finally {
+      ui.changing = false;
+      m.redraw();
+      if (ui.unconfirmed) ModelPicker.fetch(vnode);
+    }
+  },
   /** @param {ModelPickerVnode} vnode */
-  view: ({ attrs: { send, sessionId }, state: ui }) => {
+  view: (vnode) => {
+    const { attrs: { send, sessionId }, state: ui } = vnode;
+    const pendingModel = ui.unconfirmed;
     if (!ui.options || ui.options.length < 2) return null;
     const options = ui.options;
     return m('.model-picker', [
       m('span.model-picker-label', 'Model'),
       m('select.model-picker-select', {
         value: ui.selected,
+        disabled: ui.changing || !!ui.unconfirmed,
         onchange: async (/** @type {Event} */ e) => {
           const opt = options.find((o) => o.value === /** @type {HTMLSelectElement} */ (e.target).value);
           if (!opt) return;
-          ui.selected = opt.value;
-          if (ui.locked && sessionId) {
+          const message = ui.locked && sessionId
             // Mid-session, same provider — bind the new model to this session.
-            await send({ type: 'session/setModel', sessionId, model: opt.model });
-          } else {
+            ? { type: 'session/setModel', sessionId, model: opt.model }
             // Fresh chat — set the default the lazy session-create snapshots.
-            await send({
+            : {
               type: 'settings/update',
               patch: { providerName: opt.provider, providerModel: opt.model },
-            });
-          }
-          m.redraw();
+            };
+          await ModelPicker.apply(vnode, opt.value, message);
         },
       }, options.map((o) =>
         // Mid-session shows just the model name (provider is fixed); fresh
         // chats show "Provider · Model" since the provider can change too.
         m('option', { value: o.value }, ui.locked ? o.label : `${o.providerLabel} · ${o.label}`))),
+      ui.error ? m('span.model-picker-status', ui.error) : null,
+      pendingModel ? m('button.secondary.model-picker-finish', {
+        disabled: ui.changing,
+        onclick: () => ModelPicker.apply(vnode, pendingModel.value, pendingModel.message),
+      }, 'Finish same model change') : null,
     ]);
   },
 };

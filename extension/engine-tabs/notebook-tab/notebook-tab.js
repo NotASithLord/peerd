@@ -10,7 +10,7 @@
 // shimmed fetch + OPFS calls back through the host, mirror agent
 // js_notebook into the editor's notebook.js, post the result back to the SW.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import {
   createEditor, isRemoteSpecifier, makeFetchRemote,
   moduleImportPolicyMessage, MODULE_SYNTAX_ERROR_CODE,

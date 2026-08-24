@@ -7,6 +7,16 @@
 // summary (mergeContacts) — no network, correct on every channel. No reassigned
 // module state. Bodies verbatim, deps injected, imports none.
 
+/** @param {string} code @param {string} action */
+const contactEffectFailure = (code, action) => ({
+  ok: false,
+  error: `Peerd could not confirm whether ${action} finished. Refresh to reconcile before trying again.`,
+  code,
+  outcomeKnown: false,
+  outcomeKind: 'unknown',
+  retryable: false,
+});
+
 /**
  * @param {Record<string, any>} deps
  * @returns {Record<string, (msg?: any) => Promise<any>>}
@@ -49,7 +59,8 @@ export const makeContactsRoutes = (deps) => {
         const contact = await contacts.upsert(did, patch);
         return { ok: true, contact };
       } catch (e) {
-        return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+        void e;
+        return contactEffectFailure('contact-set-outcome-unknown', 'the contact update');
       }
     },
     // Forget a peer's overlay (drops the name/notes; the did may still surface as
@@ -61,7 +72,8 @@ export const makeContactsRoutes = (deps) => {
         const forgotten = await contacts.remove(did);
         return forgotten ? { ok: true } : { ok: false, error: 'contact-not-found' };
       } catch (e) {
-        return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+        void e;
+        return contactEffectFailure('contact-forget-outcome-unknown', 'forgetting the contact');
       }
     },
   };

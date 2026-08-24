@@ -1,13 +1,17 @@
 import { describe, expect, test } from 'bun:test';
-import { makeOptionsSender } from '../../extension/options/options-state-sync.js';
+import { makeReconciledUiSender } from '../../extension/shared/ui-runtime-client.js';
 
 const makeHarness = (reply: any) => {
   const events: string[] = [];
-  const send = makeOptionsSender({
-    sendRuntime: async () => { events.push('runtime'); return reply; },
-    sendTransfer: async () => { events.push('transfer'); return reply; },
-    foldReply: () => { events.push('fold'); },
-    fetchState: async () => { events.push('refresh'); },
+  const send = makeReconciledUiSender({
+    send: async (message) => {
+      events.push(message.type.startsWith('transfer/') ? 'transfer' : 'runtime');
+      return reply;
+    },
+    fold: () => { events.push('fold'); },
+    reconcile: async () => { events.push('refresh'); },
+    afterReply: (message, result) => message.type === 'transfer/import'
+      && (result?.ok || result?.partial),
   });
   return { send, events };
 };
@@ -27,5 +31,25 @@ describe('Options state synchronization', () => {
     const failed = makeHarness({ ok: false, error: 'wrong-passphrase' });
     await failed.send({ type: 'transfer/import' });
     expect(failed.events).toEqual(['transfer', 'fold']);
+  });
+
+  test('reconciles resolved and rejected unknown effects without replaying them', async () => {
+    const resolved = makeHarness({ ok: false, outcomeKnown: false });
+    await resolved.send({ type: 'settings/update', patch: { voiceEnabled: true } });
+    expect(resolved.events).toEqual(['runtime', 'fold', 'refresh']);
+
+    const events: string[] = [];
+    const unknown = Object.assign(new Error('private transport H-1'), {
+      outcomeKnown: false, retryable: false,
+    });
+    const send = makeReconciledUiSender({
+      send: async () => { events.push('runtime'); throw unknown; },
+      fold: () => { events.push('fold'); },
+      reconcile: async () => { events.push('refresh'); },
+      afterReply: () => false,
+    });
+    await expect(send({ type: 'settings/update', patch: { voiceEnabled: true } }))
+      .rejects.toBe(unknown);
+    expect(events).toEqual(['runtime', 'refresh']);
   });
 });

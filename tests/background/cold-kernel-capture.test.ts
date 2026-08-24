@@ -1,0 +1,631 @@
+import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
+import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
+import { createColdKernelCapture } from '../../extension/background/cold-kernel-capture.js';
+import { createColdListenerFanIn } from '../../extension/background/cold-listener-fan-in.js';
+import {
+  coldEventKeysFor,
+  LEGACY_COLD_EVENTS,
+} from '../../extension/background/cold-kernel-inventory.js';
+
+type Listener = (...args: any[]) => any;
+const makeEvent = () => {
+  const listeners: Listener[] = [];
+  const registrations: any[] = [];
+  return {
+    listeners,
+    registrations,
+    addListener(listener: Listener, ...args: any[]) {
+      listeners.push(listener);
+      registrations.push([listener, ...args]);
+    },
+    removeListener(listener: Listener) {
+      const index = listeners.indexOf(listener);
+      if (index >= 0) listeners.splice(index, 1);
+    },
+    emit(...args: any[]) { return listeners.map((listener) => listener(...args)); },
+  };
+};
+
+const makeBrowser = () => ({
+  runtime: {
+    onMessage: makeEvent(), onConnect: makeEvent(), onStartup: makeEvent(),
+    onInstalled: makeEvent(), onUpdateAvailable: makeEvent(),
+  },
+  alarms: { onAlarm: makeEvent() },
+  storage: { session: { onChanged: makeEvent() } },
+  tabs: {
+    onCreated: makeEvent(), onUpdated: makeEvent(), onRemoved: makeEvent(),
+    onActivated: makeEvent(),
+  },
+  windows: { onFocusChanged: makeEvent() },
+  webNavigation: { onCreatedNavigationTarget: makeEvent() },
+  webRequest: { onBeforeRequest: makeEvent() },
+  action: { onClicked: makeEvent() },
+  commands: { onCommand: makeEvent() },
+});
+
+const makeStore = () => {
+  const values = new Map<string, any>();
+  return {
+    values,
+    get: async (key: string) => structuredClone(values.get(key)),
+    set: async (key: string, value: any) => { values.set(key, structuredClone(value)); },
+  };
+};
+
+const LEGACY_LISTENER_SITES = Object.freeze({
+  'runtime.onMessage': 6,
+  'runtime.onConnect': 1,
+  'runtime.onStartup': 1,
+  'runtime.onUpdateAvailable': 2,
+  'alarms.onAlarm': 1,
+  'storage.session.onChanged': 1,
+  'tabs.onCreated': 1,
+  'tabs.onUpdated': 6,
+  'tabs.onRemoved': 8,
+  'tabs.onActivated': 2,
+  'windows.onFocusChanged': 1,
+  'webNavigation.onCreatedNavigationTarget': 1,
+  'webRequest.onBeforeRequest': 1,
+  'action.onClicked': 1,
+  'commands.onCommand': 1,
+});
+
+const authorityFor = (calls: string[] = []) => Object.fromEntries(
+  LEGACY_COLD_EVENTS.filter((entry) =>
+    entry.placement === 'kernel-authority' || entry.placement === 'kernel-immediate')
+    .map((entry) => [entry.key, () => { calls.push(entry.key); return {}; }]),
+);
+
+const ids = (...values: string[]) => {
+  const queue = [...values];
+  let fallback = 0;
+  return () => queue.shift() ?? `generated-${++fallback}`;
+};
+
+const firstParty = { id: 'extension-id', url: 'chrome-extension://extension-id/sidepanel.html' };
+const makeKernel = ({
+  browser = makeBrowser(),
+  store = makeStore(),
+  calls = [] as string[],
+  newId = ids('kernel-one', 'delivery-one', 'delivery-two'),
+  rpcDeadlineMs = 30_000,
+  firefox = false,
+} = {}) => ({
+  browser,
+  store,
+  calls,
+  kernel: createColdKernelCapture({
+    browser,
+    queueStore: store,
+    authority: authorityFor(calls),
+    isFirstPartySender: (sender) => sender?.id === 'extension-id'
+      && String(sender?.url).startsWith('chrome-extension://extension-id/'),
+    isFirstPartyPort: (port) => port?.sender?.id === 'extension-id'
+      && String(port?.sender?.url).startsWith('chrome-extension://extension-id/'),
+    newId,
+    rpcDeadlineMs,
+    firefox,
+    now: () => 123,
+  }),
+});
+
+const send = (browser: ReturnType<typeof makeBrowser>, message: any, sender = firstParty) =>
+  new Promise<any>((resolve, reject) => {
+    const listener = browser.runtime.onMessage.listeners[0];
+    if (!listener) return reject(new Error('runtime listener absent'));
+    try { listener(message, sender, resolve); } catch (error) { reject(error); }
+  });
+
+describe('cold-listener inventory differential', () => {
+  test('inventory covers every browser listener in the legacy static graph', async () => {
+    const root = new URL('../../extension/', import.meta.url).pathname;
+    const entry = new URL('../../extension/background/service-worker.js', import.meta.url).pathname;
+    const graph = await collectStaticModuleGraph(root, entry);
+    const actual = new Map<string, number>();
+    const allListenerSites = new Map<string, number>();
+    const addActual = (key: string) => actual.set(key, (actual.get(key) ?? 0) + 1);
+    for (const file of graph) {
+      const source = readFileSync(file, 'utf8');
+      if (!source.includes('addListener')) continue;
+      const parsed = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+      const walk = (node: ts.Node) => {
+        if (ts.isCallExpression(node)
+            && ts.isPropertyAccessExpression(node.expression)
+            && node.expression.name.text === 'addListener') {
+          const module = file.slice(root.length).replace(/^\//, '');
+          // The fan-in/capture implementations are the reviewed generic
+          // multiplexer itself, not semantic browser-listener owners. Their
+          // registration behavior is asserted by the differential suite below.
+          if (module !== 'background/cold-kernel-capture.js'
+              && module !== 'background/cold-listener-fan-in.js') {
+            allListenerSites.set(module, (allListenerSites.get(module) ?? 0) + 1);
+          }
+          const receiver = node.expression.expression;
+          const target = receiver.getText(parsed).replaceAll('?.', '.');
+          if (target.startsWith('browser.')) addActual(target.slice('browser.'.length));
+          else if (ts.isCallExpression(receiver)
+              && receiver.expression.getText(parsed) === 'coldEvent'
+              && ts.isStringLiteral(receiver.arguments[0])) {
+            addActual(receiver.arguments[0].text);
+          }
+        }
+        ts.forEachChild(node, walk);
+      };
+      walk(parsed);
+    }
+    // These two listeners are registered through a generic event parameter,
+    // so their addListener call has no `browser.*` receiver for the AST walk.
+    const serviceWorker = readFileSync(entry, 'utf8');
+    const updateCheck = readFileSync(
+      new URL('../../extension/background/update-check.js', import.meta.url), 'utf8',
+    );
+    expect(serviceWorker).toContain(
+      "event: coldEvent('webRequest.onBeforeRequest', browser.webRequest?.onBeforeRequest)",
+    );
+    expect(updateCheck).toContain('updateAvailableEvent?.addListener');
+    addActual('webRequest.onBeforeRequest');
+    // syncEnabled uses an `events` alias in addition to start()'s direct site.
+    addActual('runtime.onUpdateAvailable');
+    addActual('runtime.onUpdateAvailable');
+    // Debugger listeners are deliberately lazy: their first attach cannot be a
+    // cold wake because a live debugger operation already owns a semantic host.
+    const deferred = ['debugger.onDetach', 'debugger.onEvent'];
+    expect([...actual.keys()].sort()).toEqual([
+      ...Object.keys(LEGACY_LISTENER_SITES), ...deferred,
+    ].sort());
+    expect(Object.fromEntries(Object.keys(LEGACY_LISTENER_SITES)
+      .map((key) => [key, actual.get(key) ?? 0]))).toEqual(LEGACY_LISTENER_SITES);
+    expect(actual.has('runtime.onInstalled')).toBe(false);
+    // Catch a new generic `event.addListener(...)` too, not only receivers the
+    // AST can name as `browser.*`. Any listener-site change requires an explicit
+    // cold/deferred/ephemeral classification in this inventory review.
+    expect(Object.fromEntries([...allListenerSites].sort())).toEqual({
+      'background/debugger-pool.js': 5,
+      'background/driven-child-request-guard.js': 1,
+      'background/dweb-custody-client.js': 2,
+      // The extracted kernel owner contains both the authenticated heartbeat
+      // and exact disconnect retirement listeners.
+      'background/feature-lease-keepalive.js': 2,
+      'background/private-transfer-port.js': 2,
+      'background/service-worker.js': 20,
+      'background/tab-affordances.js': 10,
+      'background/update-check.js': 2,
+      'peerd-runtime/tools/defs/committed-navigation.js': 1,
+      'peerd-runtime/tools/web/screenshot.js': 1,
+    });
+    expect(graph.size).toBeGreaterThan(400);
+  });
+
+  test('target filters preserve the Firefox blocker and preview update event', () => {
+    expect(coldEventKeysFor()).not.toContain('webRequest.onBeforeRequest');
+    expect(coldEventKeysFor()).not.toContain('storage.session.onChanged');
+    expect(coldEventKeysFor()).not.toContain('runtime.onUpdateAvailable');
+    expect(coldEventKeysFor({ firefox: true })).toContain('webRequest.onBeforeRequest');
+    expect(coldEventKeysFor({ firefox: true })).toContain('storage.session.onChanged');
+    expect(coldEventKeysFor({ selfHostedChrome: true })).toContain('runtime.onUpdateAvailable');
+  });
+});
+
+describe('cold kernel durable capture and epochs', () => {
+  test('injected identity owns capture, host attachment, and acknowledgements without epoch minting', async () => {
+    const browser = makeBrowser();
+    const store = makeStore();
+    const identity = Object.freeze({
+      schema: 1 as const,
+      buildId: `0.7.0:${'a'.repeat(64)}`,
+      bootId: 'boot-cold-capture',
+      kernelEpoch: 'kernel-cold-capture',
+    });
+    const generated: string[] = [];
+    const capture = createColdKernelCapture({
+      browser,
+      queueStore: store,
+      authority: authorityFor(),
+      isFirstPartySender: () => true,
+      isFirstPartyPort: () => true,
+      kernelIdentity: identity,
+      newId: () => {
+        const value = `delivery-${generated.length + 1}`;
+        generated.push(value);
+        return value;
+      },
+      now: () => 123,
+    });
+    await capture.ready();
+    expect(capture.kernelEpoch).toBe(identity.kernelEpoch);
+    expect(capture.kernelIdentity).toEqual(identity);
+    expect(generated).toEqual([]);
+    expect(store.values.get('cold-kernel.queue.v1')).toMatchObject({
+      ownerEpoch: identity.kernelEpoch,
+      ownerIdentity: identity,
+    });
+
+    const host = (kernelIdentity: any) => ({
+      epoch: 'host-cold-capture', kernelIdentity,
+      dispatchMessage: async () => ({ ok: true }),
+      adoptPort: () => {}, retire: () => {},
+    });
+    expect(capture.attachHost(host({ ...identity, kernelEpoch: 'kernel-cold-forged' })))
+      .toBe(false);
+    expect(capture.attachHost(host(identity))).toBe(true);
+    await capture.captureEvent('runtime.onStartup', []);
+    const delivery = await capture.claim('host-cold-capture');
+    expect(delivery).toMatchObject({
+      kernelEpoch: identity.kernelEpoch,
+      kernelIdentity: identity,
+      deliveryId: 'delivery-1',
+    });
+    expect(await capture.acknowledge({
+      ...delivery,
+      kernelIdentity: { ...identity, bootId: 'boot-cold-forged' },
+      ids: delivery!.entries.map((entry: any) => entry.id),
+    })).toBe(false);
+    expect(await capture.acknowledge({
+      kernelEpoch: identity.kernelEpoch,
+      kernelIdentity: identity,
+      hostEpoch: 'host-cold-capture',
+      deliveryId: delivery!.deliveryId,
+      ids: delivery!.entries.map((entry: any) => entry.id),
+    })).toBe(true);
+  });
+
+  test('registers one synchronous listener per Store Chrome cold event', async () => {
+    const { browser, kernel } = makeKernel();
+    expect(kernel.registered).toEqual(coldEventKeysFor());
+    for (const key of coldEventKeysFor()) {
+      const event = key.split('.').reduce((value: any, part) => value?.[part], browser);
+      expect(event.listeners, key).toHaveLength(1);
+    }
+    await kernel.ready();
+  });
+
+  test('Firefox blocking and self-hosted update listeners retain target semantics', async () => {
+    const firefoxBrowser = makeBrowser();
+    const firefox = createColdKernelCapture({
+      browser: firefoxBrowser, queueStore: makeStore(), authority: authorityFor(),
+      isFirstPartySender: () => true, isFirstPartyPort: () => true,
+      firefox: true, newId: ids('kernel-firefox'),
+    });
+    await firefox.ready();
+    expect(firefox.registered).toContain('webRequest.onBeforeRequest');
+    expect(firefoxBrowser.webRequest.onBeforeRequest.registrations[0].slice(1)).toEqual([
+      { urls: ['<all_urls>'] }, ['blocking'],
+    ]);
+
+    const previewBrowser = makeBrowser();
+    const preview = createColdKernelCapture({
+      browser: previewBrowser, queueStore: makeStore(), authority: authorityFor(),
+      isFirstPartySender: () => true, isFirstPartyPort: () => true,
+      selfHostedChrome: true, newId: ids('kernel-preview'),
+    });
+    await preview.ready();
+    expect(preview.registered).toContain('runtime.onUpdateAvailable');
+  });
+
+  test('authority runs synchronously while persisted hints contain no URLs or storage values', async () => {
+    const { browser, kernel, calls } = makeKernel({ firefox: true });
+    const secret = { newValue: { dk: 'must-not-copy' } };
+    browser.webNavigation.onCreatedNavigationTarget.emit({
+      sourceTabId: 1, sourceFrameId: 0, tabId: 2, url: 'https://secret.example/private',
+    });
+    expect(calls).toEqual(['webNavigation.onCreatedNavigationTarget']);
+    browser.storage.session.onChanged.emit({ 'vault.session.dk': secret }, 'session');
+    browser.tabs.onUpdated.emit(2, { status: 'loading', url: 'https://secret.example/next' });
+    const host = {
+      epoch: 'host-one', dispatchMessage: async () => ({ ok: true }),
+      adoptPort() {}, retire() {},
+    };
+    expect(kernel.attachHost(host)).toBe(true);
+    const delivery = await kernel.claim(host.epoch);
+    expect(delivery.entries.map((entry: any) => entry.event)).toEqual([
+      'webNavigation.onCreatedNavigationTarget',
+      'storage.session.onChanged',
+      'tabs.onUpdated',
+    ]);
+    const serialized = JSON.stringify(delivery);
+    expect(serialized).not.toContain('secret.example');
+    expect(serialized).not.toContain('must-not-copy');
+    expect(serialized).toContain('vault.session.dk');
+  });
+
+  test('exact delivery and host epochs prevent stale or invented acknowledgements', async () => {
+    const { browser, kernel } = makeKernel();
+    browser.alarms.onAlarm.emit({ name: 'schedule:r1', scheduledTime: 10 });
+    const hostA = { epoch: 'host-a', dispatchMessage: async () => ({}), adoptPort() {}, retire() {} };
+    const hostB = { epoch: 'host-b', dispatchMessage: async () => ({}), adoptPort() {}, retire() {} };
+    kernel.attachHost(hostA);
+    const first = await kernel.claim(hostA.epoch);
+    expect(first.entries).toHaveLength(1);
+    const originalEntries = structuredClone(first.entries);
+    first.entries[0].payload.name = 'host-mutation-must-not-land';
+    expect((await kernel.claim(hostA.epoch)).entries).toEqual(originalEntries);
+    expect(await kernel.acknowledge({
+      kernelEpoch: kernel.kernelEpoch, hostEpoch: hostA.epoch,
+      deliveryId: 'invented', ids: originalEntries.map((entry: any) => entry.id),
+    })).toBe(false);
+    kernel.attachHost(hostB);
+    expect(await kernel.acknowledge({
+      kernelEpoch: kernel.kernelEpoch, hostEpoch: hostA.epoch,
+      deliveryId: first.deliveryId, ids: originalEntries.map((entry: any) => entry.id),
+    })).toBe(false);
+    const replacement = await kernel.claim(hostB.epoch);
+    expect(replacement.entries).toEqual(originalEntries);
+    expect(await kernel.acknowledge({
+      kernelEpoch: kernel.kernelEpoch, hostEpoch: hostB.epoch,
+      deliveryId: replacement.deliveryId,
+      ids: replacement.entries.map((entry: any) => entry.id),
+    })).toBe(true);
+    expect((await kernel.claim(hostB.epoch)).entries).toEqual([]);
+  });
+
+  test('a replacement kernel owner rejects the old generation late ack', async () => {
+    const store = makeStore();
+    const first = makeKernel({ store, newId: ids('kernel-a', 'delivery-a') });
+    await first.kernel.ready();
+    first.browser.alarms.onAlarm.emit({ name: 'schedule:r2' });
+    const hostA = { epoch: 'host-a', dispatchMessage: async () => ({}), adoptPort() {}, retire() {} };
+    first.kernel.attachHost(hostA);
+    const deliveryA = await first.kernel.claim(hostA.epoch);
+
+    const second = makeKernel({ store, newId: ids('kernel-b', 'delivery-b') });
+    await second.kernel.ready();
+    await expect(first.kernel.acknowledge({
+      kernelEpoch: first.kernel.kernelEpoch, hostEpoch: hostA.epoch,
+      deliveryId: deliveryA.deliveryId,
+      ids: deliveryA.entries.map((entry: any) => entry.id),
+    })).rejects.toThrow('cold-kernel-epoch-retired');
+    const hostB = { epoch: 'host-b', dispatchMessage: async () => ({}), adoptPort() {}, retire() {} };
+    second.kernel.attachHost(hostB);
+    expect((await second.kernel.claim(hostB.epoch)).entries).toEqual(deliveryA.entries);
+  });
+});
+
+describe('cold kernel transient routes and ports', () => {
+  test('pre-host RPC is known-safe; post-dispatch deadline is outcome unknown', async () => {
+    const setup = makeKernel({ rpcDeadlineMs: 5 });
+    const retireReasons: string[] = [];
+    await setup.kernel.ready();
+    expect(await send(setup.browser, { type: 'vault/lock' })).toMatchObject({
+      ok: false, error: 'kernel-host-unavailable', outcomeKnown: true,
+    });
+    setup.kernel.attachHost({
+      epoch: 'host-timeout',
+      dispatchMessage: async (_message, _sender, signal) => new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('host aborted')), { once: true });
+      }),
+      adoptPort() {}, retire(reason) { retireReasons.push(reason); },
+    });
+    expect(await send(setup.browser, { type: 'vault/lock' })).toMatchObject({
+      ok: false, outcomeKnown: false,
+    });
+    expect(retireReasons).toEqual(['deadline']);
+    expect(setup.kernel.attachHost({
+      epoch: 'host-timeout', dispatchMessage: async () => ({}), adoptPort() {}, retire() {},
+    })).toBe(false);
+    expect(setup.kernel.attachHost({
+      epoch: 'host-fresh', dispatchMessage: async () => ({ ok: true }), adoptPort() {}, retire() {},
+    })).toBe(true);
+  });
+
+  test('oversized transient message is refused before host dispatch', async () => {
+    const setup = makeKernel();
+    await setup.kernel.ready();
+    let dispatched = 0;
+    setup.kernel.attachHost({
+      epoch: 'host-size',
+      dispatchMessage: async () => { dispatched += 1; return { ok: true }; },
+      adoptPort() {}, retire() {},
+    });
+    expect(await send(setup.browser, {
+      type: 'agent/send', userText: 'x'.repeat(300 * 1024),
+    })).toEqual({ ok: false, error: 'kernel-message-too-large', outcomeKnown: true });
+    expect(dispatched).toBe(0);
+  });
+
+  test('binary structured-clone bytes cannot bypass the transient route cap', async () => {
+    const setup = makeKernel();
+    await setup.kernel.ready();
+    let dispatched = 0;
+    setup.kernel.attachHost({
+      epoch: 'host-binary-size',
+      dispatchMessage: async () => { dispatched += 1; return { ok: true }; },
+      adoptPort() {}, retire() {},
+    });
+    expect(await send(setup.browser, {
+      type: 'agent/send', attachment: new ArrayBuffer(100 * 1024 * 1024),
+    })).toEqual({ ok: false, error: 'kernel-message-too-large', outcomeKnown: true });
+    expect(dispatched).toBe(0);
+  });
+
+  test('secret-bearing port fails closed while UI port is bounded and adopted', async () => {
+    const { browser, kernel } = makeKernel();
+    await kernel.ready();
+    const port = (name: string) => {
+      let disconnected = false;
+      const messages: any[] = [];
+      return {
+        name, sender: firstParty, messages,
+        get disconnected() { return disconnected; },
+        disconnect() { disconnected = true; },
+        postMessage(message: any) { messages.push(message); },
+        onDisconnect: makeEvent(),
+      };
+    };
+    const secret = port('private-transfer');
+    browser.runtime.onConnect.emit(secret);
+    expect(secret.disconnected).toBe(true);
+    const ui = port('sidepanel');
+    browser.runtime.onConnect.emit(ui);
+    expect(ui.messages[0]).toMatchObject({ type: 'kernel/waiting', kernelEpoch: kernel.kernelEpoch });
+    const adopted: any[] = [];
+    kernel.attachHost({
+      epoch: 'host-port', dispatchMessage: async () => ({}),
+      adoptPort(value) { adopted.push(value); }, retire() {},
+    });
+    expect(adopted).toEqual([ui]);
+  });
+
+  test('missing synchronous authority refuses registration', () => {
+    expect(() => createColdKernelCapture({
+      browser: makeBrowser(), queueStore: makeStore(), authority: {},
+      isFirstPartySender: () => true, isFirstPartyPort: () => true,
+    })).toThrow('cold kernel missing synchronous authority: runtime.onInstalled');
+  });
+});
+
+describe('production cold listener fan-in differential', () => {
+  test('one raw registration preserves listener order, arguments, provenance and return custody', async () => {
+    const browser = makeBrowser();
+    const store = makeStore();
+    const fanIn = createColdListenerFanIn({
+      queueStore: store, newId: ids('kernel-fan-in'), now: () => 77,
+    });
+    const calls: any[] = [];
+    const first = (details: any, sender: any) => {
+      calls.push(['first', details, sender]);
+      return undefined;
+    };
+    const second = (details: any, sender: any) => {
+      calls.push(['second', details, sender]);
+      return { cancel: true };
+    };
+    const event = fanIn.event(
+      'webNavigation.onCreatedNavigationTarget',
+      browser.webNavigation.onCreatedNavigationTarget,
+    );
+    event.addListener(first);
+    event.addListener(first); // native events ignore duplicate function identity
+    event.addListener(second);
+    expect(browser.webNavigation.onCreatedNavigationTarget.listeners).toHaveLength(1);
+    const details = { sourceTabId: 4, sourceFrameId: 0, tabId: 9 };
+    const sender = { id: 'opaque-provenance-object' };
+    expect(browser.webNavigation.onCreatedNavigationTarget.emit(details, sender)).toEqual([
+      { cancel: true },
+    ]);
+    expect(calls).toEqual([
+      ['first', details, sender],
+      ['second', details, sender],
+    ]);
+    expect(fanIn.listenerCount('webNavigation.onCreatedNavigationTarget')).toBe(2);
+    await fanIn.capture.ready();
+  });
+
+  test('removeListener cancels only that semantic callback without duplicate browser registration', () => {
+    const browser = makeBrowser();
+    const fanIn = createColdListenerFanIn({
+      queueStore: makeStore(), newId: ids('kernel-remove'),
+    });
+    const calls: string[] = [];
+    const removed = () => calls.push('removed');
+    const kept = () => calls.push('kept');
+    const event = fanIn.event('tabs.onRemoved', browser.tabs.onRemoved);
+    event.addListener(removed);
+    event.addListener(kept);
+    event.removeListener(removed);
+    browser.tabs.onRemoved.emit(1, { windowId: 2 });
+    expect(calls).toEqual(['kept']);
+    expect(browser.tabs.onRemoved.registrations).toHaveLength(1);
+    event.removeListener(kept);
+    expect(browser.tabs.onRemoved.listeners).toHaveLength(0);
+    event.addListener(kept);
+    expect(browser.tabs.onRemoved.listeners).toHaveLength(1);
+    expect(browser.tabs.onRemoved.registrations).toHaveLength(2);
+    browser.tabs.onRemoved.emit(2, { windowId: 2 });
+    expect(calls).toEqual(['kept', 'kept']);
+  });
+
+  test('Firefox blocker retains exact registration options and synchronous decision', () => {
+    const browser = makeBrowser();
+    const fanIn = createColdListenerFanIn({
+      queueStore: makeStore(), firefox: true, newId: ids('kernel-firefox-fan-in'),
+    });
+    const event = fanIn.event('webRequest.onBeforeRequest', browser.webRequest.onBeforeRequest);
+    event.addListener(() => ({ cancel: true }), { urls: ['<all_urls>'] }, ['blocking']);
+    expect(browser.webRequest.onBeforeRequest.registrations).toHaveLength(1);
+    expect(browser.webRequest.onBeforeRequest.registrations[0].slice(1)).toEqual([
+      { urls: ['<all_urls>'] }, ['blocking'],
+    ]);
+    expect(browser.webRequest.onBeforeRequest.emit({ tabId: 2 })).toEqual([{ cancel: true }]);
+    expect(() => event.addListener(() => ({}), { urls: ['https://example.com/*'] }, ['blocking']))
+      .toThrow('cold webRequest registration options changed');
+  });
+
+  test('message response channel stays open when any ordered legacy listener requests it', () => {
+    const browser = makeBrowser();
+    const fanIn = createColdListenerFanIn({
+      queueStore: makeStore(), newId: ids('kernel-message-fan-in'),
+    });
+    const event = fanIn.event('runtime.onMessage', browser.runtime.onMessage);
+    const calls: string[] = [];
+    event.addListener(() => { calls.push('observer'); return false; });
+    event.addListener((_msg: any, sender: any) => {
+      calls.push(sender.url);
+      return true;
+    });
+    expect(browser.runtime.onMessage.emit({ type: 'x' }, { url: 'extension://page' }, () => {}))
+      .toEqual([true]);
+    expect(calls).toEqual(['observer', 'extension://page']);
+  });
+
+  test('failed live dispatch survives restart and overflow forces full reconciliation', async () => {
+    const browser = makeBrowser();
+    const store = makeStore();
+    const first = createColdListenerFanIn({
+      queueStore: store, queueMax: 2,
+      newId: ids('kernel-old'), now: () => 10,
+    });
+    const event = first.event('tabs.onRemoved', browser.tabs.onRemoved);
+    event.addListener(async () => { throw new Error('simulated interrupted semantic handler'); });
+    browser.tabs.onRemoved.emit(1, { windowId: 1 });
+    browser.tabs.onRemoved.emit(2, { windowId: 1 });
+    browser.tabs.onRemoved.emit(3, { windowId: 1 });
+    await first.capture.ready();
+    // Wait for the serialized appends; a claim is also the ordering barrier.
+    first.capture.attachHost({
+      epoch: 'old-reader', dispatchMessage: async () => ({}), adoptPort() {}, retire() {},
+    });
+    const oldDelivery = await first.capture.claim('old-reader');
+    expect(oldDelivery.entries.some((entry: any) => entry.event === 'kernel.queueOverflow')).toBe(true);
+
+    const replacement = createColdListenerFanIn({
+      queueStore: store, queueMax: 2,
+      newId: ids('kernel-new', 'delivery-new'), now: () => 20,
+    });
+    const recoveries: any[] = [];
+    await replacement.recover((recovery) => { recoveries.push(recovery); });
+    expect(recoveries).toHaveLength(1);
+    expect(recoveries[0].fullReconcile).toBe(true);
+    expect(recoveries[0].entries.some((entry: any) =>
+      entry.event === 'kernel.queueOverflow')).toBe(true);
+    await replacement.recover(() => { throw new Error('already empty'); });
+  });
+
+  test('production recovery carries the one injected kernel identity through host claim and ack', async () => {
+    const browser = makeBrowser();
+    const identity = Object.freeze({
+      schema: 1 as const,
+      buildId: `0.7.0:${'b'.repeat(64)}`,
+      bootId: 'boot-production-fan-in',
+      kernelEpoch: 'kernel-production-fan-in',
+    });
+    const fanIn = createColdListenerFanIn({
+      queueStore: makeStore(), kernelIdentity: identity,
+      newId: ids('entry-strict', 'delivery-strict'),
+    });
+    const event = fanIn.event('tabs.onRemoved', browser.tabs.onRemoved);
+    // Model an interrupted semantic realm without creating an unhandled
+    // rejection: an operation that never settles must leave the captured
+    // receipt for the successor/recovery path.
+    event.addListener(() => new Promise<void>(() => {}));
+    browser.tabs.onRemoved.emit(7, { windowId: 2 });
+    const recoveries: any[] = [];
+    await fanIn.recover((recovery) => { recoveries.push(recovery); });
+    expect(fanIn.capture.kernelIdentity).toEqual(identity);
+    expect(recoveries).toHaveLength(1);
+    expect(recoveries[0].entries).toHaveLength(1);
+    await fanIn.recover(() => { throw new Error('strict recovery was not acknowledged'); });
+  });
+});

@@ -11,6 +11,26 @@ import { plugin } from 'bun';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
+// The production cold-path adapter intentionally binds only to the browser's
+// native WebExtension object; it must never pull the compatibility polyfill
+// into a service-worker or offscreen graph. Give Bun the smallest equivalent
+// identity during module evaluation. Individual tests replace or extend this
+// object when they exercise an API; the default is deliberately nonfunctional
+// beyond URL identity so an accidental browser call still fails visibly.
+if (!(globalThis as any).browser && !(globalThis as any).chrome) {
+  (globalThis as any).chrome = {
+    runtime: {
+      id: 'peerd-bun-test',
+      getURL: (path: string) => `chrome-extension://peerd-bun-test/${path.replace(/^\/+/, '')}`,
+    },
+    // Some public background surfaces construct the lazy storage adapter
+    // after another test has already caused browser-api.js to capture this
+    // object. Expose the namespace, but no callable storage methods: an
+    // accidental read or write still fails visibly.
+    storage: { local: {} },
+  };
+}
+
 // Leading-slash import resolution.
 //
 // Extension modules use the browser's root-relative import form
@@ -40,9 +60,8 @@ plugin({
   },
 });
 
-// fake-indexeddb gives us a real in-memory IDB so app-store.ts (which
-// uses standard IDB) can be tested without a browser. Pulled in
-// lazily so tests that don't touch IDB don't pay the import cost.
+// fake-indexeddb gives direct-IDB owners a real in-memory database. It loads
+// lazily so tests that do not touch IDB do not pay the import cost.
 let fakeIDB: any = null;
 export const useFakeIndexedDB = async () => {
   if (!fakeIDB) {

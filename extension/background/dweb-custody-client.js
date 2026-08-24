@@ -1,34 +1,23 @@
 // @ts-check
-// Targeted service-worker client for portable-identity custody operations.
-//
-// why a Port: runtime.sendMessage broadcasts its request to every extension
-// page. These calls carry the permanent identity seed and backup passphrase,
-// so they must travel only over the exact offscreen document's verified port.
-
 export class DwebCustodyPortError extends Error {
-  /** @param {string} message @param {string} code @param {{ cause?: unknown }} [options] */
+  /** @param {string} message @param {string} code @param {{cause?:unknown,outcomeKnown?:boolean}} [options] */
   constructor(message, code, options = {}) {
     super(message, options);
     this.name = 'DwebCustodyPortError';
     this.code = code;
+    this.outcomeKnown = options.outcomeKnown !== false;
   }
 }
 
-/**
- * Cache only a successful boot reset. A timed-out or disconnected attempt is
- * cleared so the next caller can retry on the reconnected custody port.
- * @param {{ enabled: boolean, hostAvailable: boolean, reset: () => Promise<void> }} deps
- */
+/** @param {{enabled:boolean,hostAvailable:boolean,reset:()=>Promise<void>}} deps */
 export const makeRetryableCustodyReset = ({ enabled, hostAvailable, reset }) => {
   let complete = false;
-  /** @type {Promise<void> | null} */
+  /** @type {Promise<void>|null} */
   let inFlight = null;
   const ensure = async () => {
-    if (!enabled || !hostAvailable) return;
-    if (complete) return;
+    if (!enabled || !hostAvailable || complete) return;
     if (!inFlight) {
-      inFlight = Promise.resolve()
-        .then(reset)
+      inFlight = Promise.resolve().then(reset)
         .then(() => { complete = true; })
         .finally(() => { inFlight = null; });
     }
@@ -37,143 +26,157 @@ export const makeRetryableCustodyReset = ({ enabled, hostAvailable, reset }) => 
   return { ensure };
 };
 
-/**
- * @param {Object} deps
- * @param {() => Promise<void>} deps.ensureOffscreen
- * @param {(operation: 'get'|'set'|'self-get'|'self-set', args: any) => Promise<any>} deps.handleSecretRequest
- * @param {number} [deps.timeoutMs]
- * @param {() => string} [deps.newRequestId]
- */
+const safeId = (/** @type {unknown} */ value) => typeof value === 'string'
+  && value.length >= 3 && value.length <= 256
+  && !/[\u0000-\u001f\u007f]/.test(value);
+/** @param {string} code @param {boolean} [outcomeKnown] @param {unknown} [cause] */
+const failure = (code, outcomeKnown = true, cause) => new DwebCustodyPortError(
+  code, code, { cause, outcomeKnown },
+);
+
+/** @param {any} deps */
 export const makeDwebCustodyClient = ({
   ensureOffscreen, handleSecretRequest, timeoutMs = 60_000,
   newRequestId = () => crypto.randomUUID(),
 }) => {
-  /** @type {import('webextension-polyfill').Runtime.Port | null} */
+  /** @type {any} */
   let activePort = null;
-  /** @type {Set<() => void>} */
-  const connectedWaiters = new Set();
-  /** @type {Map<string, { resolve: (value: any) => void, reject: (reason: any) => void, timer: ReturnType<typeof setTimeout> }>} */
+  const waiters = new Set();
   const pending = new Map();
+  const unknown = new Map();
 
-  /** @param {string} code @param {string} message */
-  const rejectPending = (code, message) => {
-    for (const entry of pending.values()) {
+  /** @param {any} entry */
+  const remember = (entry) => unknown.set(entry.operationId, {
+    operationId: entry.operationId, operation: entry.operation,
+    args: entry.args,
+  });
+
+  /** @param {any} port @param {string} code @param {boolean} [disconnect] */
+  const lose = (port, code, disconnect = false) => {
+    if (activePort === port) activePort = null;
+    for (const [requestId, entry] of pending) {
+      if (entry.port !== port) continue;
+      pending.delete(requestId);
       clearTimeout(entry.timer);
-      entry.reject(new DwebCustodyPortError(message, code));
+      remember(entry);
+      entry.reject(failure(code, false));
     }
-    pending.clear();
+    if (disconnect) { try { port.disconnect(); } catch { /* already closed */ } }
   };
 
-  /**
-   * Attach only after the service worker has verified `port.sender` with
-   * isOffscreenSender. The client deliberately does not duplicate that browser-
-   * owned provenance check with payload data.
-   * @param {import('webextension-polyfill').Runtime.Port} port
-   */
-  const attach = (port) => {
-    if (activePort && activePort !== port) {
-      rejectPending('port-replaced', 'the identity custody host reconnected');
-      try { activePort.disconnect(); } catch { /* already disconnected */ }
+  /** @param {any} next */
+  const attach = (next) => {
+    if (activePort && activePort !== next) {
+      lose(activePort, 'port-replaced', true);
     }
-    activePort = port;
-    for (const resolve of connectedWaiters) resolve();
-    connectedWaiters.clear();
-
-    port.onMessage.addListener((/** @type {any} */ message) => {
-      if (message?.type === 'custody/response' && typeof message.requestId === 'string') {
+    activePort = next;
+    for (const resolve of waiters) resolve();
+    waiters.clear();
+    next.onMessage.addListener((/** @type {any} */ message) => {
+      if (activePort !== next) return; // late result from a poisoned Port
+      if (message?.type === 'custody/response'
+          && safeId(message.requestId) && safeId(message.operationId)
+          && safeId(message.authorityId)) {
         const entry = pending.get(message.requestId);
-        if (!entry) return;
+        if (!entry || entry.port !== next || entry.operationId !== message.operationId) return;
         pending.delete(message.requestId);
         clearTimeout(entry.timer);
+        unknown.delete(entry.operationId);
+        try { next.postMessage({ type: 'custody/ack', operationId: entry.operationId }); }
+        catch { /* result is already known */ }
         if (message.ok) entry.resolve(message.result);
-        else entry.reject(new DwebCustodyPortError(
-          'identity custody operation failed',
+        else entry.reject(failure(
           typeof message.error === 'string' ? message.error : 'host-failed',
         ));
         return;
       }
-      // 'get'/'set' carry the person root (dweb-identity-custody.js);
-      // 'self-get'/'self-set' carry the allowlisted self-device secrets
-      // (dweb-self-custody.js). Both ride this one verified port, and the
-      // SW's handler is what routes by operation, so a widened operation
-      // list here can never by itself reach a secret the handler refuses.
       if (message?.type !== 'custody/secret-request'
-          || typeof message.requestId !== 'string'
+          || !safeId(message.requestId)
           || !['get', 'set', 'self-get', 'self-set'].includes(message.operation)) return;
-      /** @param {any} response */
-      const respond = (response) => {
-        if (activePort !== port) return;
-        try { port.postMessage(response); } catch { /* caller observes disconnect */ }
+      /** @param {boolean} ok @param {any} value */
+      const reply = (ok, value) => {
+        if (activePort !== next) return;
+        try { next.postMessage({
+          type: 'custody/secret-response', requestId: message.requestId, ok,
+          ...(ok ? { result: value } : { error: value }),
+        }); } catch { /* disconnect owns retry */ }
       };
-      Promise.resolve(handleSecretRequest(message.operation, message.args ?? {}))
-        .then((result) => respond({
-            type: 'custody/secret-response', requestId: message.requestId,
-            ok: true, result,
-          }))
-        .catch((cause) => respond({
-            type: 'custody/secret-response', requestId: message.requestId,
-            ok: false,
-            error: /** @type {{ code?: string, message?: string }} */ (cause)?.code
-              ?? /** @type {{ message?: string }} */ (cause)?.message ?? 'secret-host-failed',
-          }));
+      Promise.resolve(handleSecretRequest(message.operation, message.args ?? {})).then(
+        (result) => reply(true, result),
+        (cause) => reply(false, /** @type {{code?:string,message?:string}} */ (cause)?.code
+          ?? /** @type {{message?:string}} */ (cause)?.message ?? 'secret-host-failed'),
+      );
     });
-    port.onDisconnect.addListener(() => {
-      if (activePort !== port) return;
-      activePort = null;
-      rejectPending('port-disconnected', 'the identity custody host disconnected');
+    next.onDisconnect.addListener(() => {
+      if (activePort === next) lose(next, 'port-disconnected');
     });
   };
 
-  const waitForPort = async () => {
+  const connected = async () => {
     if (activePort) return activePort;
     await ensureOffscreen();
     if (activePort) return activePort;
     await new Promise((resolve, reject) => {
-      const connected = () => {
-        clearTimeout(timer);
-        connectedWaiters.delete(connected);
-        resolve(undefined);
-      };
-      connectedWaiters.add(connected);
+      const ready = () => { clearTimeout(timer); waiters.delete(ready); resolve(undefined); };
+      waiters.add(ready);
       const timer = setTimeout(() => {
-        connectedWaiters.delete(connected);
-        reject(new DwebCustodyPortError(
-          'identity custody host did not connect', 'port-timeout',
-        ));
+        waiters.delete(ready);
+        reject(failure('port-timeout'));
       }, timeoutMs);
     });
-    if (!activePort) throw new DwebCustodyPortError(
-      'identity custody host disconnected before use', 'port-disconnected',
-    );
+    if (!activePort) throw failure('port-disconnected');
     return activePort;
   };
 
   /** @param {'export'|'adopt'|'suspend'|'resume'|'reset'} operation @param {any} [args] */
   const call = async (operation, args = {}) => {
-    const port = await waitForPort();
-    if (activePort !== port) throw new DwebCustodyPortError(
-      'identity custody host disconnected before use', 'port-disconnected',
-    );
+    let operationId = '';
+    if (unknown.size > 0) {
+      const match = [...unknown.values()].find((entry) => {
+        try {
+          return entry.operation === operation
+            && JSON.stringify(entry.args) === JSON.stringify(args);
+        } catch { return entry.operation === operation && entry.args === args; }
+      });
+      if (!match) throw failure('previous-outcome-unknown', false);
+      operationId = match.operationId;
+    }
+    if (!operationId) {
+      const leaseId = args?.leaseId;
+      operationId = (operation === 'suspend' || operation === 'resume')
+        && typeof leaseId === 'string' && leaseId.length > 0
+        ? `${operation}:${leaseId}` : `operation:${crypto.randomUUID()}`;
+      if (!safeId(operationId)) throw failure('protocol-invalid');
+    }
+    const port = await connected();
     const requestId = newRequestId();
+    if (!safeId(requestId)) throw failure('protocol-invalid');
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
+        const entry = pending.get(requestId);
+        if (!entry) return;
         pending.delete(requestId);
-        reject(new DwebCustodyPortError(
-          `identity custody ${operation} timed out`, 'operation-timeout',
-        ));
+        remember(entry);
+        reject(failure('operation-timeout', false));
+        lose(port, 'operation-timeout', true);
       }, timeoutMs);
-      pending.set(requestId, { resolve, reject, timer });
+      pending.set(requestId, {
+        operationId, operation, args, port, resolve, reject, timer,
+      });
       try {
-        port.postMessage({ type: 'custody/request', requestId, operation, args });
+        port.postMessage({
+          type: 'custody/request', requestId, operationId, operation, args,
+        });
       } catch (cause) {
+        const entry = pending.get(requestId);
         pending.delete(requestId);
         clearTimeout(timer);
-        reject(new DwebCustodyPortError(
-          `identity custody ${operation} could not be sent`, 'post-failed', { cause },
-        ));
+        if (entry) remember(entry);
+        lose(port, 'post-failed', true);
+        reject(failure('post-failed', false, cause));
       }
     });
   };
 
-  return { attach, call };
+  return Object.freeze({ attach, call });
 };

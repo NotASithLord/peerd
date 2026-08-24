@@ -1,5 +1,10 @@
 import { describe, test, expect } from 'bun:test';
 import { INITIAL_STATE, reduceChat as reduceChatRaw } from '../../extension/sidepanel/chat-reducer.js';
+import {
+  KERNEL_STATE_DEFERRED_FIELDS,
+  KERNEL_STATE_PROVENANCE,
+  KERNEL_STATE_SCHEMA,
+} from '../../extension/shared/kernel-state-contract.js';
 
 // reduceChat returns the loose `object` type (the no-build extension has no
 // named State type); cast through a thin wrapper so the tests can read the
@@ -13,6 +18,21 @@ const reduceChat = (state: any, msg: any): any => reduceChatRaw(state, msg);
 
 const withSession = (sessionId: string, messages: any[] = []) =>
   ({ ...INITIAL_STATE, session: { sessionId, messages, cost: null } });
+const projected = (generation: number, authorityEpoch = 'kernel-epoch-projected') => ({
+  hydrated: true,
+  vault: { initialized: true, locked: true, unlockedAt: 0, prfEnrolled: false,
+    hasRecovery: false, lockReason: null },
+  settings: { vaultAutoLockMs: 60_000, openrouterModels: [] },
+  session: { sessionId: null, messages: [], permission: { mode: 'act', confirmActions: false } },
+  providers: { current: '', model: '', hasKey: false },
+  composer: { provider: '', model: '', keyless: false, credentialReady: false,
+    localReady: false, canSend: false, reason: 'vault-locked' },
+  capabilities: { actorExecution: { status: 'temporarily_unavailable',
+    host: 'offscreen-document-worker', reason: 'controller-not-ready', retryable: true } },
+  projection: { schema: KERNEL_STATE_SCHEMA, provenance: KERNEL_STATE_PROVENANCE,
+    authorityEpoch, generation, settings: 'hydrated', actorIsolation: 'hydrated',
+    semanticController: 'required', deferredFields: [...KERNEL_STATE_DEFERRED_FIELDS], failures: [] },
+});
 
 describe('reduceChat', () => {
   test('the client becomes hydrated only after an authoritative state snapshot', () => {
@@ -22,6 +42,27 @@ describe('reduceChat', () => {
       state: { vault: { initialized: false, locked: true } },
     });
     expect(hydrated.hydrated).toBe(true);
+  });
+
+  test('projected state rejects malformed, stale-generation, and late-epoch pushes', () => {
+    const current = reduceChat(INITIAL_STATE, { type: 'state', state: projected(2) });
+    expect(current.projection.generation).toBe(2);
+    expect(reduceChat(current, { type: 'state', state: projected(1) })).toBe(current);
+    expect(reduceChat(current, { type: 'state', state: projected(3, 'kernel-epoch-late-old') }))
+      .toBe(current);
+    const future = projected(3);
+    future.projection.schema = KERNEL_STATE_SCHEMA + 1;
+    expect(reduceChat(current, { type: 'state', state: future })).toBe(current);
+    const malformed = projected(3);
+    (malformed.settings as any).openrouterModels = 'bad';
+    expect(reduceChat(current, { type: 'state', state: malformed })).toBe(current);
+    expect(reduceChat(current, {
+      type: 'state', state: projected(1, 'kernel-epoch-after-disconnect'),
+      authorityReplacement: true,
+    }).projection.authorityEpoch).toBe('kernel-epoch-after-disconnect');
+    expect(reduceChat(INITIAL_STATE, {
+      type: 'state', state: projected(1, 'kernel-epoch-after-disconnect'),
+    }).projection.authorityEpoch).toBe('kernel-epoch-after-disconnect');
   });
 
   test('unhandled / voice / malformed → returns the SAME ref (surface skips redraw)', () => {
@@ -35,6 +76,24 @@ describe('reduceChat', () => {
     const s1 = reduceChat(s0, { type: 'turn/delta', sessionId: 's1', messageId: 'm1', text: 'llo' });
     expect(s1.session.messages[0].content).toBe('Hello');
     expect(s1).not.toBe(s0); // new ref
+  });
+
+  test('turn/error preserves unknown custody and forbids automatic retry', () => {
+    const s0 = withSession('s1', [{
+      id: 'm1', role: 'assistant', content: '', streaming: true,
+    }]);
+    const s1 = reduceChat(s0, {
+      type: 'turn/error', sessionId: 's1', messageId: 'm1',
+      error: 'The turn may have started.', code: 'controller-call-timeout',
+      outcomeKnown: false, retryable: false,
+    });
+    expect(s1.session.messages[0]).toMatchObject({
+      streaming: false,
+      error: 'The turn may have started.',
+      errorCode: 'controller-call-timeout',
+      outcomeKnown: false,
+      retryable: false,
+    });
   });
 
   test('per-session guard: a BACKGROUND session delta does not touch the viewed chat', () => {
