@@ -8,6 +8,7 @@
 // heap. Module worker → strict.
 import { runUserTurn } from '/peerd-runtime/loop/agent-loop.js';
 import { makeInMemorySessions, makeRelayedCallModel, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
+import { AGENT_PROGRAM, isExecutionDescription } from '/shared/execution-protocol.js';
 import { ACTOR_WORKER_PROTOCOL } from './actor-worker-protocol.js';
 
 let seq = 0;
@@ -52,7 +53,20 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       return;
     }
     hasRun = true;
-    runId = m.runId;
+    const execution = m.execution;
+    const program = execution?.program;
+    const state = execution?.state;
+    const metadata = execution?.metadata;
+    if (!isExecutionDescription(execution)
+        || program?.kind !== AGENT_PROGRAM
+        || typeof execution.input !== 'string'
+        || typeof metadata?.sessionId !== 'string'
+        || !state || typeof state !== 'object'
+        || !Array.isArray(state.messages)) {
+      self.postMessage({ type: 'error', runId: execution?.id ?? '', error: 'actor worker received an invalid execution description' });
+      return;
+    }
+    runId = execution.id;
     const requestModel = (/** @type {object} */ args) => new Promise((resolve) => {
       const rid = `mc-${++seq}`;
       modelPending.set(rid, resolve);
@@ -65,28 +79,44 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
     });
     try {
       // Seed the actor's PRIOR history — a bound actor is stateful across turns.
-      const sessions = makeInMemorySessions({ sessionId: m.sessionId, provider: m.provider, model: m.model, depth: m.depth, messages: m.priorMessages });
-      const callModel = makeRelayedCallModel(requestModel, m.maxOutputTokens);
+      const sessions = makeInMemorySessions({
+        sessionId: metadata.sessionId,
+        provider: program.provider,
+        model: program.model,
+        depth: metadata.depth,
+        messages: state.messages,
+      });
+      const callModel = makeRelayedCallModel(requestModel, program.maxOutputTokens);
       const toolDispatch = makeRelayedToolDispatch(requestTool);
       // Phase 3: a WEB/API actor self-fences its own untrusted-provenance rolling
       // summary. The SW's closure (over a policy-reduced live tab origin) can't
       // cross postMessage, so rebuild it here from the pure fence fns using the
       // turn-start provenance.
-      const fenceActorSummary = makeActorSummaryFence({ actorType: m.actorType, backing: m.backing, tabOrigin: m.tabOrigin, origin: m.origin });
+      const fenceActorSummary = makeActorSummaryFence({
+        actorType: metadata.actorType,
+        backing: metadata.backing,
+        tabOrigin: metadata.tabOrigin,
+        origin: metadata.origin,
+      });
       const result = await runActorLoop(
         {
           runUserTurn, sessions, callModel, toolDispatch,
-          getSystemPrompt: () => m.systemPrompt,
+          getSystemPrompt: () => program.systemPrompt,
           appendAudit: async () => {},
           onEvent: (/** @type {object} */ event) => self.postMessage({ type: 'loop-event', runId, event }),
           tools: m.tools ?? [],
           ...(fenceActorSummary ? { fenceActorSummary } : {}),
         },
         {
-          sessionId: m.sessionId, userText: m.message, maxSteps: m.maxSteps,
-          oneShot: m.oneShot, signal: abort.signal, reasoning: m.reasoning,
-          contextWindow: m.contextWindow, inbound: m.inbound === true,
-          preflightReply: m.preflightReply,
+          sessionId: metadata.sessionId,
+          userText: execution.input,
+          maxSteps: program.maxSteps,
+          oneShot: metadata.oneShot,
+          signal: abort.signal,
+          reasoning: program.reasoning,
+          contextWindow: program.contextWindow,
+          inbound: metadata.inbound === true,
+          preflightReply: metadata.preflightReply,
         },
       );
       // why the worker does NOT stamp `aborted`: a Stop unwinds the loop cleanly (the

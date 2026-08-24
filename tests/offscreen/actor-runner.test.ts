@@ -2,6 +2,7 @@ import { describe, test, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { abortActor, runActor } from '../../extension/offscreen/actor-runner.js';
 import { ACTOR_WORKER_PROTOCOL } from '../../extension/offscreen/actor-worker-protocol.js';
+import { EXECUTION_PROTOCOL } from '../../extension/shared/execution-protocol.js';
 
 const REALM = {
   dedicatedWorker: true,
@@ -47,7 +48,7 @@ const job = {
 describe('actor worker startup proof', () => {
   test('the worker forwards the preflight reply into the actor loop', () => {
     const source = readFileSync(new URL('../../extension/offscreen/actor-worker.js', import.meta.url), 'utf8');
-    expect(source).toContain('preflightReply: m.preflightReply');
+    expect(source).toContain('preflightReply: metadata.preflightReply');
   });
 
   test('posts the run only after readiness and host-canary separation', async () => {
@@ -82,6 +83,16 @@ describe('actor worker startup proof', () => {
     const result = await resultPromise;
     expect(result).toMatchObject({ ok: true, started: true, finalText: 'done' });
     expect(worker.posted.map((message) => message.type)).toEqual(['probe', 'run']);
+    expect(worker.posted[1]).toMatchObject({
+      execution: {
+        protocol: EXECUTION_PROTOCOL,
+        id: 'run-1',
+        program: { kind: 'agent' },
+        input: 'inspect the page',
+        metadata: { sessionId: 'actor-1' },
+      },
+    });
+    expect(worker.posted[1].message).toBeUndefined();
     expect(relays).toEqual([]);
     expect(worker.terminated).toBe(true);
   });
@@ -266,7 +277,7 @@ describe('actor worker startup proof', () => {
           } }));
         }
         if (message.type === 'run') {
-          observed.push(message.inbound);
+          observed.push(message.execution.metadata.inbound);
           queueMicrotask(() => worker.emit('message', { data: {
             type: 'done', result: { finalText: 'observed', toolCalls: 0 },
           } }));
@@ -297,7 +308,7 @@ describe('actor worker startup proof', () => {
         } }));
       }
       if (message.type === 'run') {
-        observed = message.preflightReply;
+        observed = message.execution.metadata.preflightReply;
         queueMicrotask(() => worker.emit('message', { data: {
           type: 'done', result: { finalText: observed, toolCalls: 0 },
         } }));

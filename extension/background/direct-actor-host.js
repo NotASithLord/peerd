@@ -3,29 +3,42 @@
 // Chrome offscreen transport, this path is entirely in-process: no runtime
 // message exposes actor relay routes or the per-run grant to extension pages.
 
-import { runActor, abortActor } from '/offscreen/actor-runner.js';
-
 export {
   makeRefCountedFirefoxBackgroundLifetime,
   makeStorageSessionKeepAlive,
 } from './firefox-storage-keepalive.js';
 
+/** @typedef {Pick<typeof import('/offscreen/actor-runner.js'), 'runActor'|'abortActor'>} ActorRunner */
+/** @type {Promise<ActorRunner> | null} */
+let actorRunnerPromise = null;
+// Chrome never uses the Firefox background-page host, so keep its runner out
+// of the cold service-worker graph. Firefox background pages support import().
+const loadActorRunner = () => actorRunnerPromise ??= import('/offscreen/actor-runner.js');
 
 /**
  * @param {Object} deps
  * @param {string} deps.workerUrl
- * @param {typeof runActor} [deps.run]
- * @param {typeof abortActor} [deps.abort]
+ * @param {ActorRunner['runActor']} [deps.run]
+ * @param {ActorRunner['abortActor']} [deps.abort]
+ * @param {() => Promise<ActorRunner>} [deps.loadRunner]
  * @param {() => void|Promise<void>} [deps.startKeepAlive]
  * @param {() => void|Promise<void>} [deps.stopKeepAlive]
  */
 export const makeDirectActorHost = ({
   workerUrl,
-  run = runActor,
-  abort = abortActor,
+  run,
+  abort,
+  loadRunner = loadActorRunner,
   startKeepAlive = () => {},
   stopKeepAlive = () => {},
 }) => {
+  /** @type {Promise<ActorRunner> | null} */
+  let runnerPromise = null;
+  const runner = () => runnerPromise ??= loadRunner();
+  const runActor = run ?? (async (...args) => (await runner()).runActor(...args));
+  const abortActor = abort ?? ((runId) => {
+    void runner().then((value) => value.abortActor(runId)).catch(() => {});
+  });
   // Object identity is the sender proof. It never leaves this closure and is
   // never posted, serialized, stored, or exposed on runtime.onMessage.
   const relaySender = Object.freeze({});
@@ -92,7 +105,7 @@ export const makeDirectActorHost = ({
     if (keepAliveLoss) return;
     keepAliveLoss = error;
     for (const { runId, settle } of activeRunLosses.values()) {
-      if (runId) abort(runId);
+      if (runId) abortActor(runId);
       settle(error);
     }
   };
@@ -100,7 +113,7 @@ export const makeDirectActorHost = ({
   /** @param {{ type?: string, runId?: string, job?: any }} message */
   const sendMessage = async (message) => {
     if (message?.type === 'actor/abort') {
-      if (typeof message.runId === 'string') abort(message.runId);
+      if (typeof message.runId === 'string') abortActor(message.runId);
       return { ok: true };
     }
     if (message?.type !== 'actor/run' || !message.job) {
@@ -136,7 +149,7 @@ export const makeDirectActorHost = ({
           }),
         });
       });
-      const actorRun = run(message.job, {
+      const actorRun = runActor(message.job, {
         workerUrl,
         sendToSW: async (type, payload) => {
           const route = relayRoutes?.[type];
