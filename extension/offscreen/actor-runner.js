@@ -7,6 +7,10 @@
 // and resolves with the turn result.
 
 import { ACTOR_WORKER_PROTOCOL, ACTOR_WORKER_STARTUP_MS, validActorWorkerRealm } from './actor-worker-protocol.js';
+import {
+  AGENT_PROGRAM,
+  describeExecution,
+} from '/shared/execution-protocol.js';
 
 const MAX_CONCURRENT = 4;
 let active = 0;
@@ -20,6 +24,47 @@ const liveWorkers = new Map();
 const abortedEarly = new Map();
 const EARLY_ABORT_MAX = 64;
 const EARLY_ABORT_TTL_MS = 60_000;
+
+/**
+ * Project the actor-specific job into the host-neutral execution description.
+ * Tool descriptors still ride beside it for the model; SW grants remain the
+ * sole authority and never come from this worker-visible data.
+ * @param {any} job
+ * @param {string} executionId
+ */
+export const describeActorExecution = (job, executionId) => describeExecution({
+  id: executionId,
+  program: {
+    kind: AGENT_PROGRAM,
+    systemPrompt: job.systemPrompt,
+    provider: job.provider,
+    model: job.model,
+    maxSteps: job.maxSteps,
+    maxOutputTokens: job.maxOutputTokens,
+    reasoning: job.reasoning,
+    contextWindow: job.contextWindow,
+  },
+  input: job.message,
+  state: { messages: Array.isArray(job.priorMessages) ? job.priorMessages : [] },
+  capabilities: [
+    'model',
+    ...(Array.isArray(job.tools)
+      ? job.tools.flatMap((/** @type {{ name?: unknown }} */ tool) =>
+        typeof tool?.name === 'string' && tool.name ? [tool.name] : [])
+      : []),
+  ],
+  metadata: {
+    sessionId: job.actorSessionId,
+    depth: job.depth,
+    oneShot: job.oneShot === true,
+    actorType: job.actorType,
+    backing: job.backing,
+    tabOrigin: job.tabOrigin,
+    origin: job.origin,
+    inbound: job.inbound === true,
+    preflightReply: job.preflightReply,
+  },
+});
 
 const pruneEarlyAborts = (now = Date.now()) => {
   for (const [runId, expiresAt] of abortedEarly) {
@@ -80,6 +125,7 @@ export const runActor = async (job, {
     ok: false, started: false, phase: 'admission', code: 'actor_worker_busy',
     error: `actor worker rejected: ${MAX_CONCURRENT} already running`,
   };
+  const execution = describeActorExecution(job, runId);
   active++;
   // The SW-minted relay grant for this run. It stays in THIS scope — never posted to
   // the Worker — so the untrusted heap can't lift it, and every relay below carries it
@@ -155,12 +201,7 @@ export const runActor = async (job, {
           }), budgetMs);
           started = true;
           w.postMessage({
-            type: 'run', runId, sessionId: job.actorSessionId, message: job.message, systemPrompt: job.systemPrompt,
-            provider: job.provider, model: job.model, depth: job.depth, tools: job.tools ?? [],
-            priorMessages: job.priorMessages ?? [],
-            maxSteps: job.maxSteps, maxOutputTokens: job.maxOutputTokens, reasoning: job.reasoning, contextWindow: job.contextWindow,
-            oneShot: job.oneShot, actorType: job.actorType, backing: job.backing, tabOrigin: job.tabOrigin, origin: job.origin,
-            inbound: job.inbound === true, preflightReply: job.preflightReply,
+            type: 'run', execution, tools: job.tools ?? [],
           });
           return;
         }

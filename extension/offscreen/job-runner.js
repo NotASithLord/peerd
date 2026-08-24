@@ -43,6 +43,10 @@ import {
   CODE_RUN_MAX_TRACE_OPS, MAX_FILE_CONTENT_CHARS,
 } from '/peerd-runtime/offscreen.js';
 import { applyFetchExtract } from '/shared/fetch-extract.js';
+import {
+  JAVASCRIPT_PROGRAM,
+  describeExecution,
+} from '/shared/execution-protocol.js';
 
 // The workspace's total-size SOFT budget: over it the run still executes but
 // writes are refused (the tool result carries a delete-files nudge). Soft +
@@ -50,6 +54,32 @@ import { applyFetchExtract } from '/shared/fetch-extract.js';
 // origin-global quota is the hard backstop regardless. 200 MB is the intended
 // order of magnitude, not a measured limit.
 const WORKSPACE_BUDGET_BYTES = 200 * 1024 * 1024;
+
+/**
+ * Project one deterministic JS job into the same description actor runs use.
+ * The profile is host-derived; source text never grants itself a capability.
+ * @param {any} job
+ * @param {string} executionId
+ * @param {Record<string, boolean>} profile
+ * @param {boolean} toolboxOn
+ */
+export const describeCodeExecution = (job, executionId, profile, toolboxOn = false) => describeExecution({
+  id: executionId,
+  program: { kind: JAVASCRIPT_PROGRAM, source: job.code },
+  state: job.workspaceSessionId ? { workspaceSessionId: job.workspaceSessionId } : null,
+  capabilities: [
+    ...Object.entries(profile).filter(([, allowed]) => allowed).map(([name]) => name),
+    ...(job.a2a === true ? ['mesh'] : []),
+    ...(job.actors === true ? ['actors'] : []),
+    ...(job.siteFetch ? ['site'] : []),
+    ...(toolboxOn ? ['toolbox'] : []),
+    ...(job.workspaceSessionId && profile.opfs === true ? ['workspace'] : []),
+  ],
+  metadata: {
+    ownerSessionId: job.ownerSessionId,
+    siteOrigin: job.siteFetch || undefined,
+  },
+});
 
 let jobSeq = 0;
 
@@ -280,6 +310,9 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
   // it is refused by an EXPLICIT denial, mirroring the a2a/siteFetch exclusion,
   // not merely by the toolbox flag being unset.
   const toolboxOn = toolbox === true && !a2a && !siteFetch && !caps?.page && !caps?.app;
+  const execution = describeCodeExecution({
+    code, a2a, actors, siteFetch, ownerSessionId, workspaceSessionId,
+  }, runId || jobId, profile, toolboxOn);
   // The OPFS root: per-job EPHEMERAL scratch by default (peerd.self.* +
   // relative imports work within the run, then it's nuked) — or, for a
   // workspace run, the DURABLE per-session subtree, which survives the run
@@ -491,7 +524,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
         // Stop already arrived before we registered — honor it now.
         if (consumeEarlyAbort(runId, ownerSessionId)) { killWith(new Error('job aborted (Stop)')); return; }
       }
-      buildWorkerSource(code, {
+      buildWorkerSource(/** @type {string} */ (execution.program.source), {
         entryPath: 'job.js', notebookId: jobId, resolverDeps, a2a, actors,
         actorsGuardMs: ACTORS_BRIDGE_GUARD_MS, caps: profile, siteFetch,
         // Generated from the same declarative manifest that drives prompt lore

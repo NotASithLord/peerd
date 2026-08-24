@@ -385,6 +385,25 @@ describe('Firefox actor host storage.session heartbeat', () => {
 });
 
 describe('direct actor host', () => {
+  test('loads the Firefox-only runner on first use', async () => {
+    let loads = 0;
+    const host = makeDirectActorHost({
+      workerUrl: 'worker.js',
+      loadRunner: async () => {
+        loads += 1;
+        return {
+          runActor: async () => ({ ok: true }),
+          abortActor: () => {},
+        };
+      },
+    });
+    host.bindRelayRoutes({});
+
+    expect(loads).toBe(0);
+    expect(await host.sendMessage({ type: 'actor/run', job: {} })).toEqual({ ok: true });
+    expect(loads).toBe(1);
+  });
+
   test('keeps run and relays in-process behind an object-identity sender', async () => {
     let accepted = false;
     let runJob: any = null;
