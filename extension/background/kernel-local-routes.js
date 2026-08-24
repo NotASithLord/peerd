@@ -1,12 +1,5 @@
 // @ts-check
-import { createKernelToolboxStore } from './kernel-toolbox-store.js';
-import { createKernelMemoryAuthority } from './kernel-memory-authority.js';
-import { kernelAppCatalogRows } from './kernel-app-catalog.js';
-import { makeContactsRoutes } from './routes/contacts.js';
-import { makeToolboxRoutes } from './routes/toolbox.js';
-import { mergeContacts } from '../peerd-runtime/contacts/aggregate.js';
 import {
-  maskProviderKey,
   LOCAL_MODEL_LABELS,
   OPENROUTER_POPULAR,
   PROVIDER_AUTHORITY,
@@ -21,105 +14,6 @@ import {
   localModelMethodIsRead,
   parseLocalModelChannelOffer,
 } from '../shared/feature-lease-protocol.js';
-
-const contactName = (/** @type {unknown} */ value) => typeof value === 'string'
-  ? value.trim().replace(/\s+/g, ' ').slice(0, 64) || null : null;
-const contactTags = (/** @type {unknown} */ value) => {
-  if (!Array.isArray(value)) return [];
-  const tags = [];
-  const seen = new Set();
-  for (const candidate of value) {
-    const tag = typeof candidate === 'string' ? candidate.trim().slice(0, 32) : '';
-    if (tag && !seen.has(tag)) { seen.add(tag); tags.push(tag); }
-    if (tags.length >= 12) break;
-  }
-  return tags;
-};
-
-/** @param {{idb:{get:(store:string,key:string)=>Promise<any>,getAll:(store:string)=>Promise<any[]>,
- * put:(store:string,value:any)=>Promise<void>,del:(store:string,key:string)=>Promise<void>},
- * kv?:{get:(key:string)=>Promise<any>,set:(key:string,value:any)=>Promise<void>},
- * auditLog:{list:()=>Promise<any[]>,append?:(entry:any)=>Promise<any>},
- * vault:{getSecret:(name:string)=>Promise<string|null>,isLocked:()=>boolean},
- * ready:Promise<any>,now?:()=>number}} deps
- * @returns {Readonly<Record<string,(message?:any,sender?:any)=>any>>} */
-export const createKernelSemanticRoutes = ({ idb, kv, auditLog, vault, ready, now = Date.now }) => {
-  const memory = kv ? createKernelMemoryAuthority({ idb, kv, auditLog, now }) : null;
-  const toolbox = createKernelToolboxStore();
-  const contact = async (/** @type {string} */ did, /** @type {any} */ patch) => {
-    if (!did.startsWith('did:key:') || did.length <= 12 || did.length > 256) {
-      throw new Error('contact-did-invalid');
-    }
-    const prior = await idb.get('contacts', did);
-    const timestamp = now();
-    const next = prior ? { ...prior } : {
-      did, name: null, notes: '', tags: [], favorite: false,
-      createdAt: timestamp, updatedAt: timestamp,
-    };
-    if (!prior || Object.hasOwn(patch, 'name')) next.name = contactName(patch.name);
-    if (!prior || Object.hasOwn(patch, 'notes')) {
-      next.notes = typeof patch.notes === 'string' ? patch.notes.slice(0, 1_000) : '';
-    }
-    if (!prior || Object.hasOwn(patch, 'tags')) next.tags = contactTags(patch.tags);
-    if (!prior || Object.hasOwn(patch, 'favorite')) next.favorite = !!patch.favorite;
-    next.did = prior?.did ?? did;
-    next.createdAt = prior?.createdAt ?? timestamp;
-    next.updatedAt = timestamp;
-    await idb.put('contacts', next);
-    return next;
-  };
-  const removeContact = async (/** @type {string} */ did) => {
-    const prior = await idb.get('contacts', did);
-    if (prior) await idb.del('contacts', did);
-    return !!prior;
-  };
-  const keyStatus = async () => {
-    await ready;
-    return Object.fromEntries(await Promise.all(PROVIDER_AUTHORITY.map(async (policy) => {
-      let key = null;
-      try { if (policy.secretName) key = await vault.getSecret(policy.secretName); } catch {}
-      return [policy.name, {
-        hasKey: policy.secretName === null || !!key,
-        keyPreview: key ? maskProviderKey(key) : null,
-      }];
-    })));
-  };
-  const providerStatus = async () => {
-    const status = await keyStatus();
-    return {
-      ok: true,
-      providers: PROVIDER_AUTHORITY.map((provider) => ({
-        name: provider.name,
-        label: provider.label,
-        defaultModel: provider.defaultModel,
-        defaultRunnerModel: provider.defaultRunnerModel,
-        hasKey: status[provider.name]?.hasKey === true,
-        keyless: provider.secretName === null,
-        liveModels: provider.probeKind === 'ollama',
-        keyPreview: status[provider.name]?.keyPreview ?? null,
-      })),
-    };
-  };
-  const contacts = {
-    list: () => idb.getAll('contacts'),
-    upsert: contact,
-    remove: removeContact,
-  };
-  return Object.freeze({
-    ...makeContactsRoutes({
-      vault, auditLog, contacts, mergeContacts,
-      appRegistry: { list: async () => kernelAppCatalogRows(await idb.get('apps', 'apps.v1')) },
-    }),
-    ...makeToolboxRoutes({ toolboxStore: toolbox }),
-    'provider/status': providerStatus,
-    ...Object.fromEntries(Object.entries(memory?.routes ?? {}).map(([route, handler]) => [
-      route,
-      (/** @type {any} */ message = {}) => vault.isLocked()
-        ? { ok: false, error: 'vault-locked' }
-        : /** @type {any} */ (handler)(message),
-    ])),
-  });
-};
 
 /** @param {any} deps */
 export const makeKernelProviderSetKeyRoute = ({
@@ -566,23 +460,30 @@ export const createKernelLocalRoutes = ({
   const providerSetKey = makeKernelProviderSetKeyRoute({
     vault, settingsStore, auditLog, pushState: () => {},
   });
+  const localModelRoutes = makeKernelLocalModelRoutes({
+    featureHost, offscreenUrl, pushState, available: localModels,
+  });
+  const providerSetKeyRoute = async (/** @type {any} */ message = {}) => {
+    const result = await providerSetKey(message);
+    if (result.ok) {
+      providerProjection.bumpRevision();
+      await Promise.resolve(pushState());
+    }
+    return result;
+  };
+  const modelOptions = makeKernelModelOptionsRoute({
+    ready, vault, settingsStore, sessions, browser, fetchFn, localModels, onOllamaStatus,
+  });
+  const routes = Object.freeze({
+    'provider/setKey': providerSetKeyRoute,
+    'provider/test': providerTest.route,
+    'models/options': modelOptions,
+    'openrouter/models': openRouterModels.route,
+    ...localModelRoutes,
+  });
   return Object.freeze({
-    localModelRoutes: makeKernelLocalModelRoutes({
-      featureHost, offscreenUrl, pushState, available: localModels,
-    }),
-    providerSetKey: async (/** @type {any} */ message = {}) => {
-      const result = await providerSetKey(message);
-      if (result.ok) {
-        providerProjection.bumpRevision();
-        await Promise.resolve(pushState());
-      }
-      return result;
-    },
-    modelOptions: makeKernelModelOptionsRoute({
-      ready, vault, settingsStore, sessions, browser, fetchFn, localModels, onOllamaStatus,
-    }),
-    openRouterModels: openRouterModels.route,
-    providerTest: providerTest.route,
+    routes, localModelRoutes, providerSetKey: providerSetKeyRoute,
+    modelOptions, openRouterModels: openRouterModels.route, providerTest: providerTest.route,
     abortProviderTests: () => { providerTest.abortAll(); openRouterModels.abortAll(); },
   });
 };

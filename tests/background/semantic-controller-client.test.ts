@@ -87,6 +87,8 @@ describe('production semantic controller slice', () => {
       'background/offscreen-artifact-client.js',
       'background/repository-client.js',
       'background/controller-turn-bridge.js',
+      'background/kernel-semantic-authority.js',
+      'background/kernel-semantic-control.js',
     ];
     for (const entry of governed) expect(CONTROLLER_BUILD_ENTRIES).toContain(entry as any);
 
@@ -110,6 +112,23 @@ describe('production semantic controller slice', () => {
       const bridge = join(root, 'background', 'controller-turn-bridge.js');
       writeFileSync(bridge, `${readFileSync(bridge, 'utf8')}\n// identity mutation\n`);
       expect(await controllerBuildDigest(root)).not.toBe(before);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('build identity binds semantic reverse authority and admission', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'peerd-controller-semantic-identity-'));
+    try {
+      cpSync(EXTENSION_DIR, root, { recursive: true });
+      let before = await controllerBuildDigest(root);
+      for (const name of ['kernel-semantic-authority.js', 'kernel-semantic-control.js']) {
+        const path = join(root, 'background', name);
+        writeFileSync(path, `${readFileSync(path, 'utf8')}\n// identity mutation\n`);
+        const after = await controllerBuildDigest(root);
+        expect(after).not.toBe(before);
+        before = after;
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -185,7 +204,7 @@ describe('production semantic controller slice', () => {
     const offscreenUrl = 'chrome-extension://test/offscreen/offscreen.html';
     const authority = {
       ownerId: 'peerd-authority-kernel', sessionId: null, instanceId: null,
-      origin: null, target: 'semantic:toolbox/read:first-party', replayClass: 'A',
+      origin: null, target: 'semantic:provider/status:first-party', replayClass: 'A',
     } as const;
     const offerHandler = makeControllerOfferHandler({
       expectedWorkerUrl: workerUrl,
@@ -201,7 +220,13 @@ describe('production semantic controller slice', () => {
       authorizeSemanticCall: () => authority,
       handleSemanticKernelCall: async (operation, payload, context) => {
         calls.push({ operation, payload, context });
-        return { ok: true, value: 'export default 1' };
+        return { ok: true, value: {
+          anthropic: { hasKey: true, keyPreview: 'sk-ant-…test' },
+          openrouter: { hasKey: false, keyPreview: null },
+          openai: { hasKey: false, keyPreview: null },
+          glm: { hasKey: false, keyPreview: null },
+          ollama: { hasKey: true, keyPreview: null },
+        } };
       },
       fetchFn: (async () => new Response(TEMPLATE, { status: 200 })) as unknown as typeof fetch,
       listWindowClients: async () => [{
@@ -211,12 +236,14 @@ describe('production semantic controller slice', () => {
         } as unknown as MessageEvent),
       }],
     });
-    await expect(semantic.callSemantic({
-      protocol: 1, route: 'toolbox/read', message: { type: 'toolbox/read', name: 'known' },
-    })).resolves.toEqual({ ok: true, body: 'export default 1' });
+    const result = await semantic.callSemantic({
+      protocol: 1, route: 'provider/status', message: { type: 'provider/status' },
+    });
+    expect(result).toMatchObject({ ok: true });
+    expect(result.providers[0]).toMatchObject({ name: 'anthropic', hasKey: true });
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
-      operation: 'semantic.toolbox.get-body', payload: { name: 'known' },
+      operation: 'semantic.providers.key-status', payload: {},
       context: { capability: 'semantic.dispatch', authority },
     });
     semantic.close();

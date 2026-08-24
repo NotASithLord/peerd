@@ -155,7 +155,7 @@ export function activityOverlayInjected(label, originLabel) {
         // the side panel's Stop is always the backstop.
         try {
           if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-            chrome.runtime.sendMessage({ type: 'agent/stop' });
+            chrome.runtime.sendMessage({ type: 'agent/stop', activity: 'live' });
           }
         } catch (e) { /* extension context gone; side-panel Stop still works */ }
         labelEl.textContent = 'Stopping…';

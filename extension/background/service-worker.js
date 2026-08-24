@@ -433,6 +433,7 @@ import { createBrowserOriginCustody } from './browser-origin-custody.js';
 import { makeDrivenPopupGuard, popupSourceState } from './driven-popup-guard.js';
 import {
   classifyDrivenChildRequestTarget,
+  makeFirefoxDrivenChildMarkerStore,
   makeDrivenChildRequestGuard,
   registerFirefoxDrivenChildRequestGuard,
 } from './driven-child-request-guard.js';
@@ -1584,7 +1585,16 @@ const drivenChildRequestGuard = makeDrivenChildRequestGuard({
     denylistPolicyReady,
   ),
   onBlocked: (event) => recordBrowserChildRequestBlocked(event),
+  ...(coldManifest.browser_specific_settings?.gecko ? {
+    markers: makeFirefoxDrivenChildMarkerStore(
+      /** @type {Storage} */ (/** @type {unknown} */ (globalThis.localStorage)),
+    ),
+  } : {}),
 });
+if (coldManifest.browser_specific_settings?.gecko) {
+  browser.tabs.query({}).then((tabs) => drivenChildRequestGuard.reconcile(tabs))
+    .catch(() => { /* restored exact markers remain fail-closed */ });
+}
 
 /** @typedef {{ reason: string, outcome: string, child: string, retryable: boolean }} BrowserChildPolicyNotice */
 /** @type {Map<number, BrowserChildPolicyNotice[]>} */
@@ -7928,7 +7938,7 @@ const sessionMessageRoutes = {
       vault, auditLog, sessions, sessionCache, turnSlots, makeAgentSendCustody, pushState, buildToolContext,
       applyComposer, commandSources, prepareUserAttachmentsWithDocs, runAgentTurn, runInit,
       convertDocAttachment,
-      handleSystemCommand, handleToolsCommand, postChatNote, spawnActor, requestReview, browser,
+      handleSystemCommand, handleToolsCommand, postChatNote, spawnActor, browser,
       startGoalRun, haltGoalRun, ensureSession, actorRecoveryReady,
       actorMessaging,
       actorLifecycle,

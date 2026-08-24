@@ -10,15 +10,6 @@ export const SEMANTIC_DEMAND_MAX_BYTES = 256 * 1024;
 export const SEMANTIC_DEMAND_MAX_CONCURRENT = 3;
 
 const POLICIES = Object.freeze({
-  'toolbox/read': Object.freeze({ 'semantic.toolbox.get-body': 1 }),
-  'toolbox/record': Object.freeze({ 'semantic.toolbox.record-runs': 1 }),
-  'contacts/list': Object.freeze({
-    'semantic.contacts.list-saved': 1,
-    'semantic.contacts.list-apps': 1,
-    'semantic.contacts.list-audit': 1,
-  }),
-  'contacts/set': Object.freeze({ 'semantic.contacts.upsert': 1 }),
-  'contacts/forget': Object.freeze({ 'semantic.contacts.remove': 1 }),
   'provider/status': Object.freeze({ 'semantic.providers.key-status': 1 }),
   'contributor/enable': Object.freeze({
     'semantic.contributor.enable-read': 2, 'semantic.contributor.enable': 1,
@@ -27,16 +18,12 @@ const POLICIES = Object.freeze({
     'semantic.contributor.clear': 1, 'semantic.contributor.disable-read': 1,
   }),
   'contributor/status': Object.freeze({ 'semantic.contributor.read': 1 }),
-  'memory/export': Object.freeze({ 'semantic.memory.export': 1 }),
   'memory/deleteAll': Object.freeze({ 'semantic.memory.delete-all': 1 }),
   'memory/write': Object.freeze({ 'semantic.memory.write': 1 }),
   'memory/delete': Object.freeze({ 'semantic.memory.delete': 1 }),
   'memory/suggestions': Object.freeze({ 'semantic.memory.suggestions': 1 }),
   'memory/suggestions/approve': Object.freeze({ 'semantic.memory.approve': 1 }),
   'memory/suggestions/dismiss': Object.freeze({ 'semantic.memory.dismiss': 1 }),
-  'skills/list': Object.freeze({ 'semantic.skills.list': 1 }),
-  'skills/setEnabled': Object.freeze({ 'semantic.skills.set-enabled': 1 }),
-  'skills/remove': Object.freeze({ 'semantic.skills.remove': 1 }),
 });
 
 const refusal = (/** @type {string} */ code, /** @type {boolean} */ known = true) =>

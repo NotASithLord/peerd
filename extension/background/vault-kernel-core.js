@@ -251,7 +251,11 @@ export const VAULT_KERNEL_HUMAN_ROUTE_NAMES = Object.freeze([
 /**
  */
 /** Exact document ownership; handler-pinned routes stay outside. @param {any} deps */
-export const makeKernelRouteProvenance = ({ humanUi, optionsUi, appUi, voiceUi, vaultRoutes }) => {
+export const makeKernelRouteProvenance = ({
+  humanUi, homeUi, sidepanelUi, optionsUi, appUi, voiceUi,
+  evalUi = () => false, activityStopUi = () => false,
+  toolboxUi = () => false, actorSpawnUi = toolboxUi, vaultRoutes,
+}) => {
   /** @type {Map<string,(sender:any,message:any)=>boolean>} */
   const table = new Map();
   const add = (/** @type {string[]} */ names,
@@ -268,6 +272,8 @@ export const makeKernelRouteProvenance = ({ humanUi, optionsUi, appUi, voiceUi, 
     'session/list', 'audit/list', 'cost/total', 'state/get',
   ], anyHumanUi);
   add(['audit/voice-fetch'], voiceUi);
+  add(['contacts/list', 'contacts/set', 'contacts/forget'], homeUi);
+  add(['toolbox/read', 'toolbox/record'], toolboxUi);
   add([
     'session/get', 'session/setModel', 'session/contextSnapshots', 'commands/list',
     'onboarding/complete', 'permission/set',
@@ -278,13 +284,26 @@ export const makeKernelRouteProvenance = ({ humanUi, optionsUi, appUi, voiceUi, 
     'apps/repository/link', 'apps/repository/fetch', 'apps/repository/push',
     'denylist/list', 'denylist/add', 'denylist/remove',
     'learned/list', 'learned/forget', 'learned/clear',
-    'skills/list', 'skills/setEnabled', 'skills/remove',
   ], humanUi);
+  add([
+    'skills/list', 'skills/setEnabled', 'skills/remove',
+    'skills/installGit', 'skills/installLocal', 'skills/installManifest',
+    'hooks/list', 'hooks/save', 'hooks/remove', 'hooks/toggle',
+  ], sidepanelUi);
+  add(['agent/send'], (sender) => sidepanelUi(sender) || evalUi(sender));
+  add(['agent/stop'], (sender, message) => sidepanelUi(sender) || evalUi(sender)
+    || activityStopUi(sender, message));
+  add(['actor/spawn'], actorSpawnUi);
+  add(['session/debugBundle'], (sender) => sidepanelUi(sender) || optionsUi(sender));
+  add(['session/archive', 'session/switch'], (sender) => sidepanelUi(sender) || homeUi(sender));
+  add(['session/reset'], (sender) => sidepanelUi(sender) || homeUi(sender) || evalUi(sender));
+  add(['actor-isolation/retry'], sidepanelUi);
   add([
     'git-cred/list', 'git-cred/set', 'git-cred/delete', 'openrouter/models',
     'origin-cred/list', 'origin-cred/set', 'origin-cred/delete',
     'local-model/status', 'local-model/catalog', 'local-model/probe', 'local-model/init',
     'site-client/list', 'site-client/delete',
+    'memory/init',
     'memory/export', 'memory/deleteAll', 'memory/write', 'memory/delete',
     'memory/suggestions', 'memory/suggestions/approve', 'memory/suggestions/dismiss',
   ], optionsUi);
@@ -359,11 +378,11 @@ export const makeVaultKernelMessageHandler = ({
     sendResponse({ ok: false, error: 'malformed-message' });
     return false;
   }
-  if (!trusted(sender)) {
+  const exactProvenance = routeProvenance.get(message.type);
+  if (!trusted(sender) && !(exactProvenance && exactProvenance(sender, message))) {
     sendResponse({ ok: false, error: 'untrusted-sender' });
     return false;
   }
-  const exactProvenance = routeProvenance.get(message.type);
   if ((exactProvenance && !exactProvenance(sender, message))
       || (!exactProvenance && humanRoutes.has(message.type) && !humanUi(sender))) {
     sendResponse({ ok: false, error: 'vault-route-unauthorized-sender' });

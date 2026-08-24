@@ -63,23 +63,88 @@ export const createKernelAppCatalog = ({
   }
   const read = () => idb.get('apps', KERNEL_APP_CATALOG_KEY);
   const mutate = makeSerialLane();
+  /** @type {Record<string,any>|null} */
+  let liveRegistry = null;
+  const run = (/** @type {()=>Promise<any>} */ cold,
+    /** @type {(registry:Record<string,any>)=>Promise<any>} */ live) =>
+    mutate(() => liveRegistry ? live(liveRegistry) : cold());
   /** @param {string} appId @param {Record<string,unknown>} patch */
-  const patchApp = (appId, patch) => mutate(async () => {
+  const patchApp = (appId, patch) => run(async () => {
     const state = parseKernelAppCatalogRow(await read());
     const current = state?.apps[appId];
     if (!state || !current) return null;
     state.apps[appId] = { ...current, ...patch, updatedAt: now() };
     await idb.put('apps', { key: KERNEL_APP_CATALOG_KEY, value: state });
     return state.apps[appId];
+  }, (registry) => registry.update(appId, patch));
+  const boundRegistry = Object.freeze({
+    load: () => run(async () => {}, (registry) => registry.load()),
+    list: () => run(async () => kernelAppCatalogRows(await read()), (registry) => registry.list()),
+    get: (/** @type {string} */ id) => run(
+      async () => parseKernelAppCatalogRow(await read())?.apps[id] ?? null,
+      (registry) => registry.get(id),
+    ),
+    create: (/** @type {any} */ input) => run(
+      async () => { throw new Error('kernel-app-registry-not-bound'); },
+      (registry) => registry.create(input),
+    ),
+    update: (/** @type {string} */ id, /** @type {any} */ patch) => run(
+      async () => { throw new Error('kernel-app-registry-not-bound'); },
+      (registry) => registry.update(id, patch),
+    ),
+    delete: (/** @type {string} */ id) => run(
+      async () => { throw new Error('kernel-app-registry-not-bound'); },
+      (registry) => registry.delete(id),
+    ),
+    getDefaultForSession: (/** @type {string} */ sessionId) => run(
+      async () => kernelSessionAppId(await read(), sessionId),
+      (registry) => registry.getDefaultForSession(sessionId),
+    ),
+    setDefaultForSession: (/** @type {string} */ sessionId, /** @type {string} */ id) => run(
+      async () => { throw new Error('kernel-app-registry-not-bound'); },
+      (registry) => registry.setDefaultForSession(sessionId, id),
+    ),
+    setActorSession: (/** @type {string} */ id, /** @type {string} */ actorSessionId) => run(
+      async () => { throw new Error('kernel-app-registry-not-bound'); },
+      (registry) => registry.setActorSession(id, actorSessionId),
+    ),
+    getActorSession: (/** @type {string} */ id) => run(
+      async () => null,
+      (registry) => registry.getActorSession(id),
+    ),
+    snapshot: (/** @type {any} */ options = {}) => run(
+      async () => ({ apps: kernelAppCatalogRows(await read()), currentId: null }),
+      (registry) => registry.snapshot(options),
+    ),
+    searchMetadata: (/** @type {string} */ query) => run(
+      async () => [],
+      (registry) => registry.searchMetadata(query),
+    ),
   });
   return Object.freeze({
-    list: async () => kernelAppCatalogRows(await read()),
+    bindLiveRegistry: (/** @type {()=>Promise<Record<string,any>>} */ create) => mutate(async () => {
+      if (liveRegistry) return boundRegistry;
+      const registry = await create();
+      if (!registry || typeof registry.load !== 'function') {
+        throw new TypeError('kernel-app-live-registry-invalid');
+      }
+      await registry.load();
+      liveRegistry = registry;
+      return boundRegistry;
+    }),
+    list: () => run(async () => kernelAppCatalogRows(await read()), (registry) => registry.list()),
     /** @param {string} appId */
-    get: async (appId) => parseKernelAppCatalogRow(await read())?.apps[appId] ?? null,
+    get: (appId) => run(
+      async () => parseKernelAppCatalogRow(await read())?.apps[appId] ?? null,
+      (registry) => registry.get(appId),
+    ),
     /** @param {string} sessionId */
-    getDefaultForSession: async (sessionId) => kernelSessionAppId(await read(), sessionId),
+    getDefaultForSession: (sessionId) => run(
+      async () => kernelSessionAppId(await read(), sessionId),
+      (registry) => registry.getDefaultForSession(sessionId),
+    ),
     /** @param {{name?:unknown,ownerSessionId?:unknown}} input */
-    createImported: (input = {}) => mutate(async () => {
+    createImported: (input = {}) => run(async () => {
       const state = parseKernelAppCatalogRow(await read()) ?? {
         schemaVersion: 1, apps: {}, sessionDefaults: {},
       };
@@ -100,9 +165,9 @@ export const createKernelAppCatalog = ({
       state.apps[id] = record;
       await idb.put('apps', { key: KERNEL_APP_CATALOG_KEY, value: state });
       return record;
-    }),
+    }, (registry) => registry.create({ ...input, source: 'imported' })),
     /** @param {string} appId */
-    remove: (appId) => mutate(async () => {
+    remove: (appId) => run(async () => {
       const state = parseKernelAppCatalogRow(await read());
       if (!state?.apps[appId]) return false;
       delete state.apps[appId];
@@ -111,7 +176,7 @@ export const createKernelAppCatalog = ({
       }
       await idb.put('apps', { key: KERNEL_APP_CATALOG_KEY, value: state });
       return true;
-    }),
+    }, (registry) => registry.delete(appId)),
     /** @param {string} appId @param {Record<string,unknown>} patch */
     patch: (appId, patch) => patchApp(appId, patch),
     /** @param {string} appId @param {boolean} favorite */
@@ -129,11 +194,15 @@ export const createKernelAppCatalog = ({
       return patchApp(appId, { fileKinds: Object.fromEntries(entries) });
     },
     /** @param {string} sessionId @param {string} appId */
-    setDefaultForSession: (sessionId, appId) => mutate(async () => {
+    setDefaultForSession: (sessionId, appId) => run(async () => {
       const state = parseKernelAppCatalogRow(await read());
       if (!state?.apps[appId]) return false;
       state.sessionDefaults[sessionId] = appId;
       await idb.put('apps', { key: KERNEL_APP_CATALOG_KEY, value: state });
+      return true;
+    }, async (registry) => {
+      if (!await registry.get(appId)) return false;
+      await registry.setDefaultForSession(sessionId, appId);
       return true;
     }),
   });

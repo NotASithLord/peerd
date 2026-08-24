@@ -28,7 +28,7 @@
 // authority). A persistent `tool_grants` store is a documented
 // follow-up (TODO.md).
 
-import { uuidv7 } from '/shared/util.js';
+import { uuidv7 } from '/shared/cold-util.js';
 
 /** @typedef {import('/shared/tool-types.js').ConfirmPrompt} ConfirmPrompt */
 /** @typedef {import('/shared/tool-types.js').ConfirmAnswer} ConfirmAnswer */

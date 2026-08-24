@@ -12,6 +12,7 @@ import {
   NATIVE_CHROME_PRUNED_IMPORTS,
 } from '../../packaging/bundle-chrome-native-kernel.ts';
 import { packageArtifact } from '../../packaging/package.ts';
+import { FIREFOX_BACKGROUND_ENTRY } from '../../packaging/gen-manifest.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import {
   assertVaultKernelReleaseTarget,
@@ -47,7 +48,7 @@ describe('test-only vault kernel package target', () => {
     expect(firefox).toMatchObject({
       name: 'peerd vault kernel store floor',
       permissions: ['storage'],
-      background: { scripts: ['background/vault-kernel.js'], type: 'module' },
+      background: { scripts: [FIREFOX_BACKGROUND_ENTRY], type: 'module' },
     });
     expect(source.background.service_worker).toBe('background/service-worker.js');
   });
@@ -193,11 +194,11 @@ describe('test-only vault kernel package target', () => {
     }
   });
 
-  test('live manifest and release artifact inventory remain on the legacy entry', () => {
+  test('live manifest owns the native kernel entry', () => {
     const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'manifests/base.json'), 'utf8'));
     const release = readFileSync(join(REPO_ROOT, 'packaging/release.ts'), 'utf8');
     expect(manifest.background).toEqual({
-      service_worker: 'background/service-worker.js', type: 'module',
+      service_worker: 'background/vault-kernel.js', type: 'module',
     });
     expect(release).not.toContain('peerd-vault-kernel');
   });
@@ -277,7 +278,8 @@ describe('test-only vault kernel package target', () => {
         const entryRelative = browser === 'chrome'
           ? manifest.background.service_worker : manifest.background.scripts[0];
         const graph = await collectStaticModuleGraph(staging, join(staging, entryRelative));
-        expect(entryRelative).toBe('background/vault-kernel.js');
+        expect(entryRelative).toBe(browser === 'firefox'
+          ? FIREFOX_BACKGROUND_ENTRY : 'background/vault-kernel.js');
         expect(graph.size > 1).toBe(browser === 'firefox');
         if (browser === 'chrome') {
           expect(statSync(join(staging, entryRelative)).size).toBeLessThan(300_000);
@@ -330,7 +332,8 @@ describe('test-only vault kernel package target', () => {
       join(REPO_ROOT, 'scripts/firefox/vault-kernel-physical.mjs'), 'utf8',
     );
     expect(source).toContain("mkdtempSync(join(tmpdir(), 'peerd-vault-kernel-firefox-'))");
-    expect(source).toContain("scripts: ['background/vault-kernel.js']");
+    expect(source).toContain('scripts: [FIREFOX_BACKGROUND_ENTRY]');
+    expect(source).toContain('FIREFOX_BACKGROUND_ENTRY');
     expect(source).toContain("HOME_URL = `moz-extension://${FIREFOX_UUID}/home/home.html");
     expect(source).toContain('EVENT_PAGE_IDLE_MS = 45_000');
     expect(source).toContain('afterIdleBoot.bootId === initialBoot.bootId');

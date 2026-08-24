@@ -1,7 +1,17 @@
 // @ts-check
 // Kernel-owned skills metadata authority: list, enable/disable, uninstall.
-// why metadata-only: SKILL.md parsing and every install path stay
-// demand-loaded; long rationale in docs/THIN-KERNEL-ARCHITECTURE.md.
+
+import { parseSkillMd, SkillParseError } from '/peerd-runtime/skills.js';
+
+export { SkillParseError };
+export class KernelSkillExistsError extends Error {
+  /** @param {string} name */
+  constructor(name) { super(`a skill named '${name}' is already installed`); this.name = 'SkillExistsError'; }
+}
+export class KernelSkillInstallError extends Error {
+  /** @param {string} message */
+  constructor(message) { super(message); this.name = 'SkillInstallError'; }
+}
 
 const DB_NAME = 'peerd-skills';
 const DB_VERSION = 1;
@@ -14,12 +24,14 @@ const BODY_STORE = 'bodies';
  * @param {(() => void)|null} [deps.canWrite] shared schema write gate
  * @param {(entry:{type:string,details?:Record<string,any>})=>Promise<any>} [deps.audit]
  * @param {() => unknown} [deps.pushState]
+ * @param {()=>number} [deps.now]
  */
 export const createKernelSkillsAuthority = ({
   idbFactory = globalThis.indexedDB,
   canWrite = null,
   audit = async () => {},
   pushState = async () => {},
+  now = Date.now,
 } = {}) => {
   /** @type {Promise<IDBDatabase>|null} */ let opened = null;
   const openDb = () => {
@@ -108,6 +120,28 @@ export const createKernelSkillsAuthority = ({
     return removed;
   };
 
+  const install = async (/** @type {string} */ text, /** @type {any} */ options = {}) => {
+    canWrite?.();
+    const parsed = parseSkillMd(text);
+    const meta = {
+      id: parsed.name, name: parsed.name, description: parsed.description,
+      version: parsed.version, license: parsed.license, allowedTools: parsed.allowedTools,
+      source: options.source ?? 'local', origin: options.origin ?? null,
+      sizeBytes: new TextEncoder().encode(parsed.body).length,
+      enabled: true, installedAt: now(),
+    };
+    await transact([META_STORE, BODY_STORE], 'readwrite', async (transaction) => {
+      const prior = await settled(transaction.objectStore(META_STORE).get(meta.id));
+      if (prior && options.replace !== true) throw new KernelSkillExistsError(meta.id);
+      transaction.objectStore(META_STORE).put(meta);
+      transaction.objectStore(BODY_STORE).put({ id: meta.id, body: parsed.body });
+    });
+    audit({ type: 'skill_installed', details: {
+      name: meta.id, source: meta.source, origin: meta.origin,
+    } }).catch(() => {});
+    return meta;
+  };
+
   const routes = Object.freeze({
     'skills/list': async () => ({ ok: true, skills: await listMetas() }),
     'skills/setEnabled': async (/** @type {any} */ { name, enabled } = {}) => {
@@ -132,5 +166,5 @@ export const createKernelSkillsAuthority = ({
     },
   });
 
-  return Object.freeze({ routes, list: listMetas });
+  return Object.freeze({ routes, list: listMetas, install });
 };

@@ -239,6 +239,7 @@ export const createKernelFeatureHost = ({
   return Object.freeze({
     runtime,
     vault: vaultAuthority,
+    ensureOffscreen,
     handleKeepalive,
     attachFirefoxActorLifetime,
     settleVaultBoot,

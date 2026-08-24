@@ -20,15 +20,18 @@ import { minifyColdArtifactModules } from '../../packaging/minify-artifact-js.ts
 import { writeControllerBuildIdentity } from '../../packaging/controller-build-identity.ts';
 import { COLD_START_TARGETS } from '../bench/cold-start-budgets.js';
 import { bundleChromeNativeKernel } from '../../packaging/bundle-chrome-native-kernel.ts';
+import {
+  NATIVE_BACKGROUND_ENTRY,
+  targetBackgroundEntry,
+} from '../../packaging/gen-manifest.ts';
 
 const SOURCE_DATE = new Date(946684800 * 1000);
 const entriesSorted = (root) => readdirSync(root, { recursive: true })
   .map((entry) => String(entry).split('\\').join('/'))
   .sort();
 
-const nativeEntry = (browser, channel) => browser === 'chrome' && channel === 'preview'
-  ? 'background/vault-kernel-preview.js'
-  : 'background/vault-kernel.js';
+const nativeEntry = (browser, channel) =>
+  targetBackgroundEntry(NATIVE_BACKGROUND_ENTRY, channel, browser);
 
 export const vaultKernelManifest = (manifest, browser, channel = 'store') => ({
   ...manifest,

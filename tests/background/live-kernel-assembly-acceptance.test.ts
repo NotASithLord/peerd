@@ -9,7 +9,7 @@ describe('installed-artifact live kernel assembly contract', () => {
   test('pins the complete semantic, event, and Port inventories per target', () => {
     expect(liveKernelAssemblyProfile('store-chrome')).toMatchObject({
       semanticRoutes: 161, eventInventory: 16, portInventory: 6,
-      semanticPlacements: { kernel: 76, split: 85 },
+      semanticPlacements: { kernel: 85, split: 76 },
       requiredEvents: { length: 13 }, requiredPorts: { length: 4 },
     });
     expect(liveKernelAssemblyProfile('preview-chrome')).toMatchObject({

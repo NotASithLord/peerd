@@ -1,8 +1,5 @@
 // @ts-check
 // Pure fail-closed provenance predicates for privileged extension RPC/Ports.
-// Exact ownership rationale and the sender matrix live in
-// docs/THIN-KERNEL-ARCHITECTURE.md; keep executable rules and JSDoc here small
-// because this module is on the native cold path.
 
 /**
  * Is this onMessage sender a trusted first-party extension context?

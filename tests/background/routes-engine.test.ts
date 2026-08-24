@@ -174,6 +174,24 @@ describe('pod/git: instance-pinned isomorphic-git shell bridge', () => {
     expect(pushedRef.opts.signal).toBeInstanceOf(AbortSignal);
   });
 
+  test('an indeterminate remote result is never presented as a safe retry', async () => {
+    const deps = baseDeps();
+    deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
+    deps.repositories.push = async () => {
+      throw Object.assign(new Error('transport closed'), {
+        code: 'repository-outcome-unknown', outcomeKnown: false,
+      });
+    };
+    const reply = await makeEngineRoutes(deps)['pod/git']({
+      podId: 'pod-1', jobId: 'job-unknown', argv: ['push', 'origin', 'main'],
+      remoteGrant: { op: 'push', url: 'https://github.com/a/b.git' },
+    }, sender);
+    expect(reply).toMatchObject({
+      ok: false, code: 'repository-outcome-unknown', outcomeKnown: false,
+      outcomeKind: 'unknown', retryable: false,
+    });
+  });
+
   test('validates the granted target and pushes under one repository coordinator', async () => {
     let coordinated = false;
     const order: string[] = [];

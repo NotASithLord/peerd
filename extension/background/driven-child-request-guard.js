@@ -42,6 +42,35 @@ export class FirefoxChildRequestGuardUnavailableError extends Error {
   }
 }
 
+export const FIREFOX_DRIVEN_CHILD_MARKERS_KEY = 'peerd.firefoxDrivenChildren.v1';
+
+/**
+ * Firefox background scripts run in an event page, so localStorage is the
+ * synchronous durable primitive available to a blocking webRequest listener.
+ * Only browser tab ids cross this boundary; destinations never do.
+ * @param {Storage} storage
+ */
+export const makeFirefoxDrivenChildMarkerStore = (storage) => {
+  if (typeof storage?.getItem !== 'function' || typeof storage?.setItem !== 'function'
+      || typeof storage?.removeItem !== 'function') {
+    throw new FirefoxChildRequestGuardUnavailableError();
+  }
+  return Object.freeze({
+    read() {
+      const raw = storage.getItem(FIREFOX_DRIVEN_CHILD_MARKERS_KEY);
+      if (raw === null) return [];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) throw new TypeError('firefox-child-markers-invalid');
+      return parsed;
+    },
+    /** @param {readonly {tabId:number,sourceTabId:number}[]} markers */
+    write(markers) {
+      if (markers.length === 0) storage.removeItem(FIREFOX_DRIVEN_CHILD_MARKERS_KEY);
+      else storage.setItem(FIREFOX_DRIVEN_CHILD_MARKERS_KEY, JSON.stringify(markers));
+    },
+  });
+};
+
 /**
  * Register only in a generated Firefox package. A Firefox failure is fatal:
  * silently continuing would advertise a guard that is not present.
@@ -63,27 +92,86 @@ export const registerFirefoxDrivenChildRequestGuard = ({ isFirefox, event, liste
 /**
  * @param {Object} deps
  * @param {(sourceTabId: number) => boolean} deps.isDrivenSource
+ * @param {()=>boolean} [deps.isSourceReady]
  * @param {(url: string) => ChildRequestVerdict} [deps.classifyTarget]
  * @param {(event: { sourceTabId: number, tabId: number, reason: string }) => unknown} [deps.onBlocked]
+ * @param {{read:()=>unknown,write:(markers:readonly {tabId:number,sourceTabId:number}[])=>void}} [deps.markers]
+ * @param {number} [deps.maxChildren]
  */
 export const makeDrivenChildRequestGuard = ({
   isDrivenSource,
+  isSourceReady = () => true,
   classifyTarget = classifyDrivenChildRequestTarget,
   onBlocked = () => {},
+  markers,
+  maxChildren = 256,
 }) => {
   /** @type {Map<number, number>} */
   const exactChildren = new Map();
   const reported = new Set();
+  let markerStoreReady = true;
 
+  const validId = (/** @type {unknown} */ value) => typeof value === 'number'
+    && Number.isInteger(value) && value >= 0;
+  const markerSnapshot = () => [...exactChildren].map(([tabId, sourceTabId]) => ({
+    tabId, sourceTabId,
+  }));
+  const persist = () => {
+    if (!markers) return;
+    try { markers.write(markerSnapshot()); }
+    catch {
+      // why: continuing after durability loss would make an event-page recycle
+      // silently widen exact-child authority. Hold requests in this realm.
+      markerStoreReady = false;
+    }
+  };
+  if (markers) {
+    try {
+      const stored = markers.read();
+      if (!Array.isArray(stored)) throw new TypeError('firefox-child-markers-invalid');
+      for (const marker of stored) {
+        if (!validId(marker?.tabId) || !validId(marker?.sourceTabId)) {
+          throw new TypeError('firefox-child-markers-invalid');
+        }
+        exactChildren.set(marker.tabId, marker.sourceTabId);
+      }
+      if (exactChildren.size > maxChildren) markerStoreReady = false;
+    } catch {
+      markerStoreReady = false;
+    }
+  }
+
+  const sourceState = (/** @type {number} */ sourceTabId) => {
+    try {
+      if (!isSourceReady()) return null;
+      return isDrivenSource(sourceTabId) === true;
+    } catch { return null; }
+  };
   const adopt = (/** @type {unknown} */ childTabId, /** @type {unknown} */ sourceTabId) => {
-    if (typeof childTabId !== 'number' || typeof sourceTabId !== 'number') return;
-    if (isDrivenSource(sourceTabId)) exactChildren.set(childTabId, sourceTabId);
+    if (!validId(childTabId) || !validId(sourceTabId)) return;
+    const child = /** @type {number} */ (childTabId);
+    const source = /** @type {number} */ (sourceTabId);
+    if (sourceState(source) !== false) {
+      exactChildren.set(child, source);
+      if (exactChildren.size > maxChildren) markerStoreReady = false;
+      persist();
+    }
   };
 
   return {
     /** @param {{ tabId?: number, sourceTabId?: number }} details */
     onNavigationTarget(details) {
       adopt(details.tabId, details.sourceTabId);
+    },
+
+    /** @param {{ tabId?: number, sourceTabId?: number }} details */
+    resolveNavigationTarget(details) {
+      if (!validId(details.tabId) || !validId(details.sourceTabId)) return;
+      const tabId = /** @type {number} */ (details.tabId);
+      const sourceTabId = /** @type {number} */ (details.sourceTabId);
+      const state = sourceState(sourceTabId);
+      if (state === true) adopt(tabId, sourceTabId);
+      else if (state === false && exactChildren.delete(tabId)) persist();
     },
 
     /**
@@ -93,6 +181,7 @@ export const makeDrivenChildRequestGuard = ({
      * @param {{ tabId?: number, url?: string, type?: string }} details
      */
     onBeforeRequest(details) {
+      if (!markerStoreReady) return { cancel: true };
       if (typeof details.tabId !== 'number' || !exactChildren.has(details.tabId)
           || typeof details.url !== 'string') return {};
       const verdict = classifyTarget(details.url);
@@ -112,10 +201,40 @@ export const makeDrivenChildRequestGuard = ({
 
     /** @param {number} tabId */
     release(tabId) {
-      exactChildren.delete(tabId);
+      const removed = exactChildren.delete(tabId);
       reported.delete(tabId);
+      if (removed) persist();
+    },
+
+    /**
+     * Drop crash leftovers only after current browser tab identity disproves
+     * the stored exact source-child relation.
+     * @param {readonly {id?:number,openerTabId?:number}[]} tabs
+     */
+    reconcile(tabs) {
+      if (!Array.isArray(tabs)) {
+        markerStoreReady = false;
+        return false;
+      }
+      const current = new Map(tabs
+        .filter((tab) => validId(tab?.id))
+        .map((tab) => [tab.id, tab]));
+      let changed = false;
+      for (const [tabId, sourceTabId] of exactChildren) {
+        const child = current.get(tabId);
+        if (!child || !current.has(sourceTabId) || child.openerTabId !== sourceTabId
+            || sourceState(sourceTabId) === false) {
+          exactChildren.delete(tabId);
+          reported.delete(tabId);
+          changed = true;
+        }
+      }
+      markerStoreReady = exactChildren.size <= maxChildren;
+      if (changed || markers) persist();
+      return markerStoreReady;
     },
 
     has: (/** @type {number} */ tabId) => exactChildren.has(tabId),
+    ready: () => markerStoreReady,
   };
 };

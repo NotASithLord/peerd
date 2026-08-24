@@ -114,7 +114,7 @@ describe('makeGoalRunner — the goal loop', () => {
     });
 
     expect((await runner.start({ sessionId: 's1', goal: 'do the thing' })).ok).toBe(true);
-    await settle(() => !runner.isActive('s1'));
+    await settle(() => runner.get('s1') === null);
 
     expect(calls.length).toBe(2);
     // Turn 1: the user's real goal, NOT synthetic (renders in the chat).
@@ -293,7 +293,99 @@ const makeKv = () => {
   };
 };
 
+const makeDeferredKv = () => {
+  const store = new Map<string, any>();
+  const pending: Array<{ value: any; release: () => void }> = [];
+  let maxPending = 0;
+  const waitForWrite = async () => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (pending.length) return;
+      await Promise.resolve();
+    }
+    throw new Error('deferred-kv-write-missing');
+  };
+  return {
+    store,
+    pending,
+    maxPending: () => maxPending,
+    get: async (key: string) => structuredClone(store.get(key)),
+    set: (key: string, value: any) => new Promise<void>((resolve) => {
+      pending.push({
+        value: structuredClone(value),
+        release: () => { store.set(key, structuredClone(value)); resolve(); },
+      });
+      maxPending = Math.max(maxPending, pending.length);
+    }),
+    delete: async (key: string) => { store.delete(key); },
+    releaseNext: async () => {
+      await waitForWrite();
+      pending.shift()?.release();
+      await Promise.resolve();
+    },
+  };
+};
+
 describe('makeGoalRunner — persistence + resume (survives SW restart / other chats)', () => {
+  it('serializes delayed completion writes and clears before terminal publication', async () => {
+    const kv = makeDeferredKv();
+    const ends: any[] = [];
+    let runner: ReturnType<typeof makeGoalRunner>;
+    runner = makeGoalRunner({
+      runTurn: async () => { runner.complete('s', 'done'); },
+      onRunEnd: (sessionId, info) => { ends.push({ sessionId, ...info }); },
+      kv,
+    });
+
+    await runner.start({ sessionId: 's', goal: 'finish' });
+    expect(kv.pending).toHaveLength(1);
+    expect(ends).toEqual([]);
+    await kv.releaseNext();
+    await kv.releaseNext();
+    expect(ends).toEqual([]);
+    await kv.releaseNext();
+    await settle(() => ends.length === 1);
+
+    expect(kv.maxPending()).toBe(1);
+    expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
+    expect(ends).toEqual([{
+      sessionId: 's', phase: 'done', summary: 'done', reason: null,
+    }]);
+    const recycled = makeGoalRunner({ runTurn: async () => {}, kv });
+    await expect(recycled.resume()).resolves.toEqual({ resumed: 0 });
+  });
+
+  it('awaits delayed live writes and the keyed Stop clear before recycle', async () => {
+    const kv = makeDeferredKv();
+    let releaseTurn = () => {};
+    let turnStarted = () => {};
+    const started = new Promise<void>((resolve) => { turnStarted = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    const ends: any[] = [];
+    const runner = makeGoalRunner({
+      runTurn: async () => { turnStarted(); await gate; },
+      onRunEnd: (_sessionId, info) => { ends.push(info); },
+      kv,
+    });
+
+    await runner.start({ sessionId: 's', goal: 'finish' });
+    await started;
+    let stopped = false;
+    const stop = runner.stop('s').then(() => { stopped = true; });
+    await kv.releaseNext();
+    expect(stopped).toBe(false);
+    await kv.releaseNext();
+    expect(stopped).toBe(false);
+    await kv.releaseNext();
+    await stop;
+
+    expect(kv.maxPending()).toBe(1);
+    expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
+    releaseTurn();
+    await settle(() => ends.length === 1);
+    const recycled = makeGoalRunner({ runTurn: async () => {}, kv });
+    await expect(recycled.resume()).resolves.toEqual({ resumed: 0 });
+  });
+
   it('mirrors a live run to kv while running and clears it on a terminal phase', async () => {
     const kv = makeKv();
     let seenWhileLive: any = null;
@@ -303,7 +395,7 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
       kv,
     });
     await runner.start({ sessionId: 's1', goal: 'do it' });
-    await settle(() => !runner.isActive('s1'));
+    await settle(() => runner.get('s1') === null);
     // Was mirrored to storage while the run was live (so an SW restart finds it).
     expect(seenWhileLive?.s1).toMatchObject({ goal: 'do it' });
     // Cleared once the run ends — a terminal run must not resume.
@@ -322,7 +414,7 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
     });
     const res = await runner.resume();
     expect(res.resumed).toBe(1);
-    await settle(() => !runner.isActive('sBoot'));
+    await settle(() => runner.get('sBoot') === null);
     // Continues from the persisted iteration → a HIDDEN continuation that still
     // carries the goal, NOT the goal replayed as a fresh visible message.
     expect(calls[0].synthetic).toBe(true);
@@ -349,7 +441,7 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
       kv,
     });
     await runner.resume();
-    await settle(() => !runner.isActive('s'));
+    await settle(() => runner.get('s') === null);
     // The interrupted final turn re-ran exactly once, THEN the run caps — without
     // the clamp the loop would exit immediately (0 turns) and still report capped.
     expect(calls.length).toBe(1);
@@ -465,7 +557,7 @@ describe('makeGoalRunner — outcome hardening (no runaway on failure)', () => {
     expect(kv.store.get(GOAL_RUNS_KEY).s).toMatchObject({ goal: 'keep going' });
     // resume() re-drives; this time it completes → terminal, onRunEnd, kv cleared.
     await runner.resume();
-    await settle(() => !runner.isActive('s'));
+    await settle(() => runner.get('s') === null);
     expect(ends).toHaveLength(1);
     expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
   });

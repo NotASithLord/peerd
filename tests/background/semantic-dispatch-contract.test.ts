@@ -11,6 +11,8 @@ import {
 } from '../../extension/shared/semantic-route-classification.js';
 import { LEGACY_SEMANTIC_ROUTE_INVENTORY } from '../../extension/shared/semantic-route-inventory.generated.js';
 import { createSemanticDispatchRuntime } from '../../extension/offscreen/semantic-dispatch-runtime.js';
+import { createSemanticDemandQuota } from '../../extension/shared/semantic-demand-policy.js';
+import { SEMANTIC_HOST_ROUTE_CLASSIFICATIONS } from '../../extension/shared/semantic-host-route-manifest.js';
 import {
   discoverLegacySemanticRoutes,
   renderSemanticRouteInventory,
@@ -34,6 +36,10 @@ const options = (extra: Record<string, unknown> = {}) => ({
   authority: AUTHORITY,
   ...extra,
 });
+const DIRECT_KERNEL_ROUTES = [
+  'contacts/forget', 'contacts/list', 'contacts/set', 'memory/export',
+  'skills/list', 'skills/remove', 'skills/setEnabled', 'toolbox/read', 'toolbox/record',
+];
 
 describe('generated semantic route inventory', () => {
   test('is an exact generated projection of the unified legacy dispatcher', async () => {
@@ -54,9 +60,9 @@ describe('generated semantic route inventory', () => {
     ]);
     expect(SEMANTIC_ROUTE_CLASSIFICATION.size).toBe(161);
     expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.placement === 'kernel'))
-      .toHaveLength(76);
-    expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.placement === 'split'))
       .toHaveLength(85);
+    expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.placement === 'split'))
+      .toHaveLength(76);
     expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.state === 'migrated')
       .map((row) => row.route)).toEqual([
       'actors/count', 'actors/overview',
@@ -120,6 +126,26 @@ describe('generated semantic route inventory', () => {
       ready: false, expected: 3, classified: 3,
       missing: ['test/missing'], extra: ['test/extra'], unmigrated: ['test/two'],
     });
+  });
+
+  test('direct authority routes have no semantic-host or reverse-call edge', () => {
+    const reverseOperations = [
+      'semantic.contacts.list-saved', 'semantic.contacts.list-apps',
+      'semantic.contacts.list-audit', 'semantic.contacts.upsert', 'semantic.contacts.remove',
+      'semantic.memory.export', 'semantic.skills.list', 'semantic.skills.set-enabled',
+      'semantic.skills.remove', 'semantic.toolbox.get-body', 'semantic.toolbox.record-runs',
+    ];
+    for (const route of DIRECT_KERNEL_ROUTES) {
+      expect(SEMANTIC_ROUTE_CLASSIFICATION.get(route)).toMatchObject({ placement: 'kernel' });
+      expect(SEMANTIC_HOST_ROUTE_CLASSIFICATIONS.some((row) => row.route === route)).toBe(false);
+      const quota = createSemanticDemandQuota(request(route));
+      expect(quota.pendingCap).toBe(0);
+      for (const operation of reverseOperations) {
+        expect(quota.admit(operation, {})).toMatchObject({
+          ok: false, code: 'kernel-operation-denied',
+        });
+      }
+    }
   });
 
   test('rejects duplicate, malformed, and silently extended classification rows', () => {

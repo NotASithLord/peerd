@@ -8,12 +8,9 @@ import { makeBoundedModuleLoader } from '../shared/bounded-module-load.js';
 import { createSemanticDispatchRuntime } from './semantic-dispatch-runtime.js';
 
 const actorRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/actors.js'));
-const toolboxRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/toolbox.js'));
-const contactRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/contacts.js'));
 const contributorRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/contributor.js'));
 const providerRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/providers.js'));
 const memoryRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/memory.js'));
-const skillRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/skills.js'));
 const routeHandler = (/** @type {()=>Promise<any>} */ load, /** @type {string} */ method) => (
   /** @type {string} */ route,
 ) => async (/** @type {any} */ message, /** @type {any} */ options) => {
@@ -33,36 +30,24 @@ const routeHandler = (/** @type {()=>Promise<any>} */ load, /** @type {string} *
   return routes[method](route, message, options);
 };
 const actor = routeHandler(actorRoutes, 'dispatchActorSemanticRoute');
-const toolbox = routeHandler(toolboxRoutes, 'dispatchToolboxSemanticRoute');
-const contacts = routeHandler(contactRoutes, 'dispatchContactsSemanticRoute');
 const contributor = routeHandler(contributorRoutes, 'dispatchContributorSemanticRoute');
 const providers = routeHandler(providerRoutes, 'dispatchProviderSemanticRoute');
 const memory = routeHandler(memoryRoutes, 'dispatchMemorySemanticRoute');
-const skills = routeHandler(skillRoutes, 'dispatchSkillsSemanticRoute');
 const runtime = createSemanticDispatchRuntime({
   classifications: SEMANTIC_HOST_ROUTE_CLASSIFICATIONS,
   handlers: {
     'actors/overview': actor('actors/overview'),
     'actors/count': actor('actors/count'),
-    'contacts/forget': contacts('contacts/forget'),
-    'contacts/list': contacts('contacts/list'),
-    'contacts/set': contacts('contacts/set'),
     'contributor/disable': contributor('contributor/disable'),
     'contributor/enable': contributor('contributor/enable'),
     'contributor/status': contributor('contributor/status'),
     'memory/delete': memory('memory/delete'),
     'memory/deleteAll': memory('memory/deleteAll'),
-    'memory/export': memory('memory/export'),
     'memory/suggestions': memory('memory/suggestions'),
     'memory/suggestions/approve': memory('memory/suggestions/approve'),
     'memory/suggestions/dismiss': memory('memory/suggestions/dismiss'),
     'memory/write': memory('memory/write'),
     'provider/status': providers('provider/status'),
-    'skills/list': skills('skills/list'),
-    'skills/remove': skills('skills/remove'),
-    'skills/setEnabled': skills('skills/setEnabled'),
-    'toolbox/read': toolbox('toolbox/read'),
-    'toolbox/record': toolbox('toolbox/record'),
   },
 });
 

@@ -9,7 +9,10 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
-import { generateManifest } from '../../packaging/gen-manifest.ts';
+import {
+  FIREFOX_BACKGROUND_ENTRY,
+  generateManifest,
+} from '../../packaging/gen-manifest.ts';
 import { startGeckodriver } from './webdriver.mjs';
 import { assertLiveKernelAssembly } from '../acceptance/live-kernel-assembly.mjs';
 
@@ -54,7 +57,7 @@ export async function runVaultKernelFirefoxPhysical() {
     cpSync(join(ROOT, 'extension'), tree, { recursive: true });
     const manifest = generateManifest({ channel: 'store', browser: 'firefox', version: VERSION });
     manifest.name = `${manifest.name} vault kernel floor`;
-    manifest.background = { scripts: ['background/vault-kernel.js'], type: 'module' };
+    manifest.background = { scripts: [FIREFOX_BACKGROUND_ENTRY], type: 'module' };
     writeFileSync(join(tree, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
     execFileSync('zip', ['-q', '-X', '-r', xpi, '.'], {
       cwd: tree, env: { ...process.env, TZ: 'UTC' },
