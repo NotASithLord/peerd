@@ -354,14 +354,15 @@ describe('makeSpawnActor', () => {
     async function* loop() { loopRuns++; yield { type: 'stop', stopReason: 'end_turn' }; }
     const { deps, audits, modelCalls } = baseDeps(store, loop, {
       runChildOffscreen: async () => ({
-        ok: false, started: false, code: 'actor_worker_spawn_failed', error: 'worker failed to start',
+        ok: false, started: false, phase: 'startup',
+        code: 'actor_worker_spawn_failed', error: 'worker failed to start',
       }),
     });
 
     const result = await makeSpawnActor(deps)({ task: 't', parentSessionId: parent.sessionId });
 
     expect(result.refused).toBe(true);
-    expect(result.result).toContain('worker failed to start');
+    expect(result.result).toBe('Temporarily unavailable. Try again.');
     expect(loopRuns).toBe(0);
     expect(modelCalls).toEqual([]);
     expect(audits).toContainEqual(expect.objectContaining({

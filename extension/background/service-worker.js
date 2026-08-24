@@ -1,39 +1,7 @@
 // @ts-check
-// Service worker — wiring + dependency-injection assembly (architecture.md §6).
-//
-// The SW imports each peerd-* module's public surface, creates concrete
-// instances (vault, audit log, session store), assembles the per-call
-// dependency context (buildToolContext, buildStateSnapshot), drives the agent
-// turn, and routes messages. It owns no business logic of its own — that lives
-// in the peerd-* modules and in the route handlers under background/routes/.
-//
-// Message routes: the dispatcher handlers live in background/routes/*.js —
-// import-free, deps-injected factories (makeVaultRoutes, makeProviderRoutes, …)
-// spread into makeDispatcher with a shared `routeDeps` object. They are
-// Bun-unit-tested in tests/background/ and statically wiring-checked in
-// tests/meta/sw-routes-wiring.test.ts. A route stays INLINE here only when it
-// closes over reassigned module state (settings, activeSession, denylist*,
-// defaultProfile, localModel*) that a captured reference couldn't track — those
-// are the handful left in the dispatcher below. Keep that rule: a new route
-// that needs only stable collaborators belongs in a routes/ module, not here.
-// New non-route logic that grows past a few lines of glue belongs in a module
-// (a peerd-* barrel, or a background/*.js helper like settings-patch.js), not
-// inlined into a handler.
-//
-// SW lifetime: this module is re-executed on every cold start. Module
-// scope is the "per-SW-lifetime singleton" surface. The offscreen doc
-// holds a keepalive port so the SW survives the 30s idle timer during
-// active sessions. State that must survive SW termination lives in
-// chrome.storage.session (`peerd-egress` sessionCache namespace) or
-// chrome.storage.local (`egress.kv`).
 
 import browser from '/shared/browser-api.js';
 import { makeDispatcher, isTrustedSender } from '/shared/background-dispatcher.js';
-import {
-  isEvalSender, isHomeSender, isOffscreenSender as senderIsOffscreen,
-  isOptionsSender, isSidepanelSender,
-  isSidepanelPortSender,
-} from '/shared/sender-trust.js';
 import { loadDweb } from '/shared/dweb-loader.js';
 import { makeSiteCaptureManager } from '/background/site-capture-manager.js';
 import {
@@ -45,21 +13,30 @@ import { makeActorIsolationStateStore } from './actor-isolation-state.js';
 import { actorDeliveryIdsFromMessage, makeActorRecoveryGate } from './actor-recovery-gate.js';
 import { createActorLiveProjection } from './actor-live-projection.js';
 import { answerWithSessionConfirmGrant } from './confirm-session-grants.js';
-import { isAuthorizedUiPortSender } from './ui-port-sender.js';
 import { makeCoalescedStatePush } from './state-push.js';
 import { makeStateSnapshotBuilder } from './state-snapshot.js';
-import { makeSessionCostFolder } from './session-cost-fold.js';
 import { makeScriptModelCallRoute } from './script-model-call.js';
 import { makeOriginLockResolver } from './origin-lock-controller.js';
 import { makeAppActorChatHandler } from './app-actor-chat.js';
 import { makeArtifactEngineClient } from './offscreen-artifact-client.js';
+import {
+  createFeatureLeaseControlPlane,
+  isAuthorizedUiPortSender,
+  makeLazyFirefoxActorControl,
+  makeOffscreenToolboxParseClient,
+  makeRetryableLazy,
+  makeSenderChecks,
+  makeSessionCostFolder,
+  makeTrackerNote,
+  makeUiForwarder,
+  makeVoiceControlPlane,
+} from './service-worker-control-plane.js';
 import {
   createDeferredRepositoryClient,
   createOffscreenRepositoryClient,
   makeRepositoryKernelFetch,
 } from './repository-client.js';
 import { makeControllerTurnBridge } from './controller-turn-bridge.js';
-import { createProductionFeatureLeaseRuntime } from './feature-lease-runtime.js';
 import { attachFeatureLeaseKeepalive } from './feature-lease-keepalive.js';
 import {
   browserLocalQueueStore,
@@ -407,7 +384,6 @@ import { createJsTabTracker } from './notebook-tab-tracker.js';
 import { createPodClient } from './pod-client.js';
 import { createPodTabTracker } from './pod-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
-import { makeOffscreenToolboxParseClient } from './offscreen-toolbox-parse-client.js';
 import { createScriptRunRegistry } from './script-runs.js';
 import { createContextSnapshots } from './context-snapshots.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
@@ -417,11 +393,6 @@ import {
 import {
   isActorHostStartupFailure, runActorWithStartupRetry,
 } from './actor-startup-retry.js';
-import {
-  makeDirectActorHost,
-  makeRefCountedFirefoxBackgroundLifetime,
-  makeStorageSessionKeepAlive,
-} from './direct-actor-host.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeOffscreenDocClient } from './offscreen-doc-client.js';
 import { makeOffscreenWebClient } from './offscreen-web-client.js';
@@ -1120,21 +1091,21 @@ const toolboxStore = createToolboxStore();
 // there so Acorn is not parsed twice. Firefox has no offscreen document; its
 // background page can use import() safely, so it pays the parser cost only on
 // the first toolbox write. Both paths fail closed before any body is persisted.
-let localToolboxParseCheckPromise = null;
+const loadLocalToolboxParseCheck = makeRetryableLazy(() =>
+  import('/peerd-engine/module-resolver.js').then(({ buildModule }) => makeToolboxParseCheck({
+    buildModule,
+    remoteModulesEnabled: REMOTE_MODULE_IMPORTS_ENABLED,
+    readSibling: async (siblingName) => {
+      const siblingBody = await toolboxStore.getBody(siblingName);
+      if (siblingBody == null) {
+        throw new Error(`unknown toolbox module '${siblingName}'; write it first (toolbox_write)`);
+      }
+      return siblingBody;
+    },
+  })),
+);
 const localToolboxParseCheck = async (/** @type {string} */ name, /** @type {string} */ body) => {
-  localToolboxParseCheckPromise ??= import('/peerd-engine/module-resolver.js')
-    .then(({ buildModule }) => makeToolboxParseCheck({
-      buildModule,
-      remoteModulesEnabled: REMOTE_MODULE_IMPORTS_ENABLED,
-      readSibling: async (siblingName) => {
-        const siblingBody = await toolboxStore.getBody(siblingName);
-        if (siblingBody == null) {
-          throw new Error(`unknown toolbox module '${siblingName}'; write it first (toolbox_write)`);
-        }
-        return siblingBody;
-      },
-    }));
-  return (await localToolboxParseCheckPromise)(name, body);
+  return (await loadLocalToolboxParseCheck())(name, body);
 };
 const toolboxParseCheck = offscreenAvailable
   ? makeOffscreenToolboxParseClient({
@@ -3101,11 +3072,8 @@ const vmRegistry = createVmRegistry({ storage: idbKV('vms'), onActorArchive: arc
 // Per-kind tracker note: on every background ensureTab the card updates to the
 // touched tab, labelled "<Kind> · <instance name>" (looked up from the registry
 // by the instance id) so it reads like a real tab. noteAgentTab is late-bound.
-const trackerNote = (/** @type {any} */ registry, /** @type {string} */ kind) => (/** @type {number} */ tabId, /** @type {string} */ _kindLabel, /** @type {any} */ id) => {
-  Promise.resolve(registry.get(id))
-    .then((r) => noteAgentTab(tabId, { kind, name: r?.name ?? null }))
-    .catch(() => noteAgentTab(tabId, { kind }));
-};
+const trackerNote = (/** @type {any} */ registry, /** @type {string} */ kind) =>
+  makeTrackerNote(registry, kind, (tabId, value) => noteAgentTab(tabId, value));
 const vmTabTracker = createVmTabTracker({
   announce: trackerNote(vmRegistry, 'WebVM'),
   onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('vm', id, tabId),
@@ -3147,82 +3115,17 @@ const appTabTracker = createAppTabTracker({
   onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('app', id, tabId),
   onDrop: (/** @type {string} */ id) => engineLiveness.drop('app', id),
 });
-const ensureOffscreen = async () => {
-  // Firefox has no offscreen document. Its direct Worker adapters own their
-  // bounded lifetimes and offscreen-only capabilities stay unavailable.
-  if (typeof (/** @type {any} */ (browser)).offscreen?.createDocument !== 'function') return;
-  try {
-    const contexts = await listOffscreenContexts(browser);
-    if (contexts.length > 0) return;
-    await (/** @type {any} */ (browser)).offscreen.createDocument({
-      url: OFFSCREEN_URL,
-      reasons: ['WORKERS', 'USER_MEDIA'],
-      justification: 'Demand-scoped feature Workers and local voice transcription.',
-    });
-    // Let the tiny lease host register before the first authenticated start.
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  } catch (error) {
-    if (/single offscreen document|already exists/i.test(
-      (/** @type {{message?:string}} */ (error))?.message ?? '',
-    )) return;
-    throw error;
-  }
-};
-const featureLeases = createProductionFeatureLeaseRuntime({
+const {
+  runtime: featureLeases,
+  ensureOffscreen,
+  run: withFeatureLease,
+  acquire: acquireFeatureLease,
+} = createFeatureLeaseControlPlane({
+  browser,
+  offscreenUrl: OFFSCREEN_URL,
   identity: kernelIdentity,
-  // This document contains desired lease identities only, never feature data
-  // or secret material. Session lifetime is exactly the SW-adoption horizon.
-  store: {
-    get: async (key) => (await browser.storage.session.get(key))?.[key],
-    set: async (key, value) => { await browser.storage.session.set({ [key]: value }); },
-  },
-  ensureOffscreen: async () => { await ensureOffscreen(); },
-  hasOffscreen: async () => (await listOffscreenContexts(browser)).length > 0,
-  closeOffscreen: async () => {
-    if (typeof (/** @type {any} */ (browser)).offscreen?.closeDocument === 'function') {
-      await (/** @type {any} */ (browser)).offscreen.closeDocument();
-    }
-  },
-  sendHostMessage: (message) => browser.runtime.sendMessage(message),
   vaultUnlocked: !vault.isLocked(),
 });
-/**
- * @template T
- * @param {'controller'|'dweb'|'dom-host'|'media-host'|'model-host'} scope
- * @param {(lease:any)=>Promise<T>|T} operation
- * @param {Record<string, unknown>} [options]
- * @returns {Promise<T>}
- */
-const withFeatureLease = async (scope, operation, options = {}) => {
-  await featureLeases.ready;
-  let entered = false;
-  const result = await featureLeases.runWithLease(scope, async (lease) => {
-    entered = true;
-    return operation(lease);
-  }, options);
-  if (!entered) {
-    const refusal = /** @type {any} */ (result);
-    const error = /** @type {Error & {code?:string,outcomeKnown?:boolean}} */ (
-      new Error(refusal?.code ?? 'feature lease unavailable')
-    );
-    error.code = refusal?.code ?? 'feature-lease-unavailable';
-    error.outcomeKnown = refusal?.outcomeKnown === true;
-    throw error;
-  }
-  return /** @type {T} */ (result);
-};
-/** @param {'controller'|'dweb'|'dom-host'|'media-host'|'model-host'} scope @param {Record<string,unknown>} options */
-const acquireFeatureLease = async (scope, options = {}) => {
-  await featureLeases.ready;
-  const result = await featureLeases.acquire(scope, options);
-  if (result?.ok) return result;
-  const error = /** @type {Error & {code?:string,outcomeKnown?:boolean}} */ (
-    new Error(result?.code ?? 'feature lease unavailable')
-  );
-  error.code = result?.code ?? 'feature-lease-unavailable';
-  error.outcomeKnown = result?.outcomeKnown === true;
-  throw error;
-};
 const ensureDwebFeature = async () => {
   if (!DWEB_ENABLED || !settingsHydrated || !settingsStore.get().dwebEnabled) {
     throw new Error('dweb-disabled');
@@ -3237,8 +3140,8 @@ const withHost = (operation) => withFeatureLease(
 const acquireResidentHost = () => acquireFeatureLease(
   'model-host', { reason: 'local-model-resident' },
 );
-/** @type {ReturnType<typeof makeRefCountedFirefoxBackgroundLifetime>|null} */
-let firefoxBackgroundLifetime = null;
+/** @type {<T>(operation:()=>Promise<T>|T,options?:any)=>Promise<T>} */
+let withFirefoxBackgroundLifetime = async (operation) => operation();
 const artifactEngine = makeArtifactEngineClient({
   offscreen: offscreenAvailable,
   offscreenUrl: browser.runtime.getURL(OFFSCREEN_URL),
@@ -3246,9 +3149,7 @@ const artifactEngine = makeArtifactEngineClient({
     'dom-host', operation, { reason: 'artifact-codec-demand' },
   ),
   retireHost: (reason) => featureLeases.retireActiveHost(reason),
-  withLocalLifetime: (operation, options) => firefoxBackgroundLifetime
-    ? firefoxBackgroundLifetime.run(operation, options)
-    : operation(),
+  withLocalLifetime: (operation, options) => withFirefoxBackgroundLifetime(operation, options),
 });
 const repositoryAudit = (/** @type {any} */ event) => { auditLog.append(event).catch(() => {}); };
 const repositoryKernelFetch = makeRepositoryKernelFetch({
@@ -3256,10 +3157,6 @@ const repositoryKernelFetch = makeRepositoryKernelFetch({
   getSecret,
   audit: repositoryAudit,
 });
-// Chrome's MV3 service-worker realm cannot runtime-import isomorphic-git. Keep
-// the exact repository owner lazy in the offscreen host; Firefox's event page
-// can import the same pinned vendor directly on first Git operation. Both
-// retain the SW-local transaction coordinator used by App/editor mutations.
 const repositories = offscreenAvailable
   ? createOffscreenRepositoryClient({
     withHost: (/** @type {(lease:any)=>Promise<any>} */ operation) => withFeatureLease(
@@ -3273,9 +3170,7 @@ const repositories = offscreenAvailable
     const { createFirefoxRepositoryClient } = await import('./repository-local-client.js');
     return createFirefoxRepositoryClient({
       webFetch, getSecret, audit: repositoryAudit,
-      withLifetime: (operation, options) => firefoxBackgroundLifetime
-        ? firefoxBackgroundLifetime.run(operation, options)
-        : operation(),
+      withLifetime: (operation, options) => withFirefoxBackgroundLifetime(operation, options),
     });
   });
 const podClient = createPodClient({ registry: podRegistry, tracker: podTabTracker });
@@ -3452,7 +3347,8 @@ const semanticRouteKernel = makeSemanticRouteKernel({
   contacts,
   appRegistry,
 });
-const semanticController = makeSemanticControllerClient({ browser, ensureOffscreen,
+const semanticController = makeSemanticControllerClient({
+  browser, ensureOffscreen,
   offscreenUrl: OFFSCREEN_URL, firefoxDirect: !offscreenAvailable,
   dwebEnabled: DWEB_ENABLED,
   kernelIdentity,
@@ -3460,21 +3356,14 @@ const semanticController = makeSemanticControllerClient({ browser, ensureOffscre
   handleTurnKernelCall: turnBridge.handleKernelCall,
   authorizeSemanticCall: semanticRouteKernel.authorize,
   handleSemanticKernelCall: semanticRouteKernel.handleKernelCall,
-  retireHost: (reason) => featureLeases.retireActiveHost(reason),
-  // Chrome needs the named offscreen lease around each bounded semantic call.
-  // Firefox owns the same sealed Worker directly in its event page and must
-  // not enter an offscreen scope that does not exist there.
-  ...(offscreenAvailable ? {
-    withControllerLease: (operation) => withFeatureLease(
-      'controller', operation, { reason: 'semantic-demand' },
-    ),
-  } : {
-    withDirectLifetime: (operation, options) => firefoxBackgroundLifetime
-      ? firefoxBackgroundLifetime.run(operation, options)
-      : operation(),
-  }),
-  // Fixed package-local prompt assets; never an agent-controlled network URL.
-  fetchFn: (url, init) => fetch(url, init),
+  retireHost: (/** @type {string} */ reason) => featureLeases.retireActiveHost(reason),
+  withControllerLease: (/** @type {()=>any} */ operation) => withFeatureLease(
+    'controller', operation, { reason: 'semantic-demand' },
+  ),
+  withDirectLifetime: (/** @type {()=>any} */ operation, /** @type {any} */ options) =>
+    withFirefoxBackgroundLifetime(operation, options),
+  fetchFn: (/** @type {string|URL|Request} */ url, /** @type {RequestInit|undefined} */ init) =>
+    fetch(url, init),
 });
 const runUserTurn = turnBridge.runUserTurn;
 const renderSystemPrompt = semanticController.renderSystemPrompt;
@@ -3502,42 +3391,36 @@ const ACTOR_HOST_KEEPALIVE_KEY = 'peerdActorHostKeepAlive';
 const ACTOR_HOST_KEEPALIVE_MS = 10_000;
 const ACTOR_HOST_KEEPALIVE_ACK_MS = 2_000;
 let notifyActorHostKeepAliveLost = (/** @type {Error} */ _error) => {};
-const actorHostKeepAlive = backgroundPageWorkerAvailable
-  ? makeStorageSessionKeepAlive({
-    storage: browser.storage.session,
-    key: ACTOR_HOST_KEEPALIVE_KEY,
-    intervalMs: ACTOR_HOST_KEEPALIVE_MS,
-    ackTimeoutMs: ACTOR_HOST_KEEPALIVE_ACK_MS,
-    onLost: (error) => {
-      firefoxBackgroundLifetime?.fail(error);
-      notifyActorHostKeepAliveLost(error);
-    },
-  })
-  : null;
-if (actorHostKeepAlive) {
-  firefoxBackgroundLifetime = makeRefCountedFirefoxBackgroundLifetime({
-    start: () => actorHostKeepAlive.start(),
-    stop: () => actorHostKeepAlive.stop(),
-  });
-}
+const firefoxActorControl = makeLazyFirefoxActorControl({
+  enabled: backgroundPageWorkerAvailable,
+  browser,
+  key: ACTOR_HOST_KEEPALIVE_KEY,
+  intervalMs: ACTOR_HOST_KEEPALIVE_MS,
+  ackTimeoutMs: ACTOR_HOST_KEEPALIVE_ACK_MS,
+  onLost: (/** @type {Error} */ error) => notifyActorHostKeepAliveLost(error),
+  workerUrl: browser.runtime.getURL('offscreen/actor-worker.js'),
+});
+withFirefoxBackgroundLifetime = firefoxActorControl.withLifetime;
 // why: Firefox currently has no official long-task lifetime signal for MV3
 // event pages. Mozilla Bug 1851373 documents storage.session activity plus a
 // synchronously registered change listener as the extension-side workaround.
 // The helper verifies the exact lease generation before actor work begins.
-if (actorHostKeepAlive) {
+if (backgroundPageWorkerAvailable) {
   coldEvent('storage.session.onChanged', browser.storage.session.onChanged).addListener((/** @type {any} */ changes) => {
-    actorHostKeepAlive.onChanged(changes);
+    firefoxActorControl.onChanged(changes);
   });
 }
 const baseActorIsolation = actorIsolationCapability({
   offscreenWorker: offscreenAvailable,
   backgroundPageWorker: backgroundPageWorkerAvailable,
 });
+const directActorHost = baseActorIsolation.host === 'background-page-worker'
+  ? firefoxActorControl.directActorHost : null;
 const actorIsolationState = makeActorIsolationStateStore({
   storage: browser.storage.local,
   protocol: ACTOR_WORKER_PROTOCOL,
 });
-// why retryable:true — the kernel state contract requires every
+// why retryable:true: the kernel state contract requires every
 // temporarily_unavailable capability to be retryable (the surfaces refuse a
 // non-retryable transient as malformed and drop the whole snapshot, which
 // left the panel unhydrated behind the vault gate). This placeholder IS
@@ -3561,39 +3444,15 @@ const actorIsolationReady = actorIsolationAvailable(baseActorIsolation)
       return actorIsolation;
     })
   : Promise.resolve(actorIsolation);
-// Relays that redeem an offscreen worker's authority need the exact browser-
-// owned host, not the broader "one of our extension pages" sender check.
-const isOffscreenSender = (/** @type {any} */ sender) => senderIsOffscreen(sender, {
-  runtimeId: browser.runtime?.id,
-  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
-  offscreenUrl: browser.runtime?.getURL?.(OFFSCREEN_URL) ?? '',
-});
-const isActualOptionsSender = (/** @type {any} */ sender) => isOptionsSender(sender, {
-  runtimeId: browser.runtime?.id,
-  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
-  optionsUrl: browser.runtime?.getURL?.('options/options.html') ?? '',
-});
-const isActualSidepanelSender = (/** @type {any} */ sender) => isSidepanelSender(sender, {
-  runtimeId: browser.runtime?.id,
-  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
-  sidepanelUrl: browser.runtime?.getURL?.('sidepanel/sidepanel.html') ?? '',
-});
-const isActualSidepanelPortSender = (/** @type {any} */ sender) => isSidepanelPortSender(sender, {
-  runtimeId: browser.runtime?.id,
-  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
-  sidepanelUrl: browser.runtime?.getURL?.('sidepanel/sidepanel.html') ?? '',
-});
-const isActualHomeSender = (/** @type {any} */ sender) => isHomeSender(sender, {
-  runtimeId: browser.runtime?.id,
-  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
-  homeUrl: browser.runtime?.getURL?.('home/home.html') ?? '',
-});
-const isActualEvalSender = (/** @type {any} */ sender) => isEvalSender(sender, {
-  runtimeId: browser.runtime?.id,
-  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
-  homeUrl: browser.runtime?.getURL?.('home/home.html') ?? '',
-  evalRunnerUrl: browser.runtime?.getURL?.('eval/runner.html') ?? '',
-});
+const {
+  offscreen: isOffscreenSender,
+  options: isActualOptionsSender,
+  sidepanel: isActualSidepanelSender,
+  sidepanelPort: isActualSidepanelPortSender,
+  home: isActualHomeSender,
+  mic: isMicSender,
+  evaluation: isActualEvalSender,
+} = makeSenderChecks(browser, OFFSCREEN_URL);
 
 // Root creation and recovery share one serialized custody lane. Without it,
 // base-network auto-start and two concurrent imports can all observe "missing"
@@ -3765,22 +3624,6 @@ const rootChatSessionFor = async (sessionId) => {
   return null;
 };
 
-// Firefox hosts the same worker runner directly from its background page. The
-// relay sender is a private object identity and these routes are never exposed
-// through runtime.onMessage on that path.
-const directActorHost = baseActorIsolation.host === 'background-page-worker'
-  ? (() => {
-    const lifetime = firefoxBackgroundLifetime?.createHandle();
-    return makeDirectActorHost({
-    workerUrl: browser.runtime.getURL('offscreen/actor-worker.js'),
-    // Firefox MV3 event pages may unload while an unreturned task is pending.
-    // A small storage.session change refreshes the idle budget only while a run
-    // is active. The packaged lifetime lane proves this exact host.
-      startKeepAlive: () => lifetime?.start(),
-      stopKeepAlive: () => lifetime?.stop(),
-    });
-  })()
-  : null;
 let actorHostLossPersistence = Promise.resolve();
 notifyActorHostKeepAliveLost = (error) => {
   // Repository/controller/artifact work shares the Firefox event-page lifetime
@@ -3839,7 +3682,9 @@ const actorClient = actorIsolationAvailable(baseActorIsolation) ? makeOffscreenA
   ensureHost: async () => {},
   sendMessage: directActorHost?.sendMessage ?? ((m) => browser.runtime.sendMessage(m)),
   runOnChannel: actorChannelClient ? (job, options) => withFeatureLease(
-    'controller', () => actorChannelClient.run(job, options),
+    'controller', (/** @type {any} */ lease) => actorChannelClient.run(
+      job, { ...options, lease },
+    ),
     { reason: 'actor-demand' },
   ) : undefined,
   callModel: /** @type {any} */ (callModel),
@@ -4113,6 +3958,9 @@ let markMessageDispatcherReady = () => {};
 const messageDispatcherReady = /** @type {Promise<void>} */ (new Promise((resolve) => {
   markMessageDispatcherReady = () => resolve();
 }));
+/** @type {ReturnType<typeof makeDispatcher>|null} */
+let messageDispatcher = null;
+let messageDispatcherLive = false;
 
 coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(/** @type {any} */ ((/** @type {any} */ msg, /** @type {any} */ sender, /** @type {(reply: any) => void} */ sendResponse) => {
   if (msg?.type === 'bootstrap/ready') {
@@ -4144,6 +3992,14 @@ coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(/** @type 
     }
     uiPorts.broadcast({ type: 'local-model/progress', progress: msg.progress });
     return undefined;
+  }
+  if (!messageDispatcherLive) {
+    if (!isTrustedSender(sender)) {
+      sendResponse({ ok: false, error: 'untrusted-sender' });
+      return false;
+    }
+    messageDispatcherReady.then(() => messageDispatcher?.(msg, sender, sendResponse));
+    return true;
   }
   return undefined;
 }));
@@ -4544,99 +4400,26 @@ const pushState = makeCoalescedStatePush({
   onError: (error) => console.warn('[state] push failed', error),
 });
 
-// Side-panel forwarder. The offscreen doc broadcasts voice/* (chunk,
-// auto-stop, error, permission-result) and the VM tabs broadcast
-// vm/stdout-chunk + vm/stderr-chunk via runtime.sendMessage; the SW
-// forwards them all to the active side-panel port so the side panel
-// only has to subscribe to one surface. (Voice chunks stream the live
-// transcript; VM chunks render per-tool-use stdout/stderr inline next
-// to the vm_boot card.) Returns false so the unified makeDispatcher
-// continues to other listeners that might care.
-const FORWARD_TYPES = new Set([
-  'voice/chunk', 'voice/auto-stop', 'voice/error', 'voice/permission-result',
-  'vm/stdout-chunk', 'vm/stderr-chunk',
-]);
-coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener((/** @type {any} */ msg, /** @type {any} */ sender) => {
-  if (!FORWARD_TYPES.has(msg?.type)) return false;
-  if (!isTrustedSender(sender)) return false;
-  if (uiConnected()) {
-    try { uiPorts.broadcast(msg); }
-    catch (e) { console.warn('[sw] side-panel forward failed', e); }
-  }
-  return false;
-});
-
-const VOICE_COMMANDS = new Set([
-  'voice/init', 'voice/listen', 'voice/stop', 'voice/silence', 'voice/teardown',
-]);
-const voiceRelayToken = crypto.randomUUID();
-let voiceLifecycleTail = Promise.resolve();
-/** @template T @param {()=>Promise<T>} operation @returns {Promise<T>} */
-const queueVoiceLifecycle = (operation) => {
-  const pending = voiceLifecycleTail.then(operation, operation);
-  voiceLifecycleTail = pending.then(() => {}, () => {});
-  return pending;
-};
-const teardownVoiceFeature = () => queueVoiceLifecycle(async () => {
-  const state = featureLeases.snapshot().leases['media-host'];
-  try {
-    if (state?.status === 'active') {
-      return await browser.runtime.sendMessage({
-        type: 'voice/teardown', __peerdVoiceRelay: voiceRelayToken,
-      });
-    }
-    return { ok: true, inactive: true };
-  } finally {
-    await featureLeases.revoke('media-host', 'feature-disabled');
-  }
-});
-coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(/** @type {any} */ ((
-  /** @type {any} */ msg,
-  /** @type {any} */ sender,
-  /** @type {(value:any)=>void} */ sendResponse,
-) => {
-  if (!VOICE_COMMANDS.has(msg?.type)) return false;
-  // The forwarded copy is consumed only by the offscreen voice host. Decline
-  // it here so this listener cannot race the host's response.
-  if (msg?.__peerdVoiceRelay === voiceRelayToken) return false;
-  if (!isActualSidepanelSender(sender) && !isActualOptionsSender(sender)) {
-    sendResponse({ ok: false, error: 'untrusted-voice-sender' });
-    return false;
-  }
-  const command = async () => {
-    const startsMedia = msg.type === 'voice/init' || msg.type === 'voice/listen';
-    const state = featureLeases.snapshot().leases['media-host'];
-    if (startsMedia) {
-      await acquireFeatureLease('media-host', { reason: 'feature-demand' });
-    } else if (state?.status !== 'active') {
-      return { ok: true, inactive: true };
-    }
-    try {
-      const reply = /** @type {any} */ (await browser.runtime.sendMessage({
-        ...msg, __peerdVoiceRelay: voiceRelayToken,
-      }));
-      if (startsMedia && reply?.ok !== true) {
-        await featureLeases.revoke('media-host', 'feature-disabled');
-      }
-      return reply;
-    } finally {
-      if (msg.type === 'voice/teardown') {
-        await featureLeases.revoke('media-host', 'feature-disabled');
-      }
-    }
-  };
-  const pending = queueVoiceLifecycle(command);
-  pending.then(sendResponse, async (cause) => {
-    if (msg.type === 'voice/init' || msg.type === 'voice/listen') {
-      await featureLeases.revoke('media-host', 'feature-disabled').catch(() => {});
-    }
-    sendResponse({
-      ok: false,
-      error: cause instanceof Error ? cause.message : String(cause),
-    });
-  });
-  return true;
+coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(makeUiForwarder({
+  isOffscreenSender,
+  isMicSender,
+  deliver: (/** @type {any} */ message) => { if (uiConnected()) uiPorts.broadcast(message); },
 }));
+
+const {
+  onMessage: onVoiceControlMessage,
+  teardown: teardownVoiceFeature,
+} = makeVoiceControlPlane({
+  browser,
+  featureLeases,
+  acquire: (/** @type {Record<string,unknown>} */ options) =>
+    acquireFeatureLease('media-host', options),
+  isSidepanelSender: isActualSidepanelSender,
+  isOptionsSender: isActualOptionsSender,
+});
+coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(
+  onVoiceControlMessage,
+);
 
 // Tab tracker wiring. Each kind's tab broadcasts <kind>/tab-ready
 // on load; we resolve the pending readyPromise so any in-flight
@@ -5027,6 +4810,7 @@ const maybeAutoResume = async (/** @type {string|null|undefined} */ sessionId) =
 // Goal bar (iteration + Stop).
 goalRunner = makeGoalRunner({
   runTurn: (/** @type {any} */ args) => runAgentTurn(args),
+  withRun: semanticController.withRun,
   onEvent: (/** @type {any} */ ev) => { if (uiConnected()) { try { uiPorts.broadcast(ev); } catch { /* port closed */ } } },
   // Terminal note when a run ends WITHOUT a complete_goal result already in the
   // transcript (cap / halt). 'done' needs none — complete_goal's tool result is
@@ -7160,7 +6944,12 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
       };
     }
     if (r.aborted === true) {
-      return { result: fresh.result, stopped: true, aborted: true, turnSnapshot };
+      return {
+        result: fresh.result, stopped: true, aborted: true,
+        ...(typeof r.performed === 'boolean' ? { performed: r.performed } : {}),
+        ...(typeof r.outcomeKnown === 'boolean' ? { outcomeKnown: r.outcomeKnown } : {}),
+        turnSnapshot,
+      };
     }
     return { ...fresh, turnSnapshot };
   } finally {
@@ -8117,7 +7906,36 @@ const onUnlocked = makeLegacyVaultUnlockEffect({
 const confirmAnswerRoute = makeConfirmAnswerRoute({
   confirmCoordinator, sessionCache, isActualSidepanelSender, isActualHomeSender,
 });
-coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(/** @type {any} */ (makeDispatcher({
+const engineMessageRoutes = makeEngineRoutes({
+    vault, auditLog, pushState, browser, vmHttpFetch, appRegistry, vmRegistry, jsRegistry,
+    podRegistry, podTabTracker, appClient, appTabTracker, appQuiescence, opfsHelpers,
+    NOTEBOOK_OPFS_ROOT, IMAGE_PIN_STORAGE_KEY,
+    artifactEngine,
+    ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
+    settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
+    listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
+    repositories, parseAppManifest, podGitRemoteOperation,
+    getCurrentSessionId,
+    onAppDeleted,
+});
+const sessionMessageRoutes = {
+  ...makeSessionKernelRoutes({
+      appClient, browser, commandSources, denylistStore, manifestLabel,
+      matchesDenylist, originOfTabUrl, sessionCache, sessions, vault,
+      contextSnapshots,
+  }),
+  ...makeSessionRoutes({
+      vault, auditLog, sessions, sessionCache, turnSlots, makeAgentSendCustody, pushState, buildToolContext,
+      applyComposer, commandSources, prepareUserAttachmentsWithDocs, runAgentTurn, runInit,
+      convertDocAttachment,
+      handleSystemCommand, handleToolsCommand, postChatNote, spawnActor, requestReview, browser,
+      startGoalRun, haltGoalRun, ensureSession, actorRecoveryReady,
+      actorMessaging,
+      actorLifecycle,
+      settingsStore, contextSnapshots, assembleDebugBundle, childSessionIdsOf, CHANNEL,
+  }),
+};
+messageDispatcher = makeDispatcher({
   // Nonsecret request for a MessageChannel transferred to the exact options
   // WindowClient. Backup passphrases and payloads use only that channel.
   'private-transfer/open': privateTransferOpenRoute,
@@ -8189,43 +8007,8 @@ coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(/** @type 
     contributorFeedbackTargets, channel,
   }),
   ...semanticRouteKernel.routes,
-  ...makeSessionKernelRoutes({
-    appClient, browser, commandSources, denylistStore, manifestLabel,
-    matchesDenylist, originOfTabUrl, sessionCache, sessions, vault,
-    contextSnapshots,
-  }),
-  ...makeSessionRoutes({
-    vault, auditLog, sessions, sessionCache, turnSlots, makeAgentSendCustody, buildToolContext,
-    applyComposer, commandSources, prepareUserAttachmentsWithDocs, runAgentTurn, runInit,
-    // Attached-document conversion: the SAME offscreen reader read_doc uses,
-    // fed inline bytes instead of a URL (doc-extract has always accepted a
-    // bytesB64 source). null on Firefox — the prepare step then refuses with
-    // a legible message rather than attaching an empty file.
-    convertDocAttachment,
-    handleSystemCommand, handleToolsCommand, postChatNote, spawnActor, requestReview, browser,
-    // goal mode (the mode-row Goal toggle): start an autonomous run, and halt
-    // any active one when the user stops or steers with a fresh message.
-    startGoalRun, haltGoalRun, ensureSession, actorRecoveryReady,
-    // DESIGN-17 P1: agent/stop cascades to this chat's in-flight actors.
-    actorMessaging,
-    // PR #134 phase 5: agent/stop also cascades through the live actor
-    // subtree (children run under their own turn slots now).
-    actorLifecycle,
-    // The debug surface: session/debugBundle + session/contextSnapshots.
-    settingsStore, contextSnapshots, assembleDebugBundle, childSessionIdsOf, CHANNEL,
-  }),
-  ...makeEngineRoutes({
-    vault, auditLog, pushState, browser, vmHttpFetch, appRegistry, vmRegistry, jsRegistry,
-    podRegistry, podTabTracker, appClient, appTabTracker, appQuiescence, opfsHelpers,
-    NOTEBOOK_OPFS_ROOT, IMAGE_PIN_STORAGE_KEY,
-    artifactEngine,
-    ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
-    settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
-    listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
-    repositories, parseAppManifest, podGitRemoteOperation,
-    getCurrentSessionId,
-    onAppDeleted,
-  }),
+  ...sessionMessageRoutes,
+  ...engineMessageRoutes,
   ...systemMessageRoutes,
   // denylistNetGuard: an edit changes what the network backstop blocks, so the
   // rule is rebuilt on every edit — including the removal path, where a stale
@@ -8354,7 +8137,11 @@ coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(/** @type 
 
   // --- design 06: toolbox module resolution (body read for the sealed-worker
   // resolver) + post-run rot bookkeeping ---
-})));
+});
+coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(
+  /** @type {any} */ (messageDispatcher),
+);
+messageDispatcherLive = true;
 markMessageDispatcherReady();
 
 // The toolbar icon + Alt+Shift+P front door (open the panel or home, per the

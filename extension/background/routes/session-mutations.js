@@ -86,8 +86,11 @@ export const makeSessionMutationRoutes = (deps) => {
       return { ok: true };
     },
 
-    'session/switch': async ({ sessionId }) => {
+    'session/switch': async ({ sessionId } = {}) => {
       if (vault.isLocked()) return { ok: false, error: 'locked' };
+      if (typeof sessionId !== 'string' || !sessionId) {
+        return { ok: false, error: 'sessionId-required' };
+      }
       const session = await sessions.get(sessionId);
       if (!session) return { ok: false, error: 'session-not-found' };
       // DESIGN-17 / spawned sessions: only real CHATS are switchable. An actor/actor

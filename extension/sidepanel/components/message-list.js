@@ -553,7 +553,8 @@ const ActorReplyMessage = {
     const body = content.includes('\n\n') ? content.slice(content.indexOf('\n\n') + 2) : content;
     // A Stop with an explicitly unknown outcome is not a clean cancellation;
     // verification guidance must win over the friendlier cancelled label.
-    const aborted = reply.aborted === true && reply.outcomeKnown !== false;
+    const aborted = reply.aborted === true
+      && reply.outcomeKnown !== false && reply.performed !== true;
     const failed = reply.failed === true && !aborted;
     const userFailure = failed && reply.performed === false
       ? ACTOR_NOT_RUN_USER_FAILURE : null;

@@ -4,6 +4,14 @@
 // A page never replays an ambiguous effect; route-classified reads stay safe.
 
 const READ_SEGMENT = /(?:^|\/)(?:get|list|read|status|info|heard|updates|overview|count|history|diff|options|total)$/;
+const READ_TYPES = new Set([
+  'app/get-meta', 'bootstrap/ready', 'commands/list', 'composer/files', 'composer/tabs',
+  'export/artifact',
+  'import/inspect', 'local-model/catalog', 'local-model/probe', 'memory/export',
+  'memory/suggestions', 'openrouter/models', 'pod/get-meta', 'session/contextSnapshots',
+  'session/debugBundle', 'session/get', 'state/get', 'surfaces/get',
+  'transfer/inspectImport', 'vault/prfStatus', 'vm/get-meta',
+]);
 const LONG_EFFECT = new Set([
   'apps/import-git', 'export/artifact', 'import/apply',
   'apps/repository/commit', 'apps/repository/restore',
@@ -12,10 +20,7 @@ const LONG_EFFECT = new Set([
 ]);
 
 /** @param {string} type */
-export const uiMessageIsRead = (type) => READ_SEGMENT.test(type)
-  || type === 'bootstrap/ready' || type === 'state/get' || type === 'session/get'
-  || type === 'surfaces/get' || type === 'commands/list'
-  || type === 'openrouter/models';
+export const uiMessageIsRead = (type) => READ_SEGMENT.test(type) || READ_TYPES.has(type);
 
 /**
  * @param {Object} deps
@@ -44,8 +49,8 @@ export const makeUiRuntimeClient = ({
       return Promise.reject(new TypeError('ui-runtime-message-invalid'));
     }
     const read = uiMessageIsRead(message.type);
-    const timeoutMs = read ? readTimeoutMs
-      : LONG_EFFECT.has(message.type) ? longEffectTimeoutMs : effectTimeoutMs;
+    const timeoutMs = LONG_EFFECT.has(message.type) ? longEffectTimeoutMs
+      : read ? readTimeoutMs : effectTimeoutMs;
     const pending = Promise.resolve().then(() => browser.runtime.sendMessage(message));
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -104,3 +109,15 @@ export const makeReconciledUiSender = ({ send, fold, reconcile, afterReply }) =>
       throw cause;
     }
   };
+
+/** @param {Promise<unknown>} effect */
+export const settleUiEffect = (effect) => { void effect.catch(() => {}); };
+
+/** @param {(() => void) & {sync?: () => void}} redraw @param {{type?:string,streaming?:boolean}} message */
+export const redrawForRuntimeMessage = (redraw, message) => {
+  if (!/(?:\/|-)delta$/.test(message?.type ?? '') && typeof redraw.sync === 'function') {
+    redraw.sync();
+    return;
+  }
+  redraw();
+};

@@ -58,6 +58,48 @@ describe('shared Firefox event-page lifetime', () => {
     expect(lifetime.snapshot()).toEqual({ active: 0, lost: false });
   });
 
+  test('gives dispatched work a bounded loss-settlement window', async () => {
+    const lifetime = makeRefCountedFirefoxBackgroundLifetime({
+      start: () => {},
+      stop: () => {},
+    });
+    let settle = () => {};
+    let retired = 0;
+    const work = lifetime.run(() => new Promise<string>((resolve) => {
+      settle = () => resolve('settled');
+    }), {
+      outcomeKnownOnLoss: false,
+      code: 'turn-lost',
+      lossGraceMs: 100,
+      onLost: () => { retired += 1; },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    lifetime.fail(new Error('heartbeat stopped'));
+    settle();
+
+    await expect(work).resolves.toBe('settled');
+    expect(retired).toBe(1);
+  });
+
+  test('ends dispatched work when its loss-settlement window expires', async () => {
+    const lifetime = makeRefCountedFirefoxBackgroundLifetime({
+      start: () => {},
+      stop: () => {},
+    });
+    const work = lifetime.run(() => new Promise(() => {}), {
+      outcomeKnownOnLoss: false,
+      code: 'turn-lost',
+      lossGraceMs: 5,
+    });
+    void work.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    lifetime.fail(new Error('heartbeat stopped'));
+
+    await expect(work).rejects.toMatchObject({
+      code: 'turn-lost', outcomeKnown: false, phase: 'run',
+    });
+  });
+
   test('fails known-safe before feature dispatch when heartbeat startup fails', async () => {
     const lifetime = makeRefCountedFirefoxBackgroundLifetime({
       start: () => { throw new Error('storage unavailable'); },
@@ -404,6 +446,71 @@ describe('direct actor host', () => {
     expect(loads).toBe(1);
   });
 
+  test('returns a retryable startup result when the lazy runner fails to load', async () => {
+    let loads = 0;
+    const host = makeDirectActorHost({
+      workerUrl: 'worker.js',
+      loadRunner: async () => {
+        loads += 1;
+        if (loads === 1) throw new Error('module unavailable');
+        return { runActor: async () => ({ ok: true }), abortActor: () => {} };
+      },
+    });
+    host.bindRelayRoutes({});
+
+    expect(await host.sendMessage({ type: 'actor/run', job: {} })).toMatchObject({
+      ok: false, started: false, phase: 'startup',
+      code: 'actor_host_load_failed', outcomeKnown: true,
+    });
+    expect(await host.sendMessage({ type: 'actor/run', job: {} })).toEqual({ ok: true });
+    expect(loads).toBe(2);
+  });
+
+  test('bounds a stalled first runner load as known-safe and retryable', async () => {
+    const host = makeDirectActorHost({
+      workerUrl: 'worker.js',
+      loadRunner: () => new Promise(() => {}),
+      loadTimeoutMs: 2,
+    });
+    host.bindRelayRoutes({});
+
+    expect(await host.sendMessage({ type: 'actor/run', job: { runId: 'stalled' } }))
+      .toMatchObject({
+        ok: false,
+        started: false,
+        phase: 'startup',
+        code: 'actor_host_load_timeout',
+        error: 'Temporarily unavailable. Try again.',
+        outcomeKnown: true,
+      });
+  });
+
+  test('coalesces first-use loading and stops before actor execution', async () => {
+    let loads = 0;
+    let runs = 0;
+    let release!: (runner: any) => void;
+    const loaded = new Promise<any>((resolve) => { release = resolve; });
+    const host = makeDirectActorHost({
+      workerUrl: 'worker.js',
+      loadRunner: () => { loads += 1; return loaded; },
+    });
+    host.bindRelayRoutes({});
+
+    const first = host.sendMessage({ type: 'actor/run', job: { runId: 'run-first' } });
+    const second = host.sendMessage({ type: 'actor/run', job: { runId: 'run-second' } });
+    while (loads === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await host.sendMessage({ type: 'actor/abort', runId: 'run-first' })).toEqual({ ok: true });
+    expect(await first).toMatchObject({
+      ok: false, started: false, code: 'actor_host_aborted', outcomeKnown: true,
+    });
+    release({
+      runActor: async () => { runs += 1; return { ok: true }; },
+      abortActor: () => {},
+    });
+    expect(await second).toEqual({ ok: true });
+    expect({ loads, runs }).toEqual({ loads: 1, runs: 1 });
+  });
+
   test('keeps run and relays in-process behind an object-identity sender', async () => {
     let accepted = false;
     let runJob: any = null;
@@ -429,6 +536,41 @@ describe('direct actor host', () => {
     expect(host.isRelaySender({})).toBe(false);
   });
 
+  test('bounds a never-settling post-terminal relay drain', async () => {
+    let fireDrain!: () => void;
+    let relayStarted!: () => void;
+    const started = new Promise<void>((resolve) => { relayStarted = resolve; });
+    const aborted: string[] = [];
+    const host = makeDirectActorHost({
+      workerUrl: 'worker.js',
+      relayDrainTimeoutMs: 10,
+      setTimeoutFn: ((callback: () => void) => { fireDrain = callback; return 7; }) as typeof setTimeout,
+      clearTimeoutFn: (() => {}) as typeof clearTimeout,
+      abort: (runId: string) => { aborted.push(runId); },
+      run: async (_job: any, deps: any) => {
+        const relay = deps.sendToSW('actor/tool-dispatch', {});
+        deps.onRelayDrain();
+        return relay;
+      },
+    });
+    host.bindRelayRoutes({
+      'actor/tool-dispatch': () => {
+        relayStarted();
+        return new Promise(() => {});
+      },
+    });
+
+    const pending = host.sendMessage({ type: 'actor/run', job: { runId: 'relay-stuck' } });
+    await started;
+    fireDrain();
+    expect(await pending).toMatchObject({
+      ok: false, started: true, code: 'actor_relay_drain_timeout',
+      outcomeKnown: false, retryable: false,
+    });
+    expect(aborted).toEqual(['relay-stuck']);
+    expect(host.hasActiveRuns()).toBe(false);
+  });
+
   test('refuses a run until relay routes are bound', async () => {
     let ran = false;
     const host = makeDirectActorHost({
@@ -451,6 +593,55 @@ describe('direct actor host', () => {
     });
     expect(await host.sendMessage({ type: 'actor/abort', runId: 'run-1' })).toEqual({ ok: true });
     expect(aborted).toEqual(['run-1']);
+  });
+
+  test('waits for runner custody after aborting started execution', async () => {
+    let started!: () => void;
+    const admitted = new Promise<void>((resolve) => { started = resolve; });
+    let finish!: (value: any) => void;
+    const result = new Promise<any>((resolve) => { finish = resolve; });
+    const host = makeDirectActorHost({
+      workerUrl: 'worker.js',
+      run: async () => {
+        started();
+        return result;
+      },
+      abort: () => finish({
+        ok: false, started: true, error: 'aborted',
+        performed: false, outcomeKnown: true,
+      }),
+    });
+    host.bindRelayRoutes({});
+
+    const running = host.sendMessage({ type: 'actor/run', job: { runId: 'run-started' } });
+    await admitted;
+    expect(await host.sendMessage({ type: 'actor/abort', runId: 'run-started' }))
+      .toEqual({ ok: true });
+    expect(await running).toMatchObject({
+      ok: false, started: true, error: 'aborted',
+      performed: false, outcomeKnown: true,
+    });
+  });
+
+  test('stops a run while its first lifetime lease is still starting', async () => {
+    let release!: () => void;
+    const starting = new Promise<void>((resolve) => { release = resolve; });
+    let runs = 0;
+    const host = makeDirectActorHost({
+      workerUrl: 'worker.js',
+      run: async () => { runs += 1; return { ok: true }; },
+      startKeepAlive: () => starting,
+    });
+    host.bindRelayRoutes({});
+
+    const run = host.sendMessage({ type: 'actor/run', job: { runId: 'run-starting' } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await host.sendMessage({ type: 'actor/abort', runId: 'run-starting' });
+    release();
+    expect(await run).toMatchObject({
+      ok: false, started: false, code: 'actor_host_aborted', outcomeKnown: true,
+    });
+    expect(runs).toBe(0);
   });
 
   test('keeps one refcounted event-page lease while any actor run is active', async () => {

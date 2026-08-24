@@ -251,7 +251,7 @@ export const makeKernelLocalModelRoutes = ({
       reason: 'local-model-resident',
     });
     if (!lease?.ok) return lease;
-    return call('init', args, lease);
+    return call('init', args, lease.lease);
   };
   const observe = async (/** @type {string} */ method, /** @type {any} */ args = {}) => {
     const reply = await run(method, args);

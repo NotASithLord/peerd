@@ -699,6 +699,26 @@ describe('app/vm meta + apps Library', () => {
       runtime: ['observe', 'act'],
     });
   });
+  test('app/get-meta observes the manifest entry without repairing the registry', async () => {
+    let writes = 0;
+    const r = makeEngineRoutes(baseDeps({
+      appRegistry: {
+        get: async () => ({ id: 'a1', name: 'App', entryFile: 'old.html' }),
+        update: async () => { writes += 1; throw new Error('read wrote'); },
+      },
+      appClient: {
+        readFile: async () => JSON.stringify({
+          schema: 1, kind: 'app', entry: 'main.html', agent: { kind: 'bound-app' },
+          capabilities: [],
+        }),
+        listFiles: async () => [{ path: 'main.html' }, { path: 'peerd.json' }],
+      },
+    }));
+    expect(await r['app/get-meta']({ appId: 'a1' })).toMatchObject({
+      ok: true, entryFile: 'main.html',
+    });
+    expect(writes).toBe(0);
+  });
   test('app/get-meta revokes a stale registry bridge when peerd.json removes dweb', async () => {
     const r = makeEngineRoutes(baseDeps({
       appRegistry: {
@@ -1012,6 +1032,14 @@ describe('export/artifact', () => {
   test('app export returns filename + envelope', async () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['export/artifact']({ kind: 'app', id: 'a1' })).toEqual({ ok: true, filename: 'App.app.peerd', envelope: { env: 'app' } });
+  });
+  test('artifact export does not mutate audit state', async () => {
+    let writes = 0;
+    const r = makeEngineRoutes(baseDeps({
+      auditLog: { append: async () => { writes += 1; } },
+    }));
+    expect((await r['export/artifact']({ kind: 'app', id: 'a1' })).ok).toBe(true);
+    expect(writes).toBe(0);
   });
   test('app export preserves every file as bytes, including an unknown suffix', async () => {
     const raw = new Uint8Array([0xff, 0x00, 0xc0]);

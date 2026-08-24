@@ -83,7 +83,7 @@ export const createKernelSkillsAuthority = ({
   const setEnabled = async (/** @type {string} */ name, /** @type {boolean} */ enabled) => {
     canWrite?.();
     // why the body round-trips too: the legacy toggle re-puts meta AND body
-    // (materializing an empty body row when missing) — keep rows identical.
+    // (materializing an empty body row when missing), so keep rows identical.
     return transact([META_STORE, BODY_STORE], 'readwrite', async (transaction) => {
       const meta = await settled(transaction.objectStore(META_STORE).get(name));
       if (!meta) return null;

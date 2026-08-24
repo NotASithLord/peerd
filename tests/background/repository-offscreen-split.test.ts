@@ -570,6 +570,35 @@ describe('operation-lazy offscreen repository split', () => {
     expect({ loads, dispatches }).toEqual({ loads: 2, dispatches: 1 });
   });
 
+  test('a frozen Firefox repository module load is bounded before dispatch', async () => {
+    let loads = 0;
+    const client = createDeferredRepositoryClient(async () => {
+      loads += 1;
+      return new Promise<any>(() => {});
+    }, { loadTimeoutMs: 5 });
+    await expect(client.commit(ref, { message: 'never' })).rejects.toMatchObject({
+      code: 'repository-local-load-failed', outcomeKnown: true,
+    });
+    expect(loads).toBe(1);
+  });
+
+  test('a frozen repository service import releases the Firefox lifetime', async () => {
+    let starts = 0;
+    let stops = 0;
+    const local = createLazyLocalRepositoryClient({
+      loadService: async () => new Promise<any>(() => {}),
+      loadTimeoutMs: 5,
+      withLifetime: async (operation) => {
+        starts += 1;
+        try { return await operation(); } finally { stops += 1; }
+      },
+    });
+    await expect(local.status(ref)).rejects.toMatchObject({
+      code: 'repository-service-load-timeout', outcomeKnown: true, phase: 'startup',
+    });
+    expect({ starts, stops }).toEqual({ starts: 1, stops: 1 });
+  });
+
   test('Firefox discard drains a dispatched mutation before a fresh generation can retry', async () => {
     let loads = 0;
     let mutationCalls = 0;

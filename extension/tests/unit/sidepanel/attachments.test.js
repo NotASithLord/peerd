@@ -297,7 +297,60 @@ describe('sidepanel.attachments', () => {
     } finally { unmount(); }
   });
 
+  for (const order of ['rejection-first', 'state-first']) {
+    it(`keeps a first-message draft when the new session arrives ${order}`, async () => {
+      localStorage.removeItem('peerd.draft.new');
+      localStorage.removeItem('peerd.draft.created-session');
+      localStorage.removeItem('peerd.unconfirmed-send.new');
+      localStorage.removeItem('peerd.unconfirmed-send.created-session');
+      let rejectSend = (/** @type {unknown} */ _reason) => {};
+      const sent = [];
+      const send = (/** @type {Msg} */ msg) => {
+        sent.push(msg);
+        return new Promise((_, reject) => { rejectSend = reject; });
+      };
+      const state = baseState();
+      const { root, unmount } = await mountInputBar(state, send);
+      try {
+        const textarea = need(root, 'textarea', HTMLTextAreaElement);
+        textarea.value = 'first message survives';
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        need(root, 'form.input-bar')
+          .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        await until(() => sent.length === 1);
+        if (order === 'state-first') {
+          state.session = { sessionId: 'created-session' };
+          m.redraw.sync();
+          await flush();
+        }
+        rejectSend(new Error('worker lost'));
+        await until(() => root.textContent?.includes('Check delivery'));
+        if (order === 'rejection-first') {
+          state.session = { sessionId: 'created-session' };
+          m.redraw.sync();
+          await flush();
+        }
+        expect(need(root, 'textarea', HTMLTextAreaElement).value)
+          .toBe('first message survives');
+        expect(localStorage.getItem('peerd.draft.created-session'))
+          .toBe('first message survives');
+        expect(localStorage.getItem('peerd.unconfirmed-send.created-session'))
+          .toContain('first message survives');
+      } finally {
+        unmount();
+        localStorage.removeItem('peerd.draft.new');
+        localStorage.removeItem('peerd.draft.created-session');
+        localStorage.removeItem('peerd.unconfirmed-send.new');
+        localStorage.removeItem('peerd.unconfirmed-send.created-session');
+      }
+    });
+  }
+
   it('staged attachments do NOT bleed into another chat on switch', async () => {
+    for (const id of ['new', 'A', 'B']) {
+      localStorage.removeItem(`peerd.draft.${id}`);
+      localStorage.removeItem(`peerd.unconfirmed-send.${id}`);
+    }
     // Cross-session leak: a file staged in chat A must not ride chat B's send.
     /** @type {Msg[]} */
     const sent = [];
@@ -328,7 +381,13 @@ describe('sidepanel.attachments', () => {
       await until(() => sent.length > 0);
       expect(sent[0].text).toBe('hi from B');
       expect(sent[0].attachments).toBe(undefined);
-    } finally { unmount(); }
+    } finally {
+      unmount();
+      for (const id of ['new', 'A', 'B']) {
+        localStorage.removeItem(`peerd.draft.${id}`);
+        localStorage.removeItem(`peerd.unconfirmed-send.${id}`);
+      }
+    }
   });
 
   it('user messages render attachment chips from stripped records', async () => {

@@ -80,7 +80,9 @@ describe('sidepanel actor isolation UX', () => {
     /** @type {{ status: string, reason: string|null, retryable: boolean }} */
     const capability = { status: 'temporarily_unavailable', reason: 'worker failed', retryable: true };
     const root = document.createElement('div');
+    const onward = document.createElement('button');
     document.body.appendChild(root);
+    document.body.appendChild(onward);
     m.mount(root, {
       view: () => m(ActorIsolationBanner, {
         capability,
@@ -98,7 +100,11 @@ describe('sidepanel actor isolation UX', () => {
       expect(recovered).toBeTruthy();
       expect(recovered.textContent).toContain('Actor work is ready');
       expect(document.activeElement).toBe(recovered);
-    } finally { m.mount(root, null); root.remove(); }
+      onward.focus();
+      expect(document.activeElement).toBe(onward);
+      recovered.dispatchEvent(new FocusEvent('blur'));
+      expect(root.querySelector('.actor-isolation-banner')).toBe(null);
+    } finally { m.mount(root, null); root.remove(); onward.remove(); }
   });
 
   it('renders a failed message_actor call as an accessible Not run disclosure', async () => {

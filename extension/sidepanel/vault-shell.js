@@ -58,7 +58,7 @@ export const afterStaticShellPaint = (start) => {
  * @param {{
  *   portName: 'sidepanel'|'home',
  *   appSelector: string,
- *   loadApplication: () => Promise<unknown>,
+ *   loadApplication: () => Promise<()=>void>,
  *   appLoadTimeoutMs?: number,
  * }} options
  */
@@ -77,6 +77,7 @@ export const startVaultShell = ({
   let authoritativeStateSeen = false;
   let reboundAfterReady = false;
   let refreshGeneration = 0;
+  let applicationGeneration = 0;
   const retiredAuthorityEpochs = new Set();
   /** @type {Promise<void> | null} */
   let refreshPromise = null;
@@ -84,8 +85,7 @@ export const startVaultShell = ({
   const uiRuntime = makeUiRuntimeClient({ browser });
   document.documentElement.dataset.peerdBootStage = 'vault-loading';
 
-  /** @param {unknown} error */
-  const renderFailure = (error) => {
+  const renderFailure = () => {
     document.documentElement.dataset.peerdBootStage = 'failed';
     m.mount(root, null);
     root.innerHTML = '';
@@ -96,7 +96,7 @@ export const startVaultShell = ({
     title.className = 'boot-shell__wordmark';
     title.textContent = 'peerd';
     const detail = document.createElement('p');
-    detail.textContent = `The application could not start: ${error instanceof Error ? error.message : String(error)}`;
+    detail.textContent = 'Application unavailable.';
     const retry = document.createElement('button');
     retry.type = 'button';
     retry.textContent = 'Retry';
@@ -109,6 +109,7 @@ export const startVaultShell = ({
     if (transitioning || stopped) return;
     transitioning = true;
     stopped = true;
+    const generation = ++applicationGeneration;
     document.documentElement.dataset.peerdBootStage = 'app-loading';
     try { port?.disconnect(); } catch { /* the cold worker may have dropped it */ }
     m.mount(root, {
@@ -118,10 +119,12 @@ export const startVaultShell = ({
       ]),
     });
     try {
-      await Promise.race([
+      const start = await Promise.race([
         loadApplication(),
         sleep(appLoadTimeoutMs).then(() => { throw new Error('application load timed out'); }),
       ]);
+      if (generation !== applicationGeneration) return;
+      start();
       // Mithril may commit the first rich-app tree on its next redraw frame.
       // The module/start promise proves registration, not visible mount; give
       // the renderer two frames before enforcing the nonblank postcondition.
@@ -133,7 +136,7 @@ export const startVaultShell = ({
       }
       document.documentElement.dataset.peerdBootStage = 'app-ready';
     }
-    catch (error) { renderFailure(error); }
+    catch { applicationGeneration += 1; renderFailure(); }
   };
 
   /** @param {unknown} next @param {string|null} [replacementEpoch] */
@@ -262,7 +265,7 @@ export const startVaultShell = ({
         if (generation !== refreshGeneration || stopped) return;
         stopped = true;
         refreshGeneration += 1;
-        renderFailure(new Error('secure vault service did not become ready'));
+        renderFailure();
       }, 60_000);
       try {
         let delay = 100;

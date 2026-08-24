@@ -1,86 +1,84 @@
 // @ts-check
-// Offscreen document entry point.
-//
-// Responsibilities:
-//
-//   1. Execute exact controller/dweb/DOM/media feature leases. With no lease
-//      this document has no runtime Port, heartbeat, network, microphone, or
-//      heavyweight feature graph.
-//
-//   2. Run DOM-dependent parsing and sealed jobs on bounded demand.
-//
-//   3. Host the voice transcriber. Moonshine needs WebGPU + WebAudio
-//      which the SW doesn't have. The transcriber is lazily created
-//      on the first voice/init message; teardown drops it.
 
 import browser from '/shared/browser-api.js';
 import { CONTROLLER_BUILD_DIGEST, EXTENSION_VERSION } from '/shared/build-config.js';
 import {
-  createOffscreenFeatureLeaseHost,
-} from './feature-lease-host.js';
-import {
   FEATURE_LEASE_HOST_PROTOCOL,
   FEATURE_LEASE_KEEPALIVE_PORT,
 } from '/shared/feature-lease-protocol.js';
-// PDF text extraction (the read_pdf runner tool): pdf.js needs a Worker, which
-// the SW can't host. Self-registers a 'pdf/extract' message handler.
-// Office/publishing document conversion (the read_doc tool): Word, Excel,
-// PowerPoint, OpenDocument, RTF, EPUB, CSV -> Markdown. Self-registers a
-// 'doc/extract' message handler. Offscreen for the same reason as the PDF
-// reader: the untrusted bytes (tens of MB) never enter the SW.
-// HTML -> markdown extraction (fetch_url's clean-content path): Readability +
-// Turndown need a DOM Document, which the SW can't build. The shell
-// self-registers a 'web/extract' message handler; the headless job runner's
-// fetch bridge reaches the pipeline DIRECTLY through the core's adapter
-// (same document — no route needed).
-import {
-  isServiceWorkerSender, isTrustedSender, registerServiceWorkerChannels,
-} from './supervisor-channels.js';
-// The base network is operation-lazy: Store never loads it, while Preview
-// starts it only after the service worker acquires the deliberate dweb lease.
-// Once started it remains in this offscreen document so discovery, seeding and
-// App rooms outlive any single tab. The loader is not the lease; the host's
-// explicit start/stop routes retain that lifecycle contract.
-// (WebVM used to be hosted here. As of the discrete-VM rework, each WebVM
-// lives in its own browser tab.)
+import { makeBoundedModuleLoader } from '/shared/bounded-module-load.js';
+import { isServiceWorkerSender } from './sender-checks.js';
 
-console.log('[offscreen] loaded at', new Date().toISOString(), '— UA:', navigator.userAgent);
-
-/** @type {ReturnType<typeof createOffscreenFeatureLeaseHost> | null} */
+/** @type {ReturnType<typeof import('./feature-lease-host.js').createOffscreenFeatureLeaseHost> | null} */
 let featureLeaseHost = null;
-/** @type {Promise<typeof import('./controller-bootstrap.js')> | null} */
-let controllerBootstrapPromise = null;
-const loadControllerBootstrap = () => (controllerBootstrapPromise ??= import('./controller-bootstrap.js')
-  .catch((cause) => { controllerBootstrapPromise = null; throw cause; }));
-/** @type {Promise<typeof import('./repository-host.js')> | null} */
-let repositoryHostPromise = null;
-const loadRepositoryHost = () => (repositoryHostPromise ??= import('./repository-host.js')
-  .catch((cause) => { repositoryHostPromise = null; throw cause; }));
-/** @type {Promise<typeof import('./dweb-base.js')> | null} */
-let dwebHostPromise = null;
-const loadDwebHost = () => (dwebHostPromise ??= import('./dweb-base.js')
-  .catch((cause) => { dwebHostPromise = null; throw cause; }));
-const rejectWithoutLease = (/** @type {string} */ scope,
+/** @type {typeof import('./controller-bootstrap.js')|null} */
+let controllerBootstrap = null;
+const loadControllerBootstrap = makeBoundedModuleLoader(
+  () => import('./controller-bootstrap.js').then((module) => (controllerBootstrap = module)),
+  { loadCode: 'controller-host-load-failed', timeoutCode: 'controller-host-load-timeout' },
+);
+/** @type {typeof import('./repository-host.js')|null} */
+let repositoryHost = null;
+const loadRepositoryHost = makeBoundedModuleLoader(
+  () => import('./repository-host.js').then((module) => (repositoryHost = module)),
+  { loadCode: 'repository-host-load-failed', timeoutCode: 'repository-host-load-timeout' },
+);
+const loadDwebHost = makeBoundedModuleLoader(
+  () => import('./dweb-base.js'),
+  { loadCode: 'dweb-host-load-failed', timeoutCode: 'dweb-host-load-timeout' },
+);
+const errorResponse = (/** @type {any} */ cause) => cause?.phase === 'startup'
+  ? {
+    ok: false, code: cause.code, error: 'Feature unavailable. Try again.',
+    outcomeKnown: true, retryable: true, phase: 'startup',
+  }
+  : {
+    ok: false,
+    error: cause?.name ? `${cause.name}: ${cause.message}` : (cause?.message ?? String(cause)),
+  };
+const claimLease = (/** @type {string} */ scope,
   /** @type {(value:any)=>void} */ sendResponse) => {
-  const refusal = featureLeaseHost
-    ? featureLeaseHost.requireActive(scope)
-    : { ok: false, error: 'feature-lease-host-not-ready', scope };
-  if (!refusal) return false;
-  sendResponse(refusal);
+  const lease = featureLeaseHost?.activeLease(scope) ?? null;
+  if (lease) return lease;
+  sendResponse(featureLeaseHost?.requireActive(scope)
+    ?? { ok: false, error: 'feature-lease-host-not-ready', scope });
+  return null;
+};
+const rejectStaleClaim = (/** @type {string} */ scope, /** @type {unknown} */ lease,
+  /** @type {(value:any)=>void} */ sendResponse) => {
+  if (featureLeaseHost?.ownsLease(scope, lease) === true) return false;
+  sendResponse(featureLeaseHost?.requireActive(scope)
+    ?? { ok: false, error: 'feature-lease-required', scope });
   return true;
 };
 
-const { actorPorts, vaultAuthorityWorkers } = registerServiceWorkerChannels({
-  getFeatureLeaseHost: () => featureLeaseHost,
-  loadControllerBootstrap,
-  loadRepositoryHost,
+/** @type {Set<MessagePort>} */
+const actorPorts = new Set();
+/** @type {Set<Worker>} */
+const vaultAuthorityWorkers = new Set();
+const loadServiceWorkerChannels = makeBoundedModuleLoader(
+  () => import('./supervisor-channels.js').then(({ createServiceWorkerChannels }) => (
+    createServiceWorkerChannels({
+      getFeatureLeaseHost: () => featureLeaseHost,
+      loadControllerBootstrap,
+      loadRepositoryHost,
+      actorPorts,
+      vaultAuthorityWorkers,
+    }).onMessage
+  )),
+  {
+    loadCode: 'offscreen-channel-host-load-failed',
+    timeoutCode: 'offscreen-channel-host-load-timeout',
+  },
+);
+navigator.serviceWorker?.addEventListener('message', (event) => {
+  loadServiceWorkerChannels().then(
+    (onMessage) => onMessage(event),
+    () => { for (const port of event.ports ?? []) try { port.close(); } catch {} },
+  );
 });
+navigator.serviceWorker?.startMessages?.();
 
-// Preview dweb coordinator. Do not put the network graph in this document's
-// static imports: Store has no dweb, and Preview must not make first-run vault
-// enrollment wait for WebRTC/gossip code. The service worker's explicit
-// dweb/base-host/start call is the on-demand lease boundary. Exact sender
-// provenance is checked here before loading and again by the feature host.
 browser.runtime.onMessage.addListener(/** @type {any} */ ((
   /** @type {any} */ msg,
   /** @type {any} */ sender,
@@ -91,34 +89,28 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((
     sendResponse({ ok: false, error: 'unauthorized-command-sender' });
     return false;
   }
-  if (rejectWithoutLease('dweb', sendResponse)) return false;
+  const claim = claimLease('dweb', sendResponse);
+  if (!claim) return false;
   loadDwebHost()
     .then(({ handleDwebBaseMessage }) => {
+      if (rejectStaleClaim('dweb', claim, sendResponse)) return;
       const handled = handleDwebBaseMessage(msg, sender, sendResponse);
       if (handled !== true) sendResponse({ ok: false, error: 'unknown-dweb-host-message' });
-    }, (cause) => sendResponse({
-      ok: false,
-      error: cause instanceof Error ? cause.message : String(cause),
-    }));
+    }, (cause) => sendResponse(errorResponse(cause)));
   return true;
 }));
 
-// Heavy untrusted parsers load only after the exact trusted request arrives.
-// This central listener owns sender authority; the feature modules export pure
-// handlers and carry no independent runtime-message surface.
 /** @typedef {(message: any) => Promise<any>} ExtractionHandler */
 /** @type {Readonly<Record<string, () => Promise<ExtractionHandler>>>} */
 const extractionLoaders = Object.freeze({
-  'pdf/extract': async () => /** @type {ExtractionHandler} */ (
-    (await import('./pdf-extract.js')).handlePdfExtract
-  ),
-  'doc/extract': async () => /** @type {ExtractionHandler} */ (
-    (await import('./doc-extract.js')).handleDocExtract
-  ),
-  'web/extract': async () => /** @type {ExtractionHandler} */ (
-    (await import('./web-extract.js')).handleWebExtract
-  ),
+  'pdf/extract': makeBoundedModuleLoader(() => import('./pdf-extract.js')
+    .then((module) => /** @type {ExtractionHandler} */ (module.handlePdfExtract))),
+  'doc/extract': makeBoundedModuleLoader(() => import('./doc-extract.js')
+    .then((module) => /** @type {ExtractionHandler} */ (module.handleDocExtract))),
+  'web/extract': makeBoundedModuleLoader(() => import('./web-extract.js')
+    .then((module) => /** @type {ExtractionHandler} */ (module.handleWebExtract))),
 });
+const loadToolboxParse = makeBoundedModuleLoader(() => import('./toolbox-parse.js'));
 browser.runtime.onMessage.addListener(/** @type {any} */ ((
   /** @type {any} */ msg,
   /** @type {any} */ sender,
@@ -126,21 +118,19 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((
 ) => {
   const load = extractionLoaders[/** @type {keyof typeof extractionLoaders} */ (msg?.type)];
   if (!load) return false;
-  if (!isTrustedSender(sender)) {
+  if (!isServiceWorkerSender(sender)) {
     sendResponse({ ok: false, error: 'untrusted-sender' });
     return false;
   }
-  if (rejectWithoutLease('dom-host', sendResponse)) return false;
-  load().then((handle) => handle(msg)).then(sendResponse, (cause) => sendResponse({
-    ok: false,
-    error: cause?.name ? `${cause.name}: ${cause.message}` : (cause?.message ?? String(cause)),
-  }));
+  const claim = claimLease('dom-host', sendResponse);
+  if (!claim) return false;
+  load().then((handle) => rejectStaleClaim('dom-host', claim, sendResponse)
+    ? undefined : handle(msg)).then(
+    sendResponse, (cause) => sendResponse(errorResponse(cause)),
+  );
   return true;
 }));
 
-// Toolbox parsing is an operation-lazy Acorn/resolver feature. The loader owns
-// the exact SW sender check so the rich parser module never needs a cold
-// listener or authority of its own.
 browser.runtime.onMessage.addListener(/** @type {any} */ ((
   /** @type {any} */ msg,
   /** @type {any} */ sender,
@@ -151,41 +141,21 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((
     sendResponse({ ok: false, error: 'unauthorized-command-sender' });
     return false;
   }
-  if (rejectWithoutLease('dom-host', sendResponse)) return false;
-  import('./toolbox-parse.js')
-    .then(({ handleToolboxParseCheck }) => handleToolboxParseCheck(msg))
-    .then(sendResponse, (cause) => sendResponse({
-      ok: false, error: cause instanceof Error ? cause.message : String(cause),
-    }));
+  const claim = claimLease('dom-host', sendResponse);
+  if (!claim) return false;
+  loadToolboxParse()
+    .then(({ handleToolboxParseCheck }) => rejectStaleClaim(
+      'dom-host', claim, sendResponse,
+    ) ? undefined : handleToolboxParseCheck(msg))
+    .then(sendResponse, (cause) => sendResponse(errorResponse(cause)));
   return true;
 }));
 
-// ---------------------------------------------------------------------------
-// Voice: lazy-loaded Moonshine transcriber.
-//
-// The transcriber instance lives in this doc for two reasons:
-//   - Moonshine needs WebGPU / WebAudio (SW has neither).
-//   - The offscreen survives the SW's 30s idle window.
-//
-// We answer voice/* one-shot messages from the SW. The side-panel
-// flow is: side panel → SW → offscreen. We push transcribed chunks
-// the other way (offscreen → SW → all side-panel ports).
-// ---------------------------------------------------------------------------
-
 /** @type {ReturnType<import('/peerd-runtime/voice/transcriber-picker.js').createBestTranscriber> | null} */
 let transcriber = null;
-/** @type {Promise<typeof import('/peerd-voice-host/index.js')> | null} */
-let voiceHostPromise = null;
-const loadVoiceHost = () => (voiceHostPromise ??= import('/peerd-voice-host/index.js'));
+const loadVoiceHost = makeBoundedModuleLoader(() => import('/peerd-voice-host/index.js'));
 
-// Lazy model-store for reading the Moonshine bytes the side panel already
-// downloaded + SRI-verified + cached. They live in the shared origin IDB
-// (same origin as the side panel), so we read them here rather than
-// receiving them over the message bridge — chrome.runtime.sendMessage
-// JSON-serializes, which silently drops ArrayBuffers on Chrome.
-/** @type {Promise<ReturnType<typeof import('/peerd-runtime/offscreen.js').createModelStore>> | null} */
-let voiceModelStore = null;
-const getVoiceModelStore = () => (voiceModelStore ??= import('/peerd-runtime/offscreen.js')
+const getVoiceModelStore = makeBoundedModuleLoader(() => import('/peerd-runtime/offscreen.js')
   .then(({ createModelStore }) => createModelStore()));
 
 // --- mic kill switch (field bug 2026-06-12: macOS mic indicator stayed
@@ -294,7 +264,8 @@ const onVoiceMessage = (msg, sender, sendResponse) => {
   // the original page message without responding so it cannot race the
   // authority response; accept only the worker-forwarded copy.
   if (!isServiceWorkerSender(sender)) return undefined;
-  if (rejectWithoutLease('media-host', sendResponse)) return true;
+  const claim = claimLease('media-host', sendResponse);
+  if (!claim) return true;
   (async () => {
     try {
       switch (msg.type) {
@@ -302,15 +273,19 @@ const onVoiceMessage = (msg, sender, sendResponse) => {
           let activeTranscriber = transcriber;
           if (!activeTranscriber) {
             const { createBestTranscriber } = await loadVoiceHost();
+            if (rejectStaleClaim('media-host', claim, sendResponse)) return;
             activeTranscriber = createBestTranscriber({}, msg.engine);
             transcriber = activeTranscriber;
           }
+          if (!activeTranscriber) throw new Error('voice-transcriber-unavailable');
           // why: Moonshine needs model bytes; Web Speech doesn't. The
           // bytes can't ride the message (sendMessage drops ArrayBuffers
           // on Chrome), so we read them from the shared origin IDB the
           // side panel just populated — a cache hit, no re-download.
           if (activeTranscriber.engine === 'moonshine') {
-            const { files } = await (await getVoiceModelStore()).getModel(msg.variant, { dev: true });
+            const store = await getVoiceModelStore();
+            if (rejectStaleClaim('media-host', claim, sendResponse)) return;
+            const { files } = await store.getModel(msg.variant, { dev: true });
             await activeTranscriber.init({ files });
           } else {
             await activeTranscriber.init();
@@ -358,6 +333,10 @@ const onVoiceMessage = (msg, sender, sendResponse) => {
       }
     } catch (e) {
       console.error('[offscreen] voice handler threw', msg.type, e);
+      if (/** @type {any} */ (e)?.phase === 'startup') {
+        sendResponse(errorResponse(e));
+        return;
+      }
       const err = /** @type {{ name?: string, message?: string }} */ (e);
       sendResponse({ ok: false, error: err?.name === 'TypedError' || err?.name
         ? err.name : (err?.message ?? String(e)) });
@@ -370,16 +349,16 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (onVoiceMessage));
 // --- headless JS jobs (script tool → engine.runJob) ---
 // Spawns the sealed Worker here and relays its egress/actor bridges back to
 // the SW's audited routes. A separate listener so voice is untouched.
-/** @type {Promise<{
+/** @type {{
  * runJob: typeof import('./job-runner.js').runJob,
  * abortJob: typeof import('./job-runner.js').abortJob,
  * abortAllJobs: typeof import('./job-runner.js').abortAllJobs,
  * extractMarkdownLocal: typeof import('./web-extract-core.js').extractMarkdownLocal,
- * }> | null} */
-let jobHostPromise = null;
-const loadJobHost = () => (jobHostPromise ??= Promise.all([
+ * }|null} */
+let jobHost = null;
+const loadJobHost = makeBoundedModuleLoader(() => Promise.all([
   import('./job-runner.js'), import('./web-extract-core.js'),
-]).then(([jobs, web]) => ({
+]).then(([jobs, web]) => (jobHost = {
   runJob: jobs.runJob, abortJob: jobs.abortJob, abortAllJobs: jobs.abortAllJobs,
   extractMarkdownLocal: web.extractMarkdownLocal,
 })));
@@ -394,8 +373,11 @@ const onJobMessage = (msg, sender, sendResponse) => {
   // must match the SW dispatcher's posture (sender-trust.js). externally_connectable
   // is unset today, so this is defense-in-depth, not an active hole.
   if (!isServiceWorkerSender(sender)) { sendResponse({ ok: false, error: 'unauthorized-command-sender' }); return true; }
-  if (rejectWithoutLease('dom-host', sendResponse)) return true;
-  loadJobHost().then(({ runJob, extractMarkdownLocal }) => runJob({
+  const claim = claimLease('dom-host', sendResponse);
+  if (!claim) return true;
+  loadJobHost().then(({ runJob, extractMarkdownLocal }) => {
+    if (rejectStaleClaim('dom-host', claim, sendResponse)) return undefined;
+    return runJob({
       code: msg.code, timeoutMs: msg.timeoutMs, startedAt: msg.startedAt, deadlineAt: msg.deadlineAt,
       a2a: msg.a2a === true, actors: msg.actors === true,
       // DESIGN-19: the pinned origin for a site-client run (trusted job param, SW-set).
@@ -413,19 +395,21 @@ const onJobMessage = (msg, sender, sendResponse) => {
       // gate above is what makes it trustworthy; _runJob validates the shape).
       workspaceSessionId: msg.workspaceSessionId,
     }, {
-      sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }),
+      sendToSW: (/** @type {string} */ type, /** @type {any} */ payload) =>
+        browser.runtime.sendMessage({ type, ...payload }),
       // Run settlement is a control signal, separate from the capability relay
       // lane: the SW aborts pending confirmations/tool work before job-runner
       // releases that lane for reuse.
-      abortRun: (runId, ownerSessionId) => browser.runtime.sendMessage({
+      abortRun: (/** @type {string} */ runId, /** @type {string} */ ownerSessionId) => browser.runtime.sendMessage({
         type: 'script-run/abort', runId, ownerSessionId,
       }),
       // The bridged fetch's extract:'markdown' post-step — the local pipeline
       // adapter (see shared/fetch-extract.js for the why + posture).
       extractMarkdown: extractMarkdownLocal,
-    }))
+    });
+  })
     .then((result) => sendResponse({ ok: true, result }))
-    .catch((e) => sendResponse({ ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }));
+    .catch((e) => sendResponse(errorResponse(e)));
   return true;     // async sendResponse contract
 };
 browser.runtime.onMessage.addListener(/** @type {any} */ (onJobMessage));
@@ -441,17 +425,17 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (onJobMessage));
 const onJobAbort = (msg, sender, sendResponse) => {
   if (msg?.type !== 'job/abort') return undefined;
   if (!isServiceWorkerSender(sender)) { sendResponse({ ok: false, error: 'unauthorized-command-sender' }); return true; }
-  if (rejectWithoutLease('dom-host', sendResponse)) return true;
+  const claim = claimLease('dom-host', sendResponse);
+  if (!claim) return true;
   if (typeof msg.runId !== 'string' || !msg.runId) {
     sendResponse({ ok: true });
     return true;
   }
   loadJobHost().then(({ abortJob }) => {
+    if (rejectStaleClaim('dom-host', claim, sendResponse)) return;
     abortJob(msg.runId, typeof msg.ownerSessionId === 'string' ? msg.ownerSessionId : undefined);
     sendResponse({ ok: true });
-  }, (cause) => sendResponse({
-    ok: false, error: cause instanceof Error ? cause.message : String(cause),
-  }));
+  }, (cause) => sendResponse(errorResponse(cause)));
   return true;
 };
 browser.runtime.onMessage.addListener(/** @type {any} */ (onJobAbort));
@@ -468,9 +452,11 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (onJobAbort));
 // generate + abort handlers below).
 /** @type {Map<string, AbortController>} */
 const localGenerationControllers = new Map();
-/** @type {Promise<typeof import('./local-model.js')> | null} */
-let localModelHostPromise = null;
-const loadLocalModelHost = () => (localModelHostPromise ??= import('./local-model.js'));
+/** @type {typeof import('./local-model.js')|null} */
+let localModelHost = null;
+const loadLocalModelHost = makeBoundedModuleLoader(
+  () => import('./local-model.js').then((module) => (localModelHost = module)),
+);
 
 /**
  * @param {any} msg
@@ -480,9 +466,11 @@ const loadLocalModelHost = () => (localModelHostPromise ??= import('./local-mode
 const onLocalModelMessage = (msg, sender, sendResponse) => {
   if (typeof msg?.type !== 'string' || !msg.type.startsWith('local-model/host/')) return undefined;
   if (!isServiceWorkerSender(sender)) { sendResponse({ ok: false, error: 'unauthorized-command-sender' }); return true; }
-  if (rejectWithoutLease('model-host', sendResponse)) return true;
+  const claim = claimLease('model-host', sendResponse);
+  if (!claim) return true;
   (async () => {
     const local = await loadLocalModelHost();
+    if (rejectStaleClaim('model-host', claim, sendResponse)) return;
     switch (msg.type) {
       case 'local-model/host/status':
         // The status reply carries its own ok (false for an unknown model id).
@@ -518,8 +506,8 @@ const onLocalModelMessage = (msg, sender, sendResponse) => {
           sendResponse({ ok: false, error: `another model is still downloading (${busy}) - wait for it to finish first.`, model: pre.model });
           return;
         }
-        local.initLocalModel({ model: pre.model }, (p) => { try { browser.runtime.sendMessage({ type: 'local-model/progress', progress: p }); } catch { /* SW asleep */ } })
-          .catch((e) => {
+        local.initLocalModel({ model: pre.model }, (/** @type {any} */ p) => { try { browser.runtime.sendMessage({ type: 'local-model/progress', progress: p }); } catch { /* SW asleep */ } })
+          .catch((/** @type {any} */ e) => {
             try { browser.runtime.sendMessage({ type: 'local-model/progress', progress: { status: 'error', message: /** @type {{ message?: string }} */ (e)?.message ?? String(e), model: pre.model } }); } catch { /* SW asleep */ }
           });
         sendResponse({ ...(await local.localModelStatus({ model: pre.model })), started: true });
@@ -543,7 +531,7 @@ const onLocalModelMessage = (msg, sender, sendResponse) => {
         const controller = new AbortController();
         if (typeof genId === 'string') localGenerationControllers.set(genId, controller);
         try {
-          await local.generateLocal(msg, (token) => { try { browser.runtime.sendMessage({ type: 'local-model/delta', genId, token }); } catch { /* SW asleep */ } }, { signal: controller.signal });
+          await local.generateLocal(msg, (/** @type {string} */ token) => { try { browser.runtime.sendMessage({ type: 'local-model/delta', genId, token }); } catch { /* SW asleep */ } }, { signal: controller.signal });
           try { browser.runtime.sendMessage({ type: 'local-model/done', genId }); } catch { /* SW asleep */ }
         } catch (e) {
           try { browser.runtime.sendMessage({ type: 'local-model/done', genId, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }); } catch { /* SW asleep */ }
@@ -561,7 +549,7 @@ const onLocalModelMessage = (msg, sender, sendResponse) => {
       default:
         sendResponse({ ok: false, error: `unknown local-model message: ${msg.type}` });
     }
-  })().catch((e) => { try { sendResponse({ ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }); } catch { /* response gone */ } });
+  })().catch((e) => { try { sendResponse(errorResponse(e)); } catch { /* response gone */ } });
   return true; // async sendResponse contract
 };
 browser.runtime.onMessage.addListener(/** @type {any} */ (onLocalModelMessage));
@@ -571,31 +559,21 @@ const stopControllerFeature = async () => {
     try { actorPort.close(); } catch { /* already closed */ }
   }
   actorPorts.clear();
-  if (repositoryHostPromise) {
-    try { (await repositoryHostPromise).abortRepositoryHostCalls(); }
-    catch { repositoryHostPromise = null; }
-  }
-  if (controllerBootstrapPromise) {
-    try {
-      const bootstrap = /** @type {any} */ (await controllerBootstrapPromise);
-      bootstrap.retireControllerHost?.();
-    } catch { controllerBootstrapPromise = null; }
-  }
+  try { repositoryHost?.abortRepositoryHostCalls(); } catch {}
+  try { controllerBootstrap?.retireControllerHost?.(); } catch {}
   return { stopped: true };
 };
 
 const stopModelFeature = async () => {
   for (const controller of localGenerationControllers.values()) controller.abort();
   localGenerationControllers.clear();
-  if (localModelHostPromise) {
-    try { await (await localModelHostPromise).teardownLocalModel(); }
-    catch { /* a broken model host still loses its lease */ }
-  }
+  try { await localModelHost?.teardownLocalModel(); } catch {}
   return { stopped: true };
 };
 
 const stopDomFeature = async () => {
-  const aborted = jobHostPromise ? (await jobHostPromise).abortAllJobs() : 0;
+  let aborted = 0;
+  try { aborted = jobHost?.abortAllJobs() ?? 0; } catch {}
   return { stopped: true, aborted };
 };
 
@@ -622,28 +600,36 @@ const stopVaultAuthorityFeature = async () => {
   return { stopped: true, workers: workers.length };
 };
 
-const OFFSCREEN_BUILD_ID = `${EXTENSION_VERSION}:${CONTROLLER_BUILD_DIGEST}`;
-featureLeaseHost = createOffscreenFeatureLeaseHost({
-  expectedBuildId: OFFSCREEN_BUILD_ID,
-  connectPort: () => browser.runtime.connect({ name: FEATURE_LEASE_KEEPALIVE_PORT }),
-  startScope: async (scope, lease) => {
-    if (scope === 'dweb') return (await loadDwebHost()).startDwebFeatureLease(lease);
-    return { ready: true, scope };
+const ensureFeatureLeaseHost = makeBoundedModuleLoader(
+  () => import('./feature-lease-host.js').then(({ createOffscreenFeatureLeaseHost }) => {
+    featureLeaseHost ??= createOffscreenFeatureLeaseHost({
+      expectedBuildId: `${EXTENSION_VERSION}:${CONTROLLER_BUILD_DIGEST}`,
+      connectPort: () => browser.runtime.connect({ name: FEATURE_LEASE_KEEPALIVE_PORT }),
+      startScope: async (scope, lease) => {
+        if (scope === 'dweb') return (await loadDwebHost()).startDwebFeatureLease(lease);
+        return { ready: true, scope };
+      },
+      adoptScope: async (scope, _prior, lease) => {
+        if (scope === 'dweb') return (await loadDwebHost()).adoptDwebFeatureLease(lease);
+        return { adopted: true, scope };
+      },
+      stopScope: async (scope) => {
+        if (scope === 'dweb') return (await loadDwebHost()).stopDwebFeatureLease();
+        if (scope === 'controller') return stopControllerFeature();
+        if (scope === 'model-host') return stopModelFeature();
+        if (scope === 'dom-host') return stopDomFeature();
+        if (scope === 'media-host') return stopMediaFeature();
+        if (scope === 'vault-authority') return stopVaultAuthorityFeature();
+        throw new Error('feature-lease-scope-invalid');
+      },
+    });
+    return featureLeaseHost;
+  }),
+  {
+    loadCode: 'feature-lease-host-load-failed',
+    timeoutCode: 'feature-lease-host-load-timeout',
   },
-  adoptScope: async (scope, _prior, lease) => {
-    if (scope === 'dweb') return (await loadDwebHost()).adoptDwebFeatureLease(lease);
-    return { adopted: true, scope };
-  },
-  stopScope: async (scope) => {
-    if (scope === 'dweb') return (await loadDwebHost()).stopDwebFeatureLease();
-    if (scope === 'controller') return stopControllerFeature();
-    if (scope === 'model-host') return stopModelFeature();
-    if (scope === 'dom-host') return stopDomFeature();
-    if (scope === 'media-host') return stopMediaFeature();
-    if (scope === 'vault-authority') return stopVaultAuthorityFeature();
-    throw new Error('feature-lease-scope-invalid');
-  },
-});
+);
 
 // This is the only runtime-message lifecycle authority in the document. The
 // ordinary feature handlers above merely consume already-active leases.
@@ -662,11 +648,16 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((
     });
     return false;
   }
-  featureLeaseHost.handleMessage(message).then(sendResponse, (cause) => sendResponse({
-    ok: false,
-    protocol: FEATURE_LEASE_HOST_PROTOCOL,
-    error: cause instanceof Error ? cause.message : String(cause),
-  }));
+  ensureFeatureLeaseHost()
+    .then((host) => host.handleMessage(message))
+    .then(sendResponse, (cause) => sendResponse({
+      ok: false,
+      protocol: FEATURE_LEASE_HOST_PROTOCOL,
+      code: cause?.code ?? 'feature-lease-host-load-failed',
+      error: 'Feature host unavailable. Try again.',
+      outcomeKnown: true,
+      retryable: true,
+    }));
   return true;
 }));
 

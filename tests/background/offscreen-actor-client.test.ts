@@ -146,11 +146,15 @@ describe('run() — Stop-cascade aborted stamping', () => {
     expect(sent).toEqual([]);
   });
 
-  test('runner settlement aborts an already-admitted SW tool relay', async () => {
+  test('Stop preserves a late successful receipt from an admitted SW tool relay', async () => {
     let relay: Promise<any> | null = null;
     let dispatchStarted: (() => void) | undefined;
     const started = new Promise<void>((resolve) => { dispatchStarted = resolve; });
+    let releaseDispatch: (() => void) | undefined;
+    const dispatchGate = new Promise<void>((resolve) => { releaseDispatch = resolve; });
     let relaySignal: AbortSignal | undefined;
+    let effects = 0;
+    const ac = new AbortController();
     let client: ReturnType<typeof makeOffscreenActorClient>;
     client = makeOffscreenActorClient(baseDeps({
       sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
@@ -158,11 +162,9 @@ describe('run() — Stop-cascade aborted stamping', () => {
       dispatchToolCall: async (_call: any, ctx: any) => {
         relaySignal = ctx.abortSignal;
         dispatchStarted?.();
-        return await new Promise((resolve) => {
-          const finish = () => resolve({ ok: false, error: 'cancelled with actor run' });
-          if (ctx.abortSignal.aborted) finish();
-          else ctx.abortSignal.addEventListener('abort', finish, { once: true });
-        });
+        await dispatchGate;
+        effects += 1;
+        return { ok: true, content: 'effect landed', performed: true, outcomeKnown: true };
       },
       sendMessage: async (m: any) => {
         if (m.type !== 'actor/run') return { ok: true };
@@ -170,17 +172,51 @@ describe('run() — Stop-cascade aborted stamping', () => {
           relayToken: m.job.relayToken, call: { name: 'vm_boot', args: {} },
         }, OFFSCREEN);
         await started;
-        return { ok: false, started: true, aborted: true, error: 'actor timed out' };
+        ac.abort();
+        releaseDispatch?.();
+        const receipt = await relay;
+        return {
+          ok: true, started: true, finalText: '', stopReason: 'aborted', toolCalls: 1,
+          performed: receipt?.result?.performed, outcomeKnown: receipt?.result?.outcomeKnown,
+        };
       },
     }));
 
     const result: any = await client.run({
       actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm',
-    } as any);
+    } as any, { signal: ac.signal });
     const relayResult: any = await relay;
     expect(result.aborted).toBe(true);
+    expect(result).toMatchObject({ performed: true, outcomeKnown: true });
     expect(relaySignal?.aborted).toBe(true);
-    expect(relayResult).toEqual({ ok: false, error: 'aborted' });
+    expect(relayResult).toEqual({
+      ok: true,
+      result: { ok: true, content: 'effect landed', performed: true, outcomeKnown: true },
+    });
+    expect(effects).toBe(1);
+  });
+
+  test('unknown tool custody outranks Stop stamping', async () => {
+    const ac = new AbortController();
+    const client = makeOffscreenActorClient(baseDeps({
+      sendMessage: async (m: any) => {
+        if (m.type !== 'actor/run') return { ok: true };
+        ac.abort();
+        return {
+          ok: false, started: true, code: 'actor_tool_outcome_unknown',
+          error: 'outcome_unknown', performed: true,
+          outcomeKnown: false, retryable: false,
+        };
+      },
+    }));
+    const result: any = await client.run({
+      actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm',
+    } as any, { signal: ac.signal });
+    expect(result).toMatchObject({
+      code: 'actor_tool_outcome_unknown', performed: true,
+      outcomeKnown: false, retryable: false,
+    });
+    expect(result.aborted).toBeUndefined();
   });
 
   test('runner settlement aborts an already-admitted SW model relay', async () => {
@@ -279,6 +315,59 @@ describe('run() — Stop-cascade aborted stamping', () => {
     releaseModel?.();
     expect(relayResult).not.toBeNull();
     expect(await (relayResult as unknown as Promise<any>)).toEqual({ ok: false, error: 'aborted' });
+  });
+
+  test('Firefox relay-drain expiry aborts the worker and retires its grant', async () => {
+    let relayStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { relayStarted = resolve; });
+    let fireDrain: (() => void) | undefined;
+    let relayToken = '';
+    let relayAgain: ((type: string, payload: any) => Promise<any>) | null = null;
+    const workerAborts: string[] = [];
+    const host = makeDirectActorHost({
+      workerUrl: 'worker.js',
+      relayDrainTimeoutMs: 10,
+      setTimeoutFn: ((callback: () => void) => { fireDrain = callback; return 7; }) as typeof setTimeout,
+      clearTimeoutFn: (() => {}) as typeof clearTimeout,
+      abort: (runId: string) => { workerAborts.push(runId); },
+      run: async (job: any, { sendToSW, onRelayDrain }: any) => {
+        relayToken = job.relayToken;
+        relayAgain = sendToSW;
+        const relay = sendToSW('actor/tool-dispatch', {
+          relayToken, call: { name: 'vm_boot', args: {} },
+        });
+        await started;
+        onRelayDrain();
+        return relay;
+      },
+    });
+    const client = makeOffscreenActorClient(baseDeps({
+      ensureHost: async () => {},
+      isRelaySender: host.isRelaySender,
+      sendMessage: host.sendMessage,
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
+      dispatchToolCall: async () => {
+        relayStarted?.();
+        return new Promise(() => {});
+      },
+    }));
+    host.bindRelayRoutes(client.routes);
+
+    const run = client.run({
+      actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm',
+    } as any);
+    await started;
+    await Promise.resolve();
+    fireDrain?.();
+    expect(await run).toMatchObject({
+      ok: false, started: true, code: 'actor_relay_drain_timeout',
+      outcomeKnown: false, retryable: false,
+    });
+    expect(workerAborts).toHaveLength(1);
+    expect(relayAgain).not.toBeNull();
+    expect(await (relayAgain as unknown as (type: string, payload: any) => Promise<any>)(
+      'actor/tool-dispatch', { relayToken, call: { name: 'vm_boot', args: {} } },
+    )).toEqual({ ok: false, error: 'actor/tool-dispatch: unauthorized relay' });
   });
 });
 
@@ -395,6 +484,20 @@ describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab threa
     expect(out.ok).toBe(true);
     expect(seenSignal).not.toBe(controller.signal);   // host-owned run signal
     expect(seenSignal?.aborted).toBe(true);            // settlement cancels relays
+  });
+
+  test('an admitted dispatch throw has unknown custody', async () => {
+    const { client, during } = clientWithRelay({
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
+      buildToolContext: async () => ({}),
+      dispatchToolCall: async () => { throw new Error('dispatch receipt lost'); },
+    });
+    const out = await during((relayToken) => client.routes['actor/tool-dispatch']({
+      relayToken, call: { name: 'vm_boot', args: {} },
+    }, OFFSCREEN));
+    expect(out).toMatchObject({
+      ok: false, error: 'dispatch receipt lost', outcomeKnown: false, retryable: false,
+    });
   });
 
   test('a WEB (tab) actor threads its owned tab into buildToolContext + re-pins', async () => {
@@ -634,6 +737,100 @@ describe('actor/model-call: trusted run metadata wins over worker args', () => {
     expect(seen.provider).toBe('anthropic');
     expect(seen.model).toBe('m');
     expect(seen.ollamaHost).toBeUndefined();
+  });
+
+  test('forces the SW-stamped output cap over worker args', async () => {
+    let seen: any = null;
+    const { client, during } = clientWithRelay({
+      callModel: async function* (args: any) { seen = args; },
+    });
+    const out: any = await during((relayToken) => client.routes['actor/model-call']({
+      relayToken, args: { maxTokens: Number.MAX_SAFE_INTEGER },
+    }, OFFSCREEN), 'actor-A', undefined, { maxOutputTokens: 512 });
+    expect(out.ok).toBe(true);
+    expect(seen.maxTokens).toBe(512);
+  });
+});
+
+describe('relay quotas', () => {
+  test('a model burst starts one call and settlement aborts it', async () => {
+    let modelStarted!: () => void;
+    const started = new Promise<void>((resolve) => { modelStarted = resolve; });
+    let modelCalls = 0;
+    let burst: Promise<any>[] = [];
+    let client: ReturnType<typeof makeOffscreenActorClient>;
+    client = makeOffscreenActorClient(baseDeps({
+      callModel: async function* ({ signal }: any) {
+        modelCalls += 1;
+        modelStarted();
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) resolve();
+          else signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+      },
+      sendMessage: async (message: any) => {
+        if (message.type !== 'actor/run') return { ok: true };
+        burst = Array.from({ length: 5 }, () => client.routes['actor/model-call']({
+          relayToken: message.job.relayToken, args: {},
+        }, OFFSCREEN));
+        await started;
+        return { ok: true, started: true, finalText: 'done' };
+      },
+    }));
+
+    await client.run({
+      actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm',
+    } as any);
+    const results = await Promise.all(burst);
+    expect(modelCalls).toBe(1);
+    expect(results.filter((result) => result.code === 'actor_model_relay_busy')).toHaveLength(4);
+    expect(results.find((result) => result.code !== 'actor_model_relay_busy'))
+      .toEqual({ ok: false, error: 'aborted' });
+  });
+
+  test('model and tool relay budgets refuse excess before dispatch', async () => {
+    let modelCalls = 0;
+    let toolCalls = 0;
+    const { client, during } = clientWithRelay({
+      maxModelRelaysPerRun: 1,
+      maxToolRelaysPerRun: 1,
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
+      buildToolContext: async () => ({}),
+      callModel: async function* () { modelCalls += 1; },
+      dispatchToolCall: async () => { toolCalls += 1; return { ok: true }; },
+    });
+    const results = await during(async (relayToken) => {
+      const firstModel = await client.routes['actor/model-call']({ relayToken, args: {} }, OFFSCREEN);
+      const secondModel = await client.routes['actor/model-call']({ relayToken, args: {} }, OFFSCREEN);
+      const firstTool = await client.routes['actor/tool-dispatch']({
+        relayToken, call: { name: 'vm_boot', args: {} },
+      }, OFFSCREEN);
+      const secondTool = await client.routes['actor/tool-dispatch']({
+        relayToken, call: { name: 'vm_boot', args: {} },
+      }, OFFSCREEN);
+      return { firstModel, secondModel, firstTool, secondTool };
+    });
+    expect(results.firstModel.ok).toBe(true);
+    expect(results.firstTool.ok).toBe(true);
+    expect(results.secondModel).toMatchObject({
+      code: 'actor_model_relay_limit', outcomeKnown: true, performed: false,
+    });
+    expect(results.secondTool).toMatchObject({
+      code: 'actor_tool_relay_limit', outcomeKnown: true, performed: false,
+    });
+    expect({ modelCalls, toolCalls }).toEqual({ modelCalls: 1, toolCalls: 1 });
+  });
+
+  test('coalesces loop events after the run cap', async () => {
+    const events: any[] = [];
+    const { client, during } = clientWithRelay({ maxLoopEventsPerRun: 3 });
+    const results = await during((relayToken) => Promise.all(
+      Array.from({ length: 20 }, (_, index) => client.routes['actor/loop-event']({
+        relayToken, event: { type: 'delta', index },
+      }, OFFSCREEN)),
+    ), 'actor-A', (event) => events.push(event));
+    expect(events).toHaveLength(3);
+    expect(results.filter((result: any) => result.coalesced === true)).toHaveLength(17);
   });
 });
 

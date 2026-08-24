@@ -59,7 +59,7 @@ describe('exact sender pins are wired at privileged runtime edges', () => {
   test('toolbox parser commands are service-worker-only', () => {
     const branch = offscreen.indexOf("msg?.type !== 'toolbox/parse-check'");
     const guard = offscreen.indexOf('if (!isServiceWorkerSender(sender))', branch);
-    const load = offscreen.indexOf("import('./toolbox-parse.js')", guard);
+    const load = offscreen.indexOf('loadToolboxParse()', guard);
     const parse = offscreen.indexOf('handleToolboxParseCheck(msg)', load);
     expect(branch).toBeGreaterThan(-1);
     expect(guard).toBeGreaterThan(branch);

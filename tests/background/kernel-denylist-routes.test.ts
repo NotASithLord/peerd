@@ -1,4 +1,4 @@
-// Kernel denylist editor migration — the mutation routes must preserve the
+// Kernel denylist editor migration: the mutation routes must preserve the
 // legacy Logs-view editor's observable behavior while the network backstop
 // obligation stays live in the kernel.
 

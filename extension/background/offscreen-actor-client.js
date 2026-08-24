@@ -72,6 +72,9 @@
  *   the lane outright.
  * @param {readonly string[]} [deps.inboundDwebToolNames] positive inbound grant,
  *   supplied from the runtime capability manifest; omission fails closed.
+ * @param {number} [deps.maxModelRelaysPerRun]
+ * @param {number} [deps.maxToolRelaysPerRun]
+ * @param {number} [deps.maxLoopEventsPerRun]
  */
 export const makeOffscreenActorClient = ({
   ensureHost, ensureOffscreen, sendMessage, runOnChannel, callModel, getSecret, safeFetch,
@@ -83,13 +86,22 @@ export const makeOffscreenActorClient = ({
   spendRefusalFor = undefined,
   isRelaySender, isOffscreenSender,
   inboundDwebToolNames = [],
+  maxModelRelaysPerRun = 100,
+  maxToolRelaysPerRun = 128,
+  maxLoopEventsPerRun = 256,
 }) => {
   const ensureActorHost = ensureHost ?? ensureOffscreen ?? (async () => {});
   const relaySenderAllowed = isRelaySender ?? isOffscreenSender ?? (() => false);
   const inboundDwebTools = new Set(inboundDwebToolNames);
+  const modelRelayLimit = Number.isFinite(maxModelRelaysPerRun) && maxModelRelaysPerRun > 0
+    ? Math.floor(maxModelRelaysPerRun) : 100;
+  const toolRelayLimit = Number.isFinite(maxToolRelaysPerRun) && maxToolRelaysPerRun > 0
+    ? Math.floor(maxToolRelaysPerRun) : 128;
+  const loopEventLimit = Number.isFinite(maxLoopEventsPerRun) && maxLoopEventsPerRun > 0
+    ? Math.floor(maxLoopEventsPerRun) : 256;
   let seq = 0;
   /**
-   * @type {Map<string, { runId: string, actorSessionId: string, provider: string, model: string, ollamaHost?: string, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal }>} Firefox relay grants:
+   * @type {Map<string, { runId: string, actorSessionId: string, provider: string, model: string, ollamaHost?: string, maxOutputTokens?: number, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean }>} Firefox relay grants:
    * token → the identity of the run it was minted for.
    *
    * why a grant and not the message's own `actorSessionId`/`runId`: Firefox binds
@@ -166,10 +178,15 @@ export const makeOffscreenActorClient = ({
     const allowedTools = inbound
       ? new Set((tools ?? []).map((tool) => tool?.name).filter((name) => typeof name === 'string'))
       : null;
+    const requestedMaxOutputTokens = job.maxOutputTokens;
     const grant = {
       runId, actorSessionId: job.actorSessionId,
       provider: job.provider, model: job.model,
+      maxOutputTokens: typeof requestedMaxOutputTokens === 'number'
+        && Number.isFinite(requestedMaxOutputTokens) && requestedMaxOutputTokens > 0
+        ? Math.floor(requestedMaxOutputTokens) : undefined,
       inbound, allowedTools, relaySignal: relayController.signal,
+      modelRelays: 0, toolRelays: 0, loopEvents: 0, modelActive: false,
       ...(job.ollamaHost ? { ollamaHost: job.ollamaHost } : {}),
       ...(job.actorSurface === 'code' || job.actorSurface === 'tools'
         ? { actorSurface: job.actorSurface }
@@ -212,11 +229,13 @@ export const makeOffscreenActorClient = ({
       // hit THIS run — and the one place it's reliably observable. The worker unwinds an
       // abort several ways (a rejected relay, a model-error from the SW route, or the
       // 'abort' message) and can even finish CLEANLY (no error event, empty reply) that
-      // looks like a natural end at the result shape. So stamp `aborted` whenever the
-      // signal fired and the turn produced NO reply — the caller then renders the actor
+      // looks like a natural end at the result shape. Stamp only known no-reply
+      // cancellations; unknown custody stays terminal. The caller then renders the actor
       // card 'cancelled' (not a blank 'ok'/'failed') and spawn.js records stopReason
       // 'aborted'. A run that produced text just before Stop (raced) keeps its result.
-      if (signal?.aborted && result && !result.finalText) result.aborted = true;
+      if (signal?.aborted && result && !result.finalText && result.outcomeKnown !== false) {
+        result.aborted = true;
+      }
       return result;
     } finally {
       // Settlement is a cancellation boundary for every host relay, including a
@@ -245,7 +264,7 @@ export const makeOffscreenActorClient = ({
    * token. Every route treats a missing or retired grant as a hard refusal.
    * @param {{ relayToken?: unknown }} [msg]
    * @param {unknown} [sender]  the second argument makeDispatcher hands a handler
-   * @returns {{ runId: string, actorSessionId: string, provider: string, model: string, ollamaHost?: string, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal } | null}
+   * @returns {{ runId: string, actorSessionId: string, provider: string, model: string, ollamaHost?: string, maxOutputTokens?: number, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean } | null}
    */
   const grantFor = (msg, sender, boundGrant = null) => {
     if (boundGrant) return boundGrant;
@@ -272,46 +291,61 @@ export const makeOffscreenActorClient = ({
       // Race guard 1: a Stop that fired BEFORE this call reached the route (the card
       // appears first) → refuse without ever making the key-bearing request.
       if (grant.relaySignal.aborted || abortedRuns.has(key)) return { ok: false, error: 'aborted' };
-      // Spend-limit preflight, script/model-call's posture applied to the actor lane:
-      // an actor's model calls spend the user's money on the OWNING chat session, so a
-      // session past the hard cap must not be pushed further by its own actors. Without
-      // this the cap bounded the orchestrator's turns only, and any actor fan-out
-      // walked straight past it.
-      if (spendRefusalFor) {
-        const refusal = await spendRefusalFor(grant.actorSessionId).catch(() => null);
-        if (refusal) return { ok: false, error: refusal };
-      }
-      // The host may have settled while the spend lookup was in flight. A
-      // token lookup made before settlement is not continuing authority.
-      if (grant.relaySignal.aborted || abortedRuns.has(key)) return { ok: false, error: 'aborted' };
-      const ac = new AbortController();
-      const set = inflight.get(key) ?? new Set();
-      set.add(ac); inflight.set(key, set);
-      // The context inspector sees every DELEGATED model call here — the one
-      // relay every actor and actor heap uses. Identity comes from the
-      // runMeta stash, never the worker's args (a worker must not be able to
-      // relabel whose context this was).
-      const meta = runMeta.get(key);
-      const pinnedArgs = {
-        ...(args ?? {}),
-        provider: grant.provider,
-        model: grant.model,
-        ollamaHost: grant.ollamaHost,
+      if (grant.modelActive) return {
+        ok: false, error: 'actor/model-call: another model relay is active',
+        code: 'actor_model_relay_busy', outcomeKnown: true, performed: false,
       };
-      if (meta) recordModelCall({ ...pinnedArgs, sessionId: meta.sessionId, label: meta.label });
-      /** @type {any[]} */
-      const events = [];
+      if (grant.modelRelays >= modelRelayLimit) return {
+        ok: false, error: 'actor/model-call: relay budget exhausted',
+        code: 'actor_model_relay_limit', outcomeKnown: true, performed: false,
+      };
+      grant.modelRelays += 1;
+      grant.modelActive = true;
       try {
-        for await (const ev of callModel({ ...pinnedArgs, getSecret, safeFetch, signal: ac.signal })) events.push(ev);
-        // Race guard 2: a Stop that fired DURING the call → honor it even if the stream
-        // still fulfilled (a fake responder, or a provider that flushed before cancel),
-        // so a mid-call abort never delivers a completed turn.
-        if (ac.signal.aborted || abortedRuns.has(key)) return { ok: false, error: 'aborted' };
-        return { ok: true, events };
-      } catch (e) {
-        return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+        // Spend-limit preflight, script/model-call's posture applied to the actor lane:
+        // an actor's model calls spend the user's money on the OWNING chat session, so a
+        // session past the hard cap must not be pushed further by its own actors. Without
+        // this the cap bounded the orchestrator's turns only, and any actor fan-out
+        // walked straight past it.
+        if (spendRefusalFor) {
+          const refusal = await spendRefusalFor(grant.actorSessionId).catch(() => null);
+          if (refusal) return { ok: false, error: refusal };
+        }
+        // The host may have settled while the spend lookup was in flight. A
+        // token lookup made before settlement is not continuing authority.
+        if (grant.relaySignal.aborted || abortedRuns.has(key)) return { ok: false, error: 'aborted' };
+        const ac = new AbortController();
+        const set = inflight.get(key) ?? new Set();
+        set.add(ac); inflight.set(key, set);
+        // The context inspector sees every delegated model call here: the one
+        // relay every actor and actor heap uses. Identity comes from the
+        // runMeta stash, never the worker's args (a worker must not be able to
+        // relabel whose context this was).
+        const meta = runMeta.get(key);
+        const pinnedArgs = {
+          ...(args ?? {}),
+          provider: grant.provider,
+          model: grant.model,
+          ollamaHost: grant.ollamaHost,
+          maxTokens: grant.maxOutputTokens,
+        };
+        if (meta) recordModelCall({ ...pinnedArgs, sessionId: meta.sessionId, label: meta.label });
+        /** @type {any[]} */
+        const events = [];
+        try {
+          for await (const ev of callModel({ ...pinnedArgs, getSecret, safeFetch, signal: ac.signal })) events.push(ev);
+          // Race guard 2: a Stop that fired DURING the call → honor it even if the stream
+          // still fulfilled (a fake responder, or a provider that flushed before cancel),
+          // so a mid-call abort never delivers a completed turn.
+          if (ac.signal.aborted || abortedRuns.has(key)) return { ok: false, error: 'aborted' };
+          return { ok: true, events };
+        } catch (e) {
+          return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+        } finally {
+          set.delete(ac); if (set.size === 0) inflight.delete(key);
+        }
       } finally {
-        set.delete(ac); if (set.size === 0) inflight.delete(key);
+        grant.modelActive = false;
       }
     },
     /**
@@ -319,6 +353,7 @@ export const makeOffscreenActorClient = ({
      * @param {unknown} [sender] - must be the offscreen document (see grantFor).
      */
     'actor/tool-dispatch': async (msg = {}, sender = undefined, boundGrant = null) => {
+      let admitted = false;
       try {
         // The session comes from the offscreen-pinned GRANT, not the message. This is
         // the route that builds an instance-pinned, tool-granting context, so a caller
@@ -326,6 +361,11 @@ export const makeOffscreenActorClient = ({
         const grant = grantFor(msg, sender, boundGrant);
         if (!grant) return { ok: false, error: 'actor/tool-dispatch: unauthorized relay' };
         if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
+        if (grant.toolRelays >= toolRelayLimit) return {
+          ok: false, error: 'actor/tool-dispatch: relay budget exhausted',
+          code: 'actor_tool_relay_limit', outcomeKnown: true, performed: false,
+        };
+        grant.toolRelays += 1;
         const { actorSessionId } = grant;
         const call = msg.call;
         // Descriptor narrowing makes the model unlikely to ask; this check is the
@@ -381,8 +421,8 @@ export const makeOffscreenActorClient = ({
             ...(grant.inbound ? { synthetic: true, trusted: false, inbound: true } : {}),
             ...(rec.review === true && EXPOSURE_REVIEW ? { exposure: EXPOSURE_REVIEW } : {}),
           }, granted);
+          admitted = true;
           const result = await dispatchToolCall(call, ctx);
-          if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
           return { ok: true, result };
         }
 
@@ -429,11 +469,11 @@ export const makeOffscreenActorClient = ({
         // (A no-op for web DOM tools, whose numeric-tab pin the GATE enforces via
         // ctx.activeTab; still runs so engine/edit_file calls normalize.)
         pinActorCall(call, rec.actorType, rec.instanceId);
+        admitted = true;
         const result = await dispatchToolCall(call, ctx);
         // Announce the settled dispatch — pure, privacy-minimal observability.
         // Arguments can contain form text, credentials, or attacker-derived
         // bytes, so no UI port receives them.
-        if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
         // why: an OFFSCREEN actor turn emits no turn/tool-use broadcast (that
         // path is turn-driver's, in-SW only) — without this the eval harness's
         // OM2W recorder can't see the actor's page actions. Best-effort.
@@ -447,7 +487,16 @@ export const makeOffscreenActorClient = ({
         } catch { /* display-only */ }
         return { ok: true, result };
       } catch (e) {
-        return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+        const failure = /** @type {{ message?: string, code?: string, outcomeKnown?: boolean, performed?: boolean }} */ (e);
+        return {
+          ok: false, error: failure?.message ?? String(e),
+          ...(typeof failure?.code === 'string' ? { code: failure.code } : {}),
+          ...(admitted ? {
+            outcomeKnown: failure?.outcomeKnown === true,
+            ...(typeof failure?.performed === 'boolean' ? { performed: failure.performed } : {}),
+            ...(failure?.outcomeKnown === true ? {} : { retryable: false }),
+          } : {}),
+        };
       }
     },
     /**
@@ -461,6 +510,8 @@ export const makeOffscreenActorClient = ({
       const grant = grantFor(msg, sender, boundGrant);
       if (!grant) return { ok: false, error: 'actor/loop-event: unauthorized relay' };
       if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
+      if (grant.loopEvents >= loopEventLimit) return { ok: true, coalesced: true };
+      grant.loopEvents += 1;
       try { if (msg.event) runOnEvent.get(grant.runId)?.(msg.event); } catch { /* never break the relay */ }
       return { ok: true };
     },

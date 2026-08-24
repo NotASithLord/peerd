@@ -9,8 +9,8 @@ afterStaticShellPaint(() => {
     // before the navigation shell. Both are complete rich-app mount states.
     appSelector: '.home-shell, .options-gate',
     loadApplication: async () => {
-      const application = await import('./home.js');
-      application.startHome();
+      const app = await import('./home.js');
+      return app.startHome;
     },
   });
 });

@@ -13,7 +13,7 @@
  */
 export const makeSessionRoutes = (deps) => {
   const {
-    vault, auditLog, sessions, sessionCache, turnSlots, makeAgentSendCustody,
+    vault, auditLog, sessions, sessionCache, turnSlots, makeAgentSendCustody, pushState,
     buildToolContext, applyComposer, commandSources, prepareUserAttachmentsWithDocs,
     convertDocAttachment,
     runAgentTurn, runInit, handleSystemCommand, handleToolsCommand,
@@ -145,6 +145,7 @@ export const makeSessionRoutes = (deps) => {
           if (boundSessionId && sessionId !== boundSessionId) {
             return { ok: false, error: 'agent-send-session-mismatch', outcomeKnown: true };
           }
+          await pushState();
           await startGoalRun({ sessionId, goal: trimmed });
         } catch (e) {
           console.error('[sw] goal start threw', e);
@@ -323,10 +324,6 @@ export const makeSessionRoutes = (deps) => {
         now: Date.now(),
         limits: { auditMaxEntries: settings.auditLogMaxEntries, ...contextSnapshots.limits() },
       });
-      auditLog.append({
-        type: 'debug_bundle_exported', sessionId,
-        details: { childSessions: childSessions.length, auditEntries: auditEntries.length },
-      }).catch(() => {});
       return { ok: true, bundle };
     },
 

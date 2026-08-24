@@ -8,6 +8,7 @@ import {
   repositoryMethodMayFetch,
 } from '../shared/feature-lease-protocol.js';
 import { makeRepositoryFacade, repositoryKey } from './repository-client.js';
+import { makeBoundedModuleLoader } from '../shared/bounded-module-load.js';
 
 /**
  * @param {{
@@ -18,6 +19,7 @@ import { makeRepositoryFacade, repositoryKey } from './repository-client.js';
  *   })=>Promise<T>,
  *   appReadTimeoutMs?: number,
  *   appEffectTimeoutMs?: number,
+ *   loadTimeoutMs?: number,
  *   setTimeoutFn?: typeof setTimeout,
  *   clearTimeoutFn?: typeof clearTimeout,
  * }} deps
@@ -32,6 +34,7 @@ export const createLazyLocalRepositoryClient = ({
   withLifetime = (operation) => operation(),
   appReadTimeoutMs = 8_000,
   appEffectTimeoutMs = 15_000,
+  loadTimeoutMs = 10_000,
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
 }) => {
@@ -39,6 +42,16 @@ export const createLazyLocalRepositoryClient = ({
       || !Number.isFinite(appEffectTimeoutMs) || appEffectTimeoutMs <= 0) {
     throw new TypeError('repository-local-timeout-invalid');
   }
+  const loadRepositoryService = makeBoundedModuleLoader(loadService, {
+    timeoutMs: loadTimeoutMs,
+    loadCode: 'repository-service-load-failed',
+    timeoutCode: 'repository-service-load-timeout',
+  });
+  const loadRepositoryAppService = makeBoundedModuleLoader(loadAppService, {
+    timeoutMs: loadTimeoutMs,
+    loadCode: 'repository-app-service-load-failed',
+    timeoutCode: 'repository-app-service-load-timeout',
+  });
   /** @type {Promise<ReturnType<typeof import('../peerd-engine/repository.js').createRepositoryService>> | null} */
   let servicePromise = null;
   /** @type {Promise<Record<string,any>> | null} */
@@ -48,7 +61,7 @@ export const createLazyLocalRepositoryClient = ({
   let generationBarrier = null;
   const getService = () => {
     if (!servicePromise) {
-      servicePromise = loadService().catch((error) => {
+      servicePromise = loadRepositoryService().catch((error) => {
         servicePromise = null;
         throw error;
       });
@@ -57,7 +70,7 @@ export const createLazyLocalRepositoryClient = ({
   };
   const getAppService = () => {
     if (!appServicePromise) {
-      appServicePromise = loadAppService().catch((error) => {
+      appServicePromise = loadRepositoryAppService().catch((error) => {
         appServicePromise = null;
         throw error;
       });
@@ -147,11 +160,17 @@ export const createLazyLocalRepositoryClient = ({
       return await Promise.race([lifetimeWork, deadline]);
     } catch (cause) {
       const classification = /** @type {{outcomeKnown?:boolean,code?:string}} */ (cause);
+      if (!dispatched && classification?.outcomeKnown === false) {
+        classification.outcomeKnown = true;
+        classification.code = 'repository-firefox-startup-lost';
+      }
       if (classification?.outcomeKnown === false) {
         const drain = operationSettled.catch(() => {}).then(() => {
           if (repositoryMethodIsAppFile(method)) {
             if (appServicePromise === usedGeneration) appServicePromise = null;
+            loadRepositoryAppService.reset();
           } else if (servicePromise === usedGeneration) servicePromise = null;
+          if (!repositoryMethodIsAppFile(method)) loadRepositoryService.reset();
         });
         generationBarrier = drain;
         void drain.finally(() => {

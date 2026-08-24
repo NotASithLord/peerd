@@ -35,6 +35,7 @@ import { resolveManifestAllow } from '../tools/manifests.js';
 // drops the actor-only instance tier (vm_*/js_*/app_*/edit_file — writes AND the
 // fenced reads, already gate-refused for a non-actor). Both are pure.
 import { mainAgentDescriptors, filterActorSurface, REVIEW_INSTANCE_READS } from '../tools/exposure.js';
+import { STARTUP_UNAVAILABLE_USER_FAILURE } from '../../shared/bounded-module-load.js';
 
 /** @typedef {import('../sessions/types.js').Session} Session */
 
@@ -294,7 +295,7 @@ export const finalActorTurnReply = (session) => {
  * @param {(handle: unknown) => void} [deps.clearTimer]
  *   Injected timer pair (setTimeout/clearTimeout in the SW) so the timeout is
  *   Bun-testable without real waiting.
- * @param {((job: object, opts?: { signal?: AbortSignal, onEvent?: (ev: object) => void }) => Promise<{ ok: boolean, started?: boolean, code?: string, finalText?: string, newMessages?: any[], usage?: any, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean, outcomeKnown?: boolean }>) | null} [deps.runChildOffscreen]
+ * @param {((job: object, opts?: { signal?: AbortSignal, onEvent?: (ev: object) => void }) => Promise<{ ok: boolean, started?: boolean, phase?: string, code?: string, finalText?: string, newMessages?: any[], usage?: any, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean, outcomeKnown?: boolean }>) | null} [deps.runChildOffscreen]
  *   Heap split: run a child's loop in a dedicated Worker (its own heap;
  *   key never enters it). Tool-less children only relay the model call; tool-bearing
  *   children (job.tools set) also relay each tool call to the SW-gated dispatch.
@@ -727,7 +728,9 @@ export const makeSpawnActor = (deps) => {
             }).catch(() => {});
         } else {
           isolationRefused = true;
-          const error = r?.error ?? 'actor isolation unavailable';
+          const error = r?.started === false && r?.phase === 'startup'
+            ? STARTUP_UNAVAILABLE_USER_FAILURE
+            : r?.error ?? 'actor isolation unavailable';
           const stamp = new Date(now()).toISOString();
           await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `iso-u-${now()}`, when: stamp, role: 'user', content: task })).catch(() => {});
           await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `iso-a-${now()}`, when: stamp, role: 'assistant', content: error })).catch(() => {});

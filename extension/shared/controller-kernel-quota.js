@@ -55,6 +55,12 @@ export const controllerKernelConcurrentCap = (/** @type {string} */ capability) 
 export const controllerRenewalIdleCap = (/** @type {string} */ capability) =>
   capability === 'turn.run' ? TURN_IDLE_DEADLINE_MS : 0;
 
+export const controllerOperationAllowedAfterCancel = (
+  /** @type {string} */ capability,
+  /** @type {string} */ operation,
+) => capability === 'turn.run'
+  && (operation === 'turn.abort.finalize' || operation === 'turn.finalize');
+
 /**
  * @param {string} capability
  * @param {unknown} outerPayload
@@ -103,6 +109,7 @@ export const createControllerKernelQuota = (capability, outerPayload) => {
     'turn.model.cancel': steps,
     'turn.tool.dispatch': toolBudget,
     'turn.event': streamBudget + 2 * toolBudget + 8 * steps + 16,
+    'turn.abort.finalize': 1,
     'turn.finalize': 1,
   });
   const allowed = new Set(Object.keys(limits));

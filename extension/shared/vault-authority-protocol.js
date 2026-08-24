@@ -52,20 +52,23 @@ export const parseVaultAuthorityOffer = (value) => {
   const offer = /** @type {Record<string, unknown>} */ (value);
   if (offer.type !== VAULT_AUTHORITY_OFFER
       || offer.protocol !== VAULT_AUTHORITY_PROTOCOL
-      || !boundedId(offer.channelId)) return null;
+      || !boundedId(offer.channelId)
+      || !offer.lease || typeof offer.lease !== 'object'
+      || Array.isArray(offer.lease)) return null;
   return Object.freeze({
     type: VAULT_AUTHORITY_OFFER,
     protocol: VAULT_AUTHORITY_PROTOCOL,
     channelId: /** @type {string} */ (offer.channelId),
+    lease: Object.freeze({ ...offer.lease }),
   });
 };
 
 /**
  * @param {MessageEvent|any} event
  * @param {string} expectedScriptUrl
- * @param {boolean} active
+ * @param {(lease:unknown)=>boolean} ownsLease
  */
-export const admitVaultAuthorityOffer = (event, expectedScriptUrl, active) => {
+export const admitVaultAuthorityOffer = (event, expectedScriptUrl, ownsLease) => {
   if (event?.data?.type !== VAULT_AUTHORITY_OFFER) {
     return { matched: false, ok: false, reason: 'not-vault-authority-offer', offer: null };
   }
@@ -76,7 +79,7 @@ export const admitVaultAuthorityOffer = (event, expectedScriptUrl, active) => {
   if (!offer || event.ports?.length !== 1) {
     return { matched: true, ok: false, reason: 'offer-invalid', offer };
   }
-  if (!active) {
+  if (typeof ownsLease !== 'function' || !ownsLease(offer.lease)) {
     return { matched: true, ok: false, reason: 'lease-inactive', offer };
   }
   return { matched: true, ok: true, reason: null, offer };

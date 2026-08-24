@@ -28,6 +28,7 @@
     "test:e2e": "bun scripts/cdp/run-e2e-verify.mjs --functional",
     "test:e2e:all": "bun scripts/cdp/run-e2e-verify.mjs --functional",
     "test:e2e:lifecycle": "bun scripts/cdp/run-lifecycle-faults.mjs",
+    "test:e2e:lifecycle:store": "bun scripts/cdp/run-lifecycle-faults.mjs --target=store",
     "test:e2e:goal": "bun scripts/cdp/run-e2e-verify.mjs --only=goal",
     "test:e2e:stop": "bun scripts/cdp/run-e2e-verify.mjs --only=stop",
     "test:e2e:error": "bun scripts/cdp/run-e2e-verify.mjs --only=error",

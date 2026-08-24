@@ -207,6 +207,10 @@ describe('session/reset + switch + archive auto-memory seams', () => {
     const { deps } = baseDeps();
     expect(await makeSessionMutationRoutes(deps)['session/switch']({ sessionId: 'ghost' })).toEqual({ ok: false, error: 'session-not-found' });
   });
+  test('switch requires a session id before storage', async () => {
+    const { deps } = baseDeps({ sessions: { get: () => { throw new Error('storage reached'); } } });
+    expect(await makeSessionMutationRoutes(deps)['session/switch']({})).toEqual({ ok: false, error: 'sessionId-required' });
+  });
   test('archive of the active session clears cache + extracts with archive reason', async () => {
     const { deps, calls } = baseDeps();
     await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 'cur' });

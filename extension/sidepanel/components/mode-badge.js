@@ -18,6 +18,7 @@
 //                   a change applies from the next message.
 
 import m from '/vendor/mithril/mithril.js';
+import { settleUiEffect } from '/shared/ui-runtime-client.js';
 
 /**
  * Typed message sender — posts to the SW and resolves with its reply.
@@ -55,9 +56,11 @@ export const ModeSelector = {
     const isAct = mode === 'act';
 
     /** @param {string} next */
-    const setMode = (next) => send({ type: 'permission/set', mode: next });
+    const setMode = (next) => settleUiEffect(send({ type: 'permission/set', mode: next }));
     /** @param {boolean} next */
-    const setConfirm = (next) => send({ type: 'permission/set', confirmActions: next });
+    const setConfirm = (next) => settleUiEffect(
+      send({ type: 'permission/set', confirmActions: next }),
+    );
 
     return m('.planact', { role: 'group', 'aria-label': 'Agent permission mode' }, [
       // Mode toggle. Two buttons so the active one is obvious and each is
@@ -188,8 +191,8 @@ export const EffortDial = {
         + 'Lower = earlier visible action; higher = deeper thinking on hard tasks.\n'
         + 'Applies from the next message.',
       value: current,
-      onchange: (/** @type {Event} */ e) => send({ type: 'settings/update',
-        patch: { reasoningEffort: /** @type {HTMLSelectElement} */ (e.target).value } }),
+      onchange: (/** @type {Event} */ e) => settleUiEffect(send({ type: 'settings/update',
+        patch: { reasoningEffort: /** @type {HTMLSelectElement} */ (e.target).value } })),
     }, EFFORT_LEVELS.map((level) =>
       m('option', { value: level }, level === 'medium' ? 'effort: medium' : `effort: ${level}`)));
   },

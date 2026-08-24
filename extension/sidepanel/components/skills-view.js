@@ -18,6 +18,7 @@
 // line; no animation, so prefers-reduced-motion is moot here.
 
 import m from '/vendor/mithril/mithril.js';
+import { settleUiEffect } from '/shared/ui-runtime-client.js';
 import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
 
 /**
@@ -111,9 +112,9 @@ export const SkillsView = {
    * @param {boolean} enabled
    */
   toggle(vnode, name, enabled) {
-    vnode.attrs.send({ type: 'skills/setEnabled', name, enabled }).then(() => {
+    settleUiEffect(vnode.attrs.send({ type: 'skills/setEnabled', name, enabled }).then(() => {
       SkillsView.refresh(vnode);
-    });
+    }));
   },
 
   /**
@@ -121,9 +122,9 @@ export const SkillsView = {
    * @param {string} name
    */
   remove(vnode, name) {
-    vnode.attrs.send({ type: 'skills/remove', name }).then(() => {
+    settleUiEffect(vnode.attrs.send({ type: 'skills/remove', name }).then(() => {
       SkillsView.refresh(vnode);
-    });
+    }));
   },
 
   /** @param {SkillsVnode} vnode */

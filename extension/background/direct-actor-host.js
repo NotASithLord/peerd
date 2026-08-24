@@ -7,13 +7,14 @@ export {
   makeRefCountedFirefoxBackgroundLifetime,
   makeStorageSessionKeepAlive,
 } from './firefox-storage-keepalive.js';
+import {
+  makeBoundedModuleLoader, STARTUP_UNAVAILABLE_USER_FAILURE,
+} from '/shared/bounded-module-load.js';
 
 /** @typedef {Pick<typeof import('/offscreen/actor-runner.js'), 'runActor'|'abortActor'>} ActorRunner */
-/** @type {Promise<ActorRunner> | null} */
-let actorRunnerPromise = null;
 // Chrome never uses the Firefox background-page host, so keep its runner out
 // of the cold service-worker graph. Firefox background pages support import().
-const loadActorRunner = () => actorRunnerPromise ??= import('/offscreen/actor-runner.js');
+const loadActorRunner = () => import('/offscreen/actor-runner.js');
 
 /**
  * @param {Object} deps
@@ -21,23 +22,33 @@ const loadActorRunner = () => actorRunnerPromise ??= import('/offscreen/actor-ru
  * @param {ActorRunner['runActor']} [deps.run]
  * @param {ActorRunner['abortActor']} [deps.abort]
  * @param {() => Promise<ActorRunner>} [deps.loadRunner]
+ * @param {number} [deps.loadTimeoutMs]
+ * @param {number} [deps.relayDrainTimeoutMs]
  * @param {() => void|Promise<void>} [deps.startKeepAlive]
  * @param {() => void|Promise<void>} [deps.stopKeepAlive]
+ * @param {typeof setTimeout} [deps.setTimeoutFn]
+ * @param {typeof clearTimeout} [deps.clearTimeoutFn]
  */
 export const makeDirectActorHost = ({
   workerUrl,
   run,
   abort,
   loadRunner = loadActorRunner,
+  loadTimeoutMs,
+  relayDrainTimeoutMs = 5_000,
   startKeepAlive = () => {},
   stopKeepAlive = () => {},
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
 }) => {
-  /** @type {Promise<ActorRunner> | null} */
-  let runnerPromise = null;
-  const runner = () => runnerPromise ??= loadRunner();
-  const runActor = run ?? (async (...args) => (await runner()).runActor(...args));
+  let runnerLoaded = false;
+  const runner = makeBoundedModuleLoader(loadRunner, {
+    ...(loadTimeoutMs === undefined ? {} : { timeoutMs: loadTimeoutMs }),
+    loadCode: 'actor_host_load_failed',
+    timeoutCode: 'actor_host_load_timeout',
+  });
   const abortActor = abort ?? ((runId) => {
-    void runner().then((value) => value.abortActor(runId)).catch(() => {});
+    if (runnerLoaded) void runner().then((value) => value.abortActor(runId)).catch(() => {});
   });
   // Object identity is the sender proof. It never leaves this closure and is
   // never posted, serialized, stored, or exposed on runtime.onMessage.
@@ -51,8 +62,9 @@ export const makeDirectActorHost = ({
   let keepAliveReady = null;
   /** @type {Error|null} */
   let keepAliveLoss = null;
-  /** @type {Map<symbol, { runId: string|null, settle: (error: Error) => void }>} */
+  /** @type {Map<symbol, { runId: string|null, started:boolean, stopped:boolean, armDrain:()=>void, settle:(value:any)=>void }>} */
   const activeRunLosses = new Map();
+  const pendingAborts = new Set();
 
   /** @param {() => void|Promise<void>} operation */
   const queueKeepAliveTransition = (operation) => {
@@ -104,16 +116,47 @@ export const makeDirectActorHost = ({
     const error = reason instanceof Error ? reason : new Error(String(reason));
     if (keepAliveLoss) return;
     keepAliveLoss = error;
-    for (const { runId, settle } of activeRunLosses.values()) {
-      if (runId) abortActor(runId);
-      settle(error);
+    for (const active of activeRunLosses.values()) {
+      active.stopped = true;
+      if (active.started && active.runId) abortActor(active.runId);
+      active.settle({
+        ok: false,
+        started: active.started,
+        phase: active.started ? 'run' : 'startup',
+        code: 'actor_host_keepalive_lost',
+        error: `direct actor host: ${error.message}`,
+        outcomeKnown: !active.started,
+      });
     }
   };
 
   /** @param {{ type?: string, runId?: string, job?: any }} message */
   const sendMessage = async (message) => {
     if (message?.type === 'actor/abort') {
-      if (typeof message.runId === 'string') abortActor(message.runId);
+      if (typeof message.runId === 'string') {
+        let activeMatch = false;
+        for (const active of activeRunLosses.values()) {
+          if (active.runId !== message.runId) continue;
+          activeMatch = true;
+          if (active.started) {
+            abortActor(message.runId);
+            active.armDrain();
+          }
+          else {
+            active.stopped = true;
+            active.settle({
+              ok: false, started: false, phase: 'startup',
+              code: 'actor_host_aborted', outcomeKnown: true,
+            });
+          }
+        }
+        if (!activeMatch) {
+          pendingAborts.add(message.runId);
+          const oldest = pendingAborts.values().next().value;
+          if (pendingAborts.size > 256 && typeof oldest === 'string') pendingAborts.delete(oldest);
+          abortActor(message.runId);
+        }
+      }
       return { ok: true };
     }
     if (message?.type !== 'actor/run' || !message.job) {
@@ -136,30 +179,90 @@ export const makeDirectActorHost = ({
     try {
       const runKey = Symbol('direct-actor-run');
       const runId = typeof message.job.runId === 'string' ? message.job.runId : null;
-      const keepAliveLost = new Promise((resolve) => {
-        activeRunLosses.set(runKey, {
-          runId,
-          settle: (error) => resolve({
+      if (runId && pendingAborts.delete(runId)) {
+        return {
+          ok: false, started: false, phase: 'startup',
+          code: 'actor_host_aborted', outcomeKnown: true,
+        };
+      }
+      /** @type {(value:any)=>void} */
+      let settle = () => {};
+      const active = {
+        runId, started: false, stopped: false,
+        armDrain: () => {},
+        settle: (/** @type {any} */ value) => settle(value),
+      };
+      let relayDrainTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
+      const armRelayDrain = () => {
+        if (active.stopped || relayDrainTimer) return;
+        relayDrainTimer = setTimeoutFn(() => {
+          active.stopped = true;
+          if (runId) abortActor(runId);
+          active.settle({
+            ok: false, started: true, phase: 'run',
+            code: 'actor_relay_drain_timeout',
+            error: 'direct actor host relay drain timed out',
+            outcomeKnown: false, retryable: false,
+          });
+        }, Math.max(1, relayDrainTimeoutMs));
+      };
+      active.armDrain = armRelayDrain;
+      const stopped = new Promise((resolve) => {
+        settle = resolve;
+      });
+      activeRunLosses.set(runKey, active);
+      const actorRun = (async () => {
+        let execute = run;
+        if (!execute) {
+          let loaded;
+          try { loaded = await runner(); }
+          catch (cause) {
+            return {
+              ok: false,
+              started: false,
+              phase: 'startup',
+              code: /** @type {{code?:string}} */ (cause)?.code ?? 'actor_host_load_failed',
+              error: STARTUP_UNAVAILABLE_USER_FAILURE,
+              outcomeKnown: true,
+            };
+          }
+          if (active.stopped) return undefined;
+          runnerLoaded = true;
+          execute = loaded.runActor;
+        }
+        if (active.stopped) return undefined;
+        if (typeof execute !== 'function') {
+          return {
+            ok: false, started: false, phase: 'startup',
+            code: 'actor_host_load_failed', outcomeKnown: true,
+          };
+        }
+        active.started = true;
+        try {
+          return await execute(message.job, {
+            workerUrl,
+            onRelayDrain: armRelayDrain,
+            sendToSW: async (type, payload) => {
+              const route = relayRoutes?.[type];
+              if (!route) return { ok: false, error: `direct actor host: unknown relay '${type}'` };
+              return route(payload, relaySender);
+            },
+          });
+        } catch (cause) {
+          return {
             ok: false,
             started: true,
             phase: 'run',
-            code: 'actor_host_keepalive_lost',
-            error: `direct actor host: ${error.message}`,
+            code: 'actor_host_run_failed',
+            error: `direct actor host: ${cause instanceof Error ? cause.message : String(cause)}`,
             outcomeKnown: false,
-          }),
-        });
-      });
-      const actorRun = runActor(message.job, {
-        workerUrl,
-        sendToSW: async (type, payload) => {
-          const route = relayRoutes?.[type];
-          if (!route) return { ok: false, error: `direct actor host: unknown relay '${type}'` };
-          return route(payload, relaySender);
-        },
-      });
+          };
+        }
+      })();
       try {
-        return await Promise.race([actorRun, keepAliveLost]);
+        return await Promise.race([actorRun, stopped]);
       } finally {
+        if (relayDrainTimer) clearTimeoutFn(relayDrainTimer);
         activeRunLosses.delete(runKey);
       }
     } finally { await releaseBackground(); }

@@ -87,12 +87,14 @@ export const goalContinuationPrompt = (goal, todoBlock = '') => [
  * @param {(sessionId: string) => Promise<boolean>} [deps.hasUnresolvedSideEffects]
  *   Stops autonomous continuations when an earlier Class D/E dispatch may
  *   have landed. A new user turn can verify or deliberately start fresh work.
+ * @param {(operation: () => Promise<void>) => Promise<void>} [deps.withRun]
  * @param {number} [deps.maxIterations]
  * @param {() => number} [deps.now]
  */
 export const makeGoalRunner = ({
   runTurn, onEvent = () => {}, onRunEnd = () => {}, kv, getTodoBlock,
-  hasUnresolvedSideEffects, maxIterations = GOAL_MAX_ITERATIONS, now = Date.now,
+  hasUnresolvedSideEffects, withRun = (operation) => operation(),
+  maxIterations = GOAL_MAX_ITERATIONS, now = Date.now,
 }) => {
   /** @type {Map<string, GoalRun>} */
   const runs = new Map();
@@ -217,7 +219,7 @@ export const makeGoalRunner = ({
   };
 
   /** Run turns until complete / halted / capped, then clean up. @param {string} sid */
-  const drive = async (sid) => {
+  const driveRun = async (sid) => {
     const run = runs.get(sid);
     if (!run) return;
     // why identity check (not just isActive): a fresh start() for the SAME
@@ -299,6 +301,25 @@ export const makeGoalRunner = ({
       }
     }
   };
+  /** @param {string} sid */
+  const drive = async (sid) => {
+    let entered = false;
+    try {
+      await withRun(() => {
+        entered = true;
+        return driveRun(sid);
+      });
+    } catch (e) {
+      if (entered) throw e;
+      // why re-enter only the local lifecycle: acquisition failed before the
+      // drive could reach its terminal finally, so close the run without work.
+      const run = runs.get(sid);
+      if (!run) return;
+      run.halted = true;
+      run.lastError = /** @type {any} */ (e)?.message ?? String(e);
+      await driveRun(sid);
+    }
+  };
 
   /**
    * Start (or supersede) a goal run for a session. Fire-and-forget — returns
@@ -315,6 +336,7 @@ export const makeGoalRunner = ({
       summary: null, lastError: null, startedAt: now(),
     });
     persist();
+    emit(sessionId, 'running');
     drive(sessionId).catch((e) => {
       console.error('[goal] drive threw', e);
       halt(sessionId);
@@ -353,6 +375,7 @@ export const makeGoalRunner = ({
         completed: false, halted: false, summary: null, lastError: null,
         startedAt: Number(rec.startedAt) || now(),
       });
+      emit(sid, 'running');
       drive(sid).catch((e) => { console.error('[goal] resume drive threw', e); halt(sid); });
       resumed += 1;
     }

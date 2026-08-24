@@ -24,7 +24,7 @@ export const ActorIsolationBanner = {
         onupdate: focusRecovery,
         onblur: () => {
           vnode.state.recoveryDismissed = true;
-          m.redraw();
+          m.redraw.sync();
         },
       }, m('.actor-isolation-copy', [
         m('strong', 'Actor work is ready'),

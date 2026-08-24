@@ -49,7 +49,7 @@ import {
 /** @typedef {import('./command-palette.js').PaletteItems} PaletteItems */
 
 /** @typedef {{ name: string, mediaType: string, size: number, data: string }} StagedAttachment */
-/** @typedef {{operationId:string,text:string,goal:boolean,sessionId:string|null,hadAttachments:boolean}} UnconfirmedSend */
+/** @typedef {{operationId:string,text:string,goal:boolean,sessionId:string|null,hadAttachments:boolean,source?:'composer'|'starter'}} UnconfirmedSend */
 
 /**
  * Component-local state for InputBar.
@@ -201,6 +201,7 @@ const saveDraft = (sid, text) => {
 };
 const unconfirmedKey = (/** @type {string|null|undefined} */ sid) =>
   `peerd.unconfirmed-send.${sid || 'new'}`;
+/** @returns {UnconfirmedSend|null} */
 const loadUnconfirmed = (/** @type {string|null|undefined} */ sid) => {
   try {
     const value = JSON.parse(localStorage.getItem(unconfirmedKey(sid)) ?? 'null');
@@ -211,9 +212,12 @@ const loadUnconfirmed = (/** @type {string|null|undefined} */ sid) => {
         goal: value.goal === true,
         sessionId: typeof value.sessionId === 'string' ? value.sessionId : null,
         hadAttachments: value.hadAttachments === true,
+        source: value.source === 'starter' ? 'starter' : 'composer',
       } : null;
   } catch { return null; }
 };
+export const hasUnconfirmedAgentSend = (/** @type {string|null|undefined} */ sid) =>
+  loadUnconfirmed(sid) !== null || (!!sid && loadUnconfirmed(null) !== null);
 /** @param {string|null|undefined} sid @param {InputBarState['unconfirmedSend']} value */
 const saveUnconfirmed = (sid, value) => {
   try {
@@ -226,9 +230,35 @@ const saveUnconfirmed = (sid, value) => {
       goal: value.goal,
       sessionId: value.sessionId,
       hadAttachments: value.hadAttachments,
+      source: value.source,
     }));
     else localStorage.removeItem(unconfirmedKey(sid));
   } catch { /* private mode keeps the in-memory fence */ }
+};
+
+/**
+ * @param {Object} options
+ * @param {Send} options.send
+ * @param {{type:'agent/send'}&Record<string,any>} options.message
+ * @param {UnconfirmedSend} options.pending
+ * @param {()=>string|null|undefined} [options.currentSessionId]
+ */
+export const sendAgentWithCustody = async ({ send, message, pending, currentSessionId }) => {
+  const originalSessionId = pending.sessionId;
+  const settle = (/** @type {UnconfirmedSend|null} */ value) => {
+    saveUnconfirmed(originalSessionId, value);
+    const current = currentSessionId?.();
+    if (current && current !== originalSessionId) saveUnconfirmed(current, value);
+  };
+  settle(pending);
+  try {
+    const reply = await send(message);
+    if (reply?.outcomeKnown !== false) settle(null);
+    return reply;
+  } catch (cause) {
+    if (/** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true) settle(null);
+    throw cause;
+  }
 };
 
 /**
@@ -266,6 +296,10 @@ export const InputBar = {
     vnode.state.attachError = null;   // one-line refusal shown by the chips
     vnode.state.unconfirmedSend = loadUnconfirmed(vnode.state._sid)
       ?? (vnode.state._sid ? loadUnconfirmed(null) : null);
+    if (vnode.state.unconfirmedSend && !vnode.state.value) {
+      vnode.state.value = vnode.state.unconfirmedSend.text;
+      saveDraft(vnode.state._sid, vnode.state.value);
+    }
     if (vnode.state._sid && vnode.state.unconfirmedSend?.sessionId === null) {
       saveUnconfirmed(vnode.state._sid, vnode.state.unconfirmedSend);
       saveUnconfirmed(null, null);
@@ -302,6 +336,9 @@ export const InputBar = {
       ui.attachError = null;
       ui.unconfirmedSend = loadUnconfirmed(sid) ?? freshChatPending;
       if (freshChatPending && sid) {
+        ui.value = freshChatPending.text;
+        saveDraft(sid, ui.value);
+        saveDraft(null, '');
         saveUnconfirmed(sid, freshChatPending);
         saveUnconfirmed(null, null);
       }
@@ -318,10 +355,27 @@ export const InputBar = {
       const freshPending = loadUnconfirmed(null);
       if (freshPending) {
         ui.unconfirmedSend = freshPending;
+        ui.value = freshPending.text;
+        saveDraft(sid, ui.value);
+        saveDraft(null, '');
         ui.sendError = 'Peerd has an unconfirmed message for this chat. Check delivery before sending again.';
         saveUnconfirmed(sid, freshPending);
         saveUnconfirmed(null, null);
       }
+    }
+    const persistedPending = loadUnconfirmed(sid) ?? (sid ? loadUnconfirmed(null) : null);
+    if (!ui.unconfirmedSend && persistedPending) {
+      ui.unconfirmedSend = persistedPending;
+      ui.value = persistedPending.text;
+      saveDraft(sid, ui.value);
+      ui.sendError = 'Message unconfirmed.';
+    } else if (ui.unconfirmedSend && !persistedPending && !ui.busy) {
+      if (ui.unconfirmedSend.source === 'starter' && ui.value === ui.unconfirmedSend.text) {
+        ui.value = '';
+        saveDraft(sid, '');
+      }
+      ui.unconfirmedSend = null;
+      ui.sendError = null;
     }
     // §4c one-shot prefill: a card action typed the user's likely next message
     // into the draft. Nonce-guarded so one click adopts once - after that it is
@@ -358,46 +412,48 @@ export const InputBar = {
       // normal session. The draft is the (visible) goal; attachments don't
       // apply to a goal, so they stay staged for a later normal send.
       if (goalArmed) {
+        const pending = {
+          operationId, text, goal: true, sessionId: sid ?? null,
+          hadAttachments: false, source: /** @type {const} */ ('composer'),
+        };
         ui.busy = true;
         ui.value = '';
         saveDraft(sid, '');
         ui.transcriptBaseline = '';
         closePalette(ui);
         try {
-          const reply = await send({
-            type: 'agent/send', text, goal: true, operationId,
-            sessionId: sid ?? null,
+          const reply = await sendAgentWithCustody({
+            send,
+            message: {
+              type: 'agent/send', text, goal: true, operationId,
+              sessionId: sid ?? null,
+            },
+            pending,
+            currentSessionId: () => ui._sid,
           });
           // Disarm only on a clean launch. A refused pre-dispatch request is
           // safe to retry; an unknown result is not, because the goal may
           // already be running even though the reply was lost.
           if (reply?.ok) onGoalSent?.();
           else {
-            const pending = reply?.outcomeKnown === false ? {
-                operationId, text, goal: true, sessionId: sid ?? null,
-                hadAttachments: false,
-              } : null;
+            const unresolved = reply?.outcomeKnown === false ? pending : null;
             if (ui._sid === sid) {
               ui.value = text;
               ui.sendError = reply?.outcomeKnown === false
                 ? 'Peerd could not confirm whether the goal started. Check this chat before sending it again; your goal remains in the composer.'
                 : 'The agent service was unavailable. Your goal is still here; try again.';
-              if (pending) ui.unconfirmedSend = pending;
+              if (unresolved) ui.unconfirmedSend = unresolved;
             } else {
               saveDraft(sid, text);
             }
-            if (pending) saveUnconfirmed(sid, pending);
+            if (unresolved) saveUnconfirmed(ui._sid ?? sid, unresolved);
           }
         } catch {
           if (ui._sid === sid) ui.value = text;
           else saveDraft(sid, text);
           ui.sendError = 'Peerd could not confirm whether the goal started. Check this chat before sending it again; your goal remains in the composer.';
-          const pending = {
-            operationId, text, goal: true, sessionId: sid ?? null,
-            hadAttachments: false,
-          };
           if (ui._sid === sid) ui.unconfirmedSend = pending;
-          saveUnconfirmed(sid, pending);
+          saveUnconfirmed(ui._sid ?? sid, pending);
         } finally {
           ui.busy = false;
           m.redraw();
@@ -409,6 +465,10 @@ export const InputBar = {
       // never ride a send the provider can't honor — e.g. the user
       // attached, then switched a fresh chat to Ollama.
       const attachments = canAttach && ui.attachments.length > 0 ? ui.attachments : null;
+      const pending = {
+        operationId, text, goal: false, sessionId: sid ?? null,
+        hadAttachments: !!attachments, source: /** @type {const} */ ('composer'),
+      };
       ui.busy = true;
       ui.value = '';
       saveDraft(sid, '');          // sent → clear the saved draft for this chat
@@ -422,10 +482,15 @@ export const InputBar = {
       // wait. The component state already retains the exact recovery copy.
       m.redraw.sync();
       try {
-        const reply = await send({
-          type: 'agent/send', text, operationId,
-          sessionId: sid ?? null,
-          ...(attachments ? { attachments } : {}),
+        const reply = await sendAgentWithCustody({
+          send,
+          message: {
+            type: 'agent/send', text, operationId,
+            sessionId: sid ?? null,
+            ...(attachments ? { attachments } : {}),
+          },
+          pending,
+          currentSessionId: () => ui._sid,
         });
         if (reply?.ok) return;
         // why guard on sid: the user may have switched chats during the await.
@@ -446,19 +511,13 @@ export const InputBar = {
             ? 'Peerd could not confirm whether the message started. Check this chat before sending the restored draft again.'
             : 'The message was not sent. Your draft was restored; try again.';
           if (reply?.outcomeKnown === false) {
-            ui.unconfirmedSend = {
-              operationId, text, goal: false, sessionId: sid ?? null,
-              hadAttachments: !!attachments,
-            };
+            ui.unconfirmedSend = pending;
             saveUnconfirmed(sid, ui.unconfirmedSend);
           }
         } else {
           saveDraft(sid, text);
           if (reply?.outcomeKnown === false) {
-            saveUnconfirmed(sid, {
-              operationId, text, goal: false, sessionId: sid ?? null,
-              hadAttachments: !!attachments,
-            });
+            saveUnconfirmed(sid, pending);
           }
         }
       } catch {
@@ -466,17 +525,11 @@ export const InputBar = {
           ui.value = text;
           if (attachments) ui.attachments = attachments;
           ui.sendError = 'Peerd could not confirm whether the message started. Check this chat before sending the restored draft again.';
-          ui.unconfirmedSend = {
-            operationId, text, goal: false, sessionId: sid ?? null,
-            hadAttachments: !!attachments,
-          };
+          ui.unconfirmedSend = pending;
           saveUnconfirmed(sid, ui.unconfirmedSend);
         } else {
           saveDraft(sid, text);
-          saveUnconfirmed(sid, {
-            operationId, text, goal: false, sessionId: sid ?? null,
-            hadAttachments: !!attachments,
-          });
+          saveUnconfirmed(sid, pending);
         }
       } finally {
         ui.busy = false;

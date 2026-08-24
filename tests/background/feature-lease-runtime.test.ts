@@ -162,6 +162,59 @@ describe('production feature-lease runtime', () => {
     expect(env.host).toBeNull();
   });
 
+  test('bounded operations receive the exact active lease', async () => {
+    const env = makeEnvironment();
+    const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a');
+    await runtime.ready;
+    let owned = false;
+    const lease = await runtime.runWithLease('controller', async (value) => {
+      owned = env.host?.ownsLease('controller', value) === true;
+      return value;
+    });
+    expect(lease).toMatchObject({
+      scope: 'controller', generation: 1, schema: 1,
+      buildId: BUILD, bootId: 'boot-kernel-epoch-a',
+      kernelEpoch: 'kernel-epoch-a',
+    });
+    expect(owned).toBe(true);
+  });
+
+  test('first, coalesced, and durable acquisitions expose only canonical capabilities', async () => {
+    const env = makeEnvironment();
+    const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a');
+    await runtime.ready;
+    const keys = [
+      'bootId', 'buildId', 'generation', 'hostEpoch', 'kernelEpoch',
+      'leaseId', 'schema', 'scope',
+    ];
+    const first = await runtime.acquire('controller');
+    expect(Object.keys(first.lease).sort()).toEqual(keys);
+    expect(env.host?.ownsLease('controller', first.lease)).toBe(true);
+    const observed = await runtime.runWithLease('controller', async (lease) => {
+      expect(Object.keys(lease).sort()).toEqual(keys);
+      return env.host?.ownsLease('controller', lease) === true;
+    });
+    expect(observed).toBe(true);
+    expect((await runtime.acquire('controller')).lease).toEqual(first.lease);
+  });
+
+  test('cleanup failure cannot replace a successful operation result', async () => {
+    const env = makeEnvironment();
+    let closeAttempts = 0;
+    const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a', {
+      hostEffectTimeoutMs: 5,
+      wait: async () => {},
+      closeOffscreen: () => {
+        closeAttempts += 1;
+        return new Promise(() => {});
+      },
+    });
+    await runtime.ready;
+    await expect(runtime.runWithLease('controller', async () => ({ ok: true, value: 7 })))
+      .resolves.toEqual({ ok: true, value: 7 });
+    expect(closeAttempts).toBe(3);
+  });
+
   test('a long dweb lease survives closed UI and is adopted by the successor kernel', async () => {
     const env = makeEnvironment();
     const store = makeStore();
@@ -407,6 +460,32 @@ describe('production feature-lease runtime', () => {
     expect(env.host).toBeNull();
     expect(env.closeCount).toBe(1);
     expect(runtime.snapshot()).toMatchObject({ locked: true });
+  });
+
+  test('a status timeout cannot close a realm with another live scope', async () => {
+    const env = makeEnvironment();
+    let freezeStatus = false;
+    const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a', {
+      hostStatusTimeoutMs: 5,
+      sendHostMessage: async (message: any) => {
+        if (message.type === 'feature-lease/host-status' && freezeStatus) {
+          return new Promise(() => {});
+        }
+        const result = await env.sendHostMessage(message);
+        if (message.type === 'feature-lease/host-stop'
+            && message.lease?.scope === 'controller') freezeStatus = true;
+        return result;
+      },
+    });
+    await runtime.ready;
+    await runtime.acquire('controller');
+    await runtime.acquire('dweb');
+
+    await runtime.revoke('controller');
+
+    expect(env.closeCount).toBe(0);
+    expect(env.host?.isActive('dweb')).toBe(true);
+    expect(runtime.snapshot().leases.dweb).toMatchObject({ status: 'active' });
   });
 
   test('renderer recovery retries transient replacement failures under the same durable intent', async () => {

@@ -13,7 +13,7 @@ import { manifestLabel, bundleToOtlp, detectVoiceCapability } from '/peerd-runti
 import { openOptions } from '/shared/open-options.js';
 import { mapError, errorSettingsTarget } from '../error-display.js';
 import { MessageList } from './message-list.js';
-import { InputBar } from './input-bar.js';
+import { hasUnconfirmedAgentSend, InputBar, sendAgentWithCustody } from './input-bar.js';
 import { ModeSelector, EffortDial, GoalToggle } from './mode-badge.js';
 import { GoalBar } from './goal-bar.js';
 import { TodoCard } from './todo-card.js';
@@ -182,7 +182,7 @@ export const ChatView = {
       showVoiceOnboarding ? m(VoiceOnboardingCard, { send }) : null,
 
       messages.length === 0 ? m(EmptyState, {
-        canSend, composer, send, surface, activeTabStatus,
+        canSend, composer, send, surface, activeTabStatus, sessionId: sid,
         actorExecution: state.capabilities?.actorExecution,
       })
         : m(MessageList, {
@@ -430,7 +430,9 @@ const ModelPicker = {
   async apply(vnode, value, message) {
     const ui = vnode.state;
     if (ui.changing) return;
+    const retrying = !!ui.unconfirmed;
     const previous = ui.selected;
+    let refetch = false;
     ui.changing = true;
     ui.selected = value;
     ui.error = null;
@@ -442,23 +444,27 @@ const ModelPicker = {
         ui.unconfirmed = null;
       } else if (reply?.outcomeKnown === false) {
         ui.unconfirmed = { value, message };
-        ui.error = 'Peerd could not confirm the model change. Finish the same change or wait for it to reconcile.';
+        ui.error = 'Model change unconfirmed.';
       } else {
+        if (retrying) ui.unconfirmed = null;
         ui.selected = previous;
-        ui.error = 'Peerd could not change the model. Try again.';
+        ui.error = 'Model change failed.';
+        refetch = retrying;
       }
     } catch (cause) {
       if (/** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true) {
+        if (retrying) ui.unconfirmed = null;
         ui.selected = previous;
-        ui.error = 'Peerd could not change the model. Try again.';
+        ui.error = 'Model change failed.';
+        refetch = retrying;
       } else {
         ui.unconfirmed = { value, message };
-        ui.error = 'Peerd could not confirm the model change. Finish the same change or wait for it to reconcile.';
+        ui.error = 'Model change unconfirmed.';
       }
     } finally {
       ui.changing = false;
       m.redraw();
-      if (ui.unconfirmed) ModelPicker.fetch(vnode);
+      if (ui.unconfirmed || refetch) ModelPicker.fetch(vnode);
     }
   },
   /** @param {ModelPickerVnode} vnode */
@@ -645,11 +651,12 @@ export const PATH_TYPE = { ms: 18, start: 980, cascade: 90 };
  * @typedef {Object} EmptyState_State
  * @property {ReturnType<typeof setTimeout>[]} timers
  * @property {boolean} armed
+ * @property {boolean} busy
  * @property {number[]} shown
  * @property {boolean[]} started
  */
 
-/** @typedef {{ state: EmptyState_State, attrs: { canSend?: boolean, composer?: any, send: Send, surface?: string, activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive', actorExecution?: { status?: string } } }} EmptyStateVnode */
+/** @typedef {{ state: EmptyState_State, attrs: { canSend?: boolean, composer?: any, send: Send, sessionId?: string|null, surface?: string, activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive', actorExecution?: { status?: string } } }} EmptyStateVnode */
 
 // Arm the one-shot type-in (step 3) for every card. Idempotent via
 // `ui.armed`, so the redraw-driven onupdate can't re-trigger it; only runs
@@ -688,12 +695,13 @@ const armReveal = (vnode) => {
 // while this empty chat stays open (oninit fires once, so without the
 // re-arm the add-key-then-return first-run path would show the menu
 // un-animated). Reduced motion shows the full text at once and never arms.
-const EmptyState = {
+export const EmptyState = {
   /** @param {EmptyStateVnode} vnode */
   oninit(vnode) {
     const ui = vnode.state;
     ui.timers = [];
     ui.armed = false;
+    ui.busy = false;
     // Reduced motion -> full text immediately; otherwise start hidden (0),
     // ready to type. (canSend false means the menu isn't rendered yet, so
     // these only matter once it appears - no full-text flash on the flip.)
@@ -716,6 +724,7 @@ const EmptyState = {
     // wider container and the 3-column track (CSS owns the actual widths).
     const isHome = attrs.surface === 'home';
     const prompts = promptsFor(attrs);
+    const unconfirmed = hasUnconfirmedAgentSend(attrs.sessionId);
     return m('.placeholder', m('.empty-state', {
       class: isHome ? 'empty-state--home' : '',
       'data-active-tab-status': attrs.activeTabStatus ?? 'none',
@@ -748,10 +757,31 @@ const EmptyState = {
               : actorUnavailable
               ? `${p.label}: unavailable while actor work is paused`
               : `${p.label}: ${p.text}`,
-            disabled: blocked || actorUnavailable,
-            // Fire-and-forget: the SW pushes turn state, which flips the
-            // view out of the empty state into the live transcript.
-            onclick: () => send({ type: 'agent/send', text: p.text }),
+            disabled: blocked || actorUnavailable || ui.busy || unconfirmed,
+            onclick: async () => {
+              if (ui.busy) return;
+              ui.busy = true;
+              const operationId = `send.${Date.now().toString(36)}.${crypto.randomUUID()}`;
+              const pending = {
+                operationId, text: p.text, goal: false,
+                sessionId: attrs.sessionId ?? null,
+                hadAttachments: false, source: /** @type {const} */ ('starter'),
+              };
+              try {
+                const delivery = sendAgentWithCustody({
+                  send,
+                  message: {
+                    type: 'agent/send', text: p.text, operationId,
+                    sessionId: attrs.sessionId ?? null,
+                  },
+                  pending,
+                  currentSessionId: () => attrs.sessionId,
+                });
+                m.redraw.sync();
+                await delivery;
+              } catch { /* the composer owns unknown delivery */ }
+              finally { ui.busy = false; m.redraw(); }
+            },
           }, [
             m('.path-card-icon', (PATH_ICONS[p.type] ?? PATH_ICONS.ask)()),
             m('span.path-card-label', p.label),

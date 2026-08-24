@@ -1,4 +1,4 @@
-// Kernel origin-credential custody — the shared route factory is already
+// Kernel origin-credential custody: the shared route factory is already
 // covered by its own suite; these tests pin the KERNEL WIRING: the DPoP key
 // store binds to the idb primitives, both credential halves retire together,
 // audit rides the kernel log, and the issue-251 learned-origin seam fires off

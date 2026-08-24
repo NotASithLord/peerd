@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { isAuthorizedUiPortSender } from '../../extension/background/ui-port-sender.js';
+import { isAuthorizedUiPortSender } from '../../extension/background/service-worker-control-plane.js';
 
 describe('UI port sender mapping', () => {
   const predicates = {

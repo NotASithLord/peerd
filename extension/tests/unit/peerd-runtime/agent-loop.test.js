@@ -453,15 +453,24 @@ describe('agent loop — runUserTurn', () => {
       const session = await sessions.create();
       ctx.sessionId = session.sessionId;
 
-      const events = await drain(runUserTurn(asRunCtx(ctx)));   // must terminate
+      /** @type {LoopEvent[]} */
+      const events = [];
+      /** @type {any} */
+      let failure = null;
+      try {
+        for await (const event of runUserTurn(asRunCtx(ctx))) events.push(event);
+      } catch (cause) { failure = cause; }
 
       expect(dispatchCalls).toBe(1);
-      const stops = events.filter((e) => e.type === 'stop');
-      expect(asEv(stops[stops.length - 1]).stopReason).toBe('aborted');
-      // The turn is marked aborted, not left streaming/pending.
+      expect(failure?.code).toBe('tool-outcome-unknown');
+      expect(failure?.outcomeKnown).toBe(false);
+      expect(events.some((event) => event.type === 'error'
+        && asEv(event).code === 'tool-outcome-unknown')).toBe(true);
       const stored = present(await sessions.get(session.sessionId));
       const assistant = msg(stored.messages.find((m) => m.role === 'assistant'));
-      expect(assistant.stopReason).toBe('aborted');
+      expect(assistant.errorCode).toBe('tool-outcome-unknown');
+      expect(assistant.outcomeKnown).toBe(false);
+      expect(assistant.stopReason).toBe('tool_use');
     });
 
     it('runs consecutive READ-class calls concurrently when a classifier is injected', async () => {

@@ -226,6 +226,41 @@ describe('Chrome lazy controller private channel prototype', () => {
     controller.close();
   });
 
+  test('post-commit Stop waits for the host cancellation result', async () => {
+    const abort = new AbortController();
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => { started = resolve; });
+    let observedAbort = false;
+    const controller = await connectController({
+      ensureOffscreen: async () => {}, capabilities: ['repo.write'],
+      findHost: async () => ({
+        postMessage: (offer: any, transfer: Transferable[]) => bindControllerChannel({
+          port: transfer[0] as MessagePort, channelId: offer.channelId,
+          buildDigest: offer.buildDigest, kernelEpoch: offer.kernelEpoch,
+          hostEpoch: 'host-epoch-stop',
+          offeredCaps: offer.capabilities, supportedCaps: ['repo.write'],
+          loadController: async () => ({
+            call: async (_capability, _payload, { signal }) => {
+              started();
+              await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+              observedAbort = true;
+              return { ok: true, aborted: true, outcomeKnown: true };
+            },
+          }),
+        }),
+      }),
+    });
+    const pending = controller.call('repo.write', {}, { signal: abort.signal });
+    await running;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    abort.abort();
+    await expect(pending).resolves.toMatchObject({
+      ok: true, aborted: true, outcomeKnown: true, phase: 'settled',
+    });
+    expect(observedAbort).toBe(true);
+    controller.close();
+  });
+
   test('an exact quota-admitted reverse call renews both kernel and host idle fuses', async () => {
     const controller = await connectController({
       ensureOffscreen: async () => {},
@@ -298,6 +333,73 @@ describe('Chrome lazy controller private channel prototype', () => {
     const result = await controller.call('turn.run', { maxSteps: 1 });
     expect(result).toMatchObject({ ok: false, outcomeKnown: false });
     expect(['controller-call-timeout', 'controller-deadline-expired']).toContain(result.code);
+    controller.close();
+  });
+
+  test('post-commit Stop keeps its cancel fuse during cleanup', async () => {
+    const abort = new AbortController();
+    let renewals = 0;
+    const kernelCalls: string[] = [];
+    const controller = await connectController({
+      ensureOffscreen: async () => {},
+      capabilities: ['turn.run'],
+      cancelSettleTimeoutMs: 5,
+      callTimeoutMs: 10_000,
+      handleKernelCall: (operation) => {
+        kernelCalls.push(operation);
+        return new Promise(() => {});
+      },
+      findHost: async () => ({
+        postMessage: (offer: any, transfer: Transferable[]) => {
+          const port = transfer[0] as MessagePort;
+          let sequence = 0;
+          const common = {
+            protocol: 2, channelId: offer.channelId,
+            buildDigest: offer.buildDigest, kernelEpoch: offer.kernelEpoch,
+            hostEpoch: 'host-epoch-cancel-fuse',
+          };
+          port.onmessage = (event) => {
+            if (event.data.type === 'kernel/open') {
+              port.postMessage({
+                ...common, sequence: ++sequence, type: 'controller/accepted',
+                requestId: event.data.requestId, grantId: event.data.grantId,
+              });
+            } else if (event.data.type === 'kernel/commit') {
+              port.postMessage({
+                ...common, sequence: ++sequence, type: 'controller/committed',
+                requestId: event.data.requestId, grantId: event.data.grantId,
+              });
+            } else if (event.data.type === 'kernel/cancel') {
+              port.postMessage({
+                ...common, sequence: ++sequence, type: 'controller/kernel-call',
+                requestId: event.data.requestId, grantId: event.data.grantId,
+                rpcId: 'forged-rpc', operation: 'turn.session.append',
+                payload: { runId: 'cancel-run', value: {} },
+              });
+              port.postMessage({
+                ...common, sequence: ++sequence, type: 'controller/kernel-call',
+                requestId: event.data.requestId, grantId: event.data.grantId,
+                rpcId: 'cleanup-rpc', operation: 'turn.abort.finalize',
+                payload: { runId: 'cancel-run', value: {} },
+              });
+            } else if (event.data.type === 'kernel/renew') renewals += 1;
+          };
+          port.start();
+          port.postMessage({
+            ...common, sequence: ++sequence, type: 'controller/ready',
+            capabilities: ['turn.run'],
+          });
+        },
+      }),
+    });
+    const pending = controller.call('turn.run', { maxSteps: 1 }, { signal: abort.signal });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    abort.abort();
+    expect(await pending).toMatchObject({
+      code: 'controller-call-aborted', outcomeKnown: false,
+    });
+    expect(kernelCalls).toEqual(['turn.abort.finalize']);
+    expect(renewals).toBe(0);
     controller.close();
   });
 
@@ -614,6 +716,59 @@ describe('Chrome lazy controller private channel prototype', () => {
           grantId: 'invalid-renew-grant',
           // More than the fixed 30-minute idle cap plus clock-skew allowance.
           deadlineAt: Date.now() + 31 * 60_000,
+        });
+      }
+    };
+    channel.port1.start();
+    for (let attempt = 0; attempt < 20 && closed === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(closed).toBe(1);
+    binding.close();
+    channel.port1.close();
+  });
+
+  test('the host refuses renewal after cancellation', async () => {
+    const channel = new MessageChannel();
+    let closed = 0;
+    const binding = bindControllerChannel({
+      port: channel.port2,
+      channelId: 'cancel-renew-channel',
+      buildDigest: BUILD_DIGEST,
+      kernelEpoch: 'cancel-renew-kernel',
+      hostEpoch: 'cancel-renew-host',
+      offeredCaps: ['turn.run'],
+      supportedCaps: ['turn.run'],
+      onClose: () => { closed += 1; },
+      loadController: async () => ({ call: async () => new Promise(() => {}) }),
+    });
+    const common = {
+      protocol: 2, channelId: 'cancel-renew-channel', buildDigest: BUILD_DIGEST,
+      kernelEpoch: 'cancel-renew-kernel', hostEpoch: 'cancel-renew-host',
+    };
+    let sequence = 0;
+    channel.port1.onmessage = (event) => {
+      if (event.data.type === 'controller/ready') {
+        channel.port1.postMessage({
+          ...common, sequence: ++sequence, type: 'kernel/open',
+          requestId: 'cancel-renew-request', grantId: 'cancel-renew-grant',
+          deadlineAt: Date.now() + 10_000, capability: 'turn.run',
+          authority: AUTHORITY, payload: { maxSteps: 1 },
+        });
+      } else if (event.data.type === 'controller/accepted') {
+        channel.port1.postMessage({
+          ...common, sequence: ++sequence, type: 'kernel/commit',
+          requestId: 'cancel-renew-request', grantId: 'cancel-renew-grant',
+        });
+      } else if (event.data.type === 'controller/committed') {
+        channel.port1.postMessage({
+          ...common, sequence: ++sequence, type: 'kernel/cancel',
+          requestId: 'cancel-renew-request', grantId: 'cancel-renew-grant',
+        });
+        channel.port1.postMessage({
+          ...common, sequence: ++sequence, type: 'kernel/renew',
+          requestId: 'cancel-renew-request', grantId: 'cancel-renew-grant',
+          deadlineAt: Date.now() + 10_000,
         });
       }
     };

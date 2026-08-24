@@ -46,6 +46,27 @@ describe('detectInterruptedTurn — resumable (infrastructure cut the turn off)'
 });
 
 describe('detectInterruptedTurn — NOT resumable', () => {
+  test('unknown custody is never auto-resumed', () => {
+    expect(detectInterruptedTurn(session([
+      {
+        role: 'assistant', content: 'partial', id: 'a1', streaming: true,
+        outcomeKnown: false, retryable: false,
+      },
+    ]))).toEqual({ resumable: false });
+  });
+
+  test('unknown tool custody is never auto-resumed', () => {
+    expect(detectInterruptedTurn(session([
+      {
+        role: 'user', content: '', id: 'u1',
+        toolResults: [{
+          tool_use_id: 't1', content: 'outcome_unknown',
+          outcomeKnown: false, retryable: false,
+        }],
+      },
+    ]))).toEqual({ resumable: false });
+  });
+
   test('user pressed Stop (aborted) — never fight the user', () => {
     const v = detectInterruptedTurn(session([
       { role: 'assistant', content: 'partial', id: 'a1', stopReason: 'aborted' },

@@ -1,7 +1,4 @@
 // @ts-check
-// Keyless semantic host registry. This is intentionally not wired into the
-// controller capability list until generated route parity and migration state
-// both pass. Browser/credential authority remains available only via kernelCall.
 
 import {
   compileSemanticRouteClassification,

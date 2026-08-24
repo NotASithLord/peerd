@@ -84,8 +84,12 @@ export const recoverColdPortState = async ({
         continue;
       }
       if (wake?.kind === 'fallback') {
-        if (nextId < maxAttempts) launch();
-        fallbackAt = deadlineAt;
+        if (nextId < maxAttempts) {
+          launch();
+          fallbackAt = Math.min(deadlineAt, Date.now() + requestTimeoutMs);
+        } else {
+          fallbackAt = deadlineAt;
+        }
       }
     }
     return null;

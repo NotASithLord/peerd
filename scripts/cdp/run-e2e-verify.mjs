@@ -165,7 +165,8 @@ async function main() {
 
   const states = STATES.filter(selected);
   const preUnlock = states.filter((s) => s.phase === 'pre-unlock');
-  const postUnlock = states.filter((s) => s.phase === 'post-unlock');
+  const postUnlock = states.filter((s) => s.phase === 'post-unlock').sort((a, b) =>
+    Number(a.name === 'browser-network-floor') - Number(b.name === 'browser-network-floor'));
   const results = [];
   const ctx = await launchPeerd({ extensionDir: EXTENSION_DIR });
   try {

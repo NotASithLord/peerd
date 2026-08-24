@@ -14,6 +14,7 @@ import { ActorIsolationBanner } from './actor-isolation-banner.js';
 import { openOptions } from '/shared/open-options.js';
 import { openHome } from '/shared/open-home.js';
 import { CHANNEL } from '/shared/channel-config.js';
+import { settleUiEffect } from '/shared/ui-runtime-client.js';
 
 /** @typedef {import('../chat-reducer.js').ChatState} ChatState */
 /** @typedef {(msg: object) => Promise<any>} Send */
@@ -187,7 +188,9 @@ const TopBar = {
             ? 'Watching the agent’s tab — click to stop following'
             : 'Watch the agent’s tab (bring it to the front and follow along)',
           'aria-pressed': state.settings?.watchAgentTab ? 'true' : 'false',
-          onclick: () => send({ type: 'settings/update', patch: { watchAgentTab: !state.settings?.watchAgentTab } }),
+          onclick: () => settleUiEffect(send({
+            type: 'settings/update', patch: { watchAgentTab: !state.settings?.watchAgentTab },
+          })),
         }, icon('target')),
         m('button.icon', {
           'aria-label': 'Chats',
@@ -222,7 +225,7 @@ const TopBar = {
         m('button.icon', {
           'aria-label': 'Lock the vault',
           title: 'Lock the vault',
-          onclick: () => send({ type: 'vault/lock' }),
+          onclick: () => settleUiEffect(send({ type: 'vault/lock' })),
         }, icon('lock')),
         m('button.icon', {
           'aria-label': 'Settings',
@@ -237,7 +240,7 @@ const TopBar = {
         m('button.icon', {
           'aria-label': 'Close panel',
           title: 'Close panel',
-          onclick: () => send({ type: 'sidepanel/close' }),
+          onclick: () => settleUiEffect(send({ type: 'sidepanel/close' })),
         }, icon('x')),
       ]) : null,
     ]);

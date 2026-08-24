@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
   makeUiRuntimeClient,
+  redrawForRuntimeMessage,
+  settleUiEffect,
   uiMessageIsRead,
 } from '../../extension/shared/ui-runtime-client.js';
 
@@ -8,7 +10,11 @@ describe('bounded UI runtime client', () => {
   test('classifies reads without granting mutations replay safety', () => {
     for (const type of [
       'state/get', 'contacts/list', 'apps/repository/history', 'dweb/base/status',
-      'models/options', 'openrouter/models',
+      'models/options', 'openrouter/models', 'composer/files', 'composer/tabs',
+      'memory/export', 'memory/suggestions', 'local-model/catalog', 'local-model/probe',
+      'session/debugBundle', 'session/contextSnapshots', 'import/inspect', 'app/get-meta',
+      'vault/prfStatus', 'pod/get-meta', 'vm/get-meta', 'transfer/inspectImport',
+      'export/artifact',
     ]) {
       expect(uiMessageIsRead(type)).toBe(true);
     }
@@ -52,5 +58,52 @@ describe('bounded UI runtime client', () => {
     await new Promise((done) => setTimeout(done, 10));
     resolve({ ok: true });
     await expect(result).resolves.toMatchObject({ outcomeKnown: false });
+  });
+
+  test('artifact export is a long read', async () => {
+    let delay = 0;
+    const client = makeUiRuntimeClient({
+      browser: { runtime: { sendMessage: async () => new Promise(() => {}) } },
+      readTimeoutMs: 5,
+      effectTimeoutMs: 10,
+      longEffectTimeoutMs: 25,
+      setTimeoutFn: ((callback: () => void, timeout?: number) => {
+        delay = timeout ?? 0;
+        return setTimeout(callback, 0);
+      }) as typeof setTimeout,
+    });
+    await expect(client.send({ type: 'export/artifact' })).rejects.toMatchObject({
+      code: 'ui-runtime-timeout', outcomeKnown: true,
+    });
+    expect(delay).toBe(25);
+  });
+
+  test('ignored controls settle rejected effects', async () => {
+    let caught = false;
+    const failure = Promise.reject(new Error('lost')).catch((cause) => {
+      caught = true;
+      throw cause;
+    });
+    expect(settleUiEffect(failure)).toBeUndefined();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(caught).toBe(true);
+  });
+
+  test('only deltas use animation-frame redraws', () => {
+    let scheduled = 0;
+    let synced = 0;
+    const redraw = Object.assign(() => { scheduled += 1; }, {
+      sync: () => { synced += 1; },
+    });
+
+    redrawForRuntimeMessage(redraw, { type: 'turn/delta' });
+    redrawForRuntimeMessage(redraw, { type: 'turn/spawned-delta' });
+    redrawForRuntimeMessage(redraw, { type: 'turn/streaming', streaming: true });
+    redrawForRuntimeMessage(redraw, { type: 'turn/streaming', streaming: false });
+    redrawForRuntimeMessage(redraw, { type: 'state' });
+
+    expect(scheduled).toBe(2);
+    expect(synced).toBe(3);
   });
 });

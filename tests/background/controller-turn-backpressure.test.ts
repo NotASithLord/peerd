@@ -27,6 +27,7 @@ const makeSessions = () => {
       return clone(record);
     },
     setTrimSummary: async () => clone(record),
+    snapshot: () => clone(record),
   };
 };
 
@@ -193,6 +194,91 @@ describe('production direct-controller tool backpressure', () => {
       expect(started).toHaveLength(64);
     } finally {
       for (const release of releases.values()) release();
+      harness.close();
+    }
+  });
+
+  test('post-commit Stop crosses the channel and finalizes as aborted', async () => {
+    const harness = await connectHarness();
+    const sessions = makeSessions();
+    const abort = new AbortController();
+    let opened = () => {};
+    const modelOpened = new Promise<void>((resolve) => { opened = resolve; });
+    const context = {
+      ...makeContext({ signal: abort.signal, toolCount: 0, toolDispatch: async () => ({ ok: true }) }),
+      sessions,
+      callModel: async function* (args: any) {
+        opened();
+        await new Promise((_, reject) => {
+          const stop = () => reject(new DOMException('model aborted', 'AbortError'));
+          if (args.signal.aborted) stop();
+          else args.signal.addEventListener('abort', stop, { once: true });
+        });
+      },
+    };
+    try {
+      const turn = drain(harness.bridge.runUserTurn(context));
+      await modelOpened;
+      abort.abort();
+      const events = await turn;
+      expect(events.some((event) => event.type === 'error')).toBe(false);
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'stop', stopReason: 'aborted',
+      }));
+      expect(sessions.snapshot().messages.at(-1)).toMatchObject({
+        role: 'assistant', streaming: false, stopReason: 'aborted',
+      });
+      const workerSource = await Bun.file(
+        new URL('../../extension/offscreen/controller-worker.js', import.meta.url),
+      ).text();
+      expect(workerSource).toContain("new Set(['turn.abort.finalize', 'turn.finalize'])");
+    } finally {
+      harness.close();
+    }
+  });
+
+  test('Stop after tool dispatch persists unknown custody across the controller channel', async () => {
+    const harness = await connectHarness();
+    const sessions = makeSessions();
+    const abort = new AbortController();
+    let admitted = () => {};
+    let release = () => {};
+    const toolAdmitted = new Promise<void>((resolve) => { admitted = resolve; });
+    const context = {
+      ...makeContext({
+        signal: abort.signal,
+        toolCount: 1,
+        toolDispatch: () => new Promise((resolve) => {
+          release = () => resolve({ ok: true, content: 'RAW LATE EFFECT' });
+          admitted();
+        }),
+      }),
+      sessions,
+    };
+    try {
+      const running = drain(harness.bridge.runUserTurn(context)).then(
+        (events) => ({ ok: true as const, events, error: null }),
+        (error) => ({ ok: false as const, events: [], error }),
+      );
+      await toolAdmitted;
+      abort.abort();
+      const settlement = await running;
+      release();
+
+      expect(settlement).toMatchObject({
+        ok: false,
+        error: { code: 'tool-outcome-unknown', outcomeKnown: false, retryable: false },
+      });
+      const assistant = sessions.snapshot().messages.at(-1);
+      expect(assistant).toMatchObject({
+        role: 'assistant', streaming: false,
+        errorCode: 'tool-outcome-unknown', outcomeKnown: false, retryable: false,
+        error: expect.stringContaining('outcome unknown'),
+      });
+      expect(assistant.stopReason).not.toBe('aborted');
+      expect(JSON.stringify(sessions.snapshot())).not.toContain('RAW LATE EFFECT');
+    } finally {
+      release();
       harness.close();
     }
   });

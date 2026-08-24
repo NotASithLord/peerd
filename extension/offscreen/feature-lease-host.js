@@ -402,6 +402,10 @@ export const createOffscreenFeatureLeaseHost = ({
     hostEpoch,
     snapshot,
     handleMessage,
+    activeLease: (/** @type {string} */ scope) => {
+      const entry = active.get(scope);
+      return entry && entry.orphaned === false ? publicLease(entry) : null;
+    },
     isActive: (/** @type {string} */ scope) => active.has(scope),
     ownsLease: (/** @type {string} */ scope, /** @type {unknown} */ value) => {
       const lease = parseLease(value);

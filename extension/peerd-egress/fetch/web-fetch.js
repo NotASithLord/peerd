@@ -35,7 +35,7 @@ import { accessTokenHashFor, signDpopProof } from '../dpop/sign.js';
 
 /**
  * THE SEND-TIME BINDING GATE (rules 2 + 3). Given an outbound request URL and the
- * actor's OWNED origin, return the origin whose key may authenticate the request — or
+ * actor's owned origin, return the origin whose key may authenticate the request, or
  * null to send anonymously. Authenticates ONLY when the request is https AND its
  * URL.origin EQUALS the owned origin. Cross-origin, http, or a spoof
  * (`owned.evil.com`, userinfo tricks) all land on a different origin → null. Does NOT

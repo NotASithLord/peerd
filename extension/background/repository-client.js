@@ -22,22 +22,20 @@ import {
   repositoryMethodIsMutating,
   repositoryMethodMayFetch,
 } from '../shared/feature-lease-protocol.js';
-import { base64ToBytes, bytesToBase64 } from '../shared/cold-util.js';
+import { base64ToBytes, bytesToBase64, withDeadline } from '../shared/cold-util.js';
 export { decodeRepositoryRpcValue, encodeRepositoryRpcValue };
 
 const MAX_GIT_HTTP_BODY = 32 * 1024 * 1024;
 const MAX_GIT_HTTP_HEADERS = 64;
 const MAX_GIT_HTTP_HEADER_BYTES = 64 * 1024;
 const PUBLIC_GIT_HOST = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i;
-/** @typedef {Error & {code?:string,outcomeKnown?:boolean,repositoryHostDispatched?:boolean,cause?:unknown}} RepositoryError */
+/** @typedef {Error & {code?:string,outcomeKnown?:boolean,repositoryHostDispatched?:boolean}} RepositoryError */
 /** @returns {RepositoryError} */
 const repositoryError = (/** @type {string} */ message, /** @type {string} */ code,
-  /** @type {boolean} */ outcomeKnown, /** @type {boolean|undefined} */ dispatched,
-  /** @type {unknown} */ cause = undefined) => {
+  /** @type {boolean} */ outcomeKnown, /** @type {boolean|undefined} */ dispatched) => {
   const error = /** @type {RepositoryError} */ (new Error(message));
   Object.assign(error, { code, outcomeKnown });
   if (dispatched !== undefined) error.repositoryHostDispatched = dispatched;
-  if (cause !== undefined) error.cause = cause;
   return error;
 };
 const normalizeGitRemote = (/** @type {unknown} */ input) => {
@@ -230,17 +228,22 @@ export const makeRepositoryFacade = (invoke, coordinate) => {
 };
 
 /** @param {()=>Promise<ReturnType<typeof import('../peerd-engine/repository.js').createRepositoryService>>} loader
+ * @param {{loadTimeoutMs?:number}} [options]
  */
-export const createDeferredRepositoryClient = (loader) => {
+export const createDeferredRepositoryClient = (loader, { loadTimeoutMs = 1e4 } = {}) => {
+  const code = 'repository-local-load-failed';
+  const unavailable = () => repositoryError(code, code, true, undefined);
   /** @type {Promise<ReturnType<typeof import('../peerd-engine/repository.js').createRepositoryService>>|null} */
   let pending = null;
   const load = () => {
-    if (!pending) pending = Promise.resolve().then(loader).catch((cause) => {
+    if (!pending) pending = Promise.resolve().then(loader).catch(() => {
       pending = null;
-      throw repositoryError('Firefox repository module is temporarily unavailable.',
-        'repository-local-load-failed', true, undefined, cause);
+      throw unavailable();
     });
-    return pending;
+    return withDeadline(
+      () => /** @type {NonNullable<typeof pending>} */ (pending),
+      loadTimeoutMs, unavailable,
+    );
   };
   return makeRepositoryFacade(
     (method, args) => load().then((client) => /** @type {any} */ (client)[method](...args)),
@@ -344,7 +347,7 @@ export const createOffscreenRepositoryClient = ({
           let remote;
           try { remote = normalizeGitRemote(reply.request?.remote).url; }
           catch {
-            finish(repositoryError('repository reverse fetch authority invalid',
+            finish(repositoryError('repository-reverse-fetch-invalid',
               'repository-reverse-fetch-invalid', !repositoryMethodIsMutating(method), true), false);
             return;
           }
@@ -356,7 +359,7 @@ export const createOffscreenRepositoryClient = ({
               || reply.fetchId !== expectedFetchId
               || (boundRemote !== null && remote !== boundRemote)
               || reverseTransferChars + requestChars > REPOSITORY_CHANNEL_MAX_BYTES) {
-            finish(repositoryError('repository reverse fetch authority invalid',
+            finish(repositoryError('repository-reverse-fetch-invalid',
               'repository-reverse-fetch-invalid', !repositoryMethodIsMutating(method), true), false);
             return;
           }
@@ -410,14 +413,14 @@ export const createOffscreenRepositoryClient = ({
       try { matches[0].postMessage(offer, [port2]); }
       catch (cause) {
         finish(repositoryError(cause instanceof Error ? cause.message : String(cause),
-          'repository-host-dispatch-failed', true, false, cause), false);
+          'repository-host-dispatch-failed', true, false), false);
       }
     });
   };
 
   /** @param {boolean} [dispatched] */
   const readDeadlineError = (dispatched = false) => repositoryError(
-    'Repository read expired before it could run.', 'repository-read-deadline', true, dispatched,
+    'repository-read-deadline', 'repository-read-deadline', true, dispatched,
   );
   /** @param {string} method @param {any[]} args @param {any} lease @param {number} deadlineAt */
   const callUnhosted = async (method, args, lease = undefined, deadlineAt = Infinity) => {
@@ -448,7 +451,7 @@ export const createOffscreenRepositoryClient = ({
         };
         const timer = setTimeoutFn(() => {
           cancelTransport();
-          finish(repositoryError('Repository service took too long to respond.',
+          finish(repositoryError('repository-host-timeout',
             'repository-host-timeout', !repositoryMethodIsMutating(method), true), false);
         }, Math.min(timeoutMs, remainingMs));
         const transport = callPrivate(method, wireArgs, callId, lease, signal,
@@ -466,7 +469,7 @@ export const createOffscreenRepositoryClient = ({
     } catch (cause) {
       if (cause && typeof cause === 'object' && 'outcomeKnown' in cause) throw cause;
       throw repositoryError(cause instanceof Error ? cause.message : String(cause),
-        'repository-host-transport-lost', !repositoryMethodIsMutating(method), true, cause);
+        'repository-host-transport-lost', !repositoryMethodIsMutating(method), true);
     } finally {
       signal?.removeEventListener('abort', onAbort);
     }

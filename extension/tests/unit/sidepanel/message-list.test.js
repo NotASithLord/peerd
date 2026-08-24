@@ -330,6 +330,26 @@ describe('sidepanel.message-list actor-reply bubbles', () => {
     } finally { unmount(); }
   });
 
+  it('a known performed receipt outranks an aborted reply pulse', async () => {
+    const { root, unmount } = mount([{
+      role: 'user', id: 'u-cancelled-performed', synthetic: true,
+      actorReply: {
+        kind: 'web', instanceId: 'web', failed: true,
+        aborted: true, performed: true, outcomeKnown: true,
+      },
+      content: 'The web actor could not complete your request:\n\nthe action completed',
+    }]);
+    try {
+      await flush();
+      const message = /** @type {Element} */ (root.querySelector('.message-actor-reply'));
+      const role = message.querySelector('.role')?.textContent ?? '';
+      expect(message.classList.contains('cancelled')).toBe(false);
+      expect(message.classList.contains('failed')).toBe(true);
+      expect(role.includes('cancelled')).toBe(false);
+      expect(role).toContain('failed');
+    } finally { unmount(); }
+  });
+
   it('an unknown outcome outranks an aborted reply pulse', async () => {
     const { root, unmount } = mount([{
       role: 'user', id: 'u-cancelled-unknown', synthetic: true,

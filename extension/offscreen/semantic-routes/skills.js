@@ -1,7 +1,7 @@
 // @ts-check
 // Demand-loaded skills management surface. The sealed host owns no skill
 // storage: list, toggle, and uninstall are each one exact kernel operation
-// against the kernel-owned metadata authority. Install paths are not here —
+// against the kernel-owned metadata authority. Install paths are not here;
 // they remain unmigrated feature code with their own parse/network review.
 
 const routes = Object.freeze({

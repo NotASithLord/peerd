@@ -1,9 +1,18 @@
 // @ts-check
-// Minimal sealed-controller runtime. Feature controllers join this registry in
-// later migration slices; this health capability makes the packaged transport
-// executable now without granting semantic or browser authority.
 
 import { renderSystemPromptFromAssets } from '/peerd-runtime/controller.js';
+import { makeBoundedModuleLoader } from '/shared/bounded-module-load.js';
+
+const loadSemanticRoutes = makeBoundedModuleLoader(() => import('./semantic-route-host.js'));
+const loadTurnRuntime = makeBoundedModuleLoader(() => import('./controller-turn-runtime.js'));
+const loadFailure = (/** @type {any} */ cause) => ({
+  ok: false,
+  code: cause?.code ?? 'controller-module-load-failed',
+  error: 'Feature unavailable. Try again.',
+  outcomeKnown: true,
+  retryable: true,
+  phase: 'startup',
+});
 
 const isRecord = (/** @type {unknown} */ value) => value !== null
   && typeof value === 'object' && !Array.isArray(value);
@@ -43,15 +52,21 @@ const DEFAULT_HANDLERS = Object.freeze({
   'semantic.dispatch': async (
     /** @type {unknown} */ payload,
     /** @type {any} */ options,
-  ) => (await import('./semantic-route-host.js')).dispatchSemanticRoute(payload, options),
-  // Fixed package-local lazy module. The prompt-only controller stays small;
-  // the agent loop evaluates only after the authority kernel commits turn.run.
+  ) => {
+    let routes;
+    try { routes = await loadSemanticRoutes(); }
+    catch (cause) { return loadFailure(cause); }
+    return routes.dispatchSemanticRoute(payload, options);
+  },
   'turn.run': async (
     /** @type {unknown} */ payload,
     /** @type {{signal:AbortSignal,authority?:unknown,deadlineAt?:number,kernelCall?:(operation:string,payload:unknown)=>Promise<any>}} */ options,
-  ) => (
-    await import('./controller-turn-runtime.js')
-  ).runControllerTurn(payload, options),
+  ) => {
+    let runtime;
+    try { runtime = await loadTurnRuntime(); }
+    catch (cause) { return loadFailure(cause); }
+    return runtime.runControllerTurn(payload, options);
+  },
 });
 
 /**

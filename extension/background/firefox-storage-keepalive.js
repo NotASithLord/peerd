@@ -282,13 +282,14 @@ export const makeRefCountedFirefoxBackgroundLifetime = ({ start, stop }) => {
   /**
    * @template T
    * @param {()=>Promise<T>|T} operation
-   * @param {{outcomeKnownOnLoss?:boolean,code?:string,onLost?:(cause:Error)=>void}} [options]
+   * @param {{outcomeKnownOnLoss?:boolean,code?:string,onLost?:(cause:Error)=>void,lossGraceMs?:number}} [options]
    * @returns {Promise<T>}
    */
   const run = async (operation, {
     outcomeKnownOnLoss = false,
     code = 'firefox-background-lifetime-lost',
     onLost = () => {},
+    lossGraceMs = 0,
   } = {}) => {
     let token;
     try { token = await acquire(); }
@@ -302,13 +303,29 @@ export const makeRefCountedFirefoxBackgroundLifetime = ({ start, stop }) => {
       throw error;
     }
     let crossedDispatch = false;
+    let lostCause = /** @type {Error|null} */ (null);
+    let lossNotified = false;
+    let graceTimer = /** @type {ReturnType<typeof setTimeout>|null} */ (null);
+    let endGrace = () => {};
+    const notifyLoss = () => {
+      if (!lostCause || lossNotified) return;
+      lossNotified = true;
+      try { onLost(lostCause); } catch { /* custody classification still wins */ }
+    };
     const work = Promise.resolve().then(() => {
       crossedDispatch = true;
       return operation();
     });
-    const lost = token.lost.then((cause) => {
+    const lost = token.lost.then(async (cause) => {
+      lostCause = cause;
       if (crossedDispatch) {
-        try { onLost(cause); } catch { /* custody classification still wins */ }
+        if (lossGraceMs > 0) {
+          await new Promise((resolve) => {
+            endGrace = () => resolve(undefined);
+            graceTimer = setTimeout(resolve, lossGraceMs);
+          });
+        }
+        notifyLoss();
       }
       const error = /** @type {Error & {code?:string,outcomeKnown?:boolean,phase?:string}} */ (
         new Error(`Firefox background lifetime was lost: ${cause.message}`)
@@ -319,7 +336,12 @@ export const makeRefCountedFirefoxBackgroundLifetime = ({ start, stop }) => {
       throw error;
     });
     try { return await Promise.race([work, lost]); }
-    finally { await release(token); }
+    finally {
+      if (graceTimer !== null) clearTimeout(graceTimer);
+      endGrace();
+      notifyLoss();
+      await release(token);
+    }
   };
   const createHandle = () => {
     /** @type {Awaited<ReturnType<typeof acquire>>|null} */

@@ -29,11 +29,10 @@ describe('production semantic controller slice', () => {
       join(EXTENSION_DIR, 'background', 'service-worker.js'), 'utf8',
     );
     expect(serviceWorker).toContain('firefoxDirect: !offscreenAvailable');
-    expect(serviceWorker).toContain('withDirectLifetime: (operation, options)');
-    expect(serviceWorker).toContain('firefoxBackgroundLifetime.run(operation, options)');
-    expect(serviceWorker).toMatch(
-      /\.\.\.\(offscreenAvailable\s*\?\s*\{[\s\S]*?withControllerLease:[\s\S]*?\}\s*:\s*\{[\s\S]*?withDirectLifetime:/,
-    );
+    expect(serviceWorker).toContain('withDirectLifetime: (/** @type {()=>any} */ operation');
+    expect(serviceWorker).toContain('withFirefoxBackgroundLifetime(operation, options)');
+    expect(serviceWorker).toContain('withControllerLease: (/** @type {()=>any} */ operation)');
+    expect(serviceWorker).toContain('makeLazyFirefoxActorControl');
   });
 
   test('checked-in build identity matches the complete authored controller graphs and assets', async () => {
@@ -279,6 +278,254 @@ describe('production semantic controller slice', () => {
       'lease-acquired', 'ensure-host', 'find-host', 'controller-call', 'lease-released',
     ]);
     semantic.close();
+  });
+
+  test('an outer run hold reuses one controller channel until its final release', async () => {
+    const workerUrl = 'chrome-extension://test/background/service-worker.js';
+    const offscreenUrl = 'chrome-extension://test/offscreen/offscreen.html';
+    let offers = 0;
+    let loads = 0;
+    let closes = 0;
+    let loaded: Promise<any> | null = null;
+    const loadController = Object.assign(
+      () => {
+        loaded ??= Promise.resolve(createController({ handlers: {
+          'prompt.render': async () => ({ ok: true, prompt: 'held prompt', outcomeKnown: true }),
+          'turn.run': async () => ({ ok: true, outcomeKnown: true }),
+        } })).then((controller) => {
+          loads += 1;
+          return controller;
+        });
+        return loaded;
+      },
+      { close: () => { closes += 1; loaded = null; } },
+    );
+    const offerHandler = makeControllerOfferHandler({
+      expectedWorkerUrl: workerUrl,
+      expectedBuildDigest: CONTROLLER_BUILD_DIGEST,
+      supportedCaps: ['prompt.render', 'turn.run'],
+      loadController,
+    });
+    const semantic = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `chrome-extension://test/${path}` } },
+      ensureOffscreen: async () => {},
+      offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: false,
+      dwebEnabled: false,
+      authorizeTurnCall: () => ({
+        ownerId: 'peerd-authority-kernel', sessionId: 'session-1', instanceId: null,
+        origin: null, target: 'orchestrator-turn', replayClass: 'E',
+      }),
+      handleTurnKernelCall: async () => ({ ok: true }),
+      withControllerLease: (operation) => operation(),
+      fetchFn: (async () => new Response(TEMPLATE, { status: 200 })) as unknown as typeof fetch,
+      listWindowClients: async () => [{
+        url: offscreenUrl,
+        postMessage: (data: unknown, transfer: Transferable[]) => {
+          offers += 1;
+          offerHandler({
+            isTrusted: true, source: { scriptURL: workerUrl }, data, ports: transfer,
+          } as unknown as MessageEvent);
+        },
+      }],
+    });
+
+    await semantic.withRun(async () => {
+      await expect(semantic.renderSystemPrompt({ actorType: 'orchestrator' }))
+        .resolves.toBe('held prompt');
+      await expect(semantic.callTurn({ sessionId: 'session-1' }))
+        .resolves.toEqual({ ok: true, outcomeKnown: true, phase: 'settled' });
+      expect({ offers, loads, closes }).toEqual({ offers: 1, loads: 1, closes: 0 });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect({ offers, loads, closes }).toEqual({ offers: 1, loads: 1, closes: 1 });
+  });
+
+  test('a semantic startup retry releases its lease user before the next call', async () => {
+    const workerUrl = 'chrome-extension://test/background/service-worker.js';
+    const offscreenUrl = 'chrome-extension://test/offscreen/offscreen.html';
+    let discoveries = 0;
+    let offers = 0;
+    const semantic = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `chrome-extension://test/${path}` } },
+      ensureOffscreen: async () => {},
+      offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: false,
+      dwebEnabled: false,
+      authorizeSemanticCall: () => ({
+        ownerId: 'peerd-authority-kernel', sessionId: null, instanceId: null,
+        origin: null, target: 'semantic:test:first-party', replayClass: 'A',
+      }),
+      handleSemanticKernelCall: async () => ({ ok: true }),
+      withControllerLease: (operation) => operation(),
+      fetchFn: (async () => new Response(TEMPLATE, { status: 200 })) as unknown as typeof fetch,
+      listWindowClients: async () => {
+        discoveries += 1;
+        if (discoveries <= 2) return [];
+        return [{
+          url: offscreenUrl,
+          postMessage: (data: unknown, transfer: Transferable[]) => {
+            offers += 1;
+            makeControllerOfferHandler({
+              expectedWorkerUrl: workerUrl,
+              expectedBuildDigest: CONTROLLER_BUILD_DIGEST,
+              supportedCaps: ['semantic.dispatch'],
+              loadController: async () => ({
+                call: async () => ({
+                  ok: true, outcomeKnown: true, semanticResult: { ok: true, offer: offers },
+                }),
+              }),
+            })({
+              isTrusted: true, source: { scriptURL: workerUrl }, data, ports: transfer,
+            } as unknown as MessageEvent);
+          },
+        }];
+      },
+    });
+
+    await expect(semantic.callSemantic({ route: 'first' }))
+      .resolves.toEqual({ ok: true, offer: 1 });
+    await expect(semantic.callSemantic({ route: 'second' }))
+      .resolves.toEqual({ ok: true, offer: 2 });
+    expect(offers).toBe(2);
+  });
+
+  test('Firefox lifetime loss retires the exact controller generation before retry', async () => {
+    const calls: number[] = [];
+    const closed: number[] = [];
+    let generation = 0;
+    let lifetimes = 0;
+    const semantic = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: true, dwebEnabled: false,
+      authorizeSemanticCall: () => ({ replayClass: 'A' }),
+      handleSemanticKernelCall: async () => ({ ok: true }),
+      connectDirectController: async () => {
+        const current = ++generation;
+        return {
+          call: async () => {
+            calls.push(current);
+            if (current === 1) return new Promise(() => {});
+            return { ok: true, semanticResult: { ok: true, generation: current } };
+          },
+          close: () => { closed.push(current); },
+        } as any;
+      },
+      withDirectLifetime: async (operation, options) => {
+        lifetimes += 1;
+        const pending = operation();
+        if (lifetimes === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          options?.onLost?.(new Error('heartbeat lost'));
+          throw Object.assign(new Error('heartbeat lost'), {
+            code: options?.code, outcomeKnown: options?.outcomeKnownOnLoss,
+          });
+        }
+        return pending;
+      },
+      fetchFn: (async () => new Response(TEMPLATE, { status: 200 })) as unknown as typeof fetch,
+    });
+
+    await expect(semantic.callSemantic({ route: 'one' })).resolves.toMatchObject({
+      ok: false, code: 'controller-firefox-semantic-lifetime-lost', outcomeKnown: false,
+    });
+    await expect(semantic.callSemantic({ route: 'two' })).resolves.toEqual({
+      ok: true, generation: 2,
+    });
+    expect(calls).toEqual([1, 2]);
+    expect(closed).toEqual([1]);
+    semantic.close();
+    expect(closed).toEqual([1, 2]);
+  });
+
+  test('Firefox lifetime loss retires a controller still connecting', async () => {
+    let resolveFirst!: (client: any) => void;
+    const first = new Promise<any>((resolve) => { resolveFirst = resolve; });
+    let generations = 0;
+    let closes = 0;
+    let calls = 0;
+    let lifetimes = 0;
+    const semantic = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: true, dwebEnabled: false,
+      authorizeTurnCall: () => ({
+        ownerId: 'peerd-authority-kernel', sessionId: 'session-1', instanceId: null,
+        origin: null, target: 'orchestrator-turn', replayClass: 'E',
+      }),
+      handleTurnKernelCall: async () => ({ ok: true }),
+      authorizeSemanticCall: () => ({
+        ownerId: 'peerd-authority-kernel', sessionId: null, instanceId: null,
+        origin: null, target: 'semantic:test:first-party', replayClass: 'A',
+      }),
+      handleSemanticKernelCall: async () => ({ ok: true }),
+      connectDirectController: async () => {
+        generations += 1;
+        if (generations === 1) return first;
+        return {
+          call: async () => {
+            calls += 1;
+            return { ok: true, outcomeKnown: true, semanticResult: { ok: true } };
+          },
+          close: () => { closes += 1; },
+        } as any;
+      },
+      withDirectLifetime: async (operation, options) => {
+        lifetimes += 1;
+        const pending = operation();
+        if (lifetimes > 1) return pending;
+        await Promise.resolve();
+        options?.onLost?.(new Error('heartbeat lost'));
+        throw Object.assign(new Error('heartbeat lost'), {
+          code: options?.code, outcomeKnown: options?.outcomeKnownOnLoss,
+        });
+      },
+      fetchFn: (async () => new Response(TEMPLATE, { status: 200 })) as unknown as typeof fetch,
+    });
+
+    await expect(semantic.callSemantic({ route: 'one' })).resolves.toMatchObject({
+      code: 'controller-firefox-semantic-lifetime-lost', outcomeKnown: false,
+    });
+    resolveFirst({ call: async () => { calls += 1; }, close: () => { closes += 1; } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect({ calls, closes }).toEqual({ calls: 0, closes: 1 });
+    await expect(semantic.callSemantic({ route: 'two' })).resolves.toEqual({ ok: true });
+    expect(generations).toBe(2);
+    semantic.close();
+    expect(closes).toBe(2);
+  });
+
+  test('a frozen Firefox controller import releases its lifetime', async () => {
+    let starts = 0;
+    let stops = 0;
+    const semantic = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: true, dwebEnabled: false,
+      authorizeTurnCall: () => ({
+        ownerId: 'peerd-authority-kernel', sessionId: 'session-1', instanceId: null,
+        origin: null, target: 'orchestrator-turn', replayClass: 'E',
+      }),
+      handleTurnKernelCall: async () => ({ ok: true }),
+      authorizeSemanticCall: () => ({
+        ownerId: 'peerd-authority-kernel', sessionId: null, instanceId: null,
+        origin: null, target: 'semantic:test:first-party', replayClass: 'A',
+      }),
+      handleSemanticKernelCall: async () => ({ ok: true }),
+      loadDirectController: async () => new Promise<any>(() => {}),
+      directLoadTimeoutMs: 5,
+      withDirectLifetime: async (operation) => {
+        starts += 1;
+        try { return await operation(); } finally { stops += 1; }
+      },
+      fetchFn: (async () => new Response(TEMPLATE, { status: 200 })) as unknown as typeof fetch,
+    });
+    await expect(semantic.callTurn({ sessionId: 'session-1' })).resolves.toMatchObject({
+      code: 'controller-direct-load-timeout', outcomeKnown: true,
+      error: 'Temporarily unavailable. Try again.',
+    });
+    expect({ starts, stops }).toEqual({ starts: 1, stops: 1 });
   });
 
   test('a failed lazy controller realm is retired before the visible startup failure returns', async () => {

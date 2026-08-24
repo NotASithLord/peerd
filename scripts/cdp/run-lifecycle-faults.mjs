@@ -8,6 +8,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import puppeteer from 'puppeteer-core';
+import { packageArtifact } from '../../packaging/package.ts';
+import { readVersion } from '../../packaging/lib.ts';
 import { resolveChrome } from './e2e-harness.mjs';
 
 const ROOT = resolve(import.meta.dir, '..', '..');
@@ -17,6 +19,8 @@ const OPERATION_KEY = 'peerd.lifecycle.operations';
 const NOTICE_KEY = 'peerd.lifecycle.pendingNotices';
 const BOOT_ERROR_KEY = 'peerd.e2e.lifecycleFault.bootError';
 const STABILITY_WINDOW_MS = 1_500;
+const SOURCE_TARGET = 'source';
+const STORE_TARGET = 'store';
 
 const withDeadline = async (promise, budgetMs, label) => {
   let timeout;
@@ -43,11 +47,7 @@ const overwriteRegularFile = (path, contents) => {
   }
 };
 
-const makeFaultExtension = () => {
-  const directory = mkdtempSync(join(tmpdir(), 'peerd-chrome-lifecycle-fault-'));
-  const extension = join(directory, 'extension');
-  cpSync(join(ROOT, 'extension'), extension, { recursive: true });
-  writeFileSync(join(extension, 'background', 'lifecycle-fault-probe.js'), `
+const FAULT_PROBE_SOURCE = `
 const REACHED_KEY = ${JSON.stringify(REACHED_KEY)};
 globalThis.peerdLifecycleFaultProbe = {
   async beforeExecute(toolName) {
@@ -60,13 +60,23 @@ globalThis.peerdLifecycleFaultProbe = {
     await new Promise(() => {});
   },
 };
-`, { flag: 'wx', mode: 0o600 });
+`;
 
-  const serviceWorker = join(extension, 'background', 'service-worker.js');
-  let source = `import './lifecycle-fault-probe.js';\n${readFileSync(serviceWorker, 'utf8')}`;
+const replaceExact = (source, anchor, replacement, label) => {
+  if (source.split(anchor).length !== 2) throw new Error(`${label} seam changed`);
+  return source.replace(anchor, replacement);
+};
+
+const writeFaultProbe = (extension) => writeFileSync(
+  join(extension, 'background', 'lifecycle-fault-probe.js'),
+  FAULT_PROBE_SOURCE,
+  { flag: 'wx', mode: 0o600 },
+);
+
+export const injectLifecycleFaultServiceWorker = (input) => {
+  let source = `import './lifecycle-fault-probe.js';\n${input}`;
   const routeAnchor = "  'a2a/call': (/** @type {any} */ msg, /** @type {any} */ sender) => a2aCallRoute(msg, sender),";
-  if (source.split(routeAnchor).length !== 2) throw new Error('fault route seam changed');
-  source = source.replace(routeAnchor, `  'lifecycle-fault/dispatch': async (msg) => {
+  source = replaceExact(source, routeAnchor, `  'lifecycle-fault/dispatch': async (msg) => {
     await chrome.storage.local.set({ [${JSON.stringify(REACHED_KEY)}]: [] });
     await lifecycleArmed;
     const generation = (await chrome.storage.local.get('peerd.lifecycle.generation'))['peerd.lifecycle.generation'];
@@ -100,20 +110,89 @@ globalThis.peerdLifecycleFaultProbe = {
     }
     throw new Error('fault probe did not reach the tool body');
   },
-${routeAnchor}`);
+${routeAnchor}`, 'source fault route');
   const bootErrorLine = "    console.error('[sw] lifecycle boot failed; Class D/E dispatches fail closed', e);";
-  if (source.split(bootErrorLine).length !== 2) throw new Error('lifecycle boot error seam changed');
-  source = source.replace(bootErrorLine,
-    `${bootErrorLine}\n    chrome.storage.local.set({ [${JSON.stringify(BOOT_ERROR_KEY)}]: e?.stack || e?.message || String(e) });`);
-  overwriteRegularFile(serviceWorker, source);
+  source = replaceExact(source, bootErrorLine,
+    `${bootErrorLine}\n    chrome.storage.local.set({ [${JSON.stringify(BOOT_ERROR_KEY)}]: e?.stack || e?.message || String(e) });`,
+    'source lifecycle boot error');
+  return source;
+};
 
-  const dispatcher = join(extension, 'peerd-runtime', 'tools', 'dispatcher.js');
-  source = readFileSync(dispatcher, 'utf8');
+export const injectLifecycleFaultDispatcher = (source) => {
   const executeLine = '    let result = await tool.execute(args, execCtx);';
-  if (source.split(executeLine).length !== 2) throw new Error('dispatcher fault seam changed');
-  overwriteRegularFile(dispatcher, source.replace(executeLine,
-    `    await globalThis.peerdLifecycleFaultProbe?.beforeExecute(call.name);\n${executeLine}`));
-  return { directory, extension };
+  return replaceExact(source, executeLine,
+    `    await globalThis.peerdLifecycleFaultProbe?.beforeExecute(call.name);\n${executeLine}`,
+    'source dispatcher fault');
+};
+
+const injectLifecycleFaultTree = (extension) => {
+  writeFaultProbe(extension);
+  const serviceWorker = join(extension, 'background', 'service-worker.js');
+  overwriteRegularFile(
+    serviceWorker,
+    injectLifecycleFaultServiceWorker(readFileSync(serviceWorker, 'utf8')),
+  );
+  const dispatcher = join(extension, 'peerd-runtime', 'tools', 'dispatcher.js');
+  overwriteRegularFile(
+    dispatcher,
+    injectLifecycleFaultDispatcher(readFileSync(dispatcher, 'utf8')),
+  );
+};
+
+const makeSourceFaultExtension = () => {
+  const directory = mkdtempSync(join(tmpdir(), 'peerd-chrome-lifecycle-fault-'));
+  const extension = join(directory, 'extension');
+  cpSync(join(ROOT, 'extension'), extension, { recursive: true });
+  injectLifecycleFaultTree(extension);
+  const manifest = JSON.parse(readFileSync(join(extension, 'manifest.json'), 'utf8'));
+  return {
+    directory, extension, backgroundEntry: manifest.background?.service_worker,
+  };
+};
+
+const makePackagedFaultExtension = async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'peerd-chrome-lifecycle-store-fault-'));
+  const sourceRoot = join(directory, 'source');
+  const artifactRoot = join(directory, 'artifacts');
+  const extension = join(sourceRoot, 'extension');
+  mkdirSync(sourceRoot, { recursive: true });
+  cpSync(join(ROOT, 'extension'), extension, { recursive: true });
+  cpSync(join(ROOT, 'manifests'), join(sourceRoot, 'manifests'), { recursive: true });
+  mkdirSync(join(sourceRoot, 'packaging'), { recursive: true });
+  cpSync(
+    join(ROOT, 'packaging', 'default-settings.mjs'),
+    join(sourceRoot, 'packaging', 'default-settings.mjs'),
+  );
+  injectLifecycleFaultTree(extension);
+  await packageArtifact({
+    channel: 'store', browser: 'chrome', version: readVersion(),
+    sign: false, verify: true, minify: true, sourceRoot, artifactRoot,
+    // The fault hook intentionally adds the production lifecycle graph to the
+    // test-only kernel; release byte budgets still gate the unmodified artifact.
+    coldBudgetMode: 'measure-only',
+  });
+  const staging = join(artifactRoot, 'staging', 'store-chrome');
+  const manifest = JSON.parse(readFileSync(join(staging, 'manifest.json'), 'utf8'));
+  const backgroundEntry = manifest.background?.service_worker;
+  if (backgroundEntry !== 'background/service-worker.js') {
+    throw new Error(`packaged lifecycle target changed: ${backgroundEntry ?? '(missing)'}`);
+  }
+  const stagedSources = [
+    readFileSync(join(staging, backgroundEntry), 'utf8'),
+    readFileSync(join(staging, 'peerd-runtime/tools/dispatcher.js'), 'utf8'),
+    readFileSync(join(staging, 'background/lifecycle-fault-probe.js'), 'utf8'),
+  ].join('\n');
+  for (const canary of [REACHED_KEY, BOOT_ERROR_KEY, 'lifecycle-fault/dispatch']) {
+    if (!stagedSources.includes(canary)) {
+      throw new Error(`packaged lifecycle probe was removed before launch: ${canary}`);
+    }
+  }
+  if (!/peerdLifecycleFaultProbe\??\.beforeExecute/.test(stagedSources)) {
+    throw new Error('packaged lifecycle dispatcher hook was removed before launch');
+  }
+  return {
+    directory, extension: staging, backgroundEntry,
+  };
 };
 
 const waitFor = async (fn, budgetMs = 30_000) => {
@@ -131,10 +210,27 @@ const assert = (value, message) => {
   console.log(`  PASS ${message}`);
 };
 
-const main = async () => {
+const targetArgument = process.argv.find((argument) => argument.startsWith('--target='));
+const lifecycleTarget = targetArgument?.slice('--target='.length) ?? SOURCE_TARGET;
+if (![SOURCE_TARGET, STORE_TARGET].includes(lifecycleTarget)) {
+  throw new Error(`unknown lifecycle target: ${lifecycleTarget}`);
+}
+
+const main = async (target = SOURCE_TARGET) => {
   mkdirSync(RESULT_DIR, { recursive: true });
   rmSync(join(RESULT_DIR, 'result.json'), { force: true });
-  const fault = makeFaultExtension();
+  rmSync(join(RESULT_DIR, `${target}-result.json`), { force: true });
+  const writeResult = (value) => {
+    const json = JSON.stringify({ target, ...value }, null, 2);
+    writeFileSync(join(RESULT_DIR, 'result.json'), json);
+    writeFileSync(join(RESULT_DIR, `${target}-result.json`), json);
+  };
+  const fault = target === STORE_TARGET
+    ? await makePackagedFaultExtension()
+    : makeSourceFaultExtension();
+  if (typeof fault.backgroundEntry !== 'string') {
+    throw new Error(`${target} lifecycle target has no service worker entry`);
+  }
   const profile = mkdtempSync(join(tmpdir(), 'peerd-pipe-lifecycle-'));
   let browser;
   let forcedTerminationAttempted = false;
@@ -156,7 +252,7 @@ const main = async () => {
     stage = 'initial service-worker target';
     const discoveredTarget = await withDeadline(browser.waitForTarget((candidate) =>
       candidate.type() === 'service_worker'
-      && candidate.url().endsWith('/background/service-worker.js'), { timeout: 30_000 }),
+      && candidate.url().endsWith(`/${fault.backgroundEntry}`), { timeout: 30_000 }),
     35_000, stage);
     const extensionId = new URL(discoveredTarget.url()).host;
     stage = 'extension page';
@@ -212,7 +308,7 @@ const main = async () => {
     browser = await launchBrowser();
     const restartedTarget = await withDeadline(browser.waitForTarget((candidate) =>
       candidate.type() === 'service_worker'
-      && candidate.url().endsWith('/background/service-worker.js'), { timeout: 30_000 }),
+      && candidate.url().endsWith(`/${fault.backgroundEntry}`), { timeout: 30_000 }),
     35_000, stage);
     page = await withDeadline(browser.newPage(), 10_000, stage);
     await withDeadline(page.goto(`chrome-extension://${extensionId}/sidepanel/sidepanel.html`),
@@ -279,21 +375,23 @@ const main = async () => {
     const nextGeneration = restarted;
     assert(nextGeneration.id !== generation.id,
       'the restarted worker minted a distinct lifecycle generation');
-    writeFileSync(join(RESULT_DIR, 'result.json'), JSON.stringify({
+    writeResult({
       status: 'passed', forcedTerminationAttempted: true,
       terminationBoundary: 'SIGKILL Chrome and relaunch the same profile over CDP pipe',
+      backgroundEntry: fault.backgroundEntry,
       initialGenerationId: generation.id,
       recoveredGenerationId: nextGeneration.id,
       operationIds: [
         `${sessionId}:chrome-fault-b`, `${sessionId}:chrome-fault-c`,
         `${sessionId}:chrome-fault-d`, operationId,
       ],
-    }, null, 2));
+    });
   } catch (error) {
-    writeFileSync(join(RESULT_DIR, 'result.json'), JSON.stringify({
+    writeResult({
       status: 'blocked', forcedTerminationAttempted,
-      stage, error: error?.message ?? String(error),
-    }, null, 2));
+      stage, backgroundEntry: fault.backgroundEntry,
+      error: error?.message ?? String(error),
+    });
     throw error;
   } finally {
     if (browser) {
@@ -310,7 +408,9 @@ const main = async () => {
   }
 };
 
-main().catch((error) => {
-  console.error('Chrome lifecycle fault lane failed:', error?.stack || error);
-  process.exit(1);
-});
+if (import.meta.main) {
+  main(lifecycleTarget).catch((error) => {
+    console.error('Chrome lifecycle fault lane failed:', error?.stack || error);
+    process.exit(1);
+  });
+}

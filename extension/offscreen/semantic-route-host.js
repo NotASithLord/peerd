@@ -4,43 +4,41 @@
 // cluster remains explicit in packaging and controller build identity.
 
 import { SEMANTIC_HOST_ROUTE_CLASSIFICATIONS } from '../shared/semantic-host-route-manifest.js';
+import { makeBoundedModuleLoader } from '../shared/bounded-module-load.js';
 import { createSemanticDispatchRuntime } from './semantic-dispatch-runtime.js';
 
-const actor = (/** @type {string} */ route) => (
-  /** @type {any} */ message,
-  /** @type {any} */ options,
-) => import('./semantic-routes/actors.js')
-  .then((module) => module.dispatchActorSemanticRoute(route, message));
-const toolbox = (/** @type {string} */ route) => (
-  /** @type {any} */ message,
-  /** @type {any} */ options,
-) => import('./semantic-routes/toolbox.js')
-  .then((module) => module.dispatchToolboxSemanticRoute(route, message, options));
-const contacts = (/** @type {string} */ route) => (
-  /** @type {any} */ message,
-  /** @type {any} */ options,
-) => import('./semantic-routes/contacts.js')
-  .then((module) => module.dispatchContactsSemanticRoute(route, message, options));
-const contributor = (/** @type {string} */ route) => (
-  /** @type {any} */ message,
-  /** @type {any} */ options,
-) => import('./semantic-routes/contributor.js')
-  .then((module) => module.dispatchContributorSemanticRoute(route, message, options));
-const providers = (/** @type {string} */ route) => (
-  /** @type {any} */ message,
-  /** @type {any} */ options,
-) => import('./semantic-routes/providers.js')
-  .then((module) => module.dispatchProviderSemanticRoute(route, message, options));
-const memory = (/** @type {string} */ route) => (
-  /** @type {any} */ message,
-  /** @type {any} */ options,
-) => import('./semantic-routes/memory.js')
-  .then((module) => module.dispatchMemorySemanticRoute(route, message, options));
-const skills = (/** @type {string} */ route) => (
-  /** @type {any} */ message,
-  /** @type {any} */ options,
-) => import('./semantic-routes/skills.js')
-  .then((module) => module.dispatchSkillsSemanticRoute(route, message, options));
+const actorRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/actors.js'));
+const toolboxRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/toolbox.js'));
+const contactRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/contacts.js'));
+const contributorRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/contributor.js'));
+const providerRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/providers.js'));
+const memoryRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/memory.js'));
+const skillRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/skills.js'));
+const routeHandler = (/** @type {()=>Promise<any>} */ load, /** @type {string} */ method) => (
+  /** @type {string} */ route,
+) => async (/** @type {any} */ message, /** @type {any} */ options) => {
+  let routes;
+  try { routes = await load(); }
+  catch (cause) {
+    const detail = /** @type {any} */ (cause);
+    return {
+      ok: false,
+      code: detail?.code ?? 'semantic-route-module-load-failed',
+      error: 'Feature unavailable. Try again.',
+      outcomeKnown: true,
+      retryable: true,
+      phase: 'startup',
+    };
+  }
+  return routes[method](route, message, options);
+};
+const actor = routeHandler(actorRoutes, 'dispatchActorSemanticRoute');
+const toolbox = routeHandler(toolboxRoutes, 'dispatchToolboxSemanticRoute');
+const contacts = routeHandler(contactRoutes, 'dispatchContactsSemanticRoute');
+const contributor = routeHandler(contributorRoutes, 'dispatchContributorSemanticRoute');
+const providers = routeHandler(providerRoutes, 'dispatchProviderSemanticRoute');
+const memory = routeHandler(memoryRoutes, 'dispatchMemorySemanticRoute');
+const skills = routeHandler(skillRoutes, 'dispatchSkillsSemanticRoute');
 const runtime = createSemanticDispatchRuntime({
   classifications: SEMANTIC_HOST_ROUTE_CLASSIFICATIONS,
   handlers: {

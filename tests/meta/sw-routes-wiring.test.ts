@@ -16,6 +16,9 @@ import { join } from 'node:path';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 
 const SW = readFileSync(join(EXTENSION_DIR, 'background/service-worker.js'), 'utf8');
+const LAZY_CONTROL = readFileSync(
+  join(EXTENSION_DIR, 'background/service-worker-control-plane.js'), 'utf8',
+);
 const SEMANTIC_HOST = [
   join(EXTENSION_DIR, 'offscreen/semantic-route-host.js'),
   ...readdirSync(join(EXTENSION_DIR, 'offscreen/semantic-routes'))
@@ -58,20 +61,28 @@ const factorySourceSpan = (src: string, factory: string): string => {
   return src.slice(start, next < 0 ? src.length : next);
 };
 
+const bracedSpan = (source: string, braceStart: number): string | null => {
+  let depth = 0;
+  for (let i = braceStart; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(braceStart + 1, i);
+    }
+  }
+  return null;
+};
+
 /** Inner text of the object literal passed at the `...makeFooRoutes({ ... })` call site. */
 const callSiteSpan = (factory: string): string | null => {
   const open = SW.indexOf(`${factory}({`);
-  if (open === -1) return null;
-  // Walk from the first `{` matching braces to find the object-literal span.
-  const braceStart = SW.indexOf('{', open);
-  let depth = 0;
-  let end = -1;
-  for (let i = braceStart; i < SW.length; i += 1) {
-    if (SW[i] === '{') depth += 1;
-    else if (SW[i] === '}') { depth -= 1; if (depth === 0) { end = i; break; } }
-  }
-  if (end === -1) return null;
-  return SW.slice(braceStart + 1, end);
+  if (open !== -1) return bracedSpan(SW, SW.indexOf('{', open));
+  const property = LAZY_CONTROL.match(new RegExp(`${factory}\\(deps\\.(\\w+)\\)`))?.[1];
+  if (!property) return null;
+  const group = SW.indexOf('makeLazyRouteGroups({');
+  const propertyStart = SW.indexOf(`${property}: {`, group);
+  if (propertyStart === -1) return null;
+  return bracedSpan(SW, SW.indexOf('{', propertyStart));
 };
 const providedAtCallSite = (factory: string): string[] | null => {
   const span = callSiteSpan(factory);
@@ -85,6 +96,17 @@ const routeFiles = allRouteFiles.filter((file) => {
 });
 
 describe('sw routes wiring (per-module deps)', () => {
+  test('cold first-party messages wait for the unified dispatcher', () => {
+    const hold = SW.indexOf('messageDispatcherReady.then(() => messageDispatcher?.(msg, sender, sendResponse))');
+    const install = SW.indexOf("coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(\n  /** @type {any} */ (messageDispatcher)");
+    const live = SW.indexOf('messageDispatcherLive = true;');
+    const release = SW.indexOf('markMessageDispatcherReady();');
+    expect(hold).toBeGreaterThan(0);
+    expect(install).toBeGreaterThan(hold);
+    expect(live).toBeGreaterThan(install);
+    expect(release).toBeGreaterThan(live);
+  });
+
   test('there is at least one extracted route module', () => {
     expect(routeFiles.length).toBeGreaterThan(0);
   });

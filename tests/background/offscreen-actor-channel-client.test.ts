@@ -4,6 +4,8 @@ import {
 } from '../../extension/background/offscreen-actor-channel-client.js';
 import { bindActorChannel } from '../../extension/offscreen/actor-channel-host.js';
 
+const actorLease = Object.freeze({ scope: 'controller', leaseId: 'actor-lease-one' });
+
 describe('targeted offscreen actor MessageChannel', () => {
   test('classifies only explicit known not-started outcomes as retryable', () => {
     expect(isKnownActorStartupFailure({
@@ -30,7 +32,7 @@ describe('targeted offscreen actor MessageChannel', () => {
     ], expected)).toBeNull();
   });
 
-  test('runs and relays over the transferred channel without a bearer grant', async () => {
+  test('runs over the exact leased channel without exposing the relay grant', async () => {
     const offered: any[] = [];
     const relayed: any[] = [];
     const client = makeOffscreenActorChannelClient({
@@ -57,6 +59,7 @@ describe('targeted offscreen actor MessageChannel', () => {
     const result = await client.run(
       { runId: 'run-one', message: 'private job' },
       {
+        lease: actorLease,
         relay: async (type, payload) => {
           relayed.push({ type, payload });
           return { ok: true, events: [] };
@@ -66,7 +69,7 @@ describe('targeted offscreen actor MessageChannel', () => {
     expect(result).toEqual({ ok: true, started: true, finalText: 'done' });
     expect(offered).toHaveLength(1);
     expect(offered[0]).toMatchObject({
-      type: 'peerd/actor-channel', protocol: 1, channelId: 'channel-one',
+      type: 'peerd/actor-channel', protocol: 1, channelId: 'channel-one', lease: actorLease,
     });
     expect(JSON.stringify(offered)).not.toContain('private job');
     expect(relayed).toEqual([{
@@ -88,7 +91,9 @@ describe('targeted offscreen actor MessageChannel', () => {
       newChannelId: () => 'channel-abort',
     });
     const messages: any[] = [];
-    const result = await client.run({}, { signal: abort.signal, relay: async () => ({}) });
+    const result = await client.run({}, {
+      signal: abort.signal, lease: actorLease, relay: async () => ({}),
+    });
     expect(result).toMatchObject({ started: false, aborted: true, outcomeKnown: true });
     expect(transferred).not.toBeNull();
     const port = transferred as unknown as MessagePort;
@@ -104,7 +109,8 @@ describe('targeted offscreen actor MessageChannel', () => {
     const client = makeOffscreenActorChannelClient({
       ensureOffscreen: async () => {}, findOffscreenClient: async () => null,
     });
-    await expect(client.run({}, { relay: async () => ({}) })).resolves.toMatchObject({
+    await expect(client.run({}, { lease: actorLease, relay: async () => ({}) }))
+      .resolves.toMatchObject({
       ok: false, started: false, code: 'actor_host_not_ready', outcomeKnown: true,
     });
   });
@@ -114,7 +120,8 @@ describe('targeted offscreen actor MessageChannel', () => {
       ensureOffscreen: async () => {}, handshakeTimeoutMs: 5,
       findOffscreenClient: async () => ({ postMessage: () => {} }),
     });
-    await expect(client.run({}, { relay: async () => ({}) })).resolves.toMatchObject({
+    await expect(client.run({}, { lease: actorLease, relay: async () => ({}) }))
+      .resolves.toMatchObject({
       ok: false, started: false, phase: 'startup',
       code: 'actor_channel_ready_timeout', outcomeKnown: true,
     });
@@ -134,7 +141,9 @@ describe('targeted offscreen actor MessageChannel', () => {
         }),
       }),
     });
-    await expect(client.run({ runId: 'wedged-run' }, { relay: async () => ({}) }))
+    await expect(client.run({ runId: 'wedged-run' }, {
+      lease: actorLease, relay: async () => ({}),
+    }))
       .resolves.toMatchObject({
         ok: false, started: true, phase: 'run',
         code: 'actor_channel_run_timeout', outcomeKnown: false,
@@ -174,8 +183,111 @@ describe('targeted offscreen actor MessageChannel', () => {
       }),
     });
     await client.run({}, {
+      lease: actorLease,
       relay: async () => { dispatches += 1; return { ok: true }; },
     });
     expect(dispatches).toBe(1);
+  });
+
+  test('bounds an event burst, evicts event ids, and retains effect dedupe', async () => {
+    const eventCount = 20;
+    let eventForwards = 0;
+    let toolDispatches = 0;
+    let eventReplies = 0;
+    let excessCode = '';
+    const client = makeOffscreenActorChannelClient({
+      ensureOffscreen: async () => {},
+      maxLoopEventsPerRun: 3,
+      maxEffectRelaysPerRun: 1,
+      newChannelId: () => 'channel-event-burst',
+      findOffscreenClient: async () => ({
+        postMessage: (offer: any, transfer: Transferable[]) => {
+          const port = transfer[0] as MessagePort;
+          let phase = 'events';
+          const common = { protocol: 1, channelId: offer.channelId };
+          const sendTool = () => port.postMessage({
+            ...common, type: 'actor/relay', requestId: 'event-0',
+            relayType: 'actor/tool-dispatch', payload: { call: { name: 'click' } },
+          });
+          port.onmessage = (event) => {
+            const message = event.data;
+            if (message.type === 'actor/open') {
+              port.postMessage({ ...common, type: 'actor/accepted' });
+            } else if (message.type === 'actor/commit') {
+              for (let index = 0; index < eventCount; index += 1) {
+                port.postMessage({
+                  ...common, type: 'actor/relay', requestId: `event-${index}`,
+                  relayType: 'actor/loop-event', payload: { event: { type: 'delta', index } },
+                });
+              }
+            } else if (message.type === 'actor/relay-response' && phase === 'events') {
+              eventReplies += 1;
+              if (eventReplies === eventCount) { phase = 'tool-one'; sendTool(); }
+            } else if (message.type === 'actor/relay-response' && phase === 'tool-one') {
+              phase = 'tool-two';
+              sendTool();
+            } else if (message.type === 'actor/relay-response' && phase === 'tool-two') {
+              phase = 'tool-excess';
+              port.postMessage({
+                ...common, type: 'actor/relay', requestId: 'tool-excess',
+                relayType: 'actor/tool-dispatch', payload: { call: { name: 'click' } },
+              });
+            } else if (message.type === 'actor/relay-response' && phase === 'tool-excess') {
+              phase = 'done';
+              excessCode = message.result?.code ?? '';
+              port.postMessage({
+                ...common, type: 'actor/result',
+                result: { ok: true, started: true, finalText: 'done' },
+              });
+            }
+          };
+          port.start();
+          port.postMessage({ ...common, type: 'channel/ready' });
+        },
+      }),
+    });
+    const result = await client.run({}, {
+      lease: actorLease,
+      relay: async (type) => {
+        if (type === 'actor/loop-event') eventForwards += 1;
+        if (type === 'actor/tool-dispatch') toolDispatches += 1;
+        return { ok: true };
+      },
+    });
+    expect(result).toEqual({ ok: true, started: true, finalText: 'done' });
+    expect({ eventForwards, eventReplies, toolDispatches }).toEqual({
+      eventForwards: 3, eventReplies: eventCount, toolDispatches: 1,
+    });
+    expect(excessCode).toBe('actor_relay_limit');
+  });
+
+  test('a lost relay receipt remains unknown at the actor boundary', async () => {
+    let observed: any = null;
+    const client = makeOffscreenActorChannelClient({
+      ensureOffscreen: async () => {},
+      findOffscreenClient: async () => ({
+        postMessage: (message: any, transfer: Transferable[]) => bindActorChannel({
+          port: transfer[0] as MessagePort,
+          channelId: message.channelId,
+          workerUrl: '/offscreen/actor-worker.js',
+          abort: () => {},
+          run: async (_job, { sendToSW }) => {
+            observed = await sendToSW('actor/tool-dispatch', { call: { name: 'click' } });
+            return { ok: false, started: true, outcomeKnown: false };
+          },
+        }),
+      }),
+    });
+    await client.run({}, {
+      lease: actorLease,
+      relay: async () => {
+        throw Object.assign(new Error('response lost'), {
+          code: 'relay-lost', outcomeKnown: false, retryable: false,
+        });
+      },
+    });
+    expect(observed).toMatchObject({
+      ok: false, code: 'relay-lost', outcomeKnown: false, retryable: false,
+    });
   });
 });

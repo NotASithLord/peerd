@@ -10,6 +10,8 @@ import {
 import {
   createArtifactOfferAcceptor,
 } from '../../extension/offscreen/artifact-host.js';
+import { createServiceWorkerChannels } from '../../extension/offscreen/supervisor-channels.js';
+import { backgroundScriptUrl } from '../../extension/offscreen/sender-checks.js';
 import {
   ARTIFACT_CHANNEL_CANCEL,
   admitArtifactChannelOffer,
@@ -152,6 +154,26 @@ describe('demand-only artifact codec channel', () => {
     }]);
   });
 
+  test('a frozen Firefox codec import releases its lifetime with a startup refusal', async () => {
+    let starts = 0;
+    let stops = 0;
+    const local: any = makeArtifactEngineClient({
+      offscreen: false,
+      offscreenUrl,
+      withHost: async () => { throw new Error('must not lease'); },
+      importLocal: async () => new Promise<any>(() => {}),
+      localLoadTimeoutMs: 5,
+      withLocalLifetime: async (operation) => {
+        starts += 1;
+        try { return await operation(); } finally { stops += 1; }
+      },
+    });
+    await expect(local.inspectEnvelope({})).rejects.toMatchObject({
+      code: 'artifact-local-load-timeout', outcomeKnown: true, phase: 'startup',
+    });
+    expect({ starts, stops }).toEqual({ starts: 1, stops: 1 });
+  });
+
   test('admits only the exact trusted service worker and an active dom-host lease', () => {
     const expectedWorkerUrl = 'chrome-extension://test/background/service-worker.js';
     const offer = {
@@ -186,14 +208,65 @@ describe('demand-only artifact codec channel', () => {
     expect(admitArtifactChannelOffer(event({
       data: { ...offer, operation: 'fetch' },
     }), expectedWorkerUrl, true)).toMatchObject({ ok: false, reason: 'operation-denied' });
-    expect(supervisorSource.indexOf("getFeatureLeaseHost()?.isActive('dom-host')"))
-      .toBeLessThan(supervisorSource.indexOf("import('./artifact-host.js')"));
+    expect(supervisorSource).toContain("ownsLease?.('dom-host', lease) === true");
+    expect(supervisorSource).toContain("'dom-host', artifactAdmission.offer?.lease");
+  });
+
+  test('forged and unleased offers never load the artifact host', async () => {
+    let loads = 0;
+    let accepts = 0;
+    let active = true;
+    const lease = { scope: 'dom-host', leaseId: 'artifact-exact-lease' };
+    let releaseLoad!: (module: any) => void;
+    const deferredLoad = new Promise<any>((resolve) => { releaseLoad = resolve; });
+    const channels = createServiceWorkerChannels({
+      getFeatureLeaseHost: () => ({
+        isActive: () => active,
+        ownsLease: (scope: string, candidate: unknown) =>
+          active && scope === 'dom-host' && candidate === lease,
+      }),
+      loadControllerBootstrap: async () => ({}),
+      loadArtifactHost: async () => {
+        loads += 1;
+        return deferredLoad;
+      },
+    });
+    const port = { close() {}, postMessage() {} };
+    const offer = {
+      type: ARTIFACT_CHANNEL_OFFER,
+      protocol: ARTIFACT_CHANNEL_PROTOCOL,
+      channelId: 'artifact-loader-gate',
+      operation: 'inspectEnvelope',
+      args: [{}],
+      lease,
+    };
+    const event = (scriptURL: string) => ({
+      isTrusted: true, source: { scriptURL }, data: offer, ports: [port],
+    } as unknown as MessageEvent);
+
+    channels.onMessage(event(`${backgroundScriptUrl}.forged`));
+    channels.onMessage({
+      ...event(backgroundScriptUrl), data: { ...offer, lease: undefined },
+    } as unknown as MessageEvent);
+    await Promise.resolve();
+    expect({ loads, accepts }).toEqual({ loads: 0, accepts: 0 });
+
+    channels.onMessage(event(backgroundScriptUrl));
+    for (let attempt = 0; attempt < 5 && loads === 0; attempt += 1) await Promise.resolve();
+    expect(loads).toBe(1);
+    active = false;
+    releaseLoad({ acceptArtifactOffer: () => { accepts += 1; } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(accepts).toBe(0);
+
+    active = true;
+    channels.onMessage(event(backgroundScriptUrl));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect({ loads, accepts }).toEqual({ loads: 1, accepts: 1 });
   });
 
   test('the artifact branch closes before actor-channel admission', () => {
-    const listenerStart = supervisorSource.indexOf(
-      "navigator.serviceWorker?.addEventListener('message'",
-    );
+    const listenerStart = supervisorSource.indexOf('const onMessage =');
     const listenerEnd = supervisorSource.indexOf(
       'return Object.freeze({ actorPorts, vaultAuthorityWorkers })', listenerStart,
     );
@@ -204,7 +277,7 @@ describe('demand-only artifact codec channel', () => {
       'const source = /** @type {{ scriptURL?: string } | null} */ (event.source);',
     );
     const actorAdmission = listener.indexOf('event.data?.type !== ACTOR_CHANNEL_OFFER');
-    const actorBind = listener.indexOf("import('./actor-channel-host.js')");
+    const actorBind = listener.indexOf('loadActor()');
     expect(artifactStart).toBeGreaterThanOrEqual(0);
     expect(sourceAdmission).toBeGreaterThan(artifactStart);
     expect(listener.slice(artifactStart, sourceAdmission)).toMatch(/return;\s*\n\s*}/);

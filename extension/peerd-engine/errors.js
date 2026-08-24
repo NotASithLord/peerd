@@ -5,7 +5,7 @@
 // structured-clone across the SW/offscreen and SW/sidepanel boundaries.
 // The dispatcher and side panel branch on `.name`, not `instanceof`.
 
-import { TypedError } from '/shared/errors.js';
+import { TypedError } from '../shared/errors.js';
 
 /**
  * The VM hasn't booted yet (or is mid-boot) and a tool call asked it

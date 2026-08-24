@@ -56,15 +56,17 @@ const drain = async (iterable: AsyncIterable<any>) => {
 
 type HarnessOptions = {
   ctx: any;
+  captureEvents?: any[];
   inspectOuter?: (payload: any) => void;
   interceptKernel?: (
     operation: string,
     payload: any,
     next: () => Promise<any>,
+    invoke: (operation: string, payload: any) => Promise<any>,
   ) => Promise<any>;
 };
 
-const runPrototype = async ({ ctx, inspectOuter, interceptKernel }: HarnessOptions) => {
+const runPrototype = async ({ ctx, captureEvents, inspectOuter, interceptKernel }: HarnessOptions) => {
   let bridge: ReturnType<typeof makeControllerTurnBridge>;
   let id = 0;
   const getClient = async () => ({
@@ -82,13 +84,16 @@ const runPrototype = async ({ ctx, inspectOuter, interceptKernel }: HarnessOptio
         signal,
         authority,
         kernelCall: (operation, kernelPayload) => {
-          const next = () => Promise.resolve(bridge.handleKernelCall(
-            operation,
-            kernelPayload,
-            { capability, authority, signal, deadlineAt: Date.now() + 60_000 },
-          ));
+          const reverseSignal = new AbortController().signal;
+          const invoke = (candidateOperation: string, candidatePayload: any) =>
+            Promise.resolve(bridge.handleKernelCall(
+              candidateOperation,
+              candidatePayload,
+              { capability, authority, signal: reverseSignal, deadlineAt: Date.now() + 60_000 },
+            ));
+          const next = () => invoke(operation, kernelPayload);
           return interceptKernel
-            ? interceptKernel(operation, kernelPayload, next)
+            ? interceptKernel(operation, kernelPayload, next, invoke)
             : next();
         },
       });
@@ -96,7 +101,12 @@ const runPrototype = async ({ ctx, inspectOuter, interceptKernel }: HarnessOptio
   });
   bridge = makeControllerTurnBridge({ getClient, newId: () => `prototype-${++id}` });
   try {
-    return await drain(bridge.runUserTurn(ctx));
+    const events = [];
+    for await (const event of bridge.runUserTurn(ctx)) {
+      events.push(event);
+      captureEvents?.push(event);
+    }
+    return events;
   } finally {
     bridge.close();
   }
@@ -263,6 +273,179 @@ describe('orchestrator controller turn boundary', () => {
     expect(maxActive).toBe(1);
   });
 
+  test('a queued write cannot enter tool dispatch after Stop', async () => {
+    const sessions = makeSessions();
+    const abort = new AbortController();
+    let round = 0;
+    const started: string[] = [];
+    let firstStarted = () => {};
+    let releaseFirst = () => {};
+    const admitted = new Promise<void>((resolve) => { firstStarted = resolve; });
+    const running = runPrototype({
+      ctx: {
+        ...makeSimpleCtx(sessions, []), attachments: undefined, signal: abort.signal,
+        classifyToolCall: () => ({ actionClass: 'write', confirm: false }),
+        callModel: async function* () {
+          round += 1;
+          if (round > 1) return;
+          for (const id of ['write-1', 'write-2']) {
+            yield { type: 'tool-use-start', id, name: 'read_fixture' };
+            yield { type: 'tool-use-delta', id, partialJson: '{}' };
+            yield { type: 'tool-use-stop', id };
+          }
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+        toolDispatch: (call: any) => {
+          started.push(call.id);
+          if (call.id !== 'write-1') return Promise.resolve({ ok: true, content: 'late' });
+          firstStarted();
+          return new Promise((resolve) => {
+            releaseFirst = () => resolve({ ok: true, content: 'first' });
+          });
+        },
+      },
+      inspectOuter: (payload) => {
+        payload.classifications.read_fixture = { actionClass: 'read', confirm: false };
+      },
+    }).catch((error) => error);
+    await admitted;
+    abort.abort();
+    releaseFirst();
+    await running;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(started).toEqual(['write-1']);
+  });
+
+  test('post-cancel reverse RPCs cannot reach kernel effects', async () => {
+    const sessions = makeSessions();
+    const abort = new AbortController();
+    let modelCalls = 0;
+    let dispatches = 0;
+    let forgedAudit = false;
+    let admitted = () => {};
+    let release = () => {};
+    const toolAdmitted = new Promise<void>((resolve) => { admitted = resolve; });
+    const denied: any[] = [];
+    const running = runPrototype({
+      ctx: {
+        ...makeSimpleCtx(sessions, []), attachments: undefined, signal: abort.signal,
+        appendAudit: async (entry: any) => { if (entry?.forged) forgedAudit = true; },
+        callModel: async function* () {
+          modelCalls += 1;
+          yield { type: 'tool-use-start', id: 'write-live', name: 'read_fixture' };
+          yield { type: 'tool-use-delta', id: 'write-live', partialJson: '{}' };
+          yield { type: 'tool-use-stop', id: 'write-live' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+        toolDispatch: () => {
+          dispatches += 1;
+          admitted();
+          return new Promise((resolve) => { release = () => resolve({ ok: true }); });
+        },
+      },
+      interceptKernel: async (operation, payload, next, invoke) => {
+        if (operation === 'turn.abort.finalize') {
+          const runId = payload.runId;
+          denied.push(await invoke('turn.session.append', {
+            runId, value: { sessionId: 'session-1', messageJson: JSON.stringify({ role: 'user', content: 'FORGED' }) },
+          }));
+          denied.push(await invoke('turn.model.open', { runId, value: {} }));
+          denied.push(await invoke('turn.tool.dispatch', { runId, value: {} }));
+          denied.push(await invoke('turn.audit.append', { runId, value: { entry: { forged: true } } }));
+        }
+        return next();
+      },
+    }).catch((error) => error);
+    await toolAdmitted;
+    abort.abort();
+    await running;
+    release();
+
+    expect(denied).toHaveLength(4);
+    expect(denied.every((reply) => reply.code === 'turn-run-aborted'
+      && reply.outcomeKnown === true)).toBe(true);
+    expect(sessions.snapshot().messages.some((message: any) => message.content === 'FORGED')).toBe(false);
+    expect(modelCalls).toBe(1);
+    expect(dispatches).toBe(1);
+    expect(forgedAudit).toBe(false);
+  });
+
+  test('historical assistant IDs cannot be updated or abort-finalized', async () => {
+    const sessions = makeSessions();
+    const abort = new AbortController();
+    let round = 0;
+    const assistantIds: string[] = [];
+    const denied: any[] = [];
+    await runPrototype({
+      ctx: {
+        ...makeSimpleCtx(sessions, []), attachments: undefined, signal: abort.signal,
+        oneShot: false,
+        callModel: async function* () {
+          round += 1;
+          if (round === 1) {
+            yield { type: 'tool-use-start', id: 'advance', name: 'read_fixture' };
+            yield { type: 'tool-use-delta', id: 'advance', partialJson: '{}' };
+            yield { type: 'tool-use-stop', id: 'advance' };
+            yield { type: 'message-stop', stopReason: 'tool_use' };
+            return;
+          }
+          yield { type: 'message-stop', stopReason: 'end_turn' };
+        },
+        toolDispatch: async () => ({ ok: true, content: 'advance' }),
+      },
+      interceptKernel: async (operation, payload, next, invoke) => {
+        const message = operation === 'turn.session.append'
+          ? JSON.parse(payload.value.messageJson) : null;
+        const result = await next();
+        if (message?.role !== 'assistant') return result;
+        assistantIds.push(message.id);
+        if (assistantIds.length !== 2) return result;
+        const runId = payload.runId;
+        denied.push(await invoke('turn.session.update-assistant', {
+          runId,
+          value: {
+            sessionId: 'session-1', messageId: assistantIds[0],
+            patchJson: JSON.stringify({ content: 'FORGED-HISTORICAL' }),
+          },
+        }));
+        abort.abort();
+        denied.push(await invoke('turn.abort.finalize', {
+          runId,
+          value: { sessionId: 'session-1', messageId: assistantIds[0] },
+        }));
+        return result;
+      },
+    }).catch(() => {});
+
+    expect(denied).toHaveLength(2);
+    expect(denied.every((reply) => reply.outcomeKnown === true)).toBe(true);
+    const historical = sessions.snapshot().messages.find(
+      (message: any) => message.id === assistantIds[0],
+    );
+    expect(historical.content).not.toBe('FORGED-HISTORICAL');
+    expect(historical.stopReason).not.toBe('aborted');
+  });
+
+  test('resume can finalize only its exact trailing interrupted assistant', async () => {
+    const sessions = makeSessions();
+    await sessions.appendMessage('session-1', {
+      role: 'assistant', content: 'partial', id: 'interrupted-assistant',
+      when: 1, streaming: true,
+    });
+    await runPrototype({
+      ctx: {
+        ...makeSimpleCtx(sessions, []), attachments: undefined, resume: true,
+        callModel: async function* () {
+          yield { type: 'message-stop', stopReason: 'end_turn' };
+        },
+      },
+    });
+    const interrupted = sessions.snapshot().messages.find(
+      (message: any) => message.id === 'interrupted-assistant',
+    );
+    expect(interrupted).toMatchObject({ streaming: false, content: 'partial' });
+  });
+
   test('large read waves are backpressured without refusing or duplicating tools', async () => {
     const sessions = makeSessions();
     let round = 0;
@@ -362,10 +545,6 @@ describe('orchestrator controller turn boundary', () => {
       oneShot: true,
       callModel: async function* () {
         modelRound += 1;
-        if (modelRound > 1) {
-          yield { type: 'message-stop', stopReason: 'end_turn' };
-          return;
-        }
         yield { type: 'tool-use-start', id: 'tool-unknown', name: 'read_fixture' };
         yield { type: 'tool-use-delta', id: 'tool-unknown', partialJson: '{}' };
         yield { type: 'tool-use-stop', id: 'tool-unknown' };
@@ -379,8 +558,13 @@ describe('orchestrator controller turn boundary', () => {
     let failure: any = null;
     try { await runPrototype({ ctx }); } catch (cause) { failure = cause; }
     expect(landed).toBe(1);
-    expect(modelRound).toBeGreaterThanOrEqual(1);
+    expect(modelRound).toBe(1);
     expect(failure?.outcomeKnown).toBe(false);
+    const persisted = sessions.snapshot().messages.find((message: any) => message.toolResults);
+    expect(persisted.toolResults[0]).toMatchObject({
+      is_error: true, outcomeKnown: false, retryable: false,
+    });
+    expect(persisted.toolResults[0].content).toStartWith('outcome_unknown:');
   });
 
   test('outer channel loss after a successful dispatch is still unknown', async () => {
@@ -416,6 +600,69 @@ describe('orchestrator controller turn boundary', () => {
     expect(failure?.outcomeKnown).toBe(false);
   });
 
+  test('a provider stream rejection remains a known failure', async () => {
+    const sessions = makeSessions();
+    const ctx = {
+      ...makeSimpleCtx(sessions, []), attachments: undefined,
+      callModel: async function* () {
+        throw new Error("Provider 'fixture' HTTP 400: rejected");
+      },
+    };
+    const events = await runPrototype({ ctx });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'error', error: "Provider 'fixture' HTTP 400: rejected",
+    }));
+    expect(sessions.snapshot().messages.at(-1)).toMatchObject({
+      role: 'assistant', streaming: false,
+      error: "Provider 'fixture' HTTP 400: rejected",
+    });
+  });
+
+  test('a lost model-event receipt is terminal and never exposes transport text', async () => {
+    const sessions = makeSessions();
+    let modelCalls = 0;
+    let modelNext = 0;
+    const ctx = {
+      ...makeSimpleCtx(sessions, []), attachments: undefined,
+      callModel: async function* () {
+        modelCalls += 1;
+        yield { type: 'text-delta', text: 'partial' };
+        yield { type: 'message-stop', stopReason: 'end_turn' };
+      },
+    };
+    let failure: any = null;
+    const events: any[] = [];
+    try {
+      await runPrototype({
+        ctx,
+        captureEvents: events,
+        interceptKernel: async (operation, _payload, next) => {
+          const result = await next();
+          if (operation !== 'turn.model.next') return result;
+          modelNext += 1;
+          return modelNext === 1 ? {
+            ok: false, code: 'kernel-channel-lost',
+            error: 'reverse channel lost after model event', outcomeKnown: false,
+          } : result;
+        },
+      });
+    } catch (cause) { failure = cause; }
+    expect(modelCalls).toBe(1);
+    expect(modelNext).toBe(1);
+    expect(failure).toMatchObject({ outcomeKnown: false });
+    const snapshot = sessions.snapshot();
+    expect(snapshot.messages.at(-1)).toMatchObject({
+      role: 'assistant', streaming: false,
+      error: 'Turn outcome unknown. Check the session before retrying.',
+      errorCode: 'kernel-channel-lost', outcomeKnown: false, retryable: false,
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'error', error: 'Turn outcome unknown. Check the session before retrying.',
+      code: 'kernel-channel-lost', outcomeKnown: false, retryable: false,
+    }));
+    expect(JSON.stringify({ events, snapshot })).not.toContain('reverse channel lost');
+  });
+
   test('a resolved ToolResult with unknown custody cannot be laundered by the loop', async () => {
     const sessions = makeSessions();
     let landed = 0;
@@ -441,7 +688,49 @@ describe('orchestrator controller turn boundary', () => {
     let failure: any = null;
     try { await runPrototype({ ctx }); } catch (cause) { failure = cause; }
     expect(landed).toBe(1);
+    expect(round).toBe(1);
     expect(failure?.outcomeKnown).toBe(false);
+  });
+
+  test('post-commit Stop persists and emits an ordinary aborted turn', async () => {
+    const sessions = makeSessions();
+    const abort = new AbortController();
+    const operations: string[] = [];
+    let opened = () => {};
+    const modelOpened = new Promise<void>((resolve) => { opened = resolve; });
+    const ctx = {
+      ...makeSimpleCtx(sessions, []), attachments: undefined, signal: abort.signal,
+      callModel: async function* (args: any) {
+        opened();
+        await new Promise((_, reject) => {
+          const stop = () => reject(new DOMException('model aborted', 'AbortError'));
+          if (args.signal.aborted) stop();
+          else args.signal.addEventListener('abort', stop, { once: true });
+        });
+      },
+    };
+    const turn = runPrototype({
+      ctx,
+      interceptKernel: async (operation, _payload, next) => {
+        operations.push(operation);
+        if (operation === 'turn.model.cancel' && abort.signal.aborted) {
+          return { ok: false, code: 'controller-call-aborted', outcomeKnown: false };
+        }
+        return next();
+      },
+    });
+    await modelOpened;
+    abort.abort();
+    const events = await turn;
+    expect(events.some((event) => event.type === 'error')).toBe(false);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'stop', stopReason: 'aborted',
+    }));
+    expect(sessions.snapshot().messages.at(-1)).toMatchObject({
+      role: 'assistant', streaming: false, stopReason: 'aborted',
+    });
+    expect(operations.filter((operation) => operation === 'turn.abort.finalize')).toHaveLength(1);
+    expect(operations).not.toContain('turn.model.cancel');
   });
 
   test('a failed read-only session lookup remains known-safe', async () => {

@@ -15,6 +15,10 @@ import {
 
 const offscreenUrl = 'chrome-extension://test/offscreen/offscreen.html';
 const workerUrl = 'chrome-extension://test/offscreen/vault-authority-worker.js';
+const vaultLease = Object.freeze({
+  scope: 'vault-authority', leaseId: 'vault-lease-one', generation: 1,
+  buildId: 'build-identity-one', kernelEpoch: 'kernel-epoch-one', hostEpoch: 'host-epoch-one',
+});
 
 const makeStorage = () => {
   const local = new Map<string, any>();
@@ -50,6 +54,39 @@ const makeStorage = () => {
 };
 
 describe('sealed vault authority channel', () => {
+  test('offscreen offer carries the exact host lease', async () => {
+    const storage = makeStorage();
+    const offers: any[] = [];
+    let currentLease: any = vaultLease;
+    const client = makeVaultAuthorityClient({
+      offscreen: true,
+      offscreenUrl,
+      workerUrl,
+      kv: storage.kv,
+      idb: storage.idb,
+      sessionCache: storage.sessionCache,
+      withHost: async (operation) => operation(currentLease),
+      listWindowClients: async () => [{
+        url: offscreenUrl,
+        postMessage: (offer: any, ports: MessagePort[]) => {
+          offers.push(offer);
+          void serveVaultAuthority({ port: ports[0], channelId: offer.channelId });
+        },
+      }],
+    });
+
+    await expect(client.status()).resolves.toMatchObject({ initialized: false, locked: true });
+    expect(offers).toHaveLength(1);
+    expect(offers[0]).toMatchObject({
+      type: 'peerd/vault-authority-channel', protocol: 1, lease: vaultLease,
+    });
+    currentLease = { ...vaultLease, leaseId: 'vault-lease-two', generation: 2 };
+    await client.status();
+    expect(offers).toHaveLength(2);
+    expect(offers[1].lease).toEqual(currentLease);
+    client.close();
+  });
+
   test('runs passkey vault and secret custody through exact reverse storage only', async () => {
     const storage = makeStorage();
     let depth = 0;
@@ -64,7 +101,7 @@ describe('sealed vault authority channel', () => {
       newId: (() => { let value = 0; return () => `identity-${++value}`; })(),
       withHost: async (operation) => {
         depth += 1;
-        try { return await operation(); } finally { depth -= 1; }
+        try { return await operation(null); } finally { depth -= 1; }
       },
       createWorker: ((url: string, options: any) => ({
         postMessage(bootstrap: any, ports: MessagePort[]) {
@@ -134,16 +171,18 @@ describe('sealed vault authority channel', () => {
       source: { scriptURL: expected },
       data: {
         type: 'peerd/vault-authority-channel', protocol: 1, channelId: 'channel-123',
+        lease: vaultLease,
       },
       ports: [{}],
       ...overrides,
     });
-    expect(admitVaultAuthorityOffer(event(), expected, true)).toMatchObject({ ok: true });
-    expect(admitVaultAuthorityOffer(event({ isTrusted: false }), expected, true))
+    const ownsLease = (candidate: any) => candidate?.leaseId === vaultLease.leaseId;
+    expect(admitVaultAuthorityOffer(event(), expected, ownsLease)).toMatchObject({ ok: true });
+    expect(admitVaultAuthorityOffer(event({ isTrusted: false }), expected, ownsLease))
       .toMatchObject({ ok: false, reason: 'sender-invalid' });
-    expect(admitVaultAuthorityOffer(event({ ports: [{}, {}] }), expected, true))
+    expect(admitVaultAuthorityOffer(event({ ports: [{}, {}] }), expected, ownsLease))
       .toMatchObject({ ok: false, reason: 'offer-invalid' });
-    expect(admitVaultAuthorityOffer(event(), expected, false))
+    expect(admitVaultAuthorityOffer(event(), expected, () => false))
       .toMatchObject({ ok: false, reason: 'lease-inactive' });
   });
 
@@ -184,7 +223,7 @@ describe('sealed vault authority channel', () => {
       idb: storage.idb,
       sessionCache: storage.sessionCache,
       timeoutMs: 5,
-      withHost: async (operation) => operation(),
+      withHost: async (operation) => operation(null),
       createWorker: (() => ({
         postMessage(bootstrap: any, ports: MessagePort[]) {
           const port = ports[0];
