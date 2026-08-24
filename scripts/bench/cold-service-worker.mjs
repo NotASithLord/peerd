@@ -470,10 +470,11 @@ const prepareBrowserArtifacts = async (browser, {
 const prepareNativeFloorArtifacts = async (browser) => {
   if (browser !== 'chrome') throw new Error('native floor currently supports Chrome only');
   const prepared = {};
+  const artifactRoot = mkdtempSync(join(tmpdir(), 'peerd-cold-native-artifacts-'));
   try {
     for (const channel of ['store', 'preview']) {
       const built = await buildVaultKernelArtifact({
-        browser, channel, releaseMinify: true,
+        browser, channel, releaseMinify: true, artifactRoot,
       });
       const extensionDir = unpackArtifact(built.artifact, `native-${channel}-${browser}`);
       prepared[channel] = {
@@ -481,7 +482,8 @@ const prepareNativeFloorArtifacts = async (browser) => {
         archive: built.artifact,
         extensionDir,
         sourceRoot: ROOT,
-        artifactRoot: join(ROOT, 'artifacts'),
+        artifactRoot,
+        removeArtifactRoot: true,
         coldBudgetMode: 'native-target',
         verify: channel === 'store',
         packageVersion: built.version,
@@ -493,6 +495,7 @@ const prepareNativeFloorArtifacts = async (browser) => {
     return prepared;
   } catch (error) {
     cleanupPreparedArtifacts(prepared);
+    rmSync(artifactRoot, { recursive: true, force: true });
     throw error;
   }
 };
@@ -510,8 +513,13 @@ const assertPreparedArtifactsUnchanged = async (browser, prepared) => {
 };
 
 const cleanupPreparedArtifacts = (prepared) => {
+  const artifactRoots = new Set();
   for (const artifact of Object.values(prepared ?? {})) {
     rmSync(artifact.extensionDir, { recursive: true, force: true });
+    if (artifact.removeArtifactRoot === true) artifactRoots.add(artifact.artifactRoot);
+  }
+  for (const artifactRoot of artifactRoots) {
+    rmSync(artifactRoot, { recursive: true, force: true });
   }
 };
 
