@@ -1,5 +1,5 @@
 // @ts-check
-const OWNER = 'kernel-lifecycle';
+export const KERNEL_LIFECYCLE_OWNER = 'kernel-lifecycle';
 
 /**
  * @param {Object} deps
@@ -24,20 +24,20 @@ export const attachKernelLifecycleEvents = ({
       || (selfHostedChrome && typeof onUpdateAvailable !== 'function')) {
     throw new TypeError('kernel-lifecycle-events-config-invalid');
   }
-  registry.event('runtime.onStartup', browser.runtime.onStartup, OWNER)
+  registry.event('runtime.onStartup', browser.runtime.onStartup, KERNEL_LIFECYCLE_OWNER)
     ?.addListener(onStartup);
-  registry.event('alarms.onAlarm', browser.alarms.onAlarm, OWNER)
+  registry.event('alarms.onAlarm', browser.alarms.onAlarm, KERNEL_LIFECYCLE_OWNER)
     ?.addListener((/** @type {any} */ alarm) =>
       alarm?.name === alarmName ? onAlarm(alarm) : undefined);
   if (firefox) {
     registry.event(
-      'storage.session.onChanged', browser.storage?.session?.onChanged, OWNER,
+      'storage.session.onChanged', browser.storage?.session?.onChanged, KERNEL_LIFECYCLE_OWNER,
     )?.addListener(onSessionChanged);
   }
   if (selfHostedChrome) {
     registry.event(
-      'runtime.onUpdateAvailable', browser.runtime.onUpdateAvailable, OWNER,
+      'runtime.onUpdateAvailable', browser.runtime.onUpdateAvailable, KERNEL_LIFECYCLE_OWNER,
     )?.addListener(onUpdateAvailable);
   }
-  return Object.freeze({ owner: OWNER });
+  return Object.freeze({ owner: KERNEL_LIFECYCLE_OWNER });
 };

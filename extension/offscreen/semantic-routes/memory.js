@@ -3,7 +3,6 @@
 // every read or mutation is one exact Options-bound kernel operation.
 
 const routes = Object.freeze({
-  'memory/export': ['semantic.memory.export', () => ({})],
   'memory/deleteAll': ['semantic.memory.delete-all', () => ({})],
   'memory/write': ['semantic.memory.write', (/** @type {any} */ message) => ({
     scope: message?.scope, body: message?.body,

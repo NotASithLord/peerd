@@ -102,8 +102,7 @@ export const OWNED_DENYLIST_SESSION_RULE_IDS = Object.freeze([
  * Compact DNR backstop custody. why remove-only is currently correct: every
  * buildable rule is scoped to driven/App tabs or custodied initiators, and
  * kernel tab custody is unmigrated. The empty driven set yields exactly
- * "remove every owned id". The tab-custody slice must replace this leaf;
- * details in docs/THIN-KERNEL-ARCHITECTURE.md.
+ * "remove every owned id". The tab-custody slice must replace this leaf.
  * @param {Object} deps
  * @param {any} [deps.dnr] the chrome.declarativeNetRequest namespace
  */

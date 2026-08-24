@@ -655,31 +655,9 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
         if (m.type === 'log' || m.type === 'display') return;
 
         if (m.type === 'actor-request') {
-          // An a2a run is the dweb actor's MESH-ONLY surface. Its tool allow-set
-          // grants no delegation (no actor_create), so the worker's
-          // peerd.runtime.runAgent must not re-grant it — refuse at the host, the
-          // authoritative choke point (the worker surface can't be trusted). The
-          // caps profile (PR #119: the page_code worker) is the second no-spawn
-          // lane, enforced the same way.
-          if (a2a || !runtimeProfile.subagent) {
-            recordRefusedCodeOp('actor', 'spawn');
-            worker.postMessage({ type: 'actor-response', rid: m.rid, error: a2a
-              ? 'actor spawn is disabled for a2a runs (the dweb actor does not delegate)'
-              : usedRemoteModules
-                ? remoteModuleCapabilityBlockedMessage('subagents')
-                : 'actor spawn capability is disabled for this job' });
-            return;
-          }
-          const a = m.args ?? {};
-          try {
-            const resp = await runCodeOp('actor', 'spawn', () => sendToSW('actor/spawn', {
-              task: a.task, tools: a.tools, maxSteps: a.maxSteps, maxDepth: a.maxDepth, allowRecursion: a.allowRecursion,
-            }), (response) => response?.ok === true);
-            if (!resp?.ok) worker.postMessage({ type: 'actor-response', rid: m.rid, error: resp?.error ?? 'actor failed' });
-            else worker.postMessage({ type: 'actor-response', rid: m.rid, result: resp.result });
-          } catch (e) {
-            worker.postMessage({ type: 'actor-response', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
-          }
+          recordRefusedCodeOp('actor', 'spawn');
+          worker.postMessage({ type: 'actor-response', rid: m.rid,
+            error: 'actor spawn capability is disabled for this job' });
           return;
         }
         if (m.type === 'actors-request') {

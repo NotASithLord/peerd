@@ -118,6 +118,8 @@ describe('cold entry graphs', () => {
       'vendor/argon2/argon2.js',
       'peerd-egress/vault/vault.js',
       'peerd-egress/vault/keys.js',
+      'background/kernel-skills-authority.js',
+      'peerd-runtime/skills/parse.js',
     ]) {
       expect(measured.modulesSet.has(forbidden), `native kernel imports ${forbidden}`).toBe(false);
     }
@@ -129,14 +131,33 @@ describe('cold entry graphs', () => {
     expect(measured.modulesSet.has('background/vault-authority-client.js')).toBe(true);
     expect(measured.modulesSet.has('shared/cold-util.js')).toBe(true);
     expect(measured.modulesSet.has('shared/util.js')).toBe(false);
-    expect(measured.modulesSet.has('background/routes/contacts.js')).toBe(true);
-    expect(measured.modulesSet.has('background/routes/toolbox.js')).toBe(true);
+    expect(measured.modulesSet.has('background/routes/contacts.js')).toBe(false);
+    expect(measured.modulesSet.has('background/routes/toolbox.js')).toBe(false);
     expect(measured.modulesSet.has('background/kernel-semantic-demand.js')).toBe(false);
     expect(measured.modulesSet.has('background/semantic-demand-client.js')).toBe(false);
     expect(measured.modulesSet.has('shared/semantic-demand-policy.js')).toBe(false);
     expect(measured.modulesSet.has('peerd-engine/app-manifest.js')).toBe(true);
     expect(measured.modulesSet.has('peerd-runtime/semantic.js')).toBe(false);
-    expect(measured.modulesSet.has('peerd-runtime/contacts/aggregate.js')).toBe(true);
+    expect(measured.modulesSet.has('peerd-runtime/contacts/aggregate.js')).toBe(false);
+  });
+
+  test('demand runtimes do not inherit the composer policy family', async () => {
+    for (const entry of [
+      'background/kernel-semantic-runtime.js',
+      'background/kernel-administrative-runtime.js',
+      'background/kernel-executable-runtime.js',
+      'background/kernel-executable-live.js',
+      'background/kernel-executable-transfer-live.js',
+      'background/kernel-dweb-custody-runtime.js',
+      'background/kernel-dweb-route-runtime.js',
+    ]) {
+      const measured = await nativeKernelStats(entry);
+      for (const forbidden of [
+        'background/kernel-composer-routes.js',
+        'background/kernel-denylist-policy.js',
+        'background/kernel-app-file-reader.js',
+      ]) expect(measured.modulesSet.has(forbidden), `${entry} imports ${forbidden}`).toBe(false);
+    }
   });
 
   test('Preview Chrome alone owns the downloaded-update graph', async () => {
@@ -191,7 +212,17 @@ describe('cold entry graphs', () => {
     expect(runtimeImports).toEqual([
       './firefox-storage-keepalive.js',
       './repository-local-client.js',
+      './kernel-local-routes.js',
+      './kernel-production-runtime.js',
+      './kernel-semantic-runtime.js',
+      './kernel-executable-runtime.js',
+      './kernel-administrative-runtime.js',
+      './kernel-dweb-custody-runtime.js',
     ]);
+    for (const specifier of runtimeImports) {
+      expect(PACKAGED_LAZY_MODULE_ENTRIES)
+        .toContain(`background/${specifier.replace(/^\.\//, '')}` as any);
+    }
     expect(kernelSource)
       .toContain("kernelFirefox\n  ? createDeferredRepositoryClient");
     expect(kernelSource)
@@ -330,7 +361,7 @@ describe('cold entry graphs', () => {
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/controller-runtime.js');
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/controller-turn-runtime.js');
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/semantic-route-host.js');
-    for (const cluster of ['actors', 'contacts', 'toolbox'] as const) {
+    for (const cluster of ['actors', 'contributor', 'memory', 'providers'] as const) {
       expect(PACKAGED_LAZY_MODULE_ENTRIES)
         .toContain(`offscreen/semantic-routes/${cluster}.js`);
     }

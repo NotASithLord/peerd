@@ -229,7 +229,7 @@ describe('executable vault-kernel cutover report', () => {
   });
 });
 
-test('test-only entry uses one identity and kernel-local receipts without widening its graph', async () => {
+test('native entry uses one identity and target-exact kernel custody', async () => {
   const entry = join(EXTENSION_DIR, 'background/vault-kernel.js');
   const source = readFileSync(entry, 'utf8');
   expect(source.match(/createKernelIdentity\s*\(/g)).toHaveLength(1);
@@ -246,10 +246,10 @@ test('test-only entry uses one identity and kernel-local receipts without wideni
   expect(source).toContain('coldReceipts.registerRecovery');
   expect(source).toContain('createKernelFeatureHost');
   expect(source).toContain('attachKernelTabEvents({');
-  expect(source).toContain('firefox: false');
+  expect(source).toContain('firefox: kernelFirefox');
   expect(source).not.toContain('onBeforeRequest: () => ({})');
-  expect(source).toContain("'feature-lease-keepalive': featureHost.handleKeepalive");
-  expect(source).toContain('eval: attachUiPort');
+  expect(source).toContain('attachFeatureLease: featureHost.handleKeepalive');
+  expect(source).toContain('attachUi: uiPortOwner.attach');
   expect(source).not.toContain('browser.runtime.onMessage.addListener');
   expect(source).not.toContain('browser.runtime.onConnect.addListener');
   expect(source).toContain('await vaultReady; return kv.get(key)');

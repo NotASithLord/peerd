@@ -14,7 +14,6 @@ import {
   SkillNotFoundError,
 } from '../../extension/peerd-runtime/skills/registry.js';
 import { SkillParseError } from '../../extension/peerd-runtime/skills/parse.js';
-import { dispatchSkillsSemanticRoute } from '../../extension/offscreen/semantic-routes/skills.js';
 
 await useFakeIndexedDB();
 
@@ -134,39 +133,5 @@ describe('kernel skills metadata authority', () => {
       .toEqual({ ok: false, error: 'profile schema is newer than this build' });
     await expect(guarded.routes['skills/remove']({ name: 'alpha' })).resolves
       .toMatchObject({ ok: true });
-  });
-});
-
-describe('sealed-host skills cluster', () => {
-  test('each route is exactly one admitted kernel operation', async () => {
-    const calls: any[] = [];
-    const kernelCall = async (operation: string, payload: unknown) => {
-      calls.push([operation, payload]);
-      return { ok: true, value: { ok: true, echo: operation } };
-    };
-    expect(await dispatchSkillsSemanticRoute('skills/list', {}, { kernelCall }))
-      .toEqual({ ok: true, echo: 'semantic.skills.list' });
-    expect(await dispatchSkillsSemanticRoute('skills/setEnabled',
-      { name: 'alpha', enabled: false, extra: 'dropped' }, { kernelCall }))
-      .toEqual({ ok: true, echo: 'semantic.skills.set-enabled' });
-    expect(await dispatchSkillsSemanticRoute('skills/remove',
-      { name: 'alpha' }, { kernelCall }))
-      .toEqual({ ok: true, echo: 'semantic.skills.remove' });
-    expect(calls).toEqual([
-      ['semantic.skills.list', {}],
-      ['semantic.skills.set-enabled', { name: 'alpha', enabled: false }],
-      ['semantic.skills.remove', { name: 'alpha' }],
-    ]);
-    expect(await dispatchSkillsSemanticRoute('skills/installLocal', {}, { kernelCall }))
-      .toEqual({ ok: false, code: 'semantic-skills-route-refused', outcomeKnown: true });
-  });
-
-  test('a failed or unconfirmed kernel call maps to the shared refusal shape', async () => {
-    expect(await dispatchSkillsSemanticRoute('skills/list', {}, {
-      kernelCall: async () => ({ ok: false, outcomeKnown: true }),
-    })).toMatchObject({ ok: false, outcomeKnown: true, retryable: true });
-    expect(await dispatchSkillsSemanticRoute('skills/list', {}, {
-      kernelCall: async () => ({ ok: false, outcomeKnown: false }),
-    })).toMatchObject({ ok: false, outcomeKnown: false, retryable: false });
   });
 });

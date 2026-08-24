@@ -98,20 +98,40 @@ export const makeGoalRunner = ({
 }) => {
   /** @type {Map<string, GoalRun>} */
   const runs = new Map();
+  let persistenceQueued = 0;
+  let persistenceLane = Promise.resolve();
+
+  // why: a terminal clear must settle after every older live snapshot.
+  /** @param {()=>Promise<void>} operation */
+  const enqueuePersistence = (operation) => {
+    /** @type {Promise<void>} */
+    let running;
+    if (persistenceQueued === 0) {
+      persistenceQueued = 1;
+      try { running = Promise.resolve(operation()); }
+      catch (error) { running = Promise.reject(error); }
+    } else {
+      persistenceQueued += 1;
+      running = persistenceLane.then(operation);
+    }
+    const settled = running.finally(() => { persistenceQueued -= 1; });
+    persistenceLane = settled.catch(() => {});
+    return running;
+  };
 
   // Mirror the live (non-terminal) runs to storage. Fire-and-forget: the
   // in-memory map is authoritative within an SW lifetime; this is the seam that
   // lets resume() pick up after a restart. Best-effort — a write failure just
   // means that run won't resume, not that the live run breaks.
   const persist = () => {
-    if (!kv) return;
+    if (!kv) return Promise.resolve();
     /** @type {Record<string, { goal: string, iteration: number, startedAt: number }>} */
     const out = {};
     for (const [sid, r] of runs) {
       if (r.completed || r.halted) continue;
       out[sid] = { goal: r.goal, iteration: r.iteration, startedAt: r.startedAt };
     }
-    Promise.resolve(kv.set(GOAL_RUNS_KEY, out)).catch(() => {});
+    return enqueuePersistence(() => kv.set(GOAL_RUNS_KEY, out)).catch(() => {});
   };
 
   /** @param {string} sid @returns {GoalRun | null} */
@@ -182,14 +202,14 @@ export const makeGoalRunner = ({
   /** @param {string} sid */
   const forget = async (sid) => {
     if (!kv) return;
-    try {
+    await enqueuePersistence(async () => {
       const stored = await kv.get(GOAL_RUNS_KEY);
       if (stored && typeof stored === 'object' && Object.hasOwn(stored, sid)) {
         const next = { ...stored };
         delete next[sid];
         await kv.set(GOAL_RUNS_KEY, next);
       }
-    } catch { /* best-effort — a lost write just means it may resume once more */ }
+    }).catch(() => {});
   };
 
   /**
@@ -208,8 +228,8 @@ export const makeGoalRunner = ({
   };
 
   /** @param {string} sid @param {'running'|'done'|'halted'|'capped'} phase */
-  const emit = (sid, phase) => {
-    const r = runs.get(sid);
+  const emit = (sid, phase, source = runs.get(sid)) => {
+    const r = source;
     onEvent({
       type: 'goal/state', sessionId: sid, phase,
       active: phase === 'running',
@@ -292,11 +312,11 @@ export const makeGoalRunner = ({
         } else {
           const phase = run.completed ? 'done' : run.halted ? 'halted'
             : run.iteration >= maxIterations ? 'capped' : 'done';
-          emit(sid, phase);
+          await forget(sid);
+          emit(sid, phase, run);
           try { onRunEnd(sid, { phase, summary: run.summary, reason: run.lastError ?? null }); }
           catch (e) { console.error('[goal] onRunEnd threw', e); }
           runs.delete(sid);
-          persist();  // terminal — clear it from the durable mirror
         }
       }
     }

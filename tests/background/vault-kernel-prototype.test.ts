@@ -161,12 +161,13 @@ describe('minimal vault authority-kernel prototype', () => {
     expect(utility).toContain("from './kernel-app-file-reader.js'");
     expect(utility).toContain("from './kernel-site-client-routes.js'");
     expect(source).not.toContain('createKernelSemanticDemand');
-    expect(source).toContain('createKernelSemanticRoutes');
+    expect(source).toContain("import('./kernel-semantic-runtime.js')");
+    expect(source).toContain('makeKernelDemandRoutes');
     expect(source).toContain('createVaultKernelAssemblyReport');
     expect(source).toContain('identity: kernelIdentity');
     expect(source).toContain('CONTROLLER_BUILD_DIGEST');
     expect(source).toContain('bindReply: generation.bindCurrent');
-    expect(source).toContain("generation.bind({ type: 'state', state })");
+    expect(source).toContain("generation.bind({ type: 'state', state: delivered })");
     expect(source).not.toContain('globalThis.chrome');
     expect(source).toContain('isFirstPartySender');
     expect(source).toContain('isSidepanelSender');
@@ -179,14 +180,14 @@ describe('minimal vault authority-kernel prototype', () => {
       EXTENSION_DIR,
       join(EXTENSION_DIR, 'background/vault-kernel.js'),
     )].map((path) => path.slice(EXTENSION_DIR.length + 1));
-    expect(graph).toContain('background/routes/toolbox.js');
-    expect(graph).toContain('background/kernel-toolbox-store.js');
+    expect(graph).not.toContain('background/routes/toolbox.js');
+    expect(graph).not.toContain('background/kernel-toolbox-store.js');
     expect(graph).not.toContain('peerd-runtime/toolbox/store.js');
     expect(graph).not.toContain('peerd-runtime/toolbox/core.js');
     expect(graph).not.toContain('peerd-runtime/tools/prompt-wrap.js');
     expect(graph).not.toContain('background/context-snapshots.js');
-    expect(graph).toContain('background/routes/contacts.js');
-    expect(graph).toContain('peerd-runtime/contacts/aggregate.js');
+    expect(graph).not.toContain('background/routes/contacts.js');
+    expect(graph).not.toContain('peerd-runtime/contacts/aggregate.js');
     expect(graph).not.toContain('peerd-runtime/contacts/store.js');
     expect(graph).not.toContain('background/kernel-semantic-demand.js');
     expect(graph).not.toContain('background/semantic-demand-client.js');

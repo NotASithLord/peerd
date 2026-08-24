@@ -73,12 +73,9 @@ describe('digest-bound lazy semantic route clusters', () => {
   test('each literal cluster reaches only its own route family', async () => {
     const expected: Record<string, string> = {
       actors: 'background/routes/actor-overview.js',
-      contacts: 'background/routes/contacts.js',
       contributor: 'peerd-runtime/observability/contributor-store.js',
       memory: 'offscreen/semantic-routes/memory.js',
       providers: 'shared/provider-authority-policy.js',
-      skills: 'offscreen/semantic-routes/skills.js',
-      toolbox: 'background/routes/toolbox.js',
     };
     for (const [cluster, ownRoute] of Object.entries(expected)) {
       const entry = `offscreen/semantic-routes/${cluster}.js`;

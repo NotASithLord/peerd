@@ -364,9 +364,27 @@ describe('vault authority kernel boot and UI contract', () => {
       'apps/import-git': async () => { calls.push('import-git'); return { ok: true }; },
       'onboarding/complete': async () => { calls.push('onboarding'); return { ok: true }; },
       'permission/set': async () => { calls.push('permission'); return { ok: true }; },
+      'agent/send': async () => { calls.push('agent-send'); return { ok: true }; },
+      'contacts/list': async () => { calls.push('contacts'); return { ok: true }; },
+      'skills/list': async () => { calls.push('skills'); return { ok: true }; },
+      'hooks/list': async () => { calls.push('hooks'); return { ok: true }; },
+      'memory/init': async () => { calls.push('memory-init'); return { ok: true }; },
+      'agent/stop': async () => { calls.push('agent-stop'); return { ok: true }; },
+      'actor/spawn': async () => { calls.push('actor-spawn'); return { ok: true }; },
+      'session/archive': async () => { calls.push('session-archive'); return { ok: true }; },
+      'session/reset': async () => { calls.push('session-reset'); return { ok: true }; },
+      'session/switch': async () => { calls.push('session-switch'); return { ok: true }; },
+      'session/debugBundle': async () => { calls.push('debug'); return { ok: true }; },
+      'actor-isolation/retry': async () => { calls.push('isolation'); return { ok: true }; },
     };
     const routeProvenance = makeKernelRouteProvenance({
       humanUi: (sender: any) => sender?.surface === 'sidepanel' || sender?.surface === 'home',
+      homeUi: (sender: any) => sender?.surface === 'home',
+      sidepanelUi: (sender: any) => sender?.surface === 'sidepanel',
+      evalUi: (sender: any) => sender?.surface === 'eval',
+      activityStopUi: (sender: any, message: any) =>
+        sender?.surface === 'active-page' && message?.activity === 'live',
+      actorSpawnUi: (sender: any) => sender?.surface === 'notebook' || sender?.surface === 'offscreen',
       optionsUi: (sender: any) => sender?.surface === 'options',
       appUi: (sender: any, appId: string) => sender?.surface === 'app' && sender?.appId === appId,
       voiceUi: (sender: any) => sender?.surface === 'sidepanel' || sender?.surface === 'options',
@@ -515,6 +533,51 @@ describe('vault authority kernel boot and UI contract', () => {
       { firstParty: true, surface: 'options' },
     )).toEqual({ ok: false, error: 'vault-route-unauthorized-sender' });
     expect(await invoke(
+      { type: 'agent/send', text: 'never load' },
+      { firstParty: true, surface: 'offscreen' },
+    )).toEqual({ ok: false, error: 'vault-route-unauthorized-sender' });
+    expect(await invoke(
+      { type: 'agent/send', text: 'hello' },
+      { firstParty: true, surface: 'sidepanel' },
+    )).toEqual({ ok: true });
+    expect(await invoke(
+      { type: 'agent/send', text: 'eval' },
+      { firstParty: true, surface: 'eval' },
+    )).toEqual({ ok: true });
+    expect(await invoke(
+      { type: 'agent/send', text: 'home' },
+      { firstParty: true, surface: 'home' },
+    )).toEqual({ ok: false, error: 'vault-route-unauthorized-sender' });
+    expect(await invoke(
+      { type: 'agent/stop', activity: 'live' },
+      { surface: 'active-page' },
+    )).toEqual({ ok: true });
+    expect(await invoke({ type: 'actor/spawn' }, { firstParty: true, surface: 'notebook' }))
+      .toEqual({ ok: true });
+    for (const [route, allowed, denied] of [
+      ['session/archive', 'home', 'eval'],
+      ['session/switch', 'home', 'options'],
+      ['session/reset', 'eval', 'options'],
+      ['session/debugBundle', 'options', 'home'],
+      ['actor-isolation/retry', 'sidepanel', 'home'],
+    ]) {
+      expect(await invoke({ type: route }, { firstParty: true, surface: allowed }))
+        .toEqual({ ok: true });
+      expect(await invoke({ type: route }, { firstParty: true, surface: denied }))
+        .toEqual({ ok: false, error: 'vault-route-unauthorized-sender' });
+    }
+    for (const [route, allowed, denied] of [
+      ['contacts/list', 'home', 'sidepanel'],
+      ['skills/list', 'sidepanel', 'home'],
+      ['hooks/list', 'sidepanel', 'home'],
+      ['memory/init', 'options', 'home'],
+    ]) {
+      expect(await invoke({ type: route }, { firstParty: true, surface: allowed }))
+        .toEqual({ ok: true });
+      expect(await invoke({ type: route }, { firstParty: true, surface: denied }))
+        .toEqual({ ok: false, error: 'vault-route-unauthorized-sender' });
+    }
+    expect(await invoke(
       { type: 'app/editor/read', appId: 'one' },
       { firstParty: true, surface: 'app', appId: 'one' },
     )).toEqual({ ok: true });
@@ -533,11 +596,15 @@ describe('vault authority kernel boot and UI contract', () => {
     expect(calls).toEqual([
       'git', 'settings', 'provider', 'provider-test', 'provider-test',
       'provider-status', 'provider-status', 'models', 'models', 'openrouter-models', 'local-models', 'memory-write',
-      'session', 'permission', 'onboarding', 'import-git', 'set-model', 'editor', 'editor-alias',
+      'session', 'permission', 'onboarding', 'import-git', 'set-model',
+      'agent-send', 'agent-send', 'agent-stop', 'actor-spawn',
+      'session-archive', 'session-switch', 'session-reset', 'debug', 'isolation',
+      'contacts', 'skills', 'hooks', 'memory-init',
+      'editor', 'editor-alias',
     ]);
     expect(() => makeKernelRouteProvenance({
       humanUi: () => true, optionsUi: () => true, appUi: () => true,
-      voiceUi: () => true,
+      homeUi: () => true, sidepanelUi: () => true, voiceUi: () => true,
       vaultRoutes: ['settings/update'],
     })).toThrow('kernel-route-provenance-duplicate:settings/update');
   });

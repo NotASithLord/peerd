@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
   classifyDrivenChildRequestTarget,
+  FIREFOX_DRIVEN_CHILD_MARKERS_KEY,
   FirefoxChildRequestGuardUnavailableError,
+  makeFirefoxDrivenChildMarkerStore,
   makeDrivenChildRequestGuard,
   registerFirefoxDrivenChildRequestGuard,
 } from '../../extension/background/driven-child-request-guard.js';
@@ -60,6 +62,26 @@ describe('driven child request guard', () => {
     expect(guard.onBeforeRequest({ tabId: 8, url: 'https://public.example/' })).toEqual({});
   });
 
+  test('quarantines one cold child until durable source custody resolves', () => {
+    let sourcesReady = false;
+    const guard = makeDrivenChildRequestGuard({
+      isSourceReady: () => sourcesReady,
+      isDrivenSource: (tabId) => tabId === 7,
+      classifyTarget: (url) => ({ allowed: !url.includes('127.0.0.1') }),
+    });
+    guard.onNavigationTarget({ tabId: 8, sourceTabId: 6 });
+    expect(guard.has(8)).toBe(true);
+    expect(guard.onBeforeRequest({ tabId: 8, url: 'http://127.0.0.1/private' }))
+      .toEqual({ cancel: true });
+
+    sourcesReady = true;
+    guard.reconcile([{ id: 6 }, { id: 8, openerTabId: 6 }]);
+    expect(guard.has(8)).toBe(false);
+    guard.onNavigationTarget({ tabId: 9, sourceTabId: 7 });
+    guard.resolveNavigationTarget({ tabId: 9, sourceTabId: 7 });
+    expect(guard.has(9)).toBe(true);
+  });
+
   test('reports one blocked subrequest and releases after DNR handoff', () => {
     const blocked: any[] = [];
     const guard = makeDrivenChildRequestGuard({
@@ -103,6 +125,95 @@ describe('driven child request guard', () => {
     expect(guard.onBeforeRequest({ tabId: 9, url: 'http://127.0.0.1/private' })).toEqual({});
   });
 
+  test('restores exact child custody synchronously after a Firefox event-page recycle', () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+    } as unknown as Storage;
+    const markers = makeFirefoxDrivenChildMarkerStore(storage);
+    const first = makeDrivenChildRequestGuard({
+      isDrivenSource: (tabId) => tabId === 7,
+      classifyTarget: (url) => ({ allowed: !url.includes('127.0.0.1') }),
+      markers,
+    });
+    first.onNavigationTarget({ tabId: 8, sourceTabId: 7 });
+    expect(JSON.parse(values.get(FIREFOX_DRIVEN_CHILD_MARKERS_KEY)!)).toEqual([
+      { tabId: 8, sourceTabId: 7 },
+    ]);
+
+    const recycled = makeDrivenChildRequestGuard({
+      // The driven-source registry is intentionally not hydrated yet. The
+      // browser-issued durable relation remains authoritative for this child.
+      isDrivenSource: () => false,
+      classifyTarget: (url) => ({ allowed: !url.includes('127.0.0.1') }),
+      markers,
+    });
+    expect(recycled.onBeforeRequest({
+      tabId: 8, url: 'http://127.0.0.1/private', type: 'xmlhttprequest',
+    })).toEqual({ cancel: true });
+    expect(recycled.onBeforeRequest({
+      tabId: 9, url: 'http://127.0.0.1/private', type: 'xmlhttprequest',
+    })).toEqual({});
+    recycled.release(8);
+    expect(values.has(FIREFOX_DRIVEN_CHILD_MARKERS_KEY)).toBe(false);
+  });
+
+  test('fails closed on marker corruption and clears only browser-disproved leftovers', () => {
+    let raw: string | null = '{broken';
+    const storage = {
+      getItem: () => raw,
+      setItem: (_key: string, value: string) => { raw = value; },
+      removeItem: () => { raw = null; },
+    } as unknown as Storage;
+    const markers = makeFirefoxDrivenChildMarkerStore(storage);
+    const corrupt = makeDrivenChildRequestGuard({ isDrivenSource: () => false, markers });
+    expect(corrupt.ready()).toBe(false);
+    expect(corrupt.onBeforeRequest({ tabId: 30, url: 'https://public.example/' }))
+      .toEqual({ cancel: true });
+    expect(corrupt.reconcile([])).toBe(true);
+    expect(raw).toBeNull();
+
+    markers.write([{ tabId: 8, sourceTabId: 7 }]);
+    const stale = makeDrivenChildRequestGuard({ isDrivenSource: () => false, markers });
+    expect(stale.reconcile([{ id: 8, openerTabId: 99 }, { id: 7 }])).toBe(true);
+    expect(stale.has(8)).toBe(false);
+    expect(raw).toBeNull();
+  });
+
+  test('holds requests after a synchronous marker write failure', () => {
+    const guard = makeDrivenChildRequestGuard({
+      isDrivenSource: () => true,
+      markers: {
+        read: () => [],
+        write: () => { throw new Error('disk unavailable'); },
+      },
+    });
+    guard.onNavigationTarget({ tabId: 8, sourceTabId: 7 });
+    expect(guard.ready()).toBe(false);
+    expect(guard.onBeforeRequest({ tabId: 99, url: 'https://public.example/' }))
+      .toEqual({ cancel: true });
+  });
+
+  test('fails closed instead of evicting exact custody on marker overflow', () => {
+    const guard = makeDrivenChildRequestGuard({
+      isDrivenSource: () => true, maxChildren: 2,
+    });
+    guard.onNavigationTarget({ tabId: 1, sourceTabId: 10 });
+    guard.onNavigationTarget({ tabId: 2, sourceTabId: 10 });
+    guard.onNavigationTarget({ tabId: 3, sourceTabId: 10 });
+    expect(guard.ready()).toBe(false);
+    expect(guard.has(1)).toBe(true);
+    expect(guard.has(3)).toBe(true);
+    expect(guard.onBeforeRequest({ tabId: 99, url: 'https://public.example/' }))
+      .toEqual({ cancel: true });
+    guard.release(3);
+    expect(guard.reconcile([
+      { id: 10 }, { id: 1, openerTabId: 10 }, { id: 2, openerTabId: 10 },
+    ])).toBe(true);
+  });
+
   test('registers only on Firefox and fails honestly when blocking is unavailable', () => {
     const calls: any[] = [];
     const event = { addListener: (...args: any[]) => { calls.push(args); } };
@@ -120,5 +231,7 @@ describe('driven child request guard', () => {
       event: { addListener: () => { throw new Error('permission missing'); } },
       listener,
     })).toThrow(FirefoxChildRequestGuardUnavailableError);
+    expect(() => makeFirefoxDrivenChildMarkerStore(null as any))
+      .toThrow(FirefoxChildRequestGuardUnavailableError);
   });
 });

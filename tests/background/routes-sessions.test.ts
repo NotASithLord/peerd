@@ -42,7 +42,6 @@ const baseDeps = (over: any = {}) => {
       handleToolsCommand: async (a: string) => { calls.tools.push(a); },
       postChatNote: () => {},
       spawnActor: async (req: any) => ({ ran: req.task, depth: req.parentDepth }),
-      requestReview: async (req: any) => ({ reviewed: true, depth: req.parentDepth }),
       appClient: { listFiles: async () => ['a.js', { path: 'b.js' }] },
       browser: { tabs: { query: async () => [
         { id: 1, title: 'Allowed', url: 'https://ok.com/p', active: true },
@@ -66,6 +65,11 @@ const until = async (predicate: () => boolean, timeoutMs = 1000) => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 };
+
+test('review remains an internal tool without an external route', () => {
+  const { deps } = baseDeps();
+  expect(Object.hasOwn(makeSessionRoutes(deps), 'review/run')).toBe(false);
+});
 
 test('session/debugBundle is observational', async () => {
   let writes = 0;
@@ -539,9 +543,5 @@ describe('actor + review spawn', () => {
   test('actor/spawn no active session', async () => {
     const { deps } = baseDeps({ sessionCache: { sessionGet: async () => null } });
     expect(await makeSessionRoutes(deps)['actor/spawn']({ task: 'go' })).toEqual({ ok: false, error: 'no-active-session' });
-  });
-  test('review/run passes parent depth through', async () => {
-    const { deps } = baseDeps();
-    expect(await makeSessionRoutes(deps)['review/run']({ diff: 'd' })).toEqual({ ok: true, result: { reviewed: true, depth: 2 } });
   });
 });

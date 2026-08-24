@@ -9,7 +9,7 @@
 
 /**
  * @param {Record<string, any>} deps
- * @returns {Record<string, (msg?: any) => Promise<any>>}
+ * @returns {Record<string, (msg?: any, context?: any) => Promise<any>>}
  */
 export const makeSessionRoutes = (deps) => {
   const {
@@ -17,9 +17,9 @@ export const makeSessionRoutes = (deps) => {
     buildToolContext, applyComposer, commandSources, prepareUserAttachmentsWithDocs,
     convertDocAttachment,
     runAgentTurn, runInit, handleSystemCommand, handleToolsCommand,
-    postChatNote, spawnActor, requestReview, browser,
+    postChatNote, spawnActor, browser,
     startGoalRun, haltGoalRun, ensureSession, actorRecoveryReady, actorMessaging,
-    actorLifecycle,
+    actorLifecycle, admitSend,
     // The debug surface: the pure assembler + tree walk from
     // peerd-runtime/observability, the SW's live snapshot ring, and the
     // settings/channel/version identity the bundle stamps.
@@ -87,7 +87,9 @@ export const makeSessionRoutes = (deps) => {
       return { ok: true };
     },
 
-    'agent/send': async (/** @type {any} */ message = {}) => {
+    'agent/send': async (
+      /** @type {any} */ message = {}, /** @type {any} */ admission = undefined,
+    ) => {
       const {
         text, attachments, activeTabId = null, goal = false, operationId = null,
         checkOnly = false,
@@ -104,6 +106,16 @@ export const makeSessionRoutes = (deps) => {
         }
         return sendReceiptStatus(operationId, requestedSessionId);
       }
+      const admitted = () => !admitSend || admitSend(admission);
+      const stopped = () => ({
+        ok: false,
+        error: 'agent-send-stopped-before-dispatch',
+        code: 'agent-send-stopped-before-dispatch',
+        outcomeKnown: true,
+        phase: 'pre-dispatch',
+        retryable: false,
+      });
+      if (!admitted()) return stopped();
       if (typeof text !== 'string' || !text.trim()) {
         return { ok: false, error: 'empty-message' };
       }
@@ -145,7 +157,9 @@ export const makeSessionRoutes = (deps) => {
           if (boundSessionId && sessionId !== boundSessionId) {
             return { ok: false, error: 'agent-send-session-mismatch', outcomeKnown: true };
           }
+          if (!admitted()) return stopped();
           await pushState();
+          if (!admitted()) return stopped();
           await startGoalRun({ sessionId, goal: trimmed });
         } catch (e) {
           console.error('[sw] goal start threw', e);
@@ -272,6 +286,9 @@ export const makeSessionRoutes = (deps) => {
           return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
         }
       }
+      // why: Stop can arrive while composer or document IO is suspended; the
+      // ingress generation must still fence the eventual model admission.
+      if (!admitted()) return stopped();
       // Fire and forget — the side panel doesn't await; it watches the
       // port for streaming events. Returning immediately keeps the
       // message-channel cycle short.
@@ -354,27 +371,6 @@ export const makeSessionRoutes = (deps) => {
         allowRecursion: allowRecursion === true,
         parentSessionId,
         parentDepth: parent?.depth ?? 0,
-      });
-      return { ok: true, result: out };
-    },
-
-    // Clean-context review (feature 08). The `/review` command surface +
-    // Notebook peerd.review() shim post here. Spawns a READ-ONLY reviewer
-    // over a diff and returns the structured summary. The parent is the
-    // current chat session; the reviewer inherits its depth (+1) and trust
-    // mode through the shared spawn orchestrator, but is narrowed to
-    // read-only tools — it cannot edit, so the writer stays the single writer.
-    'review/run': async ({ before, after, diff, since, focus }) => {
-      if (vault.isLocked()) return { ok: false, error: 'locked' };
-      const parentSessionId = await sessionCache.sessionGet('currentSessionId');
-      if (!parentSessionId) return { ok: false, error: 'no-active-session' };
-      const parent = await sessions.get(parentSessionId);
-      const out = await requestReview({
-        parentSessionId,
-        parentDepth: parent?.depth ?? 0,
-        before, after, diff,
-        since: typeof since === 'string' ? since : undefined,
-        focus: typeof focus === 'string' ? focus : undefined,
       });
       return { ok: true, result: out };
     },

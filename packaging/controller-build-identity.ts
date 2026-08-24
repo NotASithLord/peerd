@@ -30,6 +30,8 @@ export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
   // native later. It is not a child of a controller client, so bind it as an
   // explicit root rather than letting authority drift behind a stale host.
   'background/controller-turn-bridge.js',
+  'background/kernel-semantic-authority.js',
+  'background/kernel-semantic-control.js',
   'offscreen/controller-shell.js',
   'offscreen/controller-bootstrap.js',
   'offscreen/controller-worker.js',

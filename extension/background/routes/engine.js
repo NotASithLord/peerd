@@ -281,6 +281,16 @@ export const makeEngineRoutes = (deps) => {
       auditLog.append({ type: 'pod_git_command', details: { podId, command, exitCode: result.exitCode } }).catch(() => {});
       return { ok: true, result };
     } catch (error) {
+      if (/** @type {{outcomeKnown?:unknown}} */ (error)?.outcomeKnown === false) {
+        return {
+          ok: false,
+          error: 'Git may have completed, but Peerd could not confirm the result. Refresh Git history before trying again.',
+          code: /** @type {{code?:string}} */ (error)?.code ?? 'pod-git-outcome-unknown',
+          outcomeKnown: false,
+          outcomeKind: 'unknown',
+          retryable: false,
+        };
+      }
       const result = podGitFailure(error);
       auditLog.append({
         type: 'pod_git_command',

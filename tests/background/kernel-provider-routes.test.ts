@@ -3,7 +3,6 @@ import {
   createKernelOpenRouterModelsRoute,
   createKernelLocalRoutes,
   createKernelProviderTestRoute,
-  createKernelSemanticRoutes,
   makeKernelModelOptionsRoute,
   makeKernelProviderSetKeyRoute,
 } from '../../extension/background/kernel-local-routes.js';
@@ -40,34 +39,6 @@ describe('native provider authority policy', () => {
           : provider.name === 'openai' ? 'https://api.openai.com/v1/chat/completions'
             : provider.name === 'glm' ? 'https://api.z.ai/api/paas/v4/chat/completions' : null,
     })));
-  });
-
-  test('native status is descriptor-only, secret-masked, and host-free', async () => {
-    const reads: string[] = [];
-    const routes = createKernelSemanticRoutes({
-      idb: { get: async () => undefined, getAll: async () => [], put: async () => {}, del: async () => {} },
-      auditLog: { list: async () => [] }, ready: Promise.resolve(),
-      vault: { isLocked: () => false, getSecret: async (name: string) => {
-        reads.push(name);
-        return name === 'anthropic_api_key' ? 'sk-ant-example-123456' : null;
-      } },
-    });
-    const direct = await routes['provider/status']();
-    expect(reads).toEqual(PROVIDER_AUTHORITY.flatMap((row) => row.secretName ? [row.secretName] : []));
-    expect(direct).toEqual({
-      ok: true,
-      providers: PROVIDER_AUTHORITY.map((provider) => ({
-        name: provider.name,
-        label: provider.label,
-        defaultModel: provider.defaultModel,
-        defaultRunnerModel: provider.defaultRunnerModel,
-        hasKey: provider.secretName === null || provider.name === 'anthropic',
-        keyless: provider.secretName === null,
-        liveModels: provider.probeKind === 'ollama',
-        keyPreview: provider.name === 'anthropic' ? 'sk-ant-…456 · 21 chars' : null,
-      })),
-    });
-    expect(JSON.stringify(direct)).not.toContain('example-123456');
   });
 
   test('pins every credentialed probe to its shipped endpoint and default model', () => {

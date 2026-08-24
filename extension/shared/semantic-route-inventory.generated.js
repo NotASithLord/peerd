@@ -951,14 +951,6 @@ export const LEGACY_SEMANTIC_ROUTE_INVENTORY = Object.freeze([
     "source": "service-worker.js"
   },
   {
-    "route": "review/run",
-    "channels": [
-      "store",
-      "preview"
-    ],
-    "source": "extension/background/routes/sessions.js"
-  },
-  {
     "route": "script-run/abort",
     "channels": [
       "store",

@@ -6,6 +6,7 @@ import {
   parseKernelAppCatalogRow,
 } from '../../extension/background/kernel-app-catalog.js';
 import { makeKernelAppCatalogRoutes } from '../../extension/background/kernel-app-catalog.js';
+import { createAppRegistry } from '../../extension/peerd-engine/background.js';
 
 const initialRow = () => ({
   key: 'apps.v1',
@@ -111,6 +112,40 @@ describe('native kernel App catalog', () => {
     expect(idb.row.value.sessionDefaults).toEqual({ chat: 'app-import' });
     await expect(catalog.remove('app-import')).resolves.toBe(true);
     expect(idb.row.value).toEqual({ schemaVersion: 1, apps: {}, sessionDefaults: {} });
+  });
+
+  test('bind drains cold mutations before loading the one live registry cache', async () => {
+    const idb = makeIdb();
+    const catalog = createKernelAppCatalog({ idb, now: () => 99 });
+    const cold = catalog.setName('a', 'Cold rename');
+    const live = await catalog.bindLiveRegistry(async () => createAppRegistry({
+      storage: {
+        get: async () => (await idb.get('apps', 'apps.v1'))?.value,
+        set: async (_key: string, value: any) => idb.put('apps', { key: 'apps.v1', value }),
+      },
+    }));
+    await cold;
+    expect(await live.get('a')).toMatchObject({ name: 'Cold rename' });
+  });
+
+  test('cold and rich callers share one serialized cache after binding', async () => {
+    const idb = makeIdb();
+    const catalog = createKernelAppCatalog({ idb, now: () => 99 });
+    const live = await catalog.bindLiveRegistry(async () => createAppRegistry({
+      storage: {
+        get: async () => (await idb.get('apps', 'apps.v1'))?.value,
+        set: async (_key: string, value: any) => idb.put('apps', { key: 'apps.v1', value }),
+      },
+    }));
+    await Promise.all([
+      catalog.setFavorite('a', true),
+      live.update('a', { name: 'Rich rename' }),
+      catalog.setDefaultForSession('other-chat', 'b'),
+    ]);
+    expect(await catalog.get('a')).toMatchObject({ name: 'Rich rename', favorite: true });
+    expect(await live.getDefaultForSession('other-chat')).toBe('b');
+    expect(idb.row.value.apps.a).toMatchObject({ name: 'Rich rename', favorite: true });
+    expect(idb.row.value.sessionDefaults['other-chat']).toBe('b');
   });
 
   test('locked and malformed mutations refuse before any catalog IO', async () => {
