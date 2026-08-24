@@ -115,6 +115,17 @@ export const abortJob = (runId, owner) => {
   entry.kill();
 };
 
+// Lease revocation is broader than a user-initiated Stop: every worker owned
+// by this DOM host must cross the teardown fence before the host can receipt
+// the stop. Do not tombstone these IDs; the whole generation is being retired.
+export const abortAllJobs = () => {
+  const entries = [...liveJobs.values()];
+  liveJobs.clear();
+  abortedEarly.clear();
+  for (const entry of entries) entry.kill();
+  return entries.length;
+};
+
 // Any job that can wait on an outward capability relay gets its own sub-cap
 // under MAX_CONCURRENT_JOBS. This includes page/a2a/site clients as well as
 // actors/provider: a slow external system must never occupy every worker slot

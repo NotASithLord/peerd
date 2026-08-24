@@ -3,160 +3,162 @@
 //
 // Responsibilities:
 //
-//   1. Hold a chrome.runtime.connect port to the SW. As long as any
-//      port is open AND ACTIVELY EXCHANGING MESSAGES, the SW won't be
-//      terminated by the 30s idle timer. Some Chrome versions appear
-//      to treat an idle port as "not actually keeping the SW busy" and
-//      kill it anyway — see the heartbeat pattern below.
+//   1. Execute exact controller/dweb/DOM/media feature leases. With no lease
+//      this document has no runtime Port, heartbeat, network, microphone, or
+//      heavyweight feature graph.
 //
-//   2. Host the WebVM (CheerpX) runtime (V1 step 10).
+//   2. Run DOM-dependent parsing and sealed jobs on bounded demand.
 //
-//   3. Run the DOM sanitizer (DOMParser-based) when read_page lands.
-//
-//   4. Host the voice transcriber. Moonshine needs WebGPU + WebAudio
+//   3. Host the voice transcriber. Moonshine needs WebGPU + WebAudio
 //      which the SW doesn't have. The transcriber is lazily created
 //      on the first voice/init message; teardown drops it.
 
-import browser from '/vendor/browser-polyfill.js';
-import { createModelStore } from '/peerd-runtime/offscreen.js';
-// Headless JS jobs (the script tool / engine.runJob): a sealed Worker hosted
-// here, no UI. See job-runner.js for its (deliberately seal-only) security note.
-import { runJob, abortJob } from './job-runner.js';
-// Toolbox writes use the same parser/resolver already linked by job-runner,
-// avoiding a duplicate Acorn graph in the MV3 service worker.
-import './toolbox-parse.js';
-// The heap split: EVERY offscreen agent loop — ephemeral spawned reasoners AND
-// bound actors (VM/Notebook/App/web) — runs in a dedicated Worker via this ONE host.
-import { runActor, abortActor } from './actor-runner.js';
-import { bindActorChannel } from './actor-channel-host.js';
-import { ACTOR_CHANNEL_OFFER, ACTOR_CHANNEL_PROTOCOL } from '/shared/actor-channel-protocol.js';
+import browser from '/shared/browser-api.js';
+import { CONTROLLER_BUILD_DIGEST, EXTENSION_VERSION } from '/shared/build-config.js';
+import {
+  createOffscreenFeatureLeaseHost,
+} from './feature-lease-host.js';
+import {
+  FEATURE_LEASE_HOST_PROTOCOL,
+  FEATURE_LEASE_KEEPALIVE_PORT,
+} from '/shared/feature-lease-protocol.js';
 // PDF text extraction (the read_pdf runner tool): pdf.js needs a Worker, which
 // the SW can't host. Self-registers a 'pdf/extract' message handler.
-import './pdf-extract.js';
 // Office/publishing document conversion (the read_doc tool): Word, Excel,
 // PowerPoint, OpenDocument, RTF, EPUB, CSV -> Markdown. Self-registers a
 // 'doc/extract' message handler. Offscreen for the same reason as the PDF
 // reader: the untrusted bytes (tens of MB) never enter the SW.
-import './doc-extract.js';
 // HTML -> markdown extraction (fetch_url's clean-content path): Readability +
 // Turndown need a DOM Document, which the SW can't build. The shell
 // self-registers a 'web/extract' message handler; the headless job runner's
 // fetch bridge reaches the pipeline DIRECTLY through the core's adapter
 // (same document — no route needed).
-import './web-extract.js';
-import { extractMarkdownLocal } from './web-extract-core.js';
-import { initLocalModel, generateLocal, generationInFlight, localModelStatus, localModelCatalog, loadingModelId, probeWebgpu, teardownLocalModel } from './local-model.js';
-import { isServiceWorkerSender, isTrustedSender } from '/shared/messaging.js';
-// The always-on base network (S1b). Self-registers a dweb/base-host/* handler;
-// inert on store builds (DWEB_ENABLED false + loadDweb stub). The lobby
-// connection lives here so the network outlives any tab.
-import './dweb-base.js';
-// (WebVM used to be hosted here. As of the discrete-VM rework, each
-// WebVM lives in its own browser tab at /engine-tabs/vm-tab/index.html and runs
-// CheerpX in that tab. The offscreen doc keeps the SW keepalive port
-// + the voice transcriber.)
-
-const PORT_NAME = 'sw-keepalive';
-const RECONNECT_DELAY_MS = 500;
-// Heartbeat interval. Must be < 30s (the SW idle timer) by a comfortable
-// margin so we never let the SW idle out between heartbeats. We also
-// don't want to spam — 20s is the standard MV3 keepalive cadence.
-const HEARTBEAT_MS = 20_000;
-// Independent tick log so we can see when this doc itself is alive vs
-// dead. The offscreen doc has a different lifecycle than the SW;
-// Chrome can terminate it under memory pressure even if the SW lives.
-const TICK_MS = 5_000;
+import {
+  isServiceWorkerSender, isTrustedSender, registerServiceWorkerChannels,
+} from './supervisor-channels.js';
+// The base network is operation-lazy: Store never loads it, while Preview
+// starts it only after the service worker acquires the deliberate dweb lease.
+// Once started it remains in this offscreen document so discovery, seeding and
+// App rooms outlive any single tab. The loader is not the lease; the host's
+// explicit start/stop routes retain that lifecycle contract.
+// (WebVM used to be hosted here. As of the discrete-VM rework, each WebVM
+// lives in its own browser tab.)
 
 console.log('[offscreen] loaded at', new Date().toISOString(), '— UA:', navigator.userAgent);
 
-/** @type {import('webextension-polyfill').Runtime.Port | null} */
-let port = null;
-/** @type {ReturnType<typeof setInterval> | null} */
-let heartbeatTimer = null;
-
-const startHeartbeat = () => {
-  stopHeartbeat();
-  heartbeatTimer = setInterval(() => {
-    if (!port) return;
-    try {
-      port.postMessage({ type: 'heartbeat', at: Date.now() });
-    } catch (e) {
-      console.warn('[offscreen] heartbeat post failed', e);
-    }
-  }, HEARTBEAT_MS);
+/** @type {ReturnType<typeof createOffscreenFeatureLeaseHost> | null} */
+let featureLeaseHost = null;
+/** @type {Promise<typeof import('./controller-bootstrap.js')> | null} */
+let controllerBootstrapPromise = null;
+const loadControllerBootstrap = () => (controllerBootstrapPromise ??= import('./controller-bootstrap.js')
+  .catch((cause) => { controllerBootstrapPromise = null; throw cause; }));
+/** @type {Promise<typeof import('./repository-host.js')> | null} */
+let repositoryHostPromise = null;
+const loadRepositoryHost = () => (repositoryHostPromise ??= import('./repository-host.js')
+  .catch((cause) => { repositoryHostPromise = null; throw cause; }));
+/** @type {Promise<typeof import('./dweb-base.js')> | null} */
+let dwebHostPromise = null;
+const loadDwebHost = () => (dwebHostPromise ??= import('./dweb-base.js')
+  .catch((cause) => { dwebHostPromise = null; throw cause; }));
+const rejectWithoutLease = (/** @type {string} */ scope,
+  /** @type {(value:any)=>void} */ sendResponse) => {
+  const refusal = featureLeaseHost
+    ? featureLeaseHost.requireActive(scope)
+    : { ok: false, error: 'feature-lease-host-not-ready', scope };
+  if (!refusal) return false;
+  sendResponse(refusal);
+  return true;
 };
 
-const stopHeartbeat = () => {
-  if (heartbeatTimer !== null) {
-    clearInterval(heartbeatTimer);
-    heartbeatTimer = null;
-  }
-};
-
-const connect = () => {
-  try {
-    const p = browser.runtime.connect({ name: PORT_NAME });
-    port = p;
-    console.log('[offscreen] keepalive port connected at', new Date().toISOString());
-
-    // Adding onMessage even though we don't strictly need to consume
-    // anything — the act of listening makes the port "fully active"
-    // from Chrome's POV. The SW posts an ack back to each heartbeat
-    // (see service-worker.js); we log if it comes in.
-    p.onMessage.addListener((/** @type {any} */ msg) => {
-      if (msg?.type === 'heartbeat-ack') {
-        // Silent on the happy path — would be very noisy.
-        return;
-      }
-      console.debug('[offscreen] port msg', msg);
-    });
-
-    p.onDisconnect.addListener(() => {
-      const err = browser.runtime.lastError;
-      console.warn('[offscreen] keepalive port disconnected at',
-        new Date().toISOString(),
-        err ? `— lastError: ${err.message}` : '');
-      port = null;
-      stopHeartbeat();
-      setTimeout(connect, RECONNECT_DELAY_MS);
-    });
-
-    startHeartbeat();
-  } catch (e) {
-    console.error('[offscreen] connect threw', e);
-    setTimeout(connect, RECONNECT_DELAY_MS);
-  }
-};
-
-// Independent liveness tick — lets us see in the offscreen DevTools
-// whether THIS doc is alive across the time the SW is supposed to be
-// idling out. If the offscreen also dies, we'll see the tick stop;
-// if it stays alive while the SW dies, we know it's strictly an SW
-// problem and the offscreen isn't being torn down with it.
-setInterval(() => {
-  console.log('[offscreen] tick at', new Date().toISOString(),
-    port ? '(port connected)' : '(port DISCONNECTED)');
-}, TICK_MS);
-
-connect();
-
-// Chrome actor jobs arrive over a standard MessageChannel transferred by the
-// service worker directly to this exact offscreen WindowClient. This avoids
-// runtime messaging and runtime Port fan-out to other extension frames.
-navigator.serviceWorker?.addEventListener('message', (event) => {
-  const source = /** @type {{ scriptURL?: string } | null} */ (event.source);
-  if (!event.isTrusted
-      || source?.scriptURL !== browser.runtime.getURL('background/service-worker.js')
-      || event.data?.type !== ACTOR_CHANNEL_OFFER
-      || event.data?.protocol !== ACTOR_CHANNEL_PROTOCOL
-      || typeof event.data?.channelId !== 'string'
-      || event.ports?.length !== 1) return;
-  bindActorChannel({
-    port: event.ports[0], channelId: event.data.channelId,
-    run: runActor, abort: abortActor,
-    workerUrl: browser.runtime.getURL('offscreen/actor-worker.js'),
-  });
+const { actorPorts, vaultAuthorityWorkers } = registerServiceWorkerChannels({
+  getFeatureLeaseHost: () => featureLeaseHost,
+  loadControllerBootstrap,
+  loadRepositoryHost,
 });
+
+// Preview dweb coordinator. Do not put the network graph in this document's
+// static imports: Store has no dweb, and Preview must not make first-run vault
+// enrollment wait for WebRTC/gossip code. The service worker's explicit
+// dweb/base-host/start call is the on-demand lease boundary. Exact sender
+// provenance is checked here before loading and again by the feature host.
+browser.runtime.onMessage.addListener(/** @type {any} */ ((
+  /** @type {any} */ msg,
+  /** @type {any} */ sender,
+  /** @type {(value:any)=>void} */ sendResponse,
+) => {
+  if (typeof msg?.type !== 'string' || !msg.type.startsWith('dweb/base-host/')) return false;
+  if (!isServiceWorkerSender(sender)) {
+    sendResponse({ ok: false, error: 'unauthorized-command-sender' });
+    return false;
+  }
+  if (rejectWithoutLease('dweb', sendResponse)) return false;
+  loadDwebHost()
+    .then(({ handleDwebBaseMessage }) => {
+      const handled = handleDwebBaseMessage(msg, sender, sendResponse);
+      if (handled !== true) sendResponse({ ok: false, error: 'unknown-dweb-host-message' });
+    }, (cause) => sendResponse({
+      ok: false,
+      error: cause instanceof Error ? cause.message : String(cause),
+    }));
+  return true;
+}));
+
+// Heavy untrusted parsers load only after the exact trusted request arrives.
+// This central listener owns sender authority; the feature modules export pure
+// handlers and carry no independent runtime-message surface.
+/** @typedef {(message: any) => Promise<any>} ExtractionHandler */
+/** @type {Readonly<Record<string, () => Promise<ExtractionHandler>>>} */
+const extractionLoaders = Object.freeze({
+  'pdf/extract': async () => /** @type {ExtractionHandler} */ (
+    (await import('./pdf-extract.js')).handlePdfExtract
+  ),
+  'doc/extract': async () => /** @type {ExtractionHandler} */ (
+    (await import('./doc-extract.js')).handleDocExtract
+  ),
+  'web/extract': async () => /** @type {ExtractionHandler} */ (
+    (await import('./web-extract.js')).handleWebExtract
+  ),
+});
+browser.runtime.onMessage.addListener(/** @type {any} */ ((
+  /** @type {any} */ msg,
+  /** @type {any} */ sender,
+  /** @type {(value:any)=>void} */ sendResponse,
+) => {
+  const load = extractionLoaders[/** @type {keyof typeof extractionLoaders} */ (msg?.type)];
+  if (!load) return false;
+  if (!isTrustedSender(sender)) {
+    sendResponse({ ok: false, error: 'untrusted-sender' });
+    return false;
+  }
+  if (rejectWithoutLease('dom-host', sendResponse)) return false;
+  load().then((handle) => handle(msg)).then(sendResponse, (cause) => sendResponse({
+    ok: false,
+    error: cause?.name ? `${cause.name}: ${cause.message}` : (cause?.message ?? String(cause)),
+  }));
+  return true;
+}));
+
+// Toolbox parsing is an operation-lazy Acorn/resolver feature. The loader owns
+// the exact SW sender check so the rich parser module never needs a cold
+// listener or authority of its own.
+browser.runtime.onMessage.addListener(/** @type {any} */ ((
+  /** @type {any} */ msg,
+  /** @type {any} */ sender,
+  /** @type {(value:any)=>void} */ sendResponse,
+) => {
+  if (msg?.type !== 'toolbox/parse-check') return false;
+  if (!isServiceWorkerSender(sender)) {
+    sendResponse({ ok: false, error: 'unauthorized-command-sender' });
+    return false;
+  }
+  if (rejectWithoutLease('dom-host', sendResponse)) return false;
+  import('./toolbox-parse.js')
+    .then(({ handleToolboxParseCheck }) => handleToolboxParseCheck(msg))
+    .then(sendResponse, (cause) => sendResponse({
+      ok: false, error: cause instanceof Error ? cause.message : String(cause),
+    }));
+  return true;
+}));
 
 // ---------------------------------------------------------------------------
 // Voice: lazy-loaded Moonshine transcriber.
@@ -181,9 +183,10 @@ const loadVoiceHost = () => (voiceHostPromise ??= import('/peerd-voice-host/inde
 // (same origin as the side panel), so we read them here rather than
 // receiving them over the message bridge — chrome.runtime.sendMessage
 // JSON-serializes, which silently drops ArrayBuffers on Chrome.
-/** @type {ReturnType<typeof createModelStore> | null} */
+/** @type {Promise<ReturnType<typeof import('/peerd-runtime/offscreen.js').createModelStore>> | null} */
 let voiceModelStore = null;
-const getVoiceModelStore = () => (voiceModelStore ??= createModelStore());
+const getVoiceModelStore = () => (voiceModelStore ??= import('/peerd-runtime/offscreen.js')
+  .then(({ createModelStore }) => createModelStore()));
 
 // --- mic kill switch (field bug 2026-06-12: macOS mic indicator stayed
 // hot after stop). The engines acquire audio internally (the vendored
@@ -281,11 +284,17 @@ const onTranscriberAutoStop = ({ targetId } = {}) => {
 // to decline a message can't satisfy it. The body stays fully typed.
 /**
  * @param {any} msg
- * @param {import('webextension-polyfill').Runtime.MessageSender} _sender
+ * @param {import('webextension-polyfill').Runtime.MessageSender} sender
  * @param {(response: any) => void} sendResponse
  */
-const onVoiceMessage = (msg, _sender, sendResponse) => {
+const onVoiceMessage = (msg, sender, sendResponse) => {
   if (!msg?.type?.startsWith?.('voice/')) return undefined;
+  // Side panel/options originate these commands, but the service worker owns
+  // the media lease and forwards the same command after acquisition. Decline
+  // the original page message without responding so it cannot race the
+  // authority response; accept only the worker-forwarded copy.
+  if (!isServiceWorkerSender(sender)) return undefined;
+  if (rejectWithoutLease('media-host', sendResponse)) return true;
   (async () => {
     try {
       switch (msg.type) {
@@ -301,7 +310,7 @@ const onVoiceMessage = (msg, _sender, sendResponse) => {
           // on Chrome), so we read them from the shared origin IDB the
           // side panel just populated — a cache hit, no re-download.
           if (activeTranscriber.engine === 'moonshine') {
-            const { files } = await getVoiceModelStore().getModel(msg.variant, { dev: true });
+            const { files } = await (await getVoiceModelStore()).getModel(msg.variant, { dev: true });
             await activeTranscriber.init({ files });
           } else {
             await activeTranscriber.init();
@@ -361,6 +370,19 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (onVoiceMessage));
 // --- headless JS jobs (script tool → engine.runJob) ---
 // Spawns the sealed Worker here and relays its egress/actor bridges back to
 // the SW's audited routes. A separate listener so voice is untouched.
+/** @type {Promise<{
+ * runJob: typeof import('./job-runner.js').runJob,
+ * abortJob: typeof import('./job-runner.js').abortJob,
+ * abortAllJobs: typeof import('./job-runner.js').abortAllJobs,
+ * extractMarkdownLocal: typeof import('./web-extract-core.js').extractMarkdownLocal,
+ * }> | null} */
+let jobHostPromise = null;
+const loadJobHost = () => (jobHostPromise ??= Promise.all([
+  import('./job-runner.js'), import('./web-extract-core.js'),
+]).then(([jobs, web]) => ({
+  runJob: jobs.runJob, abortJob: jobs.abortJob, abortAllJobs: jobs.abortAllJobs,
+  extractMarkdownLocal: web.extractMarkdownLocal,
+})));
 /**
  * @param {any} msg
  * @param {import('webextension-polyfill').Runtime.MessageSender} sender
@@ -372,8 +394,8 @@ const onJobMessage = (msg, sender, sendResponse) => {
   // must match the SW dispatcher's posture (sender-trust.js). externally_connectable
   // is unset today, so this is defense-in-depth, not an active hole.
   if (!isServiceWorkerSender(sender)) { sendResponse({ ok: false, error: 'unauthorized-command-sender' }); return true; }
-  runJob(
-    {
+  if (rejectWithoutLease('dom-host', sendResponse)) return true;
+  loadJobHost().then(({ runJob, extractMarkdownLocal }) => runJob({
       code: msg.code, timeoutMs: msg.timeoutMs, startedAt: msg.startedAt, deadlineAt: msg.deadlineAt,
       a2a: msg.a2a === true, actors: msg.actors === true,
       // DESIGN-19: the pinned origin for a site-client run (trusted job param, SW-set).
@@ -390,8 +412,7 @@ const onJobMessage = (msg, sender, sendResponse) => {
       // The durable-workspace mount (trusted job param, SW-set — the sender
       // gate above is what makes it trustworthy; _runJob validates the shape).
       workspaceSessionId: msg.workspaceSessionId,
-    },
-    {
+    }, {
       sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }),
       // Run settlement is a control signal, separate from the capability relay
       // lane: the SW aborts pending confirmations/tool work before job-runner
@@ -402,8 +423,7 @@ const onJobMessage = (msg, sender, sendResponse) => {
       // The bridged fetch's extract:'markdown' post-step — the local pipeline
       // adapter (see shared/fetch-extract.js for the why + posture).
       extractMarkdown: extractMarkdownLocal,
-    },
-  )
+    }))
     .then((result) => sendResponse({ ok: true, result }))
     .catch((e) => sendResponse({ ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }));
   return true;     // async sendResponse contract
@@ -421,8 +441,17 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (onJobMessage));
 const onJobAbort = (msg, sender, sendResponse) => {
   if (msg?.type !== 'job/abort') return undefined;
   if (!isServiceWorkerSender(sender)) { sendResponse({ ok: false, error: 'unauthorized-command-sender' }); return true; }
-  if (typeof msg.runId === 'string' && msg.runId) abortJob(msg.runId, typeof msg.ownerSessionId === 'string' ? msg.ownerSessionId : undefined);
-  sendResponse({ ok: true });
+  if (rejectWithoutLease('dom-host', sendResponse)) return true;
+  if (typeof msg.runId !== 'string' || !msg.runId) {
+    sendResponse({ ok: true });
+    return true;
+  }
+  loadJobHost().then(({ abortJob }) => {
+    abortJob(msg.runId, typeof msg.ownerSessionId === 'string' ? msg.ownerSessionId : undefined);
+    sendResponse({ ok: true });
+  }, (cause) => sendResponse({
+    ok: false, error: cause instanceof Error ? cause.message : String(cause),
+  }));
   return true;
 };
 browser.runtime.onMessage.addListener(/** @type {any} */ (onJobAbort));
@@ -439,6 +468,9 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (onJobAbort));
 // generate + abort handlers below).
 /** @type {Map<string, AbortController>} */
 const localGenerationControllers = new Map();
+/** @type {Promise<typeof import('./local-model.js')> | null} */
+let localModelHostPromise = null;
+const loadLocalModelHost = () => (localModelHostPromise ??= import('./local-model.js'));
 
 /**
  * @param {any} msg
@@ -448,19 +480,21 @@ const localGenerationControllers = new Map();
 const onLocalModelMessage = (msg, sender, sendResponse) => {
   if (typeof msg?.type !== 'string' || !msg.type.startsWith('local-model/host/')) return undefined;
   if (!isServiceWorkerSender(sender)) { sendResponse({ ok: false, error: 'unauthorized-command-sender' }); return true; }
+  if (rejectWithoutLease('model-host', sendResponse)) return true;
   (async () => {
+    const local = await loadLocalModelHost();
     switch (msg.type) {
       case 'local-model/host/status':
         // The status reply carries its own ok (false for an unknown model id).
-        sendResponse(await localModelStatus({ model: msg.model, includeSupport: !!msg.includeSupport }));
+        sendResponse(await local.localModelStatus({ model: msg.model, includeSupport: !!msg.includeSupport }));
         return;
       case 'local-model/host/catalog':
         // Every shipped model in one round-trip - what the Settings cards render.
-        sendResponse(await localModelCatalog({ includeSupport: msg.includeSupport !== false }));
+        sendResponse(await local.localModelCatalog({ includeSupport: msg.includeSupport !== false }));
         return;
       case 'local-model/host/probe':
         // probeWebgpu always carries its own `ok` (true/false) — spread it as-is.
-        sendResponse(await probeWebgpu());
+        sendResponse(await local.probeWebgpu());
         return;
       case 'local-model/host/init': {
         // Kick off the (minutes-long, ONE-TIME) load fire-and-forget — progress
@@ -470,7 +504,7 @@ const onLocalModelMessage = (msg, sender, sendResponse) => {
         // why the pre-flight await: an unknown id / unsupported architecture /
         // a load already in flight for another model must come back as a REFUSAL
         // on this response, not as a progress event the caller may never see.
-        const pre = await localModelStatus({ model: msg.model, includeSupport: true });
+        const pre = await local.localModelStatus({ model: msg.model, includeSupport: true });
         if (!pre.ok) { sendResponse(pre); return; }
         // Only a DEFINITE 'unsupported' blocks the download. 'unknown' means we
         // could not read the model's config, which is a reason to try and report
@@ -479,26 +513,26 @@ const onLocalModelMessage = (msg, sender, sendResponse) => {
           sendResponse({ ok: false, error: pre.supportReason, model: pre.model, supportState: 'unsupported' });
           return;
         }
-        const busy = loadingModelId();
+        const busy = local.loadingModelId();
         if (busy && busy !== pre.model) {
           sendResponse({ ok: false, error: `another model is still downloading (${busy}) - wait for it to finish first.`, model: pre.model });
           return;
         }
-        initLocalModel({ model: pre.model }, (p) => { try { browser.runtime.sendMessage({ type: 'local-model/progress', progress: p }); } catch { /* SW asleep */ } })
+        local.initLocalModel({ model: pre.model }, (p) => { try { browser.runtime.sendMessage({ type: 'local-model/progress', progress: p }); } catch { /* SW asleep */ } })
           .catch((e) => {
             try { browser.runtime.sendMessage({ type: 'local-model/progress', progress: { status: 'error', message: /** @type {{ message?: string }} */ (e)?.message ?? String(e), model: pre.model } }); } catch { /* SW asleep */ }
           });
-        sendResponse({ ...(await localModelStatus({ model: pre.model })), started: true });
+        sendResponse({ ...(await local.localModelStatus({ model: pre.model })), started: true });
         return;
       }
       case 'local-model/host/teardown':
         // Never destroy the GPU device under a live stream - the caller can
         // retry once the turn settles.
-        if (generationInFlight()) {
+        if (local.generationInFlight()) {
           sendResponse({ ok: false, error: 'a local generation is in progress - stop it first.' });
           return;
         }
-        await teardownLocalModel();
+        await local.teardownLocalModel();
         sendResponse({ ok: true });
         return;
       case 'local-model/host/generate': {
@@ -509,7 +543,7 @@ const onLocalModelMessage = (msg, sender, sendResponse) => {
         const controller = new AbortController();
         if (typeof genId === 'string') localGenerationControllers.set(genId, controller);
         try {
-          await generateLocal(msg, (token) => { try { browser.runtime.sendMessage({ type: 'local-model/delta', genId, token }); } catch { /* SW asleep */ } }, { signal: controller.signal });
+          await local.generateLocal(msg, (token) => { try { browser.runtime.sendMessage({ type: 'local-model/delta', genId, token }); } catch { /* SW asleep */ } }, { signal: controller.signal });
           try { browser.runtime.sendMessage({ type: 'local-model/done', genId }); } catch { /* SW asleep */ }
         } catch (e) {
           try { browser.runtime.sendMessage({ type: 'local-model/done', genId, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }); } catch { /* SW asleep */ }
@@ -531,3 +565,109 @@ const onLocalModelMessage = (msg, sender, sendResponse) => {
   return true; // async sendResponse contract
 };
 browser.runtime.onMessage.addListener(/** @type {any} */ (onLocalModelMessage));
+
+const stopControllerFeature = async () => {
+  for (const actorPort of actorPorts) {
+    try { actorPort.close(); } catch { /* already closed */ }
+  }
+  actorPorts.clear();
+  if (repositoryHostPromise) {
+    try { (await repositoryHostPromise).abortRepositoryHostCalls(); }
+    catch { repositoryHostPromise = null; }
+  }
+  if (controllerBootstrapPromise) {
+    try {
+      const bootstrap = /** @type {any} */ (await controllerBootstrapPromise);
+      bootstrap.retireControllerHost?.();
+    } catch { controllerBootstrapPromise = null; }
+  }
+  return { stopped: true };
+};
+
+const stopModelFeature = async () => {
+  for (const controller of localGenerationControllers.values()) controller.abort();
+  localGenerationControllers.clear();
+  if (localModelHostPromise) {
+    try { await (await localModelHostPromise).teardownLocalModel(); }
+    catch { /* a broken model host still loses its lease */ }
+  }
+  return { stopped: true };
+};
+
+const stopDomFeature = async () => {
+  const aborted = jobHostPromise ? (await jobHostPromise).abortAllJobs() : 0;
+  return { stopped: true, aborted };
+};
+
+const stopMediaFeature = async () => {
+  clearNoSpeechTimer();
+  try {
+    if (transcriber) {
+      await transcriber.teardown();
+      transcriber = null;
+    }
+  } finally {
+    // A broken engine is never allowed to retain OS microphone custody.
+    releaseMicTracks();
+  }
+  return { stopped: true };
+};
+
+const stopVaultAuthorityFeature = async () => {
+  const workers = [...vaultAuthorityWorkers];
+  vaultAuthorityWorkers.clear();
+  for (const worker of workers) {
+    try { worker.terminate(); } catch { /* already stopped */ }
+  }
+  return { stopped: true, workers: workers.length };
+};
+
+const OFFSCREEN_BUILD_ID = `${EXTENSION_VERSION}:${CONTROLLER_BUILD_DIGEST}`;
+featureLeaseHost = createOffscreenFeatureLeaseHost({
+  expectedBuildId: OFFSCREEN_BUILD_ID,
+  connectPort: () => browser.runtime.connect({ name: FEATURE_LEASE_KEEPALIVE_PORT }),
+  startScope: async (scope, lease) => {
+    if (scope === 'dweb') return (await loadDwebHost()).startDwebFeatureLease(lease);
+    return { ready: true, scope };
+  },
+  adoptScope: async (scope, _prior, lease) => {
+    if (scope === 'dweb') return (await loadDwebHost()).adoptDwebFeatureLease(lease);
+    return { adopted: true, scope };
+  },
+  stopScope: async (scope) => {
+    if (scope === 'dweb') return (await loadDwebHost()).stopDwebFeatureLease();
+    if (scope === 'controller') return stopControllerFeature();
+    if (scope === 'model-host') return stopModelFeature();
+    if (scope === 'dom-host') return stopDomFeature();
+    if (scope === 'media-host') return stopMediaFeature();
+    if (scope === 'vault-authority') return stopVaultAuthorityFeature();
+    throw new Error('feature-lease-scope-invalid');
+  },
+});
+
+// This is the only runtime-message lifecycle authority in the document. The
+// ordinary feature handlers above merely consume already-active leases.
+browser.runtime.onMessage.addListener(/** @type {any} */ ((
+  /** @type {any} */ message,
+  /** @type {any} */ sender,
+  /** @type {(value:any)=>void} */ sendResponse,
+) => {
+  if (typeof message?.type !== 'string'
+      || !message.type.startsWith('feature-lease/host-')) return false;
+  if (!isServiceWorkerSender(sender)) {
+    sendResponse({
+      ok: false,
+      protocol: FEATURE_LEASE_HOST_PROTOCOL,
+      error: 'feature-lease-host-sender-invalid',
+    });
+    return false;
+  }
+  featureLeaseHost.handleMessage(message).then(sendResponse, (cause) => sendResponse({
+    ok: false,
+    protocol: FEATURE_LEASE_HOST_PROTOCOL,
+    error: cause instanceof Error ? cause.message : String(cause),
+  }));
+  return true;
+}));
+
+globalThis.addEventListener('pagehide', () => { void featureLeaseHost?.close(); }, { once: true });

@@ -27,8 +27,8 @@
 // chrome.storage.session (`peerd-egress` sessionCache namespace) or
 // chrome.storage.local (`egress.kv`).
 
-import browser from '/vendor/browser-polyfill.js';
-import { makeDispatcher, isTrustedSender } from '/shared/messaging.js';
+import browser from '/shared/browser-api.js';
+import { makeDispatcher, isTrustedSender } from '/shared/background-dispatcher.js';
 import {
   isEvalSender, isHomeSender, isOffscreenSender as senderIsOffscreen,
   isOptionsSender, isSidepanelSender,
@@ -47,10 +47,29 @@ import { createActorLiveProjection } from './actor-live-projection.js';
 import { answerWithSessionConfirmGrant } from './confirm-session-grants.js';
 import { isAuthorizedUiPortSender } from './ui-port-sender.js';
 import { makeCoalescedStatePush } from './state-push.js';
+import { makeStateSnapshotBuilder } from './state-snapshot.js';
 import { makeSessionCostFolder } from './session-cost-fold.js';
 import { makeScriptModelCallRoute } from './script-model-call.js';
 import { makeOriginLockResolver } from './origin-lock-controller.js';
 import { makeAppActorChatHandler } from './app-actor-chat.js';
+import { makeArtifactEngineClient } from './offscreen-artifact-client.js';
+import {
+  createDeferredRepositoryClient,
+  createOffscreenRepositoryClient,
+  makeRepositoryKernelFetch,
+} from './repository-client.js';
+import { makeControllerTurnBridge } from './controller-turn-bridge.js';
+import { createProductionFeatureLeaseRuntime } from './feature-lease-runtime.js';
+import { attachFeatureLeaseKeepalive } from './feature-lease-keepalive.js';
+import {
+  browserLocalQueueStore,
+  createColdListenerFanIn,
+} from './cold-listener-fan-in.js';
+import {
+  FEATURE_LEASE_KEEPALIVE_PORT,
+} from '/shared/feature-lease-protocol.js';
+import { CONTROLLER_BUILD_DIGEST, EXTENSION_VERSION } from '/shared/build-config.js';
+import { createKernelIdentity } from '/shared/kernel-identity.js';
 
 import {
   // vault
@@ -99,6 +118,7 @@ import {
   idb as rawIdb,
   idbKV as rawIdbKV,
   sessionCache,
+  makeAgentSendCustody,
 } from '/peerd-egress/background.js';
 
 
@@ -158,8 +178,6 @@ import {
 
 import {
   createSessionStore,
-  renderSystemPrompt,
-  runUserTurn,
   learnedOriginCovers,
   AUTH_BOUNDARY_STOPPED_MESSAGE,
   AUTH_STATE_UNAVAILABLE_MESSAGE,
@@ -264,7 +282,6 @@ import {
   createProfileStore,
   // contacts — per-peer overlay (name/notes/tags) + known-peer aggregation
   createContactsStore,
-  mergeContacts,
   // permissions (Plan/Act mode + confirm-actions toggle — Feature 03)
   PERMISSION_MODES,
   ACTION_CLASSES,
@@ -395,12 +412,16 @@ import { createScriptRunRegistry } from './script-runs.js';
 import { createContextSnapshots } from './context-snapshots.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import {
-  makeOffscreenActorChannelClient, selectExactActorHostClient,
+  makeOffscreenActorChannelClient, makeSemanticControllerClient, selectExactActorHostClient,
 } from './offscreen-actor-channel-client.js';
 import {
   isActorHostStartupFailure, runActorWithStartupRetry,
 } from './actor-startup-retry.js';
-import { makeDirectActorHost, makeStorageSessionKeepAlive } from './direct-actor-host.js';
+import {
+  makeDirectActorHost,
+  makeRefCountedFirefoxBackgroundLifetime,
+  makeStorageSessionKeepAlive,
+} from './direct-actor-host.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeOffscreenDocClient } from './offscreen-doc-client.js';
 import { makeOffscreenWebClient } from './offscreen-web-client.js';
@@ -414,17 +435,9 @@ import {
   createNotebookRegistry,
   createPodRegistry,
   createAppRegistry,
-  appFileCheckpointContent,
-  // artifact export/import (.peerd envelopes — DESIGN-10)
   opfsHelpers as rawOpfsHelpers,
   NOTEBOOK_OPFS_ROOT,
   IMAGE_PIN_STORAGE_KEY,
-  buildAppExport,
-  buildNotebookExport,
-  buildVmRecipeExport,
-  openEnvelope,
-  inspectEnvelope,
-  exportFilename,
   ArtifactTooLargeError,
   EnvelopeFormatError,
   EnvelopeIntegrityError,
@@ -436,17 +449,9 @@ import {
   // DESIGN-19: the shared non-GET web-write predicate (site-fetch/call gates a
   // non-GET through the same web:write confirm as fetch_url / call_api).
   needsWebWriteConfirm,
-  // §11.5: the dormant App-bodies store's write gate (self-hosted DB).
-  setAppBodyWriteGate,
   parseAppManifest,
-  createRepositoryService,
   podGitRemoteOperation,
 } from '/peerd-engine/background.js';
-// MV3 ServiceWorkerGlobalScope rejects runtime import(). Keep the heavy vendor
-// statically reachable only from this host and inject it into the otherwise
-// operation-lazy repository service; unrelated peerd-engine consumers do not
-// inherit these bytes through the public barrel.
-import browserGit from '/vendor/isomorphic-git/index.js';
 import { createDebuggerPool } from './debugger-pool.js';
 import { normalizeSettingsPatch } from './settings-patch.js';
 import { makeSettingsStore } from './settings-store.js';
@@ -490,16 +495,18 @@ import {
 } from '/peerd-runtime/background.js';
 import { makePrivateTransferOpenRoute, makePrivateTransferPort } from './private-transfer-port.js';
 import { downgradesActorConfirm, a2aConsentOutcome } from './a2a-consent.js';
-import { makeVaultRoutes } from './routes/vault.js';
+import {
+  makeConfirmAnswerRoute,
+  makeLegacyVaultUnlockEffect,
+  makeVaultRoutes,
+} from './routes/vault.js';
 import { makeProviderRoutes } from './routes/providers.js';
 import { makeHooksRoutes } from './routes/hooks.js';
 import { makeSkillsRoutes } from './routes/skills.js';
 import { makeMemoryRoutes } from './routes/memory.js';
-import { makeContactsRoutes } from './routes/contacts.js';
-import { makeActorOverviewRoutes } from './routes/actor-overview.js';
-import { makeSessionRoutes } from './routes/sessions.js';
+import { makeSessionKernelRoutes, makeSessionRoutes } from './routes/sessions.js';
 import { makeEngineRoutes } from './routes/engine.js';
-import { makeSystemRoutes } from './routes/system.js';
+import { makeSystemReadRoutes, makeSystemRoutes } from './routes/system.js';
 import { makeDenylistRoutes } from './routes/denylist.js';
 import { makeLearnedOriginRoutes } from './routes/learned-origins.js';
 import { makeSettingsRoutes } from './routes/settings.js';
@@ -507,14 +514,25 @@ import { makeSessionMutationRoutes } from './routes/session-mutations.js';
 import { makeLocalModelRoutes } from './routes/local-model.js';
 import { makeDwebRoutes } from './routes/dweb.js';
 import { createDwebRollbackGuard } from './dweb-rollback-guard.js';
-import { makeToolboxRoutes } from './routes/toolbox.js';
 import { makeActorsRoutes } from './routes/actors.js';
-import { makeScriptRunControlRoutes } from './routes/script-run-control.js';
 import { makeContributorRoutes } from './routes/contributor-metrics.js';
+import { makeSemanticRouteKernel } from './semantic-route-kernel.js';
 
 // Firefox has no offscreen document host. Keep this package fact near the
 // imports so provider selection and the later capability snapshot share it.
 const offscreenAvailable = typeof (/** @type {any} */ (browser)).offscreen?.createDocument === 'function';
+const coldManifest = /** @type {any} */ (browser.runtime.getManifest());
+const kernelIdentity = createKernelIdentity({
+  buildId: `${EXTENSION_VERSION}:${CONTROLLER_BUILD_DIGEST}`,
+});
+const coldListeners = createColdListenerFanIn({
+  queueStore: browserLocalQueueStore(browser),
+  kernelIdentity,
+  firefox: Boolean(coldManifest.browser_specific_settings?.gecko),
+  selfHostedChrome: Boolean(coldManifest.update_url)
+    && typeof browser.runtime.requestUpdateCheck === 'function',
+});
+const coldEvent = coldListeners.event;
 
 // ---- §11.5 universal write guard -------------------------------------------
 // EVERY store this file constructs gets its storage through these wrapped
@@ -522,9 +540,8 @@ const offscreenAvailable = typeof (/** @type {any} */ (browser)).offscreen?.crea
 // stamp than this build supports) is enforced at the one chokepoint all
 // writes share — no per-store wiring, no store left out. The blocked set
 // starts empty (zero overhead until a store is actually blocked) and is
-// filled inside the lifecycle boot chain below. Two self-hosted databases
-// (peerd-skills, peerd-app-bodies) sit outside the adapters — the registry
-// marks them and their enforcement is a per-module follow-up.
+// filled inside the lifecycle boot chain below. The self-hosted skills database
+// sits outside the adapters, so the registry installs its verdict directly.
 const storeWriteGuard = makeWriteGuard();
 const kv = storeWriteGuard.wrapKv(rawKv);
 const idb = storeWriteGuard.wrapIdb(rawIdb);
@@ -535,12 +552,6 @@ const idbKV = (/** @type {string} */ store) =>
 // occurs; transfer import/export has no reference to these keys.
 const contributorStore = makeContributorStore({ kv });
 const CONTRIBUTOR_METRICS_AVAILABLE = CHANNEL === 'preview' || CHANNEL === 'dev';
-// The two SELF-HOSTED databases (own IDB, unreachable through the wrapped
-// adapters) get the same verdict via injected gates: skills below at its
-// construction, App bodies here (dormant store, gate installed anyway so a
-// future consumer can never ship ungated).
-setAppBodyWriteGate(() => storeWriteGuard.assertWritable('app-manifests'));
-
 // ---------------------------------------------------------------------------
 // 1. Layer 1 instances
 // ---------------------------------------------------------------------------
@@ -1127,8 +1138,11 @@ const localToolboxParseCheck = async (/** @type {string} */ name, /** @type {str
 };
 const toolboxParseCheck = offscreenAvailable
   ? makeOffscreenToolboxParseClient({
-    ensureOffscreen: () => ensureOffscreen(),
-    sendMessage: (message) => browser.runtime.sendMessage(message),
+    ensureOffscreen: async () => {},
+    sendMessage: (message) => withFeatureLease(
+      'dom-host', () => browser.runtime.sendMessage(message),
+      { reason: 'toolbox-parse-demand' },
+    ),
   })
   : localToolboxParseCheck;
 
@@ -1719,11 +1733,11 @@ const drivenPopupGuard = makeDrivenPopupGuard({
   onBlank: (event) => recordBrowserChildOutcome(event, 'unverified'),
   onGuarded: ({ tabId }) => drivenChildRequestGuard.release(tabId),
 });
-browser.tabs.onCreated?.addListener((tab) => {
+coldEvent('tabs.onCreated', browser.tabs?.onCreated)?.addListener((/** @type {any} */ tab) => {
   drivenPopupGuard.onCreated(tab);
 });
-browser.tabs.onUpdated?.addListener(drivenPopupGuard.onUpdated);
-browser.tabs.onRemoved?.addListener((tabId) => {
+coldEvent('tabs.onUpdated', browser.tabs?.onUpdated)?.addListener(drivenPopupGuard.onUpdated);
+coldEvent('tabs.onRemoved', browser.tabs?.onRemoved)?.addListener((/** @type {number} */ tabId) => {
   drivenChildRequestGuard.release(tabId);
   drivenPopupGuard.onRemoved(tabId);
   startupPopupNetworkGuard.release(tabId).catch(() => {});
@@ -1731,7 +1745,10 @@ browser.tabs.onRemoved?.addListener((tabId) => {
   for (const wake of browserChildPolicyWaiters.get(tabId) ?? []) wake();
   browserChildPolicyWaiters.delete(tabId);
 });
-browser.webNavigation?.onCreatedNavigationTarget?.addListener((details) => {
+coldEvent(
+  'webNavigation.onCreatedNavigationTarget',
+  browser.webNavigation?.onCreatedNavigationTarget,
+)?.addListener((/** @type {any} */ details) => {
   // This event is the browser's exact source-to-child statement. Keep the
   // synchronous marker first so Firefox can stop the first private request.
   // tabs.onCreated is intentionally not authority here: API-created ordinary
@@ -1741,7 +1758,7 @@ browser.webNavigation?.onCreatedNavigationTarget?.addListener((details) => {
 });
 registerFirefoxDrivenChildRequestGuard({
   isFirefox: Boolean(browser.runtime.getManifest().browser_specific_settings?.gecko),
-  event: browser.webRequest?.onBeforeRequest,
+  event: coldEvent('webRequest.onBeforeRequest', browser.webRequest?.onBeforeRequest),
   listener: drivenChildRequestGuard.onBeforeRequest,
 });
 
@@ -2223,14 +2240,7 @@ const buildToolContext = async (/** @type {any} */ {
     // the live setting, while manifest-defined App actors default to code.
     // The gate reads ctx.actorSurface to pick the allow-set; absent = 'tools'.
     ...(effectiveActorSurface ? { actorSurface: effectiveActorSurface } : {}),
-    // #241: the PROMPT half of the deterministic schema boundary. The turn driver
-    // reads it off this ctx to decide which rule (3) the actor's system prompt
-    // carries (loop/system-prompt.js SCHEMA_REPLY_RULE). It comes from the SAME
-    // setting that arms the validator in actorMessaging below, read LIVE on both
-    // sides — that is what keeps the two halves one switch. Stamped for every ctx
-    // (not just actors) because it costs nothing and the turn driver only forwards
-    // it on an actor turn; narrowing to the kinds that validate lives in
-    // actorBlock, next to the rule it selects.
+    // Prompt and reply validation read the same live switch.
     schemaReply: settingsStore.get().schemaValidatedReplies === true,
     // DESIGN-17: the WEB actor SELF-FENCES its own rolling summary. Its whole
     // accumulation is untrusted-provenance (every byte derives from page content),
@@ -2440,24 +2450,27 @@ const buildToolContext = async (/** @type {any} */ {
     // also no-op. share reads the app's OPFS bundle like export does.
     dweb: (DWEB_ENABLED && settingsHydrated && settingsStore.get().dwebEnabled) ? {
       share: (/** @type {string} */ appId) => shareLocalApp(appId, undefined),
-      discover: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/heard' }); },
+      discover: async () => { await ensureDwebFeature(); return browser.runtime.sendMessage({ type: 'dweb/base-host/heard' }); },
       install: async (/** @type {any} */ { uri, name } = {}) => withDwebPublication(async (isCurrent) => {
         if (!isCurrent() || !settingsHydrated || !settingsStore.get().dwebEnabled) {
           return { ok: false, error: 'dweb-disabled', outcomeKind: 'pre-effect-failure' };
         }
-        await ensureOffscreen();
-        return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name });
+        await ensureDwebFeature();
+        return browser.runtime.sendMessage({
+          type: 'dweb/base-host/install-app', uri, name,
+          publicationGeneration: dwebPublicationGeneration(),
+        });
       }),
-      peers: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }); },
+      peers: async () => { await ensureDwebFeature(); return browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }); },
       block: async (/** @type {any} */ { did, block = true, reason } = {}) => withDwebPublication(async (isCurrent) => {
         if (!isCurrent() || !settingsHydrated || !settingsStore.get().dwebEnabled) return { ok: false, error: 'dweb-disabled' };
-        await ensureOffscreen();
+        await ensureDwebFeature();
         if (block && typeof did === 'string') { a2aRevoke(did); conversationRegistry.closeDid(did); }
         return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason });
       }),
       setDiscovery: async (/** @type {any} */ { enabled } = {}) => withDwebPublication(async (isCurrent) => {
         if (!isCurrent() || !settingsHydrated || !settingsStore.get().dwebEnabled) return { ok: false, error: 'dweb-disabled' };
-        await ensureOffscreen();
+        await ensureDwebFeature();
         return browser.runtime.sendMessage({ type: 'dweb/base-host/set-discovery', enabled });
       }),
     } : null,
@@ -3066,17 +3079,6 @@ const OFFSCREEN_URL = 'offscreen/offscreen.html';
 // a discrete tab; the registry persists metadata, the tracker maps
 // vmId → live tabId (in memory, rebuilt at SW startup), and the
 // client wraps chrome.tabs.sendMessage with vmId resolution.
-/** Delete an IDB database (a VM's disk overlay). Resolves on success;
- *  rejects if the delete is blocked (e.g. another tab still holds it
- *  open — caller should close VM tabs first). */
-const deleteIDBDatabase = (/** @type {string} */ name) => new Promise((resolve, reject) => {
-  if (typeof indexedDB === 'undefined') return resolve(false);
-  const req = indexedDB.deleteDatabase(name);
-  req.onsuccess = () => resolve(true);
-  req.onerror = () => reject(req.error ?? new Error('deleteDatabase failed'));
-  req.onblocked = () => reject(new Error(`deleteDatabase blocked: ${name} (close VM tab first)`));
-});
-
 // DESIGN-17: archive an actor session orphaned by its instance's deletion.
 // Fired by registry.remove() (so it covers BOTH the *_delete tools and the
 // Library UI route uniformly). Archiving only sets archivedAt — safe even on a
@@ -3145,12 +3147,137 @@ const appTabTracker = createAppTabTracker({
   onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('app', id, tabId),
   onDrop: (/** @type {string} */ id) => engineLiveness.drop('app', id),
 });
-const repositories = createRepositoryService({
-  loadGit: async () => browserGit,
+const ensureOffscreen = async () => {
+  // Firefox has no offscreen document. Its direct Worker adapters own their
+  // bounded lifetimes and offscreen-only capabilities stay unavailable.
+  if (typeof (/** @type {any} */ (browser)).offscreen?.createDocument !== 'function') return;
+  try {
+    const contexts = await listOffscreenContexts(browser);
+    if (contexts.length > 0) return;
+    await (/** @type {any} */ (browser)).offscreen.createDocument({
+      url: OFFSCREEN_URL,
+      reasons: ['WORKERS', 'USER_MEDIA'],
+      justification: 'Demand-scoped feature Workers and local voice transcription.',
+    });
+    // Let the tiny lease host register before the first authenticated start.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } catch (error) {
+    if (/single offscreen document|already exists/i.test(
+      (/** @type {{message?:string}} */ (error))?.message ?? '',
+    )) return;
+    throw error;
+  }
+};
+const featureLeases = createProductionFeatureLeaseRuntime({
+  identity: kernelIdentity,
+  // This document contains desired lease identities only, never feature data
+  // or secret material. Session lifetime is exactly the SW-adoption horizon.
+  store: {
+    get: async (key) => (await browser.storage.session.get(key))?.[key],
+    set: async (key, value) => { await browser.storage.session.set({ [key]: value }); },
+  },
+  ensureOffscreen: async () => { await ensureOffscreen(); },
+  hasOffscreen: async () => (await listOffscreenContexts(browser)).length > 0,
+  closeOffscreen: async () => {
+    if (typeof (/** @type {any} */ (browser)).offscreen?.closeDocument === 'function') {
+      await (/** @type {any} */ (browser)).offscreen.closeDocument();
+    }
+  },
+  sendHostMessage: (message) => browser.runtime.sendMessage(message),
+  vaultUnlocked: !vault.isLocked(),
+});
+/**
+ * @template T
+ * @param {'controller'|'dweb'|'dom-host'|'media-host'|'model-host'} scope
+ * @param {(lease:any)=>Promise<T>|T} operation
+ * @param {Record<string, unknown>} [options]
+ * @returns {Promise<T>}
+ */
+const withFeatureLease = async (scope, operation, options = {}) => {
+  await featureLeases.ready;
+  let entered = false;
+  const result = await featureLeases.runWithLease(scope, async (lease) => {
+    entered = true;
+    return operation(lease);
+  }, options);
+  if (!entered) {
+    const refusal = /** @type {any} */ (result);
+    const error = /** @type {Error & {code?:string,outcomeKnown?:boolean}} */ (
+      new Error(refusal?.code ?? 'feature lease unavailable')
+    );
+    error.code = refusal?.code ?? 'feature-lease-unavailable';
+    error.outcomeKnown = refusal?.outcomeKnown === true;
+    throw error;
+  }
+  return /** @type {T} */ (result);
+};
+/** @param {'controller'|'dweb'|'dom-host'|'media-host'|'model-host'} scope @param {Record<string,unknown>} options */
+const acquireFeatureLease = async (scope, options = {}) => {
+  await featureLeases.ready;
+  const result = await featureLeases.acquire(scope, options);
+  if (result?.ok) return result;
+  const error = /** @type {Error & {code?:string,outcomeKnown?:boolean}} */ (
+    new Error(result?.code ?? 'feature lease unavailable')
+  );
+  error.code = result?.code ?? 'feature-lease-unavailable';
+  error.outcomeKnown = result?.outcomeKnown === true;
+  throw error;
+};
+const ensureDwebFeature = async () => {
+  if (!DWEB_ENABLED || !settingsHydrated || !settingsStore.get().dwebEnabled) {
+    throw new Error('dweb-disabled');
+  }
+  if (vault.isLocked()) throw new Error('vault-locked');
+  await acquireFeatureLease('dweb', { reason: 'feature-demand' });
+};
+/** @template T @param {() => Promise<T>} operation @returns {Promise<T>} */
+const withHost = (operation) => withFeatureLease(
+  'model-host', operation, { reason: 'local-model-demand' },
+);
+const acquireResidentHost = () => acquireFeatureLease(
+  'model-host', { reason: 'local-model-resident' },
+);
+/** @type {ReturnType<typeof makeRefCountedFirefoxBackgroundLifetime>|null} */
+let firefoxBackgroundLifetime = null;
+const artifactEngine = makeArtifactEngineClient({
+  offscreen: offscreenAvailable,
+  offscreenUrl: browser.runtime.getURL(OFFSCREEN_URL),
+  withHost: (/** @type {(lease:any)=>Promise<any>} */ operation) => withFeatureLease(
+    'dom-host', operation, { reason: 'artifact-codec-demand' },
+  ),
+  retireHost: (reason) => featureLeases.retireActiveHost(reason),
+  withLocalLifetime: (operation, options) => firefoxBackgroundLifetime
+    ? firefoxBackgroundLifetime.run(operation, options)
+    : operation(),
+});
+const repositoryAudit = (/** @type {any} */ event) => { auditLog.append(event).catch(() => {}); };
+const repositoryKernelFetch = makeRepositoryKernelFetch({
   webFetch,
   getSecret,
-  audit: (/** @type {any} */ event) => { auditLog.append(event).catch(() => {}); },
+  audit: repositoryAudit,
 });
+// Chrome's MV3 service-worker realm cannot runtime-import isomorphic-git. Keep
+// the exact repository owner lazy in the offscreen host; Firefox's event page
+// can import the same pinned vendor directly on first Git operation. Both
+// retain the SW-local transaction coordinator used by App/editor mutations.
+const repositories = offscreenAvailable
+  ? createOffscreenRepositoryClient({
+    withHost: (/** @type {(lease:any)=>Promise<any>} */ operation) => withFeatureLease(
+      'controller', operation, { reason: 'repository-demand' },
+    ),
+    offscreenUrl: browser.runtime.getURL(OFFSCREEN_URL),
+    kernelFetch: repositoryKernelFetch,
+    retireHost: (/** @type {string} */ reason) => featureLeases.retireActiveHost(reason),
+  })
+  : createDeferredRepositoryClient(async () => {
+    const { createFirefoxRepositoryClient } = await import('./repository-local-client.js');
+    return createFirefoxRepositoryClient({
+      webFetch, getSecret, audit: repositoryAudit,
+      withLifetime: (operation, options) => firefoxBackgroundLifetime
+        ? firefoxBackgroundLifetime.run(operation, options)
+        : operation(),
+    });
+  });
 const podClient = createPodClient({ registry: podRegistry, tracker: podTabTracker });
 const appClient = createAppClient({
   registry: appRegistry,
@@ -3178,47 +3305,9 @@ const commandSources = mergeSources([
   localStoreSource(commandStore),
   skillRegistrySource(skillRegistry),
 ]);
-// --- Feature 02: checkpoint manager over content-addressed snapshots ----
-//
-// The "workspace" we snapshot is an App's OPFS subtree, read directly in
-// the SW via appClient.opfsForApp (no tab needed — browser-native, cheap
-// per turn). Scopes are `app:<appId>`. A workspaceFor(scope) returns a
-// read/write/delete adapter the manager uses for capture + restore.
-//
-// Notebook scratch is also OPFS but only reachable through its tab's
-// worker; snapshotting it would require spawning a tab per turn, so it's
-// a documented V1.x gap (DEV-NOTES.md). The manager already accepts any
-// scope, so adding a `notebook:<id>` adapter later is purely additive.
+// App checkpoints use the App's Git repository as their single version
+// lineage. Notebook scratch has no checkpoint scope.
 const SNAPSHOT_SCOPE_APP = (/** @type {string} */ appId) => `app:${appId}`;
-const appWorkspaceAdapter = (/** @type {string} */ appId) => {
-  return {
-    readAll: async () => {
-      const snapshot = await appClient.snapshotFiles({ appId });
-      /** @type {Record<string,string>} */
-      const out = Object.create(null);
-      for (const [path, bytes] of Object.entries(snapshot.files)) {
-        out[path] = await appFileCheckpointContent(
-          path,
-          bytes,
-          snapshot.record.fileKinds?.[path],
-        );
-      }
-      return out;
-    },
-    writeFile: async (/** @type {string} */ path, /** @type {any} */ content) => {
-      await appClient.writeFile({ appId, path, content, reload: false });
-    },
-    deleteFile: async (/** @type {string} */ path) => {
-      await appClient.deleteFile({ appId, path, reload: false });
-    },
-  };
-};
-const workspaceForScope = (/** @type {string} */ scope) => {
-  if (typeof scope === 'string' && scope.startsWith('app:')) {
-    return appWorkspaceAdapter(scope.slice('app:'.length));
-  }
-  return null; // unknown scope kind (notebook snapshots: V1.x)
-};
 // Apps use their standard Git repository as the checkpoint substrate. This
 // preserves one version lineage for automatic turn captures, manual commits,
 // review diffs, restores, and remote publication instead of duplicating App
@@ -3339,54 +3428,56 @@ const maybeNudgeDebuggerGrant = (/** @type {any} */ result) => {
 // not per-ctx. Cleared per tab on close (below) + replaced on re-snapshot.
 const domRefs = createRefRegistry();
 
-const ensureOffscreen = async () => {
-  // why: Firefox has no chrome.offscreen. Actor turns use a run-scoped session
-  // heartbeat in direct-actor-host.js; the other offscreen-only services
-  // remain unavailable. Degrade quietly instead of throwing on every unlock:
-  // the offscreen-hosted voice transcriber is simply absent there (the
-  // mic UI's capability detection already reports voice unsupported).
-  if (typeof (/** @type {any} */ (browser)).offscreen?.createDocument !== 'function') {
-    console.info('[sw] offscreen API unavailable (Firefox event page) — skipping keepalive/voice host');
-    return;
-  }
-  try {
-    const contexts = await listOffscreenContexts(browser);
-    if (contexts.length > 0) {
-      console.log('[sw] offscreen already exists');
-      return;
-    }
-    console.log('[sw] creating offscreen document', OFFSCREEN_URL);
-    await (/** @type {any} */ (browser)).offscreen.createDocument({
-      url: OFFSCREEN_URL,
-      // why: WORKERS keeps the doc alive for the SW-keepalive port and
-      // (future) CheerpX. USER_MEDIA permits the offscreen doc to call
-      // getUserMedia for the Moonshine voice transcriber. Declared
-      // up-front so a later voice-enable doesn't require recreating
-      // the doc; the actual mic permission still prompts the user at
-      // first getUserMedia call.
-      reasons: ['WORKERS', 'USER_MEDIA'],
-      justification: 'SW keepalive, WebVM host, and local voice transcription (Moonshine).',
-    });
-    console.log('[sw] offscreen document created');
-    // why: small grace period so the offscreen import chain has
-    // actually wired up its message listeners. Without this, a
-    // voice/* message posted immediately after createDocument can land
-    // before the offscreen doc finishes evaluating its modules.
-    await new Promise((r) => setTimeout(r, 50));
-  } catch (e) {
-    // Race: concurrent caller already created it. Chrome wording:
-    // "Only a single offscreen document may be created"
-    // We deliberately match narrowly so unrelated failures still
-    // throw and get logged (the broader /offscreen/i filter was
-    // swallowing legit errors like missing-permissions).
-    if (/single offscreen document|already exists/i.test((/** @type {{ message?: string }} */ (e))?.message ?? '')) {
-      console.log('[sw] offscreen create lost the race; another caller won');
-      return;
-    }
-    console.error('[sw] ensureOffscreen failed', e);
-    throw e;
-  }
-};
+const turnBridge = makeControllerTurnBridge({
+  getClient: async () => ({
+    call: (capability, payload, options) => capability === 'turn.run'
+      ? semanticController.callTurn(payload, options)
+      : Promise.resolve({
+        ok: false, code: 'controller-capability-denied', outcomeKnown: true,
+      }),
+  }),
+});
+const semanticRouteKernel = makeSemanticRouteKernel({
+  callSemantic: (payload) => semanticController.callSemantic(payload),
+  isHomeSender: (sender) => isActualHomeSender(sender),
+  vault,
+  sessions,
+  actorLiveProjection,
+  turnSlots: {
+    busySessionIds: () => turnSlots.busySessionIds(),
+    isBusy: (sessionId) => turnSlots.isBusy(sessionId),
+  },
+  toolboxStore,
+  auditLog,
+  contacts,
+  appRegistry,
+});
+const semanticController = makeSemanticControllerClient({ browser, ensureOffscreen,
+  offscreenUrl: OFFSCREEN_URL, firefoxDirect: !offscreenAvailable,
+  dwebEnabled: DWEB_ENABLED,
+  kernelIdentity,
+  authorizeTurnCall: turnBridge.authorize,
+  handleTurnKernelCall: turnBridge.handleKernelCall,
+  authorizeSemanticCall: semanticRouteKernel.authorize,
+  handleSemanticKernelCall: semanticRouteKernel.handleKernelCall,
+  retireHost: (reason) => featureLeases.retireActiveHost(reason),
+  // Chrome needs the named offscreen lease around each bounded semantic call.
+  // Firefox owns the same sealed Worker directly in its event page and must
+  // not enter an offscreen scope that does not exist there.
+  ...(offscreenAvailable ? {
+    withControllerLease: (operation) => withFeatureLease(
+      'controller', operation, { reason: 'semantic-demand' },
+    ),
+  } : {
+    withDirectLifetime: (operation, options) => firefoxBackgroundLifetime
+      ? firefoxBackgroundLifetime.run(operation, options)
+      : operation(),
+  }),
+  // Fixed package-local prompt assets; never an agent-controlled network URL.
+  fetchFn: (url, init) => fetch(url, init),
+});
+const runUserTurn = turnBridge.runUserTurn;
+const renderSystemPrompt = semanticController.renderSystemPrompt;
 
 // why gate on offscreen availability: Firefox has no chrome.offscreen, so the
 // offscreen-hosted job/pdf workers can never run there. Injecting null (not a
@@ -3417,15 +3508,24 @@ const actorHostKeepAlive = backgroundPageWorkerAvailable
     key: ACTOR_HOST_KEEPALIVE_KEY,
     intervalMs: ACTOR_HOST_KEEPALIVE_MS,
     ackTimeoutMs: ACTOR_HOST_KEEPALIVE_ACK_MS,
-    onLost: (error) => notifyActorHostKeepAliveLost(error),
+    onLost: (error) => {
+      firefoxBackgroundLifetime?.fail(error);
+      notifyActorHostKeepAliveLost(error);
+    },
   })
   : null;
+if (actorHostKeepAlive) {
+  firefoxBackgroundLifetime = makeRefCountedFirefoxBackgroundLifetime({
+    start: () => actorHostKeepAlive.start(),
+    stop: () => actorHostKeepAlive.stop(),
+  });
+}
 // why: Firefox currently has no official long-task lifetime signal for MV3
 // event pages. Mozilla Bug 1851373 documents storage.session activity plus a
 // synchronously registered change listener as the extension-side workaround.
 // The helper verifies the exact lease generation before actor work begins.
 if (actorHostKeepAlive) {
-  browser.storage.session.onChanged.addListener((changes) => {
+  coldEvent('storage.session.onChanged', browser.storage.session.onChanged).addListener((/** @type {any} */ changes) => {
     actorHostKeepAlive.onChanged(changes);
   });
 }
@@ -3437,12 +3537,17 @@ const actorIsolationState = makeActorIsolationStateStore({
   storage: browser.storage.local,
   protocol: ACTOR_WORKER_PROTOCOL,
 });
+// why retryable:true — the kernel state contract requires every
+// temporarily_unavailable capability to be retryable (the surfaces refuse a
+// non-retryable transient as malformed and drop the whole snapshot, which
+// left the panel unhydrated behind the vault gate). This placeholder IS
+// retryable: it resolves as soon as the isolation state load settles.
 let actorIsolation = actorIsolationAvailable(baseActorIsolation)
   ? {
     status: /** @type {const} */ ('temporarily_unavailable'),
     host: baseActorIsolation.host,
     reason: 'Actor isolation state is loading.',
-    retryable: false,
+    retryable: true,
   }
   : baseActorIsolation;
 const actorIsolationReady = actorIsolationAvailable(baseActorIsolation)
@@ -3545,6 +3650,7 @@ const appQuiescence = createAppQuiescence({ tracker: appTabTracker, withLifecycl
 const dwebPublicationFence = createDwebPublicationFence();
 const withDwebPublication = dwebPublicationFence.run;
 const invalidateDwebPublications = dwebPublicationFence.invalidate;
+const dwebPublicationGeneration = dwebPublicationFence.generation;
 
 const reseedSharedApps = makeReseedSharedApps({
   enabled: DWEB_ENABLED,
@@ -3585,8 +3691,11 @@ const dwebSelfCustody = makeDwebSelfCustody({
   withCustodyMutation: withDwebSelfCustodyMutation,
 });
 const dwebCustodyClient = makeDwebCustodyClient({
-  ensureOffscreen,
-  handleSecretRequest: (operation, args) => (
+  ensureOffscreen: ensureDwebFeature,
+  handleSecretRequest: (
+    /** @type {'get'|'set'|'self-get'|'self-set'} */ operation,
+    /** @type {any} */ args,
+  ) => (
     operation === 'self-get' || operation === 'self-set'
       ? dwebSelfCustody.handle(operation, args)
       : dwebIdentityCustody.handle(operation, args)
@@ -3610,8 +3719,11 @@ void ensureDwebSuspensionRecovery().catch((error) => {
 // doc, then dispatches a 'job/run' message to job-runner.js hosted there.
 // Defined after ensureOffscreen; buildToolContext reads it lazily at dispatch.
 const jsOffscreenClient = offscreenAvailable ? makeOffscreenJsClient({
-  ensureOffscreen,
-  sendMessage: (m) => browser.runtime.sendMessage(m),
+  ensureOffscreen: async () => {},
+  sendMessage: (message) => withFeatureLease(
+    'dom-host', () => browser.runtime.sendMessage(message),
+    { reason: 'script-job-demand' },
+  ),
 }) : null;
 
 // Live actors-enabled script runs (background/script-runs.js): Stop → abort
@@ -3657,17 +3769,24 @@ const rootChatSessionFor = async (sessionId) => {
 // relay sender is a private object identity and these routes are never exposed
 // through runtime.onMessage on that path.
 const directActorHost = baseActorIsolation.host === 'background-page-worker'
-  ? makeDirectActorHost({
+  ? (() => {
+    const lifetime = firefoxBackgroundLifetime?.createHandle();
+    return makeDirectActorHost({
     workerUrl: browser.runtime.getURL('offscreen/actor-worker.js'),
     // Firefox MV3 event pages may unload while an unreturned task is pending.
     // A small storage.session change refreshes the idle budget only while a run
     // is active. The packaged lifetime lane proves this exact host.
-    startKeepAlive: () => actorHostKeepAlive?.start(),
-    stopKeepAlive: () => actorHostKeepAlive?.stop(),
-  })
+      startKeepAlive: () => lifetime?.start(),
+      stopKeepAlive: () => lifetime?.stop(),
+    });
+  })()
   : null;
 let actorHostLossPersistence = Promise.resolve();
 notifyActorHostKeepAliveLost = (error) => {
+  // Repository/controller/artifact work shares the Firefox event-page lifetime
+  // but must not globally disable actor isolation when no actor owned the lost
+  // generation. Each non-actor caller settles its own known/unknown custody.
+  if (!directActorHost?.hasActiveRuns()) return;
   // Pause actor exposure before settling current runs. A later user retry must
   // establish a fresh heartbeat and realm proof before actors become available.
   actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, error);
@@ -3702,7 +3821,7 @@ notifyActorHostKeepAliveLost = (error) => {
 // key, no engine clients, no browser extension APIs. Null only when no
 // dedicated-worker host exists.
 const actorChannelClient = offscreenAvailable ? makeOffscreenActorChannelClient({
-  ensureOffscreen,
+  ensureOffscreen: async () => {},
   findOffscreenClient: async () => {
     const clientsApi = /** @type {any} */ (globalThis).clients;
     if (!clientsApi?.matchAll) return null;
@@ -3717,9 +3836,12 @@ const actorChannelClient = offscreenAvailable ? makeOffscreenActorChannelClient(
   },
 }) : null;
 const actorClient = actorIsolationAvailable(baseActorIsolation) ? makeOffscreenActorClient({
-  ensureHost: offscreenAvailable ? ensureOffscreen : async () => {},
+  ensureHost: async () => {},
   sendMessage: directActorHost?.sendMessage ?? ((m) => browser.runtime.sendMessage(m)),
-  runOnChannel: actorChannelClient?.run,
+  runOnChannel: actorChannelClient ? (job, options) => withFeatureLease(
+    'controller', () => actorChannelClient.run(job, options),
+    { reason: 'actor-demand' },
+  ) : undefined,
   callModel: /** @type {any} */ (callModel),
   getSecret,
   safeFetch,
@@ -3868,8 +3990,11 @@ const retryActorIsolation = async () => {
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
 // 'pdf/extract' message to offscreen/pdf-extract.js (pdf.js in a Worker).
 const pdfOffscreenClient = offscreenAvailable ? makeOffscreenPdfClient({
-  ensureOffscreen,
-  sendMessage: (m) => browser.runtime.sendMessage(m),
+  ensureOffscreen: async () => {},
+  sendMessage: (message) => withFeatureLease(
+    'dom-host', () => browser.runtime.sendMessage(message),
+    { reason: 'pdf-extract-demand' },
+  ),
 }) : null;
 
 // The office-document conversion client (the read_doc tool). ensureOffscreen,
@@ -3877,8 +4002,11 @@ const pdfOffscreenClient = offscreenAvailable ? makeOffscreenPdfClient({
 // itself is pure (peerd-runtime/doc) — it runs offscreen so the multi-megabyte
 // byte buffer, and the untrusted document behind it, stay out of the SW.
 const docOffscreenClient = offscreenAvailable ? makeOffscreenDocClient({
-  ensureOffscreen,
-  sendMessage: (m) => browser.runtime.sendMessage(m),
+  ensureOffscreen: async () => {},
+  sendMessage: (message) => withFeatureLease(
+    'dom-host', () => browser.runtime.sendMessage(message),
+    { reason: 'document-extract-demand' },
+  ),
 }) : null;
 
 // Convert an ATTACHED office/e-book file to Markdown. Same offscreen reader as
@@ -3904,8 +4032,11 @@ const convertDocAttachment = offscreenAvailable
 // unavailable (Firefox) - fetch_url then degrades to today's raw-text
 // behavior (the read_pdf precedent for capability-absent contexts).
 const webOffscreenClient = offscreenAvailable ? makeOffscreenWebClient({
-  ensureOffscreen,
-  sendMessage: (m) => browser.runtime.sendMessage(m),
+  ensureOffscreen: async () => {},
+  sendMessage: (message) => withFeatureLease(
+    'dom-host', () => browser.runtime.sendMessage(message),
+    { reason: 'web-extract-demand' },
+  ),
 }) : null;
 
 // The sw/web-fetch route's extract post-step (see shared/fetch-extract.js) —
@@ -3942,12 +4073,15 @@ const hydrateLocalModelAvailability = async ({ force = false } = {}) => {
   if (!force && localModelState.hydrated()) return localModelState.available();
   if (localModelHydration) return localModelHydration;
   localModelHydration = (async () => {
-    await ensureOffscreen();
     // Seed EVERY on-device model's residency in one round-trip - a worker that
     // only asked about the default would hide a second downloaded model from the
     // picker until Settings happened to be opened. includeSupport is off: cold
     // start shouldn't pay the Transformers.js import to answer "what's cached".
-    const catalog = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'local-model/host/catalog', includeSupport: false }));
+    const catalog = /** @type {any} */ (await withHost(
+      () => browser.runtime.sendMessage({
+        type: 'local-model/host/catalog', includeSupport: false,
+      }),
+    ));
     if (!catalog?.models) throw new Error('local model status unavailable');
     let changed = false;
     for (const entry of catalog.models) {
@@ -3980,7 +4114,7 @@ const messageDispatcherReady = /** @type {Promise<void>} */ (new Promise((resolv
   markMessageDispatcherReady = () => resolve();
 }));
 
-browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ msg, /** @type {any} */ sender, /** @type {(reply: any) => void} */ sendResponse) => {
+coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(/** @type {any} */ ((/** @type {any} */ msg, /** @type {any} */ sender, /** @type {(reply: any) => void} */ sendResponse) => {
   if (msg?.type === 'bootstrap/ready') {
     if (!isTrustedSender(sender)) {
       sendResponse({ ok: false, error: 'untrusted-sender' });
@@ -4047,8 +4181,7 @@ const generateLocalForAdapter = (/** @type {any} */ opts) => {
   };
   if (hostAvailable) {
     if (opts.signal) opts.signal.addEventListener('abort', abortHostGeneration, { once: true });
-    ensureOffscreen()
-      .then(() => browser.runtime.sendMessage({
+    withHost(() => browser.runtime.sendMessage({
         type: 'local-model/host/generate', genId, model: opts.model, messages: opts.messages, system: opts.system, tools: opts.tools,
         // Token budget per ENGINE: the muse model spends its Harmony reasoning
         // channel out of the same budget as the visible answer, and a measured
@@ -4090,9 +4223,10 @@ setLocalGenerate(/** @type {any} */ (generateLocalForAdapter));
 // offscreen round-trip per model per SW life, not one per turn.
 setLocalModelInfo(/** @type {any} */ (async (/** @type {string} */ model) => {
   requireRuntimeCapability(runtimeCapabilities.localWebGpuHost, 'localWebGpuHost');
-  await ensureOffscreen();
   const status = /** @type {{ contextWindow?: number } | null} */ (
-    await browser.runtime.sendMessage({ type: 'local-model/host/status', model }));
+    await withHost(() => browser.runtime.sendMessage({
+      type: 'local-model/host/status', model,
+    })));
   const win = status?.contextWindow;
   return typeof win === 'number' && win > 0 ? win : null;
 }));
@@ -4157,7 +4291,7 @@ const closeSidePanel = async () => {
 const {
   noteAgentTab, broadcastAgentTab, scheduleWebTabHint, showWebTabHint, setTabAnchor, isHomeOpen, focusAgentTab, syncFrontDoorBehavior,
 } = makeTabAffordances({
-  browser, uiPorts, denylistStore, closeSidePanel,
+  browser, uiPorts, denylistStore, closeSidePanel, coldEvent,
   isWatchOn: () => settingsStore.get().watchAgentTab === true,
   // Sync read (no await) — the front-door decision must run inside the
   // click gesture or sidePanel.open() drops its activation.
@@ -4370,212 +4504,27 @@ const sessionState = makeSessionState();
  * the uiPorts registry is load-bearing for confirm routing and the
  * voice/vm/goal forwarders).
  *
- * why a closure, not an extracted module: this is snapshot ASSEMBLY whose
- * one load-bearing invariant — no key material in the snapshot — is already
- * pinned END-TO-END against the real SW by the in-browser
- * extension/tests/unit/background/state-get.test.js (it walks the live
- * snapshot for secret-named string values). That's STRONGER than a faked
- * bun unit would be, since a fake vault can drift from what the real one
- * emits. Extracting to an injected-deps module (it closes over ~10 SW
- * singletons) would trade real deps-wiring for redundant, weaker coverage —
- * net-negative. Contrast the turn driver (turn-driver.js): dense
- * orchestration with NO unit coverage, so THERE extraction unlocked real
- * tests. The yardstick is new testability, not runtime or line count.
+ * Snapshot assembly is isolated in a browser-neutral native module, while the
+ * worker injects every live authority store. The end-to-end state/get suite
+ * still walks the real snapshot for secret-named values, so modularity does
+ * not weaken the custody assertion.
  *
  * Invariant (pinned by extension/tests/unit/background/state-get.test.js):
  * the snapshot never carries key material — providers.hasKey is a boolean
  * derived from the vault, never the secret itself.
  */
-const buildStateSnapshot = async () => {
-  // A cold MV3 worker can resume the vault and accept a UI port before the
-  // asynchronous chrome.storage settings read finishes. The snapshot must not
-  // observe channel defaults in that window: if the user selected a keyless
-  // provider (Ollama / Local WebGPU), the default Anthropic projection reports
-  // hasKey:false and strands the already-open composer until some unrelated
-  // mutation happens to push state again (issue #384).
-  //
-  let settingsAvailable = true;
-  try { await ensureSettingsReady(); }
-  catch {
-    // A transient storage failure must not turn channel defaults into a
-    // confirmed provider choice for the rest of this worker's lifetime. The
-    // full hydration gate retries storage AND reapplies boot-time consumers
-    // such as the vault lock policy; a raw store load would leave those stale.
-    try { await ensureSettingsReady(); }
-    catch { settingsAvailable = false; }
-  }
-  await actorIsolationReady;
-  const sessionId = await sessionCache.sessionGet('currentSessionId');
-  // prfEnrolled is cheap to read (one kv.get) and the side panel uses it
-  // (permission resolved per-path below — needs the session record.)
-  // both pre-unlock (to show the Touch ID button) and post-unlock (to
-  // show the enroll/disable toggle in settings). Surfaced on every push.
-  const prf = await vault.prfStatus();
-  // why: the gate/settings need to know whether a recovery passphrase
-  // exists — the unlock screen only offers the passphrase path when it
-  // can succeed, and settings shows "Set" vs "Change". Cheap kv.get.
-  const hasRecovery = await vault.hasRecoveryPassphrase();
-  // Vault-locked path: emit a minimal state without touching IDB
-  // (session reads would surface as null anyway).
-  if (vault.isLocked()) {
-    const permission = await resolvePermission(null);
-    return {
-      vault: {
-        initialized: await vault.isInitialized(),
-        locked: true,
-        unlockedAt: 0,
-        prfEnrolled: prf.enrolled,
-        hasRecovery,
-        // §5g: WHY it locked ('idle'|'manual'|null) - the unlock screen's
-        // one added sentence renders only for an idle lock.
-        lockReason: vault.lockReason?.() ?? null,
-      },
-      session: { sessionId: null, messages: [], permission, customSystemPrompt: null, toolManifest: null },
-      providers: {
-        current: resolveActiveProvider().name,
-        hasKey: false,
-        model: resolveActiveProvider().model,
-        defaultRunnerModel: resolveActiveProvider().defaultRunnerModel,
-        configRevision: providerConfigRevision,
-      },
-      composer: {
-        provider: resolveActiveProvider().name,
-        model: resolveActiveProvider().model,
-        keyless: false,
-        credentialReady: false,
-        localReady: false,
-        canSend: false,
-        reason: 'vault-locked',
-      },
-      capabilities: { actorExecution: { ...actorIsolation }, ...runtimeCapabilities },
-      settings: { ...settingsStore.get() },
-      pendingConfirm: null,
-      streaming: false,
-      actors: {},
-      spawned: { byToolUse: {}, sessions: {} },
-      asyncTasks: {},
-    };
-  }
-  // Unlocked path.
-  const session = sessionId ? (await sessions.get(/** @type {any} */ (sessionId))) ?? null : null;
-  const permission = await resolvePermission(session);
-  // Default profile: the home page gates first-run onboarding on
-  // onboardingComplete and the transcript labels assistant rows with
-  // peerName. Only surfaced when unlocked: the locked push deliberately
-  // omits it so the surfaces' "assume complete" default holds at the gate
-  // and onboarding can never flash before a real unlock. Reconcile FIRST
-  // so the same push that would re-show the funnel to an established
-  // install carries the closed latch instead.
-  await reconcileOnboardingLatch();
-  const profile = await profileState.get();
-  // providers remains the Settings/default-for-NEW-chats projection. Composer
-  // readiness is separate because an existing chat stays bound to the provider
-  // recorded on its session even after the user changes that future default.
-  const activeProv = resolveActiveProvider();
-  const composerProvider = session?.provider ?? activeProv.name;
-  const composerModel = session?.model ?? activeProv.model;
-  if (activeProv.name === 'local-webgpu' || composerProvider === 'local-webgpu') {
-    await hydrateLocalModelAvailability().catch(() => false);
-  }
-  const providerRows = listProviders();
-  const ollamaModels = liveProviderModelStatus('ollama');
-  const defaultReadiness = await resolveComposerReadiness({
-    provider: activeProv.name,
-    model: activeProv.model,
-    providers: providerRows,
-    getSecret: (name) => vault.getSecret(name),
-    localModelAvailable: localModelState.available(),
-    ollamaModels,
-    settingsAvailable,
-  });
-  const composer = composerProvider === activeProv.name && composerModel === activeProv.model
-    ? Object.freeze({ ...defaultReadiness, model: composerModel })
-    : await resolveComposerReadiness({
-        provider: composerProvider,
-        model: composerModel,
-        providers: providerRows,
-        getSecret: (name) => vault.getSecret(name),
-        localModelAvailable: localModelState.available(),
-        ollamaModels,
-        settingsAvailable,
-       });
-  const hasKey = settingsAvailable && defaultReadiness.credentialReady;
-  // Take every awaited store read before capturing the in-memory projection.
-  // Provider tool-use ids can repeat, so an older snapshot must never cross an
-  // await and arrive after a newer correlated actor-start for the same id.
-  const vaultInitialized = await vault.isInitialized();
-  const liveActors = actorLiveProjection.snapshot(/** @type {string | null} */ (sessionId));
-  return {
-    vault: {
-      initialized: vaultInitialized,
-      locked: false,
-      unlockedAt: vault.unlockedAt(),
-      prfEnrolled: prf.enrolled,
-      hasRecovery,
-    },
-    session: {
-      sessionId: session?.sessionId ?? null,
-      messages: session?.messages ?? [],
-      permission,
-      // The provider this chat is BOUND to (sessions snapshot it on
-      // first send). The panel gates provider-specific affordances on
-      // it — e.g. the reasoning-effort dial only renders where effort
-      // is actually honored (Anthropic adapter; OpenRouter ignores
-      // the reasoning object entirely today, see TODO.md).
-      provider: session?.provider ?? null,
-      // Cost/usage tally for the meter (feature 06). Normalized so the
-      // UI always gets a full shape, even for pre-feature sessions.
-      cost: normalizeTally(session?.cost),
-      // Per-session /system instructions — the chat header chip renders
-      // from this so the augmentation's presence is always visible.
-      customSystemPrompt: session?.customSystemPrompt ?? null,
-      // Per-session /tools manifest — same visibility contract: a
-      // narrowed toolset silently changes what the model can do, so its
-      // presence must be visible where the chat happens (mode-row chip).
-      toolManifest: session?.toolManifest ?? null,
-    },
-    providers: {
-      current: activeProv.name,
-      hasKey,
-      model: activeProv.model,
-      configRevision: providerConfigRevision,
-      // why: the web actor's fast default for this provider — the Settings
-      // "Web actor model" field shows it as the blank placeholder so "blank"
-      // honestly reads as e.g. claude-haiku-4-5, not "inherit".
-      defaultRunnerModel: activeProv.defaultRunnerModel,
-    },
-    composer,
-    capabilities: { actorExecution: { ...actorIsolation }, ...runtimeCapabilities },
-    profile: {
-      id: profile.id,
-      peerName: profile.peerName,
-      onboardingComplete: !!profile.onboardingComplete,
-    },
-    settings: { ...settingsStore.get() },
-    // The snapshot is the switch-back and late-joiner path for confirmation
-    // state. Live confirm/request events remain the fast path; this selects only
-    // prompts owned by the chat represented by this snapshot.
-    pendingConfirm: confirmCoordinator.getPendingForOwner(
-      typeof sessionId === 'string' ? sessionId : null,
-    ),
-    // Self-settled confirms for THIS chat (timeout / stop / closed panel) - the
-    // panel folds these into its transcript notes so a settle that happened
-    // while no surface was open is still tellable (§4e).
-    confirmSettleNotes: sessionId ? (confirmSettleNotes.get(/** @type {string} */ (sessionId)) ?? []) : [],
-    // Live actor projections are part of the fresh snapshot, not a lucky stream
-    // of events seen only by panels that were already open. Every row is scoped
-    // to this viewed root before it crosses the UI boundary.
-    actors: liveActors.actors,
-    actorProjectionEpoch: liveActors.actorProjectionEpoch,
-    actorProjectionRevision: liveActors.actorProjectionRevision,
-    spawned: liveActors.spawned,
-    asyncTasks: liveActors.asyncTasks,
-    // Per-session truth: is THIS chat's turn in flight? Lets the panel
-    // re-arm its spinner/Stop affordances when the user switches back
-    // to a conversation that kept streaming in the background.
-    streaming: sessionId ? turnSlots.isBusy(/** @type {any} */ (sessionId)) : false,
-  };
-};
+const buildStateSnapshot = makeStateSnapshotBuilder({
+  // why a getter: actorIsolation is reassigned when the isolation state load
+  // settles; a value capture would freeze the pre-load placeholder into every
+  // snapshot and pause actor work in the UI forever.
+  getActorIsolation: () => actorIsolation, actorIsolationReady, actorLiveProjection,
+  confirmCoordinator, confirmSettleNotes, ensureSettingsReady,
+  hydrateLocalModelAvailability, listProviders, liveProviderModelStatus,
+  localModelState, normalizeTally, profileState, providerConfigRevision,
+  reconcileOnboardingLatch, resolveActiveProvider, resolveComposerReadiness,
+  resolvePermission, runtimeCapabilities, sessionCache, sessions,
+  settingsStore, isTurnBusy: (/** @type {string} */ sessionId) => turnSlots.isBusy(sessionId), vault,
+});
 
 const pushState = makeCoalescedStatePush({
   isConnected: uiConnected,
@@ -4595,13 +4544,6 @@ const pushState = makeCoalescedStatePush({
   onError: (error) => console.warn('[state] push failed', error),
 });
 
-// Keepalive ports we hold references to so they're not GC'd. Recent
-// Chrome versions retain SW ports via their internal table, but holding
-// our own reference is belt-and-suspenders against version-to-version
-// drift.
-/** @type {Set<chrome.runtime.Port>} */
-const keepalivePorts = new Set();
-
 // Side-panel forwarder. The offscreen doc broadcasts voice/* (chunk,
 // auto-stop, error, permission-result) and the VM tabs broadcast
 // vm/stdout-chunk + vm/stderr-chunk via runtime.sendMessage; the SW
@@ -4614,7 +4556,7 @@ const FORWARD_TYPES = new Set([
   'voice/chunk', 'voice/auto-stop', 'voice/error', 'voice/permission-result',
   'vm/stdout-chunk', 'vm/stderr-chunk',
 ]);
-browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} */ sender) => {
+coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener((/** @type {any} */ msg, /** @type {any} */ sender) => {
   if (!FORWARD_TYPES.has(msg?.type)) return false;
   if (!isTrustedSender(sender)) return false;
   if (uiConnected()) {
@@ -4623,6 +4565,78 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
   }
   return false;
 });
+
+const VOICE_COMMANDS = new Set([
+  'voice/init', 'voice/listen', 'voice/stop', 'voice/silence', 'voice/teardown',
+]);
+const voiceRelayToken = crypto.randomUUID();
+let voiceLifecycleTail = Promise.resolve();
+/** @template T @param {()=>Promise<T>} operation @returns {Promise<T>} */
+const queueVoiceLifecycle = (operation) => {
+  const pending = voiceLifecycleTail.then(operation, operation);
+  voiceLifecycleTail = pending.then(() => {}, () => {});
+  return pending;
+};
+const teardownVoiceFeature = () => queueVoiceLifecycle(async () => {
+  const state = featureLeases.snapshot().leases['media-host'];
+  try {
+    if (state?.status === 'active') {
+      return await browser.runtime.sendMessage({
+        type: 'voice/teardown', __peerdVoiceRelay: voiceRelayToken,
+      });
+    }
+    return { ok: true, inactive: true };
+  } finally {
+    await featureLeases.revoke('media-host', 'feature-disabled');
+  }
+});
+coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(/** @type {any} */ ((
+  /** @type {any} */ msg,
+  /** @type {any} */ sender,
+  /** @type {(value:any)=>void} */ sendResponse,
+) => {
+  if (!VOICE_COMMANDS.has(msg?.type)) return false;
+  // The forwarded copy is consumed only by the offscreen voice host. Decline
+  // it here so this listener cannot race the host's response.
+  if (msg?.__peerdVoiceRelay === voiceRelayToken) return false;
+  if (!isActualSidepanelSender(sender) && !isActualOptionsSender(sender)) {
+    sendResponse({ ok: false, error: 'untrusted-voice-sender' });
+    return false;
+  }
+  const command = async () => {
+    const startsMedia = msg.type === 'voice/init' || msg.type === 'voice/listen';
+    const state = featureLeases.snapshot().leases['media-host'];
+    if (startsMedia) {
+      await acquireFeatureLease('media-host', { reason: 'feature-demand' });
+    } else if (state?.status !== 'active') {
+      return { ok: true, inactive: true };
+    }
+    try {
+      const reply = /** @type {any} */ (await browser.runtime.sendMessage({
+        ...msg, __peerdVoiceRelay: voiceRelayToken,
+      }));
+      if (startsMedia && reply?.ok !== true) {
+        await featureLeases.revoke('media-host', 'feature-disabled');
+      }
+      return reply;
+    } finally {
+      if (msg.type === 'voice/teardown') {
+        await featureLeases.revoke('media-host', 'feature-disabled');
+      }
+    }
+  };
+  const pending = queueVoiceLifecycle(command);
+  pending.then(sendResponse, async (cause) => {
+    if (msg.type === 'voice/init' || msg.type === 'voice/listen') {
+      await featureLeases.revoke('media-host', 'feature-disabled').catch(() => {});
+    }
+    sendResponse({
+      ok: false,
+      error: cause instanceof Error ? cause.message : String(cause),
+    });
+  });
+  return true;
+}));
 
 // Tab tracker wiring. Each kind's tab broadcasts <kind>/tab-ready
 // on load; we resolve the pending readyPromise so any in-flight
@@ -4692,7 +4706,7 @@ const attachAppTabActor = async (msg, sender) => {
   }
 };
 
-browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} */ sender) => {
+coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener((/** @type {any} */ msg, /** @type {any} */ sender) => {
   if (!isTrustedSender(sender)) return false;
   // Each tab-ready is a new tabId entering the driven set, so each one resyncs
   // the denylist network backstop (idempotent; a no-op when nothing moved).
@@ -4733,7 +4747,7 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
   return false;
 });
 
-browser.tabs.onRemoved.addListener((tabId) => {
+coldEvent('tabs.onRemoved', browser.tabs.onRemoved).addListener((/** @type {number} */ tabId) => {
   poisonedAppRuntimeTabs.delete(tabId);
   // why the vmClient hop: a VM tab closing mid-command would otherwise
   // leave its pending RPCs stalling out the 90s message timeout. The
@@ -4782,7 +4796,7 @@ browser.tabs.onRemoved.addListener((tabId) => {
 // node ids belong to the old document. tabs.onUpdated covers full navigations;
 // an SPA route change that slips through still fails safe when DOM.resolveNode
 // cannot find the node and the model has to take a new snapshot.
-browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+coldEvent('tabs.onUpdated', browser.tabs.onUpdated).addListener((/** @type {number} */ tabId, /** @type {any} */ changeInfo) => {
   if (changeInfo.status === 'loading') domRefs.clear(tabId);
   if (typeof changeInfo.url === 'string' && drivenTabIds().includes(tabId)) {
     browserOriginCustody.retain(tabId, changeInfo.url, { keepOnPersistFailure: true })
@@ -4800,7 +4814,7 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
   }
 });
 
-browser.runtime.onConnect.addListener((port) => {
+coldEvent('runtime.onConnect', browser.runtime.onConnect).addListener((/** @type {any} */ port) => {
   // Reject ports from anything that isn't one of our own contexts. The
   // 'sidepanel' port receives pushState (vault status, session, settings),
   // so an untrusted connector must never get it. Same boundary as the
@@ -4866,33 +4880,26 @@ browser.runtime.onConnect.addListener((port) => {
     });
     return;
   }
-  if (port.name === 'sw-keepalive') {
+  if (port.name === FEATURE_LEASE_KEEPALIVE_PORT) {
     if (!isOffscreenSender(port.sender)) {
       try { port.disconnect(); } catch { /* already disconnected */ }
       return;
     }
-    console.log('[sw] keepalive port connected at', new Date().toISOString());
-    keepalivePorts.add(/** @type {any} */ (port));
-
-    // Heartbeat handler. Logging this proves the SW is awake AND that
-    // bidirectional traffic is flowing. If we see heartbeats stop
-    // arriving without a corresponding disconnect, the SW is being
-    // killed silently and we should switch to chrome.alarms.
-    port.onMessage.addListener((/** @type {any} */ msg) => {
-      if (msg?.type === 'heartbeat') {
-        console.log('[sw] heartbeat at', new Date().toISOString());
-        try { port.postMessage({ type: 'heartbeat-ack', at: Date.now() }); }
-        catch (e) { console.warn('[sw] heartbeat ack post failed', e); }
-        return;
-      }
-    });
-
-    port.onDisconnect.addListener(() => {
-      const err = browser.runtime.lastError;
-      console.log('[sw] keepalive port disconnected at',
-        new Date().toISOString(),
-        err ? `— lastError: ${err.message}` : '');
-      keepalivePorts.delete(/** @type {any} */ (port));
+    attachFeatureLeaseKeepalive({
+      port,
+      featureLeases,
+      identity: kernelIdentity,
+      onRecovered: (recovery) => {
+        if (recovery?.results?.some((/** @type {any} */ result) =>
+          result?.ok && result.scope === 'dweb')) {
+          // Reacquiring the lease restores the mesh itself. Re-enter the
+          // ordinary start completion so authored App seeding, publication
+          // journal repair, and the optional inbound agent room are restored
+          // too after the renderer-local caches disappeared.
+          maybeStartBaseNetwork('host-replaced');
+        }
+      },
+      onError: (error) => console.error('[sw] feature host recovery failed', error),
     });
     return;
   }
@@ -4902,10 +4909,22 @@ browser.runtime.onConnect.addListener((port) => {
       return;
     }
     dwebCustodyClient.attach(/** @type {any} */ (port));
+    return;
   }
+  // A typo or compromised first-party page must not retain an unowned Port and
+  // accidentally pin this worker. Every accepted name returns above.
+  try { port.disconnect(); } catch { /* already disconnected */ }
 });
 
-vault.subscribe(() => { pushState(); });
+vault.subscribe((event) => {
+  pushState();
+  // Idle auto-lock happens inside the vault and never traverses vault/lock.
+  // Enter the same custody teardown for every real lock event; onLocked()
+  // coalesces this with the explicit route's immediate call.
+  if (event?.type === 'locked') {
+    void onLocked().catch((error) => console.error('[sw] vault lock teardown failed', error));
+  }
+});
 
 // ---------------------------------------------------------------------------
 // 5. Agent turn driver
@@ -5152,7 +5171,7 @@ scheduler = makeScheduler({
 // resumeSchedules (defined below; referenced at fire time, post-boot) sequences
 // goalRunner.resume() → load → tick so the isRunning() guard sees paused goal
 // runs — an alarm can respawn a dead SW, racing goal-run resume.
-browser.alarms?.onAlarm?.addListener((/** @type {any} */ alarm) => {
+coldEvent('alarms.onAlarm', browser.alarms?.onAlarm)?.addListener((/** @type {any} */ alarm) => {
   if (alarm?.name !== SCHEDULE_ALARM_NAME) return;
   resumeSchedules().catch((/** @type {unknown} */ e) => console.error('[sw] schedule tick (alarm) failed', e));
 });
@@ -5161,7 +5180,7 @@ browser.alarms?.onAlarm?.addListener((/** @type {any} */ alarm) => {
 // browser was off. Redundant with the top-level boot catch-up (which runs on
 // every SW spawn), but onStartup is the guaranteed cold-browser-start signal;
 // resumeSchedules is idempotent + serialized, so both firing is harmless.
-browser.runtime?.onStartup?.addListener(() => {
+coldEvent('runtime.onStartup', browser.runtime?.onStartup)?.addListener(() => {
   resumeSchedules().catch((/** @type {unknown} */ e) => console.error('[sw] schedule onStartup catch-up failed', e));
 });
 
@@ -5812,7 +5831,6 @@ const siteFetchCallRoute = {
 // releasing its bounded relay lease, so the run signal dismisses confirmations
 // and cancels admitted work first. Exact offscreen sender + owner binding make a
 // run id insufficient to cancel another session's work.
-const scriptRunControlRoute = makeScriptRunControlRoutes({ scriptRuns, isOffscreenSender });
 
 // DESIGN-19 — the options-surface routes for stored site clients: list (metas
 // only — no module bodies) + delete. The dossier/module are NOT secrets (they hold
@@ -5852,11 +5870,11 @@ const siteCaptureManager = makeSiteCaptureManager({
 
 // The tab has already destroyed both capture backends. Release the host-side
 // ownership record too, since tab ids can be reused within a browser session.
-browser.tabs.onRemoved.addListener((tabId) => { siteCaptureManager.release(tabId); });
+coldEvent('tabs.onRemoved', browser.tabs.onRemoved).addListener((/** @type {number} */ tabId) => { siteCaptureManager.release(tabId); });
 // A capture is document-bound, while tabs.onUpdated is the earliest host-side
 // signal that the tab has begun replacing that document. Discard immediately;
 // a later stop reports the cancellation instead of digesting stale traffic.
-browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+coldEvent('tabs.onUpdated', browser.tabs.onUpdated).addListener((/** @type {number} */ tabId, /** @type {any} */ changeInfo) => {
   if (!siteCaptureManager.has(tabId)) return;
   if (changeInfo?.status !== 'loading' && typeof changeInfo?.url !== 'string') return;
   siteCaptureManager.cancel({ tabId, reason: 'page_changed' }).catch(() => {});
@@ -6301,14 +6319,11 @@ const leaveDwebAgentInbox = async () => {
 const onBaseNetworkStopped = () => { dwebAgentRoomJoined = false; };
 
 const stopBaseNetwork = () => withDwebPublication(async () => {
-  // Never create an offscreen document to stop it. A surviving document can
-  // outlive this worker, so durable OFF always reconciles it explicitly.
-  const contexts = await listOffscreenContexts(browser);
-  if (contexts.length) {
-    const stopped = /** @type {any} */ (await browser.runtime.sendMessage({
-      type: 'dweb/base-host/stop',
-    }));
-    if (!stopped?.ok) throw new Error(stopped?.error ?? 'dweb-stop-failed');
+  // Durable OFF revokes the exact lease and lets the host tear down custody,
+  // mesh, rooms and keepalive before the now-idle document is closed.
+  const stopped = await featureLeases.disable('dweb');
+  if (stopped?.ok === false && stopped?.outcomeKnown === false) {
+    throw new Error(stopped.code ?? 'dweb-stop-unknown');
   }
   onBaseNetworkStopped();
   return { ok: true, running: false };
@@ -6332,8 +6347,12 @@ const onSettingsChanged = async (/** @type {any} */ patch) => {
     vault.setAutoLockMs(settingsStore.get().vaultAutoLockMs ?? DEFAULT_AUTO_LOCK_MS);
   }
   if (Object.hasOwn(patch ?? {}, 'ollamaHost')) invalidateLiveProviderModels('ollama');
+  if (patch?.voiceEnabled === false) await teardownVoiceFeature();
   if (patch?.dwebEnabled === false) await stopBaseNetwork();
-  else if (patch?.dwebEnabled === true) maybeStartBaseNetwork('settings-enabled');
+  else if (patch?.dwebEnabled === true) {
+    featureLeases.enable('dweb');
+    maybeStartBaseNetwork('settings-enabled');
+  }
   if (dwebAgentOn()) joinDwebAgentInbox().catch(() => {});
   else leaveDwebAgentInbox().catch(() => {});
   // Watch mode: react to the TRANSITION, not the state. why: this fires on EVERY
@@ -6735,7 +6754,7 @@ const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?:
   void run.catch((e) => console.warn('[sw] dweb conversation lane failed', e));
 };
 
-browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
+coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener((/** @type {any} */ msg) => {
   if (msg?.type === 'dweb/base-room/event' && msg.roomId === DWEB_AGENT_ROOM && msg.event === 'direct') {
     void handleDwebAgentInbound(msg.data ?? {});
   }
@@ -6818,7 +6837,7 @@ const adoptWebTab = async (/** @type {string} */ actorSessionId, /** @type {Abor
 // (tabFor → undefined → the actor falls back to the 0-tab fetch state). The orphaned
 // session is harmless and ages out. Separate listener from the agent-tab-card cleanup
 // so the two concerns stay independent.
-browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
+coldEvent('tabs.onRemoved', browser.tabs?.onRemoved)?.addListener((/** @type {number} */ tabId) => {
   if (webActorTabBindings.drop(tabId)) persistWebBindings();
   // The tab is gone, so both halves of the indicator are moot — but the
   // reporter still holds the id in its marked set, and tab ids are reused
@@ -7667,8 +7686,11 @@ const runInit = async () => {
 // /tools <preset>) runs before the first message — same create shape as
 // runAgentTurn's lazy path, so the chat that follows is the one carrying
 // the setting. Returns the (existing or fresh) current session id.
-const ensureCurrentSession = async () => {
+const ensureCurrentSession = async (/** @type {string|null|undefined} */ expectedSessionId = undefined) => {
   let sessionId = /** @type {any} */ (await sessionCache.sessionGet('currentSessionId'));
+  if (expectedSessionId !== undefined && (sessionId ?? null) !== expectedSessionId) {
+    throw new Error('agent-send-session-changed');
+  }
   if (sessionId) return sessionId;
   const ap = await ensureActiveProvider();
   const inherited = await resolvePermission(null);
@@ -7679,14 +7701,27 @@ const ensureCurrentSession = async () => {
     confirmActions: inherited.confirmActions,
   });
   sessionId = created.sessionId;
+  const beforePublish = await sessionCache.sessionGet('currentSessionId');
+  if (expectedSessionId !== undefined && (beforePublish ?? null) !== expectedSessionId) {
+    await sessions.archive(sessionId).catch(() => {});
+    throw new Error('agent-send-session-changed');
+  }
   await sessionCache.sessionSet('currentSessionId', sessionId);
+  if (await sessionCache.sessionGet('currentSessionId') !== sessionId) {
+    await sessions.archive(sessionId).catch(() => {});
+    throw new Error('agent-send-session-changed');
+  }
   sessionState.set(created);
   return sessionId;
 };
 
-const handleSystemCommand = async (/** @type {string} */ arg) => {
+const handleSystemCommand = async (/** @type {string} */ arg,
+  /** @type {string|null|undefined} */ expectedSessionId = undefined) => {
   if (vault.isLocked()) throw new VaultLockedError();
   let sessionId = /** @type {any} */ (await sessionCache.sessionGet('currentSessionId'));
+  if (expectedSessionId !== undefined && (sessionId ?? null) !== expectedSessionId) {
+    throw new Error('agent-send-session-changed');
+  }
 
   // Show the active state.
   if (!arg) {
@@ -7713,7 +7748,7 @@ const handleSystemCommand = async (/** @type {string} */ arg) => {
   // Set. Lazily create a session if the user runs /system before the
   // first message, so the chat that follows is the one carrying the
   // instructions (shared helper — /tools does the same).
-  sessionId = await ensureCurrentSession();
+  sessionId = await ensureCurrentSession(expectedSessionId);
   sessionState.set(await sessions.setCustomSystemPrompt(/** @type {any} */ (sessionId), arg));
   // why: audit the EVENT and size, never the text — session instructions
   // are user-authored prompt content, not something the audit log should
@@ -7742,9 +7777,24 @@ const toolsCommand = makeToolsCommand({
   postNote: postChatNote,
   audit: (/** @type {any} */ entry) => auditLog.append(entry),
 });
-const handleToolsCommand = async (/** @type {string} */ arg) => {
+const handleToolsCommand = async (/** @type {string} */ arg,
+  /** @type {string|null|undefined} */ expectedSessionId = undefined) => {
   if (vault.isLocked()) throw new VaultLockedError();
-  const { session } = await toolsCommand(arg);
+  const currentSessionId = async () => {
+    const current = await sessionCache.sessionGet('currentSessionId');
+    if (expectedSessionId !== undefined && (current ?? null) !== expectedSessionId) {
+      throw new Error('agent-send-session-changed');
+    }
+    return current;
+  };
+  const command = expectedSessionId === undefined ? toolsCommand : makeToolsCommand({
+    sessions,
+    getCurrentSessionId: currentSessionId,
+    ensureSession: () => ensureCurrentSession(expectedSessionId),
+    postNote: postChatNote,
+    audit: (/** @type {any} */ entry) => auditLog.append(entry),
+  });
+  const { session } = await command(arg);
   // A changed manifest re-renders the chat chip + descriptor set next
   // turn; the read-only forms (/tools, /tools list) change nothing.
   if (session) {
@@ -7916,7 +7966,7 @@ const ensureSession = ensureCurrentSession;
 
 const shareLocalApp = makeDwebShare({
   enabled: DWEB_ENABLED,
-  active: () => settingsHydrated && settingsStore.get().dwebEnabled,
+  active: () => settingsHydrated && settingsStore.get().dwebEnabled && !vault.isLocked(),
   withDwebPublication,
   withIdentityMutation: withDwebIdentityMutation,
   withAppLifecycle,
@@ -7931,7 +7981,7 @@ const shareLocalApp = makeDwebShare({
   repositories,
   prepareRuntime: async () => {
     await ensureDwebSuspensionRecovery();
-    await ensureOffscreen();
+    await ensureDwebFeature();
     return browser.runtime.sendMessage({ type: 'dweb/base-host/start' });
   },
   sendMessage: (message) => browser.runtime.sendMessage(message),
@@ -8004,12 +8054,15 @@ const normalizeImportedSettings = (/** @type {any} */ patch) => normalizeSetting
   normalizeVariant,
   normalizeEngine,
 });
-const makeSystemRouteSet = () => makeSystemRoutes({
-  vault, auditLog, sessions, pushState, kv, memory, buildStateSnapshot, closeSidePanel,
-  uiPorts, loadUserEndpoints, inspectImport, applyImport, settingsStore, saveUserHook,
-  CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError, dwebTransfer,
-  onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
-  retryActorIsolation, normalizeImportedSettings, onProviderConfigChanged,
+const makeSystemRouteSet = () => ({
+  ...makeSystemReadRoutes({ vault, auditLog, sessions, buildStateSnapshot, uiPorts }),
+  ...makeSystemRoutes({
+    vault, auditLog, pushState, kv, memory, closeSidePanel,
+    loadUserEndpoints, inspectImport, applyImport, settingsStore, saveUserHook,
+    CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError, dwebTransfer,
+    onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
+    retryActorIsolation, normalizeImportedSettings, onProviderConfigChanged,
+  }),
 });
 const makeSettingsRouteSet = () => makeSettingsRoutes({
   vault, auditLog, pushState, kv, memory, settingsStore,
@@ -8057,7 +8110,14 @@ const privateTransferOpenRoute = makePrivateTransferOpenRoute({
 // a store and inject it, rather than reaching for a module-level let.
 const getCurrentSessionId = () => sessionCache.sessionGet('currentSessionId');
 const onAppDeleted = retireAppActorBindingsForApp;
-browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
+const ensureAppTrackerReady = () => engineTrackersReady;
+const onUnlocked = makeLegacyVaultUnlockEffect({
+  onUnlocked: onVaultUnlocked, resumeGoalRuns, sessionCache, maybeAutoResumeAfterRecovery, resumeSchedules,
+});
+const confirmAnswerRoute = makeConfirmAnswerRoute({
+  confirmCoordinator, sessionCache, isActualSidepanelSender, isActualHomeSender,
+});
+coldEvent('runtime.onMessage', browser.runtime.onMessage).addListener(/** @type {any} */ (makeDispatcher({
   // Nonsecret request for a MessageChannel transferred to the exact options
   // WindowClient. Backup passphrases and payloads use only that channel.
   'private-transfer/open': privateTransferOpenRoute,
@@ -8066,6 +8126,11 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // for unrelated messages and race their real route with a spurious `false`.
   'app/actor-chat': (/** @type {any} */ msg, /** @type {any} */ sender) =>
     handleAppActorChat(msg, sender),
+  // Compatibility route remains explicitly fail-closed. Git egress is carried
+  // only on the exact lease-bound repository MessagePort.
+  'repository/kernel-fetch': async () => ({
+    ok: false, error: 'repository-private-channel-required', outcomeKnown: true,
+  }),
   // The heap split: the offscreen→SW relays for the ONE agent-loop client — model-call
   // (getSecret + safeFetch added in the handler; the key never left the SW), the
   // SW-side pin+gate tool-dispatch, and the fire-and-forget loop-event (→ the actor/
@@ -8090,12 +8155,11 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // (owner/run-verified, quota-capped, the key added SW-side).
   'script/model-call': (/** @type {any} */ msg, /** @type {any} */ sender) =>
     scriptModelCallRoute(msg, sender),
+  'confirm/answer': confirmAnswerRoute,
   ...makeVaultRoutes({
-    vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
-    pushState, purgeVaultBlob, confirmCoordinator, sessionCache,
-    isActualSidepanelSender, isActualHomeSender,
-    maybeAutoResumeAfterRecovery, resumeGoalRuns,
-    resumeSchedules,
+    vault, auditLog, kv, idb, base64ToBytes,
+    onInitialized, onUnlocked, onLocked,
+    pushState, purgeVaultBlob,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,
     VaultLockedError,
@@ -8124,18 +8188,21 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     isActualHomeSender, isSessionBusy, hasInFlightFor, actorRecoveryReady,
     contributorFeedbackTargets, channel,
   }),
-  ...makeContactsRoutes({ vault, auditLog, contacts, appRegistry, mergeContacts }),
-  ...makeActorOverviewRoutes({ vault, sessions, turnSlots, actorLiveProjection, isActualHomeSender }),
+  ...semanticRouteKernel.routes,
+  ...makeSessionKernelRoutes({
+    appClient, browser, commandSources, denylistStore, manifestLabel,
+    matchesDenylist, originOfTabUrl, sessionCache, sessions, vault,
+    contextSnapshots,
+  }),
   ...makeSessionRoutes({
-    vault, auditLog, sessions, sessionCache, turnSlots, manifestLabel, buildToolContext,
+    vault, auditLog, sessions, sessionCache, turnSlots, makeAgentSendCustody, buildToolContext,
     applyComposer, commandSources, prepareUserAttachmentsWithDocs, runAgentTurn, runInit,
     // Attached-document conversion: the SAME offscreen reader read_doc uses,
     // fed inline bytes instead of a URL (doc-extract has always accepted a
     // bytesB64 source). null on Firefox — the prepare step then refuses with
     // a legible message rather than attaching an empty file.
     convertDocAttachment,
-    handleSystemCommand, handleToolsCommand, postChatNote, spawnActor, requestReview, appClient,
-    browser, originOfTabUrl, matchesDenylist, denylistStore,
+    handleSystemCommand, handleToolsCommand, postChatNote, spawnActor, requestReview, browser,
     // goal mode (the mode-row Goal toggle): start an autonomous run, and halt
     // any active one when the user stops or steers with a fresh message.
     startGoalRun, haltGoalRun, ensureSession, actorRecoveryReady,
@@ -8151,8 +8218,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     vault, auditLog, pushState, browser, vmHttpFetch, appRegistry, vmRegistry, jsRegistry,
     podRegistry, podTabTracker, appClient, appTabTracker, appQuiescence, opfsHelpers,
     NOTEBOOK_OPFS_ROOT, IMAGE_PIN_STORAGE_KEY,
-    buildAppExport, buildNotebookExport, buildVmRecipeExport,
-    openEnvelope, inspectEnvelope, exportFilename,
+    artifactEngine,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
     listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
@@ -8232,14 +8298,17 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     localModelHostAvailable,
     pushState,
     onProviderConfigChanged,
+    withHost,
+    acquireResidentHost,
   }),
   ...makeDwebRoutes({
-    vault, auditLog, kv, ensureOffscreen, browser,
+    vault, auditLog, kv, ensureDwebFeature, browser,
     appRegistry, appClient, appTabTracker, appQuiescence, settingsStore, shareLocalApp,
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
     disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady,
     repositories, isOffscreenSender, createDwebRollbackGuard,
-    getCurrentSessionId,
+    getCurrentSessionId, dwebPublicationGeneration,
+    ensureAppTrackerReady,
   }),
 
   // --- same-user devices: shape/apply the sync surfaces (portable identity) ---
@@ -8279,14 +8348,12 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...(/** @type {any} */ (siteFetchCallRoute)),
 
   // Headless settlement cancels SW-side relays before its bounded lease frees.
-  ...(/** @type {any} */ (scriptRunControlRoute)),
 
   // --- DESIGN-19: the options surface for stored site clients (list + delete) ---
   ...(/** @type {any} */ (siteClientRoutes)),
 
   // --- design 06: toolbox module resolution (body read for the sealed-worker
   // resolver) + post-run rot bookkeeping ---
-  ...makeToolboxRoutes({ toolboxStore }),
 })));
 markMessageDispatcherReady();
 
@@ -8323,6 +8390,9 @@ void dwebSettingsGate.stopWhenDisabled(stopBaseNetwork).catch((error) => {
 // Chrome update can be the event that wakes this worker.
 const updateCheck = makeUpdateCheck({
   runtime: browser.runtime,
+  updateAvailableEvent: coldEvent(
+    'runtime.onUpdateAvailable', browser.runtime.onUpdateAvailable,
+  ),
   // why a bare fetch: a chassis-internal DATA fetch of the manifest's own
   // update feed - same class as the voice model download; no secret, no
   // agent influence over the URL (see update-check.js's header).
@@ -8399,16 +8469,6 @@ onSettingsHydrationRecovered = async () => {
 // when the SW dies, so each fresh boot starts a new transcript.
 console.log('[sw] BOOT at', new Date().toISOString(), '— UA:', navigator.userAgent);
 
-// Independent 5s liveness tick. If the SW is being killed at the 30s
-// idle timer, we'll see 5–6 ticks then the console goes dead. The
-// next boot's transcript starts at the next user action. Comparing
-// the timestamps between a heartbeat and a death tells us whether
-// the heartbeat is actually keeping the SW alive.
-setInterval(() => {
-  console.log('[sw] tick at', new Date().toISOString(),
-    `(keepalive ports: ${keepalivePorts.size})`);
-}, 5_000);
-
 // Bring the always-on BASE NETWORK online (S1b/S4). The lobby host lives in
 // the offscreen doc, but it needs the vault for identity (which it fetches via
 // the SW), so vault unlock — passphrase, PRF, or session resume — is the
@@ -8422,7 +8482,7 @@ setInterval(() => {
 // false) — and this file names no dweb module, so the store verifier stays clean.
 function maybeStartSelfDeviceHost(/** @type {string} */ reason) {
   if (!DWEB_ENABLED || !settingsHydrated || !settingsStore.get().dwebEnabled || vault.isLocked()) return;
-  void ensureOffscreen()
+  void acquireFeatureLease('dweb', { reason: 'feature-demand' })
     .then(() => browser.runtime.sendMessage({ type: 'dweb/base-host/self-start' }))
     .then((/** @type {any} */ reply) => {
       if (reply?.ok && reply.running) console.log('[sw] self-device host ONLINE on', reason);
@@ -8446,8 +8506,8 @@ function maybeStartBaseNetwork(/** @type {string} */ reason) {
       if (!isCurrent() || !settingsStore.get().dwebEnabled) {
         return { ok: false, error: 'dweb-disabled' };
       }
+      await acquireFeatureLease('dweb', { reason: 'feature-demand' });
       await ensureDwebSuspensionRecovery();
-      await ensureOffscreen();
       // The host owns its suspension lease. A normal start may race a rotation,
       // but it cannot release that lease and will fail harmlessly until the owner
       // resumes with the matching token.
@@ -8468,6 +8528,38 @@ function maybeStartBaseNetwork(/** @type {string} */ reason) {
       } else if (r?.error !== 'dweb-disabled') console.warn('[sw] dweb base network start returned', r);
     });
   }).catch((e) => console.warn('[sw] dweb base network auto-start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+}
+
+// Explicit route collaborators keep the extracted vault factory's dependency
+// object shorthand-only and give the future feature-lease cutover a single
+// lifecycle seam without changing vault route semantics.
+function onInitialized() {
+  return featureLeases.runTransition('initialize', {
+    dwebEnabled: DWEB_ENABLED && settingsHydrated && settingsStore.get().dwebEnabled,
+  });
+}
+
+function onVaultUnlocked(/** @type {string} */ reason) {
+  void featureLeases.runTransition('unlock', {
+    dwebEnabled: DWEB_ENABLED && settingsHydrated && settingsStore.get().dwebEnabled,
+  }).catch((error) => console.warn('[sw] post-unlock lease transition failed', error));
+  maybeStartBaseNetwork(reason);
+}
+
+/** @type {Promise<void>|null} */
+let vaultLockLifecycle = null;
+function onLocked() {
+  // Invalidate every publication/install/update generation synchronously so a
+  // host reply crossing the custody boundary cannot commit after lock.
+  invalidateDwebPublications();
+  if (vaultLockLifecycle) return vaultLockLifecycle;
+  const run = (async () => {
+    semanticController.close();
+    await featureLeases.lock();
+    onBaseNetworkStopped();
+  })();
+  vaultLockLifecycle = run.finally(() => { vaultLockLifecycle = null; });
+  return vaultLockLifecycle;
 }
 
 // Complete the tiny publish→catalog two-phase commit after an MV3 restart.
@@ -8503,19 +8595,6 @@ async function reconcilePendingPublications() {
 // apps only (dweb.local) — we can't re-sign a peer's card. Best-effort and async;
 // it never blocks start, and the no-downgrade rule makes a re-announce a peer
 // already has a harmless no-op.
-// Spawn the offscreen doc immediately on SW boot. Previously this was
-// only called from vault/unlock and vault/initialize; in practice the
-// SW often boots cold (extension reload, browser restart) into a state
-// where there's no offscreen yet, and the 30s idle timer fires before
-// the user gets a chance to unlock. Spawning at boot eliminates that
-// window. The offscreen doc holds the keepalive port and voice host;
-// the WebVMs live in their own tabs (vm-tab/index.html).
-console.log('[sw] boot — ensuring offscreen for keepalive + voice');
-ensureOffscreen().then(async () => {
-  if (!DWEB_ENABLED) return;
-  await ensureDwebSuspensionRecovery();
-}).catch((e) => console.error('[sw] boot ensureOffscreen failed', e));
-
 // Instance registry + tracker init for all tab-hosted kinds: pull persisted
 // catalogs and re-discover live tabs (a SW restart while tabs are open
 // is common — Chrome kills the SW after 30s idle but leaves tabs alone).
@@ -8639,17 +8718,54 @@ const browserNetworkGuardReady = Promise.all([
   }
 });
 
+// If a cold authority callback was interrupted after the browser event landed,
+// never replay the raw event. Reconcile current authoritative state only after
+// every custody/lifecycle owner is armed, then acknowledge the sanitized hint.
+void Promise.all([
+  lifecycleArmed,
+  settingsReady,
+  engineTrackersReady,
+  browserNetworkGuardReady,
+  actorRecoveryReady,
+]).then(() => coldListeners.recover(async ({ entries, fullReconcile }) => {
+  if (fullReconcile) {
+    await denylistNetGuard.sync();
+    await syncFrontDoorBehavior();
+  }
+  if (entries.some((entry) => entry.event === 'alarms.onAlarm'
+      || entry.event === 'runtime.onStartup')) {
+    await resumeSchedules();
+  }
+  for (const entry of entries) {
+    if (entry.event === 'runtime.onUpdateAvailable'
+        && typeof entry.payload?.version === 'string') {
+      await updateCheck.recoverDownloaded(entry.payload.version);
+    }
+  }
+})).catch((error) => console.error('[sw] cold event reconciliation failed', error));
+
 // Attempt to resume the vault from chrome.storage.session. If the SW
 // died and respawned within the same browser session, the unwrapped DK
 // is still there and we can pick up where we left off — no passphrase
 // re-entry required. Returns false (no-op) if the vault was never
 // unlocked or session storage was cleared.
 vault.attemptResume().then(async (resumed) => {
+  await featureLeases.ready;
   // A passive recovery receipt must be durable before any automatic model turn
   // can inspect this history. If storage is temporarily unavailable, keep the
   // mailbox row, retry the receipt separately, and leave automatic work paused.
   await maybeRedrainMailbox();
   if (resumed) {
+    // Only a proven vault resume may adopt a prior long-lived host. Until this
+    // point the successor kernel stays locked; if resume fails below, lock()
+    // tears down every orphan/intended scope instead of preserving dweb under
+    // stale session intent.
+    // A stale durable dweb intent must never be adopted before the authoritative
+    // persisted setting is known. If hydration fails, the outer catch locks and
+    // physically tears down every orphan instead of briefly reviving custody.
+    await settingsReady;
+    const resumeDwebEnabled = DWEB_ENABLED && settingsStore.get().dwebEnabled === true;
+    await featureLeases.resume({ dwebEnabled: resumeDwebEnabled });
     console.log('[sw] vault resumed from session storage');
     auditLog.append({ type: 'vault_unlocked' }).catch(() => {});
     pushState();
@@ -8683,6 +8799,7 @@ vault.attemptResume().then(async (resumed) => {
       await maybeAutoResume(currentSessionId);
     }).catch(() => {});
   } else {
+    await featureLeases.lock();
     // Vault not resumed (locked): still rehydrate goal runs so the Goal bar is
     // restored; their next turn pauses on the locked vault and waits for unlock.
     // No auto-resume here — it needs an unlocked vault to call the model.
@@ -8691,7 +8808,10 @@ vault.attemptResume().then(async (resumed) => {
       () => goalRunner?.resume(),
     ).catch((e) => console.error('[sw] goal resume failed', e));
   }
-}).catch((e) => console.error('[sw] attemptResume failed', e));
+}).catch(async (e) => {
+  await featureLeases.lock().catch(() => {});
+  console.error('[sw] attemptResume failed', e);
+});
 
 // One-time cleanup of Ralph's leftover storage. Ralph (removed 2026-06-22) wrote
 // its plan + loop state to these storage.local keys; nothing reads them now, so

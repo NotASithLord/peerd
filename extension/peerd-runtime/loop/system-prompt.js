@@ -142,7 +142,7 @@ const loadDwebBlock = async () => {
  *   Trusted turn provenance. True only for an untrusted remote-peer dweb wake;
  *   capability narrowing must never be used to infer where a turn came from.
  */
-export const renderSystemPrompt = async (ctx) => {
+export const renderSystemPromptFromAssets = (ctx, { template = '', dwebBlock = '' } = {}) => {
   const temporalBlock = typeof ctx.temporalBlock === 'string' ? ctx.temporalBlock : '';
   const customInstructions = typeof ctx.customSystemPrompt === 'string'
     && ctx.customSystemPrompt.trim().length > 0
@@ -171,8 +171,9 @@ export const renderSystemPrompt = async (ctx) => {
     ].filter(Boolean).join('\n');
   }
 
-  const template = await loadTemplate();
-  const dwebBlock = await loadDwebBlock();
+  if (typeof template !== 'string' || template.length === 0) {
+    throw new Error('system-prompt template is required for the orchestrator profile');
+  }
   // why: the always-loaded memory block (V1.5). The SW builds it once per
   // turn via memory.loadAlwaysLoaded() and passes the <memory>…</memory>
   // string here. Omit → collapses to '' (the template's surrounding prose
@@ -203,11 +204,23 @@ export const renderSystemPrompt = async (ctx) => {
   return out;
 };
 
-// why: orient the agent to the tab the user is looking at WITHOUT trusting it.
-// The title/URL are framed as context, never as an instruction or as trusted
-// page content (a tab title is attacker-controllable) — the orchestrator reads
-// the page by messaging that tab's actor when it needs the content (the
-// page-driving tools left the main agent in the actor cutover).
+/**
+ * Legacy/local renderer facade. The semantic controller calls the pure
+ * renderSystemPromptFromAssets entry with kernel-loaded packaged assets, so
+ * its sealed Worker never receives ambient fetch or storage authority.
+ * @param {Parameters<typeof renderSystemPromptFromAssets>[0]} ctx
+ */
+export const renderSystemPrompt = async (ctx) => {
+  if ((typeof ctx.taskOverride === 'string' && ctx.taskOverride.trim().length > 0)
+      || (typeof ctx.actorType === 'string' && ctx.actorType.length > 0)) {
+    return renderSystemPromptFromAssets(ctx);
+  }
+  return renderSystemPromptFromAssets(ctx, {
+    template: await loadTemplate(),
+    dwebBlock: await loadDwebBlock(),
+  });
+};
+
 /** @param {{ url: string, title?: string }} tab */
 const activeTabBlock = ({ url, title }) => [
   '<active_tab>',
@@ -234,32 +247,12 @@ const protectedTabBlock = (reason) => [
 ].join('\n');
 
 /**
- * Build the per-turn EPHEMERAL context message — the wall-clock + active-tab
- * bytes that used to live INSIDE the cached system block and busted its prompt
- * cache every turn (the `<time>now …</time>` block changes at seconds
- * resolution). Relocating them to a leading `user`-role <context> message in the
- * stream — which lands AFTER the system + tool cache breakpoints — keeps the
- * system string byte-stable within a session, so the largest cacheable prefix
- * (system + tools) reads from cache instead of re-billing at full input price
- * each turn (design 01). Pure: the caller passes the pre-built temporal block +
- * the live active tab; no clock read here.
- *
- * CANONICAL rationale for design 01 lives here; other sites point back with a
- * one-line reference rather than restating it.
- *
- * The content is FENCE-NEUTRAL trusted context (a timestamp + the user's current
- * tab URL/title). The tab is low-trust — its own <active_tab> framing tells the
- * model to treat it as orienting context, never an instruction — and it was
- * already in the prompt before this move, so there is no fence regression.
- *
+ * Pure per-turn volatile context. Turn-driver carries a cold-local copy so
+ * importing the main loop never links this rich controller-only renderer.
  * @param {Object} [args]
- * @param {string} [args.temporalBlock]  the <time>…</time> block (clock/context.js)
+ * @param {string} [args.temporalBlock]
  * @param {{ url: string, title?: string } | null} [args.activeTab]
- *   The foreground web tab, or null on home / non-web tabs.
  * @param {'private_network'|'sensitive_site'|null} [args.protectedTab]
- *   Policy-only foreground status. Carries no address or page content.
- * @returns {string} the <context>…</context> body, or '' when there is nothing
- *   volatile to send (so the caller can skip injecting an empty message).
  */
 export const buildTemporalContext = ({ temporalBlock, activeTab, protectedTab } = {}) => {
   /** @type {string[]} */

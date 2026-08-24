@@ -90,8 +90,6 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: "1.3.9"
       - run: bun install --frozen-lockfile
       - name: Run functional suite and generate passing-count badge
         run: bun run test:functional:badge
@@ -128,15 +126,15 @@ jobs:
         with:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: "1.3.9"
       - run: bun install --frozen-lockfile
       - name: ESLint
         run: bun run lint
       - name: Typecheck (bun suite + // @ts-check extension files)
         run: bun run typecheck
-      - name: Typecheck coverage floor (no regressions)
+      - name: Complete typecheck coverage
         run: bun run check:tscheck
+      - name: Cold-entry graph, policy, and artifact ratchets
+        run: bun run check:cold-static
       - name: Coverage badges (well-formed; in-browser lanes agree on the graph)
         run: bun run check:badges
       # A moved major tag is arbitrary code in a job holding this checkout, and
@@ -213,8 +211,6 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: "1.3.9"
       - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
         id: chrome
         with:
@@ -247,8 +243,6 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: "1.3.9"
       - name: Read browser pins
         id: browser-pins
         shell: bash
@@ -282,6 +276,12 @@ jobs:
             echo '::error::badges/inbrowser-gecko.json is stale - run `FIREFOX_PATH=... bun run gen:badge:gecko` and commit it (the count this job just measured is in the log above).'
             exit 1
           }
+      - name: Run installed production-cutover acceptance
+        env:
+          FIREFOX_PATH: ${{ steps.firefox.outputs.firefox-path }}
+        # Human passphrase setup, first controller message, App/isomorphic-git,
+        # and real event-page discard/recovery over the exact Store XPI.
+        run: bun run test:firefox:cutover
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -305,8 +305,6 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: "1.3.9"
       - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
         id: chrome
         with:
@@ -315,40 +313,62 @@ jobs:
       - name: Run the two-peer harness over CDP
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
-        # Retry: the headless-WebRTC ICE/peer-connect handshake is intermittently
-        # flaky on CI runners. Up to 3 attempts; pass if any succeeds.
-        run: |
-          for attempt in 1 2 3; do
-            bun run test:twopeer && exit 0
-            echo "::warning::two-peer attempt $attempt failed (headless-WebRTC flake) — retrying"
-            sleep 5
-          done
-          exit 1
+        # A release gate must expose every flake. A retry that later passes is
+        # still a broken lifecycle and cannot be promoted as green evidence.
+        run: bun run test:twopeer
       - name: Run the two-peer a2a ask/reply round-trip over CDP
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
         # Same live mesh, plus the production a2a ask/reply correlation between the
-        # two peers (envelope + did-bound resolve over real WebRTC). Same flake
-        # retry as the gossip run above.
-        run: |
-          for attempt in 1 2 3; do
-            bun run test:twopeer:a2a && exit 0
-            echo "::warning::two-peer a2a attempt $attempt failed (headless-WebRTC flake) — retrying"
-            sleep 5
-          done
-          exit 1
+        # two peers (envelope + did-bound resolve over real WebRTC).
+        run: bun run test:twopeer:a2a
       - name: Run the two-peer STANDING conversation over CDP
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
         # converse opens a thread, say continues it, the convId survives real
-        # WebRTC end to end. Same flake retry as the runs above.
-        run: |
-          for attempt in 1 2 3; do
-            bun run test:twopeer:conv && exit 0
-            echo "::warning::two-peer conv attempt $attempt failed (headless-WebRTC flake) — retrying"
-            sleep 5
-          done
-          exit 1
+        # WebRTC end to end. Any failed attempt fails the gate.
+        run: bun run test:twopeer:conv
+
+  # Exact cross-repository product acceptance. Two independent installed
+  # Preview profiles import the commit-pinned Charon .peerd artifact through
+  # the visible file UI, attach its code-first App actor, converge private and
+  # Quick Match lobbies, survive SW/offscreen replacement, and enter co-op.
+  charon-dwapp:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    name: Charon packaged two-profile dwapp
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out the exact Charon acceptance source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: NotASithLord/charon
+          ref: f98907200bc3501dd5c669ab8d6c98d1d95fbaa1
+          path: charon
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Provision pinned Chrome for Testing
+        id: cft
+        run: echo "chrome-path=$(bun scripts/cdp/ensure-chrome-for-testing.mjs | tail -1)" >> "$GITHUB_OUTPUT"
+      - name: Run exact packaged Charon private/Quick Match/co-op oracle
+        env:
+          CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
+          CHARON_ROOT: ${{ github.workspace }}/charon
+        run: bun run test:e2e:charon
+      - name: Upload Charon acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: charon-dwapp-two-profile
+          path: artifacts/e2e/charon-dwapp-two-profile.json
+          if-no-files-found: error
 
   # Additive job — the multi-PROCESS dweb node test (PHASE1-TESTING §A.2),
   # previously run only by hand. Spawns a relay + N real node processes that
@@ -365,18 +385,9 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: "1.3.9"
       - run: bun install --frozen-lockfile
-      # Retry: cross-process port/timing in the multi-node mesh can flake.
-      - name: Run the netproc harness (retry)
-        run: |
-          for attempt in 1 2 3; do
-            bun run test:netproc && exit 0
-            echo "::warning::netproc attempt $attempt failed — retrying"
-            sleep 5
-          done
-          exit 1
+      - name: Run the netproc harness (no release-hidden retries)
+        run: bun run test:netproc
 
   # Additive job — NOT in the required-checks list; lets it earn a green
   # history before gating. First test that loads the REAL unpacked extension
@@ -392,8 +403,6 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: "1.3.9"
       - run: bun install --frozen-lockfile --ignore-scripts
       # why setup-chrome: it installs the system libraries headless Chrome
       # needs. We then run against Chrome for Testing (branded Chrome ignores
@@ -424,6 +433,12 @@ jobs:
         # A virtual CTAP2.1 authenticator exercises WebAuthn PRF through the
         # real side panel and MV3 worker, including the post-credential commit.
         run: bun run test:e2e:passkey
+      - name: Run packaged Preview dweb renderer/SW lifecycle regression
+        env:
+          CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
+        # Exact Preview archive: unlocked App/Git, SW replacement, renderer
+        # replacement, same DID/room reseed, and lock/OFF teardown.
+        run: bun run test:e2e:dweb-lifecycle
       - name: Exercise the MV3 lifecycle fault boundary
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
@@ -493,8 +508,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: "1.3.9"
       # why setup-chrome: installs the system libraries headless Chrome needs.
       # We then run the PINNED Chrome for Testing build against them.
       - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
@@ -666,8 +679,6 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: "1.3.9"
       - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
       - run: bun install --frozen-lockfile
       - name: Provision Chrome for Testing
@@ -681,6 +692,58 @@ jobs:
         # font/wasm/dynamic-import 404) — the silent half of the black-screen class
         # the e2e suite (unpacked source) structurally cannot see.
         run: bun run check:pages
+
+  # Secretless performance/correctness gate over the exact packaged artifacts.
+  # During the legacy-worker migration this enforces the achieved Store and
+  # Preview graph ratchets plus complete, timeout-free host-clock samples. The
+  # executable policy retains the final single-digit target but does not claim
+  # it has been reached before the manifest cutover.
+  cold-start:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    name: packaged cold start (Chrome + Firefox)
+    # Performance evidence is meaningful only on a named runner image. The
+    # harness records ImageOS/ImageVersion plus the kernel release in-report.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Harden runner (audit egress and source writes)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      # Installs the system libraries needed by pinned Chrome for Testing.
+      - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
+      - name: Read pinned Firefox and geckodriver versions
+        id: browser-pins
+        shell: bash
+        run: |
+          firefox="$(tr -d '\r\n' < scripts/firefox/firefox-version.txt)"
+          geckodriver="$(tr -d '\r\n' < scripts/firefox/geckodriver-version.txt)"
+          [[ "$firefox" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]] || { echo "invalid Firefox pin: $firefox" >&2; exit 1; }
+          [[ "$geckodriver" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]] || { echo "invalid geckodriver pin: $geckodriver" >&2; exit 1; }
+          echo "firefox=$firefox" >> "$GITHUB_OUTPUT"
+          echo "geckodriver=$geckodriver" >> "$GITHUB_OUTPUT"
+      - uses: browser-actions/setup-firefox@0bc507ddf224827e3b1af68e014d5e42ab93e795 # v1.7.2
+        id: firefox
+        with:
+          firefox-version: ${{ steps.browser-pins.outputs.firefox }}
+      - uses: browser-actions/setup-geckodriver@fac5b0424c584257f32cf12c5eb4ba86014c34f8 # latest built branch, Node 24; no release tag
+        with:
+          geckodriver-version: ${{ steps.browser-pins.outputs.geckodriver }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - run: bun install --frozen-lockfile
+      - name: Provision pinned Chrome for Testing
+        id: cft
+        run: echo "chrome-path=$(bun scripts/cdp/ensure-chrome-for-testing.mjs | tail -1)" >> "$GITHUB_OUTPUT"
+      - name: Run immutable cold-start lane
+        env:
+          CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
+          FIREFOX_PATH: ${{ steps.firefox.outputs.firefox-path }}
+          COLD_START_LANE: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || (github.event_name == 'pull_request' && 'pr' || 'main') }}
+        run: bun run bench:cold-sw -- --lane="$COLD_START_LANE"
 
   package:
     name: package ${{ matrix.channel }}/${{ matrix.browser }}
@@ -698,8 +761,6 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: "1.3.9"
       - run: bun install --frozen-lockfile
       # --no-sign: matrix packages prove packageability + boundary on every
       # push (store artifacts are verified inside package.ts); signing
@@ -753,7 +814,11 @@ jobs:
     runs-on: ubuntu-latest
     # Bound the same image-validation exposure on the trusted signing path.
     timeout-minutes: 30
-    needs: [test, checks, firefox-runtime, package]
+    # A tag is not releasable merely because it compiles. Require the exact
+    # browser/runtime surfaces that can otherwise fail after a green package:
+    # Chrome behavior, first-run/passkey+lifecycle UX, packaged lazy entries,
+    # Firefox, and the real dweb process/WebRTC seams.
+    needs: [test, checks, inbrowser, e2e, packaged-pages, cold-start, firefox-runtime, twopeer, charon-dwapp, netproc, package]
     # The one job that holds signing secrets. Bound to a GitHub Environment so
     # the secrets can be scoped to it AND protection rules (required reviewers,
     # tag-pattern restrictions) can gate every run that touches the signing
@@ -773,8 +838,6 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: "1.3.9"
       - run: bun install --frozen-lockfile
 
       - name: Check tag matches package.json version

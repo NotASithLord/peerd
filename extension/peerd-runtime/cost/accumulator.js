@@ -89,14 +89,6 @@ export const addUsage = (tally, usage, cost) => {
 export const bumpTurn = (tally) => ({ ...tally, turns: tally.turns + 1 });
 
 /**
- * Total tokens across all four buckets — handy for the compact meter.
- * @param {CostTally} tally
- */
-export const totalTokens = (tally) =>
-  (tally.inputTokens || 0) + (tally.outputTokens || 0)
-  + (tally.cacheReadTokens || 0) + (tally.cacheWriteTokens || 0);
-
-/**
  * Hard-limit predicate. The user sets an optional session spend cap (USD);
  * when the accumulated session cost crosses it, the agent halts. Pure so
  * the SW can call it after every usage fold and the test can assert the

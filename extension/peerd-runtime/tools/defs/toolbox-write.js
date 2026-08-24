@@ -13,7 +13,7 @@
 // sideEffect 'write' so the six-gate chain treats it like any mutation; the
 // confirm here layers on top of the gates (site-client-write.js is the twin).
 
-import { buildToolboxWriteProposal } from '../../toolbox/index.js';
+import { buildToolboxWriteProposal } from '../../toolbox/core.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const toolboxWriteTool = {

@@ -17,7 +17,7 @@
 import { clamp } from '/shared/util.js';
 import { pushValueBlock } from './value-block.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { normalizeSiteOrigin } from '../../site-clients/index.js';
+import { normalizeSiteOrigin } from '../../site-clients/core.js';
 import { codeClientReference, renderCodeOpTrace } from '../../actor/capability-manifest.js';
 import { siteClientOriginRefusal } from './site-client-origin.js';
 

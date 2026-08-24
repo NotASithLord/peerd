@@ -10,20 +10,25 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { extname, join, relative } from 'node:path';
-import type { Browser } from './lib.ts';
+import type { Browser, Channel } from './lib.ts';
 import {
   collectStaticModuleGraph,
   staticImportSpecifiers,
 } from './static-module-graph.ts';
+import { dwebEnabledForTarget } from './gen-channel-config.ts';
+import { LEGACY_PACKAGE_COLD_GRAPH_RATCHETS } from '../scripts/bench/cold-start-budgets.js';
 
 export interface ColdGraphStats {
   entry: string;
+  entryBytes: number;
   modules: number;
   beforeBytes: number;
   afterBytes: number;
 }
 
 export interface ArtifactMinifyReport {
+  browser: Browser;
+  channel: Channel;
   transformedModules: number;
   preservedModules: number;
   beforeBytes: number;
@@ -34,26 +39,42 @@ export interface ArtifactMinifyReport {
   };
 }
 
+export type ColdGraphBudgets = Partial<Record<'serviceWorker' | 'offscreen', Readonly<{
+  modules: number;
+  graphBytes: number;
+  entryBytes: number;
+}>>>;
+
 // These are artifact byte budgets for the complete static graphs, including
-// byte-identical vendor modules. They provide headroom for normal maintenance
-// while preventing silent cold-path growth from undoing this optimization.
-export const COLD_GRAPH_BUDGETS = Object.freeze({
-  serviceWorker: 2_200_000,
-  offscreen: 600_000,
-});
+// byte-identical vendor modules. Values come from the executable cold-start
+// policy; packaging cannot maintain a looser shadow budget.
+// Transitional no-growth fences from the v0.7.3 artifacts. The thin kernel
+// cutover replaces these with the target ceilings. Every channel/browser cell
+// gets its own exact fence so Preview cannot borrow Store headroom or vice versa.
+export const COLD_GRAPH_BUDGETS = LEGACY_PACKAGE_COLD_GRAPH_RATCHETS;
 
 const PRESERVE_EXACT = new Set([
   'shared/channel-config.js',
   'shared/dweb-loader.js',
 ]);
+const DWEB_DISABLED_PRESERVE_EXACT = new Set([
+  'background/routes/dweb.js',
+  'background/routes/dweb-self.js',
+]);
 
 const byteLength = (source: string): number => Buffer.byteLength(source, 'utf8');
 
-const shouldTransform = (staging: string, file: string): boolean => {
+const shouldTransform = (
+  staging: string,
+  file: string,
+  browser: Browser,
+  channel: Channel,
+): boolean => {
   const rel = relative(staging, file).split('\\').join('/');
   return ['.js', '.mjs'].includes(extname(file))
     && !rel.startsWith('vendor/')
-    && !PRESERVE_EXACT.has(rel);
+    && !PRESERVE_EXACT.has(rel)
+    && (dwebEnabledForTarget(channel, browser) || !DWEB_DISABLED_PRESERVE_EXACT.has(rel));
 };
 
 const unionInto = (target: Set<string>, source: Set<string>): void => {
@@ -68,6 +89,7 @@ const graphStats = (
   afterSizes: Map<string, number>,
 ): ColdGraphStats => ({
   entry: relative(staging, entry).split('\\').join('/'),
+  entryBytes: afterSizes.get(entry) ?? 0,
   modules: graph.size,
   beforeBytes: [...graph].reduce((total, file) => total + (beforeSizes.get(file) ?? 0), 0),
   afterBytes: [...graph].reduce((total, file) => total + (afterSizes.get(file) ?? 0), 0),
@@ -76,6 +98,7 @@ const graphStats = (
 export const minifyColdArtifactModules = async (
   staging: string,
   browser: Browser,
+  channel: Channel,
 ): Promise<ArtifactMinifyReport> => {
   const manifest = JSON.parse(readFileSync(join(staging, 'manifest.json'), 'utf8')) as {
     background?: { service_worker?: string; scripts?: string[] };
@@ -128,7 +151,7 @@ export const minifyColdArtifactModules = async (
   let transformedModules = 0;
 
   for (const file of allModules) {
-    if (!shouldTransform(staging, file)) continue;
+    if (!shouldTransform(staging, file, browser, channel)) continue;
     const source = beforeSource.get(file) as string;
     const output = `${transpiler.transformSync(source).trimEnd()}\n`;
     const beforeImports = await staticImportSpecifiers(source, relative(staging, file));
@@ -153,6 +176,8 @@ export const minifyColdArtifactModules = async (
     .reduce((total, file) => total + (afterSizes.get(file) ?? 0), 0);
 
   return {
+    browser,
+    channel,
     transformedModules,
     preservedModules: allModules.size - outputs.size,
     beforeBytes,
@@ -178,7 +203,10 @@ export const minifyColdArtifactModules = async (
   };
 };
 
-export const assertColdArtifactBudgets = (report: ArtifactMinifyReport): void => {
+export const assertColdArtifactBudgets = (
+  report: ArtifactMinifyReport,
+  budgets: ColdGraphBudgets = COLD_GRAPH_BUDGETS[report.channel][report.browser],
+): void => {
   for (const [name, stats] of Object.entries(report.graphs) as Array<
     ['serviceWorker' | 'offscreen', ColdGraphStats]
   >) {
@@ -187,10 +215,23 @@ export const assertColdArtifactBudgets = (report: ArtifactMinifyReport): void =>
         `${name} cold graph did not shrink (${stats.beforeBytes} -> ${stats.afterBytes} bytes)`,
       );
     }
-    const budget = COLD_GRAPH_BUDGETS[name];
-    if (stats.afterBytes > budget) {
+    const budget = budgets[name];
+    if (!budget) {
+      throw new Error(`${report.browser} has no reviewed ${name} cold-graph budget`);
+    }
+    if (stats.modules > budget.modules) {
       throw new Error(
-        `${name} cold graph is ${stats.afterBytes} bytes after release minification; budget is ${budget}`,
+        `${name} cold graph has ${stats.modules} modules; budget is ${budget.modules}`,
+      );
+    }
+    if (stats.afterBytes > budget.graphBytes) {
+      throw new Error(
+        `${name} cold graph is ${stats.afterBytes} bytes after release minification; budget is ${budget.graphBytes}`,
+      );
+    }
+    if (stats.entryBytes > budget.entryBytes) {
+      throw new Error(
+        `${name} cold entry is ${stats.entryBytes} bytes after release minification; budget is ${budget.entryBytes}`,
       );
     }
   }

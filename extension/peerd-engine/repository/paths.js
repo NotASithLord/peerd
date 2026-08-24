@@ -26,9 +26,3 @@ export const repositoryPaths = ({ kind, id }) => {
 
 /** @param {string} appId */
 export const appRepositoryRef = (appId) => ({ kind: 'app', id: appId });
-
-/** @param {string} notebookId */
-export const notebookRepositoryRef = (notebookId) => ({ kind: 'notebook', id: notebookId });
-
-/** @param {string} podId */
-export const podRepositoryRef = (podId) => ({ kind: 'pod', id: podId });

@@ -23,6 +23,9 @@
 
 import m from '/vendor/mithril/mithril.js';
 import { listLocalModelSpecs, probeLocalModelCapability, judgeModelCapability } from '/peerd-provider/index.js';
+import {
+  isUnknownMutationOutcome, mutationFailureCopy, unknownMutationCopy,
+} from '../mutation-custody.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
 
@@ -43,7 +46,7 @@ const dlText = (status, progress) => {
   const p = progress && progress.model === status?.model ? progress : null;
   const size = status?.sizeGB ? `~${status.sizeGB} GB` : '~3 GB';
   if (!p) return `Downloading… (one-time, ${size} - this takes a few minutes)`;
-  if (p.status === 'error') return `Error: ${p.message || 'download failed'}`;
+  if (p.status === 'error') return 'Download failed.';
   if (p.status === 'phase') return p.phase || 'Working…';
   // Prefer the AGGREGATE across all weight files — a single, monotonic total %.
   // The per-file `progress` (the fallback below) resets to 0 each new file, so it
@@ -68,6 +71,7 @@ export const LocalModelsSection = {
     vnode.state.progress = null;    // last download-progress event (carries its model id)
     vnode.state.error = null;       // catalog-level failure
     vnode.state.downloading = {};   // model id → optimistic "we asked for it"
+    vnode.state.downloadUncertain = {}; // model id → result lost; catalog must reconcile
     vnode.state.removed = false;
     vnode.state.readyNotified = false;
     vnode.state.pollTimer = null;
@@ -93,6 +97,11 @@ export const LocalModelsSection = {
 
   /** @param {{ state: any, attrs: { state: any, send: Send, onReady?: () => void } }} vnode */
   async refreshStatus(vnode) {
+    // Direct tests and restored component state from older builds may predate
+    // the custody latch. Treat that shape as an empty latch rather than
+    // crashing the status poll and leaving the model surface stale forever.
+    vnode.state.downloadUncertain ??= {};
+    vnode.state.downloading ??= {};
     const generation = vnode.state.statusGeneration + 1;
     vnode.state.statusGeneration = generation;
     if (vnode.attrs.state?.capabilities?.localWebGpuHost?.status !== 'available') {
@@ -116,7 +125,7 @@ export const LocalModelsSection = {
       // offscreen napping) must not repaint an installed model as locked and
       // re-offer buttons that act on stale state. The error renders as a hint
       // line and the poll below retries until the catalog answers again.
-      vnode.state.error = reply?.error ?? 'unavailable';
+      vnode.state.error = 'unavailable';
       LocalModelsSection.schedulePoll(vnode);
     }
     vnode.state.progress = reply?.progress ?? vnode.state.progress;
@@ -130,6 +139,18 @@ export const LocalModelsSection = {
       const entry = vnode.state.entries?.[spec.id];
       const ready = !!(entry?.available || entry?.downloaded);
       const failed = vnode.state.progress?.model === spec.id && vnode.state.progress?.status === 'error';
+      // A successful catalog reply is the reconciliation receipt for a lost
+      // init reply. If it says this exact model is idle, replay is safe again.
+      const reconciledIdle = vnode.state.downloadUncertain[spec.id]
+        && Object.hasOwn(vnode.state.entries ?? {}, spec.id) && !entry?.loading && !ready;
+      if (reconciledIdle) {
+        vnode.state.downloadUncertain[spec.id] = false;
+        vnode.state.downloading[spec.id] = false;
+        vnode.state.progress = {
+          status: 'error', model: spec.id,
+          message: 'Status confirms the download did not start. You can try again.',
+        };
+      }
       if (ready || failed) vnode.state.downloading[spec.id] = false;
       if (!ready && (entry?.loading || vnode.state.downloading[spec.id])) inFlight = true;
     }
@@ -148,8 +169,8 @@ export const LocalModelsSection = {
     try {
       const cap = await probeLocalModelCapability();
       vnode.state.verdicts[spec.id] = judgeModelCapability(cap, spec);
-    } catch (e) {
-      vnode.state.verdicts[spec.id] = { capable: false, reason: `probe failed: ${/** @type {{ message?: string }} */ (e)?.message ?? e}`, confidence: 'none' };
+    } catch {
+      vnode.state.verdicts[spec.id] = { capable: false, reason: 'Hardware check failed.', confidence: 'none' };
     }
     vnode.state.testing = null; m.redraw();
   },
@@ -162,11 +183,33 @@ export const LocalModelsSection = {
       vnode.state.progress = null;
     }
     vnode.state.downloading[spec.id] = true; m.redraw();
-    const reply = await vnode.attrs.send({ type: 'local-model/init', model: spec.id }).catch(() => null);
+    let reply;
+    try {
+      reply = await vnode.attrs.send({ type: 'local-model/init', model: spec.id });
+    } catch {
+      reply = { ok: false, outcomeKnown: false };
+    }
     if (!reply?.ok) {
+      if (isUnknownMutationOutcome(reply)) {
+        vnode.state.downloadUncertain[spec.id] = true;
+        vnode.state.progress = {
+          status: 'phase', model: spec.id,
+          phase: unknownMutationCopy('starting the model download'),
+        };
+        // A read is safe. Keep the action disabled unless a catalog reply
+        // proves the model is idle or reports that it is already loading.
+        await LocalModelsSection.refreshStatus(vnode);
+        if (vnode.state.downloadUncertain[spec.id]) LocalModelsSection.schedulePoll(vnode);
+        return;
+      }
       // Render the refusal on THIS card (a wrong-model progress event would be
       // ignored by the others' filters anyway).
-      vnode.state.progress = { status: 'error', message: reply?.error ?? 'download failed', model: spec.id };
+      vnode.state.progress = {
+        status: 'error', model: spec.id,
+        message: mutationFailureCopy(reply, {
+          action: 'starting the model download', fallback: 'Download could not start.',
+        }),
+      };
       vnode.state.downloading[spec.id] = false;
       m.redraw();
       return;
@@ -267,7 +310,7 @@ export const LocalModelsSection = {
           ? '✓ Downloaded + loaded - available in the Lab and selectable as a runner / main-loop model.'
           : '✓ Downloaded (cached) - loads from cache on first use; already selectable in the Lab + model pickers.')
         : loading ? m('.lm-state', dlText({ ...entry, sizeGB: spec.sizeGB }, ui.progress))
-          : failed ? m('.lm-state.bad', `✕ ${failed.message || 'Download failed - try again.'}`)
+          : failed ? m('.lm-state.bad', '✕ Download failed. Check the model status before trying again.')
             : verdict ? m('.lm-state', { class: verdict.capable ? 'ok' : 'bad' }, `${verdict.capable ? '✓' : '✕'} ${verdict.reason}`)
               : m('.lm-state.muted', '🔒 Locked - run a hardware test to check this model can run on this machine.');
 

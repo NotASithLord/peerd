@@ -98,6 +98,38 @@ describe('Contributor Metrics human UI', () => {
     }
   });
 
+  it('reconciles an unknown enable result and never renders raw transport text', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    let statusCalls = 0;
+    const send = async (/** @type {any} */ message) => {
+      if (message.type === 'contributor/status') {
+        statusCalls += 1;
+        return statusCalls === 1
+          ? { ok: true, status: { enabled: false, disclosureVersion: 1, diagnostic: null } }
+          : { ok: false, error: 'status-lost' };
+      }
+      return {
+        ok: false, error: 'raw-private-generation',
+        outcomeKnown: false, outcomeKind: 'transport-lost',
+      };
+    };
+    m.mount(root, { view: () => m(ContributorMetricsSection, { send }) });
+    try {
+      await settle();
+      button(root, 'Enable Contributor Metrics').click();
+      await settle();
+      await settle();
+      expect(statusCalls).toBe(2);
+      expect(root.textContent).toContain('could not confirm whether enabling Contributor Metrics finished');
+      expect(root.textContent?.includes('raw-private-generation')).toBe(false);
+      expect(button(root, 'Enable Contributor Metrics').disabled).toBe(true);
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
+
   it('renders binary transcript-free feedback and sends no arbitrary field', async () => {
     const root = document.createElement('div');
     document.body.appendChild(root);

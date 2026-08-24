@@ -56,25 +56,6 @@ export const originFromSecretName = (name) =>
   String(name).startsWith(ORIGIN_SECRET_PREFIX) ? String(name).slice(ORIGIN_SECRET_PREFIX.length) : null;
 
 /**
- * THE SEND-TIME BINDING GATE (rules 2 + 3). Given an outbound request URL and the
- * actor's OWNED origin, return the origin whose key may authenticate the request — or
- * null to send anonymously. Authenticates ONLY when the request is https AND its
- * URL.origin EQUALS the owned origin. Cross-origin, http, or a spoof
- * (`owned.evil.com`, userinfo tricks) all land on a different origin → null. Does NOT
- * decide whether a key EXISTS; the caller looks up originSecretName(origin) in the vault.
- * @param {string} url  the outbound request url
- * @param {string | undefined} ownedOrigin  the actor's fixed owned origin (URL.origin form)
- * @returns {string | null}
- */
-export const authOriginForRequestUrl = (url, ownedOrigin) => {
-  if (!ownedOrigin) return null;
-  let u;
-  try { u = new URL(url); } catch { return null; }
-  if (u.protocol !== 'https:') return null;        // rule 2 (send): never over cleartext
-  return u.origin === ownedOrigin ? ownedOrigin : null;   // rule 3: URL.origin equality
-};
-
-/**
  * A plausible API key: non-empty, no whitespace, a sane minimum. Formats vary wildly,
  * so this is a sanity gate, not a validator.
  * @param {unknown} key @returns {boolean}

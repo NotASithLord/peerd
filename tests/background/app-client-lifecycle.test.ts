@@ -77,4 +77,15 @@ describe('App OPFS lifecycle posture', () => {
     expect(body).not.toContain('packedBytes');
     expect(body).toContain('return { ...snapshot, files }');
   });
+
+  test('versioned replacement checks custody through commit and rolls back a stale result', async () => {
+    const source = await Bun.file('./extension/background/app-client.js').text();
+    const start = source.indexOf('const replaceVersionedFilesUnlocked = async');
+    const end = source.indexOf('const listFiles = async', start);
+    const body = source.slice(start, end);
+    expect(body).toContain("if (!isCurrent()) throw new Error('dweb-custody-changed')");
+    expect(body).toContain('await afterCommit(updated)');
+    expect(body.indexOf('await afterCommit(updated)')).toBeLessThan(body.indexOf('return { record: updated'));
+    expect(body.indexOf('await afterCommit(updated)')).toBeLessThan(body.indexOf('rollback failed App release update'));
+  });
 });

@@ -14,7 +14,7 @@
 
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { resolveTargetTab, originOfUrl, scriptingTarget } from './dom-helpers.js';
-import { summarizeMutations } from '../../dom/index.js';
+import { summarizeMutations } from '../../dom/action-result.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const watchChangesTool = {

@@ -358,13 +358,3 @@ export const createTranscriber = (deps = {}) => {
     activeTargetId: () => activeTargetId,
   });
 };
-
-/**
- * Capability check that doesn't actually instantiate Moonshine. The
- * vendor stub exposes a VENDORED constant; when it's false (the
- * shipped placeholder), we know the engine can't run yet.
- */
-// why: VENDORED is baked into the bundle as a literal, so compare through a
-// boolean cast to avoid a spurious no-overlap error on `!== false`.
-export const isMoonshineVendored = () => /** @type {boolean} */ (VENDORED) !== false;
-

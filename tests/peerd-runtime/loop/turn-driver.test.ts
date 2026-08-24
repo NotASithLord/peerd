@@ -138,6 +138,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   waitForActorIsolation = async () => {},
   dynamicIsolation = false,
   runtimeUnsupported = false,
+  turnUnknown = false,
 } = {}) => {
   const liveGetSecret = async () => 'sk-live';
   const liveSafeFetch = async () => new Response('ok');
@@ -287,6 +288,12 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     },
     runUserTurn: dynamicIsolation ? runUserTurn : async function* (ctx: any) {
       loopCtx = ctx;
+      if (turnUnknown) {
+        const failure = Object.assign(new Error('controller-call-timeout'), {
+          code: 'controller-call-timeout', outcomeKnown: false, retryable: false,
+        });
+        throw failure;
+      }
       if (boundaryFailure) {
         await ctx.safeFetch('https://provider.invalid');
         return;
@@ -435,6 +442,21 @@ describe('runAgentTurn credential custody', () => {
       type: 'turn/error', error: ACTOR_CREDENTIAL_BOUNDARY_FAILURE,
     }));
     expect(fixture.broadcasts.some((message) => message.type === 'turn/actor-done')).toBe(false);
+  });
+
+  test('an unknown controller outcome reaches the user as non-retryable custody, not a raw code', async () => {
+    const fixture = turnDeps('chat', { turnUnknown: true, boundaryFailure: true });
+    expect(await fixture.driver.runAgentTurn({
+      sessionId: 's1', userText: 'commit and continue',
+    })).toEqual({ ok: false, stopReason: null });
+    expect(fixture.broadcasts).toContainEqual(expect.objectContaining({
+      type: 'turn/error',
+      code: 'controller-call-timeout',
+      outcomeKnown: false,
+      retryable: false,
+      error: expect.stringContaining('may have started'),
+    }));
+    expect(fixture.broadcasts.some((message) => message.error === 'controller-call-timeout')).toBe(false);
   });
 
   test('a production loop error fails a background turn with no UI broadcasts', async () => {

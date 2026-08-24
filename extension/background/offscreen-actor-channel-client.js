@@ -5,7 +5,11 @@
 // The service worker instead finds the exact offscreen WindowClient and
 // transfers one standard MessageChannel endpoint directly to that document.
 
-import { ACTOR_CHANNEL_OFFER, ACTOR_CHANNEL_PROTOCOL } from '../shared/actor-channel-protocol.js';
+// Kept local so the authority kernel does not link a constants-only module.
+// The offscreen host imports the shared wire constants independently.
+const ACTOR_CHANNEL_PROTOCOL = 1;
+const ACTOR_CHANNEL_OFFER = 'peerd/actor-channel';
+export { makeSemanticControllerClient } from './offscreen-controller-client.js';
 
 export class ActorChannelError extends Error {
   /** @param {string} message @param {string} code @param {{ cause?: unknown }} [options] */

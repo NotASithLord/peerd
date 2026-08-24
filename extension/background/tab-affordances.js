@@ -38,8 +38,13 @@ const AGENT_TAB_COLORS = ['#00B7EB', '#EF4444', '#F59E0B', '#22C55E', '#D946EF']
  * @param {() => Promise<any>} deps.closeSidePanel
  * @param {() => boolean} [deps.isWatchOn]  live read of the watchAgentTab setting (default off)
  * @param {() => ('panel'|'home')} [deps.getFrontDoorView]  live read of the frontDoorView setting (default 'panel')
+ * @param {(key:string,event:any)=>any} [deps.coldEvent]
  */
-export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSidePanel, isWatchOn = () => false, getFrontDoorView = () => 'panel' }) => {
+export const makeTabAffordances = ({
+  browser, uiPorts, denylistStore, closeSidePanel,
+  isWatchOn = () => false, getFrontDoorView = () => 'panel',
+  coldEvent = (_key, event) => event,
+}) => {
   const HOME_URL = browser.runtime.getURL('home/home.html');
 
   // ── 1. the agent-tab card ──────────────────────────────────────────────────
@@ -155,12 +160,12 @@ export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSideP
   };
   // Track the active tab so the card hides when you're on the agent tab, and shows
   // again when you move away.
-  browser.tabs?.onActivated?.addListener((/** @type {{ tabId: number }} */ { tabId }) => {
+  coldEvent('tabs.onActivated', browser.tabs?.onActivated)?.addListener((/** @type {{ tabId: number }} */ { tabId }) => {
     activeTabId = tabId;
     if (agentTabInfo) broadcastAgentTab();
   });
   // Clear the card when the agent tab closes (clicking a dead tab does nothing).
-  browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
+  coldEvent('tabs.onRemoved', browser.tabs?.onRemoved)?.addListener((/** @type {number} */ tabId) => {
     if (tabId === agentTabId) { agentTabId = null; agentTabInfo = null; broadcastAgentTab(); }
   });
 
@@ -238,9 +243,9 @@ export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSideP
   };
   // Show when the user WALKS ONTO a peerd web tab, or it finishes loading while
   // they're on it. (Sidebar-close is handled at the port disconnect, in the SW.)
-  browser.tabs?.onActivated?.addListener((/** @type {{ tabId: number }} */ { tabId }) => { showWebTabHint(tabId); });
-  browser.tabs?.onUpdated?.addListener((/** @type {number} */ tabId, /** @type {any} */ changeInfo) => { if (changeInfo.status === 'complete') showWebTabHint(tabId); });
-  browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => { peerdWebTabs.delete(tabId); });
+  coldEvent('tabs.onActivated', browser.tabs?.onActivated)?.addListener((/** @type {{ tabId: number }} */ { tabId }) => { showWebTabHint(tabId); });
+  coldEvent('tabs.onUpdated', browser.tabs?.onUpdated)?.addListener((/** @type {number} */ tabId, /** @type {any} */ changeInfo) => { if (changeInfo.status === 'complete') showWebTabHint(tabId); });
+  coldEvent('tabs.onRemoved', browser.tabs?.onRemoved)?.addListener((/** @type {number} */ tabId) => { peerdWebTabs.delete(tabId); });
 
   // ── 3. the front door — toolbar icon + Alt+Shift+P ──────────────────────────
   // The toolbar icon is peerd's FRONT DOOR, and which surface it opens is the
@@ -271,10 +276,10 @@ export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSideP
   browser.tabs?.query?.({}).then((/** @type {any[]} */ tabs) => {
     for (const t of tabs) if (t.id != null) trackHomeTab(t.id, t.url ?? '');
   }).catch((/** @type {any} */ e) => console.debug('[sw] home-tab bootstrap failed', e));
-  browser.tabs?.onUpdated?.addListener((/** @type {number} */ tabId, /** @type {any} */ changeInfo, /** @type {any} */ tab) => {
+  coldEvent('tabs.onUpdated', browser.tabs?.onUpdated)?.addListener((/** @type {number} */ tabId, /** @type {any} */ changeInfo, /** @type {any} */ tab) => {
     if (changeInfo.url != null || tab?.url != null) trackHomeTab(tabId, /** @type {string} */ (changeInfo.url ?? tab.url));
   });
-  browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => { homeTabIds.delete(tabId); });
+  coldEvent('tabs.onRemoved', browser.tabs?.onRemoved)?.addListener((/** @type {number} */ tabId) => { homeTabIds.delete(tabId); });
   const isHomeOpen = () => homeTabIds.size > 0 || uiPorts.hasNamed('home');
 
   // A synchronous current-window id for sidePanel.open({ windowId }). onClicked and
@@ -291,7 +296,7 @@ export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSideP
     lastFocusedWindowId = w?.id ?? lastFocusedWindowId;
     chromeFocused = w?.focused === true;
   }).catch(() => {});
-  browser.windows?.onFocusChanged?.addListener((/** @type {number} */ winId) => {
+  coldEvent('windows.onFocusChanged', browser.windows?.onFocusChanged)?.addListener((/** @type {number} */ winId) => {
     const none = winId == null || winId === browser.windows.WINDOW_ID_NONE;
     chromeFocused = !none;
     if (!none) lastFocusedWindowId = winId;
@@ -349,14 +354,14 @@ export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSideP
     openHome();
   };
 
-  browser.action?.onClicked?.addListener((/** @type {any} */ tab) => {
+  coldEvent('action.onClicked', browser.action?.onClicked)?.addListener((/** @type {any} */ tab) => {
     pullInPeerd(/** @type {number} */ (tab?.windowId ?? lastFocusedWindowId), { fromShortcut: false });
   });
   // Alt+Shift+P (user-rebindable) — TOGGLES the panel: pulls it in, or closes it if
   // already open. The command handler is a VALID user-gesture context on BOTH Chrome
   // and Firefox, so it needs no content-script relay — and thus no hole in the
   // fail-closed SW boundary the injected-web-page button would have required.
-  browser.commands?.onCommand?.addListener((/** @type {string} */ command, /** @type {any} */ tab) => {
+  coldEvent('commands.onCommand', browser.commands?.onCommand)?.addListener((/** @type {string} */ command, /** @type {any} */ tab) => {
     if (command !== 'pull-in-peerd') return;
     pullInPeerd(/** @type {number} */ (tab?.windowId ?? lastFocusedWindowId), { fromShortcut: true });
   });

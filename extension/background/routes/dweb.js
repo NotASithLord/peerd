@@ -20,12 +20,17 @@
  */
 export const makeDwebRoutes = (deps) => {
   const {
-    vault, auditLog, kv, ensureOffscreen, browser,
+    vault, auditLog, kv, ensureDwebFeature, browser,
     appRegistry, appClient, appTabTracker, appQuiescence, settingsStore, shareLocalApp,
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
     disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady, repositories,
     isOffscreenSender, createDwebRollbackGuard, getCurrentSessionId,
+    dwebPublicationGeneration, ensureAppTrackerReady,
   } = deps;
+  // Production supplies the custody-aware lease seam. Retain the former
+  // injected host initializer only as a pure-test/migration fallback.
+  const ensureFeature = typeof ensureDwebFeature === 'function'
+    ? ensureDwebFeature : deps.ensureOffscreen;
   const rollbackGuard = createDwebRollbackGuard({ kv });
 
   /**
@@ -66,13 +71,25 @@ export const makeDwebRoutes = (deps) => {
 
   // Cold workers expose channel defaults until persisted settings hydrate.
   // Effectful/read routes fail closed if that hydration is still unavailable.
-  const dwebOn = () => DWEB_ENABLED && settingsStore.get().dwebEnabled;
+  const dwebOn = () => DWEB_ENABLED && settingsStore.get().dwebEnabled && !vault.isLocked();
   const dwebReady = async () => {
     if (!DWEB_ENABLED) return false;
     try { await ensureSettingsReady(); }
     catch { return false; }
     return dwebOn();
   };
+  /**
+   * Storage callbacks are accepted only for the exact publication generation
+   * minted by the outer kernel operation. Pure legacy fixtures may omit the
+   * getter; production always supplies it.
+   * @param {unknown} claim
+   */
+  const publicationCurrent = (claim) => typeof dwebPublicationGeneration !== 'function'
+    || (Number.isSafeInteger(claim) && claim === dwebPublicationGeneration());
+  /** @param {unknown} claim */
+  const dwebStorageReady = async (claim) => publicationCurrent(claim)
+    && await dwebReady()
+    && publicationCurrent(claim);
   /** @param {any} entry */
   const auditCommittedChange = async (entry) => {
     try { await auditLog.append(entry); return null; }
@@ -127,9 +144,9 @@ export const makeDwebRoutes = (deps) => {
     // in the calling page (fetchBundle + installAppBundle); this route is
     // the storage arm. Files cross runtime messaging as JSON-safe base64
     // envelopes, then appClient applies the same byte limits as local imports.
-    'dweb/app-install': async ({ appId, name, files, entryFile, fileKinds, dweb }, sender) => {
+    'dweb/app-install': async ({ appId, name, files, entryFile, fileKinds, dweb, publicationGeneration }, sender) => {
       if (isOffscreenSender?.(sender) !== true) return { ok: false, error: 'offscreen-sender-required' };
-      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebStorageReady(publicationGeneration))) return { ok: false, error: 'dweb-custody-changed' };
       if (typeof appId !== 'string' || !appId.startsWith('app-')) {
         return { ok: false, error: 'appId-required' };
       }
@@ -138,17 +155,29 @@ export const makeDwebRoutes = (deps) => {
       try {
         const admitted = await admitTrackedVersion(dweb);
         if (!admitted.ok) return { ok: false, error: admitted.error };
+        if (!publicationCurrent(publicationGeneration) || !dwebOn()) {
+          return { ok: false, error: 'dweb-custody-changed' };
+        }
         record = await appClient.create({ appId, name, files, entryFile, fileKinds, dweb, source: 'dweb' });
         createdAppId = record.id;
+        if (!publicationCurrent(publicationGeneration) || !dwebOn()) {
+          throw new Error('dweb-custody-changed');
+        }
         const repository = await repositories.statusApp(record.id);
         // Local history and signed publisher provenance are different lineages:
         // git_oid is our safe-update baseline; source_git_oid came from the peer.
         record = await appRegistry.update(record.id, { dweb: { git_oid: repository.oid } });
         if (!record) throw new Error('app disappeared while recording install lineage');
+        if (!publicationCurrent(publicationGeneration) || !dwebOn()) {
+          throw new Error('dweb-custody-changed');
+        }
         const auditWarning = await auditCommittedChange({
           type: 'dweb_app_installed',
           details: { appId: record.id, uri: dweb?.uri ?? null, publisher: dweb?.publisher ?? null },
         });
+        if (!publicationCurrent(publicationGeneration) || !dwebOn()) {
+          throw new Error('dweb-custody-changed');
+        }
         return { ok: true, app: record, ...(auditWarning ? { warning: auditWarning } : {}) };
       } catch (e) {
         if (createdAppId) await appClient.delete(createdAppId).catch(() => {});
@@ -162,9 +191,9 @@ export const makeDwebRoutes = (deps) => {
     // OPFS dir first, then write the new set — otherwise stale files linger and can
     // shadow the new entry. The dweb slot is MERGED so version_id/uri/seq advance
     // while publisher/slug/dwapp_id stay put. The open tab reloads to show the update.
-    'dweb/app-update': async ({ appId, files, entryFile, fileKinds, dweb, strategy }, sender) => {
+    'dweb/app-update': async ({ appId, files, entryFile, fileKinds, dweb, strategy, publicationGeneration }, sender) => {
       if (isOffscreenSender?.(sender) !== true) return { ok: false, error: 'offscreen-sender-required' };
-      if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
+      if (!(await dwebStorageReady(publicationGeneration))) return { ok: false, error: 'dweb-custody-changed' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
         // The App editor writes OPFS directly from its tab. Quiesce that host,
@@ -188,6 +217,9 @@ export const makeDwebRoutes = (deps) => {
           }
           const admitted = await admitTrackedVersion(dweb);
           if (!admitted.ok) return { ok: false, error: admitted.error };
+          if (!publicationCurrent(publicationGeneration) || !dwebOn()) {
+            return { ok: false, error: 'dweb-custody-changed' };
+          }
 
           const repository = await repositories.statusApp(appId);
           const diverged = !rec.dweb?.git_oid
@@ -241,6 +273,8 @@ export const makeDwebRoutes = (deps) => {
             }
           }
 
+          let auditWarning = null;
+          let commitFinalized = false;
           const committed = await appClient.replaceVersionedFilesUnlocked({
             appId,
             files: files || {},
@@ -259,11 +293,30 @@ export const makeDwebRoutes = (deps) => {
                 },
               } : {}),
             }),
+            isCurrent: () => publicationCurrent(publicationGeneration) && dwebOn(),
+            afterCommit: async () => {
+              commitFinalized = true;
+              if (!publicationCurrent(publicationGeneration) || !dwebOn()) {
+                throw new Error('dweb-custody-changed');
+              }
+              auditWarning = await auditCommittedChange({
+                type: 'dweb_app_updated',
+                details: { appId, uri: dweb?.uri ?? null, version_id: dweb?.version_id ?? null },
+              });
+              if (!publicationCurrent(publicationGeneration) || !dwebOn()) {
+                throw new Error('dweb-custody-changed');
+              }
+            },
           });
-          const auditWarning = await auditCommittedChange({
-            type: 'dweb_app_updated',
-            details: { appId, uri: dweb?.uri ?? null, version_id: dweb?.version_id ?? null },
-          });
+          // Compatibility for injected clients that predate the transactional
+          // hook (pure tests and downstream embedders). The production client
+          // always runs afterCommit while rollback is still possible.
+          if (!commitFinalized) {
+            auditWarning = await auditCommittedChange({
+              type: 'dweb_app_updated',
+              details: { appId, uri: dweb?.uri ?? null, version_id: dweb?.version_id ?? null },
+            });
+          }
           return {
             ok: true,
             app: committed.record,
@@ -383,7 +436,7 @@ export const makeDwebRoutes = (deps) => {
       if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       return withDwebPublication(async (/** @type {() => boolean} */ isCurrent) => {
         if (!isCurrent() || !dwebOn()) return { ok: false, error: 'dweb-disabled' };
-        await ensureOffscreen();
+        await ensureFeature();
         return browser.runtime.sendMessage({ type: 'dweb/base-host/start' });
       });
     },
@@ -399,17 +452,17 @@ export const makeDwebRoutes = (deps) => {
     },
     'dweb/base/status': async () => {
       if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
-      await ensureOffscreen();
+      await ensureFeature();
       return browser.runtime.sendMessage({ type: 'dweb/base-host/status' });
     },
     'dweb/base/announce': async ({ record } = {}) => {
       if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
-      await ensureOffscreen();
+      await ensureFeature();
       return browser.runtime.sendMessage({ type: 'dweb/base-host/announce', record });
     },
     'dweb/base/find': async ({ dwappId, publisherDid } = {}) => {
       if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
-      await ensureOffscreen();
+      await ensureFeature();
       return browser.runtime.sendMessage({ type: 'dweb/base-host/find', dwappId, publisherDid });
     },
 
@@ -425,7 +478,7 @@ export const makeDwebRoutes = (deps) => {
     // Discover: what peers have announced (gossip cache + DHT hits).
     'dweb/base/heard': async () => {
       if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
-      await ensureOffscreen();
+      await ensureFeature();
       return browser.runtime.sendMessage({ type: 'dweb/base-host/heard' });
     },
     // Install a discovered app: the offscreen fetches its signed bundle over the
@@ -435,8 +488,19 @@ export const makeDwebRoutes = (deps) => {
       if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       return withDwebPublication(async (/** @type {() => boolean} */ isCurrent) => {
         if (!isCurrent() || !dwebOn()) return { ok: false, error: 'dweb-disabled' };
-        await ensureOffscreen();
-        return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name, dwappId, slug, seq });
+        await ensureFeature();
+        const reply = await browser.runtime.sendMessage({
+          type: 'dweb/base-host/install-app', uri, name, dwappId, slug, seq,
+          publicationGeneration: typeof dwebPublicationGeneration === 'function'
+            ? dwebPublicationGeneration() : undefined,
+        });
+        if (!isCurrent() || !dwebOn()) {
+          return {
+            ok: false, error: 'dweb-custody-changed', outcomeKnown: false,
+            installedAppId: reply?.app?.id ?? null,
+          };
+        }
+        return reply;
       });
     },
     // Which installed dweb apps have a NEWER version announced? Cross-reference the
@@ -449,7 +513,7 @@ export const makeDwebRoutes = (deps) => {
         const apps = await appRegistry.list();
         const tracked = apps.filter((/** @type {any} */ a) => a.dweb?.dwapp_id && a.dweb?.version_id);
         if (!tracked.length) return { ok: true, updates: {} };
-        await ensureOffscreen();
+        await ensureFeature();
         const heard = await browser.runtime.sendMessage({ type: 'dweb/base-host/heard' });
         const cards = new Map((heard?.apps ?? []).map((/** @type {any} */ c) => [c.dwapp_id, c]));
         /** @type {Record<string, any>} */
@@ -482,9 +546,11 @@ export const makeDwebRoutes = (deps) => {
             || typeof expectedPublisher !== 'string' || !expectedPublisher) {
           return { ok: false, error: 'app-update-identity-missing' };
         }
-        await ensureOffscreen();
+        await ensureFeature();
         const reply = await browser.runtime.sendMessage({
           type: 'dweb/base-host/update-app', appId, uri, name,
+          publicationGeneration: typeof dwebPublicationGeneration === 'function'
+            ? dwebPublicationGeneration() : undefined,
           expectedDwappId,
           expectedPublisher,
           previousHash: record.dweb?.hash ?? null,
@@ -493,6 +559,9 @@ export const makeDwebRoutes = (deps) => {
             : [],
           ...(strategy === 'replace' || strategy === 'fork' ? { strategy } : {}),
         });
+        if (!isCurrent() || !dwebOn()) {
+          return { ok: false, error: 'dweb-custody-changed', outcomeKnown: false };
+        }
         if (!reply?.ok || !Array.isArray(reply.pendingUnserveHashes)) return reply;
 
         const warnings = new Set(Array.isArray(reply.warnings) ? reply.warnings : []);
@@ -528,13 +597,37 @@ export const makeDwebRoutes = (deps) => {
     // thin relay to the offscreen base host. Events flow back to the app-tab
     // directly as `dweb/base-room/event` runtime messages, so the SW only
     // carries the request/response.
-    'dweb/base/room': async (msg = {}) => {
+    'dweb/base/room': async (msg = {}, sender = {}) => {
       if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
-      const { type: _t, ...args } = msg;
+      try { await ensureAppTrackerReady?.(); }
+      catch { return { ok: false, error: 'app-room-owner-unavailable' }; }
+      const senderTabId = sender?.tab?.id;
+      const senderDocumentId = /** @type {{documentId?:unknown}} */ (sender)?.documentId;
+      const appId = typeof msg.appId === 'string' ? msg.appId : '';
+      const senderAppId = appTabTracker.parseIdFromUrl?.(sender?.url ?? sender?.tab?.url ?? '');
+      if (!appId || senderAppId !== appId
+          || !Number.isInteger(senderTabId)
+          || appTabTracker.getTabId(appId) !== senderTabId
+          || typeof senderDocumentId !== 'string'
+          || senderDocumentId.length < 8 || senderDocumentId.length > 160) {
+        return { ok: false, error: 'app-room-owner-mismatch' };
+      }
+      const {
+        type: _t,
+        appDocumentId: _claimedDocumentId,
+        appTabId: _claimedTabId,
+        ...args
+      } = msg;
       return withDwebPublication(async (/** @type {() => boolean} */ isCurrent) => {
         if (!isCurrent() || !dwebOn()) return { ok: false, error: 'dweb-disabled' };
-        await ensureOffscreen();
-        const relay = () => browser.runtime.sendMessage({ type: 'dweb/base-host/room', ...args });
+        await ensureFeature();
+        const relay = () => browser.runtime.sendMessage({
+          type: 'dweb/base-host/room', ...args,
+          appDocumentId: senderDocumentId,
+          appTabId: senderTabId,
+          publicationGeneration: typeof dwebPublicationGeneration === 'function'
+            ? dwebPublicationGeneration() : undefined,
+        });
         if (args.op === 'publish-app' && typeof args.appId === 'string') {
           return withAppLifecycle(args.appId, relay);
         }
@@ -546,7 +639,7 @@ export const makeDwebRoutes = (deps) => {
     // rosters; it never STARTS the lobby (maybeStartBaseNetwork does, on unlock).
     'dweb/distributed/info': async () => {
       if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
-      await ensureOffscreen();
+      await ensureFeature();
       return browser.runtime.sendMessage({ type: 'dweb/base-host/info' });
     },
   };

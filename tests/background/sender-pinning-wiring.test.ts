@@ -6,7 +6,9 @@ import { EXTENSION_DIR } from '../../packaging/lib.ts';
 describe('exact sender pins are wired at privileged runtime edges', () => {
   const sw = readFileSync(join(EXTENSION_DIR, 'background', 'service-worker.js'), 'utf8');
   const offscreen = readFileSync(join(EXTENSION_DIR, 'offscreen', 'offscreen.js'), 'utf8');
-  const toolboxParse = readFileSync(join(EXTENSION_DIR, 'offscreen', 'toolbox-parse.js'), 'utf8');
+  const featureKeepalive = readFileSync(
+    join(EXTENSION_DIR, 'background', 'feature-lease-keepalive.js'), 'utf8',
+  );
 
   test('state-bearing UI names are checked before a port enters the registry', () => {
     const branch = sw.indexOf("if (port.name === 'sidepanel' || port.name === 'home' || port.name === 'eval')");
@@ -17,13 +19,25 @@ describe('exact sender pins are wired at privileged runtime edges', () => {
     expect(admission).toBeGreaterThan(guard);
   });
 
-  test('the keepalive port is pinned to the offscreen document', () => {
-    const branch = sw.indexOf("if (port.name === 'sw-keepalive')");
+  test('the feature-host keepalive is sender-pinned and token-bound before disconnect recovery', () => {
+    const branch = sw.indexOf('if (port.name === FEATURE_LEASE_KEEPALIVE_PORT)');
     const guard = sw.indexOf('if (!isOffscreenSender(port.sender))', branch);
-    const admission = sw.indexOf('keepalivePorts.add', branch);
+    const attach = sw.indexOf('attachFeatureLeaseKeepalive({', guard);
+    const exact = featureKeepalive.indexOf('const current = message.leases.some');
+    const refusal = featureKeepalive.indexOf('if (!current) return;', exact);
+    const admission = featureKeepalive.indexOf(
+      'authenticatedHostEpoch = message.hostEpoch;', refusal,
+    );
+    const recovery = featureKeepalive.indexOf(
+      'featureLeases.handleHostLoss(lostHostEpoch)', admission,
+    );
     expect(branch).toBeGreaterThan(-1);
     expect(guard).toBeGreaterThan(branch);
-    expect(admission).toBeGreaterThan(guard);
+    expect(attach).toBeGreaterThan(guard);
+    expect(exact).toBeGreaterThan(-1);
+    expect(refusal).toBeGreaterThan(exact);
+    expect(admission).toBeGreaterThan(refusal);
+    expect(recovery).toBeGreaterThan(admission);
   });
 
   test('local-model pushes are offscreen-only and commands are worker-only', () => {
@@ -43,13 +57,13 @@ describe('exact sender pins are wired at privileged runtime edges', () => {
   });
 
   test('toolbox parser commands are service-worker-only', () => {
-    const handler = toolboxParse.indexOf('const onToolboxParseCheck =');
-    const branch = toolboxParse.indexOf("message?.type !== 'toolbox/parse-check'", handler);
-    const guard = toolboxParse.indexOf('if (!isServiceWorkerSender(sender))', branch);
-    const parse = toolboxParse.indexOf('parseCheck(message.name, message.body)', guard);
-    expect(handler).toBeGreaterThan(-1);
-    expect(branch).toBeGreaterThan(handler);
+    const branch = offscreen.indexOf("msg?.type !== 'toolbox/parse-check'");
+    const guard = offscreen.indexOf('if (!isServiceWorkerSender(sender))', branch);
+    const load = offscreen.indexOf("import('./toolbox-parse.js')", guard);
+    const parse = offscreen.indexOf('handleToolboxParseCheck(msg)', load);
+    expect(branch).toBeGreaterThan(-1);
     expect(guard).toBeGreaterThan(branch);
-    expect(parse).toBeGreaterThan(guard);
+    expect(load).toBeGreaterThan(guard);
+    expect(parse).toBeGreaterThan(load);
   });
 });

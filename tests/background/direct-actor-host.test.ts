@@ -1,5 +1,77 @@
 import { describe, expect, test } from 'bun:test';
-import { makeDirectActorHost, makeStorageSessionKeepAlive } from '../../extension/background/direct-actor-host.js';
+import {
+  makeDirectActorHost,
+  makeRefCountedFirefoxBackgroundLifetime,
+  makeStorageSessionKeepAlive,
+} from '../../extension/background/direct-actor-host.js';
+
+describe('shared Firefox event-page lifetime', () => {
+  test('one heartbeat spans overlapping actor and lazy module work', async () => {
+    let starts = 0;
+    let stops = 0;
+    let releaseModule = () => {};
+    const lifetime = makeRefCountedFirefoxBackgroundLifetime({
+      start: () => { starts += 1; },
+      stop: () => { stops += 1; },
+    });
+    const actor = lifetime.createHandle();
+    await actor.start();
+    const moduleWork = lifetime.run(() => new Promise<string>((resolve) => {
+      releaseModule = () => resolve('done');
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(lifetime.snapshot()).toEqual({ active: 2, lost: false });
+    expect(starts).toBe(1);
+    await actor.stop();
+    expect(stops).toBe(0);
+    releaseModule();
+    await expect(moduleWork).resolves.toBe('done');
+    expect(stops).toBe(1);
+  });
+
+  test('reports replay-safe reads known and dispatched effects unknown on lifetime loss', async () => {
+    const lifetime = makeRefCountedFirefoxBackgroundLifetime({
+      start: () => {},
+      stop: () => {},
+    });
+    const read = lifetime.run(() => new Promise(() => {}), {
+      outcomeKnownOnLoss: true,
+      code: 'read-lost',
+    });
+    const effect = lifetime.run(() => new Promise(() => {}), {
+      outcomeKnownOnLoss: false,
+      code: 'effect-lost',
+    });
+    void read.catch(() => {});
+    void effect.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    lifetime.fail(new Error('event page heartbeat stopped'));
+    const [readResult, effectResult] = await Promise.allSettled([read, effect]);
+    expect(readResult).toMatchObject({
+      status: 'rejected',
+      reason: { code: 'read-lost', outcomeKnown: true, phase: 'run' },
+    });
+    expect(effectResult).toMatchObject({
+      status: 'rejected',
+      reason: { code: 'effect-lost', outcomeKnown: false, phase: 'run' },
+    });
+    expect(lifetime.snapshot()).toEqual({ active: 0, lost: false });
+  });
+
+  test('fails known-safe before feature dispatch when heartbeat startup fails', async () => {
+    const lifetime = makeRefCountedFirefoxBackgroundLifetime({
+      start: () => { throw new Error('storage unavailable'); },
+      stop: () => {},
+    });
+    let ran = false;
+    await expect(lifetime.run(async () => { ran = true; })).rejects.toMatchObject({
+      code: 'firefox-background-lifetime-startup-failed',
+      outcomeKnown: true,
+      phase: 'startup',
+    });
+    expect(ran).toBe(false);
+  });
+});
 
 describe('Firefox actor host storage.session heartbeat', () => {
   test('changes a session key until the active lease stops', async () => {

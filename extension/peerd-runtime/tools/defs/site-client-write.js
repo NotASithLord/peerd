@@ -15,7 +15,7 @@
 import {
   normalizeSiteOrigin,
   buildClientWriteProposal,
-} from '../../site-clients/index.js';
+} from '../../site-clients/core.js';
 import { siteClientOriginRefusal } from './site-client-origin.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */

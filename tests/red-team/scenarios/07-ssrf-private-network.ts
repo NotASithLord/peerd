@@ -16,7 +16,7 @@ import {
   type Scenario, type Probe, blocked, leaked, summarize,
 } from '../harness.ts';
 import { makeWebFetch } from '../../../extension/peerd-egress/fetch/web-fetch.js';
-import { isPrivateOrLocalHost } from '../../../extension/peerd-egress/fetch/private-network.js';
+import { isPrivateOrLocalHost } from '../../../extension/shared/private-network.js';
 import { EgressDeniedError } from '../../../extension/peerd-egress/fetch/errors.js';
 import {
   buildPrivateNetworkBlockRules, buildPrivateNetworkInitiatorBlockRules,

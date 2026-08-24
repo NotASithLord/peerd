@@ -11,7 +11,7 @@
 // provider key). Don't touch the side panel while a run is in flight — this
 // page takes over the 'sidepanel' port for the duration.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import { TASKS, SUITES } from './tasks.js';
 import { aggregate, compare } from './score.js';
 import { makeOm2wRecorder } from './om2w-recorder.js';

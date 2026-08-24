@@ -92,6 +92,16 @@ describe('learned/forget', () => {
     expect(order).toEqual(['hydrate', 'forget', 'settled', 'entries']);
   });
 
+  test('a lost durable-write result is classified unknown instead of inviting replay', async () => {
+    const { deps } = makeDeps({ 'app.test': 'password-field' });
+    deps.learnedOrigins.settled = async () => { throw new Error('raw storage detail'); };
+    await expect(makeLearnedOriginRoutes(deps)['learned/forget']({ host: 'app.test' }))
+      .rejects.toMatchObject({
+        code: 'learned-origins-save-failed', outcomeKnown: false,
+        message: 'The learned-origin change could not be confirmed.',
+      });
+  });
+
   test('does not audit — the store hook owns that, so a removal is recorded once', async () => {
     const audits: any[] = [];
     const { deps } = makeDeps({ 'app.test': 'password-field' }, {
@@ -116,6 +126,15 @@ describe('learned/clear', () => {
     const { deps } = makeDeps();
     expect(await makeLearnedOriginRoutes(deps)['learned/clear']())
       .toEqual({ ok: true, origins: [], forgotten: 0 });
+  });
+
+  test('a lost clear result is classified unknown instead of inviting replay', async () => {
+    const { deps } = makeDeps({ 'app.test': 'password-field' });
+    deps.learnedOrigins.settled = async () => { throw new Error('raw storage detail'); };
+    await expect(makeLearnedOriginRoutes(deps)['learned/clear']())
+      .rejects.toMatchObject({
+        code: 'learned-origins-save-failed', outcomeKnown: false,
+      });
   });
 });
 

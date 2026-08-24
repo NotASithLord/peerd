@@ -23,6 +23,76 @@ describe('repository actor tools', () => {
     expect(result).toEqual({ ok: false, error: 'git_push_rejected: non-fast-forward' });
   });
 
+  test('preserves unknown push custody and instructs the orchestrator not to retry', async () => {
+    const failure = Object.assign(new Error('raw transport detail must not be rendered'), {
+      code: 'repository-host-timeout', outcomeKnown: false,
+    });
+    const repositories = {
+      getRemote: async () => ({ url: 'https://github.com/owner/repo', host: 'github.com' }),
+      coordinate: async (_ref: any, operation: () => Promise<any>) => operation(),
+      commit: async () => ({ created: true }),
+      push: async () => { throw failure; },
+    };
+    const result = await repositoryRemoteTool.execute({ op: 'push' }, actorContext(repositories) as any);
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'repo_remote_outcome_unknown',
+      code: 'repository-host-timeout',
+      outcomeKnown: false,
+      outcomeKind: 'transport-lost',
+      retryable: false,
+      structured: {
+        code: 'repository-host-timeout',
+        outcomeKnown: false,
+        retryable: false,
+        reconciliation: 'repo_history',
+      },
+    });
+    expect('content' in result && result.content).toContain('Do not retry automatically');
+    expect(JSON.stringify(result)).not.toContain('raw transport detail');
+  });
+
+  test('preserves unknown checkpoint custody after Firefox lifetime loss', async () => {
+    const failure = Object.assign(new Error('event page disappeared'), {
+      code: 'repository-firefox-lifetime-lost', outcomeKnown: false, outcomeKind: 'host-lost',
+    });
+    const repositories = {
+      coordinate: async (_ref: any, operation: () => Promise<any>) => operation(),
+      commit: async () => { throw failure; },
+    };
+    const result = await repositoryVersionTool.execute(
+      { op: 'checkpoint', message: 'checkpoint' }, actorContext(repositories) as any,
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'repo_version_outcome_unknown',
+      code: 'repository-firefox-lifetime-lost',
+      outcomeKnown: false,
+      outcomeKind: 'host-lost',
+      retryable: false,
+    });
+    expect('content' in result && result.content).toContain('repo_history');
+  });
+
+  test('keeps a read timeout known-safe and preserves its code', async () => {
+    const failure = Object.assign(new Error('Repository service took too long to respond.'), {
+      code: 'repository-host-timeout', outcomeKnown: true,
+    });
+    const repositories = {
+      status: async () => { throw failure; },
+      history: async () => [],
+      getRemote: async () => null,
+    };
+    const result = await repositoryHistoryTool.execute({}, actorContext(repositories) as any);
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'repository-host-timeout',
+      outcomeKnown: true,
+      retryable: true,
+    });
+    expect('error' in result && result.error).toContain('repo_history_failed');
+  });
+
   test('does not reuse approval after the remote changes while consent is pending', async () => {
     let reads = 0;
     let pushed = false;

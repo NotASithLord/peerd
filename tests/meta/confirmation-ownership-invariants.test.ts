@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 
 const serviceWorker = readFileSync(join(EXTENSION_DIR, 'background/service-worker.js'), 'utf8');
+const stateSnapshot = readFileSync(join(EXTENSION_DIR, 'background/state-snapshot.js'), 'utf8');
 
 describe('confirmation ownership wiring', () => {
   test('actor execution sessions resolve to a root-chat display owner', () => {
@@ -19,7 +20,10 @@ describe('confirmation ownership wiring', () => {
   });
 
   test('state snapshots select pending prompts by their viewed chat', () => {
-    expect(serviceWorker).toContain('pendingConfirm: confirmCoordinator.getPendingForOwner(');
+    expect(serviceWorker).toContain('const buildStateSnapshot = makeStateSnapshotBuilder({');
+    expect(serviceWorker).toContain('confirmCoordinator, confirmSettleNotes, ensureSettingsReady,');
+    expect(stateSnapshot).toContain('pendingConfirm: confirmCoordinator.getPendingForOwner(');
+    expect(stateSnapshot).not.toContain('confirmCoordinator.getPending()');
     expect(serviceWorker).not.toContain('confirmCoordinator.getPending()');
   });
 

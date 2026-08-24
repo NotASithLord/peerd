@@ -100,4 +100,74 @@ describe('sidepanel.model-picker request ordering', () => {
       root.remove();
     }
   });
+
+  it('keeps an unknown model change fenced until the exact same change settles', async () => {
+    /** @type {any[]} */
+    const changes = [];
+    let optionReads = 0;
+    const options = [
+      { value: 'anthropic::old', model: 'old', label: 'Old', provider: 'anthropic', providerLabel: 'Anthropic' },
+      { value: 'anthropic::new', model: 'new', label: 'New', provider: 'anthropic', providerLabel: 'Anthropic' },
+    ];
+    const send = async (/** @type {any} */ message) => {
+      if (message.type === 'models/options') {
+        optionReads += 1;
+        return {
+          ok: true, options, selected: 'anthropic::old', sessionProvider: 'anthropic',
+        };
+      }
+      changes.push(message);
+      return changes.length === 1
+        ? { ok: false, outcomeKnown: false }
+        : { ok: true, model: 'new' };
+    };
+    const state = /** @type {any} */ ({
+      session: {
+        sessionId: 's-model-unknown', provider: 'anthropic', model: 'old', messages: [],
+        permission: { mode: 'act', confirmActions: false },
+      },
+      providers: { hasKey: true, current: 'anthropic' },
+      settings: {
+        providerName: 'anthropic', providerModel: 'old', openrouterModels: [],
+        voiceOnboardingDismissed: true, voiceEnabled: false,
+      },
+      goalRuns: {},
+    });
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    m.mount(root, { view: () => m(ChatView, {
+      state, send, voiceManager: null, uiActions: {},
+    }) });
+    try {
+      await flush();
+      const select = /** @type {HTMLSelectElement} */ (
+        root.querySelector('select.model-picker-select'));
+      select.value = 'anthropic::new';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      await flush();
+      expect(changes).toEqual([{
+        type: 'session/setModel', sessionId: 's-model-unknown', model: 'new',
+      }]);
+      expect(optionReads).toBe(2);
+      expect(select.disabled).toBe(true);
+      expect(select.value).toBe('anthropic::new');
+      expect(root.textContent).toContain('could not confirm the model change');
+
+      const finish = [...root.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Finish same model change');
+      expect(finish).toBeTruthy();
+      finish?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await flush();
+      expect(changes).toEqual([
+        { type: 'session/setModel', sessionId: 's-model-unknown', model: 'new' },
+        { type: 'session/setModel', sessionId: 's-model-unknown', model: 'new' },
+      ]);
+      expect(select.disabled).toBe(false);
+      expect(select.value).toBe('anthropic::new');
+      expect(root.textContent?.includes('could not confirm the model change')).toBe(false);
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
 });

@@ -5,7 +5,7 @@
 // renderer fences them (renderToolboxList — trust contract rule 2). No tool
 // reads a module BODY into context — bodies are execute-only.
 
-import { renderToolboxList } from '../../toolbox/index.js';
+import { renderToolboxList } from '../../toolbox/core.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const toolboxListTool = {

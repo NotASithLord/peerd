@@ -23,10 +23,8 @@
 // app file read) is injected and orchestrated in resolveTabRef /
 // resolveFileRef. Tests exercise the pure core against mocked snapshots.
 
-// why: wrap.js re-exports the ONE canonical wrapUntrusted from
-// tools/prompt-wrap.js, so the lethal-trifecta wrap here is literally
-// read_page's wrap — it cannot drift.
-import { wrapUntrusted, neutralizeFence } from './wrap.js';
+// The lethal-trifecta wrap is read_page's canonical implementation.
+import { wrapUntrusted, neutralizeFence } from '../tools/prompt-wrap.js';
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 // why: ONE origin-extraction helper. This used to be a hand-kept copy of
 // dom-helpers.originOfUrl (the @-tab gate must match read_page's origin

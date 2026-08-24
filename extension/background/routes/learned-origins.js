@@ -37,6 +37,16 @@ export const makeLearnedOriginRoutes = (deps) => {
   // list was cleared while hydration then restored all of it. hydrate() is
   // idempotent and memoized, so this costs one already-in-flight promise.
   const ready = () => learnedOrigins.hydrate();
+  /** @param {unknown} cause */
+  const mutationUnknown = (cause) => {
+    const error = /** @type {Error & {code?:string,outcomeKnown?:boolean,cause?:unknown}} */ (
+      new Error('The learned-origin change could not be confirmed.')
+    );
+    error.code = 'learned-origins-save-failed';
+    error.outcomeKnown = false;
+    error.cause = cause;
+    return error;
+  };
 
   return {
     'learned/list': async () => { await ready(); return snapshot(); },
@@ -56,7 +66,8 @@ export const makeLearnedOriginRoutes = (deps) => {
       // Await the durable write before replying: the caller re-renders from this
       // reply, so returning early would show a row gone that a mid-flight SW
       // eviction could still bring back.
-      await learnedOrigins.settled();
+      try { await learnedOrigins.settled(); }
+      catch (cause) { throw mutationUnknown(cause); }
       return snapshot();
     },
 
@@ -66,7 +77,8 @@ export const makeLearnedOriginRoutes = (deps) => {
     'learned/clear': async () => {
       await ready();
       const count = learnedOrigins.clear();
-      await learnedOrigins.settled();
+      try { await learnedOrigins.settled(); }
+      catch (cause) { throw mutationUnknown(cause); }
       return { ...snapshot(), forgotten: count };
     },
   };

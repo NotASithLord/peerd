@@ -6,6 +6,7 @@ import m from '/vendor/mithril/mithril.js';
 import {
   CONTRIBUTOR_DISCLOSURE_VERSION, CONTRIBUTOR_SCHEMA_VERSION,
 } from '/peerd-runtime/index.js';
+import { mutationFailureCopy, unknownMutationCopy } from '../mutation-custody.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
 
@@ -14,6 +15,7 @@ export const ContributorMetricsSection = {
   oninit(vnode) {
     vnode.state.status = null;
     vnode.state.busy = false;
+    vnode.state.uncertain = false;
     vnode.state.error = null;
     vnode.state.copied = false;
     ContributorMetricsSection.refresh(vnode);
@@ -24,23 +26,39 @@ export const ContributorMetricsSection = {
     try {
       const reply = await vnode.attrs.send({ type: 'contributor/status' });
       vnode.state.status = reply?.ok ? reply.status : null;
-      vnode.state.error = reply?.ok ? null : (reply?.error ?? 'status-unavailable');
-    } catch (error) {
-      vnode.state.error = /** @type {{ message?: string }} */ (error)?.message ?? 'status-unavailable';
+      vnode.state.error = reply?.ok ? null : 'Contributor status is unavailable.';
+      if (reply?.ok) vnode.state.uncertain = false;
+      m.redraw();
+      return reply?.ok === true;
+    } catch {
+      vnode.state.error = 'Contributor status is unavailable.';
+      m.redraw();
+      return false;
     }
-    m.redraw();
   },
 
   /** @param {{ state: any, attrs: { send: Send } }} vnode @param {'enable'|'disable'} action */
   async act(vnode, action) {
+    if (vnode.state.busy || vnode.state.uncertain) return;
     vnode.state.busy = true;
     vnode.state.error = null;
     try {
-      const reply = await vnode.attrs.send({ type: `contributor/${action}` });
-      if (!reply?.ok) vnode.state.error = reply?.error ?? `${action}-failed`;
-      else vnode.state.status = reply.status;
-    } catch (error) {
-      vnode.state.error = /** @type {{ message?: string }} */ (error)?.message ?? `${action}-failed`;
+      let reply;
+      try { reply = await vnode.attrs.send({ type: `contributor/${action}` }); }
+      catch { reply = { ok: false, outcomeKnown: false }; }
+      if (reply?.ok) vnode.state.status = reply.status;
+      else if (reply?.outcomeKnown === false) {
+        const copy = unknownMutationCopy(`${action === 'enable' ? 'enabling' : 'disabling'} Contributor Metrics`);
+        vnode.state.uncertain = true;
+        vnode.state.error = copy;
+        const reconciled = await ContributorMetricsSection.refresh(vnode);
+        if (!reconciled) vnode.state.error = copy;
+      } else {
+        vnode.state.error = mutationFailureCopy(reply, {
+          action: `${action === 'enable' ? 'enabling' : 'disabling'} Contributor Metrics`,
+          fallback: 'Contributor Metrics could not be changed.',
+        });
+      }
     } finally {
       vnode.state.busy = false;
       m.redraw();
@@ -101,11 +119,11 @@ export const ContributorMetricsSection = {
         ]),
         m('.contributor-actions', enabled || status?.diagnostic
           ? m('button.secondary', {
-              type: 'button', disabled: ui.busy,
+              type: 'button', disabled: ui.busy || ui.uncertain,
               onclick: () => ContributorMetricsSection.act(vnode, 'disable'),
             }, ui.busy ? 'Clearing…' : 'Disable and clear')
           : m('button', {
-              type: 'button', disabled: ui.busy,
+              type: 'button', disabled: ui.busy || ui.uncertain,
               onclick: () => ContributorMetricsSection.act(vnode, 'enable'),
             }, ui.busy ? 'Enabling…' : 'Enable Contributor Metrics')),
       ]),

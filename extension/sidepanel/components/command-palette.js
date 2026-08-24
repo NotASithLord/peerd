@@ -26,7 +26,7 @@
 //   onhover   (i) => void
 
 import m from '/vendor/mithril/mithril.js';
-import { filterCandidates } from '/peerd-runtime/index.js';
+import { filterCandidates } from '/peerd-runtime/ui.js';
 
 /** @typedef {import('/peerd-runtime/composer/parse.js').RefKind} RefKind */
 

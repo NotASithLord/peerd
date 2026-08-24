@@ -199,12 +199,3 @@ export {
   createAppRegistry,
   APP_TAB_PATH,
 } from './app-registry.js';
-
-// The IDB body store (./app-store.js) is reserved for the future
-// SNAPSHOT tier. Not re-exported here -- consumers should import
-// directly when they need it, to keep the public engine surface
-// focused on what's actually wired up today. The ONE exception is its
-// §11.5 write gate: the SW must be able to install the newer-schema
-// refusal even while the store is dormant, so a future consumer can
-// never ship ungated.
-export { setAppBodyWriteGate } from './app-store.js';

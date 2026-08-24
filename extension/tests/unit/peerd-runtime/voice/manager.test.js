@@ -5,14 +5,14 @@
 // the offscreen-doc replies and the chunk pushes deterministically.
 
 import { describe, it, expect } from '../../../framework.js';
-import { createVoiceManager } from '/peerd-runtime/voice/index.js';
+import { createVoiceManager } from '/peerd-runtime/voice/manager.js';
 import { MicPermissionDeniedError } from '/peerd-runtime/voice/errors.js';
 
 /** @typedef {import('/peerd-runtime/voice/model-store.js').createModelStore} CreateModelStore */
 
 /**
  * @param {{ files?: Record<string, ArrayBuffer>, fail?: boolean, seenVariants?: string[] }} [opts]
- * @returns {ReturnType<typeof import('/peerd-runtime/voice/index.js').createModelStore>}
+ * @returns {ReturnType<typeof import('/peerd-runtime/voice/model-store.js').createModelStore>}
  */
 const fakeModelStore = ({ files = { encoder: new ArrayBuffer(8), decoder: new ArrayBuffer(8) }, fail = false, seenVariants = [] } = {}) => ({
   /**
@@ -31,7 +31,7 @@ const fakeModelStore = ({ files = { encoder: new ArrayBuffer(8), decoder: new Ar
 // why: pin the engine in tests so the result doesn't depend on whether
 // the runner browser ships Web Speech. Each test passes a stub. Cast to the
 // real detectVoiceCapability shape — these are deliberately-minimal stand-ins.
-/** @typedef {typeof import('/peerd-runtime/voice/index.js').detectVoiceCapability} DetectCap */
+/** @typedef {typeof import('/peerd-runtime/voice/engine-picker.js').detectVoiceCapability} DetectCap */
 const moonshineCap = /** @type {DetectCap} */ (() => ({ engine: 'moonshine', source: 'vendored', webSpeech: false, moonshine: true, cloudVendor: null }));
 const webSpeechCap = /** @type {DetectCap} */ (() => ({ engine: 'web-speech', source: 'browser', cloudVendor: 'test-cloud', webSpeech: true, moonshine: false }));
 const noEngineCap  = /** @type {DetectCap} */ (() => ({ engine: null, source: null, webSpeech: false, moonshine: false, cloudVendor: null }));
@@ -345,7 +345,7 @@ describe('voice.manager', () => {
         onMessage: backend.onMessage,
         // why cast: web-speech path never calls getModel; minimal stub stands
         // in for the full model-store surface.
-        modelStore: /** @type {ReturnType<typeof import('/peerd-runtime/voice/index.js').createModelStore>} */ ({
+        modelStore: /** @type {ReturnType<typeof import('/peerd-runtime/voice/model-store.js').createModelStore>} */ ({
           getModel: async () => { modelCalled = true; return { files: {}, sizeBytes: 0, variant: /** @type {'base'} */ ('base') }; },
         }),
         detectCapability: webSpeechCap, requestMicPermission: async () => {},

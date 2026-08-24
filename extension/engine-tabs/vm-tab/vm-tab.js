@@ -15,7 +15,7 @@
 // registry via the SW (vm/get-meta → idbKV('vms')) on boot, keyed by the
 // `#<vmId>` fragment in the URL. No URL params for cleanliness.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import {
   VMBootFailedError,
   IMAGE_PIN_HEAD_BYTES,

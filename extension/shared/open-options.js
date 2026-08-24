@@ -13,7 +13,7 @@
 // needs it too — peerd-runtime importing /shared/* has abundant
 // precedent (util.js, errors.js, channel-config.js).
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 
 /**
  * @param {string} [section] options section id (e.g. 'providers',

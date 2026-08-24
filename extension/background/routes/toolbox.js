@@ -27,7 +27,7 @@ export const makeToolboxRoutes = (deps) => {
     'toolbox/read': async ({ name } = {}) => {
       try {
         const body = await toolboxStore.getBody(name);
-        if (body == null) return { ok: false, error: `unknown toolbox module '${String(name)}' — toolbox_list shows what exists` };
+        if (body == null) return { ok: false, error: `unknown toolbox module '${String(name)}'; toolbox_list shows what exists` };
         return { ok: true, body };
       } catch (e) { return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }; }
     },
@@ -36,7 +36,18 @@ export const makeToolboxRoutes = (deps) => {
       try {
         await toolboxStore.recordRuns(Array.isArray(names) ? names : [], { ok: ok === true });
         return { ok: true };
-      } catch (e) { return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }; }
+      } catch (e) {
+        void e;
+        return {
+          ok: false,
+          error: 'Peerd could not confirm whether Toolbox run bookkeeping finished. '
+            + 'Refresh before recording it again.',
+          code: 'toolbox-record-outcome-unknown',
+          outcomeKnown: false,
+          outcomeKind: 'unknown',
+          retryable: false,
+        };
+      }
     },
   };
 };

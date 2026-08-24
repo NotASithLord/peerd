@@ -55,6 +55,7 @@
 //     structured-clone untouched.
 
 const GRANTS_KEY = 'dweb.grants.v1';
+const ROOM_COMPENSATION_PREFIX = 'dweb.room-compensation.v1';
 
 // The default transport for the app-tab host: post events into the dwapp's
 // iframe and receive its ops (identity-checked by e.source). createDwebBridge
@@ -85,6 +86,7 @@ export const iframeTransport = (frame) => ({
  *   confirmAction: (info: { kind: 'join' | 'install' | 'share', appName: string, detail: string, approveLabel?: string }) => Promise<boolean>,
  *   onHostEvent?: (handler: (m: any) => void) => () => void,
  *   launch?: { room?: string, url?: string },
+ *   newId?: () => string,
  * }} opts
  */
 export const createDwebBridge = ({
@@ -98,6 +100,7 @@ export const createDwebBridge = ({
   confirmAction,
   onHostEvent,
   launch = {},
+  newId = () => crypto.randomUUID(),
 }) => {
   // Grants key on the app's content identity when it has one (stable
   // across reinstalls of the same bundle), else the seed key / local id.
@@ -109,7 +112,19 @@ export const createDwebBridge = ({
   let did = null;           // our base-network did (the offscreen's vault identity)
   let displayName = '';
   /** @type {string | null} */
+  let hostEpoch = null;
+  /** @type {string | null} */
+  let announcedHostEpoch = null;
+  /** @type {Set<string>} */
+  const retiredHostEpochs = new Set();
+  const stableRoomClientId = `room-client-${newId()}`;
+  if (stableRoomClientId.length < 8 || stableRoomClientId.length > 160) {
+    throw new Error('room client identity invalid');
+  }
+  /** @type {string | null} */
   let roomClientId = null;
+  /** @type {string | null} */
+  let roomAdmissionToken = null;
   /** @type {string | null} */
   let activeClientId = null;
   // Once an iframe epoch has been replaced or disposed it can never become
@@ -127,6 +142,10 @@ export const createDwebBridge = ({
   const pending = new Map();
   /** @type {Set<string>} */
   const subbedTopics = new Set();
+  /** @type {Set<string>} */
+  const retainedTopics = new Set();
+  /** @type {Set<ReturnType<typeof setTimeout>>} */
+  const recoveryTimers = new Set();
   /** @type {Array<() => void>} */
   const disposers = [];
 
@@ -142,8 +161,18 @@ export const createDwebBridge = ({
 
   // One room op, relayed to the offscreen base host (which serves the room as a
   // namespaced sub-protocol on the shared mesh). roomId rides every op.
-  /** @param {string} op @param {Record<string, any>} [args] @param {string|null} [exactRoomId] */
-  const room = (op, args = {}, exactRoomId = roomId) => swCall('dweb/base/room', { op, roomId: exactRoomId, ...args });
+  /** @param {string} op @param {Record<string, any>} [args] @param {string|null} [exactRoomId] @param {string|null} [exactHostEpoch] @param {string} [exactClientId] @param {string|null} [exactAdmissionToken] */
+  const room = (op, args = {}, exactRoomId = roomId, exactHostEpoch = hostEpoch,
+    exactClientId = stableRoomClientId, exactAdmissionToken = roomAdmissionToken) =>
+    swCall('dweb/base/room', {
+      op,
+      appId,
+      roomId: exactRoomId,
+      roomClientId: exactClientId,
+      ...(exactHostEpoch ? { expectedHostEpoch: exactHostEpoch } : {}),
+      ...args,
+      ...(exactAdmissionToken ? { roomAdmissionToken: exactAdmissionToken } : {}),
+    });
 
   /** @template T @param {()=>Promise<T>} operation */
   const serializeTransition = (operation) => {
@@ -151,6 +180,63 @@ export const createDwebBridge = ({
     transitionTail = current.then(() => undefined, () => undefined);
     return current;
   };
+
+  const compensationKey = `${ROOM_COMPENSATION_PREFIX}:${appId}`;
+  /** @param {any} value */
+  const parseCompensation = (value) => value?.schema === 1
+    && value.appId === appId
+    && typeof value.roomId === 'string' && value.roomId.length > 0 && value.roomId.length <= 64
+    && typeof value.clientId === 'string' && value.clientId.length >= 8 && value.clientId.length <= 160
+    && typeof value.admissionToken === 'string'
+    && value.admissionToken.length >= 16 && value.admissionToken.length <= 192
+    && (value.hostEpoch === null || typeof value.hostEpoch === 'string')
+    ? Object.freeze({ ...value }) : null;
+  const readCompensation = async () => parseCompensation(
+    (await storage.get(compensationKey))?.[compensationKey],
+  );
+  /** @param {any} record */
+  const persistCompensation = (record) => storage.set({ [compensationKey]: record });
+  /** @param {string} admissionToken */
+  const clearCompensation = async (admissionToken) => {
+    const current = await readCompensation();
+    if (current && current.admissionToken !== admissionToken) return false;
+    await storage.set({ [compensationKey]: null });
+    return true;
+  };
+  /** @param {any} record */
+  const compensateJoin = async (record) => {
+    const reply = await room(
+      'leave', {}, record.roomId, record.hostEpoch, record.clientId, record.admissionToken,
+    );
+    if (!reply?.ok && ![
+      'not-in-room', 'dweb-host-generation-changed', 'app-room-admission-mismatch',
+    ].includes(reply?.error)) {
+      throw new Error(reply?.error ?? 'room compensation failed');
+    }
+    await clearCompensation(record.admissionToken);
+    return true;
+  };
+  /** @param {any} record @param {number} [attempt] */
+  const queueCompensation = (record, attempt = 0) => {
+    if (disposed) return;
+    const timer = setTimeout(() => {
+      recoveryTimers.delete(timer);
+      void compensateJoin(record).catch(() => {
+        if (attempt < 5) queueCompensation(record, attempt + 1);
+      });
+    }, Math.min(2_000, 100 * (2 ** attempt)));
+    recoveryTimers.add(timer);
+  };
+  const reconcileCompensation = async () => {
+    const record = await readCompensation();
+    if (!record) return true;
+    try { return await compensateJoin(record); }
+    catch (cause) { queueCompensation(record); throw cause; }
+  };
+  // A prior App document may have died after the host committed membership but
+  // before the SW delivered its receipt. Reopen starts by replaying the exact
+  // token-bound compensating leave; a different/later admission is untouched.
+  void reconcileCompensation().catch(() => {});
 
   /** @param {{clientId:string,cancelled:boolean}} request */
   const isCancelled = (request) => disposed || request.cancelled || activeClientId !== request.clientId;
@@ -191,10 +277,93 @@ export const createDwebBridge = ({
     },
   };
 
+  /** @param {any} message */
+  const recoverHost = async (message) => {
+    const nextHostEpoch = message?.hostEpoch;
+    if (disposed || typeof nextHostEpoch !== 'string'
+        || nextHostEpoch.length < 8 || announcedHostEpoch !== nextHostEpoch) return;
+    if (!roomId) {
+      if (hostEpoch && hostEpoch !== nextHostEpoch) retiredHostEpochs.add(hostEpoch);
+      hostEpoch = nextHostEpoch;
+      if (typeof message.did === 'string') did = message.did;
+      return;
+    }
+    if (hostEpoch === nextHostEpoch) return;
+    const recoveringRoomId = roomId;
+    const joined = await room(
+      'join', { name: displayName }, recoveringRoomId, nextHostEpoch,
+    );
+    if (!joined?.ok) throw new Error(joined?.error ?? 'room recovery join failed');
+    if (joined.admissionToken !== roomAdmissionToken) {
+      throw new Error('room recovery admission mismatch');
+    }
+    const acknowledged = await room(
+      'join-ack', {}, recoveringRoomId, nextHostEpoch,
+    );
+    if (!acknowledged?.ok || acknowledged.admissionToken !== roomAdmissionToken) {
+      throw new Error(acknowledged?.error ?? 'room recovery acknowledgement failed');
+    }
+    if (disposed || roomId !== recoveringRoomId || announcedHostEpoch !== nextHostEpoch) {
+      await room('leave', {}, recoveringRoomId, nextHostEpoch).catch(() => {});
+      return;
+    }
+    for (const topic of retainedTopics) {
+      const retained = await room('retain', { topic }, recoveringRoomId, nextHostEpoch);
+      if (!retained?.ok) throw new Error(retained?.error ?? 'room retain recovery failed');
+    }
+    for (const topic of subbedTopics) {
+      const subscribed = await room('subscribe', { topic }, recoveringRoomId, nextHostEpoch);
+      if (!subscribed?.ok) throw new Error(subscribed?.error ?? 'room subscription recovery failed');
+    }
+    if (disposed || roomId !== recoveringRoomId || announcedHostEpoch !== nextHostEpoch) {
+      await room('leave', {}, recoveringRoomId, nextHostEpoch).catch(() => {});
+      return;
+    }
+    if (hostEpoch && hostEpoch !== nextHostEpoch) retiredHostEpochs.add(hostEpoch);
+    hostEpoch = nextHostEpoch;
+    did = joined.did ?? message.did ?? did;
+    emit('host-recovered', {
+      roomId: recoveringRoomId,
+      did,
+      hostEpoch,
+      meshGeneration: message.meshGeneration ?? null,
+    });
+    audit('room_host_recovered', { roomId: recoveringRoomId, hostEpoch });
+  };
+
+  /** @param {any} message @param {number} [attempt] */
+  const queueHostRecovery = (message, attempt = 0) => {
+    void serializeTransition(() => recoverHost(message)).catch((error) => {
+      if (disposed || announcedHostEpoch !== message?.hostEpoch) return;
+      audit('room_host_recovery_failed', {
+        roomId,
+        hostEpoch: message?.hostEpoch,
+        attempt,
+        error: error?.message ?? String(error),
+      });
+      if (attempt >= 4) {
+        emit('host-recovery-failed', { roomId, error: error?.message ?? String(error) });
+        return;
+      }
+      const timer = setTimeout(() => {
+        recoveryTimers.delete(timer);
+        queueHostRecovery(message, attempt + 1);
+      }, Math.min(2_000, 100 * (2 ** attempt)));
+      recoveryTimers.add(timer);
+    });
+  };
+
   // Events pushed from the offscreen base host. Filter to OUR room (the shared
   // runtime push reaches every app-tab) and, for feed messages, to topics this
   // app actually subscribed — so another dwapp in the same room can't bleed in.
   const offHostEvent = onHostEvent?.((/** @type {any} */ m) => {
+    if (m?.type === 'dweb/base-host/generation') {
+      if (typeof m.hostEpoch !== 'string' || m.hostEpoch.length < 8) return;
+      if (m.hostEpoch === hostEpoch || retiredHostEpochs.has(m.hostEpoch)) return;
+      announcedHostEpoch = m.hostEpoch;
+      queueHostRecovery(m);
+      return;
+    }
     if (!roomId || m?.roomId !== roomId) return;
     if (m.event === 'message' && !subbedTopics.has(m.data?.topic)) return;
     emit(m.event, m.data);
@@ -235,25 +404,65 @@ export const createDwebBridge = ({
       const id = rid.trim();
       if (id.length > 64) throw new Error('room name too long (max 64 chars)');
       if (id === '__proto__' || id === 'constructor' || id === 'toString') throw new Error('reserved room name');
+      await reconcileCompensation();
       if (!(await consent(id, request))) throw new Error('denied');
       if (isCancelled(request)) throw new Error('cancelled');
       const nextDisplayName = String(name ?? '').slice(0, 40);
-      // Do not publish shared state until the host proves the exact room joined.
-      const r = await room('join', { name: nextDisplayName }, id);
-      if (!r?.ok) throw new Error(r?.error ?? 'join failed');
-      if (isCancelled(request)) {
-        // The host may have incremented an offscreen room ref after the client
-        // disappeared. Exact-room rollback is mandatory; ambient roomId is
-        // still null and must never select another client's room.
-        await room('leave', {}, id).catch(() => {});
-        throw new Error('cancelled');
+      const admissionToken = `room-admission-${newId()}`;
+      if (admissionToken.length < 16 || admissionToken.length > 192) {
+        throw new Error('room admission identity invalid');
       }
-      displayName = nextDisplayName;
-      roomId = id;
-      roomClientId = request.clientId;
-      did = r.did;
-      audit('room_joined', { roomId, did });
-      return { did, joined: roomId, present: r.present };
+      const compensation = Object.freeze({
+        schema: 1,
+        appId,
+        roomId: id,
+        clientId: stableRoomClientId,
+        admissionToken,
+        hostEpoch: hostEpoch ?? null,
+      });
+      // Persist before dispatch: every crash cut after this point can replay an
+      // exact leave, including host commit -> SW relay death -> App reopen.
+      await persistCompensation(compensation);
+      let committedHostEpoch = hostEpoch;
+      try {
+        // Do not publish shared state until the host proves the exact room join
+        // and finalizes the nonce-bound provisional membership.
+        const r = await room(
+          'join', { name: nextDisplayName }, id, hostEpoch,
+          stableRoomClientId, admissionToken,
+        );
+        if (!r?.ok || r.admissionToken !== admissionToken) {
+          throw new Error(r?.error ?? 'join admission mismatch');
+        }
+        committedHostEpoch = typeof r.hostEpoch === 'string' ? r.hostEpoch : hostEpoch;
+        if (isCancelled(request)) throw new Error('cancelled');
+        const acknowledged = await room(
+          'join-ack', {}, id, committedHostEpoch,
+          stableRoomClientId, admissionToken,
+        );
+        if (!acknowledged?.ok || acknowledged.admissionToken !== admissionToken) {
+          throw new Error(acknowledged?.error ?? 'join acknowledgement failed');
+        }
+        if (isCancelled(request)) throw new Error('cancelled');
+        await clearCompensation(admissionToken);
+        displayName = nextDisplayName;
+        roomId = id;
+        roomClientId = request.clientId;
+        roomAdmissionToken = admissionToken;
+        did = r.did;
+        if (typeof r.hostEpoch === 'string') {
+          if (hostEpoch && hostEpoch !== r.hostEpoch) retiredHostEpochs.add(hostEpoch);
+          hostEpoch = r.hostEpoch;
+          announcedHostEpoch = r.hostEpoch;
+        }
+        audit('room_joined', { roomId, did });
+        return { did, joined: roomId, present: r.present };
+      } catch (cause) {
+        const exactCompensation = { ...compensation, hostEpoch: committedHostEpoch ?? null };
+        try { await compensateJoin(exactCompensation); }
+        catch { queueCompensation(exactCompensation); }
+        throw cause;
+      }
     },
 
     leave: async () => {
@@ -262,7 +471,9 @@ export const createDwebBridge = ({
       await room('leave', {}, was);
       roomId = null;
       roomClientId = null;
+      roomAdmissionToken = null;
       subbedTopics.clear();
+      retainedTopics.clear();
       audit('room_left', { roomId: was });
       return { left: true };
     },
@@ -282,14 +493,18 @@ export const createDwebBridge = ({
     /** @param {{ topic?: any }} [args] */
     retain: async ({ topic } = {}) => {
       if (!roomId) throw new Error('not in a room');
-      await room('retain', { topic: String(topic) });
+      const retained = String(topic);
+      await room('retain', { topic: retained });
+      retainedTopics.add(retained);
       return { ok: true };
     },
 
     /** @param {{ topic?: any, data?: any, retain?: boolean }} [args] */
     publish: async ({ topic, data, retain = false } = {}) => {
       if (!roomId) throw new Error('not in a room');
-      const r = await room('publish', { topic: String(topic), data, retain: !!retain });
+      const publishedTopic = String(topic);
+      const r = await room('publish', { topic: publishedTopic, data, retain: !!retain });
+      if (retain) retainedTopics.add(publishedTopic);
       return { id: r.id, ts: r.ts };
     },
 
@@ -395,6 +610,7 @@ export const createDwebBridge = ({
           await room('leave', {}, was).catch(() => {});
           roomId = null;
           roomClientId = null;
+          roomAdmissionToken = null;
           did = null;
           subbedTopics.clear();
           audit('room_left', { roomId: was, reason: 'client-disposed' });
@@ -482,14 +698,18 @@ export const createDwebBridge = ({
       if (activeClientId) cancelClient(activeClientId);
       offTransport();
       for (const off of disposers.splice(0)) off();
+      for (const timer of recoveryTimers) clearTimeout(timer);
+      recoveryTimers.clear();
       void serializeTransition(async () => {
         if (!roomId) return;
         const was = roomId;
         await room('leave', {}, was).catch(() => {});
         roomId = null;
         roomClientId = null;
+        roomAdmissionToken = null;
         did = null;
         subbedTopics.clear();
+        retainedTopics.clear();
       });
     },
   };

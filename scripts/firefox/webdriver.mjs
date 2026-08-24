@@ -4,8 +4,10 @@
 
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
+import { verifyPinnedFirefoxRuntime } from './runtime-identity.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const hostNowMs = () => Number(process.hrtime.bigint()) / 1_000_000;
 const REQUEST_BUDGET_MS = 30_000;
 const SESSION_START_BUDGET_MS = 60_000;
 const CLEANUP_BUDGET_MS = 5_000;
@@ -90,8 +92,8 @@ export const startGeckodriver = async ({
   };
 
   try {
-    const deadline = Date.now() + 20_000;
-    while (Date.now() < deadline) {
+    const deadline = hostNowMs() + 20_000;
+    while (hostNowMs() < deadline) {
       if (child.exitCode !== null) {
         throw new Error(`geckodriver exited during startup\n${logs.join('')}`);
       }
@@ -131,13 +133,22 @@ export const startGeckodriver = async ({
     }
     const sessionId = session?.sessionId;
     if (!sessionId) throw new Error(`geckodriver did not return a session id\n${logs.join('')}`);
+    const sessionCapabilities = session?.capabilities ?? {};
     const sessionPath = `/session/${sessionId}`;
 
     const command = (method, path = '', body) => request(method, `${sessionPath}${path}`, body);
     await command('POST', '/timeouts', { implicit: 0, pageLoad: 30_000, script: 30_000 });
+    // No caller can install an add-on before this exact runtime gate passes.
+    const runtimeIdentity = await verifyPinnedFirefoxRuntime({
+      driver: { capabilities: sessionCapabilities },
+      firefoxBinary,
+      geckodriverBinary: binary,
+    });
 
     return {
       sessionId,
+      capabilities: sessionCapabilities,
+      runtimeIdentity,
       logs,
       installAddon: (path) => command('POST', '/moz/addon/install', { path, temporary: true }),
       navigate: (url) => command('POST', '/url', { url }),
@@ -164,9 +175,9 @@ export const startGeckodriver = async ({
 };
 
 export const waitFor = async (probe, { budgetMs = 15_000, pollMs = 200 } = {}) => {
-  const deadline = Date.now() + budgetMs;
+  const deadline = hostNowMs() + budgetMs;
   let last;
-  while (Date.now() < deadline) {
+  while (hostNowMs() < deadline) {
     try {
       last = await probe();
       if (last) return last;

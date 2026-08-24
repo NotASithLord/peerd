@@ -12,7 +12,7 @@
 
 import { createTabTracker } from './tab-tracker.js';
 import { APP_TAB_PATH } from '/peerd-engine/background.js';
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 
 const READY_TIMEOUT_MS = 15_000;
 const QUIESCE_TIMEOUT_MS = 5_000;
@@ -120,6 +120,8 @@ export const createAppTabTracker = ({
   const getOwnedTabId = (appId, ownerRoot) => ownerRootByApp.get(appId) === ownerRoot
     ? tracker.getTabId(appId)
     : null;
+  /** Preserve the exact chat-root claim when lifecycle work closes/reopens a tab. */
+  const getOwnerClaim = (/** @type {string} */ appId) => ownerClaimByApp.get(appId) ?? null;
 
   /** Refuse ambient appId-only reuse across chat roots. */
   const ensureTab = async (/** @type {string} */ appId, /** @type {{active?:boolean,groupTitle?:string,hashSuffix?:string,ownerSessionId?:string}} */ opts = {}) => {
@@ -173,6 +175,7 @@ export const createAppTabTracker = ({
     parseOwnerFromUrl,
     getTabId: tracker.getTabId,
     getOwnedTabId,
+    getOwnerClaim,
     ensureTab,
     closeTab: tracker.closeTab,
     quiesceTab,

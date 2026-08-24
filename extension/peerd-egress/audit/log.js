@@ -1,22 +1,6 @@
 // @ts-check
-// Append-only audit log over IndexedDB, with capped retention.
-//
-// The log is the *only* sanctioned write path for security events. Every
-// gate-related action (egress denial, denylist hit, tool block, vault
-// state change, etc.) lands here. The UI's audit-log view reads via
-// `list()`. The user can export to JSON — exports never leave the device.
-//
-// Retention: append-only WITHIN a cap. Entries are never updated, but
-// once the store crosses `maxEntries` the oldest are pruned so a
-// long-lived install doesn't grow unbounded (and the Logs view's
-// getAll() stays fast). Pruning is amortized — one count() every
-// `pruneCheckEvery` appends, then a single ranged delete — never a full
-// scan per write. The policy arithmetic is pure (see retention.js).
-//
-// Why a factory and not a singleton: the SW wires its own audit log;
-// tests pass a fake idb (or a recording array) and assert on writes.
 
-import { uuidv7 } from '/shared/util.js';
+import { uuidv7 } from '/shared/cold-util.js';
 import { normalizeMaxEntries, excessEntries, DEFAULT_PRUNE_CHECK_EVERY } from './retention.js';
 import { computeChainHash, verifyChain, CHAIN_HEAD_KEY } from './chain.js';
 
@@ -63,18 +47,10 @@ export const createAuditLog = ({ idb, now = Date.now, makeId, maxEntries, pruneC
     ? Math.floor(pruneCheckEvery)
     : DEFAULT_PRUNE_CHECK_EVERY;
 
-  // Start AT the check threshold so the first append after a SW boot
-  // runs a prune check — an install that grew past the cap before this
-  // shipped (or while the cap was larger) gets trimmed promptly instead
-  // of waiting out a full batch.
   let appendsSinceCheck = checkEvery;
   /** @type {Promise<void> | null} */
   let pruneInFlight = null;
 
-  // R4 tamper evidence: every entry extends a SHA-256 hash chain, and a
-  // tiny head record (audit_meta) pins the newest link. The chain tail is
-  // cached in-closure after the first append; appends SERIALIZE through
-  // writeQueue so interleaved async appends cannot fork the chain.
   /** @type {{ id: string, chain: string } | null} */
   let chainTail = null;
   let chainTailLoaded = false;
@@ -90,9 +66,6 @@ export const createAuditLog = ({ idb, now = Date.now, makeId, maxEntries, pruneC
     } catch { /* a fake idb without a meta store starts a fresh chain */ }
   };
 
-  // Delete the oldest entries down to the cap: one count, one
-  // keys-only read of the excess, one ranged delete. UUIDv7 ids make
-  // IDB key order chronological, so "first N keys" IS "oldest N".
   const prune = async () => {
     const total = await idb.count(STORE);
     const excess = excessEntries(total, cap);
@@ -102,8 +75,6 @@ export const createAuditLog = ({ idb, now = Date.now, makeId, maxEntries, pruneC
     await idb.delUpTo(STORE, doomed[doomed.length - 1]);
   };
 
-  // Concurrent appends share one in-flight prune rather than stacking
-  // redundant count/delete transactions.
   const maybePrune = () => {
     pruneInFlight ??= prune().finally(() => { pruneInFlight = null; });
     return pruneInFlight;
@@ -123,14 +94,8 @@ export const createAuditLog = ({ idb, now = Date.now, makeId, maxEntries, pruneC
    */
   const append = (input) => {
     if (!input || typeof input.type !== 'string') {
-      // why reject (not throw): append was async before the chain landed —
-      // callers handle malformed input as a rejected promise, not a sync throw.
       return Promise.reject(new TypeError('appendAudit: input.type is required'));
     }
-    // why the queue: the chain makes appends ORDER-DEPENDENT (each hash
-    // covers its predecessor's), and the SW fires many appends without
-    // awaiting. Serializing through one promise chain keeps the hash
-    // chain linear; the returned promise still settles per-append.
     const job = writeQueue.then(async () => {
       await loadChainTail();
       /** @type {AuditEntry & { chain: string }} */
@@ -148,18 +113,12 @@ export const createAuditLog = ({ idb, now = Date.now, makeId, maxEntries, pruneC
       try {
         await idb.put(META_STORE, { key: CHAIN_HEAD_KEY, id: entry.id, chain: entry.chain });
       } catch { /* a fake idb without the meta store still gets chained entries */ }
-      // Retention rides the append path (there is no other timer in the
-      // MV3 SW to hang it off), awaited so a pruning failure surfaces to
-      // whoever DOES await the append — but only one append per batch
-      // pays the cost.
       if (++appendsSinceCheck >= checkEvery) {
         appendsSinceCheck = 0;
         await maybePrune();
       }
       return entry;
     });
-    // why swallow on the QUEUE (not the caller's promise): one failed
-    // append must not wedge every later one behind a rejected chain.
     writeQueue = job.catch(() => {});
     return job;
   };
@@ -171,10 +130,6 @@ export const createAuditLog = ({ idb, now = Date.now, makeId, maxEntries, pruneC
    * failures. Read-only.
    */
   const verify = async () => {
-    // why through the queue: reading entries then head OUTSIDE the append
-    // serialization can catch an append mid-flight (head one entry ahead of
-    // the last getAll row) → a false "truncated tail" stamped into the debug
-    // bundle. Draining the queue first gives a consistent snapshot.
     const readSnapshot = async () => {
       const entries = await idb.getAll(STORE);
       let head = null;

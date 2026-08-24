@@ -14,7 +14,9 @@
 // home surface).
 
 import m from '/vendor/mithril/mithril.js';
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
+import { makeUiStatePort } from '/shared/cold-port-recovery.js';
+import { makeUiRuntimeClient } from '/shared/ui-runtime-client.js';
 import { CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
 import { loadDweb } from '/shared/dweb-loader.js';
 import { openOptions } from '/shared/open-options.js';
@@ -26,7 +28,7 @@ import { ActorsSection } from './actors-section.js';
 // EvalSection (the Lab) is LAZY-loaded — see loadEvalSection below.
 import { INITIAL_STATE, reduceChat, putSpawnedSession } from '../sidepanel/chat-reducer.js';
 import { ChatView } from '../sidepanel/components/chat-view.js';
-import { ConfirmModal, NoticeBar } from '../sidepanel/components/app.js';
+import { ConfirmModal, NoticeBar, StateRuntimeFailure } from '../sidepanel/components/app.js';
 import { ActorIsolationBanner } from '../sidepanel/components/actor-isolation-banner.js';
 import { VaultGate } from '../sidepanel/components/vault-gate.js';
 import { OnboardingView, needsOnboarding } from '../sidepanel/components/onboarding-view.js';
@@ -144,46 +146,47 @@ const toggleChatList = () => {
 };
 
 // ---- live port to the SW (home is an equal live surface, DESIGN-12) -------
-/** @type {import('webextension-polyfill').Runtime.Port | null} */
-let port = null;
-const connectPort = () => {
-  port = browser.runtime.connect({ name: 'home' });
-  port.onMessage.addListener(handlePortMessage);
-  port.onDisconnect.addListener(handlePortDisconnect);
-};
-/** @param {any} msg */
+/** @param {any} msg @returns {boolean} */
 const handlePortMessage = (msg) => {
-  if (!msg || typeof msg.type !== 'string') return;
+  if (!msg || typeof msg.type !== 'string') return false;
   // Voice is side-panel-only (no mic surface here) — ignore voice/* pushes.
-  if (msg.type.startsWith('voice/')) return;
+  if (msg.type.startsWith('voice/')) return true;
   // Surface presence (not chat state, so it bypasses the reducer): when a side
   // panel opens, hand Chat + Chats to it and drop to a tool view; when it closes,
   // take chat back to where we were.
-  if (msg.type === 'surfaces') { applySidePanelOpen(!!msg.sidePanelOpen); return; }
+  if (msg.type === 'surfaces') { applySidePanelOpen(!!msg.sidePanelOpen); return true; }
   // §4e: tag which surface this fold is FOR, so the answering surface doesn't
   // transcript-line its own click (mirrors the side panel).
   const folded = msg.type === 'confirm/resolved' ? { ...msg, confirmSurface: 'home' } : msg;
   const next = reduceChat(currentState, folded);
-  if (next === currentState) return;
+  if (next === currentState) return msg.type === 'state';
   currentState = next;
   if (msg.type === 'state') { booted = true; seedDwebApps(); }
   m.redraw();
+  return true;
 };
-const handlePortDisconnect = () => {
+
+const resetAfterDisconnect = () => {
   // SW restart — reset to the locked default (don't show stale "unlocked")
   // and reconnect, mirroring the side panel.
   currentState = INITIAL_STATE;
   booted = false;
-  port = null;
+  actorFetchInFlight.clear();
   m.redraw();
-  setTimeout(connectPort, 200);
 };
 
-/**
- * @param {{ type: string } & Record<string, any>} msg
- * @returns {Promise<any>}
- */
-const send = (msg) => browser.runtime.sendMessage(msg);
+const uiRuntime = makeUiRuntimeClient({ browser });
+const statePort = makeUiStatePort({
+  browser,
+  name: 'home',
+  isHydrated: () => booted || currentState.hydrated,
+  onMessage: handlePortMessage,
+  onDisconnect: resetAfterDisconnect,
+  onStatusChange: () => m.redraw(),
+});
+const reconcileState = () => statePort.reconcile(() => uiRuntime.send({ type: 'state/get' }));
+/** @param {{ type: string } & Record<string, any>} msg @returns {Promise<any>} */
+const send = (msg) => uiRuntime.send(msg);
 
 // ---- chat-component uiActions (the subset home needs; no voice) -----------
 /** @type {Set<string>} */
@@ -361,7 +364,7 @@ const seedDwebApps = async () => {
         return res.text();
       },
     });
-    await browser.runtime.sendMessage({ type: 'dweb/ensure-seed-app', seed });
+    await send({ type: 'dweb/ensure-seed-app', seed });
   } catch (e) { console.debug('[home] dweb seed skipped', e); }
 };
 
@@ -679,6 +682,8 @@ const content = (showDweb) => {
 
 const HomeApp = {
   view() {
+    if (!booted && statePort.failed) return m('.options-gate', m('.options-gate-card',
+      m(StateRuntimeFailure, { retry: statePort.retry, lead: m(Wordmark) })));
     if (!booted) return gate(null, 'Loading…');
     // Set up / unlock the vault RIGHT HERE — home is the SPA's primary surface, so
     // it hosts the same VaultGate the side panel does (passkey + passphrase, first-
@@ -699,7 +704,9 @@ const HomeApp = {
     // genuinely fresh install; a panel-first user who clicks Home mid-use lands
     // on home, never on a surprise re-onboarding.
     if (needsOnboarding(currentState)) {
-      return m('.options-gate', m(OnboardingView, { state: currentState, send }));
+      return m('.options-gate', m(OnboardingView, {
+        state: currentState, send, reconcileState,
+      }));
     }
 
     const showDweb = DWEB_ENABLED && currentState.settings?.dwebEnabled;
@@ -790,16 +797,23 @@ const HomeApp = {
   },
 };
 
-connectPort();
-document.addEventListener('visibilitychange', onVisibility);
 // A deep-link to an ALREADY-open home tab (openHome('library') focusing this
 // tab) changes only the fragment — no reload — so honor it via hashchange too,
 // then clear the fragment so it stays a one-shot jump.
-window.addEventListener('hashchange', () => {
+const onHashChange = () => {
   const v = viewFromHash();
   clearHash();
   if (v && v !== activeView) { setView(v); m.redraw(); }
-});
+};
 const root = document.getElementById('app');
 if (!root) throw new Error('home: #app missing from HTML');
-m.mount(root, HomeApp);
+let started = false;
+export const startHome = () => {
+  if (started) return;
+  if (document.documentElement.dataset.peerdBootStage === 'failed') return;
+  started = true;
+  statePort.start();
+  document.addEventListener('visibilitychange', onVisibility);
+  window.addEventListener('hashchange', onHashChange);
+  m.mount(root, HomeApp);
+};

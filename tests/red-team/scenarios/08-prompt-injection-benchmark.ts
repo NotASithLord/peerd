@@ -22,7 +22,7 @@ import { restrictCtxCapabilities } from '../../../extension/peerd-runtime/actor/
 import { exposureGate, actorTierGate } from '../../../extension/peerd-runtime/tools/gates.js';
 import { decideAction } from '../../../extension/peerd-runtime/permissions/policy.js';
 import { findDenylistMatch } from '../../../extension/peerd-egress/denylist/denylist.js';
-import { isPrivateOrLocalHost } from '../../../extension/peerd-egress/fetch/private-network.js';
+import { isPrivateOrLocalHost } from '../../../extension/shared/private-network.js';
 import { makeSafeFetch } from '../../../extension/peerd-egress/fetch/safe-fetch.js';
 import { neutralizeFence } from '../../../extension/peerd-runtime/tools/prompt-wrap.js';
 import { EgressDeniedError } from '../../../extension/peerd-egress/fetch/errors.js';

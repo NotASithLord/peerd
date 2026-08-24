@@ -102,30 +102,6 @@ export const collectFailures = (session) => {
 };
 
 /**
- * Roll every session's failures into a `"<scope>:<kind>" → count` table — the
- * local-first, no-telemetry "which failure classes recur" analyzer (design 5d).
- * Pure over the already-read session rows (a flatMap of collectFailures), so a
- * caller that has walked `sessions.list()` can mine error classes ACROSS
- * sessions without a backend. why scope not tool name: collectFailures records
- * scope + kind (+ toolUseId) but NOT the failing tool's NAME — it isn't on the
- * result block — so the finest honest key is `<scope>:<kind>` (e.g.
- * `tool:environment`, `turn:provider`); per-tool grouping is a follow-up that
- * would need the name threaded through collectFailures first.
- * @param {Array<Record<string, any>>} sessions  session records with messages
- * @returns {Record<string, number>}
- */
-export const aggregateFailures = (sessions) => {
-  /** @type {Record<string, number>} */
-  const byScopeKind = {};
-  const failures = (Array.isArray(sessions) ? sessions : []).flatMap((s) => collectFailures(s));
-  for (const f of failures) {
-    const key = `${String(f.scope ?? 'unknown')}:${String(f.kind ?? 'internal')}`;
-    byScopeKind[key] = (byScopeKind[key] ?? 0) + 1;
-  }
-  return byScopeKind;
-};
-
-/**
  * Assemble the bundle. Everything is passed in; nothing is read here.
  * @param {object} input
  * @param {Record<string, any>} input.session          the full assembled root session (with messages)

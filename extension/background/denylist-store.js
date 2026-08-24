@@ -30,7 +30,7 @@ export const requireDenylistPolicy = (status) => {
  * @param {{
  *   kv: { get: (k: string) => Promise<any>, set: (k: string, v: any) => Promise<any> },
  *   key: string,
- *   normalizePattern: (raw: unknown) => string,
+ *   normalizePattern: (raw: unknown) => string | null,
  * }} deps
  */
 export const makeDenylistStore = ({ kv, key, normalizePattern }) => {
@@ -95,8 +95,8 @@ export const makeDenylistStore = ({ kv, key, normalizePattern }) => {
       } else if (!seed.includes(p) && !overlay.added.includes(p)) {
         overlay = { ...overlay, added: [...overlay.added, p] };
       }
-      await kv.set(key, overlay);
       recompute();
+      await kv.set(key, overlay);
       return { ok: true, pattern: p, seed: seed.includes(p) };
     },
 
@@ -108,6 +108,7 @@ export const makeDenylistStore = ({ kv, key, normalizePattern }) => {
     async remove(pattern) {
       const p = normalizePattern(pattern);
       if (!p) return { ok: false, error: 'invalid-pattern' };
+      const previous = overlay;
       if (overlay.added.includes(p)) {
         overlay = { ...overlay, added: overlay.added.filter((x) => x !== p) };
       } else if (seed.includes(p) && !overlay.disabled.includes(p)) {
@@ -115,8 +116,15 @@ export const makeDenylistStore = ({ kv, key, normalizePattern }) => {
       } else {
         return { ok: false, error: 'not-found' };
       }
-      await kv.set(key, overlay);
       recompute();
+      try { await kv.set(key, overlay); }
+      catch (error) {
+        // A rejected write can still commit. Retain the more restrictive
+        // pre-remove policy until restart can reconcile durable truth.
+        overlay = previous;
+        recompute();
+        throw error;
+      }
       return { ok: true, pattern: p, seed: seed.includes(p) };
     },
   };

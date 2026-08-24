@@ -9,7 +9,7 @@
 
 /**
  * @param {Record<string, any>} deps
- * @returns {Record<string, (msg?: any, sender?: unknown) => Promise<any>>}
+ * @returns {Record<string, (msg?: any, sender?: any) => any>}
  */
 export const makeActorsRoutes = (deps) => {
   const {
@@ -32,6 +32,20 @@ export const makeActorsRoutes = (deps) => {
     : resolveManifestAllow(owner.toolManifest);
 
   return {
+    /** @param {{ runId?: string, ownerSessionId?: string }} msg @param {any} sender */
+    'script-run/abort': (msg = {}, sender = undefined) => {
+      if (!isOffscreenSender(sender)) {
+        return { ok: false, error: 'script_run_abort_unauthorized_relay' };
+      }
+      if (typeof msg.runId !== 'string' || !msg.runId
+        || typeof msg.ownerSessionId !== 'string' || !msg.ownerSessionId
+        || scriptRuns.ownerFor(msg.runId) !== msg.ownerSessionId) {
+        return { ok: false, error: 'script_run_abort_unknown_finished_or_foreign_run' };
+      }
+      scriptRuns.abort(msg.runId);
+      return { ok: true };
+    },
+
     'actors/call': async (msg = {}, sender = undefined) => {
       let operationSent = false;
       let operationStartedAt = 0;

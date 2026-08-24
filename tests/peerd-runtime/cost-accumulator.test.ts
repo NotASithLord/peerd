@@ -11,7 +11,6 @@ import {
   normalizeTally,
   addUsage,
   bumpTurn,
-  totalTokens,
   limitExceeded,
 } from '../../extension/peerd-runtime/cost/accumulator.js';
 
@@ -54,10 +53,6 @@ describe('accumulator folds', () => {
     expect(t.turns).toBe(1);
     expect(t.inputTokens).toBe(10);
     expect(bumpTurn(t).turns).toBe(2);
-  });
-
-  test('totalTokens sums all four buckets', () => {
-    expect(totalTokens(usage(1, 2, 3, 4) as any)).toBe(10);
   });
 
   test('addUsage tolerates a non-finite cost (NaN guard)', () => {

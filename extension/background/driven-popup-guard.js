@@ -66,6 +66,8 @@ export const makeDrivenPopupGuard = ({
    * @property {boolean} guarded
    * @property {boolean} blankReported
    * @property {ReturnType<typeof setTimeout> | null} blankTimer
+   * @property {Promise<void>} done
+   * @property {(value?:void)=>void} resolve
    */
   /** @type {Map<number, PopupFlow>} */
   const flows = new Map();
@@ -77,6 +79,7 @@ export const makeDrivenPopupGuard = ({
     const flow = flows.get(tabId);
     if (flow?.blankTimer != null) clearTimeout(flow.blankTimer);
     flows.delete(tabId);
+    flow?.resolve();
   };
   const settle = (/** @type {number} */ tabId) => {
     const flow = flows.get(tabId);
@@ -300,8 +303,12 @@ export const makeDrivenPopupGuard = ({
     /** @type {number} */ sourceTabId,
     /** @type {unknown} */ rawUrl,
   ) => {
-    if (settled.has(tabId)) return;
-    const flow = flows.get(tabId) ?? {
+    if (settled.has(tabId)) return Promise.resolve();
+    let flow = flows.get(tabId);
+    if (!flow) {
+      /** @type {(value?:void)=>void} */ let resolve = () => {};
+      const done = new Promise((doneResolve) => { resolve = doneResolve; });
+      flow = {
       tabId,
       sourceTabIds: new Set(),
       destination: '',
@@ -317,7 +324,10 @@ export const makeDrivenPopupGuard = ({
       guarded: false,
       blankReported: false,
       blankTimer: null,
-    };
+      done,
+      resolve,
+      };
+    }
     flow.sourceTabIds.add(sourceTabId);
     flow.destination = meaningfulDestination(rawUrl) || flow.destination;
     if (flow.destination && flow.blankTimer != null) {
@@ -326,13 +336,14 @@ export const makeDrivenPopupGuard = ({
     }
     flows.set(tabId, flow);
     advance(flow);
+    return flow.done;
   };
 
   return {
     /** @param {{ id?: number, openerTabId?: number, pendingUrl?: string, url?: string }} tab */
     onCreated(tab) {
       if (typeof tab.id !== 'number' || typeof tab.openerTabId !== 'number') return;
-      observe(tab.id, tab.openerTabId, tab.pendingUrl || tab.url);
+      return observe(tab.id, tab.openerTabId, tab.pendingUrl || tab.url);
     },
 
     /**
@@ -352,6 +363,7 @@ export const makeDrivenPopupGuard = ({
         flow.blankTimer = null;
       }
       finish(flow);
+      return flow.done;
     },
 
     /**
@@ -361,7 +373,7 @@ export const makeDrivenPopupGuard = ({
      */
     onNavigationTarget(details) {
       if (typeof details.sourceTabId !== 'number' || typeof details.tabId !== 'number') return;
-      observe(details.tabId, details.sourceTabId, details.url);
+      return observe(details.tabId, details.sourceTabId, details.url);
     },
 
     // Resolve only queued unknown-source events after session custody hydrates.

@@ -7,7 +7,7 @@
 // why: keeping Pod as a thin composition of existing hosts avoids owning a
 // second filesystem, Node/POSIX compatibility layer, or browser Linux runtime.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import { buildModule, createEditor, opfsHelpers, podGitRemoteOperation, POD_OPFS_ROOT } from '/peerd-engine/index.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
 import { isServiceWorkerSender } from '/shared/messaging.js';

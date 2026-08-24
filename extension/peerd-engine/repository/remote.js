@@ -99,7 +99,8 @@ const boundedResponseBody = async function* (stream, done) {
 };
 
 /**
- * @param {{ remote: { url: string, host: string }, webFetch: (url: string, init?: RequestInit) => Promise<Response>,
+ * @param {{ remote: { url: string, host: string }, webFetch: (url: string, init?: RequestInit,
+ *   context?: { gitRemote: { url: string, host: string } }) => Promise<Response>,
  *   getSecret?: (name: string) => Promise<string|null>, audit?: (event: any) => void, signal?: AbortSignal }} deps
  */
 export const createGitHttpClient = ({ remote, webFetch, getSecret, audit, signal }) => ({
@@ -138,7 +139,7 @@ export const createGitHttpClient = ({ remote, webFetch, getSecret, audit, signal
         credentials: 'omit',
         redirect: 'manual',
         signal: controller.signal,
-      });
+      }, { gitRemote: remote });
     } catch (error) {
       clearTimeout(timeoutId);
       signal?.removeEventListener('abort', onAbort);

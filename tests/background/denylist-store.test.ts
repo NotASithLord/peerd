@@ -86,6 +86,13 @@ describe('denylist-store — add', () => {
     expect(s.overlay().added).toEqual([]);
     expect(s.patterns()).toEqual(['seed.com']);
   });
+  test('an unknown add write outcome keeps the stronger in-memory policy', async () => {
+    const kv = { get: async () => undefined, set: async () => { throw new Error('unknown'); } };
+    const s = freshStore(kv);
+    await s.load(['seed.com']);
+    await expect(s.add('blocked.com')).rejects.toThrow('unknown');
+    expect(s.patterns()).toEqual(['seed.com', 'blocked.com']);
+  });
 });
 
 describe('denylist-store — remove', () => {
@@ -115,5 +122,13 @@ describe('denylist-store — remove', () => {
     const s = freshStore(kv);
     await s.load(['seed.com']);
     expect(await s.remove('seed.com')).toEqual({ ok: false, error: 'not-found' });
+  });
+  test('an unknown remove write outcome keeps the stronger prior policy', async () => {
+    const kv = { get: async () => undefined, set: async () => { throw new Error('unknown'); } };
+    const s = freshStore(kv);
+    await s.load(['seed.com']);
+    await expect(s.remove('seed.com')).rejects.toThrow('unknown');
+    expect(s.patterns()).toEqual(['seed.com']);
+    expect(s.overlay()).toEqual({ added: [], disabled: [] });
   });
 });

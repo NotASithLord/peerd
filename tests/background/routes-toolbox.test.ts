@@ -53,4 +53,15 @@ describe('toolbox/record', () => {
       { names: [], ok: false },
     ]);
   });
+  test('a rejected bookkeeping write is outcome-unknown and not replayable', async () => {
+    const routes = makeToolboxRoutes({ toolboxStore: {
+      recordRuns: async () => { throw new Error('private-idb-detail'); },
+    } });
+    const reply = await routes['toolbox/record']({ names: ['a'], ok: true });
+    expect(reply).toMatchObject({
+      ok: false, code: 'toolbox-record-outcome-unknown',
+      outcomeKnown: false, outcomeKind: 'unknown', retryable: false,
+    });
+    expect(reply.error).not.toContain('private-idb-detail');
+  });
 });

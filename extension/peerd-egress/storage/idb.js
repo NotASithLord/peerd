@@ -1,113 +1,47 @@
 // @ts-check
-// IndexedDB wrapper for larger structured data — sessions, audit log,
-// tool grants, the engine instance catalogs, and more.
-//
-// Object stores:
-//   sessions     keyPath: sessionId
-//   audit_log    keyPath: id          (UUIDv7 — cursor reads return chronologically)
-//   tool_grants  keyPath: id          composite "sessionId:toolName:origin"
-//   vm_state     keyPath: key         vestigial (declared, no live writers) — see ROADMAP
-//   agents_memory keyPath: id         AGENTS.md docs, keyed by scope id (V1.5)
-//   vault        keyPath: key         the vault blob (wrapped DK + wrap metadata)
-//   profiles     keyPath: id          profile records ('default' today; multi-profile later)
-//   apps         keyPath: key         App catalog blob (record { key:'apps.v1', value })
-//   notebooks    keyPath: key         Notebook catalog blob ({ key:'notebooks.v1', value })
-//   pods         keyPath: key         Pod catalog blob ({ key:'pods.v1', value })
-//   vms          keyPath: key         WebVM catalog blob ({ key:'webvms.v1', value })
-//   contacts     keyPath: did         per-peer overlay (user name/notes/tags), keyed by did:key
-//   dpop_keys    keyPath: origin      DPoP keypair handles, one per owned https origin
-//
-// The apps/notebooks/pods/vms stores hold the per-kind catalog as a SINGLE
-// { key, value } blob (the registry-factory's load-all / persist-all
-// shape), moved off chrome.storage.local for consistency + to escape its
-// ~10MB quota. See `idbKV` at the bottom — the single-blob adapter the
-// registries inject. The live App/Sandbox FILES stay in OPFS and VM
-// disks in their own per-VM IDB block devices; only the catalog + the
-// content-addressed bundle live here.
-//
-// We keep the wrapper deliberately thin. IndexedDB is verbose, but we
-// don't want to take on a heavier wrapper library for a fixed schema.
 
 const DB_NAME = 'peerd';
-// v2 (V1.5): adds the agents_memory store. The upgrade is forward-only
-// and additive — existing stores are untouched, so V1 data survives.
-// v3: adds the vault store (the vault blob moves out of
-// chrome.storage.local — storage hygiene, see vault/blob-migration.js).
-// v4: adds the profiles store (ROADMAP "Profiles", deprioritized to the
-// default-profile shape — one record, id 'default', carrying peerName +
-// the onboarding latch; the store is multi-profile shaped for later).
-// v5: adds the engine catalog stores (apps/sandboxes/vms) + app_content.
-// The catalogs move off chrome.storage.local onto IDB for storage
-// consistency and to escape the ~10MB local quota (pre-release: the old
-// chrome.storage.local catalogs are abandoned, not migrated).
-// v6: renames the JS-kind catalog store 'sandboxes' → 'notebooks' (the
-// kind was renamed Sandbox → Notebook). Pre-release, no migration: the
-// old 'sandboxes' store is dropped and any local instances in it are
-// orphaned (accepted — see notebook-registry.js).
-// v7: adds the contacts store (peerd-runtime/contacts) — one record per
-// known peer, keyed by its did:key, carrying the user-assigned name +
-// notes/tags. Additive, forward-only; nothing else changes.
-// v8: adds the vm_http_cache store — the WebVM's HTTP bridge caches safe,
-// idempotent GETs here (records { key, meta, bodyB64, storedAt }; bodies up to
-// the cache cap, too big for chrome.storage.local). A pure best-effort speed
-// layer: a dev re-cloning/re-installing the same bytes hits warm IDB instead
-// of re-streaming. Additive, forward-only; safe to clear at any time.
-// v9: adds the session_messages store (peerd-runtime/sessions) — one record
-// per chat message, keyed by the message's uuidv7 id, so a streaming delta
-// is a single-record patch instead of a whole-session rewrite (kills the
-// per-token write amplification + the cross-field race). The session record
-// keeps only an ordered `msgIndex`; the store migrates inline messages
-// lazily on read. Additive, forward-only.
-// why v8 AND v9 are separate (integration note): #53 (vm_http_cache) and #72
-// (session_messages) each claimed their own version — a store sharing a
-// version with another would never fire onupgradeneeded for a user already at
-// that version → NotFoundError. #53 lands first at v8; this is v9. Both upgrade
-// blocks below run in order for a pre-v8 user; each is guarded by a contains()
-// check so re-runs are idempotent.
-// v10 — audit_meta: the audit log's hash-chain head record (R4 tamper
-// evidence). One tiny record ({ key: 'audit_chain_head', id, chain })
-// pinning the newest entry so tail truncation is detectable.
-// v11 — web_extract_cache: the spill-and-page store for fetch_url AND
-// read_page mode:'content'. When a read overflows the tool budget, the FULL
-// text is spilled here (records { key, url, format, text, storedAt }) and the
-// model gets a head+tail window plus the exact read_web_cache paging call —
-// instead of silently losing the middle. Unencrypted extension-scoped disk,
-// best-effort, safe to clear at any time. NOTE: unlike vm_http_cache's fetched
-// public bytes, read_page content is the RENDERED DOM of a tab the user may be
-// logged into, so an entry can hold authenticated page text; it is not purged
-// on vault lock (same at-rest posture as session_messages/memory, which also
-// persist plaintext here).
-// v12 — dpop_keys: one proof-of-possession keypair per owned https origin
-// (records { origin, privateKey, publicJwk, createdAt }, keyPath 'origin').
-// The stored `privateKey` is a NON-EXTRACTABLE CryptoKey — a structured-clone
-// HANDLE, not bytes: the key material never leaves the browser's crypto
-// implementation, so unlike every other store here this record is not readable
-// even by us (`exportKey` on it rejects). That is what makes an IDB scrape, an
-// OPFS dump, or a compromised in-origin caller unable to exfiltrate the
-// credential. why persist it at all: the key must survive an MV3 service-worker
-// eviction, and a handle is the only form of it we can hold. Additive,
-// forward-only. See peerd-egress/dpop/keys.js.
-// v13: adds the Pod instance catalog. Pod files remain in one named OPFS
-// subtree; this store holds only the registry's single { key, value } blob.
-// Additive and forward-only so existing engine catalogs are untouched.
 const DB_VERSION = 13;
+const OPEN_TIMEOUT_MS = 8_000;
+const TX_TIMEOUT_MS = 15_000;
 
-/**
- * Open the database. Cached after first call. Re-opens on connection
- * error (extension reload, etc.).
- *
- * @returns {Promise<IDBDatabase>}
- */
+/** @param {IDBTransaction} tx @param {Function} resolve @param {Function} reject */
+const guardTransaction = (tx, resolve, reject) => {
+  let settled = false;
+  const finish = (/** @type {Function} */ fn, /** @type {unknown} */ value) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    fn(value);
+  };
+  const timer = setTimeout(() => {
+    try { tx.abort(); } catch {}
+    finish(reject, new Error('idb-transaction-timeout'));
+  }, TX_TIMEOUT_MS);
+  return {
+    resolve: (/** @type {unknown} */ value) => finish(resolve, value),
+    reject: (/** @type {unknown} */ cause) => finish(reject, cause),
+  };
+};
+
+/** @returns {Promise<IDBDatabase>} */
 /** @type {Promise<IDBDatabase> | null} */
 let dbPromise = null;
 export const openDB = () => {
   if (dbPromise) return dbPromise;
-  dbPromise = new Promise((resolve, reject) => {
+  const opening = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
+    let settled = false;
+    const fail = (/** @type {unknown} */ cause) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (dbPromise === opening) dbPromise = null;
+      reject(cause);
+    };
+    const timer = setTimeout(() => fail(new Error('idb-open-timeout')), OPEN_TIMEOUT_MS);
     req.onupgradeneeded = () => {
       const db = req.result;
-      // Schema upgrade is a single forward-only path; if we add stores
-      // in a future version, bump DB_VERSION and add another `if` here.
       if (!db.objectStoreNames.contains('sessions')) {
         db.createObjectStore('sessions', { keyPath: 'sessionId' });
       }
@@ -120,99 +54,66 @@ export const openDB = () => {
       if (!db.objectStoreNames.contains('vm_state')) {
         db.createObjectStore('vm_state', { keyPath: 'key' });
       }
-      // V1.5 — file-based memory. One AGENTS.md doc per scope id.
       if (!db.objectStoreNames.contains('agents_memory')) {
         db.createObjectStore('agents_memory', { keyPath: 'id' });
       }
-      // v10 — the audit chain head (see DB_VERSION note above).
       if (!db.objectStoreNames.contains('audit_meta')) {
         db.createObjectStore('audit_meta', { keyPath: 'key' });
       }
-      // v11 — fetch_url's spill-and-page store (see DB_VERSION note above).
       if (!db.objectStoreNames.contains('web_extract_cache')) {
         db.createObjectStore('web_extract_cache', { keyPath: 'key' });
       }
-      // v3 — the vault blob's new home (records: { key, value }). The
-      // blob itself stays ciphertext; this is hygiene, not a security
-      // boundary — both backends are unencrypted extension-scoped disk.
       if (!db.objectStoreNames.contains('vault')) {
         db.createObjectStore('vault', { keyPath: 'key' });
       }
-      // v4 — profile records (peerd-runtime/profiles). One 'default'
-      // record today; the keyPath-on-id shape is what multi-profile
-      // will key per-profile namespacing off later.
       if (!db.objectStoreNames.contains('profiles')) {
         db.createObjectStore('profiles', { keyPath: 'id' });
       }
-      // v5 — engine instance catalogs, moved off chrome.storage.local.
-      // Each holds the whole per-kind catalog as one { key, value } blob
-      // (the registry-factory load-all/persist-all shape) via `idbKV`.
-      // (The content-addressed App-bundle store the dweb sharing tier will
-      // need is intentionally NOT created here — it gets added with its
-      // first writer, not reserved empty.)
       if (!db.objectStoreNames.contains('apps')) {
         db.createObjectStore('apps', { keyPath: 'key' });
       }
       if (!db.objectStoreNames.contains('vms')) {
         db.createObjectStore('vms', { keyPath: 'key' });
       }
-      // v6 — the JS-kind catalog store, renamed 'sandboxes' → 'notebooks'.
-      // Pre-release, no migration: create the new store and drop the old
-      // one (orphaning any local instances it held — accepted).
       if (!db.objectStoreNames.contains('notebooks')) {
         db.createObjectStore('notebooks', { keyPath: 'key' });
       }
-      // v13: lightweight Pod catalog; workspace bytes live in OPFS.
       if (!db.objectStoreNames.contains('pods')) {
         db.createObjectStore('pods', { keyPath: 'key' });
       }
       if (db.objectStoreNames.contains('sandboxes')) {
         db.deleteObjectStore('sandboxes');
       }
-      // v7 — contacts (peerd-runtime/contacts). One record per known peer,
-      // keyed by its did:key — a user-owned overlay (personal name, notes,
-      // tags) on top of the otherwise-anonymous peer identity. Activity
-      // history is DERIVED at read time (apps + audit log), never stored here.
       if (!db.objectStoreNames.contains('contacts')) {
         db.createObjectStore('contacts', { keyPath: 'did' });
       }
-      // v8 — the WebVM HTTP bridge's response cache. Records
-      // { key, meta, bodyB64, storedAt }, keyed by the content-addressed URL.
-      // Best-effort + disposable: nothing else depends on it surviving.
       if (!db.objectStoreNames.contains('vm_http_cache')) {
         db.createObjectStore('vm_http_cache', { keyPath: 'key' });
       }
-      // v9 — per-message session records (peerd-runtime/sessions). One record
-      // per chat message keyed by the message's uuidv7 id; the session record
-      // holds only the ordered `msgIndex`. Additive; the session store
-      // migrates pre-v9 inline-message sessions lazily on read.
       if (!db.objectStoreNames.contains('session_messages')) {
         db.createObjectStore('session_messages', { keyPath: 'id' });
       }
-      // v12 — DPoP proof-of-possession keypairs, one per owned https origin
-      // (see the DB_VERSION note above). Keyed by origin so a credential is
-      // structurally unable to be spent at a different site.
       if (!db.objectStoreNames.contains('dpop_keys')) {
         db.createObjectStore('dpop_keys', { keyPath: 'origin' });
       }
     };
     req.onsuccess = () => {
       const db = req.result;
-      // If the connection closes (e.g. another tab triggered a version
-      // bump), drop the cached promise so the next call re-opens cleanly.
+      if (settled) { db.close(); return; }
+      settled = true;
+      clearTimeout(timer);
       db.onclose = () => { dbPromise = null; };
       db.onversionchange = () => { db.close(); dbPromise = null; };
       resolve(db);
     };
-    req.onerror = () => reject(req.error);
+    req.onerror = () => fail(req.error ?? new Error('idb-open-failed'));
+    req.onblocked = () => fail(new Error('idb-open-blocked'));
   });
+  dbPromise = /** @type {Promise<IDBDatabase>} */ (opening);
   return dbPromise;
 };
 
-/**
- * Run a read-only transaction on a store and return its result.
- *
- * @template T
+/** @template T
  * @param {string} store
  * @param {(s: IDBObjectStore) => IDBRequest<T>} fn
  * @returns {Promise<T>}
@@ -221,18 +122,15 @@ export const read = async (store, fn) => {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(store, 'readonly');
+    const guard = guardTransaction(tx, resolve, reject);
     const req = fn(tx.objectStore(store));
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => guard.resolve(req.result);
+    req.onerror = () => guard.reject(req.error);
+    tx.onabort = () => guard.reject(tx.error ?? new Error('idb-read-aborted'));
   });
 };
 
-/**
- * Run a read-write transaction. Resolves when the transaction completes,
- * not when the request fires — this catches commit-time failures (quota,
- * constraint violations) that single-request reads miss.
- *
- * @param {string} store
+/** @param {string} store
  * @param {(s: IDBObjectStore) => void} fn
  * @returns {Promise<void>}
  */
@@ -240,26 +138,76 @@ export const write = async (store, fn) => {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(store, 'readwrite');
+    const guard = guardTransaction(tx, resolve, reject);
     fn(tx.objectStore(store));
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
+    tx.oncomplete = () => guard.resolve(undefined);
+    tx.onerror = () => guard.reject(tx.error);
+    tx.onabort = () => guard.reject(tx.error ?? new Error('idb-write-aborted'));
+  });
+};
+
+/** Atomic multi-store request graph; resolves after commit. @template T
+ * @param {string[]} stores
+ * @param {(stores:Record<string,IDBObjectStore>,tx:IDBTransaction)=>T|(()=>T)} fn
+ * @returns {Promise<T>} */
+export const transact = async (stores, fn) => {
+  if (!Array.isArray(stores) || stores.length === 0
+      || new Set(stores).size !== stores.length
+      || stores.some((store) => typeof store !== 'string' || !store)
+      || typeof fn !== 'function') throw new TypeError('idb-transaction-invalid');
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(stores, 'readwrite');
+    const guard = guardTransaction(tx, resolve, reject);
+    const handles = Object.fromEntries(stores.map((name) => [name, tx.objectStore(name)]));
+    /** @type {T|(()=>T)} */
+    let result;
+    try {
+      result = fn(handles, tx);
+      if (result && typeof /** @type {any} */ (result).then === 'function') {
+        throw new TypeError('idb-transaction-callback-must-be-synchronous');
+      }
+    }
+    catch (cause) { try { tx.abort(); } catch {} guard.reject(cause); return; }
+    tx.oncomplete = () => guard.resolve(typeof result === 'function'
+      ? /** @type {()=>T} */ (result)() : result);
+    tx.onerror = () => guard.reject(tx.error ?? new Error('idb-transaction-failed'));
+    tx.onabort = () => guard.reject(tx.error ?? new Error('idb-transaction-aborted'));
   });
 };
 
 /** @param {string} store @param {any} value */
 export const put = (store, value) => write(store, (s) => s.put(value));
 
+/** @param {string} store
+ * @param {IDBValidKey} key
+ * @param {Record<string, unknown>} fields
+ * @returns {Promise<any|undefined>}
+ */
+export const patch = async (store, key, fields) => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readwrite');
+    const guard = guardTransaction(tx, resolve, reject);
+    const objectStore = tx.objectStore(store);
+    const request = objectStore.get(key);
+    /** @type {any} */
+    let updated;
+    request.onsuccess = () => {
+      if (request.result === undefined) return;
+      updated = { ...request.result, ...fields };
+      objectStore.put(updated);
+    };
+    tx.oncomplete = () => guard.resolve(updated);
+    tx.onerror = () => guard.reject(tx.error);
+    tx.onabort = () => guard.reject(tx.error ?? new Error('idb-patch-aborted'));
+  });
+};
+
 /** @param {string} store @param {IDBValidKey} key */
 export const get = (store, key) => read(store, (s) => s.get(key));
 
-/**
- * Read many records by key in ONE read-only transaction, returned aligned
- * to `keys` (a missing key yields `undefined` at its slot). This is the
- * batched assembly primitive the session store uses to rebuild a session's
- * `messages` from its `msgIndex` without N separate transactions.
- *
- * @param {string} store
+/** @param {string} store
  * @param {ReadonlyArray<IDBValidKey>} keys
  * @returns {Promise<any[]>}
  */
@@ -268,16 +216,16 @@ export const getMany = async (store, keys) => {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(store, 'readonly');
+    const guard = guardTransaction(tx, resolve, reject);
     const os = tx.objectStore(store);
     const out = new Array(keys.length);
     keys.forEach((key, i) => {
       const req = os.get(key);
       req.onsuccess = () => { out[i] = req.result; };
-      // Per-request errors bubble to tx.onerror; no per-request handler.
     });
-    tx.oncomplete = () => resolve(out);
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
+    tx.oncomplete = () => guard.resolve(out);
+    tx.onerror = () => guard.reject(tx.error);
+    tx.onabort = () => guard.reject(tx.error ?? new Error('idb-read-aborted'));
   });
 };
 
@@ -287,34 +235,19 @@ export const getAll = (store) => read(store, (s) => s.getAll());
 /** @param {string} store @param {IDBValidKey} key */
 export const del = (store, key) => write(store, (s) => s.delete(key));
 
-/**
- * Number of records in a store. Backed by the engine's b-tree count —
- * O(log n), no record deserialization — so callers (audit retention) can
- * poll it cheaply on a write path.
- *
- * @param {string} store
+/** @param {string} store
  * @returns {Promise<number>}
  */
 export const count = (store) => read(store, (s) => s.count());
 
-/**
- * The first `limit` keys in key order (all keys when limit is omitted).
- * Keys only — no values are deserialized, which is what makes "find the
- * N oldest entries" affordable on a large store.
- *
- * @param {string} store
+/** @param {string} store
  * @param {number} [limit]
  * @returns {Promise<IDBValidKey[]>}
  */
 export const getAllKeys = (store, limit) =>
   read(store, (s) => limit === undefined ? s.getAllKeys() : s.getAllKeys(null, limit));
 
-/**
- * Delete every record with key <= `key` in ONE ranged delete request.
- * This is the bulk-prune primitive: deleting a batch of oldest entries
- * is a single IDBKeyRange delete, not N individual requests.
- *
- * @param {string} store
+/** @param {string} store
  * @param {IDBValidKey} key
  */
 export const delUpTo = (store, key) =>
@@ -323,18 +256,7 @@ export const delUpTo = (store, key) =>
 /** @param {string} store */
 export const clear = (store) => write(store, (s) => s.clear());
 
-/**
- * A key-value adapter over ONE IDB store, shaped like the chrome.storage
- * `kv` wrapper's get/set so the engine registries (registry-factory.js)
- * can be backed by IndexedDB with zero changes to the factory. Records
- * are `{ key, value }`; `get` unwraps to `value`, `set` wraps. The
- * registry passes its `storageKey` (e.g. 'apps.v1') as the record key,
- * so the store holds one blob per kind.
- *
- * why: the catalogs outgrew chrome.storage.local's ~10MB shared quota and
- * we want one storage substrate (IDB) for all structured state.
- *
- * @param {string} store  an existing object store ('apps' | 'notebooks' | 'vms' | …)
+/** @param {string} store
  * @returns {{ get: (key: string) => Promise<any>, set: (key: string, value: any) => Promise<void> }}
  */
 export const idbKV = (store) => ({

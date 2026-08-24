@@ -117,6 +117,9 @@
  * @typedef {Object} ToolResultErr
  * @property {false} ok
  * @property {string} error
+ * @property {string} [code] stable bounded machine-readable error code
+ * @property {boolean} [outcomeKnown] whether the effect is known to have completed or not run
+ * @property {boolean} [retryable] whether an automatic retry is safe
  * @property {boolean} [endTurn]
  * @property {any} [content]  optional human-readable explanation authored
  *   alongside the machine `error` code (e.g. "User declined the outbound

@@ -19,7 +19,7 @@ import {
 } from '../harness.ts';
 import { makeWebFetch } from '../../../extension/peerd-egress/fetch/web-fetch.js';
 import { matchesDenylist, findDenylistMatch } from '../../../extension/peerd-egress/denylist/denylist.js';
-import { authOriginForRequestUrl } from '../../../extension/peerd-egress/fetch/origin-credentials.js';
+import { authOriginForRequestUrl } from '../../../extension/peerd-egress/fetch/web-fetch.js';
 import { EgressDeniedError } from '../../../extension/peerd-egress/fetch/errors.js';
 
 // A representative slice of the kind of sensitive origins a user's denylist holds

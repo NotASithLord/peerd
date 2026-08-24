@@ -27,7 +27,7 @@ import {
   decideAction,
   DEFAULT_CONFIRM_ACTIONS,
   normalizeMode,
-} from '../permissions/index.js';
+} from '../permissions/policy.js';
 // The lifecycle classifier — pure, no IO. Used ONLY by the fail-closed
 // backstop below, so the dispatcher never has to duplicate (and drift
 // from) the retry-class taxonomy.
@@ -71,6 +71,7 @@ const lifecycleTarget = (tool, args, ctx) => {
 };
 
 const EXPOSED_ERROR_CODE = /^[a-z][a-z0-9_]{0,79}$/;
+const TOOL_RESULT_CODE = /^[a-z0-9][a-z0-9_-]{0,127}$/;
 const EXPOSED_ERROR_CONTENT_MAX_CHARS = 6000;
 const EXPOSED_ERROR_DETAILS_MAX_CHARS = 8000;
 const FAILURE_OUTCOME_VALUES = new Set(Object.values(FAILURE_OUTCOMES));
@@ -983,11 +984,35 @@ export const dispatchToolCall = async (call, ctx) => {
         };
       }
     }
+    const recoveryState = recoveryRewrite?.recovery?.state;
+    const resultCustody = /** @type {{code?:unknown,outcomeKind?:unknown,outcomeKnown?:unknown,retryable?:unknown}} */ (result);
+    const resultCode = typeof resultCustody?.code === 'string' && TOOL_RESULT_CODE.test(resultCustody.code)
+      ? resultCustody.code : null;
+    const resultOutcomeKind = FAILURE_OUTCOME_VALUES.has(/** @type {any} */ (resultCustody?.outcomeKind))
+      ? /** @type {'transport-lost'|'host-lost'|'pre-effect-failure'|'effect-completed'} */ (resultCustody.outcomeKind)
+      : null;
+    // A lifecycle rewrite replaces presentation, not custody. Preserve a
+    // bounded machine code and the typed host/transport-loss verdict so UI,
+    // audit, and model orchestration cannot mistake an ambiguous Git/App
+    // mutation for a normal retryable failure.
+    const recoveryCustody = recoveryRewrite ? {
+      ...(resultCode ? { code: resultCode } : {}),
+      ...(resultOutcomeKind ? { outcomeKind: resultOutcomeKind } : {}),
+      ...(recoveryState === 'outcome_unknown'
+        ? { outcomeKnown: false, retryable: false }
+        : {
+            ...(typeof resultCustody?.outcomeKnown === 'boolean'
+              ? { outcomeKnown: resultCustody.outcomeKnown } : {}),
+            ...(typeof resultCustody?.retryable === 'boolean'
+              ? { retryable: resultCustody.retryable } : {}),
+          }),
+    } : {};
     /** @type {ToolResult} */
     const settled = recoveryRewrite
       ? {
         ok: false,
         error: recoveryRewrite.error,
+        ...recoveryCustody,
         ...actorHostState,
         ...(actorDeliveryId ? { actorDeliveryId } : {}),
         ...(actorDeliveryIds.length > 0 ? { actorDeliveryIds } : {}),

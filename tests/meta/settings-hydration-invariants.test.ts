@@ -11,21 +11,18 @@ import { EXTENSION_DIR } from '../../packaging/lib.ts';
 
 const serviceWorker = readFileSync(join(EXTENSION_DIR, 'background/service-worker.js'), 'utf8');
 const statePushController = readFileSync(join(EXTENSION_DIR, 'background/state-push.js'), 'utf8');
+const stateSnapshot = readFileSync(join(EXTENSION_DIR, 'background/state-snapshot.js'), 'utf8');
 
 describe('settings hydration before UI state snapshots', () => {
   test('waits for persisted settings before reading session or provider state', () => {
-    const start = serviceWorker.indexOf('const buildStateSnapshot = async () => {');
-    const end = serviceWorker.indexOf('const pushState = makeCoalescedStatePush({', start);
-    const snapshot = serviceWorker.slice(start, end);
-    const hydration = snapshot.indexOf('await ensureSettingsReady();');
-    const sessionRead = snapshot.indexOf("sessionCache.sessionGet('currentSessionId')");
-    const providerRead = snapshot.indexOf('const activeProv = resolveActiveProvider();');
+    const hydration = stateSnapshot.indexOf('await ensureSettingsReady();');
+    const sessionRead = stateSnapshot.indexOf("sessionCache.sessionGet('currentSessionId')");
+    const providerRead = stateSnapshot.indexOf('const activeProv = resolveActiveProvider();');
 
-    expect(start).toBeGreaterThan(-1);
-    expect(end).toBeGreaterThan(start);
     expect(hydration).toBeGreaterThan(-1);
     expect(sessionRead).toBeGreaterThan(hydration);
     expect(providerRead).toBeGreaterThan(hydration);
+    expect(serviceWorker).toContain('const buildStateSnapshot = makeStateSnapshotBuilder({');
   });
 
   test('the boot promise uses the retryable full settings hydration gate', () => {
@@ -39,7 +36,7 @@ describe('settings hydration before UI state snapshots', () => {
     expect(serviceWorker).toContain('active: () => settingsHydrated && settingsStore.get().dwebEnabled');
     expect(serviceWorker).toContain('dweb: (DWEB_ENABLED && settingsHydrated && settingsStore.get().dwebEnabled)');
     const wiringStart = serviceWorker.indexOf('...makeDwebRoutes({');
-    const wiringEnd = serviceWorker.indexOf('}),', wiringStart);
+    const wiringEnd = serviceWorker.indexOf('...makeDwebSelfRoutes({', wiringStart);
     expect(serviceWorker.slice(wiringStart, wiringEnd)).toContain('ensureSettingsReady');
   });
 

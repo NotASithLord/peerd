@@ -1,4 +1,5 @@
 // @ts-check
+import { validateKernelStateProjection } from '/shared/kernel-state-contract.js';
 // chat-reducer.js — the SW-message → UI-state reducer shared by every live
 // surface (the side panel AND the full-page home, DESIGN-12).
 //
@@ -28,6 +29,9 @@
  * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, aborted?: boolean, actorDeliveryId?: string, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }} [actorReply]
  * @property {string} [stopReason]
  * @property {string} [error]
+ * @property {string} [errorCode]
+ * @property {boolean} [outcomeKnown]
+ * @property {boolean} [retryable]
  * @property {unknown[]} [toolResults]
  * @property {unknown[]} [toolUses]
  * @property {unknown[]} [attachments]
@@ -127,6 +131,7 @@
  *   stopReason?: string,
  *   session?: any,
  *   state?: any,
+ *   authorityReplacement?: boolean,
  *   prompt?: any,
  *   id?: string,
  *   turn?: any,
@@ -220,6 +225,26 @@ export const INITIAL_STATE = Object.freeze({
   // a run continuing in a background chat tracks independently of the one in
   // view. goal/state pushes set/clear each entry.
   goalRuns: Object.freeze({}),
+});
+
+/** Drop live worker projections while preserving durable display posture. */
+export const resetChatAfterRuntimeLoss = (/** @type {ChatState} */ state) => ({
+  ...state,
+  projection: null,
+  hydrated: false,
+  vault: { ...state.vault, locked: true, unlockedAt: 0 },
+  providers: { ...state.providers, hasKey: false },
+  lastError: null,
+  pendingConfirm: null,
+  rateLimit: null,
+  streaming: false,
+  notices: INITIAL_STATE.notices,
+  goalRuns: INITIAL_STATE.goalRuns,
+  actors: INITIAL_STATE.actors,
+  actorProjectionEpoch: INITIAL_STATE.actorProjectionEpoch,
+  actorProjectionRevision: INITIAL_STATE.actorProjectionRevision,
+  spawned: INITIAL_STATE.spawned,
+  asyncTasks: INITIAL_STATE.asyncTasks,
 });
 
 // One quiet sentence per confirm settle (§4e - the four undrawn states). The
@@ -321,17 +346,24 @@ const applyStop = (state, { sessionId, messageId, stopReason }) => {
 
 /**
  * @param {ChatState} state
- * @param {{ sessionId?: string, messageId?: string, error?: string }} msg
+ * @param {{ sessionId?: string, messageId?: string, error?: string, code?: string, outcomeKnown?:boolean, retryable?:boolean }} msg
  * @returns {ChatState}
  */
-const applyError = (state, { sessionId, messageId, error }) => {
+const applyError = (state, {
+  sessionId, messageId, error, code, outcomeKnown, retryable,
+}) => {
   // Per-session guard first — a background chat's failure shouldn't banner
   // the chat being viewed (its transcript carries the error).
   if (state.session.sessionId && sessionId && state.session.sessionId !== sessionId) return state;
   if (messageId === undefined) return { ...state, lastError: error };
   return { ...state, lastError: error, session: { ...state.session,
     messages: state.session.messages.map((mm) =>
-      mm.id === messageId ? { ...mm, streaming: false, error } : mm) } };
+      mm.id === messageId ? {
+        ...mm, streaming: false, error,
+        ...(typeof code === 'string' ? { errorCode: code } : {}),
+        ...(typeof outcomeKnown === 'boolean' ? { outcomeKnown } : {}),
+        ...(typeof retryable === 'boolean' ? { retryable } : {}),
+      } : mm) } };
 };
 
 // ---- actor nested-transcript reducers ----------------------------------
@@ -838,6 +870,16 @@ export const reduceChat = (state, msg) => {
       return { ...state, asyncTasks: { ...state.asyncTasks,
         [/** @type {string} */ (msg.parentSessionId)]: msg.tasks } };
     case 'state': {
+      const incomingProjection = msg.state?.projection;
+      if (incomingProjection !== undefined) {
+        const checked = validateKernelStateProjection(msg.state);
+        if (!checked.ok) return state;
+        const priorProjection = /** @type {any} */ (state).projection;
+        if (priorProjection
+            && (incomingProjection.authorityEpoch !== priorProjection.authorityEpoch
+              ? msg.authorityReplacement !== true
+              : incomingProjection.generation < priorProjection.generation)) return state;
+      }
       // Full snapshot. Replace, seeding the cost meter from the persisted
       // session tally + the configured limit. (Voice-restore is the surface's
       // job — see the module header.) why preserve pendingConfirm: confirm

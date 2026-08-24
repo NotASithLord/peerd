@@ -23,7 +23,7 @@
 //   - Tracking which session is attached to which instance (registry).
 //   - Persisting anything (the persisted catalog lives in the registry).
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 
 /**
  * @typedef {Object} TabTrackerConfig

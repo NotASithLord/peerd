@@ -225,7 +225,8 @@ const snapshotsEqual = (left, right) => {
 
 /**
  * @param {{ loadGit?: () => Promise<any>, fs?: any,
- *   webFetch?: (url:string, init?:RequestInit)=>Promise<Response>,
+ *   webFetch?: (url:string, init?:RequestInit,
+ *     context?:{gitRemote:{url:string,host:string}})=>Promise<Response>,
  *   getSecret?: (name:string)=>Promise<string|null>, audit?: (event:any)=>void }} [deps]
  */
 export const createRepositoryService = ({

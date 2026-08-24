@@ -1,5 +1,9 @@
 import { describe, test, expect } from 'bun:test';
-import { normalizeSettingsPatch } from '../../extension/background/settings-patch.js';
+import {
+  makeKernelSettingsRoutes,
+  normalizeSettingsPatch,
+} from '../../extension/background/settings-patch.js';
+import { normalizeVaultAutoLockPatch } from '../../extension/background/settings-patch.js';
 
 // These pin the contract the `settings/update` route used to inline: only
 // whitelisted keys survive, every leaf is clamped/coerced, and a bad value can
@@ -107,6 +111,12 @@ describe('normalizeSettingsPatch — numeric clamps', () => {
     // present-but-undefined is still "not present" — key omitted
     expect(norm({ vaultAutoLockMs: undefined })).toEqual({});
   });
+  test('vault-only normalizer is byte-for-value identical to the full settings route', () => {
+    for (const value of [undefined, 0, -1, 1_000, 60_001, 999_999_999, 'nope']) {
+      expect(normalizeVaultAutoLockPatch({ vaultAutoLockMs: value }))
+        .toEqual(norm({ vaultAutoLockMs: value }));
+    }
+  });
   test('spendLimitUsd: positive clamps to <=100000; 0/garbage/negative → 0', () => {
     expect(norm({ spendLimitUsd: 5 })).toEqual({ spendLimitUsd: 5 });
     expect(norm({ spendLimitUsd: 1e9 })).toEqual({ spendLimitUsd: 100_000 });
@@ -168,5 +178,74 @@ describe('normalizeSettingsPatch — ollamaHost (issue #104)', () => {
     expect(norm({ ollamaHost: 'not a url' })).toEqual({});
     expect(norm({ ollamaHost: '' })).toEqual({});
     expect(norm({ ollamaHost: 123 })).toEqual({});
+  });
+});
+
+describe('native authority settings routes', () => {
+  const harness = (fail = false) => {
+    const defaults = {
+      providerName: '', providerModel: '', voiceEnabled: false,
+      dwebEnabled: true, vaultAutoLockMs: 2_700_000,
+    };
+    let current: Record<string, any> = {
+      ...defaults,
+    };
+    const calls: string[] = [];
+    const routes = makeKernelSettingsRoutes({
+      ready: Promise.resolve(),
+      settingsStore: {
+        get: () => current,
+        update: async (patch) => {
+          calls.push(`persist:${Object.keys(patch).sort().join(',')}`);
+          if (fail) throw new Error('private-storage-detail');
+          current = { ...current, ...patch };
+        },
+        reset: async (keys) => {
+          calls.push(`reset:${keys.sort().join(',')}`);
+          if (fail) throw new Error('private-storage-detail');
+          current = { ...current };
+          for (const key of keys) current[key] = defaults[key as keyof typeof defaults];
+        },
+      },
+      defaults,
+      knownProviderNames: ['anthropic', 'ollama'],
+      dwebEnabled: true,
+      normalizeVariant: () => 'base',
+      normalizeEngine: (value) => value === 'moonshine' ? value : 'auto',
+      onChanging: (patch) => calls.push(`changing:${Object.keys(patch).sort().join(',')}`),
+      onChanged: async (patch) => { calls.push(`changed:${Object.keys(patch).sort().join(',')}`); },
+      pushState: () => calls.push('state'),
+    });
+    return { routes, calls, current: () => current };
+  };
+
+  test('normalizes, persists, fences lifecycle effects, and returns the merged view', async () => {
+    const h = harness();
+    await expect(h.routes['settings/update']({ patch: {
+      providerName: 'anthropic', providerModel: '  claude  ', dwebEnabled: false,
+      invented: 'drop-me',
+    } })).resolves.toMatchObject({
+      ok: true,
+      settings: { providerName: 'anthropic', providerModel: 'claude', dwebEnabled: false },
+    });
+    expect(h.calls).toEqual([
+      'changing:dwebEnabled,providerModel,providerName',
+      'persist:dwebEnabled,providerModel,providerName',
+      'changed:dwebEnabled,providerModel,providerName', 'state',
+    ]);
+  });
+
+  test('reset uses package defaults and any post-dispatch loss stays unknown', async () => {
+    const h = harness();
+    await expect(h.routes['settings/reset']({ keys: ['providerName', 'unknown'] }))
+      .resolves.toMatchObject({ ok: true, settings: { providerName: '' } });
+    const failed = harness(true);
+    await expect(failed.routes['settings/update']({ patch: { voiceEnabled: true } }))
+      .resolves.toMatchObject({
+        ok: false, code: 'settings-update-outcome-unknown', outcomeKnown: false,
+        retryable: false,
+      });
+    expect(JSON.stringify(await failed.routes['settings/update']({ patch: { voiceEnabled: true } })))
+      .not.toContain('private-storage-detail');
   });
 });

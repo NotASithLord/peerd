@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { makeSystemRoutes } from '../../extension/background/routes/system.js';
+import { makeSystemReadRoutes } from '../../extension/background/routes/system-read.js';
 
 class ExportPassphraseError extends Error {}
 
@@ -39,27 +40,32 @@ const baseDeps = (over: any = {}) => ({
   ...over,
 });
 
+const makeRoutes = (deps: any) => ({
+  ...makeSystemReadRoutes(deps),
+  ...makeSystemRoutes(deps),
+});
+
 describe('state/get + audit/list', () => {
   test('state/get wraps the snapshot', async () => {
-    const r = makeSystemRoutes(baseDeps());
+    const r = makeRoutes(baseDeps());
     expect(await r['state/get']()).toEqual({ ok: true, state: { vault: { locked: false }, session: {} } });
   });
   test('actor isolation retry delegates to the capability controller', async () => {
-    const r = makeSystemRoutes(baseDeps());
+    const r = makeRoutes(baseDeps());
     expect(await r['actor-isolation/retry']()).toEqual({ ok: true, capability: { status: 'available' } });
   });
   test('audit/list newest-first, capped, with total', async () => {
-    const r = makeSystemRoutes(baseDeps());
+    const r = makeRoutes(baseDeps());
     const res = await r['audit/list']({ limit: 2 });
     expect(res).toEqual({ ok: true, entries: [{ id: 3 }, { id: 2 }], total: 3 });
   });
   test('audit/list surfaces an error as ok:false', async () => {
-    const r = makeSystemRoutes(baseDeps({ auditLog: { list: async () => { throw new Error('idb'); } } }));
+    const r = makeRoutes(baseDeps({ auditLog: { list: async () => { throw new Error('idb'); } } }));
     expect(await r['audit/list']({})).toEqual({ ok: false, error: 'idb' });
   });
   test('audit/voice-fetch truncates url + type-locks', async () => {
     let appended: any;
-    const r = makeSystemRoutes(baseDeps({ auditLog: { append: async (e: any) => { appended = e; } } }));
+    const r = makeRoutes(baseDeps({ auditLog: { append: async (e: any) => { appended = e; } } }));
     await r['audit/voice-fetch']({ url: 'x'.repeat(400), type: 'forged' });
     expect(appended.type).toBe('voice_model_fetch');
     expect(appended.details.url.length).toBe(300);
@@ -68,7 +74,7 @@ describe('state/get + audit/list', () => {
 
 describe('cost/total', () => {
   test('sums only sessions with usage or spend', async () => {
-    const r = makeSystemRoutes(baseDeps());
+    const r = makeRoutes(baseDeps());
     const res = await r['cost/total']();
     expect(res.ok).toBe(true);
     expect(res.chats).toBe(2);
@@ -76,46 +82,46 @@ describe('cost/total', () => {
     expect(res.usd).toBeCloseTo(0.012, 6);
   });
   test('locked → locked', async () => {
-    const r = makeSystemRoutes(baseDeps({ vault: { isLocked: () => true } }));
+    const r = makeRoutes(baseDeps({ vault: { isLocked: () => true } }));
     expect(await r['cost/total']()).toEqual({ ok: false, error: 'locked' });
   });
 });
 
 describe('surfaces + sidepanel', () => {
   test('surfaces/get reports side panel open state', async () => {
-    const r = makeSystemRoutes(baseDeps());
+    const r = makeRoutes(baseDeps());
     expect(await r['surfaces/get']()).toEqual({ ok: true, sidePanelOpen: true });
   });
   test('sidepanel/close delegates', async () => {
-    const r = makeSystemRoutes(baseDeps());
+    const r = makeRoutes(baseDeps());
     expect(await r['sidepanel/close']()).toEqual({ ok: true });
   });
 });
 
 describe('transfer import', () => {
   test('requires the private transfer capability', async () => {
-    const r = makeSystemRoutes(baseDeps());
+    const r = makeRoutes(baseDeps());
     expect(await r['transfer/inspectImport']({ payload: {} }))
       .toEqual({ ok: false, error: 'private-transfer-required' });
     expect(await r['transfer/import']({ payload: {} }))
       .toEqual({ ok: false, error: 'private-transfer-required' });
   });
   test('inspectImport passes channel + known keys', async () => {
-    const r = makeSystemRoutes(baseDeps());
+    const r = makeRoutes(baseDeps());
     expect(await r['transfer/inspectImport'](authorized({ payload: {} }))).toEqual({ ok: true, channel: 'preview', keys: ['a', 'b'] });
   });
   test('import with secrets refused when vault locked', async () => {
-    const r = makeSystemRoutes(baseDeps({ vault: { isLocked: () => true } }));
+    const r = makeRoutes(baseDeps({ vault: { isLocked: () => true } }));
     expect(await r['transfer/import'](authorized({ payload: { secrets: {} } }))).toEqual({ ok: false, error: 'vault-locked' });
   });
   test('identity-only import is also refused when vault locked', async () => {
-    const r = makeSystemRoutes(baseDeps({ vault: { isLocked: () => true } }));
+    const r = makeRoutes(baseDeps({ vault: { isLocked: () => true } }));
     expect(await r['transfer/import'](authorized({ payload: { dweb: { identityRecord: {} } } })))
       .toEqual({ ok: false, error: 'vault-locked' });
   });
   test('import audits + pushes on success', async () => {
     let pushed = false; let audited = false;
-    const r = makeSystemRoutes(baseDeps({
+    const r = makeRoutes(baseDeps({
       pushState: () => { pushed = true; },
       auditLog: { append: async () => { audited = true; }, list: async () => [] },
     }));
@@ -125,7 +131,7 @@ describe('transfer import', () => {
   });
   test('settings import runs dweb lifecycle hooks around the durable write', async () => {
     const events: string[] = [];
-    const r = makeSystemRoutes(baseDeps({
+    const r = makeRoutes(baseDeps({
       applyImport: async ({ io }: any) => {
         await io.applySettings({ dwebEnabled: false });
         return { ok: true, imported: { settings: 1 } };
@@ -139,7 +145,7 @@ describe('transfer import', () => {
   });
   test('settings import normalizes known values before they reach durable storage', async () => {
     let persisted: any = null;
-    const r = makeSystemRoutes(baseDeps({
+    const r = makeRoutes(baseDeps({
       applyImport: async ({ io }: any) => {
         const applied = await io.applySettings({
           providerName: 'bogus',
@@ -161,7 +167,7 @@ describe('transfer import', () => {
   test('partial import audits committed counts and refreshes visible state', async () => {
     let pushed = false; let event: any;
     const partial = { settings: 2, secrets: 1, memoryWritten: 0, hooks: 0, dwebIdentity: 0 };
-    const r = makeSystemRoutes(baseDeps({
+    const r = makeRoutes(baseDeps({
       applyImport: async () => ({ ok: false, error: 'import-partial', failure: 'dweb-identity-stop-failed', partial }),
       pushState: () => { pushed = true; },
       auditLog: { append: async (value: any) => { event = value; }, list: async () => [] },
@@ -174,12 +180,12 @@ describe('transfer import', () => {
     expect(pushed).toBe(true);
   });
   test('wrong export passphrase mapped', async () => {
-    const r = makeSystemRoutes(baseDeps({ applyImport: async () => { throw new ExportPassphraseError(); } }));
+    const r = makeRoutes(baseDeps({ applyImport: async () => { throw new ExportPassphraseError(); } }));
     expect(await r['transfer/import'](authorized({ payload: {} }))).toEqual({ ok: false, error: 'wrong-passphrase' });
   });
   test('passes explicit identity conflict choices to the import core', async () => {
     let received: any;
-    const r = makeSystemRoutes(baseDeps({
+    const r = makeRoutes(baseDeps({
       applyImport: async (args: any) => { received = args; return { ok: false, error: 'dweb-identity-conflict' }; },
     }));
     await r['transfer/import'](authorized({
@@ -199,12 +205,12 @@ describe('transfer import', () => {
     const error = Object.assign(new Error('offscreen unavailable'), {
       name: 'IdentityTransferError', code: 'host-unavailable',
     });
-    const r = makeSystemRoutes(baseDeps({ applyImport: async () => { throw error; } }));
+    const r = makeRoutes(baseDeps({ applyImport: async () => { throw error; } }));
     expect(await r['transfer/import'](authorized({ payload: {} })))
       .toEqual({ ok: false, error: 'dweb-identity-host-unavailable' });
   });
   test('unexpected import error rethrown', async () => {
-    const r = makeSystemRoutes(baseDeps({ applyImport: async () => { throw new Error('disk'); } }));
+    const r = makeRoutes(baseDeps({ applyImport: async () => { throw new Error('disk'); } }));
     await expect(r['transfer/import'](authorized({ payload: {} }))).rejects.toThrow('disk');
   });
 });

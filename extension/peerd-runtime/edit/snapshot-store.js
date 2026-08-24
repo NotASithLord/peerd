@@ -171,8 +171,7 @@ export const createSnapshotStore = (io, now = Date.now) => {
 //
 // why a dedicated DB: bumping the shared peerd DB's version to add stores
 // is a cross-cutting migration risk. Checkpoints are a self-contained
-// concern with their own lifecycle, so they get their own database —
-// the same pattern app-store.js uses for `peerd-app-bodies`. This keeps
+// concern with their own lifecycle, so they get their own database. This keeps
 // feature 02 from forcing a schema change on everyone else.
 
 const DB_NAME = 'peerd-checkpoints';

@@ -24,7 +24,7 @@
 //     refine without paying for a full read_page.
 
 import { browserDocumentIdentity, resolveTargetTab, scriptingTarget } from './dom-helpers.js';
-import { summarizeMutations } from '../../dom/index.js';
+import { summarizeMutations } from '../../dom/action-result.js';
 import { browserDocumentRefusalFrom, formSubmissionRefusalFrom } from '../browser-automation-policy.js';
 
 /**

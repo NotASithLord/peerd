@@ -1,5 +1,5 @@
 // @ts-check
-// Offscreen-only engine surface for the sealed headless script worker. The
+// Offscreen-only engine surface for sealed headless/repository workers. The
 // CodeMirror editor and tab/registry shells are page/background concerns.
 
 export {

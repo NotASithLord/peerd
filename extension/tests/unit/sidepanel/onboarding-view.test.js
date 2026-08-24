@@ -75,7 +75,8 @@ const need = (root, sel, _ctor) => {
 // element in the document for .click() to behave like a user click).
 /**
  * @param {any} component  a Mithril component (untyped — vendor m is any)
- * @param {{ state?: ChatState, send?: Send, messages?: any[], peerName?: string }} attrs
+ * @param {{ state?: ChatState, send?: Send, reconcileState?:()=>Promise<any>,
+ * messages?: any[], peerName?: string }} attrs
  */
 const mount = (component, attrs) => {
   const root = document.createElement('div');
@@ -328,6 +329,43 @@ describe('sidepanel.onboarding', () => {
         const done = completions(sends);
         expect(done[0].peerName).toBe('jarvis');
         expect(done[0].facts).toBe(null);
+      } finally { unmount(); }
+    });
+
+    it('reconciles a committed completion when its state push is lost', async () => {
+      /** @type {Msg[]} */ const sends = [];
+      let reconciles = 0;
+      const { root, unmount } = mount(OnboardingView, {
+        state: freshProfileState(),
+        send: async (msg) => { sends.push(msg); return { ok: true }; },
+        reconcileState: async () => { reconciles += 1; },
+      });
+      try {
+        await passProviderStep(root);
+        await skipStep(root); await skipStep(root); await skipStep(root); await tick();
+        expect(completions(sends).length).toBe(1);
+        expect(reconciles).toBe(1);
+      } finally { unmount(); }
+    });
+
+    it('never replays an unknown completion and reconciles before releasing busy state', async () => {
+      /** @type {Msg[]} */ const sends = [];
+      let reconciles = 0;
+      const { root, unmount } = mount(OnboardingView, {
+        state: freshProfileState(),
+        send: async (msg) => {
+          sends.push(msg);
+          if (msg.type === 'onboarding/complete') throw new Error('worker recycled');
+          return { ok: true };
+        },
+        reconcileState: async () => { reconciles += 1; },
+      });
+      try {
+        await passProviderStep(root);
+        await skipStep(root); await skipStep(root); await skipStep(root); await tick();
+        expect(completions(sends).length).toBe(1);
+        expect(reconciles).toBe(1);
+        expect(root.textContent).toContain('could not confirm');
       } finally { unmount(); }
     });
   });

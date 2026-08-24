@@ -21,9 +21,7 @@
 // can at worst make the parse fail, which is surfaced as an error. The text
 // crosses back wrapped in <untrusted_web_content> by the read_doc tool.
 
-import browser from '/vendor/browser-polyfill.js';
 import { base64ToBytes } from '/shared/util.js';
-import { isTrustedSender } from '/shared/messaging.js';
 import {
   convertToDocument, sniffDocFormat,
   DocFetchError, DocParseError, UnsupportedDocFormatError, LegacyDocFormatError, ZipError,
@@ -72,7 +70,7 @@ const fetchDocBytes = async ({ url, bytesB64 } = {}) => {
 /**
  * @param {{ source: any, opts?: { maxChars?: number, format?: string } }} msg
  */
-const extractDoc = async ({ source, opts = {} }) => {
+export const handleDocExtract = async ({ source, opts = {} }) => {
   // Stage rides every failure so the returned error pinpoints WHERE it broke.
   let stage = 'fetch';
   const where = source?.url ? String(source.url).slice(0, 120) : '(inline bytes)';
@@ -126,18 +124,3 @@ const extractDoc = async ({ source, opts = {} }) => {
     return { ok: false, error: `doc_extract_failed[${stage}]`, detail: `${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
   }
 };
-
-// Message route: SW → offscreen. Gated on isTrustedSender like every sibling
-// handler (pdf/extract, job/run, voice) — fail-closed: externally_connectable
-// is unset today, so this is defense-in-depth, but the gate is what keeps this
-// from being an open fetch proxy if it is ever enabled.
-// why cast: the polyfill's OnMessageListener return type is stricter than this
-// fire-and-respond handler (mirrors the pdf/extract listener).
-browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ msg, /** @type {any} */ sender, /** @type {any} */ sendResponse) => {
-  if (msg?.type !== 'doc/extract') return undefined;
-  if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
-  extractDoc(msg)
-    .then((out) => sendResponse(out))
-    .catch((e) => sendResponse({ ok: false, error: e?.name ? `${e.name}: ${e.message}` : (e?.message ?? String(e)) }));
-  return true;     // async sendResponse contract
-}));
