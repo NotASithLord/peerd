@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync,
+  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -308,6 +308,17 @@ describe('test-only vault kernel package target', () => {
         expect(graph.size > 1).toBe(browser === 'firefox');
         if (browser === 'chrome') {
           expect(statSync(join(staging, entryRelative)).size).toBeLessThan(300_000);
+        } else {
+          expect(graph.has(join(staging, 'background/driven-child-request-guard.js'))).toBe(true);
+          for (const leaf of [
+            'background/direct-controller-client.js',
+            'background/offscreen-controller-client.js',
+            'background/firefox-storage-keepalive.js',
+            'background/repository-local-client.js',
+          ]) {
+            expect(existsSync(join(staging, leaf)), leaf).toBe(true);
+            expect(graph.has(join(staging, leaf)), leaf).toBe(false);
+          }
         }
       }
     } finally {

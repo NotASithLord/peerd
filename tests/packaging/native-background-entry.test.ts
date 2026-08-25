@@ -8,6 +8,7 @@ import {
   PREVIEW_CHROME_BACKGROUND_ENTRY,
   targetBackgroundEntry,
 } from '../../packaging/gen-manifest.ts';
+import { PACKAGED_LAZY_MODULE_ENTRIES } from '../../packaging/lazy-entry-manifest.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import { genChannelConfigSource } from '../../packaging/gen-channel-config.ts';
 
@@ -45,21 +46,33 @@ describe('target-specific native background entry', () => {
       .toBeLessThan(source.indexOf("import './vault-kernel.js'"));
   });
 
-  test('statically owns the Firefox direct controller without entering Chrome', async () => {
+  test('statically owns only the synchronous Firefox guard', async () => {
     const firefox = await collectStaticModuleGraph(
       EXTENSION, join(EXTENSION, FIREFOX_BACKGROUND_ENTRY),
     );
     const chrome = await collectStaticModuleGraph(
       EXTENSION, join(EXTENSION, NATIVE_BACKGROUND_ENTRY),
     );
+    expect(firefox.has(join(EXTENSION, 'background/driven-child-request-guard.js'))).toBe(true);
     for (const leaf of [
       'background/direct-controller-client.js',
+      'background/offscreen-controller-client.js',
       'background/firefox-storage-keepalive.js',
+      'background/repository-local-client.js',
     ]) {
       const path = join(EXTENSION, leaf);
-      expect(firefox.has(path), leaf).toBe(true);
+      expect(firefox.has(path), leaf).toBe(false);
       expect(chrome.has(path), leaf).toBe(false);
     }
+    for (const root of [
+      'background/direct-controller-client.js',
+      'background/firefox-storage-keepalive.js',
+      'background/repository-local-client.js',
+    ]) expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain(root as any);
+    const addon = readFileSync(join(EXTENSION, 'background/kernel-firefox-addon.js'), 'utf8');
+    expect(addon).toContain("import('./direct-controller-client.js')");
+    expect(addon).toContain("import('./firefox-storage-keepalive.js')");
+    expect(addon).toContain("import('./repository-local-client.js')");
     const kernel = readFileSync(join(EXTENSION, 'background', 'vault-kernel.js'), 'utf8');
     expect(kernel).not.toContain("import('./firefox-storage-keepalive.js')");
     expect(kernel).toContain('makeFirefoxGuard?.connectDirectController');

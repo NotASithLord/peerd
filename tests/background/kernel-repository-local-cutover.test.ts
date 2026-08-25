@@ -277,9 +277,9 @@ describe('repository/local production composition', () => {
     expect(runtime.has('background/kernel-local-routes.js')).toBe(false);
     expect(runtime.has('background/kernel-repository-read-routes.js')).toBe(false);
     const firefox = await graph('background/kernel-firefox-addon.js');
-    expect(firefox.has('background/repository-local-client.js')).toBe(true);
+    expect(firefox.has('background/repository-local-client.js')).toBe(false);
     expect(readFileSync(join(EXTENSION_DIR, 'background/kernel-firefox-addon.js'), 'utf8'))
-      .toContain("from './repository-local-client.js'");
+      .toContain("import('./repository-local-client.js')");
     const chrome = await graph('background/vault-kernel.js');
     expect(chrome.has('background/repository-local-client.js')).toBe(false);
   });
