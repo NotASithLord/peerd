@@ -1,12 +1,5 @@
 // @ts-check
 
-import {
-  createMemoryStore,
-  createSessionStore,
-  makeTurnSlots,
-} from '../peerd-runtime/background.js';
-import { makeSessionState } from './session-state.js';
-import { createPageActivityReporter } from './page-activity.js';
 import { createKernelTurnRuntime } from './kernel-turn-runtime.js';
 
 export const KERNEL_TURN_RELAY_ROUTE_NAMES = Object.freeze([
@@ -23,39 +16,18 @@ const requiredFunction = (/** @type {Record<string,any>} */ value, /** @type {st
 export const createKernelTurnProductionRuntime = async (deps) => {
   if (!deps?.seams || !deps.browser || !deps.idb || !deps.kv || !deps.sessionCache
       || !deps.vault || !deps.auditLog || !deps.settingsStore || !deps.uiPorts
-      || !deps.factories || !deps.goal) {
+      || !deps.factories || !deps.goal || !deps.custody?.shared
+      || typeof deps.custody.bindActorRuntime !== 'function'
+      || typeof deps.custody.isActivityStopSender !== 'function') {
     throw new TypeError('kernel-turn-production-config-invalid');
   }
   for (const key of ['makeDriverDeps', 'makeRouteDeps', 'makeActorRuntime']) {
     requiredFunction(deps.factories, key);
   }
   /** @type {any} */
-  let actorRuntime = null;
-  const sessions = createSessionStore({
-    idb: deps.idb,
-    onMessageAppended: (/** @type {string} */ sessionId, /** @type {any} */ message) =>
-      actorRuntime?.onSessionMessageAppended?.(sessionId, message),
-  });
-  const memory = createMemoryStore({ idb: deps.idb });
-  const sessionState = makeSessionState();
-  const turnSlots = makeTurnSlots({
-    onAbort: (/** @type {string} */ sessionId) => deps.onAbort?.(sessionId),
-  });
-  const pageActivity = (deps.makePageActivity ?? createPageActivityReporter)({
-    tabs: deps.browser.tabs,
-    tabGroups: deps.browser.tabGroups,
-    scripting: deps.browser.scripting,
-  });
-  /** @type {any} */
   let runtime = null;
-  const shared = Object.freeze({
-    browser: deps.browser, idb: deps.idb, kv: deps.kv,
-    sessionCache: deps.sessionCache, vault: deps.vault, auditLog: deps.auditLog,
-    settingsStore: deps.settingsStore, uiPorts: deps.uiPorts,
-    sessions, memory, sessionState, turnSlots, pageActivity,
-    pushState: deps.pushState, postChatNote: deps.postChatNote,
-  });
-  actorRuntime = await deps.factories.makeActorRuntime(shared);
+  const shared = deps.custody.shared;
+  const actorRuntime = await deps.factories.makeActorRuntime(shared);
   if (!actorRuntime || typeof actorRuntime.actorCount !== 'function'
       || typeof actorRuntime.actorOverview !== 'function') {
     throw new TypeError('kernel-turn-production-actors-invalid');
@@ -65,13 +37,12 @@ export const createKernelTurnProductionRuntime = async (deps) => {
   if (!driverDeps || !routeDeps?.turn || !routeDeps?.session || !routeDeps?.isolation) {
     throw new TypeError('kernel-turn-production-deps-invalid');
   }
-  const marked = () => new Set(pageActivity.markedTabs());
-  const isActivityStopSender = (/** @type {any} */ sender, /** @type {any} */ message) =>
-    message?.type === 'agent/stop' && message.activity === 'live'
-    && typeof sender?.tab?.id === 'number' && marked().has(sender.tab.id);
   const relays = {
     ...(actorRuntime.relays ?? {}),
-    sessions, turnSlots, pageActivity, isActivityStopSender,
+    sessions: shared.sessions,
+    turnSlots: shared.turnSlots,
+    pageActivity: shared.pageActivity,
+    isActivityStopSender: deps.custody.isActivityStopSender,
     activeGoalStates: () => runtime?.goalRunner.activeStates?.() ?? [],
   };
   if (!relays.scriptRuns || !relays.sessions) {
@@ -103,23 +74,30 @@ export const createKernelTurnProductionRuntime = async (deps) => {
       throw new TypeError(`kernel-turn-production-event-${key}-invalid`);
     }
   }
-  runtime = createKernelTurnRuntime({
-    seams: deps.seams,
-    turnDriverDeps: { ...driverDeps, ...shared },
-    turnRouteDeps: { ...routeDeps.turn, ...shared },
-    sessionDeps: { ...routeDeps.session, ...shared },
-    isolationDeps: { ...routeDeps.isolation },
-    goal: deps.goal,
-    ensureReady: deps.ensureReady,
-    actorProjection: actorRuntime,
-    relays,
-    makeDriver: deps.factories.makeDriver,
-    makeGoals: deps.factories.makeGoals,
-    onClose: async () => {
-      for (const tabId of pageActivity.markedTabs()) await pageActivity.release(tabId);
-      await actorRuntime.close?.();
-      await deps.onClose?.();
-    },
-  });
+  const releaseCustody = deps.custody.bindActorRuntime(actorRuntime);
+  try {
+    runtime = createKernelTurnRuntime({
+      seams: deps.seams,
+      turnDriverDeps: { ...driverDeps, ...shared },
+      turnRouteDeps: { ...routeDeps.turn, ...shared },
+      sessionDeps: { ...routeDeps.session, ...shared },
+      isolationDeps: { ...routeDeps.isolation },
+      goal: deps.goal,
+      ensureReady: deps.ensureReady,
+      actorProjection: actorRuntime,
+      relays,
+      makeDriver: deps.factories.makeDriver,
+      makeGoals: deps.factories.makeGoals,
+      onClose: async () => {
+        await releaseCustody();
+        await actorRuntime.close?.();
+        await deps.onClose?.();
+      },
+    });
+  } catch (cause) {
+    await releaseCustody();
+    await actorRuntime.close?.();
+    throw cause;
+  }
   return runtime;
 };
