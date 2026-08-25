@@ -360,6 +360,7 @@ import {
   // narrowing, and the report a stop turns into.
   makeOriginStateStore, makeLearnedOrigins, makeJudgeLanding, makeCredentialScope,
   makeSignInOriginAuthorizer, makeSignInExcursionAuthorizer, makeSignInExcursionRevoker,
+  createOriginPacingStore,
   makeSiteClientOriginGuard, makeSiteClientOriginAuthorizer,
   makeFixedSiteClientOriginGuard, authorizeSiteClientRelayOrigin,
   hasDurableSiteClientState,
@@ -502,6 +503,7 @@ import { makeEngineRoutes } from './routes/engine.js';
 import { makeSystemRoutes } from './routes/system.js';
 import { makeDenylistRoutes } from './routes/denylist.js';
 import { makeLearnedOriginRoutes } from './routes/learned-origins.js';
+import { makePacedOriginRoutes } from './routes/paced-origins.js';
 import { makeSettingsRoutes } from './routes/settings.js';
 import { makeSessionMutationRoutes } from './routes/session-mutations.js';
 import { makeLocalModelRoutes } from './routes/local-model.js';
@@ -921,6 +923,48 @@ export const safeFetch = makeSafeFetch({
   audit: /** @type {any} */ (auditLog.append),
 });
 
+// ---------------------------------------------------------------------------
+// Adaptive per-origin action pacing (#234). SW-resident by construction: the
+// question "how fast may peerd act on this site" must never be answerable from
+// an actor heap that just ingested that site's content. Hydrated eagerly here
+// because an un-hydrated store fails browser writes closed, and a cold worker
+// would otherwise refuse the first action of every session.
+export const originPacing = createOriginPacingStore({
+  kv,
+  onAudit: (event) => { auditLog.append(/** @type {any} */ (event)).catch(() => {}); },
+  // The fallback wait notice, for the network path: a tool's own fetch has no
+  // per-call session to thread, but a stalled turn still needs its explanation.
+  // Late-bound and best-effort; the dispatcher passes its exact session instead.
+  onWait: (info) => {
+    if (!uiConnected()) return;
+    sessionCache.sessionGet('currentSessionId').then((sessionId) => {
+      if (sessionId) uiPorts.broadcast({ type: 'turn/pacing-wait', sessionId, ...info });
+    }).catch(() => {});
+  },
+});
+originPacing.hydrate();
+
+/** @param {string} sessionId */
+const pacingToolContext = (sessionId) => ({
+  pacing: {
+    // why the ceiling check awaits hydration: a message is what wakes a cold
+    // worker, so the first tool call of a session can arrive before the durable
+    // read resolves - and a pre-hydrate answer would refuse a legitimate action
+    // as "state unavailable". reserve() already waits internally.
+    peek: async (/** @type {any} */ o, /** @type {any} */ opts) => {
+      await originPacing.hydrate();
+      return originPacing.peek(o, opts);
+    },
+    engaged: () => originPacing.engaged(),
+    reserve: (/** @type {any} */ o, /** @type {any} */ opts) => originPacing.reserve(o, opts),
+  },
+  onPacingWait: (/** @type {any} */ info) => {
+    if (!uiConnected()) return;
+    try { uiPorts.broadcast({ type: 'turn/pacing-wait', sessionId, ...info }); }
+    catch (e) { console.warn('[sw] pacing notice failed', e); }
+  },
+});
+
 // why: separate egress wrapper for web tools (fetch_url) and
 // the web actor. Provider allowlist would be too narrow — those tools
 // reach arbitrary HTTPS hosts. The denylist still applies as defense
@@ -935,6 +979,15 @@ export const webFetch = makeWebFetch({
   },
   matchDenylist: (host, patterns) => matchesDenylist(host, patterns),
   audit: /** @type {any} */ (auditLog.append),
+  // The network half of #234. This wrapper is the only place in the extension
+  // that holds a real Response for an arbitrary site, so it is both the only
+  // trusted place to LEARN a limit and the natural place to honor one.
+  pace: {
+    reserve: (origin, opts) => originPacing.reserve(origin, opts),
+    observe: (signal) => originPacing.observe(signal),
+    isWriteMethod: needsWebWriteConfirm,
+    canonicalOrigin: normalizeApiOrigin,
+  },
 });
 
 // Bind vault.getSecret to a stable function reference so DI consumers
@@ -2501,6 +2554,12 @@ const buildToolContext = async (/** @type {any} */ {
     waitForBrowserChildPolicyNotice,
     hasPendingBrowserChildPolicy: (/** @type {number} */ tabId) =>
       drivenPopupGuard.hasPendingSource(tabId),
+    // #234: read-shaped only, so nothing the agent does can lower a rule; the
+    // settings routes are the sole adjusters. Addressed to the ROOT chat because
+    // most browser work runs in a bound web actor with its own session id, and a
+    // notice addressed to the actor is filtered out by the panel's session guard
+    // - invisible in exactly the case that most needs explaining.
+    ...pacingToolContext(lifecycleOwnerSessionId ?? sessionId),
     // open_tab opens in the background and announces a "go there" card instead of
     // stealing focus; this is the late-bound announce (defined below).
     // noteTab updates the "current agent tab" card to whatever tab a tool just
@@ -8172,6 +8231,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // passing one here would double-record every removal (meta test: the deps
   // object must match what the module destructures).
   ...makeLearnedOriginRoutes({ learnedOrigins, normalizeApiOrigin }),
+  ...makePacedOriginRoutes({ originPacing, normalizeApiOrigin }),
   // issue 251 — a READ-ONLY inspection route for the e2e verify loop.
   //
   // why a route at all: the two properties that matter most about the lock are
@@ -8184,6 +8244,19 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // the chat's web actor currently owns a tab. It grants nothing, and it is not
   // reachable by the model — routes are the side panel's surface, and the tool
   // dispatcher has no path to them.
+  // Dev-mode test seam for the pacing surfaces (#234). It can only feed the
+  // SAME trusted observation the egress choke point feeds - an HTTP status and a
+  // Retry-After value - so the seeded rule is one an ordinary refusal would also
+  // produce. It can never lower or clear a rule, and the model has no route here.
+  'debug/pacing': async (/** @type {{ origin?: string, status?: number, retryAfter?: string }} */ msg = {}) => {
+    const origin = normalizeApiOrigin(msg.origin);
+    if (settingsStore.get().devMode === true && origin && typeof msg.status === 'number') {
+      await originPacing.observe({
+        origin, responseAtMs: Date.now(), status: msg.status, retryAfter: msg.retryAfter,
+      });
+    }
+    return { ok: true, origins: await originPacing.list() };
+  },
   'debug/originLock': async (/** @type {{ origin?: string, seedReason?: 'password-field'|'confirmed-write' }} */ msg = {}) => {
     const origin = normalizeApiOrigin(msg.origin);
     // Dev-mode test seam for deterministic browser probes. It can only add the

@@ -135,7 +135,7 @@ if (!root) throw new Error('options: #app missing from HTML');
 // exactly why git-credentials + api-integrations were un-clickable.)
 const SECTIONS = ['providers', 'behavior', 'voice', 'skills', 'hooks',
   'memory', 'costs', 'transfer', 'vault', 'api-integrations', 'denylist',
-  'learned-sites', 'activity'];
+  'learned-sites', 'paced-sites', 'activity'];
 const Root = {
   view: () => {
     const section = (m.route.get().replace(/^\//, '').split(/[/?]/)[0]) || 'providers';

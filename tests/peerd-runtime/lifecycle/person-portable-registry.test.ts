@@ -31,8 +31,8 @@ describe('person-portable classification', () => {
     expect(workspaces.syncSurface).toBe('workspaces');
   });
 
-  test('§13 exclusions: permission grants, audit, and device keys are NEVER personPortable', () => {
-    for (const name of ['permission-grants', 'audit', 'dpop-keys', 'device-key', 'engine-registries']) {
+  test('§13 exclusions: permission grants, audit, device keys, and pacing are NEVER personPortable', () => {
+    for (const name of ['permission-grants', 'audit', 'dpop-keys', 'device-key', 'engine-registries', 'origin-pacing']) {
       const entry = storeEntry(name);
       expect(entry, `${name} should exist in the registry`).toBeDefined();
       expect(entry!.personPortable ?? false, `${name} must not be personPortable`).toBe(false);

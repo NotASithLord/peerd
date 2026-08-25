@@ -50,6 +50,12 @@ const EVENT_META = {
   // since unknown types already fall back to a raw-label row.
   origin_learned_sensitive:   { label: 'host may share browser session', level: 'info' },
   origin_unlearned_sensitive: { label: 'learned host removed', level: 'warn' },
+  // #234 per-origin pacing. `origin_paced` is the routine one - it fires
+  // whenever peerd actually waited before acting, which is the only evidence a
+  // user has that a slow turn was politeness rather than a hang.
+  origin_paced:               { label: 'waited for site limits', level: 'info' },
+  origin_pacing_learned:      { label: 'site asked peerd to slow down', level: 'info' },
+  origin_pacing_forgotten:    { label: 'site pacing forgotten', level: 'warn' },
   actor_origin_stop:          { label: 'web helper stopped',     level: 'warn' },
   browser_child_navigation_blocked:
                               { label: 'protected child navigation blocked', level: 'warn' },

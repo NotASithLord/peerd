@@ -16,6 +16,8 @@
 //
 // Pure-ish: fetchFn + signals + sleep injected, so it's unit-testable.
 
+import { abortableSleep } from '/shared/util.js';
+
 /**
  * The injected fetch — the egress-gated `safeFetch` the adapters thread through.
  * A structural subset of the platform `fetch` (it takes the same args and
@@ -114,31 +116,9 @@ export const MAX_CONNECT_ATTEMPTS = 3;
 // after attempt 2.
 export const CONNECT_RETRY_BACKOFF_MS = Object.freeze([500, 1500]);
 
-/**
- * Promise sleep that respects an AbortSignal. Rejects with AbortError when
- * the signal fires, so a user Stop during a retry backoff unwinds immediately
- * — the agent loop already treats AbortError as a clean stop. Shared by the
- * retry helper here and by the adapters' rate-limit backoff loops.
- *
- * @param {number} ms
- * @param {AbortSignal} [signal]
- * @returns {Promise<void>}
- */
-export const abortableSleep = (ms, signal) => new Promise((resolve, reject) => {
-  if (signal?.aborted) {
-    reject(new DOMException('Aborted', 'AbortError'));
-    return;
-  }
-  const t = setTimeout(() => {
-    signal?.removeEventListener('abort', onAbort);
-    resolve();
-  }, ms);
-  const onAbort = () => {
-    clearTimeout(t);
-    reject(new DOMException('Aborted', 'AbortError'));
-  };
-  signal?.addEventListener('abort', onAbort, { once: true });
-});
+// Re-exported so the provider module keeps one public spelling of the helper
+// while there is exactly one implementation (shared/util.js).
+export { abortableSleep };
 
 /**
  * Decide whether a failed initial fetch should be retried, and how long to

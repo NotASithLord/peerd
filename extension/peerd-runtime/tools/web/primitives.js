@@ -46,6 +46,14 @@ export const fetchUrl = async (url, opts, ctx) => {
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  // why the turn's Stop is relayed in: webFetch may hold this request briefly to
+  // respect a pause a site asked for (#234), and without this the only thing
+  // that could end that wait was the fetch timeout - so Stop looked broken for
+  // as long as the wait ran.
+  const stop = /** @type {{ abortSignal?: AbortSignal }} */ (ctx ?? {}).abortSignal;
+  const onStop = () => controller.abort();
+  if (stop?.aborted) controller.abort();
+  else stop?.addEventListener('abort', onStop, { once: true });
   try {
     // No redirect mode here: webFetch forces redirect:'manual' and fails
     // closed on any 3xx (SSRF/denylist re-validation isn't possible per-hop
@@ -63,6 +71,7 @@ export const fetchUrl = async (url, opts, ctx) => {
     return { status: res.status, body, headers, finalUrl: res.url ?? url };
   } finally {
     clearTimeout(timer);
+    stop?.removeEventListener('abort', onStop);
   }
 };
 

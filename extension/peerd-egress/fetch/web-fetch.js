@@ -33,6 +33,17 @@ import { authOriginForRequestUrl, originSecretName, parseOriginAuth } from './or
 import { accessTokenHashFor, dpopJkt, signDpopProof } from '../dpop/keys.js';
 import { makeNonceCache, readDpopNonce, replayableRequest, shouldRetryWithNonce } from '../dpop/nonce.js';
 
+// How long a NETWORK request may be held here before peerd refuses instead.
+//
+// why it is shorter than the action-path ceiling: every caller of this wrapper
+// runs it inside its own wall-clock timeout (the web primitives' is 20s), and a
+// courtesy pause that eats that budget turns a polite wait into a spurious
+// "the site did not respond". A browser ACTION has no such caller budget - it is
+// bounded by the turn and shows a live wait bar - so it is allowed the full
+// ceiling. Past this the request is refused with a typed reason, which the agent
+// can act on, rather than being stalled invisibly.
+const NETWORK_INLINE_WAIT_MS = 5_000;
+
 // A response we must refuse to follow. In an MV3 SW, redirect:'manual'
 // turns any 3xx into an opaqueredirect (type set, status 0). We also match
 // the real redirect statuses defensively — but NOT 300/304/305/306, which
@@ -321,8 +332,23 @@ export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDp
  *   pure matcher (passed in to avoid a cross-module import here)
  * @param {(partial: { type: string, details?: Record<string, any> }) => Promise<void>} [deps.audit]
  * @param {typeof fetch} [deps.fetchFn]
+ * @param {{
+ *   reserve: (origin: string, opts: { isWrite: boolean, signal?: AbortSignal, maxInlineWaitMs?: number })
+ *     => Promise<{ outcome: string, waitedMs: number, untilMs?: number, reason?: string }>,
+ *   observe: (signal: { origin: string, responseAtMs: number, status?: number, retryAfter?: unknown })
+ *     => Promise<void>,
+ *   isWriteMethod: (method: string) => boolean,
+ *   canonicalOrigin: (input: string) => string | null,
+ * }} [deps.pace]
+ *   adaptive per-origin action pacing (#234). Injected, and absent in tests and
+ *   on any host that has not wired it, in which case this wrapper behaves
+ *   exactly as it did before. why HERE: this is the only place in the whole
+ *   extension that holds a real Response for an arbitrary site, so it is the
+ *   only place an HTTP status and a Retry-After header exist in a context a
+ *   page cannot forge. Every other observation point is either page-world (the
+ *   injected tap), status-free (tabs.onUpdated), or preview-only (CDP).
  */
-export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn }) => {
+export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace }) => {
   const _fetch = fetchFn ?? fetch;
   const _audit = audit ?? (async () => {});
   /**
@@ -372,7 +398,41 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn }) => 
     // header-less response), so we cannot re-validate and follow per hop;
     // we refuse the redirect instead. Forced regardless of the caller's
     // redirect mode (primitives.js used to ask for 'follow').
+    // ---- Per-origin pacing (#234) ---------------------------------------
+    // Last gate before the request leaves. Deliberately AFTER the scheme, SSRF
+    // and denylist checks: a request peerd refuses outright must never consume
+    // a pacing slot or make the caller wait first.
+    // why the injected canonicalizer rather than `u.origin`: a rule is keyed by
+    // the same strict canonical origin every other origin-keyed authority
+    // decision uses, and two spellings of one key space is the bug class that
+    // makes a rule silently miss. A host it refuses (an IP literal, a
+    // single-label intranet name) is simply unpaceable - and the private-network
+    // guard above has already turned back everything loopback or LAN.
+    const paceKey = pace ? pace.canonicalOrigin(u.origin) : null;
+    if (pace && paceKey) {
+      const clearance = await pace.reserve(paceKey, {
+        isWrite: pace.isWriteMethod(method),
+        signal: init?.signal ?? undefined,
+        maxInlineWaitMs: NETWORK_INLINE_WAIT_MS,
+      });
+      if (clearance.outcome === 'handoff' || clearance.outcome === 'unavailable') {
+        const reason = clearance.outcome === 'handoff' ? 'pacing_ceiling' : 'pacing_unavailable';
+        _audit({ type: 'egress_denied', details: { origin: u.origin, reason, method } }).catch(() => {});
+        throw new EgressDeniedError(u.origin, reason);
+      }
+    }
     const res = await _fetch(resource, { ...init, redirect: 'manual' });
+    if (pace && paceKey) {
+      // Observe BEFORE the redirect refusal below, so a 3xx that also carries a
+      // Retry-After still teaches the rule. Fire-and-forget: an observation
+      // that fails must never turn a completed request into an error.
+      pace.observe({
+        origin: paceKey,
+        responseAtMs: Date.now(),
+        status: res.status,
+        retryAfter: res.headers?.get?.('retry-after') ?? null,
+      }).catch(() => {});
+    }
     if (isRedirect(res)) {
       _audit({ type: 'egress_denied', details: { origin: u.origin, reason: 'redirect_blocked', status: res.status } }).catch(() => {});
       throw new EgressDeniedError(u.origin, 'redirect_blocked');

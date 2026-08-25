@@ -11,6 +11,20 @@ export { renderSystemPrompt } from './loop/system-prompt.js';
 export { runUserTurn } from './loop/agent-loop.js';
 export { learnedOriginCovers } from './actor/origin-sensitivity.js';
 export { AUTH_BOUNDARY_STOPPED_MESSAGE, AUTH_STATE_UNAVAILABLE_MESSAGE, AUTH_WAITING_FOR_USER_MESSAGE } from './actor/auth-wait.js';
+export {
+  PACE_TUNABLES, PACE_RULE_VERSION, BLOCKING_STATUSES,
+  isBlockingStatus, isRateLimitSignal, parseRetryAfter, newRule, isValidRule,
+  nextRuleOnBlock, noteCleanResult, noteActionAt, decayRule, isRetired,
+  planRequest,
+} from './pacing/pacing-core.js';
+export {
+  createOriginPacingStore, normalizePacingState, PACING_KEY, PACING_SCHEMA,
+  DEFAULT_PACING_CAP, MAX_RESERVATION_WAIT_MS,
+} from './pacing/origin-pacing-store.js';
+export {
+  PACED_CEILING_CODE, PACED_STATE_UNAVAILABLE_CODE,
+  pacedCeilingMessage, PACED_STATE_UNAVAILABLE_MESSAGE,
+} from './pacing/pacing-messages.js';
 export { detectInterruptedTurn, RESUME_NUDGE } from './loop/resume-detect.js';
 export { prepareUserAttachmentsWithDocs, DOC_TEXT_MAX_CHARS } from './loop/attachments.js';
 export { formatDocBody } from './doc/format.js';

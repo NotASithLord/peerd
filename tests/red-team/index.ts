@@ -19,6 +19,7 @@ import { scenario as s11 } from './scenarios/11-login-orchestration.ts';
 import { scenario as s12 } from './scenarios/12-contributor-metrics.ts';
 import { scenario as s13 } from './scenarios/13-site-client-custody.ts';
 import { scenario as s14 } from './scenarios/14-confirmation-lifecycle-custody.ts';
+import { scenario as s15 } from './scenarios/15-origin-pacing-custody.ts';
 
 // Ordered to mirror the threat model's adversary walk and the task brief.
-export const CATALOG: readonly Scenario[] = [s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11, s12, s13, s14];
+export const CATALOG: readonly Scenario[] = [s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11, s12, s13, s14, s15];

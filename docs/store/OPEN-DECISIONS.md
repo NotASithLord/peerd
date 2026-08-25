@@ -38,9 +38,11 @@ Packaging and boundary checks verify that store artifacts contain no dweb code.
 ### Anti-bot behavior
 
 The non-evasion posture is fixed. peerd does not use fingerprint spoofing,
-proxies, challenge solvers, or similar bypasses. Adaptive per-origin pacing is
-designed in issue #234 but is not wired into the extension. Challenge handoff
-and assist-only behavior still need implementation and field testing. See
+proxies, challenge solvers, or similar bypasses. Adaptive per-origin pacing from
+issue #234 is enforced: peerd honors a pause a site states, learns a slower
+cadence for browser writes there, and ends the turn rather than waiting past its
+inline ceiling. Challenge handoff and assist-only behavior still need
+implementation and field testing. See
 [`ANTI-BOT-POSTURE.md`](ANTI-BOT-POSTURE.md).
 
 ## Submission checks
