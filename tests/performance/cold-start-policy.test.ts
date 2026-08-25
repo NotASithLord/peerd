@@ -27,9 +27,19 @@ const graph = (value: { modules: number; graphBytes: number; entryBytes: number 
   entrySha256: '2'.repeat(64),
 });
 
-const graphsFor = (channel: 'store' | 'preview') => Object.fromEntries(
-  Object.entries(PACKAGE_COLD_GRAPH_RATCHETS[channel].chrome)
+const graphsFor = (
+  channel: 'store' | 'preview', browser: 'chrome' | 'firefox' = 'chrome',
+) => Object.fromEntries(
+  Object.entries(PACKAGE_COLD_GRAPH_RATCHETS[channel][browser])
     .map(([name, value]) => [name, graph(value)]),
+);
+
+const targetGraphsFor = (browser: 'chrome' | 'firefox') => Object.fromEntries(
+  Object.entries(COLD_START_TARGETS[browser])
+    .filter(([name]) => name !== 'timing')
+    .map(([name, value]) => [name, graph(
+      value as { modules: number; graphBytes: number; entryBytes: number },
+    )]),
 );
 
 type RawSample = Record<string, string | number>;
@@ -137,6 +147,91 @@ const chromeResult = ({
   });
   return result;
 };
+
+const firefoxResult = ({
+  role = 'candidate', sourceCommitSha = '3'.repeat(40), lane = 'pr',
+}: { role?: 'candidate' | 'base'; sourceCommitSha?: string; lane?: keyof typeof COLD_START_LANES } = {}) => {
+  const contract = COLD_START_LANES[lane].firefox;
+  const packagedGraphsByChannel = {
+    store: graphsFor('store', 'firefox'), preview: graphsFor('preview', 'firefox'),
+  };
+  const idleDiscardWake: any = summarizedGroup(
+    COLD_START_PHASES.firefox.idleDiscardWake, contract.wakes,
+  );
+  idleDiscardWake.discarded = idleDiscardWake.completed;
+  delete idleDiscardWake.completed;
+  return {
+    browser: 'firefox',
+    version: '140.0',
+    failed: false,
+    nativeFloor: null,
+    measurement: {
+      role,
+      clock: 'host-monotonic:node-hrtime',
+      lane,
+      runtimeTarget: 'release',
+      runtimeSurface: 'sidepanel-tab',
+      coldBudgetMode: role === 'candidate' ? 'enforce' : 'measure-only',
+      nativeFloor: null,
+      sourceCommitSha,
+      sourcePackageVersion: '0.7.3',
+      sourceDirty: false,
+      sourceArchiveSha256: '8'.repeat(64),
+      sourceTreeSha256: '9'.repeat(64),
+      sourceTreeSha256Before: '9'.repeat(64),
+      sourceTreeSha256After: '9'.repeat(64),
+      hostSha256: HASH.host,
+    },
+    artifact: {
+      channel: 'store',
+      runtimeTarget: 'release',
+      runtimeSurface: 'sidepanel-tab',
+      archiveSha256: HASH.archive,
+      treeSha256: HASH.tree,
+      channels: {
+        store: { channel: 'store', archiveSha256: HASH.archive, treeSha256: HASH.tree },
+        preview: { channel: 'preview', archiveSha256: HASH.previewArchive, treeSha256: HASH.previewTree },
+      },
+      browserBinarySha256: HASH.browser,
+      browserPin: '140.0',
+      driverBinarySha256: '8'.repeat(64),
+      driverPin: '0.36.0',
+      driverVersion: 'geckodriver 0.36.0',
+      harnessSha256: HASH.harness,
+      coldBudgetMode: role === 'candidate' ? 'enforce' : 'measure-only',
+      packageVersion: '0.7.3',
+      sourceCommitSha,
+      sourceDirty: false,
+      nativeFloor: null,
+    },
+    packagedGraphs: packagedGraphsByChannel.store,
+    packagedGraphsByChannel,
+    freshProfile: summarizedGroup(
+      COLD_START_PHASES.firefox.freshProfile, contract.fresh,
+    ),
+    idleDiscardWake,
+  };
+};
+
+const useTargetGraphs = <T extends {
+  packagedGraphs: unknown;
+  packagedGraphsByChannel: Record<string, unknown>;
+}>(browser: 'chrome' | 'firefox', result: T): T => {
+  result.packagedGraphsByChannel = {
+    store: targetGraphsFor(browser), preview: targetGraphsFor(browser),
+  };
+  result.packagedGraphs = result.packagedGraphsByChannel.store;
+  return result;
+};
+
+const interleavedSchedule = (samples: number) => Array.from(
+  { length: samples }, (_, index) => ({
+    sampleIndex: index + 1,
+    order: (index + 1) % 2 === 1
+      ? ['base', 'candidate']
+      : ['candidate', 'base'],
+  }),
+);
 
 const assessChrome = (result: ReturnType<typeof chromeResult>, extra = {}) =>
   assessColdStartResult('chrome', result, {
@@ -517,7 +612,85 @@ describe('cold-start policy', () => {
       .toEqual(expect.arrayContaining([
         'candidate/base host identities differ',
         'candidate/base source commits are identical',
-      ]));
+    ]));
+  });
+
+  test('accepts complete device pairs without CI metadata and assesses each browser separately', () => {
+    const now = Date.UTC(2026, 7, 25, 12);
+    const profile = COLD_START_LANES.device;
+    const candidate = {
+      chrome: useTargetGraphs('chrome', chromeResult({
+        lane: 'device', sourceCommitSha: '3'.repeat(40),
+      })),
+      firefox: useTargetGraphs('firefox', firefoxResult({
+        lane: 'device', sourceCommitSha: '3'.repeat(40),
+      })),
+    };
+    const base = {
+      chrome: useTargetGraphs('chrome', chromeResult({
+        role: 'base', lane: 'device', sourceCommitSha: '4'.repeat(40),
+      })),
+      firefox: useTargetGraphs('firefox', firefoxResult({
+        role: 'base', lane: 'device', sourceCommitSha: '4'.repeat(40),
+      })),
+    };
+    for (const result of [candidate.chrome, base.chrome]) {
+      result.freshProfile.rawSamples.forEach((sample) => {
+        sample.stateFromLaunchMs = 2_500;
+      });
+      result.freshProfile.stateFromLaunchMs = summarizeRaw(
+        Array(profile.chrome.fresh).fill(2_500),
+      );
+    }
+    const pairAssessments = {
+      chrome: assessColdStartPair('chrome', candidate.chrome, base.chrome, { lane: 'device' }),
+      firefox: assessColdStartPair('firefox', candidate.firefox, base.firefox, { lane: 'device' }),
+    };
+    const report = {
+      schema: 3,
+      measuredAt: new Date(now - 1_000).toISOString(),
+      lane: 'device',
+      packageVersion: '0.7.3',
+      runtimeTarget: 'release',
+      runtimeSurface: 'sidepanel-tab',
+      coldBudgetMode: 'enforce',
+      nativeFloor: null,
+      commitSha: '3'.repeat(40),
+      baseCommitSha: '4'.repeat(40),
+      dirty: false,
+      hostSha256: HASH.host,
+      host: { kernel: { platform: 'darwin', release: '25.6.0', arch: 'arm64' } },
+      comparison: {
+        mode: 'interleaved-candidate-base',
+        scheduleByBrowser: {
+          chrome: interleavedSchedule(profile.chrome.fresh),
+          firefox: interleavedSchedule(profile.firefox.fresh),
+        },
+      },
+      targetCutover: COLD_START_TARGET_CUTOVER,
+      options: {
+        browser: 'all', allowFailures: false, unsafeNoSandbox: false,
+        runtimeTarget: 'release', runtimeSurface: 'sidepanel-tab', coldBudgetMode: 'enforce',
+        enforcement: profile.enforcement,
+        graphPolicy: profile.graphPolicy,
+        requireTimingTargets: profile.requireTimingTargets,
+        coldTimeoutMs: profile.timeoutMs,
+        chromeProcesses: profile.chrome.fresh,
+        chromeWakes: profile.chrome.wakes,
+        firefoxProcesses: profile.firefox.fresh,
+        firefoxWakes: profile.firefox.wakes,
+        firefoxIdleMs: profile.firefox.idleMs,
+      },
+      results: candidate,
+      baseResults: base,
+      pairAssessments,
+    };
+    expect(assessColdStartReport(report, { nowMs: now }))
+      .toEqual({ ok: true, failures: [] });
+
+    candidate.firefox.idleDiscardWake.rawSamples.pop();
+    expect(assessColdStartReport(report, { nowMs: now }).failures)
+      .toContain('firefox: firefox idleDiscardWake raw sample set is missing or incomplete');
   });
 
   test('binds required reports to immutable lane options, commits, cleanliness, and both browsers', () => {

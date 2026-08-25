@@ -9,6 +9,12 @@ export const COLD_START_LANES = Object.freeze({
     chrome: Object.freeze({ fresh: 1, wakes: 1 }),
     firefox: Object.freeze({ fresh: 1, wakes: 1, idleMs: 45_000 }),
   }),
+  device: Object.freeze({
+    enforcement: 'release-safety',
+    timeoutMs: 10_000, graphPolicy: 'target', requireTimingTargets: true,
+    chrome: Object.freeze({ fresh: 15, wakes: 15 }),
+    firefox: Object.freeze({ fresh: 15, wakes: 15, idleMs: 45_000 }),
+  }),
   pr: Object.freeze({
     enforcement: 'release-safety',
     timeoutMs: 10_000, graphPolicy: 'target', requireTimingTargets: true,
@@ -130,12 +136,8 @@ export const COLD_START_COMPARISON = Object.freeze({
   minimumToleranceMs: 100,
 });
 
-// A target cutover cannot be approved from an absolute budget alone. The
-// remaining comparison gate must interleave base/head on one host and browser
-// population while the candidate harness packages both clean source roots with
-// identical tooling. The path exists behind an explicit local comparison mode;
-// `ready` stays false until a reviewed physical run proves it and required CI
-// can switch without weakening the absolute ratchet.
+// A target cutover also needs interleaved base/head evidence from one device;
+// CI keeps its independent absolute ratchet.
 export const COLD_START_TARGET_CUTOVER = Object.freeze({
   ready: false,
   unmetGate: 'interleaved-candidate-base',
