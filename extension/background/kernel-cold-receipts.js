@@ -6,12 +6,14 @@
 
 import { coldEventKeysFor, KERNEL_COLD_EVENTS } from './cold-kernel-inventory.js';
 import {
+  bindKernelIdentity,
   kernelIdentityMatches,
   parseKernelIdentity,
 } from '../shared/kernel-identity.js';
 import { makeSerialLane } from '../shared/cold-util.js';
 
 export const KERNEL_COLD_RECEIPTS_KEY = 'kernel.coldReceipts.v1';
+export const KERNEL_GENERATION_SESSION_KEY = 'authority-kernel.generation.v1';
 const SCHEMA = 1;
 const DEFAULT_MAX = 256;
 const INVENTORY = new Map(KERNEL_COLD_EVENTS.map((entry) => [entry.key, entry]));
@@ -87,6 +89,42 @@ const emptyQueue = (/** @type {import('../shared/kernel-identity.js').KernelIden
   nextSequence: 1,
   entries: [],
 });
+
+/** @param {any} deps */
+export const makeKernelGenerationLifecycle = ({ session, identity: candidate }) => {
+  const identity = parseKernelIdentity(candidate);
+  if (!identity) throw new TypeError('kernel generation identity is invalid');
+  let retired = false;
+  const claim = async () => {
+    await session.sessionSet(KERNEL_GENERATION_SESSION_KEY, identity);
+    const observed = await session.sessionGet(KERNEL_GENERATION_SESSION_KEY);
+    if (!kernelIdentityMatches(identity, observed)) {
+      retired = true;
+      throw new Error('kernel-generation-claim-lost');
+    }
+  };
+  const readyPromise = claim();
+  const reconcile = async () => {
+    await readyPromise;
+    if (retired) return { ok: false, error: 'kernel-generation-retired' };
+    const observed = await session.sessionGet(KERNEL_GENERATION_SESSION_KEY);
+    if (!kernelIdentityMatches(identity, observed)) {
+      retired = true;
+      return { ok: false, error: 'kernel-generation-retired' };
+    }
+    return { ok: true, identity };
+  };
+  const bind = (/** @type {Record<string,unknown>} */ payload) => {
+    if (retired) throw new Error('kernel-generation-retired');
+    return bindKernelIdentity(identity, payload);
+  };
+  const bindCurrent = async (/** @type {Record<string,unknown>} */ payload) => {
+    const current = await reconcile();
+    if (!current.ok) throw new Error(current.error);
+    return bind(payload);
+  };
+  return Object.freeze({ identity, ready: () => readyPromise, reconcile, bind, bindCurrent });
+};
 
 /**
  * @param {Object} deps

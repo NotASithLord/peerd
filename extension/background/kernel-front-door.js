@@ -4,7 +4,27 @@
 // separated from its listener by an await, so this module deliberately reads
 // only warm, injected scalars and performs the open in the same stack frame.
 
-import { decidePullIn } from './panel-affordance.js';
+/**
+ * @param {{homeOpen:boolean,panelOpen?:boolean,hasSidePanel:boolean,hasSidebar:boolean,
+ * fromShortcut?:boolean,frontDoorView?:'panel'|'home',nativePanelMirror?:boolean}} input
+ */
+export const decidePullIn = ({
+  homeOpen,
+  panelOpen = false,
+  hasSidePanel,
+  hasSidebar,
+  fromShortcut = false,
+  frontDoorView = 'panel',
+  nativePanelMirror = false,
+}) => {
+  if (fromShortcut && panelOpen && (hasSidePanel || hasSidebar)) return 'close';
+  const view = !fromShortcut && nativePanelMirror ? 'home' : frontDoorView;
+  if (fromShortcut || homeOpen || view !== 'home') {
+    if (hasSidePanel) return 'panel';
+    if (hasSidebar) return 'sidebar';
+  }
+  return 'home';
+};
 
 /** @param {unknown} value @param {(cause:unknown)=>void} onError */
 const observe = (value, onError) => {

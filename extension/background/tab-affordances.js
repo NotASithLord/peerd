@@ -18,7 +18,7 @@
 // tabMsgAnchor) is cluster-internal and lives here; the SW keeps the wiring.
 
 import { openHome } from '/shared/open-home.js';
-import { decidePullIn } from './panel-affordance.js';
+import { decidePullIn } from './kernel-front-door.js';
 import { pullInHintInjected } from '/peerd-runtime/background.js';
 import { matchesDenylist } from '/peerd-egress/background.js';
 import { shouldFollowAgentTab } from './watch-mode.js';

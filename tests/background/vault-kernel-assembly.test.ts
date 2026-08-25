@@ -10,7 +10,7 @@ import { COLD_SOURCE_TARGETS } from '../../scripts/bench/cold-start-budgets.js';
 import {
   createKernelPortRouter,
   KERNEL_PORT_NAMES,
-} from '../../extension/background/kernel-port-router.js';
+} from '../../extension/background/kernel-port-owners.js';
 import {
   createVaultKernelAssemblyReport,
 } from '../../extension/background/vault-kernel-assembly.js';
@@ -113,7 +113,7 @@ describe('thin vault-kernel Port assembly', () => {
       identity: { ...IDENTITY, bootId: IDENTITY.kernelEpoch }, provenance, handlers: {},
     } as any)).toThrow('kernel-port-identity-invalid');
     const source = readFileSync(
-      join(EXTENSION_DIR, 'background/kernel-port-router.js'), 'utf8',
+      join(EXTENSION_DIR, 'background/kernel-port-owners.js'), 'utf8',
     );
     expect(source).not.toContain('adoptPort');
   });
@@ -266,7 +266,8 @@ test('native entry uses one identity and target-exact kernel custody', async () 
   expect(modules).not.toContain('background/kernel-recovery-registry.js');
   expect(modules).not.toContain('background/cold-listener-fan-in.js');
   expect(modules).not.toContain('background/cold-kernel-capture.js');
-  expect(modules).toContain('background/kernel-port-router.js');
+  expect(modules).not.toContain('background/kernel-port-router.js');
+  expect(modules).toContain('background/kernel-port-owners.js');
   expect(modules).toContain('background/kernel-front-door.js');
   expect(modules).not.toContain('background/kernel-event-registry.js');
   expect(modules).toContain('background/kernel-feature-host.js');

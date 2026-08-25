@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { decidePullIn } from '../../extension/background/panel-affordance.js';
+import { decidePullIn } from '../../extension/background/kernel-front-door.js';
 
 describe('decidePullIn', () => {
   describe('toolbar icon (fromShortcut: false) — default front door (panel)', () => {

@@ -40,7 +40,7 @@ import {
   WrongPassphraseError,
 } from '/peerd-egress/kernel-storage.js';
 import { makeUiPorts } from './ui-ports.js';
-import { createKernelBrowserNetworkRuntime } from './kernel-browser-network-runtime.js';
+import { createKernelBrowserNetworkRuntime } from './kernel-browser-network-authority.js';
 import { createKernelControllerGateway } from './kernel-controller-gateway.js';
 import { makeSemanticControllerClient } from './offscreen-controller-client.js';
 import {
