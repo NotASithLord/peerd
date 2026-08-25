@@ -4,6 +4,7 @@ import {
   TOOL_EXECUTION_PROTOCOL,
   createToolEffectQuota,
   parseToolExecutionRequest,
+  toolEffectLossSemantics,
   toolExecutionResultAllowed,
 } from '/shared/tool-execution-protocol.js';
 
@@ -89,8 +90,25 @@ export const createToolExecutionHost = ({
     const abort = new AbortController();
     let grantOpen = true;
     let effectEntered = false;
-    let unknownEffect = false;
     let pendingEffects = 0;
+    let pendingIrreversible = 0;
+    let settledIrreversible = false;
+    let unknownIrreversible = false;
+    const custody = () => {
+      if (pendingIrreversible > 0 || unknownIrreversible) {
+        return { outcomeKnown: false, retryable: false };
+      }
+      return {
+        outcomeKnown: true,
+        retryable: !settledIrreversible,
+      };
+    };
+    const stoppedForLoss = (/** @type {string} */ code) => {
+      const state = custody();
+      return stopped(request, code, state.outcomeKnown, effectEntered, {
+        retryable: state.retryable, phase: 'run',
+      });
+    };
     const onAbort = () => abort.abort();
     options.signal.addEventListener('abort', onAbort, { once: true });
     const effects = Object.fromEntries(request.policy.effects.map((/** @type {any} */ effect) => [
@@ -102,25 +120,48 @@ export const createToolExecutionHost = ({
         if (pendingEffects >= quota.pendingCap) {
           return { ok: false, code: 'tool-effect-concurrency-exhausted', outcomeKnown: true };
         }
-        const admitted = quota.admit(effect.operation, effectPayload);
-        if (admitted.ok !== true) return admitted;
         if (typeof options.kernelCall !== 'function') {
           return { ok: false, code: 'tool-effect-kernel-unavailable', outcomeKnown: true };
         }
+        const admitted = quota.admit(effect.operation, effectPayload);
+        if (admitted.ok !== true) return admitted;
+        const replayable = effect.riskClass === 'read' || effect.riskClass === 'control';
         effectEntered = true;
         pendingEffects += 1;
+        if (!replayable) pendingIrreversible += 1;
         let result;
         try { result = await options.kernelCall(effect.operation, effectPayload); }
-        catch { result = { ok: false, code: 'tool-effect-kernel-lost', outcomeKnown: false }; }
-        finally { pendingEffects = Math.max(0, pendingEffects - 1); }
+        catch {
+          const loss = toolEffectLossSemantics(effect.riskClass, 'during');
+          result = {
+            ok: false, code: 'tool-effect-kernel-lost',
+            outcomeKnown: loss.outcomeKnown, retryable: loss.retryable,
+          };
+        } finally {
+          pendingEffects = Math.max(0, pendingEffects - 1);
+          if (!replayable) pendingIrreversible = Math.max(0, pendingIrreversible - 1);
+        }
         const observed = quota.observe(effect.operation, result);
         if (observed.ok !== true) {
-          unknownEffect = true;
-          return observed;
+          const loss = toolEffectLossSemantics(effect.riskClass, 'during');
+          if (!loss.outcomeKnown) unknownIrreversible = true;
+          return {
+            ...observed,
+            outcomeKnown: loss.outcomeKnown,
+            retryable: loss.retryable,
+          };
         }
-        if (result?.outcomeKnown !== true) unknownEffect = true;
+        if (result?.outcomeKnown !== true && !replayable) unknownIrreversible = true;
+        if (!replayable && result?.outcomeKnown === true
+            && (result?.ok === true || result?.retryable !== true)) settledIrreversible = true;
         if (!grantOpen || abort.signal.aborted || Number(options.deadlineAt) <= now()) {
-          return { ok: false, code: 'tool-effect-grant-settled', outcomeKnown: false };
+          const loss = toolEffectLossSemantics(
+            effect.riskClass, result?.outcomeKnown === true ? 'after' : 'during',
+          );
+          return {
+            ok: false, code: 'tool-effect-grant-settled',
+            outcomeKnown: loss.outcomeKnown, retryable: loss.retryable,
+          };
         }
         return result;
       },
@@ -132,9 +173,9 @@ export const createToolExecutionHost = ({
       finish(stopped(
         request,
         'tool-execution-deadline-expired',
-        !effectEntered,
+        custody().outcomeKnown,
         effectEntered,
-        { retryable: !effectEntered, phase: 'run' },
+        { retryable: custody().retryable, phase: 'run' },
       ));
       abort.abort();
     }, Math.max(1, Number(options.deadlineAt) - now()));
@@ -142,9 +183,9 @@ export const createToolExecutionHost = ({
       abort.signal.addEventListener('abort', () => resolve(stopped(
         request,
         'tool-execution-aborted',
-        !effectEntered,
+        custody().outcomeKnown,
         effectEntered,
-        { retryable: !effectEntered, phase: 'run' },
+        { retryable: custody().retryable, phase: 'run' },
       )), { once: true });
     });
     try {
@@ -156,11 +197,8 @@ export const createToolExecutionHost = ({
           effects,
         }))
         .then((value) => {
-          if (unknownEffect) {
-            return stopped(request, 'tool-effect-outcome-unknown', false, true, {
-              retryable: false, phase: 'run',
-            });
-          }
+          if (unknownIrreversible) return stoppedForLoss('tool-effect-outcome-unknown');
+          if (pendingEffects > 0) return stoppedForLoss('tool-effect-pending');
           const result = {
             protocol: TOOL_EXECUTION_PROTOCOL,
             executionId: request.executionId,
@@ -172,21 +210,13 @@ export const createToolExecutionHost = ({
           };
           return toolExecutionResultAllowed(result, request.policy.resultBytes)
             ? Object.freeze(result)
-            : stopped(request, 'tool-execution-result-invalid', !effectEntered, effectEntered, {
-              retryable: !effectEntered, phase: 'run',
-            });
+            : stoppedForLoss('tool-execution-result-invalid');
         })
         .catch((cause) => {
-          const error = /** @type {{outcomeKind?:unknown,outcomeKnown?:unknown}} */ (cause);
-          const completed = error?.outcomeKind === 'effect-completed'
-            && error?.outcomeKnown === true;
-          return stopped(
-            request,
-            projectedError(cause).code,
-            !effectEntered || completed,
-            effectEntered,
-            { ...projectedError(cause), retryable: !effectEntered },
-          );
+          const loss = custody();
+          return stopped(request, projectedError(cause).code, loss.outcomeKnown, effectEntered, {
+            ...projectedError(cause), retryable: loss.retryable, phase: 'run',
+          });
         });
       return await Promise.race([execution, stoppedRun, abortedRun]);
     } finally {

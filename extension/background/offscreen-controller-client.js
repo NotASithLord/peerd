@@ -95,6 +95,7 @@ const stopped = (/** @type {string} */ code, /** @type {boolean} */ known) => ({
  * @param {number} [deps.cancelSettleTimeoutMs]
  * @param {typeof setTimeout} [deps.setTimeoutFn]
  * @param {typeof clearTimeout} [deps.clearTimeoutFn]
+ * @param {(capability:string,payload:unknown)=>any} [deps.createQuota]
  */
 export const connectOffscreenController = async ({
   ensureOffscreen,
@@ -112,6 +113,7 @@ export const connectOffscreenController = async ({
   cancelSettleTimeoutMs = 2_000,
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
+  createQuota = createControllerKernelQuota,
 }) => {
   const offeredCaps = parseControllerCaps(capabilities);
   if (!offeredCaps) throw new ControllerChannelError('invalid controller capabilities', 'caps-invalid');
@@ -143,6 +145,7 @@ export const connectOffscreenController = async ({
    *   capability: string,
    *   authority: NonNullable<ReturnType<typeof parseControllerAuthority>>,
    *   nestedUnknown: boolean,
+   *   effectEntered: boolean,
    *   cancelled: boolean,
    *   lifetime: AbortController,
    *   reverse: Map<string, {controller:AbortController,operation:string,payload:unknown}>,
@@ -179,12 +182,31 @@ export const connectOffscreenController = async ({
     call.reverse.clear();
     call.resolve(result);
   };
+  const pendingCustody = (/** @type {any} */ call) => {
+    const settled = typeof call.quota.custody === 'function'
+      ? call.quota.custody()
+      : { outcomeKnown: false, retryable: false };
+    let outcomeKnown = settled?.outcomeKnown === true;
+    let retryable = settled?.retryable === true;
+    for (const pending of call.reverse.values()) {
+      const loss = typeof call.quota.pendingLoss === 'function'
+        ? call.quota.pendingLoss(pending.operation, pending.payload)
+        : { outcomeKnown: false, retryable: false };
+      outcomeKnown &&= loss?.outcomeKnown === true;
+      retryable &&= loss?.retryable === true;
+    }
+    if (call.nestedUnknown) return { outcomeKnown: false, retryable: false };
+    return { outcomeKnown, retryable };
+  };
+  const custodyFailure = (/** @type {any} */ call, /** @type {string} */ code) => ({
+    ok: false, code, ...pendingCustody(call), phase: 'run',
+  });
   const failAll = (/** @type {string} */ code) => {
     for (const [requestId, call] of calls) {
-      finish(requestId, stopped(
-        code,
-        call.phase === CONTROLLER_PHASE.OPENED || call.phase === CONTROLLER_PHASE.ACCEPTED,
-      ));
+      const preCommit = call.phase === CONTROLLER_PHASE.OPENED
+        || call.phase === CONTROLLER_PHASE.ACCEPTED;
+      finish(requestId, preCommit ? stopped(code, true)
+        : call.reverse.size > 0 ? custodyFailure(call, code) : stopped(code, false));
     }
   };
   const close = () => {
@@ -205,11 +227,12 @@ export const connectOffscreenController = async ({
       if (!active) return;
       try { post({ type: 'kernel/cancel', requestId, grantId: active.grantId }); }
       catch { /* host gone */ }
-      finish(requestId, stopped('controller-call-timeout', false));
+      finish(requestId, active.reverse.size > 0
+        ? custodyFailure(active, 'controller-call-timeout')
+        : stopped('controller-call-timeout', false));
     }, idleMs);
     post({ type: 'kernel/renew', requestId, grantId: call.grantId, deadlineAt });
   };
-
   port1.onmessage = (event) => {
     if (!isControllerChannelMessage(event.data, binding) || closed) return;
     const message = /** @type {any} */ (event.data);
@@ -273,6 +296,7 @@ export const connectOffscreenController = async ({
         } catch { close(); }
         return;
       }
+      call.effectEntered = true;
       // A reverse call is authenticated, quota-admitted progress. Renew only
       // the idle fuse for this exact committed grant; no unrelated heartbeat
       // can extend controller custody.
@@ -337,14 +361,25 @@ export const connectOffscreenController = async ({
         && (call.phase === CONTROLLER_PHASE.COMMITTING
           || call.phase === CONTROLLER_PHASE.COMMITTED)) {
       const pendingEffect = call.reverse.size > 0;
-      const known = !pendingEffect && !call.nestedUnknown
-        && message.result?.outcomeKnown === true;
-      const result = pendingEffect && message.result?.outcomeKnown !== false ? {
-        ok: false, code: 'controller-pending-kernel-effect', outcomeKnown: false,
-      } : message.result;
+      const custody = call.effectEntered ? pendingCustody(call) : null;
+      const base = pendingEffect ? {
+        ok: false, code: 'controller-pending-kernel-effect',
+        outcomeKnown: message.result?.outcomeKnown === true,
+        ...(message.result?.retryable === false ? { retryable: false } : {}),
+      } : message.result ?? { ok: false, code: 'controller-result-missing' };
+      const result = !custody ? base
+        : custody.outcomeKnown !== true
+        ? { ...base, outcomeKnown: false, retryable: false }
+        : base?.outcomeKnown !== true
+          ? { ...base, outcomeKnown: false, retryable: false }
+          : base?.ok === true ? { ...base, outcomeKnown: true }
+          : {
+            ...base, ok: false, outcomeKnown: true,
+            retryable: custody.retryable && base?.retryable !== false,
+          };
       finish(message.requestId, {
         ...(result ?? { ok: false, error: 'controller returned no result' }),
-        outcomeKnown: known,
+        outcomeKnown: result.outcomeKnown === true,
         phase: call.capability === RUNTIME_DISPATCH_CAPABILITY
           && (message.result?.phase === 'startup' || message.result?.phase === 'run')
           ? message.result.phase : CONTROLLER_PHASE.SETTLED,
@@ -393,7 +428,7 @@ export const connectOffscreenController = async ({
     }
     if (options.signal?.aborted) return Promise.resolve(stopped('controller-call-aborted', true));
     let outerCap = controllerOuterPayloadCap(capability);
-    let quota = createControllerKernelQuota(capability, payload);
+    let quota = createQuota(capability, payload);
     let maxDurationMs = controllerCallMaxDuration(capability, payload);
     if (capability === RUNTIME_DISPATCH_CAPABILITY) {
       outerCap = RUNTIME_DISPATCH_OUTER_BYTES;
@@ -428,10 +463,13 @@ export const connectOffscreenController = async ({
         const active = calls.get(requestId);
         if (!active) return;
         try { post({ type: 'kernel/cancel', requestId, grantId: active.grantId }); } catch { /* host gone */ }
-        finish(requestId, stopped(
-          'controller-call-timeout',
-          active.phase === CONTROLLER_PHASE.OPENED || active.phase === CONTROLLER_PHASE.ACCEPTED,
-        ));
+        const preCommit = active.phase === CONTROLLER_PHASE.OPENED
+          || active.phase === CONTROLLER_PHASE.ACCEPTED;
+        finish(requestId, preCommit
+          ? stopped('controller-call-timeout', true)
+          : active.reverse.size > 0
+            ? custodyFailure(active, 'controller-call-timeout')
+            : stopped('controller-call-timeout', false));
       }, timeoutMs);
       const onAbort = () => {
         const active = calls.get(requestId);
@@ -446,7 +484,9 @@ export const connectOffscreenController = async ({
         }
         clearTimeoutFn(active.timer);
         active.timer = setTimeoutFn(() => {
-          finish(requestId, stopped('controller-call-aborted', false));
+          finish(requestId, active.reverse.size > 0
+            ? custodyFailure(active, 'controller-call-aborted')
+            : stopped('controller-call-aborted', false));
         }, cancelSettleTimeoutMs);
       };
       calls.set(requestId, {
@@ -460,6 +500,7 @@ export const connectOffscreenController = async ({
         capability,
         authority,
         nestedUnknown: false,
+        effectEntered: false,
         cancelled: false,
         lifetime: new AbortController(),
         reverse: new Map(),

@@ -7,7 +7,7 @@ import { createToolExecutionHost } from '../../extension/offscreen/tool-executio
 
 const digest = 'a'.repeat(64);
 const argsDigest = 'b'.repeat(64);
-const manifest = compileToolEffectManifest({
+const manifestFor = (riskClass: 'read' | 'control' | 'commit' | 'resource') => compileToolEffectManifest({
   protocol: TOOL_EXECUTION_PROTOCOL,
   digest,
   tools: {
@@ -15,12 +15,21 @@ const manifest = compileToolEffectManifest({
       projectionKeys: ['sessionId'],
       effects: [{
         method: 'writeMemory', operation: 'memory.write', maxCalls: 1,
+        riskClass,
+        requestSchema: {
+          type: 'object', properties: { fact: { type: 'string', maxLength: 64 } },
+          required: ['fact'],
+        },
+        resultSchema: {
+          type: 'object', properties: { stored: { type: 'boolean' } }, required: ['stored'],
+        },
         requestBytes: 1_024, resultBytes: 1_024,
       }],
       argumentBytes: 1_024, projectionBytes: 1_024, resultBytes: 4_096, pendingEffects: 1,
     },
   },
 });
+const manifest = manifestFor('commit');
 const payload = {
   protocol: TOOL_EXECUTION_PROTOCOL,
   executionId: 'execution-1',
@@ -86,6 +95,72 @@ describe('controller tool execution host', () => {
       value: { ok: true, content: 'saved' },
     });
   });
+
+  test('refuses malformed nested effect requests before kernel entry', async () => {
+    let calls = 0;
+    const host = createToolExecutionHost({
+      manifest,
+      implementations: {
+        remember: async (_args, context) => context.effects.writeMemory({
+          fact: 'one', metadata: { hidden: true },
+        }),
+      },
+    });
+    const result: any = await host.dispatch(payload, options({
+      kernelCall: async () => {
+        calls += 1;
+        return { ok: true, outcomeKnown: true, value: { stored: true } };
+      },
+    }) as any);
+    expect(calls).toBe(0);
+    expect(result).toMatchObject({
+      ok: true, outcomeKnown: true, effectEntered: false,
+      value: { ok: false, code: 'tool-effect-request-invalid' },
+    });
+  });
+
+  test('treats a malformed nested commit result as unknown', async () => {
+    const host = createToolExecutionHost({
+      manifest,
+      implementations: {
+        remember: async (args, context) => context.effects.writeMemory(args),
+      },
+    });
+    const result: any = await host.dispatch(payload, options({
+      kernelCall: async () => ({
+        ok: true, outcomeKnown: true, value: { stored: true, hidden: true },
+      }),
+    }) as any);
+    expect(result).toMatchObject({
+      ok: false, code: 'tool-effect-outcome-unknown', outcomeKnown: false,
+      effectEntered: true, retryable: false,
+    });
+  });
+
+  test.each([
+    ['read', true, true],
+    ['commit', false, false],
+  ] as const)(
+    'settles an unawaited %s effect with its in-flight custody',
+    async (riskClass, outcomeKnown, retryable) => {
+      const host = createToolExecutionHost({
+        manifest: manifestFor(riskClass),
+        implementations: {
+          remember: async (args, context) => {
+            void context.effects.writeMemory(args);
+            return { ok: true };
+          },
+        },
+      });
+      const result: any = await host.dispatch(payload, options({
+        kernelCall: async () => new Promise(() => {}),
+      }) as any);
+      expect(result).toMatchObject({
+        ok: false, code: 'tool-effect-pending', outcomeKnown,
+        effectEntered: true, retryable,
+      });
+    },
+  );
 
   test('refuses authority retargeting before implementation or effect', async () => {
     let executions = 0;
@@ -191,9 +266,66 @@ describe('controller tool execution host', () => {
       ok: false, code: 'tool-execution-deadline-expired', outcomeKnown: false,
       effectEntered: true, retryable: false,
     });
-    resolveEffect({ ok: true, outcomeKnown: true });
+    resolveEffect({ ok: true, outcomeKnown: true, value: { stored: true } });
     await Promise.resolve();
   });
+
+  test.each(['read', 'control'] as const)(
+    'a deadline during a %s effect remains known and retryable',
+    async (riskClass) => {
+      let fireDeadline!: () => void;
+      let entered = () => {};
+      const effectEntered = new Promise<void>((resolve) => { entered = resolve; });
+      const host = createToolExecutionHost({
+        manifest: manifestFor(riskClass),
+        implementations: {
+          remember: async (args, context) => context.effects.writeMemory(args),
+        },
+        now: () => 100,
+        setTimeoutFn: ((callback: () => void) => { fireDeadline = callback; return 1; }) as any,
+        clearTimeoutFn: (() => {}) as any,
+      });
+      const running = host.dispatch(payload, options({
+        deadlineAt: 200,
+        kernelCall: async () => {
+          entered();
+          return new Promise(() => {});
+        },
+      }) as any);
+      await effectEntered;
+      fireDeadline();
+      await expect(running).resolves.toMatchObject({
+        ok: false, code: 'tool-execution-deadline-expired', outcomeKnown: true,
+        effectEntered: true, retryable: true,
+      });
+    },
+  );
+
+  test.each(['commit', 'resource'] as const)(
+    'loss after a completed %s effect is known but not retryable',
+    async (riskClass) => {
+      const controller = new AbortController();
+      let completed = () => {};
+      const effectCompleted = new Promise<void>((resolve) => { completed = resolve; });
+      const host = createToolExecutionHost({
+        manifest: manifestFor(riskClass),
+        implementations: {
+          remember: async (args, context) => {
+            await context.effects.writeMemory(args);
+            completed();
+            return new Promise(() => {});
+          },
+        },
+      });
+      const running = host.dispatch(payload, options({ signal: controller.signal }) as any);
+      await effectCompleted;
+      controller.abort();
+      await expect(running).resolves.toMatchObject({
+        ok: false, code: 'tool-execution-aborted', outcomeKnown: true,
+        effectEntered: true, retryable: false,
+      });
+    },
+  );
 
   test('a replacement generation starts clean while the retired grant stays closed', async () => {
     let oldEffect!: (payload: unknown) => Promise<any>;
@@ -219,7 +351,7 @@ describe('controller tool execution host', () => {
       options({
         kernelCall: async (operation: string) => {
           calls.push(operation);
-          return { ok: true, outcomeKnown: true };
+          return { ok: true, outcomeKnown: true, value: { stored: true } };
         },
       }) as any,
     );

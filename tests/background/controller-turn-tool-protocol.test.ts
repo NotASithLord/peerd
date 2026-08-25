@@ -18,8 +18,35 @@ import {
   clearTools,
   registerTool,
 } from '../../extension/peerd-runtime/tools/registry.js';
+import {
+  TOOL_EXECUTION_PROTOCOL,
+  compileToolEffectManifest,
+} from '../../extension/shared/tool-execution-protocol.js';
 
 const MANIFEST_DIGEST = 'a'.repeat(64);
+const manifestFor = (riskClass: 'read' | 'control' | 'commit' | 'resource') =>
+  compileToolEffectManifest({
+    protocol: TOOL_EXECUTION_PROTOCOL,
+    digest: MANIFEST_DIGEST,
+    tools: {
+      remember: {
+        projectionKeys: ['sessionId'],
+        effects: [{
+          method: 'writeMemory', operation: 'memory.write', riskClass,
+          requestSchema: {
+            type: 'object', properties: { fact: { type: 'string', maxLength: 64 } },
+            required: ['fact'],
+          },
+          resultSchema: {
+            type: 'object', properties: { stored: { type: 'boolean' } }, required: ['stored'],
+          },
+          maxCalls: 1, requestBytes: 256, resultBytes: 256,
+        }],
+        argumentBytes: 256, projectionBytes: 256, resultBytes: 4_096, pendingEffects: 1,
+      },
+    },
+  });
+const TOOL_MANIFEST = manifestFor('commit');
 const descriptor = {
   name: 'remember', description: 'Remember a fact.', schema: { type: 'object' },
 };
@@ -110,6 +137,7 @@ const runHarness = async ({
   });
   bridge = makeControllerTurnBridge({
     getClient, newId: () => `tool-protocol-${++sequence}`,
+    toolManifest: TOOL_MANIFEST,
     ...bridgeHooks,
   });
   const events = [];
@@ -146,6 +174,7 @@ describe('controller turn finite tool protocol', () => {
         },
       }),
       bridgeHooks: {
+        toolManifest: CONTROLLER_TOOL_MANIFEST,
         prepareToolCall: async (call: any) => {
           const prepared: any = await prepareRuntimeToolCall(call, toolContext);
           return prepared?.prepared === true ? {
@@ -222,6 +251,109 @@ describe('controller turn finite tool protocol', () => {
     expect(observed.map(([phase]) => phase)).toEqual(['prepare', 'effect', 'settle']);
     expect(result.events).toContainEqual(expect.objectContaining({
       type: 'tool-result', result: expect.objectContaining({ content: 'remembered' }),
+    }));
+  });
+
+  test('rejects malformed nested effect payloads before handler entry', async () => {
+    let effects = 0;
+    const settlements: any[] = [];
+    const result = await runHarness({
+      bridgeHooks: {
+        prepareToolCall: async (call: any, _ctx: any, binding: any) => ({
+          mode: 'execute', custody: binding.executionId, args: call.args,
+          projection: {}, manifestDigest: MANIFEST_DIGEST,
+        }),
+        handleToolEffect: async () => {
+          effects += 1;
+          return { ok: true, outcomeKnown: true, value: { stored: true } };
+        },
+        settleToolCall: async (input: any) => {
+          settlements.push(input.result);
+          return input.result.value;
+        },
+      },
+      executeToolCall: async (request, options) => {
+        const refused = await options.kernelCall('memory.write', {
+          fact: 'one', nested: { hidden: true },
+        });
+        expect(refused).toMatchObject({
+          ok: false, code: 'tool-effect-request-invalid', outcomeKnown: true,
+        });
+        return {
+          protocol: request.protocol, executionId: request.executionId,
+          argsDigest: request.argsDigest, ok: true, outcomeKnown: true,
+          effectEntered: false, value: { ok: true },
+        };
+      },
+    });
+    expect(result.error).toBeNull();
+    expect(effects).toBe(0);
+    expect(settlements).toContainEqual(expect.objectContaining({
+      ok: true, outcomeKnown: true, effectEntered: false,
+    }));
+  });
+
+  test('settles a malformed pre-effect executor result as known and retryable', async () => {
+    const settlements: any[] = [];
+    const result = await runHarness({
+      bridgeHooks: {
+        prepareToolCall: async (call: any, _ctx: any, binding: any) => ({
+          mode: 'execute', custody: binding.executionId, args: call.args,
+          projection: {}, manifestDigest: MANIFEST_DIGEST,
+        }),
+        handleToolEffect: async () => ({
+          ok: true, outcomeKnown: true, value: { stored: true },
+        }),
+        settleToolCall: async (input: any) => {
+          settlements.push(input.result);
+          return input.result;
+        },
+      },
+      executeToolCall: async (request) => ({
+        protocol: request.protocol, executionId: request.executionId,
+        argsDigest: request.argsDigest, ok: true, outcomeKnown: true,
+        effectEntered: false, value: { ok: true }, hidden: true,
+      }),
+    });
+    expect(result.error).toBeNull();
+    expect(settlements).toContainEqual(expect.objectContaining({
+      code: 'tool-execution-result-invalid', outcomeKnown: true,
+      effectEntered: false, retryable: true,
+    }));
+  });
+
+  test('does not trust a malformed nested commit result from the handler', async () => {
+    const settlements: any[] = [];
+    const result = await runHarness({
+      bridgeHooks: {
+        prepareToolCall: async (call: any, _ctx: any, binding: any) => ({
+          mode: 'execute', custody: binding.executionId, args: call.args,
+          projection: {}, manifestDigest: MANIFEST_DIGEST,
+        }),
+        handleToolEffect: async () => ({
+          ok: true, outcomeKnown: true, value: { stored: true, hidden: true },
+        }),
+        settleToolCall: async (input: any) => {
+          settlements.push(input.result);
+          return input.result;
+        },
+      },
+      executeToolCall: async (request, options) => {
+        const effect = await options.kernelCall('memory.write', request.args);
+        expect(effect).toMatchObject({
+          ok: false, code: 'tool-effect-result-invalid', outcomeKnown: false,
+        });
+        return {
+          protocol: request.protocol, executionId: request.executionId,
+          argsDigest: request.argsDigest, ok: false,
+          code: 'tool-effect-outcome-unknown', error: 'Malformed effect result.',
+          outcomeKnown: false, effectEntered: true, retryable: false, phase: 'run',
+        };
+      },
+    });
+    expect(result.error).toMatchObject({ outcomeKnown: false, retryable: false });
+    expect(settlements).toContainEqual(expect.objectContaining({
+      outcomeKnown: false, effectEntered: true, retryable: false,
     }));
   });
 
@@ -402,6 +534,106 @@ describe('controller turn finite tool protocol', () => {
     }));
   });
 
+  test('settles executor loss after an observed commit as known and not retryable', async () => {
+    const settlements: any[] = [];
+    const result = await runHarness({
+      bridgeHooks: {
+        prepareToolCall: async (call: any, _ctx: any, binding: any) => ({
+          mode: 'execute', custody: binding.executionId, args: call.args,
+          projection: {}, manifestDigest: MANIFEST_DIGEST,
+        }),
+        handleToolEffect: async () => ({
+          ok: true, outcomeKnown: true, value: { stored: true },
+        }),
+        settleToolCall: async (input: any) => {
+          settlements.push(input.result);
+          return input.result;
+        },
+      },
+      executeToolCall: async (request, options) => {
+        await options.kernelCall('memory.write', request.args);
+        return {
+          protocol: request.protocol, executionId: request.executionId,
+          argsDigest: request.argsDigest, ok: false,
+          code: 'tool-execution-host-lost', error: 'Worker disappeared.',
+          outcomeKnown: false, effectEntered: true, retryable: false, phase: 'run',
+        };
+      },
+    });
+    expect(result.error).toBeNull();
+    expect(settlements).toContainEqual(expect.objectContaining({
+      code: 'tool-execution-host-lost', outcomeKnown: true,
+      effectEntered: true, retryable: false,
+    }));
+  });
+
+  test('does not let the executor make an observed commit retryable', async () => {
+    const settlements: any[] = [];
+    const result = await runHarness({
+      bridgeHooks: {
+        prepareToolCall: async (call: any, _ctx: any, binding: any) => ({
+          mode: 'execute', custody: binding.executionId, args: call.args,
+          projection: {}, manifestDigest: MANIFEST_DIGEST,
+        }),
+        handleToolEffect: async () => ({
+          ok: true, outcomeKnown: true, value: { stored: true },
+        }),
+        settleToolCall: async (input: any) => {
+          settlements.push(input.result);
+          return input.result;
+        },
+      },
+      executeToolCall: async (request, options) => {
+        await options.kernelCall('memory.write', request.args);
+        return {
+          protocol: request.protocol, executionId: request.executionId,
+          argsDigest: request.argsDigest, ok: false,
+          code: 'tool-execution-failed', error: 'Retry me.',
+          outcomeKnown: true, effectEntered: true, retryable: true, phase: 'run',
+        };
+      },
+    });
+    expect(result.error).toBeNull();
+    expect(settlements).toContainEqual(expect.objectContaining({
+      code: 'tool-execution-failed', outcomeKnown: true,
+      effectEntered: true, retryable: false,
+    }));
+  });
+
+  test('settles loss during a read effect as known and retryable', async () => {
+    const settlements: any[] = [];
+    const result = await runHarness({
+      bridgeHooks: {
+        toolManifest: manifestFor('read'),
+        prepareToolCall: async (call: any, _ctx: any, binding: any) => ({
+          mode: 'execute', custody: binding.executionId, args: call.args,
+          projection: {}, manifestDigest: MANIFEST_DIGEST,
+        }),
+        handleToolEffect: async () => ({
+          ok: false, code: 'tool-effect-kernel-lost',
+          outcomeKnown: false, retryable: false,
+        }),
+        settleToolCall: async (input: any) => {
+          settlements.push(input.result);
+          return input.result;
+        },
+      },
+      executeToolCall: async (request, options) => {
+        await options.kernelCall('memory.write', request.args);
+        return {
+          protocol: request.protocol, executionId: request.executionId,
+          argsDigest: request.argsDigest, ok: false,
+          code: 'tool-execution-host-lost', error: 'Worker disappeared.',
+          outcomeKnown: false, effectEntered: true, retryable: false, phase: 'run',
+        };
+      },
+    });
+    expect(result.error).toBeNull();
+    expect(settlements).toContainEqual(expect.objectContaining({
+      outcomeKnown: true, effectEntered: true, retryable: true,
+    }));
+  });
+
   test('settles an expired pre-effect grant as known and retryable', async () => {
     const settlements: any[] = [];
     let effects = 0;
@@ -510,5 +742,52 @@ describe('controller turn finite tool protocol', () => {
     expect(controllerOperationAllowedAfterCancel('turn.run', 'turn.tool.prepare')).toBe(false);
     expect(controllerOperationAllowedAfterCancel('turn.run', 'turn.tool.effect')).toBe(false);
     expect(controllerOperationAllowedAfterCancel('turn.run', 'turn.tool.settle')).toBe(true);
+  });
+
+  test.each([
+    ['read', true, true],
+    ['commit', false, false],
+  ] as const)('outer quota preserves pending %s effect custody', (
+    riskClass, outcomeKnown, retryable,
+  ) => {
+    const manifest = manifestFor(riskClass);
+    const quota = createControllerKernelQuota('turn.run', { maxSteps: 1 }, manifest);
+    const request = {
+      protocol: TOOL_EXECUTION_PROTOCOL,
+      executionId: 'execution-1', runId: 'run-12345678', callId: 'call-1',
+      sessionId: 'session:test', turnGeneration: 1, attempt: 0,
+      toolName: 'remember', argsDigest: 'b'.repeat(64),
+      manifestDigest: MANIFEST_DIGEST, args: { fact: 'one' }, projection: {},
+    };
+    const prepare = { runId: request.runId, value: { callJson: '{}' } };
+    expect(quota.admit('turn.tool.prepare', prepare).ok).toBe(true);
+    expect(quota.observe('turn.tool.prepare', prepare, {
+      ok: true, outcomeKnown: true,
+      value: { mode: 'execute', requestJson: JSON.stringify(request), deadlineAt: 1_000 },
+    }).ok).toBe(true);
+    const effect = {
+      runId: request.runId, value: {
+        executionId: request.executionId, argsDigest: request.argsDigest,
+        turnGeneration: request.turnGeneration, operation: 'memory.write',
+        effectPayload: request.args,
+      },
+    };
+    expect(quota.pendingLoss?.('turn.tool.effect', effect)).toEqual({
+      outcomeKnown, retryable,
+    });
+    const settle = {
+      runId: request.runId, value: {
+        executionId: request.executionId, argsDigest: request.argsDigest,
+        turnGeneration: request.turnGeneration, resultJson: '{}',
+      },
+    };
+    expect(quota.admit('turn.tool.settle', settle).ok).toBe(true);
+    expect(quota.observe('turn.tool.settle', settle, {
+      ok: true, outcomeKnown: true, value: {},
+    }).ok).toBe(true);
+    expect(quota.pendingLoss?.('turn.tool.effect', effect)).toEqual({
+      outcomeKnown, retryable,
+    });
+    expect(quota.custody()).toEqual({ outcomeKnown: true, retryable: false });
   });
 });
