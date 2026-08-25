@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   createKernelUpdateCustody,
   KERNEL_UPDATE_CUSTODY_KEY,
-} from '../../extension/background/kernel-update-addon.js';
+} from '../../extension/background/kernel-preview-addon.js';
 
 const harness = (overrides: Record<string, any> = {}) => {
   const values = new Map<string, any>();

@@ -72,7 +72,14 @@ const PRUNE_ALWAYS = [
 // The home Lab is a preview-only dev tool. Dweb source and prompt text are
 // separately pruned from every artifact without a working mesh host.
 const PRUNE_STORE = ['eval'];
-const PRUNE_DWEB = ['peerd-distributed', 'peerd-provider/system-prompt-dweb.txt'];
+const PRUNE_DWEB = [
+  'peerd-distributed', 'peerd-provider/system-prompt-dweb.txt',
+  'offscreen/dweb-base.js', 'offscreen/dweb-custody-host.js',
+  'offscreen/dweb-self.js', 'offscreen/dweb-transfer-host.js',
+];
+const PRUNE_PREVIEW_CHROME = [
+  'background/kernel-preview-addon.js', 'background/vault-kernel-preview.js',
+];
 
 // Reproducible artifacts: two builds of the same tree must produce
 // byte-identical zips, so a shipped artifact can be independently rebuilt
@@ -139,6 +146,7 @@ const shouldCopy = (
     ...PRUNE_ALWAYS,
     ...(channel === 'store' ? PRUNE_STORE : []),
     ...(!dwebEnabledForTarget(channel, browser) ? PRUNE_DWEB : []),
+    ...(channel === 'preview' && browser === 'chrome' ? [] : PRUNE_PREVIEW_CHROME),
   ];
   return !pruned.some((p) => rel === p || rel.startsWith(p + '/'));
 };

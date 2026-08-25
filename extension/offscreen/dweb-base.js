@@ -23,6 +23,7 @@ import { loadDweb } from '/shared/dweb-loader.js';
 import { isServiceWorkerSender } from '/shared/messaging.js';
 import { makeStartStopBarrier } from '/offscreen/start-stop-barrier.js';
 import { makeDwebCustodyHost } from '/offscreen/dweb-custody-host.js';
+import { makeDwebTransferHost } from '/offscreen/dweb-transfer-host.js';
 import { createContentOwnership } from '/offscreen/content-ownership.js';
 import { rollbackSharePublication } from '/offscreen/share-publication.js';
 import { createShareRollbackStore } from '/offscreen/share-rollback-store.js';
@@ -163,15 +164,15 @@ let custodyIntended = false;
 let custodyReconnectTimer = null;
 /** @type {Set<{ resolve: (port: import('webextension-polyfill').Runtime.Port) => void, reject: (reason: any) => void, timer: ReturnType<typeof setTimeout> }>} */
 const custodyWaiters = new Set();
-/** @type {Map<string, { resolve: (value: any) => void, reject: (reason: any) => void, timer: ReturnType<typeof setTimeout> }>} */
-const custodySecretPending = new Map();
+/** @type {Map<string, { type:string, resolve: (value: any) => void, reject: (reason: any) => void, timer: ReturnType<typeof setTimeout> }>} */
+const custodyKernelPending = new Map();
 
-const rejectCustodySecretPending = () => {
-  for (const entry of custodySecretPending.values()) {
+const rejectCustodyKernelPending = () => {
+  for (const entry of custodyKernelPending.values()) {
     clearTimeout(entry.timer);
     entry.reject(new Error('identity custody port disconnected'));
   }
-  custodySecretPending.clear();
+  custodyKernelPending.clear();
 };
 
 /** @param {string} reason */
@@ -199,44 +200,45 @@ const waitForCustodyPort = async () => {
   });
 };
 
-/** @param {'get'|'set'|'self-get'|'self-set'} operation @param {any} [args] */
-const callIdentitySecret = async (operation, args = {}) => {
+/** @param {string} operation @param {any} [args] @param {{parentOperationId?:string,onDispatched?:()=>void}} [context] */
+const callKernelEffect = async (operation, args = {}, context = {}) => {
   const port = await waitForCustodyPort();
   if (custodyPort !== port) throw new Error('identity custody port disconnected');
   const requestId = crypto.randomUUID();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
-      custodySecretPending.delete(requestId);
+      custodyKernelPending.delete(requestId);
       reject(new Error(`identity custody ${operation} timed out`));
     }, CUSTODY_TIMEOUT_MS);
-    custodySecretPending.set(requestId, { resolve, reject, timer });
+    custodyKernelPending.set(requestId, {
+      type: 'custody/effect-response', resolve, reject, timer,
+    });
     try {
+      const { onDispatched, ...wireContext } = context;
       port.postMessage({
-        type: 'custody/secret-request', requestId, operation, args,
+        type: 'custody/effect-request', requestId, operation, args, ...wireContext,
       });
+      onDispatched?.();
     } catch (cause) {
-      custodySecretPending.delete(requestId);
+      custodyKernelPending.delete(requestId);
       clearTimeout(timer);
       reject(cause);
     }
   });
 };
 
-// The self-device stack's vault surface. Same verified custody port as the
-// identity seed, different operation pair, and the SW's handler serves a
-// closed allowlist (background/dweb-self-custody.js): this document can
-// read its own device key and the person's discovery secret, and nothing
-// else. The device key never leaves here except as signatures.
+// The self-device stack gets only its fixed vault capabilities on the same
+// verified custody port. The device key never leaves here except as signatures.
 const selfSecretIo = {
   /** @param {string} name */
   getSecret: async (name) => {
-    const r = await callIdentitySecret('self-get', { name });
+    const r = await callKernelEffect('self/read', { name });
     if (!r?.ok) throw new Error(r?.error ?? 'self secret unavailable');
     return r.value ?? null;
   },
   /** @param {string} name @param {string} value */
   setSecret: async (name, value) => {
-    const r = await callIdentitySecret('self-set', { name, value });
+    const r = await callKernelEffect('self/write', { name, value });
     if (!r?.ok) throw new Error(r?.error ?? 'self secret store failed');
     if (name === 'distributed/self-records/v1' || name === 'distributed/self-discovery/v1') {
       // Do not await here: coordinator roster persistence itself uses this
@@ -302,12 +304,12 @@ const baseLifecycle = makeStartStopBarrier({
     try {
       const material = await client.identityMaterial({
         getSecret: async () => {
-          const r = await callIdentitySecret('get');
+          const r = await callKernelEffect('identity/read');
           if (!r?.ok) throw new Error(r?.error === 'vault-locked' ? 'vault is locked — unlock peerd first' : (r?.error ?? 'identity unavailable'));
           return r.value;
         },
         setSecret: async (/** @type {string} */ _n, /** @type {string} */ value) => {
-          const r = await callIdentitySecret('set', { value });
+          const r = await callKernelEffect('identity/create', { value });
           if (!r?.ok) throw new Error(r?.error ?? 'identity store failed');
         },
       });
@@ -378,44 +380,67 @@ const baseLifecycle = makeStartStopBarrier({
 
 const start = () => baseLifecycle.start();
 
-/** @param {'export'|'adopt'|'suspend'|'resume'|'reset'} operation @param {any} args */
-const runCustodyOperation = async (operation, args) => {
-  if (operation === 'suspend') {
-    if (typeof args?.leaseId !== 'string' || args.leaseId.length === 0) {
-      throw new Error('lease-required');
-    }
-    await selfHost.stop({ suspend: true });
-    await baseLifecycle.stop({ suspensionOwner: args.leaseId });
-    return { suspended: true };
-  }
-  if (operation === 'resume') {
-    if (typeof args?.leaseId !== 'string' || args.leaseId.length === 0) {
-      throw new Error('lease-required');
-    }
-    const resumed = baseLifecycle.resume(args.leaseId);
-    if (resumed) selfHost.resume();
-    return { resumed };
-  }
-  if (operation === 'reset') {
-    baseLifecycle.resetSuspension();
-    selfHost.resume();
-    return { reset: true };
-  }
+/** @param {'export'|'adopt'} operation @param {any} args */
+const runIdentityCrypto = async (operation, args) => {
   const client = await loadDweb();
   if (operation === 'export') {
-    if (!client.identityRecordExport) throw new Error('portable identity export is unsupported');
+    if (!client.identityRecordExport) throw new Error('portable-identity-export-unsupported');
     return client.identityRecordExport(args);
   }
-  if (operation === 'adopt') {
-    if (!client.identityRecordAdopt) throw new Error('portable identity restore is unsupported');
-    return client.identityRecordAdopt(args);
+  if (!client.identityRecordAdopt) throw new Error('portable-identity-restore-unsupported');
+  return client.identityRecordAdopt(args);
+};
+
+const stopIdentityRuntime = async (/** @type {string} */ leaseId) => {
+  await selfHost.stop({ suspend: true });
+  await baseLifecycle.stop({ suspensionOwner: leaseId });
+};
+
+const resumeIdentityRuntime = async (/** @type {string} */ leaseId) => {
+  if (!baseLifecycle.resume(leaseId)) throw new Error('identity-runtime-lease-conflict');
+  selfHost.resume();
+  await start();
+};
+
+const startIdentityRuntime = async (/** @type {string} */ leaseId) => {
+  await resumeIdentityRuntime(leaseId);
+};
+
+const recoverIdentityRuntime = (/** @type {string} */ leaseId) => {
+  if (!baseLifecycle.resume(leaseId)) throw new Error('identity-runtime-lease-conflict');
+  selfHost.resume();
+  void start().catch((error) => warn('identity runtime recovery failed:', error));
+  return baseLifecycle.snapshot();
+};
+
+const transferHost = makeDwebTransferHost({
+  callEffect: callKernelEffect,
+  runCrypto: runIdentityCrypto,
+  stopIdentityRuntime,
+  startIdentityRuntime,
+});
+
+/** @param {'export'|'prepare'|'adopt'} operation @param {any} args @param {{operationId:string,signal:AbortSignal,deadline:number}} context */
+const runCustodyOperation = (operation, args, context) => {
+  if (operation === 'export') return transferHost.exportRecord(args?.passphrase, context);
+  if (operation === 'prepare') {
+    return transferHost.prepareRecord(
+      args?.record, args?.passphrase, args?.options ?? {}, context,
+    );
   }
-  throw new Error('unknown identity custody operation');
+  if (operation === 'adopt') {
+    return transferHost.adoptRecord(
+      args?.record, args?.passphrase, args?.options ?? {}, context,
+    );
+  }
+  throw new Error('unknown-identity-custody-operation');
 };
 
 const custodyHost = makeDwebCustodyHost({
   runOperation: runCustodyOperation,
   readState: baseLifecycle.snapshot,
+  recoverOperation: recoverIdentityRuntime,
+  operationTimeoutMs: CUSTODY_TIMEOUT_MS - 5_000,
 });
 
 const scheduleCustodyReconnect = () => {
@@ -437,11 +462,11 @@ const connectCustodyPort = () => {
     }
     custodyWaiters.clear();
     port.onMessage.addListener((/** @type {any} */ message) => {
-      if (message?.type === 'custody/secret-response'
+      if (message?.type === 'custody/effect-response'
           && typeof message.requestId === 'string') {
-        const entry = custodySecretPending.get(message.requestId);
-        if (!entry) return;
-        custodySecretPending.delete(message.requestId);
+        const entry = custodyKernelPending.get(message.requestId);
+        if (!entry || entry.type !== message.type) return;
+        custodyKernelPending.delete(message.requestId);
         clearTimeout(entry.timer);
         if (message.ok) entry.resolve(message.result);
         else entry.reject(new Error(message.error ?? 'identity secret operation failed'));
@@ -452,7 +477,7 @@ const connectCustodyPort = () => {
     port.onDisconnect.addListener(() => {
       if (custodyPort === port) {
         custodyPort = null;
-        rejectCustodySecretPending();
+        rejectCustodyKernelPending();
       }
       scheduleCustodyReconnect();
     });
@@ -472,7 +497,7 @@ const disconnectCustodyPort = () => {
   if (custodyReconnectTimer !== null) clearTimeout(custodyReconnectTimer);
   custodyReconnectTimer = null;
   rejectCustodyWaiters('dweb feature lease ended');
-  rejectCustodySecretPending();
+  rejectCustodyKernelPending();
   const previous = custodyPort;
   custodyPort = null;
   try { previous?.disconnect(); } catch { /* already disconnected */ }

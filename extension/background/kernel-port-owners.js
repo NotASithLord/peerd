@@ -3,7 +3,6 @@
 import {
   coldPortNamesFor, KERNEL_PORT_CLASSES,
 } from './cold-kernel-inventory.js';
-import { makeBoundedModuleLoader } from '../shared/bounded-module-load.js';
 
 /** @type {Readonly<Record<string,string>>} */
 const OWNER_NAMES = Object.freeze({
@@ -148,86 +147,5 @@ export const createKernelUiPortOwner = ({
       }
       void Promise.resolve(onUiConnect(port)).catch(() => {});
     },
-  });
-};
-
-/** @param {any} port */
-const bufferDwebPort = (port) => {
-  /** @type {any[]} */ const queued = [];
-  /** @type {Set<(event:any)=>void>} */ const messages = new Set();
-  /** @type {Set<()=>void>} */ const disconnects = new Set();
-  let disconnected = false;
-  port.onMessage.addListener((/** @type {any} */ message) => {
-    if (messages.size === 0) {
-      if (queued.length >= 64) { disconnect(port); return; }
-      queued.push(message);
-      return;
-    }
-    for (const listener of messages) listener(message);
-  });
-  port.onDisconnect.addListener(() => {
-    disconnected = true;
-    for (const listener of disconnects) listener();
-  });
-  return Object.freeze({
-    get name() { return port.name; }, get sender() { return port.sender; },
-    postMessage: (/** @type {any} */ message) => port.postMessage(message),
-    disconnect: () => port.disconnect(),
-    onMessage: Object.freeze({ addListener(/** @type {(event:any)=>void} */ listener) {
-      messages.add(listener);
-      while (queued.length > 0) listener(queued.shift());
-    } }),
-    onDisconnect: Object.freeze({ addListener(/** @type {()=>void} */ listener) {
-      disconnects.add(listener);
-      if (disconnected) listener();
-    } }),
-  });
-};
-
-/** @param {any} deps */
-export const createKernelDwebCustodyOwner = ({ enabled, load, timeoutMs = 15_000 }) => {
-  if (typeof enabled !== 'boolean' || typeof load !== 'function') {
-    throw new TypeError('kernel-dweb-custody-owner-config-invalid');
-  }
-  const runtime = makeBoundedModuleLoader(async () => {
-    const value = await load();
-    if (typeof value?.attachDwebCustody !== 'function'
-        || typeof value?.dwebTransfer?.exportRecord !== 'function'
-        || typeof value.dwebTransfer.prepareRecord !== 'function'
-        || typeof value.dwebTransfer.adoptRecord !== 'function'
-        || typeof value.withIdentityMutation !== 'function') {
-      throw new TypeError('kernel-dweb-custody-runtime-invalid');
-    }
-    return value;
-  }, {
-    timeoutMs,
-    loadCode: 'kernel-dweb-custody-load-failed',
-    timeoutCode: 'kernel-dweb-custody-load-timeout',
-  });
-  let generation = 0;
-  /** @type {any|null} */ let active = null;
-  const attachDwebCustody = (/** @type {any} */ port) => {
-    if (!enabled || !port || typeof port.postMessage !== 'function'
-        || typeof port.disconnect !== 'function'
-        || typeof port.onMessage?.addListener !== 'function'
-        || typeof port.onDisconnect?.addListener !== 'function') {
-      throw new TypeError('kernel-dweb-custody-port-invalid');
-    }
-    const owned = bufferDwebPort(port);
-    const token = ++generation;
-    if (active && active !== port) disconnect(active);
-    active = port;
-    port.onDisconnect.addListener(() => { if (active === port) active = null; });
-    void runtime().then((value) => {
-      if (token === generation && active === port) value.attachDwebCustody(owned);
-    }).catch(() => {
-      if (active === port) active = null;
-      disconnect(port);
-    });
-  };
-  const getDwebLive = async () => enabled ? runtime() : null;
-  return Object.freeze({
-    attachDwebCustody, getDwebLive,
-    getDwebTransfer: async () => (await getDwebLive())?.dwebTransfer ?? null,
   });
 };

@@ -46,7 +46,7 @@ const CROSS_MODULE_IMPORT = {
   // A few pure leaves are deliberate public surfaces. Naming each one avoids
   // a one-line re-export module in the MV3 cold graph without widening any
   // sibling package path.
-  regex: '(^|/)peerd-(?!runtime/(?:administrative|controller(?:-administrative|-turn)?|semantic|skills)\\.js$|runtime/contacts/(?:store|aggregate)\\.js$|runtime/observability/contributor-store\\.js$|engine/(?:app-assets|artifact|app-manifest)\\.js$|egress/(?:kernel-storage\\.js|confirm/protocol\\.js)$)[a-z]+/(?!index\\.js$|background\\.js$|offscreen\\.js$|repository\\.js$|kernel(?:-memory|-network)?\\.js$|ui\\.js$).+',
+  regex: '(^|/)peerd-(?!runtime/(?:administrative|controller(?:-administrative|-turn)?|kernel-executable|semantic|skills)\\.js$|runtime/contacts/(?:store|aggregate)\\.js$|runtime/observability/contributor-store\\.js$|engine/(?:app-assets|artifact|app-manifest)\\.js$|egress/(?:kernel-storage\\.js|confirm/protocol\\.js)$)[a-z]+/(?!index\\.js$|background\\.js$|offscreen\\.js$|repository\\.js$|kernel(?:-memory|-network)?\\.js$|ui\\.js$).+',
   message: 'Cross-module imports must go through a declared /peerd-<name> public entry point.',
 };
 // The dweb module is stricter: NOTHING outside it may import it — not even its

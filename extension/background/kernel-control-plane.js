@@ -72,7 +72,6 @@ export { makeKernelGenerationLifecycle } from './kernel-generation.js';
 export { makeKernelDemandRoutes } from './kernel-demand-routes.js';
 export { createKernelPortRouter } from './kernel-port-router.js';
 export {
-  createKernelDwebCustodyOwner,
   createKernelPortOwners,
   createKernelUiPortOwner,
 } from './kernel-port-owners.js';

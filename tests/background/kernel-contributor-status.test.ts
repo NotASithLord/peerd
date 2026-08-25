@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   createPreviewContributorAuthority,
-} from '../../extension/background/kernel-update-addon.js';
+} from '../../extension/background/kernel-preview-addon.js';
 import { acceptContributorOffer } from '../../extension/offscreen/semantic-routes/contributor.js';
 import {
   CONTRIBUTOR_CHANNEL_CALL, CONTRIBUTOR_CHANNEL_PROTOCOL,
@@ -60,9 +60,10 @@ describe('Preview Contributor Metrics private channel', () => {
   test('target addon is update plus one fixed contributor capability', () => {
     const addon = (globalThis as any)[Symbol.for('peerd.kernel.target-addon.v1')];
     expect(addon).toMatchObject({
-      target: 'preview-chrome', update: expect.any(Function), contributor: expect.any(Function),
+      target: 'preview-chrome', update: expect.any(Function),
+      dwebCustody: expect.any(Function), contributor: expect.any(Function),
     });
-    expect(Object.keys(addon).sort()).toEqual(['contributor', 'target', 'update']);
+    expect(Object.keys(addon).sort()).toEqual(['contributor', 'dwebCustody', 'target', 'update']);
   });
 
   test('returns canonical status without exposing consent or aggregate custody', async () => {

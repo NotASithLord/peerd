@@ -17,9 +17,11 @@ export class PrivateTransferPortError extends Error {
  * @param {() => import('webextension-polyfill').Runtime.Port} [deps.connect]
  * @param {() => string} [deps.newRequestId]
  * @param {number} [deps.timeoutMs]
+ * @param {number} [deps.transferTimeoutMs]
  */
 export const makePrivateTransferClient = ({
   requestChannel, connect, newRequestId = () => crypto.randomUUID(), timeoutMs = 60_000,
+  transferTimeoutMs = Math.max(timeoutMs, 240_000),
 }) => {
   /** @type {MessagePort | import('webextension-polyfill').Runtime.Port | null} */
   let port = null;
@@ -143,7 +145,8 @@ export const makePrivateTransferClient = ({
         pending.delete(requestId);
         dropPort(active);
         reject(new PrivateTransferPortError('backup request timed out', 'timeout'));
-      }, timeoutMs);
+      }, message.type === 'transfer/export' || message.type === 'transfer/import'
+        ? transferTimeoutMs : timeoutMs);
       pending.set(requestId, { resolve, reject, timer });
       try {
         active.postMessage({ type: 'private-transfer/request', requestId, message });

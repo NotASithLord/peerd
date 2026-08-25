@@ -606,7 +606,44 @@ describe('dweb identity section', () => {
     });
   });
 
-  test('a committed identity with runtime recovery pending returns success and a notice', async () => {
+  test('an uncertain final identity commit preserves partial counts and outcome', async () => {
+    let identityCalls = 0;
+    const result = await applyImport({
+      payload: makePayload({
+        settings: { devMode: true }, memory: null, hooks: [],
+        dweb: { identityRecord: record },
+      }),
+      passphrase: 'pw123456', channel: 'preview', knownSettingKeys: KNOWN_KEYS,
+      io: {
+        applySettings: async () => {}, setProviderEndpoints: async () => {},
+        setSecret: async () => {}, importMemory: async () => ({ written: 0, skipped: 0 }),
+        saveHook: async () => {},
+        adoptDwebIdentity: async () => {
+          identityCalls += 1;
+          if (identityCalls === 1) {
+            return {
+              adopted: true, reason: 'replaced', did: record.did,
+              existingDid: 'did:key:zOld', incomingDid: record.did,
+            };
+          }
+          throw Object.assign(new Error('commit uncertain'), {
+            name: 'IdentityTransferError', code: 'identity-store-outcome-unknown',
+            outcomeKnown: false,
+          });
+        },
+      },
+      replaceDwebIdentity: true,
+      approvedExistingDwebDid: 'did:key:zOld', approvedIncomingDwebDid: record.did,
+    });
+    expect(result).toMatchObject({
+      ok: false, error: 'import-partial',
+      failure: 'dweb-identity-identity-store-outcome-unknown',
+      partial: { settings: 1, dwebIdentity: 0 },
+      identityOutcome: 'unknown', outcomeKnown: false,
+    });
+  });
+
+  test('a committed identity reports runtime recovery without promising a retry', async () => {
     let identityCalls = 0;
     const result = await applyImport({
       payload: makePayload({ memory: null, hooks: [], dweb: { identityRecord: record } }),
@@ -630,7 +667,7 @@ describe('dweb identity section', () => {
       ok: true, identityOutcome: 'restored', runtimeRecoveryPending: true,
     });
     if (!result.ok || !('notices' in result)) throw new Error('expected notices');
-    expect((result.notices ?? []).join(' ')).toContain('peer network is still recovering');
+    expect((result.notices ?? []).join(' ')).not.toContain('retry automatically');
   });
 
   test('crafted generic secrets cannot overwrite identity custody records', async () => {

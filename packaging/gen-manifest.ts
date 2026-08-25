@@ -38,7 +38,7 @@ export const targetBackgroundEntry = (
   entry: string, channel: GenChannel, browser: GenBrowser,
 ): string => entry !== NATIVE_BACKGROUND_ENTRY ? entry
   : browser === 'firefox' ? FIREFOX_BACKGROUND_ENTRY
-  : channel === 'preview' ? PREVIEW_CHROME_BACKGROUND_ENTRY : entry;
+  : channel !== 'store' ? PREVIEW_CHROME_BACKGROUND_ENTRY : entry;
 
 // Keys Chrome doesn't know (would log warnings on load) get stripped from
 // chromium manifests; keys Chrome owns get stripped from Firefox ones.

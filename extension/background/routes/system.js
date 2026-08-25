@@ -129,6 +129,7 @@ export const makeSystemRoutes = (deps) => {
       } catch (e) {
         if (e instanceof ExportPassphraseError) return { ok: false, error: 'wrong-passphrase' };
         if ((/** @type {{ name?: string, code?: string }} */ (e))?.name === 'IdentityTransferError') {
+          if ((/** @type {{ outcomeKnown?: boolean }} */ (e)).outcomeKnown === false) throw e;
           return { ok: false, error: `dweb-identity-${(/** @type {{ code?: string }} */ (e)).code ?? 'transfer-failed'}` };
         }
         throw e;

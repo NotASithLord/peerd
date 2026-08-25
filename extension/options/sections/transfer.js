@@ -373,7 +373,7 @@ export const TransferSection = {
             'not-present': '',
           }))[reply.identityOutcome ?? 'not-present'] ?? '';
           const recoveryText = reply.runtimeRecoveryPending
-            ? ' The peer network is still recovering. Keep peerd open; it will retry automatically.'
+            ? ' Peer network restart pending.'
             : '';
           ui.importMsg = {
             ok: true,

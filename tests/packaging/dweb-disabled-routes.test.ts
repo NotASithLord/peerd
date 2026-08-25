@@ -166,11 +166,13 @@ describe('dweb-disabled route factories', () => {
       copyFileSync(template, target);
     }
     expect(dwebDisabledTemplateFailures(root)).toEqual([]);
+    write(root, 'offscreen/dweb-transfer-host.js', '// leaked\n');
     writeFileSync(join(root, 'background/routes/dweb.js'), '// changed\n');
     rmSync(join(root, 'background/routes/dweb-self.js'));
     expect(dwebDisabledTemplateFailures(root)).toEqual([
       'background/routes/dweb.js is NOT the committed disabled template',
       'background/routes/dweb-self.js missing from artifact',
+      'offscreen/dweb-transfer-host.js present in dweb-disabled artifact',
     ]);
   });
 
