@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // click — click an element matching a CSS selector on the target tab.
 //
 // V1 implementation uses chrome.scripting.executeScript to dispatch a
@@ -41,47 +43,7 @@ import { browserDocumentRefusalFrom, formSubmissionRefusalFrom } from '../browse
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const clickTool = {
-  name: 'click',
-  primitive: 'tab',
-  description: [
-    'Click an element on a tab. Selector is a standard CSS selector;',
-    'get good selectors from read_page or query_dom. Dispatches a full',
-    'pointerdown / mousedown / mouseup / click sequence (not just el.click())',
-    'so framework event handlers fire. Scrolls the element into view first.',
-    'Native forms that submit to another origin are left for the user to',
-    'review and submit manually.',
-    'Optional `nth` (0-indexed) targets one match when the selector is',
-    'ambiguous. By default acts on the active tab.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      ref: {
-        type: 'string',
-        description: 'PREFERRED. An element ref from a snapshot (e.g. "@e3"). Resolved to the exact node via CDP — no selector ambiguity. Use this when you took a snapshot of the tab.',
-      },
-      selector: {
-        type: 'string',
-        description: 'CSS selector identifying the element to click (from read_page / query_dom). Use when you have a selector instead of a snapshot ref. One of ref|selector is required.',
-      },
-      nth: {
-        type: 'integer',
-        description: 'Optional 0-indexed match to click when the SELECTOR matches multiple elements (default 0 = first match). Ignored for ref.',
-      },
-      expectedCount: {
-        type: 'integer',
-        minimum: 1,
-        description: 'Optional deterministic guard: fail before clicking unless the target resolves to exactly this many elements (the selector match count; a walk ref resolves to 0 or 1).',
-      },
-      tabId: {
-        type: 'integer',
-        description: 'Optional tab id; defaults to the active tab.',
-      },
-    },
-  },
-  sideEffect: 'write',
-  origins: (_args, ctx) => ctx.activeTab?.origin ? [ctx.activeTab.origin] : [],
+export const clickTool = composeTool("click", {
 
   execute: async (args, ctx) => {
     const tab = await resolveTargetTab(args, ctx);
@@ -225,7 +187,7 @@ export const clickTool = {
       }, null, 2),
     };
   },
-};
+});
 
 /**
  * @param {string | null} selector

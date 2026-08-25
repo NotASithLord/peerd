@@ -1,27 +1,13 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // app_delete — destroy an App.
 //
 // Closes the tab (if open), drops the IDB body, removes the metadata
 // record. Irreversible. Use after confirming with the user.
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const appDeleteTool = {
-  name: 'app_delete',
-  primitive: 'app',
-  description: [
-    'Delete an App: closes its tab, drops the IDB body, removes the',
-    'catalog entry. Irreversible. Use only after confirming with the',
-    'user — there is no undo once the body is gone.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      appId: { type: 'string', description: 'App id to delete.' },
-    },
-    required: ['appId'],
-  },
-  sideEffect: 'destructive',
-  origins: () => [],
+export const appDeleteTool = composeTool("app_delete", {
 
   execute: async (args, ctx) => {
     if (typeof args?.appId !== 'string') return { ok: false, error: 'appId_required' };
@@ -44,4 +30,4 @@ export const appDeleteTool = {
       return { ok: false, error: `app_delete_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
   },
-};
+});

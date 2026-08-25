@@ -1,25 +1,10 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // app_open — focus or spawn the tab for an App.
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const appOpenTool = {
-  name: 'app_open',
-  primitive: 'app',
-  description: [
-    'Open an App in a tab on supported Chrome. It opens in the BACKGROUND and a "go there" card',
-    'appears in the chat (peerd never yanks the user to a new tab — they click',
-    'to go). Apps cannot run on Firefox yet; tell the user to open peerd in Chrome.',
-    'Becomes the chat\'s current app for follow-up app_update calls.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      appId: { type: 'string', description: 'App id to open.' },
-    },
-    required: ['appId'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const appOpenTool = composeTool("app_open", {
 
   execute: async (args, ctx) => {
     if (typeof args?.appId !== 'string') return { ok: false, error: 'appId_required' };
@@ -39,4 +24,4 @@ export const appOpenTool = {
       return { ok: false, error: `app_open_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
   },
-};
+});

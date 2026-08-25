@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // dweb_discover — list the Apps peers are sharing on the dweb right now.
 //
 // Read-only window onto the peer-to-peer app store: the gossip-heard cache plus
@@ -27,19 +29,7 @@
  */
 
 /** @type {DwebTool} */
-export const dwebDiscoverTool = {
-  name: 'dweb_discover',
-  primitive: 'dweb',
-  dweb: true,
-  description: [
-    'List Apps peers are sharing on the dweb right now — the peer-to-peer app',
-    'store. Returns each app\'s name, publisher, and peerd:// uri (pass the uri to',
-    'dweb_install). Read-only. Returns an empty list if no peers are sharing or the',
-    'base network is not up yet.',
-  ].join(' '),
-  schema: { type: 'object', properties: {} },
-  sideEffect: 'read',
-  origins: () => [],
+export const dwebDiscoverTool = composeTool("dweb_discover", {
 
   execute: async (_args, ctx) => {
     // why: ctx.dweb is an SW-injected slot (null when the dweb is off) absent
@@ -59,4 +49,4 @@ export const dwebDiscoverTool = {
     }));
     return { ok: true, content: JSON.stringify({ count: apps.length, apps }, null, 2) };
   },
-};
+});

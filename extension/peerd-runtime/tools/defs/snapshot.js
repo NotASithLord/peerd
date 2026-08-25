@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // snapshot — read a tab as an ACCESSIBILITY-TREE snapshot with element refs.
 //
 // The a11y-tree-+-refs paradigm (DOM nav Phase 1). Where read_page hands
@@ -35,30 +37,7 @@ import { diffSnapshots } from '../../dom/snapshot-diff.js';
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const snapshotTool = {
-  name: 'snapshot',
-  primitive: 'tab',
-  description: [
-    'Read a tab as an ACCESSIBILITY-TREE snapshot: a compact semantic view',
-    '(roles, names, state) where every interactable element is tagged with',
-    'an opaque ref like @e1, @e2. PREFER THIS over read_page when you intend',
-    'to ACT — pick a ref and pass it to click ({ref:"@e3"}); the harness',
-    'resolves the ref to the real node (no CSS selectors, no "selector not',
-    'found"). State shows inline ([disabled], value="…", [checked],',
-    '[expanded]) so you can gate decisions ("is Send enabled yet?"). Refs',
-    'are valid until the NEXT snapshot of this tab — re-snapshot after a',
-    'navigation or a large DOM change. Defaults to the active tab.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      tabId: { type: 'integer', description: 'Optional tab id; defaults to the active tab.' },
-      budget: { type: 'integer', description: 'Optional char budget for the snapshot text (default 8000). Lower it on very large pages.' },
-      diff: { type: 'boolean', description: 'If true, return only what CHANGED since your last snapshot of this tab (+ added, ~ changed, - removed) instead of the full tree. Cheap way to see the result of an action. Refs are still refreshed.' },
-    },
-  },
-  sideEffect: 'read',
-  origins: (_args, ctx) => (ctx.activeTab?.origin ? [ctx.activeTab.origin] : []),
+export const snapshotTool = composeTool("snapshot", {
 
   execute: async (args, ctx) => {
     const tab = await resolveTargetTab(args, ctx);
@@ -104,4 +83,4 @@ export const snapshotTool = {
       content: wrapUntrusted({ origin, tool: 'snapshot', body: header + text }),
     };
   },
-};
+});

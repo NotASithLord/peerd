@@ -1,28 +1,13 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // js_delete — destroy a Notebook.
 //
 // Closes the tab, removes the registry entry, and drops both the OPFS working
 // tree and its sibling Git object store.
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const jsDeleteTool = {
-  name: 'js_delete',
-  primitive: 'notebook',
-  description: [
-    'Delete a Notebook: closes its tab and removes the catalog entry.',
-    'Any chat with this as its current Notebook loses that pointer (their',
-    'next js_notebook auto-creates a fresh Notebook). Use after confirming',
-    'with the user — there is no recovery once destroyed.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      notebookId: { type: 'string', description: 'Notebook id to delete.' },
-    },
-    required: ['notebookId'],
-  },
-  sideEffect: 'destructive',
-  origins: () => [],
+export const jsDeleteTool = composeTool("js_delete", {
 
   execute: async (args, ctx) => {
     // why: jsRegistry / jsTabTracker ride the opaque ctx contract (not on the
@@ -58,4 +43,4 @@ export const jsDeleteTool = {
       content: JSON.stringify({ deleted: { id: args.notebookId, name: rec.name } }, null, 2),
     };
   },
-};
+});

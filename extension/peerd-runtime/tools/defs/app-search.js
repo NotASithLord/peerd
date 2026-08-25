@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // app_search — substring search across saved Apps.
 //
 // Searches BOTH metadata (name, tags) and body HTML. Returns ranked
@@ -9,24 +11,7 @@ import { serializeListResult } from './columnar.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const appSearchTool = {
-  name: 'app_search',
-  primitive: 'app',
-  description: [
-    'Search saved Apps by name, tags, and body text (substring,',
-    'case-insensitive). Returns up to 20 ranked matches with a short',
-    'snippet from the body when the hit was in the HTML. Use when the',
-    'user vaguely references a past app ("the chart I had you make").',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      query: { type: 'string', description: 'Search text.' },
-    },
-    required: ['query'],
-  },
-  sideEffect: 'read',
-  origins: () => [],
+export const appSearchTool = composeTool("app_search", {
 
   execute: async (args, ctx) => {
     if (typeof args?.query !== 'string' || !args.query.trim()) {
@@ -67,4 +52,4 @@ export const appSearchTool = {
       return { ok: false, error: `app_search_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
   },
-};
+});

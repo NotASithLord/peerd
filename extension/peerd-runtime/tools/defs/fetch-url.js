@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // fetch_url — the web actor's secure fetch (its non-render web mechanism).
 //
 // The cheaper of the web actor's two mechanisms (the other is open + drive a tab).
@@ -65,46 +67,7 @@ const stripSessionHeaders = (headers) => {
 };
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const fetchUrlTool = {
-  name: 'fetch_url',
-  primitive: 'web',
-  description: [
-    'Secure fetch: a direct GET/POST to a URL — no tab, no rendering. The cheaper of',
-    'your two web mechanisms. SESSIONLESS for every cross-origin request and whenever',
-    "you own no tab (no cookies); it carries the user's session ONLY for a request",
-    'same-origin to the tab you currently own. Use it for data reachable WITHOUT login',
-    '(public / JSON APIs, RSS, static content, an endpoint a page just wraps). For a',
-    'target you have NOT yet rendered that needs the login, or one that only renders',
-    'client-side, drive a tab instead — but once you HAVE rendered a site, fetch_url',
-    "carries its session, so hit that SAME origin's endpoints here instead of",
-    're-scraping. Rides the denylist + SSRF + audit egress chain; does NOT follow',
-    'redirects. Returns status, final URL, body + parsed JSON (capped 16k). HTML',
-    'is extracted to clean markdown by default (raw:true for the full HTML). A DOCUMENT',
-    'FILE (.docx/.xlsx/.pptx/.odt/.rtf/.epub, or a PDF) is not readable here — those',
-    'come back as binary; read_doc and read_pdf open them.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    required: ['url'],
-    properties: {
-      url: { type: 'string', description: 'Absolute URL (must include an http(s) scheme).' },
-      method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'], description: 'HTTP method. Default GET. Any non-GET is an outbound write and crosses the shared web:write confirm.' },
-      raw: { type: 'boolean', description: 'HTML responses are extracted to clean markdown by default (boilerplate stripped). Pass true to get the raw HTML instead — e.g. when you need markup, attributes, or embedded script/JSON the extraction would drop.' },
-      query: { type: 'string', description: 'What you are looking for on this page (a few keywords). When the page is too long to show whole, the most relevant passages are surfaced (BM25) instead of a blind head+tail window — so a mid-page answer is not missed. Omit to get the head+tail window.' },
-      headers: {
-        type: 'object',
-        description: 'Request headers. Tool-supplied Cookie / Authorization are always stripped (you cannot inject a credential). Content-Type is set automatically for JSON bodies.',
-      },
-      body: { description: 'Request body. If an object, it is JSON-stringified and Content-Type is set.' },
-    },
-  },
-  // read, like call_api — the non-GET write is gated INSIDE via the shared
-  // web:write confirm, not the mutate_external egress hook.
-  sideEffect: 'read',
-  origins: (args) => {
-    const o = originOfUrl(args?.url);
-    return o ? [o] : [];
-  },
+export const fetchUrlTool = composeTool("fetch_url", {
   execute: async (args, ctx) => {
     if (typeof args?.url !== 'string' || !args.url) return { ok: false, error: 'url_required' };
     let parsed;
@@ -329,4 +292,4 @@ export const fetchUrlTool = {
       };
     }
   },
-};
+});

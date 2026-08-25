@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // js_notebook — run JS in a Notebook.
 //
 // Code runs in the worker's JS realm as an `async () => { code }`
@@ -33,45 +35,7 @@ const MAX_TIMEOUT_MS = 120_000;
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const jsNotebookTool = {
-  name: 'js_notebook',
-  primitive: 'notebook',
-  description: [
-    'Run JS in a Notebook — a VISIBLE tab the user watches (CodeMirror editor +',
-    'output pane + file tree), backed by a Web Worker + OPFS. Opens/focuses that',
-    'tab. For a quick result with NO tab (headless, ephemeral), use script',
-    'instead. The code is an async function body — top-level await works and',
-    '`return <value>` sends the result back. ✅ parsing, transforms, numeric work,',
-    'exercising a library. ❌ DOM (no document/window — use sandbox_create kind:"app") or',
-    'npm/native modules. EACH CALL IS A FRESH WORKER — module state does NOT',
-    'persist; write to OPFS via peerd.self.writeFile and read it back. Inside:',
-    'peerd.egress.fetch (audited HTTP), peerd.self.readFile/writeFile/listFiles;',
-    'literal relative static imports work across supported packaged browsers.',
-    'Literal HTTPS imports work only where the package enables them, always',
-    'under compute-only restrictions. Dynamic, computed, and attributed imports',
-    'do not. No `notebook` arg → the chat\'s',
-    'current Notebook. Returns the return value, console output, and any error.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      code: {
-        type: 'string',
-        description: 'JS code to evaluate. Async function body.',
-      },
-      notebook: {
-        type: 'string',
-        description: 'Optional. Notebook id or name to target.',
-      },
-      timeoutMs: {
-        type: 'integer',
-        description: 'Wall-clock cap in ms (default 30000, max 120000).',
-      },
-    },
-    required: ['code'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const jsNotebookTool = composeTool("js_notebook", {
 
   execute: async (args, ctx) => {
     if (typeof args?.code !== 'string' || args.code.length === 0) {
@@ -149,7 +113,7 @@ export const jsNotebookTool = {
       return { ok: false, error: `js_notebook_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
     }
   },
-};
+});
 
 /**
  * @param {string} code

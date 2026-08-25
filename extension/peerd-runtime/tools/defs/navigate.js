@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // navigate — change the URL of the target tab and wait for load.
 //
 // V1 semantics:
@@ -52,40 +54,7 @@ const NAV_TIMEOUT_MS = 30_000;
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const navigateTool = {
-  name: 'navigate',
-  primitive: 'tab',
-  description: [
-    'Navigate the target tab to an http(s) URL. OPENS the tab if you do not',
-    'own one yet (the web actor starts tabless: navigate is how you go from',
-    'fetch-only to a rendered page — there is no separate open-tab tool and',
-    'you never need one). Waits up to 30s for the page to finish loading.',
-    'Returns the final URL (may differ from the requested URL after',
-    'redirects).',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      url: {
-        type: 'string',
-        description: 'Absolute http(s) URL to navigate to (must include scheme).',
-      },
-      tabId: {
-        type: 'integer',
-        description: 'Optional tab id; defaults to the active tab.',
-      },
-    },
-    required: ['url'],
-  },
-  sideEffect: 'write',
-  origins: (args, ctx) => {
-    /** @type {string[]} */
-    const out = [];
-    if (ctx.activeTab?.origin) out.push(ctx.activeTab.origin);
-    const dest = originOfUrl(args?.url);
-    if (dest && !out.includes(dest)) out.push(dest);
-    return out;
-  },
+export const navigateTool = composeTool("navigate", {
 
   execute: async (args, ctx) => {
     // why: classify before tab resolution because resolution can probe the
@@ -355,7 +324,7 @@ export const navigateTool = {
       }, null, 2),
     };
   },
-};
+});
 
 /**
  * Reset a refused committed page without claiming success until the browser

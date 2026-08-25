@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // page_keys — dispatch real, trusted keyboard events via CDP.
 //
 // JS-synthesized KeyboardEvents (the kind dispatchEvent produces) carry
@@ -54,44 +56,7 @@ const MODIFIER_BITS = {
 };
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const pageKeysTool = {
-  name: 'page_keys',
-  primitive: 'tab',
-  description: [
-    'Trusted keyboard shortcuts are currently unavailable. CDP can create',
-    'isTrusted=true events, but it cannot bind them to a verified document,',
-    'so this tool refuses without sending keys if the tab could change.',
-    'Use type with a selector or element ref for form input.',
-    '',
-    '`keys` is a space-separated sequence of key tokens. Each token',
-    'is `+`-joined modifiers ending in the base key:',
-    '  "Shift+I"            single combo',
-    '  "g i"                sequence: g then i',
-    '  "* u"                Gmail: select-all-unread',
-    '  "Cmd+K"              command palette',
-    '  "Escape"             single key',
-    '  "ArrowDown ArrowDown Enter"   navigate + select',
-    '',
-    'Modifiers: Shift, Ctrl/Control, Alt, Meta/Cmd/Command/Super/Win.',
-    'For typing free-form text into an input, use the `type` tool',
-    'instead — it\'s cheaper and doesn\'t need the debugger banner.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      keys: {
-        type: 'string',
-        description: 'Space-separated sequence of key tokens (e.g. "Shift+I", "g i", "* u", "Cmd+K Enter"). Max 1000 chars.',
-      },
-      tabId: {
-        type: 'integer',
-        description: 'Optional tab id; defaults to the active tab.',
-      },
-    },
-    required: ['keys'],
-  },
-  sideEffect: 'write',
-  origins: (_args, ctx) => ctx.activeTab?.origin ? [ctx.activeTab.origin] : [],
+export const pageKeysTool = composeTool("page_keys", {
 
   execute: async (args, ctx) => {
     if (typeof args?.keys !== 'string' || args.keys.length === 0) {
@@ -136,7 +101,7 @@ export const pageKeysTool = {
     }), { effectCompleted: false });
 
   },
-};
+});
 
 /**
  * Parse a "keys" string into CDP-event objects.

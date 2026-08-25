@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // site_capture: record the page's OWN network traffic while you drive it, then
 // digest it into a draft SITE CLIENT dossier (DESIGN-19 Phase 2).
 //
@@ -18,28 +20,7 @@ import { wrapUntrusted } from '../prompt-wrap.js';
 import { browserDocumentIdentity, originOfUrl, resolveTargetTab } from './dom-helpers.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const siteCaptureTool = {
-  name: 'site_capture',
-  primitive: 'web',
-  description: [
-    'Record the API traffic a page makes while YOU drive it, to derive a reusable',
-    'site client. Load the page first, then { action: "start" } begins recording',
-    'on that document. Use click/type without navigating; navigation cancels and',
-    'discards the capture. { action: "stop" } returns a',
-    'redacted endpoint inventory (credentials are never captured). Turn that inventory',
-    'into a client with site_client_write. It records the tab origin and a common',
-    'api. sibling as separately attributed evidence. Only the exact-origin actor',
-    'may verify and persist each client. Open the site first (navigate).',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    required: ['action'],
-    properties: {
-      action: { type: 'string', enum: ['start', 'stop'], description: 'start recording, or stop and get the digest.' },
-    },
-  },
-  sideEffect: 'read',
-  origins: () => [],
+export const siteCaptureTool = composeTool("site_capture", {
   execute: async (args, ctx) => {
     const action = args?.action;
     if (action !== 'start' && action !== 'stop') return { ok: false, error: 'action_must_be_start_or_stop' };
@@ -124,7 +105,7 @@ export const siteCaptureTool = {
       return { ok: false, error: `site_capture_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
   },
-};
+});
 
 /**
  * Capture the owned origin plus the common API sibling as separately

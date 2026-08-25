@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // Clock tools: now, wait_until.
 //
 // On-demand precision for when the per-turn temporal block isn't enough.
@@ -26,17 +28,7 @@ import { formatDelta, isoSecondsZ, parseDuration } from './now.js';
 const WAIT_MAX_MS = 60 * 60 * 1000;
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const nowTool = {
-  name: 'now',
-  primitive: 'time',
-  description: [
-    'Get the current ISO timestamp, timezone, and day-of-week.',
-    'Use when the per-turn <time> line is not enough precision; to',
-    'measure an interval, call now() twice and subtract.',
-  ].join(' '),
-  schema: { type: 'object', properties: {} },
-  sideEffect: 'read',
-  origins: () => [],
+export const nowTool = composeTool("now", {
   execute: async () => {
     const ms = Date.now();
     const d = new Date(ms);
@@ -50,30 +42,10 @@ export const nowTool = {
       }, null, 2),
     };
   },
-};
+});
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const waitUntilTool = {
-  name: 'wait_until',
-  primitive: 'time',
-  description: [
-    'Block the agent for a duration ("47s", "5m", "1h30m") or until an',
-    'absolute ISO timestamp ("2026-06-05T14:34:21Z"). Hard cap: 1 hour.',
-    'Use for "wait then check again" patterns (rate-limit cool-down, ',
-    'monitoring an external state that updates on its own).',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    required: ['when'],
-    properties: {
-      when: {
-        type: 'string',
-        description: 'Duration ("5m") or absolute ISO timestamp ("2026-06-05T14:34:21Z").',
-      },
-    },
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const waitUntilTool = composeTool("wait_until", {
   execute: async ({ when }) => {
     if (typeof when !== 'string' || !when) {
       return { ok: false, error: 'wait_until requires a duration or ISO timestamp string.' };
@@ -100,7 +72,7 @@ export const waitUntilTool = {
       }, null, 2),
     };
   },
-};
+});
 
 /** @type {import('/shared/tool-types.js').Tool[]} */
 export const CLOCK_TOOLS = [nowTool, waitUntilTool];

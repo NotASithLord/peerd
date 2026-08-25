@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // app_update — modify an existing App.
 //
 // Convenience: replace the entry file's content (HTML) and/or rename.
@@ -9,31 +11,7 @@
 const MAX_HTML_CHARS = 1_000_000;
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const appUpdateTool = {
-  name: 'app_update',
-  primitive: 'app',
-  description: [
-    'Update an existing App: replace its entry file (index.html by',
-    'default) with new HTML, and/or rename/retag. If the user has the',
-    'app\'s tab open, it reloads automatically so the change shows live.',
-    'Without an explicit `appId`, targets the chat\'s current app.',
-    '',
-    'For per-file edits (e.g. just style.css), use app_write_file.',
-    'For granular file ops, use app_read_file / app_list_files /',
-    'app_delete_file.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      appId: { type: 'string', description: 'App id to update (default: current).' },
-      name: { type: 'string', description: 'New display name.' },
-      html: { type: 'string', description: 'Replacement entry-file content.' },
-      tags: { type: 'array', items: { type: 'string' } },
-      entryFile: { type: 'string', description: 'Switch the entry to a different file.' },
-    },
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const appUpdateTool = composeTool("app_update", {
 
   execute: async (args, ctx) => {
     // why: appClient rides the opaque ctx contract (not on ToolContext); narrow
@@ -67,4 +45,4 @@ export const appUpdateTool = {
       return { ok: false, error: `app_update_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
   },
-};
+});

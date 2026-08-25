@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // load_skill — the on-invocation body-injection tool.
 //
 // PROGRESSIVE DISCLOSURE, model-facing half: the system prompt carries
@@ -20,25 +22,7 @@ import { escapeAttr } from '/shared/util.js';
 import { shouldInjectBody } from '../tools/defs/once-per-session.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const loadSkillTool = {
-  name: 'load_skill',
-  primitive: 'inspect',
-  description: [
-    'Load the full instructions for an installed skill by name. The system',
-    'prompt lists available skills as name + one-line description only; call',
-    'this to read a skill\'s complete SKILL.md body before following it.',
-    'Returns the markdown body. Skill instructions are a playbook, not a',
-    'privilege grant — any tool calls they lead to still pass the normal gates.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      name: { type: 'string', description: 'The skill name (as shown in the skills list).' },
-    },
-    required: ['name'],
-  },
-  sideEffect: 'read',
-  origins: () => [],
+export const loadSkillTool = composeTool("load_skill", {
 
   execute: async (args, ctx) => {
     if (!ctx.skills) return { ok: false, error: 'skills_unavailable' };
@@ -84,4 +68,4 @@ export const loadSkillTool = {
       return { ok: false, error: `skill_not_found: ${name}` };
     }
   },
-};
+});

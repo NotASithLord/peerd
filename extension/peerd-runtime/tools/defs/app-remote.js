@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // repo_remote: force-confirmed Git network operations. The actor never
 // receives a token or raw fetch; the trusted repository service binds vault
 // credentials to the normalized remote host.
@@ -7,30 +9,7 @@ import { normalizeGitRemote } from '/peerd-engine/repository/remote.js';
 import { repositoryToolFailure } from './app-history.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const repositoryRemoteTool = {
-  name: 'repo_remote',
-  primitive: 'engine',
-  description: [
-    'Link, fetch, or push this App, Notebook, or Pod Git repository over HTTPS. GitHub works',
-    'directly from the extension; no CORS proxy. Credentials stay in the vault',
-    'and never enter this actor. Every operation asks the user; push never forces.',
-    'Fetch downloads refs and objects but never merges the working branch. To import an',
-    'existing repository, clone it through sandbox_create instead of linking it to an App.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      op: { type: 'string', enum: ['link', 'fetch', 'push'] },
-      url: { type: 'string', description: 'HTTPS repository URL for link.' },
-      branch: { type: 'string', description: 'Optional branch for push.' },
-    },
-    required: ['op'],
-  },
-  sideEffect: 'write',
-  origins: (args) => {
-    if (typeof args?.url !== 'string') return [];
-    try { return [new URL(args.url).origin]; } catch { return []; }
-  },
+export const repositoryRemoteTool = composeTool("repo_remote", {
   execute: async (args, ctx) => {
     const repositories = /** @type {any} */ (ctx).repositories;
     const kind = /** @type {any} */ (ctx).actorType;
@@ -112,4 +91,4 @@ export const repositoryRemoteTool = {
       return repositoryToolFailure(e, 'repo_remote', `${String(args?.op ?? 'remote operation')} on the Git remote`);
     }
   },
-};
+});

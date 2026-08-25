@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // message_actor — talk to the agent that OWNS a tab-hosted instance.
 //
 // DESIGN-17: each WebVM / Notebook / App is driven by an ACTOR (a per-instance
@@ -33,69 +35,7 @@ const ORCHESTRATOR_AWAIT_CAP_MS = 3 * 60_000;
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const messageActorTool = {
-  name: 'message_actor',
-  primitive: 'spawned',
-  // why the address forms live in the DESCRIPTION, not the `to` schema field:
-  // the schema is JSON-serialized into the descriptor every turn, so per-field
-  // prose is the most expensive place to keep it. The routing knowledge the
-  // model needs to PICK a target reads once here; the field stays a terse
-  // pointer to actor_list. No target form was dropped — web / site: / API
-  // origin / tabId / instance id all survive.
-  description: [
-    'Delegate a GOAL to an ACTOR — your ONLY path to act on a page or mutate an',
-    'instance. For WEB WORK address `to:"web"` and delegate INTENT ("get the',
-    'cheapest in-stock price for X"): the web actor is the single entry point and',
-    'PICKS THE MECHANISM itself — a sessionless secure fetch, or opening + driving a',
-    'tab — so don\'t pre-open a tab or pick fetch-vs-render. Other address forms, all',
-    'listed by actor_list: a tabId to act on ONE ordinary open page (numeric ids',
-    'cannot grant authority on a site peerd treats as signed in); a vm/notebook/app',
-    'instance id; "site:<origin>" (e.g. "site:https://github.com") to work on ONE site',
-    'the user is logged into (drives a real tab, that site only, so it can sign in',
-    'where "web" may not go); or an API integration\'s ORIGIN (a bare host like',
-    '"api.github.com" (tab-free, keyless, origin-locked, ACCUMULATING what it',
-    'learns across messages). An actor is minted on first message, holds that',
-    'environment\'s tools, and works in its own focused context. By DEFAULT you send',
-    'a goal and DON\'T wait — the reply lands as a fenced note on a LATER turn; fan',
-    'out several actors and synthesize as replies land. For a SINGLE primary task',
-    'whose answer you need NOW ("find X and tell me"), set `await:true`: the actor\'s',
-    'substance comes straight back in THIS result and you answer with it, never an',
-    '"I\'ll report back" deferral. Nothing to poll either way. An actor is STATEFUL',
-    'and handles one message at a time: reuse the same `to` for follow-up (no',
-    're-orientation); message a DIFFERENT tab/instance for independent, parallel',
-    'work. While a reply is pending you know NOTHING about progress — tell the user',
-    'what you ASKED, never narrate what the actor "is doing" (it may fail). If an',
-    'actor claims it cannot do something its kind CAN (the web actor can ALWAYS',
-    'render — navigate opens its tab itself), re-send restating that capability',
-    'instead of accepting the refusal or bouncing it to the user. (As an EPHEMERAL',
-    'actor the reply comes back directly in THIS result — use it and continue.)',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      to: {
-        type: 'string',
-        description: 'An address form from actor_list (see the description): "web", a tabId, a vm/notebook/pod/app instance id, "site:<origin>", or an API origin. Minted on first message.',
-      },
-      message: {
-        type: 'string',
-        description: 'The request, in natural language. Self-contained — the actor sees only this, not your conversation.',
-      },
-      oneShot: {
-        type: 'boolean',
-        description: 'Sandbox instances ONLY (a vm/notebook/pod/app id; refused for web/API/tabId/dweb). true when ONE round settles it: a concrete command or read whose raw result IS the answer: so the actor hands that result straight back, skipping its summarize turn. Default false for open-ended or multi-step work.',
-      },
-      await: {
-        type: 'boolean',
-        description: 'Wait for the reply IN this turn — its summarized (fenced) substance returns as this result — instead of the default later-turn wake. true for ONE primary task you must answer now; false (default) to fan out several actors. Past a few minutes the wait ends with a "still working" note and the reply lands on a later turn (never dropped). An ephemeral actor always returns here regardless.',
-      },
-    },
-    required: ['to', 'message'],
-  },
-  // write, not mutate_external — every effect the actor produces goes through
-  // the actor's OWN gated turn; nothing escapes here that isn't gated there.
-  sideEffect: 'write',
-  origins: () => [],
+export const messageActorTool = composeTool("message_actor", {
 
   execute: async (args, ctx) => {
     const c = /** @type {MessageActorCtx} */ (/** @type {unknown} */ (ctx));
@@ -178,4 +118,4 @@ export const messageActorTool = {
         ...(res.actorDeliveryId ? { actorDeliveryId: res.actorDeliveryId } : {}),
       };
   },
-};
+});

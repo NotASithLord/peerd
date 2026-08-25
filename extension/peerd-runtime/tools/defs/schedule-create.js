@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // schedule_create — register a background Routine: a standing task that runs
 // unattended on a cadence, even while the side panel is closed. If peerd is
 // locked or the browser is off when a routine is due, it runs as soon as peerd
@@ -23,44 +25,7 @@ import { describeSchedule } from '../../loop/schedule.js';
 /** @typedef {Omit<Tool, 'primitive' | 'execute'> & { primitive: 'schedule', execute: (args: any, ctx: ToolContext) => Promise<ScheduleToolResult> }} ScheduleTool */
 
 /** @type {ScheduleTool} */
-export const scheduleCreateTool = {
-  name: 'schedule_create',
-  primitive: 'schedule',
-  description: [
-    'Register a background routine: a standing task that runs unattended on a',
-    'schedule, even when the side panel is closed. If peerd is locked or the',
-    'browser was off when it was due, it runs as soon as peerd is back on.',
-    'Give the task as `prompt` and EXACTLY ONE cadence: `every` (a duration like',
-    '"30m", "6h", "1d") OR `dailyAt` (local 24h "HH:MM", e.g. "08:00"). `mode`',
-    'controls each firing: "goal" (default — an autonomous multi-step run until',
-    'the task is done) or "turn" (a single agent turn). Each firing opens its own',
-    'fresh session. Use schedule_list to review and schedule_cancel to remove.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      prompt: {
-        type: 'string',
-        description: 'The task to run on each firing, e.g. "Summarize my open tabs and save a note".',
-      },
-      every: {
-        type: 'string',
-        description: 'Interval cadence: a duration like "30m", "6h", "1d". Mutually exclusive with dailyAt.',
-      },
-      dailyAt: {
-        type: 'string',
-        description: 'Daily cadence: local 24h time "HH:MM", e.g. "08:00". Mutually exclusive with every.',
-      },
-      mode: {
-        type: 'string',
-        enum: ['goal', 'turn'],
-        description: 'How each firing runs: "goal" (autonomous multi-step, default) or "turn" (one turn).',
-      },
-    },
-    required: ['prompt'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const scheduleCreateTool = composeTool("schedule_create", {
 
   execute: async (args, ctx) => {
     const scheduleAdd = /** @type {((req: any) => { ok: boolean, error?: string, routine?: any }) | undefined} */ (
@@ -140,4 +105,4 @@ export const scheduleCreateTool = {
       }, null, 2),
     };
   },
-};
+});

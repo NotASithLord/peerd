@@ -1,3 +1,5 @@
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
+
 // watch_changes — start/poll a persistent DOM-mutation watcher on a tab.
 //
 // The per-action `result` (in click/type) captures a ~400ms window around
@@ -17,27 +19,7 @@ import { resolveTargetTab, originOfUrl, scriptingTarget } from './dom-helpers.js
 import { summarizeMutations } from '../../dom/action-result.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const watchChangesTool = {
-  name: 'watch_changes',
-  primitive: 'tab',
-  description: [
-    'Start or poll a persistent watcher for DOM changes on a tab. The FIRST',
-    'call attaches a MutationObserver and returns "watching started"; each',
-    'LATER call returns everything that changed since your previous call',
-    '(+added / -removed / attr, named semantically) then clears. Use it to',
-    'catch ASYNC updates that land AFTER an action — slow results, live /',
-    'websocket updates, notifications, lazy loads — that a single snapshot or',
-    'the per-action result would miss. Cheaper than re-snapshotting. Observes',
-    'until the tab navigates (auto-reset). Defaults to the active tab.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      tabId: { type: 'integer', description: 'Optional tab id; defaults to the active tab.' },
-    },
-  },
-  sideEffect: 'read',
-  origins: (_args, ctx) => (ctx.activeTab?.origin ? [ctx.activeTab.origin] : []),
+export const watchChangesTool = composeTool("watch_changes", {
 
   execute: async (args, ctx) => {
     const tab = await resolveTargetTab(args, ctx);
@@ -58,7 +40,7 @@ export const watchChangesTool = {
       content: wrapUntrusted({ origin: originOfUrl(tab.url), tool: 'watch_changes', body }),
     };
   },
-};
+});
 
 // Runs in the page (ISOLATED world). Idempotent: creates the observer +
 // rolling delta sets on first call (stored on a window global so they

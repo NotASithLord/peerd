@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // toolbox_write — persist a durable TOOLBOX module (design js-superpower/06),
 // gated on USER CONFIRMATION: the same posture as site_client_write, because
 // the danger class is the same — the agent persisting EXECUTABLE code it may
@@ -16,33 +18,7 @@
 import { buildToolboxWriteProposal } from '../../toolbox/core.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const toolboxWriteTool = {
-  name: 'toolbox_write',
-  primitive: 'notebook',
-  description: [
-    'Save (or update) a reusable ES module in your TOOLBOX — the user must',
-    'CONFIRM before it persists. Later runs import it:',
-    "import { helper } from 'peerd:toolbox/<name>' (script and notebook runs",
-    'only). Write a real module with `export`s; it may import peerd:std or',
-    'other toolbox modules. It runs under the CALLING run\'s capabilities —',
-    'storing it grants nothing. Name: [a-z0-9-]{1,64}. Invalid syntax and',
-    'unresolvable local, builtin, or toolbox imports fail the write. Preview',
-    'remote source and transitive dependencies are checked at runtime. To fix',
-    'a broken module, rewrite it wholesale here.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    required: ['name', 'code'],
-    properties: {
-      name: { type: 'string', description: 'Module name ([a-z0-9-]{1,64}); the import specifier tail.' },
-      description: { type: 'string', description: 'Short prose: what the module does. Shown to the user for consent and on toolbox_list.' },
-      code: { type: 'string', description: 'The full module source (ES module — use export).' },
-    },
-  },
-  sideEffect: 'write',
-  // IDB write, no web origin touched — the origin/egress gates have nothing to
-  // check. The safety is the confirm round-trip below.
-  origins: () => [],
+export const toolboxWriteTool = composeTool("toolbox_write", {
 
   execute: async (args, ctx) => {
     // why: toolbox/toolboxParseCheck ride the opaque ctx contract (not on
@@ -109,4 +85,4 @@ export const toolboxWriteTool = {
       return { ok: false, error: `toolbox_write_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
   },
-};
+});

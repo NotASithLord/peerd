@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // dweb_install — fetch + verify + install an App a peer is sharing on the dweb.
 //
 // Fetches the signed bundle over the base mesh, verifies the signature + every
@@ -30,27 +32,7 @@
  */
 
 /** @type {DwebTool} */
-export const dwebInstallTool = {
-  name: 'dweb_install',
-  primitive: 'dweb',
-  dweb: true,
-  description: [
-    'Install an App a peer is sharing on the dweb (from dweb_discover). Pass the',
-    'peerd:// uri from that exact result. The host binds its update identity to the',
-    'matching discovery card, fetches the bundle over the base mesh, verifies its',
-    'signature and every chunk, and saves it to the user\'s Library as a sandboxed App.',
-    'CONFIRMS every time — it is code from a peer.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      uri: { type: 'string', description: 'The peerd:// uri from dweb_discover.' },
-      name: { type: 'string', description: 'Optional local name for the installed app.' },
-    },
-    required: ['uri'],
-  },
-  sideEffect: 'mutate_external',
-  origins: () => [],
+export const dwebInstallTool = composeTool("dweb_install", {
 
   execute: async (args, ctx) => {
     // why: narrow ctx to the dweb-only slots (dweb surface + force-confirm) the
@@ -95,4 +77,4 @@ export const dwebInstallTool = {
       }, null, 2),
     };
   },
-};
+});

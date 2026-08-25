@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // read_web_cache — page through a spilled fetch_url body.
 //
 // When fetch_url's text overflows its budget, the FULL text is spilled to the
@@ -14,32 +16,10 @@
 
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { originOfUrl } from './dom-helpers.js';
-import { buildPagedResult, clampPageLimit, pageStatusLine, SPILL_PAGE_CHARS } from '../web/spill.js';
+import { buildPagedResult, clampPageLimit, pageStatusLine } from '../web/spill.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const readWebCacheTool = {
-  name: 'read_web_cache',
-  primitive: 'web',
-  description: [
-    'Read a slice of a spilled fetch_url / read_page body. When a read overflows its',
-    'budget the full text is stored locally and the result names the cache key — page',
-    'through it here with { key, offset, limit }. Offsets are character positions into',
-    'the stored text; the result reports what remains after the slice. Page',
-    'DELIBERATELY: the head+tail window you already saw usually carries the answer —',
-    'one or two targeted slices should settle it. Do not walk the whole document.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    required: ['key'],
-    properties: {
-      key: { type: 'string', description: 'The cache key from the fetch_url paging note.' },
-      offset: { type: 'number', description: 'Start character offset. Default 0.' },
-      limit: { type: 'number', description: `Max characters to return (capped at ${SPILL_PAGE_CHARS}). Default the cap.` },
-    },
-  },
-  sideEffect: 'read',
-  // The cache is local — no network origin is touched by a page read.
-  origins: () => [],
+export const readWebCacheTool = composeTool("read_web_cache", {
   execute: async (args, ctx) => {
     if (typeof args?.key !== 'string' || !args.key) return { ok: false, error: 'key_required' };
     const webCache = /** @type {{ get?: (key: string) => Promise<{ key: string, url?: string, format?: string, text: string, ownerSessionId?: string | null } | undefined> } | undefined} */ (
@@ -88,4 +68,4 @@ export const readWebCacheTool = {
       },
     });
   },
-};
+});

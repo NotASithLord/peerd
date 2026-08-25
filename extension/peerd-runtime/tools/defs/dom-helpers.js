@@ -13,6 +13,7 @@
 // break this module's unit tests. composer/resolvers.js imports it the
 // same way for the same reason.
 import { findDenylistMatch } from '../../../peerd-egress/denylist/denylist.js';
+import { originOfUrl } from '../metadata/origins.js';
 // The one live look at the target document (issues 267 + 276). Deep import for
 // the same reason as above — dom/index.js is fine, but this file is unit-tested
 // without a browser and the barrel is wider than the one function needed.
@@ -433,15 +434,4 @@ export const cdpUnavailableError = (ctx, gap, hint) => {
  * @param {string | undefined | null} url
  * @returns {string}
  */
-export const originOfUrl = (url) => {
-  if (!url) return '';
-  try {
-    const u = new URL(url);
-    if (u.protocol === 'chrome:' || u.protocol === 'about:' || u.protocol === 'devtools:') {
-      return `${u.protocol}//${u.host || u.pathname.split('/')[0] || ''}`;
-    }
-    return `${u.protocol}//${u.host}`;
-  } catch {
-    return '';
-  }
-};
+export { originOfUrl } from '../metadata/origins.js';

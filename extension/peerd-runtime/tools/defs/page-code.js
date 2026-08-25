@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // page_code — the web actor's CODE-REPL action surface (PR #119).
 //
 // The Aside-style A/B arm: instead of emitting discrete click/type/navigate
@@ -19,7 +21,6 @@
 
 import { clamp } from '/shared/util.js';
 import { formatRunResult } from './script.js';
-import { codeClientReference } from '../../actor/capability-manifest.js';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 180_000;
@@ -30,32 +31,7 @@ export const PAGE_CODE_CAPS = Object.freeze({
 });
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const pageCodeTool = {
-  name: 'page_code',
-  primitive: 'web',
-  description: [
-    'Drive YOUR tab by writing JavaScript. Async function body in a sealed',
-    `worker. Exact client: ${codeClientReference('page')}.`,
-    'Selectors are strict unless nth is supplied; snapshot refs such as @e12 are',
-    'accepted by click/fill/login. Re-read snapshot after acting.',
-    'Each call rejects on failure (denylist, no match, count mismatch) — wrap in',
-    'try/catch to handle. `return <value>` returns your result; console output is',
-    'captured. The worker has NO direct network, NO files, NO subagents — only',
-    'the manifest-listed, gated page methods and pure compute. Keep scripts SHORT, then look at',
-    'a fresh snapshot before the next step: pages change under you.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      code: { type: 'string', description: 'JS code to run. Async function body — top-level await + `return <value>` work.' },
-      timeoutMs: { type: 'integer', description: `Wall-clock cap in ms (default ${DEFAULT_TIMEOUT_MS}, max ${MAX_TIMEOUT_MS}).` },
-    },
-    required: ['code'],
-  },
-  sideEffect: 'write',
-  // The script's page.* calls carry their own origins through the gated dispatch
-  // of each mapped tool (the 'page/call' route); the tool itself names none.
-  origins: () => [],
+export const pageCodeTool = composeTool("page_code", {
 
   execute: async (args, ctx) => {
     if (typeof args?.code !== 'string' || args.code.length === 0) {
@@ -124,4 +100,4 @@ export const pageCodeTool = {
       }
     }
   },
-};
+});

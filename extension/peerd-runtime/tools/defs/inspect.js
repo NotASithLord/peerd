@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // inspect — the single introspection tool (kind-discriminated).
 //
 // why one tool, not five: `inspect_provider_config / _storage / _session_access
@@ -11,7 +13,7 @@
 // unchanged in behavior — each still proves its §02 "sovereignty" property.
 
 import { serializeListResult } from './columnar.js';
-import { executeByKind, kindEnum } from './kind-dispatch.js';
+import { executeByKind } from './kind-dispatch.js';
 import { isDenylistedTab, originOfUrl } from './dom-helpers.js';
 import { wrapUntrusted, safeTitle } from '../prompt-wrap.js';
 import { classifyBrowserAutomationTarget } from '../browser-automation-policy.js';
@@ -219,36 +221,6 @@ export const INSPECT_HANDLERS = Object.freeze({
 });
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const inspectTool = {
-  name: 'inspect',
-  primitive: 'inspect',
-  description: [
-    'Introspect peerd itself — read-only proof of its sovereignty contract.',
-    'Pick a `kind`:',
-    '"provider_config" (current provider/model + that a key is stored, never the',
-    'key itself — BYOK); "storage" (persistent KV; vault blobs show as base64',
-    'ciphertext — encryption-at-rest; optional prefix="vault"|"secret:");',
-    '"session_access" (tabs/origins the agent can see — it inherits your logged-in',
-    'browser sessions); "denylist" (the always-off-limits origin floor; optional',
-    'domain="chase.com" to test one host); "audit_log" (the append-only security',
-    'trail, newest first; optional limit and types[]).',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      kind: {
-        type: 'string',
-        enum: kindEnum(INSPECT_HANDLERS),
-        description: 'Which facet to inspect.',
-      },
-      prefix: { type: 'string', description: 'storage only: key prefix filter, e.g. "vault" or "secret:".' },
-      domain: { type: 'string', description: 'denylist only: hostname to check, e.g. "chase.com".' },
-      limit: { type: 'integer', description: 'audit_log only: max entries (default 50, max 500).' },
-      types: { type: 'array', items: { type: 'string' }, description: 'audit_log only: event types to filter to.' },
-    },
-    required: ['kind'],
-  },
-  sideEffect: 'read',
-  origins: () => [],
+export const inspectTool = composeTool("inspect", {
   execute: executeByKind('inspect', /** @type {any} */ (INSPECT_HANDLERS)),
-};
+});

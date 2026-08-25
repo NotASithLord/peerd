@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // Internal mapped primitive for app.act(). Argument validation is duplicated at
 // this gate because a worker/client bug must not widen the App runtime surface.
 
@@ -8,17 +10,7 @@ const SAFE_ACTION = /^[a-z][a-z0-9-]{0,63}$/;
 const MAX_PARAMS_CHARS = 20_000;
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const appActTool = {
-  name: 'app_act',
-  primitive: 'app',
-  description: 'Internal exact-instance App action primitive.',
-  schema: {
-    type: 'object',
-    properties: { action: { type: 'string' }, params: { type: 'object' } },
-    required: ['action'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const appActTool = composeTool("app_act", {
   execute: async (args, ctx) => {
     if (typeof args?.action !== 'string' || !SAFE_ACTION.test(args.action)) {
       return { ok: false, error: 'invalid_app_action', outcomeKnown: true, outcomeKind: 'pre-effect-failure' };
@@ -68,4 +60,4 @@ export const appActTool = {
       };
     }
   },
-};
+});

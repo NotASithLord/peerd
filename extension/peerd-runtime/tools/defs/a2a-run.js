@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // a2a_run — the dweb actor's CODE surface for agent-to-agent over the mesh.
 //
 // The #119 lesson applied to p2p: the model talks to other agents by WRITING JS
@@ -26,7 +28,7 @@
 import { clamp } from '/shared/util.js';
 import { pushValueBlock } from './value-block.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { codeClientReference, renderCodeOpTrace } from '../../actor/capability-manifest.js';
+import { renderCodeOpTrace } from '../../actor/capability-manifest.js';
 
 // why 135s: the job wall-clock is the OUTERMOST timer above the SW call cap
 // (a2a-api.js). The generated mesh bridge now shares this outer deadline, so a
@@ -39,30 +41,7 @@ const MAX_TIMEOUT_MS = 180_000;
 /** @typedef {Omit<Tool, 'primitive' | 'execute'> & { primitive: 'dweb', dweb: boolean, execute: (args: any, ctx: ToolContext) => Promise<import('/shared/tool-types.js').ToolResult | { ok: false, error: string }> }} DwebTool */
 
 /** @type {DwebTool} */
-export const a2aRunTool = {
-  name: 'a2a_run',
-  primitive: 'dweb',
-  dweb: true,
-  description: [
-    'Talk to OTHER agents on the mesh by writing JS against the `mesh` client',
-    '(agent-to-agent). Runs in a sealed worker — async body, top-level await +',
-    `\`return\`. Exact client: ${codeClientReference('mesh')}.`,
-    'call awaits one reply and rejects on timeout; cast is fire-and-forget; converse',
-    'opens a standing thread and say continues it.',
-    'FIRST contact to a peer needs the user\'s ok (a signing call is refused until',
-    'approved); replying to a peer on a thread needs per-conversation consent.',
-    'Write ONE script that does the whole exchange and RETURN the outcome.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      code: { type: 'string', description: 'JS to run; drives the `mesh` client and returns the outcome.' },
-      timeoutMs: { type: 'number', description: `Wall-clock cap (default ${DEFAULT_TIMEOUT_MS}, max ${MAX_TIMEOUT_MS}).` },
-    },
-    required: ['code'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const a2aRunTool = composeTool("a2a_run", {
 
   execute: async (args, ctx) => {
     if (typeof args?.code !== 'string' || !args.code.trim()) return { ok: false, error: 'code_required' };
@@ -107,7 +86,7 @@ export const a2aRunTool = {
       }
     }
   },
-};
+});
 
 /**
  * The run's output carries PEER-supplied bytes (replies, cards) — always fence
