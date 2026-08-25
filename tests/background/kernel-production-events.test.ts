@@ -167,6 +167,37 @@ describe('kernel production event projection', () => {
     expect({ reads, sends }).toEqual({ reads: 2, sends: 1 });
   });
 
+  test('retires a reconcile with a lost reply before running user work', async () => {
+    let reconciles = 0;
+    let runs = 0;
+    let retires = 0;
+    const events = createKernelProductionEvents({
+      identity: { bootId: 'boot-reconcile-loss', kernelEpoch: 'epoch-reconcile-loss' },
+      timeoutMs: 5,
+      retire: () => { retires += 1; },
+      send: async (event) => {
+        if (event !== 'production/reconcile') {
+          return { ok: true, outcomeKnown: true, value: { accepted: true } };
+        }
+        reconciles += 1;
+        if (reconciles === 1) return new Promise<any>(() => {});
+        return { ok: true, outcomeKnown: true, value: { accepted: true } };
+      },
+      readSnapshot: () => ({
+        tabs: [], activeTabId: null,
+        settings: { ...CHANNEL_DEFAULTS }, uiConnected: false,
+      }),
+      withRun: (operation) => operation(),
+    });
+    await expect(events.run(async () => { runs += 1; })).resolves.toMatchObject({
+      code: 'production-reconcile-timeout', outcomeKnown: true,
+      phase: 'startup', retryable: true,
+    });
+    await expect(events.run(async () => { runs += 1; return 'done'; }))
+      .resolves.toBe('done');
+    expect({ reconciles, runs, retires }).toEqual({ reconciles: 2, runs: 1, retires: 1 });
+  });
+
   test('bounds an unknown delivery without poisoning later deltas', async () => {
     let frozen = true;
     const delivered: string[] = [];

@@ -479,7 +479,8 @@ describe('sealed administrative root cutover', () => {
     await effectStarted;
     abort.abort();
     expect(await call).toMatchObject({
-      ok: false, code: 'feature-dispatch-failed', outcomeKnown: false, phase: 'run',
+      ok: false, code: 'feature-grant-expired', outcomeKnown: false, phase: 'run',
+      retryable: false,
     });
   });
 

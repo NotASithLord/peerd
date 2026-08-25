@@ -56,6 +56,7 @@ export const createKernelDemandPlane = (deps) => {
       };
     },
     withRun: deps.controllerGateway.withRun,
+    retire: deps.controllerGateway.retire,
   });
   const reloadApp = async (/** @type {string} */ appId) => {
     const tabs = await deps.browser.tabs?.query?.({ url: `${deps.appTabUrl}*` }) ?? [];
