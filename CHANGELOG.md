@@ -10,6 +10,25 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Added
+
+- peerd honors the pause a site asks for. When a site answers that peerd is
+  asking too often, peerd records the wait that site stated and holds off before
+  acting there again, learns a slower steady cadence for browser actions on it,
+  and stops the turn with a plain explanation rather than napping when the site
+  wants longer than peerd will wait. The recorded wait is an absolute point in
+  time, so it survives a browser restart and cannot be shortened by a later
+  answer. A rule can only be created by a real response from the site: page
+  content and the model cannot create, raise, lower, or clear one. Rules fade on
+  their own, and Settings -> Paced sites lists them with a per-site forget
+  control. peerd still does not disguise itself or work around a site's limits.
+
+### Fixed
+
+- A site helper stopped for leaving its approved site no longer keeps a stale
+  handle, so retrying it starts a fresh helper instead of reopening an
+  abandoned tab.
+
 ## [0.7.3] - 2026-08-18
 
 ### Added
