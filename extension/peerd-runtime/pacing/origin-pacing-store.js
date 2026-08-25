@@ -44,7 +44,7 @@ import { abortableSleep } from '/shared/util.js';
 import {
   PACE_TUNABLES, PACE_RULE_VERSION,
   decayRule, isRetired, isValidRule, newRule,
-  nextRuleOnBlock, noteActionAt, noteCleanResult,
+  nextRuleOnBlock, noteActionAt,
   planRequest, isRateLimitSignal,
 } from './pacing-core.js';
 
@@ -263,16 +263,12 @@ export const createOriginPacingStore = ({
     // since loadFailed does not clear itself. The human "forget all" is the one
     // sanctioned way back to a readable record.
     if (loadFailed) return;
-    const isBlock = isRateLimitSignal(status, retryAfter);
+    // why a clean answer records nothing: escalation already compounds from the
+    // rule's own current value, and decay is what walks it back down. A "we were
+    // fine once" counter would be state nothing reads - and a write on every
+    // successful request to a paced origin.
+    if (!isRateLimitSignal(status, retryAfter)) return;
     const existing = rules.get(origin) ?? null;
-    if (!isBlock) {
-      if (!existing) return;
-      const cleaned = noteCleanResult(existing, responseAtMs, K);
-      if (cleaned === existing) return;
-      rules.set(origin, cleaned);
-      await persist();
-      return;
-    }
     let base = existing;
     if (!base) {
       if (rules.size >= cap) {

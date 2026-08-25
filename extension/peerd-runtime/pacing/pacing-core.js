@@ -56,7 +56,6 @@ import { clamp } from '/shared/util.js';
  *                                    which observation produced notBeforeMs
  * @property {number} minIntervalMs   learned floor between write actions; 0 = none
  * @property {number} lastActionMs    epoch ms of the last committed paced action
- * @property {number} strikes         consecutive blocks; drives escalation
  * @property {number} observations    total blocks ever fed into this rule
  * @property {number} lastBlockAt     epoch ms of the last observed block
  * @property {number} lastDecayAt     epoch ms of the last decay step
@@ -215,7 +214,6 @@ export const newRule = (origin, now) => ({
   notBeforeSource: 'none',
   minIntervalMs: 0,
   lastActionMs: 0,
-  strikes: 0,
   observations: 0,
   lastBlockAt: 0,
   lastDecayAt: now,
@@ -251,13 +249,12 @@ export const isValidRule = (value, expectedOrigin, K = PACE_TUNABLES) => {
     || rule.minIntervalMs < 0
     || rule.minIntervalMs > K.maxIntervalMs) return false;
   if (!isEpochMs(rule.lastActionMs)) return false;
-  if (!Number.isSafeInteger(rule.strikes) || /** @type {number} */ (rule.strikes) < 0) return false;
   if (!Number.isSafeInteger(rule.observations) || /** @type {number} */ (rule.observations) < 0) return false;
   if (!isEpochMs(rule.lastBlockAt) || !isEpochMs(rule.lastDecayAt)) return false;
   if (!isEpochMs(rule.createdAt) || !isEpochMs(rule.updatedAt)) return false;
   if (!Number.isSafeInteger(rule.seq) || /** @type {number} */ (rule.seq) < 0) return false;
   if (/** @type {number} */ (rule.updatedAt) < /** @type {number} */ (rule.createdAt)) return false;
-  if (rule.observations === 0 && (rule.lastBlockAt !== 0 || rule.strikes !== 0)) return false;
+  if (rule.observations === 0 && rule.lastBlockAt !== 0) return false;
   return true;
 };
 
@@ -312,28 +309,11 @@ export const nextRuleOnBlock = (rule, signal, K = PACE_TUNABLES) => {
     notBeforeMs: Math.max(rule.notBeforeMs, deadline),
     notBeforeSource: deadline >= rule.notBeforeMs && deadline > 0 ? source : rule.notBeforeSource,
     minIntervalMs: learned,
-    strikes: rule.strikes + 1,
     observations: rule.observations + 1,
     lastBlockAt: at,
     updatedAt: at,
     seq: rule.seq + 1,
   };
-};
-
-/**
- * A clean, non-blocking result was observed. Clears the strike streak so the
- * NEXT block escalates from the learned floor rather than from a stale streak,
- * but deliberately does not lower `minIntervalMs`: descent is decay's job (and
- * the human's), never a single good answer's.
- *
- * @param {PaceRule} rule @param {number} now @param {PaceTunables} [K]
- * @returns {PaceRule}
- */
-export const noteCleanResult = (rule, now, K = PACE_TUNABLES) => {
-  if (!isValidRule(rule, undefined, K) || !isEpochMs(now)) return rule;
-  if (rule.strikes === 0) return rule;
-  const at = Math.max(now, rule.updatedAt);
-  return { ...rule, strikes: 0, updatedAt: at, seq: rule.seq + 1 };
 };
 
 /**

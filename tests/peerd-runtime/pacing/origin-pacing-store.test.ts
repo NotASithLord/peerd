@@ -56,7 +56,7 @@ describe('normalizePacingState', () => {
   test('a valid record filed under the wrong key is refused', () => {
     const good = {
       version: 1, origin: 'https://a.test', notBeforeMs: 0, notBeforeSource: 'none',
-      minIntervalMs: 0, lastActionMs: 0, strikes: 0, observations: 0,
+      minIntervalMs: 0, lastActionMs: 0, observations: 0,
       lastBlockAt: 0, lastDecayAt: 1, createdAt: 1, updatedAt: 1, seq: 0,
     };
     expect(normalizePacingState({ schema: 1, entries: { 'https://a.test': good } })).not.toBeNull();

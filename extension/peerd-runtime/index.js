@@ -233,7 +233,7 @@ export {
 export {
   PACE_TUNABLES, PACE_RULE_VERSION, BLOCKING_STATUSES,
   isBlockingStatus, isRateLimitSignal, parseRetryAfter, newRule, isValidRule,
-  nextRuleOnBlock, noteCleanResult, noteActionAt, decayRule, isRetired,
+  nextRuleOnBlock, noteActionAt, decayRule, isRetired,
   planRequest,
 } from './pacing/pacing-core.js';
 export {

@@ -9,7 +9,7 @@ import { describe, test, expect } from 'bun:test';
 import {
   PACE_TUNABLES,
   isBlockingStatus, isRateLimitSignal, parseRetryAfter,
-  newRule, isValidRule, nextRuleOnBlock, noteCleanResult, noteActionAt,
+  newRule, isValidRule, nextRuleOnBlock, noteActionAt,
   decayRule, isRetired, planRequest,
 } from '../../../extension/peerd-runtime/pacing/pacing-core.js';
 
@@ -120,7 +120,6 @@ describe('the learned interval gates writes only', () => {
     const blocked = nextRuleOnBlock(rule(), { responseAtMs: T0, status: 429 });
     expect(blocked.minIntervalMs).toBe(PACE_TUNABLES.seedMs);
     expect(blocked.observations).toBe(1);
-    expect(blocked.strikes).toBe(1);
   });
 
   test('it is sized from the cadence that actually got blocked', () => {
@@ -229,13 +228,6 @@ describe('descent', () => {
     expect(isRetired(rule(), T0)).toBe(false);
   });
 
-  test('a clean result clears the strike streak but never lowers the floor', () => {
-    const blocked = nextRuleOnBlock(rule(), { responseAtMs: T0, status: 429, recentIntervalMs: 1_000 });
-    const clean = noteCleanResult(blocked, T0 + 10);
-    expect(clean.strikes).toBe(0);
-    expect(clean.minIntervalMs).toBe(blocked.minIntervalMs);
-  });
-
   test('there is no exported way to clear or lower a rule directly', async () => {
     const core = await import('../../../extension/peerd-runtime/pacing/pacing-core.js');
     const names = Object.keys(core);
@@ -264,7 +256,7 @@ describe('validation fails closed', () => {
 
   test('structurally impossible combinations are refused', () => {
     expect(isValidRule({ ...rule(), notBeforeMs: 0, notBeforeSource: 'status-backoff' })).toBe(false);
-    expect(isValidRule({ ...rule(), observations: 0, strikes: 3 })).toBe(false);
+    expect(isValidRule({ ...rule(), observations: 0, lastBlockAt: T0 })).toBe(false);
     expect(isValidRule({ ...rule(), minIntervalMs: PACE_TUNABLES.maxIntervalMs + 1 })).toBe(false);
     expect(isValidRule({ ...rule(), version: 2 })).toBe(false);
     expect(isValidRule({ ...rule(), seq: -1 })).toBe(false);

@@ -14,7 +14,7 @@ export { AUTH_BOUNDARY_STOPPED_MESSAGE, AUTH_STATE_UNAVAILABLE_MESSAGE, AUTH_WAI
 export {
   PACE_TUNABLES, PACE_RULE_VERSION, BLOCKING_STATUSES,
   isBlockingStatus, isRateLimitSignal, parseRetryAfter, newRule, isValidRule,
-  nextRuleOnBlock, noteCleanResult, noteActionAt, decayRule, isRetired,
+  nextRuleOnBlock, noteActionAt, decayRule, isRetired,
   planRequest,
 } from './pacing/pacing-core.js';
 export {
