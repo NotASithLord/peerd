@@ -55,7 +55,7 @@ import {
 import { ACTOR_ISOLATION_UNAVAILABLE_TOOLS, actorIsolationAvailable } from '../actor/isolation.js';
 import { runtimeCapabilityRefusal } from '../runtime-capabilities.js';
 
-/** @typedef {import('/shared/tool-types.js').Tool} Tool */
+/** @typedef {ReturnType<typeof import('./metadata/descriptor.js').toToolDescriptor>} Tool */
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
 /** @typedef {import('/shared/tool-types.js').GateResult} GateResult */
 

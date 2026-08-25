@@ -131,10 +131,11 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser,
     skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
     filterByDwebActive, filterByDwebEnabled,
-    filterDescriptorsByManifest, mainAgentDescriptors, listTools, settingsStore, DWEB_ENABLED,
+    filterDescriptorsByManifest, mainAgentDescriptors, listTools,
+    listToolDescriptors = listTools, settingsStore, DWEB_ENABLED,
     filterByGoalActive, goalActiveFor,
     dwebEngagedSessions, markDwebEngaged, dispatchToolCall, prepareToolCall, settleToolCall,
-    maybeNudgeDebuggerGrant, getTool,
+    maybeNudgeDebuggerGrant, getTool, getToolDescriptor = getTool,
     decideAction, listProviders, costOf, makeTurnCostTracker, uiConnected, uiPorts, auditLog,
     resolveFailoverChain, shouldFailover, callModel, postChatNote, runUserTurn, getSecret,
     safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
@@ -398,6 +399,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     // behavior. Only the actor-execution suffix can change between steps.
     if (systemPromptBase === null) {
       const promptSession = await sessions.get(sessionId);
+      const actorToolContext = isActor ? await getToolContext() : null;
       const prewalkBlock = !isActor && promptSession?.prewalk?.phase === 'planning'
         ? `\n\n${PREWALK_NUDGE}`
         : '';
@@ -425,9 +427,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         // the envelope by a build that wouldn't validate it (or vice versa).
         ...(isActor ? {
           actorType, backing: actorBacking, instanceId: actorInstanceId,
-          actorSurface: toolContext.actorSurface, schemaReply: toolContext.schemaReply,
+          actorSurface: actorToolContext.actorSurface, schemaReply: actorToolContext.schemaReply,
           effectiveTools: toolDescriptors.map((/** @type {any} */ tool) => tool.name),
-          inbound: toolContext.inbound === true,
+          inbound: actorToolContext.inbound === true,
         } : {}),
       // why await: renderSystemPrompt is async. Concatenating the un-awaited
       // promise would bake "[object Promise]" into the prompt.
@@ -457,20 +459,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // the same freshness contract getSystemPrompt keeps for /system.
   const manifestSession = await sessions.get(sessionId);
   const sessionToolAllow = resolveManifestAllow(manifestSession?.toolManifest);
+  const turnPermission = await resolvePermission(manifestSession);
 
-  // One ToolContext for the whole turn. The dispatcher reads from it
-  // per tool call; we snapshot provider/vault state at turn start so
-  // mid-turn changes (e.g. user adds a key while tools are firing)
-  // don't surface inconsistent readings. exposure:'main' makes the
-  // exposure gate refuse actor-only tools the model shouldn't reach.
-  //
-  // DESIGN-17: an actor turn builds an 'actor' ctx instead — the keyless,
-  // kind-scoped, instance-pinned tool context (buildToolContext applies the
-  // capability strip + sets actorInstanceId/actorType). `synthetic` +
-  // `trusted` ride onto BOTH: buildToolContext folds them into ctx.inbound, the
-  // message_actor sender gate's untrusted-origin signal (synthetic AND not a
-  // trusted first-party continuation → inbound → refused).
-  const toolContext = await buildToolContext(isActor
+  const toolContextArgs = isActor
     ? {
       exposure: EXPOSURE_ACTOR, sessionId, activeTabId, synthetic, trusted,
       actorInstanceId, actorType, actorBacking,
@@ -480,15 +471,17 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     : {
       exposure: 'main', sessionId, activeTabId, synthetic, trusted,
       lifecycleTurnId, lifecycleUserInitiated: synthetic !== true,
+    };
+  /** @type {Promise<any>|null} */
+  let toolContextReady = null;
+  const getToolContext = () => {
+    toolContextReady ??= Promise.resolve(buildToolContext(toolContextArgs)).then((context) => {
+      context.permission = turnPermission;
+      context.abortSignal = abortController.signal;
+      return context;
     });
-  // why: thread THIS turn's abort signal onto the tool ctx so a tool that can
-  // block IN-BAND unwinds on Stop / the turn timeout instead of parking the
-  // turn — message_actor with await:true (which resolves the actor's reply into
-  // the tool result), and a headless script run. The offscreen actor path
-  // already gets its own signal; this closes the same gap for the orchestrator,
-  // whose awaited web delegation must stay cancellable. The controller aborts on
-  // Stop (turnSlots.claim → abortController.abort()).
-  toolContext.abortSignal = abortController.signal;
+    return toolContextReady;
+  };
 
   // Recomputed PER STEP (the loop's refreshTools): the dweb-engagement and
   // goal cuts below change mid-turn, so the advertised list must follow.
@@ -509,7 +502,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       filterByGoalActive(
         filterByDwebActive(
           filterByDwebEnabled(
-            filterDescriptorsByManifest(mainAgentDescriptors(listTools()), sessionToolAllow),
+            filterDescriptorsByManifest(mainAgentDescriptors(listToolDescriptors()), sessionToolAllow),
             DWEB_ENABLED && !!settingsStore.get().dwebEnabled,
           ),
           dwebEngagedSessions.has(sessionId),
@@ -534,9 +527,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // browse-only chat's web actor is shown only the read DOM tools, matching the
   // gate (which refuses click/type for it). null manifest passes through unchanged.
   const refreshActorTools = async () => {
+    const toolContext = await getToolContext();
     const descriptors = filterByRuntimeCapabilities(
       filterDescriptorsByManifest(
-        actorDescriptors(listTools(), actorType, actorBacking, toolContext.actorSurface),
+        actorDescriptors(listToolDescriptors(), actorType, actorBacking, toolContext.actorSurface),
         sessionToolAllow,
       ),
       runtimeCapabilities,
@@ -552,10 +546,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   const toolDispatch = async (/** @type {any} */ call) => {
     const capabilityRefusal = runtimeCapabilityRefusal(String(call?.name ?? ''), getRuntimeCapabilities());
     if (capabilityRefusal) return capabilityRefusal;
+    const actorToolContext = isActor ? await getToolContext() : null;
     // The descriptor filter is model guidance. A remote-peer wake may use only
     // the positive inbound dweb subset even if it forges a hidden tool name.
     if (!inboundActorCallAllowed({
-      isActor, inbound: toolContext.inbound === true, actorType, name: call?.name,
+      isActor, inbound: actorToolContext?.inbound === true, actorType, name: call?.name,
     })) {
       return { ok: false, error: `tool_not_available_to_inbound_actor: ${call?.name}` };
     }
@@ -568,6 +563,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         meta: { toolName: call?.name, primitive: 'spawned', gates: [], durationMs: 0 },
       };
     }
+    const toolContext = actorToolContext ?? await getToolContext();
     // DESIGN-17 per-instance pin: force an actor's instance-target arg to its
     // BOUND instance before dispatch, so it can only ever touch its own (the gate
     // is the backstop). Runs first — before the gate chain sees the args.
@@ -596,6 +592,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     && typeof settleToolCall === 'function' ? Object.freeze({
       prepare: async (/** @type {any} */ call) => {
         if (!controllerHostsTool(call?.name)) return null;
+        const toolContext = await getToolContext();
         const prepared = await prepareToolCall(call, toolContext);
         if (prepared?.prepared !== true) return { mode: 'result', result: prepared };
         return {
@@ -630,15 +627,13 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // turn by the SAME decideAction policy the dispatcher enforces — READ-
   // class calls (which never confirm) may run concurrently; anything that
   // writes or would need a confirmation round-trip stays serial, so two
-  // side effects can't interleave and confirm modals never stack. Reads
-  // the turn-start permission snapshot (toolContext.permission), matching
-  // exactly what the dispatcher itself will consult per call.
+  // side effects can't interleave and confirm modals never stack.
   const classifyToolCall = (/** @type {string} */ name) => {
-    const tool = getTool(name);
+    const tool = getToolDescriptor(name);
     if (!tool) return null;
     return decideAction({
-      mode: /** @type {any} */ (toolContext.permission?.mode),
-      confirmActions: toolContext.permission?.confirmActions,
+      mode: /** @type {any} */ (turnPermission?.mode),
+      confirmActions: turnPermission?.confirmActions,
       tool,
     });
   };

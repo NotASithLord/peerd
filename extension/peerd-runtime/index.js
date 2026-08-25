@@ -296,7 +296,15 @@ export {
 } from './review/index.js';
 
 // --- tools --------------------------------------------------------------
-export { registerTool, getTool, listTools, clearTools } from './tools/registry.js';
+export {
+  registerTool,
+  registerMetadataInventory,
+  getTool,
+  getToolDescriptor,
+  listTools,
+  listToolDescriptors,
+  clearTools,
+} from './tools/registry.js';
 export { dispatchToolCall } from './tools/dispatcher.js';
 export { GATES } from './tools/gates.js';
 export { BUILTIN_TOOLS } from './tools/defs/index.js';

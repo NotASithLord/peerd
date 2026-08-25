@@ -28,7 +28,7 @@ import {
 // (ACTOR_TYPE_TOOLS.web below is the actor-side allow-list; this is the
 // main-side deny-list).
 //
-/** @typedef {import('/shared/tool-types.js').Tool} Tool */
+/** @typedef {ReturnType<typeof import('./metadata/descriptor.js').toToolDescriptor>} Tool */
 // web_search and submit_form are GONE (deleted, not hidden) — the web actor
 // covers search (navigate to an engine + read results) and form submission (its
 // DOM type/click tools) now. The ONE direct web-ish tool the orchestrator keeps

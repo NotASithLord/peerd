@@ -152,6 +152,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   waitForAbort = false, abortDuringFallback = false, uiDisconnected = false,
   waitForActorIsolation = async () => {},
   dynamicIsolation = false,
+  metadataOnly = false,
   runtimeUnsupported = false,
   turnUnknown = false,
 } = {}) => {
@@ -168,6 +169,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   };
   let loopCtx: any = null;
   let toolContextArgs: any = null;
+  let toolContextBuilds = 0;
   const modelCalls: any[] = [];
   const modelKeyReads: string[] = [];
   const recordedModelCalls: any[] = [];
@@ -224,7 +226,9 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
       return 'system';
     },
     resolveManifestAllow: () => null,
+    resolvePermission: async () => ({ mode: 'act', confirmActions: false }),
     buildToolContext: async (args: any) => {
+      toolContextBuilds++;
       toolContextArgs = args;
       return { permission: {}, actorSurface: 'tools', schemaReply: false };
     },
@@ -232,10 +236,19 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     filterByDwebEnabled: identity,
     filterDescriptorsByManifest: identity,
     mainAgentDescriptors: identity,
-    listTools: () => dynamicIsolation || runtimeUnsupported
-      ? (runtimeUnsupported ? ['script', 'read_pdf', 'message_actor'] : ['message_actor', 'actor_create', 'request_review', 'actor_list'])
-        .map((name) => ({ name, description: `${name} test tool.`, schema: { type: 'object' } }))
-      : [],
+    listTools: () => {
+      if (metadataOnly) throw new Error('executable inventory must stay cold');
+      return dynamicIsolation || runtimeUnsupported
+        ? (runtimeUnsupported ? ['script', 'read_pdf', 'message_actor'] : ['message_actor', 'actor_create', 'request_review', 'actor_list'])
+          .map((name) => ({ name, description: `${name} test tool.`, schema: { type: 'object' } }))
+        : [];
+    },
+    listToolDescriptors: metadataOnly ? () => [
+      { name: 'message_actor', description: 'delegate', schema: { type: 'object' }, primitive: 'actor', sideEffect: 'write' },
+      { name: 'actor_create', description: 'create', schema: { type: 'object' }, primitive: 'actor', sideEffect: 'write' },
+      { name: 'request_review', description: 'review', schema: { type: 'object' }, primitive: 'actor', sideEffect: 'read' },
+      { name: 'actor_list', description: 'list', schema: { type: 'object' }, primitive: 'actor', sideEffect: 'read' },
+    ] : undefined,
     settingsStore: { get: () => settings },
     DWEB_ENABLED: false,
     filterByGoalActive: identity,
@@ -250,7 +263,15 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
       return { ok: false, error: 'actor worker unavailable' };
     },
     maybeNudgeDebuggerGrant: () => {},
-    getTool: () => null,
+    getTool: () => {
+      if (metadataOnly) throw new Error('executable definition must stay cold');
+      return null;
+    },
+    getToolDescriptor: metadataOnly
+      ? (name: string) => ({
+        name, primitive: 'actor', sideEffect: name === 'request_review' || name === 'actor_list' ? 'read' : 'write',
+      })
+      : undefined,
     decideAction: () => null,
     listProviders: () => [],
     costOf: () => ({ usd: 0, known: true }),
@@ -368,12 +389,29 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     releases: () => releases,
     loopCtx: () => loopCtx,
     toolContextArgs: () => toolContextArgs,
+    toolContextBuilds: () => toolContextBuilds,
     lateProviderContinuation: () => lateProviderContinuation,
     session,
   };
 };
 
 describe('runAgentTurn credential custody', () => {
+  test('a no-tool turn never builds rich tool authority', async () => {
+    const fixture = turnDeps('chat');
+    await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'hello' });
+    expect(fixture.toolContextBuilds()).toBe(0);
+    expect(fixture.toolContextArgs()).toBeNull();
+  });
+
+  test('a tool turn builds one context for every dispatch path', async () => {
+    const fixture = turnDeps('chat', { dynamicIsolation: true, metadataOnly: true });
+    await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'delegate work' });
+    expect(fixture.toolContextBuilds()).toBe(1);
+    expect(fixture.toolContextArgs()).toMatchObject({
+      exposure: 'main', sessionId: 's1', lifecycleUserInitiated: true,
+    });
+  });
+
   test('an unsupported runtime removes host tools and corrects static prompt lore', async () => {
     const fixture = turnDeps('chat', { runtimeUnsupported: true });
     await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'hello' });
