@@ -26,13 +26,11 @@
 
 import {
   activityOverlayInjected,
+  classifyBrowserAutomationTarget,
   clearActivityOverlayInjected,
-} from '/peerd-runtime/dom/activity-overlay-injected.js';
-import { classifyBrowserAutomationTarget } from '/peerd-runtime/tools/browser-automation-policy.js';
-import {
   isDenylistedTab,
   liveDocumentLocationInjected,
-} from '/peerd-runtime/tools/defs/dom-helpers.js';
+} from '/peerd-runtime/kernel.js';
 
 /**
  * The tab group the driven tab joins. Deliberately the SAME title the engine
