@@ -618,8 +618,10 @@ const repositoryRoutes = makeKernelDemandRoutes({
 });
 /** @type {any} */
 let controllerOwner = null;
-/** @type {Promise<any>|null} */
-let richOwnerLoading = null;
+/** @type {any} */
+let liveProduction = null;
+/** @type {WeakMap<Record<string,any>,Record<string,any>>} */
+const productionOwners = new WeakMap();
 /** @type {any} */
 let administrativeControl = null;
 const handleRichKernelCall = async (/** @type {string} */ operation,
@@ -640,9 +642,9 @@ const loadProductionModule = makeBoundedModuleLoader(
     timeoutCode: 'kernel-production-runtime-load-timeout',
   },
 );
-const loadRichOwner = (/** @type {any} */ seams) => {
-  richOwnerLoading ??= loadProductionModule().then((module) =>
-    module.createKernelProductionRuntime({
+const loadRichOwner = async (/** @type {any} */ seams) => {
+  const module = await loadProductionModule();
+  const owner = await module.createKernelProductionRuntime({
       seams, browser, idb, kv, sessionCache, vault, auditLog, settingsStore, uiPorts,
       pushState, postChatNote, confirmation: confirmation.coordinator,
       denylist: denylistPolicy, repositories, appCatalog,
@@ -671,12 +673,9 @@ const loadRichOwner = (/** @type {any} */ seams) => {
       consumeBrowserChildPolicyNotice: browserChildOutcomes.consume,
       waitForBrowserChildPolicyNotice: browserChildOutcomes.wait,
       hasPendingBrowserChildPolicy: browserChildOutcomes.has,
-    })
-  ).catch((cause) => {
-    richOwnerLoading = null;
-    throw cause;
-  });
-  return richOwnerLoading;
+    });
+  productionOwners.set(owner.turnRuntime, owner);
+  return owner;
 };
 const loadControllerOwner = makeBoundedModuleLoader(async () => {
   if (controllerOwner) return Promise.resolve(controllerOwner);
@@ -699,18 +698,17 @@ const loadControllerOwner = makeBoundedModuleLoader(async () => {
       isHomeSender: homeUi,
       loadTurnRuntime: async (/** @type {any} */ seams) =>
         (await loadRichOwner(seams)).turnRuntime,
-      onTurnRuntimeLoaded: async (/** @type {any} */ runtime) => {
-        try {
-          await runtime.relays.eventOwners.reconcile();
-          networkOwner.bind(runtime.relays);
-        } catch (cause) {
-          const loading = richOwnerLoading;
-          if (loading) {
-            const owner = await loading.catch(() => null);
-            if (owner?.turnRuntime === runtime) richOwnerLoading = null;
-          }
-          throw cause;
+      onTurnRuntimeLoaded: async (/** @type {any} */ runtime, /** @type {any} */ custody) => {
+        const owner = productionOwners.get(runtime);
+        if (!owner) throw new Error('kernel-production-owner-missing');
+        await runtime.relays.eventOwners.reconcile();
+        if (!custody.isCurrent() || !custody.publish()) {
+          throw new Error('kernel-production-generation-retired');
         }
+        await runtime.relays.eventOwners.reconcile();
+        if (!custody.isCurrent()) throw new Error('kernel-production-generation-retired');
+        networkOwner.bind(runtime.relays);
+        liveProduction = owner;
       },
       ensureOffscreen: featureHost.ensureOffscreen,
       offscreenUrl, firefox: kernelFirefox, dwebEnabled: DWEB_ENABLED, kernelIdentity,
@@ -732,8 +730,13 @@ const loadControllerOwner = makeBoundedModuleLoader(async () => {
   loadCode: 'kernel-semantic-runtime-load-failed',
   timeoutCode: 'kernel-semantic-runtime-load-timeout',
 });
-const getControllerRelays = async () => (await loadControllerOwner()).getRelays();
-const controllerRelays = () => controllerOwner?.relays;
+const controllerRelays = () => liveProduction?.relays ?? null;
+const getControllerRelays = async () => {
+  await (await loadControllerOwner()).getRelays();
+  const relays = controllerRelays();
+  if (!relays) throw new Error('kernel-rich-owner-unavailable');
+  return relays;
+};
 const browserDnr = /** @type {any} */ (
   /** @type {any} */ (globalThis).chrome?.declarativeNetRequest
   ?? /** @type {any} */ (browser).declarativeNetRequest
@@ -945,8 +948,8 @@ const assemblyReport = () => Object.freeze({
 
 const getRichOwner = async () => {
   await getControllerRelays();
-  if (!richOwnerLoading) throw new Error('kernel-rich-owner-unavailable');
-  return richOwnerLoading;
+  if (!liveProduction) throw new Error('kernel-rich-owner-unavailable');
+  return liveProduction;
 };
 const loadExecutableRuntime = makeBoundedModuleLoader(
   () => import('./kernel-executable-runtime.js'),
@@ -1010,8 +1013,7 @@ const administrativeRoutes = makeKernelDemandRoutes({
     });
     administrativeControl = createKernelAdministrativeControl({
       callFeature: async (payload, options) =>
-        /** @type {any} */ ((await loadControllerOwner()).controller)
-          .callFeature(payload, options),
+        (await loadControllerOwner()).callFeature(payload, options),
       kv,
       idb: /** @type {any} */ (idb),
       auditLog,

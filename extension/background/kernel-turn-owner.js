@@ -36,10 +36,9 @@ const closedFailure = () => ({
  * @param {Object} deps
  * @param {(authority:{authorizeTurnCall:Function,handleTurnKernelCall:Function})=>{
  *   callTurn:(payload:unknown,options?:any)=>Promise<any>,
- *   callSemantic:(payload:unknown)=>Promise<any>,
  *   renderSystemPrompt:(ctx:Record<string,unknown>)=>Promise<string>,
  *   withRun:(operation:()=>Promise<void>)=>Promise<void>,
- *   close?:()=>void,
+ *   release:()=>void,
  * }} deps.createController
  * @param {(seams:{
  *   runUserTurn:Function,
@@ -56,7 +55,7 @@ const closedFailure = () => ({
  * }>} deps.loadRuntime
  * @param {number} [deps.loadTimeoutMs]
  * @param {()=>string} [deps.newId]
- * @param {(runtime:Record<string,any>)=>Promise<void>|void} [deps.onLoaded]
+ * @param {(runtime:Record<string,any>,custody:{isCurrent:()=>boolean,publish:()=>boolean})=>Promise<void>|void} [deps.onLoaded]
  */
 export const createKernelTurnOwner = ({
   createController, loadRuntime, onLoaded,
@@ -87,9 +86,9 @@ export const createKernelTurnOwner = ({
     handleTurnKernelCall: bridge.handleKernelCall,
   });
   if (typeof controller?.callTurn !== 'function'
-      || typeof controller.callSemantic !== 'function'
       || typeof controller.renderSystemPrompt !== 'function'
-      || typeof controller.withRun !== 'function') {
+      || typeof controller.withRun !== 'function'
+      || typeof controller.release !== 'function') {
     bridge.close();
     throw new TypeError('kernel-turn-controller-invalid');
   }
@@ -106,15 +105,26 @@ export const createKernelTurnOwner = ({
    *   routes:Record<string,(message?:any,sender?:any)=>Promise<any>>,
    *   release:()=>Promise<void>,
    *   retire:()=>void,
+   *   published:boolean,
    * }|null} */
   let live = null;
   let loadEpoch = 0;
+  const claimedRuntimes = new WeakSet();
   const loadCandidate = async (/** @type {number} */ epoch) => {
     const loaded = await loadRuntime(Object.freeze({
       runUserTurn: bridge.runUserTurn,
       renderSystemPrompt: controller.renderSystemPrompt.bind(controller),
       withRun: controller.withRun.bind(controller),
     }));
+    if (!loaded || typeof loaded !== 'object'
+        || !loaded.turnDeps || !loaded.sessionDeps || !loaded.isolationDeps
+        || typeof loaded.actorCount !== 'function'
+        || typeof loaded.actorOverview !== 'function') {
+      await loaded?.close?.();
+      throw new TypeError('kernel-turn-runtime-invalid');
+    }
+    if (claimedRuntimes.has(loaded)) throw new Error('kernel-turn-runtime-reused');
+    claimedRuntimes.add(loaded);
     /** @type {Promise<void>|null} */
     let releasePending = null;
     const release = async () => {
@@ -124,13 +134,6 @@ export const createKernelTurnOwner = ({
     if (closed || epoch !== loadEpoch) {
       await release();
       throw new Error('kernel-turn-owner-closed');
-    }
-    if (!loaded || typeof loaded !== 'object'
-        || !loaded.turnDeps || !loaded.sessionDeps || !loaded.isolationDeps
-        || typeof loaded.actorCount !== 'function'
-        || typeof loaded.actorOverview !== 'function') {
-      await release();
-      throw new TypeError('kernel-turn-runtime-invalid');
     }
     let routes;
     try {
@@ -149,11 +152,18 @@ export const createKernelTurnOwner = ({
     let retire = () => {};
     /** @type {Promise<void>} */
     const retired = new Promise((resolve) => { retire = () => resolve(); });
-    const candidate = { epoch, runtime: loaded, routes, release, retire };
+    const candidate = { epoch, runtime: loaded, routes, release, retire, published: false };
     live = candidate;
     try {
       const handoff = await Promise.race([
-        Promise.resolve().then(() => onLoaded?.(loaded)).then(() => 'ready'),
+        Promise.resolve().then(() => onLoaded?.(loaded, Object.freeze({
+          isCurrent: () => !closed && epoch === loadEpoch && live === candidate,
+          publish: () => {
+            if (closed || epoch !== loadEpoch || live !== candidate) return false;
+            candidate.published = true;
+            return true;
+          },
+        }))).then(() => 'ready'),
         handoffClosed.then(() => 'closed'),
         retired.then(() => 'retired'),
       ]);
@@ -161,6 +171,7 @@ export const createKernelTurnOwner = ({
         await release();
         throw new Error('kernel-turn-owner-closed');
       }
+      candidate.published = true;
     }
     catch (cause) {
       if (live === candidate) live = null;
@@ -180,12 +191,14 @@ export const createKernelTurnOwner = ({
   let load = makeLoadLane(loadEpoch);
   const retireTimedOutHandoff = (/** @type {number} */ epoch) => {
     const candidate = live;
-    if (epoch !== loadEpoch || candidate?.epoch !== epoch) return;
-    live = null;
+    if (epoch !== loadEpoch) return;
+    if (candidate?.epoch === epoch) live = null;
     loadEpoch += 1;
     load = makeLoadLane(loadEpoch);
-    candidate.retire();
-    void candidate.release().catch(() => {});
+    if (candidate?.epoch === epoch) {
+      candidate.retire();
+      void candidate.release().catch(() => {});
+    }
   };
 
   const routes = Object.freeze(Object.fromEntries(
@@ -247,7 +260,7 @@ export const createKernelTurnOwner = ({
     activeTurns: bridge.activeCount,
     actorCount: () => projection('actorCount'),
     actorOverview: () => projection('actorOverview'),
-    get relays() { return live?.runtime.relays ?? null; },
+    get relays() { return live?.published ? live.runtime.relays ?? null : null; },
     getRelays: async () => {
       if (closed) throw new Error('kernel-turn-owner-closed');
       const ingressLoadEpoch = loadEpoch;
@@ -280,7 +293,7 @@ export const createKernelTurnOwner = ({
       try { await current?.release(); }
       finally {
         bridge.close();
-        controller?.close?.();
+        controller.release();
       }
     },
   });

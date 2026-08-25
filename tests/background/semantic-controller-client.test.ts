@@ -657,4 +657,201 @@ describe('production semantic controller slice', () => {
       offerHandler?.close();
     }
   });
+
+  test('a frozen connector times out, rotates, and closes its late generation', async () => {
+    let connections = 0;
+    let lateClosed = 0;
+    let release = (value: any) => {};
+    const frozen = new Promise<any>((resolve) => { release = resolve; });
+    const client = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: true, dwebEnabled: false, connectTimeoutMs: 5,
+      authorizeSemanticCall: () => ({
+        ownerId: 'peerd-authority-kernel', sessionId: null, instanceId: null,
+        origin: null, target: 'semantic:provider/status:first-party', replayClass: 'A',
+      }),
+      handleSemanticKernelCall: async () => ({ ok: true }),
+      withDirectLifetime: (operation: () => Promise<any>) => operation(),
+      connectDirectController: async () => {
+        connections += 1;
+        if (connections === 1) return frozen;
+        return {
+          call: async () => ({ ok: true, semanticResult: { ok: true, generation: 2 } }),
+          close() {},
+        } as any;
+      },
+      fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
+    });
+    const payload = { protocol: 1, route: 'provider/status', message: {} };
+    await expect(client.callSemantic(payload)).resolves.toEqual({ ok: true, generation: 2 });
+    release({
+      call: async () => ({ ok: true }),
+      close: () => { lateClosed += 1; },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect({ connections, lateClosed }).toEqual({ connections: 2, lateClosed: 1 });
+    client.close();
+  });
+
+  test('an aborted turn stops waiting without cancelling a shared Firefox connection', async () => {
+    let release!: (client: any) => void;
+    const connecting = new Promise<any>((resolve) => { release = resolve; });
+    let calls = 0;
+    const client = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: true, dwebEnabled: false, connectTimeoutMs: 1_000,
+      authorizeTurnCall: () => ({
+        ownerId: 'peerd-authority-kernel', sessionId: 'root', instanceId: null,
+        origin: null, target: 'turn:root', replayClass: 'C',
+      }),
+      handleTurnKernelCall: async () => ({ ok: true }),
+      withDirectLifetime: (operation: () => Promise<any>) => operation(),
+      connectDirectController: async () => connecting,
+      fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
+    });
+    const stopped = new AbortController();
+    const first = client.callTurn({ sessionId: 'root' }, { signal: stopped.signal });
+    const second = client.callTurn({ sessionId: 'root' });
+    stopped.abort();
+    await expect(first).resolves.toMatchObject({
+      ok: false, code: 'controller-call-aborted', outcomeKnown: true,
+    });
+    release({
+      call: async () => { calls += 1; return { ok: true, generation: 1 }; },
+      close() {},
+    });
+    await expect(second).resolves.toEqual({ ok: true, generation: 1 });
+    expect(calls).toBe(1);
+    client.close();
+  });
+
+  test('repeated frozen connectors stop after one safe retry and a later call recovers', async () => {
+    let connections = 0;
+    const client = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: true, dwebEnabled: false, connectTimeoutMs: 5,
+      authorizeSemanticCall: () => ({
+        ownerId: 'peerd-authority-kernel', sessionId: null, instanceId: null,
+        origin: null, target: 'semantic:provider/status:first-party', replayClass: 'A',
+      }),
+      handleSemanticKernelCall: async () => ({ ok: true }),
+      withDirectLifetime: (operation: () => Promise<any>) => operation(),
+      connectDirectController: async () => {
+        connections += 1;
+        if (connections < 3) return new Promise<any>(() => {});
+        return {
+          call: async () => ({ ok: true, semanticResult: { ok: true, generation: 3 } }),
+          close() {},
+        } as any;
+      },
+      fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
+    });
+    const payload = { protocol: 1, route: 'provider/status', message: {} };
+    await expect(client.callSemantic(payload)).resolves.toMatchObject({
+      ok: false, code: 'semantic-dispatch-startup-failed', outcomeKnown: true,
+      error: 'Temporarily unavailable. Try again.', phase: 'startup', retryable: true,
+    });
+    await expect(client.callSemantic(payload)).resolves.toEqual({ ok: true, generation: 3 });
+    expect(connections).toBe(3);
+    client.close();
+  });
+
+  test('a frozen prompt asset generation is bounded and retryable', async () => {
+    let fetches = 0;
+    let firstSignal: AbortSignal | undefined;
+    const client = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: true, dwebEnabled: false, promptLoadTimeoutMs: 5,
+      withDirectLifetime: (operation: () => Promise<any>) => operation(),
+      connectDirectController: async () => ({
+        call: async () => ({ ok: true, prompt: 'ready' }), close() {},
+      } as any),
+      fetchFn: async (_input, init) => {
+        fetches += 1;
+        if (fetches === 1) {
+          firstSignal = init?.signal ?? undefined;
+          return new Promise<Response>(() => {});
+        }
+        return new Response(TEMPLATE, { status: 200 });
+      },
+    });
+    try {
+      await client.renderSystemPrompt({});
+      throw new Error('expected prompt load failure');
+    } catch (cause) {
+      expect(cause).toMatchObject({
+        code: 'prompt-assets-load-timeout', message: 'Temporarily unavailable. Try again.',
+        outcomeKnown: true, phase: 'startup', retryable: true,
+      });
+    }
+    expect(firstSignal?.aborted).toBe(true);
+    await expect(client.renderSystemPrompt({})).resolves.toBe('ready');
+    expect(fetches).toBe(2);
+    client.close();
+  });
+
+  test('Chrome waits for exact host retirement before opening a successor generation', async () => {
+    const workerUrl = 'chrome-extension://test/background/vault-kernel.js';
+    const offscreenUrl = 'chrome-extension://test/offscreen/offscreen.html';
+    let connections = 0;
+    let retirements = 0;
+    let releaseRetirement = () => {};
+    let retirementStarted = () => {};
+    const retiring = new Promise<void>((resolve) => { releaseRetirement = resolve; });
+    const started = new Promise<void>((resolve) => { retirementStarted = resolve; });
+    let retired = false;
+    const offerHandler = makeControllerOfferHandler({
+      expectedWorkerUrl: workerUrl,
+      expectedBuildDigest: CONTROLLER_BUILD_DIGEST,
+      supportedCaps: ['semantic.dispatch'],
+      loadController: async () => createController({ handlers: {
+        'semantic.dispatch': async () => ({
+          ok: true, semanticResult: { ok: true, generation: 2 },
+        }),
+      } }),
+    });
+    const client = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `chrome-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: false, dwebEnabled: false, connectTimeoutMs: 50,
+      authorizeSemanticCall: () => ({
+        ownerId: 'peerd-authority-kernel', sessionId: null, instanceId: null,
+        origin: null, target: 'semantic:provider/status:first-party', replayClass: 'A',
+      }),
+      handleSemanticKernelCall: async () => ({ ok: true }),
+      retireHost: async () => {
+        retirements += 1;
+        retirementStarted();
+        await retiring;
+        retired = true;
+      },
+      listWindowClients: async () => [{
+        url: offscreenUrl,
+        postMessage: (data: unknown, transfer: Transferable[]) => {
+          connections += 1;
+          if (retired) offerHandler({
+            isTrusted: true, source: { scriptURL: workerUrl }, data, ports: transfer,
+          } as unknown as MessageEvent);
+        },
+      }],
+      fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
+    });
+    const payload = { protocol: 1, route: 'provider/status', message: {} };
+    const first = client.callSemantic(payload);
+    await started;
+    const second = client.callSemantic(payload);
+    await Promise.resolve();
+    expect({ connections, retirements }).toEqual({ connections: 1, retirements: 1 });
+    releaseRetirement();
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { ok: true, generation: 2 }, { ok: true, generation: 2 },
+    ]);
+    expect(connections).toBe(2);
+    client.close();
+    offerHandler.close();
+  });
 });
