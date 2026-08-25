@@ -8,6 +8,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import puppeteer from 'puppeteer-core';
+import { bundleChromeNativeKernel } from '../../packaging/bundle-chrome-native-kernel.ts';
 import { packageArtifact } from '../../packaging/package.ts';
 import { readVersion } from '../../packaging/lib.ts';
 import { resolveChrome } from './e2e-harness.mjs';
@@ -47,152 +48,121 @@ const overwriteRegularFile = (path, contents) => {
   }
 };
 
-const FAULT_PROBE_SOURCE = `
-const REACHED_KEY = ${JSON.stringify(REACHED_KEY)};
-globalThis.peerdLifecycleFaultProbe = {
-  async beforeExecute(toolName) {
-    if (toolName !== 'script') return;
-    const stored = await chrome.storage.local.get(REACHED_KEY);
-    const reached = stored[REACHED_KEY] ?? [];
-    await chrome.storage.local.set({
-      [REACHED_KEY]: [...reached, { toolName, at: Date.now() }],
-    });
-    await new Promise(() => {});
-  },
-};
-`;
-
 const replaceExact = (source, anchor, replacement, label) => {
   if (source.split(anchor).length !== 2) throw new Error(`${label} seam changed`);
   return source.replace(anchor, replacement);
 };
 
-const writeFaultProbe = (extension) => writeFileSync(
-  join(extension, 'background', 'lifecycle-fault-probe.js'),
-  FAULT_PROBE_SOURCE,
-  { flag: 'wx', mode: 0o600 },
-);
-
 export const injectLifecycleFaultKernel = (input) => {
-  let source = `import './lifecycle-fault-probe.js';\n${input}`;
-  const routeAnchor = "  'audit/voice-fetch': voiceAuditRoute,";
-  source = replaceExact(source, routeAnchor, `  'lifecycle-fault/dispatch': async (message) => {
+  const routeAnchor = '  ...systemReadRoutes,\n  ...demandRoutes,';
+  return replaceExact(input, routeAnchor, `  ...systemReadRoutes,
+  'lifecycle-fault/dispatch': async (message) => {
     try {
       const relays = await getControllerRelays();
-      if (typeof relays.lifecycleFault !== 'function') {
-        throw new Error('lifecycle fault owner is unavailable');
-      }
-      return await relays.lifecycleFault(message);
-    } catch (cause) {
-      await chrome.storage.local.set({
-        [${JSON.stringify(BOOT_ERROR_KEY)}]: cause?.stack || cause?.message || String(cause),
-      });
-      throw cause;
-    }
-  },
-${routeAnchor}`, 'source fault route');
-  return source;
-};
-
-export const injectLifecycleFaultFactories = (source) => {
-  const relayAnchor = '    const relays = {\n      scriptRuns, validateGeneration, retireStale, dispatchToolCall,';
-  const replacement = `    const lifecycleFault = async (message) => {
-      if (message?.recoverOnly === true) {
-        await lifecycleArmed;
-        return {
-          recovered: true,
-          generation: await deps.kv.get('peerd.lifecycle.generation'),
-        };
+      if (typeof relays.dispatchToolCall !== 'function'
+          || typeof relays.buildActorContext !== 'function') {
+        throw new Error('lifecycle fault relays are unavailable');
       }
       const sessionId = message?.sessionId;
       const callId = message?.callId;
-      if (typeof sessionId !== 'string' || typeof callId !== 'string') {
+      const context = await relays.buildActorContext({
+        ...(typeof sessionId === 'string' ? { sessionId } : {}),
+        exposure: 'main',
+        lifecycleTurnId: 'chrome-physical-fault-turn',
+        lifecycleUserInitiated: true,
+      });
+      if (message?.recoverOnly === true) {
+        return {
+          recovered: true,
+          generation: await kv.get('peerd.lifecycle.generation'),
+        };
+      }
+      if (typeof sessionId !== 'string' || typeof callId !== 'string'
+          || typeof context.lifecycle?.beginTracking !== 'function') {
         throw new Error('lifecycle fault request is invalid');
       }
-      await deps.kv.set(${JSON.stringify(REACHED_KEY)}, []);
-      await lifecycleArmed;
-      const generation = await deps.kv.get('peerd.lifecycle.generation');
+      await kv.set(${JSON.stringify(REACHED_KEY)}, []);
+      const generation = await kv.get('peerd.lifecycle.generation');
       if (!generation?.id) throw new Error('lifecycle generation is not ready');
       for (const [toolName, retryClass] of [
         ['fetch_url', 'B'], ['remember', 'C'], ['dweb_share', 'D'],
       ]) {
-        const operationId = sessionId + ':chrome-fault-' + retryClass.toLowerCase();
-        await lifecycleBoot.operationLog.begin({
-          operationId, sessionId, toolName, retryClass,
-          generationId: generation.id,
+        const tracking = await context.lifecycle.beginTracking({
+          callId: 'chrome-fault-' + retryClass.toLowerCase(),
+          tool: { name: toolName, retryClass },
+          sessionId,
+          ownerSessionId: sessionId,
+          target: 'tool:' + toolName,
+          args: { lifecycleFault: true },
+          turnId: 'chrome-physical-fault-turn',
+          userInitiated: true,
         });
-        await lifecycleBoot.operationLog.transition(operationId, 'running');
-        await lifecycleBoot.operationLog.markDispatched(operationId);
+        if (!tracking?.handle) throw new Error('lifecycle fault tracking failed');
       }
-      void dispatchToolCall({
+      void relays.dispatchToolCall({
         id: callId,
         name: 'script',
         args: { code: "return 'must not run';" },
-      }, await buildToolContext({
-        sessionId,
-        exposure: 'main',
-        lifecycleTurnId: 'chrome-physical-fault-turn',
-        lifecycleUserInitiated: true,
-      })).catch(() => {});
+      }, context, {
+        execute: async (prepared) => {
+          if (prepared?.call?.name !== 'script') {
+            throw new Error('lifecycle fault execution target changed');
+          }
+          const reached = await kv.get(${JSON.stringify(REACHED_KEY)}) ?? [];
+          await kv.set(${JSON.stringify(REACHED_KEY)}, [
+            ...reached, { toolName: prepared.call.name, at: Date.now() },
+          ]);
+          await new Promise(() => {});
+          return prepared.tool.execute(prepared.args, prepared.execCtx);
+        },
+      }).catch(() => {});
       const deadline = Date.now() + 10_000;
       while (Date.now() < deadline) {
-        const reached = await deps.kv.get(${JSON.stringify(REACHED_KEY)});
+        const reached = await kv.get(${JSON.stringify(REACHED_KEY)});
         if (reached?.length === 1) return { started: true };
         await new Promise((resolveWait) => setTimeout(resolveWait, 25));
       }
       throw new Error('fault probe did not reach the tool body');
-    };
-    const relays = {
-      lifecycleFault,
-      scriptRuns, validateGeneration, retireStale, dispatchToolCall,`;
-  return replaceExact(source, relayAnchor, replacement, 'source lifecycle factory');
+    } catch (cause) {
+      await kv.set(${JSON.stringify(BOOT_ERROR_KEY)},
+        cause?.stack || cause?.message || String(cause));
+      throw cause;
+    }
+  },
+  ...demandRoutes,`, 'source fault route');
 };
 
-export const injectLifecycleFaultDispatcher = (source) => {
-  const tryAnchor = '  try {\n    let result;\n    if (quarantineCapable';
-  if (source.split(tryAnchor).length !== 2
-      || source.split('await tool.execute(args, execCtx)').length !== 3) {
-    throw new Error('source dispatcher fault seam changed');
+export const assertLifecycleFaultExecutionSeam = (source) => {
+  const declaration = 'export const executePreparedToolCall = async (prepared, execute = executeInline) => {';
+  const call = 'const execution = await executePreparedToolCall(prepared, options.execute);';
+  if (source.split(declaration).length !== 2 || source.split(call).length !== 2) {
+    throw new Error('source dispatcher execution seam changed');
   }
-  return source.replace(tryAnchor, `  try {
-    const executeWithLifecycleFault = async () => {
-      await globalThis.peerdLifecycleFaultProbe?.beforeExecute(call.name);
-      return tool.execute(args, execCtx);
-    };
-    let result;
-    if (quarantineCapable`).replaceAll(
-    'await tool.execute(args, execCtx)',
-    'await executeWithLifecycleFault()',
-  );
 };
 
 const injectLifecycleFaultTree = (extension) => {
-  writeFaultProbe(extension);
   const kernel = join(extension, 'background', 'vault-kernel.js');
   overwriteRegularFile(
     kernel,
     injectLifecycleFaultKernel(readFileSync(kernel, 'utf8')),
   );
-  const factories = join(extension, 'background', 'kernel-turn-live-factories.js');
-  overwriteRegularFile(
-    factories,
-    injectLifecycleFaultFactories(readFileSync(factories, 'utf8')),
-  );
   const dispatcher = join(extension, 'peerd-runtime', 'tools', 'dispatcher.js');
-  overwriteRegularFile(
-    dispatcher,
-    injectLifecycleFaultDispatcher(readFileSync(dispatcher, 'utf8')),
-  );
+  assertLifecycleFaultExecutionSeam(readFileSync(dispatcher, 'utf8'));
 };
 
-const makeSourceFaultExtension = () => {
+const makeSourceFaultExtension = async () => {
   const directory = mkdtempSync(join(tmpdir(), 'peerd-chrome-lifecycle-fault-'));
   const extension = join(directory, 'extension');
   cpSync(join(ROOT, 'extension'), extension, { recursive: true });
   injectLifecycleFaultTree(extension);
   const manifest = JSON.parse(readFileSync(join(extension, 'manifest.json'), 'utf8'));
+  const backgroundEntry = manifest.background?.service_worker;
+  if (typeof backgroundEntry !== 'string') {
+    throw new Error('source lifecycle target has no service worker entry');
+  }
+  await bundleChromeNativeKernel(extension, backgroundEntry);
   return {
-    directory, extension, backgroundEntry: manifest.background?.service_worker,
+    directory, extension, backgroundEntry,
   };
 };
 
@@ -213,8 +183,6 @@ const makePackagedFaultExtension = async () => {
   await packageArtifact({
     channel: 'store', browser: 'chrome', version: readVersion(),
     sign: false, verify: true, minify: true, sourceRoot, artifactRoot,
-    // The fault hook intentionally adds the production lifecycle graph to the
-    // test-only kernel; release byte budgets still gate the unmodified artifact.
     coldBudgetMode: 'measure-only',
   });
   const staging = join(artifactRoot, 'staging', 'store-chrome');
@@ -225,17 +193,15 @@ const makePackagedFaultExtension = async () => {
   }
   const stagedSources = [
     readFileSync(join(staging, backgroundEntry), 'utf8'),
-    readFileSync(join(staging, 'background/kernel-turn-live-factories.js'), 'utf8'),
     readFileSync(join(staging, 'peerd-runtime/tools/dispatcher.js'), 'utf8'),
-    readFileSync(join(staging, 'background/lifecycle-fault-probe.js'), 'utf8'),
   ].join('\n');
-  for (const canary of [REACHED_KEY, BOOT_ERROR_KEY, 'lifecycle-fault/dispatch']) {
+  for (const canary of [
+    REACHED_KEY, BOOT_ERROR_KEY, 'lifecycle-fault/dispatch',
+    'lifecycle fault execution target changed',
+  ]) {
     if (!stagedSources.includes(canary)) {
       throw new Error(`packaged lifecycle probe was removed before launch: ${canary}`);
     }
-  }
-  if (!/peerdLifecycleFaultProbe\??\.beforeExecute/.test(stagedSources)) {
-    throw new Error('packaged lifecycle dispatcher hook was removed before launch');
   }
   return {
     directory, extension: staging, backgroundEntry,
@@ -274,7 +240,7 @@ const main = async (target = SOURCE_TARGET) => {
   };
   const fault = target === STORE_TARGET
     ? await makePackagedFaultExtension()
-    : makeSourceFaultExtension();
+    : await makeSourceFaultExtension();
   if (typeof fault.backgroundEntry !== 'string') {
     throw new Error(`${target} lifecycle target has no service worker entry`);
   }
