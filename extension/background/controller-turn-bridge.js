@@ -697,9 +697,10 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
             return unknown(run, 'tool execution result is invalid');
           }
           entry.open = false;
+          const effectEntered = entry.effectEntered === true;
           const custodyUnknown = entry.effectPending > 0
-            || (entry.effectEntered && reported.effectEntered !== true)
-            || reported.outcomeKnown !== true;
+            || (effectEntered && (reported.effectEntered !== true
+              || reported.outcomeKnown !== true));
           const result = custodyUnknown ? {
             protocol: TOOL_EXECUTION_PROTOCOL,
             executionId: entry.executionId,
@@ -708,10 +709,20 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
             code: reported.code ?? 'tool-outcome-unknown',
             error: 'Tool outcome unknown. Check state before retrying.',
             outcomeKnown: false,
-            effectEntered: entry.effectEntered || reported.effectEntered,
+            effectEntered,
             retryable: false,
             phase: 'run',
-          } : reported;
+          } : reported.outcomeKnown === true ? {
+            ...reported,
+            effectEntered,
+          } : {
+            ...reported,
+            ok: false,
+            error: 'Tool execution interrupted before its effect.',
+            outcomeKnown: true,
+            effectEntered: false,
+            retryable: true,
+          };
           if (result.outcomeKnown !== true) run.nestedUnknown = true;
           try {
             const settledResult = await settleToolCall?.({

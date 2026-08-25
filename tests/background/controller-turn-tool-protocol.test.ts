@@ -234,7 +234,7 @@ describe('controller turn finite tool protocol', () => {
     expect(executed).toBe(0);
   });
 
-  test('settles a lost executor conservatively and rejects its stale generation', async () => {
+  test('settles a pre-effect executor loss as known and rejects its stale generation', async () => {
     const settlements: any[] = [];
     let staleEffect!: (operation: string, payload: unknown) => Promise<any>;
     const result = await runHarness({
@@ -258,13 +258,45 @@ describe('controller turn finite tool protocol', () => {
         throw new Error('worker generation disappeared');
       },
     });
-    expect(result.error).toMatchObject({ outcomeKnown: false });
+    expect(result.error).toBeNull();
     expect(settlements).toContainEqual(expect.objectContaining({
-      code: 'tool-execution-host-lost', outcomeKnown: false,
-      effectEntered: true, retryable: false,
+      code: 'tool-execution-host-lost', outcomeKnown: true,
+      effectEntered: false, retryable: true,
     }));
     await expect(staleEffect('memory.write', { fact: 'late' })).rejects.toThrow();
     result.bridge.close();
+  });
+
+  test('ignores an executor effect claim when the kernel observed no effect', async () => {
+    const settlements: any[] = [];
+    const result = await runHarness({
+      bridgeHooks: {
+        prepareToolCall: async (call: any, _ctx: any, binding: any) => ({
+          mode: 'execute', custody: binding.executionId, args: call.args,
+          projection: {}, manifestDigest: MANIFEST_DIGEST,
+        }),
+        handleToolEffect: async () => ({ ok: true, outcomeKnown: true }),
+        settleToolCall: async (input: any) => {
+          settlements.push(input.result);
+          return {
+            ok: false, error: input.result.error,
+            outcomeKnown: input.result.outcomeKnown,
+            retryable: input.result.retryable,
+          };
+        },
+      },
+      executeToolCall: async (request) => ({
+        protocol: request.protocol, executionId: request.executionId,
+        argsDigest: request.argsDigest, ok: false,
+        code: 'tool-execution-host-lost', error: 'Worker disappeared.',
+        outcomeKnown: false, effectEntered: true, retryable: false, phase: 'run',
+      }),
+    });
+    expect(result.error).toBeNull();
+    expect(settlements).toContainEqual(expect.objectContaining({
+      code: 'tool-execution-host-lost', outcomeKnown: true,
+      effectEntered: false, retryable: true,
+    }));
   });
 
   test('settles an expired pre-effect grant as known and retryable', async () => {

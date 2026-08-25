@@ -241,9 +241,9 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
             ok: false,
             code: 'tool-execution-host-lost',
             error: 'Tool execution interrupted.',
-            outcomeKnown: false,
-            effectEntered: true,
-            retryable: false,
+            outcomeKnown: true,
+            effectEntered: false,
+            retryable: true,
             phase: 'run',
           };
         }
@@ -253,9 +253,7 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
           turnGeneration: request.turnGeneration,
           resultJson: JSON.stringify(execution),
         }), 'tool result');
-        if (result?.outcomeKnown === false || execution?.outcomeKnown === false) {
-          nestedUnknown = true;
-        }
+        if (result?.outcomeKnown === false) nestedUnknown = true;
         return result;
       }),
       finalizeAbort: async (/** @type {any} */ value) => {
