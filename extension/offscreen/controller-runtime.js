@@ -21,6 +21,7 @@ const loadKernelRuntimeHost = makeBoundedModuleLoader(() => import('./kernel-run
 const loadAdministrativeHost = () => import('./kernel-administrative-host.js');
 const loadRepositoryHost = () => import('./kernel-repository-host.js');
 const loadLocalHost = () => import('./kernel-local-host.js');
+const loadSupportHost = () => import('./kernel-support-host.js');
 const loadFailure = (/** @type {any} */ cause) => ({
   ok: false,
   code: cause?.code ?? 'controller-module-load-failed',
@@ -152,6 +153,7 @@ export const createController = async ({
       administrative: loadAdministrativeHost,
       repository: loadRepositoryHost,
       local: loadLocalHost,
+      support: loadSupportHost,
     },
   });
   /** @type {{dispatch:(payload:unknown,options:any)=>Promise<any>} | null} */

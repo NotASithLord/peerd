@@ -211,7 +211,6 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
       },
       setCost: async () => {},
     },
-    sessionState: { set: () => {} },
     turnSlots: {
       claim: () => ({ controller: turnAbortController, release: () => { releases++; } }),
       isBusy: () => false,

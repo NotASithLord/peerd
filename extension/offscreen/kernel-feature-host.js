@@ -94,22 +94,7 @@ export const createKernelFeatureHost = ({
         return failure('feature-grant-expired', true, 'startup', true);
       }
       const quota = createKernelFeatureEffectQuota(KERNEL_FEATURE_DISPATCH_CAPABILITY, payload);
-      const replayable = request.policy.replayClass === 'A';
-      let pendingEffects = 0;
-      let settledIrreversible = false;
-      let unknownIrreversible = false;
-      const custody = () => replayable
-        ? Object.freeze({ outcomeKnown: true, retryable: true })
-        : pendingEffects > 0 || unknownIrreversible
-          ? Object.freeze({ outcomeKnown: false, retryable: false })
-          : Object.freeze({ outcomeKnown: true, retryable: !settledIrreversible });
-      const observeCustody = (/** @type {unknown} */ result) => {
-        if (replayable) return;
-        const reply = result && typeof result === 'object' && !Array.isArray(result)
-          ? /** @type {Record<string,unknown>} */ (result) : null;
-        if (reply?.outcomeKnown !== true) unknownIrreversible = true;
-        else if (reply.ok === true || reply.retryable !== true) settledIrreversible = true;
-      };
+      const custody = quota.custody;
       let grantOpen = true;
       const grant = new AbortController();
       let stop = (/** @type {Record<string,unknown>} */ _result) => {};
@@ -130,27 +115,26 @@ export const createKernelFeatureHost = ({
       const call = async (/** @type {string} */ operation, /** @type {unknown} */ value) => {
         if (poisoned || !grantOpen || grant.signal.aborted
             || Number(options.deadlineAt) <= now()) {
+          const state = custody();
           return failure(poisoned
-            ? 'feature-host-generation-retired' : 'feature-grant-settled', true, 'run');
+            ? 'feature-host-generation-retired' : 'feature-grant-settled',
+            state.outcomeKnown, 'run', state.retryable);
         }
         const admitted = quota.admit(operation, value);
         if (admitted?.ok !== true) return admitted;
         if (typeof options.kernelCall !== 'function') {
-          const denied = failure('kernel-operation-denied', true, 'run');
+          const denied = failure('kernel-operation-denied', true, 'run', true);
           quota.observe(operation, value, denied);
           return denied;
         }
-        pendingEffects += 1;
         let result;
         try { result = await options.kernelCall(operation, value); }
         catch {
-          result = failure(
-            'kernel-operation-failed', replayable, 'run', replayable,
-          );
+          const state = custody();
+          result = failure('kernel-operation-failed',
+            state.outcomeKnown, 'run', state.retryable);
         }
-        pendingEffects -= 1;
         const observed = quota.observe(operation, value, result);
-        observeCustody(observed?.ok === true ? result : observed);
         if (poisoned || !grantOpen || grant.signal.aborted) {
           const state = custody();
           return failure(
@@ -176,17 +160,17 @@ export const createKernelFeatureHost = ({
               state.outcomeKnown, 'run', state.retryable);
           }
           const result = Object.freeze({ ok: true, outcomeKnown: true, value });
-          return kernelFeatureResultAllowed(KERNEL_FEATURE_DISPATCH_CAPABILITY, payload, result)
-            ? result : failure('feature-result-invalid', false, 'run');
+          if (kernelFeatureResultAllowed(KERNEL_FEATURE_DISPATCH_CAPABILITY, payload, result)) {
+            return result;
+          }
+          const state = custody();
+          return failure('feature-result-invalid', state.outcomeKnown, 'run', state.retryable);
         }).catch((cause) => {
           const offered = /** @type {{code?:unknown}} */ (cause)?.code;
           const code = typeof offered === 'string' && /^[a-z0-9][a-z0-9-]{0,127}$/.test(offered)
             ? offered : 'feature-dispatch-failed';
-          return failure(
-            code,
-            custody().outcomeKnown,
-            'run',
-          );
+          const state = custody();
+          return failure(code, state.outcomeKnown, 'run', state.retryable);
         });
         return await Promise.race([execution, stopped]);
       } finally {

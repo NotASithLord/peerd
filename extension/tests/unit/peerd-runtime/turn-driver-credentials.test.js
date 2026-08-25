@@ -46,7 +46,6 @@ describe('bound actor background-heap refusal', () => {
         sessionSet: async () => {},
       },
       sessions,
-      sessionState: { set: () => {} },
       turnSlots: {
         claim: () => ({ controller: new AbortController(), release: () => { releases++; } }),
         isBusy: () => false,

@@ -48,7 +48,7 @@ const directOwnerToken = (route: string, sourceName: string) => {
   }
   if (sourceName === 'siteClientRoutes') return 'createKernelSiteClientRoutes';
   if (sourceName === 'extension/background/routes/session-mutations.js') {
-    return 'makeKernelSessionRoutes';
+    return 'makeKernelSessionTurnRoutes';
   }
   if (sourceName === 'extension/background/routes/memory.js') return "'onboarding/complete'";
   if (sourceName === 'extension/background/vault-kernel.js') {
@@ -58,8 +58,10 @@ const directOwnerToken = (route: string, sourceName: string) => {
     return route === 'audit/voice-fetch' ? 'makeKernelVoiceAuditRoute' : "'sidepanel/close'";
   }
   if (sourceName === 'extension/background/routes/sessions.js') {
-    return route.startsWith('session/') ? 'makeKernelSessionRoutes' : 'makeKernelComposerRoutes';
+    return route.startsWith('session/') || route.startsWith('agent/') || route === 'actor/spawn'
+      ? 'makeKernelSessionTurnRoutes' : 'makeKernelComposerRoutes';
   }
+  if (sourceName === 'extension/offscreen/kernel-support-host.js') return '...sessionSupportRoutes';
   return null;
 };
 

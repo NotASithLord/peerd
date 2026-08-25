@@ -1,8 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import {
-  makeSessionKernelRoutes,
-  makeSessionRoutes,
-} from '../../extension/background/routes/sessions.js';
+import { makeSessionRoutes } from '../../extension/background/routes/sessions.js';
 import { makeAgentSendCustody } from '../../extension/peerd-egress/background.js';
 
 // session/agent/composer/actor routes — moved verbatim. Pin the slash-command
@@ -496,38 +493,6 @@ describe('session read routes', () => {
     });
     await makeSessionRoutes(deps)['agent/stop']();
     expect(stopped).toEqual(['a']);
-  });
-  test('session/list filters out spawned', async () => {
-    const { deps } = baseDeps();
-    const res = await makeSessionKernelRoutes(deps)['session/list']();
-    expect(res.sessions.map((s: any) => s.sessionId)).toEqual(['a']);
-  });
-  test('session/list locked → locked', async () => {
-    const { deps } = baseDeps({ vault: { isLocked: () => true } });
-    expect(await makeSessionKernelRoutes(deps)['session/list']()).toEqual({ ok: false, error: 'locked' });
-  });
-  test('session/get requires an id', async () => {
-    const { deps } = baseDeps();
-    expect(await makeSessionKernelRoutes(deps)['session/get']({ sessionId: '' })).toEqual({ ok: false, error: 'sessionId-required' });
-  });
-  test('session/get unknown → session-not-found', async () => {
-    const { deps } = baseDeps();
-    expect(await makeSessionKernelRoutes(deps)['session/get']({ sessionId: 'zzz' })).toEqual({ ok: false, error: 'session-not-found' });
-  });
-  test('composer/files maps to paths; [] when locked', async () => {
-    const { deps } = baseDeps();
-    expect(await makeSessionKernelRoutes(deps)['composer/files']()).toEqual({ ok: true, files: ['a.js', 'b.js'] });
-    const locked = baseDeps({ vault: { isLocked: () => true } }).deps;
-    expect(await makeSessionKernelRoutes(locked)['composer/files']()).toEqual({ ok: true, files: [] });
-  });
-  test('composer/tabs flags denylisted + unsupported-scheme tabs as blocked', async () => {
-    const { deps } = baseDeps();
-    const res = await makeSessionKernelRoutes(deps)['composer/tabs']();
-    const byId = Object.fromEntries(res.tabs.map((t: any) => [t.id, t]));
-    expect(byId[1].blocked).toBe(false);                 // https://ok.com
-    expect(byId[2].blocked).toBe(true);                  // denylisted host
-    expect(byId[3].blocked).toBe(true);                  // chrome:// scheme
-    expect(byId[1]).toMatchObject({ origin: 'https://ok.com', active: true });
   });
 });
 

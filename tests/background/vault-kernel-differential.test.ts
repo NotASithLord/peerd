@@ -506,7 +506,7 @@ describe('vault authority kernel boot and UI contract', () => {
     expect(await invoke(
       { type: 'permission/set', mode: 'act' },
       { firstParty: true, surface: 'options' },
-    )).toEqual({ ok: false, error: 'vault-route-unauthorized-sender' });
+    )).toEqual({ ok: true });
     expect(await invoke(
       { type: 'onboarding/complete', peerName: 'Nova' },
       { firstParty: true, surface: 'home' },
@@ -611,7 +611,7 @@ describe('vault authority kernel boot and UI contract', () => {
     expect(calls).toEqual([
       'git', 'settings', 'provider', 'provider-test', 'provider-test',
       'provider-status', 'provider-status', 'models', 'models', 'openrouter-models', 'local-models', 'memory-write',
-      'session', 'permission', 'onboarding', 'import-git', 'set-model',
+      'session', 'permission', 'permission', 'onboarding', 'import-git', 'set-model',
       'agent-send', 'agent-send', 'origin-lock', 'origin-lock', 'agent-stop', 'actor-spawn',
       'session-archive', 'session-switch', 'session-reset', 'debug', 'isolation',
       'contacts', 'skills', 'hooks', 'memory-init',

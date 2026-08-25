@@ -22,7 +22,6 @@ import {
 } from './kernel-credential-routes.js';
 import { makeKernelProviderSetKeyRoute } from './kernel-provider-key-route.js';
 import { makeKernelSettingsRoutes, normalizeSettingsPatch } from './settings-patch.js';
-import { makeKernelSessionRoutes } from './kernel-session-routes.js';
 import { KERNEL_DEMAND_SUPPORT_ROUTE_NAMES } from '../shared/kernel-feature-route-inventory.js';
 
 /** @param {Record<string,any>} deps */
@@ -55,7 +54,7 @@ export const createKernelDemandSupport = (deps) => {
     sessionCache: deps.sessionCache,
     appFiles: /** @type {any} */ (repositories.appFiles),
   });
-  const routes = Object.freeze({
+  const directRoutes = Object.freeze({
     ...makeKernelAppEditorRoutes({
       vault: deps.vault,
       catalog: appCatalog,
@@ -102,18 +101,8 @@ export const createKernelDemandSupport = (deps) => {
       onChanged: deps.onSettingsChanged,
       pushState: deps.pushState,
     }),
-    ...makeKernelSessionRoutes({
-      vault: deps.vault,
-      sessions: deps.sessions,
-      contextSnapshots: deps.contextSnapshots,
-      ready: deps.ready,
-      sessionCache: deps.sessionCache,
-      auditLog: deps.auditLog,
-      resolvePermission: deps.resolvePermission,
-      pushState: deps.pushState,
-    }),
   });
-  if (Object.keys(routes).sort().join('\0')
+  if (Object.keys(directRoutes).sort().join('\0')
       !== [...KERNEL_DEMAND_SUPPORT_ROUTE_NAMES].sort().join('\0')) {
     throw new TypeError('kernel-demand-support-routes-invalid');
   }
@@ -144,7 +133,7 @@ export const createKernelDemandSupport = (deps) => {
     }),
   });
   return Object.freeze({
-    routes,
+    directRoutes,
     providerKeyRoutes,
     credentialRoutes,
     appCatalog,

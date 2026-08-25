@@ -49,6 +49,7 @@ import { validateKernelStateProjection } from '/shared/kernel-state-contract.js'
  * @property {string} [rootSessionId]
  * @property {string[]} [grantedTools]
  * @property {boolean} [running]
+ * @property {string} [loadError]
  * @property {any} [cost]
  */
 

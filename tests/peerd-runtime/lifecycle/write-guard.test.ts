@@ -26,6 +26,7 @@ const makeIdb = () => {
     get: async (store: string, key: string) => { ops.push(`get:${store}:${key}`); return undefined; },
     put: async (store: string) => { ops.push(`put:${store}`); },
     patch: async (store: string) => { ops.push(`patch:${store}`); },
+    mutate: async (store: string) => { ops.push(`mutate:${store}`); },
     del: async (store: string) => { ops.push(`del:${store}`); },
     getAll: async (store: string) => { ops.push(`getAll:${store}`); return []; },
     clear: async (store: string) => { ops.push(`clear:${store}`); },
@@ -83,6 +84,7 @@ describe('idb enforcement', () => {
     guard.block(['sessions', 'audit']);
     expect(() => idb.put('sessions')).toThrow(StoreReadOnlyError);
     expect(() => idb.patch('sessions')).toThrow(StoreReadOnlyError);
+    expect(() => idb.mutate('sessions')).toThrow(StoreReadOnlyError);
     expect(() => idb.del('session_messages')).toThrow(StoreReadOnlyError);
     expect(() => idb.clear('audit_log')).toThrow(StoreReadOnlyError);
     await idb.get('sessions', 'x');                    // read passes

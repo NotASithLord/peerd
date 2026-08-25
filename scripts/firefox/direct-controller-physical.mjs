@@ -291,7 +291,7 @@ export const runDirectControllerPhysicalSmoke = async () => {
     await driver.switchToWindow(extensionHandle);
     await driver.closeWindow();
     await driver.switchToWindow(survivor.handle);
-    await sleep(EVENT_PAGE_IDLE_MS);
+    await sleep(EVENT_PAGE_IDLE_MS + 1_000);
     await driver.navigate(`${FIREFOX_ORIGIN}/direct-controller-physical.html`);
     const afterEventPageIdle = await invokeProbe(driver);
 

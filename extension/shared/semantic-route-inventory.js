@@ -874,7 +874,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/routes/session-mutations.js"
+    "source": "extension/offscreen/kernel-support-host.js"
   },
   {
     "route": "pod/cancel-io",
@@ -978,7 +978,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/routes/sessions.js"
+    "source": "extension/offscreen/kernel-support-host.js"
   },
   {
     "route": "session/debugBundle",
@@ -994,7 +994,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/routes/sessions.js"
+    "source": "extension/offscreen/kernel-support-host.js"
   },
   {
     "route": "session/list",
@@ -1002,7 +1002,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/routes/sessions.js"
+    "source": "extension/offscreen/kernel-support-host.js"
   },
   {
     "route": "session/reset",
@@ -1018,7 +1018,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/routes/session-mutations.js"
+    "source": "extension/offscreen/kernel-support-host.js"
   },
   {
     "route": "session/switch",

@@ -54,8 +54,9 @@ const replaceExact = (source, anchor, replacement, label) => {
 };
 
 export const injectLifecycleFaultKernel = (input) => {
-  const routeAnchor = '  ...systemReadRoutes,\n  ...demandRoutes,';
+  const routeAnchor = '  ...systemReadRoutes,\n  ...sessionSupportRoutes,\n  ...demandRoutes,';
   return replaceExact(input, routeAnchor, `  ...systemReadRoutes,
+  ...sessionSupportRoutes,
   'lifecycle-fault/dispatch': async (message) => {
     try {
       const relays = await getControllerRelays();

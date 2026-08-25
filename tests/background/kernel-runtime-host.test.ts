@@ -544,7 +544,7 @@ describe('private runtime controller channel', () => {
     channel.port1.close();
   });
 
-  test('keeps module startup known but post-dispatch failure unknown', async () => {
+  test('keeps startup and no-effect dispatch failures known', async () => {
     let unavailableLoads = 0;
     const unavailable = await connectRuntime({
       loadRuntimeHost: async () => {
@@ -575,7 +575,8 @@ describe('private runtime controller channel', () => {
       'runtime.dispatch', REQUEST, { timeoutMs: 1_000 },
     );
     expect(failedResult).toMatchObject({
-      ok: false, code: 'runtime-dispatch-failed', outcomeKnown: false, phase: 'run',
+      ok: false, code: 'runtime-dispatch-failed', outcomeKnown: true,
+      retryable: true, phase: 'run',
     });
     failed.close();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -644,7 +645,8 @@ describe('private runtime controller channel', () => {
     const result = controller.call('runtime.dispatch', BOOTSTRAP, { timeoutMs: 1_000 });
     await started;
     await expect(result).resolves.toMatchObject({
-      ok: false, code: 'controller-pending-kernel-effect', outcomeKnown: false,
+      ok: false, code: 'controller-pending-kernel-effect',
+      outcomeKnown: true, retryable: true,
     });
     expect(observed.signal?.aborted).toBe(true);
     controller.close();
@@ -694,8 +696,59 @@ describe('private runtime controller channel', () => {
     await admission;
     expect(observed.effectSignal?.aborted).toBe(false);
     cancel.abort();
-    await expect(pending).resolves.toMatchObject({ ok: false, outcomeKnown: false });
+    await expect(pending).resolves.toMatchObject({
+      ok: false, outcomeKnown: true, retryable: true,
+    });
     expect(observed.effectSignal?.aborted).toBe(true);
+    controller.close();
+  });
+
+  test('keeps a settled model-call commit through channel timeout', async () => {
+    let committed!: () => void;
+    const settled = new Promise<void>((resolve) => { committed = resolve; });
+    const authority = {
+      ...AUTHORITY, target: 'kernel-runtime-rich-relay', replayClass: 'E' as const,
+    };
+    const controller = await connectRuntime({
+      authorizeCall: () => authority,
+      handleKernelCall: async (operation: string) => operation === 'rich.script.admit'
+        ? {
+          ok: true, outcomeKnown: true,
+          value: {
+            token: 'reservation-token-1234',
+            owner: { provider: 'anthropic', model: 'claude-test', cost: { cost: 0 } },
+            settings: { spendLimitUsd: null, pricingOverrides: {}, ollamaHost: '' },
+          },
+        }
+        : { ok: true, outcomeKnown: true, value: { text: 'done', usage: null, cost: 0 } },
+      loadRuntimeHost: async () => ({
+        createKernelRuntimeHost: () => createKernelRuntimeHost({ handlers: {
+          'runtime.rich.relay': async (_input, context) => {
+            await context.effects.call('rich.script.admit', {
+              ownerSessionId: 'session:1', runId: 'run:1', maxTokens: 32,
+              requestedModel: null,
+            });
+            await context.effects.call('rich.model.call', {
+              token: 'reservation-token-1234',
+              ownerSessionId: 'session:1', runId: 'run:1',
+              provider: 'anthropic', model: 'claude-test', system: '',
+              messages: [{ role: 'user', content: 'hello' }], maxTokens: 32,
+              ollamaHost: '', pricingOverrides: {}, localProvider: false,
+            });
+            committed();
+            return new Promise(() => {});
+          },
+        } }),
+      }),
+    });
+    const pending = controller.call('runtime.dispatch', {
+      operation: 'runtime.rich.relay',
+      input: { route: 'script/model-call', message: {} },
+    }, { timeoutMs: 20 });
+    await settled;
+    await expect(pending).resolves.toMatchObject({
+      ok: false, code: 'controller-call-timeout', outcomeKnown: true, retryable: false,
+    });
     controller.close();
   });
 
@@ -725,7 +778,9 @@ describe('private runtime controller channel', () => {
     const pending = controller.call('runtime.dispatch', BOOTSTRAP);
     await started;
     controller.close();
-    await expect(pending).resolves.toMatchObject({ outcomeKnown: false });
+    await expect(pending).resolves.toMatchObject({
+      outcomeKnown: true, retryable: true,
+    });
     expect(observed.signal?.aborted).toBe(true);
   });
 

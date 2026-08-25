@@ -973,7 +973,7 @@ const ToolCall = {
  * @param {{
  *   toolUse: ToolUse, toolResult: ToolResult|null, interrupted?: boolean,
  *   spawned?: TranscriptArgs['spawned'], actors?: Record<string, any>,
- *   loadActor?: (sessionId: string) => void,
+ *   loadActor?: (sessionId: string, retry?: boolean) => void,
  *   peerName?: string, depth: number, ui: ToolCallState,
  * }} args
  */
@@ -1019,9 +1019,13 @@ const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, 
         : null,
       tooDeep
         ? m('p.muted', `nested ${MAX_NESTED_DEPTH} levels deep — deeper transcripts are inspectable via session navigation`)
-        : (childSession && childSession.messages.length > 0)
+        : (childSession && Array.isArray(childSession.messages) && childSession.messages.length > 0)
           ? m('.actor-transcript',
               renderTranscript({ messages: childSession.messages, spawned, actors, loadActor, peerName, depth: depth + 1 }))
+          : childSession?.loadError
+            ? m('button.error-line', {
+                type: 'button', onclick: () => { if (childId) loadActor?.(childId, true); },
+              }, childSession.loadError)
           : childId
             ? m('p.muted', status === 'pending' ? 'actor running…' : status === 'cancelled' ? 'actor cancelled' : 'loading transcript…')
             : m('p.muted', outcomeUnknown

@@ -82,14 +82,8 @@ const harness = ({
     browser: { runtime: { getManifest: () => ({ version: '0.1.0' }) } },
     ...turn,
   };
-  let activeSession: any = { sessionId: 'root', depth: 2, messages: [] };
-  const sessionState = {
-    current: () => activeSession,
-    set: (value: any) => { activeSession = value; },
-    clear: () => { activeSession = null; },
-  };
   const sessionDeps = {
-    vault: turnDeps.vault, auditLog, pushState, sessions, sessionCache, sessionState,
+    vault: turnDeps.vault, auditLog, pushState, sessions, sessionCache,
     autoMemory: { maybeExtract: async () => {} },
     resolvePermission: async () => ({ mode: 'act', confirmActions: false }),
     normalizeMode: (mode: unknown) => mode, normalizeConfirmActions: Boolean,
@@ -115,7 +109,10 @@ describe('native kernel session and turn route boundary', () => {
     expect([...KERNEL_SESSION_TURN_ROUTE_NAMES]).toEqual(EXPECTED_ROUTES);
     expect(Object.keys(routes)).toEqual(EXPECTED_ROUTES);
     expect(Object.isFrozen(routes)).toBe(true);
-    expect((routes as any)['session/setModel']).toBeUndefined();
+    for (const route of [
+      'session/list', 'session/get', 'session/contextSnapshots',
+      'session/setModel', 'permission/set',
+    ]) expect((routes as any)[route]).toBeUndefined();
     expect((routes as any)['transfer/import']).toBeUndefined();
 
     await expect(routes['actor/spawn']({ task: 'inspect' }))

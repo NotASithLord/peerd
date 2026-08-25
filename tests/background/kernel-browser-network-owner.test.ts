@@ -175,6 +175,65 @@ describe('kernel browser network owner', () => {
     expect(calls).toContain('network:sync');
   });
 
+  test('bounds lazy authority startup before effects and reuses a late load', async () => {
+    let finish!: (value: any) => void;
+    let loads = 0;
+    const loading = new Promise((resolve) => { finish = resolve; });
+    const owner = createKernelBrowserNetworkOwner({
+      firefox: false, browser: {}, dnr: {}, sessionCache: {}, denylist: {},
+      loadTimeoutMs: 5,
+      createAuthority: async () => { loads += 1; return loading; },
+    });
+    await expect(owner.ensureBrowserNetworkGuard(3, 'https://public.example/'))
+      .resolves.toMatchObject({
+        ok: false,
+        code: 'kernel-browser-network-ensureBrowserNetworkGuard-load-timeout',
+        outcomeKnown: true,
+        retryable: true,
+        phase: 'startup',
+      });
+    finish(directAuthority());
+    await Promise.resolve();
+    await expect(owner.ensureBrowserNetworkGuard(3, 'https://public.example/'))
+      .resolves.toEqual({ ok: true });
+    expect(loads).toBe(1);
+  });
+
+  test('keeps a post-entry authority timeout unknown and non-retryable', async () => {
+    const owner = createKernelBrowserNetworkOwner({
+      firefox: false, browser: {}, dnr: {}, sessionCache: {}, denylist: {},
+      loadTimeoutMs: 5,
+      createAuthority: async () => directAuthority({
+        ensureBrowserNetworkGuard: async () => new Promise(() => {}),
+      }),
+    });
+    await expect(owner.ensureBrowserNetworkGuard(3, 'https://public.example/'))
+      .resolves.toMatchObject({
+        ok: false,
+        code: 'kernel-browser-network-ensureBrowserNetworkGuard-timeout',
+        outcomeKnown: false,
+        retryable: false,
+        phase: 'run',
+      });
+  });
+
+  test('keeps authority construction failures known and retryable', async () => {
+    for (const createAuthority of [
+      () => { throw new Error('construction failed'); },
+      async () => ({}),
+    ]) {
+      const owner = createKernelBrowserNetworkOwner({
+        firefox: false, browser: {}, dnr: {}, sessionCache: {}, denylist: {},
+        createAuthority,
+      });
+      await expect(owner.ensureBrowserNetworkGuard(3, 'https://public.example/'))
+        .resolves.toMatchObject({
+          ok: false, code: 'kernel-browser-network-authority-startup-failed',
+          outcomeKnown: true, retryable: true, phase: 'startup',
+        });
+    }
+  });
+
   test('admits only the exact installed App tab into network custody', async () => {
     const appTabUrl = 'moz-extension://peerd/engine-tabs/app-tab/index.html';
     const url = `${appTabUrl}#app-1?owner=session-1`;

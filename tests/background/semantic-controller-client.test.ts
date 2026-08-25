@@ -11,6 +11,8 @@ import {
 } from '../../packaging/controller-build-identity.ts';
 import { makeSemanticControllerClient } from '../../extension/background/offscreen-controller-client.js';
 import { connectDirectController } from '../../extension/background/direct-controller-client.js';
+import { createKernelSessionAuthority } from '../../extension/background/kernel-session-authority.js';
+import { createKernelSupportControl } from '../../extension/background/kernel-support-control.js';
 import { makeControllerOfferHandler } from '../../extension/offscreen/controller-shell.js';
 import { createController } from '../../extension/offscreen/controller-runtime.js';
 import {
@@ -80,8 +82,11 @@ describe('production semantic controller slice', () => {
       'background/kernel-semantic-authority.js',
       'background/kernel-semantic-control.js',
       'background/kernel-administrative-control.js',
+      'background/kernel-support-control.js',
+      'background/kernel-session-authority.js',
       'offscreen/kernel-runtime-host.js',
       'offscreen/kernel-administrative-host.js',
+      'offscreen/kernel-support-host.js',
       'offscreen/controller-tool-runtime.js',
     ];
     for (const entry of governed) expect(CONTROLLER_BUILD_ENTRIES).toContain(entry as any);
@@ -123,6 +128,27 @@ describe('production semantic controller slice', () => {
       let before = await controllerBuildDigest(root);
       for (const name of ['kernel-semantic-authority.js', 'kernel-semantic-control.js']) {
         const path = join(root, 'background', name);
+        writeFileSync(path, `${readFileSync(path, 'utf8')}\n// identity mutation\n`);
+        const after = await controllerBuildDigest(root);
+        expect(after).not.toBe(before);
+        before = after;
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('build identity binds support routing and reverse authority', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'peerd-controller-support-identity-'));
+    try {
+      cpSync(EXTENSION_DIR, root, { recursive: true });
+      let before = await controllerBuildDigest(root);
+      for (const name of [
+        'background/kernel-session-authority.js',
+        'background/kernel-support-control.js',
+        'offscreen/kernel-support-host.js',
+      ]) {
+        const path = join(root, name);
         writeFileSync(path, `${readFileSync(path, 'utf8')}\n// identity mutation\n`);
         const after = await controllerBuildDigest(root);
         expect(after).not.toBe(before);
@@ -465,6 +491,111 @@ describe('production semantic controller slice', () => {
     expect(closed).toEqual([1]);
     semantic.close();
     expect(closed).toEqual([1, 2]);
+  });
+
+  test('Firefox feature lifetime distinguishes replayable reads from commits', async () => {
+    const options: any[] = [];
+    const semantic = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: true, dwebEnabled: false,
+      authorizeFeatureCall: () => ({ replayClass: 'A' }),
+      handleFeatureKernelCall: async () => ({ ok: true }),
+      connectDirectController: async () => ({
+        call: async () => ({ ok: true, outcomeKnown: true, value: { ok: true } }),
+        close() {},
+      } as any),
+      withDirectLifetime: async (operation, offered) => {
+        options.push(offered);
+        return operation();
+      },
+      fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
+    });
+    const message = (route: string, dispatchId: string, value: Record<string, unknown>) => ({
+      cluster: 'support', route, dispatchId, message: value,
+    });
+
+    await semantic.callFeature(message('session/list', 'feature-read-1', {}));
+    await semantic.callFeature(message('session/setModel', 'feature-commit-1', { model: 'new' }));
+
+    expect(options).toHaveLength(2);
+    expect(options[0]).toMatchObject({
+      outcomeKnownOnLoss: true,
+      code: 'controller-firefox-feature-lifetime-lost',
+    });
+    expect(options[0].lossGraceMs).toBeUndefined();
+    expect(options[1]).toMatchObject({
+      outcomeKnownOnLoss: false,
+      lossGraceMs: 2_000,
+      code: 'controller-firefox-feature-lifetime-lost',
+    });
+    semantic.close();
+  });
+
+  test('Firefox carries all session support routes through the sealed controller', async () => {
+    const row: any = {
+      kind: 'chat', sessionId: 'chat-1', title: 'Chat', createdAt: 1,
+      messages: [{ when: 2 }], provider: 'anthropic', model: 'old',
+    };
+    const cache = new Map<string, any>([['currentSessionId', 'chat-1']]);
+    const authority = createKernelSessionAuthority({
+      ready: Promise.resolve(), vault: { isLocked: () => false },
+      sessions: {
+        listSummaries: async () => [{
+          ...row, lastMessageAt: 2, messageCount: 1,
+          hasCustomSystemPrompt: false, toolManifest: null,
+        }],
+        get: async (id: string) => id === row.sessionId ? row : null,
+        updateMetadata: async (id: string, patch: Record<string, unknown>) => {
+          if (id !== row.sessionId) return null;
+          Object.assign(row, patch);
+          return row;
+        },
+      },
+      contextSnapshots: { snapshotsFor: (id: string) => [{ id, capturedAt: 3 }] },
+      sessionCache: {
+        sessionGet: async (key: string) => cache.get(key),
+        sessionSet: async (key: string, value: unknown) => { cache.set(key, value); },
+      },
+      auditLog: { append: async () => {} },
+      resolvePermission: (session: any, mode: unknown, confirmActions: unknown) => ({
+        mode: (session?.permissionMode ?? mode) === 'act' ? 'act' : 'plan',
+        confirmActions: session?.confirmActions ?? confirmActions !== false,
+      }),
+      pushState: async () => {}, admitRoute: () => true,
+    });
+    let semantic!: ReturnType<typeof makeSemanticControllerClient>;
+    const control = createKernelSupportControl({
+      callFeature: (payload, options) => semantic.callFeature(payload, options),
+      admit: authority.admit,
+      effectAllowed: authority.effectAllowed,
+      effects: authority.effects,
+    });
+    semantic = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: true, dwebEnabled: false,
+      authorizeFeatureCall: control.authorize,
+      handleFeatureKernelCall: control.handleKernelCall,
+      withDirectLifetime: (operation: () => Promise<any>) => operation(),
+      connectDirectController: (deps: any) => connectDirectController({
+        ...deps, loadController: () => createController(),
+      }),
+      fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
+    });
+
+    await expect(control.routes['session/list']()).resolves.toMatchObject({
+      ok: true, sessions: [{ sessionId: 'chat-1', messageCount: 1 }],
+    });
+    await expect(control.routes['session/get']({ sessionId: 'chat-1' }))
+      .resolves.toMatchObject({ ok: true, session: { sessionId: 'chat-1' } });
+    await expect(control.routes['session/contextSnapshots']({ sessionId: 'chat-1' }))
+      .resolves.toEqual({ ok: true, snapshots: [{ id: 'chat-1', capturedAt: 3 }] });
+    await expect(control.routes['session/setModel']({ model: 'new' }))
+      .resolves.toEqual({ ok: true, model: 'new' });
+    await expect(control.routes['permission/set']({ mode: 'act' }))
+      .resolves.toEqual({ ok: true, permission: { mode: 'act', confirmActions: true } });
+    semantic.close();
   });
 
   test('Firefox lifetime loss retires a controller still connecting', async () => {

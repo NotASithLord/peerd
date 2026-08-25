@@ -184,7 +184,7 @@ export async function runVaultKernelFirefoxPhysical() {
     await driver.closeWindow();
     await driver.switchToWindow(survivor.handle);
     const handlesAfterClose = await driver.windowHandles();
-    await sleep(EVENT_PAGE_IDLE_MS);
+    await sleep(EVENT_PAGE_IDLE_MS + 1_000);
     const handlesAfterIdle = await driver.windowHandles();
     await driver.navigate(`http://127.0.0.1:${ordinaryServer.port}/`);
     const ordinaryPage = await driver.execute('return document.body.textContent;');

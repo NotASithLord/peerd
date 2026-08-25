@@ -1,6 +1,8 @@
 // @ts-check
 
 export const STARTUP_UNAVAILABLE_USER_FAILURE = 'Temporarily unavailable. Try again.';
+export const OUTCOME_UNKNOWN_USER_FAILURE = 'Peerd could not confirm whether the requested '
+  + 'change finished. Refresh to reconcile before trying again.';
 
 /** @param {string} code */
 const moduleLoadError = (code) => Object.assign(

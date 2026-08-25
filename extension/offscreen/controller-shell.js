@@ -18,7 +18,9 @@ import {
   controllerOuterPayloadCap,
   controllerPayloadAllowed,
   controllerRenewalIdleCap,
+  controllerCustodyIsAuthoritative,
   createControllerKernelQuota,
+  normalizeControllerCustody,
 } from '/shared/controller-kernel-quota.js';
 import {
   createRuntimeEffectQuota,
@@ -318,30 +320,12 @@ export const bindControllerChannel = ({
     }
     return { outcomeKnown, retryable };
   };
-  const normalizeCustody = (/** @type {any} */ result,
-    /** @type {{outcomeKnown:boolean,retryable:boolean}|null} */ custody,
-    /** @type {boolean} */ pending) => {
-    const base = pending ? {
-      ok: false, code: 'controller-pending-kernel-effect',
-      outcomeKnown: result?.outcomeKnown === true,
-      ...(result?.retryable === false ? { retryable: false } : {}),
-    } : result ?? { ok: false, code: 'controller-result-missing' };
-    if (!custody) return base;
-    if (custody.outcomeKnown !== true) {
-      return { ...base, outcomeKnown: false, retryable: false };
-    }
-    if (base?.outcomeKnown !== true) return { ...base, outcomeKnown: false, retryable: false };
-    if (base?.ok === true) return { ...base, outcomeKnown: true };
-    return {
-      ...base, ok: false, outcomeKnown: true,
-      retryable: custody.retryable && base?.retryable !== false,
-    };
-  };
   const settle = (/** @type {string} */ requestId, /** @type {any} */ result) => {
     const operation = operations.get(requestId);
     if (!operation) return;
     const pendingEffect = operation.kernelCalls.size > 0;
-    const custody = operation.effectEntered ? pendingCustody(operation) : null;
+    const custody = controllerCustodyIsAuthoritative(operation.capability)
+        || operation.effectEntered ? pendingCustody(operation) : null;
     if (pendingEffect) operation.abort?.abort();
     if (operation.deadlineTimer) clearTimeout(operation.deadlineTimer);
     for (const pending of operation.kernelCalls.values()) {
@@ -361,7 +345,9 @@ export const bindControllerChannel = ({
       stopPending = Math.max(0, stopPending - 1);
       stopPendingBytes = Math.max(0, stopPendingBytes - operation.payloadBytes);
     }
-    const settlement = normalizeCustody(result, custody, pendingEffect);
+    const settlement = normalizeControllerCustody(
+      operation.capability, result, custody, pendingEffect,
+    );
     try { post({
       type: 'controller/settled', requestId, grantId: operation.grantId, result: settlement,
     }); }
@@ -383,7 +369,8 @@ export const bindControllerChannel = ({
     if (operation.deadlineTimer) clearTimeout(operation.deadlineTimer);
     operation.deadlineTimer = setTimeout(() => {
       operation.abort?.abort();
-      const custody = operation.kernelCalls.size > 0
+      const custody = controllerCustodyIsAuthoritative(operation.capability)
+          || operation.effectEntered
         ? pendingCustody(operation) : { outcomeKnown: false, retryable: false };
       settle(requestId, { ok: false, code: 'controller-deadline-expired', ...custody });
     }, Math.max(1, operation.deadlineAt - now()));
@@ -624,7 +611,8 @@ export const bindControllerChannel = ({
         (result) => {
           if (operation.deadlineAt <= now()) {
             operation.abort?.abort();
-            const custody = operation.kernelCalls.size > 0
+            const custody = controllerCustodyIsAuthoritative(operation.capability)
+                || operation.effectEntered
               ? pendingCustody(operation) : { outcomeKnown: false, retryable: false };
             settle(message.requestId, {
               ok: false, code: 'controller-deadline-expired', ...custody,

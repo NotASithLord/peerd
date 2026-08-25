@@ -25,7 +25,7 @@ export const makeSystemReadRoutes = (deps) => {
   'cost/total': async () => {
     if (vault.isLocked()) return { ok: false, error: 'locked' };
     try {
-      const all = await sessions.list();
+      const all = await sessions.listMetadata();
       let usd = 0;
       let tokens = 0;
       let chats = 0;

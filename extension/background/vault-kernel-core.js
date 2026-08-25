@@ -12,6 +12,18 @@ export { createVaultPostureIndex } from './vault-posture-index.js';
 export { createKernelSessionReader } from './kernel-session-reader.js';
 export { makeSystemReadRoutes } from './routes/system-read.js';
 
+/** @param {{admit:(name:string,message:any,sender:any)=>boolean,vault:{isLocked:()=>boolean},ready:Promise<any>}} deps */
+export const makeSessionSupportPreflight = (deps) => async (
+  /** @type {string} */ name, /** @type {any} */ message, /** @type {any} */ sender,
+) => {
+  if (!deps.admit(name, message, sender)) {
+    return { ok: false, error: 'kernel-route-unauthorized', outcomeKnown: true };
+  }
+  if (name === 'session/setModel') await deps.ready;
+  return name !== 'permission/set' && deps.vault.isLocked()
+    ? { ok: false, error: 'locked' } : null;
+};
+
 const PROFILE_ID = 'default';
 const PROFILE_STORE = 'profiles';
 const MEMORY_STORE = 'agents_memory';
@@ -266,14 +278,14 @@ export const makeKernelRouteProvenance = ({
   add([
     'settings/update', 'settings/reset', 'provider/setKey', 'provider/status', 'provider/test',
     'models/options', ...vaultRoutes,
-    'session/list', 'audit/list', 'cost/total', 'state/get',
+    'session/list', 'permission/set', 'audit/list', 'cost/total', 'state/get',
   ], anyHumanUi);
   add(['audit/voice-fetch'], voiceUi);
   add(['contacts/list', 'contacts/set', 'contacts/forget'], homeUi);
   add(['toolbox/read', 'toolbox/record'], toolboxUi);
   add([
     'session/get', 'session/setModel', 'session/contextSnapshots', 'commands/list',
-    'onboarding/complete', 'permission/set',
+    'onboarding/complete',
     'composer/files', 'composer/tabs', 'apps/list', 'apps/favorite',
     'apps/rename', 'apps/open', 'apps/import-git', 'apps/repository/status',
     'apps/repository/history', 'apps/repository/diff', 'apps/repository/commit',

@@ -26,7 +26,7 @@ export {
   normalizeDenylistPattern,
 } from './denylist/denylist.js';
 import {
-  count, del, delUpTo, get, getAll, getAllKeys, getMany, patch, put, transact,
+  count, del, delUpTo, get, getAll, getAllKeys, getMany, mutate, patch, put, transact,
 } from './storage/idb.js';
 import { realKV } from './storage/kv.js';
 import {
@@ -40,6 +40,6 @@ export const kv = {
   /** @param {string} [prefix] */ list: (prefix) => realKV().list(prefix),
 };
 export const idb = {
-  count, del, delUpTo, get, getAll, getAllKeys, getMany, patch, put, transact,
+  count, del, delUpTo, get, getAll, getAllKeys, getMany, mutate, patch, put, transact,
 };
 export const sessionCache = { sessionGet, sessionSet, sessionDelete };

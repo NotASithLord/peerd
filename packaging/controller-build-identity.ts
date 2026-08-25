@@ -33,6 +33,8 @@ export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
   'background/kernel-semantic-authority.js',
   'background/kernel-semantic-control.js',
   'background/kernel-administrative-control.js',
+  'background/kernel-support-control.js',
+  'background/kernel-session-authority.js',
   'background/kernel-repository-control.js',
   'background/kernel-local-control.js',
   'offscreen/controller-shell.js',
@@ -41,6 +43,7 @@ export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
   'offscreen/controller-runtime.js',
   'offscreen/kernel-runtime-host.js',
   'offscreen/kernel-administrative-host.js',
+  'offscreen/kernel-support-host.js',
   'offscreen/kernel-repository-host.js',
   'offscreen/kernel-local-host.js',
   // The vault authority loads this fixed KDF graph only for passphrase demand.

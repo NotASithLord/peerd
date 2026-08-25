@@ -13,6 +13,7 @@ import {
   KERNEL_DEMAND_SUPPORT_ROUTE_NAMES,
   KERNEL_DWEB_ROUTE_NAMES,
   KERNEL_EXECUTABLE_ROUTE_NAMES,
+  KERNEL_SESSION_SUPPORT_ROUTE_NAMES,
   KERNEL_SEMANTIC_OWNER_ROUTE_NAMES,
   KERNEL_TRANSFER_ROUTE_NAMES,
 } from '/shared/kernel-feature-route-inventory.js';
@@ -42,7 +43,6 @@ import {
 import { makeUiPorts } from './ui-ports.js';
 import { createKernelBrowserNetworkRuntime } from './kernel-browser-network-authority.js';
 import { createKernelControllerGateway } from './kernel-controller-gateway.js';
-import { makeSemanticControllerClient } from './offscreen-controller-client.js';
 import {
   makeSerializedDnrSessionRules,
   makeStartupPopupNetworkGuard,
@@ -94,6 +94,7 @@ import {
   createKernelProfileAuthority,
   buildVaultKernelState,
   resolveKernelPermission,
+  makeSessionSupportPreflight,
 } from './vault-kernel-core.js';
 import { openHome } from '/shared/open-home.js';
 const kernelClockNow = () => globalThis.performance?.now?.() ?? Date.now();
@@ -215,7 +216,9 @@ const featureHost = createKernelFeatureHost({
     ? () => Promise.resolve(makeFirefoxGuard.firefoxLifetime) : undefined,
 });
 const controllerGateway = createKernelControllerGateway({
-  makeController: makeSemanticControllerClient,
+  loadController: async () => (await import(
+    './offscreen-controller-client.js'
+  )).makeSemanticControllerClient,
   controller: {
     browser,
     ensureOffscreen: featureHost.ensureOffscreen,
@@ -485,6 +488,11 @@ const indexedVaultRoutes = Object.freeze(Object.fromEntries(
     return result;
   }]),
 ));
+const routeProvenance = makeKernelRouteProvenance({
+  humanUi, homeUi, sidepanelUi, optionsUi, evalUi, appUi, voiceUi, toolboxUi,
+  actorSpawnUi: notebookUi,
+  vaultRoutes: Object.keys(indexedVaultRoutes),
+});
 
 const systemReadRoutes = makeSystemReadRoutes({
   vault,
@@ -577,6 +585,52 @@ const loadDemandPlane = makeBoundedModuleLoader(async () => {
 });
 const controllerRelays = () => demandPlane?.controllerRelays() ?? null;
 const getControllerRelays = async () => (await loadDemandPlane()).getControllerRelays();
+const supportAdmitted = (/** @type {string} */ name, /** @type {any} */ message,
+  /** @type {any} */ sender) => routeProvenance.get(name)?.(sender, message) === true;
+const loadSessionSupport = makeBoundedModuleLoader(async () => {
+  const [{ createKernelSessionAuthority }, { createKernelSupportControl }] = await Promise.all([
+    import('./kernel-session-authority.js'),
+    import('./kernel-support-control.js'),
+  ]);
+  const authority = createKernelSessionAuthority({
+    ready: vaultReady,
+    vault,
+    sessions: kernelSessions,
+    contextSnapshots,
+    sessionCache,
+    auditLog,
+    resolvePermission: resolveKernelPermission,
+    pushState,
+    admitRoute: supportAdmitted,
+  });
+  /** @type {ReturnType<typeof controllerGateway.bindFeature>|null} */
+  let binding = null;
+  const control = createKernelSupportControl({
+    callFeature: (/** @type {unknown} */ payload, /** @type {any} */ options) => {
+      if (!binding) throw new Error('kernel-session-support-binding-unavailable');
+      return binding.callFeature(payload, options);
+    },
+    admit: authority.admit,
+    effectAllowed: authority.effectAllowed,
+    effects: authority.effects,
+  });
+  binding = controllerGateway.bindFeature('support', {
+    authorize: control.authorize,
+    handle: control.handleKernelCall,
+  });
+  return control;
+}, {
+  timeoutMs: 15_000,
+  loadCode: 'kernel-session-support-load-failed',
+  timeoutCode: 'kernel-session-support-load-timeout',
+});
+const sessionSupportRoutes = makeKernelDemandRoutes({
+  names: KERNEL_SESSION_SUPPORT_ROUTE_NAMES,
+  loadCode: 'kernel-session-support-routes-load-failed',
+  timeoutCode: 'kernel-session-support-routes-load-timeout',
+  beforeLoad: makeSessionSupportPreflight({ admit: supportAdmitted, vault, ready: vaultReady }),
+  load: async () => (await loadSessionSupport()).routes,
+});
 const demandRouteNames = Object.freeze([
   ...KERNEL_DEMAND_SUPPORT_ROUTE_NAMES,
   'provider/setKey',
@@ -828,6 +882,7 @@ const routes = {
     };
   },
   ...systemReadRoutes,
+  ...sessionSupportRoutes,
   ...demandRoutes,
   ...disabledDwebRoutes,
   ...targetContributorRoutes,
@@ -852,12 +907,6 @@ const routes = {
     auditLog,
   }),
 };
-
-const routeProvenance = makeKernelRouteProvenance({
-  humanUi, homeUi, sidepanelUi, optionsUi, evalUi, appUi, voiceUi, toolboxUi,
-  actorSpawnUi: notebookUi,
-  vaultRoutes: Object.keys(indexedVaultRoutes),
-});
 
 kernelEvents.event(
   'runtime.onMessage', browser.runtime.onMessage, 'vault-kernel-message-router',

@@ -7,12 +7,14 @@ import {
   KERNEL_EXECUTABLE_ROUTE_NAMES,
   KERNEL_LOCAL_ROUTE_NAMES,
   KERNEL_REPOSITORY_ROUTE_NAMES,
+  KERNEL_SESSION_SUPPORT_ROUTE_NAMES,
 } from './kernel-feature-route-inventory.js';
 
 export { KERNEL_ADMINISTRATIVE_ROUTE_NAMES } from './kernel-feature-route-inventory.js';
 
 const KIB = 1024;
 const MIB = 1024 * KIB;
+const SESSION_READ_BYTES = Number.POSITIVE_INFINITY;
 const OWNER_ID = 'peerd-authority-kernel';
 const DISPATCH_ID = /^[A-Za-z0-9._-]{8,512}$/;
 export const KERNEL_FEATURE_DISPATCH_CAPABILITY = 'feature.dispatch';
@@ -21,6 +23,7 @@ export const KERNEL_FEATURE_ROOT_CAPABILITIES = Object.freeze({
   production: Object.freeze(['turn.run', 'runtime.dispatch']),
   semantic: Object.freeze(['semantic.dispatch', 'turn.run']),
   executable: Object.freeze([KERNEL_FEATURE_DISPATCH_CAPABILITY, 'runtime.dispatch']),
+  support: Object.freeze([KERNEL_FEATURE_DISPATCH_CAPABILITY]),
   administrative: Object.freeze([KERNEL_FEATURE_DISPATCH_CAPABILITY]),
   repository: Object.freeze([KERNEL_FEATURE_DISPATCH_CAPABILITY]),
   local: Object.freeze([KERNEL_FEATURE_DISPATCH_CAPABILITY]),
@@ -28,6 +31,10 @@ export const KERNEL_FEATURE_ROOT_CAPABILITIES = Object.freeze({
 });
 
 const READ_ROUTES = new Set([
+  'app/editor/read', 'app/editor/list', 'lifecycle/assert-opfs-writable',
+  'vm/get-meta', 'site-client/list', 'denylist/list', 'commands/list',
+  'composer/files', 'composer/tabs', 'session/list', 'session/get',
+  'session/contextSnapshots',
   'pod/get-meta', 'export/artifact', 'import/inspect', 'hooks/list',
   'apps/repository/status', 'apps/repository/history', 'apps/repository/diff',
   'models/options', 'openrouter/models', 'local-model/catalog',
@@ -37,15 +44,27 @@ const READ_ROUTES = new Set([
   'dweb/self-status',
 ]);
 const LARGE_ROUTES = new Set([
+  'app/editor/read', 'app/editor/list', 'app/editor/write', 'app/editor/delete',
+  'app/editor-write', 'app/editor-delete', 'composer/files',
+  'session/list', 'session/get', 'session/contextSnapshots',
   'export/artifact', 'import/inspect', 'import/apply',
   'dweb/app-install', 'dweb/app-snapshot', 'dweb/app-update',
 ]);
 const effectPolicy = (/** @type {string[]} */ inputKeys, /** @type {number} */ calls = 1,
   /** @type {number} */ inputBytes = 256 * KIB,
   /** @type {number} */ resultBytes = 256 * KIB,
-  /** @type {(input:Record<string,any>)=>boolean} */ validate = () => true) => Object.freeze({
-  inputBytes, inputKeys: Object.freeze(inputKeys), resultBytes, calls, concurrent: 1, validate,
+  /** @type {(input:Record<string,any>)=>boolean} */ validate = () => true,
+  /** @type {'read'|'commit'} */ risk = 'commit',
+  /** @type {(result:unknown)=>boolean} */ validateResult = () => true) => Object.freeze({
+  inputBytes, inputKeys: Object.freeze(inputKeys), resultBytes,
+  calls, concurrent: 1, validate, validateResult, risk,
 });
+const readEffectPolicy = (/** @type {string[]} */ inputKeys, /** @type {number} */ calls = 1,
+  /** @type {number} */ inputBytes = 256 * KIB,
+  /** @type {number} */ resultBytes = 256 * KIB,
+  /** @type {(input:Record<string,any>)=>boolean} */ validate = () => true,
+  /** @type {(result:unknown)=>boolean} */ validateResult = () => true) =>
+  effectPolicy(inputKeys, calls, inputBytes, resultBytes, validate, 'read', validateResult);
 const nestedExactKeys = (/** @type {Record<string,any>} */ value,
   /** @type {string[]} */ required, /** @type {string[]} */ optional = []) => {
   const allowed = new Set([...required, ...optional]);
@@ -91,12 +110,12 @@ const validAdministrativeHookSource = (/** @type {unknown} */ value) => {
 };
 const hookMutationEffects = (/** @type {string} */ operation, /** @type {string[]} */ keys,
   /** @type {(input:Record<string,any>)=>boolean} */ validate) => Object.freeze({
-  'administrative.hooks.read': effectPolicy([], 1),
+  'administrative.hooks.read': readEffectPolicy([], 1),
   [operation]: effectPolicy(keys, 1, 256 * KIB, 256 * KIB, validate),
 });
 const ADMINISTRATIVE_EFFECTS = Object.freeze({
   'hooks/list': Object.freeze({
-    'administrative.hooks.read': effectPolicy([], 1),
+    'administrative.hooks.read': readEffectPolicy([], 1),
   }),
   'hooks/save': hookMutationEffects(
     'administrative.hooks.save', ['source'],
@@ -114,8 +133,8 @@ const ADMINISTRATIVE_EFFECTS = Object.freeze({
       && typeof input.enabled === 'boolean',
   ),
   'memory/init': Object.freeze({
-    'administrative.memory.probeTab': effectPolicy([], 1, 16 * KIB, 64 * KIB),
-    'administrative.memory.listApps': effectPolicy([], 1, 16 * KIB, 256 * KIB),
+    'administrative.memory.probeTab': readEffectPolicy([], 1, 16 * KIB, 64 * KIB),
+    'administrative.memory.listApps': readEffectPolicy([], 1, 16 * KIB, 256 * KIB),
     'administrative.memory.commitInit': effectPolicy(
       ['workspace', 'body', 'checklist'], 1, 512 * KIB, 512 * KIB,
       (input) => typeof input.workspace === 'string' && input.workspace.length > 0
@@ -143,6 +162,11 @@ const string = (/** @type {unknown} */ value, /** @type {number} */ max = 4096) 
   typeof value === 'string' && value.length > 0 && value.length <= max;
 const nullableString = (/** @type {unknown} */ value, /** @type {number} */ max = 4096) =>
   value === null || typeof value === 'string' && value.length <= max;
+const record = (/** @type {unknown} */ value) => value !== null
+  && typeof value === 'object' && !Array.isArray(value)
+  ? /** @type {Record<string,any>} */ (value) : null;
+const exactKeys = (/** @type {Record<string,any>} */ value, /** @type {string[]} */ keys) =>
+  Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 const appId = (/** @type {Record<string,any>} */ input) =>
   typeof input.appId === 'string' && input.appId.length <= 256;
 const repositoryEffect = (/** @type {string} */ operation, /** @type {string[]} */ keys,
@@ -236,37 +260,135 @@ const LOCAL_EFFECTS = Object.freeze({
     ),
   }),
 });
+const validPermissionPatch = (/** @type {unknown} */ value) => {
+  const patch = record(value);
+  return !!patch && nestedExactKeys(patch, [], ['permissionMode', 'confirmActions'])
+    && Object.keys(patch).length > 0
+    && (!Object.hasOwn(patch, 'permissionMode')
+      || patch.permissionMode === 'plan' || patch.permissionMode === 'act')
+    && (!Object.hasOwn(patch, 'confirmActions')
+      || typeof patch.confirmActions === 'boolean');
+};
+const RESULT_ERROR_KEYS = new Set(['ok', 'outcomeKnown', 'code', 'error', 'retryable', 'phase']);
+const effectResult = (/** @type {(value:unknown)=>boolean} */ validateValue) =>
+  (/** @type {unknown} */ value) => {
+    const result = record(value);
+    if (!result) return false;
+    if (result.ok === true) {
+      return result.outcomeKnown === true
+        && exactKeys(result, ['ok', 'outcomeKnown', 'value']) && validateValue(result.value);
+    }
+    if (result.ok !== false || typeof result.outcomeKnown !== 'boolean'
+        || typeof result.code !== 'string' || !result.code || result.code.length > 128) return false;
+    return Object.keys(result).every((key) => RESULT_ERROR_KEYS.has(key))
+      && (result.error === undefined || typeof result.error === 'string')
+      && (result.retryable === undefined || typeof result.retryable === 'boolean')
+      && (result.phase === undefined || result.phase === 'startup' || result.phase === 'run');
+  };
+const statusValue = (/** @type {string[]} */ statuses,
+  /** @type {string|null} */ valueKey = null,
+  /** @type {(value:unknown)=>boolean} */ validateValue = () => true) =>
+  (/** @type {unknown} */ value) => {
+    const result = record(value);
+    if (!result) return false;
+    if (!statuses.includes(result.status)) return false;
+    if (result.status !== 'ok') return exactKeys(result, ['status']);
+    return valueKey !== null && exactKeys(result, ['status', valueKey])
+      && validateValue(result[valueKey]);
+  };
+const listResult = effectResult((value) => {
+  const result = record(value);
+  return !!result && exactKeys(result, ['status', 'candidates'])
+    && Array.isArray(result.candidates)
+    && (result.status === 'locked' ? result.candidates.length === 0
+      : result.status === 'ok' && result.candidates.every((candidate) => {
+        const session = record(candidate);
+        return !!session && string(session.sessionId, 512);
+      }));
+});
+const sessionReadResult = effectResult(statusValue(
+  ['locked', 'invalid', 'not-found', 'ok'], 'session',
+  (value) => {
+    const session = record(value);
+    return !!session && string(session.sessionId, 512) && Array.isArray(session.messages);
+  },
+));
+const snapshotsResult = effectResult(statusValue(
+  ['locked', 'invalid', 'not-found', 'ok'], 'snapshots', Array.isArray,
+));
+const modelResult = effectResult(statusValue([
+  'locked', 'no-session', 'invalid-model', 'not-found', 'updated',
+]));
+const permissionResult = effectResult((value) => {
+  const result = record(value);
+  return !!result && exactKeys(result, ['mode', 'confirmActions'])
+    && (result.mode === 'plan' || result.mode === 'act')
+    && typeof result.confirmActions === 'boolean';
+});
+const SUPPORT_EFFECTS = Object.freeze({
+  'session/list': Object.freeze({
+    'support.sessions.list': readEffectPolicy([], 1, 16 * KIB, 8 * MIB, undefined, listResult),
+  }),
+  'session/get': Object.freeze({
+    'support.session.read': readEffectPolicy(
+      ['sessionId'], 1, MIB, SESSION_READ_BYTES,
+      (input) => input.sessionId === null
+        || typeof input.sessionId === 'string' && input.sessionId.length > 0, sessionReadResult,
+    ),
+  }),
+  'session/contextSnapshots': Object.freeze({
+    'support.session.context-snapshots': readEffectPolicy(
+      ['sessionId'], 1, 8 * MIB, 8 * MIB,
+      (input) => input.sessionId === null
+        || typeof input.sessionId === 'string' && input.sessionId.length > 0, snapshotsResult,
+    ),
+  }),
+  'session/setModel': Object.freeze({
+    'support.session.model.commit': effectPolicy(
+      ['sessionId', 'model'], 1, MIB, 16 * KIB,
+      (input) => (input.sessionId === null
+        || typeof input.sessionId === 'string' && input.sessionId.length > 0)
+        && nullableString(input.model, 200),
+      'commit', modelResult,
+    ),
+  }),
+  'permission/set': Object.freeze({
+    'support.permission.commit': effectPolicy(
+      ['patch'], 1, 16 * KIB, 16 * KIB,
+      (input) => validPermissionPatch(input.patch), 'commit', permissionResult,
+    ),
+  }),
+});
 const routeOperation = (/** @type {string} */ cluster, /** @type {string} */ route) =>
   `feature.${cluster}.${route.replaceAll('/', '.')}`;
 const routePolicy = (/** @type {string} */ cluster, /** @type {string} */ route) => {
   const administrative = cluster === 'administrative';
   const repository = cluster === 'repository';
   const local = cluster === 'local';
+  const support = cluster === 'support';
   const large = LARGE_ROUTES.has(route) || route === 'skills/installLocal' || repository;
-  const bytes = repository ? 8 * MIB : large ? 4 * MIB : 256 * KIB;
+  const bytes = repository || support && large ? 8 * MIB
+    : support ? MIB : large ? 4 * MIB : 256 * KIB;
+  const resultBytes = support && route === 'session/get' ? SESSION_READ_BYTES : bytes;
   const operation = routeOperation(cluster, route);
   return Object.freeze({
     inputBytes: bytes,
-    resultBytes: bytes,
+    resultBytes,
     concurrent: READ_ROUTES.has(route) ? 8 : 1,
     maxDurationMs: route === 'memory/init' ? 30 * 60_000
       : repository || route === 'local-model/init' ? 120_000 : 60_000,
     replayClass: /** @type {'A'|'E'} */ (READ_ROUTES.has(route) ? 'A' : 'E'),
     effects: administrative ? ADMINISTRATIVE_EFFECTS[/** @type {keyof typeof ADMINISTRATIVE_EFFECTS} */ (route)]
       : repository ? REPOSITORY_EFFECTS[/** @type {keyof typeof REPOSITORY_EFFECTS} */ (route)]
-        : local ? LOCAL_EFFECTS[/** @type {keyof typeof LOCAL_EFFECTS} */ (route)] : Object.freeze({
-      [operation]: Object.freeze({
-        inputBytes: bytes,
-        inputKeys: Object.freeze(['value']),
-        resultBytes: bytes,
-        calls: 1,
-        concurrent: 1,
-      }),
+        : local ? LOCAL_EFFECTS[/** @type {keyof typeof LOCAL_EFFECTS} */ (route)]
+          : support ? SUPPORT_EFFECTS[/** @type {keyof typeof SUPPORT_EFFECTS} */ (route)] : Object.freeze({
+      [operation]: effectPolicy(['value'], 1, bytes, bytes),
     }),
   });
 };
 
 const routeEntries = [
+  ['support', KERNEL_SESSION_SUPPORT_ROUTE_NAMES],
   ['executable', KERNEL_EXECUTABLE_ROUTE_NAMES],
   ['administrative', KERNEL_ADMINISTRATIVE_ROUTE_NAMES],
   ['repository', KERNEL_REPOSITORY_ROUTE_NAMES],
@@ -276,13 +398,13 @@ const routeEntries = [
   `${cluster}\0${route}`, routePolicy(/** @type {string} */ (cluster), route),
 ]));
 const ROUTE_POLICIES = Object.freeze(Object.fromEntries(routeEntries));
-const record = (/** @type {unknown} */ value) => value !== null
-  && typeof value === 'object' && !Array.isArray(value)
-  ? /** @type {Record<string,any>} */ (value) : null;
-const exactKeys = (/** @type {Record<string,any>} */ value, /** @type {string[]} */ keys) =>
-  Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 const bounded = (/** @type {unknown} */ value, /** @type {number} */ maxBytes) => {
-  const bytes = controllerPayloadBytes(value, { maxDepth: 32, maxNodes: 250_000 });
+  if (maxBytes === Number.POSITIVE_INFINITY) return true;
+  const bytes = controllerPayloadBytes(value, {
+    maxDepth: 32,
+    maxNodes: Number.isFinite(maxBytes)
+      ? Math.max(250_000, Math.ceil(maxBytes / 32)) : Number.POSITIVE_INFINITY,
+  });
   return Number.isFinite(bytes) && bytes <= maxBytes;
 };
 const targetFor = (/** @type {string} */ kind, /** @type {string} */ name,
@@ -376,6 +498,9 @@ export const createKernelFeatureEffectQuota = (/** @type {string} */ capability,
   const effects = /** @type {Record<string,any>} */ (parsed?.policy.effects ?? {});
   const calls = new Map();
   const pending = new Map();
+  let pendingLoss = 0;
+  let settledLoss = false;
+  let unknownLoss = false;
   const pendingCap = Object.values(effects).reduce(
     (sum, effect) => sum + Number(/** @type {any} */ (effect).concurrent), 0,
   );
@@ -393,6 +518,7 @@ export const createKernelFeatureEffectQuota = (/** @type {string} */ capability,
     if (active >= effect.concurrent) return refused('feature-effect-concurrency-exhausted');
     calls.set(operation, used + 1);
     pending.set(operation, active + 1);
+    if (effect.risk !== 'read') pendingLoss += 1;
     return Object.freeze({ ok: true, outcomeKnown: true });
   };
   const observe = (/** @type {string} */ operation, /** @type {unknown} */ _payload,
@@ -402,11 +528,30 @@ export const createKernelFeatureEffectQuota = (/** @type {string} */ capability,
     const active = pending.get(operation) ?? 0;
     if (active > 1) pending.set(operation, active - 1);
     else pending.delete(operation);
-    return bounded(result, effect.resultBytes)
+    const accepted = bounded(result, effect.resultBytes) && effect.validateResult(result);
+    if (effect.risk !== 'read') {
+      pendingLoss = Math.max(0, pendingLoss - 1);
+      const reply = record(result);
+      if (!accepted || reply?.outcomeKnown !== true) unknownLoss = true;
+      else if (reply.ok === true || reply.retryable !== true) settledLoss = true;
+    }
+    return accepted
       ? Object.freeze({ ok: true, outcomeKnown: true })
-      : refused('feature-effect-result-too-large', false);
+      : refused(bounded(result, effect.resultBytes)
+        ? 'feature-effect-result-invalid' : 'feature-effect-result-too-large', false);
   };
-  return Object.freeze({ admit, observe, pendingCap });
+  const custody = () => pendingLoss > 0 || unknownLoss
+      ? Object.freeze({ outcomeKnown: false, retryable: false })
+      : Object.freeze({ outcomeKnown: true, retryable: !settledLoss });
+  return Object.freeze({
+    admit,
+    observe,
+    custody,
+    pendingLoss: (/** @type {string} */ operation) => effects[operation]?.risk === 'read'
+      ? Object.freeze({ outcomeKnown: true, retryable: true })
+      : Object.freeze({ outcomeKnown: false, retryable: false }),
+    pendingCap,
+  });
 };
 
 export const kernelFeatureResultAllowed = (/** @type {string} */ capability,

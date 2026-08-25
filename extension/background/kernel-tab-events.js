@@ -209,9 +209,13 @@ export const createKernelBrowserNetworkOwner = (deps) => {
   let sourceProjectionRevision = 0;
   const loadTimeoutMs = Number.isFinite(deps.loadTimeoutMs)
     ? Math.max(1, Number(deps.loadTimeoutMs)) : 5_000;
-  const bounded = (/** @type {Promise<any>} */ operation, /** @type {string} */ code) =>
+  const bounded = (/** @type {Promise<any>} */ operation, /** @type {string} */ code,
+    /** @type {boolean} */ outcomeKnown = false) =>
     new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(code)), loadTimeoutMs);
+      const timer = setTimeout(() => reject(Object.assign(new Error(code), {
+        code, outcomeKnown, retryable: outcomeKnown,
+        phase: outcomeKnown ? 'startup' : 'run',
+      })), loadTimeoutMs);
       operation.then(
         (value) => { clearTimeout(timer); resolve(value); },
         (cause) => { clearTimeout(timer); reject(cause); },
@@ -316,6 +320,14 @@ export const createKernelBrowserNetworkOwner = (deps) => {
       }
       authority = owner;
       return owner;
+    }).catch((cause) => {
+      const detail = /** @type {{code?:unknown,outcomeKnown?:unknown}} */ (cause);
+      if (detail?.outcomeKnown === true) throw cause;
+      throw Object.assign(new Error('kernel-browser-network-authority-startup-failed', { cause }), {
+        code: typeof detail?.code === 'string' ? detail.code
+          : 'kernel-browser-network-authority-startup-failed',
+        outcomeKnown: true, retryable: true, phase: 'startup',
+      });
     }).finally(() => {
       if (authorityLoading === pending) authorityLoading = null;
     });
@@ -323,7 +335,7 @@ export const createKernelBrowserNetworkOwner = (deps) => {
     return pending;
   };
   const call = (/** @type {string} */ name, /** @type {any[]} */ args = []) =>
-    bounded(get(), `kernel-browser-network-${name}-load-timeout`).then((owner) => {
+    bounded(get(), `kernel-browser-network-${name}-load-timeout`, true).then((owner) => {
       const event = args[0];
       const tabId = event?.tabId ?? event?.id;
       if (typeof event?.flowToken === 'symbol' && typeof tabId === 'number'
@@ -514,6 +526,17 @@ export const createKernelBrowserNetworkOwner = (deps) => {
     sync: () => call('syncDenylistNetwork'), admitAppTab, state,
     status: state,
   });
+  const callFailure = (/** @type {unknown} */ cause, /** @type {string} */ code) => {
+    const known = /** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true;
+    return {
+      ok: false,
+      error: cause instanceof Error ? cause.message : String(cause),
+      code: /** @type {{code?:string}} */ (cause)?.code ?? code,
+      outcomeKnown: known,
+      retryable: known,
+      phase: known ? 'startup' : 'run',
+    };
+  };
   const ensureSourceProjection = async () => {
     if (await restoreSources()) return true;
     if (sourceProjectionReady) return true;
@@ -657,29 +680,27 @@ export const createKernelBrowserNetworkOwner = (deps) => {
     },
     updateSourceProjection,
     ensureBrowserNetworkGuard: (/** @type {number} */ tabId, /** @type {string} */ url) =>
-      call('ensureBrowserNetworkGuard', [tabId, url]).catch((cause) => ({
-        ok: false, error: cause instanceof Error ? cause.message : String(cause),
-        code: 'browser-network-guard-timeout', outcomeKnown: false, retryable: true,
-      })),
+      call('ensureBrowserNetworkGuard', [tabId, url])
+        .catch((cause) => callFailure(cause, 'browser-network-guard-timeout')),
     armBrowserChildQuarantine: (/** @type {number} */ tabId) =>
-      call('armBrowserChildQuarantine', [tabId]).catch((cause) => ({
-        ok: false, error: cause instanceof Error ? cause.message : String(cause),
-        code: 'browser-child-quarantine-unavailable', outcomeKnown: true,
-        outcomeKind: 'pre-effect-failure', retryable: true,
-      })),
+      call('armBrowserChildQuarantine', [tabId]).catch((cause) => {
+        const failure = callFailure(cause, 'browser-child-quarantine-unavailable');
+        return {
+          ...failure,
+          outcomeKind: failure.outcomeKnown
+            ? /** @type {const} */ ('pre-effect-failure')
+            : /** @type {const} */ ('transport-lost'),
+        };
+      }),
     acquireBrowserNetworkGuardLease: (/** @type {number} */ tabId) =>
-      call('acquireBrowserNetworkGuardLease', [tabId]).catch((cause) => ({
-        ok: false, error: cause instanceof Error ? cause.message : String(cause),
-        code: 'browser-network-guard-timeout', outcomeKnown: false, retryable: true,
-      })),
+      call('acquireBrowserNetworkGuardLease', [tabId])
+        .catch((cause) => callFailure(cause, 'browser-network-guard-timeout')),
     releaseBrowserNetworkGuardLease: (/** @type {any} */ lease) =>
       call('releaseBrowserNetworkGuardLease', [lease]),
     updateBrowserNetworkGuardOrigin: (/** @type {number} */ tabId,
       /** @type {string} */ url) =>
-      call('updateBrowserNetworkGuardOrigin', [tabId, url]).catch((cause) => ({
-        ok: false, error: cause instanceof Error ? cause.message : String(cause),
-        code: 'browser-network-guard-timeout', outcomeKnown: false, retryable: true,
-      })),
+      call('updateBrowserNetworkGuardOrigin', [tabId, url])
+        .catch((cause) => callFailure(cause, 'browser-network-guard-timeout')),
   });
 };
 

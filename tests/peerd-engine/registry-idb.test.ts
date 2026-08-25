@@ -143,6 +143,21 @@ describe('atomic IDB patch', () => {
   });
 });
 
+describe('atomic IDB mutate', () => {
+  test('round-trips, misses cleanly, and aborts a throwing transform', async () => {
+    await idb.put('sessions', { sessionId: 'chat', model: 'old', permissionMode: 'plan' });
+    await expect(idb.mutate('sessions', 'chat', (row) => ({ ...row, model: 'new' })))
+      .resolves.toMatchObject({ model: 'new', permissionMode: 'plan' });
+    await expect(idb.mutate('sessions', 'missing', (row) => row))
+      .resolves.toBeUndefined();
+    await expect(idb.mutate('sessions', 'chat', () => { throw new Error('stop'); }))
+      .rejects.toThrow('stop');
+    expect(await idb.get('sessions', 'chat')).toMatchObject({
+      model: 'new', permissionMode: 'plan',
+    });
+  });
+});
+
 describe('Notebook + Pod + VM registries persist through IndexedDB too', () => {
   test('a Notebook survives a fresh registry (SW restart)', async () => {
     const r1 = notebookRegistry.createNotebookRegistry({ storage: idb.idbKV('notebooks') });

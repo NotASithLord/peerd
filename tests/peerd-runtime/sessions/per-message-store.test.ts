@@ -34,6 +34,13 @@ const makeIdb = () => {
       return (keys ?? []).map((k) => tbl(store).get(k));
     },
     put: async (store: string, val: any) => { tbl(store).set(val.id ?? val.sessionId, val); },
+    mutate: async (store: string, key: string, transform: (current: any) => any) => {
+      const current = tbl(store).get(key);
+      if (current === undefined) return undefined;
+      const updated = transform(current);
+      tbl(store).set(key, updated);
+      return updated;
+    },
     getAll: async (store: string) => {
       getAllCalls.push(store);
       return [...tbl(store).values()];
@@ -98,6 +105,18 @@ describe('session store v2 — per-message records', () => {
     expect(second.title).toBe('A restored chat');
     expect(idb._tbl('sessions').size).toBe(1);
     expect(idb._tbl('session_messages').size).toBe(3);
+  });
+
+  test('portable import summarizes the last accepted message', async () => {
+    const idb = makeIdb();
+    const store = makeStore(idb);
+    await store.importPortable({
+      sessionId: 'portable-tail', createdAt: 1,
+      messages: [{ role: 'user', content: 'kept', when: 100 }, null],
+    } as any);
+    expect(idb._tbl('sessions').get('portable-tail')).toMatchObject({
+      messageCount: 1, lastMessageAt: 100,
+    });
   });
 
   test('listMetadata never reads or returns message bodies', async () => {
@@ -241,6 +260,24 @@ describe('session store v2 — per-message records', () => {
     expect(idb._tbl('sessions').get(s.sessionId).msgIndex).toEqual(['actor-recovery:1']);
   });
 
+  test('append increments a verified summary instead of a corrupt index', async () => {
+    const idb = makeIdb();
+    const store = makeStore(idb);
+    await idb.put('sessions', {
+      sessionId: 'corrupt-summary', createdAt: 1, messagesV2: true,
+      msgIndex: ['owned', 'missing', 'foreign'], messageCount: 1, lastMessageAt: 2,
+    });
+    await idb.put('session_messages', {
+      id: 'owned', sessionId: 'corrupt-summary', seq: 0,
+      message: { id: 'owned', role: 'user', content: 'first', when: 2 },
+    });
+    await store.appendMessage('corrupt-summary', {
+      id: 'next', role: 'assistant', content: 'next', when: 3,
+    } as any);
+    expect(idb._tbl('sessions').get('corrupt-summary').messageCount).toBe(2);
+    expect((await store.get('corrupt-summary'))?.messages).toHaveLength(2);
+  });
+
   test('concurrent appends to one session preserve both ordered message ids', async () => {
     const idb = makeIdb();
     const store = makeStore(idb);
@@ -270,13 +307,13 @@ describe('session store v2 — per-message records', () => {
         if (armed && store === 'sessions') metadataReads += 1;
         return base.get(store, key);
       },
-      put: async (store: string, value: any) => {
+      mutate: async (store: string, key: string, transform: (current: any) => any) => {
         if (armed && store === 'sessions') {
           armed = false;
           signalWriteStarted();
           await writeReleased;
         }
-        await base.put(store, value);
+        return base.mutate(store, key, transform);
       },
     };
     const store = makeStore(idb);

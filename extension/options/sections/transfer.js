@@ -104,14 +104,29 @@ export const TransferSection = {
     // picker over ALL chats — unlike the in-chat debug chip, this reaches any
     // past session without opening it.
     vnode.state.debugSessions = null;         // null = loading; [] = none
+    vnode.state.debugSessionsError = '';
     vnode.state.debugSessionId = '';
     vnode.state.debugBusy = false;
     vnode.state.debugMsg = null;              // { ok, text } | null
-    Promise.resolve(vnode.attrs.send({ type: 'session/list' })).then((reply) => {
-      vnode.state.debugSessions = reply?.ok !== false && Array.isArray(reply?.sessions) ? reply.sessions : [];
-      vnode.state.debugSessionId = vnode.state.debugSessions[0]?.sessionId ?? '';
-      m.redraw();
-    }).catch(() => { vnode.state.debugSessions = []; m.redraw(); });
+    vnode.state.loadDebugSessions = () => {
+      vnode.state.debugSessions = null;
+      vnode.state.debugSessionsError = '';
+      Promise.resolve(vnode.attrs.send({ type: 'session/list' })).then((reply) => {
+        if (reply?.ok !== false && Array.isArray(reply?.sessions)) {
+          vnode.state.debugSessions = reply.sessions;
+          vnode.state.debugSessionId = reply.sessions[0]?.sessionId ?? '';
+        } else {
+          vnode.state.debugSessions = [];
+          vnode.state.debugSessionsError = reply?.error ?? 'Temporarily unavailable. Try again.';
+        }
+        m.redraw();
+      }).catch(() => {
+        vnode.state.debugSessions = [];
+        vnode.state.debugSessionsError = 'Temporarily unavailable. Try again.';
+        m.redraw();
+      });
+    };
+    vnode.state.loadDebugSessions();
   },
 
   /** @param {{ attrs: { send: Send }, state: any }} vnode */
@@ -648,7 +663,9 @@ export const TransferSection = {
         + 'anywhere; stored credentials cannot appear in either file.'),
       m('.input-row', [
         m('label', { for: 'dbgsess' }, 'Chat'),
-        ui.debugSessions === null
+        ui.debugSessionsError
+          ? m('button.muted', { type: 'button', onclick: ui.loadDebugSessions }, ui.debugSessionsError)
+          : ui.debugSessions === null
           ? m('span.muted', 'loading\u2026')
           : ui.debugSessions.length === 0
             ? m('span.muted', 'no chats yet')

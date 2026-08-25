@@ -12,7 +12,7 @@ const authorized = (message: Record<string, unknown> = {}) => ({
 const baseDeps = (over: any = {}) => ({
   vault: { isLocked: () => false, setSecret: async () => {} },
   auditLog: { append: async () => {}, list: async () => [{ id: 1 }, { id: 2 }, { id: 3 }] },
-  sessions: { list: async () => [
+  sessions: { listMetadata: async () => [
     { cost: { inputTokens: 100, outputTokens: 50, cost: 0.01 } },
     { cost: { inputTokens: 0, outputTokens: 0, cost: 0 } },        // skipped (no usage, no cost)
     { cost: { cacheReadTokens: 10, cost: 0.002 } },

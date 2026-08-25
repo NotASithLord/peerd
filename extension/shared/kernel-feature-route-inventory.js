@@ -12,6 +12,9 @@ export const KERNEL_DEMAND_SUPPORT_ROUTE_NAMES = Object.freeze([
   'site-client/list', 'site-client/delete', 'audit/voice-fetch',
   'denylist/list', 'commands/list', 'composer/files', 'composer/tabs',
   'settings/update', 'settings/reset',
+]);
+
+export const KERNEL_SESSION_SUPPORT_ROUTE_NAMES = Object.freeze([
   'session/list', 'session/get', 'session/contextSnapshots', 'session/setModel',
   'permission/set',
 ]);

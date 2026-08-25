@@ -6,6 +6,7 @@ import { emptySummaryState } from '../../../extension/peerd-runtime/loop/rolling
 type SessionIdb = {
   get: (store: string, key: string) => Promise<any>;
   getMany: (store: string, keys: string[]) => Promise<any[]>;
+  mutate: (store: string, key: string, transform: (current: any) => any) => Promise<any>;
   put: (store: string, value: any) => Promise<void>;
 };
 
@@ -30,6 +31,13 @@ const makeMapBackend = async (): Promise<Backend> => {
       }),
       put: async (store, value) => {
         table(store).set(value.id ?? value.sessionId, structuredClone(value));
+      },
+      mutate: async (store, key, transform) => {
+        const current = table(store).get(key);
+        if (current === undefined) return undefined;
+        const updated = transform(structuredClone(current));
+        table(store).set(key, structuredClone(updated));
+        return structuredClone(updated);
       },
     },
     close: () => {},
@@ -70,10 +78,64 @@ const makeIndexedDbBackend = async (): Promise<Backend> => {
       get,
       getMany: (store, keys) => Promise.all(keys.map((key) => get(store, key))),
       put,
+      mutate: (store, key, transform) => new Promise((resolve, reject) => {
+        const tx = db.transaction(store, 'readwrite');
+        const objectStore = tx.objectStore(store);
+        const read = objectStore.get(key);
+        let updated: any;
+        read.onsuccess = () => {
+          try {
+            if (read.result === undefined) return;
+            updated = transform(read.result);
+            objectStore.put(updated);
+          } catch (cause) { tx.abort(); reject(cause); }
+        };
+        tx.oncomplete = () => resolve(updated);
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      }),
     },
     close: () => db.close(),
   };
 };
+
+test('an external metadata patch between append read and commit is preserved', async () => {
+  const backend = await makeMapBackend();
+  const base = backend.idb;
+  await base.put('sessions', {
+    sessionId: 'race', createdAt: 1, messagesV2: true, msgIndex: [],
+    messageCount: 0, lastMessageAt: 1, model: 'old', permissionMode: 'act',
+  });
+  let release!: () => void;
+  let entered!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const messageWrite = new Promise<void>((resolve) => { entered = resolve; });
+  const idb = {
+    ...base,
+    put: async (store: string, value: any) => {
+      await base.put(store, value);
+      if (store === 'session_messages') { entered(); await blocked; }
+    },
+  };
+  const turns = createSessionTurnStore({
+    idb,
+    notFound: (sessionId) => new Error(`missing:${sessionId}`),
+  });
+  const append = turns.appendMessage('race', {
+    id: 'message-1', role: 'user', content: 'hello', when: 2,
+  });
+  await messageWrite;
+  await base.mutate('sessions', 'race', (row) => ({
+    ...row, model: 'new', permissionMode: 'plan', confirmActions: true,
+  }));
+  release();
+  await append;
+  expect(await base.get('sessions', 'race')).toMatchObject({
+    model: 'new', permissionMode: 'plan', confirmActions: true,
+    msgIndex: ['message-1'], messageCount: 1, lastMessageAt: 2,
+  });
+  backend.close();
+});
 
 const exerciseTurnStore = async (backend: Backend) => {
   const { idb } = backend;

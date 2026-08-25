@@ -80,7 +80,9 @@ export const makeWriteGuard = () => {
     } : {}),
   });
 
-  const IDB_WRITE_VERBS = Object.freeze(['put', 'patch', 'del', 'clear', 'delUpTo', 'write']);
+  const IDB_WRITE_VERBS = Object.freeze([
+    'put', 'patch', 'mutate', 'del', 'clear', 'delUpTo', 'write',
+  ]);
 
   /** @template {Record<string,any>} IDB @param {IDB} idb @returns {IDB} */
   const wrapIdb = (idb) => {
