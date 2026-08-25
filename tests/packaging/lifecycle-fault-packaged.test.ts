@@ -3,8 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { REPO_ROOT } from '../../packaging/lib.ts';
 import {
-  injectLifecycleFaultDispatcher,
-  injectLifecycleFaultFactories,
+  assertLifecycleFaultExecutionSeam,
   injectLifecycleFaultKernel,
 } from '../../scripts/cdp/run-lifecycle-faults.mjs';
 
@@ -12,28 +11,30 @@ describe('packaged Chrome lifecycle fault lane', () => {
   const kernelSource = readFileSync(
     join(REPO_ROOT, 'extension/background/vault-kernel.js'), 'utf8',
   );
-  const factoriesSource = readFileSync(
-    join(REPO_ROOT, 'extension/background/kernel-turn-live-factories.js'), 'utf8',
-  );
   const dispatcherSource = readFileSync(
     join(REPO_ROOT, 'extension/peerd-runtime/tools/dispatcher.js'), 'utf8',
   );
 
   test('injects production lifecycle recovery before Store packaging', () => {
     const worker = injectLifecycleFaultKernel(kernelSource);
-    const factories = injectLifecycleFaultFactories(factoriesSource);
-    const dispatcher = injectLifecycleFaultDispatcher(dispatcherSource);
-    expect(worker).toContain("import './lifecycle-fault-probe.js'");
+    expect(assertLifecycleFaultExecutionSeam(dispatcherSource)).toBeUndefined();
     expect(worker).toContain("'lifecycle-fault/dispatch': async (message)");
     expect(worker).toContain('await getControllerRelays()');
-    expect(factories).toContain('await lifecycleArmed');
-    expect(factories).toContain('lifecycleBoot.operationLog.markDispatched(operationId)');
-    expect(factories).toContain('message?.recoverOnly === true');
-    expect(dispatcher).toContain('peerdLifecycleFaultProbe?.beforeExecute(call.name)');
+    expect(worker).toContain('message?.recoverOnly === true');
+    expect(worker).toContain('context.lifecycle.beginTracking({');
+    expect(worker).toContain('execute: async (prepared) =>');
+    expect(worker).toContain('return prepared.tool.execute(prepared.args, prepared.execCtx)');
+    expect(worker.match(/prepared\.tool\.execute/g)).toHaveLength(1);
 
     const harness = readFileSync(
       join(REPO_ROOT, 'scripts/cdp/run-lifecycle-faults.mjs'), 'utf8',
     );
+    const sourceLane = harness.slice(
+      harness.indexOf('const makeSourceFaultExtension ='),
+      harness.indexOf('const makePackagedFaultExtension ='),
+    );
+    expect(sourceLane.indexOf('injectLifecycleFaultTree(extension);'))
+      .toBeLessThan(sourceLane.indexOf('await bundleChromeNativeKernel(extension, backgroundEntry);'));
     const storeLane = harness.slice(
       harness.indexOf('const makePackagedFaultExtension ='),
       harness.indexOf('const waitFor =', harness.indexOf('const makePackagedFaultExtension =')),
@@ -47,17 +48,14 @@ describe('packaged Chrome lifecycle fault lane', () => {
 
   test('fails closed when a pre-package source seam drifts', () => {
     expect(() => injectLifecycleFaultKernel(
-      kernelSource.replace("  'audit/voice-fetch': voiceAuditRoute,", ''),
+      kernelSource.replace('  ...systemReadRoutes,\n  ...demandRoutes,', ''),
     )).toThrow('source fault route seam changed');
-    expect(() => injectLifecycleFaultFactories(
-      factoriesSource.replace(
-        '    const relays = {\n      scriptRuns, validateGeneration, retireStale, dispatchToolCall,',
+    expect(() => assertLifecycleFaultExecutionSeam(
+      dispatcherSource.replace(
+        'const execution = await executePreparedToolCall(prepared, options.execute);',
         '',
       ),
-    )).toThrow('source lifecycle factory seam changed');
-    expect(() => injectLifecycleFaultDispatcher(
-      dispatcherSource.replace('await tool.execute(args, execCtx)', ''),
-    )).toThrow('source dispatcher fault seam changed');
+    )).toThrow('source dispatcher execution seam changed');
   });
 
   test('keeps source and Store lanes independently gated in CI', () => {
