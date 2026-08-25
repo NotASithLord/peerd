@@ -615,26 +615,12 @@ export const createKernelTabCustody = (deps) => {
     if (typeof ingress === 'function') return ingress(...args);
     return Promise.resolve(deps.network.call(name, args)).then(() => true);
   };
-  const production = (/** @type {string} */ event, /** @type {any} */ value) => {
-    const owner = deps.getProductionEvents?.();
-    return owner?.emit?.(event, value);
-  };
   const event = async (/** @type {string} */ name, /** @type {any[]} */ args) => {
     let liveResult;
     try { liveResult = live(name, args); }
     catch (cause) { liveResult = Promise.reject(cause); }
     const handled = await network(name, args);
-    const projected = name === 'onCreated'
-      ? production('production/tabs-created', { tab: args[0] })
-      : name === 'onUpdated'
-        ? production('production/tabs-updated', {
-          tabId: args[0], change: args[1], tab: args[2],
-        })
-        : name === 'onRemoved'
-          ? production('production/tabs-removed', { tabId: args[0] })
-          : name === 'onNavigationTarget'
-            ? production('production/navigation-target', args[0]) : undefined;
-    return Promise.all([handled, liveResult, projected]);
+    return Promise.all([handled, liveResult]);
   };
   return Object.freeze({
     onCreated: (/** @type {any} */ tab) => event('onCreated', [tab]),
@@ -644,10 +630,7 @@ export const createKernelTabCustody = (deps) => {
       deps.child.release(tabId);
       return event('onRemoved', [tabId, removeInfo]);
     },
-    onActivated: (/** @type {any} */ activeInfo) => Promise.all([
-      live('onActivated', [activeInfo]),
-      production('production/tabs-activated', activeInfo),
-    ]),
+    onActivated: (/** @type {any} */ activeInfo) => live('onActivated', [activeInfo]),
     onNavigationTarget: (/** @type {any} */ details) => {
       const flowToken = deps.network?.flowToken?.(details?.tabId);
       const ingress = flowToken ? { ...details, flowToken } : details;

@@ -479,7 +479,7 @@ describe('sealed administrative root cutover', () => {
     await effectStarted;
     abort.abort();
     expect(await call).toMatchObject({
-      ok: false, code: 'feature-grant-expired', outcomeKnown: false, phase: 'run',
+      ok: false, code: 'feature-host-generation-expired', outcomeKnown: false, phase: 'run',
       retryable: false,
     });
   });
@@ -533,7 +533,7 @@ describe('sealed administrative root cutover', () => {
     expect(await feature.dispatch('administrative', 'hooks/list', {}))
       .toEqual({ ok: true, outcomeKnown: true, value: [] });
     expect(offered).toEqual([[
-      'prompt.render', KERNEL_FEATURE_DISPATCH_CAPABILITY, 'feature.event',
+      'prompt.render', KERNEL_FEATURE_DISPATCH_CAPABILITY,
     ]]);
     semantic.close();
   });

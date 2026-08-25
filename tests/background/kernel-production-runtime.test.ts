@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { PACKAGED_LAZY_MODULE_ENTRIES } from '../../packaging/lazy-entry-manifest.ts';
 import { createKernelProductionRuntime } from '../../extension/background/kernel-production-runtime.js';
 
 const base = (makeRichRuntime: (deps: any) => any) => ({
@@ -29,6 +32,20 @@ const base = (makeRichRuntime: (deps: any) => any) => ({
 });
 
 describe('kernel production runtime', () => {
+  test('does not barrel the demand plane through production', () => {
+    const background = join(import.meta.dir, '../../extension/background');
+    const kernel = readFileSync(join(background, 'vault-kernel.js'), 'utf8');
+    const production = readFileSync(join(background, 'kernel-production-runtime.js'), 'utf8');
+    expect(kernel).toContain(
+      "const { createKernelDemandPlane } = await import('./kernel-demand-plane.js');",
+    );
+    expect(kernel).toContain(
+      'const { createKernelProductionRuntime } = await loadProductionRuntimeModule();',
+    );
+    expect(production).not.toContain('createKernelDemandPlane');
+    expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('background/kernel-demand-plane.js');
+  });
+
   test('passes one engine bag through the rich owner and returns it unchanged', async () => {
     let assembly: any;
     const expected = Object.freeze({

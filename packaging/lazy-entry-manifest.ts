@@ -25,6 +25,7 @@ export const PACKAGED_LAZY_MODULE_ENTRIES = Object.freeze([
   'offscreen/controller-bootstrap.js',
   ...SEMANTIC_HOST_BUILD_ENTRIES,
   'background/direct-controller-client.js',
+  'background/kernel-demand-plane.js',
   'background/kernel-semantic-runtime.js',
   'background/kernel-executable-runtime.js',
   'background/kernel-provider-key-route.js',

@@ -9,7 +9,6 @@ import { CONTROLLER_BUILD_DIGEST } from '/shared/structured-clone-size.js';
 import { RUNTIME_DISPATCH_CAPABILITY } from '/shared/kernel-runtime-policy.js';
 import {
   KERNEL_FEATURE_DISPATCH_CAPABILITY,
-  KERNEL_FEATURE_EVENT_CAPABILITY,
 } from '/shared/kernel-feature-policy.js';
 import {
   makeControllerOfferHandler,
@@ -24,7 +23,7 @@ const handleOffer = makeControllerOfferHandler({
   expectedBuildDigest: CONTROLLER_BUILD_DIGEST,
   supportedCaps: [
     'prompt.render', RUNTIME_DISPATCH_CAPABILITY, 'semantic.dispatch', 'turn.run',
-    KERNEL_FEATURE_DISPATCH_CAPABILITY, KERNEL_FEATURE_EVENT_CAPABILITY,
+    KERNEL_FEATURE_DISPATCH_CAPABILITY,
   ],
   loadController,
 });

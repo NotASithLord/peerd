@@ -2,7 +2,6 @@
 
 import {
   KERNEL_FEATURE_DISPATCH_CAPABILITY,
-  KERNEL_FEATURE_EVENT_CAPABILITY,
   kernelFeatureAuthorityFor,
   kernelFeatureAuthorityAllowed,
   kernelFeatureDispatchIdFromAuthority,
@@ -49,11 +48,6 @@ export const createKernelFeatureControl = ({
         cluster, route, dispatchId: newId(), message: Object.freeze({ ...message }),
       }),
       options,
-    ),
-    event: (/** @type {string} */ event,
-      /** @type {Record<string,unknown>} */ payload = {}) => issue(
-      KERNEL_FEATURE_EVENT_CAPABILITY,
-      Object.freeze({ event, payload: Object.freeze({ ...payload }) }),
     ),
     authorize: (/** @type {string|unknown} */ capabilityOrPayload,
       /** @type {unknown} */ offeredPayload = undefined) => {
