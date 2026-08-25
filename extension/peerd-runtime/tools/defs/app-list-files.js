@@ -1,22 +1,12 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // app_list_files — enumerate files inside an App's OPFS subtree.
 
 import { serializeListResult } from './columnar.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const appListFilesTool = {
-  name: 'app_list_files',
-  primitive: 'app',
-  description: [
-    'List every file in an App\'s OPFS subtree. Returns [{path, size}].',
-    'Without `appId`, targets the chat\'s current app.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: { appId: { type: 'string' } },
-  },
-  sideEffect: 'read',
-  origins: () => [],
+export const appListFilesTool = composeTool("app_list_files", {
 
   execute: async (args, ctx) => {
     // why: appClient rides the opaque ctx contract (not on ToolContext); narrow
@@ -37,4 +27,4 @@ export const appListFilesTool = {
       return { ok: false, error: `app_list_files_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
   },
-};
+});

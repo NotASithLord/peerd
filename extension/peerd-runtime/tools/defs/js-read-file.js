@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // js_read_file — read a file from the Notebook's OPFS scratch.
 //
 // The content comes back FENCED (wrapUntrusted): a Notebook file is not
@@ -9,31 +11,10 @@
 // fence is what makes that safe.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { buildPagedResult, clampPageLimit, pageStatusLine, SPILL_PAGE_CHARS } from '../web/spill.js';
+import { buildPagedResult, clampPageLimit, pageStatusLine } from '../web/spill.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const jsReadFileTool = {
-  name: 'js_read_file',
-  primitive: 'notebook',
-  description: [
-    'Read a file from the Notebook\'s OPFS scratch and return its',
-    'contents as UTF-8 text. Use to inspect what code wrote or what',
-    'was staged via js_write_file. A large file returns a bounded slice',
-    'plus a paging note — re-call with offset to read on (no re-truncation).',
-    'For binary files, fetch directly inside js_notebook instead.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      path: { type: 'string', description: 'Relative path in OPFS scratch.' },
-      notebook: { type: 'string', description: 'Optional notebook id or name.' },
-      offset: { type: 'number', description: 'Start character offset. Default 0.' },
-      limit: { type: 'number', description: `Max characters to return (capped at ${SPILL_PAGE_CHARS}). Default the cap.` },
-    },
-    required: ['path'],
-  },
-  sideEffect: 'read',
-  origins: () => [],
+export const jsReadFileTool = composeTool("js_read_file", {
 
   execute: async (args, ctx) => {
     if (typeof args?.path !== 'string') return { ok: false, error: 'path_required' };
@@ -84,4 +65,4 @@ export const jsReadFileTool = {
       return { ok: false, error: `read_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
   },
-};
+});

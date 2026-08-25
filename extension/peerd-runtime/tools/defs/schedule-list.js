@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // schedule_list — enumerate the registered background Routines (loop/scheduler.js
 // singleton, via ctx.scheduleList). Read-class, no egress: it reads local
 // scheduler state only, so it never confirms and the origin/egress gates pass
@@ -12,13 +14,7 @@ import { describeSchedule } from '../../loop/schedule.js';
 /** @typedef {Omit<Tool, 'primitive' | 'execute'> & { primitive: 'schedule', execute: (args: any, ctx: ToolContext) => Promise<ScheduleToolResult> }} ScheduleTool */
 
 /** @type {ScheduleTool} */
-export const scheduleListTool = {
-  name: 'schedule_list',
-  primitive: 'schedule',
-  description: 'List the registered background routines: id, task prompt, cadence, mode, enabled state, and next run time. Use schedule_create to add one, schedule_cancel to remove one.',
-  schema: { type: 'object', properties: {} },
-  sideEffect: 'read',
-  origins: () => [],
+export const scheduleListTool = composeTool("schedule_list", {
 
   execute: async (_args, ctx) => {
     const scheduleList = /** @type {(() => any[]) | undefined} */ (
@@ -44,4 +40,4 @@ export const scheduleListTool = {
     }));
     return { ok: true, content: JSON.stringify(rows, null, 2) };
   },
-};
+});

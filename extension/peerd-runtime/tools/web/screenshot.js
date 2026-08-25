@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // capture — screenshot of the active tab.
 //
 // chrome.tabs.captureVisibleTab requires either the activeTab grant
@@ -21,32 +23,7 @@ import {
 } from '../browser-automation-policy.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const captureTool = {
-  name: 'capture',
-  primitive: 'tab',
-  description: [
-    'Take a screenshot of the visible region of the active tab and show',
-    'it to the USER inline in chat. IMPORTANT: you (the model) do NOT',
-    'receive the image — its bytes are stripped from your context and',
-    'only metadata (dimensions, origin) comes back to you. This is a',
-    '"show the user a picture" tool, not a way for you to see the page.',
-    'To READ or reason about page content, use read_page / query_dom /',
-    'page_exec. Reach for capture only when the user explicitly wants to',
-    'SEE something rendered.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      windowId: {
-        type: 'integer',
-        description: 'Optional window id; defaults to the current window.',
-      },
-    },
-  },
-  sideEffect: 'read',
-  origins: (_args, ctx) => {
-    return ctx?.activeTab?.origin ? [ctx.activeTab.origin] : [];
-  },
+export const captureTool = composeTool("capture", {
   execute: async (args, ctx) => {
     /** @type {Map<number, { tabId?: number, token?: string }>} */
     const guardLeases = new Map();
@@ -141,7 +118,7 @@ export const captureTool = {
       }
     }
   },
-};
+});
 
 /**
  * Record every foreground activation while captureVisibleTab is in flight.

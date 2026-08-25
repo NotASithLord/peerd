@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // complete_goal — end the autonomous Goal run.
 //
 // Goal mode (the mode-row Goal toggle, loop/goal-runner.js) keeps re-entering
@@ -26,30 +28,7 @@
 /** @typedef {Omit<Tool, 'primitive' | 'execute'> & { primitive: 'goal', execute: (args: any, ctx: ToolContext) => Promise<GoalToolResult> }} GoalTool */
 
 /** @type {GoalTool} */
-export const completeGoalTool = {
-  name: 'complete_goal',
-  primitive: 'goal',
-  description: [
-    'End the autonomous goal run: call this when — and only when — the current',
-    'goal is FULLY achieved, or when you are genuinely blocked and cannot make',
-    'further progress. Pass a one-line summary of the outcome. After this the',
-    'loop stops and control returns to the user. Only available while a goal run',
-    'is active.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      summary: {
-        type: 'string',
-        description: 'One line: what was accomplished, or why you are stopping (if blocked).',
-      },
-    },
-    required: ['summary'],
-  },
-  // Read-class control signal — no external side effect, so no confirmation.
-  sideEffect: 'read',
-  // No web origin is touched; return [] so the origin/egress gates pass.
-  origins: () => [],
+export const completeGoalTool = composeTool("complete_goal", {
 
   execute: async (args, ctx) => {
     // why: ctx.completeGoalRun is the SW-injected hook bound to THIS session's
@@ -67,4 +46,4 @@ export const completeGoalTool = {
     }
     return { ok: true, content: `Goal run ended.${summary ? ` Summary: ${summary}` : ''}` };
   },
-};
+});

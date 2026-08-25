@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // actor_list — the ONE discovery surface for everything you can message_actor.
 //
 // DESIGN-17/18 unified addressing into a single arg (message_actor `to`): a
@@ -81,25 +83,7 @@ const engineRows = async (src, sessionId) => {
 };
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const actorListTool = {
-  name: 'actor_list',
-  primitive: 'spawned',
-  description: [
-    'Enumerate actor targets in one call. The result includes actor_execution;',
-    'targets are addressable with message_actor only when its status is available.',
-    'Returns a row per actor with: type (webvm | notebook | pod | app | tab |',
-    'integration), handle (pass it as message_actor `to`), name, live (has a',
-    'warm tab / open page right now), current (this chat\'s default of that',
-    'type — what an instance op defaults to), and detail (a tab\'s origin, an',
-    'integration\'s keyed-ness, a Pod\'s lifecycle, an app\'s tags). Use it to decide whether to',
-    'reuse an existing instance/tab or spawn fresh, and to find the handle to',
-    'message. (When actor_execution is available, the general "web" actor is',
-    'addressable as to:"web" and is not listed here; likewise the mesh operator,',
-    'when enabled, is addressable as to:"dweb". App full-text search is app_search.)',
-  ].join(' '),
-  schema: { type: 'object', properties: {} },
-  sideEffect: 'read',
-  origins: () => [],
+export const actorListTool = composeTool("actor_list", {
 
   execute: async (_args, ctx) => {
     // why: the engine registries / tab trackers / integration list ride the
@@ -218,4 +202,4 @@ export const actorListTool = {
       }, 'actors'),
     };
   },
-};
+});

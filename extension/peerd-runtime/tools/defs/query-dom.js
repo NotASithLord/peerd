@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // query_dom — selector-based DOM probe.
 //
 // read_page is comprehensive but expensive: it walks the body, returns
@@ -26,43 +28,7 @@ import { wrapUntrusted } from '../prompt-wrap.js';
 import { resolveTargetTab, originOfUrl, scriptingTarget } from './dom-helpers.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const queryDomTool = {
-  name: 'query_dom',
-  primitive: 'tab',
-  description: [
-    'Probe the DOM by CSS selector. Returns up to `limit` matches (default 20),',
-    'each with: tag, label (aria-label or visible text), a click-ready selector,',
-    'visibility, bounding box, and a few attributes (role, href, type, name,',
-    'data-testid). Use this when read_page didn\'t surface the element you',
-    'need — e.g. dynamic toolbars, items past the 100-interactable cap on',
-    'heavy SPAs (Gmail, Notion, Linear, Twitter), or when probing whether a',
-    'guessed selector actually exists. Returns "no matches" cleanly if the',
-    'selector hits nothing — that\'s expected feedback, not an error.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      selector: {
-        type: 'string',
-        description: 'CSS selector. Supports standard CSS3 syntax including [attr*=val i] case-insensitive matchers and :is()/:where(). No :has() / :contains() polyfill — use attribute substring matchers.',
-      },
-      limit: {
-        type: 'integer',
-        description: 'Max matches to return (default 20, cap 50). Lower is cheaper.',
-      },
-      includeHidden: {
-        type: 'boolean',
-        description: 'If true, include elements that are display:none / visibility:hidden / opacity:0 / zero-size. Default false — most agent decisions only care about what the user could click.',
-      },
-      tabId: {
-        type: 'integer',
-        description: 'Optional tab id; defaults to the active tab.',
-      },
-    },
-    required: ['selector'],
-  },
-  sideEffect: 'read',
-  origins: (_args, ctx) => ctx.activeTab?.origin ? [ctx.activeTab.origin] : [],
+export const queryDomTool = composeTool("query_dom", {
 
   execute: async (args, ctx) => {
     if (!args?.selector || typeof args.selector !== 'string') {
@@ -100,7 +66,7 @@ export const queryDomTool = {
       }),
     };
   },
-};
+});
 
 /**
  * @typedef {Object} QueryMatch

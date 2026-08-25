@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // read_state — read the React/Vue component state behind an element.
 //
 // For framework apps the rendered DOM is a lossy projection of the real
@@ -35,31 +37,7 @@ import { browserDocumentRefusalFrom } from '../browser-automation-policy.js';
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const readStateTool = {
-  name: 'read_state',
-  primitive: 'tab',
-  description: [
-    'Read the framework component state behind an element. For React/Vue',
-    'apps, returns the owning component\'s name + props + state straight from',
-    'the framework internals (MAIN world) — cleaner and more stable than',
-    'scraping rendered DOM. Use when you need a component\'s data: "what\'s in',
-    'this form\'s state?", "is this toggle on?". Identify the element by a',
-    'snapshot {ref} (e.g. "@e3") OR a CSS {selector} (from read_page /',
-    'query_dom). The {selector} form works WITHOUT advanced automation/CDP',
-    '(Firefox, or a DOM-walk snapshot) — prefer it there. Returns { framework,',
-    'component, props, state }, or framework:null when the element isn\'t',
-    'inside a known framework. Defaults to the active tab.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      ref: { type: 'string', description: 'An element ref from a snapshot (e.g. "@e3"). Resolved via CDP. One of ref|selector is required.' },
-      selector: { type: 'string', description: 'A CSS selector for the element (from read_page / query_dom). Read via chrome.scripting in the page\'s MAIN world — no CDP needed. One of ref|selector is required.' },
-      tabId: { type: 'integer', description: 'Optional tab id; defaults to the active tab.' },
-    },
-  },
-  sideEffect: 'read',
-  origins: (_args, ctx) => (ctx.activeTab?.origin ? [ctx.activeTab.origin] : []),
+export const readStateTool = composeTool("read_state", {
 
   execute: async (args, ctx) => {
     const tab = await resolveTargetTab(args, ctx);
@@ -122,7 +100,7 @@ export const readStateTool = {
       content: wrapUntrusted({ origin: originOfUrl(tab.url), tool: 'read_state', body: JSON.stringify(payload, null, 2) }),
     };
   },
-};
+});
 
 // Read framework state via chrome.scripting in the page's MAIN world. The
 // injected walk (readFrameworkStateInjected) is the no-CDP twin of

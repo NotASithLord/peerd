@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // read_run_cache — page through a spilled `script` [VALUE].
 //
 // read_web_cache's twin, one tier down: when a run's serialized value
@@ -17,31 +19,10 @@
 //     agent's own bytes and re-enters raw.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { buildPagedResult, clampPageLimit, pageStatusLine, SPILL_PAGE_CHARS } from '../web/spill.js';
+import { buildPagedResult, clampPageLimit, pageStatusLine } from '../web/spill.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const readRunCacheTool = {
-  name: 'read_run_cache',
-  primitive: 'notebook',
-  description: [
-    'Read a slice of a spilled script [VALUE]. When a run\'s returned value overflows',
-    'its cap the full text is stored locally and the result names the cache key — page',
-    'through it here with { key, offset, limit }. Offsets are character positions into',
-    'the stored text; the result reports what remains. Page DELIBERATELY: prefer',
-    're-running the script to return a compact aggregate over walking a huge blob.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    required: ['key'],
-    properties: {
-      key: { type: 'string', description: 'The cache key from the script paging note.' },
-      offset: { type: 'number', description: 'Start character offset. Default 0.' },
-      limit: { type: 'number', description: `Max characters to return (capped at ${SPILL_PAGE_CHARS}). Default the cap.` },
-    },
-  },
-  sideEffect: 'read',
-  // The cache is local — no network origin is touched by a page read.
-  origins: () => [],
+export const readRunCacheTool = composeTool("read_run_cache", {
   execute: async (args, ctx) => {
     if (typeof args?.key !== 'string' || !args.key) return { ok: false, error: 'key_required' };
     const runCache = /** @type {{ get?: (key: string) => Promise<import('../run-cache.js').RunCacheRecord | undefined> } | undefined} */ (
@@ -86,4 +67,4 @@ export const readRunCacheTool = {
       },
     });
   },
-};
+});

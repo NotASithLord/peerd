@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // toolbox_delete — remove a stored toolbox module (design js-superpower/06).
 // Reversibility is the point: every stored module is deletable, and a deleted
 // name stops resolving on the next run. No bespoke confirm (removing stored
@@ -6,22 +8,7 @@
 // standard Plan/Act confirm policy still applies via sideEffect 'destructive'.
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const toolboxDeleteTool = {
-  name: 'toolbox_delete',
-  primitive: 'notebook',
-  description: [
-    'Delete a TOOLBOX module by name. Runs that import',
-    "'peerd:toolbox/<name>' will fail to resolve it afterwards.",
-  ].join(' '),
-  schema: {
-    type: 'object',
-    required: ['name'],
-    properties: {
-      name: { type: 'string', description: 'The module name to delete.' },
-    },
-  },
-  sideEffect: 'destructive',
-  origins: () => [],
+export const toolboxDeleteTool = composeTool("toolbox_delete", {
 
   execute: async (args, ctx) => {
     const name = typeof args?.name === 'string' ? args.name.trim() : '';
@@ -39,4 +26,4 @@ export const toolboxDeleteTool = {
       return { ok: false, error: `toolbox_delete_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
   },
-};
+});

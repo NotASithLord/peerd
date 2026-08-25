@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // actor_cancel — stop an async actor's result from coming back.
 //
 // Frees the per-chat outstanding slot and suppresses the reintegration wake.
@@ -11,22 +13,7 @@
 /** @typedef {{ actorCancel?: (taskId: string) => ({ ok: true, content: string } | { ok: false, error: string }) }} ActorCancelCtx */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const actorCancelTool = {
-  name: 'actor_cancel',
-  primitive: 'spawned',
-  description: [
-    'Cancel an async actor you started (taskId from actor_tasks): its',
-    'result will NOT come back. Use when it\'s no longer needed.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      taskId: { type: 'string', description: 'The actor task id (e.g. as-1).' },
-    },
-    required: ['taskId'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const actorCancelTool = composeTool("actor_cancel", {
 
   execute: async (args, ctx) => {
     // why: narrow ctx to the SW-bound actorCancel slot.
@@ -40,4 +27,4 @@ export const actorCancelTool = {
     const res = sctx.actorCancel(args.taskId);
     return res.ok ? { ok: true, content: res.content } : { ok: false, error: res.error };
   },
-};
+});

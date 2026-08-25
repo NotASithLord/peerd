@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // repo_history: an App/Notebook/Pod actor's read-only repository window. One call returns
 // status + log and, when requested, a bounded diff.
 
@@ -50,26 +52,7 @@ export const repositoryToolFailure = (cause, tool, action) => {
 };
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const repositoryHistoryTool = {
-  name: 'repo_history',
-  primitive: 'engine',
-  description: [
-    'Inspect this App, Notebook, or Pod browser-native Git repository: current branch and',
-    'working-tree status plus recent commits. Set includeDiff to compare `from`',
-    '(default HEAD) with `to` (default live working tree). Git OIDs are developer',
-    'history identifiers; signed dwapp version_id remains the release identity.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      depth: { type: 'integer', description: 'Recent commits to return (default 20, max 100).' },
-      includeDiff: { type: 'boolean', description: 'Include a bounded unified diff.' },
-      from: { type: 'string', description: 'Commit/ref to diff from (default HEAD).' },
-      to: { type: 'string', description: 'Commit/ref to diff to (default live working tree).' },
-    },
-  },
-  sideEffect: 'read',
-  origins: () => [],
+export const repositoryHistoryTool = composeTool("repo_history", {
   execute: async (args, ctx) => {
     const repositories = /** @type {any} */ (ctx).repositories;
     const kind = /** @type {any} */ (ctx).actorType;
@@ -106,4 +89,4 @@ export const repositoryHistoryTool = {
       return repositoryToolFailure(e, 'repo_history', 'reading Git history');
     }
   },
-};
+});

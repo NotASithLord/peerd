@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // site_client_write — propose a durable SITE CLIENT write (DESIGN-19), gated on
 // USER CONFIRMATION. The agent-facing door to persisting a derived client, and
 // the lethal-trifecta seam: an AGENT cannot persist a client on its own.
@@ -19,56 +21,7 @@ import {
 import { siteClientOriginRefusal } from './site-client-origin.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const siteClientWriteTool = {
-  name: 'site_client_write',
-  primitive: 'web',
-  description: [
-    'Persist (or patch, or delete) the SITE CLIENT for an origin — the user must',
-    'CONFIRM before it saves. Provide the origin, a short DOSSIER (summary + endpoint',
-    'inventory + observed auth posture), and the client MODULE source. The module body',
-    'runs inside site_client_run and must RETURN an object of named ops (do NOT use',
-    '`export`; end with e.g. `return { listCharges: () => site.fetch("/v1/charges") }`);',
-    'it uses the injected `site.fetch`. Derive the dossier + module from a',
-    'site_capture digest or from what you learned driving the site. NEVER put',
-    'credentials in the module — the session rides the origin at the boundary. An empty',
-    'body deletes the stored client. Propose a PATCH here whenever a site_client_run',
-    'failed and you found the right call by driving the page.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    required: ['origin'],
-    properties: {
-      origin: { type: 'string', description: 'The site origin (e.g. https://api.example.com).' },
-      summary: { type: 'string', description: 'Short prose: what the site is, what the client covers, quirks. Shown to the user for consent.' },
-      endpoints: {
-        type: 'array',
-        description: 'Endpoint inventory: [{ method, path, note }]. Paths are TEMPLATES (/v1/charges/:id).',
-        items: {
-          type: 'object',
-          properties: {
-            method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
-            path: { type: 'string' },
-            note: { type: 'string' },
-          },
-        },
-      },
-      auth: { type: 'string', enum: ['session', 'bearer', 'none', 'unknown'], description: 'Observed auth POSTURE — never a value.' },
-      deriver: { type: 'string', enum: ['probe', 'capture-cdp', 'capture-tap'], description: 'How the client was derived (fidelity signal).' },
-      body: { type: 'string', description: 'The client module source. Empty string deletes the stored client.' },
-    },
-  },
-  sideEffect: 'write',
-  // IDB write, no web origin touched here — the origin/egress gates have nothing
-  // to check. The safety is the confirm round-trip below.
-  // Declare the target origin so the gates that already exist actually fire on it:
-  // `origins: () => []` told the denylist hook there was nothing to check, so a
-  // site client for a denylisted origin could be read/written while every other
-  // path to that origin was refused. site_client_run already declared it - these
-  // two had drifted.
-  origins: (args) => {
-    const o = normalizeSiteOrigin(args?.origin);
-    return o ? [o] : [];
-  },
+export const siteClientWriteTool = composeTool("site_client_write", {
 
   execute: async (args, ctx) => {
     const origin = normalizeSiteOrigin(args?.origin);
@@ -186,4 +139,4 @@ export const siteClientWriteTool = {
       return { ok: false, error: `site_client_write_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
   },
-};
+});

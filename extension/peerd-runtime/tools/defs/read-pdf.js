@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // read_pdf — extract the text of a PDF loaded in a tab.
 //
 // An ACTOR-ONLY tool (hidden from the main agent in exposure.js, in the web
@@ -24,38 +26,7 @@ import { formatPdfBody, DEFAULT_MAX_CHARS } from '../../pdf/extract-format.js';
 import { isPrivateOrLocalHost } from '../../../shared/private-network.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const readPdfTool = {
-  name: 'read_pdf',
-  primitive: 'tab',
-  description: [
-    'Read the TEXT of a PDF open in a tab. Use this on a PDF tab — the regular',
-    'page tools (snapshot/read_page) return nothing there because the browser',
-    'renders PDFs in a non-HTML viewer. Returns the document text, page by page',
-    '([page N] markers), with title/author when present. By default reads the',
-    'active tab; pass url to read a specific PDF link instead. Born-digital PDFs',
-    'work immediately; a scanned/image-only PDF has no text layer and is',
-    'reported as such (on-device OCR is an opt-in download in Settings).',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      tabId: { type: 'integer', description: 'Optional tab id; defaults to the active tab.' },
-      url: { type: 'string', description: 'Optional explicit PDF URL (http(s) or data:). Defaults to the tab URL.' },
-      engine: {
-        type: 'string',
-        enum: ['auto', 'pdfjs', 'ocr'],
-        description: 'auto (default): text layer, OCR fallback when installed. pdfjs: text layer only. ocr: force OCR (must be installed).',
-      },
-      maxChars: { type: 'integer', description: `Cap on returned text (default ${DEFAULT_MAX_CHARS}).` },
-    },
-  },
-  sideEffect: 'read',
-  // Gate denylist-checks the ACTUAL target origin (the url override, else the
-  // active tab) — so a PDF on a denylisted host is refused like any page read.
-  origins: (args, ctx) => {
-    const o = args?.url ? originOfUrl(args.url) : (ctx.activeTab?.origin || '');
-    return o ? [o] : [];
-  },
+export const readPdfTool = composeTool("read_pdf", {
 
   execute: async (args, ctx) => {
     // why: pdfOffscreenClient is injected into the tool context by the SW
@@ -120,4 +91,4 @@ export const readPdfTool = {
       content: wrapUntrusted({ origin: originOfUrl(target), tool: 'read_pdf', body }),
     };
   },
-};
+});

@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // read_doc — read a Word / Excel / PowerPoint / OpenDocument / RTF / EPUB /
 // CSV file as Markdown.
 //
@@ -24,7 +26,6 @@ import { wrapUntrusted } from '../prompt-wrap.js';
 import { originOfUrl, isDenylistedTab } from './dom-helpers.js';
 import { formatDocBody, formatDocHead, DEFAULT_MAX_CHARS } from '../../doc/format.js';
 import { toMarkdown } from '../../doc/markdown.js';
-import { CONVERTIBLE } from '../../doc/sniff.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
 // read_doc re-fetches bytes offscreen, so it applies the same shared lexical
 // private-network refusal as open-web egress. The denylist alone does not cover
@@ -32,40 +33,7 @@ import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web
 import { isPrivateOrLocalHost } from '../../../shared/private-network.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const readDocTool = {
-  name: 'read_doc',
-  primitive: 'web',
-  description: [
-    'Read a DOCUMENT FILE as Markdown: Word (.docx), Excel (.xlsx), PowerPoint (.pptx),',
-    'OpenDocument (.odt/.ods/.odp), RTF, EPUB, and CSV/TSV. Use it whenever a link points',
-    'at one of those — the browser downloads such files instead of rendering them, so',
-    'navigate/snapshot show you nothing and fetch_url returns unreadable binary.',
-    'Structure is preserved: headings, lists, tables, and links come back as Markdown;',
-    'spreadsheets come back as one table per sheet, decks as one section per slide with',
-    'speaker notes. You do NOT need to know the format in advance — it is detected from',
-    'the bytes, and reported back. For a PDF use read_pdf; for an HTML page use fetch_url',
-    'or open a tab. Long documents are stored whole and paged: pass a query to get the',
-    'matching passages, and follow the [paging] footer to read any other part.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    required: ['url'],
-    properties: {
-      url: { type: 'string', description: 'Absolute http(s) URL of the document file.' },
-      maxChars: { type: 'integer', description: `Cap on the returned Markdown (default ${DEFAULT_MAX_CHARS}). Raise it to read a long document whole.` },
-      query: { type: 'string', description: 'What you are looking for in this document (a few keywords). When it is too long to show whole, the most relevant passages are surfaced (BM25) instead of a blind head+tail window — so an answer in an appendix is not missed. Omit to get the head+tail window.' },
-      format: {
-        type: 'string',
-        enum: [...CONVERTIBLE],
-        description: 'Force a format instead of detecting one. Only needed when detection got it wrong — normally omit.',
-      },
-    },
-  },
-  sideEffect: 'read',
-  origins: (args) => {
-    const o = originOfUrl(args?.url);
-    return o ? [o] : [];
-  },
+export const readDocTool = composeTool("read_doc", {
 
   execute: async (args, ctx) => {
     // why: docOffscreenClient is injected into the tool context by the SW
@@ -171,4 +139,4 @@ export const readDocTool = {
     });
     return { ok: true, content: footer ? `${fenced}\n${footer}` : fenced };
   },
-};
+});

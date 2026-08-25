@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // dweb_guide — the dwapp BRIDGE reference, loaded on demand (progressive disclosure).
 //
 // The multiplayer/bridge how-to is bulky, and most sessions never build a shared
@@ -82,19 +84,7 @@ the bridge, test it, then dweb_share it so friends can install and play.`;
 /** @typedef {Omit<Tool, 'primitive' | 'execute'> & { primitive: 'dweb', execute: (args: any, ctx: ToolContext) => Promise<DwebToolResult> }} DwebTool */
 
 /** @type {DwebTool} */
-export const dwebGuideTool = {
-  name: 'dweb_guide',
-  primitive: 'dweb',
-  dweb: true,
-  description: [
-    'Get the dwapp BRIDGE reference for building a multiplayer / shared App (game,',
-    'whiteboard, chat): the postMessage client, the join/publish/subscribe/dm/',
-    'presence ops, and the events. Call this FIRST when building a shared dwapp —',
-    'it is loaded on demand to keep it out of context until needed. Read-only.',
-  ].join(' '),
-  schema: { type: 'object', properties: {} },
-  sideEffect: 'read',
-  origins: () => [],
+export const dwebGuideTool = composeTool("dweb_guide", {
 
   execute: async (_args, ctx) => {
     // why: narrow the SW-injected ctx.dweb slot — only its presence is checked.
@@ -108,4 +98,4 @@ export const dwebGuideTool = {
     }
     return { ok: true, content: BRIDGE_GUIDE };
   },
-};
+});

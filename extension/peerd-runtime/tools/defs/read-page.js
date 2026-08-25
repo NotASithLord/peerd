@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // read_page — read the DOM of the target tab.
 //
 // Returns a structured snapshot wrapped in <untrusted_web_content>:
@@ -21,36 +23,7 @@ import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web
 const CONTENT_BODY_CHARS = 16_000;
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const readPageTool = {
-  name: 'read_page',
-  primitive: 'tab',
-  description: [
-    'Read the DOM of a tab. Default mode returns title, URL, visible body text',
-    '(truncated to ~4000 chars), and a list of interactable elements',
-    '(inputs, buttons, links) with CSS selectors you can pass to click()',
-    "and type(). mode:'content' instead extracts the page's READABLE CORE as",
-    'markdown (boilerplate stripped, capped 16k, with paging for the overflow) —',
-    'far denser for articles/docs/reference pages you are READING rather than',
-    'operating; it returns no interactables, so use the default when you need',
-    'to act on the page. By default reads the active tab.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      tabId: {
-        type: 'integer',
-        description: 'Optional tab id; defaults to the active tab.',
-      },
-      mode: {
-        type: 'string',
-        enum: ['snapshot', 'content'],
-        description: "snapshot (default): text + interactables for OPERATING the page. content: the readable core as markdown for READING it.",
-      },
-      query: { type: 'string', description: "content mode only: what you're looking for (a few keywords). When the page is too long to show whole, the most relevant passages are surfaced (BM25) instead of a blind head+tail window. Omit for the head+tail window." },
-    },
-  },
-  sideEffect: 'read',
-  origins: (_args, ctx) => ctx.activeTab?.origin ? [ctx.activeTab.origin] : [],
+export const readPageTool = composeTool("read_page", {
 
   execute: async (args, ctx) => {
     const tab = await resolveTargetTab(args, ctx);
@@ -147,7 +120,7 @@ export const readPageTool = {
       content: wrapUntrusted({ origin, tool: 'read_page', body }),
     };
   },
-};
+});
 
 /**
  * @typedef {Object} PageInteractable

@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // dweb_share — publish one of the user's Apps to the dweb app store, peer to peer.
 //
 // The app's signed bundle goes out over the always-on base network: announced by
@@ -31,24 +33,7 @@
  */
 
 /** @type {DwebTool} */
-export const dwebShareTool = {
-  name: 'dweb_share',
-  primitive: 'dweb',
-  dweb: true,
-  description: [
-    'Publish one of the user\'s Apps to the dweb app store so peers can discover',
-    'and install it peer-to-peer (no server). Pass the app id (from actor_list). The',
-    'app travels as a signed bundle over the base network and shows up in peers\'',
-    'Discover view. Use after building an app the user wants to share. CONFIRMS',
-    'with the user every time — it is public and outward-facing.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: { appId: { type: 'string', description: 'The app id to publish (from actor_list).' } },
-    required: ['appId'],
-  },
-  sideEffect: 'mutate_external',
-  origins: () => [],
+export const dwebShareTool = composeTool("dweb_share", {
 
   execute: async (args, ctx) => {
     // why: narrow ctx to the dweb-only slots (dweb surface + force-confirm) the
@@ -96,4 +81,4 @@ export const dwebShareTool = {
       }, null, 2),
     };
   },
-};
+});

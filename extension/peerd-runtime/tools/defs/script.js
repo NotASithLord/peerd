@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // script — run JS HEADLESS (no tab).
 //
 // The headless sibling of js_notebook: the SAME sealed worker (realm seal +
@@ -29,7 +31,7 @@ import {
   ACTORS_JOB_DEFAULT_TIMEOUT_MS, ACTORS_JOB_MAX_TIMEOUT_MS,
   ACTORS_TRACE_ERROR_MAX_CHARS,
 } from '../../actor/actors-api.js';
-import { codeClientReference, renderCodeOpTrace } from '../../actor/capability-manifest.js';
+import { renderCodeOpTrace } from '../../actor/capability-manifest.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
@@ -68,54 +70,7 @@ const MAX_TIMEOUT_MS = 120_000;
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const scriptTool = {
-  name: 'script',
-  primitive: 'notebook',
-  description: [
-    'Run JS HEADLESS — a fast sealed Web Worker, no tab. Async function body',
-    '(top-level await + `return <value>`); each call is a FRESH worker with an',
-    'EPHEMERAL OPFS scratch (for durable files or a visible editor use a',
-    'Notebook). Use it for: (1) QUICK COMPUTE — math, parsing, transforms;',
-    '(2) CODE MODE — orchestrate many audited peerd.egress.fetch(url, { method,',
-    'headers, body }) calls + compute in one script and return just the result',
-    "(add { extract: 'markdown' } to get an HTML page back as clean readable",
-    'markdown — res.extracted says whether it ran);',
-    '(3) ORCHESTRATION — the `actors` client drives your OWN actors in code:',
-    `${codeClientReference('actors')}. actors.call returns { reply, failed }. Fan out to`,
-    'several actors, feed one\'s output to the next as a variable, retry/timeout',
-    'in code. `address` is anything message_actor accepts; a failed call returns',
-    'failed:true (actor-level) or throws (refusal/timeout — the message says',
-    'why); every delegation is individually gated + audited and shows live in',
-    'chat. (Delegate ENVIRONMENT work to actors; actor_create stays the tool',
-    'for a pure reasoning/research subtask.) (4) SUB-MODEL CALLS — const',
-    '{ text } = await peerd.provider.call({ prompt (or messages: [{role,',
-    'content}]), system?, model?, maxTokens? }): a pure text transform',
-    'mid-script (classify/extract/summarize per row) on the session\'s',
-    'provider. TEXT-ONLY (no tools/streaming — a tool-using subtask belongs to',
-    'actors/actor_create), quota-capped per run (overflow throws — catch and',
-    'degrade), spends real credits (counted in the result + cost meter).',
-    'Built-ins: import helpers from \'peerd:std\' (math / data / parsing; charts',
-    'need a Notebook) and run compiled wasm32-wasi binaries via \'peerd:wasi\' —',
-    'the first-run note lists both with signatures. Returns the value, console',
-    'output, any error, and bounded [DELEGATIONS]/[CODE OPS] traces.',
-    'Pass workspace: true to run against your durable session workspace instead',
-    'of the ephemeral scratch (files persist across runs and turns; output',
-    're-enters fenced; peerd.self.readFile/writeFile/deleteFile/listFiles',
-    'manage it).',
-    'A helper you\'ll want again? Persist it with toolbox_write and import it',
-    'here or in a Notebook: import { … } from \'peerd:toolbox/<name>\'.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      code: { type: 'string', description: 'JS code to evaluate. Async function body.' },
-      timeoutMs: { type: 'integer', description: 'Wall-clock cap in ms (default 30000, max 120000 for compute; a run whose code uses `actors` or `peerd.provider` gets a higher delegation-sized default/max automatically).' },
-      workspace: { type: 'boolean', description: 'Mount the durable per-session workspace as the OPFS root (default false: fresh ephemeral scratch, nuked after the run).' },
-    },
-    required: ['code'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const scriptTool = composeTool("script", {
 
   execute: async (args, ctx) => {
     if (typeof args?.code !== 'string' || args.code.length === 0) {
@@ -348,7 +303,7 @@ export const scriptTool = {
       }
     }
   },
-};
+});
 
 /**
  * Does this run's output need the untrusted fence? A run that touched the web

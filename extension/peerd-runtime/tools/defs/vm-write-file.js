@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // vm_write_file — write a string as a file in the VM.
 //
 // For inline content the agent generates (a Python script, a config
@@ -15,32 +17,7 @@ const MAX_CONTENT_CHARS = 200_000;  // ~200KB of UTF-8 text
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const vmWriteFileTool = {
-  name: 'vm_write_file',
-  primitive: 'webvm',
-  description: [
-    'Write `content` (a string) as a UTF-8 file at the absolute `path`',
-    'inside the VM. Use this for short inline content like Python scripts,',
-    'config files, sample inputs. For binary or large artifacts, use',
-    'vm_import to download from a URL instead — that keeps bytes off the',
-    'model context window. Cap: 200000 characters.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      path: {
-        type: 'string',
-        description: 'Absolute path in the VM (e.g. /tmp/run.py).',
-      },
-      content: {
-        type: 'string',
-        description: 'File contents as UTF-8 text.',
-      },
-    },
-    required: ['path', 'content'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const vmWriteFileTool = composeTool("vm_write_file", {
 
   execute: async (args, ctx) => {
     if (typeof args?.path !== 'string' || !args.path.startsWith('/')) {
@@ -72,4 +49,4 @@ export const vmWriteFileTool = {
       content: JSON.stringify({ path: args.path, bytes: bytes.byteLength }, null, 2),
     };
   },
-};
+});

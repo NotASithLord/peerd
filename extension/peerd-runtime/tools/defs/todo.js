@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // todo_init / todo_check / todo_add — the goal run's plan-of-record tools.
 //
 // Revealed to the model ONLY while a goal run is active (tools/exposure.js
@@ -20,7 +22,7 @@
 // concurrent wave can't lose an update.
 
 import {
-  initTodos, checkTodo, addTodo, nextPending, todoProgress, formatTodoBlock, MAX_TODO_ITEMS,
+  initTodos, checkTodo, addTodo, nextPending, todoProgress, formatTodoBlock,
 } from '../../todo/core.js';
 
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
@@ -62,36 +64,7 @@ const footer = (todos) => {
 };
 
 /** @type {GoalTool} */
-export const todoInitTool = {
-  name: 'todo_init',
-  primitive: 'goal',
-  description: [
-    'Set the goal run\'s plan as a todo checklist (replaces any existing list).',
-    `Use ${MAX_TODO_ITEMS} items or fewer — concrete steps, each with a short`,
-    '"validation" describing how you will verify that step worked. Call this once',
-    'your plan is formed, before you start executing. The list persists across',
-    'turns and is shown to the user.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      items: {
-        type: 'array',
-        description: `The plan steps, in order (max ${MAX_TODO_ITEMS}).`,
-        items: {
-          type: 'object',
-          properties: {
-            text: { type: 'string', description: 'The step, one concrete action.' },
-            validation: { type: 'string', description: 'How you will verify this step worked.' },
-          },
-          required: ['text'],
-        },
-      },
-    },
-    required: ['items'],
-  },
-  sideEffect: 'read',
-  origins: () => [],
+export const todoInitTool = composeTool("todo_init", {
   execute: async (args, ctx) => {
     const store = storeOf(ctx);
     if (!store) return NO_RUN;
@@ -102,25 +75,10 @@ export const todoInitTool = {
       content: `Plan recorded (${out.todos.length} items).\n${formatTodoBlock(out.todos)}`,
     };
   },
-};
+});
 
 /** @type {GoalTool} */
-export const todoCheckTool = {
-  name: 'todo_check',
-  primitive: 'goal',
-  description: [
-    'Mark one todo item done — call it the moment that step\'s validation',
-    'passes, not in batches at the end. The result shows what\'s next.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      id: { type: 'integer', description: 'The item id to mark done.' },
-    },
-    required: ['id'],
-  },
-  sideEffect: 'read',
-  origins: () => [],
+export const todoCheckTool = composeTool("todo_check", {
   execute: async (args, ctx) => {
     const store = storeOf(ctx);
     if (!store) return NO_RUN;
@@ -128,26 +86,10 @@ export const todoCheckTool = {
     if (!out.ok) return { ok: false, error: out.error };
     return { ok: true, content: `Done: ${out.item.id}. ${out.item.text}\n${footer(out.todos)}` };
   },
-};
+});
 
 /** @type {GoalTool} */
-export const todoAddTool = {
-  name: 'todo_add',
-  primitive: 'goal',
-  description: [
-    'Append one step to the todo list — for work discovered mid-run that the',
-    'plan missed. Include a validation for it like any other step.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      text: { type: 'string', description: 'The new step, one concrete action.' },
-      validation: { type: 'string', description: 'How you will verify this step worked.' },
-    },
-    required: ['text'],
-  },
-  sideEffect: 'read',
-  origins: () => [],
+export const todoAddTool = composeTool("todo_add", {
   execute: async (args, ctx) => {
     const store = storeOf(ctx);
     if (!store) return NO_RUN;
@@ -155,4 +97,4 @@ export const todoAddTool = {
     if (!out.ok) return { ok: false, error: out.error };
     return { ok: true, content: `Added: ${out.item.id}. ${out.item.text}\n${footer(out.todos)}` };
   },
-};
+});

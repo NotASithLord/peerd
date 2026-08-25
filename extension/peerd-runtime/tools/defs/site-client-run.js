@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // site_client_run — execute a stored SITE CLIENT (DESIGN-19) against its origin.
 //
 // The persisted client MODULE (JS derived from observed traffic) runs in the SAME
@@ -18,48 +20,14 @@ import { clamp } from '/shared/util.js';
 import { pushValueBlock } from './value-block.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { normalizeSiteOrigin } from '../../site-clients/core.js';
-import { codeClientReference, renderCodeOpTrace } from '../../actor/capability-manifest.js';
+import { renderCodeOpTrace } from '../../actor/capability-manifest.js';
 import { siteClientOriginRefusal } from './site-client-origin.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 60_000;
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const siteClientRunTool = {
-  name: 'site_client_run',
-  primitive: 'web',
-  description: [
-    'Run the stored SITE CLIENT for an origin — derived knowledge of that site\'s API,',
-    'far cheaper than re-driving the DOM. Write JS against the injected `site` client:',
-    'the loaded client module\'s ops are available as `client` (the object its body',
-    'RETURNS — call e.g. `await client.listCharges()`), and',
-    `Exact host client: ${codeClientReference('site')}. It makes requests PINNED to the`,
-    'origin (it carries your session same-origin, exactly like fetch_url — never pass',
-    'credentials). site.fetch RESOLVES to { status, finalUrl, contentType, body, json }',
-    'for ANY HTTP response — check `status` yourself; it is NOT a Fetch Response (no',
-    '.ok, and json is already the parsed value or null, not a method). It only THROWS',
-    'when the call is REFUSED (cross-origin, denylisted, redirect, declined write) or',
-    'the network fails, so wrap in try/catch. TREAT THE CLIENT AS A CACHE: it',
-    'may be stale or wrong. If a call fails or returns something off, DRIVE THE PAGE',
-    'instead (ground truth) and propose a fix with site_client_write. Returns the',
-    'run value + console, fenced (the bytes are the site\'s).',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    required: ['origin', 'code'],
-    properties: {
-      origin: { type: 'string', description: 'The site origin whose client to load (e.g. https://api.example.com).' },
-      code: { type: 'string', description: 'JS to run; drives `client` (the loaded module) and `site.fetch`, returns the outcome. Async body: top-level await + return.' },
-      timeoutMs: { type: 'number', description: `Wall-clock cap (default ${DEFAULT_TIMEOUT_MS}, max ${MAX_TIMEOUT_MS}).` },
-    },
-  },
-  // The non-GET write inside a run is gated at the SW site-fetch/call route via
-  // the shared web:write confirm — same as fetch_url. The tool itself is a read.
-  sideEffect: 'read',
-  origins: (args) => {
-    const o = normalizeSiteOrigin(args?.origin);
-    return o ? [o] : [];
-  },
+export const siteClientRunTool = composeTool("site_client_run", {
   execute: async (args, ctx) => {
     const origin = normalizeSiteOrigin(args?.origin);
     if (!origin) return { ok: false, error: 'bad_origin: expected a public HTTP(S) site origin' };
@@ -151,7 +119,7 @@ export const siteClientRunTool = {
     if (cancelled) return { ok: false, error: 'site_client_run_aborted: the turn was stopped during the run' };
     return { ok: true, content: formatRunResult(origin, args.code, result) };
   },
-};
+});
 
 /**
  * Format + fence a run result. The output carries the SITE's bytes (fetched via

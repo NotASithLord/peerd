@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // login — INITIATE a user-gesture login (passkey/WebAuthn or "Sign in with <known
 // IdP>") on the current page. Tier 0 of the credential roadmap: it holds NO secret,
 // stores NOTHING, and NEVER fills a password. The authentication factor always
@@ -37,43 +39,7 @@ import { isKnownIdp } from '../../actor/idp-registry.js';
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const loginTool = {
-  name: 'login',
-  primitive: 'tab',
-  description: [
-    'INITIATE a user-gesture sign-in on the current page — a passkey / security-key',
-    'ceremony, or a "Sign in with <provider>" button for a recognized identity',
-    'provider. peerd holds NO credential: it never fills a password and never stores a',
-    'secret; you complete the authentication with your device or on the provider. Target',
-    'the sign-in element you found in a prior snapshot via {ref} (preferred) or a CSS',
-    '{selector}. The tool reads the element off the page and derives the method/provider',
-    'itself (you do NOT pass them), verifies it really is a login affordance, then asks',
-    'the user to confirm before acting. Password logins are refused (peerd holds no',
-    'credentials); SSO for a full product that only speaks OAuth (GitHub/GitLab/Facebook)',
-    'is refused gracefully — sign in there yourself. For a passkey, keep advanced',
-    'automation on so the trusted gesture can fire.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      ref: {
-        type: 'string',
-        description: 'PREFERRED. A sign-in element ref from a snapshot (e.g. "@e7"). For a passkey the trusted click needs a CDP snapshot ref (backend node).',
-      },
-      selector: {
-        type: 'string',
-        description: 'CSS selector identifying the sign-in element (from read_page / query_dom). One of ref|selector is required.',
-      },
-      nth: {
-        type: 'integer',
-        description: 'Optional 0-indexed match when the SELECTOR matches multiple elements (default 0). Ignored for ref.',
-      },
-    },
-  },
-  sideEffect: 'write',
-  // SYSTEM-DERIVED origin — never a model-supplied string. The gates denylist-check
-  // this, and the confirm below names the same system origin.
-  origins: (_args, ctx) => ctx.activeTab?.origin ? [ctx.activeTab.origin] : [],
+export const loginTool = composeTool("login", {
 
   execute: async (args, ctx) => {
     // 1) Resolve the tab through the DOM chokepoint (runs the origin lock /
@@ -343,4 +309,4 @@ export const loginTool = {
         + `When this tab returns to ${origin}, tell peerd to continue. peerd never sees your credential.`,
     };
   },
-};
+});

@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // vm_import — download a URL and drop it into the VM rootfs.
 //
 // Bridges the agent's web access (denylist + audit) with the VM
@@ -19,39 +21,7 @@ const MAX_BYTES = 50 * 1024 * 1024;  // 50MB cap per fetch
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const vmImportTool = {
-  name: 'vm_import',
-  primitive: 'webvm',
-  description: [
-    'Download a URL and write the bytes into a VM at `path`. The fetch',
-    'runs IN PEERD (through peerd-egress: denylist + audit), NOT inside',
-    'the VM. Use it to stage large or binary data, or anything the in-VM',
-    'wrappers cannot fetch — apt packages, native/C-extension pip wheels',
-    'or sdists, raw-socket downloads. (Pure-Python `pip install` and',
-    'npm/gem installs DO work in-VM via vm_boot; only reach for vm_import',
-    'when those cannot.) An error here is peerd-side (denylist, unreachable',
-    'host, VM not booted) — read it verbatim; the VM never tried. Max 50MB.',
-    'Returns the written path and byte count.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      url: {
-        type: 'string',
-        description: 'http(s) URL to fetch.',
-      },
-      path: {
-        type: 'string',
-        description: 'Absolute path inside the VM where the bytes land (e.g. /tmp/repo.zip).',
-      },
-    },
-    required: ['url', 'path'],
-  },
-  sideEffect: 'write',
-  origins: (args) => {
-    try { return [new URL(args.url).origin]; }
-    catch { return []; }
-  },
+export const vmImportTool = composeTool("vm_import", {
 
   execute: async (args, ctx) => {
     if (typeof args?.url !== 'string') return { ok: false, error: 'url_required' };
@@ -104,4 +74,4 @@ export const vmImportTool = {
       }, null, 2),
     };
   },
-};
+});

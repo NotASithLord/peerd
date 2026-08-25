@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // open_tab — open a new browser tab, optionally pre-loaded with a URL.
 //
 // This is mutate_external in spirit (it changes user-visible browser
@@ -7,7 +9,7 @@
 // exception, see docs/DECISIONS.md #16), and Act can route it through a
 // confirmation prompt per the denylist + confirmActions policy.
 
-import { isDenylistedTab, originOfUrl } from './dom-helpers.js';
+import { isDenylistedTab } from './dom-helpers.js';
 import {
   BROWSER_TARGET_STAGES,
   browserNetworkGuardPostNavigationResult,
@@ -39,37 +41,7 @@ const NAV_TIMEOUT_MS = 30_000;
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const openTabTool = {
-  name: 'open_tab',
-  primitive: 'tab',
-  description: [
-    'Open a new browser tab. Pass url to pre-load it; omit for a blank',
-    'new tab. The tab opens in the BACKGROUND and a "go there" card appears in',
-    'the chat — peerd never yanks the user to a new tab; they click to go.',
-    "Returns the new tab id. If its final site is ordinary, the web actor can work",
-    "there via message_actor with to:'<that tabId>'. A redirect to a site peerd treats",
-    "as signed in is refused; use its explicit site:<origin> actor only when the user's",
-    "request already targets that site. Do NOT combine open_tab with to:'web', which opens its",
-    "OWN tab. For a fresh web task, skip open_tab and just message_actor to:'web'",
-    'with the goal (it opens a tab itself only if it decides to render).',
-    'This opens a protected peerd tab. Until the tab closes, peerd blocks private',
-    'or local network destinations and sites in the sensitive-site denylist.',
-    'Use a normal tab for unrestricted browsing.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      url: {
-        type: 'string',
-        description: 'Optional absolute URL to load. Must include scheme.',
-      },
-    },
-  },
-  sideEffect: 'mutate_external',
-  origins: (args) => {
-    const dest = originOfUrl(args?.url);
-    return dest ? [dest] : [];
-  },
+export const openTabTool = composeTool("open_tab", {
 
   execute: async (args, ctx) => {
     // why background, always: a tab peerd opens no longer steals the user away
@@ -252,4 +224,4 @@ export const openTabTool = {
       }, null, 2),
     };
   },
-};
+});

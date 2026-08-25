@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // vm_boot — execute a shell command in a WebVM.
 //
 // WebVMs are discrete browser tabs. By default vm_boot routes to the
@@ -39,49 +41,7 @@ const MAX_TIMEOUT_MS = 300_000;
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const vmBootTool = {
-  name: 'vm_boot',
-  primitive: 'webvm',
-  description: [
-    'Run a shell command in a WebVM (stock Debian: python3, pip, git, jq,',
-    'bash, POSIX). Persistent bash — cd, exported vars, and history persist',
-    'across calls; pipes/redirects/&&/|| work. No `vm` arg → the chat\'s',
-    'current VM (auto-created if none); pass `vm` to target another.',
-    'No raw sockets in the kernel, but HTTP(S) AND package install work via',
-    'bash wrappers routed through peerd-egress: curl / wget / git clone /',
-    'peerd-fetch for fetching, and `pip install <pkg>` (also -r',
-    'requirements.txt), `npm install`, `gem install` for packages — peerd',
-    'stages the package + its deps offline, then installs in the VM, so',
-    '`pip install requests` just works. NOT supported: compiled/native',
-    'packages (C extensions, no toolchain), apt, raw Python sockets. Staging',
-    'fetches over the network, so big installs are slow — raise timeoutMs',
-    'rather than giving up. Use `bash -c` (not `sh -c`) for subshells.',
-    'Returns stdout, stderr, exit code, duration. Default 60s (timeoutMs,',
-    'max 300s).',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      cmd: {
-        type: 'string',
-        description: 'Shell command to run in a persistent /bin/bash --login -i '
-          + 'session (bash semantics; the curl/wget/git/pip/npm/gem wrappers are '
-          + 'bash functions). Use `bash -c`, never `sh -c`, for subshells.',
-      },
-      vm: {
-        type: 'string',
-        description: 'Optional. VM id or name to target. Without this, '
-          + 'uses the chat\'s current VM (auto-created if absent).',
-      },
-      timeoutMs: {
-        type: 'integer',
-        description: 'Wall-clock cap in ms (default 60000, max 300000).',
-      },
-    },
-    required: ['cmd'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const vmBootTool = composeTool("vm_boot", {
 
   execute: async (args, ctx) => {
     // why .trim(): a whitespace-only cmd makes the wrapped-run template a bash
@@ -139,7 +99,7 @@ export const vmBootTool = {
       return { ok: false, error: `vm_boot_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
     }
   },
-};
+});
 
 /** @param {string} cmd @param {VmRunResult} r @returns {string} */
 const formatRunResult = (cmd, r) => {

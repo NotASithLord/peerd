@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // edit_file — the PRIMARY write path for agent file edits.
 //
 // Instead of re-emitting a whole file (app_write_file with full content),
@@ -45,37 +47,7 @@ const MAX_CONTENT_CHARS = 500_000;
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const editFileTool = {
-  name: 'edit_file',
-  primitive: 'app',
-  description: [
-    'Edit an existing file with one or more Aider-style SEARCH/REPLACE',
-    'blocks. PREFER THIS over rewriting a whole file. Format:',
-    '',
-    '<<<<<<< SEARCH',
-    'exact text to find (must appear once)',
-    '=======',
-    'replacement text',
-    '>>>>>>> REPLACE',
-    '',
-    'The SEARCH text must match the current file EXACTLY and UNIQUELY;',
-    'if it is not unique, add surrounding lines until it is. An empty',
-    'SEARCH block replaces the whole file (use to create one). `kind`',
-    'is "app" (default) for App files or "notebook" for Notebook files.',
-    'Without `targetId`, edits the chat\'s current App / Notebook.',
-  ].join('\n'),
-  schema: {
-    type: 'object',
-    properties: {
-      path: { type: 'string', description: 'Relative path within the workspace, e.g. app.js.' },
-      edits: { type: 'string', description: 'One or more SEARCH/REPLACE blocks.' },
-      kind: { type: 'string', enum: ['app', 'notebook'], description: 'Workspace kind (default app).' },
-      targetId: { type: 'string', description: 'App id or notebook id (default: current).' },
-    },
-    required: ['path', 'edits'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const editFileTool = composeTool("edit_file", {
 
   execute: async (args, ctx) => {
     if (typeof args?.path !== 'string' || !args.path) {
@@ -254,4 +226,4 @@ export const editFileTool = {
       }, null, 2),
     };
   },
-};
+});

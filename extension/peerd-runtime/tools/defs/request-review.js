@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // request_review — spawn a clean-context reviewer over the current diff.
 //
 // THIN tool wrapper. All orchestration lives in
@@ -44,61 +46,7 @@ const MAX_RESULT_CHARS = 64 * 1024;
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const requestReviewTool = {
-  name: 'request_review',
-  primitive: 'spawned',
-  description: [
-    'Spawn a clean-context reviewer to critique a diff and return a',
-    'STRUCTURED summary (verdict, severity, issues with suggested fixes).',
-    'The reviewer is a SECOND agent that has NOT seen this conversation —',
-    'a fresh, skeptical pair of eyes — and it is READ-ONLY (it cannot edit,',
-    'click, navigate, or run code; you remain the only writer). Use it',
-    'after you finish a non-trivial change to catch bugs, security issues,',
-    'and convention violations you rationalized past.',
-    '',
-    'Provide the diff one of three ways: pass `before`/`after` file-tree',
-    'snapshots (the standalone path), pass an explicit `diff` changeset, or',
-    'omit both to review changes since the last checkpoint (when the',
-    'checkpoint adapter is wired). Optional `focus` steers the review.',
-    '',
-    'Returns the reviewer verdict (approve | request_changes | comment),',
-    'the worst severity, and the list of issues with fixes. Incorporate the',
-    'issues into your next edits; the full reviewer transcript is in the',
-    'side panel by expanding this card.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      before: {
-        type: 'object',
-        description: 'Optional. {path: content} snapshot BEFORE your changes. With `after`, the reviewer diffs them.',
-        additionalProperties: { type: 'string' },
-      },
-      after: {
-        type: 'object',
-        description: 'Optional. {path: content} snapshot AFTER your changes.',
-        additionalProperties: { type: 'string' },
-      },
-      diff: {
-        type: 'object',
-        description: 'Optional. Explicit changeset {files:[{path,status,before,after}]} if you already have one.',
-      },
-      since: {
-        type: 'string',
-        description: 'Optional. Checkpoint ref to diff since (when the checkpoint adapter is wired). Omit for the latest.',
-      },
-      focus: {
-        type: 'string',
-        description: 'Optional. Steer the reviewer ("focus on the auth path", "check accessibility").',
-      },
-    },
-    required: [],
-  },
-  // why: read — the tool itself mutates nothing. It spawns a reviewer whose
-  // tools are all read-only and whose only output is a text summary. No
-  // edits escape; the writer stays the single writer.
-  sideEffect: 'read',
-  origins: () => [],
+export const requestReviewTool = composeTool("request_review", {
 
   execute: async (args, ctx) => {
     // why: narrow ctx to the SW-injected review orchestrator + lineage slots.
@@ -125,7 +73,7 @@ export const requestReviewTool = {
     }
     return { ok: true, content: formatReviewSummary(out) };
   },
-};
+});
 
 /** @type {Record<string, string>} */
 const SEV_MARK = { critical: '🔴', high: '🟠', medium: '🟡', low: '🔵', info: '⚪' };

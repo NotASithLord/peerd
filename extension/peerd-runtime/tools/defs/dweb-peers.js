@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // dweb_peers — who I'm connected to on the dweb, and my discovery state.
 //
 // Read-only window onto the base network: the peers I hold a link to (and any I've
@@ -21,19 +23,7 @@
  */
 
 /** @type {DwebTool} */
-export const dwebPeersTool = {
-  name: 'dweb_peers',
-  primitive: 'dweb',
-  dweb: true,
-  description: [
-    'List the peers I am connected to on the dweb right now, plus my discovery',
-    'state: whether discovery is on, how many peers subscribe to my feed, my',
-    'Library size, and which publishers I have blocked. Read-only. Use it to find a',
-    "peer's did (e.g. to pass to dweb_block) or to confirm I am connected.",
-  ].join(' '),
-  schema: { type: 'object', properties: {} },
-  sideEffect: 'read',
-  origins: () => [],
+export const dwebPeersTool = composeTool("dweb_peers", {
 
   execute: async (_args, ctx) => {
     // why: narrow the SW-injected ctx.dweb slot to the one op this tool uses.
@@ -54,4 +44,4 @@ export const dwebPeersTool = {
       }, null, 2),
     };
   },
-};
+});

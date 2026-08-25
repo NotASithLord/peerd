@@ -1,9 +1,10 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // One code-first runtime/development feedback surface for a bound App actor.
 
 import { clamp } from '/shared/util.js';
 import { formatRunResult } from './script.js';
-import { codeClientReference } from '../../actor/capability-manifest.js';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 180_000;
@@ -13,26 +14,7 @@ export const APP_CODE_CAPS = Object.freeze({
 });
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const appCodeTool = {
-  name: 'app_code',
-  primitive: 'app',
-  description: [
-    'Exercise YOUR running App by writing JavaScript in a sealed worker.',
-    `Exact client: ${codeClientReference('app')}.`,
-    'Compose short observe/act loops and return compact structured evidence.',
-    'Every call is exact-instance pinned and crosses the same App runtime gate;',
-    'code adds composition, not authority. No browser, network, files, or subagents.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      code: { type: 'string', description: 'Async JS function body; top-level await and return work.' },
-      timeoutMs: { type: 'integer', description: `Wall-clock cap in ms (default ${DEFAULT_TIMEOUT_MS}, max ${MAX_TIMEOUT_MS}).` },
-    },
-    required: ['code'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const appCodeTool = composeTool("app_code", {
   execute: async (args, ctx) => {
     if (typeof args?.code !== 'string' || args.code.length === 0) return { ok: false, error: 'code_required' };
     const client = /** @type {any} */ (ctx).jsOffscreenClient;
@@ -102,4 +84,4 @@ export const appCodeTool = {
       }
     }
   },
-};
+});

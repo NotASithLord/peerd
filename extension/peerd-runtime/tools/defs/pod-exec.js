@@ -1,5 +1,7 @@
 // @ts-check
 
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
+
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/background.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 
@@ -26,34 +28,7 @@ export const pagePodExecJob = (job, podId) => {
 };
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const podExecTool = {
-  name: 'pod_exec',
-  primitive: 'pod',
-  description: [
-    'Run one command in this Pod shell. Supports files, pipelines/redirection,',
-    'Web-standard JS (`js`, Chromium), WASI tools, browser Git, and audited HTTPS curl.',
-    'This is not Linux: no Node/npm/native binaries/sockets/PTY. `background:true`',
-    'returns a running job; inspect with pod_status and stop with pod_cancel.',
-    'Foreground results preview 8000 characters per stream; follow the returned',
-    'pod_status args to page retained output. grep uses JS regex; pass -F for literals.',
-    'Timeout default 30s, maximum 300s. Ambiguous interrupted commands are never replayed.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      command: { type: 'string', description: 'Pod shell command.' },
-      podId: { type: 'string', description: 'Optional Pod id (actor calls are pinned).' },
-      timeoutMs: { type: 'integer', description: 'Wall clock limit, 1–300000ms.' },
-      background: { type: 'boolean', description: 'Return immediately with a running job.' },
-    },
-    required: ['command'],
-  },
-  sideEffect: 'write',
-  retryClass: 'E',
-  origins: (args) => {
-    const matches = String(args?.command ?? '').match(/https:\/\/[^\s'"<>|]+/g) ?? [];
-    return [...new Set(matches.map((url) => { try { return new URL(url).origin; } catch { return ''; } }).filter(Boolean))];
-  },
+export const podExecTool = composeTool("pod_exec", {
   execute: async (args, ctx) => {
     if (typeof args?.command !== 'string' || !args.command.trim()) return { ok: false, error: 'command_required' };
     const client = /** @type {any} */ (ctx).podClient;
@@ -105,4 +80,4 @@ export const podExecTool = {
       };
     } catch (error) { return { ok: false, error: `pod_exec_failed: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}` }; }
   },
-};
+});

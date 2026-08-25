@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // repo_version: local history mutations for the actor's own App/Notebook/Pod.
 // Restore is recoverable (it writes a new commit) but force-confirms because it
 // replaces the live working tree.
@@ -6,27 +8,7 @@
 import { repositoryToolFailure } from './app-history.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const repositoryVersionTool = {
-  name: 'repo_version',
-  primitive: 'engine',
-  description: [
-    'Manage this App, Notebook, or Pod LOCAL Git history. checkpoint commits current files;',
-    'branch creates a branch; checkout switches a clean working tree; restore',
-    'replaces live files with a prior commit and records a NEW commit, so it',
-    'remains reversible. Use repo_history first.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      op: { type: 'string', enum: ['checkpoint', 'branch', 'checkout', 'restore'] },
-      message: { type: 'string', description: 'Short checkpoint message.' },
-      name: { type: 'string', description: 'Branch name for branch/checkout.' },
-      to: { type: 'string', description: 'Commit OID/ref for restore.' },
-    },
-    required: ['op'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const repositoryVersionTool = composeTool("repo_version", {
   execute: async (args, ctx) => {
     const repositories = /** @type {any} */ (ctx).repositories;
     const kind = /** @type {any} */ (ctx).actorType;
@@ -92,4 +74,4 @@ export const repositoryVersionTool = {
       }
     }
   },
-};
+});

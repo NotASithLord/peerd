@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // site_client_read — read a stored SITE CLIENT's dossier + module source so the
 // actor can inspect it before running, or before proposing a patch (DESIGN-19).
 //
@@ -11,32 +13,7 @@ import { normalizeSiteOrigin, stalenessHeader } from '../../site-clients/core.js
 import { siteClientOriginRefusal } from './site-client-origin.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const siteClientReadTool = {
-  name: 'site_client_read',
-  primitive: 'web',
-  description: [
-    'Read the stored SITE CLIENT for an origin — its dossier (what it covers, auth',
-    'posture, staleness) and its module source — before running or patching it. The',
-    'source is shown fenced (it is derived, untrusted data). Use this to understand',
-    'what a client does, then site_client_run to use it or site_client_write to fix it.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    required: ['origin'],
-    properties: {
-      origin: { type: 'string', description: 'The site origin whose client to read.' },
-    },
-  },
-  sideEffect: 'read',
-  // Declare the target origin so the gates that already exist actually fire on it:
-  // `origins: () => []` told the denylist hook there was nothing to check, so a
-  // site client for a denylisted origin could be read/written while every other
-  // path to that origin was refused. site_client_run already declared it - these
-  // two had drifted.
-  origins: (args) => {
-    const o = normalizeSiteOrigin(args?.origin);
-    return o ? [o] : [];
-  },
+export const siteClientReadTool = composeTool("site_client_read", {
   execute: async (args, ctx) => {
     const origin = normalizeSiteOrigin(args?.origin);
     if (!origin) return { ok: false, error: 'bad_origin: expected a public HTTP(S) site origin' };
@@ -69,4 +46,4 @@ export const siteClientReadTool = {
     });
     return { ok: true, content: `${header}\n${fenced}` };
   },
-};
+});

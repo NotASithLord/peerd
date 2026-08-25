@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // vm_delete — destroy a WebVM and free its disk.
 //
 // Closes the VM tab (if alive), deletes the IDB-backed disk overlay,
@@ -29,27 +31,7 @@
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const vmDeleteTool = {
-  name: 'vm_delete',
-  primitive: 'webvm',
-  description: [
-    'Permanently delete a WebVM: closes its tab, drops the IDB disk',
-    'overlay (frees storage), and removes the catalog entry. Any chat',
-    'that was attached to this VM loses its currentVmId (their next',
-    'vm_boot will auto-create a fresh VM).',
-    '',
-    'Refuses to delete a pinned VM. Use only after confirming with the',
-    'user — there is no recovery once the disk is gone.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      vmId: { type: 'string', description: 'VM id to delete.' },
-    },
-    required: ['vmId'],
-  },
-  sideEffect: 'destructive',
-  origins: () => [],
+export const vmDeleteTool = composeTool("vm_delete", {
 
   execute: async (args, ctx) => {
     // why: vmRegistry / vmTabTracker are SW-injected context extras not on the
@@ -94,4 +76,4 @@ export const vmDeleteTool = {
       }, null, 2),
     };
   },
-};
+});

@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // type — set the value of an input/textarea and dispatch the events a
 // well-behaved page expects (focus, input, change). For
 // contenteditable elements, replaces innerText.
@@ -31,54 +33,7 @@ import { browserDocumentRefusalFrom, formSubmissionRefusalFrom } from '../browse
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const typeTool = {
-  name: 'type',
-  primitive: 'tab',
-  description: [
-    'Set the value of a text input, textarea, contenteditable, or native',
-    '<select> dropdown. For a <select>, pass the option\'s visible label as',
-    'text (e.g. "Two") — the harness resolves it to the matching option.',
-    'Selector is a CSS selector (get one from read_page), or pass a snapshot',
-    'ref. Replaces whatever value was there. Fires focus, input, and change',
-    'events so reactive frameworks see the update. By default acts on the',
-    'active tab. Optional submit=true sends an Enter key after setting',
-    'the value (useful for search boxes). With submit=true, a native form',
-    'that submits to another origin is not filled or submitted; the user',
-    'must review and submit it manually.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      ref: {
-        type: 'string',
-        description: 'PREFERRED. An element ref from a snapshot (e.g. "@e2"). Resolved to the exact field via CDP. Use when you took a snapshot.',
-      },
-      selector: {
-        type: 'string',
-        description: 'CSS selector for the input/textarea/contenteditable (from read_page). Use when you have a selector instead of a snapshot ref. One of ref|selector is required.',
-      },
-      text: {
-        type: 'string',
-        description: 'Value to set. For a <select> dropdown, the visible LABEL of the option to choose (e.g. "Two"); the harness maps it to the underlying option value.',
-      },
-      submit: {
-        type: 'boolean',
-        description: 'If true, dispatch an Enter keydown after typing (submits search boxes).',
-      },
-      expectedCount: {
-        type: 'integer',
-        minimum: 1,
-        description: 'Optional deterministic guard: fail before typing unless the target resolves to exactly this many elements (the selector match count; a walk ref resolves to 0 or 1).',
-      },
-      tabId: {
-        type: 'integer',
-        description: 'Optional tab id; defaults to the active tab.',
-      },
-    },
-    required: ['text'],
-  },
-  sideEffect: 'write',
-  origins: (_args, ctx) => ctx.activeTab?.origin ? [ctx.activeTab.origin] : [],
+export const typeTool = composeTool("type", {
 
   execute: async (args, ctx) => {
     if (typeof args?.text !== 'string') {
@@ -218,7 +173,7 @@ export const typeTool = {
       }, null, 2),
     };
   },
-};
+});
 
 /**
  * @param {string | null} selector
