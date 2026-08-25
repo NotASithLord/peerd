@@ -19,7 +19,8 @@ export const createKernelProductionRuntime = async (deps) => {
   ];
   if (!deps?.seams || !deps.browser || !deps.featureHost || !deps.denylist
       || !deps.appCatalog || !deps.providerProjection || typeof deps.canWrite !== 'function'
-      || !deps.networkCustody || networkFunctions.some((value) => typeof value !== 'function')
+      || !deps.networkCustody || !deps.turnCustody
+      || networkFunctions.some((value) => typeof value !== 'function')
       || (deps.dwebEnabled && typeof deps.ensureDwebFeature !== 'function')) {
     throw new TypeError('kernel-production-runtime-config-invalid');
   }
@@ -126,6 +127,7 @@ export const createKernelProductionRuntime = async (deps) => {
       /** @type {{name?:unknown}} */ (cause)?.name === 'StoreReadOnlyError',
   };
   const turn = {
+    custody: deps.turnCustody,
     seams: deps.seams,
     browser: deps.browser,
     idb: deps.idb,

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { createKernelTurnProductionRuntime } from '../../extension/background/kernel-turn-production-runtime.js';
+import { createKernelTurnCustody } from '../../extension/background/kernel-turn-custody.js';
 
 const sendCustody = () => ({
   validOperationId: () => false, operationWindowValid: () => false,
@@ -19,21 +20,29 @@ describe('kernel turn production runtime', () => {
       sessionGet: async (key: string) => key === 'currentSessionId' ? 'root' : undefined,
       sessionSet: async () => {}, sessionDelete: async () => {},
     };
+    const browser = { tabs: {}, scripting: {} };
+    const idb = { get: async () => undefined };
+    const kv = {};
+    const vault = { isLocked: () => false };
+    const auditLog = {
+      append: async () => {}, list: async () => [], verify: async () => ({ ok: true }),
+    };
+    const settingsStore = { get: () => ({ auditLogMaxEntries: 10 }) };
+    const uiPorts = {};
+    const custody = createKernelTurnCustody({
+      browser, idb, kv, sessionCache, vault, auditLog, settingsStore, uiPorts,
+      makePageActivity: () => ({
+        markedTabs: () => [...marked],
+        release: async (tabId: number) => { releases.push(tabId); marked.delete(tabId); },
+      }),
+    });
     const runtime = await createKernelTurnProductionRuntime({
       seams: {
         runUserTurn: async () => {}, renderSystemPrompt: async () => '',
         withRun: async (operation: () => Promise<void>) => operation(),
       },
-      browser: { tabs: {}, scripting: {} },
-      idb: { get: async () => undefined }, kv: {}, sessionCache,
-      vault: { isLocked: () => false },
-      auditLog: { append: async () => {}, list: async () => [], verify: async () => ({ ok: true }) },
-      settingsStore: { get: () => ({ auditLogMaxEntries: 10 }) }, uiPorts: {},
+      browser, idb, kv, sessionCache, vault, auditLog, settingsStore, uiPorts, custody,
       pushState: async () => {}, postChatNote: () => {}, ensureReady: async () => {},
-      makePageActivity: () => ({
-        markedTabs: () => [...marked],
-        release: async (tabId: number) => { releases.push(tabId); marked.delete(tabId); },
-      }),
       factories: {
         makeActorRuntime: (shared: any) => {
           seen.push(shared);

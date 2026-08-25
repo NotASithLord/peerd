@@ -9,3 +9,6 @@ export {
   validateProviderCallArgs,
 } from './actor/provider-call-api.js';
 export { limitExceeded, normalizeTally } from './cost/accumulator.js';
+export { createMemoryStore } from './memory/store.js';
+export { createSessionStore } from './sessions/store.js';
+export { makeTurnSlots } from './loop/turn-slots.js';

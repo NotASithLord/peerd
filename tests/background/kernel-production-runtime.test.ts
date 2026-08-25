@@ -28,6 +28,7 @@ const base = (makeRichRuntime: (deps: any) => any) => ({
   updateBrowserSourceProjection: async () => true,
   syncDenylistNetwork: async () => {},
   networkCustody: { sync: async () => {}, state: () => ({ supported: true }) },
+  turnCustody: {},
   makeRichRuntime,
 });
 
@@ -58,6 +59,7 @@ describe('kernel production runtime', () => {
     }));
     expect(result).toBe(expected);
     expect(assembly.engine).toBeDefined();
+    expect(assembly.turn.custody).toBeDefined();
     expect(assembly.createTurnFactories).toBeFunction();
     expect(assembly.turn.goal.beforeStart).toBeFunction();
     expect(assembly.transfer.onProviderConfigChanged).toBeFunction();

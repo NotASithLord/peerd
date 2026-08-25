@@ -17,6 +17,7 @@ import { createKernelMemoryInitProbe } from './kernel-memory-init-probe.js';
 import { createKernelRichEffectAuthority } from './kernel-rich-effect-authority.js';
 import { createKernelSemanticRuntime } from './kernel-semantic-runtime.js';
 import { createKernelSkillPersistence } from './kernel-skill-persistence.js';
+import { createKernelTurnCustody } from './kernel-turn-custody.js';
 import { makeKernelDemandRoutes } from './kernel-demand-routes.js';
 
 const OPTIONAL_CONTROLLER_ROUTES = new Set([
@@ -93,6 +94,20 @@ export const createKernelDemandPlane = (deps) => {
       deps.featureHost.runtime.retireActiveHost(reason),
     reloadApp,
   });
+  const turnCustody = createKernelTurnCustody({
+    browser: deps.browser,
+    idb: deps.idb,
+    kv: deps.kv,
+    sessionCache: deps.sessionCache,
+    vault: deps.vault,
+    auditLog: deps.auditLog,
+    settingsStore: deps.settingsStore,
+    uiPorts: deps.uiPorts,
+    pushState: deps.pushState,
+    postChatNote: deps.postChatNote,
+    onAbort: (/** @type {string} */ sessionId) =>
+      deps.confirmation.declineSession?.(sessionId),
+  });
   /** @type {any} */
   let controllerOwner = null;
   /** @type {any} */
@@ -118,6 +133,7 @@ export const createKernelDemandPlane = (deps) => {
     const runtime = await deps.createProductionRuntime({
       ...deps,
       seams,
+      turnCustody,
       confirmation: deps.confirmation,
       denylist: deps.denylist,
       repositories: support.repositories,
