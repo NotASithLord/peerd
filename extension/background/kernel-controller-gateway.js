@@ -49,17 +49,6 @@ export const createKernelControllerGateway = ({ makeController, controller }) =>
     features.set(cluster, binding);
     return binding;
   };
-  const bindEventSlot = (/** @type {any} */ owner) => {
-    if (closed || features.has('event')) {
-      throw new Error('kernel-feature-owner-conflict');
-    }
-    if (typeof owner?.authorize !== 'function' || typeof owner?.handle !== 'function') {
-      throw new TypeError('kernel-feature-owner-invalid');
-    }
-    const binding = { cluster: 'event', owner, users: 0, retiring: false, event: true };
-    features.set('event', binding);
-    return binding;
-  };
   const release = (/** @type {any} */ binding,
     /** @type {()=>any|null} */ current, /** @type {()=>void} */ clear) => {
     if (binding.retiring) return;
@@ -103,8 +92,7 @@ export const createKernelControllerGateway = ({ makeController, controller }) =>
     const binding = featureCalls.get(payload)?.binding;
     if (!binding || binding.users < 1) return null;
     const grant = binding.owner.authorize(payload);
-    const prefix = binding.event
-      ? 'kernel-feature:event:' : `kernel-feature:${binding.cluster}:`;
+    const prefix = `kernel-feature:${binding.cluster}:`;
     return typeof grant?.target === 'string' && grant.target.startsWith(prefix) ? grant : null;
   };
   const callFeature = (/** @type {any} */ binding, /** @type {string} */ family,
@@ -152,7 +140,7 @@ export const createKernelControllerGateway = ({ makeController, controller }) =>
       featureOwner(context)?.handle(operation, payload, context)
         ?? { ok: false, code: 'kernel-operation-denied', outcomeKnown: true },
   });
-  if (['callSemantic', 'callTurn', 'callRuntime', 'callFeature', 'callFeatureEvent',
+  if (['callSemantic', 'callTurn', 'callRuntime', 'callFeature',
     'renderSystemPrompt', 'withRun', 'close']
     .some((name) => typeof client?.[name] !== 'function')) {
     try { client?.close?.(); } catch {}
@@ -205,28 +193,13 @@ export const createKernelControllerGateway = ({ makeController, controller }) =>
       callFeature: (/** @type {unknown} */ payload, /** @type {any} */ options = {}) => callFeature(
         binding, `feature-${cluster}`, payload, () => client.callFeature(payload, options),
       ),
-      callFeatureEvent: (/** @type {unknown} */ payload,
-        /** @type {any} */ options = {}) => callFeature(
-        binding, `feature-${cluster}`, payload, () => client.callFeatureEvent(payload, options),
-      ),
       release: () => release(
         binding, () => features.get(cluster), () => { features.delete(cluster); },
       ),
     });
   };
-  const bindEvents = (/** @type {any} */ owner) => {
-    const binding = bindEventSlot(owner);
-    return Object.freeze({
-      call: (/** @type {unknown} */ payload, /** @type {any} */ options = {}) => callFeature(
-        binding, 'feature-event', payload, () => client.callFeatureEvent(payload, options),
-      ),
-      release: () => release(
-        binding, () => features.get('event'), () => { features.delete('event'); },
-      ),
-    });
-  };
   return Object.freeze({
-    bindSemantic, bindTurn, bindRuntime, bindFeature, bindEvents,
+    bindSemantic, bindTurn, bindRuntime, bindFeature,
     withRun: (/** @type {()=>Promise<any>} */ operation) => client.withRun(operation),
     retire: () => client.retire?.(),
     close: () => {

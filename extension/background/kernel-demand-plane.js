@@ -17,8 +17,6 @@ import { createKernelMemoryInitProbe } from './kernel-memory-init-probe.js';
 import { createKernelSemanticRuntime } from './kernel-semantic-runtime.js';
 import { createKernelSkillPersistence } from './kernel-skill-persistence.js';
 import { makeKernelDemandRoutes } from './kernel-demand-routes.js';
-import { createKernelProductionEvents } from './kernel-production-events.js';
-import { parseKernelFeatureEvent } from '../shared/kernel-feature-policy.js';
 
 const OPTIONAL_CONTROLLER_ROUTES = new Set([
   'provider/test', 'models/options', 'openrouter/models',
@@ -28,36 +26,9 @@ const OPTIONAL_CONTROLLER_ROUTES = new Set([
 /** @param {Record<string,any>} deps */
 export const createKernelDemandPlane = (deps) => {
   if (typeof deps.createProductionRuntime !== 'function'
-      || !deps.controllerGateway || typeof deps.controllerGateway.bindEvents !== 'function'
-      || typeof deps.controllerGateway.withRun !== 'function') {
+      || !deps.controllerGateway || typeof deps.controllerGateway.withRun !== 'function') {
     throw new TypeError('kernel-demand-plane-config-invalid');
   }
-  const productionEventBinding = deps.controllerGateway.bindEvents({
-    authorize: (/** @type {unknown} */ payload) =>
-      parseKernelFeatureEvent(payload)?.authority ?? null,
-    handle: async () => ({
-      ok: false, code: 'kernel-operation-denied', outcomeKnown: true,
-    }),
-  });
-  const productionEvents = createKernelProductionEvents({
-    identity: deps.kernelIdentity,
-    send: (/** @type {string} */ event, /** @type {Record<string,unknown>} */ payload) =>
-      productionEventBinding.call({ event, payload }),
-    readSnapshot: async () => {
-      const [tabs, active] = await Promise.all([
-        deps.browser.tabs.query({}),
-        deps.browser.tabs.query({ active: true, currentWindow: true }),
-      ]);
-      return {
-        tabs,
-        activeTabId: Number.isInteger(active?.[0]?.id) ? active[0].id : null,
-        settings: deps.settingsStore.get(),
-        uiConnected: deps.uiPorts.size > 0,
-      };
-    },
-    withRun: deps.controllerGateway.withRun,
-    retire: deps.controllerGateway.retire,
-  });
   const reloadApp = async (/** @type {string} */ appId) => {
     const tabs = await deps.browser.tabs?.query?.({ url: `${deps.appTabUrl}*` }) ?? [];
     const tab = tabs.find((/** @type {any} */ candidate) => {
@@ -216,7 +187,6 @@ export const createKernelDemandPlane = (deps) => {
         deps.getFirefoxLifetime()?.run(operation, options) ?? operation(),
       connectDirectController: deps.firefox
         ? deps.firefoxAddon?.connectDirectController : undefined,
-      withProductionRun: productionEvents.run,
     });
     return controllerOwner;
   }, {
@@ -372,6 +342,5 @@ export const createKernelDemandPlane = (deps) => {
     makeTransferRoutes: executableOwner.makeTransferRoutes,
     listApps: support.appCatalog.list,
     abortProviderTests: () => controllerOwner?.abortProviderTests?.(),
-    productionEvents,
   });
 };

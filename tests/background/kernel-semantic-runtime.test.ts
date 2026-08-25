@@ -14,7 +14,6 @@ const controller = (overrides: Record<string, any> = {}) => ({
   callTurn: async () => ({ ok: true }),
   callRuntime: async () => ({ ok: true }),
   callFeature: async () => ({ ok: true }),
-  callFeatureEvent: async () => ({ ok: true }),
   renderSystemPrompt: async () => '',
   withRun: async (operation: () => Promise<any>) => operation(),
   retire: () => {},

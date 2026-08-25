@@ -16,18 +16,9 @@ const MIB = 1024 * KIB;
 const OWNER_ID = 'peerd-authority-kernel';
 const DISPATCH_ID = /^[A-Za-z0-9._-]{8,512}$/;
 export const KERNEL_FEATURE_DISPATCH_CAPABILITY = 'feature.dispatch';
-export const KERNEL_FEATURE_EVENT_CAPABILITY = 'feature.event';
-
-export const KERNEL_FEATURE_EVENT_NAMES = Object.freeze([
-  'production/reconcile',
-  'production/tabs-created', 'production/tabs-updated', 'production/tabs-removed',
-  'production/tabs-activated', 'production/navigation-target',
-  'production/ui-connect', 'production/ui-quiet',
-  'production/settings-changed',
-]);
 
 export const KERNEL_FEATURE_ROOT_CAPABILITIES = Object.freeze({
-  production: Object.freeze(['turn.run', 'runtime.dispatch', KERNEL_FEATURE_EVENT_CAPABILITY]),
+  production: Object.freeze(['turn.run', 'runtime.dispatch']),
   semantic: Object.freeze(['semantic.dispatch', 'turn.run']),
   executable: Object.freeze([KERNEL_FEATURE_DISPATCH_CAPABILITY, 'runtime.dispatch']),
   administrative: Object.freeze([KERNEL_FEATURE_DISPATCH_CAPABILITY]),
@@ -285,18 +276,6 @@ const routeEntries = [
   `${cluster}\0${route}`, routePolicy(/** @type {string} */ (cluster), route),
 ]));
 const ROUTE_POLICIES = Object.freeze(Object.fromEntries(routeEntries));
-const EVENT_POLICIES = Object.freeze(Object.fromEntries(KERNEL_FEATURE_EVENT_NAMES.map((event) => [
-  event,
-  Object.freeze({
-    inputBytes: 256 * KIB,
-    resultBytes: 16 * KIB,
-    concurrent: 16,
-    maxDurationMs: 15_000,
-    replayClass: /** @type {const} */ ('A'),
-    effects: Object.freeze({}),
-  }),
-])));
-
 const record = (/** @type {unknown} */ value) => value !== null
   && typeof value === 'object' && !Array.isArray(value)
   ? /** @type {Record<string,any>} */ (value) : null;
@@ -336,25 +315,9 @@ export const parseKernelFeatureDispatch = (value) => {
   });
 };
 
-/** @param {unknown} value */
-export const parseKernelFeatureEvent = (value) => {
-  const input = record(value);
-  if (!input || !exactKeys(input, ['event', 'payload'])
-      || typeof input.event !== 'string' || !record(input.payload)) return null;
-  const policy = EVENT_POLICIES[input.event];
-  if (!policy || !bounded(input.payload, policy.inputBytes)) return null;
-  return Object.freeze({
-    event: input.event,
-    payload: input.payload,
-    policy,
-    authority: parsedAuthority(policy, targetFor('event', input.event)),
-  });
-};
-
 export const parseKernelFeatureCall = (/** @type {string} */ capability,
   /** @type {unknown} */ value) => capability === KERNEL_FEATURE_DISPATCH_CAPABILITY
-    ? parseKernelFeatureDispatch(value)
-    : capability === KERNEL_FEATURE_EVENT_CAPABILITY ? parseKernelFeatureEvent(value) : null;
+  ? parseKernelFeatureDispatch(value) : null;
 
 export const kernelFeaturePayloadAllowed = (/** @type {string} */ capability,
   /** @type {unknown} */ value) => parseKernelFeatureCall(capability, value) !== null;
@@ -469,8 +432,6 @@ const maxPolicyBytes = (/** @type {Record<string,any>} */ policies) => Math.max(
   ...Object.values(policies).map((policy) => policy.inputBytes),
 );
 export const KERNEL_FEATURE_DISPATCH_OUTER_BYTES = maxPolicyBytes(ROUTE_POLICIES) + KIB;
-export const KERNEL_FEATURE_EVENT_OUTER_BYTES = maxPolicyBytes(EVENT_POLICIES) + KIB;
 
 export const kernelFeatureOuterPayloadCap = (/** @type {string} */ capability) =>
-  capability === KERNEL_FEATURE_DISPATCH_CAPABILITY ? KERNEL_FEATURE_DISPATCH_OUTER_BYTES
-    : capability === KERNEL_FEATURE_EVENT_CAPABILITY ? KERNEL_FEATURE_EVENT_OUTER_BYTES : 0;
+  capability === KERNEL_FEATURE_DISPATCH_CAPABILITY ? KERNEL_FEATURE_DISPATCH_OUTER_BYTES : 0;

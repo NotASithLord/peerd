@@ -11,7 +11,6 @@ import {
 } from './semantic-demand-policy.js';
 import {
   KERNEL_FEATURE_DISPATCH_CAPABILITY,
-  KERNEL_FEATURE_EVENT_CAPABILITY,
   createKernelFeatureEffectQuota,
   kernelFeatureOuterPayloadCap,
   kernelFeaturePayloadAllowed,
@@ -56,8 +55,7 @@ export const controllerOuterPayloadCap = (/** @type {string} */ capability) =>
 
 export const controllerPayloadAllowed = (/** @type {string} */ capability,
   /** @type {unknown} */ payload) => {
-  if (capability === KERNEL_FEATURE_DISPATCH_CAPABILITY
-      || capability === KERNEL_FEATURE_EVENT_CAPABILITY) {
+  if (capability === KERNEL_FEATURE_DISPATCH_CAPABILITY) {
     return kernelFeaturePayloadAllowed(capability, payload);
   }
   return true;
@@ -83,8 +81,7 @@ export const controllerOperationAllowedAfterCancel = (
  * @param {unknown} outerPayload
  */
 export const createControllerKernelQuota = (capability, outerPayload) => {
-  if (capability === KERNEL_FEATURE_DISPATCH_CAPABILITY
-      || capability === KERNEL_FEATURE_EVENT_CAPABILITY) {
+  if (capability === KERNEL_FEATURE_DISPATCH_CAPABILITY) {
     return createKernelFeatureEffectQuota(capability, outerPayload);
   }
   if (capability === 'semantic.dispatch') {

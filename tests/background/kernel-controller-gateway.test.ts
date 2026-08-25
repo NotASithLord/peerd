@@ -34,11 +34,6 @@ const makeState = () => {
           if (payload.held) { featureStarted(); await heldFeature; }
           return deps.handleFeatureKernelCall('read', {}, { authority: featureGrant });
         },
-        callFeatureEvent: async (payload: any) => {
-          calls.push(['event', payload]);
-          const grant = deps.authorizeFeatureCall(payload);
-          return grant ? { ok: true, grant } : { ok: false };
-        },
         renderSystemPrompt: async () => { promptCalls += 1; return 'prompt'; },
         withRun: async (operation: () => Promise<any>) => operation(),
         retire: () => { retired += 1; },
@@ -132,25 +127,6 @@ describe('kernel controller gateway', () => {
     await expect(binding.callFeature({ route: 'repository' }))
       .resolves.toMatchObject({ ok: false, code: 'kernel-feature-repository-owner-unavailable' });
     state.gateway.bindFeature('repository', owner('feature-repository'));
-  });
-
-  test('binds one exact reverse-effect-free production event owner', async () => {
-    const state = makeState();
-    const binding = state.gateway.bindEvents({
-      authorize: (payload: any) => payload.event === 'production/reconcile'
-        ? { target: 'kernel-feature:event:production/reconcile' } : null,
-      handle: async () => ({ ok: false }),
-    });
-    await expect(binding.call({ event: 'production/reconcile' })).resolves.toMatchObject({
-      ok: true,
-      grant: { target: 'kernel-feature:event:production/reconcile' },
-    });
-    await expect(binding.call({ event: 'production/tabs-created' }))
-      .resolves.toEqual({ ok: false });
-    expect(() => state.gateway.bindEvents(owner('feature-event')))
-      .toThrow('kernel-feature-owner-conflict');
-    binding.release();
-    state.gateway.bindEvents(owner('feature-event'));
   });
 
   test('fences turn prompt and run lifetime with the binding', async () => {

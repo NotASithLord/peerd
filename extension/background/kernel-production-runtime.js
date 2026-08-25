@@ -17,7 +17,6 @@ export { createKernelAdministrativeControl } from './kernel-administrative-contr
 export { createKernelSkillPersistence } from './kernel-skill-persistence.js';
 export { createKernelMemoryInitProbe } from './kernel-memory-init-probe.js';
 export { createKernelDemandSupport } from './kernel-demand-support.js';
-export { createKernelDemandPlane } from './kernel-demand-plane.js';
 
 const REASONING_EFFORT_LEVELS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
 

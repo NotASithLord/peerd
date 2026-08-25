@@ -580,15 +580,24 @@ export const bindControllerChannel = ({
         },
       }))
       .then(
-        (result) => settle(message.requestId, {
-          ...result,
-          // A successful settlement is evidence that the handler completed.
-          // A post-dispatch failure is NOT evidence that no effect landed: the
-          // controller must explicitly classify that exceptional safe case.
-          outcomeKnown: result?.ok === true
-            ? result?.outcomeKnown !== false
-            : result?.outcomeKnown === true,
-        }),
+        (result) => {
+          if (operation.deadlineAt <= now()) {
+            operation.abort?.abort();
+            settle(message.requestId, {
+              ok: false, code: 'controller-deadline-expired', outcomeKnown: false,
+            });
+            return;
+          }
+          settle(message.requestId, {
+            ...result,
+            // A successful settlement is evidence that the handler completed.
+            // A post-dispatch failure is NOT evidence that no effect landed: the
+            // controller must explicitly classify that exceptional safe case.
+            outcomeKnown: result?.ok === true
+              ? result?.outcomeKnown !== false
+              : result?.outcomeKnown === true,
+          });
+        },
         (cause) => settle(message.requestId, {
           ok: false,
           error: cause instanceof Error ? cause.message : String(cause),

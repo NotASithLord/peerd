@@ -24,7 +24,6 @@ import { parseKernelIdentity } from '../shared/kernel-identity.js';
 import { STARTUP_UNAVAILABLE_USER_FAILURE } from '../shared/bounded-module-load.js';
 import {
   KERNEL_FEATURE_DISPATCH_CAPABILITY,
-  KERNEL_FEATURE_EVENT_CAPABILITY,
 } from '../shared/kernel-feature-policy.js';
 import {
   RUNTIME_DISPATCH_CAPABILITY,
@@ -53,7 +52,8 @@ const startupResult = (/** @type {string} */ code) => ({
 
 const controllerGenerationMustRetire = (/** @type {any} */ result) =>
   result?.outcomeKnown === true && (result.code === 'module-load-timeout'
-    || typeof result.code === 'string' && result.code.endsWith('-load-timeout'));
+    || typeof result.code === 'string' && (result.code.endsWith('-load-timeout')
+      || result.code.startsWith('feature-host-generation-')));
 
 /**
  * @template {{ url?: string }} T
@@ -572,7 +572,6 @@ export const makeSemanticControllerClient = ({
     ...(hasSemanticAuthority ? ['semantic.dispatch'] : []),
     ...(hasTurnAuthority ? ['turn.run'] : []),
     ...(hasFeatureAuthority ? [KERNEL_FEATURE_DISPATCH_CAPABILITY] : []),
-    ...(hasFeatureAuthority ? [KERNEL_FEATURE_EVENT_CAPABILITY] : []),
   ]);
   /** @type {Promise<any> | null} */
   let connecting = null;
@@ -596,8 +595,7 @@ export const makeSemanticControllerClient = ({
     if (capability === RUNTIME_DISPATCH_CAPABILITY && hasRuntimeAuthority) {
       return authorizeRuntimeCall(payload);
     }
-    if ((capability === KERNEL_FEATURE_DISPATCH_CAPABILITY
-        || capability === KERNEL_FEATURE_EVENT_CAPABILITY) && hasFeatureAuthority) {
+    if (capability === KERNEL_FEATURE_DISPATCH_CAPABILITY && hasFeatureAuthority) {
       return authorizeFeatureCall(payload);
     }
     return capability === 'semantic.dispatch' && hasSemanticAuthority
@@ -614,9 +612,6 @@ export const makeSemanticControllerClient = ({
       return hasFeatureAuthority
         ? handleFeatureKernelCall(operation, payload, context)
         : { ok: false, code: 'kernel-operation-denied', outcomeKnown: true };
-    }
-    if (context?.capability === KERNEL_FEATURE_EVENT_CAPABILITY) {
-      return { ok: false, code: 'kernel-operation-denied', outcomeKnown: true };
     }
     if (context?.capability === 'semantic.dispatch') {
       return hasSemanticAuthority
@@ -1043,12 +1038,6 @@ export const makeSemanticControllerClient = ({
         outcomeKnown: true, phase: 'startup',
       };
     }
-    if (capability === KERNEL_FEATURE_EVENT_CAPABILITY && leasedUsers === 0) {
-      return {
-        ok: true, outcomeKnown: true, phase: 'startup',
-        value: { accepted: false, inactive: true },
-      };
-    }
     try {
       return await withControllerLease(async (/** @type {unknown} */ lease) => {
         enterLeased();
@@ -1093,9 +1082,6 @@ export const makeSemanticControllerClient = ({
   const callFeature = (/** @type {unknown} */ payload,
     /** @type {{signal?:AbortSignal,timeoutMs?:number}} */ options = {}) =>
     callFeatureCapability(KERNEL_FEATURE_DISPATCH_CAPABILITY, payload, options);
-  const callFeatureEvent = (/** @type {unknown} */ payload,
-    /** @type {{signal?:AbortSignal,timeoutMs?:number}} */ options = {}) =>
-    callFeatureCapability(KERNEL_FEATURE_EVENT_CAPABILITY, payload, options);
   // why the outer leased user: a raw host lease keeps the document alive, but
   // zero client users still retires its channel and sealed Worker between turns.
   const withRun = (/** @type {()=>Promise<any>} */ operation) =>
@@ -1115,7 +1101,6 @@ export const makeSemanticControllerClient = ({
     callSemantic,
     callRuntime,
     callFeature,
-    callFeatureEvent,
     withRun,
     retire: retireActiveOnLifetimeLoss,
     close: () => {

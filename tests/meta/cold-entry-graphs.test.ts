@@ -251,7 +251,14 @@ describe('cold entry graphs', () => {
       .map((match) => match[2]);
     expect(runtimeImports).toEqual([
       './kernel-production-runtime.js',
+      './kernel-demand-plane.js',
     ]);
+    expect(kernelSource).toContain(
+      "const { createKernelDemandPlane } = await import('./kernel-demand-plane.js');",
+    );
+    expect(kernelSource).toContain(
+      'const { createKernelProductionRuntime } = await loadProductionRuntimeModule();',
+    );
     for (const specifier of runtimeImports) {
       expect(PACKAGED_LAZY_MODULE_ENTRIES)
         .toContain(`background/${specifier.replace(/^\.\//, '')}` as any);

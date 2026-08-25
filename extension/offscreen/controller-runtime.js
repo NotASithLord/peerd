@@ -5,10 +5,8 @@ import { makeBoundedModuleLoader } from '/shared/bounded-module-load.js';
 import { RUNTIME_DISPATCH_CAPABILITY } from '/shared/kernel-runtime-policy.js';
 import {
   KERNEL_FEATURE_DISPATCH_CAPABILITY,
-  KERNEL_FEATURE_EVENT_CAPABILITY,
 } from '/shared/kernel-feature-policy.js';
 import { createKernelFeatureHost } from './kernel-feature-host.js';
-import { createKernelProductionHost } from './kernel-production-host.js';
 
 const loadSemanticRoutes = makeBoundedModuleLoader(() => import('./semantic-route-host.js'));
 const loadTurnRuntime = makeBoundedModuleLoader(() => import('./controller-turn-runtime.js'));
@@ -79,7 +77,6 @@ const makeDefaultHandlers = (/** @type {ReturnType<typeof createKernelFeatureHos
     return runtime.runControllerTurn(payload, options);
   },
   [KERNEL_FEATURE_DISPATCH_CAPABILITY]: featureHost.dispatch,
-  [KERNEL_FEATURE_EVENT_CAPABILITY]: featureHost.event,
 });
 
 /**
@@ -87,7 +84,6 @@ const makeDefaultHandlers = (/** @type {ReturnType<typeof createKernelFeatureHos
  *   signal: AbortSignal, authority?: unknown, deadlineAt?: number,
  *   kernelCall?: (operation:string, payload:unknown)=>Promise<any>,
  * }) => Promise<any>>, featureHost?:ReturnType<typeof createKernelFeatureHost>,
- * productionHost?:ReturnType<typeof createKernelProductionHost>,
  * loadRuntimeHost?:()=>Promise<{
  *   createKernelRuntimeHost:(options?:any)=>{dispatch:(payload:unknown,options:any)=>Promise<any>}
  * }> }} [options]
@@ -95,7 +91,6 @@ const makeDefaultHandlers = (/** @type {ReturnType<typeof createKernelFeatureHos
 export const createController = async ({
   handlers,
   featureHost: injectedFeatureHost,
-  productionHost = createKernelProductionHost(),
   loadRuntimeHost: runtimeHostLoader = loadKernelRuntimeHost,
 } = {}) => {
   const featureHost = injectedFeatureHost ?? createKernelFeatureHost({
@@ -104,7 +99,6 @@ export const createController = async ({
       repository: loadRepositoryHost,
       local: loadLocalHost,
     },
-    events: productionHost.events,
   });
   /** @type {{dispatch:(payload:unknown,options:any)=>Promise<any>} | null} */
   let runtimeHost = null;
@@ -118,7 +112,7 @@ export const createController = async ({
           if (typeof module?.createKernelRuntimeHost !== 'function') {
             throw new Error('kernel runtime host factory missing');
           }
-          const candidate = module.createKernelRuntimeHost({ productionHost });
+          const candidate = module.createKernelRuntimeHost();
           if (!candidate || typeof candidate.dispatch !== 'function') {
             throw new Error('kernel runtime host invalid');
           }

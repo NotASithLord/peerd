@@ -10,7 +10,6 @@ import { createKernelFeatureHost } from '../../extension/offscreen/kernel-featur
 import { bindControllerChannel } from '../../extension/offscreen/controller-shell.js';
 import {
   KERNEL_FEATURE_DISPATCH_CAPABILITY,
-  KERNEL_FEATURE_EVENT_CAPABILITY,
   createKernelFeatureEffectQuota,
   kernelFeatureAuthorityAllowed,
   kernelFeatureAuthorityFor,
@@ -125,7 +124,7 @@ describe('sealed kernel feature protocol', () => {
     )).toMatchObject({ ok: false, code: 'kernel-operation-denied' });
     expect(await control.handleKernelCall(
       'administrative.hooks.read', {}, {
-        capability: KERNEL_FEATURE_EVENT_CAPABILITY, authority,
+        capability: 'feature.event', authority,
       },
     )).toMatchObject({ ok: false, code: 'kernel-operation-denied' });
   });
@@ -293,7 +292,7 @@ describe('sealed kernel feature protocol', () => {
     expect(kernelCalls).toBe(0);
   });
 
-  test('bounds a hung handler and frees its route slot', async () => {
+  test('a hung handler poisons its full feature generation', async () => {
     const first = request({
       route: 'hooks/remove', dispatchId: 'dispatch-hung-first', message: { id: 'first' },
     });
@@ -313,9 +312,112 @@ describe('sealed kernel feature protocol', () => {
     expect(await host.dispatch(first, options(first, {
       deadlineAt: Date.now() + 5,
     }))).toMatchObject({
-      ok: false, code: 'feature-grant-expired', outcomeKnown: true, retryable: true,
+      ok: false, code: 'feature-host-generation-expired',
+      outcomeKnown: true, retryable: true,
     });
-    expect(await host.dispatch(second, options(second))).toMatchObject({ ok: true });
+    expect(await host.dispatch(second, options(second))).toMatchObject({
+      ok: false, code: 'feature-host-generation-retired', outcomeKnown: true,
+    });
+    expect(calls).toBe(1);
+  });
+
+  test('poisons concurrent grants before a stale handler can influence effects', async () => {
+    const first = request({
+      route: 'hooks/remove', dispatchId: 'dispatch-poison-first', message: { id: 'first' },
+    });
+    const second = request({ dispatchId: 'dispatch-poison-second' });
+    let releaseSecond = () => {};
+    const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    let secondStarted = () => {};
+    const secondReady = new Promise<void>((resolve) => { secondStarted = resolve; });
+    let kernelCalls = 0;
+    const host = createKernelFeatureHost({ loaders: {
+      administrative: async () => ({ routes: {
+        'hooks/remove': async () => new Promise(() => {}),
+        'hooks/list': async (_message: unknown, context: any) => {
+          secondStarted();
+          await secondGate;
+          return context.effects.call('administrative.hooks.read', {});
+        },
+      } }),
+    } });
+    const firstRun = host.dispatch(first, options(first, { deadlineAt: Date.now() + 5 }));
+    const secondRun = host.dispatch(second, options(second, {
+      kernelCall: async () => {
+        kernelCalls += 1;
+        return { ok: true, outcomeKnown: true, value: { hooks: [] } };
+      },
+    }));
+    await secondReady;
+    await expect(firstRun).resolves.toMatchObject({
+      ok: false, code: 'feature-host-generation-expired', outcomeKnown: true,
+    });
+    releaseSecond();
+    await expect(secondRun).resolves.toMatchObject({
+      ok: false, code: 'feature-host-generation-expired', outcomeKnown: true,
+    });
+    expect(kernelCalls).toBe(0);
+  });
+
+  test('refuses synchronous completion after its deadline', async () => {
+    let now = 1;
+    const payload = request({ dispatchId: 'dispatch-late-completion' });
+    const host = createKernelFeatureHost({
+      now: () => now,
+      setTimeoutFn: (() => 1) as unknown as typeof setTimeout,
+      clearTimeoutFn: (() => {}) as unknown as typeof clearTimeout,
+      loaders: { administrative: async () => ({ routes: {
+        'hooks/list': async () => { now = 11; return { hooks: [] }; },
+      } }) },
+    });
+    await expect(host.dispatch(payload, options(payload, { deadlineAt: 10 })))
+      .resolves.toMatchObject({
+        ok: false, code: 'feature-host-generation-expired', outcomeKnown: true,
+      });
+    await expect(host.dispatch(request({ dispatchId: 'dispatch-after-late' }), options(
+      request({ dispatchId: 'dispatch-after-late' }), { deadlineAt: 20 },
+    ))).resolves.toMatchObject({
+      ok: false, code: 'feature-host-generation-retired', outcomeKnown: true,
+    });
+  });
+
+  test('retires a poisoned direct controller before admitting a successor', async () => {
+    let semantic!: ReturnType<typeof makeSemanticControllerClient>;
+    let generations = 0;
+    let closed = 0;
+    const control = createKernelFeatureControl({
+      call: (capability, payload) => semantic.callFeature(payload),
+    });
+    semantic = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: true, dwebEnabled: false,
+      authorizeFeatureCall: control.authorize,
+      handleFeatureKernelCall: control.handleKernelCall,
+      withDirectLifetime: (operation) => operation(),
+      connectDirectController: (async () => {
+        const generation = ++generations;
+        return {
+          call: async () => generation === 1
+            ? {
+              ok: false, code: 'feature-host-generation-expired',
+              outcomeKnown: true, retryable: true,
+            }
+            : { ok: true, outcomeKnown: true, value: { hooks: [] } },
+          close: () => { closed += 1; },
+        };
+      }) as any,
+      fetchFn: async () => new Response('', { status: 200 }),
+    });
+    await expect(control.dispatch('administrative', 'hooks/list', {})).resolves.toMatchObject({
+      ok: false, code: 'feature-host-generation-expired', outcomeKnown: true,
+    });
+    await expect(control.dispatch('administrative', 'hooks/list', {})).resolves.toMatchObject({
+      ok: true,
+    });
+    expect(generations).toBe(2);
+    expect(closed).toBeGreaterThanOrEqual(1);
+    semantic.close();
   });
 
   test('carries an exact route through the sealed channel and reverse effect quota', async () => {
@@ -365,94 +467,6 @@ describe('sealed kernel feature protocol', () => {
     expect(effects).toEqual([['administrative.hooks.read', {}]]);
     controller.close();
     (host as any)?.close();
-  });
-
-  test('carries production events through the same sealed contract without reverse authority', async () => {
-    const seen: any[] = [];
-    let client: ReturnType<typeof makeSemanticControllerClient>;
-    const control = createKernelFeatureControl({
-      call: (capability, payload) => capability === KERNEL_FEATURE_EVENT_CAPABILITY
-        ? client.callFeatureEvent(payload) : client.callFeature(payload),
-      handleEffect: async () => {
-        throw new Error('event received reverse authority');
-      },
-    });
-    const featureHost = createKernelFeatureHost({
-      events: {
-        'production/reconcile': async (payload: unknown) => {
-          seen.push(payload);
-          return { accepted: true, reconciled: true };
-        },
-        'production/tabs-created': async (payload: unknown) => {
-          seen.push(payload);
-          return { accepted: true };
-        },
-      },
-    });
-    const controller = createController({ featureHost });
-    client = makeSemanticControllerClient({
-      browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
-      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
-      firefoxDirect: true, dwebEnabled: false,
-      authorizeFeatureCall: control.authorize,
-      handleFeatureKernelCall: control.handleKernelCall,
-      withDirectLifetime: (operation) => operation(),
-      connectDirectController: (deps) => connectDirectController({
-        ...deps,
-        loadController: async () => controller,
-      }),
-      fetchFn: async () => new Response('', { status: 200 }),
-    });
-    const envelope = {
-      bootId: 'boot-event-1', kernelEpoch: 'epoch-event-1',
-      eventId: 'logical-event-1',
-      sequence: 9, value: { tabs: [{ id: 12 }] },
-    };
-    await expect(control.event('production/tabs-created', envelope)).resolves.toMatchObject({
-      ok: true, outcomeKnown: true, value: { accepted: false, inactive: true },
-    });
-    await client.withRun(async () => {
-      await expect(control.event('production/tabs-created', envelope)).resolves.toMatchObject({
-        ok: false, code: 'feature-event-reconcile-required', outcomeKnown: true,
-      });
-      await expect(control.event('production/reconcile', envelope)).resolves.toMatchObject({
-        ok: true, outcomeKnown: true, value: { accepted: true, reconciled: true },
-      });
-      await expect(control.event('production/tabs-created', {
-        ...envelope, sequence: 10, value: { tab: { id: 12 } },
-      })).resolves.toMatchObject({
-        ok: true, outcomeKnown: true, value: { accepted: true },
-      });
-      for (const sequence of [10, 9]) {
-        await expect(control.event('production/tabs-created', {
-          ...envelope, sequence, value: { tab: { id: 12 } },
-        })).resolves.toMatchObject({
-          ok: true, outcomeKnown: true, value: { accepted: false, duplicate: true },
-        });
-      }
-      await expect(control.event('production/tabs-created', {
-        ...envelope, kernelEpoch: 'epoch-event-2', sequence: 11,
-      })).resolves.toMatchObject({
-        ok: false, code: 'feature-event-generation-invalid', outcomeKnown: true,
-      });
-      await expect(control.event('production/tabs-created', {
-        ...envelope, sequence: 12, value: { tab: { id: 13 } },
-      })).resolves.toMatchObject({
-        ok: true, outcomeKnown: true,
-        value: { accepted: false, gap: true, reconcile: true },
-      });
-      await expect(control.event('production/reconcile', {
-        ...envelope, sequence: 12, value: { tabs: [{ id: 13 }] },
-      })).resolves.toMatchObject({ ok: true, outcomeKnown: true });
-      await expect(control.event('production/tabs-created', {
-        ...envelope, sequence: 13, value: { tab: { id: 13 } },
-      })).resolves.toMatchObject({ ok: true, outcomeKnown: true });
-    });
-    expect(seen).toEqual([
-      { tabs: [{ id: 12 }] }, { tab: { id: 12 } },
-      { tabs: [{ id: 13 }] }, { tab: { id: 13 } },
-    ]);
-    client.close();
   });
 
   test('ignores a stale kernel epoch before loading the feature host', async () => {

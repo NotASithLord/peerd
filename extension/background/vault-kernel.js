@@ -431,7 +431,6 @@ const onKernelSettingsChanged = async (/** @type {Record<string,any>} */ patch) 
   else if (patch.dwebEnabled === true && !vault.isLocked()) {
     await featureHost.runtime.resume({ dwebEnabled: true });
   }
-  await demandPlane?.productionEvents.emit('production/settings-changed', { patch });
 };
 /** @type {Promise<any> | null} */
 let featureLockInFlight = null;
@@ -492,7 +491,7 @@ const systemReadRoutes = makeSystemReadRoutes({
   buildStateSnapshot: stateSnapshot,
   uiPorts,
 });
-const loadProductionModule = makeBoundedModuleLoader(
+const loadProductionRuntimeModule = makeBoundedModuleLoader(
   () => import('./kernel-production-runtime.js'),
   {
     timeoutMs: 15_000,
@@ -503,9 +502,12 @@ const loadProductionModule = makeBoundedModuleLoader(
 /** @type {any} */
 let demandPlane = null;
 const loadDemandPlane = makeBoundedModuleLoader(async () => {
-  const module = await loadProductionModule();
-  demandPlane = module.createKernelDemandPlane({
-    createProductionRuntime: module.createKernelProductionRuntime,
+  const { createKernelDemandPlane } = await import('./kernel-demand-plane.js');
+  demandPlane = createKernelDemandPlane({
+    createProductionRuntime: async (/** @type {any} */ deps) => {
+      const { createKernelProductionRuntime } = await loadProductionRuntimeModule();
+      return createKernelProductionRuntime(deps);
+    },
     browser, idb, kv, sessionCache, vault, auditLog, settingsStore, uiPorts,
     denylist: denylistPolicy,
     firefox: kernelFirefox,
@@ -681,7 +683,6 @@ const browserEventOwners = createKernelBrowserEventOwners({
   tabCustody: createKernelTabCustody({
     browser, firefox: kernelFirefox, network: networkOwner, child: childGuard,
     getRelays: controllerRelays,
-    getProductionEvents: () => demandPlane?.productionEvents ?? null,
   }),
 });
 attachKernelLifecycleEvents({
@@ -885,11 +886,9 @@ const uiPortOwner = createKernelUiPortOwner({
   onUiConnect: async (/** @type {any} */ port) => {
     await kernelUpdateCustody?.onUiConnect();
     await controllerRelays()?.onUiConnect?.(port);
-    await demandPlane?.productionEvents.emit('production/ui-connect');
   },
   onQuiet: async () => {
     await kernelUpdateCustody?.onQuiet();
-    await demandPlane?.productionEvents.emit('production/ui-quiet');
   },
   getActiveTab: async () => (await browser.tabs.query({ active: true, currentWindow: true }))[0],
   showWebTabHint: (/** @type {number} */ tabId) =>
