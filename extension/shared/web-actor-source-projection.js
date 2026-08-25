@@ -21,8 +21,11 @@ export const webActorSourceProjectionRow = (tab, sessionId) => {
  * @param {unknown} bindings
  * @param {unknown} projection
  * @param {readonly any[]} tabs
+ * @param {{requireCookieStore?:boolean}} [options]
  */
-export const validateWebActorSourceProjection = (bindings, projection, tabs) => {
+export const validateWebActorSourceProjection = (
+  bindings, projection, tabs, { requireCookieStore = true } = {},
+) => {
   if (!Array.isArray(bindings) || !Array.isArray(tabs)) return null;
   if (projection === null || projection === undefined) {
     return bindings.length === 0 ? new Map() : null;
@@ -61,10 +64,13 @@ export const validateWebActorSourceProjection = (bindings, projection, tabs) => 
       ? tab.openerTabId
       : [null, undefined].includes(tab.openerTabId) && expectedOpener === null
         ? null : unknown;
-    const cookieStoreId = row.cookieStoreId !== null
-      && typeof tab.cookieStoreId === 'string' ? tab.cookieStoreId : unknown;
+    const cookieStoreId = requireCookieStore
+      ? row.cookieStoreId !== null && typeof tab.cookieStoreId === 'string'
+        ? tab.cookieStoreId : unknown
+      : null;
     const identity = [
-      [url, row.url], [openerTabId, expectedOpener], [cookieStoreId, row.cookieStoreId],
+      [url, row.url], [openerTabId, expectedOpener],
+      ...(requireCookieStore ? [[cookieStoreId, row.cookieStoreId]] : []),
     ];
     if (identity.some(([actual, expected]) => actual !== unknown && actual !== expected)) {
       continue;

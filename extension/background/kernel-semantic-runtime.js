@@ -1,7 +1,5 @@
 // @ts-check
 
-import { makeSemanticControllerClient } from './offscreen-controller-client.js';
-import { createKernelControllerGateway } from './kernel-controller-gateway.js';
 import { createKernelSemanticAuthority } from './kernel-semantic-authority.js';
 import { createKernelContactsAuthority } from './kernel-contacts-authority.js';
 import { createKernelSemanticControl } from './kernel-semantic-control.js';
@@ -24,7 +22,12 @@ export const KERNEL_SEMANTIC_DIRECT_ROUTE_NAMES = Object.freeze([
 
 /** @param {Record<string,any>} deps */
 export const createKernelSemanticRuntime = (deps) => {
-  const makeController = deps.makeController ?? makeSemanticControllerClient;
+  const gateway = deps.controllerGateway;
+  if (!gateway || typeof gateway.bindSemantic !== 'function'
+      || typeof gateway.bindTurn !== 'function' || typeof gateway.bindRuntime !== 'function'
+      || typeof gateway.bindFeature !== 'function') {
+    throw new TypeError('kernel-semantic-controller-gateway-invalid');
+  }
   const skills = createKernelSkillsAuthority({
     idbFactory: deps.idbFactory,
     canWrite: () => deps.canWrite('skills'),
@@ -70,8 +73,6 @@ export const createKernelSemanticRuntime = (deps) => {
   if (directNames.join('\0') !== [...KERNEL_SEMANTIC_DIRECT_ROUTE_NAMES].sort().join('\0')) {
     throw new TypeError('kernel-semantic-direct-routes-invalid');
   }
-  /** @type {ReturnType<typeof createKernelControllerGateway>|null} */
-  let gateway = null;
   /** @type {Record<string,any>|null} */
   let semanticBinding = null;
   /** @type {Record<string,any>|null} */
@@ -138,26 +139,7 @@ export const createKernelSemanticRuntime = (deps) => {
       ? ensureTurnOwner().actorOverview() : deps.actorOverview(),
     awaitReady: () => deps.ready,
   });
-  const ensureGateway = () => {
-    gateway ??= createKernelControllerGateway({
-      makeController,
-      controller: {
-        browser: deps.browser,
-        ensureOffscreen: deps.ensureOffscreen,
-        offscreenUrl: deps.offscreenUrl,
-        firefoxDirect: deps.firefox,
-        dwebEnabled: deps.dwebEnabled,
-        kernelIdentity: deps.kernelIdentity,
-        retireHost: deps.retireHost,
-        withControllerLease: deps.withControllerLease,
-        withDirectLifetime: deps.withDirectLifetime,
-        connectDirectController: deps.connectDirectController,
-        loadDirectController: deps.loadDirectController,
-        fetchFn: deps.fetchFn,
-      },
-    });
-    return gateway;
-  };
+  const ensureGateway = () => gateway;
   const ensureSemanticBinding = () => semanticBinding ??= ensureGateway().bindSemantic({
     authorize: control.authorize,
     handle: control.handleKernelCall,
@@ -227,10 +209,18 @@ export const createKernelSemanticRuntime = (deps) => {
       throw new Error('kernel-turn-runtime-loader-missing');
     }
     turnOwner = createKernelTurnOwner({
-      createController: (/** @type {any} */ turnAuthority) => ensureGateway().bindTurn({
-        authorize: turnAuthority.authorizeTurnCall,
-        handle: turnAuthority.handleTurnKernelCall,
-      }),
+      createController: (/** @type {any} */ turnAuthority) => {
+        const binding = ensureGateway().bindTurn({
+          authorize: turnAuthority.authorizeTurnCall,
+          handle: turnAuthority.handleTurnKernelCall,
+        });
+        if (typeof deps.withProductionRun !== 'function') return binding;
+        return Object.freeze({
+          ...binding,
+          withRun: (/** @type {()=>Promise<any>} */ operation) =>
+            binding.withRun(() => deps.withProductionRun(operation)),
+        });
+      },
       loadRuntime: deps.loadTurnRuntime,
       onLoaded: deps.onTurnRuntimeLoaded,
       ...(deps.turnLoadTimeoutMs === undefined ? {} : { loadTimeoutMs: deps.turnLoadTimeoutMs }),
@@ -268,7 +258,6 @@ export const createKernelSemanticRuntime = (deps) => {
       repositoryBinding?.release();
       localBinding?.release();
       administrativeBinding?.release();
-      gateway?.close();
     },
   });
 };

@@ -1,11 +1,4 @@
 // @ts-check
-// Browser-automation target policy.
-//
-// Browser tabs have broader reach than the open web. With host permission they
-// can load loopback, LAN, link-local, and cloud-metadata pages, then hand those
-// pages to the scripting or debugger backends. Keep the browser-facing decision
-// in one pure classifier so every entry point can apply the same rule before it
-// gains page authority.
 
 import { isCloudMetadataHost, isPrivateOrLocalHost } from '../../shared/private-network.js';
 import { FAILURE_OUTCOMES } from '../lifecycle/failure-taxonomy.js';
@@ -14,34 +7,12 @@ import { FAILURE_OUTCOMES } from '../lifecycle/failure-taxonomy.js';
 /** @typedef {'pre_navigation' | 'committed_origin'} BrowserTargetStage */
 /** @typedef {'not_run' | 'page_loaded_not_automated'} BrowserTargetOutcome */
 
-/**
- * @typedef {Object} AllowedBrowserTarget
- * @property {true} allowed
- * @property {string} origin
- */
-
-/**
- * @typedef {Object} RefusedBrowserTarget
- * @property {false} allowed
- * @property {string} code
- * @property {BrowserTargetRefusalReason} reason
- * @property {BrowserTargetStage} stage
- * @property {BrowserTargetOutcome} outcome
- * @property {boolean} retryable
- * @property {string} message
- * @property {string} correction
- */
+/** @typedef {{allowed:true,origin:string}} AllowedBrowserTarget */
+/** @typedef {{allowed:false,code:string,reason:BrowserTargetRefusalReason,stage:BrowserTargetStage,outcome:BrowserTargetOutcome,retryable:boolean,message:string,correction:string}} RefusedBrowserTarget */
 
 /** @typedef {AllowedBrowserTarget | RefusedBrowserTarget} BrowserTargetVerdict */
 
-/**
- * @typedef {Object} BrowserTargetRefusalResult
- * @property {false} ok
- * @property {string} error
- * @property {string} content
- * @property {RefusedBrowserTarget} structured
- * @property {import('../lifecycle/failure-taxonomy.js').FailureOutcomeKind} outcomeKind
- */
+/** @typedef {{ok:false,error:string,content:string,structured:RefusedBrowserTarget,outcomeKind:import('../lifecycle/failure-taxonomy.js').FailureOutcomeKind}} BrowserTargetRefusalResult */
 
 export const BROWSER_TARGET_CODES = Object.freeze({
   INVALID_URL: 'browser_target_invalid',
@@ -56,13 +27,7 @@ export const FORM_SUBMISSION_CODES = Object.freeze({
   CROSS_ORIGIN: 'cross_origin_form_submission_blocked',
 });
 
-/**
- * Generic browser actors do not own authority to send a native form to a
- * different origin. Keep the receipt content-free: the page controls the form
- * fields and action URL, and neither belongs in a trusted error channel.
- *
- * @returns {import('/shared/tool-types.js').ToolResultErr & { endTurn: true, structured: Record<string, unknown> }}
- */
+/** @returns {import('/shared/tool-types.js').ToolResultErr & {endTurn:true,structured:Record<string,unknown>}} */
 export const crossOriginFormSubmissionRefusalResult = () => ({
   ok: false,
   error: FORM_SUBMISSION_CODES.CROSS_ORIGIN,
@@ -78,12 +43,7 @@ export const crossOriginFormSubmissionRefusalResult = () => ({
   endTurn: true,
 });
 
-/**
- * Convert only the exact host-authored form guard code into the shared fixed
- * receipt. Page text is never copied into the result.
- *
- * @param {unknown} carrier
- */
+/** @param {unknown} carrier */
 export const formSubmissionRefusalFrom = (carrier) => {
   const error = /** @type {{ error?: unknown }} */ (carrier)?.error;
   return error === FORM_SUBMISSION_CODES.CROSS_ORIGIN
@@ -108,29 +68,17 @@ const normalizeStage = (stage) => stage === BROWSER_TARGET_STAGES.COMMITTED_ORIG
   ? BROWSER_TARGET_STAGES.COMMITTED_ORIGIN
   : BROWSER_TARGET_STAGES.PRE_NAVIGATION;
 
-/**
- * @param {BrowserTargetStage} stage
- * @returns {Pick<RefusedBrowserTarget, 'stage' | 'outcome'>}
- */
+/** @param {BrowserTargetStage} stage @returns {Pick<RefusedBrowserTarget,'stage'|'outcome'>} */
 const stageContract = (stage) => ({ stage, outcome: stageOutcome(stage) });
 
-/**
- * @param {RefusedBrowserTarget} verdict
- * @param {boolean | undefined} effectCompleted
- */
+/** @param {RefusedBrowserTarget} verdict @param {boolean|undefined} effectCompleted */
 const lifecycleOutcome = (verdict, effectCompleted) => (
   effectCompleted ?? verdict.stage === BROWSER_TARGET_STAGES.COMMITTED_ORIGIN
 )
   ? FAILURE_OUTCOMES.EFFECT_COMPLETED
   : FAILURE_OUTCOMES.PRE_EFFECT_FAILURE;
 
-/**
- * Format a refusal without copying a URL path, query, fragment, or credentials
- * into an error channel. The code prefix is stable for callers and tests.
- *
- * @param {RefusedBrowserTarget} verdict
- * @param {boolean | undefined} [effectCompleted]
- */
+/** @param {RefusedBrowserTarget} verdict @param {boolean|undefined} [effectCompleted] */
 export const formatBrowserTargetRefusal = (verdict, effectCompleted = undefined) => {
   const completed = effectCompleted ?? verdict.stage === BROWSER_TARGET_STAGES.COMMITTED_ORIGIN;
   let message = verdict.message;
@@ -153,13 +101,7 @@ export const formatBrowserTargetRefusal = (verdict, effectCompleted = undefined)
   return `${message} ${verdict.correction}\nPolicy: ${JSON.stringify(modelContract)}`;
 };
 
-/**
- * Fail closed when the browser cannot bind an operation to the document whose
- * location was checked. This is distinct from classifying a known private URL.
- *
- * @param {{ message?: string, correction?: string }} [overrides]
- * @returns {RefusedBrowserTarget}
- */
+/** @param {{message?:string,correction?:string}} [overrides] @returns {RefusedBrowserTarget} */
 export const unverifiedBrowserTargetVerdict = (overrides = {}) => ({
   allowed: false,
   code: BROWSER_TARGET_CODES.UNVERIFIED_TARGET,
@@ -173,13 +115,8 @@ export const unverifiedBrowserTargetVerdict = (overrides = {}) => ({
     ?? 'Wait for the page to finish loading, then retry once. If this continues, handle the page directly in the browser.',
 });
 
-/**
- * Build the shared returned-result shape for browser automation policy stops.
- *
- * @param {RefusedBrowserTarget} verdict
- * @param {{ effectCompleted?: boolean, neutralized?: boolean }} [options]
- * @returns {BrowserTargetRefusalResult}
- */
+/** @param {RefusedBrowserTarget} verdict @param {{effectCompleted?:boolean,neutralized?:boolean}} [options]
+ * @returns {BrowserTargetRefusalResult} */
 export const browserTargetRefusalResult = (verdict, options = {}) => ({
   ok: false,
   error: verdict.code,
@@ -191,13 +128,7 @@ export const browserTargetRefusalResult = (verdict, options = {}) => ({
   outcomeKind: lifecycleOutcome(verdict, options.effectCompleted),
 });
 
-/**
- * Convert only a host-stamped pre-effect exact-document failure into the shared
- * model/user recovery contract. Page exception text alone is never trusted as
- * evidence that an action did not run.
- * @param {unknown} carrier
- * @returns {BrowserTargetRefusalResult | null}
- */
+/** @param {unknown} carrier @returns {BrowserTargetRefusalResult|null} */
 export const browserDocumentRefusalFrom = (carrier) => {
   const value = /** @type {{ outcomeKind?: unknown, error?: unknown, message?: unknown }} */ (carrier);
   if (value?.outcomeKind !== FAILURE_OUTCOMES.PRE_EFFECT_FAILURE) return null;
@@ -210,15 +141,8 @@ export const browserDocumentRefusalFrom = (carrier) => {
   });
 };
 
-/**
- * Thrown form for entry points whose API uses exceptions instead of results.
- * Its own fields survive explicit relay serialization without exposing a URL.
- */
 export class BrowserAutomationPolicyError extends Error {
-  /**
-   * @param {RefusedBrowserTarget} verdict
-   * @param {{ effectCompleted?: boolean, neutralized?: boolean }} [options]
-   */
+  /** @param {RefusedBrowserTarget} verdict @param {{effectCompleted?:boolean,neutralized?:boolean}} [options] */
   constructor(verdict, options = {}) {
     const result = browserTargetRefusalResult(verdict, options);
     super(result.error);
@@ -231,12 +155,8 @@ export class BrowserAutomationPolicyError extends Error {
   }
 }
 
-/**
- * Truthful recovery differs between a browser that lacks the enforcement API
- * and a supported browser whose rule installation failed in this context.
- * @param {'network_guard_unavailable' | 'network_guard_unsupported' | 'network_guard_install_failed'} [reason]
- * @returns {RefusedBrowserTarget}
- */
+/** @param {'network_guard_unavailable'|'network_guard_unsupported'|'network_guard_install_failed'} [reason]
+ * @returns {RefusedBrowserTarget} */
 export const browserNetworkGuardUnavailableVerdict = (reason = 'network_guard_unavailable') => {
   const unsupported = reason === 'network_guard_unsupported';
   const installFailed = reason === 'network_guard_install_failed';
@@ -258,20 +178,13 @@ export const browserNetworkGuardUnavailableVerdict = (reason = 'network_guard_un
   };
 };
 
-/**
- * @param {'network_guard_unavailable' | 'network_guard_unsupported' | 'network_guard_install_failed'} [reason]
- */
+/** @param {'network_guard_unavailable'|'network_guard_unsupported'|'network_guard_install_failed'} [reason] */
 export const browserNetworkGuardUnavailableResult = (reason = 'network_guard_unavailable') =>
   browserTargetRefusalResult(browserNetworkGuardUnavailableVerdict(reason), {
     effectCompleted: false,
   });
 
-/**
- * A navigation can commit before the worker-origin companion rule finishes
- * installing. Report the browser effect truthfully while withholding further
- * page authority.
- * @param {'network_guard_unavailable' | 'network_guard_unsupported' | 'network_guard_install_failed'} [reason]
- */
+/** @param {'network_guard_unavailable'|'network_guard_unsupported'|'network_guard_install_failed'} [reason] */
 export const browserNetworkGuardPostNavigationResult = (reason = 'network_guard_unavailable') => {
   const base = browserNetworkGuardUnavailableVerdict(reason);
   return browserTargetRefusalResult({
@@ -282,12 +195,7 @@ export const browserNetworkGuardPostNavigationResult = (reason = 'network_guard_
   }, { effectCompleted: true });
 };
 
-/**
- * A public navigation can redirect onto a site protected by the user's
- * denylist. Keep that landing on the same URL-free recovery contract as a
- * private-network redirect, while naming the distinct user-controlled policy.
- * @returns {RefusedBrowserTarget}
- */
+/** @returns {RefusedBrowserTarget} */
 export const sensitiveSiteBrowserTargetVerdict = () => ({
   allowed: false,
   code: BROWSER_TARGET_CODES.SENSITIVE_SITE,
@@ -299,12 +207,6 @@ export const sensitiveSiteBrowserTargetVerdict = () => ({
   correction: 'Handle this site directly, or remove its denylist pattern only if you want peerd to access it.',
 });
 
-/**
- * Refusal used when a tab exists but the browser could not install the
- * tab-scoped private-network request floor. This is not a target-classification
- * verdict: the public page may be valid, but running page code without the
- * network backstop would grant it an unguarded path to local services.
- */
 export class BrowserNetworkGuardUnavailableError extends BrowserAutomationPolicyError {
   /** @param {'network_guard_unavailable' | 'network_guard_unsupported' | 'network_guard_install_failed'} [reason] */
   constructor(reason = 'network_guard_unavailable') {
@@ -313,10 +215,7 @@ export class BrowserNetworkGuardUnavailableError extends BrowserAutomationPolicy
   }
 }
 
-/**
- * @param {BrowserTargetStage} stage
- * @param {'private_network' | 'cloud_metadata'} reason
- */
+/** @param {BrowserTargetStage} stage @param {'private_network'|'cloud_metadata'} reason */
 const privateTargetMessage = (stage, reason) => {
   const target = reason === 'cloud_metadata'
     ? 'a cloud metadata page'
@@ -326,16 +225,9 @@ const privateTargetMessage = (stage, reason) => {
     : `peerd does not automate ${target}. No browser action was run.`;
 };
 
-/**
- * Classify a URL before browser automation receives authority over its page.
- * Allowed results carry the public origin. Refusals carry no target text, so a
- * redirect onto a private address cannot disclose it through model or audit
- * error channels.
- *
- * @param {unknown} target
+/** @param {unknown} target
  * @param {{ stage?: BrowserTargetStage }} [options]
- * @returns {BrowserTargetVerdict}
- */
+ * @returns {BrowserTargetVerdict} */
 export const classifyBrowserAutomationTarget = (target, options = {}) => {
   const stage = normalizeStage(options?.stage);
   if (typeof target !== 'string' && !(target instanceof URL)) {
@@ -405,10 +297,7 @@ export const classifyBrowserAutomationTarget = (target, options = {}) => {
   return { allowed: true, origin: url.origin };
 };
 
-/**
- * A numeric tab handle may mint an actor only for an actionable public page.
- * @param {unknown} target
- */
+/** @param {unknown} target */
 export const isAddressableBrowserTab = (target) =>
   classifyBrowserAutomationTarget(target, {
     stage: BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,

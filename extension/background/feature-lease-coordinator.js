@@ -1,5 +1,4 @@
 // @ts-check
-// Browser-neutral authority model for feature leases.
 
 import {
   kernelIdentityMatches,
@@ -74,11 +73,7 @@ const parseDocument = (/** @type {any} */ value,
   };
 };
 
-/**
- * A dispatcher has a pre-effect prepare phase and an effectful dispatch phase.
- * The coordinator owns the exact boundary between them.
- *
- * @typedef {{
+/** @typedef {{
  *   prepare: (request: any) => Promise<{ dispatch: (signal: AbortSignal) => Promise<any>|any }>|{ dispatch: (signal: AbortSignal) => Promise<any>|any },
  *   stop?: (request: any) => Promise<any>|any,
  * }} FeatureLeaseDispatcher
@@ -184,7 +179,6 @@ export const createFeatureLeaseCoordinator = ({
     await ready;
     const state = states.get(scope);
     if (!state) return outcome(false, 'feature-lease-scope-invalid', true);
-    // Only sealed vault authority may start while the feature plane is locked.
     if (locked && scope !== 'vault-authority') {
       return outcome(false, 'feature-lease-vault-locked', true, { scope });
     }
@@ -267,7 +261,6 @@ export const createFeatureLeaseCoordinator = ({
         return outcome(false, 'feature-lease-cancelled', true, { scope });
       }
       await assertOwner();
-      // No host effect is permitted before this custody boundary.
       crossedDispatch = true;
       state.dispatched = true;
       const receipt = await prepared.dispatch(controller.signal);
@@ -327,7 +320,6 @@ export const createFeatureLeaseCoordinator = ({
     });
     const crossedDispatch = state.dispatched || state.status === 'active' || state.status === 'unknown';
     const priorStatus = state.status;
-    // Revoke before storage/host IO so late results cannot reactivate.
     state.generation += 1;
     state.status = 'revoked';
     state.durable = false;
@@ -371,8 +363,6 @@ export const createFeatureLeaseCoordinator = ({
 
   const lock = () => {
     locked = true;
-    // Every revoke invalidates before its first await. They then share one
-    // durable clear instead of serially rewriting the same empty document.
     const clearIntents = ready.then(() => document.intents.length === 0
       ? document
       : mutateDocument((current) => ({ ...current, intents: [] })));
@@ -391,21 +381,13 @@ export const createFeatureLeaseCoordinator = ({
     return true;
   };
 
-  /**
-   * Retire every exact lease owned by one authenticated host realm. This is a
-   * synchronous authority transition: an old dispatch receipt cannot restore a
-   * lease after the renderer/host Port disappears. Durable intent is preserved
-   * for the runtime to replay on a fresh host; bounded work is only cancelled.
-   *
-   * @param {string} hostEpoch
-   */
+  /** @param {string} hostEpoch */
   const hostLost = (hostEpoch) => {
     if (!validId(hostEpoch)) return [];
     const affected = [];
     for (const [scope, state] of states) {
       const liveGeneration = state.hostEpoch === hostEpoch
         && ['starting', 'active', 'unknown'].includes(state.status);
-      // Failed stop poisons the exact physical realm after logical revoke.
       const poisonedRevocation = state.status === 'revoked'
         && state.poisonedHostEpoch === hostEpoch;
       if (!liveGeneration && !poisonedRevocation) continue;
@@ -422,7 +404,6 @@ export const createFeatureLeaseCoordinator = ({
       state.controller = null;
       state.dispatched = false;
       state.poisonedHostEpoch = hostEpoch;
-      // Pre-receipt host loss permits a fresh realm without stale-finally deletion.
       for (const key of [...pending.keys()]) {
         if (key.startsWith(`${scope}:`)) pending.delete(key);
       }
@@ -431,14 +412,7 @@ export const createFeatureLeaseCoordinator = ({
     return Object.freeze(affected);
   };
 
-  /**
-   * Clear the poison fence only after the runtime has proved that this exact
-   * physical realm is absent. Keeping the fence until that boundary prevents
-   * a same-realm retry after an ambiguous stop; retaining it forever can make
-   * a later, healthy realm look like the retirement target.
-   *
-   * @param {string} hostEpoch
-   */
+  /** @param {string} hostEpoch */
   const confirmHostRetired = (hostEpoch) => {
     if (!validId(hostEpoch)) return false;
     let changed = false;
@@ -470,13 +444,7 @@ export const createFeatureLeaseCoordinator = ({
     return results;
   };
 
-  /**
-   * Executable post-vault transition. Only dweb is a deliberate durable
-   * offscreen lease. Controller, DOM, and media remain operation-demanded;
-   * otherwise an unlocked vault would recreate the old perpetual generic
-   * heartbeat under a renamed scope. Goal must settle before recovery observes
-   * goal ownership; schedule follows both.
-   * @param {'initialize'|'unlock'|'resume'} transition
+  /** @param {'initialize'|'unlock'|'resume'} transition
    * @param {{ dwebEnabled?: boolean }} [options]
    */
   const runTransition = async (transition, { dwebEnabled = false } = {}) => {
@@ -486,7 +454,6 @@ export const createFeatureLeaseCoordinator = ({
     unlock();
     const reason = transition === 'initialize'
       ? 'vault-initialize' : transition === 'unlock' ? 'vault-unlock' : 'vault-resume';
-    // Locked first install stays cold; initialized Preview may acquire dweb.
     const plan = [...(dwebEnabled ? ['dweb'] : []), 'goal', 'recovery', 'schedule'];
     const results = [];
     for (const scope of plan) results.push(await acquire(scope, { reason, durable: true }));

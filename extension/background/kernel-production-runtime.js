@@ -5,6 +5,20 @@ import { CHANNEL_DEFAULTS } from '/shared/channel-config.js';
 import { createKernelDwebRouteRuntime } from './kernel-dweb-route-runtime.js';
 import { createKernelRichRuntime } from './kernel-rich-runtime.js';
 
+export { makeKernelProviderSetKeyRoute } from './kernel-provider-key-route.js';
+export {
+  makeKernelGitCredentialRoutes,
+  makeKernelOriginCredentialRoutes,
+} from './kernel-credential-routes.js';
+export { createKernelSemanticRuntime } from './kernel-semantic-runtime.js';
+export { createKernelExecutableRuntime } from './kernel-executable-runtime.js';
+export { createKernelExecutableControl } from './kernel-executable-owner.js';
+export { createKernelAdministrativeControl } from './kernel-administrative-control.js';
+export { createKernelSkillPersistence } from './kernel-skill-persistence.js';
+export { createKernelMemoryInitProbe } from './kernel-memory-init-probe.js';
+export { createKernelDemandSupport } from './kernel-demand-support.js';
+export { createKernelDemandPlane } from './kernel-demand-plane.js';
+
 const REASONING_EFFORT_LEVELS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
 
 /** @param {Record<string,any>} deps */
@@ -15,6 +29,7 @@ export const createKernelProductionRuntime = async (deps) => {
     deps?.releaseBrowserNetworkGuardLease,
     deps?.updateBrowserNetworkGuardOrigin,
     deps?.syncDenylistNetwork,
+    deps?.updateBrowserSourceProjection,
   ];
   if (!deps?.seams || !deps.browser || !deps.featureHost || !deps.denylist
       || !deps.appCatalog || !deps.providerProjection || typeof deps.canWrite !== 'function'

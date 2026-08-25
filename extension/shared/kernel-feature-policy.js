@@ -22,7 +22,7 @@ export const KERNEL_FEATURE_EVENT_NAMES = Object.freeze([
   'production/reconcile',
   'production/tabs-created', 'production/tabs-updated', 'production/tabs-removed',
   'production/tabs-activated', 'production/navigation-target',
-  'production/schedules-resume', 'production/ui-connect', 'production/ui-quiet',
+  'production/ui-connect', 'production/ui-quiet',
   'production/settings-changed',
 ]);
 

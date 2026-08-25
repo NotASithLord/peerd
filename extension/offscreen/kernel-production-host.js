@@ -245,14 +245,6 @@ export const createKernelProductionHost = () => {
       await emit('production/navigation-target', input, context?.identity);
       return accepted();
     },
-    'production/schedules-resume': async (/** @type {unknown} */ value,
-      /** @type {any} */ context) => {
-      requireReconciled();
-      const input = record(value);
-      if (!input || !exact(input, [])) throw new TypeError('production-schedule-invalid');
-      await emit('production/schedules-resume', input, context?.identity);
-      return accepted();
-    },
     'production/ui-connect': async (/** @type {unknown} */ value, /** @type {any} */ context) => {
       requireReconciled();
       const input = record(value);

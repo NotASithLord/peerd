@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import {
   createKernelSessionReader,
+} from '../../extension/background/kernel-session-reader.js';
+import {
   kernelToolManifestLabel,
   makeKernelSessionRoutes,
-} from '../../extension/background/kernel-session-reader.js';
+} from '../../extension/background/kernel-session-routes.js';
 import { manifestLabel } from '../../extension/peerd-runtime/tools/manifests.js';
 
 describe('native kernel session reader', () => {

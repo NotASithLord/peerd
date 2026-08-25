@@ -4,19 +4,18 @@ import { join } from 'node:path';
 import {
   KERNEL_DWEB_ROUTE_NAMES,
   KERNEL_EXECUTABLE_SEMANTIC_ROUTE_NAMES,
+  KERNEL_SEMANTIC_OWNER_ROUTE_NAMES,
   KERNEL_TRANSFER_ROUTE_NAMES,
 } from '../../extension/shared/kernel-feature-route-inventory.js';
 import { SEMANTIC_ROUTE_INVENTORY } from '../../extension/shared/semantic-route-inventory.js';
 
-const source = readFileSync(join(import.meta.dir, '../../extension/background/vault-kernel.js'), 'utf8');
-
-const namedRoutes = (name: string) => {
-  const match = source.match(new RegExp(
-    `const ${name} = (?:Object\\.freeze\\()?\\[([\\s\\S]*?)\\]\\)?;`,
-  ));
-  if (!match) throw new Error(`missing route owner: ${name}`);
-  return [...match[1].matchAll(/'([^']+)'/g)].map((entry) => entry[1]);
-};
+const source = [
+  'vault-kernel.js',
+  'kernel-demand-support.js',
+  'kernel-demand-plane.js',
+].map((name) => readFileSync(
+  join(import.meta.dir, `../../extension/background/${name}`), 'utf8',
+)).join('\n');
 
 const ADMINISTRATIVE_ROUTES = Object.freeze([
   'hooks/list', 'hooks/save', 'hooks/remove', 'hooks/toggle',
@@ -69,7 +68,7 @@ test('the physical kernel owners cover the route inventory once', () => {
     KERNEL_EXECUTABLE_SEMANTIC_ROUTE_NAMES,
     KERNEL_DWEB_ROUTE_NAMES,
     KERNEL_TRANSFER_ROUTE_NAMES,
-    namedRoutes('semanticOwnerRoutes'),
+    KERNEL_SEMANTIC_OWNER_ROUTE_NAMES,
     ['provider/setKey'],
     ADMINISTRATIVE_ROUTES,
     CONTRIBUTOR_ROUTES,
@@ -89,7 +88,7 @@ test('the physical kernel owners cover the route inventory once', () => {
   }
   expect(owned.length + directlyOwned.length).toBe(SEMANTIC_ROUTE_INVENTORY.length);
   expect(source).toContain("names: ['debug/originLock']");
-  expect(source).toContain("'debug/originLock': relays.debugOriginLock");
+  expect(source).toContain("'debug/originLock': (await getControllerRelays()).debugOriginLock");
   expect(source).toContain('targetAddon?.contributor(');
   expect(source).toContain('...executableOwner.routes');
 });

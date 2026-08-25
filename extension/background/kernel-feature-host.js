@@ -1,7 +1,4 @@
 // @ts-check
-// Demand-only feature-host ownership for the thin authority kernel. Creating
-// this adapter registers no browser listener and creates no offscreen document;
-// an exact named lease is the only path that may materialize the host.
 
 import { parseKernelIdentity } from '../shared/kernel-identity.js';
 import { createProductionFeatureLeaseRuntime } from './feature-lease-runtime.js';
@@ -60,8 +57,6 @@ export const createKernelFeatureHost = ({
         reasons: ['WORKERS', 'USER_MEDIA'],
         justification: 'Demand-scoped feature Workers and local voice transcription.',
       });
-      // Let the tiny lease host register its status responder before the first
-      // authenticated start. This delay occurs only after explicit demand.
       await wait(50);
     } catch (error) {
       if (/single offscreen document|already exists/i.test(
@@ -217,7 +212,6 @@ export const createKernelFeatureHost = ({
     snapshot: () => firefoxLifetime?.snapshot() ?? { active: 0, lost: false },
   });
 
-  // Apply hydrated dweb intent before recovery; bounded scopes stay demand-only.
   const settleVaultBoot = async (/** @type {{resumed:boolean}} */ { resumed }) => {
     await runtime.ready;
     if (!resumed) {

@@ -157,14 +157,17 @@ export const createKernelExecutableOwner = (deps) => {
     catch { return dispatchFailure(); }
   }]));
   let transferRoutes = null;
+  const makeTransferRoutes = async (/** @type {symbol} */ authorization) => {
+    transferRoutes ??= (await load()).makeTransferRoutes(authorization);
+    return transferRoutes;
+  };
   const privateTransfer = deps.privateTransfer ? makePrivateTransfer(
     deps.privateTransfer,
     (/** @type {symbol} */ authorization) => Object.fromEntries(
       KERNEL_TRANSFER_ROUTE_NAMES.map((name) => [name, async (message = {}) => {
         let privateRoutes;
         try {
-          transferRoutes ??= (await load()).makeTransferRoutes(authorization);
-          privateRoutes = transferRoutes;
+          privateRoutes = await makeTransferRoutes(authorization);
         } catch (cause) { return startupFailure(cause); }
         try { return await privateRoutes[name](message); }
         catch { return dispatchFailure(); }
@@ -179,6 +182,7 @@ export const createKernelExecutableOwner = (deps) => {
   return Object.freeze({
     routes: Object.freeze(ownedRoutes),
     attachPrivateTransfer: privateTransfer?.attach ?? null,
+    makeTransferRoutes,
   });
 };
 
@@ -238,7 +242,7 @@ export const createKernelExecutableControl = (deps) => {
       },
       transfer: { load: async () => (await deps.loadRich()).transferLive },
     }),
-    privateTransfer: {
+    ...(deps.privateTransfer === false ? {} : { privateTransfer: {
       isOptionsSender: owns.options,
       ...(deps.firefox ? {} : {
         optionsUrl: paths.options,
@@ -247,7 +251,7 @@ export const createKernelExecutableControl = (deps) => {
           return clientsApi?.matchAll ? clientsApi.matchAll({ type: 'window' }) : [];
         }),
       }),
-    },
+    } }),
   });
   const dwebAdmission = makeKernelDwebAdmission({
     offscreen: owns.offscreen,
@@ -267,5 +271,6 @@ export const createKernelExecutableControl = (deps) => {
   return Object.freeze({
     routes: Object.freeze({ ...owner.routes, ...dwebRoutes }),
     attachPrivateTransfer: owner.attachPrivateTransfer,
+    makeTransferRoutes: owner.makeTransferRoutes,
   });
 };

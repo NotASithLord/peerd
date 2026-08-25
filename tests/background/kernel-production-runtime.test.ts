@@ -22,6 +22,7 @@ const base = (makeRichRuntime: (deps: any) => any) => ({
   acquireBrowserNetworkGuardLease: async () => ({ ok: true }),
   releaseBrowserNetworkGuardLease: async () => {},
   updateBrowserNetworkGuardOrigin: async () => ({ ok: true }),
+  updateBrowserSourceProjection: async () => true,
   syncDenylistNetwork: async () => {},
   networkCustody: { sync: async () => {}, state: () => ({ supported: true }) },
   makeRichRuntime,

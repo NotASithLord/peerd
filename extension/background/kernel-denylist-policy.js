@@ -1,7 +1,4 @@
 // @ts-check
-// Lazy authority-kernel denylist policy. Construction performs no fetch or
-// storage read. The first security consumer loads the packaged seed plus the
-// user overlay; a load failure makes every web origin blocked.
 
 import { makeDenylistStore } from './denylist-store.js';
 import {
@@ -78,8 +75,6 @@ export const createKernelDenylistPolicy = ({
     blocks,
     patterns: store.patterns,
     snapshot,
-    // why edits await ready(): a later load() must not replace the overlay
-    // mid-edit; the seed outcome itself is not a gate (legacy parity).
     add: async (/** @type {unknown} */ pattern) => {
       await ready();
       return store.add(pattern);
@@ -91,10 +86,7 @@ export const createKernelDenylistPolicy = ({
   });
 };
 
-/**
- * Denylist editor mutations (legacy Logs-view parity): resync backstop,
- * audit, snapshot reply.
- * @param {Object} deps
+/** @param {Object} deps
  * @param {{snapshot:()=>Promise<any>,add:(pattern:unknown)=>Promise<any>,
  *   remove:(pattern:unknown)=>Promise<any>}} deps.policy
  * @param {{sync:()=>Promise<void>}} deps.networkCustody

@@ -9,10 +9,7 @@ import {
   validateKernelStateProjection,
 } from '../shared/kernel-state-contract.js';
 export { createVaultPostureIndex } from './vault-posture-index.js';
-export {
-  createKernelSessionReader,
-  makeKernelSessionRoutes,
-} from './kernel-session-reader.js';
+export { createKernelSessionReader } from './kernel-session-reader.js';
 export { makeSystemReadRoutes } from './routes/system-read.js';
 
 const PROFILE_ID = 'default';

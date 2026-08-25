@@ -191,6 +191,7 @@ const harness = async (
   const cache = new Map<string, any>([['currentSessionId', root.sessionId]]);
   const kvState = new Map<string, any>();
   const broadcasts: any[] = [];
+  const sourceProjections: any[] = [];
   let actorConfig: any;
   const engine: any = {
     vmRegistry, jsRegistry, podRegistry, appRegistry,
@@ -268,6 +269,9 @@ const harness = async (
       sync: options.networkSync ?? (async () => {}),
       state: () => ({ supported: true, lastError: null }),
     },
+    updateBrowserSourceProjection: async (bindings: any, projection: any) => {
+      sourceProjections.push(structuredClone({ bindings, projection }));
+    },
     providerProjection: { bumpRevision: () => { providerRevision += 1; } },
     siteCapture: {
       has: (tabId: number) => tabId === 9,
@@ -307,6 +311,7 @@ const harness = async (
     factories, runtime, shared, root, sessions, engine, browser, tabs,
     broadcasts, storageState, kvState, cache, settings, notifications, panelBehavior,
     siteCaptureEvents, providerRevision: () => providerRevision,
+    sourceProjections,
     actorConfig: () => actorConfig,
   };
 };
@@ -420,10 +425,12 @@ describe('kernel live turn factories', () => {
       tabId: adopted.tabId, sessionId: h.root.sessionId, url: 'about:blank',
       openerTabId: null, cookieStoreId: null,
     }]);
+    expect(h.sourceProjections.at(-1)?.projection).toEqual(first);
     const tab = h.tabs.get(adopted.tabId);
     tab.url = 'https://public.example/next';
     await h.runtime.relays.eventOwners.onUpdated(adopted.tabId, { url: tab.url }, tab);
     expect(h.cache.get('webActorSourceProjection.v1')?.[0]?.url).toBe(tab.url);
+    expect(h.sourceProjections.at(-1)?.projection?.[0]?.url).toBe(tab.url);
   });
 
   test('restored App network reconciliation waits only for hydrated trackers', async () => {

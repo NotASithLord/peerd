@@ -1,6 +1,6 @@
 // @ts-check
 
-import { normalizeKeyedOrigin } from '../peerd-egress/kernel-storage.js';
+import { normalizeKeyedOrigin } from '/peerd-egress/kernel-credentials.js';
 
 /** @param {{listSecretNames:()=>Promise<string[]>}} vault */
 export const createKernelKeyedOriginAuthority = (vault) => {

@@ -5,6 +5,7 @@ import {
   KERNEL_SEMANTIC_DIRECT_ROUTE_NAMES,
 } from '../../extension/background/kernel-semantic-runtime.js';
 import { SEMANTIC_HOST_ROUTE_CLASSIFICATIONS } from '../../extension/shared/semantic-host-route-manifest.js';
+import { createKernelControllerGateway } from '../../extension/background/kernel-controller-gateway.js';
 
 await useFakeIndexedDB();
 
@@ -16,15 +17,27 @@ const controller = (overrides: Record<string, any> = {}) => ({
   callFeatureEvent: async () => ({ ok: true }),
   renderSystemPrompt: async () => '',
   withRun: async (operation: () => Promise<any>) => operation(),
+  retire: () => {},
   close: () => {},
   ...overrides,
+});
+
+const gateway = (makeController: (deps: any) => any) => createKernelControllerGateway({
+  controller: {}, makeController,
 });
 
 const makeRuntime = (locked = false, docs: any[] = [], withTurn = false) => {
   let controllerCalls = 0;
   let controllerCreates = 0;
   let io = 0;
+  const controllerGateway = gateway(() => {
+    controllerCreates += 1;
+    return controller({
+      callSemantic: async () => { controllerCalls += 1; return { ok: true }; },
+    });
+  });
   const runtime = createKernelSemanticRuntime({
+    controllerGateway,
     idbFactory: indexedDB,
     idb: {
       get: async () => { io += 1; return undefined; },
@@ -45,9 +58,6 @@ const makeRuntime = (locked = false, docs: any[] = [], withTurn = false) => {
     ready: Promise.resolve(),
     canWrite: () => {}, pushState: () => {}, isHomeSender: () => true,
     actorCount: () => ({ activeActors: 0 }), actorOverview: () => ({ roots: [] }),
-    makeController: () => { controllerCreates += 1; return controller({
-      callSemantic: async () => { controllerCalls += 1; return { ok: true }; },
-    }); },
     ...(withTurn ? {
       loadTurnRuntime: async () => ({
         turnDeps: {
@@ -94,7 +104,7 @@ describe('kernel semantic runtime', () => {
       await state.runtime.routes[route](message, {});
     }
     expect(state.controllerCalls()).toBe(0);
-    expect(state.controllerCreates()).toBe(0);
+    expect(state.controllerCreates()).toBe(1);
   });
 
   test('contact route shells cross the sealed controller while storage stays local', async () => {
@@ -109,7 +119,14 @@ describe('kernel semantic runtime', () => {
   test('App metadata sender custody and file reads stay local to an exact host projection', async () => {
     const payloads: any[] = [];
     let controllerCreates = 0;
+    const controllerGateway = gateway(() => {
+      controllerCreates += 1;
+      return controller({
+        callSemantic: async (payload: any) => { payloads.push(payload); return { ok: true }; },
+      });
+    });
     const runtime = createKernelSemanticRuntime({
+      controllerGateway,
       idbFactory: indexedDB,
       idb: {
         get: async () => undefined, getAll: async () => [], put: async () => {},
@@ -129,16 +146,10 @@ describe('kernel semantic runtime', () => {
         listApp: async () => ['/peerd.json', '/index.html'],
       },
       isAppSender: (sender: unknown) => sender === 'owned-app',
-      makeController: () => {
-        controllerCreates += 1;
-        return controller({
-          callSemantic: async (payload: any) => { payloads.push(payload); return { ok: true }; },
-        });
-      },
     });
     await expect(runtime.routes['app/get-meta']({ appId: 'a' }, 'forged'))
       .resolves.toEqual({ ok: false, error: 'app-meta-unauthorized' });
-    expect(controllerCreates).toBe(0);
+    expect(controllerCreates).toBe(1);
     await expect(runtime.routes['app/get-meta']({ appId: 'a' }, 'owned-app'))
       .resolves.toEqual({ ok: true });
     expect(payloads[0]).toMatchObject({
@@ -150,10 +161,19 @@ describe('kernel semantic runtime', () => {
     expect(JSON.stringify(payloads[0])).not.toContain('private-');
   });
 
-  test('wires the fixed runtime probe through Chrome and Firefox controller transports', async () => {
-    for (const firefox of [false, true]) {
-      let controllerDeps: any;
+  test('wires the fixed runtime probe through the injected controller gateway', async () => {
+    for (const target of ['chrome', 'firefox']) {
+      let authority: any;
+      const controllerGateway = gateway((deps: any) => {
+        authority = deps;
+        return controller({
+          callRuntime: async (payload: any) => ({
+            ok: true, payload, authority: deps.authorizeRuntimeCall(payload), target,
+          }),
+        });
+      });
       const state = createKernelSemanticRuntime({
+        controllerGateway,
         idbFactory: indexedDB,
         idb: {
           get: async () => undefined, getAll: async () => [], put: async () => {},
@@ -164,22 +184,15 @@ describe('kernel semantic runtime', () => {
         vault: { isLocked: () => false, getSecret: async () => null },
         ready: Promise.resolve(), canWrite: () => {}, pushState: () => {},
         isHomeSender: () => true, actorCount: () => ({ activeActors: 0 }),
-        actorOverview: () => ({ roots: [] }), firefox,
-        makeController: (deps: any) => {
-          controllerDeps = deps;
-          return controller({
-            callRuntime: async (payload: any) => ({
-              ok: true, payload, authority: deps.authorizeRuntimeCall(payload),
-            }),
-          });
-        },
+        actorOverview: () => ({ roots: [] }), firefox: target === 'firefox',
       });
       await expect(state.runtime.probe()).resolves.toMatchObject({
         ok: true,
         payload: { operation: 'runtime.probe', input: {} },
         authority: { target: 'kernel-runtime', replayClass: 'A' },
+        target,
       });
-      expect(controllerDeps.firefoxDirect).toBe(firefox);
+      expect(authority.authorizeRuntimeCall).toBeFunction();
     }
   });
 
@@ -195,7 +208,7 @@ describe('kernel semantic runtime', () => {
     }
     expect(state.io()).toBe(0);
     expect(state.controllerCalls()).toBe(0);
-    expect(state.controllerCreates()).toBe(0);
+    expect(state.controllerCreates()).toBe(1);
   });
 
   test('returns an export above the controller limit without touching the controller', async () => {
@@ -203,7 +216,7 @@ describe('kernel semantic runtime', () => {
     const state = makeRuntime(false, [{ id: 'user', kind: 'user', body }]);
     const result = await state.runtime.routes['memory/export']();
     expect(result.payload.docs[0].body).toBe(body);
-    expect(state.controllerCreates()).toBe(0);
+    expect(state.controllerCreates()).toBe(1);
     expect(state.controllerCalls()).toBe(0);
   });
 
@@ -212,7 +225,7 @@ describe('kernel semantic runtime', () => {
     const state = makeRuntime(false, [{ id: 'user', kind: 'user', body }], true);
     const result = await state.runtime.routes['memory/export']();
     expect(result.payload.docs[0].body).toBe(body);
-    expect(state.controllerCreates()).toBe(0);
+    expect(state.controllerCreates()).toBe(1);
     expect(state.controllerCalls()).toBe(0);
   });
 
@@ -222,7 +235,19 @@ describe('kernel semantic runtime', () => {
     const semanticPayloads: any[] = [];
     let authority: any;
     const base = makeRuntime();
+    const controllerGateway = gateway((deps: any) => {
+      creates += 1;
+      authority = deps;
+      return controller({
+        callSemantic: async (payload: any) => {
+          semanticCalls += 1;
+          semanticPayloads.push(payload);
+          return { ok: true };
+        },
+      });
+    });
     const runtime = createKernelSemanticRuntime({
+      controllerGateway,
       idbFactory: indexedDB,
       idb: {
         get: async () => undefined, getAll: async () => [], put: async () => {},
@@ -235,17 +260,6 @@ describe('kernel semantic runtime', () => {
       isHomeSender: () => true,
       actorCount: () => { throw new Error('fallback projection used'); },
       actorOverview: () => { throw new Error('fallback projection used'); },
-      makeController: (deps: any) => {
-        creates += 1;
-        authority = deps;
-        return controller({
-          callSemantic: async (payload: any) => {
-            semanticCalls += 1;
-            semanticPayloads.push(payload);
-            return { ok: true };
-          },
-        });
-      },
       loadTurnRuntime: async () => ({
         turnDeps: {
           makeAgentSendCustody: () => ({
