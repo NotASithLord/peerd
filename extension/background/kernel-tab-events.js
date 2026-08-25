@@ -1,12 +1,12 @@
 // @ts-check
 
-import { KERNEL_LIFECYCLE_OWNER } from './kernel-lifecycle-events.js';
 import {
   WEB_ACTOR_SOURCE_PROJECTION_KEY,
   validateWebActorSourceProjection,
 } from '../shared/web-actor-source-projection.js';
 
 export const KERNEL_TAB_CUSTODY_OWNER = 'kernel-tab-custody';
+export const KERNEL_LIFECYCLE_OWNER = 'kernel-lifecycle';
 export const INERT_CHILD_REQUEST_GUARD = Object.freeze({
   onNavigationTarget() {}, onBeforeRequest() { return {}; },
   resolveNavigationTarget() {}, release() {}, reconcile() { return true; },
@@ -59,6 +59,36 @@ export const attachKernelTabEvents = ({
     blocking.addListener(onBeforeRequest, { urls: ['<all_urls>'] }, ['blocking']);
   }
   return Object.freeze({ owner: KERNEL_TAB_CUSTODY_OWNER });
+};
+
+/** @param {any} deps */
+export const attachKernelLifecycleEvents = ({
+  browser, registry, firefox = false, selfHostedChrome = false,
+  onStartup, alarmName, onAlarm, onSessionChanged, onUpdateAvailable,
+}) => {
+  if (!browser?.runtime || !browser?.alarms || typeof registry?.event !== 'function'
+      || typeof onStartup !== 'function' || typeof onAlarm !== 'function'
+      || typeof alarmName !== 'string' || !alarmName
+      || (onSessionChanged !== undefined && typeof onSessionChanged !== 'function')
+      || (selfHostedChrome && typeof onUpdateAvailable !== 'function')) {
+    throw new TypeError('kernel-lifecycle-events-config-invalid');
+  }
+  registry.event('runtime.onStartup', browser.runtime.onStartup, KERNEL_LIFECYCLE_OWNER)
+    ?.addListener(onStartup);
+  registry.event('alarms.onAlarm', browser.alarms.onAlarm, KERNEL_LIFECYCLE_OWNER)
+    ?.addListener((/** @type {any} */ alarm) =>
+      alarm?.name === alarmName ? onAlarm(alarm) : undefined);
+  if (firefox && onSessionChanged) {
+    registry.event(
+      'storage.session.onChanged', browser.storage?.session?.onChanged, KERNEL_LIFECYCLE_OWNER,
+    )?.addListener(onSessionChanged);
+  }
+  if (selfHostedChrome) {
+    registry.event(
+      'runtime.onUpdateAvailable', browser.runtime.onUpdateAvailable, KERNEL_LIFECYCLE_OWNER,
+    )?.addListener(onUpdateAvailable);
+  }
+  return Object.freeze({ owner: KERNEL_LIFECYCLE_OWNER });
 };
 
 const TAB_EVENTS = Object.freeze([

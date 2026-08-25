@@ -3,19 +3,21 @@
 export { createKernelSenderPolicy } from './kernel-sender-policy.js';
 
 export { createKernelConfirmation } from './kernel-confirmation.js';
-export { createKernelColdReceipts } from './kernel-cold-receipts.js';
+export {
+  createKernelColdReceipts,
+  makeKernelGenerationLifecycle,
+} from './kernel-cold-receipts.js';
 export { createKernelFeatureHost } from './kernel-feature-host.js';
 export { createKernelBrowserChildOutcomes } from './kernel-browser-child-outcomes.js';
 export { attachKernelFrontDoor } from './kernel-front-door.js';
-export { makeKernelGenerationLifecycle } from './kernel-generation.js';
 export { makeKernelDemandRoutes } from './kernel-demand-routes.js';
-export { createKernelPortRouter } from './kernel-port-router.js';
 export {
+  createKernelPortRouter,
   createKernelPortOwners,
   createKernelUiPortOwner,
 } from './kernel-port-owners.js';
-export { attachKernelLifecycleEvents } from './kernel-lifecycle-events.js';
 export {
+  attachKernelLifecycleEvents,
   attachKernelTabEvents,
   createKernelBrowserEventOwners,
   createKernelBrowserNetworkOwner,

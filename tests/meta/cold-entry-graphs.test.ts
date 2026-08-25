@@ -148,7 +148,7 @@ describe('cold entry graphs', () => {
       'background/kernel-executable-live.js',
       'background/kernel-executable-transfer-live.js',
       'background/kernel-dweb-route-runtime.js',
-      'background/kernel-browser-network-runtime.js',
+      'background/kernel-browser-network-authority.js',
     ]) {
       const measured = await nativeKernelStats(entry);
       for (const forbidden of [
@@ -180,11 +180,11 @@ describe('cold entry graphs', () => {
     ]) expect(measured.modulesSet.has(file), `Firefox imports ${file}`).toBe(false);
   });
 
-  test('browser network custody is static and reaches exact policy leaves without barrels', async () => {
+  test('browser network custody is static and reaches exact kernel surfaces', async () => {
     const measured = await nativeKernelStats();
     expect(PACKAGED_LAZY_MODULE_ENTRIES)
       .not.toContain('background/kernel-browser-network-runtime.js');
-    expect(measured.modulesSet.has('background/kernel-browser-network-runtime.js')).toBe(true);
+    expect(measured.modulesSet.has('background/kernel-browser-network-runtime.js')).toBe(false);
     expect(measured.modulesSet.has('background/kernel-browser-network-authority.js')).toBe(true);
     expect(measured.modulesSet.has('peerd-egress/kernel-network.js')).toBe(true);
     expect(measured.modulesSet.has('peerd-runtime/kernel-network.js')).toBe(true);
@@ -263,7 +263,11 @@ describe('cold entry graphs', () => {
       expect(PACKAGED_LAZY_MODULE_ENTRIES)
         .toContain(`background/${specifier.replace(/^\.\//, '')}` as any);
     }
-    expect(kernelSource).toContain('createDeferredRepositoryClient(async () => {');
+    expect(kernelSource).not.toContain('createDeferredRepositoryClient');
+    expect(measured.modulesSet.has('background/kernel-demand-support.js')).toBe(false);
+    expect(readFileSync(
+      join(EXTENSION_DIR, 'background/kernel-demand-support.js'), 'utf8',
+    )).toContain('createDeferredRepositoryClient(async () => {');
     expect(kernelSource).not.toContain("import('./firefox-storage-keepalive.js')");
     expect(kernelSource)
       .not.toContain("import('./direct-controller-client.js')");

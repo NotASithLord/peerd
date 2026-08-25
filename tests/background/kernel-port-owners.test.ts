@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { createKernelPortOwners } from '../../extension/background/kernel-port-owners.js';
-import { createKernelPortRouter, KERNEL_PORT_NAMES } from '../../extension/background/kernel-port-router.js';
+import {
+  createKernelPortRouter,
+  KERNEL_PORT_NAMES,
+} from '../../extension/background/kernel-port-owners.js';
 import { createVaultKernelAssemblyReport } from '../../extension/background/vault-kernel-assembly.js';
 import {
   isEvalSender, isHomeSender, isOffscreenSender, isOptionsSender,

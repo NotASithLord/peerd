@@ -7,7 +7,7 @@ import {
   coldEventKeysFor,
   KERNEL_COLD_EVENTS,
 } from '../../extension/background/cold-kernel-inventory.js';
-import { attachKernelLifecycleEvents } from '../../extension/background/kernel-lifecycle-events.js';
+import { attachKernelLifecycleEvents } from '../../extension/background/kernel-tab-events.js';
 
 const identity = (suffix: string) => ({
   schema: 1 as const,

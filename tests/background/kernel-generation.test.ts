@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   KERNEL_GENERATION_SESSION_KEY,
   makeKernelGenerationLifecycle,
-} from '../../extension/background/kernel-generation.js';
+} from '../../extension/background/kernel-cold-receipts.js';
 import {
   createKernelIdentity,
   KERNEL_IDENTITY_SCHEMA,

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { attachKernelLifecycleEvents } from '../../extension/background/kernel-lifecycle-events.js';
+import { attachKernelLifecycleEvents } from '../../extension/background/kernel-tab-events.js';
 import { attachKernelTabEvents } from '../../extension/background/kernel-tab-events.js';
 import { createKernelColdReceipts } from '../../extension/background/kernel-cold-receipts.js';
 
