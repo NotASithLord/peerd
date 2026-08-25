@@ -14,6 +14,7 @@ import { createKernelDemandSupport } from './kernel-demand-support.js';
 import { createKernelExecutableControl } from './kernel-executable-owner.js';
 import { createKernelExecutableRuntime } from './kernel-executable-runtime.js';
 import { createKernelMemoryInitProbe } from './kernel-memory-init-probe.js';
+import { createKernelRichEffectAuthority } from './kernel-rich-effect-authority.js';
 import { createKernelSemanticRuntime } from './kernel-semantic-runtime.js';
 import { createKernelSkillPersistence } from './kernel-skill-persistence.js';
 import { makeKernelDemandRoutes } from './kernel-demand-routes.js';
@@ -101,16 +102,16 @@ export const createKernelDemandPlane = (deps) => {
   /** @type {WeakMap<Record<string,any>,Record<string,any>>} */
   const productionOwners = new WeakMap();
   const controllerRelays = () => liveProduction?.relays ?? null;
-  const handleRichKernelCall = async (/** @type {string} */ operation,
-    /** @type {unknown} */ payload, /** @type {any} */ context) => {
-    const handler = controllerRelays()?.handleRichKernelCall;
-    return typeof handler === 'function'
-      ? handler(operation, payload, context)
-      : {
-        ok: false, code: 'kernel-rich-effect-unavailable',
-        error: 'Feature unavailable. Try again.', outcomeKnown: true,
-      };
-  };
+  const richEffects = createKernelRichEffectAuthority({
+    scriptRuns: deps.scriptRuns,
+    sessions: deps.sessions,
+    settingsStore: deps.settingsStore,
+    vault: deps.vault,
+    auditLog: deps.auditLog,
+    contextSnapshots: deps.contextSnapshots,
+    kv: deps.kv,
+    fetchFn: deps.fetchFn,
+  });
   const loadRichOwner = async (/** @type {any} */ seams) => {
     const sourceProjectionGeneration = crypto.randomUUID();
     let sourceProjectionRevision = 0;
@@ -161,7 +162,7 @@ export const createKernelDemandPlane = (deps) => {
         /** @type {unknown} */ payload, /** @type {any} */ context) =>
         administrativeControl?.handleKernelCall(operation, payload, context)
           ?? { ok: false, code: 'kernel-operation-denied', outcomeKnown: true },
-      handleRichKernelCall,
+      handleRichKernelCall: richEffects.handle,
       ensureOffscreen: deps.featureHost.ensureOffscreen,
       retireHost: (/** @type {string} */ reason) =>
         deps.featureHost.runtime.retireActiveHost(reason),

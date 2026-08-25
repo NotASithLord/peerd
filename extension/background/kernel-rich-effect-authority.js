@@ -5,15 +5,15 @@ import {
   costOf,
   hasPricing,
   listProviders,
-} from '/peerd-provider/background.js';
+} from '/peerd-provider/kernel.js';
 import {
   foldProviderEvents,
   limitExceeded,
   normalizeTally,
   providerQuotaError,
   validateProviderCallArgs,
-} from '/peerd-runtime/background.js';
-import { HARDCODED_ALLOWLIST, makeSafeFetch } from '/peerd-egress/background.js';
+} from '/peerd-runtime/kernel.js';
+import { HARDCODED_ALLOWLIST, makeSafeFetch } from '/peerd-egress/kernel.js';
 
 const RESERVATION_TTL_MS = 120_000;
 const record = (/** @type {unknown} */ value) => value !== null

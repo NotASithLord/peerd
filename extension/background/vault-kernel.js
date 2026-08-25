@@ -77,6 +77,8 @@ import {
 import { makePrivateTransferOpenRoute, makePrivateTransferPort } from './private-transfer-port.js';
 import { createKernelProviderProjection } from './kernel-provider-projection.js';
 import { createKernelRecoveryCustody } from './kernel-recovery-custody.js';
+import { createContextSnapshots } from './context-snapshots.js';
+import { createScriptRunRegistry } from './script-runs.js';
 import {
   createVaultKernelAssemblyReport,
   SEMANTIC_CUTOVER_SUMMARY,
@@ -247,7 +249,8 @@ const controllerGateway = createKernelControllerGateway({
 const vault = featureHost.vault;
 const kernelSessions = createKernelSessionReader(idb);
 const kernelProfile = createKernelProfileAuthority({ idb, sessions: kernelSessions });
-const contextSnapshots = Object.freeze({ snapshotsFor: () => [] });
+const contextSnapshots = createContextSnapshots();
+const scriptRuns = createScriptRunRegistry();
 
 const vaultReady = prepareVaultKernel({
   applyPosture: () => applyStoreBootPosture({
@@ -540,6 +543,7 @@ const loadDemandPlane = makeBoundedModuleLoader(async () => {
     onSettingsChanged: onKernelSettingsChanged,
     sessions: kernelSessions,
     contextSnapshots,
+    scriptRuns,
     resolvePermission: resolveKernelPermission,
     runtimeId,
     channel: CHANNEL,

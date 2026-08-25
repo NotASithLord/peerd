@@ -89,7 +89,7 @@ export const createKernelTurnProductionRuntime = async (deps) => {
     'validateGeneration', 'retireStale', 'dispatchToolCall', 'buildActorContext',
     'appActorChat', 'activeGoalStates', 'broadcastAgentTab', 'onUiConnect',
     'showWebTabHint', 'isDrivenSource', 'webActorSessionForTab',
-    'handleRichKernelCall', 'resumeSchedules',
+    'resumeSchedules',
   ]) {
     if (typeof relays[key] !== 'function') {
       throw new TypeError(`kernel-turn-production-relay-${key}-invalid`);
