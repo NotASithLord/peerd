@@ -357,13 +357,11 @@ const liveTabUrl = async (ctx) => {
  */
 
 /**
- * Dispatch a single tool call. Returns a ToolResult with meta populated.
- *
  * @param {ToolCall} call
  * @param {DispatchContext} ctx
- * @returns {Promise<ToolResult>}
+ * @returns {Promise<ToolResult | Record<string, any>>}
  */
-export const dispatchToolCall = async (call, ctx) => {
+export const prepareToolCall = async (call, ctx) => {
   const tool = getTool(call.name);
   if (!tool) {
     return {
@@ -875,7 +873,7 @@ export const dispatchToolCall = async (call, ctx) => {
     .includes(call.name)
     && typeof activityTabId === 'number';
   /** @type {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} */
-  let browserChildPolicyNotices = [];
+  const browserChildPolicyNotices = [];
   /** @type {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} */
   let browserAsyncPolicyNotices = [];
   if (childPolicyEligible && consumeBrowserChildPolicyNotice) {
@@ -890,8 +888,10 @@ export const dispatchToolCall = async (call, ctx) => {
       }).catch(() => {});
     }
   }
+  let preExecutionResult = null;
+  let preExecutionError = null;
+  let preExecutionFailed = false;
   try {
-    let result;
     if (quarantineCapable && (ctx.browserChildQuarantineRequired
         || typeof ctx.armBrowserChildQuarantine === 'function')) {
       const armed = typeof ctx.armBrowserChildQuarantine === 'function'
@@ -899,15 +899,57 @@ export const dispatchToolCall = async (call, ctx) => {
         : null;
       if (armed?.ok === true) {
         Object.assign(execCtx, { browserChildQuarantineArmedTabId: activityTabId });
-        result = await tool.execute(args, execCtx);
-      } else result = {
+      } else preExecutionResult = {
         ok: /** @type {const} */ (false),
         error: armed?.error ?? 'browser_child_quarantine_unavailable',
         code: armed?.code ?? 'browser-child-quarantine-unavailable',
         outcomeKnown: true,
         outcomeKind: /** @type {const} */ ('pre-effect-failure'), retryable: true,
       };
-    } else result = await tool.execute(args, execCtx);
+    }
+  } catch (error) {
+    preExecutionError = error;
+    preExecutionFailed = true;
+  }
+  return {
+    prepared: true,
+    call, ctx, tool, args, hooks, hookCtx, hookOutcomes, gateResults,
+    tracking, execCtx, activity, activityTabId, start,
+    consumeBrowserChildPolicyNotice, childPolicyEligible, childCapable,
+    browserChildPolicyNotices, browserAsyncPolicyNotices,
+    preExecutionResult, preExecutionError, preExecutionFailed,
+  };
+};
+
+/** @param {Record<string, any>} prepared */
+const executeInline = (prepared) => prepared.tool.execute(prepared.args, prepared.execCtx);
+
+/**
+ * @param {Record<string, any>} prepared
+ * @param {(prepared:Record<string, any>)=>Promise<any>|any} [execute]
+ */
+export const executePreparedToolCall = async (prepared, execute = executeInline) => {
+  if (prepared.preExecutionFailed) return { error: prepared.preExecutionError };
+  if (prepared.preExecutionResult) return { result: prepared.preExecutionResult };
+  try { return { result: await execute(prepared) }; }
+  catch (error) { return { error }; }
+};
+
+/**
+ * @param {Record<string, any>} prepared
+ * @param {{result?:any,error?:unknown}} execution
+ * @returns {Promise<ToolResult>}
+ */
+export const settleToolCall = async (prepared, execution) => {
+  let {
+    call, ctx, tool, args, hooks, hookCtx, hookOutcomes, gateResults,
+    tracking, activity, activityTabId, start, consumeBrowserChildPolicyNotice,
+    childPolicyEligible, childCapable, browserChildPolicyNotices,
+    browserAsyncPolicyNotices,
+  } = prepared;
+  try {
+    if (Object.hasOwn(execution, 'error')) throw execution.error;
+    let result = execution.result;
     if (childPolicyEligible && consumeBrowserChildPolicyNotice) {
       const embedded = normalizeBrowserChildPolicyNotices(
         /** @type {any} */ (result).browserChildPolicyNotices,
@@ -1213,4 +1255,17 @@ export const dispatchToolCall = async (call, ctx) => {
     }
     return failedResult;
   }
+};
+
+/**
+ * @param {ToolCall} call
+ * @param {DispatchContext} ctx
+ * @param {{execute?:(prepared:Record<string, any>)=>Promise<any>|any}} [options]
+ * @returns {Promise<ToolResult>}
+ */
+export const dispatchToolCall = async (call, ctx, options = {}) => {
+  const prepared = /** @type {any} */ (await prepareToolCall(call, ctx));
+  if (prepared?.prepared !== true) return /** @type {ToolResult} */ (prepared);
+  const execution = await executePreparedToolCall(prepared, options.execute);
+  return settleToolCall(prepared, execution);
 };
