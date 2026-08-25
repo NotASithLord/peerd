@@ -204,6 +204,36 @@ export const patch = async (store, key, fields) => {
   });
 };
 
+/** @param {string} store @param {IDBValidKey} key
+ * @param {(current:any)=>any} transform
+ */
+export const mutate = async (store, key, transform) => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readwrite');
+    const guard = guardTransaction(tx, resolve, reject);
+    const objectStore = tx.objectStore(store);
+    const request = objectStore.get(key);
+    /** @type {any} */ let updated;
+    request.onsuccess = () => {
+      if (request.result === undefined) return;
+      try {
+        updated = transform(request.result);
+        if (!updated || typeof updated !== 'object') {
+          throw new TypeError('idb-mutate-result-invalid');
+        }
+        objectStore.put(updated);
+      } catch (cause) {
+        try { tx.abort(); } catch {}
+        guard.reject(cause);
+      }
+    };
+    tx.oncomplete = () => guard.resolve(updated);
+    tx.onerror = () => guard.reject(tx.error);
+    tx.onabort = () => guard.reject(tx.error ?? new Error('idb-mutate-aborted'));
+  });
+};
+
 /** @param {string} store @param {IDBValidKey} key */
 export const get = (store, key) => read(store, (s) => s.get(key));
 

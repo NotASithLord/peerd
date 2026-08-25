@@ -339,7 +339,7 @@ export const createKernelDemandPlane = (deps) => {
     }),
   });
   const routes = Object.freeze({
-    ...support.routes,
+    ...support.directRoutes,
     ...support.providerKeyRoutes,
     ...support.credentialRoutes,
     ...semanticRoutes,

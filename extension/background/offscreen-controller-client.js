@@ -18,12 +18,18 @@ import {
   controllerOuterPayloadCap,
   controllerPayloadAllowed,
   controllerRenewalIdleCap,
+  controllerCustodyIsAuthoritative,
   createControllerKernelQuota,
+  normalizeControllerCustody,
 } from '../shared/controller-kernel-quota.js';
 import { parseKernelIdentity } from '../shared/kernel-identity.js';
-import { STARTUP_UNAVAILABLE_USER_FAILURE } from '../shared/bounded-module-load.js';
+import {
+  OUTCOME_UNKNOWN_USER_FAILURE,
+  STARTUP_UNAVAILABLE_USER_FAILURE,
+} from '../shared/bounded-module-load.js';
 import {
   KERNEL_FEATURE_DISPATCH_CAPABILITY,
+  parseKernelFeatureCall,
 } from '../shared/kernel-feature-policy.js';
 import {
   RUNTIME_DISPATCH_CAPABILITY,
@@ -195,7 +201,9 @@ export const connectOffscreenController = async ({
       outcomeKnown &&= loss?.outcomeKnown === true;
       retryable &&= loss?.retryable === true;
     }
-    if (call.nestedUnknown) return { outcomeKnown: false, retryable: false };
+    if (call.nestedUnknown && !controllerCustodyIsAuthoritative(call.capability)) {
+      return { outcomeKnown: false, retryable: false };
+    }
     return { outcomeKnown, retryable };
   };
   const custodyFailure = (/** @type {any} */ call, /** @type {string} */ code) => ({
@@ -206,7 +214,8 @@ export const connectOffscreenController = async ({
       const preCommit = call.phase === CONTROLLER_PHASE.OPENED
         || call.phase === CONTROLLER_PHASE.ACCEPTED;
       finish(requestId, preCommit ? stopped(code, true)
-        : call.reverse.size > 0 ? custodyFailure(call, code) : stopped(code, false));
+        : controllerCustodyIsAuthoritative(call.capability) || call.effectEntered
+          ? custodyFailure(call, code) : stopped(code, false));
     }
   };
   const close = () => {
@@ -227,9 +236,10 @@ export const connectOffscreenController = async ({
       if (!active) return;
       try { post({ type: 'kernel/cancel', requestId, grantId: active.grantId }); }
       catch { /* host gone */ }
-      finish(requestId, active.reverse.size > 0
-        ? custodyFailure(active, 'controller-call-timeout')
-        : stopped('controller-call-timeout', false));
+      finish(requestId,
+        controllerCustodyIsAuthoritative(active.capability) || active.effectEntered
+          ? custodyFailure(active, 'controller-call-timeout')
+          : stopped('controller-call-timeout', false));
     }, idleMs);
     post({ type: 'kernel/renew', requestId, grantId: call.grantId, deadlineAt });
   };
@@ -309,13 +319,18 @@ export const connectOffscreenController = async ({
         call.reverse.delete(message.rpcId);
         const observed = call.quota.observe(message.operation, message.payload, result);
         const bounded = observed?.ok === true ? result : observed;
-        if (bounded?.outcomeKnown !== true) call.nestedUnknown = true;
+        if (bounded?.outcomeKnown !== true
+            && (!controllerCustodyIsAuthoritative(call.capability)
+              || pendingCustody(call).outcomeKnown !== true)) call.nestedUnknown = true;
         try {
           post({
             type: 'kernel/kernel-result', requestId: message.requestId,
             grantId: call.grantId, rpcId: message.rpcId, result: bounded,
           });
-        } catch { call.nestedUnknown = true; }
+        } catch {
+          if (!controllerCustodyIsAuthoritative(call.capability)
+              || pendingCustody(call).outcomeKnown !== true) call.nestedUnknown = true;
+        }
       };
       if (typeof handleKernelCall !== 'function') {
         settleKernelCall({ ok: false, code: 'kernel-operation-denied', outcomeKnown: true });
@@ -361,22 +376,11 @@ export const connectOffscreenController = async ({
         && (call.phase === CONTROLLER_PHASE.COMMITTING
           || call.phase === CONTROLLER_PHASE.COMMITTED)) {
       const pendingEffect = call.reverse.size > 0;
-      const custody = call.effectEntered ? pendingCustody(call) : null;
-      const base = pendingEffect ? {
-        ok: false, code: 'controller-pending-kernel-effect',
-        outcomeKnown: message.result?.outcomeKnown === true,
-        ...(message.result?.retryable === false ? { retryable: false } : {}),
-      } : message.result ?? { ok: false, code: 'controller-result-missing' };
-      const result = !custody ? base
-        : custody.outcomeKnown !== true
-        ? { ...base, outcomeKnown: false, retryable: false }
-        : base?.outcomeKnown !== true
-          ? { ...base, outcomeKnown: false, retryable: false }
-          : base?.ok === true ? { ...base, outcomeKnown: true }
-          : {
-            ...base, ok: false, outcomeKnown: true,
-            retryable: custody.retryable && base?.retryable !== false,
-          };
+      const custody = controllerCustodyIsAuthoritative(call.capability) || call.effectEntered
+        ? pendingCustody(call) : null;
+      const result = normalizeControllerCustody(
+        call.capability, message.result, custody, pendingEffect,
+      );
       finish(message.requestId, {
         ...(result ?? { ok: false, error: 'controller returned no result' }),
         outcomeKnown: result.outcomeKnown === true,
@@ -467,7 +471,7 @@ export const connectOffscreenController = async ({
           || active.phase === CONTROLLER_PHASE.ACCEPTED;
         finish(requestId, preCommit
           ? stopped('controller-call-timeout', true)
-          : active.reverse.size > 0
+          : controllerCustodyIsAuthoritative(active.capability) || active.effectEntered
             ? custodyFailure(active, 'controller-call-timeout')
             : stopped('controller-call-timeout', false));
       }, timeoutMs);
@@ -484,9 +488,10 @@ export const connectOffscreenController = async ({
         }
         clearTimeoutFn(active.timer);
         active.timer = setTimeoutFn(() => {
-          finish(requestId, active.reverse.size > 0
-            ? custodyFailure(active, 'controller-call-aborted')
-            : stopped('controller-call-aborted', false));
+          finish(requestId,
+            controllerCustodyIsAuthoritative(active.capability) || active.effectEntered
+              ? custodyFailure(active, 'controller-call-aborted')
+              : stopped('controller-call-aborted', false));
         }, cancelSettleTimeoutMs);
       };
       calls.set(requestId, {
@@ -1027,6 +1032,7 @@ export const makeSemanticControllerClient = ({
         outcomeKnown: true, phase: 'startup',
       };
     }
+    const replayable = parseRuntimeDispatch(payload)?.policy.authority.replayClass === 'A';
     try {
       return await withControllerLease(async (/** @type {unknown} */ lease) => {
         enterLeased();
@@ -1054,17 +1060,21 @@ export const makeSemanticControllerClient = ({
           exitLeased();
         }
       }, {
-        outcomeKnownOnLoss: false,
+        outcomeKnownOnLoss: replayable,
         code: 'controller-firefox-runtime-lifetime-lost',
         onLost: retireActiveOnLifetimeLoss,
+        ...(!replayable ? { lossGraceMs: 2_000 } : {}),
       });
     } catch (cause) {
+      const known = /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown !== false;
       return {
         ok: false,
         code: /** @type {{code?:string}} */ (cause)?.code
           ?? 'runtime-dispatch-lifetime-failed',
-        outcomeKnown: /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown !== false,
+        error: known ? STARTUP_UNAVAILABLE_USER_FAILURE : OUTCOME_UNKNOWN_USER_FAILURE,
+        outcomeKnown: known,
         phase: /** @type {{phase?:string}} */ (cause)?.phase ?? 'startup',
+        retryable: known,
       };
     }
   };
@@ -1079,6 +1089,7 @@ export const makeSemanticControllerClient = ({
         outcomeKnown: true, phase: 'startup',
       };
     }
+    const replayable = parseKernelFeatureCall(capability, payload)?.policy.replayClass === 'A';
     try {
       return await withControllerLease(async (/** @type {unknown} */ lease) => {
         enterLeased();
@@ -1106,17 +1117,21 @@ export const makeSemanticControllerClient = ({
           exitLeased();
         }
       }, {
-        outcomeKnownOnLoss: false,
+        outcomeKnownOnLoss: replayable,
         code: 'controller-firefox-feature-lifetime-lost',
         onLost: retireActiveOnLifetimeLoss,
+        ...(!replayable ? { lossGraceMs: 2_000 } : {}),
       });
     } catch (cause) {
+      const known = /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown !== false;
       return {
         ok: false,
         code: /** @type {{code?:string}} */ (cause)?.code
           ?? 'feature-dispatch-lifetime-failed',
-        outcomeKnown: /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown !== false,
+        error: known ? STARTUP_UNAVAILABLE_USER_FAILURE : OUTCOME_UNKNOWN_USER_FAILURE,
+        outcomeKnown: known,
         phase: /** @type {{phase?:string}} */ (cause)?.phase ?? 'startup',
+        retryable: known,
       };
     }
   };

@@ -1251,7 +1251,7 @@ export async function runFirefoxProductionCutover({
     await driver.switchToWindow(survivor.handle);
     mainHandle = survivor.handle;
     const eventPageIdleStartedMs = hostNowMs() - startedAt;
-    await sleep(EVENT_PAGE_IDLE_MS);
+    await sleep(EVENT_PAGE_IDLE_MS + 1_000);
     const recycleWakeStartedMs = hostNowMs() - startedAt;
     panel = await openFirefoxSidebar(driver);
     const afterReply = await waitFor(async () => {

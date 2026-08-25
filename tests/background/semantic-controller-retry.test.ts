@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { makeSemanticControllerClient } from '../../extension/background/offscreen-controller-client.js';
 import { makeControllerOfferHandler } from '../../extension/offscreen/controller-shell.js';
 import { CONTROLLER_BUILD_DIGEST } from '../../extension/shared/structured-clone-size.js';
+import { STARTUP_UNAVAILABLE_USER_FAILURE } from '../../extension/shared/bounded-module-load.js';
 
 const makeLane = (controllerCall: () => Promise<any> | any) => {
   const workerUrl = 'chrome-extension://test/background/service-worker.js';
@@ -62,7 +63,7 @@ describe('semantic controller unavailable/retry behavior', () => {
     });
 
     await expect(lane.semantic.renderSystemPrompt({ actorType: 'orchestrator' }))
-      .rejects.toThrow('semantic prompt renderer unavailable: controller-worker-lost');
+      .rejects.toThrow(STARTUP_UNAVAILABLE_USER_FAILURE);
     expect(calls).toBe(2);
     expect(lane.ensures()).toBe(2);
     lane.semantic.close();

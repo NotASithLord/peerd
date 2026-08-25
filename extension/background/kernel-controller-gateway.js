@@ -13,11 +13,11 @@ const unavailable = (/** @type {string} */ family) => Object.freeze({
 
 /**
  * @param {Object} deps
- * @param {(...args:any[])=>any} deps.makeController
+ * @param {()=>Promise<((...args:any[])=>any)>} deps.loadController
  * @param {Record<string,any>} deps.controller
  */
-export const createKernelControllerGateway = ({ makeController, controller }) => {
-  if (typeof makeController !== 'function' || !controller || typeof controller !== 'object') {
+export const createKernelControllerGateway = ({ loadController, controller }) => {
+  if (typeof loadController !== 'function' || !controller || typeof controller !== 'object') {
     throw new TypeError('kernel-controller-gateway-config-invalid');
   }
   /** @type {Record<'semantic'|'turn'|'runtime',any|null>} */
@@ -114,7 +114,7 @@ export const createKernelControllerGateway = ({ makeController, controller }) =>
       }
     },
   );
-  const client = makeController({
+  const clientDeps = Object.freeze({
     ...controller,
     authorizeSemanticCall: (/** @type {unknown} */ payload) =>
       activeOwner('semantic')?.authorize(payload) ?? null,
@@ -140,18 +140,85 @@ export const createKernelControllerGateway = ({ makeController, controller }) =>
       featureOwner(context)?.handle(operation, payload, context)
         ?? { ok: false, code: 'kernel-operation-denied', outcomeKnown: true },
   });
-  if (['callSemantic', 'callTurn', 'callRuntime', 'callFeature',
-    'renderSystemPrompt', 'withRun', 'close']
-    .some((name) => typeof client?.[name] !== 'function')) {
-    try { client?.close?.(); } catch {}
-    throw new TypeError('kernel-controller-client-invalid');
-  }
+  /** @type {any|null} */
+  let client = null;
+  /** @type {Promise<any>|null} */
+  let clientLoading = null;
+  let retirement = 0;
+  const getClient = async () => {
+    if (closed) throw new Error('kernel-controller-gateway-closed');
+    if (client) return client;
+    const generation = retirement;
+    clientLoading ??= Promise.resolve().then(async () => {
+      try {
+        const makeController = await loadController();
+        if (typeof makeController !== 'function') {
+          throw new TypeError('kernel-controller-loader-invalid');
+        }
+        const candidate = makeController(clientDeps);
+        if (['callSemantic', 'callTurn', 'callRuntime', 'callFeature',
+          'renderSystemPrompt', 'withRun', 'close']
+          .some((name) => typeof candidate?.[name] !== 'function')) {
+          try { candidate?.close?.(); } catch {}
+          throw new TypeError('kernel-controller-client-invalid');
+        }
+        if (closed) {
+          candidate.close();
+          throw new Error('kernel-controller-gateway-closed');
+        }
+        if (generation !== retirement) {
+          candidate.close();
+          throw Object.assign(new Error('kernel-controller-generation-retired'), {
+            code: 'kernel-controller-generation-retired',
+            outcomeKnown: true,
+            phase: 'startup',
+            retryable: true,
+          });
+        }
+        client = candidate;
+        return candidate;
+      } catch (cause) {
+        const detail = /** @type {{code?:unknown,outcomeKnown?:unknown}} */ (cause);
+        if (detail?.outcomeKnown === true) throw cause;
+        throw Object.assign(new Error(STARTUP_UNAVAILABLE_USER_FAILURE, { cause }), {
+          code: typeof detail?.code === 'string' ? detail.code
+            : 'kernel-controller-startup-failed',
+          outcomeKnown: true, phase: 'startup', retryable: true,
+        });
+      }
+    })
+      .finally(() => { clientLoading = null; });
+    return clientLoading;
+  };
+  /** @param {string} method @param {...any} args */
+  const clientCall = async (method, ...args) => {
+    const active = await getClient();
+    return active[method](...args);
+  };
+  /** @param {string} method @param {...any} args */
+  const resultCall = async (method, ...args) => {
+    try { return await clientCall(method, ...args); }
+    catch (cause) {
+      const detail = /** @type {{code?:unknown,outcomeKnown?:unknown,
+       * phase?:unknown,retryable?:unknown}} */ (cause);
+      if (detail?.outcomeKnown !== true) throw cause;
+      return {
+        ok: false,
+        code: typeof detail.code === 'string' ? detail.code
+          : 'kernel-controller-startup-failed',
+        error: STARTUP_UNAVAILABLE_USER_FAILURE,
+        outcomeKnown: true,
+        phase: detail.phase === 'run' ? 'run' : 'startup',
+        retryable: detail.retryable !== false,
+      };
+    }
+  };
 
   const bindSemantic = (/** @type {any} */ owner) => {
     const binding = bindSlot('semantic', owner);
     return Object.freeze({
       callSemantic: (/** @type {unknown} */ payload) => use(
-        binding, 'semantic', () => client.callSemantic(payload),
+        binding, 'semantic', () => resultCall('callSemantic', payload),
       ),
       release: () => release(binding, () => slots.semantic, () => { slots.semantic = null; }),
     });
@@ -167,13 +234,13 @@ export const createKernelControllerGateway = ({ makeController, controller }) =>
     };
     return Object.freeze({
       callTurn: (/** @type {unknown} */ payload, /** @type {any} */ options = {}) => useTurn(
-        () => client.callTurn(payload, options),
+        () => resultCall('callTurn', payload, options),
       ),
       renderSystemPrompt: (/** @type {Record<string,unknown>} */ context) => useTurn(
-        () => client.renderSystemPrompt(context),
+        () => clientCall('renderSystemPrompt', context),
       ),
       withRun: (/** @type {()=>Promise<any>} */ operation) => useTurn(
-        () => client.withRun(operation),
+        () => clientCall('withRun', operation),
       ),
       release: () => release(binding, () => slots.turn, () => { slots.turn = null; }),
     });
@@ -182,7 +249,7 @@ export const createKernelControllerGateway = ({ makeController, controller }) =>
     const binding = bindSlot('runtime', owner);
     return Object.freeze({
       callRuntime: (/** @type {unknown} */ payload, /** @type {any} */ options = {}) => use(
-        binding, 'runtime', () => client.callRuntime(payload, options),
+        binding, 'runtime', () => resultCall('callRuntime', payload, options),
       ),
       release: () => release(binding, () => slots.runtime, () => { slots.runtime = null; }),
     });
@@ -191,7 +258,7 @@ export const createKernelControllerGateway = ({ makeController, controller }) =>
     const binding = bindFeatureSlot(cluster, owner);
     return Object.freeze({
       callFeature: (/** @type {unknown} */ payload, /** @type {any} */ options = {}) => callFeature(
-        binding, `feature-${cluster}`, payload, () => client.callFeature(payload, options),
+        binding, `feature-${cluster}`, payload, () => resultCall('callFeature', payload, options),
       ),
       release: () => release(
         binding, () => features.get(cluster), () => { features.delete(cluster); },
@@ -200,12 +267,16 @@ export const createKernelControllerGateway = ({ makeController, controller }) =>
   };
   return Object.freeze({
     bindSemantic, bindTurn, bindRuntime, bindFeature,
-    withRun: (/** @type {()=>Promise<any>} */ operation) => client.withRun(operation),
-    retire: () => client.retire?.(),
+    withRun: (/** @type {()=>Promise<any>} */ operation) => clientCall('withRun', operation),
+    retire: () => {
+      retirement += 1;
+      client?.retire?.();
+    },
     close: () => {
       if (closed) return;
       closed = true;
-      client.close();
+      client?.close();
+      client = null;
       slots.semantic = null;
       slots.turn = null;
       slots.runtime = null;

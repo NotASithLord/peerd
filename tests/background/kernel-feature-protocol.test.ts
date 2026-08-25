@@ -290,7 +290,7 @@ describe('sealed kernel feature protocol', () => {
         kernelCall: async () => ({ ok: true, outcomeKnown: true }),
       }))).toMatchObject({
         ok: false, code: 'feature-dispatch-failed', outcomeKnown: true,
-        retryable: false, phase: 'run',
+        retryable: !afterEffect, phase: 'run',
       });
     }
   });
@@ -576,6 +576,58 @@ describe('sealed kernel feature protocol', () => {
     expect(effects).toEqual([['administrative.hooks.read', {}]]);
     controller.close();
     (host as any)?.close();
+  });
+
+  test('keeps settled effect custody through a sealed-channel timeout', async () => {
+    for (const testCase of [
+      { route: 'hooks/list', message: {}, operation: 'administrative.hooks.read', payload: {}, retryable: true },
+      { route: 'hooks/remove', message: { id: 'hook' }, operation: 'administrative.hooks.remove', payload: { id: 'hook' }, retryable: false },
+    ] as const) {
+      let controller: any;
+      let effectSettled!: () => void;
+      const settled = new Promise<void>((resolve) => { effectSettled = resolve; });
+      const control = createKernelFeatureControl({
+        call: (capability, payload, callOptions) => controller.call(capability, payload, callOptions),
+        handleEffect: async () => ({ ok: true, outcomeKnown: true, value: {} }),
+      });
+      const featureHost = createKernelFeatureHost({ loaders: {
+        administrative: async () => ({ routes: {
+          [testCase.route]: async (_message: unknown, context: any) => {
+            await context.effects.call(testCase.operation, testCase.payload);
+            effectSettled();
+            return new Promise(() => {});
+          },
+        } }),
+      } });
+      let host: ReturnType<typeof bindControllerChannel> | null = null;
+      controller = await connectOffscreenController({
+        ensureOffscreen: async () => {},
+        capabilities: [KERNEL_FEATURE_DISPATCH_CAPABILITY],
+        buildDigest: BUILD_DIGEST,
+        authorizeCall: control.authorize,
+        handleKernelCall: control.handleKernelCall,
+        findHost: async () => ({ postMessage: (offer: any, transfer: Transferable[]) => {
+          host = bindControllerChannel({
+            port: transfer[0] as MessagePort,
+            channelId: offer.channelId, buildDigest: offer.buildDigest,
+            kernelEpoch: offer.kernelEpoch, hostEpoch: 'custody-host',
+            offeredCaps: offer.capabilities,
+            supportedCaps: [KERNEL_FEATURE_DISPATCH_CAPABILITY],
+            loadController: async () => createController({ featureHost }),
+          });
+        } }),
+      });
+      const result = control.dispatch(
+        'administrative', testCase.route, testCase.message, { timeoutMs: 20 },
+      );
+      await settled;
+      await expect(result).resolves.toMatchObject({
+        ok: false, code: 'controller-call-timeout',
+        outcomeKnown: true, retryable: testCase.retryable,
+      });
+      controller.close();
+      (host as any)?.close();
+    }
   });
 
   test('ignores a stale kernel epoch before loading the feature host', async () => {

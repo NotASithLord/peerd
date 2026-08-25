@@ -17,7 +17,7 @@ const makeState = () => {
   const calls: any[] = [];
   const gateway = createKernelControllerGateway({
     controller: { fixed: true },
-    makeController: (value) => {
+    loadController: async () => (value) => {
       creates += 1;
       deps = value;
       return {
@@ -70,6 +70,7 @@ describe('kernel controller gateway', () => {
       const ordered = [first, ...Object.keys(bindings).filter((name) => name !== first)]
         .map((name) => bindings[name as keyof typeof bindings]());
       const firstBinding = ordered[0] as any;
+      expect(state.creates()).toBe(0);
       await (first === 'semantic' ? firstBinding.callSemantic({ route: first })
         : first === 'turn' ? firstBinding.callTurn({ route: first })
           : first === 'runtime' ? firstBinding.callRuntime({ route: first })
@@ -167,9 +168,11 @@ describe('kernel controller gateway', () => {
     await expect(successor.callSemantic({ route: 'next' })).resolves.toMatchObject({ ok: true });
   });
 
-  test('only the kernel closes the shared controller', () => {
+  test('only the kernel closes the shared controller', async () => {
     const state = makeState();
-    state.gateway.bindSemantic(owner('semantic')).release();
+    const semantic = state.gateway.bindSemantic(owner('semantic'));
+    await semantic.callSemantic({ route: 'ready' });
+    semantic.release();
     state.gateway.bindTurn(owner('turn')).release();
     expect(state.closed()).toBe(0);
     state.gateway.retire();
@@ -177,5 +180,21 @@ describe('kernel controller gateway', () => {
     state.gateway.close();
     state.gateway.close();
     expect(state.closed()).toBe(1);
+  });
+
+  test('maps controller construction failures to a safe startup result', async () => {
+    const gateway = createKernelControllerGateway({
+      controller: {},
+      loadController: async () => () => { throw new Error('private construction failure'); },
+    });
+    await expect(gateway.bindRuntime(owner('runtime')).callRuntime({ route: 'ready' }))
+      .resolves.toEqual({
+        ok: false,
+        code: 'kernel-controller-startup-failed',
+        error: 'Temporarily unavailable. Try again.',
+        outcomeKnown: true,
+        phase: 'startup',
+        retryable: true,
+      });
   });
 });

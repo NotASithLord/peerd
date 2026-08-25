@@ -336,6 +336,7 @@ export const makeRefCountedFirefoxBackgroundLifetime = ({ start, stop }) => {
       );
       error.code = code;
       error.outcomeKnown = crossedDispatch ? outcomeKnownOnLoss : true;
+      /** @type {Error & {retryable?:boolean}} */ (error).retryable = error.outcomeKnown;
       error.phase = crossedDispatch ? 'run' : 'startup';
       throw error;
     });

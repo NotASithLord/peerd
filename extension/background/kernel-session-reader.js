@@ -10,6 +10,8 @@ const present = (record, messages = undefined) => {
     messagesV2: _v2,
     messages: _inline,
     latestNonSyntheticUserMessageId: _latest,
+    messageCount: _messageCount,
+    lastMessageAt: _lastMessageAt,
     ...metadata
   } = record;
   const value = { ...metadata, kind: metadata.kind ?? 'chat', depth: metadata.depth ?? 0 };
@@ -28,6 +30,7 @@ const realUserMessage = (message) => message?.role === 'user'
  *   getAll:(store:string)=>Promise<any[]>,
  *   getMany?:(store:string,keys:string[])=>Promise<any[]>,
  *   patch?:(store:string,key:string,fields:Record<string,unknown>)=>Promise<any|undefined>,
+ *   mutate?:(store:string,key:string,transform:(current:any)=>any)=>Promise<any|undefined>,
  * }} idb
  */
 export const createKernelSessionReader = (idb) => {
@@ -42,7 +45,8 @@ export const createKernelSessionReader = (idb) => {
     const rows = typeof idb.getMany === 'function'
       ? await idb.getMany(MESSAGE_STORE, ids)
       : await Promise.all(ids.map((/** @type {string} */ id) => idb.get(MESSAGE_STORE, id)));
-    return present(record, rows.filter(Boolean).map((row) => row.message));
+    return present(record, rows.flatMap((row, index) => row?.id === ids[index]
+        && row.sessionId === record.sessionId ? [row.message] : []));
   };
 
   return Object.freeze({
@@ -55,29 +59,82 @@ export const createKernelSessionReader = (idb) => {
       if (typeof idb.patch !== 'function') throw new Error('session-atomic-update-unavailable');
       return present(await idb.patch(SESSION_STORE, sessionId, fields));
     },
-    list: async () => {
-      const records = await idb.getAll(SESSION_STORE);
-      if (!records.length) return [];
-      const external = records.some((record) => record?.messagesV2 === true)
-        ? await idb.getAll(MESSAGE_STORE) : [];
-      /** @type {Map<string, Map<string, any>>} */
-      const rowsBySession = new Map();
-      for (const row of external) {
-        if (!row || typeof row.sessionId !== 'string' || typeof row.id !== 'string') continue;
-        const rows = rowsBySession.get(row.sessionId) ?? new Map();
-        rows.set(row.id, row.message);
-        rowsBySession.set(row.sessionId, rows);
+    listMetadata: async () => (await idb.getAll(SESSION_STORE))
+      .map((record) => present(record))
+      .sort((left, right) => right.createdAt - left.createdAt),
+    listSummaries: async () => {
+      const records = (await idb.getAll(SESSION_STORE))
+        .filter((record) => (record?.kind ?? 'chat') === 'chat');
+      const legacyV2 = records.filter((record) => record?.messagesV2 === true
+        && (!Number.isSafeInteger(record.messageCount) || record.messageCount < 0
+          || !Number.isFinite(record.lastMessageAt)));
+      const refs = legacyV2.flatMap((record) => (
+        Array.isArray(record.msgIndex) ? record.msgIndex : []
+      ).flatMap((/** @type {unknown} */ id) => typeof id === 'string'
+        ? [{ record, id }] : []));
+      const keys = refs.map(({ id }) => id);
+      const rows = keys.length === 0 ? [] : typeof idb.getMany === 'function'
+        ? await idb.getMany(MESSAGE_STORE, keys)
+        : await Promise.all(keys.map((key) => idb.get(MESSAGE_STORE, key)));
+      /** @type {Map<string,{count:number,last:any}>} */
+      const legacyStats = new Map(legacyV2.map((record) => [
+        record.sessionId, { count: 0, last: undefined },
+      ]));
+      for (const [index, { record, id }] of refs.entries()) {
+        const row = rows[index];
+        if (row?.id !== id || row.sessionId !== record.sessionId) continue;
+        const stats = legacyStats.get(record.sessionId);
+        if (!stats) continue;
+        stats.count += 1;
+        stats.last = row.message;
       }
-      const sessions = records.map((record) => {
-        if (record?.messagesV2 !== true) {
-          return present(record, Array.isArray(record?.messages) ? record.messages : []);
-        }
-        const rows = rowsBySession.get(record.sessionId) ?? new Map();
-        const messages = (Array.isArray(record.msgIndex) ? record.msgIndex : [])
-          .map((/** @type {string} */ id) => rows.get(id)).filter(Boolean);
-        return present(record, messages);
+      if (typeof idb.mutate === 'function') await Promise.allSettled(legacyV2.map((record) => {
+        const expected = (Array.isArray(record.msgIndex) ? record.msgIndex : [])
+          .filter((/** @type {unknown} */ id) => typeof id === 'string');
+        const stats = legacyStats.get(record.sessionId);
+        return idb.mutate?.(SESSION_STORE, record.sessionId, (current) => {
+          if (Number.isSafeInteger(current.messageCount) && current.messageCount >= 0
+              && Number.isFinite(current.lastMessageAt)) return current;
+          const currentIds = (Array.isArray(current.msgIndex) ? current.msgIndex : [])
+            .filter((/** @type {unknown} */ id) => typeof id === 'string');
+          if (currentIds.length !== expected.length
+              || currentIds.some((/** @type {string} */ id,
+                /** @type {number} */ index) => id !== expected[index])) {
+            return current;
+          }
+          const lastWhen = stats?.last?.when;
+          return {
+            ...current,
+            messageCount: stats?.count ?? 0,
+            lastMessageAt: Number.isFinite(lastWhen)
+              ? lastWhen : Number.isFinite(current.createdAt) ? current.createdAt : 0,
+          };
+        });
+      }));
+      const summaries = records.map((record) => {
+        const inline = record?.messagesV2 === true
+          ? [] : Array.isArray(record?.messages) ? record.messages : [];
+        const stats = legacyStats.get(record?.sessionId);
+        const last = stats?.last ?? inline.at(-1);
+        const summarized = Number.isSafeInteger(record?.messageCount)
+          && record.messageCount >= 0 && Number.isFinite(record?.lastMessageAt);
+        return {
+          kind: record?.kind ?? 'chat',
+          sessionId: record?.sessionId,
+          title: record?.title ?? null,
+          createdAt: record?.createdAt,
+          lastMessageAt: summarized ? record.lastMessageAt : last?.when ?? record?.createdAt,
+          messageCount: summarized ? record.messageCount
+            : record?.messagesV2 === true ? stats?.count ?? 0 : inline.length,
+          archivedAt: record?.archivedAt,
+          provider: record?.provider,
+          model: record?.model,
+          hasCustomSystemPrompt: typeof record?.customSystemPrompt === 'string'
+            && record.customSystemPrompt.length > 0,
+          toolManifest: record?.toolManifest,
+        };
       });
-      return sessions.sort((left, right) => right.createdAt - left.createdAt);
+      return summaries.sort((left, right) => right.createdAt - left.createdAt);
     },
     hasChat: async () => {
       const records = await idb.getAll(SESSION_STORE);

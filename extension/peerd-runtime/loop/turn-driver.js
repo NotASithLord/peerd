@@ -128,7 +128,7 @@ export const inboundActorCallAllowed = ({ isActor, inbound, actorType, name }) =
 export const makeTurnDriver = (/** @type {any} */ deps) => {
   const {
     vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
-    sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser,
+    sessions, turnSlots, buildTemporalBlock, memory, browser,
     skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
     filterByDwebActive, filterByDwebEnabled,
     filterDescriptorsByManifest, mainAgentDescriptors, listTools,
@@ -211,7 +211,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     });
     sessionId = created.sessionId;
     await sessionCache.sessionSet('currentSessionId', sessionId);
-    sessionState.set(created);
   }
 
   // Claim THIS session's turn slot. If this chat is already streaming,
@@ -1065,13 +1064,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // a 'cancelled' card (not a misleading green 'ok'). ok=false marks a failure.
       if (actorDisplay) uiPorts.broadcast({ type: 'turn/actor-done', parentToolUseId: actorDisplay.parentToolUseId, sessionId, ok: turnOk, aborted: lastStopReason === 'aborted' });
     }
-  }
-  // Refresh the SW's session cache from the turn's final state — but only
-  // when the user is still ON this chat. A turn finishing in a background
-  // conversation must not clobber the cache for the one now in view.
-  if (lastSession
-      && (await sessionCache.sessionGet('currentSessionId')) === lastSession.sessionId) {
-    sessionState.set(lastSession);
   }
   // why: the outcome lets goal mode stop on a failed/aborted turn rather than
   // re-driving a broken condition up to the cap. Normal sends ignore it.

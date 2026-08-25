@@ -16,6 +16,7 @@ import {
   kernelFeaturePayloadAllowed,
   parseKernelFeatureCall,
 } from './kernel-feature-policy.js';
+import { RUNTIME_DISPATCH_CAPABILITY } from './kernel-runtime-policy.js';
 import { CONTROLLER_TOOL_MANIFEST } from './controller-tool-manifest.js';
 import {
   parseToolExecutionRequest,
@@ -69,6 +70,37 @@ const makeCustody = () => {
   });
 };
 
+export const controllerCustodyIsAuthoritative = (/** @type {string} */ capability) =>
+  capability === KERNEL_FEATURE_DISPATCH_CAPABILITY
+  || capability === RUNTIME_DISPATCH_CAPABILITY;
+
+export const normalizeControllerCustody = (
+  /** @type {string} */ capability,
+  /** @type {any} */ result,
+  /** @type {{outcomeKnown:boolean,retryable:boolean}|null} */ custody,
+  /** @type {boolean} */ pending,
+) => {
+  const preservesUnknown = result?.ok === false && result.outcomeKnown === false
+    && result.retryable === false;
+  const base = pending && !preservesUnknown ? {
+    ok: false, code: 'controller-pending-kernel-effect',
+    outcomeKnown: result?.outcomeKnown === true,
+    ...(result?.retryable === false ? { retryable: false } : {}),
+  } : result ?? { ok: false, code: 'controller-result-missing' };
+  if (!custody) return base;
+  if (custody.outcomeKnown !== true) {
+    return { ...base, outcomeKnown: false, retryable: false };
+  }
+  if (!controllerCustodyIsAuthoritative(capability) && base?.outcomeKnown !== true) {
+    return { ...base, outcomeKnown: false, retryable: false };
+  }
+  if (base?.ok === true) return { ...base, outcomeKnown: true };
+  return {
+    ...base, ok: false, outcomeKnown: true,
+    retryable: custody.retryable && base?.retryable !== false,
+  };
+};
+
 export const controllerOuterPayloadCap = (/** @type {string} */ capability) =>
   capability === 'turn.run' ? TURN_OUTER_BYTES
     : capability === 'prompt.render' ? PROMPT_OUTER_BYTES
@@ -107,22 +139,7 @@ export const createControllerKernelQuota = (
   capability, outerPayload, toolManifest = CONTROLLER_TOOL_MANIFEST,
 ) => {
   if (capability === KERNEL_FEATURE_DISPATCH_CAPABILITY) {
-    const quota = createKernelFeatureEffectQuota(capability, outerPayload);
-    const replayable = parseKernelFeatureCall(capability, outerPayload)?.policy.replayClass === 'A';
-    const custody = makeCustody();
-    return Object.freeze({
-      ...quota,
-      observe: (/** @type {string} */ operation, /** @type {unknown} */ payload,
-        /** @type {unknown} */ result) => {
-        const observed = quota.observe(operation, payload, result);
-        custody.observe(observed?.ok === true ? result : observed, replayable);
-        return observed;
-      },
-      pendingLoss: replayable
-        ? () => Object.freeze({ outcomeKnown: true, retryable: true })
-        : unknownPendingLoss,
-      custody: custody.snapshot,
-    });
+    return createKernelFeatureEffectQuota(capability, outerPayload);
   }
   if (capability === 'semantic.dispatch') {
     const quota = createSemanticDemandQuota(outerPayload);

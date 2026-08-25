@@ -48,6 +48,28 @@ const mount = async (importReply, inspectReply, stateOverrides = {}) => {
 };
 
 describe('options.transfer — portable identity restore', () => {
+  it('shows and retries a chat-list startup failure', async () => {
+    let attempts = 0;
+    const send = async (/** @type {any} */ msg) => {
+      if (msg.type !== 'session/list') return { ok: true };
+      attempts += 1;
+      return attempts === 1 ? { ok: false, error: 'Temporarily unavailable. Try again.' }
+        : { ok: true, sessions: [{ sessionId: 'chat-1', title: 'Chat', createdAt: 1 }] };
+    };
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    m.mount(root, { view: () => m(TransferSection, { send }) });
+    try {
+      await flush();
+      const retry = /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Temporarily unavailable. Try again.'));
+      expect(retry).toBeTruthy();
+      retry.click();
+      await flush();
+      expect(root.querySelector('#dbgsess')?.textContent).toContain('Chat');
+    } finally { m.mount(root, null); root.remove(); }
+  });
+
   it('asks for a passphrase even when the backup carries no API keys', async () => {
     const { root, unmount } = await mount(() => ({ ok: false, error: 'unused' }));
     try {

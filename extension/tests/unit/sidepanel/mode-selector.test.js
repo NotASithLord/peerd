@@ -91,6 +91,38 @@ describe('ModeSelector (Plan/Act + confirm toggle)', () => {
     } finally { unmount(); }
   });
 
+  it('shows a refused update and retries it', async () => {
+    let attempts = 0;
+    const calls = /** @type {any[]} */ ([]);
+    const send = Object.assign(async (/** @type {any} */ msg) => {
+      calls.push(msg);
+      attempts += 1;
+      return attempts === 1 ? { ok: false, error: 'Temporarily unavailable. Try again.' }
+        : { ok: true };
+    }, { calls });
+    const { root, unmount } = mount({ mode: 'act', confirmActions: false }, send);
+    try {
+      /** @type {HTMLElement} */ (root.querySelectorAll('.planact-mode')[0]).click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(root.querySelector('.error-line')?.textContent)
+        .toBe('Temporarily unavailable. Try again.');
+      /** @type {HTMLElement} */ (root.querySelectorAll('.planact-mode')[0]).click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(calls.length).toBe(2);
+      expect(root.querySelector('.error-line')).toBe(null);
+    } finally { unmount(); }
+  });
+
+  it('shows a transport failure', async () => {
+    const send = Object.assign(async () => { throw new Error('Connection lost'); }, { calls: [] });
+    const { root, unmount } = mount({ mode: 'act', confirmActions: false }, send);
+    try {
+      /** @type {HTMLElement} */ (root.querySelectorAll('.planact-mode')[0]).click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(root.querySelector('.error-line')?.textContent).toBe('Connection lost');
+    } finally { unmount(); }
+  });
+
   it('confirm toggle reflects ON state and flips back off', () => {
     const send = makeSend();
     const { root, unmount } = mount({ mode: 'act', confirmActions: true }, send);

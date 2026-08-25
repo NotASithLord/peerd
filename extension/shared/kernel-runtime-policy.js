@@ -257,6 +257,10 @@ export const createRuntimeEffectQuota = (request) => {
   const calls = new Map();
   /** @type {Map<string, number>} */
   const pending = new Map();
+  let pendingIrreversible = 0;
+  let settledIrreversible = false;
+  let unknownIrreversible = false;
+  const irreversible = (/** @type {string} */ operation) => operation === 'rich.model.call';
   const pendingCap = Object.values(effects).reduce(
     (total, effect) => total + Number(effect.concurrent), 0,
   );
@@ -273,6 +277,7 @@ export const createRuntimeEffectQuota = (request) => {
     if (active >= effect.concurrent) return refused('runtime-effect-concurrency-exhausted');
     calls.set(operation, used + 1);
     pending.set(operation, active + 1);
+    if (irreversible(operation)) pendingIrreversible += 1;
     return Object.freeze({ ok: true, outcomeKnown: true });
   };
   const observe = (
@@ -286,35 +291,56 @@ export const createRuntimeEffectQuota = (request) => {
     if (active > 1) pending.set(operation, active - 1);
     else pending.delete(operation);
     const reply = record(result);
-    if (!reply || typeof reply.ok !== 'boolean' || typeof reply.outcomeKnown !== 'boolean'
-        || !bounded(reply, effect.resultBytes)) {
+    const validEnvelope = !!reply && typeof reply.ok === 'boolean'
+      && typeof reply.outcomeKnown === 'boolean' && bounded(reply, effect.resultBytes);
+    const settleCustody = (/** @type {boolean} */ accepted) => {
+      if (!irreversible(operation)) return;
+      pendingIrreversible = Math.max(0, pendingIrreversible - 1);
+      if (!accepted || reply?.outcomeKnown !== true) unknownIrreversible = true;
+      else if (reply.ok === true || reply.retryable !== true) settledIrreversible = true;
+    };
+    const invalid = () => {
+      settleCustody(false);
       return refused('runtime-effect-result-invalid', false);
-    }
+    };
+    if (!validEnvelope) return invalid();
     if (operation === 'runtime.bootstrap.read' && reply.ok === true
         && (reply.outcomeKnown !== true
           || !exactKeys(reply, ['ok', 'outcomeKnown', 'value'])
           || !parseRuntimeBootstrapProjection(reply.value))) {
-      return refused('runtime-effect-result-invalid', false);
+      return invalid();
     }
     if (operation === 'rich.script.admit' && reply.ok === true
         && (reply.outcomeKnown !== true
           || !exactKeys(reply, ['ok', 'outcomeKnown', 'value'])
           || !parseRuntimeRichAdmitProjection(reply.value))) {
-      return refused('runtime-effect-result-invalid', false);
+      return invalid();
     }
     if (operation === 'rich.model.call' && reply.ok === true
         && (reply.outcomeKnown !== true
           || !exactKeys(reply, ['ok', 'outcomeKnown', 'value'])
           || !parseRuntimeRichModelValue(reply.value))) {
-      return refused('runtime-effect-result-invalid', false);
+      return invalid();
     }
     if (operation === 'rich.script.abort' && reply.ok === true
         && (reply.outcomeKnown !== true || !exactKeys(reply, ['ok', 'outcomeKnown']))) {
-      return refused('runtime-effect-result-invalid', false);
+      return invalid();
     }
+    settleCustody(true);
     return Object.freeze({ ok: true, outcomeKnown: true });
   };
-  return Object.freeze({ admit, observe, pendingCap });
+  const custody = () => pendingIrreversible > 0 || unknownIrreversible
+    ? Object.freeze({ outcomeKnown: false, retryable: false })
+    : Object.freeze({ outcomeKnown: true, retryable: !settledIrreversible });
+  return Object.freeze({
+    admit,
+    observe,
+    pendingCap,
+    pendingLoss: (/** @type {string} */ operation) => irreversible(operation)
+      ? Object.freeze({ outcomeKnown: false, retryable: false })
+      : Object.freeze({ outcomeKnown: true, retryable: true }),
+    custody,
+  });
 };
 
 export const RUNTIME_DISPATCH_OUTER_BYTES = Math.max(

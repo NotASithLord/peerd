@@ -934,7 +934,6 @@ export const createKernelTurnLiveFactories = (deps) => {
     });
     sessionId = created.sessionId;
     await deps.sessionCache.sessionSet('currentSessionId', sessionId);
-    live.shared.sessionState.set(created);
     return sessionId;
   };
   const handleSystemCommand = async (/** @type {string} */ raw) => {
@@ -950,15 +949,13 @@ export const createKernelTurnLiveFactories = (deps) => {
     }
     if (/^clear$/i.test(argument)) {
       if (!sessionId) return;
-      live.shared.sessionState.set(await live.shared.sessions.setCustomSystemPrompt(sessionId, null));
+      await live.shared.sessions.setCustomSystemPrompt(sessionId, null);
       await deps.auditLog.append({ type: 'session_instructions_cleared', sessionId });
       await deps.pushState();
       return;
     }
     sessionId = await ensureCurrentSession();
-    live.shared.sessionState.set(
-      await live.shared.sessions.setCustomSystemPrompt(sessionId, argument),
-    );
+    await live.shared.sessions.setCustomSystemPrompt(sessionId, argument);
     await deps.auditLog.append({
       type: 'session_instructions_set', sessionId, details: { chars: argument.length },
     });
@@ -2834,7 +2831,7 @@ export const createKernelTurnLiveFactories = (deps) => {
   const makeDriverDeps = (/** @type {Record<string,any>} */ shared) => ({
     vault: deps.vault, VaultLockedError, sessionCache: deps.sessionCache,
     ensureActiveProvider, resolvePermission, sessions: shared.sessions,
-    sessionState: shared.sessionState, turnSlots: shared.turnSlots,
+    turnSlots: shared.turnSlots,
     buildTemporalBlock, memory: shared.memory, browser: deps.browser,
     skillRegistry, resolveManifestAllow, buildToolContext,
     filterByDwebActive, filterByDwebEnabled, filterDescriptorsByManifest,
@@ -2909,7 +2906,7 @@ export const createKernelTurnLiveFactories = (deps) => {
     session: {
       vault: deps.vault, auditLog: deps.auditLog, pushState: deps.pushState,
       sessions: shared.sessions, sessionCache: deps.sessionCache,
-      sessionState: shared.sessionState, autoMemory: live.autoMemory,
+      autoMemory: live.autoMemory,
       resolvePermission, normalizeMode, normalizeConfirmActions,
       SessionNotFoundError, maybeAutoResumeAfterRecovery: (/** @type {string} */ sessionId) =>
         live.actorRecoveryGate.runWhenReady(

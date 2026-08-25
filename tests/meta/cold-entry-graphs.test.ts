@@ -252,6 +252,8 @@ describe('cold entry graphs', () => {
     expect(runtimeImports).toEqual([
       './kernel-production-runtime.js',
       './kernel-demand-plane.js',
+      './kernel-session-authority.js',
+      './kernel-support-control.js',
     ]);
     expect(kernelSource).toContain(
       "const { createKernelDemandPlane } = await import('./kernel-demand-plane.js');",

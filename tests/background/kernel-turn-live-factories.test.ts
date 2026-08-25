@@ -321,7 +321,6 @@ const harness = async (
   const shared: any = {
     sessions,
     memory: { list: async () => [], get: async () => null, search: async () => [] },
-    sessionState: { get: () => root, set: () => {} },
     turnSlots: makeTurnSlots(),
     pageActivity: {
       begin: async () => {}, end: async () => {}, idle: async () => {},

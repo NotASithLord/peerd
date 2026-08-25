@@ -22,6 +22,7 @@ const isRealUserMessage = (message) => message?.role === 'user'
  * @param {{
  *   get:(store:string,key:string)=>Promise<any>,
  *   getMany?:(store:string,keys:string[])=>Promise<any[]>,
+ *   mutate?:(store:string,key:string,transform:(current:any)=>any)=>Promise<any|undefined>,
  *   put:(store:string,value:any)=>Promise<void>,
  * }} deps.idb
  * @param {(sessionId:string)=>Error} deps.notFound
@@ -34,6 +35,15 @@ export const createSessionTurnStore = ({
 }) => {
   /** @type {Map<string, Promise<unknown>>} */
   const sessionChains = new Map();
+  const mutateRecord = async (/** @type {string} */ sessionId,
+    /** @type {(record:any)=>any} */ transform) => {
+    if (typeof idb.mutate === 'function') return idb.mutate(SESSIONS, sessionId, transform);
+    const record = await idb.get(SESSIONS, sessionId);
+    if (!record) return undefined;
+    const updated = transform(record);
+    await idb.put(SESSIONS, updated);
+    return updated;
+  };
 
   /**
    * Serialize every read-modify-write of one session record, including lazy
@@ -75,6 +85,8 @@ export const createSessionTurnStore = ({
       messagesV2: _v2,
       messages: _inline,
       latestNonSyntheticUserMessageId: _latest,
+      messageCount: _messageCount,
+      lastMessageAt: _lastMessageAt,
       ...metadata
     } = record;
     return withKindDefaults({ ...metadata, messages });
@@ -87,6 +99,8 @@ export const createSessionTurnStore = ({
       messagesV2: _v2,
       messages: _inline,
       latestNonSyntheticUserMessageId: _latest,
+      messageCount: _messageCount,
+      lastMessageAt: _lastMessageAt,
       ...metadata
     } = record;
     return withKindDefaults(metadata);
@@ -101,6 +115,7 @@ export const createSessionTurnStore = ({
   const migrate = async (record) => {
     if (record.messagesV2) return record;
     const inline = Array.isArray(record.messages) ? record.messages : [];
+    /** @type {string[]} */
     const msgIndex = [];
     for (let seq = 0; seq < inline.length; seq++) {
       const message = inline[seq];
@@ -108,9 +123,14 @@ export const createSessionTurnStore = ({
       await idb.put(MESSAGES, { id, sessionId: record.sessionId, seq, message });
       msgIndex.push(id);
     }
-    const { messages: _drop, ...metadata } = record;
-    const migrated = { ...metadata, msgIndex, messagesV2: true };
-    await idb.put(SESSIONS, migrated);
+    const migrated = await mutateRecord(record.sessionId, (current) => {
+      if (current.messagesV2) return current;
+      const { messages: _drop, ...metadata } = current;
+      return {
+        ...metadata, msgIndex, messagesV2: true, messageCount: inline.length,
+        lastMessageAt: inline.at(-1)?.when ?? current.createdAt,
+      };
+    });
     return migrated;
   };
 
@@ -137,8 +157,8 @@ export const createSessionTurnStore = ({
   const updateRecord = (sessionId, transform) => serialize(sessionId, async () => {
     const record = await getRecord(sessionId);
     if (!record) throw notFound(sessionId);
-    const updated = transform(record);
-    await idb.put(SESSIONS, updated);
+    const updated = await mutateRecord(sessionId, transform);
+    if (!updated) throw notFound(sessionId);
     return /** @type {Promise<Session>} */ (assemble(updated));
   });
 
@@ -163,16 +183,23 @@ export const createSessionTurnStore = ({
       return /** @type {Promise<Session>} */ (assemble(record));
     }
     await idb.put(MESSAGES, { id, sessionId, seq, message });
-    const updated = {
-      ...record,
-      msgIndex: [...record.msgIndex, id],
-      ...(isRealUserMessage(message) ? { latestNonSyntheticUserMessageId: id } : {}),
-    };
-    if (!record.title && message.role === 'user' && typeof message.content === 'string') {
-      const title = message.content.replace(/\s+/g, ' ').trim();
-      if (title) updated.title = title.slice(0, 60);
-    }
-    await idb.put(SESSIONS, updated);
+    const updated = await mutateRecord(sessionId, (current) => {
+      if (current.msgIndex.includes(id)) return current;
+      const next = {
+        ...current,
+        msgIndex: [...current.msgIndex, id],
+        messageCount: Number.isSafeInteger(current.messageCount) && current.messageCount >= 0
+          ? current.messageCount + 1 : current.msgIndex.length + 1,
+        lastMessageAt: message?.when ?? current.lastMessageAt ?? current.createdAt,
+        ...(isRealUserMessage(message) ? { latestNonSyntheticUserMessageId: id } : {}),
+      };
+      if (!current.title && message.role === 'user' && typeof message.content === 'string') {
+        const title = message.content.replace(/\s+/g, ' ').trim();
+        if (title) next.title = title.slice(0, 60);
+      }
+      return next;
+    });
+    if (!updated) throw notFound(sessionId);
     try { await onMessageAppended(sessionId, message); } catch {}
     return /** @type {Promise<Session>} */ (assemble(updated));
   });

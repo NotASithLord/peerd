@@ -1,12 +1,4 @@
 // @ts-check
-// background/routes/sessions.js: agent send/stop, session read routes,
-// composer palette sources, and the actor/review spawn entry points.
-//
-// The mutating session routes — session/{setModel,switch,reset,archive} +
-// permission/set — live in routes/session-mutations.js (they go through the
-// session-state store). The routes here close over only stable collaborators.
-// Bodies verbatim, deps injected.
-
 /**
  * @param {Record<string, any>} deps
  * @returns {Record<string, (msg?: any, context?: any) => Promise<any>>}
@@ -373,96 +365,6 @@ export const makeSessionRoutes = (deps) => {
         parentDepth: parent?.depth ?? 0,
       });
       return { ok: true, result: out };
-    },
-  };
-};
-
-/**
- * Controller-independent session and navigation reads. These stay in the
- * authority kernel so basic UI works without a semantic feature realm.
- * @param {Record<string, any>} deps
- * @returns {Record<string, (msg?: any) => Promise<any>>}
- */
-export const makeSessionKernelRoutes = (deps) => {
-  const {
-    appClient, browser, commandSources, denylistStore, manifestLabel,
-    matchesDenylist, originOfTabUrl, sessionCache, sessions, vault,
-    contextSnapshots,
-  } = deps;
-  return {
-    'commands/list': async () => {
-      const all = await commandSources.list();
-      return { ok: true, commands: all.map((/** @type {any} */ command) => ({
-        name: command.name, description: command.description ?? '',
-      })) };
-    },
-    'composer/tabs': async () => {
-      let tabs = [];
-      try { tabs = await browser.tabs.query({}); } catch { tabs = []; }
-      return { ok: true, tabs: tabs.map((/** @type {any} */ tab) => {
-        const url = tab.url ?? '';
-        const origin = originOfTabUrl(url);
-        let blocked = false;
-        try {
-          const host = url ? new URL(url).hostname : '';
-          blocked = !!host && matchesDenylist(host, denylistStore.patterns());
-        } catch { blocked = false; }
-        return {
-          id: tab.id, title: (tab.title ?? '').slice(0, 80), origin,
-          active: !!tab.active,
-          blocked: blocked
-            || /^(chrome|about|devtools|chrome-extension|edge|moz-extension):/.test(url),
-        };
-      }) };
-    },
-    'composer/files': async () => {
-      if (vault.isLocked()) return { ok: true, files: [] };
-      try {
-        const sessionId = await sessionCache.sessionGet('currentSessionId');
-        if (!appClient?.listFiles) return { ok: true, files: [] };
-        const files = await appClient.listFiles({ sessionId });
-        return { ok: true, files: (files ?? []).map((/** @type {any} */ file) =>
-          typeof file === 'string' ? file : file.path) };
-      } catch { return { ok: true, files: [] }; }
-    },
-    'session/list': async () => {
-      if (vault.isLocked()) return { ok: false, error: 'locked' };
-      const all = await sessions.list();
-      return {
-        ok: true,
-        sessions: all.filter((/** @type {any} */ session) => {
-          const kind = session.kind ?? 'chat';
-          return kind !== 'spawned' && kind !== 'actor';
-        }).map((/** @type {any} */ session) => ({
-          sessionId: session.sessionId,
-          title: session.title ?? null,
-          createdAt: session.createdAt,
-          lastMessageAt: session.messages[session.messages.length - 1]?.when
-            ?? session.createdAt,
-          messageCount: session.messages.length,
-          archived: session.archivedAt !== undefined,
-          provider: session.provider,
-          model: session.model,
-          hasCustomSystemPrompt: typeof session.customSystemPrompt === 'string'
-            && session.customSystemPrompt.length > 0,
-          toolManifestLabel: manifestLabel(session.toolManifest),
-        })),
-      };
-    },
-    'session/get': async ({ sessionId } = {}) => {
-      if (vault.isLocked()) return { ok: false, error: 'locked' };
-      if (typeof sessionId !== 'string' || !sessionId) {
-        return { ok: false, error: 'sessionId-required' };
-      }
-      const session = await sessions.get(sessionId);
-      return session ? { ok: true, session } : { ok: false, error: 'session-not-found' };
-    },
-    'session/contextSnapshots': async ({ sessionId } = {}) => {
-      if (vault.isLocked()) return { ok: false, error: 'locked' };
-      if (typeof sessionId !== 'string' || !sessionId) {
-        return { ok: false, error: 'sessionId-required' };
-      }
-      return { ok: true, snapshots: contextSnapshots.snapshotsFor(sessionId) };
     },
   };
 };

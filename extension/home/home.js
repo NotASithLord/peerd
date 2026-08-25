@@ -197,19 +197,30 @@ const send = makeReconciledUiSender({
 // ---- chat-component uiActions (the subset home needs; no voice) -----------
 /** @type {Set<string>} */
 const actorFetchInFlight = new Set();
-/** @param {string} sessionId */
-const loadActor = (sessionId) => {
+/** @param {string} sessionId @param {boolean} [retry] */
+const loadActor = (sessionId, retry = false) => {
   if (!sessionId) return;
-  if (currentState.spawned.sessions[sessionId]?.messages?.length) return;
+  const current = currentState.spawned.sessions[sessionId];
+  if (current?.messages?.length || (!retry && current?.loadError)) return;
   if (actorFetchInFlight.has(sessionId)) return;
   actorFetchInFlight.add(sessionId);
   send({ type: 'session/get', sessionId }).then((/** @type {any} */ resp) => {
     actorFetchInFlight.delete(sessionId);
     if (resp?.ok && resp.session) {
-      currentState = putSpawnedSession(currentState, resp.session);
-      m.redraw();
+      currentState = putSpawnedSession(currentState, { ...resp.session, loadError: undefined });
+    } else {
+      currentState = putSpawnedSession(currentState, {
+        sessionId, messages: [], loadError: resp?.error ?? 'Temporarily unavailable. Try again.',
+      });
     }
-  }).catch(() => { actorFetchInFlight.delete(sessionId); });
+    m.redraw();
+  }).catch(() => {
+    actorFetchInFlight.delete(sessionId);
+    currentState = putSpawnedSession(currentState, {
+      sessionId, messages: [], loadError: 'Temporarily unavailable. Try again.',
+    });
+    m.redraw();
+  });
 };
 const confirmAnswer = makeConfirmationAnswer({
   send,
@@ -513,16 +524,28 @@ const fmtAgo = (ms) => {
 // The recent-chats list column (ChatGPT-style): "+ New chat" + every chat,
 // newest-active first. Lives to the LEFT of the chat, off the rail. Selecting a
 // chat switches the SW session; "New chat" resets to a fresh one. Refreshed on
-// a light interval so a freshly-titled chat (the agent titles it) updates.
+// state changes so a freshly-titled chat (the agent titles it) updates.
 const ChatListPanel = () => {
   /** @type {any[] | null} */
   let sessions = null;
-  /** @type {ReturnType<typeof setInterval> | number} */
-  let timer = 0;
+  let error = '';
+  /** @type {string|null} */
+  let sessionStamp = null;
+  let queued = false;
+  const loadVisible = () => { if (!document.hidden) load(); };
   /** @type {string | null} */
   let deletingId = null;   // the row currently playing its delete animation
   const load = () => send({ type: 'session/list' })
-    .then((/** @type {any} */ r) => { if (r?.ok) { sessions = r.sessions ?? []; m.redraw(); } }).catch(() => {});
+    .then((/** @type {any} */ r) => {
+      if (r?.ok) {
+        sessions = r.sessions ?? [];
+        error = '';
+      } else error = r?.error ?? 'Temporarily unavailable. Try again.';
+      m.redraw();
+    }).catch(() => {
+      error = 'Temporarily unavailable. Try again.';
+      m.redraw();
+    });
   // Animate the row out, THEN archive it (a deleted chat leaves the list). If it
   // was the current chat, drop into a fresh one so the view isn't left on a
   // now-deleted session.
@@ -545,11 +568,24 @@ const ChatListPanel = () => {
   };
   return {
     oninit: load,
-    oncreate() { timer = setInterval(() => { if (!document.hidden) load(); }, 5000); },
-    onremove() { if (timer) clearInterval(timer); },
+    oncreate() {
+      document.addEventListener('visibilitychange', loadVisible);
+      window.addEventListener('focus', load);
+    },
+    onremove() {
+      document.removeEventListener('visibilitychange', loadVisible);
+      window.removeEventListener('focus', load);
+    },
     /** @param {{ attrs: { state: any } }} vnode */
     view: ({ attrs: { state } }) => {
       const cur = state.session?.sessionId;
+      const nextStamp = `${cur ?? ''}:${state.session?.title ?? ''}:${state.session?.messages?.length ?? 0}`;
+      if (sessionStamp === null) sessionStamp = nextStamp;
+      else if (sessions !== null && sessionStamp !== nextStamp && !queued) {
+        sessionStamp = nextStamp;
+        queued = true;
+        queueMicrotask(() => { queued = false; load(); });
+      }
       const visible = (sessions ?? []).filter((/** @type {any} */ s) => !s.archived)
         .sort((/** @type {any} */ a, /** @type {any} */ b) => (b.lastMessageAt ?? b.createdAt ?? 0) - (a.lastMessageAt ?? a.createdAt ?? 0));
       return m('.chat-list', [
@@ -558,7 +594,11 @@ const ChatListPanel = () => {
           m('button.chat-list-toggle', { title: 'Hide chats', 'aria-label': 'Hide chats', onclick: toggleChatList }, '«'),
         ]),
         m('button.chat-list-new', { onclick: async () => { await send({ type: 'session/reset' }); load(); } }, '＋ New chat'),
-        m('.chat-list-items', visible.length
+        m('.chat-list-items', error
+          ? m('button.chat-list-empty.muted', { type: 'button', onclick: load }, error)
+          : sessions === null
+            ? m('.chat-list-empty.muted', 'Loading…')
+            : visible.length
           ? visible.map((/** @type {any} */ s) => m('.chat-list-item', {
               key: s.sessionId,
               class: [s.sessionId === cur ? 'is-active' : '', deletingId === s.sessionId ? 'is-deleting' : ''].filter(Boolean).join(' '),
@@ -573,7 +613,7 @@ const ChatListPanel = () => {
                 onclick: (/** @type {Event} */ e) => { e.stopPropagation(); deleteChat(s.sessionId, s.sessionId === cur); },
               }),
             ]))
-          : m('.chat-list-empty.muted', 'No chats yet.')),
+            : m('.chat-list-empty.muted', 'No chats yet.')),
       ]);
     },
   };

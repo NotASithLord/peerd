@@ -57,7 +57,6 @@ const probeBoundActorTurnDriver = async () => {
       get: async () => session,
       setCost: async () => {},
     },
-    sessionState: { set: () => {} },
     turnSlots: {
       claim: () => ({ controller: new AbortController(), release: () => { releases++; } }),
       isBusy: () => false,

@@ -48,7 +48,9 @@ describe('packaged Chrome lifecycle fault lane', () => {
 
   test('fails closed when a pre-package source seam drifts', () => {
     expect(() => injectLifecycleFaultKernel(
-      kernelSource.replace('  ...systemReadRoutes,\n  ...demandRoutes,', ''),
+      kernelSource.replace(
+        '  ...systemReadRoutes,\n  ...sessionSupportRoutes,\n  ...demandRoutes,', '',
+      ),
     )).toThrow('source fault route seam changed');
     expect(() => assertLifecycleFaultExecutionSeam(
       dispatcherSource.replace(

@@ -45,9 +45,9 @@ export const ModeSelector = {
    * @param {{ attrs: {
    *   permission?: { mode?: string, confirmActions?: boolean } | null,
    *   send: Send,
-   * } }} vnode
+   * }, state: any }} vnode
    */
-  view: ({ attrs: { permission, send } }) => {
+  view: ({ attrs: { permission, send }, state: ui }) => {
     const mode = permission?.mode === 'act' ? 'act' : 'plan';
     // why: fail toward "confirms on" in the RENDER too — if the SW state
     // hasn't arrived yet, show the cautious reading the policy would
@@ -55,11 +55,27 @@ export const ModeSelector = {
     const confirms = permission?.confirmActions !== false;
     const isAct = mode === 'act';
 
+    const commit = async (/** @type {Record<string,unknown>} */ message) => {
+      if (ui.busy) return;
+      ui.busy = true;
+      ui.error = '';
+      m.redraw();
+      try {
+        const reply = await send(message);
+        if (reply?.ok === false) throw new Error(reply.error ?? 'Temporarily unavailable. Try again.');
+      } catch (cause) {
+        ui.error = cause instanceof Error
+          ? cause.message : 'Temporarily unavailable. Try again.';
+      } finally {
+        ui.busy = false;
+        m.redraw();
+      }
+    };
     /** @param {string} next */
-    const setMode = (next) => settleUiEffect(send({ type: 'permission/set', mode: next }));
+    const setMode = (next) => settleUiEffect(commit({ type: 'permission/set', mode: next }));
     /** @param {boolean} next */
     const setConfirm = (next) => settleUiEffect(
-      send({ type: 'permission/set', confirmActions: next }),
+      commit({ type: 'permission/set', confirmActions: next }),
     );
 
     return m('.planact', { role: 'group', 'aria-label': 'Agent permission mode' }, [
@@ -68,12 +84,14 @@ export const ModeSelector = {
       m('.planact-modes', [
         m('button.planact-mode', {
           class: mode === 'plan' ? 'is-active' : '',
+          disabled: ui.busy,
           'aria-pressed': String(mode === 'plan'),
           title: 'Plan — read-only + navigation. The agent can look and load URLs, but not act.',
           onclick: () => mode !== 'plan' && setMode('plan'),
         }, MODE_LABEL.plan),
         m('button.planact-mode', {
           class: mode === 'act' ? 'is-active' : '',
+          disabled: ui.busy,
           'aria-pressed': String(mode === 'act'),
           title: 'Act — writes allowed. "Confirm" controls whether each action asks first.',
           onclick: () => mode !== 'act' && setMode('act'),
@@ -85,7 +103,7 @@ export const ModeSelector = {
       // in. Same state as the Settings "Confirm before actions" toggle.
       m('button.planact-confirm', {
         class: confirms ? 'is-on' : '',
-        disabled: !isAct,
+        disabled: !isAct || ui.busy,
         'aria-pressed': String(confirms),
         title: !isAct
           ? 'Switch to Act to change confirmation'
@@ -94,6 +112,7 @@ export const ModeSelector = {
             : 'Confirm actions: OFF — the agent runs without asking, until you halt',
         onclick: () => setConfirm(!confirms),
       }, confirms ? 'Confirm: on' : 'Confirm: off'),
+      ui.error ? m('p.error-line', ui.error) : null,
     ]);
   },
 };

@@ -22,7 +22,7 @@ const controller = (overrides: Record<string, any> = {}) => ({
 });
 
 const gateway = (makeController: (deps: any) => any) => createKernelControllerGateway({
-  controller: {}, makeController,
+  controller: {}, loadController: async () => makeController,
 });
 
 const makeRuntime = (locked = false, docs: any[] = [], withTurn = false) => {
@@ -103,7 +103,7 @@ describe('kernel semantic runtime', () => {
       await state.runtime.routes[route](message, {});
     }
     expect(state.controllerCalls()).toBe(0);
-    expect(state.controllerCreates()).toBe(1);
+    expect(state.controllerCreates()).toBe(0);
   });
 
   test('contact route shells cross the sealed controller while storage stays local', async () => {
@@ -148,7 +148,7 @@ describe('kernel semantic runtime', () => {
     });
     await expect(runtime.routes['app/get-meta']({ appId: 'a' }, 'forged'))
       .resolves.toEqual({ ok: false, error: 'app-meta-unauthorized' });
-    expect(controllerCreates).toBe(1);
+    expect(controllerCreates).toBe(0);
     await expect(runtime.routes['app/get-meta']({ appId: 'a' }, 'owned-app'))
       .resolves.toEqual({ ok: true });
     expect(payloads[0]).toMatchObject({
@@ -207,7 +207,7 @@ describe('kernel semantic runtime', () => {
     }
     expect(state.io()).toBe(0);
     expect(state.controllerCalls()).toBe(0);
-    expect(state.controllerCreates()).toBe(1);
+    expect(state.controllerCreates()).toBe(0);
   });
 
   test('returns an export above the controller limit without touching the controller', async () => {
@@ -215,7 +215,7 @@ describe('kernel semantic runtime', () => {
     const state = makeRuntime(false, [{ id: 'user', kind: 'user', body }]);
     const result = await state.runtime.routes['memory/export']();
     expect(result.payload.docs[0].body).toBe(body);
-    expect(state.controllerCreates()).toBe(1);
+    expect(state.controllerCreates()).toBe(0);
     expect(state.controllerCalls()).toBe(0);
   });
 
@@ -224,7 +224,7 @@ describe('kernel semantic runtime', () => {
     const state = makeRuntime(false, [{ id: 'user', kind: 'user', body }], true);
     const result = await state.runtime.routes['memory/export']();
     expect(result.payload.docs[0].body).toBe(body);
-    expect(state.controllerCreates()).toBe(1);
+    expect(state.controllerCreates()).toBe(0);
     expect(state.controllerCalls()).toBe(0);
   });
 

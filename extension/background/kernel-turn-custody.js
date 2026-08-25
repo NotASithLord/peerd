@@ -5,7 +5,6 @@ import {
   createSessionStore,
   makeTurnSlots,
 } from '/peerd-runtime/kernel.js';
-import { makeSessionState } from './session-state.js';
 import { createPageActivityReporter } from './page-activity.js';
 
 /** @param {Record<string,any>} deps */
@@ -22,7 +21,6 @@ export const createKernelTurnCustody = (deps) => {
       actorRuntime?.onSessionMessageAppended?.(sessionId, message),
   });
   const memory = createMemoryStore({ idb: deps.idb });
-  const sessionState = makeSessionState();
   const turnSlots = makeTurnSlots({
     onAbort: deps.onAbort,
     forceReleaseMs: deps.turnForceReleaseMs,
@@ -43,7 +41,6 @@ export const createKernelTurnCustody = (deps) => {
     uiPorts: deps.uiPorts,
     sessions,
     memory,
-    sessionState,
     turnSlots,
     pageActivity,
     pushState: deps.pushState,

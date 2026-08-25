@@ -137,15 +137,18 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     originState,
   } = {}) => {
     const normalizedManifest = normalizeToolManifest(toolManifest);
+    const createdAt = now();
     const record = {
       sessionId: generateId(),
-      createdAt: now(),
+      createdAt,
       provider,
       model,
       // v2: messages live in the message store; the record carries order.
       msgIndex: [],
       messagesV2: true,
       latestNonSyntheticUserMessageId: null,
+      messageCount: 0,
+      lastMessageAt: createdAt,
       kind,
       depth,
       ...(permissionMode !== undefined ? { permissionMode } : {}),
@@ -254,6 +257,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
       /** @type {string[]} */
       const msgIndex = [];
       let latestNonSyntheticUserMessageId = null;
+      let lastMessageAt;
       for (let seq = 0; seq < sourceMessages.length; seq++) {
         const source = sourceMessages[seq];
         if (!source || typeof source !== 'object') continue;
@@ -268,9 +272,10 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
           if (!occupied || occupied.sessionId === sessionId) break;
           id = `${base}:${suffix}`;
         }
-        const message = { ...pickPortable(source, PORTABLE_MESSAGE_FIELDS), id };
+        const message = /** @type {any} */ ({ ...pickPortable(source, PORTABLE_MESSAGE_FIELDS), id });
         await idb.put(MSGS, { id, sessionId, seq: msgIndex.length, message });
         msgIndex.push(id);
+        if (Number.isFinite(message.when)) lastMessageAt = message.when;
         if (turnRecords.isRealUserMessage(message)) latestNonSyntheticUserMessageId = id;
       }
 
@@ -286,6 +291,9 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
         msgIndex,
         messagesV2: true,
         latestNonSyntheticUserMessageId,
+        messageCount: msgIndex.length,
+        lastMessageAt: lastMessageAt
+          ?? (Number.isFinite(portable.createdAt) ? portable.createdAt : now()),
         ...(Number.isFinite(portable.archivedAt) ? { archivedAt: portable.archivedAt } : {}),
         ...(typeof portable.title === 'string' && portable.title ? { title: portable.title } : {}),
         ...(portable.cost && typeof portable.cost === 'object' ? { cost: portable.cost } : {}),

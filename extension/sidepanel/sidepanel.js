@@ -91,19 +91,30 @@ const send = makeReconciledUiSender({
 // re-expand mid-fetch doesn't fire a second request.
 /** @type {Set<string>} */
 const actorFetchInFlight = new Set();
-/** @param {string} sessionId */
-const loadActor = (sessionId) => {
+/** @param {string} sessionId @param {boolean} [retry] */
+const loadActor = (sessionId, retry = false) => {
   if (!sessionId) return;
-  if (currentState.spawned.sessions[sessionId]?.messages?.length) return;
+  const current = currentState.spawned.sessions[sessionId];
+  if (current?.messages?.length || (!retry && current?.loadError)) return;
   if (actorFetchInFlight.has(sessionId)) return;
   actorFetchInFlight.add(sessionId);
   send({ type: 'session/get', sessionId }).then((resp) => {
     actorFetchInFlight.delete(sessionId);
     if (resp?.ok && resp.session) {
-      currentState = putSpawnedSession(currentState, resp.session);
-      m.redraw();
+      currentState = putSpawnedSession(currentState, { ...resp.session, loadError: undefined });
+    } else {
+      currentState = putSpawnedSession(currentState, {
+        sessionId, messages: [], loadError: resp?.error ?? 'Temporarily unavailable. Try again.',
+      });
     }
-  }).catch(() => { actorFetchInFlight.delete(sessionId); });
+    m.redraw();
+  }).catch(() => {
+    actorFetchInFlight.delete(sessionId);
+    currentState = putSpawnedSession(currentState, {
+      sessionId, messages: [], loadError: 'Temporarily unavailable. Try again.',
+    });
+    m.redraw();
+  });
 };
 
 // Reentry guard for voice auto-restore so a chatty state push doesn't

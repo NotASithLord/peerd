@@ -18,7 +18,7 @@ const withWebExtensionRuntime = async <T>(run: () => Promise<T>): Promise<T> => 
 };
 
 describe('native storage surface', () => {
-  test('exports only the ten IDB operations used by the authority kernel', async () => {
+  test('exports only the IDB operations used by the authority kernel', async () => {
     await withWebExtensionRuntime(async () => {
       const { idb, kv } = await import('../../extension/peerd-egress/kernel-storage.js');
 
@@ -30,6 +30,7 @@ describe('native storage surface', () => {
         'getAll',
         'getAllKeys',
         'getMany',
+        'mutate',
         'patch',
         'put',
         'transact',
