@@ -30,6 +30,25 @@ const loadFailure = (/** @type {any} */ cause) => ({
   phase: 'startup',
 });
 
+const controllerToolLoadAbort = () => Object.assign(
+  new Error('controller-tool-runtime-load-aborted'),
+  {
+    code: 'controller-tool-runtime-load-aborted', outcomeKnown: true,
+    retryable: true, phase: 'startup',
+  },
+);
+
+/** @template T @param {()=>Promise<T>} load @param {AbortSignal} signal */
+export const loadControllerToolRuntimeForCall = (load, signal) => {
+  if (signal.aborted) return Promise.reject(controllerToolLoadAbort());
+  /** @type {(cause:Error)=>void} */ let rejectAbort = () => {};
+  const aborted = new Promise((_, reject) => { rejectAbort = reject; });
+  const onAbort = () => rejectAbort(controllerToolLoadAbort());
+  signal.addEventListener('abort', onAbort, { once: true });
+  return Promise.race([load(), aborted])
+    .finally(() => signal.removeEventListener('abort', onAbort));
+};
+
 const isRecord = (/** @type {unknown} */ value) => value !== null
   && typeof value === 'object' && !Array.isArray(value);
 
@@ -87,7 +106,9 @@ const makeDefaultHandlers = (/** @type {ReturnType<typeof createKernelFeatureHos
         /** @type {any} */ executionOptions,
       ) => {
         try {
-          const tools = await loadToolRuntime();
+          const tools = await loadControllerToolRuntimeForCall(
+            loadToolRuntime, executionOptions.signal,
+          );
           return tools.executeControllerToolCall(request, executionOptions);
         } catch (cause) {
           const input = /** @type {Record<string,any>} */ (request ?? {});

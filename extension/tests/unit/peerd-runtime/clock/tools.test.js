@@ -50,5 +50,16 @@ describe('clock.tools', () => {
       const r = await waitUntilTool.execute({ when: 'gobbledygook' }, ctx());
       expect(r.ok).toBe(false);
     });
+
+    it('stops immediately with its turn', async () => {
+      const controller = new AbortController();
+      const pending = waitUntilTool.execute(
+        { when: '1h' }, ctx({ abortSignal: controller.signal }),
+      );
+      controller.abort();
+      let error = null;
+      try { await pending; } catch (cause) { error = cause; }
+      expect(/** @type {{name?:string}|null} */ (error)?.name).toBe('AbortError');
+    });
   });
 });

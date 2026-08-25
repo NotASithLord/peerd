@@ -75,11 +75,16 @@ const context = (over: Record<string, unknown> = {}) => {
 
 const runHarness = async ({
   bridgeHooks = {}, executeToolCall, ctx = context(), leaveOpen = false,
+  interceptKernel,
 }: {
   bridgeHooks?: Record<string, unknown>;
   executeToolCall: (request: any, options: any) => Promise<any>;
   ctx?: any;
   leaveOpen?: boolean;
+  interceptKernel?: (
+    operation: string, payload: unknown, next: () => Promise<any>,
+    invoke: (operation: string, payload: unknown) => Promise<any>,
+  ) => Promise<any>;
 }) => {
   let bridge!: ReturnType<typeof makeControllerTurnBridge>;
   let sequence = 0;
@@ -90,11 +95,16 @@ const runHarness = async ({
       return runtime.runControllerTurn(payload, {
         signal: options.signal,
         authority,
-        kernelCall: (operation: string, kernelPayload: unknown) =>
-          bridge.handleKernelCall(operation, kernelPayload, {
+        kernelCall: (operation: string, kernelPayload: unknown) => {
+          const invoke = (candidate: string, candidatePayload: unknown) =>
+            bridge.handleKernelCall(candidate, candidatePayload, {
             capability, authority, signal: options.signal,
             deadlineAt: Date.now() + 60_000,
-          }),
+            });
+          const next = () => invoke(operation, kernelPayload);
+          return interceptKernel
+            ? interceptKernel(operation, kernelPayload, next, invoke) : next();
+        },
       });
     },
   });
@@ -232,6 +242,99 @@ describe('controller turn finite tool protocol', () => {
     expect(result.error).toBeNull();
     expect(legacy).toBe(1);
     expect(executed).toBe(0);
+  });
+
+  test('keeps wait_until in the durable legacy lane', async () => {
+    let legacy = 0;
+    let executed = 0;
+    const waitDescriptor = {
+      name: 'wait_until', description: 'Wait.', schema: { type: 'object' },
+    };
+    const result = await runHarness({
+      ctx: context({
+        tools: [waitDescriptor], refreshTools: async () => [waitDescriptor],
+        toolDispatch: async () => { legacy += 1; return { ok: true, content: 'waited' }; },
+        callModel: async function* () {
+          yield { type: 'tool-use-start', id: 'tool-wait-1', name: 'wait_until' };
+          yield { type: 'tool-use-delta', id: 'tool-wait-1', partialJson: '{"when":"1s"}' };
+          yield { type: 'tool-use-stop', id: 'tool-wait-1' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      }),
+      bridgeHooks: { prepareToolCall: async () => null },
+      executeToolCall: async () => { executed += 1; return {}; },
+    });
+    expect(result.error).toBeNull();
+    expect(legacy).toBe(1);
+    expect(executed).toBe(0);
+  });
+
+  test('never falls back to legacy dispatch for a controller-hosted tool', async () => {
+    let legacy = 0;
+    let executed = 0;
+    const nowDescriptor = {
+      name: 'now', description: 'Current time.', schema: { type: 'object' },
+    };
+    const result = await runHarness({
+      ctx: context({
+        tools: [nowDescriptor], refreshTools: async () => [nowDescriptor],
+        toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
+        callModel: async function* () {
+          yield { type: 'tool-use-start', id: 'tool-now-1', name: 'now' };
+          yield { type: 'tool-use-delta', id: 'tool-now-1', partialJson: '{}' };
+          yield { type: 'tool-use-stop', id: 'tool-now-1' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      }),
+      bridgeHooks: {
+        prepareToolCall: async () => null,
+        handleToolEffect: async () => ({ ok: true, outcomeKnown: true }),
+        settleToolCall: async () => ({ ok: true }),
+      },
+      executeToolCall: async () => { executed += 1; return {}; },
+    });
+    expect(result.error).toBeNull();
+    const toolResult: any = result.events.find((event: any) => event.type === 'tool-result');
+    expect(toolResult.result).toMatchObject({
+      ok: false,
+      code: 'controller-tool-preparation-unavailable',
+    });
+    expect(legacy).toBe(0);
+    expect(executed).toBe(0);
+  });
+
+  test('the kernel rejects direct legacy dispatch of a controller-hosted tool', async () => {
+    let bypass: any = null;
+    let legacy = 0;
+    const nowDescriptor = {
+      name: 'now', description: 'Current time.', schema: { type: 'object' },
+    };
+    const result = await runHarness({
+      ctx: context({
+        tools: [nowDescriptor], refreshTools: async () => [nowDescriptor],
+        toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
+        callModel: async function* () {
+          yield { type: 'tool-use-start', id: 'tool-now-bypass', name: 'now' };
+          yield { type: 'tool-use-delta', id: 'tool-now-bypass', partialJson: '{}' };
+          yield { type: 'tool-use-stop', id: 'tool-now-bypass' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      }),
+      bridgeHooks: { prepareToolCall: async () => null },
+      executeToolCall: async () => ({}),
+      interceptKernel: async (operation, payload, next, invoke) => {
+        if (operation === 'turn.tool.prepare') {
+          bypass = await invoke('turn.tool.dispatch', payload);
+        }
+        return next();
+      },
+    });
+    expect(bypass).toMatchObject({
+      ok: false, code: 'turn-controller-tool-legacy-dispatch-refused',
+      outcomeKnown: true,
+    });
+    expect(result.error).toBeNull();
+    expect(legacy).toBe(0);
   });
 
   test('settles a pre-effect executor loss as known and rejects its stale generation', async () => {

@@ -46,6 +46,19 @@ const options = (over: Record<string, unknown> = {}) => ({
 });
 
 describe('controller tool execution host', () => {
+  test('requires an exact implementation for every manifest tool', () => {
+    expect(() => createToolExecutionHost({ manifest, implementations: {} }))
+      .toThrow('tool-execution-host-incomplete');
+    expect(() => createToolExecutionHost({
+      manifest,
+      implementations: { remember: async () => ({}), extra: async () => ({}) },
+    })).toThrow('tool-execution-host-incomplete');
+    expect(() => createToolExecutionHost({
+      manifest,
+      implementations: Object.create({ remember: async () => ({}) }),
+    })).toThrow('tool-execution-host-incomplete');
+  });
+
   test('gives implementation only declared exact effect methods', async () => {
     const calls: Array<[string, unknown]> = [];
     const host = createToolExecutionHost({
@@ -116,6 +129,39 @@ describe('controller tool execution host', () => {
       ok: false, code: 'tool-effect-grant-settled', outcomeKnown: true,
     });
     expect(calls).toEqual([]);
+  });
+
+  test('Stop settles an effect-free execution as known and retryable', async () => {
+    const controller = new AbortController();
+    const host = createToolExecutionHost({
+      manifest,
+      implementations: { remember: async () => new Promise(() => {}) },
+    });
+    const running = host.dispatch(payload, options({ signal: controller.signal }) as any);
+    await Promise.resolve();
+    controller.abort();
+    await expect(running).resolves.toMatchObject({
+      ok: false, code: 'tool-execution-aborted', outcomeKnown: true,
+      effectEntered: false, retryable: true, phase: 'run',
+    });
+  });
+
+  test('an effect-free deadline remains a known pre-effect failure', async () => {
+    let fireDeadline!: () => void;
+    const host = createToolExecutionHost({
+      manifest,
+      implementations: { remember: async () => new Promise(() => {}) },
+      now: () => 100,
+      setTimeoutFn: ((callback: () => void) => { fireDeadline = callback; return 1; }) as any,
+      clearTimeoutFn: (() => {}) as any,
+    });
+    const running = host.dispatch(payload, options({ deadlineAt: 200 }) as any);
+    await Promise.resolve();
+    fireDeadline();
+    await expect(running).resolves.toMatchObject({
+      ok: false, code: 'tool-execution-deadline-expired', outcomeKnown: true,
+      effectEntered: false, retryable: true, phase: 'run',
+    });
   });
 
   test('a deadline during an entered effect settles unknown and denies its late reply', async () => {

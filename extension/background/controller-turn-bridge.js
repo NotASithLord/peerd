@@ -5,6 +5,7 @@
 // this service-worker closure.
 
 import { TOOL_EXECUTION_PROTOCOL } from '../shared/tool-execution-protocol.js';
+import { controllerHostsTool } from '../shared/controller-tool-manifest.js';
 
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
@@ -745,6 +746,12 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
           if (!isRecord(call) || typeof call.id !== 'string' || typeof call.name !== 'string'
               || !run.toolNames.has(call.name)) {
             return failed('tool grant mismatch', true);
+          }
+          if (controllerHostsTool(call.name)) {
+            return {
+              ok: false, code: 'turn-controller-tool-legacy-dispatch-refused',
+              error: 'controller-owned tool requires finite execution', outcomeKnown: true,
+            };
           }
           if (!issuedToolCall(run, call)
               && !issuedToolCall(run, call, run.legacyToolCalls)) {

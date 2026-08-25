@@ -19,12 +19,12 @@ const request = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-const options = () => ({
+const options = (toolName = 'now') => ({
   signal: new AbortController().signal,
   authority: {
     ownerId: 'run-now-1',
     sessionId: 'session-now-1',
-    target: 'tool:now',
+    target: `tool:${toolName}`,
     replayClass: 'E',
   },
   deadlineAt: Date.now() + 5_000,
