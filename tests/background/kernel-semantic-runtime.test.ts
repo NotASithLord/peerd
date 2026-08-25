@@ -8,6 +8,18 @@ import { SEMANTIC_HOST_ROUTE_CLASSIFICATIONS } from '../../extension/shared/sema
 
 await useFakeIndexedDB();
 
+const controller = (overrides: Record<string, any> = {}) => ({
+  callSemantic: async () => ({ ok: true }),
+  callTurn: async () => ({ ok: true }),
+  callRuntime: async () => ({ ok: true }),
+  callFeature: async () => ({ ok: true }),
+  callFeatureEvent: async () => ({ ok: true }),
+  renderSystemPrompt: async () => '',
+  withRun: async (operation: () => Promise<any>) => operation(),
+  close: () => {},
+  ...overrides,
+});
+
 const makeRuntime = (locked = false, docs: any[] = [], withTurn = false) => {
   let controllerCalls = 0;
   let controllerCreates = 0;
@@ -33,11 +45,8 @@ const makeRuntime = (locked = false, docs: any[] = [], withTurn = false) => {
     ready: Promise.resolve(),
     canWrite: () => {}, pushState: () => {}, isHomeSender: () => true,
     actorCount: () => ({ activeActors: 0 }), actorOverview: () => ({ roots: [] }),
-    makeController: () => { controllerCreates += 1; return ({
+    makeController: () => { controllerCreates += 1; return controller({
       callSemantic: async () => { controllerCalls += 1; return { ok: true }; },
-      callTurn: async () => ({ ok: true }), renderSystemPrompt: async () => '',
-      withRun: async (operation: () => Promise<void>) => operation(),
-      close: () => {},
     }); },
     ...(withTurn ? {
       loadTurnRuntime: async () => ({
@@ -122,11 +131,9 @@ describe('kernel semantic runtime', () => {
       isAppSender: (sender: unknown) => sender === 'owned-app',
       makeController: () => {
         controllerCreates += 1;
-        return {
+        return controller({
           callSemantic: async (payload: any) => { payloads.push(payload); return { ok: true }; },
-          callTurn: async () => ({ ok: true }), renderSystemPrompt: async () => '',
-          withRun: async (operation: () => Promise<void>) => operation(), close: () => {},
-        };
+        });
       },
     });
     await expect(runtime.routes['app/get-meta']({ appId: 'a' }, 'forged'))
@@ -160,14 +167,11 @@ describe('kernel semantic runtime', () => {
         actorOverview: () => ({ roots: [] }), firefox,
         makeController: (deps: any) => {
           controllerDeps = deps;
-          return {
+          return controller({
             callRuntime: async (payload: any) => ({
               ok: true, payload, authority: deps.authorizeRuntimeCall(payload),
             }),
-            callSemantic: async () => ({ ok: true }),
-            callTurn: async () => ({ ok: true }), renderSystemPrompt: async () => '',
-            withRun: async (operation: () => Promise<void>) => operation(), close: () => {},
-          };
+          });
         },
       });
       await expect(state.runtime.probe()).resolves.toMatchObject({
@@ -234,17 +238,13 @@ describe('kernel semantic runtime', () => {
       makeController: (deps: any) => {
         creates += 1;
         authority = deps;
-        return {
+        return controller({
           callSemantic: async (payload: any) => {
             semanticCalls += 1;
             semanticPayloads.push(payload);
             return { ok: true };
           },
-          callTurn: async () => ({ ok: true }),
-          renderSystemPrompt: async () => '',
-          withRun: async (operation: () => Promise<void>) => operation(),
-          close: () => {},
-        };
+        });
       },
       loadTurnRuntime: async () => ({
         turnDeps: {

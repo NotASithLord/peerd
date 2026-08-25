@@ -386,6 +386,38 @@ describe('kernel dweb custody owner', () => {
     }
   });
 
+  test('an unreadable identity preserves an unknown commit without retry or acknowledgement', async () => {
+    const runtime = owner({
+      vault: {
+        isLocked: () => true,
+        getSecret: async () => { throw new Error('locked'); },
+        setSecret: async () => {},
+      },
+    });
+    const live = port();
+    runtime.attachDwebCustody(live);
+    live.onMessage.emit({ type: 'custody/ready', authorityId: 'authority:unreadable' });
+    const pending = (await runtime.getDwebTransfer())!.adoptRecord({}, 'passphrase', {
+      expectedExistingDid: null, expectedIncomingDid: 'did:key:zIncoming',
+    });
+    const status = await waitForPacket(live, 'custody/status');
+    live.onMessage.emit({
+      type: 'custody/status-response', requestId: status.requestId,
+      operationId: status.operationId, authorityId: 'authority:unreadable',
+      receipt: {
+        state: 'unknown', operationId: 'receipt:unreadable',
+        error: 'identity-custody-operation-timeout', outcomeKnown: false,
+        phase: 'commit-dispatched',
+      },
+    });
+    await expect(pending).rejects.toMatchObject({
+      code: 'vault-locked', outcomeKnown: false,
+    });
+    expect(live.sent.some((message) => [
+      'custody/ack', 'custody/recover', 'custody/request',
+    ].includes(message.type))).toBe(false);
+  });
+
   test('a successor claims an applied commit, releases its lease, and returns success', async () => {
     const identity = identityFixture();
     const runtime = owner({

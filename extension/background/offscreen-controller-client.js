@@ -44,6 +44,15 @@ export class ControllerChannelError extends Error {
   }
 }
 
+const startupChannelError = (/** @type {string} */ code) => Object.assign(
+  new ControllerChannelError(STARTUP_UNAVAILABLE_USER_FAILURE, code),
+  { outcomeKnown: true, phase: 'startup', retryable: true },
+);
+const startupResult = (/** @type {string} */ code) => ({
+  ok: false, code, error: STARTUP_UNAVAILABLE_USER_FAILURE,
+  outcomeKnown: true, phase: 'startup', retryable: true,
+});
+
 const controllerGenerationMustRetire = (/** @type {any} */ result) =>
   result?.outcomeKnown === true && (result.code === 'module-load-timeout'
     || typeof result.code === 'string' && result.code.endsWith('-load-timeout'));
@@ -495,6 +504,8 @@ const PROMPT_CAPABILITIES = Object.freeze(['prompt.render']);
  * @param {typeof import('./direct-controller-client.js').connectDirectController} [deps.connectDirectController]
  * @param {()=>Promise<typeof import('./direct-controller-client.js')>} [deps.loadDirectController]
  * @param {number} [deps.directLoadTimeoutMs]
+ * @param {number} [deps.connectTimeoutMs]
+ * @param {number} [deps.promptLoadTimeoutMs]
  * @param {(reason:string)=>Promise<any>} [deps.retireHost]
  * @param {() => Promise<any[]>} [deps.listWindowClients]
  * @param {(input: string | URL | Request, init?: RequestInit) => Promise<Response>} deps.fetchFn
@@ -519,6 +530,8 @@ export const makeSemanticControllerClient = ({
   connectDirectController: directConnector,
   loadDirectController: directModuleLoader,
   directLoadTimeoutMs = 10_000,
+  connectTimeoutMs = 15_000,
+  promptLoadTimeoutMs = 10_000,
   retireHost = async () => {},
   fetchFn,
   listWindowClients = async () => {
@@ -527,7 +540,9 @@ export const makeSemanticControllerClient = ({
     return clientApi.matchAll({ type: 'window', includeUncontrolled: true });
   },
 }) => {
-  if (typeof fetchFn !== 'function') {
+  if (typeof fetchFn !== 'function'
+      || !Number.isFinite(connectTimeoutMs) || connectTimeoutMs <= 0
+      || !Number.isFinite(promptLoadTimeoutMs) || promptLoadTimeoutMs <= 0) {
     throw new TypeError('semantic controller asset reader is required');
   }
   const hasTurnAuthority = typeof authorizeTurnCall === 'function'
@@ -575,6 +590,9 @@ export const makeSemanticControllerClient = ({
   let connecting = null;
   /** @type {any | null} */
   let active = null;
+  /** @type {Promise<void>|null} */
+  let retirementBarrier = null;
+  let retirementBlocked = false;
   /** @type {Promise<{template:string,dwebBlock:string}> | null} */
   let promptAssets = null;
   const authorizeCall = (
@@ -681,26 +699,76 @@ export const makeSemanticControllerClient = ({
   };
 
   let connectionGeneration = 0;
+  const retirePoisonedHost = () => {
+    if (retirementBarrier) return retirementBarrier;
+    /** @type {ReturnType<typeof setTimeout>} */ let timer;
+    const pending = Promise.race([
+      Promise.resolve().then(() => retireHost('controller-host-startup-failed'))
+        .then(() => true, () => false),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(false), connectTimeoutMs);
+      }),
+    ]).then((retired) => {
+      if (!retired) retirementBlocked = true;
+    }).finally(() => {
+      clearTimeout(timer);
+      if (retirementBarrier === pending && !retirementBlocked) retirementBarrier = null;
+    });
+    retirementBarrier = pending;
+    return pending;
+  };
   const getClient = async (/** @type {unknown} */ lease) => {
+    if (retirementBlocked) throw startupChannelError('controller-host-retirement-failed');
+    if (retirementBarrier) await retirementBarrier;
+    if (retirementBlocked) throw startupChannelError('controller-host-retirement-failed');
     if (active) return active;
     if (!connecting) {
       const generation = connectionGeneration;
-      const pending = connect(lease).then((client) => {
+      /** @type {ReturnType<typeof setTimeout>} */ let timer;
+      const candidate = connect(lease).then((client) => {
         if (generation !== connectionGeneration) {
           try { client.close(); } catch {}
           throw new ControllerChannelError('controller generation retired', 'generation-retired');
         }
         active = client;
         return client;
-      }).catch(async (cause) => {
-        if (generation === connectionGeneration && !firefoxDirect) {
-          await retireHost('controller-host-startup-failed');
+      });
+      const bounded = Promise.race([
+        candidate,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new ControllerChannelError(
+            'controller connection timed out', 'controller-connect-timeout',
+          )), connectTimeoutMs);
+        }),
+      ]);
+      const pending = bounded.catch(async (cause) => {
+        if (generation === connectionGeneration) {
+          connectionGeneration += 1;
+          const retirement = !firefoxDirect ? retirePoisonedHost() : null;
+          connecting = null;
+          await retirement;
         }
         throw cause;
-      }).finally(() => { if (connecting === pending) connecting = null; });
+      }).finally(() => {
+        clearTimeout(timer);
+        if (connecting === pending) connecting = null;
+      });
       connecting = pending;
     }
     return connecting;
+  };
+  const getClientForTurn = (/** @type {unknown} */ lease,
+    /** @type {AbortSignal|undefined} */ signal) => {
+    const pending = getClient(lease);
+    if (!signal) return pending;
+    if (signal.aborted) return Promise.resolve(null);
+    return new Promise((resolve, reject) => {
+      const aborted = () => resolve(null);
+      signal.addEventListener('abort', aborted, { once: true });
+      pending.then(resolve, reject).finally(() => {
+        signal.removeEventListener('abort', aborted);
+      });
+    });
   };
 
   const retire = (/** @type {any} */ client) => {
@@ -715,21 +783,52 @@ export const makeSemanticControllerClient = ({
     if (client) retire(client);
   };
 
+  let promptGeneration = 0;
   const loadPromptAssets = () => {
-    promptAssets ??= (async () => {
-      const base = await fetchFn(browser.runtime.getURL('peerd-provider/system-prompt.txt'));
+    if (promptAssets) return promptAssets;
+    const generation = promptGeneration;
+    const controller = new AbortController();
+    /** @type {ReturnType<typeof setTimeout>} */ let timer;
+    const loaded = (async () => {
+      const base = await fetchFn(
+        browser.runtime.getURL('peerd-provider/system-prompt.txt'),
+        { signal: controller.signal },
+      );
       if (!base.ok) throw new Error('packaged system-prompt template is unavailable');
       let dwebBlock = '';
       if (dwebEnabled) {
-        const dweb = await fetchFn(browser.runtime.getURL('peerd-provider/system-prompt-dweb.txt'));
+        const dweb = await fetchFn(
+          browser.runtime.getURL('peerd-provider/system-prompt-dweb.txt'),
+          { signal: controller.signal },
+        );
         const text = dweb.ok ? (await dweb.text()).trim() : '';
         dwebBlock = text ? `\n${text}\n` : '';
       }
       return { template: await base.text(), dwebBlock };
-    })().catch((cause) => {
-      promptAssets = null;
+    })();
+    const pending = Promise.race([
+      loaded,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(startupChannelError('prompt-assets-load-timeout'));
+        }, promptLoadTimeoutMs);
+      }),
+    ]).then((assets) => {
+      if (generation !== promptGeneration) {
+        throw new ControllerChannelError(
+          'controller prompt generation retired', 'prompt-assets-generation-retired',
+        );
+      }
+      return /** @type {{template:string,dwebBlock:string}} */ (assets);
+    }).catch((cause) => {
+      if (generation === promptGeneration) promptGeneration += 1;
       throw cause;
+    }).finally(() => {
+      clearTimeout(timer);
+      if (promptAssets === pending && generation !== promptGeneration) promptAssets = null;
     });
+    promptAssets = pending;
     return promptAssets;
   };
 
@@ -778,7 +877,7 @@ export const makeSemanticControllerClient = ({
       };
     }
     let client;
-    try { client = await getClient(lease); }
+    try { client = await getClientForTurn(lease, options.signal); }
     catch (cause) {
       return {
         ok: false,
@@ -787,8 +886,10 @@ export const makeSemanticControllerClient = ({
         error: STARTUP_UNAVAILABLE_USER_FAILURE,
         outcomeKnown: true,
         phase: 'startup',
+        retryable: true,
       };
     }
+    if (!client) return stopped('controller-call-aborted', true);
     let result;
     try {
       result = await client.call('turn.run', payload, options);
@@ -852,12 +953,10 @@ export const makeSemanticControllerClient = ({
     let client;
     try { client = await getClient(lease); }
     catch (cause) {
-      return {
-        ok: false,
-        code: /** @type {{code?:string}} */ (cause)?.code === 'controller-direct-load-timeout'
+      return startupResult(
+        /** @type {{code?:string}} */ (cause)?.code === 'controller-direct-load-timeout'
           ? 'controller-direct-load-timeout' : 'semantic-dispatch-startup-failed',
-        outcomeKnown: true,
-      };
+      );
     }
     try {
       const result = await client.call('semantic.dispatch', payload, { timeoutMs: 30_000 });
@@ -914,10 +1013,7 @@ export const makeSemanticControllerClient = ({
           let client;
           try { client = await getClient(lease); }
           catch {
-            return {
-              ok: false, code: 'runtime-dispatch-startup-failed',
-              outcomeKnown: true, phase: 'startup',
-            };
+            return startupResult('runtime-dispatch-startup-failed');
           }
           try {
             const result = await client.call(RUNTIME_DISPATCH_CAPABILITY, payload, options);
@@ -975,10 +1071,7 @@ export const makeSemanticControllerClient = ({
           let client;
           try { client = await getClient(lease); }
           catch {
-            return {
-              ok: false, code: 'feature-dispatch-startup-failed',
-              outcomeKnown: true, phase: 'startup',
-            };
+            return startupResult('feature-dispatch-startup-failed');
           }
           try {
             const result = await client.call(capability, payload, options);

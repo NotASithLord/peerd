@@ -70,16 +70,12 @@ const makeControllerFactory = (calls: Record<string, any>, turnFailure: any = nu
           }),
         });
       },
-      callSemantic: async (payload: any) => {
-        calls.semanticCalls += 1;
-        return { ok: true, payload };
-      },
       renderSystemPrompt: async () => 'PINNED-SYSTEM',
       withRun: async (operation: () => Promise<void>) => {
         calls.withRuns += 1;
         await operation();
       },
-      close: () => { calls.controllerCloses += 1; },
+      release: () => { calls.controllerCloses += 1; },
     };
   };
 
@@ -145,7 +141,7 @@ const makeRuntime = (seams: any, calls: Record<string, any>, sessionCache = make
 };
 
 const makeCalls = () => ({
-  loads: 0, controllerCreates: 0, turnCalls: 0, semanticCalls: 0,
+  loads: 0, controllerCreates: 0, turnCalls: 0,
   modelCalls: 0, withRuns: 0, pushes: 0,
   controllerCloses: 0, runtimeCloses: 0,
   events: [] as any[], failures: [] as any[], goals: [] as any[],
@@ -189,9 +185,6 @@ describe('native kernel turn owner', () => {
     });
     expect(calls.events.some((event: any) => event.type === 'stop'
       && event.stopReason === 'end_turn')).toBe(true);
-    await expect(owner.controller.callSemantic({ route: 'toolbox/read' }))
-      .resolves.toEqual({ ok: true, payload: { route: 'toolbox/read' } });
-    expect(calls).toMatchObject({ controllerCreates: 1, semanticCalls: 1 });
     await expect(owner.getRelays()).resolves.toEqual({});
     await expect(owner.actorCount()).resolves.toEqual({ activeActors: 2 });
     await expect(owner.actorOverview()).resolves.toEqual({
@@ -207,7 +200,7 @@ describe('native kernel turn owner', () => {
     expect(calls).toMatchObject({ controllerCloses: 1, runtimeCloses: 1 });
   });
 
-  test('publishes relays during handoff without losing or duplicating an event', async () => {
+  test('publishes relays only after the current handoff reconciles', async () => {
     const calls = makeCalls();
     let releaseReconcile!: () => void;
     let reconcileStarted!: () => void;
@@ -236,11 +229,12 @@ describe('native kernel turn owner', () => {
     const count = owner.actorCount();
     const overview = owner.actorOverview();
     await reconciling;
-    await owner.relays?.eventOwners.tabsOnUpdated();
+    expect(owner.relays).toBeNull();
     releaseReconcile();
 
     await expect(count).resolves.toEqual({ activeActors: 2 });
     await expect(overview).resolves.toEqual({ roots: [{ sessionId: 'actor-root' }] });
+    await owner.relays?.eventOwners.tabsOnUpdated();
     expect(events).toEqual(['snapshot', 'tab']);
     await owner.close();
   });
@@ -361,30 +355,65 @@ describe('native kernel turn owner', () => {
     const sessionCache = makeCache();
     let resolve!: (runtime: any) => void;
     const pending = new Promise<any>((done) => { resolve = done; });
-    let seams: any;
+    let firstSeams: any;
     const owner = createKernelTurnOwner({
       createController: makeControllerFactory(calls), loadTimeoutMs: 2,
-      loadRuntime: async (value) => { calls.loads += 1; seams = value; return pending; },
+      loadRuntime: async (seams) => {
+        calls.loads += 1;
+        if (calls.loads === 1) {
+          firstSeams = seams;
+          return pending;
+        }
+        return makeRuntime(seams, calls, sessionCache);
+      },
     });
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      await expect(owner.routes['agent/send']({
-        text: 'not yet', operationId: `send.${Date.now().toString(36)}.frozen-runtime-00`,
-        sessionId: 'root',
-      })).resolves.toEqual({
-        ok: false, error: 'Temporarily unavailable. Try again.',
-        code: 'kernel-turn-runtime-load-timeout', outcomeKnown: true,
-        phase: 'startup', retryable: true,
-      });
-    }
-    expect(calls.loads).toBe(1);
+    await expect(owner.routes['agent/send']({
+      text: 'not yet', operationId: `send.${Date.now().toString(36)}.frozen-runtime-00`,
+      sessionId: 'root',
+    })).resolves.toEqual({
+      ok: false, error: 'Temporarily unavailable. Try again.',
+      code: 'kernel-turn-runtime-load-timeout', outcomeKnown: true,
+      phase: 'startup', retryable: true,
+    });
     expect(sessionCache.values['agentSendReceipts.v1']).toBeUndefined();
 
-    resolve(makeRuntime(seams, calls, sessionCache));
     await expect(owner.routes['actor-isolation/retry']())
       .resolves.toEqual({ ok: true, capability: { status: 'available' } });
-    expect(calls.loads).toBe(1);
+    expect(calls.loads).toBe(2);
+    resolve(makeRuntime(firstSeams, calls, sessionCache));
+    await until(() => calls.runtimeCloses === 1);
+    expect(calls.loads).toBe(2);
     await owner.close();
+    expect(calls.runtimeCloses).toBe(2);
+  });
+
+  test('never adopts one runtime object across timeout generations', async () => {
+    const calls = makeCalls();
+    let resolve!: (runtime: any) => void;
+    const shared = new Promise<any>((done) => { resolve = done; });
+    let loads = 0;
+    const owner = createKernelTurnOwner({
+      createController: makeControllerFactory(calls), loadTimeoutMs: 10,
+      loadRuntime: async (seams) => {
+        loads += 1;
+        return loads < 3 ? shared : makeRuntime(seams, calls);
+      },
+    });
+    await expect(owner.actorCount()).resolves.toMatchObject({
+      code: 'kernel-turn-runtime-load-timeout', outcomeKnown: true,
+    });
+    const second = owner.actorCount();
+    await until(() => loads === 2);
+    resolve(makeRuntime({}, calls));
+    await expect(second).resolves.toMatchObject({
+      code: 'kernel-turn-runtime-load-failed', outcomeKnown: true,
+    });
+    await expect(owner.actorCount()).resolves.toEqual({ activeActors: 2 });
+    expect(loads).toBe(3);
+    expect(calls.runtimeCloses).toBe(1);
+    await owner.close();
+    expect(calls.runtimeCloses).toBe(2);
   });
 
   test('Stop tombstones a send held on first load before any model or render effect', async () => {
@@ -508,6 +537,14 @@ describe('native kernel turn owner', () => {
   test('fails closed on invalid assembly and after close', async () => {
     expect(() => createKernelTurnOwner({} as any))
       .toThrow('kernel-turn-owner-config-invalid');
+    expect(() => createKernelTurnOwner({
+      createController: () => ({
+        callTurn: async () => ({ ok: true }),
+        renderSystemPrompt: async () => '',
+        withRun: async (operation: () => Promise<any>) => operation(),
+      } as any),
+      loadRuntime: async () => ({} as any),
+    })).toThrow('kernel-turn-controller-invalid');
     const calls = makeCalls();
     const owner = createKernelTurnOwner({
       createController: makeControllerFactory(calls),

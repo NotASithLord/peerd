@@ -1,6 +1,7 @@
 // @ts-check
 
 import { makeSemanticControllerClient } from './offscreen-controller-client.js';
+import { createKernelControllerGateway } from './kernel-controller-gateway.js';
 import { createKernelSemanticAuthority } from './kernel-semantic-authority.js';
 import { createKernelContactsAuthority } from './kernel-contacts-authority.js';
 import { createKernelSemanticControl } from './kernel-semantic-control.js';
@@ -69,13 +70,23 @@ export const createKernelSemanticRuntime = (deps) => {
   if (directNames.join('\0') !== [...KERNEL_SEMANTIC_DIRECT_ROUTE_NAMES].sort().join('\0')) {
     throw new TypeError('kernel-semantic-direct-routes-invalid');
   }
-  /** @type {ReturnType<typeof makeSemanticControllerClient>|null} */
-  let controller = null;
+  /** @type {ReturnType<typeof createKernelControllerGateway>|null} */
+  let gateway = null;
+  /** @type {Record<string,any>|null} */
+  let semanticBinding = null;
+  /** @type {Record<string,any>|null} */
+  let runtimeBinding = null;
+  /** @type {Record<string,any>|null} */
+  let repositoryBinding = null;
+  /** @type {Record<string,any>|null} */
+  let localBinding = null;
+  /** @type {Record<string,any>|null} */
+  let administrativeBinding = null;
   /** @type {ReturnType<typeof createKernelTurnOwner>|null} */
   let turnOwner = null;
   const repository = deps.repositories ? createKernelRepositoryControl({
     callFeature: (/** @type {unknown} */ payload, /** @type {any} */ options) =>
-      /** @type {any} */ (controllerClient()).callFeature(payload, options),
+      ensureRepositoryBinding().callFeature(payload, options),
     repositories: deps.repositories,
     catalog: deps.appCatalog,
     appFiles: deps.appFiles,
@@ -88,7 +99,7 @@ export const createKernelSemanticRuntime = (deps) => {
   }) : null;
   const local = deps.settingsStore && deps.featureHost ? createKernelLocalControl({
     callFeature: (/** @type {unknown} */ payload, /** @type {any} */ options) =>
-      /** @type {any} */ (controllerClient()).callFeature(payload, options),
+      ensureLocalBinding().callFeature(payload, options),
     vault: deps.vault,
     settingsStore: deps.settingsStore,
     sessions: deps.sessions,
@@ -109,56 +120,13 @@ export const createKernelSemanticRuntime = (deps) => {
       dwebEnabled: deps.dwebEnabled === true,
     }),
     call: (/** @type {unknown} */ payload,
-      /** @type {{timeoutMs?:number}} */ options = {}) => {
-      const client = /** @type {ReturnType<typeof makeSemanticControllerClient>} */ (
-        controllerClient()
-      );
-      return client.callRuntime(payload, options);
-    },
+      /** @type {{timeoutMs?:number}} */ options = {}) =>
+      ensureRuntimeBinding().callRuntime(payload, options),
     handleRichKernelCall: deps.handleRichKernelCall,
   });
-  const makeSharedController = (turnAuthority = {}) => {
-    if (controller) return controller;
-    controller = makeController({
-      browser: deps.browser,
-      ensureOffscreen: deps.ensureOffscreen,
-      offscreenUrl: deps.offscreenUrl,
-      firefoxDirect: deps.firefox,
-      dwebEnabled: deps.dwebEnabled,
-      kernelIdentity: deps.kernelIdentity,
-      authorizeSemanticCall: control.authorize,
-      handleSemanticKernelCall: control.handleKernelCall,
-      authorizeRuntimeCall: runtime.authorize,
-      handleRuntimeKernelCall: runtime.handleKernelCall,
-      authorizeFeatureCall: (/** @type {unknown} */ payload) =>
-        repository?.authorize(payload) ?? local?.authorize(payload)
-        ?? deps.authorizeFeatureCall?.(payload),
-      handleFeatureKernelCall: (/** @type {string} */ operation,
-        /** @type {unknown} */ payload, /** @type {any} */ context) => {
-        const target = context?.authority?.target;
-        if (typeof target === 'string' && target.startsWith('kernel-feature:repository:')) {
-          return repository?.handleKernelCall(operation, payload, context)
-            ?? { ok: false, code: 'kernel-operation-denied', outcomeKnown: true };
-        }
-        if (typeof target === 'string' && target.startsWith('kernel-feature:local:')) {
-          return local?.handleKernelCall(operation, payload, context)
-            ?? { ok: false, code: 'kernel-operation-denied', outcomeKnown: true };
-        }
-        return deps.handleFeatureKernelCall?.(operation, payload, context)
-          ?? { ok: false, code: 'kernel-operation-denied', outcomeKnown: true };
-      },
-      ...turnAuthority,
-      retireHost: deps.retireHost,
-      withControllerLease: deps.withControllerLease,
-      withDirectLifetime: deps.withDirectLifetime,
-      connectDirectController: deps.connectDirectController,
-      loadDirectController: deps.loadDirectController,
-      fetchFn: deps.fetchFn,
-    });
-    return /** @type {NonNullable<typeof controller>} */ (controller);
-  };
   const control = createKernelSemanticControl({
-    callSemantic: (/** @type {any} */ payload) => controllerClient().callSemantic(payload),
+    callSemantic: (/** @type {any} */ payload) =>
+      ensureSemanticBinding().callSemantic(payload),
     isHomeSender: deps.isHomeSender,
     vault: deps.vault,
     authority,
@@ -170,6 +138,58 @@ export const createKernelSemanticRuntime = (deps) => {
       ? ensureTurnOwner().actorOverview() : deps.actorOverview(),
     awaitReady: () => deps.ready,
   });
+  const ensureGateway = () => {
+    gateway ??= createKernelControllerGateway({
+      makeController,
+      controller: {
+        browser: deps.browser,
+        ensureOffscreen: deps.ensureOffscreen,
+        offscreenUrl: deps.offscreenUrl,
+        firefoxDirect: deps.firefox,
+        dwebEnabled: deps.dwebEnabled,
+        kernelIdentity: deps.kernelIdentity,
+        retireHost: deps.retireHost,
+        withControllerLease: deps.withControllerLease,
+        withDirectLifetime: deps.withDirectLifetime,
+        connectDirectController: deps.connectDirectController,
+        loadDirectController: deps.loadDirectController,
+        fetchFn: deps.fetchFn,
+      },
+    });
+    return gateway;
+  };
+  const ensureSemanticBinding = () => semanticBinding ??= ensureGateway().bindSemantic({
+    authorize: control.authorize,
+    handle: control.handleKernelCall,
+  });
+  const ensureRuntimeBinding = () => runtimeBinding ??= ensureGateway().bindRuntime({
+    authorize: runtime.authorize,
+    handle: runtime.handleKernelCall,
+  });
+  const ensureRepositoryBinding = () => {
+    if (!repository) throw new Error('kernel-repository-owner-unavailable');
+    return repositoryBinding ??= ensureGateway().bindFeature('repository', {
+      authorize: repository.authorize,
+      handle: repository.handleKernelCall,
+    });
+  };
+  const ensureLocalBinding = () => {
+    if (!local) throw new Error('kernel-local-owner-unavailable');
+    return localBinding ??= ensureGateway().bindFeature('local', {
+      authorize: local.authorize,
+      handle: local.handleKernelCall,
+    });
+  };
+  const ensureAdministrativeBinding = () => {
+    if (typeof deps.authorizeFeatureCall !== 'function'
+        || typeof deps.handleFeatureKernelCall !== 'function') {
+      throw new Error('kernel-administrative-owner-unavailable');
+    }
+    return administrativeBinding ??= ensureGateway().bindFeature('administrative', {
+      authorize: deps.authorizeFeatureCall,
+      handle: deps.handleFeatureKernelCall,
+    });
+  };
   const appMetaRoute = async (/** @type {any} */ message = {},
     /** @type {unknown} */ sender = undefined) => {
     const { appId } = message;
@@ -207,15 +227,16 @@ export const createKernelSemanticRuntime = (deps) => {
       throw new Error('kernel-turn-runtime-loader-missing');
     }
     turnOwner = createKernelTurnOwner({
-      createController: (/** @type {any} */ turnAuthority) => makeSharedController(turnAuthority),
+      createController: (/** @type {any} */ turnAuthority) => ensureGateway().bindTurn({
+        authorize: turnAuthority.authorizeTurnCall,
+        handle: turnAuthority.handleTurnKernelCall,
+      }),
       loadRuntime: deps.loadTurnRuntime,
       onLoaded: deps.onTurnRuntimeLoaded,
       ...(deps.turnLoadTimeoutMs === undefined ? {} : { loadTimeoutMs: deps.turnLoadTimeoutMs }),
     });
     return turnOwner;
   };
-  const controllerClient = () => typeof deps.loadTurnRuntime === 'function'
-    ? ensureTurnOwner().controller : makeSharedController();
   const turnRoutes = typeof deps.loadTurnRuntime === 'function'
     ? Object.fromEntries(KERNEL_SESSION_TURN_ROUTE_NAMES.map((name) => [name, (
       /** @type {any} */ message = {}, /** @type {any} */ sender = undefined,
@@ -230,7 +251,8 @@ export const createKernelSemanticRuntime = (deps) => {
   });
   return Object.freeze({
     routes,
-    get controller() { return controllerClient(); },
+    callFeature: (/** @type {unknown} */ payload, /** @type {any} */ options = {}) =>
+      ensureAdministrativeBinding().callFeature(payload, options),
     actorCount: () => typeof deps.loadTurnRuntime === 'function'
       ? ensureTurnOwner().actorCount() : deps.actorCount(),
     actorOverview: () => typeof deps.loadTurnRuntime === 'function'
@@ -239,6 +261,14 @@ export const createKernelSemanticRuntime = (deps) => {
     getRelays: () => ensureTurnOwner().getRelays(),
     abortProviderTests: () => local?.abort(),
     runtime,
-    close: () => turnOwner?.close() ?? controller?.close?.(),
+    close: async () => {
+      await turnOwner?.close();
+      semanticBinding?.release();
+      runtimeBinding?.release();
+      repositoryBinding?.release();
+      localBinding?.release();
+      administrativeBinding?.release();
+      gateway?.close();
+    },
   });
 };
