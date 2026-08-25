@@ -1,5 +1,5 @@
 # Handoff
 
-- Done: exact controller effect schemas, risk classes, quotas, and end-to-end loss custody.
-- Next: integrate the uncommitted support-host slice, then replace and delete `kernel-demand-plane.js` and `kernel-production-runtime.js` against packaged Chrome bytes.
-- Do not ship the uncommitted vault/gateway lazy-import experiment; Chrome folds it into the service worker.
+- Done: exact controller and feature-effect loss custody.
+- Next: cut the five session routes through explicit read/commit effects and delete `kernel-session-routes.js`.
+- Discard the uncommitted support proxy and Chrome lazy-import experiments.

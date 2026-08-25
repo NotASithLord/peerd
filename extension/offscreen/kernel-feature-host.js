@@ -94,7 +94,22 @@ export const createKernelFeatureHost = ({
         return failure('feature-grant-expired', true, 'startup', true);
       }
       const quota = createKernelFeatureEffectQuota(KERNEL_FEATURE_DISPATCH_CAPABILITY, payload);
-      let effectsStarted = 0;
+      const replayable = request.policy.replayClass === 'A';
+      let pendingEffects = 0;
+      let settledIrreversible = false;
+      let unknownIrreversible = false;
+      const custody = () => replayable
+        ? Object.freeze({ outcomeKnown: true, retryable: true })
+        : pendingEffects > 0 || unknownIrreversible
+          ? Object.freeze({ outcomeKnown: false, retryable: false })
+          : Object.freeze({ outcomeKnown: true, retryable: !settledIrreversible });
+      const observeCustody = (/** @type {unknown} */ result) => {
+        if (replayable) return;
+        const reply = result && typeof result === 'object' && !Array.isArray(result)
+          ? /** @type {Record<string,unknown>} */ (result) : null;
+        if (reply?.outcomeKnown !== true) unknownIrreversible = true;
+        else if (reply.ok === true || reply.retryable !== true) settledIrreversible = true;
+      };
       let grantOpen = true;
       const grant = new AbortController();
       let stop = (/** @type {Record<string,unknown>} */ _result) => {};
@@ -103,9 +118,8 @@ export const createKernelFeatureHost = ({
         if (!grantOpen) return;
         grantOpen = false;
         grant.abort();
-        stop(failure(
-          code, effectsStarted === 0, 'run', effectsStarted === 0,
-        ));
+        const state = custody();
+        stop(failure(code, state.outcomeKnown, 'run', state.retryable));
       };
       const expireGeneration = () => poison('feature-host-generation-expired');
       activeGrants.add(expire);
@@ -126,14 +140,23 @@ export const createKernelFeatureHost = ({
           quota.observe(operation, value, denied);
           return denied;
         }
-        effectsStarted += 1;
+        pendingEffects += 1;
         let result;
         try { result = await options.kernelCall(operation, value); }
-        catch { result = failure('kernel-operation-failed', false, 'run'); }
-        if (poisoned || !grantOpen || grant.signal.aborted) {
-          return failure('feature-host-generation-retired', false, 'run');
+        catch {
+          result = failure(
+            'kernel-operation-failed', replayable, 'run', replayable,
+          );
         }
+        pendingEffects -= 1;
         const observed = quota.observe(operation, value, result);
+        observeCustody(observed?.ok === true ? result : observed);
+        if (poisoned || !grantOpen || grant.signal.aborted) {
+          const state = custody();
+          return failure(
+            'feature-host-generation-retired', state.outcomeKnown, 'run', state.retryable,
+          );
+        }
         return observed?.ok === true ? result : observed;
       };
       try {
@@ -148,10 +171,9 @@ export const createKernelFeatureHost = ({
           if (poisoned || !grantOpen || grant.signal.aborted
               || Number(options.deadlineAt) <= now()) {
             poison('feature-host-generation-expired');
-            return failure(
-              'feature-host-generation-expired', effectsStarted === 0,
-              'run', effectsStarted === 0,
-            );
+            const state = custody();
+            return failure('feature-host-generation-expired',
+              state.outcomeKnown, 'run', state.retryable);
           }
           const result = Object.freeze({ ok: true, outcomeKnown: true, value });
           return kernelFeatureResultAllowed(KERNEL_FEATURE_DISPATCH_CAPABILITY, payload, result)
@@ -162,8 +184,7 @@ export const createKernelFeatureHost = ({
             ? offered : 'feature-dispatch-failed';
           return failure(
             code,
-            effectsStarted === 0
-              || /** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true,
+            custody().outcomeKnown,
             'run',
           );
         });

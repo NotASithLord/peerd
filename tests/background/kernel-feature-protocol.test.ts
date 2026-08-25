@@ -245,8 +245,8 @@ describe('sealed kernel feature protocol', () => {
     await Promise.all(readCalls);
   });
 
-  test('keeps pre-effect failures known and post-effect failures unknown', async () => {
-    for (const [afterEffect, outcomeKnown] of [[false, true], [true, false]] as const) {
+  test('keeps read-route failures known after a safe effect', async () => {
+    for (const afterEffect of [false, true]) {
       const payload = request();
       const host = createKernelFeatureHost({
         loaders: {
@@ -263,7 +263,116 @@ describe('sealed kernel feature protocol', () => {
       expect(await host.dispatch(payload, options(payload, {
         kernelCall: async () => ({ ok: true, outcomeKnown: true }),
       }))).toMatchObject({
-        ok: false, code: 'feature-dispatch-failed', outcomeKnown, phase: 'run',
+        ok: false, code: 'feature-dispatch-failed', outcomeKnown: true, phase: 'run',
+      });
+    }
+  });
+
+  test('retains settled mutation custody when the handler later fails', async () => {
+    for (const afterEffect of [false, true]) {
+      const payload = request({
+        route: 'hooks/remove', dispatchId: `dispatch-mutation-failure-${afterEffect}`,
+        message: { id: 'hook' },
+      });
+      const host = createKernelFeatureHost({
+        loaders: {
+          administrative: async () => ({ routes: {
+            'hooks/remove': async (_message: unknown, context: any) => {
+              if (afterEffect) {
+                await context.effects.call('administrative.hooks.remove', { id: 'hook' });
+              }
+              throw new Error('failed');
+            },
+          } }),
+        },
+      });
+      expect(await host.dispatch(payload, options(payload, {
+        kernelCall: async () => ({ ok: true, outcomeKnown: true }),
+      }))).toMatchObject({
+        ok: false, code: 'feature-dispatch-failed', outcomeKnown: true,
+        retryable: false, phase: 'run',
+      });
+    }
+  });
+
+  test('preserves exact loss custody across pending and settled effects', async () => {
+    const cases = [
+      { route: 'hooks/list', operation: 'administrative.hooks.read',
+        message: {}, effectResult: null, outcomeKnown: true, retryable: true },
+      { route: 'hooks/remove', operation: 'administrative.hooks.remove',
+        message: { id: 'hook' }, effectResult: null, outcomeKnown: false, retryable: false },
+      { route: 'hooks/remove', operation: 'administrative.hooks.remove',
+        message: { id: 'hook' }, effectResult: { ok: true, outcomeKnown: true },
+        outcomeKnown: true, retryable: false },
+      { route: 'hooks/remove', operation: 'administrative.hooks.remove',
+        message: { id: 'hook' }, effectResult: {
+          ok: false, code: 'write-refused', outcomeKnown: true, retryable: true,
+        }, outcomeKnown: true, retryable: true },
+    ] as const;
+    for (const [index, testCase] of cases.entries()) {
+      const payload = request({
+        route: testCase.route, dispatchId: `dispatch-loss-custody-${index}`,
+        message: testCase.message,
+      });
+      const abort = new AbortController();
+      let effectEntered = () => {};
+      const entered = new Promise<void>((resolve) => { effectEntered = resolve; });
+      let effectSettled = () => {};
+      const settled = new Promise<void>((resolve) => { effectSettled = resolve; });
+      const host = createKernelFeatureHost({ loaders: {
+        administrative: async () => ({ routes: {
+          [testCase.route]: async (_message: unknown, context: any) => {
+            await context.effects.call(testCase.operation,
+              testCase.message as Record<string, unknown>);
+            effectSettled();
+            return new Promise(() => {});
+          },
+        } }),
+      } });
+      const running = host.dispatch(payload, options(payload, {
+        signal: abort.signal,
+        kernelCall: async () => {
+          effectEntered();
+          if (testCase.effectResult) return testCase.effectResult;
+          return new Promise(() => {});
+        },
+      }));
+      await entered;
+      if (testCase.effectResult) await settled;
+      abort.abort();
+      expect(await running).toMatchObject({
+        ok: false, code: 'feature-host-generation-expired',
+        outcomeKnown: testCase.outcomeKnown, retryable: testCase.retryable,
+      });
+    }
+  });
+
+  test('does not let a handler launder unknown mutation custody', async () => {
+    const cases = [
+      { kernelCall: () => new Promise(() => {}), awaitEffect: false },
+      { kernelCall: async () => ({ ok: false, code: 'effect-lost', outcomeKnown: false }),
+        awaitEffect: true },
+    ];
+    for (const testCase of cases) {
+      const payload = request({
+        route: 'hooks/remove', dispatchId: `dispatch-no-launder-${crypto.randomUUID()}`,
+        message: { id: 'hook' },
+      });
+      const host = createKernelFeatureHost({ loaders: {
+        administrative: async () => ({ routes: {
+          'hooks/remove': async (_message: unknown, context: any) => {
+            const effect = context.effects.call('administrative.hooks.remove', { id: 'hook' });
+            if (testCase.awaitEffect) await effect;
+            else await Promise.resolve();
+            throw Object.assign(new Error('claimed-known'), { outcomeKnown: true });
+          },
+        } }),
+      } });
+      expect(await host.dispatch(payload, options(payload, {
+        kernelCall: testCase.kernelCall,
+      }))).toMatchObject({
+        ok: false, code: 'feature-dispatch-failed', outcomeKnown: false,
+        retryable: false, phase: 'run',
       });
     }
   });

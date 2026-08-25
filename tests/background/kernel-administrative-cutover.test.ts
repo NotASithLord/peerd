@@ -154,14 +154,15 @@ describe('sealed administrative root cutover', () => {
     const refused = makeHarness({ canWrite: () => { throw new Error('read-only'); } });
     const refusedId = `refused-${crypto.randomUUID()}`;
     expect(await refused.control.routes['hooks/save']({ markdown: hookMarkdown(refusedId) }))
-      .toMatchObject({ ok: false, outcomeKnown: true, code: 'feature-dispatch-failed' });
+      .toMatchObject({ ok: false, outcomeKnown: true, code: 'administrative-write-refused' });
 
     const lost = makeHarness({
       kv: { get: async () => [], set: async () => { throw new Error('storage lost'); } },
     });
     const lostId = `lost-${crypto.randomUUID()}`;
     expect(await lost.control.routes['hooks/save']({ markdown: hookMarkdown(lostId) }))
-      .toMatchObject({ ok: false, outcomeKnown: false, code: 'feature-dispatch-failed' });
+      .toMatchObject({ ok: false, outcomeKnown: false,
+        code: 'administrative-hooks-write-unknown' });
   });
 
   test('preserves accepted-then-note memory init while the sealed lease finishes', async () => {
@@ -436,7 +437,7 @@ describe('sealed administrative root cutover', () => {
     expect(await graphBytes(kernelGraph)).toBeLessThan(20_000);
   });
 
-  test('bounds administrative module hangs and classifies cancellation after an effect unknown', async () => {
+  test('bounds administrative module hangs and keeps cancelled reads replayable', async () => {
     const payload = Object.freeze({
       cluster: 'administrative', route: 'hooks/list',
       dispatchId: 'dispatch-admin-1', message: Object.freeze({}),
@@ -479,8 +480,8 @@ describe('sealed administrative root cutover', () => {
     await effectStarted;
     abort.abort();
     expect(await call).toMatchObject({
-      ok: false, code: 'feature-host-generation-expired', outcomeKnown: false, phase: 'run',
-      retryable: false,
+      ok: false, code: 'feature-host-generation-expired', outcomeKnown: true, phase: 'run',
+      retryable: true,
     });
   });
 
