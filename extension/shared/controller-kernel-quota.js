@@ -16,6 +16,11 @@ import {
   kernelFeaturePayloadAllowed,
   parseKernelFeatureCall,
 } from './kernel-feature-policy.js';
+import { CONTROLLER_TOOL_MANIFEST } from './controller-tool-manifest.js';
+import {
+  parseToolExecutionRequest,
+  toolEffectLossSemantics,
+} from './tool-execution-protocol.js';
 
 const KIB = 1024;
 const MIB = 1024 * KIB;
@@ -47,6 +52,22 @@ const bounded = (/** @type {unknown} */ value, /** @type {number} */ max) => {
 };
 const refusal = (/** @type {string} */ code, /** @type {boolean} */ outcomeKnown = true) =>
   Object.freeze({ ok: false, code, outcomeKnown });
+const unknownPendingLoss = () => Object.freeze({ outcomeKnown: false, retryable: false });
+const makeCustody = () => {
+  let settledIrreversible = false;
+  let unknownIrreversible = false;
+  return Object.freeze({
+    observe: (/** @type {unknown} */ result, /** @type {boolean} */ replayable) => {
+      if (replayable) return;
+      const reply = record(result);
+      if (reply?.outcomeKnown !== true) unknownIrreversible = true;
+      else if (reply.ok === true || reply.retryable !== true) settledIrreversible = true;
+    },
+    snapshot: () => unknownIrreversible
+      ? Object.freeze({ outcomeKnown: false, retryable: false })
+      : Object.freeze({ outcomeKnown: true, retryable: !settledIrreversible }),
+  });
+};
 
 export const controllerOuterPayloadCap = (/** @type {string} */ capability) =>
   capability === 'turn.run' ? TURN_OUTER_BYTES
@@ -80,21 +101,46 @@ export const controllerOperationAllowedAfterCancel = (
 /**
  * @param {string} capability
  * @param {unknown} outerPayload
+ * @param {typeof CONTROLLER_TOOL_MANIFEST} [toolManifest]
  */
-export const createControllerKernelQuota = (capability, outerPayload) => {
+export const createControllerKernelQuota = (
+  capability, outerPayload, toolManifest = CONTROLLER_TOOL_MANIFEST,
+) => {
   if (capability === KERNEL_FEATURE_DISPATCH_CAPABILITY) {
-    return createKernelFeatureEffectQuota(capability, outerPayload);
+    const quota = createKernelFeatureEffectQuota(capability, outerPayload);
+    const replayable = parseKernelFeatureCall(capability, outerPayload)?.policy.replayClass === 'A';
+    const custody = makeCustody();
+    return Object.freeze({
+      ...quota,
+      observe: (/** @type {string} */ operation, /** @type {unknown} */ payload,
+        /** @type {unknown} */ result) => {
+        const observed = quota.observe(operation, payload, result);
+        custody.observe(observed?.ok === true ? result : observed, replayable);
+        return observed;
+      },
+      pendingLoss: replayable
+        ? () => Object.freeze({ outcomeKnown: true, retryable: true })
+        : unknownPendingLoss,
+      custody: custody.snapshot,
+    });
   }
   if (capability === 'semantic.dispatch') {
     const quota = createSemanticDemandQuota(outerPayload);
+    const custody = makeCustody();
     return Object.freeze({
       admit: quota.admit,
       observe: (
         /** @type {string} */ operation,
         /** @type {unknown} */ _payload,
         /** @type {unknown} */ result,
-      ) => quota.observe(operation, result),
+      ) => {
+        const observed = quota.observe(operation, result);
+        custody.observe(observed?.ok === true ? result : observed, false);
+        return observed;
+      },
       pendingCap: quota.pendingCap,
+      pendingLoss: unknownPendingLoss,
+      custody: custody.snapshot,
     });
   }
   if (capability !== 'turn.run') {
@@ -102,6 +148,8 @@ export const createControllerKernelQuota = (capability, outerPayload) => {
       admit: () => refusal('kernel-operation-denied'),
       observe: () => refusal('kernel-operation-denied'),
       pendingCap: 0,
+      pendingLoss: unknownPendingLoss,
+      custody: unknownPendingLoss,
     });
   }
   const outer = record(outerPayload);
@@ -111,6 +159,9 @@ export const createControllerKernelQuota = (capability, outerPayload) => {
   const streamBudget = MODEL_STREAM_EVENTS * steps;
   /** @type {Map<string, number>} */
   const counts = new Map();
+  const custody = makeCustody();
+  /** @type {Map<string, ReturnType<typeof parseToolExecutionRequest>>} */
+  const toolExecutions = new Map();
   /** @type {Map<string, { events:number, bytes:number, pending:boolean }>} */
   const models = new Map();
 
@@ -206,8 +257,43 @@ export const createControllerKernelQuota = (capability, outerPayload) => {
       const modelId = value?.modelId;
       if (typeof modelId === 'string') models.delete(modelId);
     }
+    if (operation === 'turn.tool.prepare' && reply?.ok === true
+        && typeof replyValue?.requestJson === 'string') {
+      try {
+        const request = parseToolExecutionRequest(
+          JSON.parse(replyValue.requestJson), toolManifest,
+        );
+        if (request) toolExecutions.set(request.executionId, request);
+      } catch { /* malformed preparation remains kernel-owned */ }
+    }
+    const replayable = operation === 'turn.session.get'
+      || operation === 'turn.prompt.get' || operation === 'turn.tools.refresh'
+      || operation === 'turn.tool.prepare'
+      || (operation === 'turn.tool.effect'
+        && pendingLoss(operation, payload).retryable === true);
+    custody.observe(result, replayable);
     return Object.freeze({ ok: true, outcomeKnown: true });
   };
 
-  return Object.freeze({ admit, observe, pendingCap: MAX_CONCURRENT_KERNEL_CALLS });
+  const pendingLoss = (/** @type {string} */ operation, /** @type {unknown} */ payload) => {
+    if (operation !== 'turn.tool.effect') return unknownPendingLoss();
+    const effect = record(record(payload)?.value);
+    const execution = typeof effect?.executionId === 'string'
+      ? toolExecutions.get(effect.executionId) : null;
+    if (!execution || effect?.argsDigest !== execution.argsDigest
+        || effect?.turnGeneration !== execution.turnGeneration
+        || typeof effect?.operation !== 'string') {
+      return unknownPendingLoss();
+    }
+    const policy = execution.policy.effects.find(
+      (/** @type {any} */ candidate) => candidate.operation === effect.operation,
+    );
+    return policy ? toolEffectLossSemantics(policy.riskClass, 'during')
+      : unknownPendingLoss();
+  };
+
+  return Object.freeze({
+    admit, observe, pendingLoss, custody: custody.snapshot,
+    pendingCap: MAX_CONCURRENT_KERNEL_CALLS,
+  });
 };

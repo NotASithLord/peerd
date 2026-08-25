@@ -47,6 +47,13 @@ const ids = (...values: string[]) => {
   const queue = [...values];
   return () => queue.shift() ?? crypto.randomUUID();
 };
+const replaySafeQuota = () => ({
+  pendingCap: 1,
+  admit: () => ({ ok: true, outcomeKnown: true }),
+  observe: () => ({ ok: true, outcomeKnown: true }),
+  pendingLoss: () => ({ outcomeKnown: true, retryable: true }),
+  custody: () => ({ outcomeKnown: true, retryable: true }),
+});
 
 describe('Chrome lazy controller private channel prototype', () => {
   test('selects exactly one host and refuses duplicate exact documents', () => {
@@ -556,6 +563,79 @@ describe('Chrome lazy controller private channel prototype', () => {
     });
     expect(observed.signal?.aborted).toBe(true);
     controller.close();
+  });
+
+  test('an unawaited replay-safe effect remains known and retryable', async () => {
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const controller = await connectController({
+      ensureOffscreen: async () => {}, capabilities: ['turn.run'], callTimeoutMs: 1_000,
+      createQuota: replaySafeQuota,
+      handleKernelCall: async () => {
+        entered();
+        return new Promise((resolve) => setTimeout(
+          () => resolve({ ok: true, outcomeKnown: true }), 100,
+        ));
+      },
+      findHost: async () => ({
+        postMessage: (offer: any, transfer: Transferable[]) => bindControllerChannel({
+          port: transfer[0] as MessagePort, channelId: offer.channelId,
+          buildDigest: offer.buildDigest, kernelEpoch: offer.kernelEpoch,
+          hostEpoch: 'host-pending-read-effect', offeredCaps: offer.capabilities,
+          supportedCaps: ['turn.run'],
+          createQuota: replaySafeQuota,
+          loadController: async () => ({
+            call: async (_capability, _payload, options) => {
+              void options.kernelCall?.('turn.tool.effect', { value: {} });
+              return { ok: true, outcomeKnown: true };
+            },
+          }),
+        }),
+      }),
+    });
+    const result = controller.call('turn.run', { maxSteps: 1 });
+    await started;
+    await expect(result).resolves.toMatchObject({
+      ok: false, code: 'controller-pending-kernel-effect',
+      outcomeKnown: true, retryable: true,
+    });
+    controller.close();
+  });
+
+  test('a replay-safe pending effect stays known across timeout and channel loss', async () => {
+    for (const mode of ['timeout', 'close'] as const) {
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => { entered = resolve; });
+      const controller = await connectController({
+        ensureOffscreen: async () => {}, capabilities: ['repo.write'], callTimeoutMs: 20,
+        createQuota: replaySafeQuota,
+        handleKernelCall: async () => {
+          entered();
+          return new Promise((resolve) => setTimeout(
+            () => resolve({ ok: true, outcomeKnown: true }), 100,
+          ));
+        },
+        findHost: async () => ({
+          postMessage: (offer: any, transfer: Transferable[]) => bindControllerChannel({
+            port: transfer[0] as MessagePort, channelId: offer.channelId,
+            buildDigest: offer.buildDigest, kernelEpoch: offer.kernelEpoch,
+            hostEpoch: `host-read-${mode}`, offeredCaps: offer.capabilities,
+            supportedCaps: ['repo.write'], createQuota: replaySafeQuota,
+            loadController: async () => ({
+              call: async (_capability, _payload, options) =>
+                options.kernelCall?.('state.read', {}),
+            }),
+          }),
+        }),
+      });
+      const running = controller.call('repo.write', {}, { timeoutMs: 20 });
+      await started;
+      if (mode === 'close') controller.close();
+      await expect(running).resolves.toMatchObject({
+        ok: false, outcomeKnown: true, retryable: true,
+      });
+      controller.close();
+    }
   });
 
   test('turn lifetime loss aborts a pending reverse effect and stays unknown', async () => {

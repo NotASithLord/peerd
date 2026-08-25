@@ -238,6 +238,7 @@ export const makeSealedControllerLoader = ({
  * @param {() => void} [deps.closeController]
  * @param {() => number} [deps.now]
  * @param {() => string} [deps.newId]
+ * @param {(capability:string,payload:unknown)=>any} [deps.createQuota]
  */
 export const bindControllerChannel = ({
   port,
@@ -257,6 +258,7 @@ export const bindControllerChannel = ({
   closeController = () => loadController.close?.(),
   now = Date.now,
   newId = () => crypto.randomUUID(),
+  createQuota = createControllerKernelQuota,
 }) => {
   const capabilities = offeredCaps.filter((cap) => supportedCaps.includes(cap));
   const kernelIdentity = injectedIdentity ? parseKernelIdentity(injectedIdentity) : null;
@@ -279,6 +281,7 @@ export const bindControllerChannel = ({
    *   deadlineTimer?: ReturnType<typeof setTimeout>,
    *   kernelCalls: Map<string, { resolve: (value:any) => void, operation:string, payload:unknown }>,
  *   quota: ReturnType<typeof createControllerKernelQuota>,
+ *   effectEntered: boolean,
  *   stopLane: boolean,
  * }>} */
   const operations = new Map();
@@ -300,14 +303,52 @@ export const bindControllerChannel = ({
     sequence: ++sentSequence,
     ...message,
   });
+  const pendingCustody = (/** @type {any} */ operation) => {
+    const settled = typeof operation.quota.custody === 'function'
+      ? operation.quota.custody()
+      : { outcomeKnown: false, retryable: false };
+    let outcomeKnown = settled?.outcomeKnown === true;
+    let retryable = settled?.retryable === true;
+    for (const pending of operation.kernelCalls.values()) {
+      const loss = typeof operation.quota.pendingLoss === 'function'
+        ? operation.quota.pendingLoss(pending.operation, pending.payload)
+        : { outcomeKnown: false, retryable: false };
+      outcomeKnown &&= loss?.outcomeKnown === true;
+      retryable &&= loss?.retryable === true;
+    }
+    return { outcomeKnown, retryable };
+  };
+  const normalizeCustody = (/** @type {any} */ result,
+    /** @type {{outcomeKnown:boolean,retryable:boolean}|null} */ custody,
+    /** @type {boolean} */ pending) => {
+    const base = pending ? {
+      ok: false, code: 'controller-pending-kernel-effect',
+      outcomeKnown: result?.outcomeKnown === true,
+      ...(result?.retryable === false ? { retryable: false } : {}),
+    } : result ?? { ok: false, code: 'controller-result-missing' };
+    if (!custody) return base;
+    if (custody.outcomeKnown !== true) {
+      return { ...base, outcomeKnown: false, retryable: false };
+    }
+    if (base?.outcomeKnown !== true) return { ...base, outcomeKnown: false, retryable: false };
+    if (base?.ok === true) return { ...base, outcomeKnown: true };
+    return {
+      ...base, ok: false, outcomeKnown: true,
+      retryable: custody.retryable && base?.retryable !== false,
+    };
+  };
   const settle = (/** @type {string} */ requestId, /** @type {any} */ result) => {
     const operation = operations.get(requestId);
     if (!operation) return;
     const pendingEffect = operation.kernelCalls.size > 0;
+    const custody = operation.effectEntered ? pendingCustody(operation) : null;
     if (pendingEffect) operation.abort?.abort();
     if (operation.deadlineTimer) clearTimeout(operation.deadlineTimer);
     for (const pending of operation.kernelCalls.values()) {
-      pending.resolve({ ok: false, code: 'kernel-channel-lost', outcomeKnown: false });
+      const loss = typeof operation.quota.pendingLoss === 'function'
+        ? operation.quota.pendingLoss(pending.operation, pending.payload)
+        : { outcomeKnown: false, retryable: false };
+      pending.resolve({ ok: false, code: 'kernel-channel-lost', ...loss });
     }
     operation.kernelCalls.clear();
     operations.delete(requestId);
@@ -320,9 +361,7 @@ export const bindControllerChannel = ({
       stopPending = Math.max(0, stopPending - 1);
       stopPendingBytes = Math.max(0, stopPendingBytes - operation.payloadBytes);
     }
-    const settlement = pendingEffect && result?.outcomeKnown !== false ? {
-      ok: false, code: 'controller-pending-kernel-effect', outcomeKnown: false,
-    } : result;
+    const settlement = normalizeCustody(result, custody, pendingEffect);
     try { post({
       type: 'controller/settled', requestId, grantId: operation.grantId, result: settlement,
     }); }
@@ -344,9 +383,9 @@ export const bindControllerChannel = ({
     if (operation.deadlineTimer) clearTimeout(operation.deadlineTimer);
     operation.deadlineTimer = setTimeout(() => {
       operation.abort?.abort();
-      settle(requestId, {
-        ok: false, code: 'controller-deadline-expired', outcomeKnown: false,
-      });
+      const custody = operation.kernelCalls.size > 0
+        ? pendingCustody(operation) : { outcomeKnown: false, retryable: false };
+      settle(requestId, { ok: false, code: 'controller-deadline-expired', ...custody });
     }, Math.max(1, operation.deadlineAt - now()));
   };
   const close = () => {
@@ -465,10 +504,11 @@ export const bindControllerChannel = ({
         authority,
         phase: 'accepted',
         stopLane,
+        effectEntered: false,
         kernelCalls: new Map(),
         quota: message.capability === RUNTIME_DISPATCH_CAPABILITY
           ? createRuntimeEffectQuota(message.payload)
-          : createControllerKernelQuota(message.capability, message.payload),
+          : createQuota(message.capability, message.payload),
       });
       pendingBytes += payloadBytes;
       if (stopLane) {
@@ -561,6 +601,7 @@ export const bindControllerChannel = ({
           if (admitted?.ok !== true) {
             return Promise.resolve(admitted);
           }
+          operation.effectEntered = true;
           const rpcId = newId();
           return new Promise((resolve) => {
             operation.kernelCalls.set(rpcId, {
@@ -583,8 +624,10 @@ export const bindControllerChannel = ({
         (result) => {
           if (operation.deadlineAt <= now()) {
             operation.abort?.abort();
+            const custody = operation.kernelCalls.size > 0
+              ? pendingCustody(operation) : { outcomeKnown: false, retryable: false };
             settle(message.requestId, {
-              ok: false, code: 'controller-deadline-expired', outcomeKnown: false,
+              ok: false, code: 'controller-deadline-expired', ...custody,
             });
             return;
           }

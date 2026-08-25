@@ -16,6 +16,20 @@ const manifest = () => compileToolEffectManifest({
       projectionKeys: ['sessionId'],
       effects: [{
         method: 'writeMemory', operation: 'memory.write', maxCalls: 1,
+        riskClass: 'commit',
+        requestSchema: {
+          type: 'object', properties: {
+            fact: { type: 'string', maxLength: 64 },
+            metadata: {
+              type: 'object', properties: { source: { type: 'string', maxLength: 16 } },
+              required: ['source'],
+            },
+            tags: { type: 'array', items: { type: 'string' }, maxItems: 2 },
+          }, required: ['fact'],
+        },
+        resultSchema: {
+          type: 'object', properties: { stored: { type: 'boolean' } }, required: ['stored'],
+        },
         requestBytes: 256, resultBytes: 256,
       }],
       argumentBytes: 256, projectionBytes: 256, resultBytes: 1_024, pendingEffects: 1,
@@ -44,6 +58,20 @@ describe('tool execution protocol', () => {
     expect(Object.isFrozen(compiled.tools.remember.effects[0])).toBe(true);
     expect(compiled.tools.remember.effects[0]).toEqual({
       method: 'writeMemory', operation: 'memory.write', maxCalls: 1,
+      riskClass: 'commit',
+      requestSchema: {
+        type: 'object', properties: {
+          fact: { type: 'string', maxLength: 64 },
+          metadata: {
+            type: 'object', properties: { source: { type: 'string', maxLength: 16 } },
+            required: ['source'],
+          },
+          tags: { type: 'array', items: { type: 'string' }, maxItems: 2 },
+        }, required: ['fact'],
+      },
+      resultSchema: {
+        type: 'object', properties: { stored: { type: 'boolean' } }, required: ['stored'],
+      },
       requestBytes: 256, resultBytes: 256,
     });
     expect(compiled.tools.remember.projectionKeys).toEqual(['sessionId']);
@@ -51,15 +79,27 @@ describe('tool execution protocol', () => {
       protocol: TOOL_EXECUTION_PROTOCOL,
       digest,
       tools: { remember: { projectionKeys: [], effects: [
-        { method: 'writeMemory', operation: 'memory.write' },
-        { method: 'writeMemory', operation: 'memory.delete' },
+        {
+          method: 'writeMemory', operation: 'memory.write', riskClass: 'commit',
+          requestSchema: { type: 'object', properties: {}, required: [] },
+          resultSchema: { type: 'object', properties: {}, required: [] },
+        },
+        {
+          method: 'writeMemory', operation: 'memory.delete', riskClass: 'commit',
+          requestSchema: { type: 'object', properties: {}, required: [] },
+          resultSchema: { type: 'object', properties: {}, required: [] },
+        },
       ] } },
     })).toThrow('tool-effect-manifest-effect-invalid:remember');
     expect(() => compileToolEffectManifest({
       protocol: TOOL_EXECUTION_PROTOCOL,
       digest,
       tools: { remember: {
-        projectionKeys: [], effects: [{ method: 'call', operation: 'memory.write' }],
+        projectionKeys: [], effects: [{
+          method: 'call', operation: 'memory.write', riskClass: 'commit',
+          requestSchema: { type: 'object', properties: {}, required: [] },
+          resultSchema: { type: 'object', properties: {}, required: [] },
+        }],
       } },
     })).toThrow('tool-effect-manifest-effect-invalid:remember');
   });
@@ -84,8 +124,29 @@ describe('tool execution protocol', () => {
   test('accounts exact operations, bytes, and call counts', () => {
     const quota = createToolEffectQuota(manifest().tools.remember);
     expect(quota.admit('memory.delete', {})).toMatchObject({ ok: false, code: 'tool-effect-denied' });
+    expect(quota.admit('memory.write', { fact: 'one', hidden: true }))
+      .toMatchObject({ ok: false, code: 'tool-effect-request-invalid' });
+    expect(quota.admit('memory.write', { fact: 'one', metadata: { source: 1 } }))
+      .toMatchObject({ ok: false, code: 'tool-effect-request-invalid' });
+    expect(quota.admit('memory.write', { fact: 'one', metadata: new Date() }))
+      .toMatchObject({ ok: false, code: 'tool-effect-request-invalid' });
+    const sparseTags: string[] = [];
+    sparseTags.length = 1;
+    expect(quota.admit('memory.write', { fact: 'one', tags: sparseTags }))
+      .toMatchObject({ ok: false, code: 'tool-effect-request-invalid' });
+    const decoratedTags: any = ['one'];
+    decoratedTags.hidden = true;
+    expect(quota.admit('memory.write', { fact: 'one', tags: decoratedTags }))
+      .toMatchObject({ ok: false, code: 'tool-effect-request-invalid' });
     expect(quota.admit('memory.write', { fact: 'one' })).toMatchObject({ ok: true });
-    expect(quota.observe('memory.write', { ok: true, outcomeKnown: true }))
+    expect(quota.observe('memory.write', {
+      ok: true, outcomeKnown: true, value: { stored: true, hidden: true },
+    })).toMatchObject({ ok: false, code: 'tool-effect-result-invalid' });
+    const second = createToolEffectQuota(manifest().tools.remember);
+    expect(second.admit('memory.write', { fact: 'one' })).toMatchObject({ ok: true });
+    expect(second.observe('memory.write', {
+      ok: true, outcomeKnown: true, value: { stored: true },
+    }))
       .toMatchObject({ ok: true });
     expect(quota.admit('memory.write', { fact: 'two' }))
       .toMatchObject({ ok: false, code: 'tool-effect-budget-exhausted' });
@@ -100,5 +161,9 @@ describe('tool execution protocol', () => {
     expect(toolExecutionResultAllowed(valid, 1_024)).toBe(true);
     expect(toolExecutionResultAllowed({ ...valid, effectEntered: 'yes' }, 1_024)).toBe(false);
     expect(toolExecutionResultAllowed({ ...valid, hidden: true }, 1_024)).toBe(false);
+    expect(toolExecutionResultAllowed({
+      ...valid, ok: false, code: 'lost', outcomeKnown: false,
+      retryable: true, value: undefined,
+    }, 1_024)).toBe(false);
   });
 });

@@ -4,8 +4,17 @@
 // binary references; every effect and every authority-bearing lookup stays in
 // this service-worker closure.
 
-import { TOOL_EXECUTION_PROTOCOL } from '../shared/tool-execution-protocol.js';
-import { controllerHostsTool } from '../shared/controller-tool-manifest.js';
+import {
+  TOOL_EXECUTION_PROTOCOL,
+  createToolEffectQuota,
+  parseToolExecutionRequest,
+  toolEffectLossSemantics,
+  toolExecutionResultAllowed,
+} from '../shared/tool-execution-protocol.js';
+import {
+  CONTROLLER_TOOL_MANIFEST,
+  controllerHostsTool,
+} from '../shared/controller-tool-manifest.js';
 
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
@@ -135,6 +144,8 @@ const controllerCtx = (ctx) => {
  * @param {(input:{custody:unknown,result:Record<string,any>,call:Record<string,any>,
  *   ctx:Record<string,any>,binding:Record<string,any>})=>Promise<any>} [deps.settleToolCall]
  * @param {(value:unknown)=>Promise<string>} [deps.digestArgs]
+ * @param {ReturnType<import('../shared/tool-execution-protocol.js').compileToolEffectManifest>}
+ *   [deps.toolManifest]
  * @param {()=>number} [deps.now]
  */
 export const makeControllerTurnBridge = ({
@@ -144,6 +155,7 @@ export const makeControllerTurnBridge = ({
   handleToolEffect,
   settleToolCall,
   digestArgs = digestJson,
+  toolManifest = CONTROLLER_TOOL_MANIFEST,
   now = Date.now,
 }) => {
   /** @type {Map<string, any>} */
@@ -152,6 +164,39 @@ export const makeControllerTurnBridge = ({
   const sessionGenerations = new Map();
   const protocolEnabled = typeof prepareToolCall === 'function'
     && typeof handleToolEffect === 'function' && typeof settleToolCall === 'function';
+  if (!toolManifest || toolManifest.protocol !== TOOL_EXECUTION_PROTOCOL
+      || typeof toolManifest.digest !== 'string' || !isRecord(toolManifest.tools)) {
+    throw new TypeError('controller-tool-manifest-invalid');
+  }
+
+  const executionCustody = (/** @type {any} */ entry) => {
+    if (entry.pendingIrreversible > 0 || entry.unknownIrreversible === true) {
+      return { outcomeKnown: false, retryable: false };
+    }
+    return {
+      outcomeKnown: true,
+      retryable: entry.settledIrreversible !== true,
+    };
+  };
+  const executionFailure = (
+    /** @type {any} */ entry,
+    /** @type {string} */ code,
+    /** @type {string} */ error,
+  ) => {
+    const state = executionCustody(entry);
+    return {
+      protocol: TOOL_EXECUTION_PROTOCOL,
+      executionId: entry.executionId,
+      argsDigest: entry.argsDigest,
+      ok: false,
+      code,
+      error,
+      outcomeKnown: state.outcomeKnown,
+      effectEntered: entry.effectEntered === true,
+      retryable: state.retryable,
+      phase: 'run',
+    };
+  };
 
   const mintOpaque = (
     /** @type {any} */ run,
@@ -368,24 +413,19 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
     for (const entry of entries) {
       const needsSettlement = entry.open === true;
       entry.open = false;
-      const outcomeKnown = entry.effectEntered !== true;
+      const state = executionCustody(entry);
+      const outcomeKnown = state.outcomeKnown;
       if (!outcomeKnown) run.nestedUnknown = true;
       try {
         if (needsSettlement) await settleToolCall?.({
           custody: entry.custody,
-          result: {
-            protocol: TOOL_EXECUTION_PROTOCOL,
-            executionId: entry.executionId,
-            argsDigest: entry.argsDigest,
-            ok: false,
+          result: executionFailure(
+            entry,
             code,
-            error: outcomeKnown ? 'Tool execution stopped before its effect.'
+            outcomeKnown
+              ? 'Tool execution stopped with a known effect state.'
               : 'Tool outcome unknown. Check state before retrying.',
-            outcomeKnown,
-            effectEntered: entry.effectEntered === true,
-            retryable: outcomeKnown,
-            phase: 'run',
-          },
+          ),
           call: entry.call,
           ctx: run.ctx,
           binding: entry.binding,
@@ -638,9 +678,17 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
             args: prepared.args,
             projection: prepared.projection,
           };
+          const parsedRequest = parseToolExecutionRequest(request, toolManifest);
+          if (!parsedRequest) {
+            release();
+            return failed('tool execution request is outside its manifest', true);
+          }
           run.preparedExecutions.set(executionId, {
             executionId, argsDigest, binding, call, custody: prepared.custody,
             deadlineAt, release, open: true, effectEntered: false, effectPending: 0,
+            pendingIrreversible: 0, settledIrreversible: false,
+            unknownIrreversible: false, policy: parsedRequest.policy,
+            quota: createToolEffectQuota(parsedRequest.policy),
           });
           return known({ mode: 'execute', requestJson: jsonWire(request), deadlineAt });
         }
@@ -655,8 +703,22 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
           if (run.signal.aborted || context.signal?.aborted || entry.deadlineAt <= now()) {
             return failed('tool effect grant settled', true);
           }
+          const effectPolicy = entry.policy.effects.find(
+            (/** @type {any} */ effect) => effect.operation === value.operation,
+          );
+          if (!effectPolicy) return known({
+            ok: false, code: 'tool-effect-denied', outcomeKnown: true,
+          });
+          if (entry.effectPending >= entry.quota.pendingCap) return known({
+            ok: false, code: 'tool-effect-concurrency-exhausted', outcomeKnown: true,
+          });
+          const admitted = entry.quota.admit(value.operation, value.effectPayload);
+          if (admitted.ok !== true) return known(admitted);
+          const replayable = effectPolicy.riskClass === 'read'
+            || effectPolicy.riskClass === 'control';
           entry.effectEntered = true;
           entry.effectPending += 1;
+          if (!replayable) entry.pendingIrreversible += 1;
           let result;
           try {
             result = await handleToolEffect?.({
@@ -668,17 +730,52 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
               binding: entry.binding,
             });
           } catch (cause) {
-            entry.effectPending = Math.max(0, entry.effectPending - 1);
-            return unknown(run, cause);
+            const loss = toolEffectLossSemantics(effectPolicy.riskClass, 'during');
+            result = {
+              ok: false,
+              code: 'tool-effect-kernel-lost',
+              error: cause instanceof Error ? cause.message : String(cause),
+              outcomeKnown: loss.outcomeKnown,
+              retryable: loss.retryable,
+            };
           }
           entry.effectPending = Math.max(0, entry.effectPending - 1);
-          if (!isRecord(result) || typeof result.ok !== 'boolean'
-              || typeof result.outcomeKnown !== 'boolean'
-              || entry.open !== true || run.signal.aborted
-              || context.signal?.aborted || entry.deadlineAt <= now()) {
-            return unknown(run, 'tool effect outcome is unknown');
+          if (!replayable) {
+            entry.pendingIrreversible = Math.max(0, entry.pendingIrreversible - 1);
           }
-          if (result.outcomeKnown !== true) run.nestedUnknown = true;
+          const observed = entry.quota.observe(value.operation, result);
+          if (observed.ok !== true) {
+            const loss = toolEffectLossSemantics(effectPolicy.riskClass, 'during');
+            if (!loss.outcomeKnown) {
+              entry.unknownIrreversible = true;
+              run.nestedUnknown = true;
+            }
+            return known({
+              ok: false,
+              code: observed.code,
+              outcomeKnown: loss.outcomeKnown,
+              retryable: loss.retryable,
+            });
+          }
+          if (result.outcomeKnown !== true && !replayable) {
+            entry.unknownIrreversible = true;
+            run.nestedUnknown = true;
+          }
+          if (!replayable && result.outcomeKnown === true
+              && (result.ok === true || result.retryable !== true)) {
+            entry.settledIrreversible = true;
+          }
+          if (entry.open !== true || run.signal.aborted
+              || context.signal?.aborted || entry.deadlineAt <= now()) {
+            const loss = toolEffectLossSemantics(
+              effectPolicy.riskClass, result.outcomeKnown === true ? 'after' : 'during',
+            );
+            if (!loss.outcomeKnown) run.nestedUnknown = true;
+            return known({
+              ok: false, code: 'tool-effect-grant-settled',
+              outcomeKnown: loss.outcomeKnown, retryable: loss.retryable,
+            });
+          }
           return known(result);
         }
         case 'turn.tool.settle': {
@@ -688,43 +785,41 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
             return failed('tool settlement grant mismatch', true);
           }
           const reported = jsonUnwire(value.resultJson, 'tool execution result');
-          if (!isRecord(reported)
-              || reported.protocol !== TOOL_EXECUTION_PROTOCOL
-              || reported.executionId !== entry.executionId
-              || reported.argsDigest !== entry.argsDigest
-              || typeof reported.ok !== 'boolean'
-              || typeof reported.outcomeKnown !== 'boolean'
-              || typeof reported.effectEntered !== 'boolean') {
-            return unknown(run, 'tool execution result is invalid');
-          }
+          const validReported = isRecord(reported)
+            && toolExecutionResultAllowed(reported, entry.policy.resultBytes)
+            && reported.executionId === entry.executionId
+            && reported.argsDigest === entry.argsDigest;
           entry.open = false;
           const effectEntered = entry.effectEntered === true;
-          const custodyUnknown = entry.effectPending > 0
-            || (effectEntered && (reported.effectEntered !== true
-              || reported.outcomeKnown !== true));
-          const result = custodyUnknown ? {
-            protocol: TOOL_EXECUTION_PROTOCOL,
-            executionId: entry.executionId,
-            argsDigest: entry.argsDigest,
-            ok: false,
-            code: reported.code ?? 'tool-outcome-unknown',
-            error: 'Tool outcome unknown. Check state before retrying.',
-            outcomeKnown: false,
-            effectEntered,
-            retryable: false,
-            phase: 'run',
-          } : reported.outcomeKnown === true ? {
+          const state = executionCustody(entry);
+          const pending = entry.effectPending > 0;
+          const result = !validReported ? executionFailure(
+            entry,
+            'tool-execution-result-invalid',
+            state.outcomeKnown
+              ? 'Tool executor returned an invalid result with a known effect state.'
+              : 'Tool outcome unknown. Check state before retrying.',
+          ) : !state.outcomeKnown ? executionFailure(
+            entry,
+            reported.code ?? 'tool-outcome-unknown',
+            'Tool outcome unknown. Check state before retrying.',
+          ) : pending ? executionFailure(
+            entry,
+            'tool-effect-pending',
+            'Tool execution ended while a replay-safe effect was pending.',
+          ) : reported.outcomeKnown === true ? {
             ...reported,
             effectEntered,
-          } : {
-            ...reported,
-            ok: false,
-            error: 'Tool execution interrupted before its effect.',
-            outcomeKnown: true,
-            effectEntered: false,
-            retryable: true,
-          };
-          if (result.outcomeKnown !== true) run.nestedUnknown = true;
+            ...(reported.ok === false && state.retryable === false
+              ? { retryable: false } : {}),
+          } : executionFailure(
+            entry,
+            reported.code,
+            effectEntered
+              ? 'Tool execution stopped after the kernel observed its effect.'
+              : 'Tool execution interrupted before its effect.',
+          );
+          if (/** @type {any} */ (result).outcomeKnown !== true) run.nestedUnknown = true;
           try {
             const settledResult = await settleToolCall?.({
               custody: entry.custody,
