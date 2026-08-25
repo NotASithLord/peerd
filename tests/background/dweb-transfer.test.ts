@@ -16,8 +16,6 @@ const makeLane = () => {
 };
 
 const baseDeps = (over: Record<string, any> = {}) => ({
-  enabled: true,
-  offscreenAvailable: true,
   vault: {
     isLocked: () => false,
     getSecret: async () => material,
@@ -27,7 +25,6 @@ const baseDeps = (over: Record<string, any> = {}) => ({
   runCustodyOperation: async (operation: string) => operation === 'export'
     ? { did: 'did:key:zPortable' }
     : { adopted: true, material, did: 'did:key:zPortable', reason: 'already-present' },
-  loadDweb: async () => ({ available: false }),
   withIdentityMutation: makeLane(),
   canReplaceIdentity: async () => true,
   stopIdentityRuntime: async () => {},
@@ -36,7 +33,7 @@ const baseDeps = (over: Record<string, any> = {}) => ({
   ...over,
 });
 
-describe('dweb transfer host selection', () => {
+describe('dweb transfer custody host', () => {
   test('identity adoption cannot split an existing self-device membership', async () => {
     let writes = 0;
     const transfer = makeDwebTransfer(baseDeps({
@@ -56,7 +53,7 @@ describe('dweb transfer host selection', () => {
     expect(writes).toBe(0);
   });
 
-  test('Chrome uses the offscreen host and fails loudly on a bad reply', async () => {
+  test('fails loudly on a bad host reply', async () => {
     const messages: any[] = [];
     const transfer = makeDwebTransfer(baseDeps({
       runCustodyOperation: async (operation: string, args: any) => {
@@ -70,28 +67,6 @@ describe('dweb transfer host selection', () => {
       operation: 'export',
       args: { material: { v: 1, seed: 'seed', pub: 'pub' }, passphrase: 'backup-passphrase' },
     });
-  });
-
-  test('Firefox runs the same crypto through the direct preview client', async () => {
-    const calls: any[] = [];
-    const transfer = makeDwebTransfer(baseDeps({
-      offscreenAvailable: false,
-      runCustodyOperation: async () => { throw new Error('offscreen relay must not run'); },
-      loadDweb: async () => ({
-        available: true,
-        identityRecordExport: async (args: any) => {
-          calls.push(args);
-          return { did: 'did:key:zFirefox' };
-        },
-      }),
-    }));
-    expect(await transfer.exportRecord('backup-passphrase')).toEqual({
-      identityRecord: { did: 'did:key:zFirefox' },
-    });
-    expect(calls).toEqual([{
-      material: { v: 1, seed: 'seed', pub: 'pub' },
-      passphrase: 'backup-passphrase',
-    }]);
   });
 
   test('an install without an identity exports no identity section', async () => {

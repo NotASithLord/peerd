@@ -125,6 +125,29 @@ describe('test-only vault kernel package target', () => {
     }
   });
 
+  test('Chrome rejects a distributed implementation edge in the worker bundle', async () => {
+    const staging = mkdtempSync(join(tmpdir(), 'peerd-native-kernel-dweb-'));
+    mkdirSync(join(staging, 'background'), { recursive: true });
+    mkdirSync(join(staging, 'shared'), { recursive: true });
+    mkdirSync(join(staging, 'peerd-distributed'), { recursive: true });
+    writeFileSync(
+      join(staging, 'background', 'vault-kernel-preview.js'),
+      "void import('/shared/dweb-loader.js');\n",
+    );
+    writeFileSync(
+      join(staging, 'shared', 'dweb-loader.js'),
+      "export const loadDweb = () => import('/peerd-distributed/index.js');\n",
+    );
+    writeFileSync(join(staging, 'peerd-distributed', 'index.js'), 'export const live = true;\n');
+    try {
+      await expect(bundleChromeNativeKernel(
+        staging, 'background/vault-kernel-preview.js',
+      )).rejects.toThrow('native Chrome kernel hosted distributed inputs');
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+    }
+  });
+
   test('Chrome bundles only staged Store and Preview target identity', async () => {
     const targets = [
       {

@@ -1,7 +1,4 @@
 // @ts-check
-// Portable identity transfer shell. The cryptographic core stays behind the
-// dweb client; this helper owns vault custody, Chrome-offscreen vs Firefox-
-// background hosting, mutation serialization, and fail-loud backup semantics.
 
 export class IdentityTransferError extends Error {
   /** @param {string} message @param {string} code @param {{ cause?: unknown }} [options] */
@@ -25,12 +22,9 @@ const materialRevision = async (material) => {
 
 /**
  * @param {Object} deps
- * @param {boolean} deps.enabled
- * @param {boolean} deps.offscreenAvailable
  * @param {{ isLocked: () => boolean, getSecret: (name: string) => Promise<string|null>, setSecret: (name: string, value: string) => Promise<void> }} deps.vault
  * @param {string} deps.identitySecretName
  * @param {(operation: 'export'|'adopt', args: any) => Promise<any>} deps.runCustodyOperation
- * @param {() => Promise<any>} deps.loadDweb
  * @param {<T>(operation: () => Promise<T>) => Promise<T>} deps.withIdentityMutation
  * @param {() => Promise<boolean>} deps.canReplaceIdentity
  * @param {(incomingDid: string | null) => Promise<boolean>} [deps.canAdoptIdentity]
@@ -40,43 +34,28 @@ const materialRevision = async (material) => {
  * @param {(event: any) => Promise<any>} deps.audit
  */
 export const makeDwebTransfer = ({
-  enabled, offscreenAvailable, vault, identitySecretName,
-  runCustodyOperation, loadDweb, withIdentityMutation,
+  vault, identitySecretName,
+  runCustodyOperation, withIdentityMutation,
   canReplaceIdentity, canAdoptIdentity = async () => true,
   stopIdentityRuntime, startIdentityRuntime,
   newLeaseId = () => crypto.randomUUID(), audit,
 }) => {
   /** @param {'export'|'adopt'} operation @param {any} args */
   const runCrypto = async (operation, args) => {
-    if (offscreenAvailable) {
-      try {
-        return await runCustodyOperation(operation, args);
-      } catch (cause) {
-        throw new IdentityTransferError(
-          `identity ${operation} host failed`,
-          /** @type {{ code?: string }} */ (cause)?.code ?? 'host-failed',
-          { cause },
-        );
-      }
+    try {
+      return await runCustodyOperation(operation, args);
+    } catch (cause) {
+      throw new IdentityTransferError(
+        `identity ${operation} host failed`,
+        /** @type {{ code?: string }} */ (cause)?.code ?? 'host-failed',
+        { cause },
+      );
     }
-
-    // Firefox MV3 has an event-page background and no offscreen API. Its
-    // background can host this pure crypto directly through the package-gated
-    // loader; the store loader remains a stub and `enabled` is false there.
-    const client = await loadDweb();
-    const method = operation === 'export'
-      ? client?.identityRecordExport
-      : client?.identityRecordAdopt;
-    if (!client?.available || typeof method !== 'function') {
-      throw new IdentityTransferError(`identity ${operation} is unavailable`, 'unsupported');
-    }
-    return method(args);
   };
 
   return Object.freeze({
     /** @param {string} passphrase */
     exportRecord: (passphrase) => withIdentityMutation(async () => {
-      if (!enabled) return null;
       if (vault.isLocked()) throw new IdentityTransferError('vault is locked', 'vault-locked');
       const material = await vault.getSecret(identitySecretName);
       if (typeof material !== 'string' || material.length === 0) return null;
@@ -95,7 +74,6 @@ export const makeDwebTransfer = ({
      */
     prepareRecord: (record, passphrase, { replaceExisting = false } = {}) =>
       withIdentityMutation(async () => {
-        if (!enabled) return { adopted: false, did: null, reason: 'dweb-disabled' };
         if (vault.isLocked()) return { adopted: false, did: null, reason: 'vault-locked' };
         const existingMaterial = await vault.getSecret(identitySecretName);
         const outcome = await runCrypto('adopt', {
@@ -154,7 +132,6 @@ export const makeDwebTransfer = ({
           await stopIdentityRuntime(leaseId);
         }
         outcomeResult = await withIdentityMutation(async () => {
-          if (!enabled) return { adopted: false, did: null, reason: 'dweb-disabled' };
           if (vault.isLocked()) return { adopted: false, did: null, reason: 'vault-locked' };
           const existingMaterial = await vault.getSecret(identitySecretName);
           const outcome = await runCrypto('adopt', {

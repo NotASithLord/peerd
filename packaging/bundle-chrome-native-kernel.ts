@@ -91,6 +91,11 @@ export async function bundleChromeNativeKernel(staging: string, entryRelative: s
       throw new Error(`native Chrome bundle input escaped staging: ${leakedInputs.sort().join(', ')}`);
     }
     inputs.sort();
+    const distributedInputs = inputs.filter((input) => input === 'shared/dweb-loader.js'
+      || input.startsWith('peerd-distributed/'));
+    if (distributedInputs.length > 0) {
+      throw new Error(`native Chrome kernel hosted distributed inputs: ${distributedInputs.join(', ')}`);
+    }
 
     const output = readFileSync(result.outputs[0].path, 'utf8');
     const staticImports = await staticImportSpecifiers(output, entryRelative);
