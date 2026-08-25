@@ -315,6 +315,7 @@ export const parseSiteHandle = (input) => {
  *   drop: (ownerChatId: string, origin: string) => boolean,
  *   originsFor: (ownerChatId: string) => string[],
  *   entries: () => Array<[string, string]>,
+ *   dropBySession: (actorSessionId: string) => number,
  *   load: (entries: Array<[string, string]>) => void,
  * }}
  */
@@ -333,6 +334,18 @@ export const makeApiActorBindings = () => {
       const out = [];
       for (const k of byKey.keys()) if (k.startsWith(prefix)) out.push(k.slice(prefix.length));
       return out;
+    },
+    // Drop every binding pointing at one actor session, and report how many
+    // went. why the MAP owns this rather than a caller splitting the key: the
+    // separator lived in two files and drifted, so the cleanup that runs when a
+    // provisional site actor is stopped silently did nothing (issue #438). A key
+    // shape known in one place cannot drift from itself.
+    dropBySession: (actorSessionId) => {
+      let dropped = 0;
+      for (const [k, s] of byKey) {
+        if (s === actorSessionId && byKey.delete(k)) dropped += 1;
+      }
+      return dropped;
     },
     entries: () => [...byKey.entries()],
     load: (entries) => { for (const [k, s] of entries ?? []) byKey.set(k, s); },

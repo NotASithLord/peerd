@@ -63,16 +63,8 @@ export const makeOriginLockResolver = (deps) => {
           // A provisional site binding that landed elsewhere is a dead handle.
           // Remove it so a retry mints a fresh actor instead of reopening an
           // orphaned tab, while the stopped state remains as a queued-call fence.
-          if (state?.provisional) {
-            let dropped = false;
-            for (const [key, sessionId] of siteActorBindings.entries()) {
-              if (sessionId !== actorSessionId) continue;
-              const gap = key.indexOf(' ');
-              if (gap < 0) continue;
-              siteActorBindings.drop(key.slice(0, gap), key.slice(gap + 1));
-              dropped = true;
-            }
-            if (dropped) persistSiteActors();
+          if (state?.provisional && siteActorBindings.dropBySession(actorSessionId) > 0) {
+            persistSiteActors();
           }
           if (retirement) {
             const durable = await retirement;
