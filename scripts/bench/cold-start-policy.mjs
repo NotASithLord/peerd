@@ -606,11 +606,14 @@ export const assessColdStartReport = (report, {
     failures.push(`${report?.lane ?? 'required'} report must come from a clean tree`);
   }
   if (!validSha256(report?.hostSha256)) failures.push('report host identity SHA-256 is missing');
-  if (report?.lane !== 'local') {
+  const ciReport = ['pr', 'main', 'release'].includes(report?.lane);
+  if (ciReport) {
     if (typeof report?.host?.runnerImage?.os !== 'string'
         || typeof report?.host?.runnerImage?.version !== 'string') {
       failures.push('required report omits the pinned runner image identity');
     }
+  }
+  if (report?.lane !== 'local') {
     if (typeof report?.host?.kernel?.release !== 'string'
         || typeof report?.host?.kernel?.platform !== 'string'
         || typeof report?.host?.kernel?.arch !== 'string') {
@@ -621,7 +624,7 @@ export const assessColdStartReport = (report, {
   if (!['absolute-ratchet', 'interleaved-candidate-base'].includes(comparisonMode)) {
     failures.push('report comparison mode is invalid');
   }
-  if (report?.lane !== 'local' && comparisonMode !== 'absolute-ratchet') {
+  if (ciReport && comparisonMode !== 'absolute-ratchet') {
     failures.push('required report comparison mode changed before target cutover');
   }
   if (report?.targetCutover?.ready !== COLD_START_TARGET_CUTOVER.ready

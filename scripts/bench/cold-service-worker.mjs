@@ -156,7 +156,7 @@ const boolOption = (name, fallback = false) => {
 };
 const lane = String(options.lane ?? 'local');
 const laneContract = COLD_START_LANES[lane];
-if (!laneContract) throw new Error('--lane must be local, pr, main, or release');
+if (!laneContract) throw new Error('--lane must be local, device, pr, main, or release');
 const chromeWakes = intOption('chrome-wakes', nativeFloor
   ? NATIVE_FLOOR_CONTRACT.confirmedStopWakes : laneContract.chrome.wakes, 0);
 const chromeProcesses = intOption('chrome-processes', nativeFloor
@@ -184,7 +184,7 @@ if (lane !== 'local' && unsafeNoSandbox) throw new Error('--no-sandbox is local-
 if (!['absolute-ratchet', 'interleaved-candidate-base'].includes(comparisonMode)) {
   throw new Error('--comparison must be absolute-ratchet or interleaved-candidate-base');
 }
-if (lane !== 'local' && comparisonMode !== 'absolute-ratchet') {
+if (!['local', 'device'].includes(lane) && comparisonMode !== 'absolute-ratchet') {
   throw new Error('interleaved candidate/base comparison is not a required-lane gate before target cutover');
 }
 if (nativeFloor) {
@@ -1651,8 +1651,8 @@ const benchmarkFirefoxPair = async (measurements, comparisonSources) => {
 
 export const main = async () => {
   if (options.help === true || options.help === 'true') {
-    console.log('usage: bun run bench:cold-sw -- --lane=<local|pr|main|release> [--browser=<all|chrome|firefox>] [--runtime-target=<release|native-floor>] [--comparison=<absolute-ratchet|interleaved-candidate-base>]');
-    console.log('Required lanes use the exact checked-in sample, timeout, graph, and timing profile.');
+    console.log('usage: bun run bench:cold-sw -- --lane=<local|device|pr|main|release> [--browser=<all|chrome|firefox>] [--runtime-target=<release|native-floor>] [--comparison=<absolute-ratchet|interleaved-candidate-base>]');
+    console.log('Fixed lanes use the exact checked-in sample, timeout, graph, and timing profile.');
     return;
   }
   if (!['all', 'chrome', 'firefox'].includes(browserChoice)) {
@@ -1670,8 +1670,8 @@ export const main = async () => {
     throw new Error('cold-start evidence requires a readable Git commit, merge base, and worktree status');
   }
   const dirty = status !== '';
-  if (nativeFloor && dirty) {
-    throw new Error('native-floor evidence requires a clean committed worktree');
+  if ((nativeFloor || lane === 'device') && dirty) {
+    throw new Error(`${nativeFloor ? 'native-floor' : 'device'} evidence requires a clean committed worktree`);
   }
   const host = {
     platform: process.platform,
@@ -1834,7 +1834,7 @@ export const main = async () => {
     expectedLane: lane,
     expectedCommitSha: commitSha,
     expectedBaseCommitSha: baseCommitSha,
-    requireClean: lane === 'release' || nativeFloor,
+    requireClean: ['device', 'release'].includes(lane) || nativeFloor,
   });
   writeFileSync(OUTPUT, `${JSON.stringify(report, null, 2)}\n`);
   console.log(`wrote ${OUTPUT}`);

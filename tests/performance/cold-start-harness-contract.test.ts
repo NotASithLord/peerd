@@ -113,6 +113,15 @@ describe('cold-start browser harness contract', () => {
     expect(run.stderr).toContain('not a required-lane gate before target cutover');
   });
 
+  test('device lane accepts the interleaved pair gate without launching browsers', () => {
+    const run = spawnSync(process.execPath, [
+      harness, '--lane=device', '--comparison=interleaved-candidate-base', '--help',
+    ], { encoding: 'utf8' });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain('local|device|pr|main|release');
+    expect(run.stderr).toBe('');
+  });
+
   test('has a runnable side-effect-free help path', () => {
     const run = spawnSync(process.execPath, [harness, '--help'], { encoding: 'utf8' });
     expect(run.status).toBe(0);
@@ -140,6 +149,27 @@ describe('cold-start browser harness contract', () => {
     ];
     for (const [attack, message] of attacks) {
       const run = spawnSync(process.execPath, [harness, '--lane=pr', attack, '--help'], {
+        encoding: 'utf8',
+      });
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain(message);
+    }
+  });
+
+  test('device lane sample, safety, timing, and browser posture are immutable', () => {
+    const attacks = [
+      ['--chrome-processes=14', '--chrome-processes cannot alter the immutable device lane'],
+      ['--firefox-processes=14', '--firefox-processes cannot alter the immutable device lane'],
+      ['--firefox-wakes=14', '--firefox-wakes cannot alter the immutable device lane'],
+      ['--firefox-idle-ms=1', '--firefox-idle-ms cannot alter the immutable device lane'],
+      ['--graph-policy=ratchet', '--graph-policy cannot alter the immutable device lane'],
+      ['--require-timing-targets=false', '--require-timing-targets cannot alter the immutable device lane'],
+      ['--browser=firefox', 'the device lane requires --browser=all'],
+      ['--allow-failures=true', '--allow-failures is local-only'],
+      ['--no-sandbox=true', '--no-sandbox is local-only'],
+    ];
+    for (const [attack, message] of attacks) {
+      const run = spawnSync(process.execPath, [harness, '--lane=device', attack, '--help'], {
         encoding: 'utf8',
       });
       expect(run.status).not.toBe(0);
@@ -193,7 +223,7 @@ describe('cold-start browser harness contract', () => {
       expect(text).not.toContain("row.scriptURL.endsWith(backgroundEntry)");
       expect(text).not.toContain("worker.send('Runtime.runIfWaitingForDebugger'");
       expect(text).toContain("location.href === 'about:blank'");
-      expect(text).toContain("requireClean: lane === 'release' || nativeFloor");
+      expect(text).toContain("requireClean: ['device', 'release'].includes(lane) || nativeFloor");
       expect(text).not.toContain('runNativeFloorChromeProcess');
     });
   });
