@@ -231,7 +231,7 @@ describe('production direct-controller tool backpressure', () => {
       const workerSource = await Bun.file(
         new URL('../../extension/offscreen/controller-worker.js', import.meta.url),
       ).text();
-      expect(workerSource).toContain("new Set(['turn.abort.finalize', 'turn.finalize'])");
+      expect(workerSource).toContain("'turn.tool.settle'");
     } finally {
       harness.close();
     }

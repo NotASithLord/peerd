@@ -36,6 +36,8 @@ import {
   decideNumericTabAuthority,
   detectInterruptedTurn,
   dispatchToolCall,
+  prepareToolCall,
+  settleToolCall,
   DOC_TEXT_MAX_CHARS,
   DWEB_INBOUND_TOOL_NAMES,
   EXPOSURE_ACTOR,
@@ -2841,7 +2843,8 @@ export const createKernelTurnLiveFactories = (deps) => {
     markDwebEngaged: (/** @type {string} */ sessionId) => {
       if (sessionId) dwebEngagedSessions.add(sessionId);
     },
-    dispatchToolCall, maybeNudgeDebuggerGrant, getTool, decideAction,
+    dispatchToolCall, prepareToolCall, settleToolCall,
+    maybeNudgeDebuggerGrant, getTool, decideAction,
     listProviders, costOf, makeTurnCostTracker,
     uiConnected, uiPorts: shared.uiPorts, auditLog: deps.auditLog,
     resolveFailoverChain: (/** @type {{provider:string,model:string}} */ start) => {

@@ -10,6 +10,13 @@ import { createKernelFeatureHost } from './kernel-feature-host.js';
 
 const loadSemanticRoutes = makeBoundedModuleLoader(() => import('./semantic-route-host.js'));
 const loadTurnRuntime = makeBoundedModuleLoader(() => import('./controller-turn-runtime.js'));
+const loadToolRuntime = makeBoundedModuleLoader(
+  () => import('./controller-tool-runtime.js'),
+  {
+    loadCode: 'controller-tool-runtime-load-failed',
+    timeoutCode: 'controller-tool-runtime-load-timeout',
+  },
+);
 const loadKernelRuntimeHost = makeBoundedModuleLoader(() => import('./kernel-runtime-host.js'));
 const loadAdministrativeHost = () => import('./kernel-administrative-host.js');
 const loadRepositoryHost = () => import('./kernel-repository-host.js');
@@ -74,7 +81,33 @@ const makeDefaultHandlers = (/** @type {ReturnType<typeof createKernelFeatureHos
     let runtime;
     try { runtime = await loadTurnRuntime(); }
     catch (cause) { return loadFailure(cause); }
-    return runtime.runControllerTurn(payload, options);
+    const turn = runtime.createControllerTurnRuntime({
+      executeToolCall: async (
+        /** @type {unknown} */ request,
+        /** @type {any} */ executionOptions,
+      ) => {
+        try {
+          const tools = await loadToolRuntime();
+          return tools.executeControllerToolCall(request, executionOptions);
+        } catch (cause) {
+          const input = /** @type {Record<string,any>} */ (request ?? {});
+          return {
+            protocol: input.protocol,
+            executionId: input.executionId,
+            argsDigest: input.argsDigest,
+            ok: false,
+            code: /** @type {{code?:string}} */ (cause)?.code
+              ?? 'controller-tool-runtime-load-failed',
+            error: 'Tool unavailable. Try again.',
+            outcomeKnown: true,
+            effectEntered: false,
+            retryable: true,
+            phase: 'startup',
+          };
+        }
+      },
+    });
+    return turn.runControllerTurn(payload, options);
   },
   [KERNEL_FEATURE_DISPATCH_CAPABILITY]: featureHost.dispatch,
 });

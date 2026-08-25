@@ -4,9 +4,16 @@
 // binary references; every effect and every authority-bearing lookup stays in
 // this service-worker closure.
 
+import { TOOL_EXECUTION_PROTOCOL } from '../shared/tool-execution-protocol.js';
+
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
-const ABORT_CLEANUP_OPERATIONS = new Set(['turn.abort.finalize', 'turn.finalize']);
+const ABORT_CLEANUP_OPERATIONS = new Set([
+  'turn.tool.settle', 'turn.abort.finalize', 'turn.finalize',
+]);
+const DIGEST = /^[a-f0-9]{64}$/;
+const EFFECT_OPERATION = /^[a-z][a-z0-9.-]{0,127}$/;
+const TURN_DEADLINE_MS = 30 * 60_000;
 
 /** @param {unknown} value @returns {value is Record<string, any>} */
 const isRecord = (value) => value !== null
@@ -32,6 +39,12 @@ const jsonUnwire = (/** @type {unknown} */ value, /** @type {string} */ label) =
   if (typeof value !== 'string') throw new Error(`${label} wire payload is invalid`);
   try { return JSON.parse(value); }
   catch { throw new Error(`${label} wire payload is invalid`); }
+};
+const digestJson = async (/** @type {unknown} */ value) => {
+  const bytes = new TextEncoder().encode(jsonWire(value));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0')).join('');
 };
 const unknown = (/** @type {any} */ run, /** @type {unknown} */ cause) => {
   run.nestedUnknown = true;
@@ -113,13 +126,31 @@ const controllerCtx = (ctx) => {
  * @param {Object} deps
  * @param {() => Promise<{call:(capability:string,payload:unknown,options?:any)=>Promise<any>}>} deps.getClient
  * @param {() => string} [deps.newId]
+ * @param {(call:Record<string,any>,ctx:Record<string,any>,binding:Record<string,any>)=>
+ *   Promise<null|{mode:'result',result:unknown}|{mode:'execute',custody:unknown,args:unknown,
+ *   projection:Record<string,unknown>,manifestDigest:string,attempt?:number}>} [deps.prepareToolCall]
+ * @param {(input:{custody:unknown,operation:string,payload:unknown,call:Record<string,any>,
+ *   ctx:Record<string,any>,binding:Record<string,any>})=>Promise<any>} [deps.handleToolEffect]
+ * @param {(input:{custody:unknown,result:Record<string,any>,call:Record<string,any>,
+ *   ctx:Record<string,any>,binding:Record<string,any>})=>Promise<any>} [deps.settleToolCall]
+ * @param {(value:unknown)=>Promise<string>} [deps.digestArgs]
+ * @param {()=>number} [deps.now]
  */
 export const makeControllerTurnBridge = ({
   getClient,
   newId = () => crypto.randomUUID(),
+  prepareToolCall,
+  handleToolEffect,
+  settleToolCall,
+  digestArgs = digestJson,
+  now = Date.now,
 }) => {
   /** @type {Map<string, any>} */
   const runs = new Map();
+  /** @type {Map<string, number>} */
+  const sessionGenerations = new Map();
+  const protocolEnabled = typeof prepareToolCall === 'function'
+    && typeof handleToolEffect === 'function' && typeof settleToolCall === 'function';
 
   const mintOpaque = (
     /** @type {any} */ run,
@@ -281,6 +312,87 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
     try { return await promise; }
     finally { run.activeDispatches.delete(promise); }
   };
+  const acquireDispatch = async (
+    /** @type {any} */ run,
+    /** @type {boolean} */ concurrencySafe,
+  ) => {
+    let releaseHold = () => {};
+    const released = new Promise((resolve) => {
+      releaseHold = () => resolve(undefined);
+    });
+    const prior = run.dispatchBarrier;
+    const safeBefore = concurrencySafe ? [] : [...run.activeSafeDispatches];
+    const started = (concurrencySafe
+      ? Promise.resolve(prior) : Promise.allSettled([prior, ...safeBefore]))
+      .then(() => {
+        if (run.signal.aborted) throw Object.assign(
+          new DOMException('controller turn stopped before tool preparation', 'AbortError'),
+          { code: 'turn-tool-not-dispatched' },
+        );
+      });
+    const hold = started.then(() => released);
+    hold.catch(() => {});
+    if (!concurrencySafe) run.dispatchBarrier = hold.catch(() => {});
+    if (concurrencySafe) run.activeSafeDispatches.add(hold);
+    run.activeDispatches.add(hold);
+    let releasedOnce = false;
+    const release = () => {
+      if (releasedOnce) return;
+      releasedOnce = true;
+      releaseHold();
+      run.activeDispatches.delete(hold);
+      run.activeSafeDispatches.delete(hold);
+    };
+    try { await started; }
+    catch (cause) { release(); throw cause; }
+    return release;
+  };
+  const issuedToolCall = (
+    /** @type {any} */ run,
+    /** @type {Record<string, any>} */ call,
+    /** @type {Map<string, any>} */ calls = run.modelToolCalls,
+  ) => {
+    if (typeof call.id !== 'string' || typeof call.name !== 'string'
+        || !run.toolNames.has(call.name)) return null;
+    const issued = calls.get(call.id);
+    let issuedArgs = {};
+    try { issuedArgs = issued?.inputBuf ? JSON.parse(issued.inputBuf) : {}; }
+    catch { issuedArgs = {}; }
+    return issued && issued.name === call.name && sameClone(issuedArgs, call.args ?? {})
+      ? issued : null;
+  };
+  const cleanupPrepared = async (/** @type {any} */ run, /** @type {string} */ code) => {
+    const entries = [...run.preparedExecutions.values()];
+    run.preparedExecutions.clear();
+    for (const entry of entries) {
+      const needsSettlement = entry.open === true;
+      entry.open = false;
+      const outcomeKnown = entry.effectEntered !== true;
+      if (!outcomeKnown) run.nestedUnknown = true;
+      try {
+        if (needsSettlement) await settleToolCall?.({
+          custody: entry.custody,
+          result: {
+            protocol: TOOL_EXECUTION_PROTOCOL,
+            executionId: entry.executionId,
+            argsDigest: entry.argsDigest,
+            ok: false,
+            code,
+            error: outcomeKnown ? 'Tool execution stopped before its effect.'
+              : 'Tool outcome unknown. Check state before retrying.',
+            outcomeKnown,
+            effectEntered: entry.effectEntered === true,
+            retryable: outcomeKnown,
+            phase: 'run',
+          },
+          call: entry.call,
+          ctx: run.ctx,
+          binding: entry.binding,
+        });
+      } catch { if (!outcomeKnown) run.nestedUnknown = true; }
+      finally { entry.release(); }
+    }
+  };
   const recordModelEvent = (/** @type {any} */ run, /** @type {any} */ event) => {
     if (event?.type === 'tool-use-start'
         && typeof event.id === 'string' && typeof event.name === 'string') {
@@ -416,6 +528,7 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
             return failed('model/tool/system pin mismatch', true);
           }
           run.modelToolCalls.clear();
+          run.legacyToolCalls.clear();
           const modelId = newId();
           const hydrated = rehydrateModelArgs(run, args);
           const iterator = run.ctx.callModel(hydrated)[Symbol.asyncIterator]();
@@ -444,20 +557,190 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
           if (iterator?.return) await iterator.return();
           return known(null);
         }
+        case 'turn.tool.prepare': {
+          if (!protocolEnabled) return known({ mode: 'legacy' });
+          const call = jsonUnwire(value.callJson, 'tool call');
+          if (!isRecord(call) || !issuedToolCall(run, call)) {
+            return failed('tool call was not issued by the pinned model stream', true);
+          }
+          const issued = run.modelToolCalls.get(call.id);
+          run.modelToolCalls.delete(call.id);
+          const release = await acquireDispatch(
+            run, dispatchIsConcurrencySafe(run, call.name),
+          );
+          const executionId = newId();
+          const deadlineAt = Number.isSafeInteger(context.deadlineAt)
+            ? Number(context.deadlineAt) : now() + TURN_DEADLINE_MS;
+          const modelArgsDigest = await digestArgs(call.args ?? {});
+          const baseBinding = Object.freeze({
+            runId: run.runId,
+            callId: call.id,
+            sessionId: run.sessionId,
+            turnGeneration: run.turnGeneration,
+            toolName: call.name,
+            executionId,
+            modelArgsDigest,
+            deadlineAt,
+            signal: run.signal,
+          });
+          let prepared;
+          try {
+            prepared = await prepareToolCall?.(call, run.ctx, baseBinding);
+          } catch (cause) {
+            release();
+            return failed(cause, true);
+          }
+          if (prepared === null) {
+            run.legacyToolCalls.set(call.id, issued);
+            release();
+            return known({ mode: 'legacy' });
+          }
+          if (!isRecord(prepared)) {
+            release();
+            return failed('tool preparation result is invalid', true);
+          }
+          if (prepared.mode === 'result') {
+            release();
+            return known({
+              mode: 'result',
+              resultJson: jsonWire(externalizeToolResult(run, prepared.result)),
+            });
+          }
+          const attempt = prepared.attempt ?? 0;
+          if (prepared.mode !== 'execute' || !Object.hasOwn(prepared, 'custody')
+              || !isRecord(prepared.projection)
+              || typeof prepared.manifestDigest !== 'string'
+              || !DIGEST.test(prepared.manifestDigest)
+              || !Number.isSafeInteger(attempt) || Number(attempt) < 0) {
+            release();
+            return unknown(run, 'tool execution preparation is invalid');
+          }
+          let argsDigest;
+          try { argsDigest = await digestArgs(prepared.args); }
+          catch (cause) { release(); return failed(cause, true); }
+          if (!DIGEST.test(argsDigest)) {
+            release();
+            return failed('tool argument digest is invalid', true);
+          }
+          const binding = Object.freeze({ ...baseBinding, argsDigest });
+          const request = {
+            protocol: TOOL_EXECUTION_PROTOCOL,
+            executionId,
+            runId: run.runId,
+            callId: call.id,
+            sessionId: run.sessionId,
+            turnGeneration: run.turnGeneration,
+            attempt: Number(attempt),
+            toolName: call.name,
+            argsDigest,
+            manifestDigest: prepared.manifestDigest,
+            args: prepared.args,
+            projection: prepared.projection,
+          };
+          run.preparedExecutions.set(executionId, {
+            executionId, argsDigest, binding, call, custody: prepared.custody,
+            deadlineAt, release, open: true, effectEntered: false, effectPending: 0,
+          });
+          return known({ mode: 'execute', requestJson: jsonWire(request), deadlineAt });
+        }
+        case 'turn.tool.effect': {
+          const entry = run.preparedExecutions.get(value.executionId);
+          if (!entry || entry.open !== true || value.argsDigest !== entry.argsDigest
+              || value.turnGeneration !== run.turnGeneration
+              || typeof value.operation !== 'string'
+              || !EFFECT_OPERATION.test(value.operation)) {
+            return failed('tool effect grant mismatch', true);
+          }
+          if (run.signal.aborted || context.signal?.aborted || entry.deadlineAt <= now()) {
+            return failed('tool effect grant settled', true);
+          }
+          entry.effectEntered = true;
+          entry.effectPending += 1;
+          let result;
+          try {
+            result = await handleToolEffect?.({
+              custody: entry.custody,
+              operation: value.operation,
+              payload: value.effectPayload,
+              call: entry.call,
+              ctx: run.ctx,
+              binding: entry.binding,
+            });
+          } catch (cause) {
+            entry.effectPending = Math.max(0, entry.effectPending - 1);
+            return unknown(run, cause);
+          }
+          entry.effectPending = Math.max(0, entry.effectPending - 1);
+          if (!isRecord(result) || typeof result.ok !== 'boolean'
+              || typeof result.outcomeKnown !== 'boolean'
+              || entry.open !== true || run.signal.aborted
+              || context.signal?.aborted || entry.deadlineAt <= now()) {
+            return unknown(run, 'tool effect outcome is unknown');
+          }
+          if (result.outcomeKnown !== true) run.nestedUnknown = true;
+          return known(result);
+        }
+        case 'turn.tool.settle': {
+          const entry = run.preparedExecutions.get(value.executionId);
+          if (!entry || entry.open !== true || value.argsDigest !== entry.argsDigest
+              || value.turnGeneration !== run.turnGeneration) {
+            return failed('tool settlement grant mismatch', true);
+          }
+          const reported = jsonUnwire(value.resultJson, 'tool execution result');
+          if (!isRecord(reported)
+              || reported.protocol !== TOOL_EXECUTION_PROTOCOL
+              || reported.executionId !== entry.executionId
+              || reported.argsDigest !== entry.argsDigest
+              || typeof reported.ok !== 'boolean'
+              || typeof reported.outcomeKnown !== 'boolean'
+              || typeof reported.effectEntered !== 'boolean') {
+            return unknown(run, 'tool execution result is invalid');
+          }
+          entry.open = false;
+          const custodyUnknown = entry.effectPending > 0
+            || (entry.effectEntered && reported.effectEntered !== true)
+            || reported.outcomeKnown !== true;
+          const result = custodyUnknown ? {
+            protocol: TOOL_EXECUTION_PROTOCOL,
+            executionId: entry.executionId,
+            argsDigest: entry.argsDigest,
+            ok: false,
+            code: reported.code ?? 'tool-outcome-unknown',
+            error: 'Tool outcome unknown. Check state before retrying.',
+            outcomeKnown: false,
+            effectEntered: entry.effectEntered || reported.effectEntered,
+            retryable: false,
+            phase: 'run',
+          } : reported;
+          if (result.outcomeKnown !== true) run.nestedUnknown = true;
+          try {
+            const settledResult = await settleToolCall?.({
+              custody: entry.custody,
+              result,
+              call: entry.call,
+              ctx: run.ctx,
+              binding: entry.binding,
+            });
+            return known(jsonWire(externalizeToolResult(run, settledResult)));
+          } catch (cause) {
+            return unknown(run, cause);
+          } finally {
+            run.preparedExecutions.delete(entry.executionId);
+            entry.release();
+          }
+        }
         case 'turn.tool.dispatch': {
           const call = jsonUnwire(value.callJson, 'tool call');
           if (!isRecord(call) || typeof call.id !== 'string' || typeof call.name !== 'string'
               || !run.toolNames.has(call.name)) {
             return failed('tool grant mismatch', true);
           }
-          const issued = run.modelToolCalls.get(call.id);
-          let issuedArgs = {};
-          try { issuedArgs = issued?.inputBuf ? JSON.parse(issued.inputBuf) : {}; }
-          catch { issuedArgs = {}; }
-          if (!issued || issued.name !== call.name || !sameClone(issuedArgs, call.args)) {
+          if (!issuedToolCall(run, call)
+              && !issuedToolCall(run, call, run.legacyToolCalls)) {
             return failed('tool call was not issued by the pinned model stream', true);
           }
           run.modelToolCalls.delete(call.id);
+          run.legacyToolCalls.delete(call.id);
           try {
             const result = await scheduleDispatch(
               run,
@@ -514,6 +797,9 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
           if (run.signal.aborted && run.activeDispatches.size > 0) {
             return unknown(run, 'a dispatched operation remained active after Stop');
           }
+          if (run.preparedExecutions.size > 0) {
+            await cleanupPrepared(run, 'tool-execution-unsettled');
+          }
           await Promise.allSettled([run.dispatchBarrier, ...run.activeSafeDispatches]);
           return run.nestedUnknown
             ? unknown(run, 'a kernel operation crossed dispatch without a known outcome')
@@ -537,9 +823,14 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
     const onAbort = () => localAbort.abort();
     ctx.signal?.addEventListener?.('abort', onAbort, { once: true });
     if (ctx.signal?.aborted) localAbort.abort();
+    const turnGeneration = (sessionGenerations.get(ctx.sessionId) ?? 0) + 1;
+    sessionGenerations.set(ctx.sessionId, turnGeneration);
     const run = {
-      runId, sessionId: ctx.sessionId, ctx, events, signal: localAbort.signal,
+      runId, sessionId: ctx.sessionId, turnGeneration,
+      ctx, events, abort: localAbort, signal: localAbort.signal,
       opaque: new Map(), models: new Map(), modelToolCalls: new Map(),
+      legacyToolCalls: new Map(),
+      preparedExecutions: new Map(),
       tools: [], toolNames: new Set(), classifications: {}, system: null,
       nestedUnknown: false, abortFinalized: false,
       currentAssistantId: null, resumeAssistantId: null,
@@ -583,6 +874,7 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
       localAbort.abort();
       ctx.signal?.removeEventListener?.('abort', onAbort);
       events.close();
+      await cleanupPrepared(run, 'tool-execution-controller-lost');
       runs.delete(runId);
       for (const iterator of run.models.values()) {
         try { await iterator.return?.(); } catch { /* detached provider cleanup */ }
@@ -597,8 +889,13 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
     handleKernelCall,
     runUserTurn,
     close: () => {
-      for (const run of runs.values()) run.events.close();
+      for (const run of runs.values()) {
+        run.abort.abort();
+        run.events.close();
+        void cleanupPrepared(run, 'tool-execution-kernel-closed');
+      }
       runs.clear();
+      sessionGenerations.clear();
     },
     activeCount: () => runs.size,
   });

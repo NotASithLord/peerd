@@ -15,6 +15,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // interval.)
 
 import { sleep } from '/shared/util.js';
+import { executeNow } from './execute.js';
 import { formatDelta, isoSecondsZ, parseDuration } from './now.js';
 
 /**
@@ -29,19 +30,7 @@ const WAIT_MAX_MS = 60 * 60 * 1000;
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const nowTool = composeTool("now", {
-  execute: async () => {
-    const ms = Date.now();
-    const d = new Date(ms);
-    return {
-      ok: true,
-      content: JSON.stringify({
-        iso:        isoSecondsZ(ms),
-        unixMs:     ms,
-        timezone:   Intl.DateTimeFormat().resolvedOptions().timeZone,
-        dayOfWeek:  d.toLocaleString('en-US', { weekday: 'long' }),
-      }, null, 2),
-    };
-  },
+  execute: async () => executeNow(),
 });
 
 /** @type {import('/shared/tool-types.js').Tool} */
@@ -93,4 +82,3 @@ const resolveTarget = (when) => {
   if (Number.isFinite(dur)) return Date.now() + dur;
   return null;
 };
-

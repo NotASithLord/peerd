@@ -26,7 +26,11 @@ const denyNavigator = (/** @type {string} */ name, /** @type {unknown} */ value)
 denyNavigator('sendBeacon', undefined);
 for (const name of ['storage', 'serviceWorker', 'locks']) denyNavigator(name, undefined);
 const globals = /** @type {Record<string, unknown>} */ (globalThis);
-const ABORT_CLEANUP_OPERATIONS = new Set(['turn.abort.finalize', 'turn.finalize']);
+const ABORT_CLEANUP_OPERATIONS = new Set([
+  'turn.abort.finalize',
+  'turn.finalize',
+  'turn.tool.settle',
+]);
 if (typeof globals.browser !== 'undefined') sealFailures.push('browser');
 if (typeof globals.chrome !== 'undefined') sealFailures.push('chrome');
 

@@ -41,6 +41,11 @@ import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 import {
   filterByRuntimeCapabilities, runtimeCapabilityPromptBlock, runtimeCapabilityRefusal,
 } from '../runtime-capabilities.js';
+import {
+  CONTROLLER_TOOL_MANIFEST,
+  controllerHostsTool,
+} from '../../shared/controller-tool-manifest.js';
+import { toolExecutionResultAllowed } from '../../shared/tool-execution-protocol.js';
 
 const UNKNOWN_TURN_ERROR = 'Turn outcome unknown. Check the session before retrying.';
 
@@ -128,7 +133,8 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     filterByDwebActive, filterByDwebEnabled,
     filterDescriptorsByManifest, mainAgentDescriptors, listTools, settingsStore, DWEB_ENABLED,
     filterByGoalActive, goalActiveFor,
-    dwebEngagedSessions, markDwebEngaged, dispatchToolCall, maybeNudgeDebuggerGrant, getTool,
+    dwebEngagedSessions, markDwebEngaged, dispatchToolCall, prepareToolCall, settleToolCall,
+    maybeNudgeDebuggerGrant, getTool,
     decideAction, listProviders, costOf, makeTurnCostTracker, uiConnected, uiPorts, auditLog,
     resolveFailoverChain, shouldFailover, callModel, postChatNote, runUserTurn, getSecret,
     safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
@@ -586,6 +592,40 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     }
     return result;
   };
+  const toolExecution = typeof prepareToolCall === 'function'
+    && typeof settleToolCall === 'function' ? Object.freeze({
+      prepare: async (/** @type {any} */ call) => {
+        if (!controllerHostsTool(call?.name)) return null;
+        const prepared = await prepareToolCall(call, toolContext);
+        if (prepared?.prepared !== true) return { mode: 'result', result: prepared };
+        return {
+          mode: 'execute',
+          custody: prepared,
+          args: prepared.args,
+          projection: {},
+          manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+        };
+      },
+      effect: async () => ({
+        ok: false, code: 'tool-effect-denied', outcomeKnown: true,
+      }),
+      settle: async (/** @type {any} */ custody, /** @type {any} */ reported) => {
+        const policy = CONTROLLER_TOOL_MANIFEST.tools[custody?.call?.name];
+        if (!policy || !toolExecutionResultAllowed(reported, policy.resultBytes)) {
+          throw new Error('tool execution result is invalid');
+        }
+        const result = reported.ok === true ? reported.value : {
+          ok: false,
+          error: reported.error ?? reported.code,
+          code: reported.code,
+          outcomeKnown: reported.outcomeKnown,
+          retryable: reported.retryable,
+          outcomeKind: reported.outcomeKnown === true
+            ? 'pre-effect-failure' : 'host-lost',
+        };
+        return settleToolCall(custody, { result });
+      },
+    }) : null;
   // why: the loop's concurrent-dispatch scheduler partitions a multi-tool
   // turn by the SAME decideAction policy the dispatcher enforces — READ-
   // class calls (which never confirm) may run concurrently; anything that
@@ -797,6 +837,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // exposure changes therefore update the prompt and tools together.
       refreshTools,
       toolDispatch,
+      ...(toolExecution ? { toolExecution } : {}),
       classifyToolCall,
       // why: resolve from CURRENT settings at turn start (settings load
       // async and the user can dial reasoning/effort between turns). The
