@@ -248,7 +248,15 @@ export const createKernelDemandPlane = (deps) => {
     dweb: deps.dwebEnabled,
     privateTransfer: false,
     createRuntime: createKernelExecutableRuntime,
-    loadRich: getRichOwner,
+    loadEngineLive: async () => (await getRichOwner()).executableLive,
+    loadActorChatRelays: async () => (await getRichOwner()).relays,
+    loadAppCallRelays: async () => (await getRichOwner()).relays,
+    loadRelayRoutes: async () => {
+      const owner = await getRichOwner();
+      return { ...owner.relayRoutes, ...owner.relays?.engineRoutes };
+    },
+    loadTransferLive: async () => (await getRichOwner()).transferLive,
+    loadDwebRoutes: async () => (await getRichOwner()).dwebRoutes,
     dispatchRuntimeRelay: async (/** @type {string} */ route,
       /** @type {unknown} */ message) =>
       (await loadControllerOwner()).runtime.relay(route, message),

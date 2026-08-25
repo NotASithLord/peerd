@@ -44,6 +44,14 @@ const DWEB_OFFSCREEN_ROUTES = new Set([
   'dweb/self-read-surface',
 ]);
 const DWEB_APP_ROUTES = new Set(['dweb/audit', 'dweb/base/room']);
+const EXECUTABLE_LIVE_LOADERS = Object.freeze([
+  ['loadEngineLive', 'engine-live'],
+  ['loadActorChatRelays', 'actor-chat-relays'],
+  ['loadAppCallRelays', 'app-call-relays'],
+  ['loadRelayRoutes', 'relay-routes'],
+  ['loadTransferLive', 'transfer-live'],
+  ['loadDwebRoutes', 'dweb-routes'],
+]);
 
 const makeTabDocument = (/** @type {string} */ runtimeId) => (
   /** @type {any} */ sender, /** @type {string} */ expectedUrl,
@@ -188,7 +196,30 @@ export const createKernelExecutableOwner = (deps) => {
 
 /** @param {Record<string,any>} deps */
 export const createKernelExecutableControl = (deps) => {
+  if (EXECUTABLE_LIVE_LOADERS.some(([key]) => typeof deps?.[key] !== 'function')) {
+    throw new TypeError('kernel-executable-control-config-invalid');
+  }
   const { owns, paths } = deps;
+  const liveLoader = (/** @type {string} */ key, /** @type {string} */ label) => {
+    const load = makeBoundedModuleLoader(async () => {
+      const value = await deps[key]();
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new TypeError(`kernel-executable-${label}-invalid`);
+      }
+      return value;
+    }, {
+      timeoutMs: deps.liveLoadTimeoutMs ?? 15_000,
+      loadCode: `kernel-executable-${label}-load-failed`,
+      timeoutCode: `kernel-executable-${label}-load-timeout`,
+    });
+    return async () => {
+      try { return await load(); }
+      catch (cause) { load.reset(); throw cause; }
+    };
+  };
+  const live = Object.fromEntries(EXECUTABLE_LIVE_LOADERS.map(([key, label]) => [
+    key, liveLoader(key, label),
+  ]));
   const ownsTab = owns.tab ?? makeTabDocument(deps.runtimeId);
   const admit = makeKernelExecutableAdmission({
     pod: (sender, message) => typeof message?.podId === 'string'
@@ -230,17 +261,14 @@ export const createKernelExecutableControl = (deps) => {
     admit,
     createRuntime: deps.createRuntime,
     loadRuntimeDeps: async () => ({
-      engine: { load: async () => (await deps.loadRich()).executableLive },
-      actorChat: { load: async () => (await deps.loadRich()).relays },
-      appCall: { load: async () => (await deps.loadRich()).relays },
+      engine: { load: live.loadEngineLive },
+      actorChat: { load: live.loadActorChatRelays },
+      appCall: { load: live.loadAppCallRelays },
       relay: {
         dispatch: deps.dispatchRuntimeRelay,
-        load: async () => {
-          const rich = await deps.loadRich();
-          return { ...rich.relayRoutes, ...rich.relays?.engineRoutes };
-        },
+        load: live.loadRelayRoutes,
       },
-      transfer: { load: async () => (await deps.loadRich()).transferLive },
+      transfer: { load: live.loadTransferLive },
     }),
     ...(deps.privateTransfer === false ? {} : { privateTransfer: {
       isOptionsSender: owns.options,
@@ -266,7 +294,7 @@ export const createKernelExecutableControl = (deps) => {
     timeoutCode: 'kernel-dweb-routes-load-timeout',
     beforeLoad: (name, message, sender) => dwebAdmission(name, message, sender)
       ? null : { ok: false, error: 'kernel-route-unauthorized', outcomeKnown: true },
-    load: async () => (await deps.loadRich()).dwebRoutes,
+    load: live.loadDwebRoutes,
   }) : {};
   return Object.freeze({
     routes: Object.freeze({ ...owner.routes, ...dwebRoutes }),
