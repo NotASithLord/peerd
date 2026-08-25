@@ -242,6 +242,17 @@ describe('fail-closed on unreadable state', () => {
     expect(s.hydrationStatus()).toMatchObject({ ready: true, ok: false });
   });
 
+  test('an observation never overwrites an unreadable record with a partial one', async () => {
+    const { s, kv, c } = corrupt();
+    await s.observe({ origin: ORIGIN, responseAtMs: c.at(), status: 429, retryAfter: '30' });
+    await s.settled();
+    // The evidence survives, and the store still refuses writes rather than
+    // silently reporting itself healthy on a record it never read.
+    expect(kv.values.get(PACING_KEY)).toEqual({ schema: 99, entries: 'nope' });
+    expect(s.hydrationStatus().ok).toBe(false);
+    expect((await s.reserve(ORIGIN, { isWrite: true })).outcome).toBe('unavailable');
+  });
+
   test('the human "forget all" is the recovery path back to a readable record', async () => {
     const { s } = corrupt();
     await s.forgetAll();

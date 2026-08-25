@@ -257,6 +257,12 @@ export const createOriginPacingStore = ({
   const observe = async ({ origin, responseAtMs, status, retryAfter }) => {
     if (typeof origin !== 'string' || !origin) return;
     await hydrate();
+    // Never learn into state we could not read. Persisting here would overwrite
+    // the unreadable record with a partial one built from whatever this session
+    // happened to see - destroying the evidence while writes still fail closed,
+    // since loadFailed does not clear itself. The human "forget all" is the one
+    // sanctioned way back to a readable record.
+    if (loadFailed) return;
     const isBlock = isRateLimitSignal(status, retryAfter);
     const existing = rules.get(origin) ?? null;
     if (!isBlock) {
