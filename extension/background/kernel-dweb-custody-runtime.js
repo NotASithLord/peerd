@@ -1,6 +1,5 @@
 // @ts-check
 
-import { loadDweb } from '../shared/dweb-loader.js';
 import { makeDwebCustodyClient, makeRetryableCustodyReset } from './dweb-custody-client.js';
 import { makeDwebTransfer, IdentityTransferError } from './dweb-transfer.js';
 import {
@@ -59,13 +58,10 @@ export const createKernelDwebCustodyRuntime = (deps) => {
     reset: async () => { await custody.call('reset'); },
   });
   const dwebTransfer = makeDwebTransfer({
-    enabled: true,
-    offscreenAvailable: true,
     vault: deps.vault,
     identitySecretName: IDENTITY_SECRET,
     runCustodyOperation: (/** @type {any} */ operation, /** @type {any} */ args) =>
       custody.call(operation, args),
-    loadDweb,
     withIdentityMutation,
     canReplaceIdentity: canChangeIdentity,
     canAdoptIdentity: async (incomingDid) => {

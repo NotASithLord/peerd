@@ -159,6 +159,30 @@ describe('cold entry graphs', () => {
     }
   });
 
+  test('the Preview custody runtime never hosts the distributed implementation', async () => {
+    const measured = await nativeKernelStats('background/kernel-dweb-custody-runtime.js');
+    expect(measured.modulesSet.has('shared/dweb-loader.js')).toBe(false);
+    expect([...measured.modulesSet].some((file) => file.startsWith('peerd-distributed/')))
+      .toBe(false);
+  });
+
+  test('the full Preview worker never hosts the distributed implementation', async () => {
+    const measured = await nativeKernelStats(previewKernelEntry);
+    expect(measured.modulesSet.has('shared/dweb-loader.js')).toBe(false);
+    expect([...measured.modulesSet].some((file) => file.startsWith('peerd-distributed/')))
+      .toBe(false);
+  });
+
+  test('Firefox never carries the unavailable custody host', async () => {
+    const measured = await nativeKernelStats('background/vault-kernel-firefox.js');
+    for (const file of [
+      'background/kernel-dweb-addon.js',
+      'background/kernel-dweb-custody-runtime.js',
+      'background/dweb-transfer.js',
+      'shared/dweb-loader.js',
+    ]) expect(measured.modulesSet.has(file), `Firefox imports ${file}`).toBe(false);
+  });
+
   test('browser network custody is static and reaches exact policy leaves without barrels', async () => {
     const measured = await nativeKernelStats();
     expect(PACKAGED_LAZY_MODULE_ENTRIES)
