@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
+  KERNEL_DWEB_ROUTE_NAMES,
   KERNEL_EXECUTABLE_ROUTE_NAMES,
   KERNEL_TRANSFER_ROUTE_NAMES,
 } from '../../extension/shared/kernel-feature-route-inventory.js';
@@ -23,8 +26,94 @@ const runtimeModule = (onTransfer = (_authorization: symbol) => {}) => ({
 });
 const runtimeFactory = (onTransfer = (_authorization: symbol) => {}) =>
   runtimeModule(onTransfer).createKernelExecutableRuntime;
+const liveLoaders = () => ({
+  loadEngineLive: async () => ({}),
+  loadActorChatRelays: async () => ({}),
+  loadAppCallRelays: async () => ({}),
+  loadRelayRoutes: async () => ({}),
+  loadTransferLive: async () => ({}),
+  loadDwebRoutes: async () => ({}),
+});
 
 describe('kernel executable owner', () => {
+  test('has no physical rich-owner dependency', () => {
+    const background = join(import.meta.dir, '../../extension/background');
+    const owner = readFileSync(join(background, 'kernel-executable-owner.js'), 'utf8');
+    const demand = readFileSync(join(background, 'kernel-demand-plane.js'), 'utf8');
+    expect(owner).not.toContain('loadRich');
+    for (const loader of [
+      'loadEngineLive', 'loadActorChatRelays', 'loadAppCallRelays',
+      'loadRelayRoutes', 'loadTransferLive', 'loadDwebRoutes',
+    ]) expect(demand).toContain(`${loader}:`);
+  });
+
+  test('requires exact live loaders instead of a rich aggregate', () => {
+    expect(() => createKernelExecutableControl({
+      loadRich: async () => ({}),
+    })).toThrow('kernel-executable-control-config-invalid');
+  });
+
+  test('keeps exact live loaders independently lazy, cached, and bounded', async () => {
+    const relaySender = {};
+    const homeSender = {};
+    const calls: string[] = [];
+    let engineLoads = 0;
+    let runtimeDeps: any;
+    const control = createKernelExecutableControl({
+      runtimeId: 'runtime', firefox: false, dweb: true, privateTransfer: false,
+      liveLoadTimeoutMs: 1,
+      createRuntime: (deps: any) => {
+        runtimeDeps = deps;
+        return runtimeFactory()();
+      },
+      loadEngineLive: () => {
+        engineLoads += 1;
+        return engineLoads === 1 ? new Promise(() => {}) : Promise.resolve({});
+      },
+      loadActorChatRelays: async () => { calls.push('actor-chat'); return {}; },
+      loadAppCallRelays: async () => { calls.push('app-call'); return {}; },
+      loadRelayRoutes: async () => { calls.push('relay'); return {}; },
+      loadTransferLive: async () => { calls.push('transfer'); return {}; },
+      loadDwebRoutes: async () => {
+        calls.push('dweb');
+        return Object.fromEntries(KERNEL_DWEB_ROUTE_NAMES.map((name) => [
+          name, () => ({ ok: true, name }),
+        ]));
+      },
+      owns: {
+        home: (sender: any) => sender === homeSender,
+        options: () => false,
+        offscreen: (sender: any) => sender === relaySender,
+        app: () => false,
+      },
+      paths: {
+        app: 'chrome-extension://runtime/engine-tabs/app-tab/app-tab.html',
+        notebook: 'chrome-extension://runtime/engine-tabs/notebook-tab/notebook-tab.html',
+        vm: 'chrome-extension://runtime/engine-tabs/vm-tab/vm-tab.html',
+        pod: 'chrome-extension://runtime/engine-tabs/pod-tab/pod-tab.html',
+        options: 'chrome-extension://runtime/options/options.html',
+      },
+    });
+    expect(await control.routes['app/call']({}, relaySender)).toMatchObject({ ok: true });
+    expect(calls).toEqual([]);
+    await runtimeDeps.actorChat.load();
+    await runtimeDeps.appCall.load();
+    await runtimeDeps.relay.load();
+    await runtimeDeps.transfer.load();
+    await runtimeDeps.actorChat.load();
+    expect(calls).toEqual(['actor-chat', 'app-call', 'relay', 'transfer']);
+    expect(await control.routes['dweb/base/start']({}, homeSender))
+      .toMatchObject({ ok: true, name: 'dweb/base/start' });
+    expect(calls).toEqual(['actor-chat', 'app-call', 'relay', 'transfer', 'dweb']);
+    const frozen = await runtimeDeps.engine.load().catch((cause: unknown) => cause);
+    expect(frozen).toMatchObject({
+      code: 'kernel-executable-engine-live-load-timeout',
+      outcomeKnown: true, phase: 'startup', retryable: true,
+    });
+    expect(await runtimeDeps.engine.load()).toEqual({});
+    expect(engineLoads).toBe(2);
+  });
+
   test('assigns every executable surface to one exact provenance gate', () => {
     const sender = {};
     const called: string[] = [];
@@ -142,10 +231,7 @@ describe('kernel executable owner', () => {
     const control = createKernelExecutableControl({
       runtimeId: 'runtime', firefox: false, dweb: false,
       createRuntime: () => { loads += 1; return runtimeFactory()(); },
-      loadRich: async () => ({
-        executableLive: {}, transferLive: {}, relayRoutes: {},
-        relays: { engineRoutes: {} },
-      }),
+      ...liveLoaders(),
       owns: {
         home: () => false, options: () => false, offscreen: () => false,
         app: (value: any, appId: string) => value === 'app-sender' && appId === 'app-1',
