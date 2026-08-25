@@ -22,8 +22,7 @@
 //
 // Pure — values in, values out, no IO. The declarative manifest is its only
 // import. The imperative shell (the
-// worker bridge, the job-runner relay, the SW actors/call route) lives in
-// worker-source.js / job-runner.js / service-worker.js.
+// worker bridge, the job-runner relay, the actors/call route) lives outside.
 
 import { codeClientMethod, codeClientMethods } from './capability-manifest.js';
 

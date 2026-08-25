@@ -175,7 +175,7 @@ export const PLAN_NAVIGATION_TOOLS = Object.freeze(new Set(['navigate', 'open_ta
 // leaving Plan with no way to read a page at all — silently breaking Decision
 // #16's "go look at X and tell me what it says". But the delegation itself
 // mutates nothing: the actor it mints INHERITS the orchestrator's permission
-// mode (service-worker.js mintActor: `permissionMode: perm.mode`), so a
+// mode, so a
 // Plan-mode delegation spins up a Plan-mode actor whose OWN inner turn is the
 // real write barrier — its read_page/snapshot run, its click/type still block.
 // The outer gate allows the delegation; the inner inherited-Plan turn enforces

@@ -85,6 +85,22 @@ const redirectContext = ({
 };
 
 describe('navigate private-network policy', () => {
+  test('arms child quarantine before loading the next public HTML', async () => {
+    const { ctx, publicUrl, updates } = redirectContext({ landingUrl: 'https://example.com/start' });
+    const order: string[] = [];
+    ctx.ensureBrowserNetworkGuard = async () => { order.push('guard'); return { ok: true }; };
+    ctx.armBrowserChildQuarantine = async () => { order.push('quarantine'); return { ok: true }; };
+    const originalUpdate = ctx.tabs.update;
+    ctx.tabs.update = async (...args: any[]) => {
+      order.push('update');
+      return originalUpdate(...args);
+    };
+    const result = await navigateTool.execute({ url: publicUrl }, ctx);
+    expect(result.ok).toBe(true);
+    expect(order.indexOf('quarantine')).toBeGreaterThan(order.indexOf('guard'));
+    expect(order.indexOf('quarantine')).toBeLessThan(order.indexOf('update'));
+    expect(updates).toEqual([publicUrl]);
+  });
   test('a confirmed provider landing returns a stable user-wait result', async () => {
     const landingUrl = 'https://accounts.google.com/signin';
     const { ctx, publicUrl } = redirectContext({ landingUrl, landingAction: 'wait' });

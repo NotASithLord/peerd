@@ -32,10 +32,17 @@ export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
   'background/controller-turn-bridge.js',
   'background/kernel-semantic-authority.js',
   'background/kernel-semantic-control.js',
+  'background/kernel-administrative-control.js',
+  'background/kernel-repository-control.js',
+  'background/kernel-local-control.js',
   'offscreen/controller-shell.js',
   'offscreen/controller-bootstrap.js',
   'offscreen/controller-worker.js',
   'offscreen/controller-runtime.js',
+  'offscreen/kernel-runtime-host.js',
+  'offscreen/kernel-administrative-host.js',
+  'offscreen/kernel-repository-host.js',
+  'offscreen/kernel-local-host.js',
   // The vault authority loads this fixed KDF graph only for passphrase demand.
   'shared/argon2id.js',
   // Demand-owned sealed vault realm. Its bootstrap has no static feature

@@ -1,6 +1,5 @@
 // @ts-check
-// peerd-runtime/loop/turn-driver — the agent turn driver, lifted from the
-// service worker (background/service-worker.js §5 "Agent turn driver").
+// peerd-runtime/loop/turn-driver — the agent turn driver.
 // makeTurnDriver(deps) returns { runAgentTurn, maybeAutoResume }; every
 // IO/dependency is INJECTED (functional-core/imperative-shell) so the turn
 // orchestration — ~530 lines previously reachable only through a real browser —

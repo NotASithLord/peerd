@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { createKernelFrontDoor } from '../../extension/background/kernel-front-door.js';
+import {
+  attachKernelFrontDoor,
+  createKernelFrontDoor,
+} from '../../extension/background/kernel-front-door.js';
 
 const event = () => {
   const listeners: Array<(...args: any[]) => any> = [];
@@ -96,5 +99,38 @@ describe('thin-kernel synchronous front door', () => {
     expect(harness.calls).toEqual(['panel:8', 'native:true']);
     harness.focus.emit(-1);
     expect(harness.api.snapshot()).toEqual({ lastFocusedWindowId: 8, browserFocused: false });
+  });
+
+  test('attaches recovery and returns one shared panel closer', async () => {
+    const action = event();
+    const command = event();
+    const focus = event();
+    let closed = 0;
+    let recovery: any = null;
+    const browser: any = {
+      runtime: {}, action: { onClicked: action }, commands: { onCommand: command },
+      windows: {
+        WINDOW_ID_NONE: -1, onFocusChanged: focus,
+        getLastFocused: async () => ({ id: 4, focused: true }),
+      },
+      sidebarAction: { close: async () => { closed += 1; } },
+    };
+    const attached = attachKernelFrontDoor({
+      browser,
+      events: {
+        event: (_key: string, raw: any) => raw,
+        registerRecovery: (entry: any) => { recovery = entry; },
+      },
+      uiPorts: { hasNamed: () => false },
+      settingsStore: { get: () => ({ frontDoorView: 'panel' }) },
+      openHome: () => {},
+      ready: Promise.resolve(),
+    });
+    expect(await attached.closePanel()).toEqual({ ok: true });
+    expect(closed).toBe(1);
+    expect(recovery).toMatchObject({
+      event: 'windows.onFocusChanged', owner: 'kernel-front-door',
+    });
+    expect(await recovery.reconcile()).toEqual({ lastFocusedWindowId: 4, browserFocused: true });
   });
 });

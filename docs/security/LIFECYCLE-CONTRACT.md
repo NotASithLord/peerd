@@ -94,9 +94,7 @@ state without producing a resource-loss report. Do not treat tracker discovery
 alone as proof that process state survived a full browser restart.
 
 Current live source: `extension/peerd-runtime/lifecycle/engine-liveness.js`,
-`extension/peerd-runtime/lifecycle/resource-recovery.js`, engine tab trackers,
-and the engine orphan sweep in
-`extension/background/service-worker.js`.
+`extension/peerd-runtime/lifecycle/resource-recovery.js`, and engine tab trackers.
 
 ## Stored data and upgrades
 

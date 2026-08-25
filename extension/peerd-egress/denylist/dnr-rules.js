@@ -35,6 +35,17 @@
 // trade — and every seed entry that has an apex lists it explicitly anyway.
 
 import { normalizeDenylistPattern } from './denylist.js';
+import {
+  PRIVATE_NETWORK_INITIATOR_RULE_IDS,
+  PRIVATE_NETWORK_INITIATOR_RULE_ID_OFFSET,
+  PRIVATE_NETWORK_RULE_IDS,
+} from '../../shared/private-network-rule-ids.js';
+
+export {
+  PRIVATE_NETWORK_INITIATOR_RULE_IDS,
+  PRIVATE_NETWORK_INITIATOR_RULE_ID_OFFSET,
+  PRIVATE_NETWORK_RULE_IDS,
+};
 
 /**
  * The session rule id the denylist block rule occupies. ONE rule carries every
@@ -167,18 +178,6 @@ export const PRIVATE_NETWORK_REGEX_RULES = Object.freeze([
   ...PRIVATE_NETWORK_DOTTED_HOST_REGEX_RULES,
   ...PRIVATE_NETWORK_IPV6_WEBSOCKET_REGEX_RULES,
 ]);
-export const PRIVATE_NETWORK_RULE_IDS = Object.freeze([
-  PRIVATE_NETWORK_HOST_RULE_ID,
-  ...PRIVATE_NETWORK_REGEX_RULES.map(({ id }) => id),
-]);
-
-// Page service-worker requests have no tab identity. Give their companion
-// rules a disjoint id range so tab custody and origin custody can be replaced
-// atomically without either set mistaking the other's rules for stale state.
-export const PRIVATE_NETWORK_INITIATOR_RULE_ID_OFFSET = 100;
-export const PRIVATE_NETWORK_INITIATOR_RULE_IDS = Object.freeze(
-  PRIVATE_NETWORK_RULE_IDS.map((id) => id + PRIVATE_NETWORK_INITIATOR_RULE_ID_OFFSET),
-);
 // browser.tabs.TAB_ID_NONE is -1 in both supported browsers. Keep the value in
 // the pure core so rule construction does not import a privileged browser API.
 export const PRIVATE_NETWORK_NO_TAB_ID = -1;

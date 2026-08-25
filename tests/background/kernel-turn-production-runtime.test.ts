@@ -50,6 +50,8 @@ describe('kernel turn production runtime', () => {
               appActorChat: async () => ({ ok: true }),
               broadcastAgentTab: () => {}, onUiConnect: () => {},
               showWebTabHint: () => {}, isDrivenSource: () => false,
+              webActorSessionForTab: () => null,
+              handleRichKernelCall: async () => ({ ok: false }),
               resumeSchedules: async () => {},
               eventOwners: {
                 onCreated: () => {}, onUpdated: () => {}, onRemoved: () => {},

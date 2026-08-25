@@ -26,6 +26,7 @@ export {
   normalizeDenylistPattern,
 } from './denylist/denylist.js';
 export { makeOriginCredentialRoutes } from './fetch/origin-credential-routes.js';
+export { normalizeKeyedOrigin } from './fetch/origin-credentials.js';
 export {
   DPOP_KEY_STORE,
   ensureDpopJkt,

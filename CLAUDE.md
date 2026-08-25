@@ -310,12 +310,7 @@ exists today:
    are invisible where `DWEB_ENABLED` is false. Plus sessions, clock
    (temporal grounding), actor orchestrator, voice (Moonshine WASM
    + Web Speech fallback).
-6. **Wire it together** in `background/service-worker.js` — message
-   routing, dependency injection, lifecycle wiring. The SW is wiring
-   plus per-route message handlers (one per RPC the side panel /
-   offscreen doc / tab pages dispatch in); the logic lives in
-   modules. If a new handler needs more than a few lines of glue,
-   push the logic INTO a module and keep the handler thin.
+6. **Wire it together** in `background/vault-kernel.js`; keep the kernel thin.
 
 ---
 
@@ -487,8 +482,7 @@ gotchas to know going in:
   `actor/a2a-api.js` (the page-api.js twin: `meshCallToOp`/
   `shapeMeshResult`, a `MESH_METHODS` table); the ask/reply CORRELATION —
   tag a request DM, await the matching reply bound to the target did, time
-  out — is `actor/a2a-dispatch.js`; the SW singleton + consent live in
-  `background/service-worker.js` (`a2aCallRoute`). We RHYME with A2A's data
+  out — is `actor/a2a-dispatch.js`. We RHYME with A2A's data
   model (`peerd-distributed/agent-card.js` — Agent Card, message shape) for
   future interop, but REJECT its HTTP+SSE transport: the mesh is the
   transport, did:key the address, the fenced inbound wake the stream. Signing

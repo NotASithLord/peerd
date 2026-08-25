@@ -74,6 +74,7 @@ export const createKernelDenylistPolicy = ({
   };
   return Object.freeze({
     ready,
+    isReady: () => available,
     blocks,
     patterns: store.patterns,
     snapshot,
@@ -87,46 +88,6 @@ export const createKernelDenylistPolicy = ({
       await ready();
       return store.remove(pattern);
     },
-  });
-};
-
-// why a compact projection: the cold graph must not evaluate the 23 KB
-// rule-math module; a meta-test pins these ids to dnr-rules.js.
-const range = (/** @type {number} */ from, /** @type {number} */ to) =>
-  Array.from({ length: to - from + 1 }, (_ignored, index) => from + index);
-export const OWNED_DENYLIST_SESSION_RULE_IDS = Object.freeze([
-  ...range(1, 30), ...range(104, 130),
-]);
-
-/**
- * Compact DNR backstop custody. why remove-only is currently correct: every
- * buildable rule is scoped to driven/App tabs or custodied initiators, and
- * kernel tab custody is unmigrated. The empty driven set yields exactly
- * "remove every owned id". The tab-custody slice must replace this leaf.
- * @param {Object} deps
- * @param {any} [deps.dnr] the chrome.declarativeNetRequest namespace
- */
-export const createKernelDenylistNetworkCustody = ({ dnr }) => {
-  const supported = typeof dnr?.updateSessionRules === 'function';
-  /** @type {string|null} */ let lastError = null;
-  let queue = Promise.resolve();
-  const sync = () => {
-    if (!supported) return Promise.resolve();
-    queue = queue.then(async () => {
-      try {
-        await dnr.updateSessionRules({
-          removeRuleIds: [...OWNED_DENYLIST_SESSION_RULE_IDS],
-        });
-        lastError = null;
-      } catch (cause) {
-        lastError = cause instanceof Error ? cause.message : String(cause);
-      }
-    });
-    return queue;
-  };
-  return Object.freeze({
-    sync,
-    status: () => Object.freeze({ supported, lastError }),
   });
 };
 

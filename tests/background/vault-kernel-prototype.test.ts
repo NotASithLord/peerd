@@ -117,6 +117,7 @@ describe('minimal vault authority-kernel prototype', () => {
   test('entry keeps tiny local projections cheaper than their bridge and excludes controller work', async () => {
     const source = readFileSync(join(import.meta.dir, '../../extension/background/vault-kernel.js'), 'utf8');
     const core = readFileSync(join(import.meta.dir, '../../extension/background/vault-kernel-core.js'), 'utf8');
+    const control = readFileSync(join(import.meta.dir, '../../extension/background/kernel-control-plane.js'), 'utf8');
     const composer = readFileSync(join(import.meta.dir, '../../extension/background/kernel-composer-routes.js'), 'utf8');
     const local = readFileSync(join(import.meta.dir, '../../extension/background/kernel-local-routes.js'), 'utf8');
     const utility = readFileSync(join(import.meta.dir, '../../extension/background/kernel-utility-routes.js'), 'utf8');
@@ -137,9 +138,11 @@ describe('minimal vault authority-kernel prototype', () => {
     expect(source).toContain('coldReceipts.registerRecovery');
     expect(source).toContain('coldReceipts.recover()');
     expect(source).not.toContain('createColdListenerFanIn');
-    expect(source).toContain('createKernelFrontDoor');
+    expect(source).toContain('attachKernelFrontDoor');
     expect(source).toContain('createKernelPortRouter');
-    expect(source).toContain('createKernelLocalRoutes');
+    expect(source).not.toContain('createKernelLocalRoutes');
+    expect(source).toContain("import('./kernel-provider-key-route.js')");
+    expect(source).toContain("import('./kernel-credential-routes.js')");
     expect(source).toContain('createKernelAppFileReader');
     expect(source).toContain('makeKernelAppEditorRoutes');
     expect(source).toContain('createKernelSiteClientRoutes');
@@ -169,9 +172,9 @@ describe('minimal vault authority-kernel prototype', () => {
     expect(source).toContain('bindReply: generation.bindCurrent');
     expect(source).toContain("generation.bind({ type: 'state', state: delivered })");
     expect(source).not.toContain('globalThis.chrome');
-    expect(source).toContain('isFirstPartySender');
-    expect(source).toContain('isSidepanelSender');
-    expect(source).toContain('isSidepanelPortSender');
+    expect(source).toContain('createKernelSenderPolicy');
+    expect(control).toContain('isSidepanelSender');
+    expect(control).toContain('isSidepanelPortSender');
     expect(source).toContain('makeVaultKernelMessageHandler');
     expect(core).toContain('humanRoutes.has(message.type) && !humanUi(sender)');
     expect(core).toContain('vault-route-unauthorized-sender');

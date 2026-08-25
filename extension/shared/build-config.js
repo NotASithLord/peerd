@@ -4,10 +4,10 @@
 // exact build facts are stamped into every artifact and the dev tree.
 
 export const EXTENSION_VERSION = "0.7.3";
-export const BACKGROUND_MODULE_PATH = "background/service-worker.js";
+export const BACKGROUND_MODULE_PATH = "background/vault-kernel.js";
 /** @type {'chrome'|'firefox'} */
 export const BROWSER = "chrome";
 export const CHANNEL = "preview";
 export const DWEB_ENABLED = true;
 export const CHANNEL_DEFAULTS = Object.freeze({"voiceEnabled":false,"voiceVariant":"base","voiceEngine":"auto","voiceSilenceMs":1500,"voiceOnboardingDismissed":false,"ocrEnabled":false,"devMode":false,"reasoningEnabled":true,"reasoningEffort":"medium","webActorActionSurface":"code","providerName":"","providerModel":"","ollamaHost":"http://localhost:11434","openrouterModels":[],"advancedAutomationEnabled":true,"watchAgentTab":false,"frontDoorView":"panel","runnerModel":"","prewalkEnabled":false,"enginePrewalkEnabled":false,"prewalkExecutorModel":"","spendLimitUsd":0,"pricingOverrides":{},"confirmWebWrites":true,"schemaValidatedReplies":false,"autoMemoryEnabled":true,"autoResumeInterruptedTurns":true,"providerFailoverEnabled":true,"providerFallbacks":[],"vaultAutoLockMs":2700000,"auditLogMaxEntries":20000,"autoUpdateEnabled":true,"dwebEnabled":true,"dwebAgentEnabled":false});
-export const CONTROLLER_BUILD_DIGEST = 'ce4d331039f3b4548b57f34ff3c5570bdc68b38ec36114e48ff3b1f0f0ffad06';
+export const CONTROLLER_BUILD_DIGEST = 'b39f3ef9bc675913d4d90501e4b78b125a17538b73756b7f72fd4a4ba64086e5';

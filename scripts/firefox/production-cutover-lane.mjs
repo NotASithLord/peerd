@@ -12,7 +12,7 @@ import { packageArtifact } from '../../packaging/package.ts';
 import { ARTIFACTS_DIR, REPO_ROOT } from '../../packaging/lib.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import {
-  digestTree, PRODUCTION_BACKGROUND_ENTRY, sha256File,
+  digestTree, sha256File,
 } from '../cdp/passkey-signup-lane.mjs';
 import {
   assertLiveKernelAssembly,
@@ -34,6 +34,7 @@ import {
 import { startGeckodriver, waitFor } from './webdriver.mjs';
 
 const ENTRY = import.meta.path;
+const FIREFOX_BACKGROUND_ENTRY = 'background/vault-kernel-firefox.js';
 const ADDON_ID = 'peerd@peerd.ai';
 const FIREFOX_UUID = '7d12f198-31fc-4e95-9184-e954123981b6';
 const HOME_URL = `moz-extension://${FIREFOX_UUID}/home/home.html#production-cutover`;
@@ -142,6 +143,14 @@ const submitPassphrase = (driver) => driver.execute(`
   submit.click();
   return true;
 `, [PASSPHRASE]);
+
+const skipProviderSetup = (driver) => waitFor(() => executeJson(driver, `(() => {
+  const skip = [...document.querySelectorAll('button')]
+    .find((node) => /do this later/i.test(node.textContent || '') && !node.disabled);
+  if (!skip) return null;
+  skip.click();
+  return true;
+})()`), { budgetMs: 30_000, pollMs: 100 });
 
 const waitForControllerReply = async (driver, text, fixture, expectedCalls) => waitFor(async () => {
   if (fixture.completionCalls() !== expectedCalls) return null;
@@ -264,7 +273,7 @@ export const assertFirefoxProductionReport = (report) => {
   assert(report.bindings.gitFixture?.host === GIT_FIXTURE_HOST
     && report.bindings.gitFixture?.remote === GIT_FIXTURE_REMOTE, 'Git fixture identity');
   assertGitFixtureBinding(report.bindings.gitFixture);
-  assert(report.bindings.manifest.backgroundEntry === PRODUCTION_BACKGROUND_ENTRY,
+  assert(report.bindings.manifest.backgroundEntry === FIREFOX_BACKGROUND_ENTRY,
     'production background entry');
   assert(report.bindings.runtimeIdentity?.pinned === true
     && report.bindings.runtimeIdentity.expected.firefox
@@ -405,9 +414,9 @@ export async function runFirefoxProductionCutover({
   let driver;
   let fixture;
   try {
-    if (backgroundEntry !== PRODUCTION_BACKGROUND_ENTRY) {
+    if (backgroundEntry !== FIREFOX_BACKGROUND_ENTRY) {
       throw new Error(
-        `production worker cutover mismatch: expected ${PRODUCTION_BACKGROUND_ENTRY}, `
+        `production worker cutover mismatch: expected ${FIREFOX_BACKGROUND_ENTRY}, `
         + `packaged ${backgroundEntry || '(missing)'}`,
       );
     }
@@ -444,6 +453,19 @@ export async function runFirefoxProductionCutover({
     const ctaMs = hostNowMs() - startedAt;
     const submitMs = hostNowMs() - startedAt;
     await submitPassphrase(driver);
+    if (!await skipProviderSetup(driver)) {
+      throw new Error('Firefox provider setup did not become skippable');
+    }
+    const onboarding = await call(driver, {
+      type: 'onboarding/complete', peerName: 'peerd', facts: null,
+    });
+    const settings = await call(driver, {
+      type: 'settings/update',
+      patch: { providerName: 'ollama', providerModel: 'qwen3:8b', ollamaHost: fixture.origin },
+    });
+    if (onboarding?.ok !== true || settings?.ok !== true) {
+      throw new Error(`Firefox semantic setup failed: ${JSON.stringify({ onboarding, settings })}`);
+    }
     const homeReady = await waitFor(async () => {
       const ui = await uiSnapshot(driver);
       return ui.stage === 'app-ready' && ui.homeShell && ui.rootVisible && !ui.failure ? ui : null;
@@ -461,16 +483,6 @@ export async function runFirefoxProductionCutover({
     }, { budgetMs: 60_000, pollMs: 100 });
     if (!panelReady) throw new Error('Firefox panel did not reach app-ready');
     const panelReadyMs = hostNowMs() - startedAt;
-    const onboarding = await call(driver, {
-      type: 'onboarding/complete', peerName: 'peerd', facts: null,
-    });
-    const settings = await call(driver, {
-      type: 'settings/update',
-      patch: { providerName: 'ollama', providerModel: 'qwen3:8b', ollamaHost: fixture.origin },
-    });
-    if (onboarding?.ok !== true || settings?.ok !== true) {
-      throw new Error(`Firefox semantic setup failed: ${JSON.stringify({ onboarding, settings })}`);
-    }
     const firstText = 'Firefox production controller first message';
     const sent = await call(driver, { type: 'agent/send', text: firstText });
     if (sent?.ok !== true || !(await waitForControllerReply(driver, firstText, fixture, 1))) {

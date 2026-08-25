@@ -11,14 +11,17 @@ import {
 } from './kernel-direct-route-owners.js';
 import { makeKernelTransferRoutes } from './kernel-transfer-routes.js';
 import {
+  KERNEL_ENGINE_ATTACH_ROUTE_NAMES,
   KERNEL_EXECUTABLE_ROUTE_NAMES,
   KERNEL_RELAY_ROUTE_NAMES,
   KERNEL_TRANSFER_ROUTE_NAMES,
-} from './kernel-executable-inventory.js';
+} from '../shared/kernel-feature-route-inventory.js';
 import {
   makeBoundedModuleLoader,
   STARTUP_UNAVAILABLE_USER_FAILURE,
 } from '../shared/bounded-module-load.js';
+import { kernelUnknownOutcome } from './kernel-route-effect.js';
+import { makeAppCallHandler } from '../peerd-runtime/actor/app-call-handler.js';
 
 const DEFAULT_FACTORIES = Object.freeze({
   makeKernelAppDeleteRoutes,
@@ -29,6 +32,7 @@ const DEFAULT_FACTORIES = Object.freeze({
   makeKernelAppCallRoutes,
   makeKernelTransferRoutes,
 });
+const SEALED_RELAY_ROUTES = new Set(['script/model-call', 'script-run/abort']);
 
 /** @param {Record<string,any>} deps */
 export const createKernelExecutableRuntime = (deps) => {
@@ -63,9 +67,7 @@ export const createKernelExecutableRuntime = (deps) => {
   const loadAppCall = makeBoundedModuleLoader(async () => {
     const appCall = typeof deps.appCall.load === 'function'
       ? { ...deps.appCall, ...await deps.appCall.load() } : deps.appCall;
-    const makeHandler = factories.makeAppCallHandler
-      ?? (await (deps.importAppCall
-        ?? (() => import('/peerd-runtime/background.js')))()).makeAppCallHandler;
+    const makeHandler = factories.makeAppCallHandler ?? makeAppCallHandler;
     if (typeof makeHandler !== 'function') {
       throw new TypeError('kernel-app-call-handler-invalid');
     }
@@ -79,7 +81,8 @@ export const createKernelExecutableRuntime = (deps) => {
     timeoutCode: 'kernel-app-call-handler-load-timeout',
   });
   const callApp = async (/** @type {any} */ request) => {
-    try { return (await loadAppCall())(request); }
+    let handler;
+    try { handler = await loadAppCall(); }
     catch (cause) {
       return {
         ok: false,
@@ -91,12 +94,17 @@ export const createKernelExecutableRuntime = (deps) => {
         retryable: true,
       };
     }
+    try { return await handler(request); }
+    catch { return kernelUnknownOutcome('app-call-outcome-unknown'); }
   };
   const loadRelays = makeBoundedModuleLoader(async () => {
     const live = typeof deps.relay.load === 'function'
       ? await deps.relay.load() : deps.relay;
     const routes = live?.relayRoutes ?? live;
-    if (KERNEL_RELAY_ROUTE_NAMES.some((name) => typeof routes?.[name] !== 'function')) {
+    if ([...KERNEL_RELAY_ROUTE_NAMES, ...KERNEL_ENGINE_ATTACH_ROUTE_NAMES]
+      .filter((name) => !SEALED_RELAY_ROUTES.has(name)).some(
+      (name) => typeof routes?.[name] !== 'function',
+    )) {
       throw new TypeError('kernel-relay-routes-invalid');
     }
     return routes;
@@ -105,13 +113,29 @@ export const createKernelExecutableRuntime = (deps) => {
     loadCode: 'kernel-relay-routes-load-failed',
     timeoutCode: 'kernel-relay-routes-load-timeout',
   });
-  const relayRoutes = Object.fromEntries(KERNEL_RELAY_ROUTE_NAMES.map((name) => [name, async (
+  const relayRoutes = Object.fromEntries(
+    [...KERNEL_RELAY_ROUTE_NAMES, ...KERNEL_ENGINE_ATTACH_ROUTE_NAMES].map((name) => [name, async (
     /** @type {any} */ message = {}, /** @type {any} */ sender = undefined,
   ) => {
     if (!isAllowed(name, message, sender)) {
       return { ok: false, error: 'kernel-relay-unauthorized', outcomeKnown: true };
     }
-    try { return (await loadRelays())[name](message, sender); }
+    if (SEALED_RELAY_ROUTES.has(name)) {
+      if (typeof deps.relay.dispatch !== 'function') {
+        return {
+          ok: false, error: STARTUP_UNAVAILABLE_USER_FAILURE,
+          code: 'kernel-runtime-relay-unavailable', outcomeKnown: true,
+          phase: 'startup', retryable: true,
+        };
+      }
+      try {
+        const result = await deps.relay.dispatch(name, message);
+        return result?.ok === true && result.outcomeKnown === true
+          ? result.value : result;
+      } catch { return kernelUnknownOutcome('kernel-runtime-relay-outcome-unknown'); }
+    }
+    let routes;
+    try { routes = await loadRelays(); }
     catch (cause) {
       return {
         ok: false,
@@ -122,7 +146,10 @@ export const createKernelExecutableRuntime = (deps) => {
         retryable: true,
       };
     }
-  }]));
+    try { return await routes[name](message, sender); }
+    catch { return kernelUnknownOutcome('kernel-relay-outcome-unknown'); }
+    }]),
+  );
   const routes = Object.freeze({
     ...factories.makeKernelPodRoutes({ ...engine, isAllowed }),
     ...factories.makeKernelWebFetchRoutes({ ...engine, isAllowed }),

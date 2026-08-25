@@ -10,6 +10,7 @@ import {
   writeControllerBuildIdentity,
 } from '../../packaging/controller-build-identity.ts';
 import { makeSemanticControllerClient } from '../../extension/background/offscreen-controller-client.js';
+import { connectDirectController } from '../../extension/background/direct-controller-client.js';
 import { makeControllerOfferHandler } from '../../extension/offscreen/controller-shell.js';
 import { createController } from '../../extension/offscreen/controller-runtime.js';
 import {
@@ -24,17 +25,6 @@ const DWEB_TEXT = readFileSync(
 const DWEB_BLOCK = DWEB_TEXT ? `\n${DWEB_TEXT}\n` : '';
 
 describe('production semantic controller slice', () => {
-  test('the live Firefox assembly never enters a Chrome offscreen lease', () => {
-    const serviceWorker = readFileSync(
-      join(EXTENSION_DIR, 'background', 'service-worker.js'), 'utf8',
-    );
-    expect(serviceWorker).toContain('firefoxDirect: !offscreenAvailable');
-    expect(serviceWorker).toContain('withDirectLifetime: (/** @type {()=>any} */ operation');
-    expect(serviceWorker).toContain('withFirefoxBackgroundLifetime(operation, options)');
-    expect(serviceWorker).toContain('withControllerLease: (/** @type {()=>any} */ operation)');
-    expect(serviceWorker).toContain('makeLazyFirefoxActorControl');
-  });
-
   test('checked-in build identity matches the complete authored controller graphs and assets', async () => {
     expect(CONTROLLER_BUILD_DIGEST).toMatch(/^[a-f0-9]{64}$/);
     expect(await controllerBuildDigest(EXTENSION_DIR)).toBe(CONTROLLER_BUILD_DIGEST);
@@ -89,6 +79,9 @@ describe('production semantic controller slice', () => {
       'background/controller-turn-bridge.js',
       'background/kernel-semantic-authority.js',
       'background/kernel-semantic-control.js',
+      'background/kernel-administrative-control.js',
+      'offscreen/kernel-runtime-host.js',
+      'offscreen/kernel-administrative-host.js',
     ];
     for (const entry of governed) expect(CONTROLLER_BUILD_ENTRIES).toContain(entry as any);
 
@@ -98,7 +91,12 @@ describe('production semantic controller slice', () => {
       const before = await controllerBuildDigest(root);
       const repositoryHost = join(root, 'offscreen', 'repository-host.js');
       writeFileSync(repositoryHost, `${readFileSync(repositoryHost, 'utf8')}\n// identity mutation\n`);
-      expect(await controllerBuildDigest(root)).not.toBe(before);
+      const afterRepository = await controllerBuildDigest(root);
+      expect(afterRepository).not.toBe(before);
+
+      const runtimeHost = join(root, 'offscreen', 'kernel-runtime-host.js');
+      writeFileSync(runtimeHost, `${readFileSync(runtimeHost, 'utf8')}\n// identity mutation\n`);
+      expect(await controllerBuildDigest(root)).not.toBe(afterRepository);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -589,5 +587,72 @@ describe('production semantic controller slice', () => {
       'controller-host-startup-failed',
       'controller-host-startup-failed',
     ]);
+  });
+
+  test('a module-load timeout retires the Chrome and Firefox controller generation', async () => {
+    for (const firefoxDirect of [false, true]) {
+      const scheme = firefoxDirect ? 'moz-extension' : 'chrome-extension';
+      const workerUrl = `${scheme}://test/background/vault-kernel.js`;
+      const offscreenUrl = `${scheme}://test/offscreen/offscreen.html`;
+      let attempts = 0;
+      let connections = 0;
+      const loadController = async () => createController({ handlers: {
+        'semantic.dispatch': async () => {
+          attempts += 1;
+          return attempts === 1
+            ? {
+              ok: false, code: 'module-load-timeout', outcomeKnown: true,
+              retryable: true, phase: 'startup',
+            }
+            : { ok: true, outcomeKnown: true, semanticResult: { ok: true, ready: true } };
+        },
+      } });
+      const offerHandler = firefoxDirect ? null : makeControllerOfferHandler({
+        expectedWorkerUrl: workerUrl,
+        expectedBuildDigest: CONTROLLER_BUILD_DIGEST,
+        supportedCaps: ['semantic.dispatch'],
+        loadController,
+      });
+      const client = makeSemanticControllerClient({
+        browser: { runtime: { getURL: (path: string) => `${scheme}://test/${path}` } },
+        ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+        firefoxDirect, dwebEnabled: false,
+        authorizeSemanticCall: () => ({
+          ownerId: 'peerd-authority-kernel', sessionId: null, instanceId: null,
+          origin: null, target: 'semantic:provider/status:first-party', replayClass: 'A',
+        }),
+        handleSemanticKernelCall: async () => ({ ok: true }),
+        ...(firefoxDirect ? {
+          withDirectLifetime: (operation: () => Promise<any>) => operation(),
+          connectDirectController: (deps: any) => {
+            connections += 1;
+            return connectDirectController({ ...deps, loadController });
+          },
+        } : {
+          listWindowClients: async () => [{
+            url: offscreenUrl,
+            postMessage: (data: unknown, transfer: Transferable[]) => {
+              connections += 1;
+              offerHandler?.({
+                isTrusted: true, source: { scriptURL: workerUrl }, data, ports: transfer,
+              } as unknown as MessageEvent);
+            },
+          }],
+        }),
+        fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
+      });
+      const payload = {
+        protocol: 1, route: 'provider/status', message: { type: 'provider/status' },
+      };
+      await expect(client.callSemantic(payload)).resolves.toMatchObject({
+        ok: false, code: 'module-load-timeout', outcomeKnown: true,
+      });
+      await expect(client.callSemantic(payload)).resolves.toMatchObject({
+        ok: true, ready: true,
+      });
+      expect({ attempts, connections }).toEqual({ attempts: 2, connections: 2 });
+      client.close();
+      offerHandler?.close();
+    }
   });
 });

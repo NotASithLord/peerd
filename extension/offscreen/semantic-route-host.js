@@ -8,6 +8,8 @@ import { makeBoundedModuleLoader } from '../shared/bounded-module-load.js';
 import { createSemanticDispatchRuntime } from './semantic-dispatch-runtime.js';
 
 const actorRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/actors.js'));
+const appRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/apps.js'));
+const contactRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/contacts.js'));
 const contributorRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/contributor.js'));
 const providerRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/providers.js'));
 const memoryRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/memory.js'));
@@ -30,6 +32,8 @@ const routeHandler = (/** @type {()=>Promise<any>} */ load, /** @type {string} *
   return routes[method](route, message, options);
 };
 const actor = routeHandler(actorRoutes, 'dispatchActorSemanticRoute');
+const apps = routeHandler(appRoutes, 'dispatchAppSemanticRoute');
+const contacts = routeHandler(contactRoutes, 'dispatchContactSemanticRoute');
 const contributor = routeHandler(contributorRoutes, 'dispatchContributorSemanticRoute');
 const providers = routeHandler(providerRoutes, 'dispatchProviderSemanticRoute');
 const memory = routeHandler(memoryRoutes, 'dispatchMemorySemanticRoute');
@@ -38,6 +42,12 @@ const runtime = createSemanticDispatchRuntime({
   handlers: {
     'actors/overview': actor('actors/overview'),
     'actors/count': actor('actors/count'),
+    'app/get-meta': apps('app/get-meta'),
+    'apps/favorite': apps('apps/favorite'),
+    'apps/open': apps('apps/open'),
+    'apps/rename': apps('apps/rename'),
+    'contacts/forget': contacts('contacts/forget'),
+    'contacts/set': contacts('contacts/set'),
     'contributor/disable': contributor('contributor/disable'),
     'contributor/enable': contributor('contributor/enable'),
     'contributor/status': contributor('contributor/status'),

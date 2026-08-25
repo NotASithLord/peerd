@@ -1,7 +1,7 @@
 // @ts-check
 // background/a2a-consent.js — the two PURE consent decisions for a2a first-contact.
 //
-// Extracted from service-worker.js so the security-sensitive rule the swarm
+// The security-sensitive rule the swarm
 // flagged — "Allow once" must NOT persist as a standing signing grant — is unit
 // tested in isolation, not left to trace-by-eye through the SW. Values in, values
 // out, no IO.

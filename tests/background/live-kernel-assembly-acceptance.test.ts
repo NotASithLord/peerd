@@ -8,16 +8,16 @@ import {
 describe('installed-artifact live kernel assembly contract', () => {
   test('pins the complete semantic, event, and Port inventories per target', () => {
     expect(liveKernelAssemblyProfile('store-chrome')).toMatchObject({
-      semanticRoutes: 161, eventInventory: 16, portInventory: 6,
-      semanticPlacements: { kernel: 85, split: 76 },
+      semanticRoutes: 160, eventInventory: 16, portInventory: 6,
+      semanticPlacements: { kernel: 142, split: 18 },
       requiredEvents: { length: 13 }, requiredPorts: { length: 4 },
     });
     expect(liveKernelAssemblyProfile('preview-chrome')).toMatchObject({
-      semanticRoutes: 161, eventInventory: 16, portInventory: 6,
+      semanticRoutes: 160, eventInventory: 16, portInventory: 6,
       requiredEvents: { length: 14 }, requiredPorts: { length: 5 },
     });
     expect(liveKernelAssemblyProfile('store-firefox')).toMatchObject({
-      semanticRoutes: 161, eventInventory: 16, portInventory: 6,
+      semanticRoutes: 160, eventInventory: 16, portInventory: 6,
       requiredEvents: { length: 15 }, requiredPorts: { length: 4 },
     });
     for (const target of ['store-chrome', 'preview-chrome', 'store-firefox'] as const) {

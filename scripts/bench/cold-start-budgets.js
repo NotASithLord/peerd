@@ -184,7 +184,7 @@ export const OFFSCREEN_SUPERVISOR_SOURCE_CONTRACT = Object.freeze({
   minimumReduction: Object.freeze({ modules: 2, graphBytes: 8_717 }),
 });
 
-export const LEGACY_COLD_SOURCE_RATCHETS = Object.freeze({
+export const COLD_SOURCE_RATCHETS = Object.freeze({
   // Repository/isomorphic-git moved behind the authenticated lazy host. The
   // browser-neutral vault auto-lock normalizer is one reviewed leaf shared by
   // legacy settings and the future authority kernel; it adds exactly one
@@ -254,7 +254,7 @@ export const COLD_START_TARGETS = Object.freeze({
   }),
 });
 
-export const LEGACY_COLD_GRAPH_RATCHETS = Object.freeze({
+export const COLD_GRAPH_RATCHETS = Object.freeze({
   chrome: Object.freeze({
     // The agent loop moved behind the sealed lazy turn controller; the explicit
     // vault lifecycle seam remains in the entry. The generated 213-byte build
@@ -283,8 +283,8 @@ export const LEGACY_COLD_GRAPH_RATCHETS = Object.freeze({
 // cold graphs differ by the exact generated loader bytes. Keep a separate
 // no-growth fence for every shipped cell instead of granting the smaller Store
 // build unused headroom.
-export const LEGACY_PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
-  store: LEGACY_COLD_GRAPH_RATCHETS,
+export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
+  store: COLD_GRAPH_RATCHETS,
   preview: Object.freeze({
     chrome: Object.freeze({
       serviceWorker: Object.freeze({ modules: 453, graphBytes: 1_714_810, entryBytes: 188_885 }),

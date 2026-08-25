@@ -14,8 +14,8 @@
 //
 // This module is the pure decision: given a session, was its last turn
 // interrupted by INFRASTRUCTURE (resumable) rather than by the user or a
-// clean stop (not resumable)? The imperative shell (service-worker.js)
-// calls it on session open / vault unlock and, when it says yes, drives
+// clean stop (not resumable)? The host calls it on session open / vault unlock
+// and, when it says yes, drives
 // one synthetic continuation turn — the loop rebuilds history from the
 // session each step, so injectResumeNotes (partial reasoning) and the
 // format layer's orphan-repair (dangling tool_use) make the continuation

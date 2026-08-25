@@ -11,9 +11,9 @@ import {
   COLD_START_TARGETS,
   COLD_START_TARGET_CUTOVER,
   NATIVE_FLOOR_CONTRACT,
-  LEGACY_COLD_GRAPH_RATCHETS,
-  LEGACY_PACKAGE_COLD_GRAPH_RATCHETS,
-  LEGACY_COLD_SOURCE_RATCHETS,
+  COLD_GRAPH_RATCHETS,
+  PACKAGE_COLD_GRAPH_RATCHETS,
+  COLD_SOURCE_RATCHETS,
 } from './cold-start-budgets.js';
 
 export {
@@ -26,9 +26,9 @@ export {
   COLD_START_TARGETS,
   COLD_START_TARGET_CUTOVER,
   NATIVE_FLOOR_CONTRACT,
-  LEGACY_COLD_GRAPH_RATCHETS,
-  LEGACY_PACKAGE_COLD_GRAPH_RATCHETS,
-  LEGACY_COLD_SOURCE_RATCHETS,
+  COLD_GRAPH_RATCHETS,
+  PACKAGE_COLD_GRAPH_RATCHETS,
+  COLD_SOURCE_RATCHETS,
 };
 
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -201,7 +201,7 @@ const graphFailures = (browser, result, policy) => {
     const budgets = policy === 'target'
       ? COLD_START_TARGETS[browser]
       : policy === 'ratchet'
-        ? LEGACY_PACKAGE_COLD_GRAPH_RATCHETS[channel]?.[browser]
+        ? PACKAGE_COLD_GRAPH_RATCHETS[channel]?.[browser]
         : null;
     if (policy !== 'integrity' && !budgets) {
       failures.push(`no ${policy} graph policy for ${channel}/${browser}`);

@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
-import { createVault } from '../../extension/peerd-egress/vault/vault.js';
 import {
   makeUiForwarder, makeVoiceControlPlane,
 } from '../../extension/background/service-worker-control-plane.js';
@@ -318,46 +317,6 @@ describe('offscreen production feature-lease wiring', () => {
     expect(source('shared/feature-lease-protocol.js')).not.toMatch(/\b(?:browser|chrome)\./);
   });
 
-  test('the live worker owns lease authority and has no unconditional offscreen boot', () => {
-    const worker = source('background/service-worker.js');
-    const keepalive = source('background/feature-lease-keepalive.js');
-    const control = source('background/service-worker-control-plane.js');
-    expect(worker).toContain('createFeatureLeaseControlPlane({');
-    expect(control).toContain('createProductionFeatureLeaseRuntime({');
-    expect(worker).toContain('FEATURE_LEASE_KEEPALIVE_PORT');
-    expect(worker).toContain('attachFeatureLeaseKeepalive({');
-    expect(keepalive).toContain("type: 'feature-lease/heartbeat-ack'");
-    expect(worker).toContain('featureLeases.resume({ dwebEnabled: resumeDwebEnabled })');
-    expect(worker.indexOf('await settingsReady;'))
-      .toBeLessThan(worker.indexOf('featureLeases.resume({ dwebEnabled: resumeDwebEnabled })'));
-    expect(keepalive).toContain('featureLeases.handleHostLoss(lostHostEpoch)');
-    expect(keepalive).toContain("['starting', 'active', 'unknown'].includes(state?.status)");
-    expect(keepalive.indexOf('if (!current) return;'))
-      .toBeLessThan(keepalive.indexOf('authenticatedHostEpoch = message.hostEpoch;'));
-    expect(worker).toContain("featureLeases.runTransition('initialize'");
-    expect(worker).toContain("featureLeases.runTransition('unlock'");
-    expect(worker).toContain('await featureLeases.lock()');
-    expect(worker).not.toContain("'sw-keepalive'");
-    expect(worker).not.toContain('keepalivePorts');
-    expect(worker).not.toMatch(/void ensureOffscreen\(\);\s*\/\/ Best-effort boot/i);
-  });
-
-  test('every rich Chrome feature enters through a named bounded or durable lease', () => {
-    const worker = source('background/service-worker.js');
-    expect(worker).toContain('withControllerLease: (/** @type {()=>any} */ operation) => withFeatureLease(');
-    expect(worker).toContain('firefoxDirect: !offscreenAvailable');
-    expect(worker).toContain('withDirectLifetime: (/** @type {()=>any} */ operation');
-    expect(worker).toContain('withHost: (/** @type {(lease:any)=>Promise<any>} */ operation) => withFeatureLease(');
-    expect(worker).toContain("const withHost = (operation) => withFeatureLease(\n  'model-host'");
-    expect(worker).toContain("const acquireResidentHost = () => acquireFeatureLease(\n  'model-host'");
-    expect(worker).not.toMatch(/withFeatureLease\(\s*'controller',[\s\S]{0,180}local-model\/host\//);
-    expect(worker).toContain("runOnChannel: actorChannelClient ? (job, options) => withFeatureLease(");
-    expect(worker).toContain("'dom-host', () => browser.runtime.sendMessage(message)");
-    expect(worker).toContain("acquireFeatureLease('media-host'");
-    expect(worker).toContain("acquireFeatureLease('dweb'");
-    expect(worker).toContain("featureLeases.disable('dweb')");
-  });
-
   test('voice media is accepted only from human UI and teardown revokes the durable hold', () => {
     const voice = source('background/service-worker-control-plane.js');
     expect(voice).toContain('deps.isSidepanelSender(sender)');
@@ -441,81 +400,6 @@ describe('offscreen production feature-lease wiring', () => {
       'acquire', 'host:voice/init', 'host:voice/teardown', 'revoke',
     ]);
     expect(relay.active()).toBe(false);
-    expect(source('background/service-worker.js')).toContain(
-      'if (patch?.voiceEnabled === false) await teardownVoiceFeature();',
-    );
-  });
-
-  test('a fake-timer idle lock enters the exact live authority teardown once', async () => {
-    const worker = source('background/service-worker.js');
-    const lifecycleStart = worker.indexOf('/** @type {Promise<void>|null} */\nlet vaultLockLifecycle');
-    const lifecycleEnd = worker.indexOf('// Complete the tiny publish', lifecycleStart);
-    const subscriptionStart = worker.indexOf('vault.subscribe((event) => {');
-    const subscriptionEnd = worker.indexOf('// 5. Agent turn driver', subscriptionStart);
-    if ([lifecycleStart, lifecycleEnd, subscriptionStart, subscriptionEnd].some((at) => at < 0)) {
-      throw new Error('vault-lock-lifecycle-source-boundary-missing');
-    }
-
-    let timer: (() => void) | null = null;
-    const session = new Map<string, any>([[
-      'vault.unlocked.v1',
-      { dk: btoa(String.fromCharCode(...new Uint8Array(32))), unlockedAt: 1 },
-    ]]);
-    const vault = createVault({
-      kv: {
-        get: async () => undefined,
-        set: async () => {},
-        delete: async () => {},
-        list: async () => ({}),
-        clear: async () => {},
-      },
-      sessionCache: {
-        sessionGet: async (key: string) => session.get(key),
-        sessionSet: async (key: string, value: any) => { session.set(key, value); },
-        sessionDelete: async (key: string) => { session.delete(key); },
-      },
-      autoLockMs: 1_000,
-      now: () => 1,
-      setTimer: (callback: () => void) => { timer = callback; return 1; },
-      clearTimer: () => { timer = null; },
-    });
-    let statePushes = 0;
-    let controllerCloses = 0;
-    let authorityLocks = 0;
-    let networkStops = 0;
-    let publicationInvalidations = 0;
-    const install = new Function(
-      'vault',
-      'pushState',
-      'semanticController',
-      'featureLeases',
-      'onBaseNetworkStopped',
-      'invalidateDwebPublications',
-      `${worker.slice(lifecycleStart, lifecycleEnd)}\n${worker.slice(subscriptionStart, subscriptionEnd)}`,
-    );
-    install(
-      vault,
-      () => { statePushes += 1; },
-      { close: () => { controllerCloses += 1; } },
-      { lock: async () => { authorityLocks += 1; } },
-      () => { networkStops += 1; },
-      () => { publicationInvalidations += 1; },
-    );
-
-    expect(await vault.attemptResume()).toBe(true);
-    expect(vault.isLocked()).toBe(false);
-    const fire = timer as unknown as (() => void) | null;
-    if (!fire) throw new Error('vault-auto-lock-timer-not-armed');
-    fire();
-    for (let i = 0; i < 8 && networkStops === 0; i += 1) await Promise.resolve();
-
-    expect(vault.isLocked()).toBe(true);
-    expect(vault.lockReason()).toBe('idle');
-    expect(authorityLocks).toBe(1);
-    expect(controllerCloses).toBe(1);
-    expect(networkStops).toBe(1);
-    expect(publicationInvalidations).toBe(1);
-    expect(statePushes).toBe(2); // resumed + timer-fired lock
   });
 
   test('loading the dweb host cannot open custody or network without a lease', () => {

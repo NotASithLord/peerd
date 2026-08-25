@@ -9,7 +9,11 @@ import {
   minifyColdArtifactModules,
 } from '../../packaging/minify-artifact-js.ts';
 import { COLD_START_TARGETS } from '../../scripts/bench/cold-start-budgets.js';
-import { staticImportSpecifiers } from '../../packaging/static-module-graph.ts';
+import {
+  exportedNames,
+  moduleImportSpecifiers,
+  staticImportSpecifiers,
+} from '../../packaging/static-module-graph.ts';
 
 const temporaryRoots: string[] = [];
 afterEach(() => {
@@ -80,6 +84,10 @@ describe('release artifact JavaScript minification', () => {
       '/shared/channel-config.js',
       '/shared/dweb-loader.js',
     ]);
+    expect(await moduleImportSpecifiers(swAfter)).toContainEqual({
+      kind: 'dynamic', specifier: './lazy.js',
+    });
+    expect(await exportedNames(swAfter)).toEqual(['keepReadableName']);
     expect(readFileSync(join(root, 'background/lazy.js'), 'utf8')).toBe(lazySource);
     expect(readFileSync(join(root, 'vendor/library.js'), 'utf8')).toBe(vendorSource);
     expect(readFileSync(join(root, 'shared/channel-config.js'), 'utf8')).toBe(channelSource);

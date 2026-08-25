@@ -1,23 +1,9 @@
 // @ts-check
 // Native App metadata authority; bytes and repository work stay demand-owned.
 
-import { parseAppManifest } from '/peerd-engine/app-manifest.js';
 import { makeSerialLane } from '../shared/cold-util.js';
 
 export const KERNEL_APP_CATALOG_KEY = 'apps.v1';
-
-/** @param {unknown} cause @param {string} code @param {string} action */
-const catalogEffectFailure = (cause, code, action) => {
-  void cause;
-  return {
-    ok: false,
-    error: `Peerd could not confirm whether ${action} finished. Refresh to reconcile before trying again.`,
-    code,
-    outcomeKnown: false,
-    outcomeKind: 'unknown',
-    retryable: false,
-  };
-};
 
 /** @typedef {{schemaVersion:1,apps:Record<string,any>,sessionDefaults:Record<string,string>}} KernelAppCatalogState */
 
@@ -207,102 +193,3 @@ export const createKernelAppCatalog = ({
     }),
   });
 };
-
-/** @param {any} deps */
-export const makeKernelAppCatalogRoutes = ({
-  vault, idb, catalog = createKernelAppCatalog({ idb }), reloadApp = () => {},
-  browser = null, appTabUrl = '', sessionCache = undefined,
-  isAppSender = () => false, appFiles = undefined, dwebEnabled = false,
-}) => Object.freeze({
-  'apps/list': async () => {
-    if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
-    try { return { ok: true, apps: await catalog.list() }; }
-    catch (cause) {
-      return { ok: false, error: /** @type {{message?:string}} */ (cause)?.message ?? String(cause) };
-    }
-  },
-  'apps/favorite': async (
-    /** @type {{appId?:unknown,favorite?:unknown}} */ { appId, favorite } = {},
-  ) => {
-    if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
-    if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
-    if (typeof favorite !== 'boolean') return { ok: false, error: 'favorite-boolean-required' };
-    try {
-      const app = await catalog.setFavorite(appId, favorite);
-      return app ? { ok: true, app } : { ok: false, error: 'app-not-found' };
-    } catch (cause) {
-      return catalogEffectFailure(cause, 'app-favorite-outcome-unknown', 'the favorite update');
-    }
-  },
-  'apps/rename': async (
-    /** @type {{appId?:unknown,name?:unknown}} */ { appId, name } = {},
-  ) => {
-    if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
-    if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
-    if (typeof name !== 'string' || !name.trim()) return { ok: false, error: 'name-required' };
-    try {
-      const app = await catalog.setName(appId, name.trim().slice(0, 80));
-      if (!app) return { ok: false, error: 'app-not-found' };
-      Promise.resolve(reloadApp(appId)).catch(() => {});
-      return { ok: true, app };
-    } catch (cause) {
-      return catalogEffectFailure(cause, 'app-rename-outcome-unknown', 'the App rename');
-    }
-  },
-  'apps/open': async (/** @type {{appId?:unknown}} */ { appId } = {}) => {
-    if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
-    if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
-    const app = await catalog.get(appId);
-    if (!app) return { ok: false, error: 'app-not-found' };
-    const sessionId = await sessionCache?.sessionGet('currentSessionId');
-    const owner = typeof sessionId === 'string' ? sessionId
-      : typeof app.ownerSessionId === 'string' ? app.ownerSessionId : null;
-    const url = `${appTabUrl}#${appId}${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`;
-    const existing = (await browser?.tabs?.query?.({ url: `${appTabUrl}#${appId}*` }) ?? [])[0];
-    try {
-      if (typeof existing?.id === 'number') await browser.tabs.update(existing.id, { active: true });
-      else await browser?.tabs?.create?.({ url, active: true });
-      if (typeof sessionId === 'string') await catalog.setDefaultForSession(sessionId, appId);
-      return { ok: true };
-    } catch (cause) {
-      return catalogEffectFailure(cause, 'app-open-outcome-unknown', 'opening the App');
-    }
-  },
-  'app/get-meta': async (
-    /** @type {{appId?:unknown}} */ { appId } = {}, /** @type {unknown} */ sender = undefined,
-  ) => {
-    if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
-    if (!isAppSender(sender, appId)) return { ok: false, error: 'app-meta-unauthorized' };
-    let app = await catalog.get(appId);
-    if (!app) return { ok: false, error: 'app-not-found' };
-    let runtimeDweb = app.dweb ?? null;
-    let runtimeAgent = { kind: 'bound-app', profile: 'developer', surface: 'code' };
-    if (appFiles) {
-      try {
-        const contract = parseAppManifest(await appFiles.readText(appId, 'peerd.json'));
-        const paths = new Set((await appFiles.listApp(appId))
-          .map((/** @type {string} */ path) => path.replace(/^\/+/, '')));
-        if (!paths.has(contract.entry)) {
-          return { ok: false, error: `peerd.json entry is missing: ${contract.entry}` };
-        }
-        runtimeDweb = contract.capabilities.includes('dweb') && dwebEnabled
-          ? (app.dweb ?? { uri: null, publisher: null, hash: null, local: true }) : null;
-        runtimeAgent = contract.agent;
-        if (contract.entry !== app.entryFile) {
-          try { app = await catalog.setEntryFile(appId, contract.entry) ?? app; }
-          catch (cause) {
-            return catalogEffectFailure(
-              cause, 'app-entry-update-outcome-unknown', 'the App entry update',
-            );
-          }
-        }
-      } catch (cause) {
-        if (/** @type {{name?:unknown}} */ (cause)?.name !== 'NotFoundError') {
-          return { ok: false, error: /** @type {{message?:string}} */ (cause)?.message ?? String(cause) };
-        }
-      }
-    }
-    return { ok: true, name: app.name, entryFile: app.entryFile,
-      fileKinds: app.fileKinds ?? {}, dweb: runtimeDweb, agent: runtimeAgent };
-  },
-});

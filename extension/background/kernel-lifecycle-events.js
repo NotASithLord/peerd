@@ -20,7 +20,7 @@ export const attachKernelLifecycleEvents = ({
   if (!browser?.runtime || !browser?.alarms || typeof registry?.event !== 'function'
       || typeof onStartup !== 'function' || typeof onAlarm !== 'function'
       || typeof alarmName !== 'string' || !alarmName
-      || (firefox && typeof onSessionChanged !== 'function')
+      || (onSessionChanged !== undefined && typeof onSessionChanged !== 'function')
       || (selfHostedChrome && typeof onUpdateAvailable !== 'function')) {
     throw new TypeError('kernel-lifecycle-events-config-invalid');
   }
@@ -29,7 +29,7 @@ export const attachKernelLifecycleEvents = ({
   registry.event('alarms.onAlarm', browser.alarms.onAlarm, KERNEL_LIFECYCLE_OWNER)
     ?.addListener((/** @type {any} */ alarm) =>
       alarm?.name === alarmName ? onAlarm(alarm) : undefined);
-  if (firefox) {
+  if (firefox && onSessionChanged) {
     registry.event(
       'storage.session.onChanged', browser.storage?.session?.onChanged, KERNEL_LIFECYCLE_OWNER,
     )?.addListener(onSessionChanged);

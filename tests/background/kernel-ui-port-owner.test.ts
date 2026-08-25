@@ -83,6 +83,30 @@ describe('kernel UI Port owner', () => {
     expect(hints).toEqual([]);
   });
 
+  test('takes custody without waiting for state or live-runtime hydration', async () => {
+    const uiPorts = makeUiPorts();
+    let settleState = () => {};
+    let settleRuntime = () => {};
+    const state = new Promise<void>((resolve) => { settleState = resolve; });
+    const runtime = new Promise<void>((resolve) => { settleRuntime = resolve; });
+    const port = makePort();
+    const owner = createKernelUiPortOwner({
+      uiPorts,
+      pushState: () => state,
+      broadcastSurfaces: () => {},
+      broadcastAgentTab: () => {},
+      activeGoalStates: () => [{ type: 'goal/state', sessionId: 'live' }],
+      onUiConnect: () => runtime,
+    });
+
+    expect(owner.attach(port)).toBeUndefined();
+    expect(uiPorts.hasNamed('sidepanel')).toBe(true);
+    expect(port.messages).toEqual([{ type: 'goal/state', sessionId: 'live' }]);
+    settleState();
+    settleRuntime();
+    await Promise.all([state, runtime]);
+  });
+
   test('rejects incomplete dependencies, malformed ports, and malformed goal replay', () => {
     expect(() => createKernelUiPortOwner({} as any))
       .toThrow('kernel-ui-port-owner-config-invalid');

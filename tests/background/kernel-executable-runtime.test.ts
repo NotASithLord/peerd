@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  KERNEL_ENGINE_ATTACH_ROUTE_NAMES,
   KERNEL_EXECUTABLE_ROUTE_NAMES,
   KERNEL_RELAY_ROUTE_NAMES,
   KERNEL_TRANSFER_ROUTE_NAMES,
-} from '../../extension/background/kernel-executable-inventory.js';
+} from '../../extension/shared/kernel-feature-route-inventory.js';
 import { createKernelExecutableRuntime } from '../../extension/background/kernel-executable-runtime.js';
 
 const routes = (names: readonly string[]) => (deps: any) => Object.fromEntries(
@@ -32,6 +33,10 @@ describe('kernel executable runtime', () => {
           ok: true, allowed: deps.isRelay(sender), value: await deps.callApp(message),
         }),
       }),
+      makeAppCallHandler: () => {
+        appCallLoads += 1;
+        return async (message: any) => message.method;
+      },
       makeKernelTransferRoutes: ({ privateTransferAuthorization }: any) =>
         Object.fromEntries(KERNEL_TRANSFER_ROUTE_NAMES.map((name) => [name, (message: any) => ({
           ok: true, name,
@@ -41,12 +46,15 @@ describe('kernel executable runtime', () => {
     const runtime = createKernelExecutableRuntime({
       admit: (_route: string, _message: any, sender: any) => sender === 'trusted',
       engine: {}, actorChat: {}, appCall: {},
-      relay: { relayRoutes: routes(KERNEL_RELAY_ROUTE_NAMES)({ isAllowed: () => true }) },
-      transfer: {}, factories,
-      importAppCall: async () => {
-        appCallLoads += 1;
-        return { makeAppCallHandler: () => async (message: any) => message.method };
+      relay: {
+        dispatch: async (name: string, message: any) => ({
+          ok: true, outcomeKnown: true, value: { ok: true, name, message },
+        }),
+        relayRoutes: routes([
+          ...KERNEL_RELAY_ROUTE_NAMES, ...KERNEL_ENGINE_ATTACH_ROUTE_NAMES,
+        ])({ isAllowed: () => true }),
       },
+      transfer: {}, factories,
     });
     expect(Object.keys(runtime.routes).sort()).toEqual([...KERNEL_EXECUTABLE_ROUTE_NAMES].sort());
     expect(runtime.routes['pod/get-meta']({}, 'trusted')).toMatchObject({ allowed: true });
@@ -61,6 +69,12 @@ describe('kernel executable runtime', () => {
     expect(appCallLoads).toBe(1);
     expect(runtime.routes['pod/git']).toBeFunction();
     expect(await runtime.routes['page/call']({}, 'trusted')).toMatchObject({ ok: true });
+    expect(await runtime.routes['script/model-call']({ runId: 'run:1' }, 'trusted'))
+      .toEqual({ ok: true, name: 'script/model-call', message: { runId: 'run:1' } });
+    expect(await runtime.routes['vm/tab-ready']({ vmId: 'vm-1' }, 'trusted'))
+      .toMatchObject({ ok: true, name: 'vm/tab-ready' });
+    expect(await runtime.routes['app/actor-retry']({ appId: 'app-1' }, 'forged'))
+      .toMatchObject({ ok: false, error: 'kernel-relay-unauthorized', outcomeKnown: true });
     expect(await runtime.routes['site-fetch/call']({}, 'forged')).toMatchObject({
       ok: false, error: 'kernel-relay-unauthorized', outcomeKnown: true,
     });
@@ -70,7 +84,9 @@ describe('kernel executable runtime', () => {
     const runtime = createKernelExecutableRuntime({
       admit: () => true,
       engine: {}, actorChat: {}, appCall: {},
-      relay: { relayRoutes: routes(KERNEL_RELAY_ROUTE_NAMES)({ isAllowed: () => true }) },
+      relay: { relayRoutes: routes([
+        ...KERNEL_RELAY_ROUTE_NAMES, ...KERNEL_ENGINE_ATTACH_ROUTE_NAMES,
+      ])({ isAllowed: () => true }) },
       transfer: {},
       factories: {
         makeKernelPodRoutes: routes(['pod/cancel-io', 'pod/get-meta', 'pod/git', 'pod/web-fetch']),

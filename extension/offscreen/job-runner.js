@@ -765,7 +765,9 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           try {
             const resp = await runCodeOp(
               'provider', 'call',
-              () => sendToSW('script/model-call', { ownerSessionId, runId, args: m.args }),
+              () => sendToSW('script/model-call', {
+                ownerSessionId, runId, args: m.args, deadlineAt: absoluteDeadline,
+              }),
               (response) => response?.ok === true,
             );
             const usage = resp?.ok ? resp.value?.usage : resp?.usage;

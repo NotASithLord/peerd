@@ -1,20 +1,15 @@
 // @ts-check
 
-import {
-  isEvalSender,
-  isFirstPartySender,
-  isHomeSender,
-  isOffscreenSender,
-  isOptionsSender,
-  isSidepanelPortSender,
-  isSidepanelSender,
-} from '/shared/sender-trust.js';
 import { createKernelIdentity } from '/shared/kernel-identity.js';
 import {
   BROWSER, CHANNEL, CHANNEL_DEFAULTS, CONTROLLER_BUILD_DIGEST, DWEB_ENABLED,
 } from '/shared/build-config.js';
 import browser from '/shared/browser-api.js';
 import { base64ToBytes } from '/shared/cold-util.js';
+import {
+  PRIVATE_NETWORK_RULE_DIGESTS,
+  PRIVATE_NETWORK_RULE_IDS,
+} from '/shared/private-network-rule-ids.js';
 import {
   createAuditLog,
   DEFAULT_AUDIT_MAX_ENTRIES,
@@ -36,41 +31,42 @@ import {
 } from '/peerd-egress/kernel-storage.js';
 import { makeUiPorts } from './ui-ports.js';
 import {
+  makeSerializedDnrSessionRules,
+  makeStartupPopupNetworkGuard,
+} from './startup-popup-network-guard.js';
+import { createKernelBrowserNetworkRuntime } from './kernel-browser-network-runtime.js';
+import {
   makeKernelLearnedOriginRoutes,
   makeSettingsStore,
 } from './settings-store.js';
 import { makeKernelSettingsRoutes, normalizeSettingsPatch } from './settings-patch.js';
-import { makeKernelGenerationLifecycle } from './kernel-generation.js';
-import { createKernelColdReceipts } from './kernel-cold-receipts.js';
+import { createKernelAppCatalog } from './kernel-app-catalog.js';
 import {
-  createKernelAppCatalog,
-  makeKernelAppCatalogRoutes,
-} from './kernel-app-catalog.js';
-import {
-  createKernelDenylistNetworkCustody,
   createKernelDenylistPolicy,
   makeKernelComposerRoutes,
   makeKernelDenylistRoutes,
 } from './kernel-composer-routes.js';
-import { createKernelFrontDoor } from './kernel-front-door.js';
-import { createKernelFeatureHost } from './kernel-feature-host.js';
 import {
+  attachKernelFrontDoor,
   attachKernelTabEvents,
   attachKernelLifecycleEvents,
+  createKernelColdReceipts,
+  createKernelBrowserChildOutcomes,
   createKernelConfirmation,
   createKernelBrowserEventOwners,
+  createKernelBrowserNetworkOwner,
+  createKernelTabCustody,
   createKernelDwebCustodyOwner,
   createKernelExecutableControl,
+  createKernelFeatureHost,
+  INERT_CHILD_REQUEST_GUARD,
   createKernelPortOwners,
   createKernelPortRouter,
+  createKernelSenderPolicy,
   createKernelUiPortOwner,
+  makeKernelGenerationLifecycle,
   makeKernelDemandRoutes,
 } from './kernel-control-plane.js';
-import {
-  makeKernelGitCredentialRoutes,
-  makeKernelOriginCredentialRoutes,
-  makeKernelRepositoryReadRoutes,
-} from './kernel-repository-read-routes.js';
 import {
   createKernelAppFileReader,
   createKernelSiteClientRoutes,
@@ -85,6 +81,17 @@ import {
   createOffscreenRepositoryClient,
   makeRepositoryKernelFetch,
 } from './repository-client.js';
+import { createKernelKeyedOriginAuthority } from './kernel-keyed-origin-authority.js';
+import { createKernelAdministrativeControl } from './kernel-administrative-control.js';
+import { createKernelSkillPersistence } from './kernel-skill-persistence.js';
+import { createKernelMemoryInitProbe } from './kernel-memory-init-probe.js';
+import { makeKernelProviderSetKeyRoute } from './kernel-provider-key-route.js';
+import {
+  makeKernelGitCredentialRoutes,
+  makeKernelOriginCredentialRoutes,
+} from './kernel-credential-routes.js';
+import { createKernelSemanticRuntime } from './kernel-semantic-runtime.js';
+import { createKernelExecutableRuntime } from './kernel-executable-runtime.js';
 import {
   createVaultKernelAssemblyReport,
   SEMANTIC_CUTOVER_SUMMARY,
@@ -103,7 +110,6 @@ import {
   resolveKernelPermission,
 } from './vault-kernel-core.js';
 import { openHome } from '/shared/open-home.js';
-
 const kernelClockNow = () => globalThis.performance?.now?.() ?? Date.now();
 const kernelBundleStartedAt = Number(
   /** @type {any} */ (globalThis)[Symbol.for('peerd.kernel.bundle-start.v1')],
@@ -113,7 +119,6 @@ const kernelModuleEvaluatedAt = kernelClockNow();
 let kernelVaultReadyAt = null;
 /** @type {number|null} */
 let kernelReadyAt = null;
-
 const runtimeId = browser.runtime.id;
 const kernelManifest = /** @type {any} */ (browser.runtime.getManifest());
 const kernelFirefox = BROWSER === 'firefox';
@@ -126,6 +131,11 @@ const targetAddon = /** @type {any} */ (globalThis)[Symbol.for('peerd.kernel.tar
 if (targetAddon && (targetAddon.target !== 'preview-chrome'
     || typeof targetAddon.update !== 'function' || typeof targetAddon.contributor !== 'function')) {
   throw new Error('kernel-target-addon-invalid');
+}
+const dwebAddon = /** @type {any} */ (globalThis)[Symbol.for('peerd.kernel.dweb-addon.v1')];
+if (DWEB_ENABLED !== !!dwebAddon
+    || dwebAddon && typeof dwebAddon.createKernelDwebCustodyRuntime !== 'function') {
+  throw new Error('kernel-dweb-addon-invalid');
 }
 const kernelSelfHostedChrome = !!kernelManifest.update_url
   && typeof browser.runtime.requestUpdateCheck === 'function';
@@ -144,42 +154,13 @@ const offscreenUrl = browser.runtime.getURL(offscreenPath);
 const appTabUrl = browser.runtime.getURL('engine-tabs/app-tab/index.html');
 const packagedFetch = (/** @type {string|URL|Request} */ input,
   /** @type {RequestInit|undefined} */ init = undefined) => globalThis.fetch(input, init);
-const trusted = (/** @type {any} */ sender) => isFirstPartySender(sender, {
-  runtimeId, extensionOrigin,
+const {
+  trusted, sidepanelUi, homeUi, humanUi, optionsUi, evalUi, voiceUi,
+  notebookUi, toolboxUi, appUi, offscreenUi, sidepanelPortUi,
+} = createKernelSenderPolicy({
+  runtimeId, extensionOrigin, sidepanelUrl, homeUrl, optionsUrl, evalRunnerUrl,
+  notebookTabUrl, offscreenUrl, appTabUrl,
 });
-const sidepanelUi = (/** @type {any} */ sender) =>
-  isSidepanelSender(sender, { runtimeId, extensionOrigin, sidepanelUrl });
-const homeUi = (/** @type {any} */ sender) =>
-  isHomeSender(sender, { runtimeId, extensionOrigin, homeUrl });
-const humanUi = (/** @type {any} */ sender) => sidepanelUi(sender) || homeUi(sender);
-const optionsUi = (/** @type {any} */ sender) => isOptionsSender(sender, {
-  runtimeId, extensionOrigin, optionsUrl,
-});
-const evalUi = (/** @type {any} */ sender) => !homeUi(sender) && isEvalSender(sender, {
-  runtimeId, extensionOrigin, homeUrl, evalRunnerUrl,
-});
-const voiceUi = (/** @type {any} */ sender) => sidepanelUi(sender) || optionsUi(sender);
-const notebookUi = (/** @type {any} */ sender) => {
-  const senderUrl = sender?.url ?? sender?.tab?.url;
-  return typeof sender?.tab?.id === 'number' && typeof senderUrl === 'string'
-    && senderUrl.split(/[?#]/, 1)[0] === notebookTabUrl;
-};
-const toolboxUi = (/** @type {any} */ sender) => notebookUi(sender)
-  || isOffscreenSender(sender, { runtimeId, extensionOrigin, offscreenUrl });
-const appUi = (/** @type {any} */ sender, /** @type {string} */ appId) => {
-  if (sender?.id !== runtimeId || typeof sender?.tab?.id !== 'number') return false;
-  const raw = sender.url ?? sender.tab.url;
-  try {
-    const url = new URL(raw);
-    const expected = new URL(appTabUrl);
-    return url.origin === expected.origin && url.pathname === expected.pathname
-      && url.search === '' && decodeURIComponent(url.hash.slice(1).split('?', 1)[0]) === appId;
-  } catch { return false; }
-};
-const offscreenUi = (/** @type {any} */ sender) => isOffscreenSender(sender, {
-  runtimeId, extensionOrigin, offscreenUrl,
-});
-
 const writeGuard = makeWriteGuard();
 const kv = writeGuard.wrapKv(rawKv);
 const idb = writeGuard.wrapIdb(rawIdb);
@@ -198,14 +179,18 @@ const postChatNote = (/** @type {string} */ text, /** @type {any} */ action = nu
     ...(action ? { action } : {}), ...(sessionId ? { sessionId } : {}),
   });
 };
+const browserChildOutcomes = createKernelBrowserChildOutcomes({
+  audit: (entry) => auditLog.append(entry),
+  noteBlank: (tabId) => controllerRelays()?.noteAgentTab?.(tabId, {
+    label: 'blank child', opened: true, protected: true,
+  }),
+});
 const confirmation = createKernelConfirmation({
   browser,
   uiPorts,
   sessionCache,
   isSidepanelSender: sidepanelUi,
-  isHomeSender: (/** @type {any} */ sender) => isHomeSender(sender, {
-    runtimeId, extensionOrigin, homeUrl,
-  }),
+  isHomeSender: homeUi,
 });
 const denylistPolicy = createKernelDenylistPolicy({
   kv,
@@ -243,9 +228,10 @@ const featureHost = createKernelFeatureHost({
     console.error('[kernel] feature host recovery failed', error);
   },
   loadFirefoxLifetime: kernelFirefox
-    ? () => import('./firefox-storage-keepalive.js') : undefined,
+    ? () => Promise.resolve(makeFirefoxGuard.firefoxLifetime) : undefined,
 });
 const vault = featureHost.vault;
+const keyedOriginAuthority = createKernelKeyedOriginAuthority(vault);
 const kernelSessions = createKernelSessionReader(idb);
 const kernelProfile = createKernelProfileAuthority({ idb, sessions: kernelSessions });
 const contextSnapshots = Object.freeze({ snapshotsFor: () => [] });
@@ -273,6 +259,7 @@ const featureHostReady = vaultReady.then(({ resumed }) =>
   featureHost.settleVaultBoot({ resumed }));
 const kernelReady = Promise.all([generation.ready(), vaultReady, featureHostReady]);
 void kernelReady.then(() => { kernelReadyAt = kernelClockNow(); });
+const ensureDwebFeature = () => featureHost.ensureDwebFeature(kernelReady);
 const coldReceipts = createKernelColdReceipts({
   store: {
     get: async (key) => { await vaultReady; return kv.get(key); },
@@ -315,45 +302,9 @@ if (kernelUpdateCustody) {
   });
 }
 
-const closeKernelPanel = async () => {
-  try {
-    if (browser.sidebarAction?.close) {
-      await browser.sidebarAction.close();
-      return { ok: true };
-    }
-    const sidePanel = /** @type {any} */ (browser).sidePanel;
-    if (sidePanel?.setOptions) {
-      await sidePanel.setOptions({ enabled: false });
-      setTimeout(() => {
-        sidePanel.setOptions({
-          enabled: true, path: 'sidepanel/sidepanel.html',
-        }).catch(() => {});
-      }, 250);
-      return { ok: true };
-    }
-    return { ok: false, error: 'no-sidepanel' };
-  } catch (error) {
-    return {
-      ok: false,
-      error: /** @type {{message?:string}} */ (error)?.message ?? String(error),
-    };
-  }
-};
-const frontDoor = createKernelFrontDoor({
-  browser,
-  coldEvent: (key, event) => kernelEvents.event(key, event, 'kernel-front-door'),
-  isHomeOpen: () => uiPorts.hasNamed('home'),
-  isPanelOpen: () => uiPorts.hasNamed('sidepanel'),
-  getFrontDoorView: () => settingsStore.get().frontDoorView === 'home' ? 'home' : 'panel',
-  closePanel: closeKernelPanel,
-  openHome,
+const { closePanel: closeKernelPanel } = attachKernelFrontDoor({
+  browser, events: kernelEvents, uiPorts, settingsStore, openHome, ready: vaultReady,
 });
-coldReceipts.registerRecovery({
-  event: 'windows.onFocusChanged',
-  owner: 'kernel-front-door',
-  reconcile: () => frontDoor.refreshFocus(),
-});
-void vaultReady.then(() => frontDoor.syncNativeBehavior()).catch(() => {});
 
 const providerProjection = createKernelProviderProjection({
   settingsStore,
@@ -583,41 +534,32 @@ const repositoryKernelFetch = makeRepositoryKernelFetch({
   getSecret: (name) => vault.getSecret(name),
   audit: repositoryAudit,
 });
-const repositories = /** @type {any} */ (kernelFirefox
-  ? createDeferredRepositoryClient(async () => {
-    const { createFirefoxRepositoryClient } = await import('./repository-local-client.js');
-    return createFirefoxRepositoryClient({
+const repositories = /** @type {any} */ (createDeferredRepositoryClient(async () => {
+  if (kernelFirefox) {
+    return makeFirefoxGuard.createFirefoxRepositoryClient({
       webFetch: repositoryWebFetch,
-      getSecret: (name) => vault.getSecret(name),
+      getSecret: (/** @type {string} */ name) => vault.getSecret(name),
       audit: repositoryAudit,
-      withLifetime: (operation, options) => firefoxActorLifetime
+      withLifetime: (/** @type {()=>Promise<any>} */ operation, /** @type {any} */ options) => firefoxActorLifetime
         ? firefoxActorLifetime.run(operation, options) : operation(),
     });
-  })
-  : createOffscreenRepositoryClient({
+  }
+  return createOffscreenRepositoryClient({
     withHost: withRepositoryHost,
     offscreenUrl,
     kernelFetch: repositoryKernelFetch,
     retireHost: (/** @type {string} */ reason) => featureHost.runtime.retireActiveHost(reason),
-  }));
-/** @type {any} */
-let kernelLocal = null;
-const localRouteNames = [
-  'provider/setKey', 'provider/test', 'models/options', 'openrouter/models',
-  'local-model/catalog', 'local-model/init', 'local-model/probe', 'local-model/status',
-];
-const loadKernelLocalRoutes = async () => {
-  if (!kernelLocal) {
-    const { createKernelLocalRoutes } = await import('./kernel-local-routes.js');
-    kernelLocal = createKernelLocalRoutes({
-      vault, auditLog, pushState,
-      ready: vaultReady, settingsStore, fetchFn: globalThis.fetch.bind(globalThis),
-      sessions: kernelSessions, browser, localModels: !kernelFirefox,
-      featureHost, offscreenUrl, providerProjection,
-    });
-  }
-  return kernelLocal.routes;
-};
+  });
+}));
+const providerKeyRoutes = Object.freeze({
+  'provider/setKey': makeKernelProviderSetKeyRoute({
+    vault, settingsStore, auditLog,
+    pushState: async () => {
+      providerProjection.bumpRevision();
+      await pushState();
+    },
+  }),
+});
 const appFiles = createKernelAppFileReader({
   idb, sessionCache, appFiles: /** @type {any} */ (repositories.appFiles),
 });
@@ -632,27 +574,43 @@ const appEditorRoutes = makeKernelAppEditorRoutes({
 const opfsPostureRoute = makeKernelOpfsPostureRoute({
   ready: vaultReady,
   assertWritable: () => writeGuard.assertWritable('opfs-workspaces'),
-  isAllowed: (sender) => {
-    const source = /** @type {any} */ (sender);
-    const senderUrl = source?.url ?? source?.tab?.url;
-    const notebook = typeof source?.tab?.id === 'number' && typeof senderUrl === 'string'
-      && senderUrl.split(/[?#]/, 1)[0] === notebookTabUrl;
-    return notebook || isOffscreenSender(source, {
-      runtimeId, extensionOrigin, offscreenUrl,
-    });
-  },
+  isAllowed: (sender) => notebookUi(sender) || offscreenUi(sender),
 });
 const vmMetaRoute = makeKernelVmMetaRoute({
   ready: vaultReady, idb, settingsStore, isAllowed: trusted,
 });
 const siteClientRoutes = createKernelSiteClientRoutes({ isAllowed: optionsUi });
 const voiceAuditRoute = makeKernelVoiceAuditRoute({ auditLog, isAllowed: voiceUi });
-/** @type {ReturnType<import('./kernel-semantic-runtime.js').createKernelSemanticRuntime>|null} */
+const repositoryRoutes = Object.freeze({
+  ...makeKernelGitCredentialRoutes({
+    vault, auditLog,
+    isLockedError: (/** @type {unknown} */ cause) => cause instanceof VaultLockedError,
+  }),
+  ...makeKernelOriginCredentialRoutes({
+    vault, auditLog, idb,
+    isLockedError: (/** @type {unknown} */ cause) => cause instanceof VaultLockedError,
+    learnKeyedOrigin: keyedOriginAuthority.add,
+    forgetKeyedOrigin: keyedOriginAuthority.remove,
+  }),
+});
+/** @type {ReturnType<typeof createKernelSemanticRuntime>|null} */
 let controllerOwner = null;
-/** @type {Promise<ReturnType<import('./kernel-semantic-runtime.js').createKernelSemanticRuntime>>|null} */
+/** @type {Promise<ReturnType<typeof createKernelSemanticRuntime>>|null} */
 let controllerOwnerLoading = null;
 /** @type {Promise<any>|null} */
 let richOwnerLoading = null;
+/** @type {ReturnType<typeof createKernelAdministrativeControl>|null} */
+let administrativeControl = null;
+const handleRichKernelCall = async (/** @type {string} */ operation,
+  /** @type {unknown} */ payload, /** @type {any} */ context) => {
+  const handler = controllerRelays()?.handleRichKernelCall;
+  return typeof handler === 'function'
+    ? handler(operation, payload, context)
+    : {
+      ok: false, code: 'kernel-rich-effect-unavailable',
+      error: 'Feature unavailable. Try again.', outcomeKnown: true,
+    };
+};
 const loadRichOwner = (/** @type {any} */ seams) => {
   richOwnerLoading ??= import('./kernel-production-runtime.js').then((module) =>
     module.createKernelProductionRuntime({
@@ -661,13 +619,12 @@ const loadRichOwner = (/** @type {any} */ seams) => {
       denylist: denylistPolicy, repositories, appCatalog,
       bindAppRegistry: appCatalog.bindLiveRegistry,
       getDwebLive: async () => dwebCustodyOwner?.getDwebLive() ?? null,
+      ensureDwebFeature,
       ready: kernelReady, vaultReady, featureHost, firefoxActorLifetime,
       firefox: kernelFirefox, dwebEnabled: DWEB_ENABLED, channel: CHANNEL,
       kernelIdentity, offscreenUrl,
       canWrite: (/** @type {string} */ store) => writeGuard.assertWritable(store),
-      isOffscreenSender: (/** @type {any} */ sender) => isOffscreenSender(sender, {
-        runtimeId, extensionOrigin, offscreenUrl,
-      }),
+      isOffscreenSender: offscreenUi,
       isTrustedSender: trusted,
       isAppSender: appUi,
       normalizeSettingsPatch,
@@ -675,8 +632,21 @@ const loadRichOwner = (/** @type {any} */ seams) => {
       onSettingsChanging: onKernelSettingsChanging,
       onSettingsChanged: onKernelSettingsChanged,
       providerProjection,
+      ensureBrowserNetworkGuard,
+      armBrowserChildQuarantine,
+      acquireBrowserNetworkGuardLease,
+      releaseBrowserNetworkGuardLease,
+      updateBrowserNetworkGuardOrigin,
+      syncDenylistNetwork: networkCustody.sync,
+      networkCustody,
+      consumeBrowserChildPolicyNotice: browserChildOutcomes.consume,
+      waitForBrowserChildPolicyNotice: browserChildOutcomes.wait,
+      hasPendingBrowserChildPolicy: browserChildOutcomes.has,
     })
-  ).catch((cause) => {
+  ).then((owner) => {
+    networkOwner.bind(owner.relays);
+    return owner;
+  }).catch((cause) => {
     richOwnerLoading = null;
     throw cause;
   });
@@ -684,14 +654,25 @@ const loadRichOwner = (/** @type {any} */ seams) => {
 };
 const loadControllerOwner = () => {
   if (controllerOwner) return Promise.resolve(controllerOwner);
-  controllerOwnerLoading ??= import('./kernel-semantic-runtime.js').then((module) => {
-    controllerOwner = module.createKernelSemanticRuntime({
+  controllerOwnerLoading ??= Promise.resolve().then(() => {
+    controllerOwner = createKernelSemanticRuntime({
       browser, idb, kv, auditLog, vault, ready: vaultReady, pushState,
+      appCatalog, appFiles, reloadApp: reloadOpenApp, appTabUrl, sessionCache,
+      repositories, settingsStore, sessions: kernelSessions, featureHost,
+      localModels: !kernelFirefox, providerProjection,
+      keyedOriginAuthority,
+      authorizeFeatureCall: (/** @type {unknown} */ payload) =>
+        administrativeControl?.authorize(payload) ?? null,
+      handleFeatureKernelCall: (/** @type {string} */ operation,
+        /** @type {unknown} */ payload, /** @type {any} */ context) =>
+        administrativeControl?.handleKernelCall(operation, payload, context)
+          ?? { ok: false, code: 'kernel-operation-denied', outcomeKnown: true },
+      handleRichKernelCall,
+      isAppSender: appUi,
       canWrite: (/** @type {string} */ store) => writeGuard.assertWritable(store),
-      isHomeSender: (/** @type {any} */ sender) => isHomeSender(sender, {
-        runtimeId, extensionOrigin, homeUrl,
-      }),
-      loadTurnRuntime: async (seams) => (await loadRichOwner(seams)).turnRuntime,
+      isHomeSender: homeUi,
+      loadTurnRuntime: async (/** @type {any} */ seams) =>
+        (await loadRichOwner(seams)).turnRuntime,
       ensureOffscreen: featureHost.ensureOffscreen,
       offscreenUrl, firefox: kernelFirefox, dwebEnabled: DWEB_ENABLED, kernelIdentity,
       retireHost: (/** @type {string} */ reason) =>
@@ -702,6 +683,8 @@ const loadControllerOwner = () => {
         ),
       withDirectLifetime: (/** @type {()=>any} */ operation, /** @type {any} */ options) =>
         firefoxActorLifetime ? firefoxActorLifetime.run(operation, options) : operation(),
+      connectDirectController: kernelFirefox
+        ? makeFirefoxGuard.connectDirectController : undefined,
       fetchFn: packagedFetch,
     });
     return controllerOwner;
@@ -712,60 +695,93 @@ const loadControllerOwner = () => {
   return controllerOwnerLoading;
 };
 const getControllerRelays = async () => (await loadControllerOwner()).getRelays();
-const controllerRelays = () => controllerOwner?.relays ?? null;
+const controllerRelays = () => controllerOwner?.relays;
+const browserDnr = /** @type {any} */ (
+  /** @type {any} */ (globalThis).chrome?.declarativeNetRequest
+  ?? /** @type {any} */ (browser).declarativeNetRequest
+);
+const serializedBrowserDnr = browserDnr?.updateSessionRules
+  ? makeSerializedDnrSessionRules(browserDnr) : browserDnr;
+const startupPopupNetworkGuard = makeStartupPopupNetworkGuard(
+  serializedBrowserDnr, PRIVATE_NETWORK_RULE_IDS, {
+    loadPending: () => sessionCache.sessionGet('startupPopupCleanup'),
+    savePending: (/** @type {{tabId:number,sourceTabId:number}[]} */ rows) =>
+      sessionCache.sessionSet('startupPopupCleanup', rows),
+    loadTabs: () => browser.tabs.query({}),
+    ruleDigests: PRIVATE_NETWORK_RULE_DIGESTS,
+  },
+);
+const networkOwner = createKernelBrowserNetworkOwner({
+  firefox: kernelFirefox, browser, dnr: serializedBrowserDnr, sessionCache,
+  denylist: denylistPolicy, getRelays: controllerRelays,
+  createAuthority: createKernelBrowserNetworkRuntime,
+  startupGuard: startupPopupNetworkGuard,
+  onPopupBlocked: browserChildOutcomes.recordBlocked,
+  onPopupFailed: browserChildOutcomes.recordFailed,
+  onPopupBlank: browserChildOutcomes.recordUnverified,
+  beginOutcome: browserChildOutcomes.begin,
+  containOutcome: browserChildOutcomes.contain,
+  settleOutcome: browserChildOutcomes.settle,
+  releaseOutcome: browserChildOutcomes.release,
+  audit: (/** @type {any} */ entry) => { void auditLog.append(entry).catch(() => {}); },
+  releaseChild: (/** @type {number} */ tabId) => childGuard.release(tabId),
+  onError: (/** @type {unknown} */ error) => {
+    console.error('[kernel] browser network authority failed', error);
+  },
+});
+const {
+  custody: networkCustody,
+  ensureBrowserNetworkGuard,
+  armBrowserChildQuarantine,
+  acquireBrowserNetworkGuardLease,
+  releaseBrowserNetworkGuardLease,
+  updateBrowserNetworkGuardOrigin,
+} = networkOwner;
 const childGuard = makeFirefoxGuard?.({
   isDrivenSource: (/** @type {number} */ tabId) =>
-    controllerRelays()?.eventOwners?.isDrivenSource?.(tabId)
-      ?? controllerRelays()?.isDrivenSource?.(tabId)
-      ?? false,
-  isSourceReady: () => !!controllerRelays(),
-  isSensitiveHost: (/** @type {string} */ hostname) => denylistPolicy.blocks(hostname),
-}) ?? { onNavigationTarget() {}, onBeforeRequest() { return {}; },
-  resolveNavigationTarget() {}, release() {}, reconcile() { return true; } };
-const relayTabEvent = (/** @type {string} */ name, /** @type {any[]} */ args) => {
-  const handler = controllerRelays()?.eventOwners?.[name];
-  if (typeof handler === 'function') return handler(...args);
-  return getControllerRelays().then((relays) => {
-    const coldHandler = relays.eventOwners?.[name];
-    if (typeof coldHandler !== 'function') {
-      throw new Error(`kernel-tab-custody-${name}-unavailable`);
+    networkOwner.relays()?.isDrivenSource?.(tabId) ?? false,
+  isSourceReady: () => networkOwner.sourceProjectionReady?.() === true,
+  waitForSourceEvidence: (/** @type {number} */ tabId) =>
+    startupPopupNetworkGuard.sourceEvidence(tabId),
+  waitForSourceAuthority: async (/** @type {number} */ tabId) => {
+    if (!await networkOwner.waitForSourceProjection()) {
+      throw new Error('kernel-firefox-source-projection-unavailable');
     }
-    return coldHandler(...args);
-  });
-};
+    return networkOwner.relays()?.isDrivenSource?.(tabId) === true;
+  },
+  ensureSourceAuthority: async (/** @type {number} */ tabId) => {
+    if (!await networkOwner.ensureSourceProjection()) {
+      throw new Error('kernel-firefox-source-projection-unavailable');
+    }
+    return networkOwner.relays()?.isDrivenSource?.(tabId) === true;
+  },
+  onBlocked: (/** @type {any} */ event) => {
+    if (typeof event?.flowToken === 'symbol') {
+      browserChildOutcomes.recordRequestBlocked(event);
+      return;
+    }
+    const token = browserChildOutcomes.begin(event.sourceTabId, event.tabId);
+    browserChildOutcomes.recordRequestBlocked({ ...event, flowToken: token });
+    browserChildOutcomes.settle(event.sourceTabId, event.tabId, token);
+  },
+  isSensitiveHost: (/** @type {string} */ hostname) => denylistPolicy.blocks(hostname),
+  isPolicyReady: denylistPolicy.isReady,
+  waitForPolicyReady: async () => (await denylistPolicy.ready()).ok === true,
+  turnSlots: () => controllerRelays()?.turnSlots,
+  webActorSessionForTab: (/** @type {number} */ tabId) =>
+    controllerRelays()?.webActorSessionForTab?.(tabId) ?? null,
+  closeTab: (/** @type {number} */ tabId) => browser.tabs.remove(tabId),
+  noteUnavailable: postChatNote,
+}) ?? INERT_CHILD_REQUEST_GUARD;
 const browserEventOwners = createKernelBrowserEventOwners({
   ready: kernelReady,
   resumeSchedules: async () => (await getControllerRelays()).resumeSchedules(),
   firefox: kernelFirefox,
   receipts: coldReceipts,
-  tabCustody: {
-    onCreated: (/** @type {any} */ tab) => relayTabEvent('onCreated', [tab]),
-    onUpdated: (/** @type {number} */ tabId, /** @type {any} */ changeInfo,
-      /** @type {any} */ tab) =>
-      relayTabEvent('onUpdated', [tabId, changeInfo, tab]),
-    onRemoved: (/** @type {number} */ tabId, /** @type {any} */ removeInfo) => {
-      childGuard.release(tabId);
-      return relayTabEvent('onRemoved', [tabId, removeInfo]);
-    },
-    onActivated: (/** @type {any} */ activeInfo) =>
-      relayTabEvent('onActivated', [activeInfo]),
-    onNavigationTarget: (/** @type {any} */ details) => {
-      childGuard.onNavigationTarget(details);
-      const custody = relayTabEvent('onNavigationTarget', [details]);
-      void Promise.resolve(custody).then(
-        () => childGuard.resolveNavigationTarget(details), () => {},
-      );
-      return custody;
-    },
-    onBeforeRequest: childGuard.onBeforeRequest,
-    reconcile: async () => {
-      const tabs = await browser.tabs.query({});
-      childGuard.reconcile(tabs);
-      const reconciled = await relayTabEvent('reconcile', []);
-      childGuard.reconcile(tabs);
-      return reconciled;
-    },
-  },
+  tabCustody: createKernelTabCustody({
+    browser, firefox: kernelFirefox, network: networkOwner, child: childGuard,
+    getRelays: controllerRelays, loadRelays: getControllerRelays,
+  }),
 });
 attachKernelLifecycleEvents({
   browser,
@@ -792,12 +808,23 @@ if (kernelFirefox) {
 }
 const semanticOwnerRoutes = Object.freeze([
   'actor-isolation/retry', 'actor/spawn', 'agent/send', 'agent/stop',
-  'actors/count', 'actors/overview', 'contacts/forget', 'contacts/list', 'contacts/set',
+  'actors/count', 'actors/overview', 'app/get-meta', 'apps/favorite', 'apps/list',
+  'apps/open', 'apps/rename', 'contacts/forget', 'contacts/list', 'contacts/set',
   'memory/delete', 'memory/deleteAll', 'memory/export', 'memory/suggestions',
   'memory/suggestions/approve', 'memory/suggestions/dismiss', 'memory/write',
   'provider/status', 'skills/list', 'skills/remove', 'skills/setEnabled',
+  'provider/test', 'models/options', 'openrouter/models',
+  'local-model/catalog', 'local-model/init', 'local-model/probe', 'local-model/status',
+  'apps/repository/status', 'apps/repository/history', 'apps/repository/diff',
+  'apps/repository/commit', 'apps/repository/restore', 'apps/repository/branch',
+  'apps/repository/checkout', 'apps/repository/link', 'apps/repository/fetch',
+  'apps/repository/push', 'apps/import-git',
   'session/archive', 'session/debugBundle', 'session/reset', 'session/switch',
   'toolbox/read', 'toolbox/record',
+]);
+const vaultOptionalControllerRoutes = new Set([
+  'provider/test', 'models/options', 'openrouter/models',
+  'local-model/catalog', 'local-model/init', 'local-model/probe', 'local-model/status',
 ]);
 const semanticRoutes = Object.freeze({
   ...makeKernelDemandRoutes({
@@ -816,7 +843,15 @@ const semanticRoutes = Object.freeze({
       }),
     },
     beforeLoad: async (name) => {
-      if (name.startsWith('toolbox/')) return null;
+      if (name.startsWith('toolbox/') || vaultOptionalControllerRoutes.has(name)) return null;
+      if (kernelFirefox && ['actor/spawn', 'agent/send'].includes(name)
+          && !childGuard.ready()) {
+        return {
+          ok: false, error: 'Web automation paused. Retry.',
+          code: 'firefox-child-custody-unavailable', outcomeKnown: true,
+          retryable: true, phase: 'startup',
+        };
+      }
       try { await vaultReady; }
       catch {
         return {
@@ -828,6 +863,15 @@ const semanticRoutes = Object.freeze({
       return vault.isLocked() ? { ok: false, error: 'vault-locked' } : null;
     },
     load: async () => (await loadControllerOwner()).routes,
+  }),
+  ...makeKernelDemandRoutes({
+    names: ['debug/originLock'],
+    loadCode: 'kernel-debug-owner-load-failed',
+    timeoutCode: 'kernel-debug-owner-load-timeout',
+    load: async () => {
+      const relays = await getControllerRelays();
+      return { 'debug/originLock': relays.debugOriginLock };
+    },
   }),
   ...(targetAddon?.contributor({
     kv, optionsUi, offscreenUrl, featureHost,
@@ -843,6 +887,8 @@ const assemblyReport = () => Object.freeze({
     eventOwners: kernelEvents.owners(),
     eventReadiness: {
       ...browserEventOwners.readiness,
+      ...(kernelFirefox && !childGuard.ready()
+        ? { 'webRequest.onBeforeRequest': false } : {}),
       'runtime.onMessage': SEMANTIC_CUTOVER_SUMMARY.ready,
       'runtime.onConnect': true,
       'runtime.onInstalled': true,
@@ -868,8 +914,10 @@ const executableOwner = createKernelExecutableControl({
   runtimeId,
   firefox: kernelFirefox,
   dweb: DWEB_ENABLED,
-  importRuntime: () => import('./kernel-executable-runtime.js'),
+  createRuntime: createKernelExecutableRuntime,
   loadRich: getRichOwner,
+  dispatchRuntimeRelay: async (/** @type {string} */ route, /** @type {unknown} */ message) =>
+    (await loadControllerOwner()).runtime.relay(route, message),
   owns: {
     home: homeUi, options: optionsUi, offscreen: offscreenUi,
     app: appUi,
@@ -877,6 +925,47 @@ const executableOwner = createKernelExecutableControl({
   paths: {
     app: appTabUrl, notebook: notebookTabUrl, vm: vmTabUrl, pod: podTabUrl, options: optionsUrl,
   },
+});
+
+const skillPersistence = createKernelSkillPersistence({
+  canWrite: () => writeGuard.assertWritable('skills'),
+  audit: auditLog.append,
+  pushState,
+});
+const memoryInitProbe = createKernelMemoryInitProbe({
+  tabs: browser.tabs,
+  scripting: browser.scripting,
+  resolveTab: async (/** @type {any} */ tab) => {
+    if (typeof tab?.id !== 'number') return null;
+    const [identity] = await browser.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => globalThis.location.href,
+    });
+    const current = await browser.tabs.get(tab.id);
+    const documentId = /** @type {{documentId?:unknown}|undefined} */ (identity)?.documentId;
+    if (typeof documentId !== 'string'
+        || typeof identity?.result !== 'string'
+        || identity.result !== current?.url) return null;
+    return { ...current, peerdDocumentId: documentId };
+  },
+});
+administrativeControl = createKernelAdministrativeControl({
+  callFeature: async (payload, options) =>
+    /** @type {any} */ ((await loadControllerOwner()).controller).callFeature(payload, options),
+  kv,
+  idb: /** @type {any} */ (idb),
+  auditLog,
+  canWrite: (store) => writeGuard.assertWritable(store),
+  commitSkill: skillPersistence.commit,
+  probeMemoryTab: memoryInitProbe.probeTab,
+  listApps: () => appCatalog.list(),
+  confirm: confirmation.coordinator.confirm,
+  currentSessionId: () => sessionCache.sessionGet('currentSessionId'),
+  assertMemoryInitAllowed: async () => {
+    if (vault.isLocked()) throw new VaultLockedError();
+    if (!(await denylistPolicy.ready()).ok) throw new Error('denylist policy unavailable');
+  },
+  postChatNote,
 });
 
 /** @type {Record<string, (message?: any, sender?: any) => Promise<any>|any>} */
@@ -887,6 +976,7 @@ const routes = {
       ok: true,
       kernel: true,
       assembly: assemblyReport(),
+      browserCustody: childGuard.status(),
       timing: Object.freeze({
         clock: 'worker-performance-now-diagnostic',
         moduleEvaluationMs: Math.max(0, kernelModuleEvaluatedAt),
@@ -905,30 +995,8 @@ const routes = {
   },
   ...systemReadRoutes,
   'lifecycle/assert-opfs-writable': opfsPostureRoute,
-  ...makeKernelAppCatalogRoutes({
-    vault, idb, catalog: appCatalog, reloadApp: reloadOpenApp,
-    browser, appTabUrl, sessionCache, isAppSender: appUi,
-    appFiles, dwebEnabled: DWEB_ENABLED,
-  }),
   'vm/get-meta': vmMetaRoute,
-  ...makeKernelRepositoryReadRoutes({
-    browser,
-    vault,
-    catalog: appCatalog,
-    repositories,
-    auditLog,
-    appTabUrl,
-    appFiles,
-    sessionCache,
-    allowDweb: DWEB_ENABLED,
-  }),
-  ...makeKernelGitCredentialRoutes({
-    vault, auditLog, isLockedError: (/** @type {unknown} */ cause) => cause instanceof VaultLockedError,
-  }),
-  ...makeKernelOriginCredentialRoutes({
-    vault, auditLog, idb,
-    isLockedError: (/** @type {unknown} */ cause) => cause instanceof VaultLockedError,
-  }),
+  ...repositoryRoutes,
   ...appEditorRoutes,
   'repository/kernel-fetch': async () => ({
     ok: false, error: 'repository-private-channel-required', outcomeKnown: true,
@@ -954,39 +1022,14 @@ const routes = {
     return result;
   },
   'audit/voice-fetch': voiceAuditRoute,
-  ...makeKernelDemandRoutes({
-    names: localRouteNames,
-    load: loadKernelLocalRoutes,
-  }),
+  ...providerKeyRoutes,
   ...makeKernelComposerRoutes({
     browser, kv, idb, sessionCache, vault, denylist: denylistPolicy, appFiles,
   }),
-  ...makeKernelDemandRoutes({
-    names: [
-      'hooks/list', 'hooks/save', 'hooks/remove', 'hooks/toggle',
-      'memory/init', 'skills/installGit', 'skills/installLocal', 'skills/installManifest',
-    ],
-    loadCode: 'kernel-administrative-owner-load-failed',
-    timeoutCode: 'kernel-administrative-owner-load-timeout',
-    load: async () => {
-      const { createKernelAdministrativeRuntime } =
-        await import('./kernel-administrative-runtime.js');
-      return createKernelAdministrativeRuntime({
-        browser, idb, kv, auditLog, vault, sessionCache, pushState, postChatNote,
-        listApps: () => appCatalog.list(),
-        confirm: confirmation.coordinator.confirm,
-        getDenylist: () => denylistPolicy.patterns(),
-        denylistReady: () => denylistPolicy.ready(),
-        canWrite: (/** @type {string} */ store) => writeGuard.assertWritable(store),
-        lockedError: () => new VaultLockedError(),
-      });
-    },
-  }),
+  ...administrativeControl.routes,
   ...makeKernelDenylistRoutes({
     policy: denylistPolicy,
-    networkCustody: createKernelDenylistNetworkCustody({
-      dnr: /** @type {any} */ (browser).declarativeNetRequest,
-    }),
+    networkCustody,
     auditLog,
   }),
 };
@@ -1042,19 +1085,15 @@ const uiPortOwner = createKernelUiPortOwner({
 });
 const dwebCustodyOwner = DWEB_ENABLED ? createKernelDwebCustodyOwner({
   enabled: true,
-  load: async () => {
-    const { createKernelDwebCustodyRuntime } =
-      await import('./kernel-dweb-custody-runtime.js');
-    return createKernelDwebCustodyRuntime({
+  load: async () => dwebAddon.createKernelDwebCustodyRuntime({
       enabled: DWEB_ENABLED,
-      ensureOffscreen: featureHost.ensureOffscreen,
+      ensureDwebFeature,
       active: () => settingsStore.get().dwebEnabled === true,
       vault,
       auditLog,
       listApps: () => appCatalog.list(),
       sendMessage: (/** @type {any} */ message) => browser.runtime.sendMessage(message),
-    });
-  },
+    }),
 }) : null;
 const portOwners = createKernelPortOwners({
   firefox: kernelFirefox, dweb: DWEB_ENABLED,
@@ -1066,24 +1105,12 @@ const portOwners = createKernelPortOwners({
 const portRouter = createKernelPortRouter({
   identity: kernelIdentity,
   provenance: {
-    'private-transfer': (sender) => isOptionsSender(sender, {
-      runtimeId, extensionOrigin, optionsUrl,
-    }),
-    sidepanel: (sender) => isSidepanelPortSender(sender, {
-      runtimeId, extensionOrigin, sidepanelUrl,
-    }),
-    home: (sender) => isHomeSender(sender, {
-      runtimeId, extensionOrigin, homeUrl,
-    }),
-    eval: (sender) => isEvalSender(sender, {
-      runtimeId, extensionOrigin, homeUrl, evalRunnerUrl,
-    }),
-    'feature-lease-keepalive': (sender) => isOffscreenSender(sender, {
-      runtimeId, extensionOrigin, offscreenUrl,
-    }),
-    'dweb-custody': (sender) => isOffscreenSender(sender, {
-      runtimeId, extensionOrigin, offscreenUrl,
-    }),
+    'private-transfer': optionsUi,
+    sidepanel: sidepanelPortUi,
+    home: homeUi,
+    eval: evalUi,
+    'feature-lease-keepalive': offscreenUi,
+    'dweb-custody': offscreenUi,
   },
   handlers: portOwners.handlers,
 });
@@ -1096,7 +1123,7 @@ kernelEvents.event(
 vault.subscribe((event) => {
   void pushState().catch(() => {});
   if (event?.type === 'locked') {
-    kernelLocal?.abortProviderTests();
+    controllerOwner?.abortProviderTests?.();
     void lockFeatureHost().catch(() => {});
   }
 });

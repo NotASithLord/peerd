@@ -8,6 +8,7 @@ type HarnessOptions = {
   guardFails?: boolean;
   originGuardFails?: boolean;
   withGuard?: boolean;
+  withQuarantine?: boolean;
   denylist?: string[];
 };
 
@@ -18,6 +19,7 @@ const openHarness = ({
   guardFails = false,
   originGuardFails = false,
   withGuard = false,
+  withQuarantine = false,
   denylist = [],
 }: HarnessOptions = {}) => {
   let listener: any = null;
@@ -93,11 +95,26 @@ const openHarness = ({
         released.push(tabId);
       },
     } : {}),
+    ...(withQuarantine ? {
+      armBrowserChildQuarantine: async () => {
+        order.push('quarantine');
+        return { ok: true };
+      },
+    } : {}),
   };
   return { creates, ctx, guarded, hints, noted, order, reconciled, released, removed, updates };
 };
 
 describe('open_tab committed target policy', () => {
+  test('arms child quarantine before loading the initial public HTML', async () => {
+    const { ctx, order } = openHarness({
+      finalUrl: 'https://public.example/start', withGuard: true, withQuarantine: true,
+    });
+    const result = await openTabTool.execute({ url: 'https://public.example/start' }, ctx);
+    expect(result.ok).toBe(true);
+    expect(order.indexOf('quarantine')).toBeGreaterThan(order.indexOf('guard'));
+    expect(order.indexOf('quarantine')).toBeLessThan(order.indexOf('update'));
+  });
   test('returns a structured refusal after a redirect onto a sensitive site', async () => {
     const { ctx, updates } = openHarness({
       finalUrl: 'https://accounts.example/private?token=secret',

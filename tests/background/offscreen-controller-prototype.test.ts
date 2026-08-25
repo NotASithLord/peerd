@@ -511,6 +511,87 @@ describe('Chrome lazy controller private channel prototype', () => {
     controller.close();
   });
 
+  test('turn success cannot strand an unawaited reverse effect', async () => {
+    let called!: () => void;
+    const dispatched = new Promise<void>((resolve) => { called = resolve; });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const observed = { signal: null as AbortSignal | null };
+    const controller = await connectController({
+      ensureOffscreen: async () => {}, capabilities: ['turn.run'], callTimeoutMs: 1_000,
+      handleKernelCall: (_operation, _payload, context) => {
+        void context;
+        entered();
+        return new Promise((resolve) => setTimeout(
+          () => resolve({ ok: true, outcomeKnown: true }), 100,
+        ));
+      },
+      findHost: async () => ({
+        postMessage: (offer: any, transfer: Transferable[]) => bindControllerChannel({
+          port: transfer[0] as MessagePort, channelId: offer.channelId,
+          buildDigest: offer.buildDigest, kernelEpoch: offer.kernelEpoch,
+          hostEpoch: 'host-pending-turn-effect', offeredCaps: offer.capabilities,
+          supportedCaps: ['turn.run'],
+          loadController: async () => ({
+            call: async (_capability, _payload, options) => {
+              called();
+              observed.signal = options.signal;
+              void options.kernelCall?.('turn.session.get', {
+                runId: 'pending-turn-effect', value: { sessionId: 'session:test' },
+              });
+              return { ok: true, outcomeKnown: true };
+            },
+          }),
+        }),
+      }),
+    });
+    const result = controller.call('turn.run', {
+      runId: 'pending-turn-effect', sessionId: 'session:test',
+      ctx: { maxSteps: 1 }, tools: [], classifications: {},
+    });
+    await dispatched;
+    await started;
+    await expect(result).resolves.toMatchObject({
+      ok: false, code: 'controller-pending-kernel-effect', outcomeKnown: false,
+    });
+    expect(observed.signal?.aborted).toBe(true);
+    controller.close();
+  });
+
+  test('turn lifetime loss aborts a pending reverse effect and stays unknown', async () => {
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const observed = { signal: null as AbortSignal | null };
+    const controller = await connectController({
+      ensureOffscreen: async () => {}, capabilities: ['turn.run'],
+      handleKernelCall: (_operation, _payload, context) => {
+        observed.signal = context.signal;
+        entered();
+        return new Promise(() => {});
+      },
+      findHost: async () => ({
+        postMessage: (offer: any, transfer: Transferable[]) => bindControllerChannel({
+          port: transfer[0] as MessagePort, channelId: offer.channelId,
+          buildDigest: offer.buildDigest, kernelEpoch: offer.kernelEpoch,
+          hostEpoch: 'host-lost-turn-effect', offeredCaps: offer.capabilities,
+          supportedCaps: ['turn.run'],
+          loadController: async () => ({
+            call: async (_capability, _payload, options) => options.kernelCall?.(
+              'turn.session.get', {
+                runId: 'lost-turn-effect', value: { sessionId: 'session:test' },
+              },
+            ),
+          }),
+        }),
+      }),
+    });
+    const pending = controller.call('turn.run', { maxSteps: 1 });
+    await started;
+    controller.close();
+    await expect(pending).resolves.toMatchObject({ outcomeKnown: false });
+    expect(observed.signal?.aborted).toBe(true);
+  });
+
   test('offscreen supervisor boots the sealed Worker lazily over a second private port', async () => {
     let workerCreated = 0;
     const loader = makeSealedControllerLoader({

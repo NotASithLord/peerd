@@ -107,4 +107,30 @@ describe('migrated semantic route parity', () => {
     expect(JSON.stringify(payload)).not.toContain('private input');
   });
 
+  test('contact mutations move sealed while reads and storage effects remain kernel-bound', async () => {
+    const calls: string[] = [];
+    const { kernel } = harness({
+      contacts: {
+        list: async () => { calls.push('list'); return []; },
+        upsert: async (did: string, patch: any) => {
+          calls.push('upsert'); return { did, ...patch };
+        },
+        remove: async () => { calls.push('remove'); return false; },
+      },
+    });
+    await expect(kernel.routes['contacts/list']({ type: 'contacts/list' })).resolves.toEqual({
+      ok: true, contacts: [],
+    });
+    await expect(kernel.routes['contacts/set']({
+      type: 'contacts/set', did: 'did:key:z6MkContact', name: 'Peer',
+    })).resolves.toEqual({
+      ok: true, contact: { did: 'did:key:z6MkContact', name: 'Peer' },
+    });
+    await expect(kernel.routes['contacts/forget']({
+      type: 'contacts/forget', did: 'did:key:z6MkContact',
+    }))
+      .resolves.toEqual({ ok: false, error: 'contact-not-found' });
+    expect(calls).toEqual(['list', 'upsert', 'remove']);
+  });
+
 });

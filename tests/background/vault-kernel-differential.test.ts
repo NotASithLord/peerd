@@ -375,6 +375,7 @@ describe('vault authority kernel boot and UI contract', () => {
       'session/reset': async () => { calls.push('session-reset'); return { ok: true }; },
       'session/switch': async () => { calls.push('session-switch'); return { ok: true }; },
       'session/debugBundle': async () => { calls.push('debug'); return { ok: true }; },
+      'debug/originLock': async () => { calls.push('origin-lock'); return { ok: true }; },
       'actor-isolation/retry': async () => { calls.push('isolation'); return { ok: true }; },
     };
     const routeProvenance = makeKernelRouteProvenance({
@@ -549,6 +550,20 @@ describe('vault authority kernel boot and UI contract', () => {
       { firstParty: true, surface: 'home' },
     )).toEqual({ ok: false, error: 'vault-route-unauthorized-sender' });
     expect(await invoke(
+      { type: 'debug/originLock', origin: 'https://example.test' },
+      { firstParty: true, surface: 'sidepanel' },
+    )).toEqual({ ok: true });
+    expect(await invoke(
+      { type: 'debug/originLock', origin: 'https://example.test' },
+      { firstParty: true, surface: 'eval' },
+    )).toEqual({ ok: true });
+    for (const surface of ['home', 'options', 'offscreen']) {
+      expect(await invoke(
+        { type: 'debug/originLock', origin: 'https://example.test' },
+        { firstParty: true, surface },
+      )).toEqual({ ok: false, error: 'vault-route-unauthorized-sender' });
+    }
+    expect(await invoke(
       { type: 'agent/stop', activity: 'live' },
       { surface: 'active-page' },
     )).toEqual({ ok: true });
@@ -597,7 +612,7 @@ describe('vault authority kernel boot and UI contract', () => {
       'git', 'settings', 'provider', 'provider-test', 'provider-test',
       'provider-status', 'provider-status', 'models', 'models', 'openrouter-models', 'local-models', 'memory-write',
       'session', 'permission', 'onboarding', 'import-git', 'set-model',
-      'agent-send', 'agent-send', 'agent-stop', 'actor-spawn',
+      'agent-send', 'agent-send', 'origin-lock', 'origin-lock', 'agent-stop', 'actor-spawn',
       'session-archive', 'session-switch', 'session-reset', 'debug', 'isolation',
       'contacts', 'skills', 'hooks', 'memory-init',
       'editor', 'editor-alias',

@@ -1,5 +1,4 @@
 import { describe, expect, test } from 'bun:test';
-import { createKernelPrivateTransferOwner } from '../../extension/background/kernel-private-transfer-owner.js';
 import { makeKernelTransferRoutes } from '../../extension/background/kernel-transfer-routes.js';
 
 class ExportPassphraseError extends Error {}
@@ -172,94 +171,5 @@ describe('kernel transfer routes', () => {
     expect(await exactPartial['transfer/import']({
       privateTransferAuthorization: authorization, payload: {},
     })).toEqual({ ok: false, error: 'import-partial', partial: { settings: 1 } });
-  });
-});
-
-describe('kernel private transfer owner', () => {
-  test('only the exact options sender can attach the hidden capability port', async () => {
-    const optionsSender = { url: 'moz-extension://peerd/options.html' };
-    const authorizationSeen: symbol[] = [];
-    const owner = createKernelPrivateTransferOwner({
-      isOptionsSender: (sender: any) => sender === optionsSender,
-      makeHandlers: (authorization: symbol) => ({
-        'transfer/export': async (message: any) => {
-          authorizationSeen.push(message.privateTransferAuthorization);
-          return { ok: true };
-        },
-      }),
-      listWindowClients: async () => [],
-      optionsUrl: optionsSender.url,
-    });
-    let disconnected = 0;
-    const refusedPort: any = {
-      sender: { url: 'moz-extension://peerd/sidepanel.html' },
-      disconnect: () => { disconnected += 1; },
-    };
-    expect(owner.attach(refusedPort)).toBe(false);
-    expect(disconnected).toBe(1);
-
-    const listeners: Array<(message: any) => void> = [];
-    const replies: any[] = [];
-    const port: any = {
-      sender: optionsSender,
-      onMessage: { addListener: (listener: (message: any) => void) => { listeners.push(listener); } },
-      onDisconnect: { addListener: () => {} },
-      postMessage: (message: any) => { replies.push(message); },
-    };
-    expect(owner.attach(port)).toBe(true);
-    listeners[0]({
-      type: 'private-transfer/request', requestId: 'request-1',
-      message: { type: 'transfer/export' },
-    });
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(replies[0]).toMatchObject({
-      type: 'private-transfer/response', requestId: 'request-1', ok: true,
-      reply: { ok: true },
-    });
-    expect(typeof authorizationSeen[0]).toBe('symbol');
-  });
-
-  test('Firefox exposes the exact options Port without a WindowClient route', () => {
-    const owner = createKernelPrivateTransferOwner({
-      isOptionsSender: () => true,
-      makeHandlers: () => ({}),
-    });
-    expect(owner.routes).toEqual({});
-  });
-
-  test('channel creation refuses forged senders before client lookup', async () => {
-    const optionsSender = { url: 'chrome-extension://peerd/options.html' };
-    let lookups = 0;
-    const channel = new MessageChannel();
-    const offers: any[] = [];
-    const owner = createKernelPrivateTransferOwner({
-      isOptionsSender: (sender: any) => sender === optionsSender,
-      makeHandlers: () => ({}),
-      listWindowClients: async () => {
-        lookups += 1;
-        return [{
-          url: optionsSender.url,
-          postMessage: (message: any, transfer: any[]) => { offers.push({ message, transfer }); },
-        }];
-      },
-      optionsUrl: optionsSender.url,
-      createChannel: () => channel,
-    });
-    const open = owner.routes['private-transfer/open'];
-    if (!open) throw new Error('private transfer route missing');
-    expect(await open(
-      { requestId: 'request-1' }, { url: optionsSender.url },
-    )).toEqual({ ok: false, error: 'private-transfer-channel-refused' });
-    expect(lookups).toBe(0);
-    expect(await open(
-      { requestId: 'request-1' }, optionsSender,
-    )).toEqual({ ok: true });
-    expect(offers[0]).toMatchObject({
-      message: { type: 'private-transfer/channel', requestId: 'request-1' },
-    });
-    expect(offers[0].transfer[0]).toBe(channel.port2);
-    channel.port1.close();
-    channel.port2.close();
   });
 });

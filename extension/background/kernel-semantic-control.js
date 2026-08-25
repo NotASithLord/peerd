@@ -82,6 +82,7 @@ export const createKernelSemanticControl = ({
   ]));
   return Object.freeze({
     routes: Object.freeze(handlers),
+    dispatchProjected: dispatch,
     authorize: (/** @type {unknown} */ payload) => {
       if (!payload || typeof payload !== 'object') return null;
       const authorityGrant = grants.get(/** @type {object} */ (payload)) ?? null;

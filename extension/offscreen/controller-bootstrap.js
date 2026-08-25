@@ -6,6 +6,11 @@
 import browser from '/shared/browser-api.js';
 import { backgroundModuleUrl } from '/shared/background-entry.js';
 import { CONTROLLER_BUILD_DIGEST } from '/shared/structured-clone-size.js';
+import { RUNTIME_DISPATCH_CAPABILITY } from '/shared/kernel-runtime-policy.js';
+import {
+  KERNEL_FEATURE_DISPATCH_CAPABILITY,
+  KERNEL_FEATURE_EVENT_CAPABILITY,
+} from '/shared/kernel-feature-policy.js';
 import {
   makeControllerOfferHandler,
   makeSealedControllerLoader,
@@ -17,7 +22,10 @@ const loadController = makeSealedControllerLoader({
 const handleOffer = makeControllerOfferHandler({
   expectedWorkerUrl: backgroundModuleUrl(browser),
   expectedBuildDigest: CONTROLLER_BUILD_DIGEST,
-  supportedCaps: ['prompt.render', 'semantic.dispatch', 'turn.run'],
+  supportedCaps: [
+    'prompt.render', RUNTIME_DISPATCH_CAPABILITY, 'semantic.dispatch', 'turn.run',
+    KERNEL_FEATURE_DISPATCH_CAPABILITY, KERNEL_FEATURE_EVENT_CAPABILITY,
+  ],
   loadController,
 });
 

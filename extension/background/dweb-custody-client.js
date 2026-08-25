@@ -113,7 +113,6 @@ export const makeDwebCustodyClient = ({
   };
 
   const connected = async () => {
-    if (activePort) return activePort;
     await ensureOffscreen();
     if (activePort) return activePort;
     await new Promise((resolve, reject) => {

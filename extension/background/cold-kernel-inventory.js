@@ -1,5 +1,5 @@
 // @ts-check
-// Pure inventory for browser events that can wake the legacy service worker.
+// Pure inventory for browser events that can wake the kernel.
 // This module deliberately imports nothing: it is safe in a cold entry graph.
 
 /** @typedef {'kernel-immediate'|'kernel-authority'|'durable-hint'|'transient-host'} ColdPlacement */
@@ -13,14 +13,13 @@
  */
 
 /**
- * One kernel listener replaces the legacy file's duplicate listeners for each
- * event. `kernel-authority` means delaying or replaying the event would lose a
+ * `kernel-authority` means delaying or replaying the event would lose a
  * browser gesture or reopen an authority race; a production kernel must supply
  * the synchronous handler before registering it. `durable-hint` payloads are
  * sanitized and at-least-once. Runtime messages and ports are never persisted.
  */
 /** @type {ReadonlyArray<Readonly<ColdEventInventory>>} */
-export const LEGACY_COLD_EVENTS = Object.freeze([
+export const KERNEL_COLD_EVENTS = Object.freeze([
   Object.freeze({ key: 'runtime.onMessage', placement: 'transient-host', common: true }),
   Object.freeze({ key: 'runtime.onConnect', placement: 'transient-host', common: true }),
   Object.freeze({ key: 'runtime.onStartup', placement: 'durable-hint', common: true }),
@@ -56,7 +55,7 @@ export const LEGACY_COLD_EVENTS = Object.freeze([
  * @property {boolean} [dweb]
  */
 /** @type {ReadonlyArray<Readonly<ColdPortInventory>>} */
-export const LEGACY_PORT_CLASSES = Object.freeze([
+export const KERNEL_PORT_CLASSES = Object.freeze([
   // Chrome transfers a private MessageChannel to the exact Options
   // WindowClient. Only Firefox uses the runtime.Port fallback.
   Object.freeze({
@@ -78,14 +77,14 @@ export const LEGACY_PORT_CLASSES = Object.freeze([
 export const coldEventKeysFor = ({
   firefox = false,
   selfHostedChrome = false,
-} = {}) => LEGACY_COLD_EVENTS
+} = {}) => KERNEL_COLD_EVENTS
   .filter((entry) => entry.common || (firefox && entry.firefox)
     || (selfHostedChrome && entry.selfHostedChrome))
   .map((entry) => entry.key);
 
 /** @param {{ firefox?: boolean, dweb?: boolean }} [target] */
 export const coldPortNamesFor = ({ firefox = false, dweb = false } = {}) =>
-  LEGACY_PORT_CLASSES
+  KERNEL_PORT_CLASSES
     .filter((entry) => entry.common || (firefox && entry.firefox)
       || (!firefox && entry.chrome) || (!firefox && dweb && entry.dweb))
     .map((entry) => entry.name);

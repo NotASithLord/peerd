@@ -76,7 +76,7 @@ describe('packaged Preview dweb feature-lease contract', () => {
       (value: any) => { value.observations.cutover.target.selfHostedChrome = false; },
       (value: any) => { value.observations.cutover.events.splice(2, 0, value.observations.cutover.events[2]); },
       (value: any) => { value.observations.cutover.ports[5].required = false; },
-      (value: any) => { value.observations.cutover.semantic.migrated = 160; },
+      (value: any) => { value.observations.cutover.semantic.migrated = 159; },
       (value: any) => { value.observations.continuity.after.hostEpoch = 'host-b'; },
       (value: any) => { value.observations.continuity.after.kernelEpoch = 'kernel-a'; },
       (value: any) => { value.observations.continuity.after.dwebLeases = 2; },

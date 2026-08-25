@@ -1,7 +1,7 @@
 // script — clean "unavailable" signal when the offscreen host is absent.
 //
 // On Firefox there is no chrome.offscreen, so the SW injects a NULL
-// jsOffscreenClient into the tool context (service-worker.js: gated on
+// jsOffscreenClient into the tool context (gated on
 // `offscreenAvailable`). This test pins the TOOL CONTRACT that gating relies
 // on: a missing/!execHeadless client yields the actionable
 // `headless_js_unavailable` error the agent can read — NOT an opaque "headless

@@ -19,8 +19,7 @@
 //     auto-deny. While a prompt is pending, the SW raises an action-badge so the
 //     user knows the agent is waiting on them (onPendingChange below).
 //
-// Session-scoped grants live in SW MEMORY (service-worker.js
-// sessionConfirmGrants): sessionId → the set of GRANT KEYS the user
+// Session-scoped grants live in memory: sessionId → the set of GRANT KEYS the user
 // blanket-approved for that chat. They die with the SW (same blast
 // radius as the vault DK). Since R5 the key is origin-bound when the
 // prompt carries an origin - `tool|origin` - and the bare tool name

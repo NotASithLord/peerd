@@ -926,19 +926,19 @@ describe('operation-lazy offscreen repository split', () => {
     })).rejects.toThrow('response headers exceed the transfer ceiling');
   });
 
-  test('isomorphic-git is absent from the service-worker static graph', async () => {
+  test('isomorphic-git is absent from the kernel static graph', async () => {
     const root = join(process.cwd(), 'extension');
-    const entry = join(root, 'background/service-worker.js');
+    const entry = join(root, 'background/vault-kernel.js');
     const graph = await collectStaticModuleGraph(root, entry);
     expect([...graph].some((file) => file.includes('/vendor/isomorphic-git/'))).toBe(false);
     expect([...graph].some((file) => file.endsWith('/repository/repository-service.js'))).toBe(false);
     expect([...graph].some((file) => file.endsWith('/offscreen/repository-app-files.js'))).toBe(false);
     expect([...graph].some((file) => readFileSync(file, 'utf8')
       .includes('admitRepositoryChannelOffer'))).toBe(false);
-    const sw = readFileSync(entry, 'utf8');
+    const kernel = readFileSync(entry, 'utf8');
     const offscreen = readFileSync(join(root, 'offscreen/offscreen.js'), 'utf8');
     const supervisor = readFileSync(join(root, 'offscreen/supervisor-channels.js'), 'utf8');
-    expect(sw).not.toContain("import browserGit from '/vendor/isomorphic-git/index.js'");
+    expect(kernel).not.toContain("import browserGit from '/vendor/isomorphic-git/index.js'");
     expect(offscreen).toContain("import('./repository-host.js')");
     expect(supervisor).toContain('export const admitRepositoryChannelOffer');
   });

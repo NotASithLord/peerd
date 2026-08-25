@@ -24,12 +24,12 @@ describe('packaged background entry provenance', () => {
       .toBe('chrome-extension://id/background/vault-kernel.js');
     expect(backgroundModuleUrl({
       runtime: { ...runtime, getManifest: () => ({}) },
-    })).toBe('chrome-extension://id/background/service-worker.js');
+    })).toBe('chrome-extension://id/background/vault-kernel.js');
   });
 
   test('uses the package-stamped entry when an offscreen realm has no getManifest', () => {
     expect(backgroundModuleUrl({
       runtime: { getURL: (path: string) => `chrome-extension://id/${path}` },
-    })).toBe('chrome-extension://id/background/service-worker.js');
+    })).toBe('chrome-extension://id/background/vault-kernel.js');
   });
 });

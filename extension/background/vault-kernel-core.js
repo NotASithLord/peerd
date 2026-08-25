@@ -291,6 +291,7 @@ export const makeKernelRouteProvenance = ({
     'hooks/list', 'hooks/save', 'hooks/remove', 'hooks/toggle',
   ], sidepanelUi);
   add(['agent/send'], (sender) => sidepanelUi(sender) || evalUi(sender));
+  add(['debug/originLock'], (sender) => sidepanelUi(sender) || evalUi(sender));
   add(['agent/stop'], (sender, message) => sidepanelUi(sender) || evalUi(sender)
     || activityStopUi(sender, message));
   add(['actor/spawn'], actorSpawnUi);

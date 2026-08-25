@@ -171,7 +171,7 @@ describe('packaged first-install passkey lane', () => {
     rejects((report) => {
       report.observations.cutover.events[0].key = 'runtime.onInvented';
     }, /complete live kernel assembly/);
-    rejects((report) => { report.observations.cutover.semantic.total = 160; },
+    rejects((report) => { report.observations.cutover.semantic.total = 159; },
       /complete live kernel assembly/);
     rejects((report) => { report.observations.coldRecycle.recycledUi.appShell = false; },
       /cold recycle continuity/);
@@ -267,6 +267,9 @@ describe('packaged first-install passkey lane', () => {
     expect(harness).toContain("row?.runningStatus === 'stopped'");
     expect(harness).not.toContain("browserConn.send('Target.closeTarget'");
     expect(harness).toContain("Target.setDiscoverTargets");
+    expect(harness).toContain("Extensions.triggerAction");
+    expect(harness).toContain("entry.type === 'tab'");
+    expect(harness).toContain('browser-owned side panel target never appeared');
     expect(harness).toContain("method === 'Target.targetInfoChanged'");
     expect(harness).toContain('blob:chrome-extension://');
     expect(probes).toContain("opened.files?.['assets/raw.bin']");
@@ -304,8 +307,7 @@ describe('packaged first-install passkey lane', () => {
       .toBe(PRODUCTION_BACKGROUND_ENTRY);
     expect(identifyPeerdBackgroundTarget(target(PRODUCTION_PREVIEW_CHROME_BACKGROUND_ENTRY))?.entry)
       .toBe(PRODUCTION_PREVIEW_CHROME_BACKGROUND_ENTRY);
-    expect(identifyPeerdBackgroundTarget(target('background/service-worker.js'))?.entry)
-      .toBe('background/service-worker.js');
+    expect(identifyPeerdBackgroundTarget(target('background/service-worker.js'))).toBeNull();
     expect(identifyPeerdBackgroundTarget(target('background/other.js'))).toBeNull();
     expect(identifyPeerdBackgroundTarget(target(PRODUCTION_BACKGROUND_ENTRY, 'worker'))).toBeNull();
   });

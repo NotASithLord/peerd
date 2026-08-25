@@ -218,13 +218,15 @@ export const scenario: Scenario = {
         getSessionRules: async () => incompleteRules,
         updateSessionRules: async () => { incompleteUpdates += 1; },
       }, PRIVATE_NETWORK_RULE_IDS);
-      const incompleteAdopted = await incompleteGuard.adopt(sourceTabId, childTabId + 1);
-      probes.push(!incompleteAdopted && incompleteUpdates === 0
+      let incompleteRejected = false;
+      try { await incompleteGuard.adopt(sourceTabId, childTabId + 1); }
+      catch { incompleteRejected = true; }
+      probes.push(incompleteRejected && incompleteUpdates === 0
         ? blocked('claim startup child custody from a partial surviving rule set', 'partial browser evidence changed no rule')
         : leaked('claim startup child custody from a partial surviving rule set', 'partial browser evidence was accepted'));
     }
 
-    // 8) Firefox's synchronous first-request stop is exact-child scoped. It
+    // 8) Firefox's blocking first-request stop is exact-child scoped. It
     // does not infer ownership from an ordinary opener and it does not block a
     // public request from the adopted child.
     {
@@ -243,26 +245,32 @@ export const scenario: Scenario = {
       guard.onNavigationTarget({ tabId: 76, sourceTabId: 74 });
       guard.onNavigationTarget({ tabId: 77, sourceTabId: 73 });
       guard.onNavigationTarget({ tabId: 78, sourceTabId: 73 });
-      const drivenPrivate = guard.onBeforeRequest({ tabId: 75, url: 'http://127.0.0.1/' });
-      const drivenSocket = guard.onBeforeRequest({
+      const drivenPrivate = await Promise.resolve(guard.onBeforeRequest({
+        tabId: 75, url: 'http://127.0.0.1/',
+      }));
+      const drivenSocket = await Promise.resolve(guard.onBeforeRequest({
         tabId: 75, url: 'ws://127.0.0.1/socket', type: 'websocket',
-      });
-      const drivenPublic = guard.onBeforeRequest({ tabId: 75, url: 'https://public.example/' });
-      const ordinaryPrivate = guard.onBeforeRequest({ tabId: 76, url: 'http://127.0.0.1/' });
-      const drivenSensitive = guard.onBeforeRequest({
+      }));
+      const drivenPublic = await Promise.resolve(guard.onBeforeRequest({
+        tabId: 75, url: 'https://public.example/',
+      }));
+      const ordinaryPrivate = await Promise.resolve(guard.onBeforeRequest({
+        tabId: 76, url: 'http://127.0.0.1/',
+      }));
+      const drivenSensitive = await Promise.resolve(guard.onBeforeRequest({
         tabId: 77, url: 'https://vault.example/account', type: 'xmlhttprequest',
-      });
+      }));
       policyReady = false;
-      const drivenCold = guard.onBeforeRequest({
+      const drivenCold = await Promise.resolve(guard.onBeforeRequest({
         tabId: 78, url: 'https://public.example/', type: 'xmlhttprequest',
-      });
-      const ordinaryCold = guard.onBeforeRequest({
+      }));
+      const ordinaryCold = await Promise.resolve(guard.onBeforeRequest({
         tabId: 76, url: 'https://public.example/', type: 'xmlhttprequest',
-      });
+      }));
       policyReady = true;
-      const hydratedPublic = guard.onBeforeRequest({
+      const hydratedPublic = await Promise.resolve(guard.onBeforeRequest({
         tabId: 78, url: 'https://public.example/', type: 'xmlhttprequest',
-      });
+      }));
       probes.push(drivenPrivate.cancel === true
           && drivenSocket.cancel === true
           && drivenSensitive.cancel === true
@@ -273,7 +281,7 @@ export const scenario: Scenario = {
           && ordinaryPrivate.cancel !== true
           && stopped.length === 3
         ? blocked('race a protected request through a newly opened child', 'private HTTP, WebSocket, denylisted, and cold-policy requests were cancelled only for exact children, with source-bound receipts')
-        : leaked('race a protected request through a newly opened child', 'the synchronous child scope was missing or overbroad'));
+        : leaked('race a protected request through a newly opened child', 'the blocking child scope was missing or overbroad'));
     }
 
     return {
@@ -283,7 +291,7 @@ export const scenario: Scenario = {
         'browser automation target classifier',
         'tab-scoped private-network DNR rules',
         'origin-scoped no-tab worker fetch DNR rules',
-        'exact-child synchronous Firefox request stop',
+        'exact-child blocking Firefox request stop',
         'exact-source startup child rule copy',
         'redirect fail-closed',
       ]),

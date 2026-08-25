@@ -9,11 +9,11 @@
 //     against stubs (job-runner.test.js pins the relay shape with stubs).
 //   - notebook tab: the sealed-realm fixture worker with the test page playing
 //     the tab host + SW route — the same applyFetchExtract ∘ extractMarkdownLocal
-//     composition service-worker.js injects as applyWebExtract.
+//     composition injected as applyWebExtract.
 //
 // The spec's parity check: both hosts must return the SAME markdown for the
 // same fixture. What stays glue-only (entry files this page cannot import):
-// notebook-tab.js's relay lines and service-worker.js's applyWebExtract
+// notebook-tab.js's relay lines and the applyWebExtract
 // composition — their threading is pinned by tests/background/routes-engine
 // .test.ts and tests/engine-tabs/notebook-tab/notebook-neutralizers.test.ts.
 

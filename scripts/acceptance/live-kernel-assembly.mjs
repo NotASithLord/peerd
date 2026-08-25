@@ -5,12 +5,12 @@
 import {
   coldEventKeysFor,
   coldPortNamesFor,
-  LEGACY_COLD_EVENTS,
-  LEGACY_PORT_CLASSES,
+  KERNEL_COLD_EVENTS,
+  KERNEL_PORT_CLASSES,
 } from '../../extension/background/cold-kernel-inventory.js';
 import {
-  LEGACY_SEMANTIC_ROUTE_INVENTORY,
-} from '../../extension/shared/semantic-route-inventory.generated.js';
+  SEMANTIC_ROUTE_INVENTORY,
+} from '../../extension/shared/semantic-route-inventory.js';
 import {
   SEMANTIC_ROUTE_CLASSIFICATIONS,
 } from '../../extension/shared/semantic-route-classification.js';
@@ -42,13 +42,13 @@ export const liveKernelAssemblyProfile = (targetName) => {
   return Object.freeze({
     targetName,
     target,
-    semanticRoutes: LEGACY_SEMANTIC_ROUTE_INVENTORY.length,
+    semanticRoutes: SEMANTIC_ROUTE_INVENTORY.length,
     semanticPlacements,
-    eventInventory: LEGACY_COLD_EVENTS.length,
-    eventKeys: Object.freeze(LEGACY_COLD_EVENTS.map((entry) => entry.key)),
+    eventInventory: KERNEL_COLD_EVENTS.length,
+    eventKeys: Object.freeze(KERNEL_COLD_EVENTS.map((entry) => entry.key)),
     requiredEvents: Object.freeze(requiredEvents),
-    portInventory: LEGACY_PORT_CLASSES.length,
-    portNames: Object.freeze(LEGACY_PORT_CLASSES.map((entry) => entry.name)),
+    portInventory: KERNEL_PORT_CLASSES.length,
+    portNames: Object.freeze(KERNEL_PORT_CLASSES.map((entry) => entry.name)),
     requiredPorts: Object.freeze(requiredPorts),
   });
 };
@@ -102,7 +102,7 @@ export const assertLiveKernelAssembly = (candidate, targetName) => {
   const requiredEvents = new Set(profile.requiredEvents);
   for (let index = 0; index < assembly.events.length; index += 1) {
     const entry = assembly.events[index];
-    const inventory = LEGACY_COLD_EVENTS[index];
+    const inventory = KERNEL_COLD_EVENTS[index];
     const required = requiredEvents.has(inventory.key);
     const hasOwner = typeof entry?.owner === 'string'
       && entry.owner.length >= 3 && entry.owner.length <= 128;
@@ -122,7 +122,7 @@ export const assertLiveKernelAssembly = (candidate, targetName) => {
   const requiredPorts = new Set(profile.requiredPorts);
   for (let index = 0; index < assembly.ports.length; index += 1) {
     const entry = assembly.ports[index];
-    const inventory = LEGACY_PORT_CLASSES[index];
+    const inventory = KERNEL_PORT_CLASSES[index];
     const required = requiredPorts.has(inventory.name);
     const hasOwner = typeof entry?.owner === 'string'
       && entry.owner.length >= 3 && entry.owner.length <= 128;
@@ -179,14 +179,14 @@ export const completeLiveKernelAssemblyFixture = (targetName) => {
       firefox: profile.target.firefox,
       selfHostedChrome: profile.target.selfHostedChrome,
     },
-    events: LEGACY_COLD_EVENTS.map((entry) => ({
+    events: KERNEL_COLD_EVENTS.map((entry) => ({
       key: entry.key,
       placement: entry.placement,
       required: requiredEvents.has(entry.key),
       status: requiredEvents.has(entry.key) ? 'owned' : 'missing',
       owner: requiredEvents.has(entry.key) ? `owner:${entry.key}` : null,
     })),
-    ports: LEGACY_PORT_CLASSES.map((entry) => ({
+    ports: KERNEL_PORT_CLASSES.map((entry) => ({
       name: entry.name,
       cold: entry.cold,
       required: requiredPorts.has(entry.name),

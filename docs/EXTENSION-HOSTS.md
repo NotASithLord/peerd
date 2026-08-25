@@ -36,7 +36,7 @@ a pinned, binary-safe, abort-aware host channel.
 
 ## Ratchets
 
-The cold-graph test follows every static import from `service-worker.js`, caps
+The cold-graph test follows every static import from `vault-kernel.js`, caps
 both module count and authored bytes, and rejects known UI/heavy modules. Adding
 a feature does not justify raising that budget. First move its controller to an
 owning document or offscreen host and leave only the smallest reusable authority

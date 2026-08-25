@@ -143,6 +143,11 @@ export const navigateTool = {
       const guarded = await c.ensureBrowserNetworkGuard(tabId, requestedUrl);
       if (!guarded.ok) return guarded;
     }
+    if (c.browserChildQuarantineArmedTabId !== tabId
+        && typeof c.armBrowserChildQuarantine === 'function') {
+      const armed = await c.armBrowserChildQuarantine(tabId);
+      if (!armed.ok) return armed;
+    }
 
     const navigationTimeoutMs = Number.isFinite(c.navigationTimeoutMs)
       ? Math.max(1, Number(c.navigationTimeoutMs))
@@ -189,7 +194,7 @@ export const navigateTool = {
     // re-stamp is what launders an open redirect. That was wrong twice over, and
     // an adversarial review caught it:
     //
-    //   1. This pin IS the credential scope. service-worker.js wires
+    //   1. This pin IS the credential scope. The host wires
     //      `webFetch = withSessionScopedCredentials(webFetch, () => ctx.activeTab?.origin)`
     //      and peerd-egress reads that getter LIVE on every fetch to decide
     //      `credentials:'include'`. Freezing it at the owned origin leaves a

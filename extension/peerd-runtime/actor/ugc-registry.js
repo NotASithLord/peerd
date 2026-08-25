@@ -37,7 +37,7 @@
 // page" grant, because (a) it is exactly what a user who switches
 // confirmations ON already lives with on every site — the same machinery, one
 // posture, no bespoke second concept — and (b) an actor session deliberately
-// accumulates NO standing grants (background/service-worker.js `ephemeral`),
+// accumulates NO standing grants,
 // which is the property that makes this confirm meaningful at all. If the
 // prompting proves annoying in the field, a per-turn per-origin grant is the
 // designed follow-up; speculating it now would trade a real guarantee for a

@@ -4,24 +4,31 @@ import { join } from 'node:path';
 import { REPO_ROOT } from '../../packaging/lib.ts';
 import {
   injectLifecycleFaultDispatcher,
-  injectLifecycleFaultServiceWorker,
+  injectLifecycleFaultFactories,
+  injectLifecycleFaultKernel,
 } from '../../scripts/cdp/run-lifecycle-faults.mjs';
 
 describe('packaged Chrome lifecycle fault lane', () => {
-  const serviceWorkerSource = readFileSync(
-    join(REPO_ROOT, 'extension/background/service-worker.js'), 'utf8',
+  const kernelSource = readFileSync(
+    join(REPO_ROOT, 'extension/background/vault-kernel.js'), 'utf8',
+  );
+  const factoriesSource = readFileSync(
+    join(REPO_ROOT, 'extension/background/kernel-turn-live-factories.js'), 'utf8',
   );
   const dispatcherSource = readFileSync(
     join(REPO_ROOT, 'extension/peerd-runtime/tools/dispatcher.js'), 'utf8',
   );
 
   test('injects production lifecycle recovery before Store packaging', () => {
-    const worker = injectLifecycleFaultServiceWorker(serviceWorkerSource);
+    const worker = injectLifecycleFaultKernel(kernelSource);
+    const factories = injectLifecycleFaultFactories(factoriesSource);
     const dispatcher = injectLifecycleFaultDispatcher(dispatcherSource);
     expect(worker).toContain("import './lifecycle-fault-probe.js'");
-    expect(worker).toContain("'lifecycle-fault/dispatch': async (msg)");
-    expect(worker).toContain('await lifecycleArmed');
-    expect(worker).toContain('lifecycleBoot.operationLog.markDispatched(operationId)');
+    expect(worker).toContain("'lifecycle-fault/dispatch': async (message)");
+    expect(worker).toContain('await getControllerRelays()');
+    expect(factories).toContain('await lifecycleArmed');
+    expect(factories).toContain('lifecycleBoot.operationLog.markDispatched(operationId)');
+    expect(factories).toContain('message?.recoverOnly === true');
     expect(dispatcher).toContain('peerdLifecycleFaultProbe?.beforeExecute(call.name)');
 
     const harness = readFileSync(
@@ -38,15 +45,18 @@ describe('packaged Chrome lifecycle fault lane', () => {
     expect(storeLane).toContain("join(artifactRoot, 'staging', 'store-chrome')");
   });
 
-  test('fails closed when either pre-package source seam drifts', () => {
-    expect(() => injectLifecycleFaultServiceWorker(
-      serviceWorkerSource.replace(
-        "  'a2a/call': (/** @type {any} */ msg, /** @type {any} */ sender) => a2aCallRoute(msg, sender),",
+  test('fails closed when a pre-package source seam drifts', () => {
+    expect(() => injectLifecycleFaultKernel(
+      kernelSource.replace("  'audit/voice-fetch': voiceAuditRoute,", ''),
+    )).toThrow('source fault route seam changed');
+    expect(() => injectLifecycleFaultFactories(
+      factoriesSource.replace(
+        '    const relays = {\n      scriptRuns, validateGeneration, retireStale, dispatchToolCall,',
         '',
       ),
-    )).toThrow('source fault route seam changed');
+    )).toThrow('source lifecycle factory seam changed');
     expect(() => injectLifecycleFaultDispatcher(
-      dispatcherSource.replace('    let result = await tool.execute(args, execCtx);', ''),
+      dispatcherSource.replace('await tool.execute(args, execCtx)', ''),
     )).toThrow('source dispatcher fault seam changed');
   });
 

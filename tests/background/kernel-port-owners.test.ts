@@ -2,6 +2,10 @@ import { describe, expect, test } from 'bun:test';
 import { createKernelPortOwners } from '../../extension/background/kernel-port-owners.js';
 import { createKernelPortRouter, KERNEL_PORT_NAMES } from '../../extension/background/kernel-port-router.js';
 import { createVaultKernelAssemblyReport } from '../../extension/background/vault-kernel-assembly.js';
+import {
+  isEvalSender, isHomeSender, isOffscreenSender, isOptionsSender,
+  isSidepanelPortSender,
+} from '../../extension/shared/sender-trust.js';
 
 const IDENTITY = Object.freeze({
   schema: 1 as const,
@@ -11,10 +15,10 @@ const IDENTITY = Object.freeze({
 });
 
 const provenance = Object.fromEntries(KERNEL_PORT_NAMES.map((name) => [name, () => true]));
-const makePort = (name: string) => {
+const makePort = (name: string, sender: any = {}) => {
   let disconnected = 0;
   return {
-    name, sender: {},
+    name, sender,
     get disconnected() { return disconnected; },
     disconnect() { disconnected += 1; },
   };
@@ -105,6 +109,57 @@ describe('target-exact kernel Port owners', () => {
     expect(owners.calls).toEqual([
       'ui:sidepanel', 'ui:home', 'ui:eval', 'feature-lease',
     ]);
+  });
+
+  test('Firefox pins each Port name to its exact browser sender', () => {
+    const runtimeId = 'peerd@test';
+    const extensionOrigin = 'moz-extension://peerd/';
+    const optionsUrl = `${extensionOrigin}options/options.html`;
+    const sidepanelUrl = `${extensionOrigin}sidepanel/sidepanel.html`;
+    const homeUrl = `${extensionOrigin}home/home.html`;
+    const evalRunnerUrl = `${extensionOrigin}tests/eval.html`;
+    const offscreenUrl = `${extensionOrigin}offscreen/offscreen.html`;
+    const optionsTrust = { runtimeId, extensionOrigin, optionsUrl };
+    const sidepanelTrust = { runtimeId, extensionOrigin, sidepanelUrl };
+    const homeTrust = { runtimeId, extensionOrigin, homeUrl };
+    const evalTrust = { runtimeId, extensionOrigin, homeUrl, evalRunnerUrl };
+    const offscreenTrust = { runtimeId, extensionOrigin, offscreenUrl };
+    const calls: string[] = [];
+    const owners = createKernelPortOwners({
+      firefox: true,
+      attachUi: (_port, context) => { calls.push(context.name); },
+      attachPrivateTransfer: () => { calls.push('private-transfer'); },
+    });
+    const router = createKernelPortRouter({
+      identity: IDENTITY,
+      provenance: {
+        'private-transfer': (sender) => isOptionsSender(sender, optionsTrust),
+        sidepanel: (sender) => isSidepanelPortSender(sender, sidepanelTrust),
+        home: (sender) => isHomeSender(sender, homeTrust),
+        eval: (sender) => isEvalSender(sender, evalTrust),
+        'feature-lease-keepalive': (sender) => isOffscreenSender(sender, offscreenTrust),
+        'dweb-custody': (sender) => isOffscreenSender(sender, offscreenTrust),
+      },
+      handlers: owners.handlers,
+    });
+    const options = { id: runtimeId, url: `${optionsUrl}#backup`, tab: { id: 1 } };
+    const panel = { id: runtimeId, url: `${sidepanelUrl}#chat`, tab: { id: 2 } };
+    const home = { id: runtimeId, url: `${homeUrl}#settings`, tab: { id: 3 } };
+    expect(router.route(makePort('private-transfer', options)).accepted).toBe(true);
+    expect(router.route(makePort('sidepanel', panel)).accepted).toBe(true);
+    expect(router.route(makePort('home', home)).accepted).toBe(true);
+    for (const port of [
+      makePort('sidepanel', options),
+      makePort('private-transfer', { ...options, url: `${optionsUrl}?forged=1` }),
+      makePort('sidepanel', { ...panel, id: 'sibling@test' }),
+      makePort('home', { id: runtimeId, url: homeUrl }),
+    ]) {
+      expect(router.route(port)).toMatchObject({
+        accepted: false, reason: 'provenance-refused',
+      });
+      expect(port.disconnected).toBe(1);
+    }
+    expect(calls).toEqual(['private-transfer', 'sidepanel', 'home']);
   });
 
   test('rejects missing required owners and asynchronous custody', () => {

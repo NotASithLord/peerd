@@ -161,6 +161,16 @@ export const createScriptRunRegistry = ({ actorOpLimit = 50, codeOpLimit = actor
       entry.providerOutputTokens = Math.max(0, entry.providerOutputTokens - reserved + actual);
     },
 
+    /** @param {string} runId @param {number} reservedOutputTokens */
+    cancelProviderCall: (runId, reservedOutputTokens) => {
+      const entry = runs.get(runId);
+      if (!entry) return;
+      const reserved = Number.isFinite(reservedOutputTokens) && reservedOutputTokens > 0
+        ? reservedOutputTokens : 0;
+      entry.providerCalls = Math.max(0, entry.providerCalls - 1);
+      entry.providerOutputTokens = Math.max(0, entry.providerOutputTokens - reserved);
+    },
+
     /** The run's sub-call meter (copy), or null when unregistered. @param {string} runId */
     providerUsageFor: (runId) => {
       const entry = runs.get(runId);

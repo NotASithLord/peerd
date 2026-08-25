@@ -10,8 +10,7 @@ import { createPageActivityReporter } from './page-activity.js';
 import { createKernelTurnRuntime } from './kernel-turn-runtime.js';
 
 export const KERNEL_TURN_RELAY_ROUTE_NAMES = Object.freeze([
-  'a2a/call', 'actors/call', 'page/call', 'script/model-call', 'script-run/abort',
-  'site-fetch/call',
+  'a2a/call', 'actors/call', 'page/call', 'site-fetch/call',
 ]);
 
 const requiredFunction = (/** @type {Record<string,any>} */ value, /** @type {string} */ key) => {
@@ -89,7 +88,8 @@ export const createKernelTurnProductionRuntime = async (deps) => {
   for (const key of [
     'validateGeneration', 'retireStale', 'dispatchToolCall', 'buildActorContext',
     'appActorChat', 'activeGoalStates', 'broadcastAgentTab', 'onUiConnect',
-    'showWebTabHint', 'isDrivenSource', 'resumeSchedules',
+    'showWebTabHint', 'isDrivenSource', 'webActorSessionForTab',
+    'handleRichKernelCall', 'resumeSchedules',
   ]) {
     if (typeof relays[key] !== 'function') {
       throw new TypeError(`kernel-turn-production-relay-${key}-invalid`);

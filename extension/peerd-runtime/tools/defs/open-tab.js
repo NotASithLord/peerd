@@ -103,7 +103,7 @@ export const openTabTool = {
     const tabsApi = /** @type {import('./committed-navigation.js').NavigationTabsApi & { create: (opts: CreateOpts) => Promise<BrowserTab>, remove?: (tabId: number) => Promise<unknown> }} */ (ctx.tabs);
     // why: noteTab / hintPullIn are optional SW-injected context extras not on
     // the ToolContext contract slot.
-    const ctxExtras = /** @type {{ noteTab?: (id: number | undefined, label?: string) => Promise<unknown>, hintPullIn?: (id: number | undefined, url: string) => unknown, judgeLanding?: (url: string) => Promise<unknown>, navigationTimeoutMs?: number, ensureBrowserNetworkGuard?: (tabId: number, targetUrl?: string) => Promise<import('/shared/tool-types.js').ToolResult>, updateBrowserNetworkGuardOrigin?: (tabId: number, rawUrl?: string) => Promise<import('/shared/tool-types.js').ToolResult> }} */ (ctx);
+    const ctxExtras = /** @type {{ noteTab?: (id: number | undefined, label?: string) => Promise<unknown>, hintPullIn?: (id: number | undefined, url: string) => unknown, judgeLanding?: (url: string) => Promise<unknown>, navigationTimeoutMs?: number, ensureBrowserNetworkGuard?: (tabId: number, targetUrl?: string) => Promise<import('/shared/tool-types.js').ToolResult>, armBrowserChildQuarantine?: (tabId:number)=>Promise<import('/shared/tool-types.js').ToolResult>, updateBrowserNetworkGuardOrigin?: (tabId: number, rawUrl?: string) => Promise<import('/shared/tool-types.js').ToolResult> }} */ (ctx);
     /** @type {BrowserTab} */
     let tab;
     try { tab = await tabsApi.create(opts); }
@@ -116,6 +116,13 @@ export const openTabTool = {
       if (!guarded.ok) {
         await tabsApi.remove?.(tab.id).catch(() => {});
         return guarded;
+      }
+    }
+    if (requestedUrl && typeof ctxExtras.armBrowserChildQuarantine === 'function') {
+      const armed = await ctxExtras.armBrowserChildQuarantine(tab.id);
+      if (!armed.ok) {
+        await tabsApi.remove?.(tab.id).catch(() => {});
+        return armed;
       }
     }
 

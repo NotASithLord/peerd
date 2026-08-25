@@ -1,12 +1,12 @@
 // @ts-check
 import {
-  coldEventKeysFor, coldPortNamesFor, LEGACY_COLD_EVENTS, LEGACY_PORT_CLASSES,
+  coldEventKeysFor, coldPortNamesFor, KERNEL_COLD_EVENTS, KERNEL_PORT_CLASSES,
 } from './cold-kernel-inventory.js';
 import { parseKernelIdentity } from '../shared/kernel-identity.js';
 
 export const SEMANTIC_CUTOVER_SUMMARY = Object.freeze({
-  schema: 2, total: 161, kernel: 85, split: 76, migrated: 94,
-  unmigrated: 67, executable: 94, unavailable: 67, ready: false,
+  schema: 2, total: 160, kernel: 142, split: 18, migrated: 160,
+  unmigrated: 0, executable: 160, unavailable: 0, ready: true,
 });
 
 const EVENT_OWNERS = Object.freeze({
@@ -58,8 +58,8 @@ export const createVaultKernelAssemblyReport = (deps) => {
   } = deps;
   const canonicalIdentity = parseKernelIdentity(identity);
   if (!canonicalIdentity) throw new TypeError('vault-kernel-assembly-identity-invalid');
-  const eventKeys = new Set(LEGACY_COLD_EVENTS.map(({ key }) => key));
-  const portKeys = new Set(LEGACY_PORT_CLASSES.map(({ name }) => name));
+  const eventKeys = new Set(KERNEL_COLD_EVENTS.map(({ key }) => key));
+  const portKeys = new Set(KERNEL_PORT_CLASSES.map(({ name }) => name));
   const eventOwnerMap = checked(eventOwners, eventKeys, 'vault-kernel-event-owners', 'owner');
   checked(eventReadiness, eventKeys, 'vault-kernel-event-readiness', 'ready');
   const portOwnerMap = checked(portOwners, portKeys, 'vault-kernel-port-owners', 'owner');
@@ -70,14 +70,14 @@ export const createVaultKernelAssemblyReport = (deps) => {
   }
   const requiredEvents = new Set(coldEventKeysFor({ firefox, selfHostedChrome }));
   const requiredPorts = new Set(coldPortNamesFor({ firefox, dweb }));
-  const events = Object.freeze(LEGACY_COLD_EVENTS.map((entry) => {
+  const events = Object.freeze(KERNEL_COLD_EVENTS.map((entry) => {
     const owner = eventOwnerMap.get(entry.key) ?? null;
     return Object.freeze({
       key: entry.key, placement: entry.placement, required: requiredEvents.has(entry.key),
       status: !owner ? 'missing' : eventReadiness[entry.key] ? 'owned' : 'partial', owner,
     });
   }));
-  const ports = Object.freeze(LEGACY_PORT_CLASSES.map((entry) => Object.freeze({
+  const ports = Object.freeze(KERNEL_PORT_CLASSES.map((entry) => Object.freeze({
     name: entry.name, cold: entry.cold, required: requiredPorts.has(entry.name),
     status: portOwnerMap.has(entry.name)
       ? portReadiness[entry.name] ? 'owned' : 'partial'

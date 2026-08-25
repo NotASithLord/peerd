@@ -5,9 +5,10 @@ import {
 } from '../shared/bounded-module-load.js';
 import {
   KERNEL_DWEB_ROUTE_NAMES,
+  KERNEL_ENGINE_ATTACH_ROUTE_NAMES,
   KERNEL_EXECUTABLE_ROUTE_NAMES,
   KERNEL_TRANSFER_ROUTE_NAMES,
-} from './kernel-executable-inventory.js';
+} from '../shared/kernel-feature-route-inventory.js';
 import { makePrivateTransferOpenRoute, makePrivateTransferPort } from './private-transfer-port.js';
 import { makeKernelDemandRoutes } from './kernel-demand-routes.js';
 
@@ -20,6 +21,14 @@ const startupFailure = (/** @type {unknown} */ cause) => ({
   phase: 'startup',
   retryable: true,
 });
+const dispatchFailure = () => ({
+  ok: false,
+  error: 'The operation outcome could not be confirmed.',
+  code: 'kernel-executable-dispatch-failed',
+  outcomeKnown: false,
+  outcomeKind: 'unknown',
+  retryable: false,
+});
 
 const POD_ROUTES = new Set([
   'pod/cancel-io', 'pod/get-meta', 'pod/git', 'pod/web-fetch',
@@ -28,6 +37,7 @@ const RELAY_ROUTES = new Set([
   'a2a/call', 'actors/call', 'app/call', 'page/call', 'script/model-call',
   'script-run/abort', 'site-fetch/call',
 ]);
+const ENGINE_ATTACH_ROUTES = new Set(KERNEL_ENGINE_ATTACH_ROUTE_NAMES);
 const DWEB_OFFSCREEN_ROUTES = new Set([
   'dweb/app-install', 'dweb/app-record-served', 'dweb/app-snapshot', 'dweb/app-update',
   'dweb/meta-admit', 'dweb/self-apply-surface', 'dweb/self-prepare-offer',
@@ -51,7 +61,7 @@ const makeTabDocument = (/** @type {string} */ runtimeId) => (
   } catch { return false; }
 };
 
-/** @param {Record<string,(sender:any,message:any)=>boolean>} gates */
+/** @param {Record<string,((...args:any[])=>boolean)|undefined>} gates */
 export const makeKernelExecutableAdmission = (gates) => (
   /** @type {string} */ route, /** @type {any} */ message, /** @type {any} */ sender,
 ) => {
@@ -66,6 +76,7 @@ export const makeKernelExecutableAdmission = (gates) => (
   if (route === 'apps/delete') return gates.home?.(sender, message) === true;
   if (route === 'app/actor-chat') return gates.app?.(sender, message) === true;
   if (RELAY_ROUTES.has(route)) return gates.relay?.(sender, message) === true;
+  if (ENGINE_ATTACH_ROUTES.has(route)) return gates.engine?.(route, sender, message) === true;
   return false;
 };
 
@@ -111,15 +122,14 @@ const makePrivateTransfer = (deps, handlers) => {
 /** @param {Record<string,any>} deps */
 export const createKernelExecutableOwner = (deps) => {
   if (typeof deps.admit !== 'function'
-      || typeof deps.importRuntime !== 'function'
+      || typeof deps.createRuntime !== 'function'
       || (!deps.runtime && typeof deps.loadRuntimeDeps !== 'function')) {
     throw new TypeError('kernel-executable-owner-config-invalid');
   }
   const load = makeBoundedModuleLoader(async () => {
-    const module = await deps.importRuntime();
     const runtimeDeps = typeof deps.loadRuntimeDeps === 'function'
       ? await deps.loadRuntimeDeps() : deps.runtime;
-    const runtime = module.createKernelExecutableRuntime({
+    const runtime = await deps.createRuntime({
       ...runtimeDeps, admit: deps.admit,
     });
     if (!runtime || KERNEL_EXECUTABLE_ROUTE_NAMES.some(
@@ -140,18 +150,24 @@ export const createKernelExecutableOwner = (deps) => {
     if (deps.admit(name, message, sender) !== true) {
       return { ok: false, error: 'kernel-route-unauthorized', outcomeKnown: true };
     }
-    try { return (await load()).routes[name](message, sender); }
+    let runtime;
+    try { runtime = await load(); }
     catch (cause) { return startupFailure(cause); }
+    try { return await runtime.routes[name](message, sender); }
+    catch { return dispatchFailure(); }
   }]));
   let transferRoutes = null;
   const privateTransfer = deps.privateTransfer ? makePrivateTransfer(
     deps.privateTransfer,
     (/** @type {symbol} */ authorization) => Object.fromEntries(
       KERNEL_TRANSFER_ROUTE_NAMES.map((name) => [name, async (message = {}) => {
+        let privateRoutes;
         try {
           transferRoutes ??= (await load()).makeTransferRoutes(authorization);
-          return transferRoutes[name](message);
+          privateRoutes = transferRoutes;
         } catch (cause) { return startupFailure(cause); }
+        try { return await privateRoutes[name](message); }
+        catch { return dispatchFailure(); }
       }]),
     ),
   ) : null;
@@ -189,15 +205,37 @@ export const createKernelExecutableControl = (deps) => {
     app: (sender, message) => typeof message?.appId === 'string'
       && owns.app(sender, message.appId),
     relay: owns.offscreen,
+    engine: (/** @type {string} */ route, /** @type {any} */ sender,
+      /** @type {any} */ message) => {
+      if (route === 'vm/tab-ready') {
+        return typeof message?.vmId === 'string'
+          && ownsTab(sender, paths.vm, message.vmId);
+      }
+      if (route === 'js/tab-ready') {
+        return typeof message?.notebookId === 'string'
+          && ownsTab(sender, paths.notebook, message.notebookId);
+      }
+      if (route === 'pod/tab-adopt') {
+        return typeof message?.podId === 'string'
+          && ownsTab(sender, paths.pod, message.podId);
+      }
+      return typeof message?.appId === 'string' && owns.app(sender, message.appId);
+    },
   });
   const owner = createKernelExecutableOwner({
     admit,
-    importRuntime: deps.importRuntime,
+    createRuntime: deps.createRuntime,
     loadRuntimeDeps: async () => ({
       engine: { load: async () => (await deps.loadRich()).executableLive },
       actorChat: { load: async () => (await deps.loadRich()).relays },
       appCall: { load: async () => (await deps.loadRich()).relays },
-      relay: { load: async () => (await deps.loadRich()).relayRoutes },
+      relay: {
+        dispatch: deps.dispatchRuntimeRelay,
+        load: async () => {
+          const rich = await deps.loadRich();
+          return { ...rich.relayRoutes, ...rich.relays?.engineRoutes };
+        },
+      },
       transfer: { load: async () => (await deps.loadRich()).transferLive },
     }),
     privateTransfer: {

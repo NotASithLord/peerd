@@ -1,4 +1,4 @@
-// Tests for the SW-side egress orchestration extracted from service-worker.js:
+// Tests for the background egress orchestration:
 // makeVmHttpFetch (the anti-exfil write gate + host-bound git-auth + the
 // revalidating IDB cache) and makeGitCredentialRoutes (token provisioning).
 //

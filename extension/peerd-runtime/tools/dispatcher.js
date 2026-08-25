@@ -134,13 +134,15 @@ const withBrowserChildPolicyNotices = (result, notices) => {
     }
   } catch {
     const receipt = (
-      /** @type {{ reason: string, outcome: string, child: string }} */ entry,
+      /** @type {{ reason: string, outcome: string, child: string, retryable: boolean }} */ entry,
       /** @type {number} */ index,
     ) => {
       const outcome = entry.outcome === 'not_run'
         ? entry.reason === 'protected_child_request'
           ? 'A protected child request did not run.'
           : 'A protected child navigation did not run.'
+        : entry.reason === 'child_authority_unavailable'
+          ? 'Child browser authority became unavailable.'
         : 'A child navigation was not verified.';
       const child = entry.child === 'closed'
         ? 'The child tab was closed.'
@@ -151,7 +153,7 @@ const withBrowserChildPolicyNotices = (result, notices) => {
           : 'The browser did not confirm that the child tab was closed or blank.';
       const label = notices.length > 1 ? `[HOST POLICY ${index + 1}/${notices.length}]` : '[HOST POLICY]';
       return `${label}\n${outcome} ${child} `
-        + 'No destination details or protected page content were exposed. Do not retry automatically.\n'
+        + `No destination details or protected page content were exposed. ${entry.retryable ? 'Retry after browser control recovers.' : 'Do not retry automatically.'}\n`
         + `Receipt: ${JSON.stringify(entry)}`;
     };
     content = `${content}${content ? '\n\n' : ''}${notices.map(receipt).join('\n\n')}`;
@@ -168,22 +170,50 @@ const withBrowserChildPolicyNotices = (result, notices) => {
   };
 };
 
+/** @param {any} result @param {Array<{reason:string,outcome:string,child:string,retryable:boolean}>} notices */
+const withAsyncBrowserChildPolicyNotices = (result, notices) => {
+  if (notices.length === 0) return result;
+  const browserAsyncPolicies = notices;
+  const asyncFields = {
+    browserAsyncPolicyAttribution: 'prior_action', browserAsyncPolicies,
+  };
+  let content = typeof result.content === 'string' ? result.content : '';
+  try {
+    const parsed = JSON.parse(content);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not-object');
+    content = JSON.stringify({ ...parsed, ...asyncFields }, null, 2);
+  } catch {
+    content = `${content}${content ? '\n\n' : ''}[ASYNC HOST POLICY — PRIOR ACTION]\n`
+      + 'A child-browser outcome from an earlier action arrived after that action settled. '
+      + 'It is not an outcome of this tool call. No destination details were exposed.\n'
+      + `Receipts: ${JSON.stringify(browserAsyncPolicies)}`;
+  }
+  return {
+    ...result,
+    content,
+    structured: {
+      ...(result.structured && typeof result.structured === 'object' ? result.structured : {}),
+      ...asyncFields,
+    },
+  };
+};
+
 /** @param {unknown} value */
 const normalizeBrowserChildPolicyNotices = (value) => (Array.isArray(value) ? value : value ? [value] : [])
   .filter((entry) => {
     const notice = /** @type {any} */ (entry);
     return notice && typeof notice === 'object'
-      && ['protected_child_navigation', 'protected_child_request', 'child_navigation_failed', 'child_navigation_unverified']
+      && ['protected_child_navigation', 'protected_child_request', 'child_navigation_failed', 'child_navigation_unverified', 'child_authority_unavailable']
         .includes(notice.reason)
       && ['not_run', 'unverified'].includes(notice.outcome)
       && ['closed', 'left_blank', 'guarded', 'uncontained'].includes(notice.child)
-      && notice.retryable === false;
+      && typeof notice.retryable === 'boolean';
   })
   .map((entry) => ({
     reason: entry.reason,
     outcome: entry.outcome,
     child: entry.child,
-    retryable: false,
+    retryable: entry.retryable,
   }));
 
 /**
@@ -303,8 +333,10 @@ const liveTabUrl = async (ctx) => {
  *   lifecycleTurnId?: string,
  *   lifecycleUserInitiated?: boolean,
  *   consumeBrowserChildPolicyNotice?: (tabId: number) => Array<{ reason: string, outcome: string, child: string, retryable: boolean }>,
- *   waitForBrowserChildPolicyNotice?: (tabId: number, timeoutMs: number) => Promise<boolean>,
+ *   waitForBrowserChildPolicyNotice?: (tabId: number, timeoutMs: number, terminal?: boolean) => Promise<boolean>,
  *   hasPendingBrowserChildPolicy?: (tabId: number) => boolean,
+ *   browserChildQuarantineRequired?: boolean,
+ *   armBrowserChildQuarantine?: (tabId: number) => Promise<{ok?:boolean,reason?:string,error?:string,code?:string}>,
  * }} DispatchContext
  */
 
@@ -316,7 +348,8 @@ const liveTabUrl = async (ctx) => {
  *
  * @typedef {ToolMeta & { dispatch?: 'inline' | 'spawned',
  *   recovery?: Record<string, unknown>,
- *   browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }> }} DispatchMeta
+ *   browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }>,
+ *   browserAsyncPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }> }} DispatchMeta
  *   `recovery` is the lifecycle contract's agent-facing semantic record —
  *   present only when a dispatch settled as interrupted/outcome_unknown/
  *   refused-replay, so the agent hears the recovery category, not a
@@ -387,7 +420,7 @@ export const dispatchToolCall = async (call, ctx) => {
       gateResults.push({ name: 'live-landing', allowed: false, reason });
       ctx.audit({ type: 'tool_blocked', details: { tool: call.name, gate: 'live-landing', reason } }).catch(() => {});
       return {
-        ok: false,
+        ok: /** @type {const} */ (false),
         error: 'auth_state_unavailable',
         content: AUTH_STATE_UNAVAILABLE_MESSAGE,
         endTurn: true,
@@ -836,18 +869,45 @@ export const dispatchToolCall = async (call, ctx) => {
     && tool.sideEffect !== 'read'
     && typeof activityTabId === 'number'
     && consumeBrowserChildPolicyNotice != null;
-  const childCapable = ['click', 'type', 'page_code', 'page_exec', 'page_keys']
+  const childCapable = ['click', 'type', 'page_code', 'page_eval', 'page_exec', 'page_keys']
     .includes(call.name);
-  /** @type {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} */
-  let priorBrowserChildPolicyNotices = [];
+  const quarantineCapable = ['navigate', 'click', 'type', 'page_eval', 'page_exec', 'page_keys']
+    .includes(call.name)
+    && typeof activityTabId === 'number';
   /** @type {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} */
   let browserChildPolicyNotices = [];
+  /** @type {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} */
+  let browserAsyncPolicyNotices = [];
   if (childPolicyEligible && consumeBrowserChildPolicyNotice) {
-    const prior = consumeBrowserChildPolicyNotice(activityTabId);
-    priorBrowserChildPolicyNotices = normalizeBrowserChildPolicyNotices(prior);
+    const detached = normalizeBrowserChildPolicyNotices(
+      consumeBrowserChildPolicyNotice(activityTabId),
+    );
+    browserAsyncPolicyNotices = detached;
+    if (detached.length > 0) {
+      void ctx.audit({
+        type: 'browser_child_policy_detached',
+        details: { count: detached.length },
+      }).catch(() => {});
+    }
   }
   try {
-    let result = await tool.execute(args, execCtx);
+    let result;
+    if (quarantineCapable && (ctx.browserChildQuarantineRequired
+        || typeof ctx.armBrowserChildQuarantine === 'function')) {
+      const armed = typeof ctx.armBrowserChildQuarantine === 'function'
+        ? await ctx.armBrowserChildQuarantine(activityTabId)
+        : null;
+      if (armed?.ok === true) {
+        Object.assign(execCtx, { browserChildQuarantineArmedTabId: activityTabId });
+        result = await tool.execute(args, execCtx);
+      } else result = {
+        ok: /** @type {const} */ (false),
+        error: armed?.error ?? 'browser_child_quarantine_unavailable',
+        code: armed?.code ?? 'browser-child-quarantine-unavailable',
+        outcomeKnown: true,
+        outcomeKind: /** @type {const} */ ('pre-effect-failure'), retryable: true,
+      };
+    } else result = await tool.execute(args, execCtx);
     if (childPolicyEligible && consumeBrowserChildPolicyNotice) {
       const embedded = normalizeBrowserChildPolicyNotices(
         /** @type {any} */ (result).browserChildPolicyNotices,
@@ -871,15 +931,22 @@ export const dispatchToolCall = async (call, ctx) => {
         notices = normalizeBrowserChildPolicyNotices(
           consumeBrowserChildPolicyNotice(activityTabId),
         );
+        if (notices.length === 0 && ctx.hasPendingBrowserChildPolicy?.(activityTabId)) {
+          await ctx.waitForBrowserChildPolicyNotice?.(activityTabId, 5_000, true);
+          notices = normalizeBrowserChildPolicyNotices(
+            consumeBrowserChildPolicyNotice(activityTabId),
+          );
+        }
       }
       const { browserChildPolicyNotices: _hostOnlyNotices, ...visibleResult } = /** @type {any} */ (result);
-      notices = [...priorBrowserChildPolicyNotices, ...embedded, ...notices];
+      notices = [...embedded, ...notices];
       browserChildPolicyNotices = notices;
       result = withBrowserChildPolicyNotices(
         visibleResult,
         notices,
       );
     }
+    result = withAsyncBrowserChildPolicyNotices(result, browserAsyncPolicyNotices);
     const durationMs = Math.round(performance.now() - start);
     if (activity && typeof activityTabId === 'number') {
       Promise.resolve(activity.end(activityTabId)).catch(() => {});
@@ -934,7 +1001,7 @@ export const dispatchToolCall = async (call, ctx) => {
       ? result.actorDeliveryId : undefined;
     const actorDeliveryIds = Array.isArray(result?.actorDeliveryIds)
       ? [...new Set(result.actorDeliveryIds.filter(
-        (id) => typeof id === 'string' && id.length > 0))]
+        (/** @type {unknown} */ id) => typeof id === 'string' && id.length > 0))]
       : [];
     const hasActorHostState = typeof result?.actorCorrelationId === 'string'
       || typeof result?.actorTerminal === 'boolean'
@@ -1037,6 +1104,9 @@ export const dispatchToolCall = async (call, ctx) => {
         ...(browserChildPolicyNotices.length > 0
           ? { browserPolicies: browserChildPolicyNotices }
           : {}),
+        ...(browserAsyncPolicyNotices.length > 0
+          ? { browserAsyncPolicies: browserAsyncPolicyNotices }
+          : {}),
       }),
     };
     return enriched;
@@ -1119,11 +1189,26 @@ export const dispatchToolCall = async (call, ctx) => {
           consumeBrowserChildPolicyNotice(activityTabId),
         );
       }
-      browserChildPolicyNotices = [...priorBrowserChildPolicyNotices, ...notices];
+      if (notices.length === 0 && ctx.hasPendingBrowserChildPolicy?.(activityTabId)) {
+        await ctx.waitForBrowserChildPolicyNotice?.(activityTabId, 5_000, true);
+        notices = normalizeBrowserChildPolicyNotices(
+          consumeBrowserChildPolicyNotice(activityTabId),
+        );
+      }
+      browserChildPolicyNotices = notices;
       failedResult = withBrowserChildPolicyNotices(failedResult, browserChildPolicyNotices);
       failedResult.meta = /** @type {DispatchMeta} */ ({
         ...failedResult.meta,
         browserPolicies: browserChildPolicyNotices,
+      });
+    }
+    failedResult = withAsyncBrowserChildPolicyNotices(
+      failedResult, browserAsyncPolicyNotices,
+    );
+    if (browserAsyncPolicyNotices.length > 0) {
+      failedResult.meta = /** @type {DispatchMeta} */ ({
+        ...failedResult.meta,
+        browserAsyncPolicies: browserAsyncPolicyNotices,
       });
     }
     return failedResult;

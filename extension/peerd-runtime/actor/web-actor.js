@@ -5,7 +5,7 @@
 // This module is the PURE core (functional core / imperative shell): the
 // tab→session binding store, the action-log rolling-summary prompt, and the
 // SELF-FENCE that wraps the actor's own accumulated summary as untrusted data.
-// The SW (service-worker.js) wires persistence (chrome.storage.session), session
+// The host wires persistence (chrome.storage.session), session
 // creation, and the relay; the loop reuses `rolling-summary.js` verbatim. All of
 // the security knobs the spec calls out live here so they're unit-testable.
 //

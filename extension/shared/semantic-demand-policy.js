@@ -10,6 +10,12 @@ export const SEMANTIC_DEMAND_MAX_BYTES = 256 * 1024;
 export const SEMANTIC_DEMAND_MAX_CONCURRENT = 3;
 
 const POLICIES = Object.freeze({
+  'app/get-meta': Object.freeze({ 'semantic.apps.set-entry': 1 }),
+  'apps/favorite': Object.freeze({ 'semantic.apps.favorite': 1 }),
+  'apps/open': Object.freeze({ 'semantic.apps.open': 1 }),
+  'apps/rename': Object.freeze({ 'semantic.apps.rename': 1, 'semantic.apps.reload': 1 }),
+  'contacts/forget': Object.freeze({ 'semantic.contacts.remove': 1 }),
+  'contacts/set': Object.freeze({ 'semantic.contacts.upsert': 1 }),
   'provider/status': Object.freeze({ 'semantic.providers.key-status': 1 }),
   'contributor/enable': Object.freeze({
     'semantic.contributor.enable-read': 2, 'semantic.contributor.enable': 1,

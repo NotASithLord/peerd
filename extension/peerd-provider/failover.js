@@ -17,7 +17,7 @@
 //   - planFailoverChain(start, fallbacks): the ordered list of {provider,
 //     model} candidates to try, primary first, de-duplicated by provider.
 //
-// The imperative shell (service-worker.js) wraps the registry's callModel
+// The host wraps the registry's callModel
 // with these: it only ever switches BEFORE any model output has streamed
 // (a mid-stream switch would replay consumed deltas), so failover composes
 // cleanly with the adapter-level retries that run underneath it.

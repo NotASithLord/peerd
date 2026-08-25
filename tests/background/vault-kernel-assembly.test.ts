@@ -16,8 +16,8 @@ import {
 } from '../../extension/background/vault-kernel-assembly.js';
 import {
   coldPortNamesFor,
-  LEGACY_COLD_EVENTS,
-  LEGACY_PORT_CLASSES,
+  KERNEL_COLD_EVENTS,
+  KERNEL_PORT_CLASSES,
 } from '../../extension/background/cold-kernel-inventory.js';
 
 const IDENTITY = Object.freeze({
@@ -39,7 +39,7 @@ const makePort = (name: string, senderClass = name) => {
 
 describe('thin vault-kernel Port assembly', () => {
   test('routes exactly six names through their own provenance and owner', () => {
-    expect(KERNEL_PORT_NAMES).toEqual(LEGACY_PORT_CLASSES.map((entry) => entry.name));
+    expect(KERNEL_PORT_NAMES).toEqual(KERNEL_PORT_CLASSES.map((entry) => entry.name));
     expect(KERNEL_PORT_NAMES).toHaveLength(6);
     const proven: string[] = [];
     const handled: string[] = [];
@@ -123,9 +123,9 @@ describe('executable vault-kernel cutover report', () => {
   test('inventories all events and Ports but defaults every executable owner fail-closed', () => {
     const store = createVaultKernelAssemblyReport({ identity: IDENTITY });
     expect(store.events.map((entry) => entry.key))
-      .toEqual(LEGACY_COLD_EVENTS.map((entry) => entry.key));
+      .toEqual(KERNEL_COLD_EVENTS.map((entry) => entry.key));
     expect(store.ports.map((entry) => entry.name))
-      .toEqual(LEGACY_PORT_CLASSES.map((entry) => entry.name));
+      .toEqual(KERNEL_PORT_CLASSES.map((entry) => entry.name));
     expect(store.counts).toEqual({
       eventInventory: 16,
       requiredEvents: 13,
@@ -179,19 +179,19 @@ describe('executable vault-kernel cutover report', () => {
 
   test('becomes ready only with every target event and every Port owned', () => {
     const eventOwners = Object.fromEntries(
-      LEGACY_COLD_EVENTS.map((entry) => [entry.key, `owner:${entry.key}`]),
+      KERNEL_COLD_EVENTS.map((entry) => [entry.key, `owner:${entry.key}`]),
     );
     const eventReadiness = Object.fromEntries(
-      LEGACY_COLD_EVENTS.map((entry) => [entry.key, true]),
+      KERNEL_COLD_EVENTS.map((entry) => [entry.key, true]),
     );
     const portOwners = Object.fromEntries(
-      LEGACY_PORT_CLASSES.map((entry) => [entry.name, `owner:${entry.name}`]),
+      KERNEL_PORT_CLASSES.map((entry) => [entry.name, `owner:${entry.name}`]),
     );
     const complete = createVaultKernelAssemblyReport({
       identity: IDENTITY, firefox: true, selfHostedChrome: true,
       eventOwners, eventReadiness, portOwners, failClosedPorts: {},
       portReadiness: Object.fromEntries(
-        LEGACY_PORT_CLASSES.map((entry) => [entry.name, true]),
+        KERNEL_PORT_CLASSES.map((entry) => [entry.name, true]),
       ),
     });
     expect(complete.counts).toEqual({
@@ -240,7 +240,7 @@ test('native entry uses one identity and target-exact kernel custody', async () 
   expect(source).toContain('eventOwners: kernelEvents.owners()');
   expect(source).toContain('SEMANTIC_CUTOVER_SUMMARY.ready');
   expect(source).toContain('semantic: SEMANTIC_CUTOVER_SUMMARY');
-  expect(source).toContain('createKernelFrontDoor');
+  expect(source).toContain('attachKernelFrontDoor');
   expect(source).toContain('const kernelEvents = coldReceipts');
   expect(source).toContain('createKernelColdReceipts');
   expect(source).toContain('coldReceipts.registerRecovery');

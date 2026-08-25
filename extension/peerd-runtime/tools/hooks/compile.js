@@ -1,4 +1,5 @@
 // @ts-check
+export { parseHookDocument as parseHookMarkdown } from '../../../shared/hook-document.js';
 // Compile a user-authored hook record into a runnable Hook.
 //
 // SHAPE OF A USER HOOK. The user authors hooks as markdown-with-
@@ -147,81 +148,4 @@ export const compileUserHook = (record) => {
     run,
     _record: record,
   };
-};
-
-/**
- * Tiny frontmatter splitter. NOT a full YAML parser — we deliberately
- * avoid vendoring one (security-sensitive codebase, audits every dep).
- * Supports the flat `key: value` lines our frontmatter uses, coercing
- * true/false/numbers, plus a single nested `rule:` block of indented
- * `  key: value` lines. Anything fancier is out of scope for V1
- * authoring; the runtime never depends on this — it consumes records.
- *
- * @param {string} text
- * @returns {{ meta: Record<string, any>, body: string }}
- */
-const parseFrontmatter = (text) => {
-  const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text);
-  if (!m) return { meta: {}, body: text };
-  /** @type {Record<string, any>} */
-  const meta = {};
-  /** @type {Record<string, any> | null} */
-  let rule = null;
-  for (const raw of m[1].split('\n')) {
-    if (!raw.trim()) continue;
-    const indented = /^\s+/.test(raw);
-    const kv = /^\s*([\w-]+):\s*(.*)$/.exec(raw);
-    if (!kv) continue;
-    const [, key, valRaw] = kv;
-    if (key === 'rule' && valRaw.trim() === '') { rule = {}; meta.rule = rule; continue; }
-    const val = coerce(valRaw.trim());
-    if (indented && rule) rule[key] = val;
-    else meta[key] = val;
-  }
-  return { meta, body: m[2] };
-};
-
-/** @param {string} s @returns {string | number | boolean} */
-const coerce = (s) => {
-  if (s === 'true') return true;
-  if (s === 'false') return false;
-  if (s !== '' && !Number.isNaN(Number(s))) return Number(s);
-  return s.replace(/^["']|["']$/g, '');
-};
-
-/**
- * Parse a markdown-with-frontmatter hook file into a UserHookRecord.
- * The frontmatter supplies metadata; the prose before the code fence is
- * the `doc`; the first ```js fence is the body (kind:'js'). A YAML
- * `rule:` block in frontmatter yields kind:'declarative' instead. This
- * is the authoring ergonomics layer — the editor/importer calls it, the
- * runtime only ever sees the resulting record.
- *
- * @param {string} text
- * @returns {UserHookRecord}
- */
-export const parseHookMarkdown = (text) => {
-  const { meta, body: markdownBody } = parseFrontmatter(text);
-  if (!meta || typeof meta.id !== 'string') {
-    throw new TypeError('parseHookMarkdown: frontmatter must set at least `id` and `event`');
-  }
-  const codeMatch = /```(?:js|javascript)\n([\s\S]*?)```/.exec(markdownBody);
-  const doc = markdownBody.replace(/```[\s\S]*?```/g, '').trim();
-  /** @type {UserHookRecord} */
-  const record = {
-    id: meta.id,
-    event: meta.event,
-    enabled: meta.enabled !== false,
-    order: typeof meta.order === 'number' ? meta.order : undefined,
-    match: typeof meta.match === 'string' ? meta.match : undefined,
-    doc,
-    kind: meta.rule ? 'declarative' : 'js',
-  };
-  if (meta.rule) {
-    record.rule = meta.rule;
-  } else {
-    record.trusted = meta.trusted === true;
-    record.body = codeMatch ? codeMatch[1].trim() : '';
-  }
-  return record;
 };

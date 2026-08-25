@@ -474,14 +474,9 @@ async function waitForCdpPort(profile) {
   throw new Error('CDP endpoint never came up');
 }
 
-// Both names are accepted while the repository migrates, but callers that
-// claim production-cutover evidence must pass expectedBackgroundEntry. This
-// keeps ordinary source-tree E2E useful without allowing a legacy worker to
-// satisfy the new production lane by accident.
 export const PEERD_BACKGROUND_ENTRIES = Object.freeze([
   'background/vault-kernel.js',
   'background/vault-kernel-preview.js',
-  'background/service-worker.js',
 ]);
 
 export const identifyPeerdBackgroundTarget = (target) => {
@@ -564,7 +559,7 @@ export async function launchPeerd({
     // Browser-policy fixtures need public-looking names while their local HTTP
     // servers stay deterministic and offline. Reserved .test names preserve the
     // documented DNS-resolution residual without weakening localhost coverage.
-    '--host-resolver-rules=MAP orders.peerd.test 127.0.0.1, MAP acme.peerd.test 127.0.0.1, MAP acct.peerd.test 127.0.0.1, MAP guard.peerd.test 127.0.0.1',
+    '--host-resolver-rules=MAP orders.peerd.test 127.0.0.1, MAP acme.peerd.test 127.0.0.1, MAP acct.peerd.test 127.0.0.1, MAP guard.peerd.test 127.0.0.1, MAP chase.com 127.0.0.1',
     // Product-boundary security tests must not pass because Chrome's separate
     // Local Network Access feature stopped the request first.
     `--disable-features=${[
@@ -577,6 +572,7 @@ export async function launchPeerd({
     '--ip-address-space-overrides=127.0.0.0/8=public',
     `--unsafely-treat-insecure-origin-as-secure=http://orders.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT},http://acct.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT}`,
     '--disable-gpu', '--no-sandbox',
+    '--enable-unsafe-extension-debugging',
     ...(acceptanceProxy ? [
       `--proxy-server=${acceptanceProxy.url}`,
       `--ignore-certificate-errors-spki-list=${acceptanceProxy.certificateSpkiSha256}`,
@@ -759,14 +755,78 @@ export async function launchPeerd({
     log('Fetch interception armed across extension worker/controller targets');
   }
 
-  // 3) open the side panel as a normal tab (chrome.sidePanel.open is not
-  //    drivable over CDP; the same Mithril app + SW port load fine in a tab).
   const panelUrl = `chrome-extension://${sw.id}/${String(panelPath).replace(/^\//, '')}`;
-  // Create at about:blank FIRST, configure, THEN navigate — the deterministic
-  // capture must be armed before the panel document boots (armDeterministic-
-  // Capture explains why). Same shape openExtPage uses.
   const created = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' })).json();
-  const page = await attach(created.webSocketDebuggerUrl);
+  const activationPage = await attach(created.webSocketDebuggerUrl);
+  await activationPage.send('Runtime.enable');
+  await activationPage.send('Page.enable');
+  await activationPage.send('Page.bringToFront');
+  const manifest = JSON.parse(readFileSync(join(extensionDir, 'manifest.json'), 'utf8'));
+  const nativePanel = String(manifest.side_panel?.default_path ?? '').replace(/^\//, '')
+    === String(panelPath).replace(/^\//, '');
+  let page;
+  if (nativePanel) {
+    if (!browserConn) throw new Error('browser CDP connection unavailable');
+    const { targetInfos: actionTargets = [] } = await browserConn.send('Target.getTargets', {
+      filter: [{ type: 'tab', exclude: false }, { exclude: false }],
+    });
+    const actionTabs = actionTargets.filter(
+      (entry) => entry.type === 'tab' && entry.url === 'about:blank',
+    );
+    if (actionTabs.length === 0) {
+      throw new Error(`Chrome did not expose an action tab target: ${JSON.stringify(actionTargets)}`);
+    }
+    /** @type {any} */ let target = null;
+    for (const actionTarget of actionTabs) {
+      await browserConn.send('Extensions.triggerAction', {
+        id: sw.id, targetId: actionTarget.targetId,
+      });
+      target = await waitFor(async () => {
+        const { targetInfos = [] } = await browserConn.send('Target.getTargets');
+        return targetInfos.find(
+          (entry) => entry.targetId !== created.id && entry.url === panelUrl,
+        ) ?? null;
+      }, { budgetMs: Math.min(2_000, READY_BUDGET_MS), pollMs: 25 });
+      if (target) break;
+    }
+    if (!target) {
+      activationPage.close();
+      cleanup();
+      throw new Error('browser-owned side panel target never appeared');
+    }
+    const { sessionId } = await browserConn.send('Target.attachToTarget', {
+      targetId: target.targetId,
+      flatten: true,
+    });
+    const listeners = new Set();
+    const events = [];
+    const onTargetEvent = (method, params, message) => {
+      if (message.sessionId !== sessionId) return;
+      if (method === 'Runtime.exceptionThrown') {
+        events.push('EXC ' + (params?.exceptionDetails?.exception?.description
+          || params?.exceptionDetails?.text));
+      }
+      if (method === 'Runtime.consoleAPICalled' && params?.type === 'error') {
+        events.push('ERR ' + (params.args || [])
+          .map((arg) => arg.value || arg.description || arg.type).join(' '));
+      }
+      for (const listener of listeners) listener(method, params, message);
+    };
+    browserConn.on(onTargetEvent);
+    activationPage.close();
+    page = {
+      send: (method, params = {}) => browserConn.send(method, params, sessionId),
+      close: () => {
+        browserConn.off(onTargetEvent);
+        browserConn.send('Target.detachFromTarget', { sessionId }).catch(() => {});
+      },
+      events,
+      on: (listener) => listeners.add(listener),
+      off: (listener) => listeners.delete(listener),
+    };
+  } else {
+    page = activationPage;
+  }
   await page.send('Runtime.enable');
   await page.send('Page.enable');
   await armDeterministicCapture(page);
@@ -776,7 +836,8 @@ export async function launchPeerd({
   // foregrounded by Chrome.
   await page.send('Page.bringToFront');
   if (beforePanelNavigate) await beforePanelNavigate(page);
-  await page.send('Page.navigate', { url: panelUrl });
+  if (nativePanel) await page.send('Page.reload');
+  else await page.send('Page.navigate', { url: panelUrl });
 
   let staticShellPaintedAt = null;
   if (captureBootTimeline) {
@@ -788,7 +849,7 @@ export async function launchPeerd({
         // The source sets this marker only after the static shell itself has a
         // visible box. startVaultShell then synchronously replaces that node,
         // so requiring the old node to survive until a host poll is a race.
-        return document.documentElement.dataset.peerdStaticShellPainted === 'true'
+        return document.documentElement?.dataset.peerdStaticShellPainted === 'true'
           && !!root && !!rect && rect.width > 0 && rect.height > 0
           && style?.visibility !== 'hidden' && style?.display !== 'none';
       })()`),
@@ -823,8 +884,8 @@ export async function launchPeerd({
 
   const mounted = await waitFor(
     () => evalIn(page, `document.readyState === 'complete'
-      && document.documentElement.dataset.peerdBootModule === 'evaluated'
-      && !!document.documentElement.dataset.peerdBootStage`),
+      && document.documentElement?.dataset.peerdBootModule === 'evaluated'
+      && !!document.documentElement?.dataset.peerdBootStage`),
     { budgetMs: READY_BUDGET_MS },
   );
   if (!mounted) { cleanup(); throw new Error('side panel never mounted'); }
@@ -954,8 +1015,8 @@ export async function launchPeerd({
       }
       const pageReady = await waitFor(
         () => evalIn(page, `document.readyState === 'complete'
-          && document.documentElement.dataset.peerdBootModule === 'evaluated'
-          && !!document.documentElement.dataset.peerdBootStage`),
+          && document.documentElement?.dataset.peerdBootModule === 'evaluated'
+          && !!document.documentElement?.dataset.peerdBootStage`),
         { budgetMs: READY_BUDGET_MS, pollMs: 25 },
       );
       if (!pageReady) throw new Error('side panel did not remount after worker wake');

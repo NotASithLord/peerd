@@ -90,7 +90,7 @@ const isExpectedDocument = (expected) => {
     && Number.isFinite(value.timeOrigin);
 };
 
-export const createDebuggerPool = () => {
+export const createDebuggerPool = (/** @type {{bindTabEvents?:boolean,bindTabRemoval?:boolean}} */ options = {}) => {
   /** @type {Set<number>} tabIds we've successfully attached to */
   const attached = new Set();
   /** @type {Set<number>} attached tabs whose setup or cleanup is uncertain */
@@ -172,17 +172,15 @@ export const createDebuggerPool = () => {
     });
   };
 
-  // Tab close → drop our state (the debugger session is gone anyway).
-  // Uses only the `tabs` API (always available), so it's safe to bind at
-  // construction regardless of the debugger permission.
-  browser.tabs.onRemoved.addListener((tabId) => {
+  const onTabRemoved = (/** @type {number} */ tabId) => {
     attached.delete(tabId);
     quarantined.delete(tabId);
     consoleBufs.delete(tabId);
     runtimeContexts.release(tabId);
     networkCaptures.discard(tabId);
     rejectPendingEvals(tabId, 'the tab closed mid-evaluate');
-  });
+  };
+  if (options.bindTabRemoval !== false) browser.tabs.onRemoved.addListener(onTabRemoved);
 
   const attach = async (tabId) => {
     // why per-tab: the `debugger` permission Chrome granted is GLOBAL (an
@@ -275,10 +273,11 @@ export const createDebuggerPool = () => {
   // The attachment belongs to the document proved by the scripting bridge.
   // A navigation revokes it immediately, including a public to private hop;
   // the next CDP call must attach and prove the new document from scratch.
-  browser.tabs.onUpdated.addListener(makeDebuggerNavigationGuard({
+  const onTabUpdated = makeDebuggerNavigationGuard({
     isAttached: (tabId) => attached.has(tabId),
     detach,
-  }));
+  });
+  if (options.bindTabEvents !== false) browser.tabs.onUpdated.addListener(onTabUpdated);
 
   // Deadline for one Runtime.evaluate (issue #176). Generous — an agent
   // script may legitimately await slow fetches/navigation — but finite, so a
@@ -979,7 +978,7 @@ export const createDebuggerPool = () => {
     clickBackendNode, setValueBackendNode,
     readFrameworkState,
     startNetworkCapture, stopNetworkCapture, discardNetworkCapture,
-    releaseNetworkCapture,
+    releaseNetworkCapture, onTabRemoved, onTabUpdated,
     isAttached: (tabId) => attached.has(tabId),
   };
 };
