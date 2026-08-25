@@ -38,7 +38,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/semantic-route-kernel.js"
+    "source": "extension/background/kernel-semantic-control.js"
   },
   {
     "route": "actors/overview",
@@ -46,7 +46,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/semantic-route-kernel.js"
+    "source": "extension/background/kernel-semantic-control.js"
   },
   {
     "route": "agent/send",
@@ -318,7 +318,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/semantic-route-kernel.js"
+    "source": "extension/background/kernel-semantic-authority.js"
   },
   {
     "route": "contacts/list",
@@ -326,7 +326,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/semantic-route-kernel.js"
+    "source": "extension/background/kernel-semantic-control.js"
   },
   {
     "route": "contacts/set",
@@ -334,7 +334,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/semantic-route-kernel.js"
+    "source": "extension/background/kernel-semantic-authority.js"
   },
   {
     "route": "contributor/disable",
@@ -1162,7 +1162,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/semantic-route-kernel.js"
+    "source": "extension/background/kernel-semantic-control.js"
   },
   {
     "route": "toolbox/record",
@@ -1170,7 +1170,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/semantic-route-kernel.js"
+    "source": "extension/background/kernel-semantic-control.js"
   },
   {
     "route": "transfer/export",

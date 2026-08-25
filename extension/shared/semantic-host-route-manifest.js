@@ -6,7 +6,7 @@
 const channels = Object.freeze(['store', 'preview']);
 const preview = Object.freeze(['preview']);
 const row = (/** @type {string} */ route,
-  /** @type {string} */ source = 'extension/background/semantic-route-kernel.js',
+  /** @type {string} */ source = 'extension/background/kernel-semantic-control.js',
   /** @type {readonly string[]} */ routeChannels = channels) => Object.freeze({
   route,
   channels: routeChannels,
@@ -22,8 +22,8 @@ export const SEMANTIC_HOST_ROUTE_CLASSIFICATIONS = Object.freeze([
   row('apps/favorite', 'extension/background/routes/engine.js'),
   row('apps/open', 'extension/background/routes/engine.js'),
   row('apps/rename', 'extension/background/routes/engine.js'),
-  row('contacts/forget'),
-  row('contacts/set'),
+  row('contacts/forget', 'extension/background/kernel-semantic-authority.js'),
+  row('contacts/set', 'extension/background/kernel-semantic-authority.js'),
   row('contributor/disable', 'extension/background/routes/contributor-metrics.js', preview),
   row('contributor/enable', 'extension/background/routes/contributor-metrics.js', preview),
   row('contributor/status', 'extension/background/routes/contributor-metrics.js', preview),
