@@ -110,7 +110,7 @@ const validReport = () => ({
         ['GET', 'upload-info-refs'], ['POST', 'upload-pack'],
       ].map(([method, kind], index) => ({
         sequence: index + 1, method, kind, authenticated: true,
-        path: `/cutover.git/${kind.includes('info') ? 'info/refs' : `git-${kind}`}`,
+        path: `/acceptance/cutover.git/${kind.includes('info') ? 'info/refs' : `git-${kind}`}`,
         requestBytes: method === 'POST' ? 10 : 0,
       })),
     },

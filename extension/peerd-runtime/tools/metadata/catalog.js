@@ -850,7 +850,7 @@ export const TOOL_METADATA_RECORDS = {
   "sandbox_create": {
     "name": "sandbox_create",
     "primitive": "engine",
-    "description": "Create an isolated, tab-hosted sandbox and return its id. Pick `kind`: \"webvm\" = full Linux/POSIX with bash, Python, Node/npm, and native tools; heavy. \"notebook\" = lightweight fresh-run JS workspace for compute, data, and charts. \"pod\" = fast shell + persistent OPFS, pipelines, WASI, browser Git, and audited HTTPS; no Linux, Node/npm, native binaries, sockets, or PTY. \"app\" = user-facing multi-file HTML in a sandboxed iframe with NO ambient network; bundle dependencies. Firefox saves Apps but cannot run them. Apps use `files` (or `html`); pass `dwapp:true` only for peer multiplayer. The sandbox becomes current for its kind. Delegate substantial work with `message_actor(id, goal)`; use `script` for quick headless compute.",
+    "description": "Create an isolated, tab-hosted sandbox and return its id. Pick `kind`: \"webvm\" = full Linux/POSIX with bash, Python, Node/npm, and native tools; heavy. \"notebook\" = lightweight fresh-run JS workspace for compute, data, and charts. \"pod\" = fast shell + persistent OPFS, pipelines, WASI, browser Git, and audited HTTPS; no Linux, Node/npm, native binaries, sockets, or PTY. \"app\" = user-facing multi-file HTML in a sandboxed iframe with NO ambient network; bundle dependencies. Apps use `files` (or `html`); pass `dwapp:true` only for peer multiplayer. The sandbox becomes current for its kind. Delegate substantial work with `message_actor(id, goal)`; use `script` for quick headless compute.",
     "schema": {
       "type": "object",
       "properties": {
@@ -1423,7 +1423,7 @@ export const TOOL_METADATA_RECORDS = {
   "app_open": {
     "name": "app_open",
     "primitive": "app",
-    "description": "Open an App in a tab on supported Chrome. It opens in the BACKGROUND and a \"go there\" card appears in the chat (peerd never yanks the user to a new tab — they click to go). Apps cannot run on Firefox yet; tell the user to open peerd in Chrome. Becomes the chat's current app for follow-up app_update calls.",
+    "description": "Open an App in a background tab. A \"go there\" card appears in chat; peerd never yanks the user to another tab. Becomes the chat's current app for follow-up app_update calls.",
     "schema": {
       "type": "object",
       "properties": {

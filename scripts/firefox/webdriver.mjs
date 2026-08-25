@@ -148,6 +148,8 @@ export const startGeckodriver = async ({
       runtimeIdentity,
       logs,
       installAddon: (path) => command('POST', '/moz/addon/install', { path, temporary: true }),
+      setContext: (context) => command('POST', '/moz/context', { context }),
+      switchToFrame: (id) => command('POST', '/frame', { id }),
       navigate: (url) => command('POST', '/url', { url }),
       execute: (script, args = []) => command('POST', '/execute/sync', { script, args }),
       executeAsync: (script, args = []) => command('POST', '/execute/async', { script, args }),

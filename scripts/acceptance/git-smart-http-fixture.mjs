@@ -17,7 +17,7 @@ import { join } from 'node:path';
 
 export const GIT_FIXTURE_SCHEMA = 1;
 export const GIT_FIXTURE_HOST = 'git-fixture.peerd.test';
-export const GIT_FIXTURE_REPOSITORY = 'cutover.git';
+export const GIT_FIXTURE_REPOSITORY = 'acceptance/cutover.git';
 export const GIT_FIXTURE_REMOTE = `https://${GIT_FIXTURE_HOST}/${GIT_FIXTURE_REPOSITORY}`;
 export const GIT_FIXTURE_MAX_BODY_BYTES = 40 * 1024 * 1024;
 export const GIT_FIXTURE_EXPECTED_REQUESTS = Object.freeze({
@@ -175,7 +175,7 @@ export const assertGitFixtureBinding = (binding) => {
       || binding.schema !== GIT_FIXTURE_SCHEMA
       || binding.host !== GIT_FIXTURE_HOST
       || binding.remote !== GIT_FIXTURE_REMOTE
-      || !/^git version \d+\.\d+\.\d+(?:[.-][^\s]+)?$/.test(binding.gitVersion)
+      || !/^git version \d+\.\d+\.\d+(?:[.-][^\s()]+)?(?: \(Apple Git-\d+\))?$/.test(binding.gitVersion)
       || !HEX_256.test(binding.certificateSha256)
       || !HEX_256.test(binding.protocolSha256)
       || !HEX_256.test(binding.sha256)) {
@@ -328,6 +328,11 @@ export const startGitSmartHttpFixture = async () => {
             },
           });
           const cgi = parseCgi(output);
+          if (kind === 'receive-pack' && cgi.status >= 200 && cgi.status < 300) {
+            await run('git', ['symbolic-ref', 'HEAD', 'refs/heads/acceptance/cutover'], {
+              cwd: repositoryPath,
+            });
+          }
           response.writeHead(cgi.status, { ...cgi.headers, 'cache-control': 'no-store' });
           response.end(cgi.body);
         } catch (error) {

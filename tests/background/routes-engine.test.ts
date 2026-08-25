@@ -1051,6 +1051,17 @@ describe('export/artifact', () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['export/artifact']({ kind: 'app', id: 'a1' })).toEqual({ ok: true, filename: 'App.app.peerd', envelope: { env: 'app' } });
   });
+  test('app export returns a Firefox-cloneable JSON reply', async () => {
+    const r = makeEngineRoutes(baseDeps({
+      artifactEngine: {
+        ...baseDeps().artifactEngine,
+        buildAppExport: async () => ({ reference: new URL('https://example.test/app') }),
+      },
+    }));
+    const reply = await r['export/artifact']({ kind: 'app', id: 'a1' });
+    expect(reply.envelope.reference).toBe('https://example.test/app');
+    expect(() => structuredClone(reply)).not.toThrow();
+  });
   test('artifact export does not mutate audit state', async () => {
     let writes = 0;
     const r = makeEngineRoutes(baseDeps({

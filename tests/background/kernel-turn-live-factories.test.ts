@@ -78,6 +78,7 @@ const tracker = (kind: 'vm'|'notebook'|'pod'|'app') => {
     },
     markReloading: () => {},
     getTabId: (id: string) => tabs.get(id) ?? null,
+    reconcileTabClaim: async (id: string, _claimantTabId?: number) => tabs.get(id) ?? null,
     getOwnedTabId: (id: string, owner: string) => owners.get(id) === owner
       ? tabs.get(id) ?? null : null,
     listLive: () => [...tabs.keys()],
@@ -89,6 +90,7 @@ const harness = async (
   options: {
     restoredApp?: boolean,
     networkSync?: () => Promise<void>,
+    networkAdmission?: (tabId: number, url: string) => Promise<{ ok: boolean }>,
     firefox?: boolean,
     firefoxActorLifetime?: any,
     loadDirectActorHost?: () => Promise<any>,
@@ -117,6 +119,8 @@ const harness = async (
       runtime: ['observe', 'act'],
     },
   });
+  const appNetworkAdmissions: [number, string][] = [];
+  const appNetworkTabs = new Set<number>();
   const vmRegistry = registry([{ id: 'vm-1', name: 'VM' }]);
   const jsRegistry = registry([{ id: 'notebook-1', name: 'Notebook' }]);
   const podRegistry = registry([{ id: 'pod-1', name: 'Pod' }]);
@@ -132,6 +136,14 @@ const harness = async (
     [9, { id: 9, windowId: 1, url: 'https://example.com/work', title: 'Example', active: true }],
     [17, { id: 17, windowId: 1, url: `app://app-1?owner=${root.sessionId}`, active: false }],
   ]);
+  appTabTracker.reconcileTabClaim = async (id: string, claimantTabId?: number) => {
+    const liveTabId = appTabTracker.getTabId(id);
+    if (liveTabId == null || liveTabId === claimantTabId) return liveTabId;
+    const live = tabs.get(liveTabId);
+    if (live && appTabTracker.parseIdFromUrl(live.url) === id) return liveTabId;
+    appTabTracker.onTabRemoved(liveTabId);
+    return null;
+  };
   const notifications: any[] = [];
   const panelBehavior: any[] = [];
   const siteCaptureEvents: any[] = [];
@@ -271,7 +283,16 @@ const harness = async (
     isTrustedSender: (sender: any) => typeof sender?.tab?.id === 'number',
     networkCustody: {
       sync: options.networkSync ?? (async () => {}),
-      state: () => ({ supported: true, lastError: null }),
+      admitAppTab: async (tabId: number, url: string) => {
+        appNetworkAdmissions.push([tabId, url]);
+        const result = await (options.networkAdmission?.(tabId, url)
+          ?? Promise.resolve({ ok: true }));
+        if (result.ok) appNetworkTabs.add(tabId);
+        return result;
+      },
+      state: () => ({
+        supported: true, lastError: null, tabs: [...appNetworkTabs],
+      }),
     },
     updateBrowserSourceProjection: async (bindings: any, projection: any) => {
       sourceProjections.push(structuredClone({ bindings, projection }));
@@ -316,6 +337,7 @@ const harness = async (
     broadcasts, storageState, kvState, cache, settings, notifications, panelBehavior,
     siteCaptureEvents, providerRevision: () => providerRevision,
     sourceProjections,
+    appNetworkAdmissions,
     actorConfig: () => actorConfig,
   };
 };
@@ -405,6 +427,9 @@ describe('kernel live turn factories', () => {
       { tab: { id: 17, url: `app://app-1?owner=${h.root.sessionId}` } },
     );
     expect(attached.ok).toBe(true);
+    expect(h.appNetworkAdmissions).toEqual([
+      [17, `app://app-1?owner=${h.root.sessionId}`],
+    ]);
     const actor = await h.sessions.get(attached.actorSessionId);
     expect(actor).toMatchObject({
       kind: 'actor', actorType: 'app', instanceId: 'app-1',
@@ -417,6 +442,47 @@ describe('kernel live turn factories', () => {
       { appId: 'app-1', ownerSessionId: 'wrong-owner' },
       { tab: { id: 17, url: `app://app-1?owner=${h.root.sessionId}` } },
     )).toEqual({ ok: false, error: 'app-tab-owner-mismatch' });
+  });
+
+  test('attaches a Firefox App only after exact network admission', async () => {
+    const h = await harness(undefined, { firefox: true });
+    const url = `app://app-1?owner=${h.root.sessionId}`;
+    const attached: any = await h.runtime.relays.engineRoutes['app/tab-ready'](
+      { appId: 'app-1', ownerSessionId: h.root.sessionId },
+      { tab: { id: 17, url } },
+    );
+    expect(attached.ok).toBe(true);
+    expect(h.appNetworkAdmissions).toEqual([[17, url]]);
+    expect(h.engine.appTabTracker.getTabId('app-1')).toBe(17);
+  });
+
+  test('reconciles a navigated App claim before accepting its replacement tab', async () => {
+    const h = await harness(undefined, { firefox: true });
+    const owner = h.root.sessionId;
+    expect((await h.runtime.relays.engineRoutes['app/tab-ready'](
+      { appId: 'app-1', ownerSessionId: owner },
+      { tab: { id: 17, url: `app://app-1?owner=${owner}` } },
+    ) as any).ok).toBe(true);
+    h.tabs.get(17).url = 'home://root';
+    h.tabs.set(18, { id: 18, url: `app://app-1?owner=${owner}` });
+    expect((await h.runtime.relays.engineRoutes['app/tab-ready'](
+      { appId: 'app-1', ownerSessionId: owner },
+      { tab: { id: 18, url: `app://app-1?owner=${owner}` } },
+    ) as any).ok).toBe(true);
+    expect(h.engine.appTabTracker.getTabId('app-1')).toBe(18);
+  });
+
+  test('refuses an App when exact network admission fails', async () => {
+    const h = await harness(undefined, {
+      firefox: true,
+      networkAdmission: async () => ({ ok: false }),
+    });
+    const attached: any = await h.runtime.relays.engineRoutes['app/tab-ready'](
+      { appId: 'app-1', ownerSessionId: h.root.sessionId },
+      { tab: { id: 17, url: `app://app-1?owner=${h.root.sessionId}` } },
+    );
+    expect(attached).toMatchObject({ ok: false });
+    expect(h.engine.appTabTracker.getTabId('app-1')).toBeNull();
   });
 
   test('persists a fingerprinted web source projection and refreshes it on navigation', async () => {
@@ -439,16 +505,17 @@ describe('kernel live turn factories', () => {
     expect(h.sourceProjections.at(-1)?.projection?.[0]?.url).toBe(tab.url);
   });
 
-  test('restored App network reconciliation waits only for hydrated trackers', async () => {
+  test('restored App network admission waits only for hydrated trackers', async () => {
     let pending!: ReturnType<typeof harness>;
     const stages: string[] = [];
     pending = harness(undefined, {
       restoredApp: true,
-      networkSync: async () => {
+      networkAdmission: async () => {
         stages.push('network-start');
         const h = await pending;
         await h.runtime.relays.eventOwners.reconcileTrackers();
         stages.push('network-ready');
+        return { ok: true };
       },
     });
     const h = await pending;

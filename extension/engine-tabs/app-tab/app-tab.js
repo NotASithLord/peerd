@@ -369,9 +369,6 @@ let pendingBody = null;
 let pendingAssets = {};
 /** @type {MessagePort | null} */
 let runnerPort = null;
-// Set true right before WE point the frame at the runner, so the frame's load
-// event can tell our own (re)load apart from a navigation the app initiated.
-let expectingRunnerLoad = false;
 // The frame starts with NO src, so the browser fires one `load` for its initial
 // about:blank — before we've ever pointed it at the runner. That isn't an app
 // navigation; flip this true once we DO start the runner so the load handler
@@ -467,7 +464,6 @@ const startRunner = () => {
   runnerPort?.close();
   runnerPort = null;
   runnerPhase = 'awaiting-ready';
-  expectingRunnerLoad = true;
   runnerStarted = true;
   runnerGeneration += 1;
   frame.sandbox.add('allow-scripts');
@@ -490,7 +486,6 @@ const suspendRunnerForEdit = () => {
   pendingAssets = {};
   runnerPhase = 'suspended';
   runnerStarted = false;
-  expectingRunnerLoad = false;
   expectingBodyLoad = false;
   if (dwebBridge) { dwebBridge.dispose(); dwebBridge = null; }
   // Replacing the document is the only way to stop a late async handler from
@@ -596,6 +591,14 @@ window.addEventListener('securitypolicyviolation', (event) => {
 
 window.addEventListener('message', (/** @type {MessageEvent} */ e) => {
   if (e.source !== frame.contentWindow) return;
+  if (e.data?.type === 'runner-loaded') {
+    if (runnerPhase === 'awaiting-ready'
+        && runnerPort == null
+        && e.data.generation === String(runnerGeneration)) {
+      initializeRunnerChannel();
+    }
+    return;
+  }
   if (e.data?.peerd === 'app:data:request' && runnerPhase === 'delivered') {
     const id = typeof e.data.id === 'string' && e.data.id.length <= 100 ? e.data.id : null;
     const op = ['get', 'set', 'delete', 'list'].includes(e.data.op) ? e.data.op : null;
@@ -708,11 +711,7 @@ window.addEventListener('message', (/** @type {MessageEvent} */ e) => {
 // events can't reach whatever now occupies the frame.
 frame.addEventListener('load', () => {
   if (!runnerStarted) return;                 // the empty iframe's initial about:blank load — not an app navigation
-  if (expectingRunnerLoad) {
-    expectingRunnerLoad = false;
-    initializeRunnerChannel();
-    return;
-  }
+  if (runnerPhase === 'awaiting-ready') return;
   if (expectingBodyLoad) { expectingBodyLoad = false; return; }  // the runner's document.write delivery — not a navigation
   runnerPhase = 'idle';
   if (dwebBridge) { dwebBridge.dispose(); dwebBridge = null; }

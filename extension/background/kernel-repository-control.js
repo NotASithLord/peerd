@@ -174,9 +174,12 @@ export const createKernelRepositoryControl = (deps) => {
           await deps.repositories.destroy({ kind: 'app', id: record.id }, {
             worktree: true, signal,
           });
-          await deps.catalog.remove(record.id);
         } catch (cleanupCause) {
-          return failure('repository-import-rollback-unknown', false, cleanupCause);
+          return failure('repository-import-repository-rollback-unknown', false, cleanupCause);
+        }
+        try { await deps.catalog.remove(record.id); }
+        catch (cleanupCause) {
+          return failure('repository-import-catalog-rollback-unknown', false, cleanupCause);
         }
         return success({
           ok: false, error: /** @type {{message?:string}} */ (cause)?.message ?? String(cause),

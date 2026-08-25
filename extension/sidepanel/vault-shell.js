@@ -85,8 +85,10 @@ export const startVaultShell = ({
   const uiRuntime = makeUiRuntimeClient({ browser });
   document.documentElement.dataset.peerdBootStage = 'vault-loading';
 
-  const renderFailure = () => {
+  const renderFailure = (/** @type {unknown} */ cause = undefined) => {
     document.documentElement.dataset.peerdBootStage = 'failed';
+    document.documentElement.dataset.peerdBootError = cause instanceof Error
+      ? `${cause.name}:${cause.message}`.slice(0, 512) : 'unknown';
     m.mount(root, null);
     root.innerHTML = '';
     const shell = document.createElement('main');
@@ -136,7 +138,7 @@ export const startVaultShell = ({
       }
       document.documentElement.dataset.peerdBootStage = 'app-ready';
     }
-    catch { applicationGeneration += 1; renderFailure(); }
+    catch (cause) { applicationGeneration += 1; renderFailure(cause); }
   };
 
   /** @param {unknown} next @param {string|null} [replacementEpoch] */

@@ -204,6 +204,7 @@ export const createKernelBrowserNetworkOwner = (deps) => {
   /** @type {Promise<void>|null} */ let sourceProjectionLoading = null;
   /** @type {Map<number,string>|null} */ let restoredSources = null;
   /** @type {Promise<boolean>|null} */ let restoredSourcesLoading = null;
+  /** @type {Set<number>} */ const appTabs = new Set();
   /** @type {string|null} */ let sourceProjectionGeneration = null;
   let sourceProjectionRevision = 0;
   const loadTimeoutMs = Number.isFinite(deps.loadTimeoutMs)
@@ -216,6 +217,19 @@ export const createKernelBrowserNetworkOwner = (deps) => {
         (cause) => { clearTimeout(timer); reject(cause); },
       );
     });
+  const isAppTab = (/** @type {any} */ tab) => typeof deps.appTabUrl === 'string'
+    && Number.isInteger(tab?.id) && tab.id >= 0 && typeof tab?.url === 'string'
+    && tab.url.split('#', 1)[0] === deps.appTabUrl && tab.url.includes('#');
+  const reconcileAppTabs = (/** @type {any[]} */ tabs) => {
+    appTabs.clear();
+    for (const tab of tabs) if (isAppTab(tab)) appTabs.add(tab.id);
+  };
+  const observeAppTab = (/** @type {any} */ tab) => {
+    if (!Number.isInteger(tab?.id) || tab.id < 0) return false;
+    if (isAppTab(tab)) appTabs.add(tab.id);
+    else appTabs.delete(tab.id);
+    return appTabs.has(tab.id);
+  };
   const restoreSources = (/** @type {boolean} */ refresh = false) => {
     if (refresh) restoredSources = null;
     if (restoredSources) return Promise.resolve(true);
@@ -226,6 +240,7 @@ export const createKernelBrowserNetworkOwner = (deps) => {
       deps.sessionCache.sessionGet(WEB_ACTOR_SOURCE_PROJECTION_KEY),
       deps.browser.tabs.query({}),
     ]).then(([bindings, projection, tabs]) => {
+      reconcileAppTabs(tabs);
       const validated = validateWebActorSourceProjection(
         bindings ?? [], projection, tabs, { requireCookieStore: deps.firefox },
       );
@@ -236,11 +251,14 @@ export const createKernelBrowserNetworkOwner = (deps) => {
     return restoredSourcesLoading;
   };
   const sourceRelays = Object.freeze({
-    isDrivenSource: (/** @type {number} */ tabId) => restoredSources?.has(tabId) === true,
+    isDrivenSource: (/** @type {number} */ tabId) => restoredSources?.has(tabId) === true
+      || appTabs.has(tabId),
     webActorSessionForTab: (/** @type {number} */ tabId) => restoredSources?.get(tabId) ?? null,
     isWebActorTab: (/** @type {number} */ tabId) => restoredSources?.has(tabId) === true,
-    externalDrivenTabIds: () => [...(restoredSources?.keys() ?? [])],
-    appTabIds: () => [],
+    externalDrivenTabIds: () => [...new Set([
+      ...(restoredSources?.keys() ?? []), ...appTabs,
+    ])],
+    appTabIds: () => [...appTabs],
   });
   void restoreSources();
   const externalReady = () => {
@@ -250,7 +268,8 @@ export const createKernelBrowserNetworkOwner = (deps) => {
       const ready = await restoreSources(true);
       if (!ready) throw new Error('kernel-browser-network-source-projection-unavailable');
       await bounded(Promise.resolve(deps.startupGuard?.reconcileSources?.(
-        (/** @type {number} */ tabId) => restoredSources?.has(tabId) ?? null,
+          (/** @type {number} */ tabId) => restoredSources?.has(tabId) === true
+            || appTabs.has(tabId),
       )), 'kernel-browser-network-startup-reconcile-timeout');
       sourceProjectionReady = true;
       if (authority) {
@@ -270,8 +289,10 @@ export const createKernelBrowserNetworkOwner = (deps) => {
   const authorityConfig = () => ({
     firefox: deps.firefox, browser: deps.browser, dnr: deps.dnr,
     sessionCache: deps.sessionCache, denylist: deps.denylist,
-    getExternalTabIds: () => [...(restoredSources?.keys() ?? [])],
-    getAppTabIds: () => [],
+    getExternalTabIds: () => [...new Set([
+      ...(restoredSources?.keys() ?? []), ...appTabs,
+    ])],
+    getAppTabIds: () => [...appTabs],
     isWebActorTab: (/** @type {number} */ tabId) =>
       restoredSources?.has(tabId) === true
       || deps.startupGuard?.hasSourceEvidence?.(tabId) === true,
@@ -396,14 +417,16 @@ export const createKernelBrowserNetworkOwner = (deps) => {
   const sourceIsDriven = async (/** @type {any} */ details) => {
     const sourceTabId = sourceFor(details);
     if (typeof sourceTabId !== 'number') return null;
-    if (await restoreSources()) return restoredSources?.has(sourceTabId) === true;
+    if (await restoreSources()) {
+      return restoredSources?.has(sourceTabId) === true || appTabs.has(sourceTabId);
+    }
     if (!sourceProjectionReady) {
       try {
         await bounded(Promise.resolve(externalReady()),
           'kernel-browser-network-source-classification-timeout');
       } catch { return null; }
     }
-    return restoredSources?.has(sourceTabId) ?? null;
+    return restoredSources?.has(sourceTabId) === true || appTabs.has(sourceTabId);
   };
   const handleAbsentProof = async (/** @type {any} */ details,
     /** @type {symbol} */ generation, /** @type {string} */ name,
@@ -468,8 +491,27 @@ export const createKernelBrowserNetworkOwner = (deps) => {
     supported: typeof deps.dnr?.updateSessionRules === 'function',
     lastError: null, ready: false, tabs: Object.freeze([]), origins: Object.freeze([]),
   });
+  const admitAppTab = async (/** @type {number} */ tabId, /** @type {string} */ url) => {
+    try {
+      if (!Number.isInteger(tabId) || tabId < 0 || typeof url !== 'string'
+          || typeof deps.browser?.tabs?.get !== 'function') return { ok: false };
+      const tab = await bounded(Promise.resolve(deps.browser.tabs.get(tabId)),
+        'kernel-browser-app-tab-read-timeout');
+      if (!isAppTab(tab) || tab.url !== url) return { ok: false };
+      appTabs.add(tabId);
+      await call('syncDenylistNetwork');
+      const verified = await call('verifyAppNetwork', [tabId]);
+      const current = state();
+      return verified === true && current.supported === true && current.lastError == null
+        && current.tabs?.includes(tabId)
+        ? { ok: true }
+        : { ok: false };
+    } catch {
+      return { ok: false };
+    }
+  };
   const custody = Object.freeze({
-    sync: () => call('syncDenylistNetwork'), state,
+    sync: () => call('syncDenylistNetwork'), admitAppTab, state,
     status: state,
   });
   const ensureSourceProjection = async () => {
@@ -498,11 +540,13 @@ export const createKernelBrowserNetworkOwner = (deps) => {
       bindings, projection, tabs, { requireCookieStore: deps.firefox },
     );
     if (!validated) return false;
+    reconcileAppTabs(tabs);
     restoredSources = validated;
     sourceProjectionRevision = identity.revision;
     sourceProjectionReady = true;
     await bounded(Promise.resolve(deps.startupGuard?.reconcileSources?.(
-      (/** @type {number} */ tabId) => restoredSources?.has(tabId) ?? null,
+      (/** @type {number} */ tabId) => restoredSources?.has(tabId) === true
+        || appTabs.has(tabId),
     )), 'kernel-browser-network-startup-reconcile-timeout');
     if (authority) {
       const result = await authority.reconcileExternalProjection?.();
@@ -522,6 +566,7 @@ export const createKernelBrowserNetworkOwner = (deps) => {
     ensureSourceProjection,
     flowToken: (/** @type {number} */ tabId) => childGeneration(tabId),
     onCreated(/** @type {any} */ tab) {
+      observeAppTab(tab);
       if (typeof tab?.id !== 'number' || typeof tab?.openerTabId !== 'number') {
         if (!authority) return coldQuarantineActive().then((active) => active
           ? loadedCall('onCreated', [tab]) : false).catch((cause) => {
@@ -572,11 +617,13 @@ export const createKernelBrowserNetworkOwner = (deps) => {
     },
     async onUpdated(/** @type {number} */ tabId, /** @type {any} */ changeInfo,
       /** @type {any} */ tab) {
+      observeAppTab({ ...tab, id: tabId, url: changeInfo?.url ?? tab?.url });
       if (!authority && !deps.startupGuard?.tabIds?.().includes(tabId)
           && await coldQuarantineActive() !== true) return false;
       return loadedCall('onUpdated', [tabId, changeInfo, tab]);
     },
     onRemoved(/** @type {number} */ tabId) {
+      appTabs.delete(tabId);
       const generation = childGenerations.get(tabId);
       childGenerations.delete(tabId);
       const released = deps.startupGuard?.release(tabId, generation) ?? Promise.resolve();
@@ -585,9 +632,12 @@ export const createKernelBrowserNetworkOwner = (deps) => {
         ? loadedCall('onRemoved', [tabId]) : false);
     },
     reconcile: async () => {
+      if (typeof deps.browser?.tabs?.query === 'function') {
+        reconcileAppTabs(await deps.browser.tabs.query({}));
+      }
       await restoreSources();
       await deps.startupGuard?.reconcileSources?.((/** @type {number} */ tabId) =>
-        restoredSources?.has(tabId) ?? null);
+        restoredSources?.has(tabId) === true || appTabs.has(tabId));
       return authority ? loadedCall('reconcile') : false;
     },
     bind(/** @type {string} */ generation) {

@@ -168,6 +168,37 @@ const setup = (overrides: Record<string, any> = {}) => {
 };
 
 describe('kernel browser network authority', () => {
+  test('verifies the exact installed App egress rule', async () => {
+    let drifted = false;
+    const harness = setup({
+      tabs: [{ id: 4, url: 'moz-extension://peerd/app#one' }],
+      external: [4], apps: [4], resourceTypes: ['main_frame', 'websocket'],
+      buildRuleUpdate: (input: any) => ({
+        removeRuleIds: [3],
+        addRules: [{
+          id: 3, priority: 3, action: { type: 'block' },
+          condition: {
+            regexFilter: '^(?:https?|wss?)://',
+            tabIds: [...input.appTabIds],
+            resourceTypes: [...input.resourceTypes],
+          },
+        }],
+      }),
+      getDnr: (rules: any[]) => drifted
+        ? rules.map((rule) => ({
+          ...rule,
+          condition: { ...rule.condition, resourceTypes: ['main_frame'] },
+        }))
+        : structuredClone(rules),
+    });
+
+    await harness.authority.ready();
+    await expect(harness.authority.verifyAppNetwork(4)).resolves.toBe(true);
+    await expect(harness.authority.verifyAppNetwork(5)).resolves.toBe(false);
+    drifted = true;
+    await expect(harness.authority.verifyAppNetwork(4)).resolves.toBe(false);
+  });
+
   test('hydrates one exact driven/App/origin projection with private and IdP policy inputs', async () => {
     const harness = setup({
       stored: {

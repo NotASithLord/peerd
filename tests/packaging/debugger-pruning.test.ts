@@ -9,7 +9,7 @@ import { generateManifest } from '../../packaging/gen-manifest.ts';
 import { createDebuggerPool } from '../../packaging/templates/debugger-pool.unavailable.js';
 
 describe('package-time debugger graph pruning', () => {
-  test('unavailable targets retain the complete pool interface and fail closed', async () => {
+  test('unavailable targets retain the operational pool interface and fail closed', async () => {
     const pool = createDebuggerPool();
     expect(Object.keys(pool).sort()).toEqual([
       'attach', 'captureScreenshot', 'clickBackendNode', 'detach',
@@ -20,6 +20,22 @@ describe('package-time debugger graph pruning', () => {
     expect(pool.isAttached()).toBe(false);
     expect(await pool.stopNetworkCapture()).toEqual([]);
     await expect(pool.evaluate()).rejects.toThrow('debugger_unavailable');
+  });
+
+  test('unavailable targets receive no debugger custody lifecycle events', () => {
+    const pool = createDebuggerPool();
+    expect('onTabUpdated' in pool).toBe(false);
+    expect('onTabRemoved' in pool).toBe(false);
+    const source = readFileSync(
+      join(REPO_ROOT, 'extension', 'background', 'kernel-turn-live-factories.js'),
+      'utf8',
+    );
+    expect(source).toContain(
+      'if (debuggerApiAvailable()) debuggerPool.onTabUpdated(tabId, change);',
+    );
+    expect(source).toContain(
+      'if (debuggerApiAvailable()) debuggerPool.onTabRemoved(tabId);',
+    );
   });
 
   test('packaging swaps a committed whole-file template only where permission is absent', () => {

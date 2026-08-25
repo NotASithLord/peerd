@@ -48,7 +48,7 @@ const FIREFOX_ONLY_KEYS = ['browser_specific_settings', 'sidebar_action'];
 // them as manifest keys — left in, they're dead weight an AMO validator can
 // flag. (The WebVM is already non-functional on Firefox without isolation;
 // stripping the keys just keeps the manifest clean.)
-const CHROME_ONLY_KEYS = ['update_url', 'key', 'side_panel', 'sandbox',
+const CHROME_ONLY_KEYS = ['update_url', 'key', 'side_panel',
   'cross_origin_embedder_policy', 'cross_origin_opener_policy'];
 
 // Permissions Firefox doesn't implement. Stripping them keeps AMO
