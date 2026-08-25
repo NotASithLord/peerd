@@ -2,8 +2,9 @@ import { describe, expect, test } from 'bun:test';
 import {
   KERNEL_EXECUTABLE_ROUTE_NAMES,
   KERNEL_TRANSFER_ROUTE_NAMES,
-} from '../../extension/background/kernel-executable-inventory.js';
+} from '../../extension/shared/kernel-feature-route-inventory.js';
 import {
+  createKernelExecutableControl,
   createKernelExecutableOwner,
   makeKernelDwebAdmission,
   makeKernelExecutableAdmission,
@@ -20,6 +21,8 @@ const runtimeModule = (onTransfer = (_authorization: symbol) => {}) => ({
     },
   }),
 });
+const runtimeFactory = (onTransfer = (_authorization: symbol) => {}) =>
+  runtimeModule(onTransfer).createKernelExecutableRuntime;
 
 describe('kernel executable owner', () => {
   test('assigns every executable surface to one exact provenance gate', () => {
@@ -29,6 +32,7 @@ describe('kernel executable owner', () => {
     const admit = makeKernelExecutableAdmission({
       pod: gate('pod'), webFetch: gate('webFetch'), artifactExport: gate('artifactExport'),
       options: gate('options'), home: gate('home'), app: gate('app'), relay: gate('relay'),
+      engine: gate('engine'),
     });
     const expected = new Map([
       ['pod/cancel-io', 'pod'], ['pod/get-meta', 'pod'], ['pod/git', 'pod'],
@@ -38,6 +42,9 @@ describe('kernel executable owner', () => {
       ['app/actor-chat', 'app'], ['app/call', 'relay'], ['actors/call', 'relay'],
       ['page/call', 'relay'], ['site-fetch/call', 'relay'], ['script/model-call', 'relay'],
       ['script-run/abort', 'relay'], ['a2a/call', 'relay'],
+      ['vm/tab-ready', 'engine'], ['js/tab-ready', 'engine'],
+      ['pod/tab-adopt', 'engine'], ['app/tab-ready', 'engine'],
+      ['app/actor-retry', 'engine'],
     ]);
     for (const [route, owner] of expected) {
       called.length = 0;
@@ -76,6 +83,16 @@ describe('kernel executable owner', () => {
     called.length = 0;
     expect(admit('dweb/base/start', {}, sender)).toBe(true);
     expect(called).toEqual(['home']);
+    const notebookOnly = makeKernelDwebAdmission({
+      offscreen: () => false, app: () => false, home: () => false, notebook: () => true,
+    });
+    expect(notebookOnly('dweb/distributed/info', {}, sender)).toBe(true);
+    expect(notebookOnly('dweb/base/start', {}, sender)).toBe(false);
+    const appOnly = makeKernelDwebAdmission({
+      offscreen: () => false, app: () => true, home: () => false, notebook: () => false,
+    });
+    expect(appOnly('dweb/audit', {}, sender)).toBe(true);
+    expect(appOnly('dweb/base/start', {}, sender)).toBe(false);
     expect(admit('review/run', {}, sender)).toBe(false);
   });
 
@@ -84,7 +101,7 @@ describe('kernel executable owner', () => {
     const owner = createKernelExecutableOwner({
       admit: (_route: string, _message: any, sender: any) => sender === 'trusted',
       runtime: {},
-      importRuntime: async () => { loads += 1; return runtimeModule(); },
+      createRuntime: () => { loads += 1; return runtimeFactory()(); },
     });
     expect(await owner.routes['pod/get-meta']({}, 'forged')).toEqual({
       ok: false, error: 'kernel-route-unauthorized', outcomeKnown: true,
@@ -105,7 +122,7 @@ describe('kernel executable owner', () => {
         dependencyLoads += 1;
         return {};
       },
-      importRuntime: async () => runtimeModule(),
+      createRuntime: runtimeFactory(),
     });
     await owner.routes['pod/get-meta']({}, 'forged');
     expect(dependencyLoads).toBe(0);
@@ -115,16 +132,83 @@ describe('kernel executable owner', () => {
     expect(dependencyLoads).toBe(1);
   });
 
+  test('engine attach messages require the exact engine document and instance', async () => {
+    const url = (kind: string, id: string) =>
+      `chrome-extension://runtime/engine-tabs/${kind}-tab/${kind}-tab.html#${id}`;
+    const sender = (kind: string, id: string) => ({
+      id: 'runtime', url: url(kind, id), tab: { id: 7, url: url(kind, id) },
+    });
+    let loads = 0;
+    const control = createKernelExecutableControl({
+      runtimeId: 'runtime', firefox: false, dweb: false,
+      createRuntime: () => { loads += 1; return runtimeFactory()(); },
+      loadRich: async () => ({
+        executableLive: {}, transferLive: {}, relayRoutes: {},
+        relays: { engineRoutes: {} },
+      }),
+      owns: {
+        home: () => false, options: () => false, offscreen: () => false,
+        app: (value: any, appId: string) => value === 'app-sender' && appId === 'app-1',
+      },
+      paths: {
+        app: 'chrome-extension://runtime/engine-tabs/app-tab/app-tab.html',
+        notebook: 'chrome-extension://runtime/engine-tabs/notebook-tab/notebook-tab.html',
+        vm: 'chrome-extension://runtime/engine-tabs/vm-tab/vm-tab.html',
+        pod: 'chrome-extension://runtime/engine-tabs/pod-tab/pod-tab.html',
+        options: 'chrome-extension://runtime/options/options.html',
+      },
+    });
+    expect(await control.routes['vm/tab-ready']({ vmId: 'vm-1' }, sender('vm', 'vm-2')))
+      .toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
+    expect(await control.routes['js/tab-ready'](
+      { notebookId: 'notebook-1' }, sender('notebook', 'notebook-2'),
+    )).toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
+    expect(await control.routes['pod/tab-adopt'](
+      { podId: 'pod-1' }, sender('pod', 'pod-2'),
+    )).toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
+    expect(await control.routes['app/tab-ready']({ appId: 'app-2' }, 'app-sender'))
+      .toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
+    expect(loads).toBe(0);
+
+    expect(await control.routes['vm/tab-ready']({ vmId: 'vm-1' }, sender('vm', 'vm-1')))
+      .toMatchObject({ ok: true, name: 'vm/tab-ready' });
+    expect(await control.routes['js/tab-ready'](
+      { notebookId: 'notebook-1' }, sender('notebook', 'notebook-1'),
+    )).toMatchObject({ ok: true, name: 'js/tab-ready' });
+    expect(await control.routes['pod/tab-adopt'](
+      { podId: 'pod-1' }, sender('pod', 'pod-1'),
+    )).toMatchObject({ ok: true, name: 'pod/tab-adopt' });
+    expect(await control.routes['app/actor-retry']({ appId: 'app-1' }, 'app-sender'))
+      .toMatchObject({ ok: true, name: 'app/actor-retry' });
+    expect(loads).toBe(1);
+  });
+
   test('a frozen runtime settles as a known startup failure', async () => {
     const owner = createKernelExecutableOwner({
       admit: () => true,
       runtime: {}, loadTimeoutMs: 1,
-      importRuntime: () => new Promise(() => {}),
+      createRuntime: () => new Promise(() => {}),
     });
     expect(await owner.routes['import/apply']({}, {})).toMatchObject({
       ok: false, error: 'Temporarily unavailable. Try again.',
       code: 'kernel-executable-runtime-load-timeout', outcomeKnown: true,
       phase: 'startup', retryable: true,
+    });
+  });
+
+  test('an asynchronous route failure never masquerades as a safe retry', async () => {
+    const owner = createKernelExecutableOwner({
+      admit: () => true,
+      runtime: {},
+      createRuntime: async () => ({
+        routes: Object.fromEntries(KERNEL_EXECUTABLE_ROUTE_NAMES.map((name) => [name,
+          async () => { throw Object.assign(new Error('lost reply'), { phase: 'startup' }); }])),
+        makeTransferRoutes: () => ({}),
+      }),
+    });
+    expect(await owner.routes['import/apply']()).toMatchObject({
+      ok: false, code: 'kernel-executable-dispatch-failed',
+      outcomeKnown: false, retryable: false,
     });
   });
 
@@ -135,9 +219,9 @@ describe('kernel executable owner', () => {
     const owner = createKernelExecutableOwner({
       admit: () => true,
       runtime: {},
-      importRuntime: async () => {
+      createRuntime: () => {
         loads += 1;
-        return runtimeModule((authorization) => { transferAuthorization = authorization; });
+        return runtimeFactory((authorization) => { transferAuthorization = authorization; })();
       },
       privateTransfer: { isOptionsSender: (sender: any) => sender === optionsSender },
     });
@@ -170,5 +254,40 @@ describe('kernel executable owner', () => {
       reply: { ok: true, name: 'transfer/import' },
     });
     expect(replies[0].reply.authorization).toBe(transferAuthorization);
+  });
+
+  test('Chrome channel creation refuses forged senders before client lookup', async () => {
+    const optionsSender = { url: 'chrome-extension://peerd/options.html' };
+    let lookups = 0;
+    const channel = new MessageChannel();
+    const offers: any[] = [];
+    const owner = createKernelExecutableOwner({
+      admit: () => true,
+      runtime: {},
+      createRuntime: runtimeFactory(),
+      privateTransfer: {
+        isOptionsSender: (sender: any) => sender === optionsSender,
+        listWindowClients: async () => {
+          lookups += 1;
+          return [{
+            url: optionsSender.url,
+            postMessage: (message: any, transfer: any[]) => offers.push({ message, transfer }),
+          }];
+        },
+        optionsUrl: optionsSender.url,
+        createChannel: () => channel,
+      },
+    });
+    const open = owner.routes['private-transfer/open'];
+    expect(await open({ requestId: 'request-1' }, { url: optionsSender.url }))
+      .toEqual({ ok: false, error: 'private-transfer-channel-refused' });
+    expect(lookups).toBe(0);
+    expect(await open({ requestId: 'request-1' }, optionsSender)).toEqual({ ok: true });
+    expect(offers[0]).toMatchObject({
+      message: { type: 'private-transfer/channel', requestId: 'request-1' },
+    });
+    expect(offers[0].transfer[0]).toBe(channel.port2);
+    channel.port1.close();
+    channel.port2.close();
   });
 });

@@ -2,9 +2,20 @@
 
 import { renderSystemPromptFromAssets } from '/peerd-runtime/controller.js';
 import { makeBoundedModuleLoader } from '/shared/bounded-module-load.js';
+import { RUNTIME_DISPATCH_CAPABILITY } from '/shared/kernel-runtime-policy.js';
+import {
+  KERNEL_FEATURE_DISPATCH_CAPABILITY,
+  KERNEL_FEATURE_EVENT_CAPABILITY,
+} from '/shared/kernel-feature-policy.js';
+import { createKernelFeatureHost } from './kernel-feature-host.js';
+import { createKernelProductionHost } from './kernel-production-host.js';
 
 const loadSemanticRoutes = makeBoundedModuleLoader(() => import('./semantic-route-host.js'));
 const loadTurnRuntime = makeBoundedModuleLoader(() => import('./controller-turn-runtime.js'));
+const loadKernelRuntimeHost = makeBoundedModuleLoader(() => import('./kernel-runtime-host.js'));
+const loadAdministrativeHost = () => import('./kernel-administrative-host.js');
+const loadRepositoryHost = () => import('./kernel-repository-host.js');
+const loadLocalHost = () => import('./kernel-local-host.js');
 const loadFailure = (/** @type {any} */ cause) => ({
   ok: false,
   code: cause?.code ?? 'controller-module-load-failed',
@@ -44,7 +55,7 @@ const renderPrompt = async (/** @type {unknown} */ payload) => {
   }
 };
 
-const DEFAULT_HANDLERS = Object.freeze({
+const makeDefaultHandlers = (/** @type {ReturnType<typeof createKernelFeatureHost>} */ featureHost) => Object.freeze({
   'health.ping': async (/** @type {unknown} */ payload) => ({
     ok: true, outcomeKnown: true, payload,
   }),
@@ -67,15 +78,69 @@ const DEFAULT_HANDLERS = Object.freeze({
     catch (cause) { return loadFailure(cause); }
     return runtime.runControllerTurn(payload, options);
   },
+  [KERNEL_FEATURE_DISPATCH_CAPABILITY]: featureHost.dispatch,
+  [KERNEL_FEATURE_EVENT_CAPABILITY]: featureHost.event,
 });
 
 /**
  * @param {{ handlers?: Record<string, (payload: unknown, options: {
  *   signal: AbortSignal, authority?: unknown, deadlineAt?: number,
  *   kernelCall?: (operation:string, payload:unknown)=>Promise<any>,
- * }) => Promise<any>> }} [options]
+ * }) => Promise<any>>, featureHost?:ReturnType<typeof createKernelFeatureHost>,
+ * productionHost?:ReturnType<typeof createKernelProductionHost>,
+ * loadRuntimeHost?:()=>Promise<{
+ *   createKernelRuntimeHost:(options?:any)=>{dispatch:(payload:unknown,options:any)=>Promise<any>}
+ * }> }} [options]
  */
-export const createController = async ({ handlers = DEFAULT_HANDLERS } = {}) => Object.freeze({
+export const createController = async ({
+  handlers,
+  featureHost: injectedFeatureHost,
+  productionHost = createKernelProductionHost(),
+  loadRuntimeHost: runtimeHostLoader = loadKernelRuntimeHost,
+} = {}) => {
+  const featureHost = injectedFeatureHost ?? createKernelFeatureHost({
+    loaders: {
+      administrative: loadAdministrativeHost,
+      repository: loadRepositoryHost,
+      local: loadLocalHost,
+    },
+    events: productionHost.events,
+  });
+  /** @type {{dispatch:(payload:unknown,options:any)=>Promise<any>} | null} */
+  let runtimeHost = null;
+  /** @type {Promise<{dispatch:(payload:unknown,options:any)=>Promise<any>}> | null} */
+  let runtimeHostLoading = null;
+  const runtimeDispatch = async (/** @type {unknown} */ payload, /** @type {any} */ options) => {
+    let host = runtimeHost;
+    if (!host) {
+      try {
+        runtimeHostLoading ??= runtimeHostLoader().then((module) => {
+          if (typeof module?.createKernelRuntimeHost !== 'function') {
+            throw new Error('kernel runtime host factory missing');
+          }
+          const candidate = module.createKernelRuntimeHost({ productionHost });
+          if (!candidate || typeof candidate.dispatch !== 'function') {
+            throw new Error('kernel runtime host invalid');
+          }
+          runtimeHost = candidate;
+          return candidate;
+        });
+        host = await runtimeHostLoading;
+      }
+      catch (cause) {
+        runtimeHostLoading = null;
+        return loadFailure(cause);
+      }
+    }
+    return host.dispatch(payload, options);
+  };
+  /** @type {Record<string, (payload:unknown, options:any)=>Promise<any>>} */
+  const activeHandlers = Object.freeze({
+    ...makeDefaultHandlers(featureHost),
+    ...handlers,
+    [RUNTIME_DISPATCH_CAPABILITY]: runtimeDispatch,
+  });
+  return Object.freeze({
   /**
    * @param {string} capability
    * @param {unknown} payload
@@ -86,10 +151,11 @@ export const createController = async ({ handlers = DEFAULT_HANDLERS } = {}) => 
     if (options.signal.aborted) {
       return { ok: false, code: 'controller-call-aborted', outcomeKnown: true };
     }
-    const handler = handlers[capability];
+    const handler = activeHandlers[capability];
     if (typeof handler !== 'function') {
       return { ok: false, code: 'controller-capability-unimplemented', outcomeKnown: true };
     }
     return handler(payload, options);
   },
-});
+  });
+};

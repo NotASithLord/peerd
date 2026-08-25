@@ -4,8 +4,8 @@
 // files, NOT a mythical local git repo. A checkpoint is a manifest of
 // {path -> contentHash}; the bytes live once, deduplicated by hash.
 //
-// why content-addressed: we snapshot AFTER every file-modifying turn
-// (see service-worker.js). Most turns touch one or two files out of a
+// why content-addressed: we snapshot AFTER every file-modifying turn.
+// Most turns touch one or two files out of a
 // workspace that may hold dozens. Storing a full copy per turn would be
 // O(turns × workspace). Storing each distinct blob once, keyed by its
 // SHA-256, makes a checkpoint O(files-changed) in new bytes — the rest

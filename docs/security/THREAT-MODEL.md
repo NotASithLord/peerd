@@ -689,8 +689,8 @@ may observe a common `api.` sibling, but its digest retains exact-origin
 attribution and calls it separate custody; only that origin's actor may verify
 and persist its client.
 Code: `peerd-runtime/actor/origin-lock.js` (`mayUseSiteClientOrigin`),
-`tools/gates.js`, `tools/defs/site-client-{read,run,write}.js`,
-`tools/defs/site-capture.js`, and `background/service-worker.js`. Red-team:
+`tools/gates.js`, `tools/defs/site-client-{read,run,write}.js`, and
+`tools/defs/site-capture.js`. Red-team:
 scenario 13.
 
 <a id="inv-19"></a>
@@ -721,8 +721,8 @@ Refusals expose only the canonical origin and a machine-authored recovery rule.
 They never expose the path, query, title, or other page-authored text.
 
 Code: `peerd-runtime/actor/numeric-tab-authority.js`,
-`peerd-runtime/actor/idp-registry.js`, `peerd-runtime/actor/landing-rule.js`,
-`background/service-worker.js`, and `peerd-runtime/actor/actor-messaging.js`.
+`peerd-runtime/actor/idp-registry.js`, `peerd-runtime/actor/landing-rule.js`, and
+`peerd-runtime/actor/actor-messaging.js`.
 Red-team: scenario 10.
 
 <a id="inv-20"></a>
@@ -742,7 +742,7 @@ same uncertain action through a sibling actor therefore requires a new exact
 user confirmation. A different root chat or external target remains independent.
 
 Code: `peerd-egress/confirm/protocol.js`, `background/routes/vault.js`,
-`background/service-worker.js`, `peerd-runtime/lifecycle/dispatch-tracking.js`,
+`peerd-runtime/lifecycle/dispatch-tracking.js`,
 and `peerd-runtime/tools/dispatcher.js`. Red-team: scenario 14.
 
 ### Additional invariants (not scenario-gated, enforced in code)
@@ -942,8 +942,7 @@ evaluating peerd should know. Each cites where it lives in the code.
   DIFFERENT origin and spend that origin's stored key + cookies — a cross-origin
   credential escalation past the "an API actor owns one origin" containment (DESIGN-18).
   Closed: the branch now pins to the actor's own bound origin (`instanceId`) and refuses a
-  cross-origin target, mirroring `fetch_url`'s API pin. (`background/service-worker.js`
-  `siteFetchCallRoute`.)
+  cross-origin target, mirroring `fetch_url`'s API pin.
 - R13. The egress tripwire does not scan the query string or fragment, so the canonical
   exfil GET is uncovered. `attacker.test/?d=<blob>` is not inspected, because that is
   where legitimate long high-entropy values live — OIDC `id_token`s, SAML requests,

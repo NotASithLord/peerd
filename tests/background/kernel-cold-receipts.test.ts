@@ -5,7 +5,7 @@ import {
 } from '../../extension/background/kernel-cold-receipts.js';
 import {
   coldEventKeysFor,
-  LEGACY_COLD_EVENTS,
+  KERNEL_COLD_EVENTS,
 } from '../../extension/background/cold-kernel-inventory.js';
 import { attachKernelLifecycleEvents } from '../../extension/background/kernel-lifecycle-events.js';
 
@@ -54,7 +54,7 @@ const waitForCount = async (receipts: any, count: number) => {
   throw new Error(`receipt count did not settle at ${count}`);
 };
 
-const recoverable = new Set(LEGACY_COLD_EVENTS.filter(({ placement }) =>
+const recoverable = new Set(KERNEL_COLD_EVENTS.filter(({ placement }) =>
   placement === 'durable-hint' || placement === 'kernel-authority').map(({ key }) => key));
 
 const registerRequiredRecoveries = (

@@ -5,18 +5,27 @@ import {
   ACTORS_ASK_DEFAULT_TIMEOUT_MS,
   ACTORS_TRACE_ERROR_MAX_CHARS,
   ACTORS_TRACE_TARGET_MAX_CHARS,
+  ACTION_CLASSES,
   actorsCallToOp,
   askOutcome,
   actorAllowedToolsFor,
   actorDescriptors,
+  authorizeSiteClientRelayOrigin,
   actorIsolationAvailable,
   actorIsolationCapability,
   actorIsolationRefusal,
+  actorIsolationSpawnRefusal,
+  actorIsolationTemporarilyUnavailable,
   applyComposer,
   assembleDebugBundle,
+  AUTH_BOUNDARY_STOPPED_MESSAGE,
+  AUTH_STATE_UNAVAILABLE_MESSAGE,
+  AUTH_WAITING_FOR_USER_MESSAGE,
   buildAncestry,
+  buildMintInjection,
   buildTemporalBlock,
   BUILTIN_TOOLS,
+  canonicalCodeTraceLabel,
   childSessionIdsOf,
   CLOCK_TOOLS,
   confirmActionsFromRecord,
@@ -25,8 +34,10 @@ import {
   createSkillRegistry,
   createSkillStore,
   decideAction,
+  decideNumericTabAuthority,
   detectInterruptedTurn,
   dispatchToolCall,
+  DOC_TEXT_MAX_CHARS,
   DWEB_INBOUND_TOOL_NAMES,
   EXPOSURE_ACTOR,
   EXPOSURE_REVIEW,
@@ -35,14 +46,17 @@ import {
   filterByGoalActive,
   filterByRuntimeCapabilities,
   filterDescriptorsByManifest,
-  foldProviderEvents,
   finalActorTurnReply,
+  finalAssistantText,
+  formatDocBody,
   getTool,
+  GOAL_MAX_ITERATIONS,
   listTools,
   loadSkillTool,
   localStoreSource,
   mainAgentDescriptors,
   makeActorMessaging,
+  makeAsyncActors,
   makeInitOrchestrator,
   makeSpawnActor,
   makeRequestReview,
@@ -53,6 +67,7 @@ import {
   makeTrimEnricher,
   makeToolsCommand,
   makeTurnCostTracker,
+  makeTurnDriver,
   manifestLabel,
   mergeSources,
   normalizeConfirmActions,
@@ -62,15 +77,17 @@ import {
   makeDispatchTracker,
   makeFailClosedTracker,
   makeLifecycleBoot,
+  makeMeshDispatch,
   retryClassForTool,
   classifyFailure,
+  classifyAction,
   PERMISSION_MODES,
   pinActorCall,
   prepareUserAttachmentsWithDocs,
-  providerQuotaError,
   registerTool,
   resolveManifestAllow,
   shapeActorsResult,
+  shapeMeshResult,
   restrictCtxCapabilities,
   skillRegistrySource,
   SessionNotFoundError,
@@ -80,6 +97,7 @@ import {
   makeWebActorRegistry,
   makeApiActorBindings,
   normalizeApiOrigin,
+  numericTabAuthorityRefusal,
   safeWebActorSummaryOrigin,
   siteHandleFor,
   parseSiteHandle,
@@ -87,6 +105,11 @@ import {
   fenceApiActorSummary,
   makeOriginStateStore,
   makeJudgeLanding,
+  learnedOriginCovers,
+  makeLearnedOrigins,
+  makeEngineLiveness,
+  makePrewalkController,
+  meshCallToOp,
   makeCredentialScope,
   makeSignInOriginAuthorizer,
   makeSignInExcursionAuthorizer,
@@ -95,27 +118,38 @@ import {
   makeSiteClientOriginAuthorizer,
   makeFixedSiteClientOriginGuard,
   hasDurableSiteClientState,
+  IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
   isKnownIdp,
   isKnownIdpHost,
+  isReadOnlyTool,
+  isAddressableBrowserTab,
   isUgcHost,
   describeLandingStop,
   landingStopCard,
   originPhrase,
   retireStoppedRoamingWebActorDurably,
   createSiteClientStore,
+  createConversationRegistry,
   createToolboxStore,
   makeToolboxParseCheck,
+  makeAppCallHandler,
   createRefRegistry,
+  resolvePageTab,
+  resolveSiteUrl,
   WEB_TOOLS,
-  validateProviderCallArgs,
   wrapUntrusted,
+  installFetchTapInjected,
+  drainFetchTapInjected,
+  digestCapture,
 } from '/peerd-runtime/background.js';
 import {
   callModel,
+  costOf,
   contextWindowFor,
-  hasPricing,
   listProviders,
+  listProviderModels,
   planFailoverChain,
+  providerModelContextWindow,
   shouldFailover,
 } from '/peerd-provider/background.js';
 import {
@@ -124,11 +158,21 @@ import {
   makeSafeFetch,
   makeWebFetch,
   matchesDenylist,
+  withDpopCredentials,
+  makeDpopKeyStore,
+  getOrCreateDpopKey,
   VaultLockedError,
   withSessionScopedCredentials,
 } from '/peerd-egress/background.js';
+import {
+  needsWebWriteConfirm,
+  parseAppManifest,
+  WEB_WRITE_CONFIRM_KEY,
+} from '/peerd-engine/background.js';
 import { createActorLiveProjection } from './actor-live-projection.js';
-import { makeDirectActorHost } from './direct-actor-host.js';
+import { makeActorOverviewRoutes } from './routes/actor-overview.js';
+import { makeActorIsolationStateStore } from './actor-isolation-state.js';
+import { makeSiteCaptureManager } from './site-capture-manager.js';
 import { makeOffscreenActorChannelClient, selectExactActorHostClient } from './offscreen-actor-channel-client.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import { makeOffscreenDocClient } from './offscreen-doc-client.js';
@@ -138,11 +182,35 @@ import { makeOffscreenWebClient } from './offscreen-web-client.js';
 import { createScriptRunRegistry } from './script-runs.js';
 import { makeAppActorChatHandler } from './app-actor-chat.js';
 import { createContextSnapshots } from './context-snapshots.js';
-import { makeScriptModelCallRoute } from './script-model-call.js';
 import { makePageCallHandler } from '/peerd-runtime/background.js';
 import { makeActorsRoutes } from './routes/actors.js';
 import { makeOriginLockResolver } from './origin-lock-controller.js';
+import { actorDeliveryIdsFromMessage, makeActorRecoveryGate } from './actor-recovery-gate.js';
+import { isActorHostStartupFailure, runActorWithStartupRetry } from './actor-startup-retry.js';
+import { makeTabAffordances } from './tab-affordances.js';
+import { createDebuggerPool } from './debugger-pool.js';
+import { answerWithSessionConfirmGrant } from './confirm-session-grants.js';
+import { a2aConsentOutcome, downgradesActorConfirm } from './a2a-consent.js';
+import { makeDwebShare } from './dweb-share.js';
+import { createKernelDwebAgentOwner } from './kernel-dweb-agent-owner.js';
+import { relayAppRuntimeCall } from './app-runtime-deadline.js';
+import {
+  appActorSessionMatches,
+  canonicalAppActorManifest,
+  canonicalAppOwnerAuthority,
+  makeAppRole,
+  manifestAppActorTools,
+  resolveAppTabOwnerClaim,
+  validateAppTabClaim,
+} from './app-actor-policy.js';
+import { sha256Hex } from '/shared/util.js';
+import { createKernelRichEffectAuthority } from './kernel-rich-effect-authority.js';
 import { CHANNEL_DEFAULTS } from '/shared/channel-config.js';
+import { ACTOR_WORKER_PROTOCOL } from '/offscreen/actor-worker-protocol.js';
+import {
+  WEB_ACTOR_SOURCE_PROJECTION_KEY,
+  webActorSourceProjectionRow,
+} from '/shared/web-actor-source-projection.js';
 
 const REASONING_BUDGET_TOKENS = 2048;
 const REASONING_EFFORT_LEVELS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
@@ -169,9 +237,19 @@ export const createKernelTurnLiveFactories = (deps) => {
   }
   registerTools();
   const engine = deps.engine;
-  const scriptRuns = createScriptRunRegistry({ actorOpLimit: ACTORS_RUN_MAX_OPS });
+  const scriptRuns = deps.scriptRuns
+    ?? createScriptRunRegistry({ actorOpLimit: ACTORS_RUN_MAX_OPS });
+  const poisonedAppRuntimeTabs = new Set();
   const projection = createActorLiveProjection();
   const contextSnapshots = createContextSnapshots();
+  const debuggerPool = createDebuggerPool({ bindTabEvents: false, bindTabRemoval: false });
+  const debuggerApiAvailable = () => typeof deps.browser.debugger?.attach === 'function';
+  const advancedAutomationOn = () => debuggerApiAvailable()
+    && deps.settingsStore.get().advancedAutomationEnabled !== false;
+  const siteCapture = deps.siteCapture ?? makeSiteCaptureManager({
+    advancedAutomationOn, debuggerPool, scripting: deps.browser.scripting,
+    installFetchTapInjected, drainFetchTapInjected, digestCapture,
+  });
   const skillRegistry = createSkillRegistry({
     store: createSkillStore({ canWrite: () => deps.canWrite('skills') }),
     audit: deps.auditLog.append,
@@ -181,7 +259,7 @@ export const createKernelTurnLiveFactories = (deps) => {
     localStoreSource(commandStore), skillRegistrySource(skillRegistry),
   ]);
   const safeFetch = makeSafeFetch({
-    getAllowlist: () => [...HARDCODED_ALLOWLIST],
+    getAllowlist: () => [...HARDCODED_ALLOWLIST, ...userEndpoints],
     audit: deps.auditLog.append,
   });
   const webFetch = makeWebFetch({
@@ -194,7 +272,28 @@ export const createKernelTurnLiveFactories = (deps) => {
     dwebPackaged: deps.dwebEnabled,
   });
   const dwebEngagedSessions = new Set();
+  const a2aApprovedDids = new Set();
+  const a2aApprovedReady = deps.sessionCache.sessionGet('a2aApprovedDids')
+    .then((/** @type {unknown} */ stored) => {
+      for (const did of Array.isArray(stored) ? stored : []) {
+        if (typeof did === 'string') a2aApprovedDids.add(did);
+      }
+    });
+  /** @type {string|null} */
+  let dwebActorSessionId = null;
+  const dwebActorReady = deps.sessionCache.sessionGet('dwebActorBinding')
+    .then((/** @type {unknown} */ stored) => {
+      if (typeof stored === 'string') dwebActorSessionId = stored;
+    });
   const userEndpoints = new Set();
+  const loadUserEndpoints = async () => {
+    const stored = await deps.kv.get('provider_endpoints.v1');
+    userEndpoints.clear();
+    for (const endpoint of Array.isArray(stored?.endpoints) ? stored.endpoints : []) {
+      if (typeof endpoint?.url === 'string') userEndpoints.add(endpoint.url);
+    }
+  };
+  const userEndpointsReady = loadUserEndpoints();
   const todoChains = new Map();
   const webActorTabBindings = makeWebActorTabBindings();
   const webActorRegistry = makeWebActorRegistry();
@@ -205,6 +304,7 @@ export const createKernelTurnLiveFactories = (deps) => {
   const landingTurnTokens = new Map();
   const landingStopReports = new Map();
   const landingStopCards = new Map();
+  let landingTurnSequence = 0;
   const originStates = makeOriginStateStore({
     save: async (sessionId, state) => {
       if (live) await live.shared.sessions.update(sessionId, { originState: state });
@@ -221,7 +321,24 @@ export const createKernelTurnLiveFactories = (deps) => {
   const webCache = createRunCacheStore();
   const persistEntries = (/** @type {string} */ key, /** @type {any} */ store) => () =>
     deps.sessionCache.sessionSet(key, store.entries()).catch(() => {});
-  const persistWebBindings = persistEntries('webActorTabBindings', webActorTabBindings);
+  /** @type {Promise<void>} */
+  let webBindingWrite = Promise.resolve();
+  const persistWebBindings = () => {
+    const entries = webActorTabBindings.entries();
+    webBindingWrite = webBindingWrite.then(async () => {
+      if (!deps.firefox) {
+        await deps.sessionCache.sessionSet('webActorTabBindings', entries);
+        return;
+      }
+      const sourceRows = (await Promise.all(entries.map(async ([tabId, sessionId]) =>
+        webActorSourceProjectionRow(
+          await deps.browser.tabs.get(tabId).catch(() => null), sessionId,
+        )))).filter(Boolean);
+      await deps.sessionCache.sessionSet('webActorTabBindings', entries);
+      await deps.sessionCache.sessionSet(WEB_ACTOR_SOURCE_PROJECTION_KEY, sourceRows);
+    }).catch(() => {});
+    return webBindingWrite;
+  };
   const persistWebActors = persistEntries('webActorRegistry', webActorRegistry);
   const persistApiActors = persistEntries('apiActorBindings', apiActorBindings);
   const persistSiteActors = persistEntries('siteActorBindings', siteActorBindings);
@@ -239,18 +356,52 @@ export const createKernelTurnLiveFactories = (deps) => {
   ]);
   const keyedOrigins = new Set();
   const refreshKeyedOrigins = async () => {
-    const names = await deps.vault.listSecretNames?.().catch(() => []) ?? [];
-    for (const name of names) {
-      if (!String(name).startsWith('origin:')) continue;
-      const origin = normalizeApiOrigin(String(name).slice(7));
-      if (origin) keyedOrigins.add(origin);
-    }
+    if (deps.keyedOriginAuthority) return deps.keyedOriginAuthority.hydrate();
+    try {
+      const names = await deps.vault.listSecretNames();
+      keyedOrigins.clear();
+      for (const name of names) {
+        if (!String(name).startsWith('origin:')) continue;
+        const origin = normalizeApiOrigin(String(name).slice(7));
+        if (origin) keyedOrigins.add(origin);
+      }
+      return true;
+    } catch { return false; }
+  };
+  const learnedOrigins = makeLearnedOrigins({
+    load: async () => deps.kv.get('learnedOrigins.v1'),
+    save: async (all) => deps.kv.set('learnedOrigins.v1', all),
+    onLearn: (host, reason) => {
+      deps.auditLog.append({
+        type: 'origin_learned_sensitive', details: { host, reason },
+      }).catch(() => {});
+    },
+    onForget: (hosts) => {
+      for (const host of hosts) {
+        deps.auditLog.append({
+          type: 'origin_unlearned_sensitive', details: { host },
+        }).catch(() => {});
+      }
+    },
+  });
+  const engineLiveness = makeEngineLiveness({ storage: deps.kv });
+  const numericTabAuthorityFor = async (/** @type {unknown} */ liveUrl) => {
+    await learnedOrigins.hydrate();
+    const keyedReady = await refreshKeyedOrigins();
+    return decideNumericTabAuthority(liveUrl, {
+      policyReady: keyedReady && learnedOrigins.hydrationStatus().ok,
+      isKnownIdp: isKnownIdpHost,
+      isUgcZone: isUgcHost,
+      hasVaultSecret: (origin) => deps.keyedOriginAuthority?.has(origin) ?? keyedOrigins.has(origin),
+      learned: learnedOrigins.snapshot(),
+    });
   };
   const sensitivitySignals = () => ({
     isKnownIdp: isKnownIdpHost,
     isUgcZone: isUgcHost,
-    hasVaultSecret: (/** @type {string} */ origin) => keyedOrigins.has(origin),
-    getLearned: () => new Set(),
+    hasVaultSecret: (/** @type {string} */ origin) =>
+      deps.keyedOriginAuthority?.has(origin) ?? keyedOrigins.has(origin),
+    getLearned: () => learnedOrigins.snapshot(),
   });
   const lifecycleBoot = makeLifecycleBoot({
     storage: deps.kv,
@@ -298,7 +449,8 @@ export const createKernelTurnLiveFactories = (deps) => {
 
   const resolveActiveProvider = () => {
     const settings = deps.settingsStore.get();
-    const providers = listProviders();
+    const providers = listProviders().filter((provider) =>
+      provider.name !== 'local-webgpu' || !deps.firefox);
     const entry = providers.find((provider) => provider.name === settings.providerName)
       ?? providers.find((provider) => provider.keyless)
       ?? providers[0];
@@ -306,45 +458,73 @@ export const createKernelTurnLiveFactories = (deps) => {
     return { name: entry.name, model: settings.providerModel || entry.defaultModel };
   };
   const ensureActiveProvider = async () => {
-    const configured = resolveActiveProvider();
-    const provider = listProviders().find((entry) => entry.name === configured.name);
-    if (provider?.keyless) return configured;
-    if (provider?.vaultSecretName && await deps.vault.getSecret(provider.vaultSecretName).catch(() => null)) {
-      return configured;
+    await deps.ready;
+    const providers = listProviders().filter((provider) =>
+      provider.name !== 'local-webgpu' || !deps.firefox);
+    const configuredName = deps.settingsStore.get().providerName;
+    if (configuredName && providers.some((provider) => provider.name === configuredName)) {
+      return resolveActiveProvider();
     }
-    for (const candidate of listProviders()) {
-      if (candidate.keyless) return { name: candidate.name, model: candidate.defaultModel };
-      if (candidate.vaultSecretName
-          && await deps.vault.getSecret(candidate.vaultSecretName).catch(() => null)) {
-        return { name: candidate.name, model: candidate.defaultModel };
+    for (const candidate of providers) {
+      let usable = false;
+      if (candidate.keyless) {
+        if (candidate.liveModels) {
+          const models = await listProviderModels(candidate.name, {
+            safeFetch, ollamaHost: deps.settingsStore.get().ollamaHost,
+          }).catch(() => null);
+          usable = Array.isArray(models) && models.length > 0;
+        } else if (candidate.name !== 'local-webgpu') usable = true;
+      } else if (candidate.vaultSecretName) {
+        usable = !!await deps.vault.getSecret(candidate.vaultSecretName).catch(() => null);
       }
+      if (!usable) continue;
+      await deps.settingsStore.update({
+        providerName: candidate.name, providerModel: '',
+      }).catch(() => {});
+      deps.providerProjection?.bumpRevision?.();
+      return resolveActiveProvider();
     }
-    return configured;
+    return resolveActiveProvider();
   };
-  const resolvePermission = async (/** @type {any} */ session) => ({
-    mode: normalizeMode(session?.permissionMode
-      ?? await deps.sessionCache.sessionGet('currentPermissionMode')
-      ?? PERMISSION_MODES.ACT),
-    confirmActions: normalizeConfirmActions(confirmActionsFromRecord(session)
-      ?? confirmActionsFromRecord({
-        confirmActions: await deps.sessionCache.sessionGet('currentConfirmActions'),
-      }) ?? false),
-  });
+  const resolvePermission = async (/** @type {any} */ session) => {
+    if (session?.sessionId && goalRunner?.isActive(session.sessionId)) {
+      return { mode: PERMISSION_MODES.ACT, confirmActions: false };
+    }
+    return {
+      mode: normalizeMode(session?.permissionMode
+        ?? await deps.sessionCache.sessionGet('currentPermissionMode')
+        ?? PERMISSION_MODES.ACT),
+      confirmActions: normalizeConfirmActions(confirmActionsFromRecord(session)
+        ?? confirmActionsFromRecord({
+          confirmActions: await deps.sessionCache.sessionGet('currentConfirmActions'),
+        }) ?? false),
+    };
+  };
   const providerSecret = (/** @type {string} */ name) =>
     listProviders().find((provider) => provider.name === name)?.vaultSecretName ?? 'anthropic';
-  const foldSessionCost = async (/** @type {string} */ sessionId,
+  const costChains = new Map();
+  const foldSessionCost = (/** @type {string} */ sessionId,
     /** @type {any} */ usage, /** @type {number} */ amount) => {
-    const session = await live.shared.sessions.get(sessionId);
-    const prior = session?.cost ?? {};
-    await live.shared.sessions.update(sessionId, {
-      cost: {
-        inputTokens: (prior.inputTokens ?? 0) + (usage.inputTokens ?? 0),
-        outputTokens: (prior.outputTokens ?? 0) + (usage.outputTokens ?? 0),
-        cacheReadTokens: (prior.cacheReadTokens ?? 0) + (usage.cacheReadTokens ?? 0),
-        cacheWriteTokens: (prior.cacheWriteTokens ?? 0) + (usage.cacheWriteTokens ?? 0),
-        cost: (prior.cost ?? 0) + amount,
-      },
+    const previous = costChains.get(sessionId) ?? Promise.resolve();
+    const operation = previous.catch(() => {}).then(async () => {
+      const session = await live.shared.sessions.get(sessionId);
+      const prior = normalizeTally(session?.cost);
+      const addition = normalizeTally({ ...usage, cost: amount });
+      await live.shared.sessions.update(sessionId, {
+        cost: {
+          inputTokens: prior.inputTokens + addition.inputTokens,
+          outputTokens: prior.outputTokens + addition.outputTokens,
+          cacheReadTokens: prior.cacheReadTokens + addition.cacheReadTokens,
+          cacheWriteTokens: prior.cacheWriteTokens + addition.cacheWriteTokens,
+          cost: prior.cost + addition.cost,
+        },
+      });
     });
+    costChains.set(sessionId, operation);
+    void operation.finally(() => {
+      if (costChains.get(sessionId) === operation) costChains.delete(sessionId);
+    }).catch(() => {});
+    return operation;
   };
 
   const withLease = (/** @type {string} */ scope, /** @type {any} */ operation,
@@ -370,13 +550,81 @@ export const createKernelTurnLiveFactories = (deps) => {
     sendMessage: (message) => hostMessage(message, 'web-extract-demand'),
   });
   const runCache = createRunCacheStore();
+  /** @type {ReturnType<typeof createKernelDwebAgentOwner>|null} */
+  let dwebAgentOwner = null;
+  /** @type {Promise<ReturnType<typeof makeDwebShare>>|null} */
+  let dwebShareReady = null;
+  const dwebTransportOn = () => deps.dwebEnabled
+    && deps.settingsStore.get().dwebEnabled === true && !deps.vault.isLocked();
+  const shareLocalApp = async (/** @type {string} */ appId) => {
+    dwebShareReady ??= (async () => {
+      const dweb = await deps.getDwebLive?.();
+      if (typeof dweb?.withIdentityMutation !== 'function') {
+        throw new Error('dweb identity runtime unavailable');
+      }
+      return makeDwebShare({
+        enabled: deps.dwebEnabled, active: dwebTransportOn,
+        withDwebPublication: engine.withDwebPublication,
+        withIdentityMutation: dweb.withIdentityMutation,
+        withAppLifecycle: engine.withAppLifecycle,
+        withAppWriteLock: (id, operation) => engine.appQuiescence.runUnlocked(
+          id, () => engine.appClient.withWriteLock(id, operation),
+        ),
+        appRegistry: engine.appRegistry, repositories: engine.repositories,
+        prepareRuntime: async () => {
+          await deps.ensureDwebFeature();
+          return deps.browser.runtime.sendMessage({ type: 'dweb/base-host/start' });
+        },
+        sendMessage: (message) => deps.browser.runtime.sendMessage(message),
+      });
+    })();
+    return (await dwebShareReady)(appId, undefined);
+  };
+  const withDwebPublication = (/** @type {(current:()=>boolean)=>Promise<any>} */ operation) =>
+    engine.withDwebPublication(async (/** @type {()=>boolean} */ current) => {
+      if (!current() || !dwebTransportOn()) return { ok: false, error: 'dweb-disabled' };
+      await deps.ensureDwebFeature();
+      return operation(current);
+    });
+  const dwebSurface = deps.dwebEnabled ? Object.freeze({
+    share: shareLocalApp,
+    discover: async () => {
+      if (!dwebTransportOn()) return { ok: false, error: 'dweb-disabled' };
+      await deps.ensureDwebFeature();
+      return deps.browser.runtime.sendMessage({ type: 'dweb/base-host/heard' });
+    },
+    install: (/** @type {any} */ { uri, name } = {}) => withDwebPublication((current) => {
+      if (!current()) return Promise.resolve({ ok: false, error: 'dweb-disabled' });
+      return deps.browser.runtime.sendMessage({
+        type: 'dweb/base-host/install-app', uri, name,
+        publicationGeneration: engine.dwebPublicationGeneration(),
+      });
+    }),
+    peers: async () => {
+      if (!dwebTransportOn()) return { ok: false, error: 'dweb-disabled' };
+      await deps.ensureDwebFeature();
+      return deps.browser.runtime.sendMessage({ type: 'dweb/base-host/peers' });
+    },
+    block: (/** @type {any} */ { did, block = true, reason } = {}) =>
+      withDwebPublication(async () => {
+        if (block && typeof did === 'string') {
+          await /** @type {any} */ (dwebAgentOwner)?.revokePeer(did);
+        }
+        return deps.browser.runtime.sendMessage({
+          type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason,
+        });
+      }),
+    setDiscovery: (/** @type {any} */ { enabled } = {}) => withDwebPublication(() =>
+      deps.browser.runtime.sendMessage({ type: 'dweb/base-host/set-discovery', enabled })),
+  }) : null;
 
   const buildToolContext = async (/** @type {any} */ options = {}) => {
     const shared = live.shared;
+    await userEndpointsReady;
     const denylistReady = await deps.denylist.ready();
     if (!denylistReady?.ok) throw new Error('sensitive-origin policy unavailable');
     await lifecycleArmed;
-    await deps.syncDenylistNetwork();
+    await deps.syncDenylistNetwork?.();
     const sessionId = options.sessionId
       ?? await deps.sessionCache.sessionGet('currentSessionId');
     const session = sessionId ? await shared.sessions.get(sessionId) : null;
@@ -444,6 +692,10 @@ export const createKernelTurnLiveFactories = (deps) => {
       activeTab,
       onToolActivity: shared.pageActivity,
       spawnActor: (/** @type {any} */ request) => live.spawnActor(request),
+      spawnActorAsync: (/** @type {any} */ request) => live.asyncActors.spawnActorAsync(request),
+      actorTasks: () => live.asyncActors.actorTasks(sessionId),
+      actorCancel: (/** @type {string} */ taskId) =>
+        live.asyncActors.actorCancel(sessionId, taskId),
       messageActor: (/** @type {any} */ request) => live.actorMessaging.messageActor(request),
       scriptRuns,
       requestReview: (/** @type {any} */ request) => live.requestReview(request),
@@ -488,22 +740,32 @@ export const createKernelTurnLiveFactories = (deps) => {
       runCache,
       tabs: deps.browser.tabs,
       scripting: deps.browser.scripting,
-      debuggerPool: deps.advancedAutomationOn?.() ? deps.debuggerPool : undefined,
-      cdpUnavailableReason: deps.advancedAutomationOn?.()
+      debuggerPool: advancedAutomationOn() ? debuggerPool : undefined,
+      cdpUnavailableReason: advancedAutomationOn()
         ? null : deps.browser.debugger ? 'setting_off' : 'browser_unsupported',
       domRefs,
       ensureBrowserNetworkGuard: deps.ensureBrowserNetworkGuard,
+      browserChildQuarantineRequired: !deps.firefox,
+      armBrowserChildQuarantine: deps.armBrowserChildQuarantine,
       updateBrowserNetworkGuardOrigin: deps.updateBrowserNetworkGuardOrigin,
       acquireBrowserNetworkGuardLease: deps.acquireBrowserNetworkGuardLease,
       releaseBrowserNetworkGuardLease: deps.releaseBrowserNetworkGuardLease,
       consumeBrowserChildPolicyNotice: deps.consumeBrowserChildPolicyNotice,
       waitForBrowserChildPolicyNotice: deps.waitForBrowserChildPolicyNotice,
       hasPendingBrowserChildPolicy: deps.hasPendingBrowserChildPolicy,
-      noteTab: deps.noteAgentTab,
-      hintPullIn: deps.scheduleWebTabHint,
+      noteTab: (/** @type {number} */ tabId, /** @type {any} */ info,
+        /** @type {any} */ noteOptions = {}) => live.tabAffordances.noteAgentTab(
+        tabId,
+        typeof info === 'string'
+          ? { ...(info ? { label: info } : {}), opened: noteOptions.opened !== false }
+          : info,
+      ),
+      hintPullIn: (/** @type {number} */ tabId, /** @type {string} */ url) =>
+        live.tabAffordances.scheduleWebTabHint(tabId, url),
       ...(actorType === 'web' && actorBacking !== 'api'
         ? { adoptWebTab: () => live.adoptWebTab(sessionId) } : {}),
-      noteLearnedOrigin: deps.noteLearnedOrigin ?? (() => {}),
+      noteLearnedOrigin: (/** @type {string} */ origin, /** @type {any} */ reason) =>
+        learnedOrigins.note(origin, reason),
       listApiIntegrations: () => live.listApiIntegrations(sessionId),
       safeFetch,
       webFetch,
@@ -520,6 +782,49 @@ export const createKernelTurnLiveFactories = (deps) => {
       siteClients: siteClientStore,
       toolbox: toolboxStore,
       toolboxParseCheck,
+      dweb: dwebTransportOn() ? dwebSurface : null,
+      ...(actorType === 'app' && options.actorInstanceId ? {
+        appAgentCall: async (/** @type {'observe'|'act'} */ op,
+          /** @type {object} */ args, /** @type {AbortSignal|undefined} */ signal) => {
+          const ownerRoot = session?.parentSessionId;
+          if (!ownerRoot) {
+            return {
+              ok: false, error: 'app_runtime_owner_unbound', outcomeKnown: true,
+              outcomeKind: 'pre-effect-failure',
+            };
+          }
+          const tabId = engine.appTabTracker.getOwnedTabId(
+            options.actorInstanceId, ownerRoot,
+          );
+          if (tabId == null) {
+            return {
+              ok: false, error: 'app_runtime_tab_not_open_or_wrong_owner', outcomeKnown: true,
+              outcomeKind: 'pre-effect-failure',
+            };
+          }
+          try {
+            return await relayAppRuntimeCall({
+              tabId,
+              message: {
+                type: 'app/agent-call', appId: options.actorInstanceId, op, args,
+              },
+              send: deps.browser.tabs.sendMessage.bind(deps.browser.tabs),
+              reload: async (ownedTabId) => {
+                engine.appTabTracker.markReloading(options.actorInstanceId);
+                return deps.browser.tabs.reload(ownedTabId);
+              },
+              poisoned: poisonedAppRuntimeTabs,
+              signal,
+            });
+          } catch (cause) {
+            return {
+              ok: false,
+              error: `app_runtime_unreachable: ${/** @type {{message?:string}} */ (cause)?.message ?? String(cause)}`,
+              outcomeKnown: false, outcomeKind: 'transport-lost',
+            };
+          }
+        },
+      } : {}),
       denylist: Object.freeze([...deps.denylist.patterns()]),
       allowlist: Object.freeze([...HARDCODED_ALLOWLIST, ...userEndpoints]),
       provider: {
@@ -562,10 +867,2136 @@ export const createKernelTurnLiveFactories = (deps) => {
           : () => restricted.activeTab?.origin,
       );
       restricted.repinActiveTab = (/** @type {any} */ tab) => { restricted.activeTab = tab; };
-      restricted.siteCapture = deps.siteCapture;
+      restricted.siteCapture = siteCapture;
     }
     return restricted;
   };
 
-  return Object.freeze({ buildToolContext });
+  const uiConnected = () => live?.shared.uiPorts.size > 0;
+  const post = (/** @type {any} */ message) => {
+    if (uiConnected()) live.shared.uiPorts.broadcast(message);
+  };
+  const rootSessionIdFor = async (/** @type {string} */ sessionId) => {
+    const seen = new Set();
+    let cursor = sessionId;
+    for (let hops = 0; cursor && hops < 32 && !seen.has(cursor); hops += 1) {
+      seen.add(cursor);
+      const record = await live.shared.sessions.get(cursor).catch(() => null);
+      if (!record?.parentSessionId) return record ? cursor : null;
+      cursor = record.parentSessionId;
+    }
+    return null;
+  };
+  const dpopKeys = makeDpopKeyStore({
+    get: (/** @type {string} */ store, /** @type {string} */ key) => deps.idb.get(store, key),
+    put: (/** @type {string} */ store, /** @type {any} */ row) => deps.idb.put(store, row),
+    del: (/** @type {string} */ store, /** @type {string} */ key) => deps.idb.del(store, key),
+  });
+  const getDpopKey = (/** @type {string} */ origin) => getOrCreateDpopKey(origin, {
+    ...dpopKeys,
+    audit: (/** @type {any} */ event) => deps.auditLog.append(event),
+  });
+  /** @type {Map<string,Set<string>>} */
+  const sessionConfirmGrants = new Map();
+  const confirmAction = async (/** @type {any} */ prompt, /** @type {AbortSignal} */ signal) => {
+    if (signal?.aborted) return 'no';
+    const sessionId = prompt.sessionId ?? null;
+    if (prompt.oneShot !== true && prompt.tool === WEB_WRITE_CONFIRM_KEY
+        && deps.settingsStore.get().confirmWebWrites === false) return 'yes_once';
+    const ephemeral = sessionId
+      ? (await live.shared.sessions.get(sessionId).catch(() => null))?.kind === 'actor' : false;
+    const answer = await answerWithSessionConfirmGrant({
+      prompt, sessionId, ephemeral, grants: sessionConfirmGrants,
+      request: async () => {
+        const ownerSessionId = sessionId ? await rootSessionIdFor(sessionId) : null;
+        return deps.confirmation.confirm({
+          ...prompt, ownerSessionId,
+          ...(downgradesActorConfirm(prompt.tool, ephemeral, 'yes_session')
+            ? { ephemeral: true } : {}),
+        }, signal);
+      },
+    });
+    const normalized = downgradesActorConfirm(prompt.tool, ephemeral, answer)
+      ? 'yes_once' : answer;
+    if (prompt.tool === WEB_WRITE_CONFIRM_KEY
+        && (normalized === 'yes_once' || normalized === 'yes_session')) {
+      for (const origin of prompt.origins ?? []) learnedOrigins.note(origin, 'confirmed-write');
+    }
+    return normalized;
+  };
+  const ensureCurrentSession = async () => {
+    let sessionId = await deps.sessionCache.sessionGet('currentSessionId');
+    if (sessionId) return sessionId;
+    const active = await ensureActiveProvider();
+    const permission = await resolvePermission(null);
+    const created = await live.shared.sessions.create({
+      provider: active.name, model: active.model,
+      permissionMode: permission.mode, confirmActions: permission.confirmActions,
+    });
+    sessionId = created.sessionId;
+    await deps.sessionCache.sessionSet('currentSessionId', sessionId);
+    live.shared.sessionState.set(created);
+    return sessionId;
+  };
+  const handleSystemCommand = async (/** @type {string} */ raw) => {
+    if (deps.vault.isLocked()) throw new VaultLockedError();
+    const argument = raw.trim();
+    let sessionId = await deps.sessionCache.sessionGet('currentSessionId');
+    if (!argument) {
+      const current = sessionId ? await live.shared.sessions.get(sessionId) : null;
+      deps.postChatNote(current?.customSystemPrompt
+        ? `Session instructions active (${current.customSystemPrompt.length} chars): ${current.customSystemPrompt}`
+        : 'No session instructions set. "/system <text>" sets them for this chat; "/system clear" removes them.');
+      return;
+    }
+    if (/^clear$/i.test(argument)) {
+      if (!sessionId) return;
+      live.shared.sessionState.set(await live.shared.sessions.setCustomSystemPrompt(sessionId, null));
+      await deps.auditLog.append({ type: 'session_instructions_cleared', sessionId });
+      await deps.pushState();
+      return;
+    }
+    sessionId = await ensureCurrentSession();
+    live.shared.sessionState.set(
+      await live.shared.sessions.setCustomSystemPrompt(sessionId, argument),
+    );
+    await deps.auditLog.append({
+      type: 'session_instructions_set', sessionId, details: { chars: argument.length },
+    });
+    await deps.pushState();
+  };
+  const handleToolsCommand = makeToolsCommand({
+    sessions: {
+      get: (/** @type {string} */ sessionId) => live.shared.sessions.get(sessionId),
+      setToolManifest: (/** @type {string} */ sessionId, /** @type {any} */ manifest) =>
+        live.shared.sessions.setToolManifest(sessionId, manifest),
+    },
+    getCurrentSessionId: () => deps.sessionCache.sessionGet('currentSessionId'),
+    ensureSession: ensureCurrentSession,
+    postNote: deps.postChatNote,
+    audit: deps.auditLog.append,
+  });
+
+  const registryEntries = () => [
+    ['vm', 'webvm', engine.vmRegistry, engine.vmTabTracker],
+    ['notebook', 'notebook', engine.jsRegistry, engine.jsTabTracker],
+    ['pod', 'pod', engine.podRegistry, engine.podTabTracker],
+    ['app', 'app', engine.appRegistry, engine.appTabTracker],
+  ];
+  const deriveAppOwnerAuthority = async (/** @type {any} */ owner,
+    /** @type {any} */ contract) => {
+    const permission = await resolvePermission(owner);
+    const allow = manifestAppActorTools({
+      contract,
+      hostTools: [...actorAllowedToolsFor('app')],
+      ownerAllowed: resolveManifestAllow(owner?.toolManifest),
+    });
+    return {
+      permission,
+      toolManifest: { allow },
+      digest: await sha256Hex(canonicalAppOwnerAuthority({
+        allow,
+        permissionMode: permission.mode,
+        confirmActions: permission.confirmActions,
+      })),
+    };
+  };
+  const mintActor = async (/** @type {any} */ entry, /** @type {any} */ record,
+    /** @type {string} */ ownerSessionId, /** @type {Record<string,any>} */ options = {}) => {
+    const owner = await live.shared.sessions.get(ownerSessionId);
+    if (!owner || owner.archivedAt) throw new Error('actor-owner-unavailable');
+    let permission = await resolvePermission(owner);
+    let toolManifest = owner.toolManifest;
+    let appManifestDigest;
+    let appOwnerAuthorityDigest;
+    let appRole;
+    if (entry[1] === 'app') {
+      const contract = options.contract
+        ?? parseAppManifest(await engine.appClient.readFile({ appId: record.id, path: 'peerd.json' }));
+      const authority = options.ownerAuthority
+        ?? await deriveAppOwnerAuthority(owner, contract);
+      permission = authority.permission;
+      toolManifest = authority.toolManifest;
+      appOwnerAuthorityDigest = authority.digest;
+      appManifestDigest = options.manifestDigest
+        ?? await sha256Hex(canonicalAppActorManifest(contract));
+      appRole = makeAppRole({ contract, record, manifestDigest: appManifestDigest });
+    }
+    const created = await live.shared.sessions.create({
+      kind: 'actor', parentSessionId: ownerSessionId,
+      provider: owner.provider, model: owner.model,
+      permissionMode: permission.mode, confirmActions: permission.confirmActions,
+      depth: (owner.depth ?? 0) + 1,
+      actorType: entry[1], instanceId: record.id,
+      ...(toolManifest !== undefined ? { toolManifest } : {}),
+      ...(entry[1] === 'web' ? { backing: record.backing ?? 'tab' } : {}),
+      ...(entry[1] === 'web' && record.ownedOrigin
+        ? { originState: {
+          mode: 'bound', ownedOrigin: record.ownedOrigin,
+          ...(record.provisionalOrigin ? { provisional: true } : {}),
+        } }
+        : entry[1] === 'web' && record.backing !== 'api'
+          ? { originState: { mode: 'roaming' } } : {}),
+      ...(entry[1] === 'app' ? {
+        actorSurface: 'code', appManifestDigest, appOwnerAuthorityDigest, appRole,
+      } : {}),
+    });
+    if (entry[2]) {
+      await entry[2].setDefaultForSession(created.sessionId, record.id);
+      if (options.bindForward !== false) {
+        await entry[2].setActorSession(record.id, created.sessionId);
+      }
+    }
+    deps.auditLog.append({
+      type: 'actor_minted', sessionId: created.sessionId,
+      details: { instanceId: record.id, kind: entry[1] },
+    }).catch(() => {});
+    if (['webvm', 'notebook', 'app'].includes(entry[1])) {
+      await live.prewalk?.armEngineActor(created.sessionId);
+    }
+    return created.sessionId;
+  };
+  /** @type {Map<string,Promise<string|null>>} */
+  const appActorTails = new Map();
+  const retireStale = async (/** @type {string|null|undefined} */ actorSessionId) => {
+    if (!actorSessionId) return;
+    live.shared.turnSlots.stop(actorSessionId);
+    await live.shared.sessions.archive(actorSessionId).catch(() => {});
+  };
+  const resolveAppActorOwner = async (/** @type {string|null|undefined} */ senderSessionId,
+    /** @type {any} */ record) => {
+    const explicitOwner = senderSessionId || record?.ownerSessionId;
+    if (typeof explicitOwner !== 'string' || !explicitOwner) {
+      throw new Error('App has no explicit actor owner; reopen it from a chat');
+    }
+    const ownerSessionId = await rootSessionIdFor(explicitOwner);
+    if (!ownerSessionId) throw new Error('App actor owner session is unavailable');
+    return ownerSessionId;
+  };
+  const ensureAppActorBinding = async (/** @type {string} */ appId,
+    /** @type {string|null|undefined} */ senderSessionId) => {
+    await bindingReady;
+    const ownerRecord = await engine.appRegistry.get(appId);
+    if (!ownerRecord) return null;
+    const ownerSessionId = await resolveAppActorOwner(senderSessionId, ownerRecord);
+    const key = `${ownerSessionId}\0${appId}`;
+    const previous = appActorTails.get(key) ?? Promise.resolve(null);
+    const operation = previous.catch(() => null).then(async () => {
+      const record = await engine.appRegistry.get(appId);
+      if (!record) return null;
+      const contract = parseAppManifest(
+        await engine.appClient.readFile({ appId, path: 'peerd.json' }),
+      );
+      const manifestDigest = await sha256Hex(canonicalAppActorManifest(contract));
+      const role = makeAppRole({ contract, record, manifestDigest });
+      const owner = await live.shared.sessions.get(ownerSessionId);
+      if (!owner || owner.archivedAt) throw new Error('App actor owner session is unavailable');
+      const ownerAuthority = await deriveAppOwnerAuthority(owner, contract);
+      const expected = {
+        ownerChatId: ownerSessionId, appId, manifestDigest,
+        ownerAuthorityDigest: ownerAuthority.digest,
+        publisherSource: role.source, publisher: role.publisher,
+      };
+      let actorSessionId = appActorBindings.resolve(ownerSessionId, appId);
+      let actor = actorSessionId
+        ? await live.shared.sessions.get(actorSessionId).catch(() => null) : null;
+      if (actorSessionId && !appActorSessionMatches(actor, expected)) {
+        appActorBindings.drop(ownerSessionId, appId);
+        await persistAppActors();
+        await retireStale(actorSessionId);
+        actorSessionId = null;
+      }
+      for (let attempt = 0; !actorSessionId && attempt < 8; attempt += 1) {
+        const durable = await live.shared.sessions.findActorSession({
+          parentSessionId: ownerSessionId, instanceId: appId, actorType: 'app',
+        });
+        if (!durable) break;
+        actor = await live.shared.sessions.get(durable).catch(() => null);
+        if (appActorSessionMatches(actor, expected)) {
+          actorSessionId = durable;
+          break;
+        }
+        await retireStale(durable);
+      }
+      if (!actorSessionId) {
+        actorSessionId = await mintActor(
+          ['app', 'app', engine.appRegistry, engine.appTabTracker], record, ownerSessionId, {
+            contract, manifestDigest, ownerAuthority, bindForward: false,
+          });
+      }
+      if (!appActorBindings.resolve(ownerSessionId, appId)) {
+        if (!actorSessionId) throw new Error('app-actor-mint-failed');
+        appActorBindings.bind(ownerSessionId, appId, actorSessionId);
+        await persistAppActors();
+      }
+      return actorSessionId;
+    });
+    appActorTails.set(key, operation);
+    return operation.finally(() => {
+      if (appActorTails.get(key) === operation) appActorTails.delete(key);
+    });
+  };
+  const retireAppActors = async (/** @type {string} */ appId) => {
+    await bindingReady;
+    const retirements = [];
+    for (const [key, actorSessionId] of appActorBindings.entries()) {
+      const gap = key.indexOf('\0');
+      if (gap < 0 || key.slice(gap + 1) !== appId) continue;
+      appActorBindings.drop(key.slice(0, gap), appId);
+      retirements.push(retireStale(actorSessionId));
+    }
+    await persistAppActors();
+    await Promise.all(retirements);
+  };
+  const validateGeneration = async (/** @type {any} */ actor) => {
+    if (!actor?.sessionId || !actor?.parentSessionId || !actor?.instanceId) return false;
+    await bindingReady;
+    const record = await engine.appRegistry.get(actor.instanceId);
+    const owner = await live.shared.sessions.get(actor.parentSessionId);
+    if (!record || !owner || owner.archivedAt) return false;
+    const contract = parseAppManifest(await engine.appClient.readFile({
+      appId: actor.instanceId, path: 'peerd.json',
+    }));
+    const manifestDigest = await sha256Hex(canonicalAppActorManifest(contract));
+    const role = makeAppRole({ contract, record, manifestDigest });
+    const ownerAuthority = await deriveAppOwnerAuthority(owner, contract);
+    return appActorBindings.resolve(actor.parentSessionId, actor.instanceId) === actor.sessionId
+      && appActorSessionMatches(actor, {
+        ownerChatId: actor.parentSessionId, appId: actor.instanceId, manifestDigest,
+        ownerAuthorityDigest: ownerAuthority.digest,
+        publisherSource: role.source, publisher: role.publisher,
+      });
+  };
+  const resolveActor = async (/** @type {string} */ requested,
+    /** @type {{senderSessionId?:string|null}} */ options = {}) => {
+    await bindingReady;
+    if (requested === 'dweb') {
+      if (!deps.dwebEnabled || deps.settingsStore.get().dwebEnabled !== true
+          || deps.settingsStore.get().dwebAgentEnabled !== true) return null;
+      await dwebActorReady;
+      let actorSessionId = dwebActorSessionId;
+      if (actorSessionId && !await live.shared.sessions.get(actorSessionId)) {
+        actorSessionId = null;
+      }
+      actorSessionId ??= await live.shared.sessions.findActorSession({
+        instanceId: 'dweb', actorType: 'dweb',
+      });
+      if (!actorSessionId) {
+        const active = await ensureActiveProvider();
+        const created = await live.shared.sessions.create({
+          kind: 'actor', provider: active.name, model: active.model,
+          permissionMode: PERMISSION_MODES.ACT, confirmActions: false,
+          depth: 0, actorType: 'dweb', instanceId: 'dweb',
+        });
+        actorSessionId = created.sessionId;
+      }
+      dwebActorSessionId = actorSessionId;
+      await deps.sessionCache.sessionSet('dwebActorBinding', actorSessionId);
+      return { instanceId: 'dweb', kind: 'dweb', actorSessionId };
+    }
+    const senderSessionId = options.senderSessionId
+      ?? await deps.sessionCache.sessionGet('currentSessionId');
+    if (!senderSessionId) return null;
+    const ownerSessionId = await rootSessionIdFor(senderSessionId);
+    if (!ownerSessionId) return null;
+    if (requested === 'web') {
+      let actorSessionId = webActorRegistry.resolve(ownerSessionId);
+      const actor = actorSessionId
+        ? await live.shared.sessions.get(actorSessionId).catch(() => null) : null;
+      if (!actor || actor.archivedAt) {
+        actorSessionId = await mintActor(
+          ['web', 'web', null, null], { id: 'web', backing: 'tab' }, ownerSessionId,
+        );
+        if (!actorSessionId) throw new Error('web-actor-mint-failed');
+        webActorRegistry.bind(ownerSessionId, actorSessionId);
+        await persistWebActors();
+      }
+      const boundActorSessionId = /** @type {string} */ (actorSessionId);
+      return { instanceId: 'web', kind: 'web', actorSessionId: boundActorSessionId,
+        tabId: webActorTabBindings.tabFor(boundActorSessionId) };
+    }
+    if (/^\d+$/.test(requested)) {
+      const tabId = Number(requested);
+      const tab = await deps.browser.tabs.get(tabId).catch(() => null);
+      if (!tab || !isAddressableBrowserTab(tab.url)) return null;
+      let hostname = '';
+      try { hostname = new URL(tab.url).hostname; } catch { return null; }
+      if (matchesDenylist(hostname, deps.denylist.patterns())) return null;
+      const authority = await numericTabAuthorityFor(tab.url);
+      if (!authority.allowed) {
+        deps.auditLog.append({
+          type: 'actor_tab_authority_refused',
+          details: {
+            code: authority.code,
+            ...(authority.origin ? { origin: authority.origin } : {}),
+            ...(authority.reason ? { reason: authority.reason } : {}),
+            performed: false,
+          },
+        }).catch(() => {});
+        return { resolutionRefusal: numericTabAuthorityRefusal(authority) };
+      }
+      let actorSessionId = webActorTabBindings.resolve(tabId);
+      if (actorSessionId) {
+        const current = await live.shared.sessions.get(actorSessionId).catch(() => null);
+        if (!current || current.originState?.ownedOrigin !== authority.origin) {
+          webActorTabBindings.drop(tabId);
+          await persistWebBindings();
+          if (current) await retireStale(actorSessionId);
+          actorSessionId = null;
+        }
+      }
+      if (!actorSessionId) {
+        actorSessionId = await mintActor(
+          ['web', 'web', null, null], {
+            id: requested, backing: 'tab', ownedOrigin: authority.origin,
+          }, ownerSessionId,
+        );
+        if (!actorSessionId) throw new Error('tab-actor-mint-failed');
+        webActorTabBindings.bind(tabId, actorSessionId);
+        await persistWebBindings();
+      }
+      return { instanceId: requested, kind: 'web', actorSessionId, tabId };
+    }
+    const siteOrigin = parseSiteHandle(requested);
+    const apiOrigin = siteOrigin ?? normalizeApiOrigin(requested);
+    if (apiOrigin && !isKnownIdpHost(apiOrigin)) {
+      const bindings = siteOrigin ? siteActorBindings : apiActorBindings;
+      const persist = siteOrigin ? persistSiteActors : persistApiActors;
+      let actorSessionId = bindings.resolve(ownerSessionId, apiOrigin);
+      if (actorSessionId && !await live.shared.sessions.get(actorSessionId).catch(() => null)) {
+        bindings.drop(ownerSessionId, apiOrigin);
+        await persist();
+        originStates.forget(actorSessionId);
+        actorSessionId = null;
+      }
+      if (!actorSessionId) {
+        actorSessionId = await live.shared.sessions.findActorSession({
+          parentSessionId: ownerSessionId,
+          instanceId: siteOrigin ? siteHandleFor(apiOrigin) : apiOrigin,
+          actorType: 'web',
+          ...(siteOrigin ? {} : { backing: 'api' }),
+        });
+        if (actorSessionId) {
+          bindings.bind(ownerSessionId, apiOrigin, actorSessionId);
+          await persist();
+        }
+      }
+      if (!actorSessionId) {
+        actorSessionId = await mintActor(
+          ['web', 'web', null, null],
+          siteOrigin
+            ? {
+              id: siteHandleFor(apiOrigin), backing: 'tab',
+              ownedOrigin: apiOrigin, provisionalOrigin: true,
+            }
+            : { id: apiOrigin, backing: 'api' },
+          ownerSessionId,
+        );
+        if (!actorSessionId) throw new Error('origin-actor-mint-failed');
+        bindings.bind(ownerSessionId, apiOrigin, actorSessionId);
+        await persist();
+      }
+      let tabId = siteOrigin ? webActorTabBindings.tabFor(actorSessionId) : undefined;
+      if (typeof tabId === 'number'
+          && !await deps.browser.tabs.get(tabId).catch(() => null)) {
+        webActorTabBindings.drop(tabId);
+        await persistWebBindings();
+        tabId = undefined;
+      }
+      return {
+        instanceId: siteOrigin ? siteHandleFor(apiOrigin) : apiOrigin,
+        kind: 'web', actorSessionId,
+        ...(typeof tabId === 'number' ? { tabId } : {}),
+      };
+    }
+    for (const entry of registryEntries()) {
+      const record = await entry[2].get(requested);
+      if (!record) continue;
+      if (entry[1] === 'app') {
+        const actorSessionId = await ensureAppActorBinding(requested, ownerSessionId);
+        return actorSessionId ? { instanceId: requested, kind: 'app', actorSessionId } : null;
+      }
+      let actorSessionId = await entry[2].getActorSession(requested);
+      if (!actorSessionId) {
+        actorSessionId = await mintActor(entry, record, ownerSessionId);
+        await entry[2].setActorSession(requested, actorSessionId);
+      }
+      return { instanceId: requested, kind: entry[1], actorSessionId, name: record.name };
+    }
+    return null;
+  };
+
+  const forwardSpawnedEvent = (/** @type {any} */ event) => {
+    const topology = projection.foldSpawned(event);
+    if (topology) {
+      post(topology);
+      return;
+    }
+    const rootSessionId = projection.rootForSpawned(event.sessionId);
+    const base = { rootSessionId, sessionId: event.sessionId };
+    if (event.type === 'delta') {
+      post({ type: 'turn/spawned-delta', ...base, messageId: event.messageId, text: event.text });
+    } else if (event.type === 'tool-use') {
+      post({
+        type: 'turn/spawned-tool-use', ...base, messageId: event.messageId,
+        toolUseId: event.toolUseId, name: event.name, input: event.input,
+      });
+    } else if (event.type === 'tool-result') {
+      post({
+        type: 'turn/spawned-tool-result', ...base,
+        toolUseId: event.toolUseId, result: event.result,
+      });
+    } else if (event.type === 'stop') {
+      post({
+        type: 'turn/spawned-stop', ...base,
+        messageId: event.messageId, stopReason: event.stopReason,
+      });
+    } else if (event.type === 'error') {
+      post({
+        type: 'turn/spawned-error', ...base,
+        messageId: event.messageId, error: event.error,
+      });
+    } else if (event.type === 'usage') {
+      post({ type: 'turn/spawned-cost', ...base, usage: event.usage });
+    }
+  };
+  /** @type {Record<string,any>|null} */
+  let actorOverviewRoutes = null;
+  const actorCount = async () => {
+    const routes = /** @type {any} */ (actorOverviewRoutes);
+    return routes ? routes['actors/count']({}, null)
+      : { activeActors: projection.activeActorCount() };
+  };
+  const actorOverview = async () => {
+    const routes = /** @type {any} */ (actorOverviewRoutes);
+    return routes ? routes['actors/overview']({}, null) : { roots: [] };
+  };
+
+  /** @type {any} */
+  let actorClient = null;
+  /** @type {any} */
+  let directActorHost = null;
+  let mailboxChain = Promise.resolve();
+  const mailboxUpdate = (/** @type {(mailbox:Record<string,any>)=>Record<string,any>} */ update) => {
+    const operation = mailboxChain.catch(() => undefined).then(async () => {
+      const stored = await deps.sessionCache.sessionGet('actorMailbox');
+      const mailbox = stored && typeof stored === 'object' && !Array.isArray(stored)
+        ? stored : {};
+      await deps.sessionCache.sessionSet('actorMailbox', update(mailbox));
+    });
+    mailboxChain = operation.catch((cause) => {
+      console.warn('[actor] mailbox persist failed: request not run', cause);
+    });
+    return operation;
+  };
+  const actorMailbox = {
+    append: (/** @type {{id:string}} */ entry) =>
+      mailboxUpdate((mailbox) => ({ ...mailbox, [entry.id]: entry })),
+    markStarted: (/** @type {string} */ id) => mailboxUpdate((mailbox) => {
+      const entry = mailbox[id];
+      if (!entry || typeof entry !== 'object'
+          || entry.state !== undefined && entry.state !== 'queued') {
+        throw new Error('actor mailbox entry is missing or not queued');
+      }
+      return { ...mailbox, [id]: { ...entry, state: 'started', startedAt: Date.now() } };
+    }),
+    remove: (/** @type {string} */ id) => mailboxUpdate((mailbox) => {
+      const next = { ...mailbox };
+      delete next[id];
+      return next;
+    }),
+    load: async () => {
+      const stored = await deps.sessionCache.sessionGet('actorMailbox');
+      if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return [];
+      return Object.entries(stored).map(([id, entry]) =>
+        entry && typeof entry === 'object' ? { ...entry, id: entry.id ?? id } : { id });
+    },
+  };
+  const siteClientInjected = new Set();
+  const siteClientCustodyFor = async (/** @type {string} */ actorSessionId,
+    /** @type {string} */ instanceId, /** @type {number|undefined} */ actorTabId) => {
+    const record = await live.shared.sessions.get(actorSessionId).catch(() => null);
+    if (!record) return null;
+    if (record.backing === 'api') {
+      const origin = normalizeApiOrigin(record.instanceId ?? instanceId);
+      const authorize = makeFixedSiteClientOriginGuard(origin, { isKnownIdp: isKnownIdpHost });
+      return origin && authorize(origin) ? { origin, authorize: async () => authorize(origin) } : null;
+    }
+    if (record.backing !== undefined && record.backing !== 'tab'
+        || !hasDurableSiteClientState(record.originState)) return null;
+    originStates.hydrate(actorSessionId, record.originState);
+    const lock = live.originLockFor(actorSessionId);
+    if (!lock) return null;
+    const getLanding = async () => {
+      const tabId = actorTabId ?? webActorTabBindings.tabFor(actorSessionId);
+      if (typeof tabId !== 'number') return { status: 'missing' };
+      const tab = await deps.browser.tabs.get(tabId).catch(() => null);
+      return tab?.url ? { status: 'live', url: tab.url } : { status: 'missing' };
+    };
+    const authorize = lock.authorizeSiteClientOrigin(getLanding);
+    let origin = record.originState?.mode === 'bound'
+      ? normalizeApiOrigin(record.originState.ownedOrigin) : null;
+    if (!origin && record.originState?.mode === 'roaming') {
+      const landing = await getLanding();
+      if (landing.status === 'live') origin = normalizeApiOrigin(landing.url);
+    }
+    return origin && await authorize(origin) === true ? { origin, authorize: () => authorize(origin) } : null;
+  };
+  const runActorTurn = async (/** @type {any} */ request) => {
+    await live.actorIsolationReady;
+    const {
+      actorSessionId, message, instanceId, kind, actorTabId,
+      oneShot, turnLease, inbound, correlationId, parentToolUseId,
+      parentSessionId, rootSessionId, name, actorSurface: latchedActorSurface,
+    } = request;
+    if (!actorClient || !actorIsolationAvailable(live.actorIsolation)) {
+      turnLease?.release?.();
+      const refusal = actorIsolationRefusal(live.actorIsolation);
+      return { result: refusal.error, stopped: true, isolationFailure: refusal };
+    }
+    let record = await live.shared.sessions.get(actorSessionId);
+    if (!record) {
+      turnLease?.release?.();
+      return { result: 'the actor session no longer exists.', stopped: true };
+    }
+    const { controller, release } = turnLease ?? live.shared.turnSlots.claim(actorSessionId);
+    landingStopReports.delete(actorSessionId);
+    landingStopCards.delete(actorSessionId);
+    landingTurnSequence += 1;
+    landingTurnTokens.set(actorSessionId, landingTurnSequence);
+    await originStates.serialize(actorSessionId, () => undefined);
+    const withLandingStop = (/** @type {any} */ reply) => {
+      const report = landingStopReports.get(actorSessionId);
+      if (!report) return reply;
+      const card = landingStopCards.get(actorSessionId);
+      landingStopReports.delete(actorSessionId);
+      landingStopCards.delete(actorSessionId);
+      return { result: report, stopped: true, ...(card ? { landingStop: card } : {}) };
+    };
+    try {
+      record = await live.prewalk.reconcileEngineActor(record);
+      let deliveredMessage = message;
+      if (kind === 'web' && !siteClientInjected.has(actorSessionId)) {
+        try {
+          const custody = await siteClientCustodyFor(actorSessionId, instanceId, actorTabId);
+          if (custody) {
+            const meta = await siteClientStore.getMeta(custody.origin).catch(() => null);
+            if (meta && await custody.authorize() === true) {
+              siteClientInjected.add(actorSessionId);
+              deliveredMessage = `${buildMintInjection(meta)}\n\n---\n\n${message}`;
+            }
+          }
+        } catch { /* dossier injection is optional and never widens custody */ }
+      }
+      let preflightReply;
+      if (kind === 'web' && record.backing !== 'api') {
+        originStates.hydrate(actorSessionId, record.originState);
+        const lock = live.originLockFor(actorSessionId);
+        try {
+          const landing = await live.liveLandingFor(actorSessionId);
+          const state = originStates.read(actorSessionId);
+          const verdict = landing.status === 'live'
+            ? await lock?.judgeLanding(landing.url)
+            : state?.authGrant != null || state?.excursion != null
+              ? await lock?.terminateUnreadableSignIn() : null;
+          if (verdict?.action === 'wait') preflightReply = AUTH_WAITING_FOR_USER_MESSAGE;
+          else if (verdict && verdict.action !== 'continue') {
+            preflightReply = AUTH_BOUNDARY_STOPPED_MESSAGE;
+          }
+        } catch (cause) {
+          if (/** @type {{name?:string}} */ (cause)?.name === 'AbortError') throw cause;
+          preflightReply = AUTH_STATE_UNAVAILABLE_MESSAGE;
+        }
+      }
+      const actorSurface = latchedActorSurface ?? record.actorSurface
+        ?? (kind === 'web' && record.backing !== 'api'
+          ? resolveWebActorSurface({
+            requested: deps.settingsStore.get().webActorActionSurface,
+            allowedTools: resolveManifestAllow(record.toolManifest),
+            headlessAvailable: !deps.firefox,
+          }) : undefined);
+      const descriptors = filterByRuntimeCapabilities(filterDescriptorsByManifest(
+        actorDescriptors(listTools(), kind, record.backing, actorSurface),
+        resolveManifestAllow(record.toolManifest),
+      ), runtimeCapabilities);
+      const inboundTools = new Set(DWEB_INBOUND_TOOL_NAMES);
+      const tools = (inbound === true && kind === 'dweb'
+        ? descriptors.filter((descriptor) => inboundTools.has(descriptor.name)) : descriptors)
+        .map((descriptor) => ({
+        name: descriptor.name, description: descriptor.description, schema: descriptor.schema,
+      }));
+      const systemPrompt = await deps.seams.renderSystemPrompt({
+        actorType: kind, backing: record.backing, instanceId, actorSurface,
+        schemaReply: deps.settingsStore.get().schemaValidatedReplies === true,
+        temporalBlock: buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() }),
+        customSystemPrompt: record.customSystemPrompt,
+        appRole: record.appRole,
+        effectiveTools: tools.map((tool) => tool.name),
+        inbound: inbound === true,
+      });
+      const reasoning = {
+        enabled: deps.settingsStore.get().reasoningEnabled,
+        budgetTokens: REASONING_BUDGET_TOKENS,
+        effort: REASONING_EFFORT_LEVELS.includes(deps.settingsStore.get().reasoningEffort)
+          ? deps.settingsStore.get().reasoningEffort : CHANNEL_DEFAULTS.reasoningEffort,
+      };
+      const contextWindow = contextWindowFor(record.model, {
+        overrides: deps.settingsStore.get().contextWindowOverrides,
+        live: liveContextWindow(record.provider, record.model),
+      });
+      const display = parentToolUseId ? {
+        parentToolUseId, parentSessionId, rootSessionId,
+        actorCorrelationId: correlationId, kind, instanceId, name, task: message,
+      } : null;
+      if (parentToolUseId) {
+        const tabId = kind === 'web'
+          ? actorTabId ?? webActorTabBindings.tabFor(actorSessionId)
+          : registryEntries().find((entry) => entry[1] === kind)?.[3].getTabId(instanceId);
+        if (typeof tabId === 'number') live.tabAffordances.setTabAnchor(tabId, parentToolUseId);
+      }
+      const fromIndex = (record.messages ?? []).length;
+      if (display) {
+        projection.startBound({
+          ...display, sessionId: actorSessionId, fromIndex,
+          grantedTools: tools.map((tool) => tool.name),
+          messages: [], streaming: true, error: null, cost: null,
+        });
+        post({
+          type: 'turn/actor-start', ...display, sessionId: actorSessionId, fromIndex,
+          actorProjectionEpoch: projection.epoch(),
+          actorProjectionRevision: projection.revision(),
+          grantedTools: tools.map((tool) => tool.name),
+          messages: [], streaming: true, error: null, cost: null,
+        });
+      }
+      const onEvent = display ? (/** @type {any} */ event) => {
+        if (event.type === 'state') {
+          const messages = Array.isArray(event.session?.messages)
+            ? event.session.messages.slice(fromIndex) : [];
+          if (projection.patchBound(display, { messages })) {
+            post({
+              type: 'turn/actor-state', ...display,
+              actorProjectionEpoch: projection.epoch(),
+              actorProjectionRevision: projection.revision(),
+              session: event.session, fromIndex,
+              grantedTools: tools.map((tool) => tool.name),
+            });
+          }
+        } else if (event.type === 'error'
+            && projection.patchBound(display, { error: event.error, streaming: false })) {
+          post({
+            type: 'turn/actor-error', ...display,
+            actorProjectionEpoch: projection.epoch(),
+            actorProjectionRevision: projection.revision(), error: event.error,
+          });
+        }
+      } : undefined;
+      const job = {
+        actorSessionId, message: deliveredMessage, systemPrompt,
+        provider: record.provider, model: record.model, depth: record.depth,
+        ollamaHost: deps.settingsStore.get().ollamaHost,
+        tools, priorMessages: record.messages ?? [], reasoning, contextWindow,
+        oneShot: oneShot === true,
+        actorType: kind, backing: record.backing, inbound: inbound === true,
+        ...(actorSurface ? { actorSurface } : {}),
+        ...(kind === 'web' && record.backing === 'api' ? { origin: instanceId } : {}),
+        ...(kind === 'web' && record.backing !== 'api' && actorTabId != null
+          ? { tabOrigin: safeWebActorSummaryOrigin(
+            (await deps.browser.tabs.get(actorTabId).catch(() => null))?.url,
+            deps.denylist.patterns(),
+          ) }
+          : {}),
+        ...(preflightReply ? { preflightReply } : {}),
+      };
+      const result = await live.runActorIsolated(job, { signal: controller.signal, onEvent });
+      if (!(result.ok || result.started)) {
+        const error = result.error ?? 'the isolated actor worker did not start';
+        if (display && projection.patchBound(display, { error, streaming: false })) {
+          post({ type: 'turn/actor-error', ...display, error });
+          post({
+            type: 'turn/actor-done', ...display,
+            sessionId: actorSessionId, ok: false, aborted: false,
+          });
+        }
+        return withLandingStop({
+          result: error,
+          stopped: true, isolationFailure: result,
+        });
+      }
+      const newMessages = Array.isArray(result.newMessages) ? result.newMessages : [];
+      let persisted = true;
+      for (const entry of newMessages) {
+        await live.shared.sessions.appendMessage(actorSessionId, entry)
+          .catch(() => { persisted = false; });
+      }
+      if (result.usage) {
+        const price = costOf(record.model, result.usage,
+          deps.settingsStore.get().pricingOverrides,
+          { localProvider: !!listProviders().find((entry) => entry.name === record.provider)?.keyless });
+        await foldSessionCost(actorSessionId, result.usage, price?.cost ?? 0).catch(() => {});
+        if (display && projection.patchBound(display, { cost: price })) {
+          post({
+            type: 'turn/actor-cost', ...display, cost: price, usage: result.usage,
+          });
+        }
+      }
+      const turnSnapshot = {
+        messages: [...(record.messages ?? []), ...newMessages],
+        usage: { ...normalizeTally(result.usage) },
+      };
+      if (!persisted) return withLandingStop({
+        result: 'the actor ran, but its response could not be saved reliably; the outcome is unknown.',
+        stopped: true, executionFailed: true, outcomeKnown: false,
+        persistenceFailure: { performed: true, outcomeKnown: false, retryable: false },
+        turnSnapshot,
+      });
+      const reply = finalActorTurnReply(/** @type {any} */ ({ messages: newMessages }));
+      const terminalError = [...newMessages].reverse()
+        .find((entry) => entry?.role === 'assistant' && typeof entry?.error === 'string')?.error
+        ?? (result.ok || result.aborted ? null
+          : result.error ?? 'the isolated actor turn failed before it produced a reply');
+      const outcomeKnown = terminalError == null || result.outcomeKnown === true;
+      if (display) {
+        const current = terminalError
+          ? projection.patchBound(display, {
+            error: terminalError, outcomeKnown, streaming: false,
+          }) : projection.patchBound(display, {});
+        if (current) {
+          if (terminalError) post({
+            type: 'turn/actor-error', ...display, error: terminalError, outcomeKnown,
+          });
+          post({
+            type: 'turn/actor-done', ...display, sessionId: actorSessionId,
+            ok: terminalError == null && !result.aborted, aborted: result.aborted === true,
+          });
+        }
+      }
+      if (terminalError) return withLandingStop({
+        result: terminalError, stopped: true, executionFailed: true,
+        outcomeKnown, executionFailure: result, turnSnapshot,
+      });
+      if (result.aborted) return withLandingStop({
+        ...reply, stopped: true, aborted: true, turnSnapshot,
+      });
+      if (!result.ok) return withLandingStop({
+        result: result.error ?? reply.result, stopped: true,
+        executionFailed: true, outcomeKnown: result.outcomeKnown === true,
+        turnSnapshot,
+      });
+      return withLandingStop({ ...reply, turnSnapshot });
+    } finally {
+      projection.finishBound(parentToolUseId ? {
+        parentToolUseId, rootSessionId, actorCorrelationId: correlationId,
+      } : null);
+      release();
+      const tabId = webActorTabBindings.tabFor(actorSessionId);
+      if (typeof tabId === 'number') live.shared.pageActivity.idle(tabId).catch(() => {});
+    }
+  };
+
+  const makeActorRuntime = async (/** @type {Record<string,any>} */ shared) => {
+    const baseActorIsolation = actorIsolationCapability({
+      offscreenWorker: !deps.firefox,
+      backgroundPageWorker: deps.firefox && typeof globalThis.Worker === 'function',
+    });
+    const isolationState = deps.browser.storage?.local
+      ? makeActorIsolationStateStore({
+        storage: deps.browser.storage.local, protocol: ACTOR_WORKER_PROTOCOL,
+      }) : null;
+    const loadingIsolation = actorIsolationAvailable(baseActorIsolation)
+      ? {
+        status: /** @type {const} */ ('temporarily_unavailable'),
+        host: baseActorIsolation.host,
+        reason: 'Actor isolation state is loading.', retryable: true,
+      } : baseActorIsolation;
+    /** @type {Map<string, Set<(...args:any[])=>void>>} */
+    const tabListeners = new Map();
+    const captureTabListener = (/** @type {string} */ key) => ({
+      addListener: (/** @type {(...args:any[])=>void} */ listener) => {
+        const listeners = tabListeners.get(key) ?? new Set();
+        listeners.add(listener);
+        tabListeners.set(key, listeners);
+      },
+    });
+    const dispatchTabListeners = (/** @type {string} */ key, /** @type {any[]} */ args) => {
+      for (const listener of tabListeners.get(key) ?? []) listener(...args);
+    };
+    const closePanel = async () => {
+      if (deps.browser.sidebarAction?.close) {
+        await deps.browser.sidebarAction.close();
+        return { ok: true };
+      }
+      const sidePanel = deps.browser.sidePanel;
+      if (!sidePanel?.setOptions) return { ok: false, error: 'no-sidepanel' };
+      await sidePanel.setOptions({ enabled: false });
+      setTimeout(() => {
+        sidePanel.setOptions({ enabled: true, path: 'sidepanel/sidepanel.html' }).catch(() => {});
+      }, 250);
+      return { ok: true };
+    };
+    const tabAffordances = makeTabAffordances({
+      browser: deps.browser, uiPorts: shared.uiPorts,
+      denylistStore: deps.denylist, closeSidePanel: closePanel,
+      isWatchOn: () => deps.settingsStore.get().watchAgentTab === true,
+      getFrontDoorView: () => deps.settingsStore.get().frontDoorView === 'home' ? 'home' : 'panel',
+      coldEvent: (key) => captureTabListener(key),
+    });
+    void tabAffordances.syncFrontDoorBehavior();
+    live = {
+      shared, baseActorIsolation, actorIsolation: loadingIsolation,
+      tabAffordances, dispatchTabListeners,
+    };
+    actorOverviewRoutes = makeActorOverviewRoutes({
+      vault: deps.vault, sessions: shared.sessions, turnSlots: shared.turnSlots,
+      actorLiveProjection: projection, isActualHomeSender: () => true,
+    });
+    await Promise.all([
+      bindingReady, refreshKeyedOrigins(), learnedOrigins.hydrate(), userEndpointsReady,
+    ]);
+    if (deps.firefox) void persistWebBindings();
+    const directHandle = deps.firefoxActorLifetime?.createHandle?.();
+    directActorHost = deps.firefox
+      ? (await import('./direct-actor-host.js')).makeDirectActorHost({
+        workerUrl: deps.browser.runtime.getURL('offscreen/actor-worker.js'),
+        startKeepAlive: () => directHandle?.start(),
+        stopKeepAlive: () => directHandle?.stop(),
+      }) : null;
+    const channel = deps.firefox ? null : makeOffscreenActorChannelClient({
+      ensureOffscreen: deps.featureHost.ensureOffscreen,
+      findOffscreenClient: async () => {
+        const candidates = typeof deps.listActorHostClients === 'function'
+          ? await deps.listActorHostClients() : [];
+        return /** @type {any} */ (selectExactActorHostClient(candidates, deps.offscreenUrl));
+      },
+    });
+    const makeActorClient = deps.makeActorClient ?? makeOffscreenActorClient;
+    actorClient = actorIsolationAvailable(baseActorIsolation) ? makeActorClient({
+      ensureHost: async () => {
+        if (directActorHost) return;
+        await deps.featureHost.runtime.ready;
+      },
+      sendMessage: directActorHost?.sendMessage
+        ?? ((/** @type {any} */ message) => deps.browser.runtime.sendMessage(message)),
+      runOnChannel: channel ? (/** @type {any} */ job, /** @type {any} */ options) =>
+        deps.featureHost.runtime.runWithLease(
+          'controller', (/** @type {any} */ lease) => channel.run(job, { ...options, lease }),
+          { reason: 'actor-demand' },
+        ) : undefined,
+      callModel: /** @type {any} */ (callModel),
+      getSecret: (/** @type {string} */ name) => deps.vault.getSecret(name), safeFetch,
+      sessions: shared.sessions, buildToolContext,
+      dispatchToolCall: /** @type {any} */ (dispatchToolCall),
+      reviewToolAllowed: (/** @type {string} */ name) => isReadOnlyTool(name,
+        listTools().map((tool) => ({ name: tool.name, sideEffect: tool.sideEffect }))),
+      pinActorCall, restrictCtxCapabilities,
+      ownedTabFor: (/** @type {string} */ sessionId) => webActorTabBindings.tabFor(sessionId),
+      EXPOSURE_ACTOR, EXPOSURE_REVIEW,
+      recordModelCall: contextSnapshots.record,
+      broadcastOp: post,
+      isRelaySender: directActorHost?.isRelaySender ?? deps.isOffscreenSender,
+      inboundDwebToolNames: DWEB_INBOUND_TOOL_NAMES,
+      spendRefusalFor: async (/** @type {string} */ actorSessionId) => {
+        const spendLimit = deps.settingsStore.get().spendLimitUsd;
+        const over = (/** @type {any} */ record) => record
+          && limitExceeded(normalizeTally(record.cost).cost, spendLimit);
+        const own = await shared.sessions.get(actorSessionId).catch(() => null);
+        if (over(own)) {
+          return `actor refused: this actor has reached the session spend limit ($${spendLimit})`;
+        }
+        const rootId = await rootSessionIdFor(actorSessionId);
+        const root = rootId ? await shared.sessions.get(rootId).catch(() => null) : null;
+        return over(root)
+          ? `actor refused: the session spend limit ($${spendLimit}) is reached` : null;
+      },
+    }) : null;
+    directActorHost?.bindRelayRoutes(actorClient?.routes ?? {});
+    live.actorIsolationReady = actorIsolationAvailable(baseActorIsolation) && isolationState
+      ? isolationState.load(baseActorIsolation).then((stored) => {
+        live.actorIsolation = stored ?? baseActorIsolation;
+        return live.actorIsolation;
+      }).catch((cause) => {
+        live.actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, cause);
+        return live.actorIsolation;
+      }) : Promise.resolve(baseActorIsolation);
+    live.actorIsolationState = isolationState;
+    live.runActorIsolated = async (/** @type {any} */ job, /** @type {any} */ options = {}) => {
+      await live.actorIsolationReady;
+      if (!actorClient || !actorIsolationAvailable(live.actorIsolation)) {
+        return actorIsolationRefusal(live.actorIsolation, {
+          targetRead: false, targetChanged: false,
+        });
+      }
+      const attempt = await runActorWithStartupRetry({
+        run: () => actorClient.run(job, options),
+        isStartupFailure: isActorHostStartupFailure,
+        signal: options.signal,
+      });
+      if (!attempt.exhausted) return attempt.result;
+      live.actorIsolation = actorIsolationTemporarilyUnavailable(
+        baseActorIsolation, attempt.result?.error ?? 'actor worker startup failed',
+      );
+      let persisted = true;
+      try {
+        await isolationState?.markUnavailable(
+          baseActorIsolation,
+          attempt.result?.error ?? 'actor worker startup failed',
+          attempt.result?.code ?? 'unknown',
+        );
+      } catch { persisted = false; }
+      deps.auditLog.append({
+        type: 'actor_isolation_unavailable',
+        details: {
+          host: baseActorIsolation.host, code: attempt.result?.code ?? 'unknown',
+          retryable: true, persisted,
+        },
+      }).catch(() => {});
+      void deps.pushState().catch(() => {});
+      return {
+        ...actorIsolationRefusal(live.actorIsolation, {
+          targetRead: false, targetChanged: false,
+        }),
+        cause: attempt.result?.error ?? null,
+      };
+    };
+    const prewalk = makePrewalkController({
+      sessions: shared.sessions,
+      goalRunner: {
+        isActive: (/** @type {string} */ sessionId) => goalRunner?.isActive(sessionId) ?? false,
+        isPersisted: (/** @type {string} */ sessionId) =>
+          goalRunner?.isPersisted(sessionId) ?? Promise.resolve(false),
+      },
+      settings: deps.settingsStore, listProviders, getTool,
+      appendAudit: deps.auditLog.append, postChatNote: deps.postChatNote, now: Date.now,
+    });
+    live.prewalk = prewalk;
+    const actorMessaging = makeActorMessaging({
+      resolveActor: /** @type {any} */ (resolveActor), runActorTurn,
+      reenter: (/** @type {any} */ request) => live.runAgentTurn(request),
+      recordRecovery: async (/** @type {any} */ request) => {
+        await shared.sessions.appendMessage(request.sessionId, {
+          role: 'user', content: request.userText, synthetic: true,
+          actorReply: request.actorReply,
+          id: `actor-recovery:${request.sessionId}:${request.recoveryId}`,
+          when: Date.now(),
+        });
+        await deps.pushState();
+        return true;
+      },
+      deliveryCommitted: async (/** @type {{sessionId:string,deliveryId:string}} */ request) => {
+        const session = await shared.sessions.get(request.sessionId);
+        return (session?.messages ?? []).some((/** @type {any} */ message) =>
+          actorDeliveryIdsFromMessage(message).includes(request.deliveryId));
+      },
+      isActorSessionCurrent: async (/** @type {string} */ actorSessionId) => {
+        if (retiredActorSessions.has(actorSessionId)) return false;
+        const actor = await shared.sessions.get(actorSessionId);
+        return !!actor && actor.originState?.retired !== true;
+      },
+      turnSlots: shared.turnSlots,
+      getActiveSessionId: () => deps.sessionCache.sessionGet('currentSessionId'),
+      getAncestry: (/** @type {string} */ sessionId) => buildAncestry({
+        sessionId, getRecord: (/** @type {string} */ id) => shared.sessions.get(id),
+      }),
+      schemaValidatedReplies: () => deps.settingsStore.get().schemaValidatedReplies === true,
+      isVaultLocked: () => deps.vault.isLocked(),
+      getActorIsolation: () => live.actorIsolation,
+      wrapUntrusted, appendAudit: deps.auditLog.append, mailbox: actorMailbox,
+    });
+    const actorRecoveryGate = makeActorRecoveryGate({
+      redrain: () => actorMessaging.redrain(),
+      log: (cause) => console.error('[actor] mailbox recovery failed', cause),
+    });
+    void actorRecoveryGate.recover();
+    const spawnActorCore = makeSpawnActor({
+      sessions: shared.sessions, appendAudit: deps.auditLog.append,
+      getToolDescriptors: () => filterByRuntimeCapabilities(
+        mainAgentDescriptors(listTools()), runtimeCapabilities,
+      ),
+      turnSlots: shared.turnSlots,
+      runChildOffscreen: (/** @type {any} */ job, /** @type {any} */ options) => live.runActorIsolated({
+        actorSessionId: job.sessionId, message: job.task,
+        systemPrompt: job.systemPrompt, provider: job.provider, model: job.model,
+        ollamaHost: deps.settingsStore.get().ollamaHost,
+        depth: job.depth, maxSteps: job.maxSteps,
+        maxOutputTokens: job.maxOutputTokens, budgetMs: job.budgetMs,
+        tools: job.tools ?? [],
+      }, options),
+      renderSystemPromptForChild: (task, effectiveTools) => deps.seams.renderSystemPrompt({
+        taskOverride: task, effectiveTools,
+        temporalBlock: buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() }),
+      }),
+    });
+    const spawnActor = async (/** @type {any} */ request) => {
+      await live.actorIsolationReady;
+      return actorIsolationAvailable(live.actorIsolation)
+        ? spawnActorCore({ onEvent: forwardSpawnedEvent, ...request })
+        : actorIsolationSpawnRefusal(live.actorIsolation, request?.parentDepth);
+    };
+    const pushAsyncTasks = (/** @type {string} */ parentSessionId) => {
+      const tasks = live.asyncActors.actorTasks(parentSessionId);
+      projection.setAsyncTasks(parentSessionId, tasks);
+      post({ type: 'async-tasks/update', parentSessionId, tasks });
+    };
+    const notifyAsyncActors = (/** @type {number} */ count) => {
+      try {
+        deps.browser.notifications?.create?.({
+          type: 'basic', iconUrl: deps.browser.runtime.getURL('icons/icon128.png'),
+          title: count > 1 ? `${count} actors finished` : 'An actor finished',
+          message: 'Open peerd to see the result.',
+        });
+      } catch { /* notification delivery is optional */ }
+    };
+    const asyncActors = makeAsyncActors({
+      spawnActor,
+      turnSlots: {
+        runWhenIdle: (/** @type {string} */ sessionId, /** @type {any} */ operation) =>
+          shared.turnSlots.runWhenIdle(sessionId, operation),
+        runWhenIdleClaimed: (/** @type {string} */ sessionId,
+          /** @type {any} */ operation) => shared.turnSlots.runWhenIdleClaimed(sessionId, operation),
+        generation: (/** @type {string} */ sessionId) => shared.turnSlots.generation(sessionId),
+        isBusy: (/** @type {string} */ sessionId) => shared.turnSlots.isBusy(sessionId),
+        stop: (/** @type {string} */ sessionId) => shared.turnSlots.stop(sessionId),
+      },
+      stopSubtree: (/** @type {string} */ sessionId) => spawnActorCore.stopSubtree(sessionId),
+      reenter: (/** @type {any} */ request) => live.runAgentTurn(request),
+      getActiveSessionId: () => deps.sessionCache.sessionGet('currentSessionId'),
+      isVaultLocked: () => deps.vault.isLocked(), wrapUntrusted,
+      forwardEvent: forwardSpawnedEvent, notify: notifyAsyncActors,
+      onTasksChanged: pushAsyncTasks,
+    });
+    live.asyncActors = asyncActors;
+    const stopVaultSubscription = deps.vault.subscribe?.(() => {
+      if (!deps.vault.isLocked()) asyncActors.onVaultUnlock();
+    });
+    const requestReview = makeRequestReview({
+      spawnActor: /** @type {any} */ (spawnActor),
+      getToolDescriptors: () => listTools().map((tool) => ({
+        name: tool.name, sideEffect: tool.sideEffect,
+      })),
+      appendAudit: deps.auditLog.append,
+      checkpoints: {
+        diffSince: async (/** @type {string|null|undefined} */ ref) => {
+          const sessionId = await deps.sessionCache.sessionGet('currentSessionId');
+          const appId = sessionId
+            ? await engine.appRegistry.getDefaultForSession(sessionId).catch(() => null) : null;
+          const scope = appId ? `app:${appId}` : null;
+          if (!scope && !ref) return { files: [] };
+          return checkpointMgr.diffSince({ scope, ref: ref ?? null });
+        },
+      },
+      permissions: {
+        readOnlyTools: () => listTools()
+          .filter((tool) => classifyAction(tool) === ACTION_CLASSES.READ)
+          .map((tool) => tool.name),
+      },
+    });
+    const cheapCall = makeCheapCall({
+      spawnActor, sessions: shared.sessions,
+      costOf: (/** @type {string|undefined} */ model, /** @type {any} */ usage) =>
+        costOf(/** @type {any} */ (model ?? ''), usage,
+          deps.settingsStore.get().pricingOverrides),
+      getSpendLimitUsd: () => deps.settingsStore.get().spendLimitUsd,
+      appendAudit: deps.auditLog.append,
+    });
+    const suggestions = createSuggestionStore({ kv: deps.kv });
+    const autoMemory = makeAutoMemory({
+      sessions: shared.sessions, memory: shared.memory, suggestions, cheapCall,
+      getSettings: () => deps.settingsStore.get(),
+      isBusy: (/** @type {string} */ sessionId) => shared.turnSlots.isBusy(sessionId),
+      appendAudit: deps.auditLog.append,
+      notify: (/** @type {{pending:number}} */ { pending }) =>
+        post({ type: 'memory/suggestions-changed', pending }),
+    });
+    const trimEnricher = makeTrimEnricher({
+      cheapCall, sessions: shared.sessions, appendAudit: deps.auditLog.append,
+    });
+    const scheduler = makeScheduler({
+      kv: deps.kv, isLocked: () => deps.vault.isLocked(),
+      isRunning: (/** @type {any} */ routine) => !!routine.lastSessionId
+        && goalRunner?.isActive(routine.lastSessionId),
+      setAlarm: (/** @type {number|null} */ when) => {
+        if (when == null) deps.browser.alarms?.clear?.('peerd-schedule');
+        else deps.browser.alarms?.create?.('peerd-schedule', { when });
+      },
+      onEvent: post,
+      fireRoutine: async (/** @type {any} */ routine) => {
+        await deps.ready;
+        const active = await ensureActiveProvider();
+        const created = await shared.sessions.create({
+          provider: active.name, model: active.model,
+          permissionMode: PERMISSION_MODES.ACT, confirmActions: false,
+        });
+        await shared.sessions.update(created.sessionId, { routineId: routine.id }).catch(() => {});
+        deps.auditLog.append({
+          type: 'routine_fired',
+          details: {
+            routineId: routine.id, mode: routine.mode, sessionId: created.sessionId,
+          },
+        }).catch(() => {});
+        if (routine.mode === 'goal') {
+          await prewalk.armForRun(created.sessionId);
+          await goalRunner?.start({ sessionId: created.sessionId, goal: routine.prompt });
+        } else {
+          void live.runAgentTurn({
+            sessionId: created.sessionId, userText: routine.prompt, synthetic: false,
+          }).catch(() => {});
+        }
+        try {
+          deps.browser.notifications?.create?.({
+            type: 'basic', iconUrl: deps.browser.runtime.getURL('icons/icon128.png'),
+            title: 'peerd routine running',
+            message: 'A scheduled task started. Open peerd to see it.',
+          });
+        } catch { /* notification delivery is optional */ }
+        return { sessionId: created.sessionId };
+      },
+    });
+    const init = makeInitOrchestrator({
+      tabs: deps.browser.tabs, scripting: deps.browser.scripting,
+      listApps: () => engine.appRegistry.list(), memory: shared.memory,
+      confirm: deps.confirmation.confirm, postChatNote: deps.postChatNote,
+      getDenylist: () => deps.denylist.patterns(),
+    });
+    const adoptWebTab = async (/** @type {string} */ sessionId,
+      /** @type {AbortSignal|undefined} */ signal = undefined) => {
+      if (signal?.aborted) throw new Error('adopt_web_tab: aborted');
+      const tab = await deps.browser.tabs.create({ active: false, url: 'about:blank' });
+      if (typeof tab?.id !== 'number') throw new Error('web-actor-tab-open-failed');
+      if (signal?.aborted) {
+        await deps.browser.tabs.remove(tab.id).catch(() => {});
+        throw new Error('adopt_web_tab: aborted');
+      }
+      webActorTabBindings.bind(tab.id, sessionId);
+      await persistWebBindings();
+      await deps.syncDenylistNetwork?.();
+      if (signal?.aborted) {
+        webActorTabBindings.drop(tab.id);
+        await persistWebBindings();
+        await deps.browser.tabs.remove(tab.id).catch(() => {});
+        throw new Error('adopt_web_tab: aborted');
+      }
+      await live.tabAffordances.noteAgentTab(tab.id, { kind: 'web', opened: true });
+      return { tabId: tab.id, windowId: tab.windowId };
+    };
+    const liveLandingFor = async (/** @type {string} */ sessionId) => {
+      const tabId = webActorTabBindings.tabFor(sessionId);
+      if (typeof tabId !== 'number') return { status: 'missing' };
+      const tab = await deps.browser.tabs.get(tabId).catch(() => null);
+      return tab?.url ? { status: 'live', url: tab.url } : { status: 'missing' };
+    };
+    const originLockFor = makeOriginLockResolver({
+      originStates, landingTurnTokens, landingStopReports, landingStopCards,
+      makeJudgeLanding, describeLandingStop, landingStopCard,
+      retireStoppedRoamingWebActorDurably, webActorRegistry,
+      retiredActorSessions, persistWebActors, turnSlots: shared.turnSlots,
+      webActorTabBindings, persistWebBindings, pageActivity: shared.pageActivity,
+      siteActorBindings, persistSiteActors, auditLog: deps.auditLog,
+      originPhrase, isKnownIdp, isKnownIdpHost, sensitivitySignals,
+      makeSignInOriginAuthorizer, makeSignInExcursionAuthorizer,
+      makeSignInExcursionRevoker, makeCredentialScope,
+      makeSiteClientOriginGuard, makeSiteClientOriginAuthorizer,
+      liveSiteClientLandingFor: liveLandingFor,
+    });
+    Object.assign(live, {
+      actorMessaging, spawnActor, requestReview, scheduler, trimEnricher,
+      autoMemory, init, adoptWebTab, liveLandingFor, originLockFor,
+      actorRecoveryGate, actorLifecycle: spawnActorCore,
+    });
+
+    const pageCall = makePageCallHandler({
+      dispatchToolCall: /** @type {any} */ (dispatchToolCall),
+      buildActorContext: (/** @type {any} */ { sessionId, tabId }) => buildToolContext({
+        sessionId, activeTabId: tabId, exposure: EXPOSURE_ACTOR,
+        actorType: 'web', actorInstanceId: String(tabId), actorBacking: 'tab',
+        actorSurface: 'tools',
+      }),
+    });
+    const appCall = makeAppCallHandler({
+      dispatchToolCall: /** @type {any} */ (dispatchToolCall),
+      buildActorContext: (/** @type {any} */ { sessionId, appId }) => buildToolContext({
+        sessionId, exposure: EXPOSURE_ACTOR, actorType: 'app',
+        actorInstanceId: appId, actorSurface: 'tools',
+      }),
+    });
+    const actorsRoutes = makeActorsRoutes({
+      sessions: shared.sessions, uiPorts: shared.uiPorts, buildToolContext,
+      dispatchToolCall, actorMessaging, scriptRuns, actorsCallToOp,
+      shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
+      ACTORS_TRACE_TARGET_MAX_CHARS, ACTORS_TRACE_ERROR_MAX_CHARS,
+      resolveManifestAllow, isOffscreenSender: deps.isOffscreenSender,
+    });
+    const appActorChat = makeAppActorChatHandler({
+      isTrustedSender: deps.isTrustedSender, appTabTracker: engine.appTabTracker,
+      ensureAppActorBinding, sessions: shared.sessions,
+      messageActor: actorMessaging.messageActor,
+    });
+    const networkCustody = deps.networkCustody;
+    const syncNetworkCustody = async () => {
+      if (networkCustody?.sync) await networkCustody.sync();
+      else if (typeof deps.syncDenylistNetwork === 'function') {
+        await deps.syncDenylistNetwork();
+      }
+    };
+    const networkCustodyState = () => networkCustody?.state?.()
+      ?? networkCustody?.status?.()
+      ?? { supported: false, lastError: 'network-custody-unavailable' };
+    const refuseAppNetwork = (/** @type {string} */ appId, /** @type {number} */ tabId) => {
+      engine.appTabTracker.onTabFailed(appId, new Error('App network isolation is unavailable.'));
+      setTimeout(() => deps.browser.tabs.remove(tabId).catch(() => {}), 250);
+      return {
+        ok: false,
+        error: 'Apps are unavailable because this browser cannot enforce their network isolation.',
+      };
+    };
+    const attachAppTabActor = async (/** @type {any} */ message,
+      /** @type {any} */ sender) => {
+      const claim = validateAppTabClaim({
+        claimedAppId: message?.appId,
+        urlAppId: engine.appTabTracker.parseIdFromUrl(sender?.tab?.url),
+        senderTabId: sender?.tab?.id,
+        liveTabId: typeof message?.appId === 'string'
+          ? engine.appTabTracker.getTabId(message.appId) : null,
+      });
+      if (!claim.ok) return claim;
+      const { appId, tabId } = claim;
+      const record = await engine.appRegistry.get(appId);
+      if (!record) return { ok: false, error: 'app-not-found' };
+      const ownerClaim = resolveAppTabOwnerClaim({
+        claimedOwner: message.ownerSessionId,
+        urlOwner: engine.appTabTracker.parseOwnerFromUrl(sender?.tab?.url),
+        recordOwner: record.ownerSessionId,
+      });
+      if (!ownerClaim.ok) return ownerClaim;
+      const ownerSessionId = ownerClaim.ownerSessionId;
+      if (message.type === 'app/actor-retry') engine.appTabTracker.markReloading(appId);
+      engine.appTabTracker.onTabPending(appId, tabId, ownerSessionId);
+      if (deps.firefox) {
+        engine.appTabTracker.onTabFailed(appId, new Error('Apps are not available in Firefox yet.'));
+        setTimeout(() => deps.browser.tabs.remove(tabId).catch(() => {}), 250);
+        return {
+          ok: false,
+          error: 'Apps are not available in Firefox yet. Use Chrome for isolated Apps.',
+        };
+      }
+      await syncNetworkCustody();
+      const network = networkCustodyState();
+      if (!network.supported || network.lastError) return refuseAppNetwork(appId, tabId);
+      try {
+        const actorSessionId = await ensureAppActorBinding(appId, ownerSessionId);
+        if (!actorSessionId) throw new Error('manifest-defined App actor could not be attached');
+        const actor = await shared.sessions.get(actorSessionId);
+        if (!actor?.parentSessionId) throw new Error('manifest-defined App actor has no owner root');
+        engine.appTabTracker.onTabReady(
+          appId, tabId, ownerSessionId, actor.parentSessionId,
+        );
+        poisonedAppRuntimeTabs.delete(tabId);
+        return { ok: true, actorSessionId };
+      } catch (cause) {
+        const error = cause instanceof Error ? cause : new Error(String(cause));
+        engine.appTabTracker.onTabFailed(appId, error);
+        await syncNetworkCustody();
+        return {
+          ok: false, error: error.message, actorRequired: true, retryable: true,
+        };
+      }
+    };
+    const trustedEngineMessage = (/** @type {any} */ sender) =>
+      deps.isTrustedSender(sender) && typeof sender?.tab?.id === 'number';
+    const engineRoutes = {
+      'vm/tab-ready': async (/** @type {any} */ message, /** @type {any} */ sender) => {
+        if (!trustedEngineMessage(sender) || typeof message?.vmId !== 'string'
+            || engine.vmTabTracker.parseVmIdFromUrl(sender.tab.url) !== message.vmId
+            || !await engine.vmRegistry.get(message.vmId)) return false;
+        const liveTabId = engine.vmTabTracker.getTabId(message.vmId);
+        if (liveTabId != null && liveTabId !== sender.tab.id) return false;
+        engine.vmTabTracker.onTabReady(message.vmId, sender.tab.id);
+        await syncNetworkCustody();
+        return false;
+      },
+      'js/tab-ready': async (/** @type {any} */ message, /** @type {any} */ sender) => {
+        if (!trustedEngineMessage(sender) || typeof message?.notebookId !== 'string'
+            || engine.jsTabTracker.parseIdFromUrl(sender.tab.url) !== message.notebookId
+            || !await engine.jsRegistry.get(message.notebookId)) return false;
+        const liveTabId = engine.jsTabTracker.getTabId(message.notebookId);
+        if (liveTabId != null && liveTabId !== sender.tab.id) return false;
+        engine.jsTabTracker.onTabReady(message.notebookId, sender.tab.id);
+        await syncNetworkCustody();
+        return false;
+      },
+      'pod/tab-adopt': async (/** @type {any} */ message, /** @type {any} */ sender) => {
+        if (!trustedEngineMessage(sender) || typeof message?.podId !== 'string'
+            || engine.podTabTracker.parseIdFromUrl(sender.tab.url) !== message.podId) return false;
+        if (!await engine.podRegistry.get(message.podId)) {
+          return { ok: false, error: 'pod-not-found' };
+        }
+        const liveTabId = engine.podTabTracker.getTabId(message.podId);
+        if (liveTabId != null && liveTabId !== sender.tab.id) {
+          return { ok: false, error: 'pod-already-open' };
+        }
+        engine.podTabTracker.onTabPending(message.podId, sender.tab.id);
+        await syncNetworkCustody();
+        return { ok: true };
+      },
+      'app/tab-ready': (/** @type {any} */ message, /** @type {any} */ sender) =>
+        trustedEngineMessage(sender) ? attachAppTabActor(message, sender) : false,
+      'app/actor-retry': (/** @type {any} */ message, /** @type {any} */ sender) =>
+        trustedEngineMessage(sender) ? attachAppTabActor(message, sender) : false,
+    };
+    const engineTrackersHydrated = Promise.resolve();
+    const engineReady = Promise.all(engine.appCandidates.map((/** @type {any} */ candidate) =>
+      attachAppTabActor({
+        type: 'app/tab-ready', appId: candidate.appId,
+        ownerSessionId: candidate.ownerSessionId,
+      }, { tab: { id: candidate.tabId, url: candidate.url } })))
+      .then(() => undefined);
+    const conversationRegistry = createConversationRegistry();
+    const dwebAgentOn = () => deps.dwebEnabled
+      && deps.settingsStore.get().dwebEnabled === true
+      && deps.settingsStore.get().dwebAgentEnabled === true;
+    const meshHostRoom = (/** @type {Record<string,any>} */ payload,
+      /** @type {()=>boolean} */ guard = () => true) =>
+      engine.withDwebPublication(async (/** @type {()=>boolean} */ current) => {
+        if (!current() || !dwebAgentOn() || guard() !== true) {
+          return { ok: false, error: 'dweb-disabled-or-revoked' };
+        }
+        await deps.ensureDwebFeature();
+        return deps.browser.runtime.sendMessage({
+          type: 'dweb/base-host/room', roomId: 'peerd-agent', ...payload,
+        });
+      });
+    const meshDispatch = makeMeshDispatch({
+      sendDm: async (to, envelope) => {
+        const replyConversationId = envelope?.kind === 'reply'
+          && typeof envelope?.convId === 'string' ? envelope.convId : null;
+        const result = await meshHostRoom(
+          { op: 'dm', to, data: envelope },
+          replyConversationId
+            ? () => conversationRegistry.ownedBy(replyConversationId, to) : () => true,
+        ).catch(() => null);
+        return {
+          ok: result?.ok === true, id: result?.id,
+          error: result?.error,
+        };
+      },
+      listPeers: async () => {
+        await deps.ensureDwebFeature();
+        const result = await deps.browser.runtime.sendMessage({
+          type: 'dweb/base-host/peers',
+        }).catch(() => null);
+        return Array.isArray(result?.peers) ? result.peers.map((/** @type {any} */ peer) => ({
+          did: peer.did, name: peer.name,
+        })) : [];
+      },
+      fetchCard: async (did) => {
+        const result = await meshHostRoom({ op: 'card-get', did }).catch(() => null);
+        return result?.ok ? result.card ?? null : null;
+      },
+      publishCard: async (card) => {
+        const result = await meshHostRoom({ op: 'card-set', card }).catch(() => null);
+        return { ok: result?.ok === true, did: result?.did, error: result?.error };
+      },
+      conversations: conversationRegistry,
+    });
+    const confirmDwebReply = async (/** @type {string} */ conversationId,
+      /** @type {string} */ did, /** @type {string} */ sessionId) => {
+      if (conversationRegistry.hasReplyConsent(conversationId)) return true;
+      const answer = await confirmAction({
+        tool: 'a2a_reply', sessionId, origins: [did],
+      }, /** @type {any} */ (undefined));
+      const granted = answer === 'yes_once' || answer === 'yes_session';
+      if (answer === 'yes_session') conversationRegistry.grantReplyConsent(conversationId);
+      deps.auditLog.append({
+        type: 'a2a_reply_consent',
+        details: {
+          did, convId: conversationId, approved: granted,
+          standing: answer === 'yes_session',
+        },
+      }).catch(() => {});
+      return granted;
+    };
+    dwebAgentOwner = createKernelDwebAgentOwner({
+      active: dwebAgentOn, isLocked: deps.vault.isLocked,
+      appendAudit: deps.auditLog.append, meshDispatch,
+      conversations: conversationRegistry, approvedDids: a2aApprovedDids,
+      persistApproved: () => deps.sessionCache.sessionSet(
+        'a2aApprovedDids', [...a2aApprovedDids],
+      ),
+      isolationReady: () => live.actorIsolationReady,
+      isolationAvailable: () => actorIsolationAvailable(live.actorIsolation),
+      runWhenRecoveryReady: actorRecoveryGate.runWhenReady,
+      resolveActor: () => resolveActor('dweb'),
+      sessions: shared.sessions, runActorTurn, turnSlots: shared.turnSlots,
+      currentSessionId: () => deps.sessionCache.sessionGet('currentSessionId'),
+      runAgentTurn: (/** @type {any} */ request) => live.runAgentTurn(request),
+      wrapUntrusted, finalAssistantText, confirmReply: confirmDwebReply,
+      withPublication: engine.withDwebPublication,
+      ensureFeature: deps.ensureDwebFeature,
+      sendMessage: (/** @type {any} */ message) => deps.browser.runtime.sendMessage(message),
+      isOffscreenSender: deps.isOffscreenSender,
+    });
+    const a2aCall = async (/** @type {any} */ message = {}, /** @type {any} */ sender) => {
+      try {
+        if (!deps.isOffscreenSender(sender)) return { ok: false, error: 'a2a: unauthorized relay' };
+        if (!dwebAgentOn()) return { ok: false, error: 'a2a: the dweb agent is off' };
+        await a2aApprovedReady;
+        if (typeof message.runId !== 'string'
+            || scriptRuns.ownerFor(message.runId) !== message.ownerSessionId
+            || scriptRuns.allows(message.runId, 'a2a') !== true
+            || scriptRuns.admitOp(message.runId, 'a2a') !== true) {
+          return { ok: false, error: 'a2a: unknown, finished, foreign, or over-limit run' };
+        }
+        const signal = scriptRuns.signalFor(message.runId);
+        if (signal?.aborted) return { ok: false, error: 'a2a: run aborted' };
+        const owner = message.ownerSessionId
+          ? await shared.sessions.get(message.ownerSessionId) : null;
+        if (!owner || owner.kind !== 'actor' || owner.actorType !== 'dweb') {
+          return { ok: false, error: 'a2a: not the dweb actor' };
+        }
+        const { op, args: rawArgs, signs } = meshCallToOp({
+          method: message.method, args: message.args,
+        });
+        const args = /** @type {Record<string,any>} */ (rawArgs);
+        if (signs) {
+          const target = op === 'publishCard' ? 'self:publishCard'
+            : op === 'say'
+              ? conversationRegistry.didFor(args.convId ?? '') : args.did;
+          if (!target) return { ok: false, error: `a2a: ${op} has no consent target` };
+          if (!a2aApprovedDids.has(target)) {
+            const answer = await confirmAction({
+              tool: 'a2a_contact', sessionId: message.ownerSessionId, origins: [target],
+            }, /** @type {any} */ (signal));
+            const consent = a2aConsentOutcome(answer);
+            if (consent.persist) {
+              a2aApprovedDids.add(target);
+              await deps.sessionCache.sessionSet('a2aApprovedDids', [...a2aApprovedDids]);
+            }
+            deps.auditLog.append({
+              type: 'a2a_consent',
+              details: { target, op, approved: consent.ok, standing: consent.persist },
+            }).catch(() => {});
+            if (!consent.ok) {
+              return { ok: false, error: `a2a: the user declined ${op} to ${target}` };
+            }
+          }
+        }
+        if (signal?.aborted) return { ok: false, error: 'a2a: run aborted' };
+        const result = await meshDispatch.dispatch(op, args, {
+          signs, allowed: (did) => a2aApprovedDids.has(did),
+          signal: signal ?? undefined,
+        });
+        return { ok: true, value: shapeMeshResult(message.method ?? '', result) };
+      } catch (cause) {
+        return { ok: false, error: /** @type {{message?:string}} */ (cause)?.message ?? String(cause) };
+      }
+    };
+    const reconcileTrackers = async () => {
+      await engineTrackersHydrated;
+      const tabs = await deps.browser.tabs.query({});
+      const tabIds = new Set(tabs.flatMap((/** @type {any} */ tab) =>
+        typeof tab.id === 'number' ? [tab.id] : []));
+      let changed = false;
+      for (const [tabId] of webActorTabBindings.entries()) {
+        if (tabIds.has(tabId)) continue;
+        webActorTabBindings.drop(tabId);
+        changed = true;
+      }
+      if (changed) await persistWebBindings();
+    };
+    const eventOwners = {
+      onCreated: (/** @type {any} */ tab) => {
+        live.dispatchTabListeners('tabs.onCreated', [tab]);
+      },
+      onUpdated: (/** @type {number} */ tabId, /** @type {any} */ change,
+        /** @type {any} */ tab) => {
+        debuggerPool.onTabUpdated(tabId, change);
+        if (change?.status === 'loading' || change?.url) domRefs.clear?.(tabId);
+        if (siteCapture.has(tabId)
+            && (change?.status === 'loading' || typeof change?.url === 'string')) {
+          void siteCapture.cancel({ tabId, reason: 'page_changed' }).catch(() => {});
+        }
+        const sourceWrite = deps.firefox && typeof change?.url === 'string'
+          && webActorTabBindings.has(tabId) ? persistWebBindings() : undefined;
+        live.dispatchTabListeners('tabs.onUpdated', [tabId, change, tab]);
+        return sourceWrite;
+      },
+      onRemoved: async (/** @type {number} */ tabId) => {
+        poisonedAppRuntimeTabs.delete(tabId);
+        debuggerPool.onTabRemoved(tabId);
+        siteCapture.release(tabId);
+        for (const [kind, , , tracker] of registryEntries()) {
+          const instanceId = tracker.onTabRemoved(tabId);
+          if (kind === 'vm' && instanceId) engine.vmClient.onTabClosed(instanceId);
+        }
+        if (webActorTabBindings.drop(tabId)) await persistWebBindings();
+        domRefs.clear?.(tabId);
+        await shared.pageActivity.release(tabId).catch(() => {});
+        live.dispatchTabListeners('tabs.onRemoved', [tabId]);
+      },
+      onActivated: (/** @type {any} */ activeInfo) => {
+        live.dispatchTabListeners('tabs.onActivated', [activeInfo]);
+      },
+      onNavigationTarget: (/** @type {any} */ details) => {
+        if (typeof details?.sourceTabId !== 'number' || typeof details?.tabId !== 'number'
+            || !webActorTabBindings.has(details.sourceTabId)) return;
+        void live.tabAffordances.noteAgentTab(details.tabId, {
+          kind: 'web', opened: true, protected: true,
+        });
+      },
+      onBeforeRequest: () => ({}),
+      reconcileTrackers,
+      reconcile: async () => {
+        await engineReady;
+        await reconcileTrackers();
+      },
+    };
+    const relayRoutes = {
+      'actors/call': actorsRoutes['actors/call'],
+      'page/call': async (/** @type {any} */ message = {}, /** @type {any} */ sender) => {
+        if (!deps.isOffscreenSender(sender)) return { ok: false, error: 'page_call_unauthorized_relay' };
+        if (deps.vault.isLocked()) return { ok: false, error: 'locked' };
+        const { method, args, ownerSessionId, runId } = message;
+        if (typeof ownerSessionId !== 'string' || !ownerSessionId) {
+          return { ok: false, error: 'page_call_no_owner' };
+        }
+        if (typeof runId !== 'string' || scriptRuns.ownerFor(runId) !== ownerSessionId
+            || scriptRuns.allows(runId, 'page') !== true
+            || scriptRuns.admitOp(runId, 'page') !== true) {
+          return { ok: false, error: 'page_call_unknown_finished_foreign_or_over_limit_run' };
+        }
+        const signal = scriptRuns.signalFor(runId);
+        if (signal?.aborted) return { ok: false, error: 'page_call_aborted' };
+        const owner = await shared.sessions.get(ownerSessionId).catch(() => null);
+        if (signal?.aborted) return { ok: false, error: 'page_call_aborted' };
+        if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web'
+            || owner.backing === 'api') {
+          return { ok: false, error: 'page_call_not_web_actor' };
+        }
+        const decision = resolvePageTab(
+          webActorTabBindings.tabFor(ownerSessionId), String(method ?? ''),
+        );
+        if (decision.action === 'refuse') return { ok: false, error: decision.error };
+        let tabId;
+        if (decision.action === 'adopt') {
+          const adopted = await adoptWebTab(ownerSessionId, signal ?? undefined).catch(() => null);
+          if (signal?.aborted) return { ok: false, error: 'page_call_aborted' };
+          if (typeof adopted?.tabId !== 'number') {
+            return { ok: false, error: 'page_call_tab_open_failed' };
+          }
+          tabId = adopted.tabId;
+        } else tabId = decision.tabId;
+        if (signal?.aborted) return { ok: false, error: 'page_call_aborted' };
+        const outcome = await pageCall({
+          method: String(method ?? ''), args, sessionId: ownerSessionId, tabId,
+          signal: signal ?? undefined,
+        });
+        shared.uiPorts.broadcast({
+          type: 'page/op', sessionId: ownerSessionId, tabId,
+          method: canonicalCodeTraceLabel('page', method).method,
+          ok: outcome?.ok === true,
+        });
+        return outcome;
+      },
+      'site-fetch/call': async (/** @type {any} */ message = {}, /** @type {any} */ sender) => {
+        if (!deps.isOffscreenSender(sender)) return { ok: false, error: 'site_fetch_unauthorized_relay' };
+        if (deps.vault.isLocked()) return { ok: false, error: 'locked' };
+        const { ownerSessionId, siteOrigin, pathOrUrl, method, headers, body, runId } = message;
+        if (typeof ownerSessionId !== 'string' || !ownerSessionId) {
+          return { ok: false, error: 'site_fetch_no_owner' };
+        }
+        if (typeof runId !== 'string' || scriptRuns.ownerFor(runId) !== ownerSessionId
+            || scriptRuns.allows(runId, 'site') !== true
+            || scriptRuns.admitOp(runId, 'site') !== true) {
+          return { ok: false, error: 'site_fetch_unknown_finished_foreign_or_over_limit_run' };
+        }
+        const signal = scriptRuns.signalFor(runId);
+        if (signal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
+        const owner = await shared.sessions.get(ownerSessionId).catch(() => null);
+        if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web') {
+          return { ok: false, error: 'site_fetch_not_web_actor' };
+        }
+        const pin = normalizeApiOrigin(siteOrigin);
+        if (!pin) return { ok: false, error: `site_fetch_bad_origin: ${siteOrigin}` };
+        if (isKnownIdpHost(pin)) {
+          return { ok: false, error: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE };
+        }
+        const target = resolveSiteUrl(pathOrUrl, pin);
+        if ('error' in target) return { ok: false, error: target.error };
+        let host = '';
+        try { host = new URL(target.url).hostname; } catch { /* resolveSiteUrl already validated */ }
+        const denied = host ? matchesDenylist(host, deps.denylist.patterns()) : null;
+        if (denied) return { ok: false, error: `denylisted: ${host} matches '${denied}'` };
+        const backing = owner.backing === undefined ? 'tab' : owner.backing;
+        const ownedApiOrigin = owner.backing === 'api'
+          ? normalizeApiOrigin(owner.instanceId) : null;
+        let originLock = null;
+        if (backing === 'tab' && hasDurableSiteClientState(owner.originState)) {
+          originStates.hydrate(ownerSessionId, owner.originState);
+          originLock = live.originLockFor(ownerSessionId);
+        }
+        const authorizeTabOrigin = originLock?.authorizeSiteClientOrigin(
+          () => live.liveLandingFor(ownerSessionId),
+        );
+        const reauthorize = () => authorizeSiteClientRelayOrigin({
+          backing, instanceOrigin: ownedApiOrigin, durableState: owner.originState,
+          targetOrigin: pin, authorizeTabOrigin, isKnownIdp: isKnownIdpHost,
+        });
+        if (!await reauthorize()) return { ok: false, error: 'site_fetch_cross_origin' };
+        const httpMethod = String(method ?? 'GET').toUpperCase();
+        if (needsWebWriteConfirm(httpMethod)) {
+          const answer = await confirmAction({
+            tool: WEB_WRITE_CONFIRM_KEY, kind: 'web_write', origins: [pin],
+            summary: `Allow a ${httpMethod} request to ${host} from a site client? This can send data out of the browser.`,
+            sessionId: ownerSessionId,
+          }, /** @type {any} */ (signal));
+          if (answer !== 'yes_once' && answer !== 'yes_session') {
+            return { ok: false, error: 'declined: user declined the site-client write.' };
+          }
+          if (signal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
+        }
+        let scopedFetch;
+        if (owner.backing === 'api') {
+          if (!ownedApiOrigin || pin !== ownedApiOrigin) {
+            return { ok: false, error: 'site_fetch_cross_origin' };
+          }
+          scopedFetch = withDpopCredentials(webFetch, () => ownedApiOrigin, {
+            getSecret: (/** @type {string} */ name) => deps.vault.getSecret(name),
+            getDpopKey, audit: deps.auditLog.append,
+          });
+        } else {
+          const ownedTabId = webActorTabBindings.tabFor(ownerSessionId);
+          /** @type {string|undefined} */
+          let tabOrigin;
+          if (typeof ownedTabId === 'number') {
+            const tab = await deps.browser.tabs.get(ownedTabId).catch(() => null);
+            if (tab?.url) tabOrigin = originOf(tab.url);
+          }
+          scopedFetch = withSessionScopedCredentials(
+            webFetch,
+            originLock ? originLock.makeScope(() => tabOrigin) : () => tabOrigin,
+          );
+        }
+        /** @type {Record<string,string>} */
+        const safeHeaders = {};
+        for (const [name, value] of Object.entries(headers ?? {})) {
+          if (['cookie', 'authorization', 'proxy-authorization', 'dpop']
+            .includes(name.toLowerCase())) continue;
+          if (typeof value === 'string') safeHeaders[name] = value;
+        }
+        let requestBody = body;
+        if (requestBody !== undefined && typeof requestBody !== 'string') {
+          requestBody = JSON.stringify(requestBody);
+          if (!safeHeaders['Content-Type'] && !safeHeaders['content-type']) {
+            safeHeaders['Content-Type'] = 'application/json';
+          }
+        }
+        if (!await reauthorize()) return { ok: false, error: 'site_fetch_cross_origin' };
+        if (signal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
+        try {
+          const response = await scopedFetch(target.url, {
+            method: httpMethod, headers: safeHeaders,
+            body: /** @type {string|undefined} */ (requestBody),
+            ...(signal ? { signal } : {}),
+          });
+          const contentType = response.headers.get('content-type') ?? '';
+          const text = (await response.text()).slice(0, 200_000);
+          let json = null;
+          if (/(json|graphql)/i.test(contentType)) {
+            try { json = JSON.parse(text); } catch { json = null; }
+          }
+          return { ok: true, value: {
+            status: response.status, finalUrl: response.url ?? target.url,
+            contentType: contentType || null, body: text, json,
+          } };
+        } catch (cause) {
+          const error = /** @type {{reason?:string,message?:string}} */ (cause);
+          if (error.reason === 'redirect_blocked') {
+            return { ok: false, error: `redirected: ${target.url} issued a redirect (not followed). Use the final URL.` };
+          }
+          if (error.reason === 'private_network') {
+            return { ok: false, error: `blocked: ${target.url} is a private/loopback host (SSRF defense).` };
+          }
+          return { ok: false, error: error.message ?? 'site_fetch_failed' };
+        }
+      },
+      'a2a/call': a2aCall,
+    };
+    const richEffects = createKernelRichEffectAuthority({
+      scriptRuns,
+      sessions: {
+        getMetadata: (/** @type {string} */ sessionId) => shared.sessions.get(sessionId),
+        updateMetadata: (/** @type {string} */ sessionId, /** @type {any} */ patch) =>
+          shared.sessions.update(sessionId, patch),
+      },
+      settingsStore: deps.settingsStore,
+      vault: deps.vault,
+      auditLog: deps.auditLog,
+      contextSnapshots,
+      kv: deps.kv,
+      safeFetch,
+      fetchFn: globalThis.fetch.bind(globalThis),
+    });
+    const relays = {
+      scriptRuns, validateGeneration, retireStale, dispatchToolCall,
+      buildActorContext: buildToolContext, appActorChat, engineTrackersHydrated, engineReady,
+      relayRoutes, engineRoutes, eventOwners,
+      handleRichKernelCall: richEffects.handle,
+      dwebInbound: dwebAgentOwner.onMessage,
+      syncDwebAgentRoom: dwebAgentOwner.syncRoom,
+      onDwebStopped: dwebAgentOwner.roomStopped,
+      onSettingsChanged: async (/** @type {any} */ patch) => {
+        if (patch?.watchAgentTab === true) await live.tabAffordances.focusAgentTab();
+        if (Object.hasOwn(patch ?? {}, 'frontDoorView')) {
+          await live.tabAffordances.syncFrontDoorBehavior();
+        }
+      },
+      resolveAppOwnerRoot: (/** @type {string} */ ownerSessionId) =>
+        rootSessionIdFor(ownerSessionId),
+      onAppDeleted: retireAppActors,
+      onAppManifestMutation: retireAppActors,
+      archiveOrphanedActor: retireStale,
+      loadUserEndpoints,
+      onEngineAdopt: (/** @type {string} */ kind, /** @type {string} */ id,
+        /** @type {number} */ tabId) => engineLiveness.adopt(kind, id, tabId),
+      onEngineDrop: (/** @type {string} */ kind, /** @type {string} */ id) =>
+        engineLiveness.drop(kind, id),
+      noteAgentTab: (/** @type {number} */ tabId, /** @type {any} */ tab) =>
+        live.tabAffordances.noteAgentTab(tabId, tab),
+      bindGoalRunner: (/** @type {any} */ runner) => { goalRunner = runner; },
+      beforeGoalStart: (/** @type {{sessionId:string}} */ request) =>
+        prewalk.armForRun(request?.sessionId),
+      hasUnresolvedSideEffects: async (/** @type {string} */ sessionId) => {
+        await lifecycleArmed;
+        if (await lifecycleBoot.operationLog.unknownIntentOverflowed?.()) return true;
+        for (const record of await lifecycleBoot.operationLog.listOutcomeUnknown()) {
+          if (await rootSessionIdFor(record.sessionId) === sessionId) return true;
+        }
+        return false;
+      },
+      onGoalRunEnd: (/** @type {string} */ sessionId, /** @type {any} */ info) => {
+        prewalk.restoreForRun(sessionId).catch(() => {});
+        void deps.sessionCache.sessionGet('currentSessionId').then((/** @type {any} */ current) => {
+          if (current !== sessionId) return;
+          if (info?.phase === 'capped') {
+            deps.postChatNote(`Goal run stopped after reaching the ${GOAL_MAX_ITERATIONS}-turn limit.`);
+          } else if (info?.phase === 'halted') {
+            deps.postChatNote(info?.reason
+              ? `Goal run stopped (${info.reason}).` : 'Goal run stopped.');
+          }
+        }).catch(() => {});
+      },
+      broadcastAgentTab: () => live.tabAffordances.broadcastAgentTab(),
+      onUiConnect: async (/** @type {any} */ port) => {
+        for (const event of goalRunner?.activeStates?.() ?? []) port.postMessage(event);
+        const sessionId = await deps.sessionCache.sessionGet('currentSessionId');
+        const snapshot = projection.snapshot(sessionId);
+        for (const actor of Object.values(snapshot.actors)) {
+          port.postMessage({
+            type: 'turn/actor-start', ...actor,
+            actorProjectionEpoch: snapshot.actorProjectionEpoch,
+            actorProjectionRevision: snapshot.actorProjectionRevision,
+          });
+        }
+        for (const actor of Object.values(snapshot.spawned.sessions)) {
+          port.postMessage({
+            type: 'turn/spawned-start', ...actor,
+          });
+          port.postMessage({
+            type: 'turn/spawned-state', rootSessionId: actor.rootSessionId,
+            session: actor,
+          });
+        }
+        for (const [parentSessionId, tasks] of Object.entries(snapshot.asyncTasks)) {
+          port.postMessage({ type: 'async-tasks/update', parentSessionId, tasks });
+        }
+      },
+      showWebTabHint: (/** @type {number} */ tabId) =>
+        live.tabAffordances.showWebTabHint(tabId),
+      isDrivenSource: (/** @type {number} */ tabId) =>
+        webActorTabBindings.resolve(tabId) != null,
+      webActorSessionForTab: (/** @type {number} */ tabId) =>
+        webActorTabBindings.resolve(tabId),
+      isWebActorTab: (/** @type {number} */ tabId) => webActorTabBindings.has(tabId),
+      externalDrivenTabIds: () => {
+        const ids = new Set(webActorTabBindings.entries().map(([tabId]) => tabId));
+        for (const [, , , tracker] of registryEntries()) {
+          for (const instanceId of tracker.listLive()) {
+            const tabId = tracker.getTabId(instanceId);
+            if (typeof tabId === 'number') ids.add(tabId);
+          }
+        }
+        return [...ids];
+      },
+      appTabIds: () => engine.appTabTracker.listLive()
+        .map((/** @type {string} */ appId) => engine.appTabTracker.getTabId(appId))
+        .filter((/** @type {number|null} */ tabId) => typeof tabId === 'number'),
+      resumeSchedules: async () => {
+        await actorRecoveryGate.runWhenReady('schedules', async () => {
+          await Promise.resolve(goalRunner?.resume?.()).catch(() => {});
+          await scheduler.load();
+          await scheduler.tick();
+          await dwebAgentOwner?.syncRoom();
+        });
+      },
+      debugOriginLock: async (/** @type {any} */ message = {}) => {
+        await deps.keyedOriginAuthority?.hydrate();
+        const origin = normalizeApiOrigin(message.origin);
+        const chatId = await deps.sessionCache.sessionGet('currentSessionId');
+        const actorSessionId = chatId ? webActorRegistry.resolve(chatId) : null;
+        if (deps.settingsStore.get().devMode === true && origin
+            && ['password-field', 'confirmed-write'].includes(message.seedReason)) {
+          learnedOrigins.note(origin, message.seedReason);
+          await learnedOrigins.settled();
+        }
+        const siteActorSessionId = origin && chatId
+          ? siteActorBindings.resolve(chatId, origin) : null;
+        return {
+          ok: true,
+          learned: origin ? [...learnedOrigins.snapshot().keys()]
+            .some((host) => learnedOriginCovers(host, origin)) : false,
+          keyed: origin
+            ? deps.keyedOriginAuthority?.has(origin) ?? keyedOrigins.has(origin) : false,
+          ownedTabId: actorSessionId ? webActorTabBindings.tabFor(actorSessionId) ?? null : null,
+          originState: actorSessionId ? originStates.read(actorSessionId) ?? null : null,
+          siteActorState: siteActorSessionId
+            ? originStates.read(siteActorSessionId) ?? null : null,
+          siteActorTabId: siteActorSessionId
+            ? webActorTabBindings.tabFor(siteActorSessionId) ?? null : null,
+        };
+      },
+    };
+    return Object.freeze({
+      actorCount, actorOverview, relays,
+      onSessionMessageAppended: async (/** @type {string} */ _sessionId,
+        /** @type {any} */ message) => {
+        await Promise.all(actorDeliveryIdsFromMessage(message).map((id) => actorMailbox.remove(id)));
+      },
+      close: async () => {
+        stopVaultSubscription?.();
+        await directHandle?.stop?.();
+      },
+    });
+  };
+
+  let debuggerNudgeShown = false;
+  const maybeNudgeDebuggerGrant = (/** @type {any} */ result) => {
+    const unavailable = typeof result?.error === 'string'
+      && (result.error.startsWith('debugger_unavailable')
+        || result.error.startsWith('debugger_not_available'));
+    if (!debuggerApiAvailable() || advancedAutomationOn() || debuggerNudgeShown
+        || result?.ok !== false || !unavailable || !uiConnected()) return;
+    try {
+      live.shared.uiPorts.broadcast({
+        type: 'turn/system-note',
+        text: 'That step needs advanced automation. It is off in Settings → Advanced.',
+        action: { kind: 'grant-debugger', label: 'Turn on advanced automation' },
+      });
+      debuggerNudgeShown = true;
+    } catch { /* the next unavailable result can retry after a surface reconnects */ }
+  };
+  /** @type {Map<string,{window?:number,fetching?:boolean}>} */
+  const contextWindowCache = new Map();
+  const liveContextWindow = (/** @type {string} */ provider, /** @type {string} */ model) => {
+    if (!provider || !model) return undefined;
+    const host = provider === 'ollama' ? `::${deps.settingsStore.get().ollamaHost ?? ''}` : '';
+    const key = `${provider}${host}::${model}`;
+    const cached = contextWindowCache.get(key);
+    if (typeof cached?.window === 'number') return cached.window;
+    if (cached?.fetching) return undefined;
+    contextWindowCache.set(key, { fetching: true });
+    providerModelContextWindow(provider, model, {
+      getSecret: (/** @type {string} */ name) => deps.vault.getSecret(name),
+      safeFetch, ollamaHost: deps.settingsStore.get().ollamaHost,
+    }).then((window) => {
+      if (typeof window === 'number') contextWindowCache.set(key, { window });
+      else contextWindowCache.delete(key);
+    }).catch(() => contextWindowCache.delete(key));
+    return undefined;
+  };
+  const checkpointMgr = {
+    capture: async (/** @type {{scope:string,label?:string|null}} */ { scope, label }) => {
+      if (typeof scope !== 'string' || !scope.startsWith('app:')) return null;
+      const appId = scope.slice(4);
+      const result = await engine.appQuiescence.run(appId, () => engine.repositories.coordinate(
+        { kind: 'app', id: appId },
+        async () => {
+          const status = await engine.repositories.statusApp(appId);
+          const paths = status.changed.slice(0, 3)
+            .map((/** @type {{path:string}} */ change) => change.path);
+          const automatic = paths.length
+            ? `agent turn: update ${paths.join(', ')}${status.changed.length > paths.length ? ', …' : ''}`
+            : 'agent turn';
+          return engine.repositories.commitApp(appId, { message: label || automatic });
+        },
+      ));
+      return result?.oid ? { id: result.oid, scope } : null;
+    },
+    diffSince: async (/** @type {{scope?:string|null,ref?:string|null}} */ { scope, ref }) => {
+      if (typeof scope !== 'string' || !scope.startsWith('app:')) return { files: [] };
+      const appId = scope.slice(4);
+      const status = await engine.repositories.statusApp(appId);
+      const from = ref || status.oid;
+      if (!from) return { files: [] };
+      const result = await engine.repositories.diffApp(appId, { from });
+      return { files: result.files, ref: from };
+    },
+  };
+
+  const makeDriver = (/** @type {Record<string,any>} */ assembly) => {
+    const driver = makeTurnDriver(assembly);
+    live.runAgentTurn = driver.runAgentTurn;
+    live.maybeAutoResume = driver.maybeAutoResume;
+    return driver;
+  };
+  const makeDriverDeps = (/** @type {Record<string,any>} */ shared) => ({
+    vault: deps.vault, VaultLockedError, sessionCache: deps.sessionCache,
+    ensureActiveProvider, resolvePermission, sessions: shared.sessions,
+    sessionState: shared.sessionState, turnSlots: shared.turnSlots,
+    buildTemporalBlock, memory: shared.memory, browser: deps.browser,
+    skillRegistry, resolveManifestAllow, buildToolContext,
+    filterByDwebActive, filterByDwebEnabled, filterDescriptorsByManifest,
+    mainAgentDescriptors, listTools, settingsStore: deps.settingsStore,
+    DWEB_ENABLED: deps.dwebEnabled, filterByGoalActive,
+    dwebEngagedSessions,
+    markDwebEngaged: (/** @type {string} */ sessionId) => {
+      if (sessionId) dwebEngagedSessions.add(sessionId);
+    },
+    dispatchToolCall, maybeNudgeDebuggerGrant, getTool, decideAction,
+    listProviders, costOf, makeTurnCostTracker,
+    uiConnected, uiPorts: shared.uiPorts, auditLog: deps.auditLog,
+    resolveFailoverChain: (/** @type {{provider:string,model:string}} */ start) => {
+      const settings = deps.settingsStore.get();
+      const fallbacks = settings.providerFailoverEnabled
+        ? (settings.providerFallbacks ?? []).flatMap((/** @type {string} */ name) => {
+          const provider = listProviders().find((entry) => entry.name === name);
+          return provider ? [{ provider: provider.name, model: provider.defaultModel }] : [];
+        }) : [];
+      return planFailoverChain(start, fallbacks);
+    },
+    shouldFailover, callModel, postChatNote: deps.postChatNote,
+    getSecret: (/** @type {string} */ name) => deps.vault.getSecret(name), safeFetch,
+    REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS,
+    DEFAULT_SETTINGS: CHANNEL_DEFAULTS, trimEnricher: live.trimEnricher,
+    contextWindowFor, liveContextWindow,
+    currentAppScope: async (/** @type {string} */ sessionId) => {
+      const appId = await engine.appRegistry.getDefaultForSession(sessionId).catch(() => null);
+      return appId ? `app:${appId}` : null;
+    },
+    checkpointMgr, detectInterruptedTurn,
+    getDenylist: () => deps.denylist.patterns(),
+    drainRecoveryNotices: (/** @type {string} */ sessionId) =>
+      lifecycleBoot.drainNoticesFor(sessionId),
+    recordModelCall: contextSnapshots.record,
+    getActorIsolation: () => live.actorIsolation,
+    waitForActorIsolation: () => live.actorIsolationReady,
+    getRuntimeCapabilities: () => runtimeCapabilities,
+    reconcilePrewalk: live.prewalk.reconcile,
+    maybePrewalkSwap: live.prewalk.maybeSwap,
+    reconcileEngineActor: live.prewalk.reconcileEngineActor,
+  });
+  const makeRouteDeps = (/** @type {Record<string,any>} */ shared) => ({
+    turn: {
+      vault: deps.vault, auditLog: deps.auditLog, sessions: shared.sessions,
+      sessionCache: deps.sessionCache, turnSlots: shared.turnSlots,
+      makeAgentSendCustody, pushState: deps.pushState, buildToolContext,
+      applyComposer, commandSources, prepareUserAttachmentsWithDocs,
+      convertDocAttachment: docOffscreenClient
+        ? async (/** @type {any} */ attachment) => {
+          if (!attachment?.data) throw new Error('the file was empty');
+          const { doc } = await docOffscreenClient.extract({
+            bytesB64: attachment.data, name: attachment.name,
+            contentType: attachment.mediaType,
+          });
+          return formatDocBody({
+            doc, maxChars: DOC_TEXT_MAX_CHARS, source: attachment.name,
+          });
+        } : null,
+      runInit: () => live.init.runInit(), handleSystemCommand, handleToolsCommand,
+      postChatNote: deps.postChatNote, spawnActor: live.spawnActor,
+      browser: deps.browser, ensureSession: ensureCurrentSession,
+      actorRecoveryReady: () => live.actorRecoveryGate.ready(),
+      actorMessaging: live.actorMessaging,
+      actorLifecycle: live.actorLifecycle, settingsStore: deps.settingsStore,
+      contextSnapshots, assembleDebugBundle, childSessionIdsOf,
+      CHANNEL: deps.channel,
+    },
+    session: {
+      vault: deps.vault, auditLog: deps.auditLog, pushState: deps.pushState,
+      sessions: shared.sessions, sessionCache: deps.sessionCache,
+      sessionState: shared.sessionState, autoMemory: live.autoMemory,
+      resolvePermission, normalizeMode, normalizeConfirmActions,
+      SessionNotFoundError, maybeAutoResumeAfterRecovery: (/** @type {string} */ sessionId) =>
+        live.actorRecoveryGate.runWhenReady(
+          `auto-resume:${sessionId}`,
+          () => live.maybeAutoResume(sessionId),
+        ),
+      turnSlots: shared.turnSlots, actorMessaging: live.actorMessaging,
+      nukeSessionWorkspace: (/** @type {string} */ sessionId) =>
+        engine.opfsHelpers(['peerd-workspace', sessionId]).nuke(),
+      purgeLifecycleSession: (/** @type {string} */ sessionId) =>
+        lifecycleBoot.purgeSession(sessionId),
+    },
+    isolation: {
+      retryActorIsolation: async () => {
+        await live.actorIsolationReady;
+        if (!actorIsolationAvailable(live.baseActorIsolation) || !actorClient) {
+          return actorIsolationRefusal(live.baseActorIsolation);
+        }
+        const result = await actorClient.run({
+          actorSessionId: '__actor_isolation_probe__', message: '', systemPrompt: '',
+          provider: '', model: '', probeOnly: true,
+        });
+        if (!result?.ok) {
+          live.actorIsolation = actorIsolationTemporarilyUnavailable(
+            live.baseActorIsolation, result?.error ?? 'actor worker startup failed',
+          );
+          let persisted = true;
+          try {
+            await live.actorIsolationState?.markUnavailable(
+              live.baseActorIsolation,
+              result?.error ?? 'actor worker startup failed',
+              result?.code ?? 'unknown',
+            );
+          } catch { persisted = false; }
+          deps.auditLog.append({
+            type: 'actor_isolation_retry_failed',
+            details: {
+              host: live.baseActorIsolation.host, code: result?.code ?? 'unknown',
+              performed: false, persisted,
+            },
+          }).catch(() => {});
+          await deps.pushState();
+          return { ...actorIsolationRefusal(live.actorIsolation), cause: result?.error ?? null };
+        }
+        try {
+          await live.actorIsolationState?.clear(live.baseActorIsolation);
+        } catch (cause) {
+          live.actorIsolation = actorIsolationTemporarilyUnavailable(
+            live.baseActorIsolation, cause,
+          );
+          deps.auditLog.append({
+            type: 'actor_isolation_retry_failed',
+            details: {
+              host: live.baseActorIsolation.host,
+              code: 'actor_isolation_state_clear_failed', performed: false, persisted: true,
+            },
+          }).catch(() => {});
+          await deps.pushState();
+          return { ...actorIsolationRefusal(live.actorIsolation), cause: live.actorIsolation.reason };
+        }
+        live.actorIsolation = live.baseActorIsolation;
+        deps.auditLog.append({
+          type: 'actor_isolation_restored',
+          details: {
+            host: live.actorIsolation.host, realmVerified: true, extensionApisPresent: false,
+          },
+        }).catch(() => {});
+        await deps.pushState();
+        return { ok: true, capability: { ...live.actorIsolation } };
+      },
+    },
+  });
+
+  return Object.freeze({
+    buildToolContext, makeActorRuntime, makeDriverDeps, makeRouteDeps, makeDriver,
+  });
 };

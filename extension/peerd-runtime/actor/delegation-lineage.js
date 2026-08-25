@@ -18,7 +18,7 @@
 // chat OR a descendant of it reached ENTIRELY through trusted SPAWN edges. Two
 // walls stay exactly as they are:
 //   1. the inbound wall — `inbound === true` still refuses. `inbound` is the
-//      turn's untrusted-origin flag (synthetic && !trusted, service-worker.js).
+//      turn's untrusted-origin flag (synthetic && !trusted).
 //      It is what keeps an injected/synthetic re-entry from delegating, and it is
 //      ALSO what keeps an async-actor's RESULT-wake from delegating (that wake
 //      re-enters the parent trusted:false → inbound:true), preserving the explicit
@@ -169,8 +169,8 @@ export const messageProvenance = ({ senderSessionId, ancestry = [] }) => {
 // LineageHop[] mayMessageActor/messageProvenance consume, applying the
 // fail-closed trust rules. It lives here (not inlined in the SW) so those rules
 // — the linchpin of the whole trusted-lineage defense — are unit-tested, not
-// only exercised through a hand-built mock. The imperative shell
-// (service-worker.js getAncestry) injects getRecord = sessions.get; the walk
+// only exercised through a hand-built mock. The host injects
+// getRecord = sessions.get; the walk
 // itself reads values only.
 
 /**

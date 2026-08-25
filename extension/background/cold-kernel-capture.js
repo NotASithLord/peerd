@@ -3,8 +3,8 @@
 // owns no semantic route implementation and imports no semantic barrel.
 
 import {
-  LEGACY_COLD_EVENTS,
-  LEGACY_PORT_CLASSES,
+  KERNEL_COLD_EVENTS,
+  KERNEL_PORT_CLASSES,
 } from './cold-kernel-inventory.js';
 import { structuredClonePayloadFits } from '../shared/structured-clone-size.js';
 import {
@@ -86,7 +86,7 @@ const validEntry = (/** @type {any} */ value) => value
   && typeof value.kernelEpoch === 'string'
   && typeof value.event === 'string'
   && (value.event === 'kernel.queueOverflow'
-    || LEGACY_COLD_EVENTS.some((entry) => entry.key === value.event))
+    || KERNEL_COLD_EVENTS.some((entry) => entry.key === value.event))
   && Number.isFinite(value.capturedAt)
   && structuredClonePayloadFits(value.payload, 16 * 1024);
 const parseQueue = (/** @type {any} */ value, /** @type {string} */ ownerEpoch,
@@ -215,7 +215,7 @@ export const createColdKernelCapture = ({
   }).catch((error) => { degraded = error; throw error; });
 
   const capture = (/** @type {string} */ key, /** @type {any[]} */ args) => {
-    const entry = LEGACY_COLD_EVENTS.find((candidate) => candidate.key === key);
+    const entry = KERNEL_COLD_EVENTS.find((candidate) => candidate.key === key);
     if (!entry) return null;
     if (registerListeners && entry.placement === 'kernel-authority') {
       try { authority[key]?.(...args); }
@@ -309,7 +309,7 @@ export const createColdKernelCapture = ({
 
   const onConnect = (/** @type {any} */ port) => {
     if (!isFirstPartyPort(port)) { try { port.disconnect(); } catch { /* closed */ } return; }
-    const portClass = LEGACY_PORT_CLASSES.find((candidate) => candidate.name === port.name);
+    const portClass = KERNEL_PORT_CLASSES.find((candidate) => candidate.name === port.name);
     if (!portClass || portClass.cold === 'disconnect') {
       try { port.disconnect(); } catch { /* closed */ }
       return;
@@ -327,7 +327,7 @@ export const createColdKernelCapture = ({
     try { port.postMessage({ type: 'kernel/waiting', kernelEpoch }); } catch { pendingPorts.delete(port); }
   };
 
-  const requiredAuthority = registerListeners ? LEGACY_COLD_EVENTS.filter((entry) =>
+  const requiredAuthority = registerListeners ? KERNEL_COLD_EVENTS.filter((entry) =>
     (entry.placement === 'kernel-authority' || entry.placement === 'kernel-immediate')
       && (entry.common || (firefox && entry.firefox)
         || (selfHostedChrome && entry.selfHostedChrome))) : [];
@@ -338,7 +338,7 @@ export const createColdKernelCapture = ({
   }
 
   const registered = [];
-  for (const entry of registerListeners ? LEGACY_COLD_EVENTS : []) {
+  for (const entry of registerListeners ? KERNEL_COLD_EVENTS : []) {
     if (!(entry.common || (firefox && entry.firefox)
         || (selfHostedChrome && entry.selfHostedChrome))) continue;
     const event = eventAt(browser, entry.key);

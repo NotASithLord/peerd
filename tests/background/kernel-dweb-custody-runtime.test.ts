@@ -15,9 +15,10 @@ describe('kernel dweb custody runtime', () => {
       'distributed/identity/v1', JSON.stringify({ seed: 'seed', pub: 'pub' }),
     ]]);
     const sent: any[] = [];
+    let featureAcquisitions = 0;
     const runtime = createKernelDwebCustodyRuntime({
       enabled: true,
-      ensureOffscreen: async () => {},
+      ensureDwebFeature: async () => { featureAcquisitions += 1; },
       active: () => true,
       vault: {
         isLocked: () => false,
@@ -52,6 +53,7 @@ describe('kernel dweb custody runtime', () => {
     await expect(runtime.dwebTransfer.exportRecord('backup-passphrase')).resolves.toEqual({
       identityRecord: { capsule: 'encrypted' },
     });
+    expect(featureAcquisitions).toBe(1);
     expect(sent.some((message) => message.type === 'custody/ack')).toBe(true);
 
     onMessage.emit({

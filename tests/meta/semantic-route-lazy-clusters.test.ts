@@ -73,6 +73,8 @@ describe('digest-bound lazy semantic route clusters', () => {
   test('each literal cluster reaches only its own route family', async () => {
     const expected: Record<string, string> = {
       actors: 'background/routes/actor-overview.js',
+      apps: 'peerd-engine/app-manifest.js',
+      contacts: 'background/routes/contacts.js',
       contributor: 'peerd-runtime/observability/contributor-store.js',
       memory: 'offscreen/semantic-routes/memory.js',
       providers: 'shared/provider-authority-policy.js',

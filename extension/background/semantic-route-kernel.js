@@ -5,6 +5,8 @@
 // cold graph does not grow while it remains the differential oracle.
 
 import { SEMANTIC_DISPATCH_PROTOCOL } from '../shared/structured-clone-size.js';
+import { mergeContacts } from '/peerd-runtime/contacts/aggregate.js';
+import { makeContactsRoutes } from './routes/contacts.js';
 
 const refused = (/** @type {string} */ error) => ({ ok: false, error });
 const text = (/** @type {unknown} */ value, max = 512) => typeof value === 'string'
@@ -101,6 +103,7 @@ export const makeSemanticRouteKernel = (deps) => {
     return { roots };
   };
   /** @type {Promise<any>|null} */ let overviewInFlight = null;
+  const listContacts = makeContactsRoutes({ ...deps, mergeContacts })['contacts/list'];
   const routes = Object.freeze({
     'actors/overview': async (/** @type {any} */ message, /** @type {any} */ sender) => {
       if (!deps.isHomeSender(sender)) return refused('actor-overview-unauthorized');
@@ -123,9 +126,7 @@ export const makeSemanticRouteKernel = (deps) => {
         ...message, kernelContext: { activeActors: deps.actorLiveProjection.activeActorCount() },
       }, authorityFor('actors/count', 'A', 'home'));
     },
-    'contacts/list': (/** @type {any} */ message) => deps.vault.isLocked()
-      ? refused('vault-locked')
-      : dispatch('contacts/list', message, authorityFor('contacts/list', 'A', 'first-party')),
+    'contacts/list': listContacts,
     'contacts/set': (/** @type {any} */ message) => deps.vault.isLocked()
       ? refused('vault-locked')
       : dispatch('contacts/set', message, authorityFor('contacts/set', 'E', 'first-party')),

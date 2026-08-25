@@ -114,4 +114,24 @@ describe('modular native-kernel browser event owners', () => {
     })).toThrow('kernel-lifecycle-events-config-invalid');
     expect(browser.runtime.onStartup.listeners).toHaveLength(0);
   });
+
+  test('Firefox fails closed when its blocking child-request event is absent', () => {
+    const browser = makeBrowser() as any;
+    browser.webRequest.onBeforeRequest = undefined;
+    expect(() => attachKernelTabEvents({
+      browser, registry: makeRegistry({ firefox: true }), firefox: true,
+      onCreated: () => {}, onUpdated: () => {}, onRemoved: () => {},
+      onActivated: () => {}, onNavigationTarget: () => {}, onBeforeRequest: () => ({}),
+    })).toThrow('kernel-firefox-child-request-guard-unavailable');
+  });
+
+  test('Firefox storage lifetime may own its event outside lifecycle custody', () => {
+    const browser = makeBrowser();
+    const registry = makeRegistry({ firefox: true });
+    attachKernelLifecycleEvents({
+      browser, registry, firefox: true,
+      onStartup: () => {}, alarmName: 'peerd-schedule', onAlarm: () => {},
+    });
+    expect(browser.storage.session.onChanged.listeners).toHaveLength(0);
+  });
 });

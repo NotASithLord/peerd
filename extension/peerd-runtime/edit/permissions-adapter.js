@@ -9,8 +9,7 @@
 //
 // Until 03 lands, this default ALWAYS ALLOWS, so feature 02 is fully
 // functional standalone. The integrator swaps `defaultWritePermissions`
-// for 03's real object at the single call site in service-worker.js
-// (search: EDIT_03_ADAPTER). No other code changes — the tool reads
+// for the live object at the single call site. The tool reads
 // `ctx.permissions?.canWrite` and falls back to allow only if absent,
 // so wiring 03 is purely additive.
 //

@@ -14,7 +14,6 @@ import { kernelTabOrigin } from './kernel-denylist-policy.js';
 // on one reviewed edge prevents each small cold adapter from consuming another
 // top-level import while its own native module remains independently measured.
 export {
-  createKernelDenylistNetworkCustody,
   createKernelDenylistPolicy,
   makeKernelDenylistRoutes,
 } from './kernel-denylist-policy.js';

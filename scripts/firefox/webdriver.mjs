@@ -46,10 +46,7 @@ export const startGeckodriver = async ({
 }) => {
   const port = await reservePort();
   const logs = [];
-  // why: geckodriver 0.37.1 requires this explicit host-side grant for
-  // browser-UI contexts. The runtime gate installs and opens the packaged
-  // moz-extension pages, so Firefox 153 otherwise rejects that navigation
-  // before the extension smoke can begin.
+  // why: geckodriver requires this grant for browser-UI contexts.
   const child = spawn(binary, [
     '--allow-system-access',
     '--host', '127.0.0.1',

@@ -8,8 +8,15 @@ import { controllerPayloadBytes } from './structured-clone-size.js';
 import {
   createSemanticDemandQuota,
   SEMANTIC_DEMAND_MAX_BYTES,
-  SEMANTIC_DEMAND_MAX_CONCURRENT,
 } from './semantic-demand-policy.js';
+import {
+  KERNEL_FEATURE_DISPATCH_CAPABILITY,
+  KERNEL_FEATURE_EVENT_CAPABILITY,
+  createKernelFeatureEffectQuota,
+  kernelFeatureOuterPayloadCap,
+  kernelFeaturePayloadAllowed,
+  parseKernelFeatureCall,
+} from './kernel-feature-policy.js';
 
 const KIB = 1024;
 const MIB = 1024 * KIB;
@@ -44,11 +51,21 @@ const refusal = (/** @type {string} */ code, /** @type {boolean} */ outcomeKnown
 
 export const controllerOuterPayloadCap = (/** @type {string} */ capability) =>
   capability === 'turn.run' ? TURN_OUTER_BYTES
-    : capability === 'prompt.render' ? PROMPT_OUTER_BYTES : GENERIC_OUTER_BYTES;
+    : capability === 'prompt.render' ? PROMPT_OUTER_BYTES
+      : kernelFeatureOuterPayloadCap(capability) || GENERIC_OUTER_BYTES;
 
-export const controllerKernelConcurrentCap = (/** @type {string} */ capability) =>
-  capability === 'turn.run' ? MAX_CONCURRENT_KERNEL_CALLS
-    : capability === 'semantic.dispatch' ? SEMANTIC_DEMAND_MAX_CONCURRENT : 0;
+export const controllerPayloadAllowed = (/** @type {string} */ capability,
+  /** @type {unknown} */ payload) => {
+  if (capability === KERNEL_FEATURE_DISPATCH_CAPABILITY
+      || capability === KERNEL_FEATURE_EVENT_CAPABILITY) {
+    return kernelFeaturePayloadAllowed(capability, payload);
+  }
+  return true;
+};
+
+export const controllerCallMaxDuration = (/** @type {string} */ capability,
+  /** @type {unknown} */ payload) => parseKernelFeatureCall(capability, payload)
+    ?.policy.maxDurationMs ?? Number.POSITIVE_INFINITY;
 
 // Renewals are progress-bound and never widen unattended host custody beyond
 // one idle window.
@@ -66,6 +83,10 @@ export const controllerOperationAllowedAfterCancel = (
  * @param {unknown} outerPayload
  */
 export const createControllerKernelQuota = (capability, outerPayload) => {
+  if (capability === KERNEL_FEATURE_DISPATCH_CAPABILITY
+      || capability === KERNEL_FEATURE_EVENT_CAPABILITY) {
+    return createKernelFeatureEffectQuota(capability, outerPayload);
+  }
   if (capability === 'semantic.dispatch') {
     const quota = createSemanticDemandQuota(outerPayload);
     return Object.freeze({

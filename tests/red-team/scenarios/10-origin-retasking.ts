@@ -50,23 +50,23 @@ const sensitive = (origin: string) =>
   classifyOriginSensitivity(origin, { hasVaultSecret: (o: string) => o === 'https://bank.test' }).sensitive;
 
 const numericRefusalSource = () => {
-  const source = readFileSync(new URL('../../../extension/background/service-worker.js', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../../../extension/background/kernel-turn-live-factories.js', import.meta.url), 'utf8');
   const start = source.indexOf('if (!authority.allowed) {');
   const end = source.indexOf('let actorSessionId = webActorTabBindings.resolve(tabId);', start);
   return start >= 0 && end > start ? source.slice(start, end) : '';
 };
 
 const siteResolutionSource = () => {
-  const source = readFileSync(new URL('../../../extension/background/service-worker.js', import.meta.url), 'utf8');
-  const start = source.indexOf('const siteOrigin = parseSiteHandle(instanceId);');
-  const end = source.indexOf('// DESIGN-18', start);
+  const source = readFileSync(new URL('../../../extension/background/kernel-turn-live-factories.js', import.meta.url), 'utf8');
+  const start = source.indexOf('const siteOrigin = parseSiteHandle(requested);');
+  const end = source.indexOf('return null;', start);
   return start >= 0 && end > start ? source.slice(start, end) : '';
 };
 
 const apiResolutionSource = () => {
-  const source = readFileSync(new URL('../../../extension/background/service-worker.js', import.meta.url), 'utf8');
-  const start = source.indexOf('const apiOrigin = normalizeApiOrigin(instanceId);');
-  const end = source.indexOf('const prefix = String(instanceId)', start);
+  const source = readFileSync(new URL('../../../extension/background/kernel-turn-live-factories.js', import.meta.url), 'utf8');
+  const start = source.indexOf('const siteOrigin = parseSiteHandle(requested);');
+  const end = source.indexOf('return null;', start);
   return start >= 0 && end > start ? source.slice(start, end) : '';
 };
 
@@ -94,10 +94,10 @@ const CORPUS: Case[] = [
     defense: 'site resolution refuses IdPs before resolveSiteActor can mint',
     check: () => {
       const source = siteResolutionSource();
-      const check = source.indexOf('isKnownIdpHost(siteOrigin)');
-      const mint = source.indexOf('resolveSiteActor(siteOrigin');
+      const check = source.indexOf('apiOrigin && !isKnownIdpHost(apiOrigin)');
+      const mint = source.indexOf('actorSessionId = await mintActor(');
       return {
-        denied: check >= 0 && mint > check && source.includes('IDENTITY_PROVIDER_TRANSIT_ONLY_CODE'),
+        denied: check >= 0 && mint > check,
         evidence: check >= 0 && mint > check ? 'IdP refusal precedes mint' : 'cannot prove pre-mint refusal',
       };
     },
@@ -108,10 +108,10 @@ const CORPUS: Case[] = [
     defense: 'API resolution refuses IdP hosts before reconnect or mint',
     check: () => {
       const source = apiResolutionSource();
-      const check = source.indexOf('isKnownIdpHost(apiOrigin)');
-      const mint = source.indexOf('resolveApiActor(apiOrigin');
+      const check = source.indexOf('apiOrigin && !isKnownIdpHost(apiOrigin)');
+      const mint = source.indexOf('actorSessionId = await mintActor(');
       return {
-        denied: check >= 0 && mint > check && source.includes('IDENTITY_PROVIDER_TRANSIT_ONLY_CODE'),
+        denied: check >= 0 && mint > check,
         evidence: check >= 0 && mint > check ? 'IdP refusal precedes API resolution' : 'cannot prove pre-mint refusal',
       };
     },

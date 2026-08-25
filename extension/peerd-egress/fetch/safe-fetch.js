@@ -72,7 +72,7 @@ export const isAllowed = (origin, allowlist) => allowlist.includes(origin);
 
 /**
  * Factory for a safeFetch bound to a specific allowlist source and audit
- * sink. The production wiring (see service-worker.js) builds one of these
+ * sink. Production builds one of these
  * with the hardcoded list + user-added endpoints; tests build one with
  * a fixed allowlist and a recording audit.
  *

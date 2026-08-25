@@ -22,6 +22,7 @@ describe('lazy native-kernel denylist policy', () => {
     });
     expect(reads).toBe(0);
     expect(fetches).toBe(0);
+    expect(policy.isReady()).toBe(false);
     expect(policy.blocks('example.com')).toBe(true);
   });
 
@@ -36,6 +37,7 @@ describe('lazy native-kernel denylist policy', () => {
     });
     await expect(Promise.all([policy.ready(), policy.ready()]))
       .resolves.toEqual([{ ok: true }, { ok: true }]);
+    expect(policy.isReady()).toBe(true);
     expect(fetches).toBe(1);
     expect(policy.blocks('bank.example')).toBe(false);
     expect(policy.blocks('private.example')).toBe(true);

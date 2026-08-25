@@ -22,7 +22,7 @@ const serial = () => {
 
 /** @param {Record<string,any>} deps */
 export const createKernelDwebCustodyRuntime = (deps) => {
-  if (!deps.enabled || typeof deps.ensureOffscreen !== 'function'
+  if (!deps.enabled || typeof deps.ensureDwebFeature !== 'function'
       || typeof deps.active !== 'function' || !deps.vault
       || !deps.auditLog || typeof deps.listApps !== 'function'
       || typeof deps.sendMessage !== 'function') {
@@ -48,7 +48,7 @@ export const createKernelDwebCustodyRuntime = (deps) => {
     withCustodyMutation: withIdentityMutation,
   });
   const custody = makeDwebCustodyClient({
-    ensureOffscreen: deps.ensureOffscreen,
+    ensureOffscreen: deps.ensureDwebFeature,
     handleSecretRequest: (/** @type {any} */ operation, /** @type {any} */ args) =>
       operation === 'self-get' || operation === 'self-set'
         ? self.handle(operation, args) : identity.handle(operation, args),

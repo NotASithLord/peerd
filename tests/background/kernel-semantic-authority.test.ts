@@ -73,11 +73,19 @@ describe('native local authority boundary', () => {
     expect(JSON.stringify(result)).not.toContain('secret-value');
   });
 
-  test('refuses operations whose custody moved fully into the kernel', async () => {
+  test('admits contact storage only for its exact sealed route', async () => {
+    const authority = makeAuthority();
+    await expect(call(authority, 'semantic.contacts.upsert', 'contacts/list', {
+      did: 'did:key:z6MkContact', patch: {},
+    }))
+      .resolves.toEqual({
+        ok: false, code: 'semantic-kernel-operation-denied', outcomeKnown: true,
+      });
+  });
+
+  test('refuses operations whose custody remains fully in the kernel', async () => {
     const authority = makeAuthority();
     for (const [operation, route] of [
-      ['semantic.contacts.list-saved', 'contacts/list'],
-      ['semantic.contacts.upsert', 'contacts/set'],
       ['semantic.toolbox.read-body', 'toolbox/read'],
       ['semantic.skills.list', 'skills/list'],
       ['semantic.memory.export', 'memory/export'],

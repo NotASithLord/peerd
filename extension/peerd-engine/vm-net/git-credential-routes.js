@@ -7,7 +7,7 @@
 // point of view — `list` returns host names ONLY, never values; the token is
 // decrypted just-in-time in injectGitAuth at request time (vm-http-fetch.js).
 //
-// Factored out of service-worker.js as an IO-injected factory so the validation
+// IO-injected so the validation
 // + error mapping is bun-testable without a SW. The pure host/token policy lives
 // in git-credentials.js; this composes it over an injected vault + audit. All IO
 // is injected — no vault/audit import here.

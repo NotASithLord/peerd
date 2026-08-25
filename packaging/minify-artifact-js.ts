@@ -6,10 +6,11 @@ import { extname, join, relative } from 'node:path';
 import type { Browser, Channel } from './lib.ts';
 import {
   collectStaticModuleGraph,
-  staticImportSpecifiers,
+  exportedNames,
+  moduleImportSpecifiers,
 } from './static-module-graph.ts';
 import { dwebEnabledForTarget } from './gen-channel-config.ts';
-import { LEGACY_PACKAGE_COLD_GRAPH_RATCHETS } from '../scripts/bench/cold-start-budgets.js';
+import { PACKAGE_COLD_GRAPH_RATCHETS } from '../scripts/bench/cold-start-budgets.js';
 
 export interface ColdGraphStats {
   entry: string;
@@ -44,7 +45,7 @@ export type ColdGraphBudgets = Partial<Record<'serviceWorker' | 'offscreen', Rea
 // Transitional no-growth fences from the v0.7.3 artifacts. The thin kernel
 // cutover replaces these with the target ceilings. Every channel/browser cell
 // gets its own exact fence so Preview cannot borrow Store headroom or vice versa.
-export const COLD_GRAPH_BUDGETS = LEGACY_PACKAGE_COLD_GRAPH_RATCHETS;
+export const COLD_GRAPH_BUDGETS = PACKAGE_COLD_GRAPH_RATCHETS;
 
 const PRESERVE_EXACT = new Set([
   'shared/channel-config.js',
@@ -147,7 +148,7 @@ export const minifyColdArtifactModules = async (
       minify: {
         whitespace: true,
         syntax: true,
-        identifiers: file === serviceWorkerEntry || file === offscreenEntry,
+        identifiers: false,
       },
     });
     if (!built.success || built.outputs.length !== 1) {
@@ -157,11 +158,18 @@ export const minifyColdArtifactModules = async (
     const whitespace = `${compactWhitespace.transformSync(source).trimEnd()}\n`;
     const output = [source, whitespace, candidate]
       .reduce((smallest, value) => byteLength(value) < byteLength(smallest) ? value : smallest);
-    const beforeImports = await staticImportSpecifiers(source, relative(staging, file));
-    const afterImports = await staticImportSpecifiers(output, relative(staging, file));
+    const beforeImports = await moduleImportSpecifiers(source, relative(staging, file));
+    const afterImports = await moduleImportSpecifiers(output, relative(staging, file));
     if (JSON.stringify(afterImports) !== JSON.stringify(beforeImports)) {
       throw new Error(
-        `release minification changed static imports in ${relative(staging, file)}`,
+        `release minification changed imports in ${relative(staging, file)}`,
+      );
+    }
+    const beforeExports = await exportedNames(source, relative(staging, file));
+    const afterExports = await exportedNames(output, relative(staging, file));
+    if (JSON.stringify([...afterExports].sort()) !== JSON.stringify([...beforeExports].sort())) {
+      throw new Error(
+        `release minification changed exports in ${relative(staging, file)}`,
       );
     }
     outputs.set(file, output);

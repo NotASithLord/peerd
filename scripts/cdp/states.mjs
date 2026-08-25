@@ -494,6 +494,8 @@ export const STATES = [
       let probeConnections = 0;
       let probeRequests = [];
       let controllerRequests = 0;
+      let ordinaryControllerRequests = 0;
+      let sensitiveChildRequests = 0;
       const controllerAttempts = new Set();
       const probeServer = createServer((req, res) => {
         probeRequests.push(req.url ?? '/');
@@ -508,6 +510,23 @@ export const STATES = [
       const controllerServer = createServer((req, res) => {
         controllerRequests += 1;
         const requestUrl = new URL(req.url ?? '/', 'http://orders.peerd.test');
+        if (requestUrl.pathname === '/sensitive-child') {
+          sensitiveChildRequests += 1;
+          res.end('<!doctype html><title>sensitive-child-leaked</title>');
+          return;
+        }
+        if (requestUrl.pathname === '/ordinary-quarantine') {
+          ordinaryControllerRequests += 1;
+          const fetchTarget = `http://127.0.0.1:${probePort}/probe?vector=ordinary-fetch`;
+          const socketTarget = `ws://127.0.0.1:${probePort}/probe?vector=ordinary-websocket`;
+          res.end(`<!doctype html><title>ordinary-quarantine-ready</title>
+            <main>ordinary-quarantine-ready</main><script>
+              fetch(${JSON.stringify(fetchTarget)}, { mode: 'no-cors' }).catch(() => {});
+              const socket = new WebSocket(${JSON.stringify(socketTarget)});
+              socket.addEventListener('error', () => {}, { once: true });
+            <\/script>`);
+          return;
+        }
         if (requestUrl.pathname === '/attempt') {
           controllerAttempts.add(requestUrl.searchParams.get('vector') ?? '');
           res.writeHead(204);
@@ -592,6 +611,10 @@ export const STATES = [
           return;
         }
         const trustedTarget = `http://127.0.0.1:${probePort}/probe?vector=trusted-click-blank`;
+        const sensitiveTarget = `http://chase.com:${NETWORK_GUARD_CONTROLLER_PORT}/sensitive-child`;
+        const dataTarget = `data:text/html,${encodeURIComponent(`<script>fetch(${JSON.stringify(
+          `http://127.0.0.1:${probePort}/probe?vector=data-child`,
+        )}).catch(()=>{})</script>`)}`;
         res.end(`<!doctype html><title>network-guard-controller</title>
           <h1>network-guard-controller</h1>
           <button id="trusted-blank-burst">Open child</button>
@@ -599,9 +622,14 @@ export const STATES = [
             navigator.serviceWorker.register('/worker.js');
             document.querySelector('#trusted-blank-burst').addEventListener('click', () => {
               const child = window.open(${JSON.stringify(trustedTarget)}, 'trusted-private-child');
-              if (!child) return;
-              navigator.sendBeacon('/attempt?vector=trusted-click-blank');
-              child.fetch(${JSON.stringify(trustedTarget)}, { mode: 'no-cors' }).catch(() => {});
+              if (child) {
+                navigator.sendBeacon('/attempt?vector=trusted-click-blank');
+                child.fetch(${JSON.stringify(trustedTarget)}, { mode: 'no-cors' }).catch(() => {});
+              }
+              const sensitive = window.open(${JSON.stringify(sensitiveTarget)}, 'trusted-sensitive-child');
+              if (sensitive) navigator.sendBeacon('/attempt?vector=trusted-sensitive-child');
+              const opaque = window.open(${JSON.stringify(dataTarget)}, 'trusted-data-child');
+              if (opaque) navigator.sendBeacon('/attempt?vector=trusted-data-child');
             });
           <\/script>`);
       });
@@ -733,19 +761,69 @@ export const STATES = [
         };
         rec.check('the trusted click reaches its about:blank child action',
           burstObserved.completed && burstObserved.attempted, JSON.stringify(burstObserved));
-        const expectedRaceRequests = burstObserved.requests.filter((request) => request.includes('trusted-click-blank'));
-        rec.check('Chrome immediate-child outcome stays inside the documented race envelope',
-          burstObserved.requests.length === 0
-            || expectedRaceRequests.length === burstObserved.requests.length,
+        rec.check('Chrome immediate-child private requests do not reach the network',
+          burstObserved.connections === 0 && burstObserved.requests.length === 0
+            && sensitiveChildRequests === 0,
           JSON.stringify(burstObserved));
+        rec.check('the trusted click exercised private, sensitive, and opaque child paths',
+          ['trusted-click-blank', 'trusted-sensitive-child', 'trusted-data-child']
+            .every((vector) => controllerAttempts.has(vector)),
+          JSON.stringify([...controllerAttempts]));
         rec.check('the protected child is closed instead of left as a blank tab',
           !burstTabs.some((tab) => !burstTabIdsBefore.has(tab.id) && tab.openerTabId === drivenTab.id),
           JSON.stringify(burstTabs));
         rec.check('the source actor receives the fixed child policy outcome',
           networkGuardActorResult.includes('protected_child_navigation')
             && networkGuardActorResult.includes('closed')
+            && burstObserved.connections === 0 && burstObserved.requests.length === 0
             && !networkGuardActorResult.includes(`127.0.0.1:${probePort}`),
           networkGuardActorResult.slice(0, 2000));
+
+        await resetProbe();
+        const activeBeforeOrdinary = await evalIn(ctx.page,
+          'chrome.tabs.query({ active: true, currentWindow: true }).then((tabs) => tabs[0]?.id)', true);
+        const ordinaryUrl = `http://acct.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT}/ordinary-quarantine`;
+        const ordinaryStartedAt = Date.now();
+        const ordinaryTab = await evalIn(ctx.page,
+          `chrome.tabs.create({ url: ${JSON.stringify(ordinaryUrl)}, active: false })`, true);
+        const ordinaryReady = typeof ordinaryTab?.id === 'number' && await waitFor(() =>
+          evalIn(ctx.page, `chrome.scripting.executeScript({
+            target: { tabId: ${ordinaryTab.id} },
+            func: () => ({ title: document.title, body: document.body?.innerText ?? '',
+              historyLength: history.length }),
+          }).then((rows) => rows[0]?.result).catch(() => null)`, true).then((value) =>
+            value?.title === 'ordinary-quarantine-ready' ? value : null), {
+          budgetMs: 5_000, pollMs: 25,
+        });
+        await waitFor(() => probeRequests.filter((request) =>
+          request.includes('ordinary-')).length >= 2, { budgetMs: 5_000, pollMs: 25 });
+        const activeAfterOrdinary = await evalIn(ctx.page,
+          'chrome.tabs.query({ active: true, currentWindow: true }).then((tabs) => tabs[0]?.id)', true);
+        const ordinaryObserved = {
+          elapsedMs: Date.now() - ordinaryStartedAt,
+          routeRequests: ordinaryControllerRequests,
+          probeRequests: probeRequests.filter((request) => request.includes('ordinary-')),
+          page: ordinaryReady,
+          activeBeforeOrdinary,
+          activeAfterOrdinary,
+        };
+        rec.check('an ordinary post-arm page loads once without an error document',
+          ordinaryObserved.routeRequests === 1
+            && ordinaryReady?.title === 'ordinary-quarantine-ready'
+            && ordinaryReady?.body.includes('ordinary-quarantine-ready')
+            && ordinaryReady?.historyLength >= 1,
+          JSON.stringify(ordinaryObserved));
+        rec.check('the ordinary page keeps focus and its first localhost fetch and socket',
+          activeAfterOrdinary === activeBeforeOrdinary
+            && ordinaryObserved.probeRequests.filter((request) =>
+              request.includes('ordinary-fetch')).length === 1
+            && ordinaryObserved.probeRequests.filter((request) =>
+              request.includes('ordinary-websocket')).length === 1
+            && ordinaryObserved.elapsedMs < 5_000,
+          JSON.stringify(ordinaryObserved));
+        if (typeof ordinaryTab?.id === 'number') {
+          await evalIn(ctx.page, `chrome.tabs.remove(${ordinaryTab.id})`, true).catch(() => {});
+        }
 
         const runVector = async (vector) => {
           await resetProbe();

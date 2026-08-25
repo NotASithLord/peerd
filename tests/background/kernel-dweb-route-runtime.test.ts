@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { createKernelDwebRouteRuntime } from '../../extension/background/kernel-dweb-route-runtime.js';
-import { KERNEL_DWEB_ROUTE_NAMES } from '../../extension/background/kernel-executable-inventory.js';
+import { KERNEL_DWEB_ROUTE_NAMES } from '../../extension/shared/kernel-feature-route-inventory.js';
 
 const registry = {
   list: async () => [], get: async () => null, update: async () => null,

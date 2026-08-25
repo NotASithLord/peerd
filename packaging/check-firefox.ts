@@ -55,9 +55,6 @@ export type GuardedChromeOnlyApi = {
 export const FIREFOX_BUILD_NAMES = ['store-firefox', 'preview-firefox'] as const;
 
 export const GUARDED_CHROME_ONLY: readonly GuardedChromeOnlyApi[] = [
-  // Chrome uses this for the actor-worker host and other document-only jobs.
-  // Firefox starts the actor Worker directly from its extension background page.
-  { api: 'offscreen.createDocument', file: 'background/service-worker.js', why: 'guarded by offscreenAvailable' },
   { api: 'runtime.getContexts', file: 'background/offscreen-contexts.js', why: 'one capability-checked offscreen liveness probe' },
   // CDP. The `debugger` permission is STRIPPED from every Firefox manifest
   // (gen-manifest.ts), and the pool is wired in only when advancedAutomationOn().
@@ -70,7 +67,6 @@ export const GUARDED_CHROME_ONLY: readonly GuardedChromeOnlyApi[] = [
   // them and these call sites are capability-probed.
   { api: 'sidePanel.open', file: 'background/tab-affordances.js', why: 'Firefox uses sidebar_action' },
   { api: 'sidePanel.setPanelBehavior', file: 'background/tab-affordances.js', why: 'Firefox uses sidebar_action' },
-  { api: 'sidePanel.setOptions', file: 'background/service-worker.js', why: 'Firefox uses sidebar_action' },
   // Tab groups are the engine-tab strip affordance; absent on Firefox, and the
   // tracker degrades to ungrouped tabs.
   { api: 'tabs.group', file: 'background/tab-tracker.js', why: 'cosmetic grouping; degrades to ungrouped' },
@@ -94,9 +90,6 @@ export const GUARDED_CHROME_ONLY: readonly GuardedChromeOnlyApi[] = [
   { api: 'runtime.requestUpdateCheck', file: 'background/vault-kernel.js',
     why: 'enabled only for a top-level Chrome update_url plus the runtime capability',
     proof: ['!!kernelManifest.update_url', "typeof browser.runtime.requestUpdateCheck === 'function'"] },
-  { api: 'runtime.requestUpdateCheck', file: 'background/service-worker.js',
-    why: 'legacy cold listener is enabled only for a Chrome update_url plus the runtime capability',
-    proof: ['selfHostedChrome:Boolean(', '.update_url)&&typeof', ".runtime.requestUpdateCheck==='function'"] },
 ];
 
 /** The two codes that mean "this API is not there on Firefox". */

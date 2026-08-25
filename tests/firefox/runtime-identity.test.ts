@@ -11,7 +11,7 @@ import {
 
 describe('Firefox installed runtime identity', () => {
   test('pins exact complete Firefox and geckodriver releases', () => {
-    expect(PINNED_FIREFOX_VERSION).toBe('153.0.3');
+    expect(PINNED_FIREFOX_VERSION).toBe('154.0');
     expect(PINNED_GECKODRIVER_VERSION).toBe('0.37.1');
     expect(parseGeckodriverVersion('geckodriver 0.37.1 (abc 2026-01-01)\n'))
       .toBe('0.37.1');

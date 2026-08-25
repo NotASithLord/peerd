@@ -17,6 +17,7 @@ export const CHROME_NATIVE_KERNEL_ENTRIES = Object.freeze([
 export const NATIVE_CHROME_PRUNED_IMPORTS = Object.freeze([
   './firefox-storage-keepalive.js',
   './repository-local-client.js',
+  './direct-actor-host.js',
 ]);
 
 export const isChromeNativeKernelEntry = (entry: unknown): entry is string =>

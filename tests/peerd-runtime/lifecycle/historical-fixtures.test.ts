@@ -269,7 +269,7 @@ describe('permissions — legacy records normalize instead of throwing', () => {
   // conservatively — "a migration must never widen authority", so suggest AND
   // auto-edit were to map to confirm-ON. Today's confirmActionsFromRecord reads
   // only `confirmActions`, so an actTier-only record yields undefined and the
-  // SW's resolution chain (service-worker.js resolvePermission:
+  // Permission resolution chain:
   // `confirmActionsFromRecord(session) ?? cachedConfirm ?? false`) lands on
   // confirm-OFF — a WIDENING of a 'suggest' user's authority. The FIELD is not
   // lost (asserted below); its MEANING is. Pinned here so the behavior can't

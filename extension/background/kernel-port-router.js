@@ -3,11 +3,11 @@
 // to a generic semantic host: the kernel retains browser-owned provenance and
 // delegates only to one explicitly injected class owner.
 
-import { LEGACY_PORT_CLASSES } from './cold-kernel-inventory.js';
+import { KERNEL_PORT_CLASSES } from './cold-kernel-inventory.js';
 import { parseKernelIdentity } from '../shared/kernel-identity.js';
 
 export const KERNEL_PORT_NAMES = Object.freeze(
-  LEGACY_PORT_CLASSES.map((entry) => entry.name),
+  KERNEL_PORT_CLASSES.map((entry) => entry.name),
 );
 /** @type {Set<string>} */
 const PORT_NAME_SET = new Set(KERNEL_PORT_NAMES);

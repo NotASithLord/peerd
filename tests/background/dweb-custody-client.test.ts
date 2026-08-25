@@ -92,7 +92,7 @@ describe('dweb custody port client', () => {
       ok: true, result: { did: 'did:key:zA' },
     });
     expect(await result).toEqual({ did: 'did:key:zA' });
-    expect(ensured).toBe(0);
+    expect(ensured).toBe(1);
   });
 
   test('waits for the verified host port after ensuring the offscreen document', async () => {

@@ -12,7 +12,7 @@
         }
       },
       "background": {
-        "service_worker": "background/service-worker.js",
+        "service_worker": "background/vault-kernel.js",
         "type": "module"
       },
       "commands": {
@@ -87,7 +87,7 @@
       },
       "background": {
         "scripts": [
-          "background/service-worker.js"
+          "background/vault-kernel-firefox.js"
         ],
         "type": "module"
       },
@@ -161,7 +161,7 @@
         }
       },
       "background": {
-        "service_worker": "background/service-worker.js",
+        "service_worker": "background/vault-kernel-preview.js",
         "type": "module"
       },
       "commands": {
@@ -238,7 +238,7 @@
       },
       "background": {
         "scripts": [
-          "background/service-worker.js"
+          "background/vault-kernel-firefox.js"
         ],
         "type": "module"
       },
@@ -313,7 +313,7 @@
         }
       },
       "background": {
-        "service_worker": "background/service-worker.js",
+        "service_worker": "background/vault-kernel.js",
         "type": "module"
       },
       "commands": {
@@ -399,7 +399,7 @@
       },
       "background": {
         "scripts": [
-          "background/service-worker.js"
+          "background/vault-kernel-firefox.js"
         ],
         "type": "module"
       },

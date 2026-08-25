@@ -13,15 +13,27 @@ import {
   payloadFitsControllerCap,
 } from '/shared/structured-clone-size.js';
 import {
+  controllerCallMaxDuration,
   controllerOperationAllowedAfterCancel,
   controllerOuterPayloadCap,
+  controllerPayloadAllowed,
   controllerRenewalIdleCap,
   createControllerKernelQuota,
 } from '/shared/controller-kernel-quota.js';
 import {
+  createRuntimeEffectQuota,
+  parseRuntimeDispatch,
+  RUNTIME_DISPATCH_CAPABILITY,
+  RUNTIME_DISPATCH_OUTER_BYTES,
+} from '/shared/kernel-runtime-policy.js';
+import {
   kernelIdentityIsSuccessor,
   parseKernelIdentity,
 } from '/shared/kernel-identity.js';
+
+const STOP_LANE_MAX_PENDING = 64;
+const STOP_LANE_MAX_PENDING_BYTES = 256 * 1024;
+const STOP_LANE_MAX_CONCURRENT = 64;
 
 /**
  * Create the lazy loader used by bindControllerChannel. The offscreen document
@@ -266,11 +278,15 @@ export const bindControllerChannel = ({
    *   abort?: AbortController,
    *   deadlineTimer?: ReturnType<typeof setTimeout>,
    *   kernelCalls: Map<string, { resolve: (value:any) => void, operation:string, payload:unknown }>,
-   *   quota: ReturnType<typeof createControllerKernelQuota>,
-   * }>} */
+ *   quota: ReturnType<typeof createControllerKernelQuota>,
+ *   stopLane: boolean,
+ * }>} */
   const operations = new Map();
   let concurrent = 0;
+  let stopConcurrent = 0;
   let pendingBytes = 0;
+  let stopPending = 0;
+  let stopPendingBytes = 0;
   let closed = false;
   let sentSequence = 0;
   let receivedSequence = 0;
@@ -287,6 +303,8 @@ export const bindControllerChannel = ({
   const settle = (/** @type {string} */ requestId, /** @type {any} */ result) => {
     const operation = operations.get(requestId);
     if (!operation) return;
+    const pendingEffect = operation.kernelCalls.size > 0;
+    if (pendingEffect) operation.abort?.abort();
     if (operation.deadlineTimer) clearTimeout(operation.deadlineTimer);
     for (const pending of operation.kernelCalls.values()) {
       pending.resolve({ ok: false, code: 'kernel-channel-lost', outcomeKnown: false });
@@ -294,9 +312,19 @@ export const bindControllerChannel = ({
     operation.kernelCalls.clear();
     operations.delete(requestId);
     pendingBytes = Math.max(0, pendingBytes - operation.payloadBytes);
-    if (operation.phase === 'committed') concurrent = Math.max(0, concurrent - 1);
+    if (operation.phase === 'committed') {
+      concurrent = Math.max(0, concurrent - 1);
+      if (operation.stopLane) stopConcurrent = Math.max(0, stopConcurrent - 1);
+    }
+    if (operation.stopLane) {
+      stopPending = Math.max(0, stopPending - 1);
+      stopPendingBytes = Math.max(0, stopPendingBytes - operation.payloadBytes);
+    }
+    const settlement = pendingEffect && result?.outcomeKnown !== false ? {
+      ok: false, code: 'controller-pending-kernel-effect', outcomeKnown: false,
+    } : result;
     try { post({
-      type: 'controller/settled', requestId, grantId: operation.grantId, result,
+      type: 'controller/settled', requestId, grantId: operation.grantId, result: settlement,
     }); }
     catch { /* retired kernel epoch */ }
   };
@@ -336,7 +364,10 @@ export const bindControllerChannel = ({
     }
     operations.clear();
     pendingBytes = 0;
+    stopPending = 0;
+    stopPendingBytes = 0;
     concurrent = 0;
+    stopConcurrent = 0;
     closeController();
     try { port.close(); } catch { /* already closed */ }
     onClose();
@@ -385,14 +416,43 @@ export const bindControllerChannel = ({
         if (typeof message.requestId === 'string') reject(message.requestId, grantId, 'capability-denied');
         return;
       }
-      if (operations.size >= maxPending) { reject(message.requestId, grantId, 'host-capacity'); return; }
-      const outerCap = controllerOuterPayloadCap(message.capability);
+      const outerCap = message.capability === RUNTIME_DISPATCH_CAPABILITY
+        ? RUNTIME_DISPATCH_OUTER_BYTES : controllerOuterPayloadCap(message.capability);
+      if (!controllerPayloadAllowed(message.capability, message.payload)) {
+        reject(message.requestId, grantId, 'payload-invalid');
+        return;
+      }
       if (outerCap <= 0 || !payloadFitsControllerCap(message.payload, outerCap)) {
         reject(message.requestId, grantId, 'payload-too-large');
         return;
       }
+      let runtimeRequest = null;
+      if (message.capability === RUNTIME_DISPATCH_CAPABILITY) {
+        runtimeRequest = parseRuntimeDispatch(message.payload);
+        if (!runtimeRequest) {
+          reject(message.requestId, grantId, 'payload-invalid');
+          return;
+        }
+        if (message.deadlineAt - now() > runtimeRequest.policy.maxDurationMs) {
+          reject(message.requestId, grantId, 'duration-invalid');
+          return;
+        }
+      }
+      const callMaxDuration = controllerCallMaxDuration(message.capability, message.payload);
+      if (message.deadlineAt - now() > callMaxDuration) {
+        reject(message.requestId, grantId, 'duration-invalid');
+        return;
+      }
+      const stopLane = runtimeRequest?.operation === 'runtime.rich.abort';
+      if (stopLane ? stopPending >= STOP_LANE_MAX_PENDING
+        : operations.size - stopPending >= maxPending) {
+        reject(message.requestId, grantId, 'host-capacity');
+        return;
+      }
       const payloadBytes = controllerPayloadBytes(message.payload);
-      if (!Number.isFinite(payloadBytes) || pendingBytes + payloadBytes > maxPendingBytes) {
+      const laneBytes = stopLane ? stopPendingBytes : pendingBytes - stopPendingBytes;
+      const laneCap = stopLane ? STOP_LANE_MAX_PENDING_BYTES : maxPendingBytes;
+      if (!Number.isFinite(payloadBytes) || laneBytes + payloadBytes > laneCap) {
         reject(message.requestId, grantId, 'host-byte-capacity');
         return;
       }
@@ -404,10 +464,17 @@ export const bindControllerChannel = ({
         deadlineAt: message.deadlineAt,
         authority,
         phase: 'accepted',
+        stopLane,
         kernelCalls: new Map(),
-        quota: createControllerKernelQuota(message.capability, message.payload),
+        quota: message.capability === RUNTIME_DISPATCH_CAPABILITY
+          ? createRuntimeEffectQuota(message.payload)
+          : createControllerKernelQuota(message.capability, message.payload),
       });
       pendingBytes += payloadBytes;
+      if (stopLane) {
+        stopPending += 1;
+        stopPendingBytes += payloadBytes;
+      }
       post({ type: 'controller/accepted', requestId: message.requestId, grantId });
       return;
     }
@@ -440,7 +507,9 @@ export const bindControllerChannel = ({
       return;
     }
     if (message.type !== 'kernel/commit' || operation.phase !== 'accepted') return;
-    if (concurrent >= maxConcurrent) {
+    const laneConcurrent = operation.stopLane ? stopConcurrent : concurrent - stopConcurrent;
+    const laneConcurrentCap = operation.stopLane ? STOP_LANE_MAX_CONCURRENT : maxConcurrent;
+    if (laneConcurrent >= laneConcurrentCap) {
       settle(message.requestId, {
         ok: false, code: 'host-concurrency', outcomeKnown: true,
       });
@@ -449,6 +518,7 @@ export const bindControllerChannel = ({
     operation.phase = 'committed';
     operation.abort = new AbortController();
     concurrent += 1;
+    if (operation.stopLane) stopConcurrent += 1;
     if (operation.deadlineAt <= now()) {
       settle(message.requestId, {
         ok: false, code: 'controller-deadline-expired', outcomeKnown: true,

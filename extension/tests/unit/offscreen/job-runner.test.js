@@ -765,6 +765,7 @@ throw new Error('unrelated failure');`,
     expect(c.payload.ownerSessionId).toBe('chat-1');
     expect(c.payload.runId).toBe('run-p1');
     expect(c.payload.args?.prompt).toBe('classify: good or bad?');
+    expect(Number.isSafeInteger(c.payload.deadlineAt)).toBe(true);
     // the host-counted meter rides the result (the [MODEL CALLS] line's source)
     expect(r.usedProvider).toBe(true);
     expect(r.providerCalls).toBe(1);

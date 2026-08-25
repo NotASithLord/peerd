@@ -9,16 +9,10 @@ import {
   SEMANTIC_ROUTE_CLASSIFICATIONS,
   SEMANTIC_ROUTE_CUTOVER,
 } from '../../extension/shared/semantic-route-classification.js';
-import { LEGACY_SEMANTIC_ROUTE_INVENTORY } from '../../extension/shared/semantic-route-inventory.generated.js';
+import { SEMANTIC_ROUTE_INVENTORY } from '../../extension/shared/semantic-route-inventory.js';
 import { createSemanticDispatchRuntime } from '../../extension/offscreen/semantic-dispatch-runtime.js';
 import { createSemanticDemandQuota } from '../../extension/shared/semantic-demand-policy.js';
 import { SEMANTIC_HOST_ROUTE_CLASSIFICATIONS } from '../../extension/shared/semantic-host-route-manifest.js';
-import {
-  discoverLegacySemanticRoutes,
-  renderSemanticRouteInventory,
-} from '../../scripts/generate-semantic-route-inventory.mjs';
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
 
 const AUTHORITY = Object.freeze({
   ownerId: 'root:test', sessionId: 'session:test', instanceId: null,
@@ -37,81 +31,32 @@ const options = (extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 const DIRECT_KERNEL_ROUTES = [
-  'contacts/forget', 'contacts/list', 'contacts/set', 'memory/export',
-  'skills/list', 'skills/remove', 'skills/setEnabled', 'toolbox/read', 'toolbox/record',
+  'contacts/list', 'memory/export', 'skills/list', 'skills/remove', 'skills/setEnabled',
+  'toolbox/read', 'toolbox/record',
 ];
 
-describe('generated semantic route inventory', () => {
-  test('is an exact generated projection of the unified legacy dispatcher', async () => {
-    const sourceRoot = resolve(import.meta.dir, '../..');
-    const discovered = await discoverLegacySemanticRoutes({ sourceRoot });
-    expect(discovered).toEqual([...LEGACY_SEMANTIC_ROUTE_INVENTORY]);
-    const checkedIn = await readFile(resolve(sourceRoot,
-      'extension/shared/semantic-route-inventory.generated.js'), 'utf8');
-    expect(renderSemanticRouteInventory(discovered)).toBe(checkedIn);
-  }, 15_000);
-
-  test('pins cardinality, channel variance, ownership, and the unwired cutover', () => {
-    expect(LEGACY_SEMANTIC_ROUTE_INVENTORY).toHaveLength(161);
-    expect(LEGACY_SEMANTIC_ROUTE_INVENTORY.filter((row) => row.channels.length === 1)
+describe('semantic route inventory', () => {
+  test('pins cardinality, channel variance, ownership, and the complete cutover', () => {
+    expect(SEMANTIC_ROUTE_INVENTORY).toHaveLength(160);
+    expect(SEMANTIC_ROUTE_INVENTORY.filter((row) => row.channels.length === 1)
       .map((row) => row.route)).toEqual([
       'contributor/disable', 'contributor/enable',
       'contributor/feedback', 'contributor/status',
     ]);
-    expect(SEMANTIC_ROUTE_CLASSIFICATION.size).toBe(161);
+    expect(SEMANTIC_ROUTE_INVENTORY.some((row) => row.route === 'review/run')).toBe(false);
+    expect(SEMANTIC_ROUTE_CLASSIFICATION.size).toBe(160);
     expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.placement === 'kernel'))
-      .toHaveLength(85);
+      .toHaveLength(142);
     expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.placement === 'split'))
-      .toHaveLength(76);
+      .toHaveLength(18);
     expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.state === 'migrated')
-      .map((row) => row.route)).toEqual([
-      'actors/count', 'actors/overview',
-      'app/editor-delete', 'app/editor-write',
-      'app/editor/delete', 'app/editor/list', 'app/editor/read', 'app/editor/write',
-      'app/get-meta',
-      'apps/favorite', 'apps/import-git', 'apps/list', 'apps/open', 'apps/rename',
-      'apps/repository/branch', 'apps/repository/checkout',
-      'apps/repository/commit', 'apps/repository/diff',
-      'apps/repository/fetch', 'apps/repository/history',
-      'apps/repository/link', 'apps/repository/push',
-      'apps/repository/restore', 'apps/repository/status',
-      'audit/list', 'audit/voice-fetch',
-      'commands/list', 'composer/files', 'composer/tabs',
-      'contacts/forget', 'contacts/list', 'contacts/set',
-      'contributor/disable', 'contributor/enable', 'contributor/status',
-      'cost/total',
-      'denylist/add', 'denylist/list', 'denylist/remove',
-      'git-cred/delete', 'git-cred/list', 'git-cred/set',
-      'learned/clear', 'learned/forget', 'learned/list',
-      'lifecycle/assert-opfs-writable',
-      'local-model/catalog', 'local-model/init', 'local-model/probe', 'local-model/status',
-      'memory/delete', 'memory/deleteAll', 'memory/export',
-      'memory/suggestions', 'memory/suggestions/approve',
-      'memory/suggestions/dismiss', 'memory/write',
-      'models/options',
-      'onboarding/complete',
-      'openrouter/models',
-      'origin-cred/delete', 'origin-cred/list', 'origin-cred/set',
-      'permission/set',
-      'provider/setKey', 'provider/status', 'provider/test',
-      'repository/kernel-fetch',
-      'session/contextSnapshots', 'session/get', 'session/list', 'session/setModel',
-      'settings/reset', 'settings/update',
-      'sidepanel/close',
-      'site-client/delete', 'site-client/list',
-      'skills/list', 'skills/remove', 'skills/setEnabled',
-      'state/get',
-      'surfaces/get',
-      'toolbox/read', 'toolbox/record',
-      'vault/disablePrf', 'vault/enrollPrf', 'vault/initialize',
-      'vault/initializeWithPasskey', 'vault/lock', 'vault/prfStatus',
-      'vault/setRecoveryPassphrase', 'vault/unlock', 'vault/unlockPrf',
-      'vm/get-meta',
-    ]);
+      .map((row) => row.route)).toEqual(
+        SEMANTIC_ROUTE_INVENTORY.map((row) => row.route),
+      );
     expect(SEMANTIC_ROUTE_CUTOVER).toMatchObject({
-      ready: false, expected: 161, classified: 161, missing: [], extra: [],
+      ready: true, expected: 160, classified: 160, missing: [], extra: [],
     });
-    expect(SEMANTIC_ROUTE_CUTOVER.unmigrated).toHaveLength(67);
+    expect(SEMANTIC_ROUTE_CUTOVER.unmigrated).toEqual([]);
   });
 
   test('does not let a candidate table hide missing, extra, or unmigrated routes', () => {

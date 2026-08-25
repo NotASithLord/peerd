@@ -283,7 +283,7 @@ describe('DESIGN-17 actor tier — the gate (the wall)', () => {
 });
 
 describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () => {
-  // Production shape (buildToolContext, service-worker.js): the per-chat web
+  // Production shape: the per-chat web
   // actor's actorInstanceId is the FIXED literal 'web' (its message_actor
   // address — stable across re-navigation), never a tab id. The actor's
   // actually-owned tab lives at ctx.activeTab.id, resolved separately. A

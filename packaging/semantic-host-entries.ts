@@ -6,6 +6,8 @@
 
 export const SEMANTIC_HOST_CLUSTER_ENTRIES = Object.freeze([
   'offscreen/semantic-routes/actors.js',
+  'offscreen/semantic-routes/apps.js',
+  'offscreen/semantic-routes/contacts.js',
   'offscreen/semantic-routes/contributor.js',
   'offscreen/semantic-routes/memory.js',
   'offscreen/semantic-routes/providers.js',

@@ -1,12 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import ts from 'typescript';
-import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import { createColdKernelCapture } from '../../extension/background/cold-kernel-capture.js';
 import { createColdListenerFanIn } from '../../extension/background/cold-listener-fan-in.js';
 import {
   coldEventKeysFor,
-  LEGACY_COLD_EVENTS,
+  KERNEL_COLD_EVENTS,
 } from '../../extension/background/cold-kernel-inventory.js';
 
 type Listener = (...args: any[]) => any;
@@ -55,26 +52,8 @@ const makeStore = () => {
   };
 };
 
-const LEGACY_LISTENER_SITES = Object.freeze({
-  'runtime.onMessage': 6,
-  'runtime.onConnect': 1,
-  'runtime.onStartup': 1,
-  'runtime.onUpdateAvailable': 2,
-  'alarms.onAlarm': 1,
-  'storage.session.onChanged': 1,
-  'tabs.onCreated': 1,
-  'tabs.onUpdated': 6,
-  'tabs.onRemoved': 8,
-  'tabs.onActivated': 2,
-  'windows.onFocusChanged': 1,
-  'webNavigation.onCreatedNavigationTarget': 1,
-  'webRequest.onBeforeRequest': 1,
-  'action.onClicked': 1,
-  'commands.onCommand': 1,
-});
-
 const authorityFor = (calls: string[] = []) => Object.fromEntries(
-  LEGACY_COLD_EVENTS.filter((entry) =>
+  KERNEL_COLD_EVENTS.filter((entry) =>
     entry.placement === 'kernel-authority' || entry.placement === 'kernel-immediate')
     .map((entry) => [entry.key, () => { calls.push(entry.key); return {}; }]),
 );
@@ -120,85 +99,6 @@ const send = (browser: ReturnType<typeof makeBrowser>, message: any, sender = fi
   });
 
 describe('cold-listener inventory differential', () => {
-  test('inventory covers every browser listener in the legacy static graph', async () => {
-    const root = new URL('../../extension/', import.meta.url).pathname;
-    const entry = new URL('../../extension/background/service-worker.js', import.meta.url).pathname;
-    const graph = await collectStaticModuleGraph(root, entry);
-    const actual = new Map<string, number>();
-    const allListenerSites = new Map<string, number>();
-    const addActual = (key: string) => actual.set(key, (actual.get(key) ?? 0) + 1);
-    for (const file of graph) {
-      const source = readFileSync(file, 'utf8');
-      if (!source.includes('addListener')) continue;
-      const parsed = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
-      const walk = (node: ts.Node) => {
-        if (ts.isCallExpression(node)
-            && ts.isPropertyAccessExpression(node.expression)
-            && node.expression.name.text === 'addListener') {
-          const module = file.slice(root.length).replace(/^\//, '');
-          // The fan-in/capture implementations are the reviewed generic
-          // multiplexer itself, not semantic browser-listener owners. Their
-          // registration behavior is asserted by the differential suite below.
-          if (module !== 'background/cold-kernel-capture.js'
-              && module !== 'background/cold-listener-fan-in.js') {
-            allListenerSites.set(module, (allListenerSites.get(module) ?? 0) + 1);
-          }
-          const receiver = node.expression.expression;
-          const target = receiver.getText(parsed).replaceAll('?.', '.');
-          if (target.startsWith('browser.')) addActual(target.slice('browser.'.length));
-          else if (ts.isCallExpression(receiver)
-              && receiver.expression.getText(parsed) === 'coldEvent'
-              && ts.isStringLiteral(receiver.arguments[0])) {
-            addActual(receiver.arguments[0].text);
-          }
-        }
-        ts.forEachChild(node, walk);
-      };
-      walk(parsed);
-    }
-    // These two listeners are registered through a generic event parameter,
-    // so their addListener call has no `browser.*` receiver for the AST walk.
-    const serviceWorker = readFileSync(entry, 'utf8');
-    const updateCheck = readFileSync(
-      new URL('../../extension/background/update-check.js', import.meta.url), 'utf8',
-    );
-    expect(serviceWorker).toContain(
-      "event: coldEvent('webRequest.onBeforeRequest', browser.webRequest?.onBeforeRequest)",
-    );
-    expect(updateCheck).toContain('updateAvailableEvent?.addListener');
-    addActual('webRequest.onBeforeRequest');
-    // syncEnabled uses an `events` alias in addition to start()'s direct site.
-    addActual('runtime.onUpdateAvailable');
-    addActual('runtime.onUpdateAvailable');
-    // Debugger listeners are deliberately lazy: their first attach cannot be a
-    // cold wake because a live debugger operation already owns a semantic host.
-    const deferred = ['debugger.onDetach', 'debugger.onEvent'];
-    expect([...actual.keys()].sort()).toEqual([
-      ...Object.keys(LEGACY_LISTENER_SITES), ...deferred,
-    ].sort());
-    expect(Object.fromEntries(Object.keys(LEGACY_LISTENER_SITES)
-      .map((key) => [key, actual.get(key) ?? 0]))).toEqual(LEGACY_LISTENER_SITES);
-    expect(actual.has('runtime.onInstalled')).toBe(false);
-    // Catch a new generic `event.addListener(...)` too, not only receivers the
-    // AST can name as `browser.*`. Any listener-site change requires an explicit
-    // cold/deferred/ephemeral classification in this inventory review.
-    expect(Object.fromEntries([...allListenerSites].sort())).toEqual({
-      'background/debugger-pool.js': 5,
-      'background/driven-child-request-guard.js': 1,
-      'background/dweb-custody-client.js': 2,
-      // The extracted kernel owner contains both the authenticated heartbeat
-      // and exact disconnect retirement listeners.
-      'background/feature-lease-keepalive.js': 2,
-      'background/private-transfer-port.js': 2,
-      'background/service-worker.js': 20,
-      'background/tab-affordances.js': 10,
-      'background/update-check.js': 2,
-      'peerd-runtime/tools/defs/committed-navigation.js': 1,
-      'peerd-runtime/tools/web/screenshot.js': 1,
-    });
-    expect(graph.size).toBeGreaterThan(400);
-  });
-
   test('target filters preserve the Firefox blocker and preview update event', () => {
     expect(coldEventKeysFor()).not.toContain('webRequest.onBeforeRequest');
     expect(coldEventKeysFor()).not.toContain('storage.session.onChanged');

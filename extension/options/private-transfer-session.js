@@ -2,6 +2,7 @@
 // One owner for the options page's private backup/restore transport.
 
 import browser from '/shared/browser-api.js';
+import { BACKGROUND_MODULE_PATH } from '/shared/build-config.js';
 import { makePrivateTransferClient } from './private-transfer-client.js';
 
 const serviceWorkerChannels = typeof navigator.serviceWorker?.addEventListener === 'function';
@@ -19,7 +20,7 @@ const client = makePrivateTransferClient(serviceWorkerChannels ? {
 if (serviceWorkerChannels) navigator.serviceWorker.addEventListener('message', (event) => {
   const source = /** @type {{ scriptURL?: string } | null} */ (event.source);
   if (!event.isTrusted
-      || source?.scriptURL !== browser.runtime.getURL('background/service-worker.js')
+      || source?.scriptURL !== browser.runtime.getURL(BACKGROUND_MODULE_PATH)
       || event.data?.type !== 'private-transfer/channel'
       || typeof event.data?.requestId !== 'string'
       || event.ports?.length !== 1) return;

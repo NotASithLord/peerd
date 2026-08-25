@@ -40,6 +40,16 @@ const defaultHooks = new Map();
 /** @type {Map<string, CompiledUserHook>} compiled user hooks, keyed by id */
 const userHooks = new Map();
 
+/** Compile and activate one already-persisted user record in this realm. */
+export const activateUserHook = (/** @type {UserHookRecord} */ record) => {
+  const compiled = compileUserHook(record);
+  userHooks.set(compiled.id, compiled);
+  return compiled;
+};
+
+/** Retire one already-removed user record from this realm. */
+export const deactivateUserHook = (/** @type {string} */ id) => userHooks.delete(id);
+
 /**
  * Register a DEFAULT (trusted, in-tree) hook. The chassis calls this at
  * boot for each built-in. Re-registering an id replaces it (tests swap
@@ -96,8 +106,7 @@ export const loadUserHooks = async ({ kv, warn = (m, e) => console.warn(m, e) })
   let skipped = 0;
   for (const record of records) {
     try {
-      const hook = compileUserHook(record);
-      userHooks.set(hook.id, hook);
+      activateUserHook(record);
       loaded += 1;
     } catch (e) {
       skipped += 1;
@@ -117,7 +126,7 @@ export const loadUserHooks = async ({ kv, warn = (m, e) => console.warn(m, e) })
  * @param {import('./compile.js').UserHookRecord} record
  */
 export const saveUserHook = async ({ kv }, record) => {
-  const compiled = compileUserHook(record); // throws on malformed — caller surfaces
+  const compiled = compileUserHook(record); // throws before persistence
   const existing = (await kv.get(HOOKS_STORAGE_KEY)) ?? [];
   const next = Array.isArray(existing) ? existing.filter((r) => r.id !== record.id) : [];
   next.push(record);
@@ -138,7 +147,7 @@ export const removeHook = async ({ kv }, id) => {
   const existing = (await kv.get(HOOKS_STORAGE_KEY)) ?? [];
   const next = Array.isArray(existing) ? existing.filter((r) => r.id !== id) : [];
   await kv.set(HOOKS_STORAGE_KEY, next);
-  userHooks.delete(id);
+  deactivateUserHook(id);
 };
 
 /**

@@ -4,7 +4,7 @@
 // secretless hints persist, and recovery asks the owning kernel module to
 // re-read current state.
 
-import { coldEventKeysFor, LEGACY_COLD_EVENTS } from './cold-kernel-inventory.js';
+import { coldEventKeysFor, KERNEL_COLD_EVENTS } from './cold-kernel-inventory.js';
 import {
   kernelIdentityMatches,
   parseKernelIdentity,
@@ -14,8 +14,8 @@ import { makeSerialLane } from '../shared/cold-util.js';
 export const KERNEL_COLD_RECEIPTS_KEY = 'kernel.coldReceipts.v1';
 const SCHEMA = 1;
 const DEFAULT_MAX = 256;
-const INVENTORY = new Map(LEGACY_COLD_EVENTS.map((entry) => [entry.key, entry]));
-const RECOVERABLE = new Set(LEGACY_COLD_EVENTS.filter(({ placement }) =>
+const INVENTORY = new Map(KERNEL_COLD_EVENTS.map((entry) => [entry.key, entry]));
+const RECOVERABLE = new Set(KERNEL_COLD_EVENTS.filter(({ placement }) =>
   placement === 'durable-hint' || placement === 'kernel-authority').map(({ key }) => key));
 
 const ownerValid = (/** @type {unknown} */ value) => typeof value === 'string'
@@ -258,7 +258,7 @@ export const createKernelColdReceipts = ({
       if (!recoveryOwners.has(key)) throw new Error(`kernel-recovery-owner-missing:${key}`);
     }
     const invoked = [];
-    for (const { key } of LEGACY_COLD_EVENTS) {
+    for (const { key } of KERNEL_COLD_EVENTS) {
       const record = recoveryOwners.get(key);
       const count = counts.get(key) ?? 0;
       if (!record || (!fullReconcile && count === 0)) continue;

@@ -92,9 +92,7 @@ Dynamic Worker/CSP behavior is not yet a stable Firefox Pod contract.
   is `RESOLVED WONTFIX`; Mozilla's stated replacement is the DOM-capable MV3
   event page. The cross-browser API discussion remains in
   [WECG issue 170](https://github.com/w3c/webextensions/issues/170).
-- **Peerd status:** this is a Peerd architecture task, not something to wait for
-  Mozilla to fix. The current gate is `offscreenAvailable` in
-  [`service-worker.js`](../extension/background/service-worker.js).
+- **Peerd status:** Firefox uses its event-page controller path.
 - **Exit check:** a Firefox event-page or equivalent host provides the same
   lifecycle, cancellation, keyless Worker boundary, and document/media
   capabilities, with Firefox browser tests covering both success and recovery.
@@ -109,9 +107,7 @@ Dynamic Worker/CSP behavior is not yet a stable Firefox Pod contract.
   remains `NEW`; the older direct Chrome-parity request,
   [Bug 1241448](https://bugzilla.mozilla.org/show_bug.cgi?id=1241448), is
   `RESOLVED WONTFIX`.
-- **Peerd fallback:** the capability gate and exact fallback surface are in
-  [`service-worker.js`](../extension/background/service-worker.js); the
-  top-frame-only snapshot constraint is in
+- **Peerd fallback:** the top-frame-only snapshot constraint is in
   [`walk-injected.js`](../extension/peerd-runtime/dom/walk-injected.js).
 - **Exit check:** Firefox exposes a reviewed automation API with the required
   trusted-input and inspection semantics, or Peerd implements equivalent

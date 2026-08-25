@@ -21,18 +21,13 @@ import { draftAgentsMd, deriveChecklist, resolveWorkspaceKey } from './initializ
 import { disarmText } from '../dom/cdr.js';
 import { resolveTargetTab, scriptingTarget } from '../tools/defs/dom-helpers.js';
 import { BrowserAutomationPolicyError } from '../tools/browser-automation-policy.js';
+import { probeMemoryInitTabInjected } from '../../shared/memory-init-tab-probe.js';
 
 /**
  * Read the small page summary used by /init. This function is serialized into
  * the page, so it must be self-contained and explicitly strict.
  */
-export function probeInitTabInjected() {
-  'use strict';
-  const headings = [...document.querySelectorAll('h1,h2,h3')]
-    .map((heading) => heading.textContent?.trim() ?? '').filter(Boolean).slice(0, 12);
-  const text = (document.body?.innerText || '').slice(0, 1500);
-  return { title: document.title, headings, textSnippet: text };
-}
+export { probeMemoryInitTabInjected as probeInitTabInjected };
 
 /**
  * @param {Object} deps
@@ -100,7 +95,7 @@ export const makeInitOrchestrator = (deps) => {
       try {
         const [res] = await scripting.executeScript({
           target: scriptingTarget(target),
-          func: probeInitTabInjected,
+          func: probeMemoryInitTabInjected,
         });
         if (res?.result) {
           const r = res.result;

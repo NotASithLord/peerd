@@ -13,9 +13,10 @@ import {
   parseControllerCaps,
 } from '../shared/structured-clone-size.js';
 import {
-  controllerKernelConcurrentCap,
+  controllerCallMaxDuration,
   controllerOperationAllowedAfterCancel,
   controllerOuterPayloadCap,
+  controllerPayloadAllowed,
   controllerRenewalIdleCap,
   createControllerKernelQuota,
 } from '../shared/controller-kernel-quota.js';
@@ -23,6 +24,16 @@ import { parseKernelIdentity } from '../shared/kernel-identity.js';
 import {
   makeBoundedModuleLoader, STARTUP_UNAVAILABLE_USER_FAILURE,
 } from '../shared/bounded-module-load.js';
+import {
+  KERNEL_FEATURE_DISPATCH_CAPABILITY,
+  KERNEL_FEATURE_EVENT_CAPABILITY,
+} from '../shared/kernel-feature-policy.js';
+import {
+  RUNTIME_DISPATCH_CAPABILITY,
+  RUNTIME_DISPATCH_OUTER_BYTES,
+  createRuntimeEffectQuota,
+  parseRuntimeDispatch,
+} from '../shared/kernel-runtime-policy.js';
 
 export class ControllerChannelError extends Error {
   /** @param {string} message @param {string} code */
@@ -32,6 +43,10 @@ export class ControllerChannelError extends Error {
     this.code = code;
   }
 }
+
+const controllerGenerationMustRetire = (/** @type {any} */ result) =>
+  result?.outcomeKnown === true && (result.code === 'module-load-timeout'
+    || typeof result.code === 'string' && result.code.endsWith('-load-timeout'));
 
 /**
  * @template {{ url?: string }} T
@@ -122,6 +137,7 @@ export const connectOffscreenController = async ({
    *   authority: NonNullable<ReturnType<typeof parseControllerAuthority>>,
    *   nestedUnknown: boolean,
    *   cancelled: boolean,
+   *   lifetime: AbortController,
    *   reverse: Map<string, {controller:AbortController,operation:string,payload:unknown}>,
    *   quota: ReturnType<typeof createControllerKernelQuota>,
    * }>} */
@@ -150,6 +166,7 @@ export const connectOffscreenController = async ({
     if (!call) return;
     calls.delete(requestId);
     clearTimeoutFn(call.timer);
+    call.lifetime.abort();
     if (call.onAbort) call.signal?.removeEventListener('abort', call.onAbort);
     for (const pending of call.reverse.values()) pending.controller.abort();
     call.reverse.clear();
@@ -224,7 +241,7 @@ export const connectOffscreenController = async ({
           || typeof message.operation !== 'string'
           || !/^[a-z][a-z0-9./-]{0,127}$/.test(message.operation)
           || call.reverse.has(message.rpcId)
-          || call.reverse.size >= controllerKernelConcurrentCap(call.capability)) {
+          || call.reverse.size >= call.quota.pendingCap) {
         close();
         return;
       }
@@ -276,7 +293,7 @@ export const connectOffscreenController = async ({
       Promise.resolve(handleKernelCall(message.operation, message.payload, {
         capability: call.capability,
         authority: call.authority,
-        signal: controller.signal,
+        signal: call.lifetime.signal,
         deadlineAt: call.deadlineAt,
       })).then(
         settleKernelCall,
@@ -312,11 +329,18 @@ export const connectOffscreenController = async ({
     if (message.type === 'controller/settled'
         && (call.phase === CONTROLLER_PHASE.COMMITTING
           || call.phase === CONTROLLER_PHASE.COMMITTED)) {
-      const known = !call.nestedUnknown && message.result?.outcomeKnown === true;
+      const pendingEffect = call.reverse.size > 0;
+      const known = !pendingEffect && !call.nestedUnknown
+        && message.result?.outcomeKnown === true;
+      const result = pendingEffect && message.result?.outcomeKnown !== false ? {
+        ok: false, code: 'controller-pending-kernel-effect', outcomeKnown: false,
+      } : message.result;
       finish(message.requestId, {
-        ...(message.result ?? { ok: false, error: 'controller returned no result' }),
+        ...(result ?? { ok: false, error: 'controller returned no result' }),
         outcomeKnown: known,
-        phase: CONTROLLER_PHASE.SETTLED,
+        phase: call.capability === RUNTIME_DISPATCH_CAPABILITY
+          && (message.result?.phase === 'startup' || message.result?.phase === 'run')
+          ? message.result.phase : CONTROLLER_PHASE.SETTLED,
       });
     }
   };
@@ -355,22 +379,43 @@ export const connectOffscreenController = async ({
    * @param {unknown} payload
    * @param {{ signal?: AbortSignal, timeoutMs?: number }} [options]
    */
-  const call = (capability, payload, options = {}) => {
+  const call = async (capability, payload, options = {}) => {
     if (closed) return Promise.resolve(stopped('controller-channel-closed', true));
     if (!activeCaps.includes(capability)) {
       return Promise.resolve(stopped('controller-capability-denied', true));
     }
     if (options.signal?.aborted) return Promise.resolve(stopped('controller-call-aborted', true));
-    const outerCap = controllerOuterPayloadCap(capability);
+    let outerCap = controllerOuterPayloadCap(capability);
+    let quota = createControllerKernelQuota(capability, payload);
+    let maxDurationMs = controllerCallMaxDuration(capability, payload);
+    if (capability === RUNTIME_DISPATCH_CAPABILITY) {
+      outerCap = RUNTIME_DISPATCH_OUTER_BYTES;
+      quota = createRuntimeEffectQuota(payload);
+      if (!payloadFitsControllerCap(payload, outerCap)) {
+        return stopped('controller-payload-too-large', true);
+      }
+      const request = parseRuntimeDispatch(payload);
+      if (!request) return stopped('controller-payload-invalid', true);
+      maxDurationMs = request.policy.maxDurationMs;
+    }
+    if (closed) return stopped('controller-channel-closed', true);
+    if (options.signal?.aborted) return stopped('controller-call-aborted', true);
+    if (!controllerPayloadAllowed(capability, payload)) {
+      return stopped('controller-payload-invalid', true);
+    }
     if (outerCap <= 0 || !payloadFitsControllerCap(payload, outerCap)) {
       return Promise.resolve(stopped('controller-payload-too-large', true));
     }
+    const requestedTimeoutMs = options.timeoutMs ?? callTimeoutMs;
+    if (!Number.isFinite(requestedTimeoutMs) || requestedTimeoutMs <= 0) {
+      return stopped('controller-timeout-invalid', true);
+    }
+    const timeoutMs = Math.max(1, Math.min(Math.floor(requestedTimeoutMs), maxDurationMs));
     const authority = parseControllerAuthority(authorizeCall(capability, payload));
     if (!authority) return Promise.resolve(stopped('controller-authority-invalid', true));
     const requestId = newId();
     const grantId = newId();
     return new Promise((resolve) => {
-      const timeoutMs = Math.max(1, options.timeoutMs ?? callTimeoutMs);
       const deadlineAt = Date.now() + timeoutMs;
       const timer = setTimeoutFn(() => {
         const active = calls.get(requestId);
@@ -385,6 +430,7 @@ export const connectOffscreenController = async ({
         const active = calls.get(requestId);
         if (!active) return;
         active.cancelled = true;
+        active.lifetime.abort();
         try { post({ type: 'kernel/cancel', requestId, grantId: active.grantId }); } catch { /* host gone */ }
         if (active.phase === CONTROLLER_PHASE.OPENED
             || active.phase === CONTROLLER_PHASE.ACCEPTED) {
@@ -408,8 +454,9 @@ export const connectOffscreenController = async ({
         authority,
         nestedUnknown: false,
         cancelled: false,
+        lifetime: new AbortController(),
         reverse: new Map(),
-        quota: createControllerKernelQuota(capability, payload),
+        quota,
       });
       options.signal?.addEventListener('abort', onAbort, { once: true });
       post({
@@ -439,6 +486,10 @@ const PROMPT_CAPABILITIES = Object.freeze(['prompt.render']);
  * @param {(operation:string,payload:unknown,context:any)=>Promise<any>|any} [deps.handleTurnKernelCall]
  * @param {(payload:unknown)=>unknown} [deps.authorizeSemanticCall]
  * @param {(operation:string,payload:unknown,context:any)=>Promise<any>|any} [deps.handleSemanticKernelCall]
+ * @param {(payload:unknown)=>unknown} [deps.authorizeRuntimeCall]
+ * @param {(operation:string,payload:unknown,context:any)=>Promise<any>|any} [deps.handleRuntimeKernelCall]
+ * @param {(payload:unknown)=>unknown} [deps.authorizeFeatureCall]
+ * @param {(operation:string,payload:unknown,context:any)=>Promise<any>|any} [deps.handleFeatureKernelCall]
  * @param {<T>(operation:(lease?:unknown)=>Promise<T>)=>Promise<T>} [deps.withControllerLease]
  * @param {<T>(operation:()=>Promise<T>,options?:{outcomeKnownOnLoss?:boolean,code?:string,onLost?:(error:Error)=>void,lossGraceMs?:number})=>Promise<T>} [deps.withDirectLifetime]
  * @param {typeof import('./direct-controller-client.js').connectDirectController} [deps.connectDirectController]
@@ -459,10 +510,14 @@ export const makeSemanticControllerClient = ({
   handleTurnKernelCall,
   authorizeSemanticCall,
   handleSemanticKernelCall,
+  authorizeRuntimeCall,
+  handleRuntimeKernelCall,
+  authorizeFeatureCall,
+  handleFeatureKernelCall,
   withControllerLease: withLease,
   withDirectLifetime,
   connectDirectController: directConnector,
-  loadDirectController: directModuleLoader = () => import('./direct-controller-client.js'),
+  loadDirectController: directModuleLoader,
   directLoadTimeoutMs = 10_000,
   retireHost = async () => {},
   fetchFn,
@@ -479,6 +534,10 @@ export const makeSemanticControllerClient = ({
     && typeof handleTurnKernelCall === 'function';
   const hasSemanticAuthority = typeof authorizeSemanticCall === 'function'
     && typeof handleSemanticKernelCall === 'function';
+  const hasRuntimeAuthority = typeof authorizeRuntimeCall === 'function';
+  const hasRuntimeHandler = typeof handleRuntimeKernelCall === 'function';
+  const hasFeatureAuthority = typeof authorizeFeatureCall === 'function'
+    && typeof handleFeatureKernelCall === 'function';
   const ownsLeaseBoundary = !firefoxDirect && typeof withLease === 'function';
   // why a leased-user count: the Chrome lease is per bounded operation, but
   // the CLIENT channel is shared. Retiring it when one operation settles
@@ -500,17 +559,18 @@ export const makeSemanticControllerClient = ({
       : (operation) => operation();
   const semanticCapabilities = Object.freeze([
     'prompt.render',
+    ...(hasRuntimeAuthority ? [RUNTIME_DISPATCH_CAPABILITY] : []),
     ...(hasSemanticAuthority ? ['semantic.dispatch'] : []),
     ...(hasTurnAuthority ? ['turn.run'] : []),
+    ...(hasFeatureAuthority ? [KERNEL_FEATURE_DISPATCH_CAPABILITY] : []),
+    ...(hasFeatureAuthority ? [KERNEL_FEATURE_EVENT_CAPABILITY] : []),
   ]);
-  const loadDirectConnector = makeBoundedModuleLoader(
-    directModuleLoader,
-    {
+  const loadDirectConnector = typeof directModuleLoader === 'function'
+    ? makeBoundedModuleLoader(directModuleLoader, {
       timeoutMs: directLoadTimeoutMs,
       loadCode: 'controller-direct-load-failed',
       timeoutCode: 'controller-direct-load-timeout',
-    },
-  );
+    }) : null;
   /** @type {Promise<any> | null} */
   let connecting = null;
   /** @type {any | null} */
@@ -526,26 +586,62 @@ export const makeSemanticControllerClient = ({
     }
     : capability === 'turn.run' && hasTurnAuthority ? authorizeTurnCall(payload) : null;
   const authorizeControllerCall = (/** @type {string} */ capability,
-    /** @type {unknown} */ payload) => capability === 'semantic.dispatch' && hasSemanticAuthority
+    /** @type {unknown} */ payload) => {
+    if (capability === RUNTIME_DISPATCH_CAPABILITY && hasRuntimeAuthority) {
+      return authorizeRuntimeCall(payload);
+    }
+    if ((capability === KERNEL_FEATURE_DISPATCH_CAPABILITY
+        || capability === KERNEL_FEATURE_EVENT_CAPABILITY) && hasFeatureAuthority) {
+      return authorizeFeatureCall(payload);
+    }
+    return capability === 'semantic.dispatch' && hasSemanticAuthority
       ? authorizeSemanticCall(payload) : authorizeCall(capability, payload);
+  };
   const handleControllerKernelCall = (/** @type {string} */ operation,
-    /** @type {unknown} */ payload, /** @type {any} */ context) =>
-    context?.capability === 'semantic.dispatch' && hasSemanticAuthority
-      ? handleSemanticKernelCall(operation, payload, context)
-      : hasTurnAuthority ? handleTurnKernelCall(operation, payload, context)
+    /** @type {unknown} */ payload, /** @type {any} */ context) => {
+    if (context?.capability === RUNTIME_DISPATCH_CAPABILITY) {
+      return hasRuntimeHandler
+        ? handleRuntimeKernelCall(operation, payload, context)
         : { ok: false, code: 'kernel-operation-denied', outcomeKnown: true };
+    }
+    if (context?.capability === KERNEL_FEATURE_DISPATCH_CAPABILITY) {
+      return hasFeatureAuthority
+        ? handleFeatureKernelCall(operation, payload, context)
+        : { ok: false, code: 'kernel-operation-denied', outcomeKnown: true };
+    }
+    if (context?.capability === KERNEL_FEATURE_EVENT_CAPABILITY) {
+      return { ok: false, code: 'kernel-operation-denied', outcomeKnown: true };
+    }
+    if (context?.capability === 'semantic.dispatch') {
+      return hasSemanticAuthority
+        ? handleSemanticKernelCall(operation, payload, context)
+        : { ok: false, code: 'kernel-operation-denied', outcomeKnown: true };
+    }
+    if (context?.capability === 'turn.run') {
+      return hasTurnAuthority
+        ? handleTurnKernelCall(operation, payload, context)
+        : { ok: false, code: 'kernel-operation-denied', outcomeKnown: true };
+    }
+    return { ok: false, code: 'kernel-operation-denied', outcomeKnown: true };
+  };
 
   const connect = async (/** @type {unknown} */ lease) => {
     if (firefoxDirect) {
       const connectDirectController = directConnector
-        ?? (await loadDirectConnector()).connectDirectController;
+        ?? (await loadDirectConnector?.())?.connectDirectController;
+      if (typeof connectDirectController !== 'function') {
+        throw new ControllerChannelError(
+          'Firefox direct controller connector missing', 'direct-connector-missing',
+        );
+      }
       return connectDirectController({
         capabilities: [...semanticCapabilities],
         supportedCapabilities: [...semanticCapabilities],
         buildDigest: CONTROLLER_BUILD_DIGEST,
         ...(kernelIdentity ? { kernelIdentity } : {}),
         authorizeCall: authorizeControllerCall,
-        handleKernelCall: hasTurnAuthority || hasSemanticAuthority
+        handleKernelCall: hasTurnAuthority || hasSemanticAuthority || hasRuntimeHandler
+          || hasFeatureAuthority
           ? handleControllerKernelCall : undefined,
         workerUrl: browser.runtime.getURL('offscreen/controller-worker.js'),
       });
@@ -566,7 +662,8 @@ export const makeSemanticControllerClient = ({
       lease,
       ...(kernelIdentity ? { kernelIdentity } : {}),
       authorizeCall: authorizeControllerCall,
-      handleKernelCall: hasTurnAuthority || hasSemanticAuthority
+      handleKernelCall: hasTurnAuthority || hasSemanticAuthority || hasRuntimeHandler
+        || hasFeatureAuthority
         ? handleControllerKernelCall : undefined,
       handshakeTimeoutMs: handshakeMs,
       findHost: async () => selectExactControllerHost(
@@ -705,7 +802,7 @@ export const makeSemanticControllerClient = ({
         phase: 'run',
       };
     }
-    if (result?.outcomeKnown === false) retire(client);
+    if (result?.outcomeKnown === false || controllerGenerationMustRetire(result)) retire(client);
     return result;
   };
   const callTurn = async (
@@ -764,7 +861,7 @@ export const makeSemanticControllerClient = ({
     }
     try {
       const result = await client.call('semantic.dispatch', payload, { timeoutMs: 30_000 });
-      if (result?.outcomeKnown === false) retire(client);
+      if (result?.outcomeKnown === false || controllerGenerationMustRetire(result)) retire(client);
       return result?.ok === true && Object.hasOwn(result, 'semanticResult')
         ? result.semanticResult : result;
     } catch {
@@ -800,6 +897,127 @@ export const makeSemanticControllerClient = ({
       };
     }
   };
+  const callRuntime = async (
+    /** @type {unknown} */ payload,
+    /** @type {{signal?:AbortSignal,timeoutMs?:number}} */ options = {},
+  ) => {
+    if (!hasRuntimeAuthority) {
+      return {
+        ok: false, code: 'runtime-dispatch-authority-unavailable',
+        outcomeKnown: true, phase: 'startup',
+      };
+    }
+    try {
+      return await withControllerLease(async (/** @type {unknown} */ lease) => {
+        enterLeased();
+        try {
+          let client;
+          try { client = await getClient(lease); }
+          catch {
+            return {
+              ok: false, code: 'runtime-dispatch-startup-failed',
+              outcomeKnown: true, phase: 'startup',
+            };
+          }
+          try {
+            const result = await client.call(RUNTIME_DISPATCH_CAPABILITY, payload, options);
+            if (result?.outcomeKnown === false || controllerGenerationMustRetire(result)) {
+              retire(client);
+            }
+            return result;
+          } catch (cause) {
+            retire(client);
+            return {
+              ok: false, code: 'runtime-dispatch-transport-failed',
+              error: cause instanceof Error ? cause.message : String(cause),
+              outcomeKnown: false, phase: 'run',
+            };
+          }
+        } finally {
+          exitLeased();
+        }
+      }, {
+        outcomeKnownOnLoss: false,
+        code: 'controller-firefox-runtime-lifetime-lost',
+        onLost: retireActiveOnLifetimeLoss,
+      });
+    } catch (cause) {
+      return {
+        ok: false,
+        code: /** @type {{code?:string}} */ (cause)?.code
+          ?? 'runtime-dispatch-lifetime-failed',
+        outcomeKnown: /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown !== false,
+        phase: /** @type {{phase?:string}} */ (cause)?.phase ?? 'startup',
+      };
+    }
+  };
+  const callFeatureCapability = async (
+    /** @type {string} */ capability,
+    /** @type {unknown} */ payload,
+    /** @type {{signal?:AbortSignal,timeoutMs?:number}} */ options = {},
+  ) => {
+    if (!hasFeatureAuthority) {
+      return {
+        ok: false, code: 'feature-dispatch-authority-unavailable',
+        outcomeKnown: true, phase: 'startup',
+      };
+    }
+    if (capability === KERNEL_FEATURE_EVENT_CAPABILITY && leasedUsers === 0) {
+      return {
+        ok: true, outcomeKnown: true, phase: 'startup',
+        value: { accepted: false, inactive: true },
+      };
+    }
+    try {
+      return await withControllerLease(async (/** @type {unknown} */ lease) => {
+        enterLeased();
+        try {
+          let client;
+          try { client = await getClient(lease); }
+          catch {
+            return {
+              ok: false, code: 'feature-dispatch-startup-failed',
+              outcomeKnown: true, phase: 'startup',
+            };
+          }
+          try {
+            const result = await client.call(capability, payload, options);
+            if (result?.outcomeKnown === false || controllerGenerationMustRetire(result)) {
+              retire(client);
+            }
+            return result;
+          } catch (cause) {
+            retire(client);
+            return {
+              ok: false, code: 'feature-dispatch-transport-failed',
+              error: cause instanceof Error ? cause.message : String(cause),
+              outcomeKnown: false, phase: 'run',
+            };
+          }
+        } finally {
+          exitLeased();
+        }
+      }, {
+        outcomeKnownOnLoss: false,
+        code: 'controller-firefox-feature-lifetime-lost',
+        onLost: retireActiveOnLifetimeLoss,
+      });
+    } catch (cause) {
+      return {
+        ok: false,
+        code: /** @type {{code?:string}} */ (cause)?.code
+          ?? 'feature-dispatch-lifetime-failed',
+        outcomeKnown: /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown !== false,
+        phase: /** @type {{phase?:string}} */ (cause)?.phase ?? 'startup',
+      };
+    }
+  };
+  const callFeature = (/** @type {unknown} */ payload,
+    /** @type {{signal?:AbortSignal,timeoutMs?:number}} */ options = {}) =>
+    callFeatureCapability(KERNEL_FEATURE_DISPATCH_CAPABILITY, payload, options);
+  const callFeatureEvent = (/** @type {unknown} */ payload,
+    /** @type {{signal?:AbortSignal,timeoutMs?:number}} */ options = {}) =>
+    callFeatureCapability(KERNEL_FEATURE_EVENT_CAPABILITY, payload, options);
   // why the outer leased user: a raw host lease keeps the document alive, but
   // zero client users still retires its channel and sealed Worker between turns.
   const withRun = (/** @type {()=>Promise<void>} */ operation) =>
@@ -817,6 +1035,9 @@ export const makeSemanticControllerClient = ({
     renderSystemPrompt,
     callTurn,
     callSemantic,
+    callRuntime,
+    callFeature,
+    callFeatureEvent,
     withRun,
     close: () => {
       connectionGeneration += 1;

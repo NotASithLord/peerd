@@ -130,6 +130,22 @@ describe('thin-kernel demand-only feature host', () => {
     expect(calls).toEqual(['resume:true']);
   });
 
+  test('dweb demand refuses disabled posture before acquiring a host lease', async () => {
+    const { browser } = makeBrowser();
+    let acquires = 0;
+    const host = createKernelFeatureHost({
+      browser,
+      identity,
+      dwebEnabled: () => false,
+      createRuntime: (() => ({
+        ready: Promise.resolve(),
+        acquire: async () => { acquires += 1; return { ok: true }; },
+      })) as any,
+    });
+    await expect(host.ensureDwebFeature()).rejects.toThrow('dweb-disabled');
+    expect(acquires).toBe(0);
+  });
+
   test('the exact keepalive owner receives the canonical identity and runtime', () => {
     const { browser } = makeBrowser();
     const runtime = {

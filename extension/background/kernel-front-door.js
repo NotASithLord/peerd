@@ -119,3 +119,43 @@ export const createKernelFrontDoor = ({
     snapshot: () => Object.freeze({ lastFocusedWindowId, browserFocused }),
   });
 };
+
+/** @param {Record<string,any>} deps */
+export const attachKernelFrontDoor = (deps) => {
+  const closePanel = async () => {
+    try {
+      if (deps.browser.sidebarAction?.close) {
+        await deps.browser.sidebarAction.close();
+        return { ok: true };
+      }
+      const sidePanel = deps.browser.sidePanel;
+      if (!sidePanel?.setOptions) return { ok: false, error: 'no-sidepanel' };
+      await sidePanel.setOptions({ enabled: false });
+      setTimeout(() => {
+        sidePanel.setOptions({ enabled: true, path: 'sidepanel/sidepanel.html' }).catch(() => {});
+      }, 250);
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        error: /** @type {{message?:string}} */ (error)?.message ?? String(error),
+      };
+    }
+  };
+  const frontDoor = createKernelFrontDoor({
+    browser: deps.browser,
+    coldEvent: (key, event) => deps.events.event(key, event, 'kernel-front-door'),
+    isHomeOpen: () => deps.uiPorts.hasNamed('home'),
+    isPanelOpen: () => deps.uiPorts.hasNamed('sidepanel'),
+    getFrontDoorView: () => deps.settingsStore.get().frontDoorView === 'home' ? 'home' : 'panel',
+    closePanel,
+    openHome: deps.openHome,
+  });
+  deps.events.registerRecovery({
+    event: 'windows.onFocusChanged',
+    owner: 'kernel-front-door',
+    reconcile: () => frontDoor.refreshFocus(),
+  });
+  void deps.ready.then(() => frontDoor.syncNativeBehavior()).catch(() => {});
+  return Object.freeze({ closePanel, frontDoor });
+};

@@ -90,12 +90,13 @@ describe('test-only vault kernel package target', () => {
       'globalThis.__peerdBundleValue = answer;',
       "globalThis.__peerdBundleFirefox = kernelFirefox ? () => import('./firefox-storage-keepalive.js') : undefined;",
       "globalThis.__peerdBundleRepository = kernelFirefox ? () => import('./repository-local-client.js') : undefined;",
+      "globalThis.__peerdBundleActor = kernelFirefox ? () => import('./direct-actor-host.js') : undefined;",
       '',
     ].join('\n'));
     try {
       const result = await bundleChromeNativeKernel(staging, 'background/vault-kernel.js');
       const output = readFileSync(join(background, 'vault-kernel.js'), 'utf8');
-      expect(NATIVE_CHROME_PRUNED_IMPORTS).toHaveLength(2);
+      expect(NATIVE_CHROME_PRUNED_IMPORTS).toHaveLength(3);
       expect(result.inputs).toEqual([
         'background/dep.js',
         'background/vault-kernel.js',
@@ -116,6 +117,7 @@ describe('test-only vault kernel package target', () => {
       delete (globalThis as any).__peerdBundleValue;
       delete (globalThis as any).__peerdBundleFirefox;
       delete (globalThis as any).__peerdBundleRepository;
+      delete (globalThis as any).__peerdBundleActor;
       delete (globalThis as any)[Symbol.for('peerd.kernel.bundle-start.v1')];
       expect(result.bytes).toBeLessThan(2_000);
     } finally {
@@ -338,6 +340,8 @@ describe('test-only vault kernel package target', () => {
     expect(source).toContain('EVENT_PAGE_IDLE_MS = 45_000');
     expect(source).toContain('afterIdleBoot.bootId === initialBoot.bootId');
     expect(source).toContain('afterIdleBoot.kernelEpoch === initialBoot.kernelEpoch');
+    expect(source).toContain("ordinaryPage !== 'ordinary-firefox-tab'");
+    expect(source).toContain('FIREFOX_DRIVEN_CHILD_IDS_KEY');
     expect(source).toContain(
       "assertLiveKernelAssembly(initialBoot?.assembly, 'store-firefox')",
     );

@@ -15,8 +15,7 @@
 //   workspace.writeFile(path, content) -> Promise<void>
 //   workspace.deleteFile(path)         -> Promise<void>
 //
-// The SW binds these to appClient / jsClient for a given scope (see
-// service-worker.js). The manager itself never imports OPFS.
+// The host binds these to appClient / jsClient. The manager never imports OPFS.
 
 /**
  * @typedef {Object} WorkspaceAdapter

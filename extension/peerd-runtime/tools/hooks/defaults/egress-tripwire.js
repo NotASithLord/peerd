@@ -42,6 +42,7 @@
 // RESIDUALS before trusting this with anything.
 
 import { inspectTabToolCall } from '../../egress-heuristics.js';
+import { DEFAULT_HOOK_MANIFEST } from '/shared/default-hook-manifest.js';
 
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
 
@@ -58,21 +59,7 @@ import { inspectTabToolCall } from '../../egress-heuristics.js';
 
 /** @type {import('../runner.js').Hook} */
 export const egressTripwireHook = {
-  id: 'egress-tripwire',
-  event: 'pre-tool-use',
-  // why: rendered verbatim in the Context → Hooks tab. Says what it catches AND
-  // what it does not, so a user reading the list does not mistake a best-effort
-  // tripwire for a guarantee.
-  description: 'Blocks a page-driving tool — or a web helper\'s own fetch — from '
-    + 'sending an off-origin URL that carries a high-entropy encoded payload in its '
-    + 'userinfo, host, or path, or a fetch header/body carrying that shape. Does NOT scan the '
-    + 'query string, where legitimate login tokens live. Best-effort tripwire, not a '
-    + 'guarantee. Built-in code, registered at boot; cannot be disabled or removed.',
-  // why: just after egress-allowlist (10) — both are network vetoes and belong
-  // ahead of softer policy/observability hooks, and running second keeps the
-  // allowlist (the hard floor) as the first thing a blocked call reports.
-  order: 20,
-  match: '*',
+  ...DEFAULT_HOOK_MANIFEST[1],
   run: (inv) => {
     const { args, toolName } = inv;
     const ctx = /** @type {import('/shared/tool-types.js').ToolContext & TripwireHookCtx} */ (inv.ctx);

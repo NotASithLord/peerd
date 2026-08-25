@@ -37,6 +37,27 @@ export const staticImportSpecifiers = async (
     .map((imported) => imported.n as string);
 };
 
+export const moduleImportSpecifiers = async (
+  source: string,
+  filename = '<module>',
+): Promise<Array<Readonly<{ kind: 'static' | 'dynamic'; specifier: string }>>> => {
+  await init;
+  return parse(source, filename)[0]
+    .filter((imported) => typeof imported.n === 'string')
+    .map((imported) => Object.freeze({
+      kind: imported.d === -1 ? 'static' as const : 'dynamic' as const,
+      specifier: imported.n as string,
+    }));
+};
+
+export const exportedNames = async (
+  source: string,
+  filename = '<module>',
+): Promise<string[]> => {
+  await init;
+  return parse(source, filename)[1].map((exported) => exported.n);
+};
+
 /**
  * Collect every local module linked before an entry can evaluate. Missing or
  * root-escaping links fail here because an optimized artifact must never be

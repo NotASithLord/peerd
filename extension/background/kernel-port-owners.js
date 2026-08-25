@@ -1,7 +1,7 @@
 // @ts-check
 
 import {
-  coldPortNamesFor, LEGACY_PORT_CLASSES,
+  coldPortNamesFor, KERNEL_PORT_CLASSES,
 } from './cold-kernel-inventory.js';
 import { makeBoundedModuleLoader } from '../shared/bounded-module-load.js';
 
@@ -82,7 +82,7 @@ export const createKernelPortOwners = ({
   const readiness = {};
   /** @type {Record<string,string>} */
   const failClosedPorts = {};
-  for (const { name, reason } of LEGACY_PORT_CLASSES) {
+  for (const { name, reason } of KERNEL_PORT_CLASSES) {
     if (requiredSet.has(name)) {
       handlers[name] = synchronousOwner(
         name,

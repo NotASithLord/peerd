@@ -7,7 +7,7 @@ import {
   COLD_START_PHASES,
   COLD_START_TARGETS,
   COLD_START_TARGET_CUTOVER,
-  LEGACY_PACKAGE_COLD_GRAPH_RATCHETS,
+  PACKAGE_COLD_GRAPH_RATCHETS,
   NATIVE_FLOOR_CONTRACT,
   summarizeRaw,
 } from '../../scripts/bench/cold-start-policy.mjs';
@@ -28,7 +28,7 @@ const graph = (value: { modules: number; graphBytes: number; entryBytes: number 
 });
 
 const graphsFor = (channel: 'store' | 'preview') => Object.fromEntries(
-  Object.entries(LEGACY_PACKAGE_COLD_GRAPH_RATCHETS[channel].chrome)
+  Object.entries(PACKAGE_COLD_GRAPH_RATCHETS[channel].chrome)
     .map(([name, value]) => [name, graph(value)]),
 );
 
@@ -390,7 +390,7 @@ describe('cold-start policy', () => {
   test('fails one byte of growth in either shipped channel', () => {
     const result = chromeResult();
     result.packagedGraphsByChannel.preview.serviceWorker.graphBytes += 1;
-    const ceiling = LEGACY_PACKAGE_COLD_GRAPH_RATCHETS.preview.chrome.serviceWorker.graphBytes;
+    const ceiling = PACKAGE_COLD_GRAPH_RATCHETS.preview.chrome.serviceWorker.graphBytes;
     expect(assessChrome(result).failures)
       .toContain(`preview.serviceWorker.graphBytes ${ceiling + 1} exceeds ${ceiling}`);
   });

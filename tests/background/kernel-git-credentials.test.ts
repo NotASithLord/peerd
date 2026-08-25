@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { makeKernelGitCredentialRoutes } from '../../extension/background/kernel-repository-read-routes.js';
+import { makeKernelGitCredentialRoutes } from '../../extension/background/kernel-credential-routes.js';
 import { makeGitCredentialRoutes } from '../../extension/peerd-engine/vm-net/git-credential-routes.js';
 
 const fixture = () => {

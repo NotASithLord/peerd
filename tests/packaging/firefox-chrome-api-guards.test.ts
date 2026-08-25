@@ -10,7 +10,6 @@ const NATIVE_KERNEL_GUARDS = [
   'sidePanel.open|background/kernel-front-door.js',
   'sidePanel.setPanelBehavior|background/kernel-front-door.js',
   'runtime.requestUpdateCheck|background/vault-kernel.js',
-  'runtime.requestUpdateCheck|background/service-worker.js',
 ];
 
 describe('Firefox Chrome-only API guard inventory', () => {
@@ -18,7 +17,7 @@ describe('Firefox Chrome-only API guard inventory', () => {
     expect(FIREFOX_BUILD_NAMES).toEqual(['store-firefox', 'preview-firefox']);
   });
 
-  test('the native/legacy kernel exceptions are exact and carry executable guard proof', () => {
+  test('the kernel exceptions are exact and carry executable guard proof', () => {
     const entries = GUARDED_CHROME_ONLY.filter((entry) => entry.proof);
     expect(entries.map((entry) => `${entry.api}|${entry.file}`)).toEqual(NATIVE_KERNEL_GUARDS);
     expect(new Set(entries.map((entry) => `${entry.api}|${entry.file}`)).size)

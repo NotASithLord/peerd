@@ -32,6 +32,7 @@
 // touch no external origin skip entirely (`origins()` returns []).
 
 import { originOf } from '/peerd-egress/background.js';
+import { DEFAULT_HOOK_MANIFEST } from '/shared/default-hook-manifest.js';
 
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
 
@@ -49,19 +50,7 @@ import { originOf } from '/peerd-egress/background.js';
 
 /** @type {import('../runner.js').Hook} */
 export const egressAllowlistHook = {
-  id: 'egress-allowlist',
-  event: 'pre-tool-use',
-  // why: rendered verbatim in the Context → Hooks tab. This hook is the
-  // always-on egress floor, so the description doubles as the visible
-  // reason there is no off switch for it.
-  description: 'Blocks network tools whose target origin is off the provider '
-    + 'allowlist — the always-on egress floor. Built-in code, registered at '
-    + 'boot; cannot be disabled or removed.',
-  // why: very low order so the network veto runs before softer policy
-  // hooks — no point letting a user observability hook fire on a request
-  // we're about to reject.
-  order: 10,
-  match: '*',
+  ...DEFAULT_HOOK_MANIFEST[0],
   run: (inv) => {
     const { args, toolName } = inv;
     const ctx = /** @type {import('/shared/tool-types.js').ToolContext & EgressHookCtx} */ (inv.ctx);

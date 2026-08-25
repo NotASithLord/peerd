@@ -5,7 +5,8 @@
 // the exact audit event.
 
 import { describe, expect, test } from 'bun:test';
-import { makeKernelOriginCredentialRoutes } from '../../extension/background/kernel-repository-read-routes.js';
+import { makeKernelOriginCredentialRoutes } from '../../extension/background/kernel-credential-routes.js';
+import { createKernelKeyedOriginAuthority } from '../../extension/background/kernel-keyed-origin-authority.js';
 import { DPOP_KEY_STORE } from '../../extension/peerd-egress/dpop/keys.js';
 
 class FakeLockedError extends Error {}
@@ -19,6 +20,7 @@ const makeLane = () => {
   };
   const audit: any[] = [];
   const learned: string[] = [];
+  const forgotten: string[] = [];
   const routes = makeKernelOriginCredentialRoutes({
     vault: {
       listSecretNames: async () => [...secrets.keys()],
@@ -34,8 +36,9 @@ const makeLane = () => {
       del: async (store: string, key: string) => { table(store).delete(key); },
     },
     learnKeyedOrigin: (origin: string) => { learned.push(origin); },
+    forgetKeyedOrigin: (origin: string) => { forgotten.push(origin); },
   });
-  return { routes, secrets, table, audit, learned };
+  return { routes, secrets, table, audit, learned, forgotten };
 };
 
 describe('kernel origin-credential routes', () => {
@@ -53,6 +56,18 @@ describe('kernel origin-credential routes', () => {
     });
     expect(JSON.stringify(lane.audit)).not.toContain('sk-super-secret');
     expect(lane.learned).toEqual(['https://api.example.com']);
+    expect(lane.forgotten).toEqual([]);
+  });
+
+  test('kernel-owned keyed origins hydrate and survive controller replacement', async () => {
+    const names = ['origin:https://api.example.com'];
+    const authority = createKernelKeyedOriginAuthority({ listSecretNames: async () => names });
+    expect(await authority.hydrate()).toBe(true);
+    expect(authority.has('https://api.example.com')).toBe(true);
+    authority.add('https://api.second.example');
+    expect(authority.has('https://api.second.example')).toBe(true);
+    authority.remove('https://api.example.com');
+    expect(authority.has('https://api.example.com')).toBe(false);
   });
 
   test('a dpop credential mints the keypair at provisioning and lists its public jkt', async () => {
@@ -88,6 +103,7 @@ describe('kernel origin-credential routes', () => {
       details: { origin: 'https://api.example.com', dpopKeyRemoved: true },
     });
     expect(lane.learned).toEqual(['https://api.example.com']);
+    expect(lane.forgotten).toEqual(['https://api.example.com']);
   });
 
   test('a locked vault maps to the shared locked reply', async () => {

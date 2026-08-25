@@ -340,10 +340,14 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a child policy receipt reaches the model without destination details', async () => {
+    const queuedNotices: any[] = [];
     registerTool(baseTool({
       primitive: 'tab',
       sideEffect: 'write',
-      execute: async () => ({ ok: true, content: JSON.stringify({ clicked: true }) }),
+      execute: async () => {
+        queuedNotices.push(notice);
+        return { ok: true, content: JSON.stringify({ clicked: true }) };
+      },
     }) as any);
     const notice = {
       reason: 'protected_child_navigation',
@@ -351,7 +355,6 @@ describe('dispatcher lineage spine fields', () => {
       child: 'left_blank',
       retryable: false,
     };
-    const queuedNotices = [notice];
     const result: any = await dispatchToolCall(
       { id: 'child-policy', name: 'lt', args: {} } as any,
       {
@@ -366,10 +369,14 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a blocked child subrequest has an honest guarded receipt', async () => {
+    const queuedNotices: any[] = [];
     registerTool(baseTool({
       primitive: 'tab',
       sideEffect: 'write',
-      execute: async () => ({ ok: true, content: 'clicked' }),
+      execute: async () => {
+        queuedNotices.push(notice);
+        return { ok: true, content: 'clicked' };
+      },
     }) as any);
     const notice = {
       reason: 'protected_child_request',
@@ -377,7 +384,6 @@ describe('dispatcher lineage spine fields', () => {
       child: 'guarded',
       retryable: false,
     };
-    const queuedNotices = [notice];
     const result: any = await dispatchToolCall(
       { id: 'child-request-policy', name: 'lt', args: {} } as any,
       {
@@ -392,16 +398,19 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('ordered child policy receipts survive one tool result', async () => {
+    const queuedNotices: any[] = [];
     registerTool(baseTool({
       primitive: 'tab',
       sideEffect: 'write',
-      execute: async () => ({ ok: true, content: JSON.stringify({ clicked: true }) }),
+      execute: async () => {
+        queuedNotices.push(...notices);
+        return { ok: true, content: JSON.stringify({ clicked: true }) };
+      },
     }) as any);
     const notices = [
       { reason: 'protected_child_navigation', outcome: 'not_run', child: 'closed', retryable: false },
       { reason: 'child_navigation_failed', outcome: 'unverified', child: 'uncontained', retryable: false },
     ];
-    const queuedNotices = [...notices];
     const result: any = await dispatchToolCall(
       { id: 'child-policies', name: 'lt', args: {} } as any,
       {
@@ -446,6 +455,160 @@ describe('dispatcher lineage spine fields', () => {
     expect(JSON.parse(result.content).browserPolicy).toEqual(notice);
   });
 
+  test('Chrome arms navigation and direct page-action tools before their effect', async () => {
+    for (const name of ['navigate', 'click', 'type', 'page_eval', 'page_exec', 'page_keys']) {
+      clearTools();
+      const calls: string[] = [];
+      registerTool(baseTool({
+        name, primitive: 'tab', sideEffect: 'write',
+        execute: async (_args: any, executionContext: any) => {
+          if (name === 'navigate'
+              && executionContext.browserChildQuarantineArmedTabId !== 7) {
+            await executionContext.armBrowserChildQuarantine(7);
+          }
+          calls.push('effect');
+          return { ok: true, content: 'done' };
+        },
+      }) as any);
+      const result: any = await dispatchToolCall(
+        { id: `quarantine-${name}`, name, args: {} } as any,
+        {
+          ...ctx,
+          activeTab: { id: 7, url: 'https://example.com', origin: 'https://example.com' },
+          browserChildQuarantineRequired: true,
+          armBrowserChildQuarantine: async (tabId: number) => {
+            calls.push(`arm:${tabId}`);
+            return { ok: true };
+          },
+        },
+      );
+      expect(result.ok).toBe(true);
+      expect(calls).toEqual(['arm:7', 'effect']);
+    }
+  });
+
+  test('a failed Chrome quarantine never reaches the page effect', async () => {
+    let effects = 0;
+    registerTool(baseTool({
+      name: 'page_eval', primitive: 'tab', sideEffect: 'write',
+      execute: async () => { effects += 1; return { ok: true }; },
+    }) as any);
+    const result: any = await dispatchToolCall(
+      { id: 'quarantine-failed', name: 'page_eval', args: {} } as any,
+      {
+        ...ctx,
+        activeTab: { id: 7, url: 'https://example.com', origin: 'https://example.com' },
+        browserChildQuarantineRequired: true,
+        armBrowserChildQuarantine: async () => ({
+          ok: false, code: 'browser-child-quarantine-unavailable',
+          error: 'browser_child_quarantine_unavailable',
+        }),
+      },
+    );
+    expect(effects).toBe(0);
+    expect(result).toMatchObject({
+      ok: false, code: 'browser-child-quarantine-unavailable',
+      outcomeKind: 'pre-effect-failure', retryable: true,
+    });
+  });
+
+  test('a delayed prior action receipt is detached before the next click', async () => {
+    registerTool(baseTool({
+      name: 'click', primitive: 'tab', sideEffect: 'write',
+      execute: async () => ({ ok: true, content: JSON.stringify({ clicked: true }) }),
+    }) as any);
+    const recorded = recorderCtx();
+    const notice = {
+      reason: 'protected_child_navigation', outcome: 'not_run',
+      child: 'closed', retryable: false,
+    };
+    let queued: any[] = [];
+    const dispatchCtx = {
+      ...recorded.ctx,
+      activeTab: { id: 7, url: 'https://example.com', origin: 'https://example.com' },
+      consumeBrowserChildPolicyNotice: () => queued.splice(0),
+      waitForBrowserChildPolicyNotice: async () => false,
+    };
+    const actionA: any = await dispatchToolCall(
+      { id: 'action-a', name: 'click', args: {} } as any, dispatchCtx,
+    );
+    expect(actionA.structured?.browserPolicy).toBeUndefined();
+    queued.push(notice);
+    const actionB: any = await dispatchToolCall(
+      { id: 'action-b', name: 'click', args: {} } as any, dispatchCtx,
+    );
+    expect(actionB.structured?.browserPolicy).toBeUndefined();
+    expect(actionB.structured?.browserAsyncPolicies).toEqual([notice]);
+    expect(actionB.structured?.browserAsyncPolicyAttribution).toBe('prior_action');
+    expect(JSON.parse(actionB.content).browserAsyncPolicyAttribution).toBe('prior_action');
+    expect(recorded.audited).toContainEqual({
+      type: 'browser_child_policy_detached', details: { count: 1 },
+    });
+  });
+
+  test('a guarded authority failure is retryable without exposing its destination', async () => {
+    registerTool(baseTool({
+      name: 'page_eval', primitive: 'tab', sideEffect: 'write',
+      execute: async () => ({ ok: true, content: 'evaluated' }),
+    }) as any);
+    const notice = {
+      reason: 'child_authority_unavailable', outcome: 'unverified',
+      child: 'guarded', retryable: true,
+    };
+    let queued: any[] = [];
+    const result: any = await dispatchToolCall(
+      { id: 'authority-unavailable', name: 'page_eval', args: {} } as any,
+      {
+        ...ctx,
+        activeTab: { id: 7, url: 'https://example.com', origin: 'https://example.com' },
+        consumeBrowserChildPolicyNotice: () => queued.splice(0),
+        waitForBrowserChildPolicyNotice: async () => { queued.push(notice); return true; },
+      },
+    );
+    expect(result.structured.browserPolicy).toEqual(notice);
+    expect(result.content).toContain('retry');
+    expect(JSON.stringify(result)).not.toContain('127.0.0.1');
+  });
+
+  test('a pending cold child outcome cannot move to the next action', async () => {
+    registerTool(baseTool({
+      name: 'click', primitive: 'tab', sideEffect: 'write',
+      execute: async () => ({ ok: true, content: JSON.stringify({ clicked: true }) }),
+    }) as any);
+    const notice = {
+      reason: 'child_navigation_unverified', outcome: 'unverified',
+      child: 'uncontained', retryable: false,
+    };
+    let pending = true;
+    let queued: any[] = [];
+    const waits: any[] = [];
+    const dispatchCtx = {
+      ...ctx,
+      activeTab: { id: 7, url: 'https://example.com', origin: 'https://example.com' },
+      consumeBrowserChildPolicyNotice: () => queued.splice(0),
+      hasPendingBrowserChildPolicy: () => pending,
+      waitForBrowserChildPolicyNotice: async (_tabId: number, timeoutMs: number,
+        terminal = false) => {
+        waits.push([timeoutMs, terminal]);
+        if (terminal) {
+          pending = false;
+          queued.push(notice);
+          return true;
+        }
+        return false;
+      },
+    };
+    const first: any = await dispatchToolCall(
+      { id: 'cold-child-first', name: 'click', args: {} } as any, dispatchCtx,
+    );
+    expect(first.structured.browserPolicy).toEqual(notice);
+    expect(waits).toEqual([[175, false], [5_000, true]]);
+    const second: any = await dispatchToolCall(
+      { id: 'cold-child-second', name: 'click', args: {} } as any, dispatchCtx,
+    );
+    expect(second.structured?.browserPolicy).toBeUndefined();
+  });
+
   test('page_code keeps an inner page receipt even when user code discards the call result', async () => {
     const notice = {
       reason: 'protected_child_navigation', outcome: 'not_run', child: 'closed', retryable: false,
@@ -475,7 +638,7 @@ describe('dispatcher lineage spine fields', () => {
     expect(result.meta.browserPolicies).toEqual([notice]);
   });
 
-  test('a throwing tab tool does not lose an older child receipt', async () => {
+  test('a throwing tab tool never claims an older child receipt', async () => {
     const notice = {
       reason: 'child_navigation_failed', outcome: 'unverified', child: 'uncontained', retryable: false,
     };
@@ -486,18 +649,23 @@ describe('dispatcher lineage spine fields', () => {
       sideEffect: 'write',
       execute: async () => { throw new Error('click exploded'); },
     }) as any);
+    const recorded = recorderCtx();
     const result: any = await dispatchToolCall(
       { id: 'throwing-child-policy', name: 'click', args: {} } as any,
       {
-        ...ctx,
+        ...recorded.ctx,
         activeTab: { id: 7, url: 'https://example.com', origin: 'https://example.com' },
         consumeBrowserChildPolicyNotice: () => queued.splice(0),
         waitForBrowserChildPolicyNotice: async () => false,
       },
     );
     expect(result.ok).toBe(false);
-    expect(result.content).toContain('The browser did not confirm');
-    expect(result.structured.browserPolicy).toEqual(notice);
-    expect(result.meta.browserPolicies).toEqual([notice]);
+    expect(result.structured?.browserPolicy).toBeUndefined();
+    expect(result.meta?.browserPolicies).toEqual([]);
+    expect(result.structured?.browserAsyncPolicies).toEqual([notice]);
+    expect(result.meta?.browserAsyncPolicies).toEqual([notice]);
+    expect(recorded.audited).toContainEqual({
+      type: 'browser_child_policy_detached', details: { count: 1 },
+    });
   });
 });

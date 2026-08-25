@@ -148,10 +148,9 @@ describe('production kernel browser event owners', () => {
     expect(JSON.stringify(calls)).not.toContain('must-not-replay');
   });
 
-  test('Firefox request authority cancels synchronously on throw, async, or malformed output', () => {
+  test('Firefox request authority preserves and validates blocking promises', async () => {
     for (const result of [
       () => { throw new Error('guard unavailable'); },
-      () => Promise.resolve({}),
       () => null,
       () => ({ redirectUrl: 'https://unsafe.example/' }),
     ]) {
@@ -164,6 +163,23 @@ describe('production kernel browser event owners', () => {
       expect(owners.tabs.onBeforeRequest?.({
         tabId: 1, url: 'http://127.0.0.1/',
       })).toEqual({ cancel: true });
+    }
+    for (const [result, expected] of [
+      [() => Promise.resolve({}), {}],
+      [() => Promise.resolve({ redirectUrl: 'https://unsafe.example/' }), { cancel: true }],
+      [() => Promise.reject(new Error('guard unavailable')), { cancel: true }],
+    ] as const) {
+      const owners = createKernelBrowserEventOwners({
+        ready: Promise.resolve(), firefox: true,
+        resumeSchedules: () => {},
+        tabCustody: makeCustody([], { onBeforeRequest: result }),
+        receipts: recoveryRegistry(),
+      });
+      const decision = owners.tabs.onBeforeRequest?.({
+        tabId: 1, url: 'https://example.com/',
+      });
+      expect(decision).toBeInstanceOf(Promise);
+      await expect(decision).resolves.toEqual(expected);
     }
     const owners = createKernelBrowserEventOwners({
       ready: Promise.resolve(), firefox: true,

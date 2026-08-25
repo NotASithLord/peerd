@@ -76,12 +76,4 @@ describe('App tab required-actor and runtime lifecycle contracts', () => {
     expect(runner).toContain("poisoned: request.op === 'act' || error?.poisoned === true");
   });
 
-  test('the app_code relay derives the exact App from a live owner-bound run', async () => {
-    const source = await Bun.file('./extension/background/service-worker.js').text();
-    expect(source).toContain("if (!isOffscreenSender(sender)) return { ok: false, error: 'app_call_unauthorized_relay' }");
-    expect(source).toContain("scriptRuns.ownerFor(runId) !== ownerSessionId");
-    expect(source).toContain("scriptRuns.allows(runId, 'app') !== true");
-    expect(source).toContain("owner.actorSurface !== 'code'");
-    expect(source).toContain('appId: owner.instanceId');
-  });
 });

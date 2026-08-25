@@ -206,6 +206,7 @@ export const createBrowserNetworkCustody = ({ persist, makeToken = () => crypto.
 
     /** @param {number} tabId */
     hasDurable: (tabId) => durable.has(tabId),
+    durableTabIds: () => [...durable],
     tabIds: () => [...new Set([
       ...durable,
       ...[...leases].filter(([, owned]) => owned.size).map(([tabId]) => tabId),

@@ -235,12 +235,24 @@ export const createKernelFeatureHost = ({
     await runtime.ready;
     return runtime.lock();
   };
+  const ensureDwebFeature = async (/** @type {Promise<any>} */ ready = runtime.ready) => {
+    await ready;
+    if (!dwebEnabled()) throw new Error('dweb-disabled');
+    if (vaultAuthority.isLocked()) {
+      const LockedError = vaultErrorTypes.locked ?? Error;
+      throw new LockedError('vault-locked');
+    }
+    const result = await runtime.acquire('dweb', { reason: 'feature-demand' });
+    if (!result?.ok) throw new Error(result?.code ?? 'dweb-host-unavailable');
+    return result;
+  };
 
   return Object.freeze({
     runtime,
     vault: vaultAuthority,
     ensureOffscreen,
     handleKeepalive,
+    ensureDwebFeature,
     attachFirefoxActorLifetime,
     settleVaultBoot,
     vaultInitialized: vaultUnlockedNow,

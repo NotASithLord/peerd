@@ -77,6 +77,13 @@ const LIFETIME_HEARTBEAT_KEY = 'peerdActorHostKeepAlive';
 const LIFETIME_RESPONSE_DELAY_MS = 65_000;
 const FIREFOX_EVENT_PAGE_IDLE_MS = 30_000;
 const FIREFOX_EVENT_PAGE_RESTART_MARGIN_MS = 15_000;
+
+const backgroundEntryPath = (staging) => {
+  const manifest = JSON.parse(readFileSync(join(staging, 'manifest.json'), 'utf8'));
+  const entry = manifest.background?.scripts?.[0] ?? manifest.background?.service_worker;
+  if (typeof entry !== 'string') throw new Error('Firefox background entry is missing');
+  return join(staging, entry);
+};
 const LIFETIME_QUIET_MS = 12_000;
 const LIFETIME_FAILURE_SCREENSHOT = 'lifetime-failure.png';
 const LIFETIME_FAILURE_LOG = 'lifetime-geckodriver.log';
@@ -1751,7 +1758,7 @@ browser.runtime.onMessage.addListener((message) =>
     ? Promise.resolve({ ok: true, bootId })
     : undefined);
 `, { flag: 'wx', mode: 0o600 });
-  const serviceWorker = join(staging, 'background', 'service-worker.js');
+  const serviceWorker = backgroundEntryPath(staging);
   const serviceWorkerSource = readFileSync(serviceWorker, 'utf8');
   overwriteRegularFile(serviceWorker,
     `import './firefox-broken-worker-probe.js';\n${serviceWorkerSource}`);
@@ -1777,7 +1784,7 @@ const createNotebookProbeArtifact = (channel) => {
   const staging = join(directory, 'staging');
   const artifact = join(directory, `peerd-${VERSION}-${channel}-firefox-notebook-probe.xpi`);
   cpSync(join(ROOT, 'artifacts', 'staging', `${channel}-firefox`), staging, { recursive: true });
-  const serviceWorker = join(staging, 'background', 'service-worker.js');
+  const serviceWorker = backgroundEntryPath(staging);
   const source = readFileSync(serviceWorker, 'utf8');
   const probe = `{
   const probeType = ${JSON.stringify(NOTEBOOK_PROBE_TYPE)};
@@ -1834,7 +1841,7 @@ browser.runtime.onMessage.addListener((message) =>
     ? Promise.resolve({ ok: true, bootId, heartbeats: heartbeats.slice() })
     : undefined);
 `, { flag: 'wx', mode: 0o600 });
-  const serviceWorker = join(staging, 'background', 'service-worker.js');
+  const serviceWorker = backgroundEntryPath(staging);
   const source = readFileSync(serviceWorker, 'utf8');
   overwriteRegularFile(serviceWorker,
     `import './firefox-lifetime-probe.js';\n${injectFirefoxLifetimeProbe(source)}`);
@@ -1868,7 +1875,7 @@ browser.runtime.onMessage.addListener((message) => {
   const keepalive = join(staging, 'background', 'firefox-storage-keepalive.js');
   const source = readFileSync(keepalive, 'utf8');
   overwriteRegularFile(keepalive, injectFirefoxKeepaliveLossFault(source));
-  const serviceWorker = join(staging, 'background', 'service-worker.js');
+  const serviceWorker = backgroundEntryPath(staging);
   const serviceWorkerSource = readFileSync(serviceWorker, 'utf8');
   overwriteRegularFile(serviceWorker, `import './firefox-keepalive-loss-probe.js';\n${serviceWorkerSource}`);
   execFileSync('zip', ['-q', '-X', '-r', artifact, '.'], {
@@ -1938,7 +1945,7 @@ browser.runtime.onMessage.addListener((message) => {
   })();
 });
 `, { flag: 'wx', mode: 0o600 });
-  const serviceWorker = join(staging, 'background', 'service-worker.js');
+  const serviceWorker = backgroundEntryPath(staging);
   const source = readFileSync(serviceWorker, 'utf8');
   overwriteRegularFile(serviceWorker, `import './firefox-recovery-probe.js';\n${source}`);
   execFileSync('zip', ['-q', '-X', '-r', artifact, '.'], {

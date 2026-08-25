@@ -4,7 +4,7 @@
 // method receivers nor the realm that owns authority.
 
 import { createColdKernelCapture } from './cold-kernel-capture.js';
-import { coldEventKeysFor, LEGACY_COLD_EVENTS } from './cold-kernel-inventory.js';
+import { coldEventKeysFor, KERNEL_COLD_EVENTS } from './cold-kernel-inventory.js';
 
 const canonical = (/** @type {any[]} */ value) => JSON.stringify(value);
 
@@ -36,7 +36,7 @@ export const createColdListenerFanIn = ({
   kernelIdentity,
 }) => {
   const allowed = new Set(coldEventKeysFor({ firefox, selfHostedChrome }));
-  const inventory = new Map(LEGACY_COLD_EVENTS.map((entry) => [entry.key, entry]));
+  const inventory = new Map(KERNEL_COLD_EVENTS.map((entry) => [entry.key, entry]));
   const capture = createColdKernelCapture({
     browser: {}, queueStore, authority: {},
     isFirstPartySender: () => false, isFirstPartyPort: () => false,
