@@ -23,12 +23,6 @@ and storage formats may move until the surface stabilizes.
   their own, and Settings -> Paced sites lists them with a per-site forget
   control. peerd still does not disguise itself or work around a site's limits.
 
-### Fixed
-
-- A site helper stopped for leaving its approved site no longer keeps a stale
-  handle, so retrying it starts a fresh helper instead of reopening an
-  abandoned tab.
-
 ## [0.7.3] - 2026-08-18
 
 ### Added
