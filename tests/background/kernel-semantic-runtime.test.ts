@@ -232,6 +232,8 @@ describe('kernel semantic runtime', () => {
   test('shares one controller gateway with the demand-loaded turn owner', async () => {
     let creates = 0;
     let semanticCalls = 0;
+    let physicalRuns = 0;
+    let productionRuns = 0;
     const semanticPayloads: any[] = [];
     let authority: any;
     const base = makeRuntime();
@@ -243,6 +245,10 @@ describe('kernel semantic runtime', () => {
           semanticCalls += 1;
           semanticPayloads.push(payload);
           return { ok: true };
+        },
+        withRun: async (operation: () => Promise<any>) => {
+          physicalRuns += 1;
+          return operation();
         },
       });
     });
@@ -260,7 +266,13 @@ describe('kernel semantic runtime', () => {
       isHomeSender: () => true,
       actorCount: () => { throw new Error('fallback projection used'); },
       actorOverview: () => { throw new Error('fallback projection used'); },
-      loadTurnRuntime: async () => ({
+      withProductionRun: async (operation: () => Promise<any>) => {
+        productionRuns += 1;
+        return operation();
+      },
+      loadTurnRuntime: async (seams: any) => {
+        await seams.withRun(async () => {});
+        return ({
         turnDeps: {
           makeAgentSendCustody: () => ({
             validOperationId: () => false, operationWindowValid: () => false,
@@ -273,7 +285,7 @@ describe('kernel semantic runtime', () => {
         actorCount: async () => ({ activeActors: 2 }),
         actorOverview: async () => ({ roots: [{ sessionId: 'root' }] }),
         relays: { sessions: base.runtime },
-      }),
+      }); },
     });
 
     await expect(runtime.routes['provider/status']({ provider: 'anthropic' }))
@@ -288,6 +300,7 @@ describe('kernel semantic runtime', () => {
     expect(authority.handleSemanticKernelCall).toBeFunction();
     expect(authority.authorizeTurnCall).toBeFunction();
     expect(authority.handleTurnKernelCall).toBeFunction();
+    expect({ physicalRuns, productionRuns }).toEqual({ physicalRuns: 0, productionRuns: 1 });
     expect(runtime.relays).toEqual({ sessions: base.runtime });
     await runtime.close();
   });

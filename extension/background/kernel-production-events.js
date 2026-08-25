@@ -17,6 +17,7 @@ const inactive = () => Object.freeze({
  * @param {(event:string,envelope:Record<string,unknown>)=>Promise<any>} deps.send
  * @param {()=>Promise<Record<string,unknown>>|Record<string,unknown>} deps.readSnapshot
  * @param {<T>(operation:()=>Promise<T>)=>Promise<T>} deps.withRun
+ * @param {()=>unknown} [deps.retire]
  * @param {()=>string} [deps.newId]
  * @param {number} [deps.timeoutMs]
  * @param {typeof setTimeout} [deps.setTimeoutFn]
@@ -24,7 +25,8 @@ const inactive = () => Object.freeze({
  */
 export const createKernelProductionEvents = ({
   identity, send, readSnapshot, withRun, newId = () => crypto.randomUUID(),
-  timeoutMs = 15_000, setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout,
+  retire = () => {}, timeoutMs = 15_000,
+  setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout,
 }) => {
   if (typeof identity?.bootId !== 'string' || typeof identity?.kernelEpoch !== 'string'
       || typeof send !== 'function' || typeof readSnapshot !== 'function'
@@ -143,11 +145,12 @@ export const createKernelProductionEvents = ({
     try {
       result = await bounded(
         Promise.resolve(send('production/reconcile', envelope(snapshot, newId()))),
-        'production-reconcile-timeout', false,
+        'production-reconcile-timeout', true,
       );
     } catch (cause) {
       needsReconcile = true;
-      return failure(cause, false, 'run');
+      try { retire(); } catch {}
+      return failure(cause, true, 'startup');
     }
     needsReconcile = result?.ok !== true || result?.value?.accepted !== true;
     return result;

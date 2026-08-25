@@ -95,9 +95,22 @@ export const createKernelFeatureHost = ({
       }
       const quota = createKernelFeatureEffectQuota(KERNEL_FEATURE_DISPATCH_CAPABILITY, payload);
       let effectsStarted = 0;
+      let grantOpen = true;
+      const grant = new AbortController();
+      let stop = (/** @type {Record<string,unknown>} */ _result) => {};
+      const stopped = new Promise((resolve) => { stop = resolve; });
+      const expire = () => {
+        if (!grantOpen) return;
+        grant.abort();
+        stop(failure(
+          'feature-grant-expired', effectsStarted === 0, 'run', effectsStarted === 0,
+        ));
+      };
+      options.signal.addEventListener('abort', expire, { once: true });
+      const deadlineTimer = setTimeout(expire, Math.max(1, Number(options.deadlineAt) - now()));
       const call = async (/** @type {string} */ operation, /** @type {unknown} */ value) => {
-        if (options.signal.aborted || Number(options.deadlineAt) <= now()) {
-          return failure('feature-grant-expired', effectsStarted === 0, 'run');
+        if (!grantOpen || grant.signal.aborted || Number(options.deadlineAt) <= now()) {
+          return failure('feature-grant-settled', true, 'run');
         }
         const admitted = quota.admit(operation, value);
         if (admitted?.ok !== true) return admitted;
@@ -114,19 +127,29 @@ export const createKernelFeatureHost = ({
         return observed?.ok === true ? result : observed;
       };
       try {
-        const value = await handler(request.message, Object.freeze({
-          effects: Object.freeze({ call, signal: options.signal, deadlineAt: options.deadlineAt }),
-        }));
-        const result = Object.freeze({ ok: true, outcomeKnown: true, value });
-        return kernelFeatureResultAllowed(KERNEL_FEATURE_DISPATCH_CAPABILITY, payload, result)
-          ? result : failure('feature-result-invalid', false, 'run');
-      } catch (cause) {
-        return failure(
+        const execution = Promise.resolve().then(() => handler(
+          request.message,
+          Object.freeze({
+            effects: Object.freeze({
+              call, signal: grant.signal, deadlineAt: options.deadlineAt,
+            }),
+          }),
+        )).then((value) => {
+          const result = Object.freeze({ ok: true, outcomeKnown: true, value });
+          return kernelFeatureResultAllowed(KERNEL_FEATURE_DISPATCH_CAPABILITY, payload, result)
+            ? result : failure('feature-result-invalid', false, 'run');
+        }).catch((cause) => failure(
           'feature-dispatch-failed',
           effectsStarted === 0
             || /** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true,
           'run',
-        );
+        ));
+        return await Promise.race([execution, stopped]);
+      } finally {
+        grantOpen = false;
+        grant.abort();
+        clearTimeout(deadlineTimer);
+        options.signal.removeEventListener('abort', expire);
       }
     } finally {
       const remaining = (activeRoutes.get(routeKey) ?? 1) - 1;

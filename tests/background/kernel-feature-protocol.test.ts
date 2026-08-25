@@ -269,6 +269,55 @@ describe('sealed kernel feature protocol', () => {
     }
   });
 
+  test('closes a captured effect grant on settlement without a kernel call', async () => {
+    const payload = request();
+    let lateEffect!: () => Promise<any>;
+    let kernelCalls = 0;
+    const host = createKernelFeatureHost({ loaders: {
+      administrative: async () => ({ routes: {
+        'hooks/list': async (_message: unknown, context: any) => {
+          lateEffect = () => context.effects.call('administrative.hooks.read', {});
+          return { hooks: [] };
+        },
+      } }),
+    } });
+    expect(await host.dispatch(payload, options(payload, {
+      kernelCall: async () => {
+        kernelCalls += 1;
+        return { ok: true, outcomeKnown: true };
+      },
+    }))).toMatchObject({ ok: true });
+    expect(await lateEffect()).toMatchObject({
+      ok: false, code: 'feature-grant-settled', outcomeKnown: true,
+    });
+    expect(kernelCalls).toBe(0);
+  });
+
+  test('bounds a hung handler and frees its route slot', async () => {
+    const first = request({
+      route: 'hooks/remove', dispatchId: 'dispatch-hung-first', message: { id: 'first' },
+    });
+    const second = request({
+      route: 'hooks/remove', dispatchId: 'dispatch-hung-second', message: { id: 'second' },
+    });
+    let calls = 0;
+    const host = createKernelFeatureHost({ loaders: {
+      administrative: async () => ({ routes: {
+        'hooks/remove': async () => {
+          calls += 1;
+          if (calls === 1) return new Promise(() => {});
+          return { hooks: [] };
+        },
+      } }),
+    } });
+    expect(await host.dispatch(first, options(first, {
+      deadlineAt: Date.now() + 5,
+    }))).toMatchObject({
+      ok: false, code: 'feature-grant-expired', outcomeKnown: true, retryable: true,
+    });
+    expect(await host.dispatch(second, options(second))).toMatchObject({ ok: true });
+  });
+
   test('carries an exact route through the sealed channel and reverse effect quota', async () => {
     let controller: any = null;
     const effects: any[] = [];

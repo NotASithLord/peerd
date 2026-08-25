@@ -217,8 +217,7 @@ export const createKernelSemanticRuntime = (deps) => {
         if (typeof deps.withProductionRun !== 'function') return binding;
         return Object.freeze({
           ...binding,
-          withRun: (/** @type {()=>Promise<any>} */ operation) =>
-            binding.withRun(() => deps.withProductionRun(operation)),
+          withRun: deps.withProductionRun,
         });
       },
       loadRuntime: deps.loadTurnRuntime,
