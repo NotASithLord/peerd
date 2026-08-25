@@ -82,9 +82,9 @@ const coalesced = (operation) => {
 
 /** @param {any} deps */
 export const createKernelBrowserEventOwners = ({
-  ready, resumeSchedules, tabCustody, firefox = false, receipts,
+  ready, resumeRecovery, tabCustody, firefox = false, receipts,
 }) => {
-  if (!thenable(ready) || typeof resumeSchedules !== 'function'
+  if (!thenable(ready) || typeof resumeRecovery !== 'function'
       || !tabCustody || [
         tabCustody.onCreated, tabCustody.onUpdated, tabCustody.onRemoved,
         tabCustody.onActivated, tabCustody.onNavigationTarget, tabCustody.reconcile,
@@ -93,9 +93,9 @@ export const createKernelBrowserEventOwners = ({
       || typeof receipts?.registerRecovery !== 'function') {
     throw new TypeError('kernel-browser-event-owners-config-invalid');
   }
-  const resumeCurrentSchedules = coalesced(async () => {
+  const resumeCurrentRecovery = coalesced(async () => {
     await ready;
-    return resumeSchedules();
+    return resumeRecovery();
   });
   const reconcileCurrentTabs = coalesced(async () => {
     await ready;
@@ -103,7 +103,7 @@ export const createKernelBrowserEventOwners = ({
   });
   for (const event of ['runtime.onStartup', 'alarms.onAlarm']) {
     receipts.registerRecovery({
-      event, owner: KERNEL_LIFECYCLE_OWNER, reconcile: resumeCurrentSchedules,
+      event, owner: KERNEL_LIFECYCLE_OWNER, reconcile: resumeCurrentRecovery,
     });
   }
   for (const event of TAB_EVENTS) {
@@ -141,8 +141,8 @@ export const createKernelBrowserEventOwners = ({
   } : undefined;
   return Object.freeze({
     lifecycle: Object.freeze({
-      onStartup: resumeCurrentSchedules,
-      onAlarm: resumeCurrentSchedules,
+      onStartup: resumeCurrentRecovery,
+      onAlarm: resumeCurrentRecovery,
     }),
     tabs: Object.freeze({
       onCreated: (/** @type {any} */ tab) => tabCustody.onCreated(tab),
@@ -562,15 +562,10 @@ export const createKernelBrowserNetworkOwner = (deps) => {
 
 /** @param {Record<string,any>} deps */
 export const createKernelTabCustody = (deps) => {
-  const live = (/** @type {string} */ name, /** @type {any[]} */ args, demand = false) => {
+  const live = (/** @type {string} */ name, /** @type {any[]} */ args) => {
     const handler = deps.getRelays()?.eventOwners?.[name];
     if (typeof handler === 'function') return handler(...args);
-    if (!demand) return undefined;
-    return deps.loadRelays().then((/** @type {Record<string,any>} */ relays) => {
-      const loaded = relays.eventOwners?.[name];
-      if (typeof loaded !== 'function') throw new Error(`kernel-tab-custody-${name}-unavailable`);
-      return loaded(...args);
-    });
+    return undefined;
   };
   const network = (/** @type {string} */ name, /** @type {any[]} */ args = []) => {
     const ingress = deps.network?.[name];
@@ -578,11 +573,11 @@ export const createKernelTabCustody = (deps) => {
     return Promise.resolve(deps.network.call(name, args)).then(() => true);
   };
   const event = async (/** @type {string} */ name, /** @type {any[]} */ args) => {
-    const hadLive = typeof deps.getRelays()?.eventOwners?.[name] === 'function';
-    const liveResult = live(name, args);
+    let liveResult;
+    try { liveResult = live(name, args); }
+    catch (cause) { liveResult = Promise.reject(cause); }
     const handled = await network(name, args);
-    if (hadLive) return Promise.all([handled, liveResult]);
-    return Promise.all([handled, handled ? live(name, args, true) : undefined]);
+    return Promise.all([handled, liveResult]);
   };
   return Object.freeze({
     onCreated: (/** @type {any} */ tab) => event('onCreated', [tab]),

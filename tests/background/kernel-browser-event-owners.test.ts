@@ -62,13 +62,13 @@ describe('production kernel browser event owners', () => {
     const calls: any[] = [];
     let releaseReady!: () => void;
     const ready = new Promise<void>((resolve) => { releaseReady = resolve; });
-    let releaseSchedules!: () => void;
-    const schedulesHeld = new Promise<void>((resolve) => { releaseSchedules = resolve; });
+    let releaseRecovery!: () => void;
+    const recoveryHeld = new Promise<void>((resolve) => { releaseRecovery = resolve; });
     const owners = createKernelBrowserEventOwners({
       ready,
-      resumeSchedules: async () => {
-        calls.push(['schedules']);
-        await schedulesHeld;
+      resumeRecovery: async () => {
+        calls.push(['recovery']);
+        await recoveryHeld;
       },
       tabCustody: makeCustody(calls),
       receipts: recoveryRegistry(),
@@ -103,8 +103,8 @@ describe('production kernel browser event owners', () => {
     releaseReady();
     await Promise.resolve();
     await Promise.resolve();
-    expect(calls.filter(([name]) => name === 'schedules')).toHaveLength(1);
-    releaseSchedules();
+    expect(calls.filter(([name]) => name === 'recovery')).toHaveLength(1);
+    releaseRecovery();
     await Promise.all(wakes);
   });
 
@@ -116,7 +116,7 @@ describe('production kernel browser event owners', () => {
     });
     const owners = createKernelBrowserEventOwners({
       ready: Promise.resolve(),
-      resumeSchedules: () => { calls.push(['schedules']); },
+      resumeRecovery: () => { calls.push(['recovery']); },
       tabCustody: makeCustody(calls, {
         onUpdated: () => new Promise(() => {}),
         reconcile: (...args: any[]) => { calls.push(['reconcile', ...args]); },
@@ -156,7 +156,7 @@ describe('production kernel browser event owners', () => {
     ]) {
       const owners = createKernelBrowserEventOwners({
         ready: Promise.resolve(), firefox: true,
-        resumeSchedules: () => {},
+        resumeRecovery: () => {},
         tabCustody: makeCustody([], { onBeforeRequest: result }),
         receipts: recoveryRegistry(),
       });
@@ -171,7 +171,7 @@ describe('production kernel browser event owners', () => {
     ] as const) {
       const owners = createKernelBrowserEventOwners({
         ready: Promise.resolve(), firefox: true,
-        resumeSchedules: () => {},
+        resumeRecovery: () => {},
         tabCustody: makeCustody([], { onBeforeRequest: result }),
         receipts: recoveryRegistry(),
       });
@@ -183,7 +183,7 @@ describe('production kernel browser event owners', () => {
     }
     const owners = createKernelBrowserEventOwners({
       ready: Promise.resolve(), firefox: true,
-      resumeSchedules: () => {},
+      resumeRecovery: () => {},
       tabCustody: makeCustody([], { onBeforeRequest: () => ({}) }),
       receipts: recoveryRegistry(),
     });
@@ -193,17 +193,17 @@ describe('production kernel browser event owners', () => {
 
   test('refuses incomplete custody before any readiness can be claimed', () => {
     expect(() => createKernelBrowserEventOwners({
-      ready: Promise.resolve(), resumeSchedules: () => {},
+      ready: Promise.resolve(), resumeRecovery: () => {},
       tabCustody: { reconcile: () => {} } as any,
       receipts: recoveryRegistry(),
     })).toThrow('kernel-browser-event-owners-config-invalid');
     expect(() => createKernelBrowserEventOwners({
-      ready: Promise.resolve(), firefox: true, resumeSchedules: () => {},
+      ready: Promise.resolve(), firefox: true, resumeRecovery: () => {},
       tabCustody: makeCustody([], { onBeforeRequest: undefined }),
       receipts: recoveryRegistry(),
     })).toThrow('kernel-browser-event-owners-config-invalid');
     expect(() => createKernelBrowserEventOwners({
-      ready: Promise.resolve(), resumeSchedules: () => {},
+      ready: Promise.resolve(), resumeRecovery: () => {},
       tabCustody: makeCustody([]),
     } as any)).toThrow('kernel-browser-event-owners-config-invalid');
   });

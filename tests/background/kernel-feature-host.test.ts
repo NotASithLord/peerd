@@ -211,4 +211,41 @@ describe('thin-kernel demand-only feature host', () => {
     expect(() => host.attachFirefoxActorLifetime({ event: () => null } as any))
       .toThrow('kernel-firefox-lifetime-registry-changed');
   });
+
+  test('carries heartbeat loss through a lazy Firefox handle', async () => {
+    const { browser } = makeBrowser();
+    const runtime = {
+      ready: Promise.resolve(), disable: async () => {}, unlock: () => {},
+      reconcile: async () => [], lock: async () => [],
+    };
+    let lose = (_error: Error) => {};
+    const host = createKernelFeatureHost({
+      browser,
+      identity,
+      createRuntime: (() => runtime) as any,
+      loadFirefoxLifetime: async () => {
+        const module = await import('../../extension/background/firefox-storage-keepalive.js');
+        return {
+          ...module,
+          makeStorageSessionKeepAlive: (options: any) => {
+            lose = options.onLost;
+            return { start: async () => {}, stop: async () => {}, onChanged: () => false };
+          },
+        } as any;
+      },
+    });
+    const lifetime = host.attachFirefoxActorLifetime({
+      event: (_key: string, raw: any) => raw,
+    } as any);
+    const losses: string[] = [];
+    const handle = lifetime.createHandle({
+      onLost: (error: Error) => { losses.push(error.message); },
+    });
+    await handle.start();
+
+    lose(new Error('heartbeat acknowledgment stopped'));
+
+    expect(losses).toEqual(['heartbeat acknowledgment stopped']);
+    await handle.stop();
+  });
 });

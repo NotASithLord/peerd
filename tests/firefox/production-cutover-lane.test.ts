@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { REPO_ROOT } from '../../packaging/lib.ts';
-import { PRODUCTION_BACKGROUND_ENTRY } from '../../scripts/cdp/passkey-signup-lane.mjs';
+import { FIREFOX_BACKGROUND_ENTRY } from '../../packaging/gen-manifest.ts';
 import {
   assertFirefoxProductionReport,
 } from '../../scripts/firefox/production-cutover-lane.mjs';
@@ -24,7 +24,7 @@ const valid = () => ({
     channel: 'store', browser: 'firefox',
     artifact: { sha256: digest, bytes: 10 },
     tree: { sha256: digest, bytes: 20, files: 3 },
-    manifest: { sha256: digest, backgroundEntry: PRODUCTION_BACKGROUND_ENTRY },
+    manifest: { sha256: digest, backgroundEntry: FIREFOX_BACKGROUND_ENTRY },
     harness: { sha256: digest },
     gitFixture: gitBinding,
     runtimeIdentity: {
@@ -183,7 +183,7 @@ describe('installed Firefox production cutover lane', () => {
     );
     expect(source).toContain("channel: 'store', browser: 'firefox'");
     expect(source).toContain('driver.installAddon(artifactPath)');
-    expect(source).toContain('backgroundEntry !== PRODUCTION_BACKGROUND_ENTRY');
+    expect(source).toContain('backgroundEntry !== FIREFOX_BACKGROUND_ENTRY');
     expect(source).toContain('EVENT_PAGE_IDLE_MS = 45_000');
     expect(source).toContain('browserAppGitProbe.toString()');
     expect(source).toContain('browserVerifyAcceptanceAppPayload.toString()');

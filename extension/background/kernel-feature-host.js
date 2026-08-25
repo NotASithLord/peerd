@@ -204,11 +204,11 @@ export const createKernelFeatureHost = ({
     run: async (/** @type {()=>Promise<any>|any} */ operation,
       /** @type {any} */ options = undefined) =>
       (await loadFirefoxActorLifetime()).run(operation, options),
-    createHandle: () => {
+    createHandle: (/** @type {{onLost?:(error:Error)=>void}} */ options = {}) => {
       /** @type {any|null} */
       let handle = null;
       return Object.freeze({
-        start: async () => { handle ??= (await loadFirefoxActorLifetime()).createHandle(); await handle.start(); },
+        start: async () => { handle ??= (await loadFirefoxActorLifetime()).createHandle(options); await handle.start(); },
         stop: async () => { const active = handle; handle = null; await active?.stop(); },
       });
     },

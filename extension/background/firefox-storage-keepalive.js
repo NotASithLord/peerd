@@ -229,7 +229,7 @@ export const makeRefCountedFirefoxBackgroundLifetime = ({ start, stop }) => {
   if (typeof start !== 'function' || typeof stop !== 'function') {
     throw new TypeError('firefox-background-lifetime-config-invalid');
   }
-  /** @type {Set<{released:boolean,lost:Promise<Error>,lose:(error:Error)=>void}>} */
+  /** @type {Set<{released:boolean,lost:Promise<Error>,lose:(error:Error)=>void,onLost:(error:Error)=>void}>} */
   const tokens = new Set();
   /** @type {Promise<void>|null} */
   let ready = null;
@@ -251,13 +251,14 @@ export const makeRefCountedFirefoxBackgroundLifetime = ({ start, stop }) => {
     failure = null;
     await queue(stop).catch(() => {});
   };
-  const acquire = async () => {
+  const acquire = async (/** @type {(error:Error)=>void} */ onLost = () => {}) => {
     if (failure && tokens.size > 0) throw failure;
     let lose = (/** @type {Error} */ _error) => {};
     const token = {
       released: false,
       lost: new Promise((resolve) => { lose = resolve; }),
       lose,
+      onLost,
     };
     tokens.add(token);
     if (tokens.size === 1) {
@@ -277,7 +278,10 @@ export const makeRefCountedFirefoxBackgroundLifetime = ({ start, stop }) => {
     const error = cause instanceof Error ? cause : new Error(String(cause));
     if (failure) return;
     failure = error;
-    for (const token of tokens) token.lose(error);
+    for (const token of tokens) {
+      token.lose(error);
+      try { token.onLost(error); } catch { /* lifetime loss still reaches every token */ }
+    }
   };
   /**
    * @template T
@@ -343,12 +347,13 @@ export const makeRefCountedFirefoxBackgroundLifetime = ({ start, stop }) => {
       await release(token);
     }
   };
-  const createHandle = () => {
+  /** @param {{onLost?:(error:Error)=>void}} [options] */
+  const createHandle = ({ onLost = () => {} } = {}) => {
     /** @type {Awaited<ReturnType<typeof acquire>>|null} */
     let token = null;
     return Object.freeze({
       async start() {
-        if (!token) token = await acquire();
+        if (!token) token = await acquire(onLost);
       },
       async stop() {
         const active = token;

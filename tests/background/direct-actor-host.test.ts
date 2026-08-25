@@ -29,6 +29,24 @@ describe('shared Firefox event-page lifetime', () => {
     expect(stops).toBe(1);
   });
 
+  test('notifies an active handle when its shared heartbeat is lost', async () => {
+    const losses: string[] = [];
+    const lifetime = makeRefCountedFirefoxBackgroundLifetime({
+      start: () => {},
+      stop: () => {},
+    });
+    const actor = lifetime.createHandle({
+      onLost: (error) => { losses.push(error.message); },
+    });
+    await actor.start();
+
+    lifetime.fail(new Error('event page heartbeat stopped'));
+    lifetime.fail(new Error('duplicate loss'));
+
+    expect(losses).toEqual(['event page heartbeat stopped']);
+    await actor.stop();
+  });
+
   test('reports replay-safe reads known and dispatched effects unknown on lifetime loss', async () => {
     const lifetime = makeRefCountedFirefoxBackgroundLifetime({
       start: () => {},

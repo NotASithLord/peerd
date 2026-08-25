@@ -5,7 +5,9 @@ export const WEB_ACTOR_SOURCE_PROJECTION_KEY = 'webActorSourceProjection.v1';
 /** @param {any} tab @param {string} sessionId */
 export const webActorSourceProjectionRow = (tab, sessionId) => {
   if (!Number.isInteger(tab?.id) || tab.id < 0 || typeof sessionId !== 'string'
-      || sessionId.length === 0 || typeof tab?.url !== 'string') return null;
+      || sessionId.length === 0 || typeof tab?.url !== 'string' || tab.url.length === 0) {
+    return null;
+  }
   return Object.freeze({
     tabId: tab.id,
     sessionId,
@@ -38,6 +40,7 @@ export const validateWebActorSourceProjection = (bindings, projection, tabs) => 
   for (const row of projection) {
     if (!row || !Number.isInteger(row.tabId) || row.tabId < 0
         || typeof row.sessionId !== 'string' || typeof row.url !== 'string'
+        || row.url.length === 0
         || ![null, undefined].includes(row.openerTabId)
           && (!Number.isInteger(row.openerTabId) || row.openerTabId < 0)
         || row.cookieStoreId !== null && typeof row.cookieStoreId !== 'string'
@@ -48,12 +51,25 @@ export const validateWebActorSourceProjection = (bindings, projection, tabs) => 
     .filter((tab) => Number.isInteger(tab?.id) && tab.id >= 0)
     .map((tab) => [tab.id, tab]));
   const live = new Map();
+  const unknown = Symbol('unknown-source-identity');
   for (const [tabId, row] of rows) {
     const tab = current.get(tabId);
-    const openerTabId = Number.isInteger(tab?.openerTabId) ? tab.openerTabId : null;
-    const cookieStoreId = typeof tab?.cookieStoreId === 'string' ? tab.cookieStoreId : null;
-    if (tab?.url !== row.url || openerTabId !== (row.openerTabId ?? null)
-        || cookieStoreId !== row.cookieStoreId) return null;
+    if (!tab) continue;
+    const expectedOpener = row.openerTabId ?? null;
+    const url = typeof tab.url === 'string' && tab.url.length > 0 ? tab.url : unknown;
+    const openerTabId = Number.isInteger(tab.openerTabId) && tab.openerTabId >= 0
+      ? tab.openerTabId
+      : [null, undefined].includes(tab.openerTabId) && expectedOpener === null
+        ? null : unknown;
+    const cookieStoreId = row.cookieStoreId !== null
+      && typeof tab.cookieStoreId === 'string' ? tab.cookieStoreId : unknown;
+    const identity = [
+      [url, row.url], [openerTabId, expectedOpener], [cookieStoreId, row.cookieStoreId],
+    ];
+    if (identity.some(([actual, expected]) => actual !== unknown && actual !== expected)) {
+      continue;
+    }
+    if (identity.some(([actual]) => actual === unknown)) return null;
     live.set(tabId, row.sessionId);
   }
   return live;

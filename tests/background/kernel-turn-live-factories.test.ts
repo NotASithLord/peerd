@@ -84,7 +84,13 @@ const tracker = (kind: 'vm'|'notebook'|'pod'|'app') => {
 
 const harness = async (
   actorRun?: (job: any, options: any, config: any) => Promise<any>,
-  options: { restoredApp?: boolean, networkSync?: () => Promise<void>, firefox?: boolean } = {},
+  options: {
+    restoredApp?: boolean,
+    networkSync?: () => Promise<void>,
+    firefox?: boolean,
+    firefoxActorLifetime?: any,
+    loadDirectActorHost?: () => Promise<any>,
+  } = {},
 ) => {
   const idb = memoryStore();
   let sessionSequence = 0;
@@ -252,6 +258,8 @@ const harness = async (
     canWrite: () => {}, ready: Promise.resolve(),
     postChatNote: () => {}, pushState: async () => {},
     dwebEnabled: false, firefox: options.firefox === true,
+    firefoxActorLifetime: options.firefoxActorLifetime,
+    loadDirectActorHost: options.loadDirectActorHost,
     channel: 'dev', offscreenUrl: 'offscreen.html',
     dispatchEffectsRequired: true,
     isOffscreenSender: () => true,
@@ -337,6 +345,32 @@ describe('kernel live turn factories', () => {
     expect(() => createKernelTurnLiveFactories({})).toThrow(
       'kernel-turn-live-config-invalid',
     );
+  });
+
+  test('routes Firefox heartbeat loss into the direct actor host', async () => {
+    let onLost = (_error: Error) => {};
+    const losses: string[] = [];
+    await harness(undefined, {
+      firefox: true,
+      firefoxActorLifetime: {
+        createHandle: (options: any) => {
+          onLost = options.onLost;
+          return { start: async () => {}, stop: async () => {} };
+        },
+      },
+      loadDirectActorHost: async () => ({
+        makeDirectActorHost: () => ({
+          sendMessage: async () => ({ ok: true }),
+          bindRelayRoutes: () => {},
+          isRelaySender: () => false,
+          failKeepAlive: (error: Error) => { losses.push(error.message); },
+        }),
+      }),
+    });
+
+    onLost(new Error('storage heartbeat failed'));
+
+    expect(losses).toEqual(['storage heartbeat failed']);
   });
 
   test('validates every engine attach and binds App provenance to one owner generation', async () => {

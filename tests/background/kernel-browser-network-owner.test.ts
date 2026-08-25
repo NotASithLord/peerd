@@ -3,6 +3,11 @@ import {
   createKernelBrowserNetworkOwner,
   createKernelTabCustody,
 } from '../../extension/background/kernel-tab-events.js';
+import {
+  FIREFOX_DRIVEN_CHILD_IDS_KEY,
+  FIREFOX_DRIVEN_CHILD_MARKERS_KEY,
+  makeDrivenChildRequestGuard,
+} from '../../extension/background/driven-child-request-guard.js';
 import { WEB_ACTOR_SOURCE_PROJECTION_KEY } from '../../extension/shared/web-actor-source-projection.js';
 
 const directAuthority = (overrides: Record<string, any> = {}) => ({
@@ -54,12 +59,36 @@ describe('kernel browser network owner', () => {
     }
   });
 
-  test('rejects stale Firefox source identity and ambiguous session projection', async () => {
+  test('prunes concretely stale Firefox source identity without loading relays', async () => {
     for (const tab of [
       { id: 7, url: 'https://reused.example/', cookieStoreId: 'firefox-default' },
-      { id: 7, url: restoredSource.url, cookieStoreId: 'firefox-container-2' }, null,
+      { id: 7, url: restoredSource.url, cookieStoreId: 'firefox-container-2' },
+      {
+        id: 7, url: restoredSource.url, openerTabId: 9,
+        cookieStoreId: restoredSource.cookieStoreId,
+      },
+      null,
     ]) {
-      const { owner } = restoredOwner([restoredSource], tab ? [tab] : []);
+      const { owner, relayReads } = restoredOwner([restoredSource], tab ? [tab] : []);
+      await expect(owner.ensureSourceProjection()).resolves.toBe(true);
+      expect(owner.sourceProjectionReady()).toBe(true);
+      expect(owner.relays()?.isDrivenSource(7)).toBe(false);
+      expect(owner.relays()?.webActorSessionForTab(7)).toBeNull();
+      expect(relayReads()).toBe(0);
+    }
+  });
+
+  test('rejects unavailable Firefox identity fields and ambiguous sessions', async () => {
+    for (const [source, tab] of [
+      [restoredSource, {
+        id: 7, cookieStoreId: restoredSource.cookieStoreId,
+      }],
+      [restoredSource, { id: 7, url: restoredSource.url }],
+      [{ ...restoredSource, openerTabId: 5 }, {
+        id: 7, url: restoredSource.url, cookieStoreId: restoredSource.cookieStoreId,
+      }],
+    ] as const) {
+      const { owner } = restoredOwner([source], [tab]);
       await expect(owner.ensureSourceProjection()).resolves.toBe(false);
       expect(owner.sourceProjectionReady()).toBe(false);
       expect(owner.relays()).toBeNull();
@@ -69,6 +98,33 @@ describe('kernel browser network owner', () => {
       [{ id: 7, url: restoredSource.url, cookieStoreId: restoredSource.cookieStoreId }],
     );
     await expect(mismatch.owner.ensureSourceProjection()).resolves.toBe(false);
+  });
+
+  test('a pruned source releases restored child custody before agent/send', async () => {
+    const { owner } = restoredOwner([restoredSource], []);
+    const values = new Map<string, string>([
+      [FIREFOX_DRIVEN_CHILD_MARKERS_KEY, JSON.stringify([{ tabId: 8, sourceTabId: 7 }])],
+      [FIREFOX_DRIVEN_CHILD_IDS_KEY, '[8]'],
+    ]);
+    const guard = makeDrivenChildRequestGuard({
+      isSourceReady: owner.sourceProjectionReady,
+      isDrivenSource: (tabId) => owner.relays()?.isDrivenSource(tabId) === true,
+      markers: {
+        read: () => JSON.parse(values.get(FIREFOX_DRIVEN_CHILD_MARKERS_KEY) ?? '[]'),
+        readExactIds: () => JSON.parse(values.get(FIREFOX_DRIVEN_CHILD_IDS_KEY) ?? '[]'),
+        write: (markers) => {
+          values.set(FIREFOX_DRIVEN_CHILD_MARKERS_KEY, JSON.stringify(markers));
+          values.set(FIREFOX_DRIVEN_CHILD_IDS_KEY, JSON.stringify(
+            markers.map(({ tabId }) => tabId),
+          ));
+        },
+      },
+    });
+
+    expect(guard.ready()).toBe(false);
+    await expect(owner.ensureSourceProjection()).resolves.toBe(true);
+    expect(guard.ready()).toBe(true);
+    expect(guard.has(8)).toBe(false);
   });
 
   test('constructs the authority synchronously and binds live projections later', async () => {
@@ -303,7 +359,7 @@ describe('kernel browser network owner', () => {
       'onCreated', 'onUpdated', 'onRemoved', 'onNavigationTarget', 'reconcile',
     ].map((name) => [name, async (...args: any[]) => {
       calls.push(['network', name, ...args]);
-      return false;
+      return true;
     }]));
     const child = {
       onNavigationTarget: (details: any) => calls.push(['child:mark', details.tabId]),
@@ -311,21 +367,39 @@ describe('kernel browser network owner', () => {
       release: (tabId: number) => calls.push(['child:release', tabId]),
       reconcile: () => calls.push(['child:reconcile']), onBeforeRequest: () => ({}),
     };
-    let richLoads = 0;
     const custody = createKernelTabCustody({
       firefox: false, browser: { tabs: { query: async () => [] } }, network, child,
       getRelays: () => null,
-      loadRelays: async () => { richLoads += 1; return { eventOwners: {} }; },
     });
 
     await custody.onCreated({ id: 4 });
     await custody.onNavigationTarget({ sourceTabId: 2, tabId: 4 });
     await custody.onRemoved(4, {});
-    expect(richLoads).toBe(0);
     expect(calls).toContainEqual(['network', 'onCreated', { id: 4 }]);
     expect(calls).toContainEqual(['child:mark', 4]);
     expect(calls).toContainEqual(['child:resolve', 4]);
     expect(calls).toContainEqual(['child:release', 4]);
+  });
+
+  test('runs network custody once when a live event owner throws synchronously', async () => {
+    const calls: string[] = [];
+    const richFailure = new Error('rich-event-failed');
+    const custody = createKernelTabCustody({
+      browser: {},
+      network: {
+        onUpdated: async () => { calls.push('network'); return true; },
+      },
+      child: {},
+      getRelays: () => ({
+        eventOwners: {
+          onUpdated: () => { calls.push('rich'); throw richFailure; },
+        },
+      }),
+    });
+
+    await expect(custody.onUpdated(4, { status: 'complete' }, { id: 4 }))
+      .rejects.toBe(richFailure);
+    expect(calls).toEqual(['rich', 'network']);
   });
 
   test('requeries Firefox tabs after reconciliation before releasing markers', async () => {
@@ -348,7 +422,6 @@ describe('kernel browser network owner', () => {
         onBeforeRequest: ({ tabId }: any) => childIds.has(tabId) ? { cancel: true } : {},
       },
       getRelays: () => ({ eventOwners: { reconcile: async () => {} } }),
-      loadRelays: async () => ({ eventOwners: {} }),
     });
 
     const pending = custody.reconcile();

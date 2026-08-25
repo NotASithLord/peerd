@@ -8,14 +8,18 @@
 // peerd-provider/errors.js, peerd-runtime/errors.js.
 //
 // What lives here:
-//   - TypedError: a base class that sets `.name` from the subclass
-//     constructor so error.name survives structured clone across the
-//     SW/port boundary (instanceof does not).
+//   - TypedError: a base class that sets `.name` from an explicit stable
+//     subclass tag so minification and structured clone cannot change it.
 
 export class TypedError extends Error {
+  static errorName = 'TypedError';
+
   /** @param {string} [message] */
   constructor(message) {
     super(message);
-    this.name = new.target.name;
+    if (!Object.hasOwn(new.target, 'errorName')) {
+      throw new TypeError('TypedError subclasses require a stable errorName.');
+    }
+    this.name = new.target.errorName;
   }
 }

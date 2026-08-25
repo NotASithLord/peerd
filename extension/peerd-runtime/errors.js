@@ -12,6 +12,8 @@ import { TypedError } from '/shared/errors.js';
 
 /** Session id does not exist in the store. */
 export class SessionNotFoundError extends TypedError {
+  static errorName = 'SessionNotFoundError';
+
   /** @param {string} sessionId */
   constructor(sessionId) {
     super(`Session not found: ${sessionId}`);
@@ -21,6 +23,8 @@ export class SessionNotFoundError extends TypedError {
 
 /** Profile id does not exist in the store (profiles/store.js). */
 export class ProfileNotFoundError extends TypedError {
+  static errorName = 'ProfileNotFoundError';
+
   /** @param {string} profileId */
   constructor(profileId) {
     super(`Profile not found: ${profileId}`);
@@ -34,6 +38,8 @@ export class ProfileNotFoundError extends TypedError {
  * names the missing dependency to speed up SW-wiring debugging.
  */
 export class RuntimeContextIncompleteError extends TypedError {
+  static errorName = 'RuntimeContextIncompleteError';
+
   /** @param {string} missing */
   constructor(missing) {
     super(`Runtime context is missing: ${missing}`);
@@ -46,6 +52,8 @@ export class RuntimeContextIncompleteError extends TypedError {
  * crossing the service-worker-owned model boundary.
  */
 export class ActorCredentialBoundaryError extends TypedError {
+  static errorName = 'ActorCredentialBoundaryError';
+
   /** @param {'secret'|'provider-network'} capability */
   constructor(capability) {
     super(`Actor provider boundary refused direct ${capability} access`);

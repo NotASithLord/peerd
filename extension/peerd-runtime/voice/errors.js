@@ -9,6 +9,7 @@ import { TypedError } from '/shared/errors.js';
  * downloaded and the offscreen transcriber initialized.
  */
 export class VoiceNotEnabledError extends TypedError {
+  static errorName = 'VoiceNotEnabledError';
   constructor() { super('Voice is not enabled. Enable it in settings first.'); }
 }
 
@@ -19,6 +20,8 @@ export class VoiceNotEnabledError extends TypedError {
  * error in the UI.
  */
 export class VoiceUnsupportedError extends TypedError {
+  static errorName = 'VoiceUnsupportedError';
+
   constructor(msg = 'Voice is not supported in this build (moonshine-js not vendored).') {
     super(msg);
   }
@@ -29,6 +32,8 @@ export class VoiceUnsupportedError extends TypedError {
  * site permissions UI; we surface a clear actionable error.
  */
 export class MicPermissionDeniedError extends TypedError {
+  static errorName = 'MicPermissionDeniedError';
+
   constructor() {
     super('Microphone permission was denied. Allow it from the browser site settings to enable voice.');
   }
@@ -39,6 +44,8 @@ export class MicPermissionDeniedError extends TypedError {
  * available so the UI can render a retryable error vs a permanent one.
  */
 export class ModelDownloadError extends TypedError {
+  static errorName = 'ModelDownloadError';
+
   /**
    * @param {string} message
    * @param {{ status?: number }} [opts]
@@ -56,6 +63,8 @@ export class ModelDownloadError extends TypedError {
  * wrong; both are blocking. The bytes are NOT cached.
  */
 export class SriMismatchError extends TypedError {
+  static errorName = 'SriMismatchError';
+
   /** @param {{ url: string, expected: string, actual: string }} parts */
   constructor({ url, expected, actual }) {
     super(`Model integrity check failed for ${url}: expected ${expected}, got ${actual}.`);

@@ -1,5 +1,10 @@
 // @ts-check
 
+export const KERNEL_ADMINISTRATIVE_ROUTE_NAMES = Object.freeze([
+  'hooks/list', 'hooks/save', 'hooks/remove', 'hooks/toggle',
+  'memory/init', 'skills/installGit', 'skills/installLocal', 'skills/installManifest',
+]);
+
 export const KERNEL_EXECUTABLE_SEMANTIC_ROUTE_NAMES = Object.freeze(
   'pod/cancel-io pod/get-meta pod/git pod/web-fetch sw/web-fetch sw/web-fetch-abort export/artifact import/inspect import/apply apps/delete app/actor-chat app/call a2a/call actors/call page/call script/model-call script-run/abort site-fetch/call'.split(' '),
 );

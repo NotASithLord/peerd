@@ -101,6 +101,8 @@ export const DOC_TEXT_MAX_CHARS = 40_000;
 
 /** A single attachment was a type peerd can't ship to the model. */
 export class UnsupportedAttachmentError extends TypedError {
+  static errorName = 'UnsupportedAttachmentError';
+
   /**
    * @param {string} name
    * @param {string} mediaType
@@ -116,6 +118,8 @@ export class UnsupportedAttachmentError extends TypedError {
 
 /** A single attachment exceeds its kind's byte cap. */
 export class AttachmentTooLargeError extends TypedError {
+  static errorName = 'AttachmentTooLargeError';
+
   /**
    * @param {string} name
    * @param {string} kind
@@ -134,6 +138,8 @@ export class AttachmentTooLargeError extends TypedError {
 
 /** A document attachment could not be converted to text. */
 export class AttachmentConversionError extends TypedError {
+  static errorName = 'AttachmentConversionError';
+
   /**
    * @param {string} name
    * @param {string} reason
@@ -147,6 +153,8 @@ export class AttachmentConversionError extends TypedError {
 
 /** The message carries more attachments than the per-message cap. */
 export class TooManyAttachmentsError extends TypedError {
+  static errorName = 'TooManyAttachmentsError';
+
   /** @param {number} count */
   constructor(count) {
     super(`Too many attachments: ${count} — the limit is `
