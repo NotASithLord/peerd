@@ -7,7 +7,7 @@ import {
 
 export const CONTROLLER_TOOL_MANIFEST = compileToolEffectManifest({
   protocol: TOOL_EXECUTION_PROTOCOL,
-  digest: 'bb92c44598ca5357ee17b747bc9d63c4b5668df43d89dea1de1d622bab7d47e4',
+  digest: 'ae34d2d90539d067cb5afa4ac0ff317dcabea4a912779fef23a665c694e7c604',
   tools: {
     now: {
       projectionKeys: [],

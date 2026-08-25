@@ -58,6 +58,12 @@ export const createToolExecutionHost = ({
   if (!manifest || !implementations || typeof implementations !== 'object') {
     throw new TypeError('tool-execution-host-invalid');
   }
+  const toolNames = Object.keys(manifest.tools ?? {});
+  if (toolNames.length !== Object.keys(implementations).length
+      || toolNames.some((name) => !Object.hasOwn(implementations, name)
+        || typeof implementations[name] !== 'function')) {
+    throw new TypeError('tool-execution-host-incomplete');
+  }
   const dispatch = async (/** @type {unknown} */ payload, /** @type {{
    * signal:AbortSignal,authority?:any,deadlineAt?:number,
    * kernelCall?:(operation:string,payload:unknown)=>Promise<any>

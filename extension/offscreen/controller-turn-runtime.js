@@ -3,6 +3,7 @@
 // runtime imports this fixed package-local module only after a turn.run commit.
 
 import { runUserTurn } from '/peerd-runtime/controller-turn.js';
+import { controllerHostsTool } from '/shared/controller-tool-manifest.js';
 
 const isRecord = (/** @type {unknown} */ value) => value !== null
   && typeof value === 'object' && !Array.isArray(value);
@@ -186,6 +187,11 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
           callJson: JSON.stringify(call),
         }), 'tool result');
         if (typeof executeToolCall !== 'function') {
+          if (controllerHostsTool(/** @type {any} */ (call)?.name)) {
+            throw Object.assign(new Error('controller tool executor unavailable'), {
+              code: 'controller-tool-executor-unavailable', outcomeKnown: true,
+            });
+          }
           const result = await legacyDispatch();
           if (result?.outcomeKnown === false) nestedUnknown = true;
           return result;
@@ -194,6 +200,11 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
           callJson: JSON.stringify(call),
         });
         if (prepared?.mode === 'legacy') {
+          if (controllerHostsTool(/** @type {any} */ (call)?.name)) {
+            throw Object.assign(new Error('controller tool preparation unavailable'), {
+              code: 'controller-tool-preparation-unavailable', outcomeKnown: true,
+            });
+          }
           const result = await legacyDispatch();
           if (result?.outcomeKnown === false) nestedUnknown = true;
           return result;
