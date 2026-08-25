@@ -58,7 +58,6 @@ import {
   createKernelBrowserEventOwners,
   createKernelBrowserNetworkOwner,
   createKernelTabCustody,
-  createKernelDwebCustodyOwner,
   createKernelExecutableControl,
   createKernelFeatureHost,
   INERT_CHILD_REQUEST_GUARD,
@@ -122,14 +121,12 @@ if (kernelFirefox !== !!makeFirefoxGuard) {
 }
 const targetAddon = /** @type {any} */ (globalThis)[Symbol.for('peerd.kernel.target-addon.v1')];
 if (targetAddon && (targetAddon.target !== 'preview-chrome'
-    || typeof targetAddon.update !== 'function' || typeof targetAddon.contributor !== 'function')) {
+    || typeof targetAddon.update !== 'function'
+    || typeof targetAddon.dwebCustody !== 'function'
+    || typeof targetAddon.contributor !== 'function')) {
   throw new Error('kernel-target-addon-invalid');
 }
-const dwebAddon = /** @type {any} */ (globalThis)[Symbol.for('peerd.kernel.dweb-addon.v1')];
-if (DWEB_ENABLED !== !!dwebAddon
-    || dwebAddon && typeof dwebAddon.createKernelDwebCustodyRuntime !== 'function') {
-  throw new Error('kernel-dweb-addon-invalid');
-}
+if (DWEB_ENABLED !== !!targetAddon) throw new Error('kernel-target-addon-mismatch');
 const kernelSelfHostedChrome = !!kernelManifest.update_url
   && typeof browser.runtime.requestUpdateCheck === 'function';
 const kernelBuild = `${kernelManifest.version}:${CONTROLLER_BUILD_DIGEST}`;
@@ -1149,17 +1146,14 @@ const uiPortOwner = createKernelUiPortOwner({
   showWebTabHint: (/** @type {number} */ tabId) =>
     controllerRelays()?.showWebTabHint?.(tabId),
 });
-const dwebCustodyOwner = DWEB_ENABLED ? createKernelDwebCustodyOwner({
+const dwebCustodyOwner = DWEB_ENABLED ? targetAddon.dwebCustody({
   enabled: true,
-  load: async () => dwebAddon.createKernelDwebCustodyRuntime({
-      enabled: DWEB_ENABLED,
-      ensureDwebFeature,
-      active: () => settingsStore.get().dwebEnabled === true,
-      vault,
-      auditLog,
-      listApps: () => appCatalog.list(),
-      sendMessage: (/** @type {any} */ message) => browser.runtime.sendMessage(message),
-    }),
+  ensureDwebFeature,
+  retireDwebHost: () => featureHost.runtime.retireActiveHost('dweb-custody-unknown'),
+  active: () => settingsStore.get().dwebEnabled === true,
+  vault,
+  auditLog,
+  listApps: () => appCatalog.list(),
 }) : null;
 const portOwners = createKernelPortOwners({
   firefox: kernelFirefox, dweb: DWEB_ENABLED,

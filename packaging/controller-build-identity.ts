@@ -57,6 +57,13 @@ export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
   ...SEMANTIC_HOST_BUILD_ENTRIES,
 ] as const);
 
+export const CONTROLLER_OPTIONAL_BUILD_ENTRIES = Object.freeze([
+  'offscreen/dweb-base.js',
+  'offscreen/dweb-custody-host.js',
+  'offscreen/dweb-transfer-host.js',
+  'background/kernel-preview-addon.js',
+] as const);
+
 export const CONTROLLER_BUILD_ASSETS = Object.freeze([
   'peerd-provider/system-prompt.txt',
   'peerd-provider/system-prompt-dweb.txt',
@@ -76,8 +83,9 @@ const CONTROLLER_BUILD_STAMP_PATHS = new Set(
 export const controllerBuildDigest = async (root: string): Promise<string> => {
   const absoluteRoot = resolve(root);
   const files = new Set<string>();
-  for (const entry of CONTROLLER_BUILD_ENTRIES) {
+  for (const entry of [...CONTROLLER_BUILD_ENTRIES, ...CONTROLLER_OPTIONAL_BUILD_ENTRIES]) {
     const absolute = join(absoluteRoot, entry);
+    if (!existsSync(absolute)) continue;
     for (const file of await collectStaticModuleGraph(absoluteRoot, absolute)) files.add(file);
   }
   for (const asset of CONTROLLER_BUILD_ASSETS) {

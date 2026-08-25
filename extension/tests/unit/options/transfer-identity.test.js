@@ -247,6 +247,27 @@ describe('options.transfer — portable identity restore', () => {
     } finally { unmount(); }
   });
 
+  it('never reports an uncertain final identity commit as unchanged', async () => {
+    const { root, unmount } = await mount(() => ({
+      ok: false, error: 'import-partial', outcomeKnown: false,
+      failure: 'dweb-identity-identity-store-outcome-unknown',
+      partial: { settings: 2, secrets: 1, dwebIdentity: 0 },
+      identityOutcome: 'unknown',
+    }));
+    try {
+      const passphrase = /** @type {HTMLInputElement} */ (root.querySelector('#imppass'));
+      passphrase.value = 'backup-passphrase';
+      passphrase.dispatchEvent(new Event('input'));
+      await flush();
+      /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Apply import')).click();
+      await flush();
+      expect(root.textContent).toContain('could not confirm');
+      expect(root.textContent?.includes('identity was not changed')).toBe(false);
+      expect(root.querySelector('#restore-summary')).toBeFalsy();
+    } finally { unmount(); }
+  });
+
   it('restores focus to the replacement review action after going back', async () => {
     const { root, unmount } = await mount(() => ({
       ok: false, error: 'dweb-identity-conflict',

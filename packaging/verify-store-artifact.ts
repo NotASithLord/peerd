@@ -40,6 +40,11 @@ const DWEB_DISABLED_TEMPLATE_TARGETS = Object.freeze([
   ['background/routes/dweb.js', DWEB_ROUTES_DISABLED_TEMPLATE],
   ['background/routes/dweb-self.js', DWEB_SELF_ROUTES_DISABLED_TEMPLATE],
 ] as const);
+const DWEB_ABSENT_TARGETS = Object.freeze([
+  'background/kernel-preview-addon.js', 'background/vault-kernel-preview.js',
+  'offscreen/dweb-base.js', 'offscreen/dweb-custody-host.js',
+  'offscreen/dweb-self.js', 'offscreen/dweb-transfer-host.js',
+]);
 
 /** Byte-for-byte package boundary shared by the verifier and focused tests. */
 export const dwebDisabledTemplateFailures = (artifactRoot: string): string[] => {
@@ -51,6 +56,11 @@ export const dwebDisabledTemplateFailures = (artifactRoot: string): string[] => 
       if (!shipped.equals(template)) failures.push(`${relativePath} is NOT the committed disabled template`);
     } catch {
       failures.push(`${relativePath} missing from artifact`);
+    }
+  }
+  for (const relativePath of DWEB_ABSENT_TARGETS) {
+    if (existsSync(join(artifactRoot, relativePath))) {
+      failures.push(`${relativePath} present in dweb-disabled artifact`);
     }
   }
   return failures;

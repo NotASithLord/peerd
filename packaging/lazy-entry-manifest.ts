@@ -56,8 +56,7 @@ export const PACKAGED_LAZY_MODULE_ENTRIES = Object.freeze([
   'offscreen/pdf-extract.js',
   'offscreen/doc-extract.js',
   'offscreen/web-extract.js',
-  // Preview's deliberate long-lived mesh lease starts this graph on demand;
-  // Store packages the same inert host but never loads it.
+  // Preview Chrome's mesh lease starts this graph on demand.
   'offscreen/dweb-base.js',
   // Firefox event pages load this directly on first repository use; Chrome
   // reaches the same graph through repository-host.js.
@@ -79,3 +78,7 @@ export const PACKAGED_LAZY_ASSET_ENTRIES = Object.freeze([
   'vendor/pdfjs/pdf.worker.min.mjs',
   'vendor/tesseract/worker.min.js',
 ] as const);
+
+export const packagedLazyModuleEntries = (dweb: boolean): readonly string[] => dweb
+  ? PACKAGED_LAZY_MODULE_ENTRIES
+  : PACKAGED_LAZY_MODULE_ENTRIES.filter((entry) => entry !== 'offscreen/dweb-base.js');

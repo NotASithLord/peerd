@@ -720,16 +720,15 @@ export const applyImport = async ({
         identityOutcome = 'already-present';
       }
       runtimeRecoveryPending = outcome.runtimeRecoveryPending === true;
-      if (runtimeRecoveryPending) {
-        summary.notices.push('The peer identity was stored, but the peer network is still recovering. Keep peerd open; it will retry automatically.');
-      }
     }
     if (identityOutcome === 'already-present') {
       summary.notices.push('The backup carries the same peer identity already present on this install; no identity change was needed.');
     }
     return { ok: true, imported, identityOutcome, runtimeRecoveryPending, notices: summary.notices };
   } catch (cause) {
-    const named = /** @type {{ name?: string, code?: string }} */ (cause);
+    const named = /** @type {{ name?: string, code?: string, outcomeKnown?: boolean }} */ (cause);
+    const outcomeKnown = named?.name !== 'IdentityTransferError'
+      || named.outcomeKnown !== false;
     const failure = cause instanceof ExportPassphraseError
       ? 'wrong-passphrase'
       : named?.name === 'IdentityTransferError'
@@ -740,7 +739,8 @@ export const applyImport = async ({
       error: 'import-partial',
       failure,
       partial: imported,
-      identityOutcome: 'not-changed',
+      identityOutcome: outcomeKnown ? 'not-changed' : 'unknown',
+      ...(outcomeKnown ? {} : { outcomeKnown: false }),
     };
   }
 };

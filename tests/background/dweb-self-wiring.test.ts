@@ -7,13 +7,16 @@
 // stores. Both must be closed to everyone else.
 
 import { describe, test, expect } from 'bun:test';
-import {
-  makeDwebSelfCustody, SELF_CUSTODY_SECRET_NAMES, hasEnrolledSelfCustody,
-} from '../../extension/background/dweb-self-custody.js';
+import { createKernelDwebVaultEffects } from '../../extension/background/kernel-preview-addon.js';
 import { makeDwebSelfRoutes } from '../../extension/background/routes/dweb-self.js';
 import { encodeDidKey } from '../../extension/peerd-distributed/identity/did.js';
 
 const IDENTITY_SECRET = 'distributed/identity/v1';
+const SELF_CUSTODY_SECRET_NAMES = Object.freeze([
+  'distributed/device-key/v1',
+  'distributed/self-discovery/v1',
+  'distributed/self-records/v1',
+]);
 
 const fakeVault = (seed: Record<string, string> = {}) => {
   const map = new Map(Object.entries(seed));
@@ -27,9 +30,20 @@ const fakeVault = (seed: Record<string, string> = {}) => {
   };
 };
 
-const custodyFor = (vault: ReturnType<typeof fakeVault>, overrides = {}) => makeDwebSelfCustody({
-  enabled: true, active: () => true, vault, identitySecretName: IDENTITY_SECRET, ...overrides,
-} as any);
+const custodyFor = (vault: ReturnType<typeof fakeVault>, overrides: any = {}) => {
+  const effects = createKernelDwebVaultEffects({
+    enabled: overrides.enabled ?? true,
+    active: overrides.active ?? (() => true),
+    vault,
+    auditLog: { append: async () => {} },
+    listApps: async () => [],
+  });
+  return {
+    handle: (operation: string, args: any = {}) => effects.handle(
+      operation === 'self-get' ? 'self/read' : 'self/write', args,
+    ),
+  };
+};
 
 describe('self-device custody allowlist', () => {
   test('serves exactly the three self-device secrets, and nothing else', async () => {
@@ -136,17 +150,21 @@ describe('self-device custody allowlist', () => {
   });
 
   test('either half of an interrupted enrollment blocks a replacement person root', async () => {
-    expect(await hasEnrolledSelfCustody(fakeVault())).toBe(false);
-    expect(await hasEnrolledSelfCustody(fakeVault({
+    const mint = (vault: ReturnType<typeof fakeVault>) => createKernelDwebVaultEffects({
+      enabled: true, active: () => true, vault,
+      auditLog: { append: async () => {} }, listApps: async () => [],
+    }).handle('identity/create', { value: 'root' });
+    expect((await mint(fakeVault())).ok).toBe(true);
+    expect(await mint(fakeVault({
       'distributed/self-records/v1': '{"v":1}',
-    }))).toBe(true);
-    expect(await hasEnrolledSelfCustody(fakeVault({
+    }))).toMatchObject({ ok: false, error: 'certificate-only-device' });
+    expect(await mint(fakeVault({
       'distributed/self-discovery/v1': 'AAAA',
-    }))).toBe(true);
+    }))).toMatchObject({ ok: false, error: 'certificate-only-device' });
     // A pre-minted per-install device key alone is not an enrollment commit.
-    expect(await hasEnrolledSelfCustody(fakeVault({
+    expect((await mint(fakeVault({
       'distributed/device-key/v1': '{"seed":"d"}',
-    }))).toBe(false);
+    }))).ok).toBe(true);
   });
 });
 

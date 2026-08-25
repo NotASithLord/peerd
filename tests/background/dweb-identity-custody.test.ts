@@ -1,15 +1,14 @@
 import { describe, expect, test } from 'bun:test';
-import {
-  identityChangeBlockedByApps, makeDwebIdentityCustody,
-} from '../../extension/background/dweb-identity-custody.js';
+import { createKernelDwebVaultEffects } from '../../extension/background/kernel-preview-addon.js';
+import { encodeDidKey } from '../../extension/peerd-distributed/identity/did.js';
 
 const makeFixture = (overrides: any = {}) => {
   let stored: string | null = overrides.stored ?? null;
   let writes = 0;
   const audits: any[] = [];
-  const custody = makeDwebIdentityCustody({
-    enabled: true,
-    active: () => true,
+  const effects = createKernelDwebVaultEffects({
+    enabled: overrides.enabled ?? true,
+    active: overrides.active ?? (() => true),
     vault: {
       isLocked: () => false,
       getSecret: async () => stored,
@@ -20,29 +19,17 @@ const makeFixture = (overrides: any = {}) => {
       append: async (entry: any) => { audits.push(entry); },
       ...overrides.auditLog,
     },
-    identitySecretName: 'distributed/identity/v1',
-    withIdentityMutation: async (operation: () => Promise<any>) => operation(),
-    canChangeIdentity: async () => true,
-    canMintIdentity: async () => true,
-    ...overrides.deps,
+    listApps: async () => overrides.apps ?? [],
   });
+  const custody = {
+    handle: (operation: string, args: any = {}) => effects.handle(
+      operation === 'get' ? 'identity/read' : 'identity/create', args,
+    ),
+  };
   return { custody, audits, get stored() { return stored; }, get writes() { return writes; } };
 };
 
 describe('dweb identity custody', () => {
-  test('recognizes current and legacy local publisher bindings only', () => {
-    expect(identityChangeBlockedByApps([{ shared: true }])).toBe(true);
-    expect(identityChangeBlockedByApps([{
-      shared: false, dweb: { local: true, publisher: 'did:key:zLegacy' },
-    }])).toBe(true);
-    expect(identityChangeBlockedByApps([{
-      shared: false, dweb: { local: true, publisher: null },
-    }])).toBe(false);
-    expect(identityChangeBlockedByApps([{
-      shared: false, dweb: { local: false, publisher: 'did:key:zPeer' },
-    }])).toBe(false);
-  });
-
   test('reads and first-mints the root inside the custody handler', async () => {
     const fixture = makeFixture();
     expect(await fixture.custody.handle('get')).toEqual({ ok: true, value: null });
@@ -52,7 +39,7 @@ describe('dweb identity custody', () => {
   });
 
   test('fails closed when disabled, locked, or given a non-string root', async () => {
-    const disabled = makeFixture({ deps: { enabled: false } });
+    const disabled = makeFixture({ enabled: false });
     expect(await disabled.custody.handle('get')).toEqual({ ok: false, error: 'dweb-disabled' });
     const locked = makeFixture({ vault: { isLocked: () => true } });
     expect(await locked.custody.handle('get')).toEqual({ ok: false, error: 'vault-locked' });
@@ -68,9 +55,7 @@ describe('dweb identity custody', () => {
   });
 
   test('blocks first mint while a local shared app still depends on the missing root', async () => {
-    const fixture = makeFixture({
-      deps: { canChangeIdentity: async () => false },
-    });
+    const fixture = makeFixture({ apps: [{ shared: true }] });
     expect(await fixture.custody.handle('set', { value: 'replacement-root' }))
       .toEqual({ ok: false, error: 'identity-in-use' });
     expect(fixture.writes).toBe(0);
@@ -78,7 +63,10 @@ describe('dweb identity custody', () => {
 
   test('blocks legacy root minting on an enrolled certificate-only device', async () => {
     const fixture = makeFixture({
-      deps: { canMintIdentity: async () => false },
+      vault: {
+        getSecret: async (name: string) => name === 'distributed/self-records/v1'
+          ? '{"v":1}' : null,
+      },
     });
     expect(await fixture.custody.handle('set', { value: 'unrelated-root' }))
       .toEqual({ ok: false, error: 'certificate-only-device' });
@@ -91,5 +79,91 @@ describe('dweb identity custody', () => {
     });
     expect(await fixture.custody.handle('set', { value: 'root' })).toEqual({ ok: true });
     expect(fixture.stored).toBe('root');
+  });
+
+  test('commits only the approved old identity and reconciles a landed write', async () => {
+    const identity = (lastByte: number) => {
+      const pub = new Uint8Array(32);
+      pub[31] = lastByte;
+      return {
+        did: encodeDidKey(pub),
+        material: JSON.stringify({
+          v: 1,
+          seed: btoa(String.fromCharCode(...new Uint8Array(32))),
+          pub: btoa(String.fromCharCode(...pub)),
+        }),
+      };
+    };
+    const oldIdentity = identity(1);
+    const unexpected = identity(2);
+    const incoming = identity(3);
+    let stored = unexpected.material;
+    let writes = 0;
+    let reportWriteFailure = false;
+    const effects = createKernelDwebVaultEffects({
+      enabled: true, active: () => true,
+      vault: {
+        isLocked: () => false,
+        getSecret: async (name: string) => name === 'distributed/identity/v1' ? stored : null,
+        setSecret: async (_name: string, value: string) => {
+          stored = value;
+          writes += 1;
+          if (reportWriteFailure) throw new Error('lost acknowledgement');
+        },
+      },
+      auditLog: { append: async () => {} }, listApps: async () => [],
+    });
+    expect(await effects.handle('identity/commit', {
+      value: incoming.material, incomingDid: incoming.did,
+    })).toEqual({ ok: false, error: 'identity-cas-required' });
+    expect(await effects.handle('identity/commit', {
+      value: incoming.material,
+      incomingDid: incoming.did,
+      expectedExistingDid: oldIdentity.did,
+    })).toMatchObject({ ok: false, error: 'identity-changed' });
+    expect(writes).toBe(0);
+
+    reportWriteFailure = true;
+    expect(await effects.handle('identity/commit', {
+      value: incoming.material,
+      incomingDid: incoming.did,
+      expectedExistingDid: unexpected.did,
+    })).toEqual({ ok: true, committed: true, alreadyApplied: true });
+    expect(stored).toBe(incoming.material);
+    expect(writes).toBe(1);
+  });
+
+  test('rechecks the approved identity immediately before the durable write', async () => {
+    const identity = (lastByte: number) => {
+      const pub = new Uint8Array(32); pub[31] = lastByte;
+      return {
+        did: encodeDidKey(pub),
+        material: JSON.stringify({
+          v: 1, seed: btoa(String.fromCharCode(...new Uint8Array(32))),
+          pub: btoa(String.fromCharCode(...pub)),
+        }),
+      };
+    };
+    const approved = identity(4);
+    const changed = identity(5);
+    const incoming = identity(6);
+    let stored = approved.material;
+    let writes = 0;
+    const effects = createKernelDwebVaultEffects({
+      enabled: true, active: () => true,
+      vault: {
+        isLocked: () => false,
+        getSecret: async (name: string) => name === 'distributed/identity/v1' ? stored : null,
+        setSecret: async (_name: string, value: string) => { stored = value; writes++; },
+      },
+      auditLog: { append: async () => {} },
+      listApps: async () => { stored = changed.material; return []; },
+    });
+    expect(await effects.handle('identity/commit', {
+      value: incoming.material, incomingDid: incoming.did,
+      expectedExistingDid: approved.did,
+    })).toEqual({ ok: false, error: 'identity-changed' });
+    expect(writes).toBe(0);
+    expect(stored).toBe(changed.material);
   });
 });

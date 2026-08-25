@@ -159,16 +159,15 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
   offscreen: Object.freeze({ modules: 25, graphBytes: 200_000, entryBytes: 40_000 }),
 });
 
-// Preview is the common authority kernel plus one target-owned slice. Keep the
-// slice shrinking independently of common-kernel work: an absolute Preview
-// total conflates those two graphs and the old total was never an achieved
-// measurement. The baseline is the first executable target slice; the required
-// reduction is the deletion already achieved while retaining update custody.
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
-  exclusiveBaseline: Object.freeze({ modules: 3, graphBytes: 24_723 }),
-  minimumReduction: Object.freeze({ modules: 0, graphBytes: 9_071 }),
-  entryBytesCeiling: 146,
+  shared: Object.freeze({ modules: 94, graphBytes: 678_376 }),
+  target: Object.freeze({ modules: 97, graphBytes: 728_153 }),
+  exclusive: Object.freeze({ modules: 3, graphBytes: 49_777 }),
+  entryBytesCeiling: 78,
   directImportsCeiling: 2,
+});
+export const FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
+  modules: 108, graphBytes: 862_165, entryBytes: 78, directImports: 2,
 });
 
 // The offscreen entry is a broker/supervisor, not a feature host. Its former

@@ -9,17 +9,28 @@ import {
   targetBackgroundEntry,
 } from '../../packaging/gen-manifest.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
+import { genChannelConfigSource } from '../../packaging/gen-channel-config.ts';
 
 const EXTENSION = join(import.meta.dir, '..', '..', 'extension');
 
 describe('target-specific native background entry', () => {
-  test('adds update custody only to native Preview Chrome', () => {
+  test('generated Chrome entry matches its dweb build posture', () => {
+    for (const channel of ['store', 'preview', 'dev'] as const) {
+      const manifest = generateManifest({ channel, browser: 'chrome', version: '0.0.0' });
+      const config = genChannelConfigSource(channel === 'dev' ? 'preview' : channel, 'chrome');
+      const dweb = config.includes('export const DWEB_ENABLED = true;');
+      expect(manifest.background.service_worker, channel).toBe(dweb
+        ? PREVIEW_CHROME_BACKGROUND_ENTRY : NATIVE_BACKGROUND_ENTRY);
+    }
+  });
+
+  test('adds Preview custody to dweb-enabled Chrome targets', () => {
     expect(targetBackgroundEntry(NATIVE_BACKGROUND_ENTRY, 'preview', 'chrome'))
       .toBe(PREVIEW_CHROME_BACKGROUND_ENTRY);
-    for (const [channel, browser] of [['store', 'chrome'], ['dev', 'chrome']] as const) {
-      expect(targetBackgroundEntry(NATIVE_BACKGROUND_ENTRY, channel, browser))
-        .toBe(NATIVE_BACKGROUND_ENTRY);
-    }
+    expect(targetBackgroundEntry(NATIVE_BACKGROUND_ENTRY, 'dev', 'chrome'))
+      .toBe(PREVIEW_CHROME_BACKGROUND_ENTRY);
+    expect(targetBackgroundEntry(NATIVE_BACKGROUND_ENTRY, 'store', 'chrome'))
+      .toBe(NATIVE_BACKGROUND_ENTRY);
     for (const channel of ['store', 'preview', 'dev'] as const) {
       expect(targetBackgroundEntry(NATIVE_BACKGROUND_ENTRY, channel, 'firefox'))
         .toBe(FIREFOX_BACKGROUND_ENTRY);
@@ -71,7 +82,7 @@ describe('target-specific native background entry', () => {
 
       const chrome = generateManifest({ channel, browser: 'chrome', version: '0.0.0' });
       expect(chrome.background).toEqual({
-        service_worker: channel === 'preview'
+        service_worker: channel !== 'store'
           ? PREVIEW_CHROME_BACKGROUND_ENTRY : NATIVE_BACKGROUND_ENTRY,
         type: 'module',
       });

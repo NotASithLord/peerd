@@ -12,6 +12,7 @@ import {
 } from '../../packaging/lazy-entry-manifest.ts';
 import {
   COLD_SOURCE_TARGETS,
+  FIREFOX_KERNEL_SOURCE_CONTRACT,
   COLD_SOURCE_RATCHETS,
   OFFSCREEN_SUPERVISOR_SOURCE_CONTRACT,
   PREVIEW_KERNEL_SOURCE_CONTRACT,
@@ -146,7 +147,6 @@ describe('cold entry graphs', () => {
       'background/kernel-executable-runtime.js',
       'background/kernel-executable-live.js',
       'background/kernel-executable-transfer-live.js',
-      'background/kernel-dweb-custody-runtime.js',
       'background/kernel-dweb-route-runtime.js',
       'background/kernel-browser-network-runtime.js',
     ]) {
@@ -159,13 +159,6 @@ describe('cold entry graphs', () => {
     }
   });
 
-  test('the Preview custody runtime never hosts the distributed implementation', async () => {
-    const measured = await nativeKernelStats('background/kernel-dweb-custody-runtime.js');
-    expect(measured.modulesSet.has('shared/dweb-loader.js')).toBe(false);
-    expect([...measured.modulesSet].some((file) => file.startsWith('peerd-distributed/')))
-      .toBe(false);
-  });
-
   test('the full Preview worker never hosts the distributed implementation', async () => {
     const measured = await nativeKernelStats(previewKernelEntry);
     expect(measured.modulesSet.has('shared/dweb-loader.js')).toBe(false);
@@ -175,10 +168,14 @@ describe('cold entry graphs', () => {
 
   test('Firefox never carries the unavailable custody host', async () => {
     const measured = await nativeKernelStats('background/vault-kernel-firefox.js');
+    expect(measured.modules).toBeLessThanOrEqual(FIREFOX_KERNEL_SOURCE_CONTRACT.modules);
+    expect(measured.graphBytes).toBeLessThanOrEqual(FIREFOX_KERNEL_SOURCE_CONTRACT.graphBytes);
+    expect(measured.entryBytes).toBeLessThanOrEqual(FIREFOX_KERNEL_SOURCE_CONTRACT.entryBytes);
+    expect(measured.directImports)
+      .toBeLessThanOrEqual(FIREFOX_KERNEL_SOURCE_CONTRACT.directImports);
     for (const file of [
-      'background/kernel-dweb-addon.js',
-      'background/kernel-dweb-custody-runtime.js',
-      'background/dweb-transfer.js',
+      'background/kernel-preview-addon.js',
+      'background/kernel-dweb-route-runtime.js',
       'shared/dweb-loader.js',
     ]) expect(measured.modulesSet.has(file), `Firefox imports ${file}`).toBe(false);
   });
@@ -205,11 +202,16 @@ describe('cold entry graphs', () => {
       .filter((file) => !common.modulesSet.has(file)).sort();
     const exclusiveBytes = exclusive.reduce((total, file) =>
       total + statSync(join(EXTENSION_DIR, file)).size, 0);
-    const { exclusiveBaseline, minimumReduction } = PREVIEW_KERNEL_SOURCE_CONTRACT;
-    expect(exclusiveBaseline.modules - exclusive.length)
-      .toBeGreaterThanOrEqual(minimumReduction.modules);
-    expect(exclusiveBaseline.graphBytes - exclusiveBytes)
-      .toBeGreaterThanOrEqual(minimumReduction.graphBytes);
+    expect(common.modules).toBeLessThanOrEqual(PREVIEW_KERNEL_SOURCE_CONTRACT.shared.modules);
+    expect(common.graphBytes)
+      .toBeLessThanOrEqual(PREVIEW_KERNEL_SOURCE_CONTRACT.shared.graphBytes);
+    expect(preview.modules).toBeLessThanOrEqual(PREVIEW_KERNEL_SOURCE_CONTRACT.target.modules);
+    expect(preview.graphBytes)
+      .toBeLessThanOrEqual(PREVIEW_KERNEL_SOURCE_CONTRACT.target.graphBytes);
+    expect(exclusive.length)
+      .toBeLessThanOrEqual(PREVIEW_KERNEL_SOURCE_CONTRACT.exclusive.modules);
+    expect(exclusiveBytes)
+      .toBeLessThanOrEqual(PREVIEW_KERNEL_SOURCE_CONTRACT.exclusive.graphBytes);
     expect(preview.entryBytes)
       .toBeLessThanOrEqual(PREVIEW_KERNEL_SOURCE_CONTRACT.entryBytesCeiling);
     expect(preview.directImports)
@@ -217,13 +219,13 @@ describe('cold entry graphs', () => {
     expect(preview.modules).toBe(common.modules + exclusive.length);
     expect(preview.graphBytes).toBe(common.graphBytes + exclusiveBytes);
     expect(exclusive).toEqual([
-      'background/kernel-update-addon.js',
+      'background/kernel-preview-addon.js',
       'background/vault-kernel-preview.js',
       'shared/contributor-channel.js',
     ]);
-    expect(common.modulesSet.has('background/kernel-update-addon.js')).toBe(false);
+    expect(common.modulesSet.has('background/kernel-preview-addon.js')).toBe(false);
     const source = readFileSync(join(EXTENSION_DIR, previewKernelEntry), 'utf8');
-    expect(source.indexOf("import './kernel-update-addon.js'"))
+    expect(source.indexOf("import './kernel-preview-addon.js'"))
       .toBeLessThan(source.indexOf("import './vault-kernel.js'"));
   });
 

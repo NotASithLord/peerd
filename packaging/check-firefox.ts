@@ -133,6 +133,14 @@ export const main = () => {
     if (existsSync(join(dir, 'peerd-distributed'))) {
       problems.push(`  [${name}] dweb module is present without a Firefox mesh host`);
     }
+    for (const relativePath of [
+      'offscreen/dweb-base.js', 'offscreen/dweb-custody-host.js',
+      'offscreen/dweb-self.js', 'offscreen/dweb-transfer-host.js',
+    ]) {
+      if (existsSync(join(dir, relativePath))) {
+        problems.push(`  [${name}] ${relativePath} is present without a Firefox mesh host`);
+      }
+    }
     const loader = join(dir, 'shared', 'dweb-loader.js');
     if (!existsSync(loader)
         || !readFileSync(loader).equals(readFileSync(STORE_LOADER_TEMPLATE))) {

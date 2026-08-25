@@ -21,7 +21,7 @@ import {
   STARTUP_UNAVAILABLE_USER_FAILURE,
 } from '../shared/bounded-module-load.js';
 import { kernelUnknownOutcome } from './kernel-route-effect.js';
-import { makeAppCallHandler } from '../peerd-runtime/actor/app-call-handler.js';
+import { makeAppCallHandler } from '../peerd-runtime/kernel-executable.js';
 
 const DEFAULT_FACTORIES = Object.freeze({
   makeKernelAppDeleteRoutes,
