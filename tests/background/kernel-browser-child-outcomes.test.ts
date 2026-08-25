@@ -154,7 +154,6 @@ describe('kernel browser child outcomes', () => {
       getRelays: () => ({ eventOwners: {
         onNavigationTarget: async () => {}, onRemoved: async () => {},
       } }),
-      loadRelays: async () => ({ eventOwners: {} }),
     });
     await custody.onNavigationTarget({ sourceTabId: 7, tabId: 8 });
     await custody.onRemoved(8, {});

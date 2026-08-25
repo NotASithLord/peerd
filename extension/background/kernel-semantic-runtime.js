@@ -209,6 +209,7 @@ export const createKernelSemanticRuntime = (deps) => {
     turnOwner = createKernelTurnOwner({
       createController: (/** @type {any} */ turnAuthority) => makeSharedController(turnAuthority),
       loadRuntime: deps.loadTurnRuntime,
+      onLoaded: deps.onTurnRuntimeLoaded,
       ...(deps.turnLoadTimeoutMs === undefined ? {} : { loadTimeoutMs: deps.turnLoadTimeoutMs }),
     });
     return turnOwner;

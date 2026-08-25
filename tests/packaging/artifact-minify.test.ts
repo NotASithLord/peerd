@@ -132,6 +132,81 @@ describe('release artifact JavaScript minification', () => {
     expect(module.NamedFailure.name).toBe('NamedFailure');
   });
 
+  test('keeps typed error wire names through identifier minification', async () => {
+    const root = makeRoot();
+    const extension = join(import.meta.dir, '..', '..', 'extension');
+    const entry = join(root, 'errors.js');
+    writeFileSync(entry, `
+      import { TypedError } from ${JSON.stringify(join(extension, 'shared/errors.js'))};
+      import * as fetchErrors from ${JSON.stringify(join(extension, 'peerd-egress/fetch/errors.js'))};
+      import * as vaultErrors from ${JSON.stringify(join(extension, 'peerd-egress/vault/errors.js'))};
+      import * as engineErrors from ${JSON.stringify(join(extension, 'peerd-engine/errors.js'))};
+      import * as providerErrors from ${JSON.stringify(join(extension, 'peerd-provider/errors.js'))};
+      import * as runtimeErrors from ${JSON.stringify(join(extension, 'peerd-runtime/errors.js'))};
+      import * as attachmentErrors from ${JSON.stringify(join(extension, 'peerd-runtime/loop/attachments.js'))};
+      import * as pdfErrors from ${JSON.stringify(join(extension, 'peerd-runtime/pdf/errors.js'))};
+      import * as voiceErrors from ${JSON.stringify(join(extension, 'peerd-runtime/voice/errors.js'))};
+      const modules = [fetchErrors, vaultErrors, engineErrors, providerErrors,
+        runtimeErrors, attachmentErrors, pdfErrors, voiceErrors];
+      export const errorTags = modules.flatMap((module) => Object.entries(module))
+        .filter(([, value]) => typeof value === 'function' && value.prototype instanceof TypedError)
+        .map(([exportName, value]) => ({
+          exportName,
+          errorName: value.errorName,
+          own: Object.hasOwn(value, 'errorName'),
+        }));
+      const errors = [
+        new fetchErrors.EgressDeniedError('https://blocked.test'),
+        new vaultErrors.VaultLockedError(),
+        new engineErrors.VMNotReadyError('booting'),
+        new providerErrors.OllamaNotRunningError(),
+        new runtimeErrors.SessionNotFoundError('missing'),
+        new attachmentErrors.UnsupportedAttachmentError('file.bin', 'application/octet-stream'),
+        new pdfErrors.PdfFetchError('fetch failed'),
+        new voiceErrors.VoiceNotEnabledError(),
+      ];
+      export const errorNames = errors.map((error) => error.name);
+      export const constructorNames = errors.map((error) => error.constructor.name);
+    `);
+    const built = await Bun.build({
+      entrypoints: [entry],
+      target: 'browser',
+      format: 'esm',
+      minify: { whitespace: true, syntax: true, identifiers: true },
+      plugins: [{
+        name: 'extension-root-imports',
+        setup(builder) {
+          builder.onResolve({ filter: /^\/(?:shared|peerd-)/ }, ({ path }) => ({
+            path: join(extension, path.slice(1)),
+          }));
+        },
+      }],
+    });
+    expect(built.success).toBe(true);
+    expect(built.outputs).toHaveLength(1);
+    const bundled = join(root, 'errors-bundle.js');
+    writeFileSync(bundled, await built.outputs[0].text());
+    const module = await import(`${pathToFileURL(bundled).href}?${crypto.randomUUID()}`);
+    const expected = [
+      'EgressDeniedError',
+      'VaultLockedError',
+      'VMNotReadyError',
+      'OllamaNotRunningError',
+      'SessionNotFoundError',
+      'UnsupportedAttachmentError',
+      'PdfFetchError',
+      'VoiceNotEnabledError',
+    ];
+    expect(module.errorTags.length).toBeGreaterThan(expected.length);
+    expect(module.errorTags.every((tag: {
+      exportName: string;
+      errorName: string;
+      own: boolean;
+    }) => tag.own && tag.errorName === tag.exportName)).toBe(true);
+    expect(module.errorNames).toEqual(expected);
+    expect(module.constructorNames).not.toEqual(expected);
+  });
+
   test('parses one-line static imports without following dynamic imports', async () => {
     const source = 'import{x}from"./a.js";export{y}from"./b.js";const z=import("./lazy.js");';
     expect(await staticImportSpecifiers(source)).toEqual(['./a.js', './b.js']);

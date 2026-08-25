@@ -56,9 +56,10 @@ const closedFailure = () => ({
  * }>} deps.loadRuntime
  * @param {number} [deps.loadTimeoutMs]
  * @param {()=>string} [deps.newId]
+ * @param {(runtime:Record<string,any>)=>Promise<void>|void} [deps.onLoaded]
  */
 export const createKernelTurnOwner = ({
-  createController, loadRuntime,
+  createController, loadRuntime, onLoaded,
   loadTimeoutMs = TURN_RUNTIME_LOAD_TIMEOUT_MS,
   newId,
 }) => {
@@ -95,41 +96,97 @@ export const createKernelTurnOwner = ({
 
   let closed = false;
   let stopEpoch = 0;
-  /** @type {{close?:()=>Promise<void>|void,relays?:Record<string,any>}|null} */
-  let runtime = null;
-  /** @type {Record<string,(message?:any,sender?:any)=>Promise<any>>|null} */
-  let liveRoutes = null;
-  const load = makeBoundedModuleLoader(async () => {
+  /** @type {()=>void} */
+  let closeHandoff;
+  /** @type {Promise<void>} */
+  const handoffClosed = new Promise((resolve) => { closeHandoff = () => resolve(); });
+  /** @type {{
+   *   epoch:number,
+   *   runtime:{close?:()=>Promise<void>|void,relays?:Record<string,any>},
+   *   routes:Record<string,(message?:any,sender?:any)=>Promise<any>>,
+   *   release:()=>Promise<void>,
+   *   retire:()=>void,
+   * }|null} */
+  let live = null;
+  let loadEpoch = 0;
+  const loadCandidate = async (/** @type {number} */ epoch) => {
     const loaded = await loadRuntime(Object.freeze({
       runUserTurn: bridge.runUserTurn,
       renderSystemPrompt: controller.renderSystemPrompt.bind(controller),
       withRun: controller.withRun.bind(controller),
     }));
-    if (closed) {
-      await loaded?.close?.();
+    /** @type {Promise<void>|null} */
+    let releasePending = null;
+    const release = async () => {
+      releasePending ||= (async () => { await loaded?.close?.(); })();
+      await releasePending;
+    };
+    if (closed || epoch !== loadEpoch) {
+      await release();
       throw new Error('kernel-turn-owner-closed');
     }
     if (!loaded || typeof loaded !== 'object'
         || !loaded.turnDeps || !loaded.sessionDeps || !loaded.isolationDeps
         || typeof loaded.actorCount !== 'function'
         || typeof loaded.actorOverview !== 'function') {
+      await release();
       throw new TypeError('kernel-turn-runtime-invalid');
     }
-    const routes = makeKernelSessionTurnRoutes({
-      ...loaded,
-      turnDeps: {
-        ...loaded.turnDeps,
-        admitSend: (/** @type {any} */ context) => context?.stopEpoch === stopEpoch,
-      },
-    });
-    runtime = loaded;
-    liveRoutes = routes;
-    return { routes, runtime: loaded };
-  }, {
-    timeoutMs: loadTimeoutMs,
-    loadCode: 'kernel-turn-runtime-load-failed',
-    timeoutCode: 'kernel-turn-runtime-load-timeout',
-  });
+    let routes;
+    try {
+      routes = makeKernelSessionTurnRoutes({
+        ...loaded,
+        turnDeps: {
+          ...loaded.turnDeps,
+          admitSend: (/** @type {any} */ context) => context?.stopEpoch === stopEpoch,
+        },
+      });
+    } catch (cause) {
+      await release();
+      throw cause;
+    }
+    /** @type {()=>void} */
+    let retire = () => {};
+    /** @type {Promise<void>} */
+    const retired = new Promise((resolve) => { retire = () => resolve(); });
+    const candidate = { epoch, runtime: loaded, routes, release, retire };
+    live = candidate;
+    try {
+      const handoff = await Promise.race([
+        Promise.resolve().then(() => onLoaded?.(loaded)).then(() => 'ready'),
+        handoffClosed.then(() => 'closed'),
+        retired.then(() => 'retired'),
+      ]);
+      if (handoff !== 'ready' || closed || epoch !== loadEpoch || live !== candidate) {
+        await release();
+        throw new Error('kernel-turn-owner-closed');
+      }
+    }
+    catch (cause) {
+      if (live === candidate) live = null;
+      await release();
+      throw cause;
+    }
+    return candidate;
+  };
+  const makeLoadLane = (/** @type {number} */ epoch) => makeBoundedModuleLoader(
+    () => loadCandidate(epoch),
+    {
+      timeoutMs: loadTimeoutMs,
+      loadCode: 'kernel-turn-runtime-load-failed',
+      timeoutCode: 'kernel-turn-runtime-load-timeout',
+    },
+  );
+  let load = makeLoadLane(loadEpoch);
+  const retireTimedOutHandoff = (/** @type {number} */ epoch) => {
+    const candidate = live;
+    if (epoch !== loadEpoch || candidate?.epoch !== epoch) return;
+    live = null;
+    loadEpoch += 1;
+    load = makeLoadLane(loadEpoch);
+    candidate.retire();
+    void candidate.release().catch(() => {});
+  };
 
   const routes = Object.freeze(Object.fromEntries(
     KERNEL_SESSION_TURN_ROUTE_NAMES.map((name) => [name, async (
@@ -138,23 +195,43 @@ export const createKernelTurnOwner = ({
       if (closed) return closedFailure();
       if (name === 'agent/stop') {
         stopEpoch += 1;
-        const stop = liveRoutes?.[name];
+        const stop = live?.routes[name];
         return stop ? stop(message, sender) : { ok: true };
       }
       const ingressStopEpoch = stopEpoch;
-      let live;
-      try { live = await load(); }
-      catch (cause) { return closed ? closedFailure() : startupFailure(cause); }
-      return live.routes[name](message, name === 'agent/send'
+      const ingressLoadEpoch = loadEpoch;
+      let loadedOwner;
+      try { loadedOwner = await load(); }
+      catch (cause) {
+        if (/** @type {{code?:unknown}} */ (cause)?.code
+            === 'kernel-turn-runtime-load-timeout') {
+          retireTimedOutHandoff(ingressLoadEpoch);
+        }
+        return closed ? closedFailure() : startupFailure(cause);
+      }
+      if (closed) return closedFailure();
+      if (ingressLoadEpoch !== loadEpoch || live !== loadedOwner) {
+        return startupFailure({ code: 'kernel-turn-runtime-load-timeout' });
+      }
+      return loadedOwner.routes[name](message, name === 'agent/send'
         ? Object.freeze({ stopEpoch: ingressStopEpoch }) : sender);
     }]),
   ));
   const projection = async (/** @type {'actorCount'|'actorOverview'} */ method) => {
     if (closed) return closedFailure();
+    const ingressLoadEpoch = loadEpoch;
     try {
-      const live = await load();
-      return live.runtime[method]();
+      const loadedOwner = await load();
+      if (closed) return closedFailure();
+      if (ingressLoadEpoch !== loadEpoch || live !== loadedOwner) {
+        return startupFailure({ code: 'kernel-turn-runtime-load-timeout' });
+      }
+      return loadedOwner.runtime[method]();
     } catch (cause) {
+      if (/** @type {{code?:unknown}} */ (cause)?.code
+          === 'kernel-turn-runtime-load-timeout') {
+        retireTimedOutHandoff(ingressLoadEpoch);
+      }
       return closed ? closedFailure() : startupFailure(
         Object.assign(new Error('actor projection unavailable'), {
           code: /** @type {{code?:string}} */ (cause)?.code
@@ -170,16 +247,37 @@ export const createKernelTurnOwner = ({
     activeTurns: bridge.activeCount,
     actorCount: () => projection('actorCount'),
     actorOverview: () => projection('actorOverview'),
-    get relays() { return runtime?.relays ?? null; },
-    getRelays: async () => (await load()).runtime.relays ?? {},
+    get relays() { return live?.runtime.relays ?? null; },
+    getRelays: async () => {
+      if (closed) throw new Error('kernel-turn-owner-closed');
+      const ingressLoadEpoch = loadEpoch;
+      let loaded;
+      try { loaded = await load(); }
+      catch (cause) {
+        if (/** @type {{code?:unknown}} */ (cause)?.code
+            === 'kernel-turn-runtime-load-timeout') {
+          retireTimedOutHandoff(ingressLoadEpoch);
+        }
+        throw cause;
+      }
+      if (closed) throw new Error('kernel-turn-owner-closed');
+      if (ingressLoadEpoch !== loadEpoch || live !== loaded) {
+        throw Object.assign(new Error('kernel-turn-runtime-load-timeout'), {
+          code: 'kernel-turn-runtime-load-timeout',
+        });
+      }
+      return loaded.runtime.relays ?? {};
+    },
     close: async () => {
       if (closed) return;
       closed = true;
+      closeHandoff();
+      loadEpoch += 1;
       load.reset();
-      const live = runtime;
-      runtime = null;
-      liveRoutes = null;
-      try { await live?.close?.(); }
+      const current = live;
+      live = null;
+      current?.retire();
+      try { await current?.release(); }
       finally {
         bridge.close();
         controller?.close?.();

@@ -6,6 +6,8 @@ import {
 } from '/shared/build-config.js';
 import browser from '/shared/browser-api.js';
 import { base64ToBytes } from '/shared/cold-util.js';
+import { makeBoundedModuleLoader } from '/shared/bounded-module-load.js';
+import { KERNEL_ADMINISTRATIVE_ROUTE_NAMES } from '/shared/kernel-feature-route-inventory.js';
 import {
   PRIVATE_NETWORK_RULE_DIGESTS,
   PRIVATE_NETWORK_RULE_IDS,
@@ -82,16 +84,7 @@ import {
   makeRepositoryKernelFetch,
 } from './repository-client.js';
 import { createKernelKeyedOriginAuthority } from './kernel-keyed-origin-authority.js';
-import { createKernelAdministrativeControl } from './kernel-administrative-control.js';
-import { createKernelSkillPersistence } from './kernel-skill-persistence.js';
-import { createKernelMemoryInitProbe } from './kernel-memory-init-probe.js';
-import { makeKernelProviderSetKeyRoute } from './kernel-provider-key-route.js';
-import {
-  makeKernelGitCredentialRoutes,
-  makeKernelOriginCredentialRoutes,
-} from './kernel-credential-routes.js';
-import { createKernelSemanticRuntime } from './kernel-semantic-runtime.js';
-import { createKernelExecutableRuntime } from './kernel-executable-runtime.js';
+import { createKernelRecoveryCustody } from './kernel-recovery-custody.js';
 import {
   createVaultKernelAssemblyReport,
   SEMANTIC_CUTOVER_SUMMARY,
@@ -443,6 +436,14 @@ const lockFeatureHost = () => {
   featureLockInFlight = run;
   return run;
 };
+const recoveryCustody = createKernelRecoveryCustody({
+  kv,
+  alarms: browser.alarms,
+  dwebActive: () => DWEB_ENABLED
+    && settingsStore.get().dwebEnabled === true
+    && settingsStore.get().dwebAgentEnabled === true,
+  load: async () => (await getControllerRelays()).resumeSchedules(),
+});
 
 const vaultRoutes = makeVaultKernelRoutes({
   ready: kernelReady,
@@ -453,7 +454,10 @@ const vaultRoutes = makeVaultKernelRoutes({
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,
     VaultLockedError,
     onInitialized: featureHost.vaultInitialized,
-    onUnlocked: featureHost.vaultUnlocked,
+    onUnlocked: async () => {
+      await featureHost.vaultUnlocked();
+      await recoveryCustody.resume();
+    },
     onLocked: lockFeatureHost,
   },
 });
@@ -551,14 +555,22 @@ const repositories = /** @type {any} */ (createDeferredRepositoryClient(async ()
     retireHost: (/** @type {string} */ reason) => featureHost.runtime.retireActiveHost(reason),
   });
 }));
-const providerKeyRoutes = Object.freeze({
-  'provider/setKey': makeKernelProviderSetKeyRoute({
-    vault, settingsStore, auditLog,
-    pushState: async () => {
-      providerProjection.bumpRevision();
-      await pushState();
-    },
-  }),
+const providerKeyRoutes = makeKernelDemandRoutes({
+  names: ['provider/setKey'],
+  loadCode: 'kernel-provider-key-routes-load-failed',
+  timeoutCode: 'kernel-provider-key-routes-load-timeout',
+  load: async () => {
+    const { makeKernelProviderSetKeyRoute } = await import('./kernel-provider-key-route.js');
+    return Object.freeze({
+      'provider/setKey': makeKernelProviderSetKeyRoute({
+        vault, settingsStore, auditLog,
+        pushState: async () => {
+          providerProjection.bumpRevision();
+          await pushState();
+        },
+      }),
+    });
+  },
 });
 const appFiles = createKernelAppFileReader({
   idb, sessionCache, appFiles: /** @type {any} */ (repositories.appFiles),
@@ -581,25 +593,37 @@ const vmMetaRoute = makeKernelVmMetaRoute({
 });
 const siteClientRoutes = createKernelSiteClientRoutes({ isAllowed: optionsUi });
 const voiceAuditRoute = makeKernelVoiceAuditRoute({ auditLog, isAllowed: voiceUi });
-const repositoryRoutes = Object.freeze({
-  ...makeKernelGitCredentialRoutes({
-    vault, auditLog,
-    isLockedError: (/** @type {unknown} */ cause) => cause instanceof VaultLockedError,
-  }),
-  ...makeKernelOriginCredentialRoutes({
-    vault, auditLog, idb,
-    isLockedError: (/** @type {unknown} */ cause) => cause instanceof VaultLockedError,
-    learnKeyedOrigin: keyedOriginAuthority.add,
-    forgetKeyedOrigin: keyedOriginAuthority.remove,
-  }),
+const repositoryRoutes = makeKernelDemandRoutes({
+  names: [
+    'git-cred/list', 'git-cred/set', 'git-cred/delete',
+    'origin-cred/list', 'origin-cred/set', 'origin-cred/delete',
+  ],
+  loadCode: 'kernel-credential-routes-load-failed',
+  timeoutCode: 'kernel-credential-routes-load-timeout',
+  load: async () => {
+    const {
+      makeKernelGitCredentialRoutes,
+      makeKernelOriginCredentialRoutes,
+    } = await import('./kernel-credential-routes.js');
+    return Object.freeze({
+      ...makeKernelGitCredentialRoutes({
+        vault, auditLog,
+        isLockedError: (/** @type {unknown} */ cause) => cause instanceof VaultLockedError,
+      }),
+      ...makeKernelOriginCredentialRoutes({
+        vault, auditLog, idb,
+        isLockedError: (/** @type {unknown} */ cause) => cause instanceof VaultLockedError,
+        learnKeyedOrigin: keyedOriginAuthority.add,
+        forgetKeyedOrigin: keyedOriginAuthority.remove,
+      }),
+    });
+  },
 });
-/** @type {ReturnType<typeof createKernelSemanticRuntime>|null} */
+/** @type {any} */
 let controllerOwner = null;
-/** @type {Promise<ReturnType<typeof createKernelSemanticRuntime>>|null} */
-let controllerOwnerLoading = null;
 /** @type {Promise<any>|null} */
 let richOwnerLoading = null;
-/** @type {ReturnType<typeof createKernelAdministrativeControl>|null} */
+/** @type {any} */
 let administrativeControl = null;
 const handleRichKernelCall = async (/** @type {string} */ operation,
   /** @type {unknown} */ payload, /** @type {any} */ context) => {
@@ -611,8 +635,16 @@ const handleRichKernelCall = async (/** @type {string} */ operation,
       error: 'Feature unavailable. Try again.', outcomeKnown: true,
     };
 };
+const loadProductionModule = makeBoundedModuleLoader(
+  () => import('./kernel-production-runtime.js'),
+  {
+    timeoutMs: 15_000,
+    loadCode: 'kernel-production-runtime-load-failed',
+    timeoutCode: 'kernel-production-runtime-load-timeout',
+  },
+);
 const loadRichOwner = (/** @type {any} */ seams) => {
-  richOwnerLoading ??= import('./kernel-production-runtime.js').then((module) =>
+  richOwnerLoading ??= loadProductionModule().then((module) =>
     module.createKernelProductionRuntime({
       seams, browser, idb, kv, sessionCache, vault, auditLog, settingsStore, uiPorts,
       pushState, postChatNote, confirmation: confirmation.coordinator,
@@ -643,19 +675,16 @@ const loadRichOwner = (/** @type {any} */ seams) => {
       waitForBrowserChildPolicyNotice: browserChildOutcomes.wait,
       hasPendingBrowserChildPolicy: browserChildOutcomes.has,
     })
-  ).then((owner) => {
-    networkOwner.bind(owner.relays);
-    return owner;
-  }).catch((cause) => {
+  ).catch((cause) => {
     richOwnerLoading = null;
     throw cause;
   });
   return richOwnerLoading;
 };
-const loadControllerOwner = () => {
+const loadControllerOwner = makeBoundedModuleLoader(async () => {
   if (controllerOwner) return Promise.resolve(controllerOwner);
-  controllerOwnerLoading ??= Promise.resolve().then(() => {
-    controllerOwner = createKernelSemanticRuntime({
+  const { createKernelSemanticRuntime } = await import('./kernel-semantic-runtime.js');
+  controllerOwner = createKernelSemanticRuntime({
       browser, idb, kv, auditLog, vault, ready: vaultReady, pushState,
       appCatalog, appFiles, reloadApp: reloadOpenApp, appTabUrl, sessionCache,
       repositories, settingsStore, sessions: kernelSessions, featureHost,
@@ -673,6 +702,19 @@ const loadControllerOwner = () => {
       isHomeSender: homeUi,
       loadTurnRuntime: async (/** @type {any} */ seams) =>
         (await loadRichOwner(seams)).turnRuntime,
+      onTurnRuntimeLoaded: async (/** @type {any} */ runtime) => {
+        try {
+          await runtime.relays.eventOwners.reconcile();
+          networkOwner.bind(runtime.relays);
+        } catch (cause) {
+          const loading = richOwnerLoading;
+          if (loading) {
+            const owner = await loading.catch(() => null);
+            if (owner?.turnRuntime === runtime) richOwnerLoading = null;
+          }
+          throw cause;
+        }
+      },
       ensureOffscreen: featureHost.ensureOffscreen,
       offscreenUrl, firefox: kernelFirefox, dwebEnabled: DWEB_ENABLED, kernelIdentity,
       retireHost: (/** @type {string} */ reason) =>
@@ -686,14 +728,13 @@ const loadControllerOwner = () => {
       connectDirectController: kernelFirefox
         ? makeFirefoxGuard.connectDirectController : undefined,
       fetchFn: packagedFetch,
-    });
-    return controllerOwner;
-  }).catch((cause) => {
-    controllerOwnerLoading = null;
-    throw cause;
   });
-  return controllerOwnerLoading;
-};
+  return controllerOwner;
+}, {
+  timeoutMs: 15_000,
+  loadCode: 'kernel-semantic-runtime-load-failed',
+  timeoutCode: 'kernel-semantic-runtime-load-timeout',
+});
 const getControllerRelays = async () => (await loadControllerOwner()).getRelays();
 const controllerRelays = () => controllerOwner?.relays;
 const browserDnr = /** @type {any} */ (
@@ -775,12 +816,12 @@ const childGuard = makeFirefoxGuard?.({
 }) ?? INERT_CHILD_REQUEST_GUARD;
 const browserEventOwners = createKernelBrowserEventOwners({
   ready: kernelReady,
-  resumeSchedules: async () => (await getControllerRelays()).resumeSchedules(),
+  resumeRecovery: recoveryCustody.resume,
   firefox: kernelFirefox,
   receipts: coldReceipts,
   tabCustody: createKernelTabCustody({
     browser, firefox: kernelFirefox, network: networkOwner, child: childGuard,
-    getRelays: controllerRelays, loadRelays: getControllerRelays,
+    getRelays: controllerRelays,
   }),
 });
 attachKernelLifecycleEvents({
@@ -910,11 +951,20 @@ const getRichOwner = async () => {
   if (!richOwnerLoading) throw new Error('kernel-rich-owner-unavailable');
   return richOwnerLoading;
 };
+const loadExecutableRuntime = makeBoundedModuleLoader(
+  () => import('./kernel-executable-runtime.js'),
+  {
+    timeoutMs: 15_000,
+    loadCode: 'kernel-executable-runtime-load-failed',
+    timeoutCode: 'kernel-executable-runtime-load-timeout',
+  },
+);
 const executableOwner = createKernelExecutableControl({
   runtimeId,
   firefox: kernelFirefox,
   dweb: DWEB_ENABLED,
-  createRuntime: createKernelExecutableRuntime,
+  createRuntime: async (/** @type {any} */ deps) =>
+    (await loadExecutableRuntime()).createKernelExecutableRuntime(deps),
   loadRich: getRichOwner,
   dispatchRuntimeRelay: async (/** @type {string} */ route, /** @type {unknown} */ message) =>
     (await loadControllerOwner()).runtime.relay(route, message),
@@ -927,45 +977,61 @@ const executableOwner = createKernelExecutableControl({
   },
 });
 
-const skillPersistence = createKernelSkillPersistence({
-  canWrite: () => writeGuard.assertWritable('skills'),
-  audit: auditLog.append,
-  pushState,
-});
-const memoryInitProbe = createKernelMemoryInitProbe({
-  tabs: browser.tabs,
-  scripting: browser.scripting,
-  resolveTab: async (/** @type {any} */ tab) => {
-    if (typeof tab?.id !== 'number') return null;
-    const [identity] = await browser.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: () => globalThis.location.href,
+const administrativeRoutes = makeKernelDemandRoutes({
+  names: KERNEL_ADMINISTRATIVE_ROUTE_NAMES,
+  loadCode: 'kernel-administrative-routes-load-failed',
+  timeoutCode: 'kernel-administrative-routes-load-timeout',
+  load: async () => {
+    const [{ createKernelAdministrativeControl },
+      { createKernelSkillPersistence },
+      { createKernelMemoryInitProbe }] = await Promise.all([
+      import('./kernel-administrative-control.js'),
+      import('./kernel-skill-persistence.js'),
+      import('./kernel-memory-init-probe.js'),
+    ]);
+    const skillPersistence = createKernelSkillPersistence({
+      canWrite: () => writeGuard.assertWritable('skills'),
+      audit: auditLog.append,
+      pushState,
     });
-    const current = await browser.tabs.get(tab.id);
-    const documentId = /** @type {{documentId?:unknown}|undefined} */ (identity)?.documentId;
-    if (typeof documentId !== 'string'
-        || typeof identity?.result !== 'string'
-        || identity.result !== current?.url) return null;
-    return { ...current, peerdDocumentId: documentId };
+    const memoryInitProbe = createKernelMemoryInitProbe({
+      tabs: browser.tabs,
+      scripting: browser.scripting,
+      resolveTab: async (/** @type {any} */ tab) => {
+        if (typeof tab?.id !== 'number') return null;
+        const [identity] = await browser.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => globalThis.location.href,
+        });
+        const current = await browser.tabs.get(tab.id);
+        const documentId = /** @type {{documentId?:unknown}|undefined} */ (identity)?.documentId;
+        if (typeof documentId !== 'string'
+            || typeof identity?.result !== 'string'
+            || identity.result !== current?.url) return null;
+        return { ...current, peerdDocumentId: documentId };
+      },
+    });
+    administrativeControl = createKernelAdministrativeControl({
+      callFeature: async (payload, options) =>
+        /** @type {any} */ ((await loadControllerOwner()).controller)
+          .callFeature(payload, options),
+      kv,
+      idb: /** @type {any} */ (idb),
+      auditLog,
+      canWrite: (store) => writeGuard.assertWritable(store),
+      commitSkill: skillPersistence.commit,
+      probeMemoryTab: memoryInitProbe.probeTab,
+      listApps: () => appCatalog.list(),
+      confirm: confirmation.coordinator.confirm,
+      currentSessionId: () => sessionCache.sessionGet('currentSessionId'),
+      assertMemoryInitAllowed: async () => {
+        if (vault.isLocked()) throw new VaultLockedError();
+        if (!(await denylistPolicy.ready()).ok) throw new Error('denylist policy unavailable');
+      },
+      postChatNote,
+    });
+    return administrativeControl.routes;
   },
-});
-administrativeControl = createKernelAdministrativeControl({
-  callFeature: async (payload, options) =>
-    /** @type {any} */ ((await loadControllerOwner()).controller).callFeature(payload, options),
-  kv,
-  idb: /** @type {any} */ (idb),
-  auditLog,
-  canWrite: (store) => writeGuard.assertWritable(store),
-  commitSkill: skillPersistence.commit,
-  probeMemoryTab: memoryInitProbe.probeTab,
-  listApps: () => appCatalog.list(),
-  confirm: confirmation.coordinator.confirm,
-  currentSessionId: () => sessionCache.sessionGet('currentSessionId'),
-  assertMemoryInitAllowed: async () => {
-    if (vault.isLocked()) throw new VaultLockedError();
-    if (!(await denylistPolicy.ready()).ok) throw new Error('denylist policy unavailable');
-  },
-  postChatNote,
 });
 
 /** @type {Record<string, (message?: any, sender?: any) => Promise<any>|any>} */
@@ -1026,7 +1092,7 @@ const routes = {
   ...makeKernelComposerRoutes({
     browser, kv, idb, sessionCache, vault, denylist: denylistPolicy, appFiles,
   }),
-  ...administrativeControl.routes,
+  ...administrativeRoutes,
   ...makeKernelDenylistRoutes({
     policy: denylistPolicy,
     networkCustody,

@@ -207,6 +207,155 @@ describe('native kernel turn owner', () => {
     expect(calls).toMatchObject({ controllerCloses: 1, runtimeCloses: 1 });
   });
 
+  test('publishes relays during handoff without losing or duplicating an event', async () => {
+    const calls = makeCalls();
+    let releaseReconcile!: () => void;
+    let reconcileStarted!: () => void;
+    const reconciling = new Promise<void>((resolve) => { reconcileStarted = resolve; });
+    const reconcileGate = new Promise<void>((resolve) => { releaseReconcile = resolve; });
+    const events: string[] = [];
+    let owner!: ReturnType<typeof createKernelTurnOwner>;
+    owner = createKernelTurnOwner({
+      createController: makeControllerFactory(calls),
+      loadRuntime: async (seams) => ({
+        ...makeRuntime(seams, calls),
+        relays: {
+          eventOwners: {
+            reconcile: async () => {
+              events.push('snapshot');
+              reconcileStarted();
+              await reconcileGate;
+            },
+            tabsOnUpdated: async () => { events.push('tab'); },
+          },
+        },
+      }),
+      onLoaded: async (runtime) => runtime.relays.eventOwners.reconcile(),
+    });
+
+    const count = owner.actorCount();
+    const overview = owner.actorOverview();
+    await reconciling;
+    await owner.relays?.eventOwners.tabsOnUpdated();
+    releaseReconcile();
+
+    await expect(count).resolves.toEqual({ activeActors: 2 });
+    await expect(overview).resolves.toEqual({ roots: [{ sessionId: 'actor-root' }] });
+    expect(events).toEqual(['snapshot', 'tab']);
+    await owner.close();
+  });
+
+  test('discards a failed handoff exactly once and retries with a fresh runtime', async () => {
+    const calls = makeCalls();
+    const closes: number[] = [];
+    let attempts = 0;
+    const owner = createKernelTurnOwner({
+      createController: makeControllerFactory(calls),
+      loadRuntime: async (seams) => {
+        attempts += 1;
+        const runtime = makeRuntime(seams, calls);
+        return {
+          ...runtime,
+          close: () => { closes.push(attempts); },
+        };
+      },
+      onLoaded: async () => {
+        if (attempts === 1) throw new Error('reconcile-failed');
+      },
+    });
+
+    await expect(owner.actorCount()).resolves.toMatchObject({
+      code: 'kernel-turn-runtime-load-failed', outcomeKnown: true, retryable: true,
+    });
+    expect(owner.relays).toBeNull();
+    await expect(owner.actorCount()).resolves.toEqual({ activeActors: 2 });
+    expect(attempts).toBe(2);
+    expect(closes).toEqual([1]);
+
+    await owner.close();
+    expect(closes).toEqual([1, 2]);
+  });
+
+  test('close during a held handoff closes once and prevents post-close dispatch', async () => {
+    const calls = makeCalls();
+    let handoffStarted!: () => void;
+    const handoff = new Promise<void>((resolve) => { handoffStarted = resolve; });
+    let dispatches = 0;
+    const owner = createKernelTurnOwner({
+      createController: makeControllerFactory(calls),
+      loadRuntime: async (seams) => {
+        const runtime = makeRuntime(seams, calls);
+        runtime.isolationDeps.retryActorIsolation = async () => {
+          dispatches += 1;
+          return { ok: true, capability: { status: 'available' } };
+        };
+        return runtime;
+      },
+      onLoaded: async () => {
+        handoffStarted();
+        await new Promise(() => {});
+      },
+    });
+
+    const request = owner.routes['actor-isolation/retry']();
+    await handoff;
+    await owner.close();
+
+    await expect(request).resolves.toMatchObject({
+      code: 'kernel-turn-owner-closed', outcomeKnown: true, retryable: false,
+    });
+    expect(dispatches).toBe(0);
+    expect(calls).toMatchObject({ runtimeCloses: 1, controllerCloses: 1 });
+  });
+
+  test('retires a timed-out handoff and retries fresh without waiting for cleanup', async () => {
+    const calls = makeCalls();
+    let releaseFirst!: () => void;
+    const firstHandoff = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const closes: number[] = [];
+    let attempts = 0;
+    const owner = createKernelTurnOwner({
+      createController: makeControllerFactory(calls), loadTimeoutMs: 2,
+      loadRuntime: async (seams) => {
+        attempts += 1;
+        const attempt = attempts;
+        return {
+          ...makeRuntime(seams, calls),
+          relays: { attempt },
+          close: () => {
+            closes.push(attempt);
+            return attempt === 1 ? new Promise<void>(() => {}) : undefined;
+          },
+        };
+      },
+      onLoaded: async (runtime) => {
+        if (runtime.relays.attempt === 1) await firstHandoff;
+      },
+    });
+
+    const timedOutCount = owner.actorCount();
+    const timedOutOverview = owner.actorOverview();
+    await expect(timedOutCount).resolves.toMatchObject({
+      code: 'kernel-turn-runtime-load-timeout', outcomeKnown: true, retryable: true,
+    });
+    await expect(timedOutOverview).resolves.toMatchObject({
+      code: 'kernel-turn-runtime-load-timeout', outcomeKnown: true, retryable: true,
+    });
+    expect(owner.relays).toBeNull();
+    expect(closes).toEqual([1]);
+
+    await expect(owner.actorCount()).resolves.toEqual({ activeActors: 2 });
+    expect(owner.relays).toEqual({ attempt: 2 });
+    releaseFirst();
+    await Promise.resolve();
+    expect(owner.relays).toEqual({ attempt: 2 });
+
+    await owner.close();
+    expect(owner.relays).toBeNull();
+    expect(closes).toEqual([1, 2]);
+    expect(calls.controllerCloses).toBe(1);
+  }, 1_000);
+
   test('a frozen turn module returns a stable pre-dispatch refusal and later becomes usable', async () => {
     const calls = makeCalls();
     const sessionCache = makeCache();

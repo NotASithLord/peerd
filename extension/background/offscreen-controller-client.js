@@ -1020,10 +1020,10 @@ export const makeSemanticControllerClient = ({
     callFeatureCapability(KERNEL_FEATURE_EVENT_CAPABILITY, payload, options);
   // why the outer leased user: a raw host lease keeps the document alive, but
   // zero client users still retires its channel and sealed Worker between turns.
-  const withRun = (/** @type {()=>Promise<void>} */ operation) =>
+  const withRun = (/** @type {()=>Promise<any>} */ operation) =>
     withControllerLease(async () => {
       enterLeased();
-      try { await operation(); }
+      try { return await operation(); }
       finally { exitLeased(); }
     }, {
       outcomeKnownOnLoss: false,

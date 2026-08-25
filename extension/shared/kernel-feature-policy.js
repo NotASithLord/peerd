@@ -2,11 +2,14 @@
 
 import { controllerPayloadBytes, parseControllerAuthority } from './structured-clone-size.js';
 import {
+  KERNEL_ADMINISTRATIVE_ROUTE_NAMES,
   KERNEL_DWEB_ROUTE_NAMES,
   KERNEL_EXECUTABLE_ROUTE_NAMES,
   KERNEL_LOCAL_ROUTE_NAMES,
   KERNEL_REPOSITORY_ROUTE_NAMES,
 } from './kernel-feature-route-inventory.js';
+
+export { KERNEL_ADMINISTRATIVE_ROUTE_NAMES } from './kernel-feature-route-inventory.js';
 
 const KIB = 1024;
 const MIB = 1024 * KIB;
@@ -14,11 +17,6 @@ const OWNER_ID = 'peerd-authority-kernel';
 const DISPATCH_ID = /^[A-Za-z0-9._-]{8,512}$/;
 export const KERNEL_FEATURE_DISPATCH_CAPABILITY = 'feature.dispatch';
 export const KERNEL_FEATURE_EVENT_CAPABILITY = 'feature.event';
-
-export const KERNEL_ADMINISTRATIVE_ROUTE_NAMES = Object.freeze([
-  'hooks/list', 'hooks/save', 'hooks/remove', 'hooks/toggle',
-  'memory/init', 'skills/installGit', 'skills/installLocal', 'skills/installManifest',
-]);
 
 export const KERNEL_FEATURE_EVENT_NAMES = Object.freeze([
   'production/reconcile',

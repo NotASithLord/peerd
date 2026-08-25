@@ -1754,9 +1754,13 @@ export const createKernelTurnLiveFactories = (deps) => {
       bindingReady, refreshKeyedOrigins(), learnedOrigins.hydrate(), userEndpointsReady,
     ]);
     if (deps.firefox) void persistWebBindings();
-    const directHandle = deps.firefoxActorLifetime?.createHandle?.();
+    const directHandle = deps.firefoxActorLifetime?.createHandle?.({
+      onLost: (/** @type {Error} */ error) => directActorHost?.failKeepAlive(error),
+    });
+    const directActorModule = deps.firefox
+      ? await (deps.loadDirectActorHost?.() ?? import('./direct-actor-host.js')) : null;
     directActorHost = deps.firefox
-      ? (await import('./direct-actor-host.js')).makeDirectActorHost({
+      ? directActorModule.makeDirectActorHost({
         workerUrl: deps.browser.runtime.getURL('offscreen/actor-worker.js'),
         startKeepAlive: () => directHandle?.start(),
         stopKeepAlive: () => directHandle?.stop(),

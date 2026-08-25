@@ -355,13 +355,15 @@ describe('production semantic controller slice', () => {
       }],
     });
 
-    await semantic.withRun(async () => {
+    const runResult = await semantic.withRun(async () => {
       await expect(semantic.renderSystemPrompt({ actorType: 'orchestrator' }))
         .resolves.toBe('held prompt');
       await expect(semantic.callTurn({ sessionId: 'session-1' }))
         .resolves.toEqual({ ok: true, outcomeKnown: true, phase: 'settled' });
       expect({ offers, loads, closes }).toEqual({ offers: 1, loads: 1, closes: 0 });
+      return 'completed';
     });
+    expect(runResult).toBe('completed');
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect({ offers, loads, closes }).toEqual({ offers: 1, loads: 1, closes: 1 });
   });
