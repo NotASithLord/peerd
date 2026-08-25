@@ -2,6 +2,11 @@
 
 import { describe, it, expect } from '../../framework.js';
 import { startVaultShell } from '/sidepanel/vault-shell.js';
+import {
+  KERNEL_STATE_DEFERRED_FIELDS,
+  KERNEL_STATE_PROVENANCE,
+  KERNEL_STATE_SCHEMA,
+} from '/shared/kernel-state-contract.js';
 
 const waitFor = async (/** @type {() => boolean} */ predicate) => {
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -12,6 +17,87 @@ const waitFor = async (/** @type {() => boolean} */ predicate) => {
 };
 
 describe('vault shell application load', () => {
+  it('enters the application from a valid Port snapshot without message fallback', async () => {
+    const runtime = /** @type {any} */ (chrome.runtime);
+    const chromeApi = /** @type {any} */ (chrome);
+    const prior = {
+      connect: runtime.connect,
+      sendMessage: runtime.sendMessage,
+      storage: chromeApi.storage,
+    };
+    /** @type {Array<(message: any) => void>} */
+    const messageListeners = [];
+    runtime.connect = () => ({
+      onMessage: { addListener: (/** @type {(message: any) => void} */ listener) => { messageListeners.push(listener); } },
+      onDisconnect: { addListener: () => {} },
+      disconnect: () => {},
+    });
+    runtime.sendMessage = async () => null;
+    chromeApi.storage = { local: { get: async () => ({}) } };
+
+    const root = document.createElement('div');
+    root.id = 'app';
+    document.body.append(root);
+    try {
+      startVaultShell({
+        portName: 'sidepanel',
+        appSelector: '.app-shell',
+        loadApplication: async () => () => {
+          root.innerHTML = '<main class="app-shell">ready</main>';
+        },
+      });
+      messageListeners[0]?.({
+        type: 'state',
+        state: {
+          hydrated: true,
+          vault: {
+            initialized: true, locked: false, unlockedAt: 1,
+            prfEnrolled: false, hasRecovery: true, lockReason: null,
+          },
+          settings: { vaultAutoLockMs: 0, confirmWebWrites: true },
+          session: {
+            sessionId: null, messages: [],
+            permission: { mode: 'act', confirmActions: false },
+          },
+          providers: { current: 'ollama', model: 'qwen3:8b', hasKey: false },
+          composer: {
+            provider: 'ollama', model: 'qwen3:8b', keyless: true,
+            credentialReady: true, localReady: true, canSend: true, reason: null,
+          },
+          profile: { id: 'default', peerName: 'peerd', onboardingComplete: true },
+          capabilities: {
+            actorExecution: {
+              status: 'temporarily_unavailable', host: 'background-page-worker',
+              reason: 'controller-not-ready', retryable: true,
+            },
+          },
+          projection: {
+            schema: KERNEL_STATE_SCHEMA,
+            provenance: KERNEL_STATE_PROVENANCE,
+            authorityEpoch: 'kernel-firefox-port', generation: 1,
+            settings: 'hydrated', actorIsolation: 'hydrated',
+            semanticController: 'required',
+            deferredFields: [...KERNEL_STATE_DEFERRED_FIELDS], failures: [],
+          },
+        },
+      });
+
+      await waitFor(() => document.documentElement.dataset.peerdBootStage === 'app-ready');
+      expect(root.querySelector('.app-shell')?.textContent).toBe('ready');
+    } finally {
+      root.remove();
+      delete document.documentElement.dataset.peerdBootStage;
+      delete document.documentElement.dataset.peerdBootError;
+      delete document.documentElement.dataset.peerdVaultPosture;
+      if (prior.connect === undefined) delete runtime.connect;
+      else runtime.connect = prior.connect;
+      if (prior.sendMessage === undefined) delete runtime.sendMessage;
+      else runtime.sendMessage = prior.sendMessage;
+      if (prior.storage === undefined) delete chromeApi.storage;
+      else chromeApi.storage = prior.storage;
+    }
+  });
+
   it('keeps the failure shell after a timed-out import resolves late', async () => {
     const runtime = /** @type {any} */ (chrome.runtime);
     const chromeApi = /** @type {any} */ (chrome);

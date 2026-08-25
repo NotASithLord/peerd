@@ -4,7 +4,9 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  assertGitFixtureBinding,
   assertSecretlessGitReport,
+  buildGitFixtureBinding,
   GIT_FIXTURE_HOST,
   GIT_FIXTURE_REMOTE,
   redactGitFixtureCredential,
@@ -36,6 +38,19 @@ const run = (args: string[], cwd: string, env: Record<string, string> = {}) =>
   });
 
 describe('secretless local Smart HTTP acceptance fixture', () => {
+  test('binds the system and Apple Git version formats exactly', () => {
+    const hashes = {
+      certificateSha256: 'a'.repeat(64), protocolSha256: 'b'.repeat(64),
+    };
+    for (const gitVersion of ['git version 2.50.1', 'git version 2.50.1.windows.1', 'git version 2.50.1 (Apple Git-155)']) {
+      expect(assertGitFixtureBinding(buildGitFixtureBinding({ gitVersion, ...hashes })).gitVersion)
+        .toBe(gitVersion);
+    }
+    expect(() => assertGitFixtureBinding(buildGitFixtureBinding({
+      gitVersion: 'git version 2.50.1 arbitrary', ...hashes,
+    }))).toThrow(/binding is invalid/);
+  });
+
   test('serves an authenticated push and clean clone through its loopback CONNECT proxy', async () => {
     const fixture = await startGitSmartHttpFixture();
     const root = mkdtempSync(join(tmpdir(), 'peerd-smart-http-test-'));

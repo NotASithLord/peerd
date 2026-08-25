@@ -809,7 +809,7 @@ export const actorBlock = (actorType, backing, instanceId, surface, schemaReply,
 // on an existing tab likewise never steals focus. ~55 tokens.
 const TAB_POLICY = [
   'A tab you open stays in the BACKGROUND — open_tab and a new',
-  'VM/Notebook tabs, and Apps on supported Chrome, open quietly and drop a "go there" card in the chat',
+  'VM, Notebook, and App tabs open quietly and drop a "go there" card in the chat',
   'for the user to click when they want to look. You never yank them across',
   'to a tab. Acting on a tab that already exists is the same — navigating,',
   'clicking, typing, or running commands leave the user wherever they are,',

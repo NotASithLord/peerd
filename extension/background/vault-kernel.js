@@ -404,10 +404,9 @@ const pushState = async () => {
   const ownerSessionId = typeof state.session?.sessionId === 'string'
     ? state.session.sessionId : null;
   const pendingConfirm = confirmation.coordinator.getPendingForOwner(ownerSessionId);
-  const delivered = { ...state, pendingConfirm };
-  uiPorts.broadcast(generation.bind({ type: 'state', state: delivered }));
+  uiPorts.broadcast(generation.bind({ type: 'state', state }));
   if (pendingConfirm) uiPorts.broadcast({ type: 'confirm/request', prompt: pendingConfirm });
-  return delivered;
+  return state;
 };
 
 const normalizeVoiceEngine = (/** @type {string} */ value) =>
@@ -602,6 +601,12 @@ const demandRoutes = makeKernelDemandRoutes({
   },
   load: async () => (await loadDemandPlane()).routes,
 });
+const disabledDwebRoute = async () => ({
+  ok: false, error: 'dweb-disabled', outcomeKnown: true,
+});
+const disabledDwebRoutes = DWEB_ENABLED ? {} : Object.fromEntries(
+  KERNEL_DWEB_ROUTE_NAMES.map((name) => [name, disabledDwebRoute]),
+);
 const browserDnr = /** @type {any} */ (
   /** @type {any} */ (globalThis).chrome?.declarativeNetRequest
   ?? /** @type {any} */ (browser).declarativeNetRequest
@@ -619,7 +624,7 @@ const startupPopupNetworkGuard = makeStartupPopupNetworkGuard(
 );
 const networkOwner = createKernelBrowserNetworkOwner({
   firefox: kernelFirefox, browser, dnr: serializedBrowserDnr, sessionCache,
-  denylist: denylistPolicy, kernelIdentity,
+  denylist: denylistPolicy, kernelIdentity, appTabUrl,
   createAuthority: createKernelBrowserNetworkRuntime,
   startupGuard: startupPopupNetworkGuard,
   onPopupBlocked: browserChildOutcomes.recordBlocked,
@@ -824,6 +829,7 @@ const routes = {
   },
   ...systemReadRoutes,
   ...demandRoutes,
+  ...disabledDwebRoutes,
   ...targetContributorRoutes,
   'repository/kernel-fetch': async () => ({
     ok: false, error: 'repository-private-channel-required', outcomeKnown: true,

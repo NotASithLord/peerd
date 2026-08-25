@@ -462,13 +462,42 @@ export const createRepositoryService = ({
     try { return await remoteFor(ctx); } catch { return null; }
   });
 
+  /** @param {RepositoryContext} ctx @param {{http:any,remote:{url:string},ref?:string|null,
+   * depth?:number,prune?:boolean,tags?:boolean,fs?:any}} options */
+  const fetchBranch = async (ctx, { http, remote, ref, depth, prune = false, tags = false,
+    fs: transportFs = quotaFsFor(ctx) }) => {
+    let result;
+    try {
+      result = await ctx.git.fetch({
+        fs: transportFs, http, dir: ctx.dir, gitdir: ctx.gitdir,
+        remote: 'origin', url: remote.url, singleBranch: true, prune, tags,
+        ...(ref ? { ref } : {}),
+        ...(Number.isFinite(depth) ? { depth } : {}),
+      });
+    } catch (cause) {
+      const missing = /** @type {{code?:unknown,data?:{what?:unknown}}} */ (cause);
+      if (missing?.code !== 'NotFoundError' || missing.data?.what !== 'HEAD' || !ref) {
+        throw cause;
+      }
+      const fetchHead = await ctx.git.resolveRef({
+        fs: ctx.fs, dir: ctx.dir, gitdir: ctx.gitdir,
+        ref: `refs/remotes/origin/${ref}`,
+      });
+      result = { defaultBranch: null, fetchHead, fetchHeadDescription: null };
+    }
+    return result;
+  };
+
   /** @param {{kind:string,id:string}} ref @param {{signal?:AbortSignal}} [opts] */
   const fetchRemote = (ref, { signal } = {}) => run(ref, async (ctx) => {
     await ensureUnlocked(ctx);
     if (!webFetch) throw new Error('git remote transport unavailable');
     const remote = await remoteFor(ctx);
+    const current = await ctx.git.currentBranch({
+      fs: ctx.fs, dir: ctx.dir, gitdir: ctx.gitdir, fullname: false,
+    });
     const http = createGitHttpClient({ remote, webFetch, getSecret, audit, signal });
-    const result = await ctx.git.fetch({ fs: quotaFsFor(ctx), http, dir: ctx.dir, gitdir: ctx.gitdir, remote: 'origin', url: remote.url, singleBranch: true, prune: true });
+    const result = await fetchBranch(ctx, { http, remote, ref: current, prune: true });
     return { remote, fetchHead: result.fetchHead ?? null, fetchHeadDescription: result.fetchHeadDescription ?? null };
   });
 

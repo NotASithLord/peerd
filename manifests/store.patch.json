@@ -3,7 +3,7 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "peerd@peerd.ai",
-      "strict_min_version": "153.0"
+      "strict_min_version": "154.0"
     }
   }
 }

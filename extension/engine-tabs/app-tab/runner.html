@@ -34,7 +34,7 @@
     }
 
     let initialized = false;
-    window.addEventListener('message', (e) => {
+      window.addEventListener('message', (e) => {
       if (initialized || e.source !== window.parent) return;
       const msg = e.data;
       const port = e.ports?.[0];
@@ -362,6 +362,9 @@
       // Window after document.write but never gets a reference to this closure.
       port.postMessage({ type: 'runner-ready' });
     });
+    window.parent.postMessage({
+      type: 'runner-loaded', generation: location.hash.slice(1),
+    }, '*');
   })();
 </script>
 </body>

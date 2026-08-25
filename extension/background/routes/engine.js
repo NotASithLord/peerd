@@ -868,7 +868,9 @@ export const makeEngineRoutes = (deps) => {
         } else {
           return { ok: false, error: 'unknown-kind' };
         }
-        return { ok: true, filename: exportFilename(record.name, kind), envelope };
+        return JSON.parse(JSON.stringify({
+          ok: true, filename: exportFilename(record.name, kind), envelope,
+        }));
       } catch (e) {
         // why cast: the error class arrives via the `any` deps bag, so
         // instanceof can't narrow `e` for tsc — read .message off a view.

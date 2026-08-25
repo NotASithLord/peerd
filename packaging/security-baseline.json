@@ -94,7 +94,7 @@
       "browser_specific_settings": {
         "gecko": {
           "id": "peerd@peerd.ai",
-          "strict_min_version": "153.0",
+          "strict_min_version": "154.0",
           "data_collection_permissions": {
             "required": [
               "none"
@@ -145,6 +145,12 @@
         "webRequest",
         "webRequestBlocking"
       ],
+      "sandbox": {
+        "pages": [
+          "engine-tabs/app-tab/runner.html",
+          "engine-tabs/notebook-tab/worker-host.html"
+        ]
+      },
       "sidebar_action": {
         "default_panel": "sidepanel/sidepanel.html",
         "default_title": "peerd"
@@ -245,7 +251,7 @@
       "browser_specific_settings": {
         "gecko": {
           "id": "peerd-preview@peerd.ai",
-          "strict_min_version": "153.0",
+          "strict_min_version": "154.0",
           "update_url": "https://peerd.ai/updates/firefox-preview.json",
           "data_collection_permissions": {
             "required": [
@@ -297,6 +303,12 @@
         "webRequest",
         "webRequestBlocking"
       ],
+      "sandbox": {
+        "pages": [
+          "engine-tabs/app-tab/runner.html",
+          "engine-tabs/notebook-tab/worker-host.html"
+        ]
+      },
       "sidebar_action": {
         "default_panel": "sidepanel/sidepanel.html",
         "default_title": "peerd preview"
@@ -313,7 +325,7 @@
         }
       },
       "background": {
-        "service_worker": "background/vault-kernel.js",
+        "service_worker": "background/vault-kernel-preview.js",
         "type": "module"
       },
       "commands": {
@@ -406,7 +418,7 @@
       "browser_specific_settings": {
         "gecko": {
           "id": "peerd-dev@peerd.ai",
-          "strict_min_version": "153.0",
+          "strict_min_version": "154.0",
           "data_collection_permissions": {
             "required": [
               "none"
@@ -457,6 +469,12 @@
         "webRequest",
         "webRequestBlocking"
       ],
+      "sandbox": {
+        "pages": [
+          "engine-tabs/app-tab/runner.html",
+          "engine-tabs/notebook-tab/worker-host.html"
+        ]
+      },
       "sidebar_action": {
         "default_panel": "sidepanel/sidepanel.html",
         "default_title": "peerd (dev)"

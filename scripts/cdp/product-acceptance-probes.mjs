@@ -23,9 +23,10 @@ const close = (server) => new Promise((resolve) => server.close(() => resolve())
 
 export const startOllamaAcceptanceFixture = async ({
   host = '127.0.0.1', port = 11434, replyText = ACCEPTANCE_REPLY,
-  completionDelayMs = 250,
+  completionDelayMs = 250, completionResponse = null,
 } = {}) => {
   const requests = [];
+  const completionProofs = [];
   const server = createServer((request, response) => {
     const chunks = [];
     let bytes = 0;
@@ -52,9 +53,35 @@ export const startOllamaAcceptanceFixture = async ({
         response.writeHead(200, { ...headers, 'content-type': 'application/json' });
         response.end(JSON.stringify({ model_info: { 'qwen3.context_length': 32_768 } }));
       } else if (request.method === 'POST' && url.pathname === '/v1/chat/completions') {
+        const completionCall = requests.filter((entry) =>
+          entry.method === 'POST' && entry.path === '/v1/chat/completions').length;
+        let requestBody = null;
+        try { requestBody = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch {}
+        let completion;
+        try {
+          completion = typeof completionResponse === 'function'
+            ? completionResponse({ completionCall, requestBody }) : sseText(replyText);
+        } catch {
+          completion = {
+            status: 422,
+            contentType: 'application/json',
+            body: JSON.stringify({ error: 'acceptance-completion-rejected' }),
+          };
+        }
+        const spec = typeof completion === 'string' ? { body: completion } : completion;
+        if (spec?.proof && typeof spec.proof === 'object') {
+          const safeProof = Object.fromEntries(Object.entries(spec.proof).filter(([, value]) =>
+            typeof value === 'boolean'
+            || Number.isSafeInteger(value)
+            || (typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))));
+          completionProofs.push(Object.freeze(safeProof));
+        }
         setTimeout(() => {
-          response.writeHead(200, { ...headers, 'content-type': 'text/event-stream' });
-          response.end(sseText(replyText));
+          response.writeHead(spec?.status ?? 200, {
+            ...headers,
+            'content-type': spec?.contentType ?? 'text/event-stream',
+          });
+          response.end(spec?.body ?? '');
         }, completionDelayMs);
       } else {
         response.writeHead(404, { ...headers, 'content-type': 'application/json' });
@@ -79,6 +106,7 @@ export const startOllamaAcceptanceFixture = async ({
     requests,
     completionCalls: () => requests.filter((entry) =>
       entry.method === 'POST' && entry.path === '/v1/chat/completions').length,
+    completionProofs: () => completionProofs.map((proof) => ({ ...proof })),
     close: () => close(server),
   });
 };

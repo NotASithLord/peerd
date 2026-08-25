@@ -2153,12 +2153,16 @@ export const createKernelTurnLiveFactories = (deps) => {
     };
     const attachAppTabActor = async (/** @type {any} */ message,
       /** @type {any} */ sender) => {
+      const liveTabId = typeof message?.appId === 'string'
+        ? typeof engine.appTabTracker.reconcileTabClaim === 'function'
+          ? await engine.appTabTracker.reconcileTabClaim(message.appId, sender?.tab?.id)
+          : engine.appTabTracker.getTabId(message.appId)
+        : null;
       const claim = validateAppTabClaim({
         claimedAppId: message?.appId,
         urlAppId: engine.appTabTracker.parseIdFromUrl(sender?.tab?.url),
         senderTabId: sender?.tab?.id,
-        liveTabId: typeof message?.appId === 'string'
-          ? engine.appTabTracker.getTabId(message.appId) : null,
+        liveTabId,
       });
       if (!claim.ok) return claim;
       const { appId, tabId } = claim;
@@ -2173,17 +2177,10 @@ export const createKernelTurnLiveFactories = (deps) => {
       const ownerSessionId = ownerClaim.ownerSessionId;
       if (message.type === 'app/actor-retry') engine.appTabTracker.markReloading(appId);
       engine.appTabTracker.onTabPending(appId, tabId, ownerSessionId);
-      if (deps.firefox) {
-        engine.appTabTracker.onTabFailed(appId, new Error('Apps are not available in Firefox yet.'));
-        setTimeout(() => deps.browser.tabs.remove(tabId).catch(() => {}), 250);
-        return {
-          ok: false,
-          error: 'Apps are not available in Firefox yet. Use Chrome for isolated Apps.',
-        };
-      }
-      await syncNetworkCustody();
+      const admission = await networkCustody?.admitAppTab?.(tabId, sender.tab.url);
       const network = networkCustodyState();
-      if (!network.supported || network.lastError) return refuseAppNetwork(appId, tabId);
+      if (admission?.ok !== true || !network.supported || network.lastError
+          || !network.tabs?.includes(tabId)) return refuseAppNetwork(appId, tabId);
       try {
         const actorSessionId = await ensureAppActorBinding(appId, ownerSessionId);
         if (!actorSessionId) throw new Error('manifest-defined App actor could not be attached');
@@ -2411,7 +2408,7 @@ export const createKernelTurnLiveFactories = (deps) => {
       },
       onUpdated: (/** @type {number} */ tabId, /** @type {any} */ change,
         /** @type {any} */ tab) => {
-        debuggerPool.onTabUpdated(tabId, change);
+        if (debuggerApiAvailable()) debuggerPool.onTabUpdated(tabId, change);
         if (change?.status === 'loading' || change?.url) domRefs.clear?.(tabId);
         if (siteCapture.has(tabId)
             && (change?.status === 'loading' || typeof change?.url === 'string')) {
@@ -2424,7 +2421,7 @@ export const createKernelTurnLiveFactories = (deps) => {
       },
       onRemoved: async (/** @type {number} */ tabId) => {
         poisonedAppRuntimeTabs.delete(tabId);
-        debuggerPool.onTabRemoved(tabId);
+        if (debuggerApiAvailable()) debuggerPool.onTabRemoved(tabId);
         siteCapture.release(tabId);
         for (const [kind, , , tracker] of registryEntries()) {
           const instanceId = tracker.onTabRemoved(tabId);

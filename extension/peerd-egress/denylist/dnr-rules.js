@@ -16,6 +16,7 @@ export {
 export const DENYLIST_RULE_ID = 1;
 export const DENYLIST_ALLOW_RULE_ID = 2;
 export const APP_EGRESS_RULE_ID = 3;
+export const APP_EGRESS_REGEX = '^(?:https?|wss?)://';
 export const PRIVATE_NETWORK_HOST_RULE_ID = 4;
 
 export const PRIVATE_NETWORK_HOSTS = Object.freeze([
@@ -178,7 +179,7 @@ export const buildAppEgressBlockRule = ({
     priority: 3,
     action: { type: 'block' },
     condition: {
-      regexFilter: '^https?://',
+      regexFilter: APP_EGRESS_REGEX,
       tabIds: tabs,
       resourceTypes: [...resourceTypes],
     },

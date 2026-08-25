@@ -66,6 +66,16 @@ describe('App tab required-actor and runtime lifecycle contracts', () => {
     expect(host).toContain('recoverPoisonedRunner()');
   });
 
+  test('the sandbox announces its exact generation before receiving a channel', async () => {
+    const runner = await Bun.file('./extension/engine-tabs/app-tab/runner.html').text();
+    const host = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
+    expect(runner).toContain("type: 'runner-loaded', generation: location.hash.slice(1)");
+    expect(host).toContain("e.data?.type === 'runner-loaded'");
+    expect(host).toContain("e.data.generation === String(runnerGeneration)");
+    expect(host).toContain("if (runnerPhase === 'awaiting-ready') return;");
+    expect(host).not.toContain('expectingRunnerLoad');
+  });
+
   test('every rejected post-dispatch act is unknown and retires its runner generation', async () => {
     const runner = await Bun.file('./extension/engine-tabs/app-tab/runner.html').text();
     const host = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();

@@ -62,7 +62,7 @@ describe('target-specific native background entry', () => {
     }
     const kernel = readFileSync(join(EXTENSION, 'background', 'vault-kernel.js'), 'utf8');
     expect(kernel).not.toContain("import('./firefox-storage-keepalive.js')");
-    expect(kernel).toContain('makeFirefoxGuard.connectDirectController');
+    expect(kernel).toContain('makeFirefoxGuard?.connectDirectController');
   });
 
   test('generates target-exact browser ownership for every channel', () => {
@@ -76,9 +76,12 @@ describe('target-specific native background entry', () => {
       for (const permission of ['sidePanel', 'offscreen', 'debugger', 'tabGroups']) {
         expect(firefox.permissions).not.toContain(permission);
       }
-      for (const key of ['side_panel', 'sandbox', 'update_url', 'key']) {
+      for (const key of ['side_panel', 'update_url', 'key']) {
         expect(firefox).not.toHaveProperty(key);
       }
+      expect(firefox.browser_specific_settings.gecko.strict_min_version).toBe('154.0');
+      expect(firefox.sandbox?.pages).toContain('engine-tabs/app-tab/runner.html');
+      expect(firefox.content_security_policy?.sandbox).toContain("connect-src 'none'");
 
       const chrome = generateManifest({ channel, browser: 'chrome', version: '0.0.0' });
       expect(chrome.background).toEqual({

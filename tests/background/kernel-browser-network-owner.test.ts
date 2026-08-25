@@ -15,6 +15,7 @@ const directAuthority = (overrides: Record<string, any> = {}) => ({
   status: () => ({ supported: true, lastError: null, ready: false }),
   reconcileExternalProjection: async () => ({ ok: true }),
   syncDenylistNetwork: async () => {},
+  verifyAppNetwork: async () => true,
   ensureBrowserNetworkGuard: async () => ({ ok: true }),
   acquireBrowserNetworkGuardLease: async () => ({ ok: true }),
   releaseBrowserNetworkGuardLease: async () => {},
@@ -172,6 +173,73 @@ describe('kernel browser network owner', () => {
     await owner.custody.sync();
     expect(calls).toContainEqual(['ensure', 2, 'https://public.example/']);
     expect(calls).toContain('network:sync');
+  });
+
+  test('admits only the exact installed App tab into network custody', async () => {
+    const appTabUrl = 'moz-extension://peerd/engine-tabs/app-tab/index.html';
+    const url = `${appTabUrl}#app-1?owner=session-1`;
+    let config: any;
+    let syncs = 0;
+    let verifications = 0;
+    let constructions = 0;
+    const owner = createKernelBrowserNetworkOwner({
+      firefox: true, appTabUrl,
+      browser: { tabs: {
+        query: async () => [{ id: 17, url }],
+        get: async (tabId: number) => tabId === 17 ? { id: 17, url } : null,
+      } },
+      dnr: { updateSessionRules() {} }, denylist: {},
+      sessionCache: { sessionGet: async () => [] },
+      createAuthority: (deps: any) => {
+        constructions += 1;
+        config = deps;
+        return directAuthority({
+          syncDenylistNetwork: async () => { syncs += 1; },
+          verifyAppNetwork: async (tabId: number) => {
+            verifications += 1;
+            return tabId === 17;
+          },
+          status: () => ({
+            supported: true, lastError: null, ready: true,
+            tabs: config.getExternalTabIds(), origins: [],
+          }),
+        });
+      },
+    });
+
+    await expect(owner.custody.admitAppTab(17, `${url}-wrong`))
+      .resolves.toEqual({ ok: false });
+    expect(constructions).toBe(0);
+    await expect(owner.custody.admitAppTab(17, url)).resolves.toEqual({ ok: true });
+    expect(config.getAppTabIds()).toEqual([17]);
+    expect(config.getExternalTabIds()).toEqual([17]);
+    expect(config.isWebActorTab(17)).toBe(false);
+    expect(owner.relays()?.isDrivenSource(17)).toBe(true);
+    expect(syncs).toBe(1);
+    expect(verifications).toBe(1);
+  });
+
+  test('refuses App admission without exact rule verification', async () => {
+    const appTabUrl = 'moz-extension://peerd/engine-tabs/app-tab/index.html';
+    const url = `${appTabUrl}#app-1`;
+    const owner = createKernelBrowserNetworkOwner({
+      firefox: true, appTabUrl,
+      browser: { tabs: {
+        query: async () => [{ id: 17, url }],
+        get: async () => ({ id: 17, url }),
+      } },
+      dnr: { updateSessionRules() {} }, denylist: {},
+      sessionCache: { sessionGet: async () => [] },
+      createAuthority: () => directAuthority({
+        verifyAppNetwork: async () => false,
+        status: () => ({
+          supported: true, lastError: null, ready: true,
+          tabs: [17], origins: [],
+        }),
+      }),
+    });
+
+    await expect(owner.custody.admitAppTab(17, url)).resolves.toEqual({ ok: false });
   });
 
   test('rejects stale source generations and revisions', async () => {

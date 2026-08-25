@@ -156,12 +156,17 @@ export const createKernelFeatureHost = ({
           const result = Object.freeze({ ok: true, outcomeKnown: true, value });
           return kernelFeatureResultAllowed(KERNEL_FEATURE_DISPATCH_CAPABILITY, payload, result)
             ? result : failure('feature-result-invalid', false, 'run');
-        }).catch((cause) => failure(
-          'feature-dispatch-failed',
-          effectsStarted === 0
-            || /** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true,
-          'run',
-        ));
+        }).catch((cause) => {
+          const offered = /** @type {{code?:unknown}} */ (cause)?.code;
+          const code = typeof offered === 'string' && /^[a-z0-9][a-z0-9-]{0,127}$/.test(offered)
+            ? offered : 'feature-dispatch-failed';
+          return failure(
+            code,
+            effectsStarted === 0
+              || /** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true,
+            'run',
+          );
+        });
         return await Promise.race([execution, stopped]);
       } finally {
         grantOpen = false;

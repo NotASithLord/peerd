@@ -1,6 +1,8 @@
 // @ts-check
 
 import {
+  APP_EGRESS_REGEX,
+  APP_EGRESS_RULE_ID,
   CHROME_DNR_RESOURCE_TYPES,
   DENYLIST_RESOURCE_TYPES,
   denylistSessionRuleUpdate,
@@ -1071,6 +1073,25 @@ export const createKernelBrowserNetworkAuthority = ({
     if (quarantineActive) await refreshQuarantine();
     return result;
   };
+  const verifyAppNetwork = async (/** @type {number} */ tabId) => {
+    if (!Number.isInteger(tabId) || tabId < 0
+        || typeof dnr?.getSessionRules !== 'function') return false;
+    try {
+      const rules = await quarantineRead('kernel-browser-app-network-verify-timeout');
+      const rule = rules.find((/** @type {any} */ candidate) =>
+        candidate?.id === APP_EGRESS_RULE_ID);
+      const actualTypes = rule?.condition?.resourceTypes;
+      return rule?.action?.type === 'block'
+        && rule?.condition?.regexFilter === APP_EGRESS_REGEX
+        && Array.isArray(rule?.condition?.tabIds)
+        && rule.condition.tabIds.includes(tabId)
+        && Array.isArray(actualTypes)
+        && actualTypes.length === resourceTypes.length
+        && resourceTypes.every((type) => actualTypes.includes(type));
+    } catch {
+      return false;
+    }
+  };
   const syncStarted = () => starting ? netGuard.sync() : Promise.resolve();
   const onUpdated = (
     /** @type {number} */ tabId,
@@ -1167,6 +1188,7 @@ export const createKernelBrowserNetworkAuthority = ({
     releaseBrowserNetworkGuardLease: releaseLease,
     updateBrowserNetworkGuardOrigin: updateOrigin,
     syncDenylistNetwork: sync,
+    verifyAppNetwork,
     armBrowserChildQuarantine,
     onCreated: (/** @type {any} */ tab) => Promise.all([
       popupGuard.onCreated(tab),

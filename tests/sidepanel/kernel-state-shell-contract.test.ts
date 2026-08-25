@@ -60,6 +60,7 @@ describe('cold shell state contract', () => {
     expect(normalizeColdStateSnapshot({
       ...projected(), projection: { ...projected().projection, schema: KERNEL_STATE_SCHEMA + 1 },
     })).toBeNull();
+    expect(normalizeColdStateSnapshot({ ...projected(), pendingConfirm: null })).toBeNull();
     expect(normalizeColdStateSnapshot({
       ...projected(), vault: { ...vault, locked: false },
     })).toBeNull();
@@ -96,7 +97,7 @@ describe('cold shell state contract', () => {
       source.indexOf('const refreshUntilChanged'));
     expect(disconnect).toContain('hydrated: false');
     expect(disconnect).toContain('void refreshUntilChanged()');
-    expect(source).toContain('renderFailure();');
+    expect(source).toContain('renderFailure(cause);');
   });
 
   test('vault effects use bounded RPC and reconcile even when the receipt is lost', async () => {

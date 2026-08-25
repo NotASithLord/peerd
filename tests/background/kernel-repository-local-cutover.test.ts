@@ -128,9 +128,33 @@ describe('repository controller cutover', () => {
     } });
     expect(await lane.control.routes['apps/import-git']({
       name: 'Imported', url: 'https://example.test/a.git',
-    })).toMatchObject({ ok: false, outcomeKnown: false });
+    })).toMatchObject({
+      ok: false, code: 'repository-import-outcome-unknown', outcomeKnown: false,
+    });
     expect(lane.calls).toEqual([]);
     expect(lane.records.has('import-1')).toBe(true);
+  });
+
+  test('reports the exact failed import rollback custodian', async () => {
+    const repository = repositoryLane({ repositories: {
+      clone: async () => { throw new Error('known failure'); },
+      destroy: async () => { throw undefined; },
+    } });
+    expect(await repository.control.routes['apps/import-git']({
+      url: 'https://example.test/a.git',
+    })).toMatchObject({
+      code: 'repository-import-repository-rollback-unknown', outcomeKnown: false,
+    });
+
+    const catalog = repositoryLane({
+      repositories: { clone: async () => { throw new Error('known failure'); } },
+      catalog: { ...repositoryDeps().catalog, remove: async () => { throw undefined; } },
+    });
+    expect(await catalog.control.routes['apps/import-git']({
+      url: 'https://example.test/a.git',
+    })).toMatchObject({
+      code: 'repository-import-catalog-rollback-unknown', outcomeKnown: false,
+    });
   });
 
   test('bounds a repository module hang before any effect', async () => {

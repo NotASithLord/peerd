@@ -3,6 +3,7 @@ import {
   normalizeGitRemote, gitRemoteOwnsRequest, smartHttpAuthHeader,
   createGitHttpClient,
 } from '../../extension/peerd-engine/repository/remote.js';
+import { createRepositoryService } from '../../extension/peerd-engine/repository/repository-service.js';
 
 describe('browser Git remote boundary', () => {
   test('canonicalizes HTTPS repository URLs and rejects embedded authority', () => {
@@ -53,4 +54,50 @@ describe('browser Git remote boundary', () => {
     expect(chunks).toEqual([1, 2, 3]);
     await expect(http.request({ url: 'https://evil.example/o/r.git/info/refs' })).rejects.toThrow('escaped');
   });
+
+  test('fetches the checked-out branch instead of an unrelated remote default', async () => {
+    let options: any = null;
+    const git = {
+      resolveRef: async ({ ref }: any) => ref === 'HEAD' ? 'head-oid' : 'fetched-oid',
+      getConfig: async () => 'https://github.com/o/r.git',
+      currentBranch: async () => 'acceptance/cutover',
+      fetch: async (value: any) => {
+        options = value;
+        throw Object.assign(new Error('Could not find HEAD.'), {
+          code: 'NotFoundError', data: { what: 'HEAD' },
+        });
+      },
+    };
+    const repositories = createRepositoryService({
+      loadGit: async () => git,
+      fs: {} as any,
+      webFetch: async () => new Response(),
+    });
+    expect(await repositories.fetch({ kind: 'app', id: 'app-1' })).toMatchObject({
+      fetchHead: 'fetched-oid', fetchHeadDescription: null,
+    });
+    expect(options.ref).toBe('acceptance/cutover');
+    expect(options.singleBranch).toBe(true);
+  });
+
+  test('does not convert a missing requested branch into a successful fetch', async () => {
+    const git = {
+      resolveRef: async () => 'head-oid',
+      getConfig: async () => 'https://github.com/o/r.git',
+      currentBranch: async () => 'missing',
+      fetch: async () => {
+        throw Object.assign(new Error('Could not find missing.'), {
+          code: 'NotFoundError', data: { what: 'missing' },
+        });
+      },
+    };
+    const repositories = createRepositoryService({
+      loadGit: async () => git,
+      fs: {} as any,
+      webFetch: async () => new Response(),
+    });
+    await expect(repositories.fetch({ kind: 'app', id: 'app-1' }))
+      .rejects.toMatchObject({ code: 'NotFoundError', data: { what: 'missing' } });
+  });
+
 });

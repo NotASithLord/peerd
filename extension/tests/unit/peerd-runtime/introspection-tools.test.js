@@ -236,7 +236,7 @@ describe('inspect dispatch', () => {
 
   it('the schema enumerates all five kinds and requires kind', () => {
     const props = /** @type {any} */ (inspectTool.schema).properties;
-    expect(props.kind.enum.sort()).toEqual(
+    expect([...props.kind.enum].sort()).toEqual(
       ['audit_log', 'denylist', 'provider_config', 'session_access', 'storage']);
     expect(/** @type {any} */ (inspectTool.schema).required).toEqual(['kind']);
   });
