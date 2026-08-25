@@ -85,8 +85,11 @@ const isTurnPayload = (value) => {
  * @param {unknown} payload
  * @param {{ signal: AbortSignal, authority?: unknown,
  *   kernelCall?: (operation:string, payload:unknown)=>Promise<any> }} options
+ * @param {((request:unknown,options:{signal:AbortSignal,authority:unknown,
+ *   deadlineAt:number,kernelCall:(operation:string,payload:unknown)=>Promise<any>})=>
+ *   Promise<any>)|undefined} executeToolCall
  */
-export const runControllerTurn = async (payload, options) => {
+const runControllerTurnWith = async (payload, options, executeToolCall) => {
   if (!isTurnPayload(payload) || typeof options.kernelCall !== 'function') {
     return { ok: false, code: 'turn-payload-invalid', outcomeKnown: true };
   }
@@ -179,10 +182,80 @@ export const runControllerTurn = async (payload, options) => {
           ? parseJson(refreshed.toolsJson, 'turn tools') : [];
       },
       toolDispatch: (/** @type {unknown} */ call) => withToolSlot(async () => {
-        const result = parseJson(await rpc('turn.tool.dispatch', {
+        const legacyDispatch = async () => parseJson(await rpc('turn.tool.dispatch', {
           callJson: JSON.stringify(call),
         }), 'tool result');
-        if (result?.outcomeKnown === false) nestedUnknown = true;
+        if (typeof executeToolCall !== 'function') {
+          const result = await legacyDispatch();
+          if (result?.outcomeKnown === false) nestedUnknown = true;
+          return result;
+        }
+        const prepared = await rpc('turn.tool.prepare', {
+          callJson: JSON.stringify(call),
+        });
+        if (prepared?.mode === 'legacy') {
+          const result = await legacyDispatch();
+          if (result?.outcomeKnown === false) nestedUnknown = true;
+          return result;
+        }
+        if (prepared?.mode === 'result') {
+          const result = parseJson(prepared.resultJson, 'tool result');
+          if (result?.outcomeKnown === false) nestedUnknown = true;
+          return result;
+        }
+        if (prepared?.mode !== 'execute' || typeof prepared.requestJson !== 'string'
+            || !Number.isSafeInteger(prepared.deadlineAt)) {
+          throw new Error('kernel tool preparation is invalid');
+        }
+        const request = parseJson(prepared.requestJson, 'tool execution request');
+        if (!isRecord(request) || typeof request.executionId !== 'string'
+            || typeof request.argsDigest !== 'string'
+            || !Number.isSafeInteger(request.turnGeneration)
+            || typeof request.toolName !== 'string') {
+          throw new Error('kernel tool execution request is invalid');
+        }
+        let execution;
+        try {
+          execution = await executeToolCall(request, {
+            signal: options.signal,
+            authority: {
+              ownerId: runId,
+              sessionId: input.sessionId,
+              target: `tool:${request.toolName}`,
+              replayClass: 'E',
+            },
+            deadlineAt: prepared.deadlineAt,
+            kernelCall: (operation, effectPayload) => rpc('turn.tool.effect', {
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              turnGeneration: request.turnGeneration,
+              operation,
+              effectPayload,
+            }),
+          });
+        } catch {
+          execution = {
+            protocol: request.protocol,
+            executionId: request.executionId,
+            argsDigest: request.argsDigest,
+            ok: false,
+            code: 'tool-execution-host-lost',
+            error: 'Tool execution interrupted.',
+            outcomeKnown: false,
+            effectEntered: true,
+            retryable: false,
+            phase: 'run',
+          };
+        }
+        const result = parseJson(await rpc('turn.tool.settle', {
+          executionId: request.executionId,
+          argsDigest: request.argsDigest,
+          turnGeneration: request.turnGeneration,
+          resultJson: JSON.stringify(execution),
+        }), 'tool result');
+        if (result?.outcomeKnown === false || execution?.outcomeKnown === false) {
+          nestedUnknown = true;
+        }
         return result;
       }),
       finalizeAbort: async (/** @type {any} */ value) => {
@@ -224,3 +297,22 @@ export const runControllerTurn = async (payload, options) => {
     await cancelModel();
   }
 };
+
+/**
+ * Bind a lazy local tool executor without placing its implementation graph in
+ * the default turn module. The plain export remains the compatibility path.
+ * @param {{executeToolCall?:(request:unknown,options:{signal:AbortSignal,
+ *   authority:unknown,deadlineAt:number,
+ *   kernelCall:(operation:string,payload:unknown)=>Promise<any>})=>Promise<any>}} [deps]
+ */
+export const createControllerTurnRuntime = ({ executeToolCall } = {}) => Object.freeze({
+  runControllerTurn: (/** @type {unknown} */ payload, /** @type {any} */ options) =>
+    runControllerTurnWith(payload, options, executeToolCall),
+});
+
+export const runControllerTurn = (
+  /** @type {unknown} */ payload,
+  /** @type {{signal:AbortSignal,authority?:unknown,
+   * kernelCall?:(operation:string,payload:unknown)=>Promise<any>}} */ options,
+) =>
+  runControllerTurnWith(payload, options, undefined);

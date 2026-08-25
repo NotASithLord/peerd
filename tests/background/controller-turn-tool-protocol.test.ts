@@ -1,0 +1,379 @@
+import { afterEach, describe, expect, test } from 'bun:test';
+import { makeControllerTurnBridge } from '../../extension/background/controller-turn-bridge.js';
+import {
+  createControllerTurnRuntime,
+} from '../../extension/offscreen/controller-turn-runtime.js';
+import {
+  controllerOperationAllowedAfterCancel,
+  createControllerKernelQuota,
+} from '../../extension/shared/controller-kernel-quota.js';
+import { executeControllerToolCall } from '../../extension/offscreen/controller-tool-runtime.js';
+import { CONTROLLER_TOOL_MANIFEST } from '../../extension/shared/controller-tool-manifest.js';
+import { nowTool } from '../../extension/peerd-runtime/clock/tools.js';
+import {
+  prepareToolCall as prepareRuntimeToolCall,
+  settleToolCall as settleRuntimeToolCall,
+} from '../../extension/peerd-runtime/tools/dispatcher.js';
+import {
+  clearTools,
+  registerTool,
+} from '../../extension/peerd-runtime/tools/registry.js';
+
+const MANIFEST_DIGEST = 'a'.repeat(64);
+const descriptor = {
+  name: 'remember', description: 'Remember a fact.', schema: { type: 'object' },
+};
+
+const makeSessions = () => {
+  let session: any = {
+    sessionId: 'session-tool-protocol', provider: 'fixture', model: 'fixture', messages: [],
+  };
+  return {
+    get: async () => structuredClone(session),
+    appendMessage: async (_sessionId: string, message: any) => {
+      session = { ...session, messages: [...session.messages, structuredClone(message)] };
+      return structuredClone(session);
+    },
+    updateAssistantMessage: async (_sessionId: string, messageId: string, patch: any) => {
+      session = {
+        ...session,
+        messages: session.messages.map((message: any) => message.id === messageId
+          ? { ...message, ...structuredClone(patch) } : message),
+      };
+      return structuredClone(session);
+    },
+    setTrimSummary: async () => structuredClone(session),
+    snapshot: () => structuredClone(session),
+  };
+};
+
+const context = (over: Record<string, unknown> = {}) => {
+  const sessions = makeSessions();
+  let round = 0;
+  return {
+    sessionId: 'session-tool-protocol', userText: 'remember one', sessions,
+    tools: [descriptor], refreshTools: async () => [descriptor],
+    classifyToolCall: () => ({ actionClass: 'write', confirm: false }),
+    toolDispatch: async () => ({ ok: true, content: 'legacy' }),
+    getSystemPrompt: async () => 'PINNED', appendAudit: async () => {},
+    enrichTrimSummary: () => {}, signal: new AbortController().signal,
+    reasoning: { enabled: false }, oneShot: true,
+    callModel: async function* () {
+      round += 1;
+      if (round > 1) {
+        yield { type: 'message-stop', stopReason: 'end_turn' };
+        return;
+      }
+      yield { type: 'tool-use-start', id: 'tool-use-1', name: 'remember' };
+      yield { type: 'tool-use-delta', id: 'tool-use-1', partialJson: '{"fact":"one"}' };
+      yield { type: 'tool-use-stop', id: 'tool-use-1' };
+      yield { type: 'message-stop', stopReason: 'tool_use' };
+    },
+    ...over,
+  } as any;
+};
+
+const runHarness = async ({
+  bridgeHooks = {}, executeToolCall, ctx = context(), leaveOpen = false,
+}: {
+  bridgeHooks?: Record<string, unknown>;
+  executeToolCall: (request: any, options: any) => Promise<any>;
+  ctx?: any;
+  leaveOpen?: boolean;
+}) => {
+  let bridge!: ReturnType<typeof makeControllerTurnBridge>;
+  let sequence = 0;
+  const runtime = createControllerTurnRuntime({ executeToolCall });
+  const getClient = async () => ({
+    call: async (capability: string, payload: any, options: any) => {
+      const authority = bridge.authorize(payload);
+      return runtime.runControllerTurn(payload, {
+        signal: options.signal,
+        authority,
+        kernelCall: (operation: string, kernelPayload: unknown) =>
+          bridge.handleKernelCall(operation, kernelPayload, {
+            capability, authority, signal: options.signal,
+            deadlineAt: Date.now() + 60_000,
+          }),
+      });
+    },
+  });
+  bridge = makeControllerTurnBridge({
+    getClient, newId: () => `tool-protocol-${++sequence}`,
+    ...bridgeHooks,
+  });
+  const events = [];
+  let error: any = null;
+  try {
+    for await (const event of bridge.runUserTurn(ctx)) events.push(event);
+  } catch (cause) { error = cause; }
+  if (!leaveOpen) bridge.close();
+  return { bridge, events, error };
+};
+
+afterEach(() => clearTools());
+
+describe('controller turn finite tool protocol', () => {
+  test('executes now through real prepare, controller, and settle phases', async () => {
+    registerTool(nowTool);
+    let legacy = 0;
+    const toolContext = {
+      audit: async () => {}, hooks: [], session: { sessionId: 'session-tool-protocol' },
+      permission: { mode: 'act', confirmActions: false },
+    } as any;
+    const nowDescriptor = {
+      name: 'now', description: 'Current time.', schema: { type: 'object' },
+    };
+    const result = await runHarness({
+      ctx: context({
+        tools: [nowDescriptor], refreshTools: async () => [nowDescriptor],
+        toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
+        callModel: async function* () {
+          yield { type: 'tool-use-start', id: 'tool-now-1', name: 'now' };
+          yield { type: 'tool-use-delta', id: 'tool-now-1', partialJson: '{}' };
+          yield { type: 'tool-use-stop', id: 'tool-now-1' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      }),
+      bridgeHooks: {
+        prepareToolCall: async (call: any) => {
+          const prepared: any = await prepareRuntimeToolCall(call, toolContext);
+          return prepared?.prepared === true ? {
+            mode: 'execute', custody: prepared, args: prepared.args,
+            projection: {}, manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+          } : { mode: 'result', result: prepared };
+        },
+        handleToolEffect: async () => ({
+          ok: false, code: 'tool-effect-denied', outcomeKnown: true,
+        }),
+        settleToolCall: async ({ custody, result }: any) => settleRuntimeToolCall(custody, {
+          result: result.value,
+        }),
+      },
+      executeToolCall: executeControllerToolCall,
+    });
+    expect(result.error).toBeNull();
+    expect(legacy).toBe(0);
+    const toolResult: any = result.events.find((event: any) => event.type === 'tool-result');
+    expect(toolResult.result.ok).toBe(true);
+    expect(typeof toolResult.result.content).toBe('string');
+    expect(JSON.parse(toolResult.result.content)).toMatchObject({
+      iso: expect.any(String), unixMs: expect.any(Number),
+      timezone: expect.any(String), dayOfWeek: expect.any(String),
+    });
+  });
+
+  test('retains preparation in the kernel and exposes only exact effect calls', async () => {
+    const custody = Object.freeze({ private: true });
+    const observed: any[] = [];
+    let legacy = 0;
+    const ctx = context({
+      toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
+    });
+    const result = await runHarness({
+      ctx,
+      bridgeHooks: {
+        prepareToolCall: async (call: any, _ctx: any, binding: any) => {
+          observed.push(['prepare', call, binding]);
+          return {
+            mode: 'execute', custody, args: call.args,
+            projection: { sessionId: binding.sessionId }, manifestDigest: MANIFEST_DIGEST,
+          };
+        },
+        handleToolEffect: async (input: any) => {
+          observed.push(['effect', input]);
+          expect(input.custody).toBe(custody);
+          return { ok: true, outcomeKnown: true, value: { stored: true } };
+        },
+        settleToolCall: async (input: any) => {
+          observed.push(['settle', input]);
+          expect(input.custody).toBe(custody);
+          return input.result.value;
+        },
+      },
+      executeToolCall: async (request, options) => {
+        expect(request.argsDigest).toMatch(/^[a-f0-9]{64}$/);
+        expect(request.turnGeneration).toBe(1);
+        expect(options.authority).toEqual({
+          ownerId: request.runId, sessionId: request.sessionId,
+          target: 'tool:remember', replayClass: 'E',
+        });
+        const effect = await options.kernelCall('memory.write', request.args);
+        expect(effect).toEqual({ ok: true, outcomeKnown: true, value: { stored: true } });
+        return {
+          protocol: request.protocol, executionId: request.executionId,
+          argsDigest: request.argsDigest, ok: true, outcomeKnown: true,
+          effectEntered: true, value: { ok: true, content: 'remembered' },
+        };
+      },
+    });
+    expect(result.error).toBeNull();
+    expect(legacy).toBe(0);
+    expect(observed.map(([phase]) => phase)).toEqual(['prepare', 'effect', 'settle']);
+    expect(result.events).toContainEqual(expect.objectContaining({
+      type: 'tool-result', result: expect.objectContaining({ content: 'remembered' }),
+    }));
+  });
+
+  test('uses legacy dispatch only when kernel preparation declines hosting', async () => {
+    let legacy = 0;
+    let executed = 0;
+    const result = await runHarness({
+      ctx: context({
+        toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
+      }),
+      bridgeHooks: {
+        prepareToolCall: async () => null,
+        handleToolEffect: async () => ({ ok: true, outcomeKnown: true }),
+        settleToolCall: async () => ({ ok: true }),
+      },
+      executeToolCall: async () => { executed += 1; return {}; },
+    });
+    expect(result.error).toBeNull();
+    expect(legacy).toBe(1);
+    expect(executed).toBe(0);
+  });
+
+  test('settles a lost executor conservatively and rejects its stale generation', async () => {
+    const settlements: any[] = [];
+    let staleEffect!: (operation: string, payload: unknown) => Promise<any>;
+    const result = await runHarness({
+      leaveOpen: true,
+      bridgeHooks: {
+        prepareToolCall: async (call: any, _ctx: any, binding: any) => ({
+          mode: 'execute', custody: { id: binding.executionId }, args: call.args,
+          projection: {}, manifestDigest: MANIFEST_DIGEST,
+        }),
+        handleToolEffect: async () => ({ ok: true, outcomeKnown: true }),
+        settleToolCall: async (input: any) => {
+          settlements.push(input.result);
+          return {
+            ok: false, error: input.result.error,
+            outcomeKnown: input.result.outcomeKnown, retryable: false,
+          };
+        },
+      },
+      executeToolCall: async (_request, options) => {
+        staleEffect = options.kernelCall;
+        throw new Error('worker generation disappeared');
+      },
+    });
+    expect(result.error).toMatchObject({ outcomeKnown: false });
+    expect(settlements).toContainEqual(expect.objectContaining({
+      code: 'tool-execution-host-lost', outcomeKnown: false,
+      effectEntered: true, retryable: false,
+    }));
+    await expect(staleEffect('memory.write', { fact: 'late' })).rejects.toThrow();
+    result.bridge.close();
+  });
+
+  test('settles an expired pre-effect grant as known and retryable', async () => {
+    const settlements: any[] = [];
+    let effects = 0;
+    const result = await runHarness({
+      bridgeHooks: {
+        prepareToolCall: async (call: any, _ctx: any, binding: any) => ({
+          mode: 'execute', custody: binding.executionId, args: call.args,
+          projection: {}, manifestDigest: MANIFEST_DIGEST,
+        }),
+        handleToolEffect: async () => {
+          effects += 1;
+          return { ok: true, outcomeKnown: true };
+        },
+        settleToolCall: async (input: any) => {
+          settlements.push(input.result);
+          return {
+            ok: false, error: input.result.error,
+            outcomeKnown: input.result.outcomeKnown,
+            retryable: input.result.retryable,
+          };
+        },
+      },
+      executeToolCall: async (request) => ({
+        protocol: request.protocol, executionId: request.executionId,
+        argsDigest: request.argsDigest, ok: false,
+        code: 'tool-execution-deadline-expired',
+        error: 'Tool execution deadline expired.', outcomeKnown: true,
+        effectEntered: false, retryable: true, phase: 'run',
+      }),
+    });
+    expect(result.error).toBeNull();
+    expect(effects).toBe(0);
+    expect(settlements).toContainEqual(expect.objectContaining({
+      code: 'tool-execution-deadline-expired', outcomeKnown: true,
+      effectEntered: false, retryable: true,
+    }));
+  });
+
+  test('Stop after effect entry settles unknown and never enters another effect', async () => {
+    const abort = new AbortController();
+    let admit = () => {};
+    let release = () => {};
+    const admitted = new Promise<void>((resolve) => { admit = resolve; });
+    const effect = new Promise((resolve) => { release = () => resolve(undefined); });
+    const settlements: any[] = [];
+    let effects = 0;
+    const running = runHarness({
+      ctx: context({ signal: abort.signal }),
+      bridgeHooks: {
+        prepareToolCall: async (call: any, _ctx: any, binding: any) => ({
+          mode: 'execute', custody: binding.executionId, args: call.args,
+          projection: {}, manifestDigest: MANIFEST_DIGEST,
+        }),
+        handleToolEffect: async () => {
+          effects += 1;
+          admit();
+          await effect;
+          return { ok: true, outcomeKnown: true };
+        },
+        settleToolCall: async (input: any) => {
+          settlements.push(input.result);
+          return {
+            ok: false, error: input.result.error,
+            outcomeKnown: input.result.outcomeKnown, retryable: false,
+          };
+        },
+      },
+      executeToolCall: async (request, options) => {
+        await options.kernelCall('memory.write', request.args);
+        return {
+          protocol: request.protocol, executionId: request.executionId,
+          argsDigest: request.argsDigest, ok: true, outcomeKnown: true,
+          effectEntered: true, value: { ok: true },
+        };
+      },
+    });
+    await admitted;
+    abort.abort();
+    release();
+    const result = await running;
+    expect(result.error).toMatchObject({ outcomeKnown: false });
+    expect(effects).toBe(1);
+    expect(settlements).toContainEqual(expect.objectContaining({
+      outcomeKnown: false, effectEntered: true, retryable: false,
+    }));
+  });
+
+  test('quota admits the three bounded phases and only settle survives cancellation', () => {
+    const quota = createControllerKernelQuota('turn.run', { maxSteps: 1 });
+    const prepare = { runId: 'run-1', value: { callJson: '{}' } };
+    const effect = {
+      runId: 'run-1', value: {
+        executionId: 'execution-1', argsDigest: 'b'.repeat(64), turnGeneration: 1,
+        operation: 'memory.write', effectPayload: { fact: 'one' },
+      },
+    };
+    const settle = {
+      runId: 'run-1', value: {
+        executionId: 'execution-1', argsDigest: 'b'.repeat(64), turnGeneration: 1,
+        resultJson: '{}',
+      },
+    };
+    expect(quota.admit('turn.tool.prepare', prepare).ok).toBe(true);
+    expect(quota.admit('turn.tool.effect', effect).ok).toBe(true);
+    expect(quota.admit('turn.tool.settle', settle).ok).toBe(true);
+    expect(controllerOperationAllowedAfterCancel('turn.run', 'turn.tool.prepare')).toBe(false);
+    expect(controllerOperationAllowedAfterCancel('turn.run', 'turn.tool.effect')).toBe(false);
+    expect(controllerOperationAllowedAfterCancel('turn.run', 'turn.tool.settle')).toBe(true);
+  });
+});

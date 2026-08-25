@@ -32,7 +32,11 @@ export { makeScheduler, SCHEDULE_ALARM_NAME } from './loop/scheduler.js';
 export { formatTodoBlock } from './todo/core.js';
 export { makePrewalkController } from './loop/prewalk-controller.js';
 export { makeToolsCommand } from './tools/manifest-command.js';
-export { dispatchToolCall } from './tools/dispatcher.js';
+export {
+  dispatchToolCall,
+  prepareToolCall,
+  settleToolCall,
+} from './tools/dispatcher.js';
 export { BUILTIN_TOOLS } from './tools/defs/index.js';
 export { makeLifecycleBoot } from './lifecycle/boot.js';
 export { makeDispatchTracker, makeFailClosedTracker } from './lifecycle/dispatch-tracking.js';

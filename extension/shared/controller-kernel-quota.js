@@ -74,7 +74,8 @@ export const controllerOperationAllowedAfterCancel = (
   /** @type {string} */ capability,
   /** @type {string} */ operation,
 ) => capability === 'turn.run'
-  && (operation === 'turn.abort.finalize' || operation === 'turn.finalize');
+  && (operation === 'turn.tool.settle'
+    || operation === 'turn.abort.finalize' || operation === 'turn.finalize');
 
 /**
  * @param {string} capability
@@ -125,6 +126,9 @@ export const createControllerKernelQuota = (capability, outerPayload) => {
     'turn.model.open': steps,
     'turn.model.next': streamBudget,
     'turn.model.cancel': steps,
+    'turn.tool.prepare': toolBudget,
+    'turn.tool.effect': 8 * toolBudget,
+    'turn.tool.settle': toolBudget,
     'turn.tool.dispatch': toolBudget,
     'turn.event': streamBudget + 2 * toolBudget + 8 * steps + 16,
     'turn.abort.finalize': 1,
