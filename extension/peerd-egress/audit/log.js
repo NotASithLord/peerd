@@ -10,17 +10,7 @@ import { computeChainHash, verifyChain, CHAIN_HEAD_KEY } from './chain.js';
 const STORE = 'audit_log';
 const META_STORE = 'audit_meta';
 
-/**
- * The slice of the IDB wrapper (storage/idb.js) the audit log writes
- * through. Narrowed to exactly what it uses so tests can inject a fake.
- *
- * why method-shorthand (not arrow-typed properties): the key params are
- * written METHOD-style so they're checked bivariantly — the wrapper hands
- * back the wide IDBValidKey while a fake idb may declare string-keyed
- * versions (the keys are always UUIDv7 strings in practice), and both must
- * be injectable.
- *
- * @typedef {{
+/** @typedef {{
  *   put(store: string, value: object): Promise<void>,
  *   get?(store: string, key: string): Promise<any>,
  *   getAll(store: string): Promise<any[]>,
@@ -30,16 +20,9 @@ const META_STORE = 'audit_meta';
  * }} AuditIdb
  */
 
-/**
- * Build an audit log bound to a specific IDB-like backend.
- *
- * @param {Object} deps
- * @param {AuditIdb} deps.idb                  IDB wrapper with put/getAll/count/getAllKeys/delUpTo
- * @param {() => number} [deps.now]           injectable clock (tests)
- * @param {() => string} [deps.makeId]        injectable id generator (tests)
- * @param {number} [deps.maxEntries]          retention cap (channel-overridable; see retention.js)
- * @param {number} [deps.pruneCheckEvery]     appends between prune checks (tests shrink this)
- */
+/** @param {Object} deps @param {AuditIdb} deps.idb
+ * @param {()=>number} [deps.now] @param {()=>string} [deps.makeId]
+ * @param {number} [deps.maxEntries] @param {number} [deps.pruneCheckEvery] */
 export const createAuditLog = ({ idb, now = Date.now, makeId, maxEntries, pruneCheckEvery }) => {
   const generateId = makeId ?? (() => uuidv7(now));
   const cap = normalizeMaxEntries(maxEntries);
@@ -63,7 +46,7 @@ export const createAuditLog = ({ idb, now = Date.now, makeId, maxEntries, pruneC
     try {
       const head = await idb.get?.(META_STORE, CHAIN_HEAD_KEY);
       if (head?.chain) chainTail = { id: head.id, chain: head.chain };
-    } catch { /* a fake idb without a meta store starts a fresh chain */ }
+    } catch {}
   };
 
   const prune = async () => {
@@ -80,18 +63,7 @@ export const createAuditLog = ({ idb, now = Date.now, makeId, maxEntries, pruneC
     return pruneInFlight;
   };
 
-  /**
-   * Append one entry. The caller passes type + optional sessionId/details;
-   * id and timestamp are filled in here so callers can't accidentally
-   * forge them.
-   *
-   * Returns a Promise that resolves when the write commits. Caller
-   * decides whether to await — most policy code fires-and-forgets so
-   * logging latency doesn't leak timing information.
-   *
-   * @param {AuditEntryInput} input
-   * @returns {Promise<AuditEntry>}
-   */
+  /** @param {AuditEntryInput} input @returns {Promise<AuditEntry>} */
   const append = (input) => {
     if (!input || typeof input.type !== 'string') {
       return Promise.reject(new TypeError('appendAudit: input.type is required'));
@@ -112,7 +84,7 @@ export const createAuditLog = ({ idb, now = Date.now, makeId, maxEntries, pruneC
       chainTail = { id: entry.id, chain: entry.chain };
       try {
         await idb.put(META_STORE, { key: CHAIN_HEAD_KEY, id: entry.id, chain: entry.chain });
-      } catch { /* a fake idb without the meta store still gets chained entries */ }
+      } catch {}
       if (++appendsSinceCheck >= checkEvery) {
         appendsSinceCheck = 0;
         await maybePrune();
@@ -123,12 +95,6 @@ export const createAuditLog = ({ idb, now = Date.now, makeId, maxEntries, pruneC
     return job;
   };
 
-  /**
-   * Verify the retained log against its hash chain + head record.
-   * ok=false means a DETECTED inconsistency (rewrite, deletion,
-   * truncation); pre-chain legacy entries report as `unchained`, not
-   * failures. Read-only.
-   */
   const verify = async () => {
     const readSnapshot = async () => {
       const entries = await idb.getAll(STORE);
@@ -141,11 +107,6 @@ export const createAuditLog = ({ idb, now = Date.now, makeId, maxEntries, pruneC
     return job;
   };
 
-  /**
-   * Read all retained entries. Returns them in insertion order (UUIDv7
-   * keys make this equivalent to chronological order). The UI is
-   * expected to reverse-paginate as needed.
-   */
   const list = () => idb.getAll(STORE);
 
   return Object.freeze({ append, list, verify });

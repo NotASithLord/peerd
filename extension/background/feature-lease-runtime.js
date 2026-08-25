@@ -1,5 +1,4 @@
 // @ts-check
-// Browser adapter for the feature-lease coordinator.
 
 import {
   createFeatureLeaseCoordinator,
@@ -97,7 +96,6 @@ export const createProductionFeatureLeaseRuntime = ({
     recoveryTokens.set(scope, (recoveryTokens.get(scope) ?? 0) + 1);
   };
   const waitForOffscreenClosed = async () => {
-    // Wait for physical disappearance before binding a replacement realm.
     for (let attempt = 0; attempt < 40; attempt += 1) {
       const present = await hostStatus(hasOffscreen).catch(() => true);
       if (!present) return;
@@ -117,7 +115,6 @@ export const createProductionFeatureLeaseRuntime = ({
       && reply.protocol === FEATURE_LEASE_HOST_PROTOCOL
       && reply.buildId === identity.buildId
       && typeof reply.hostEpoch === 'string';
-    // Only a start may replace an obsolete unauthenticated document.
     const authenticatedButIncompatible = () => reply?.ok === true
       && (reply.protocol !== FEATURE_LEASE_HOST_PROTOCOL
         || reply.buildId !== identity.buildId
@@ -209,13 +206,7 @@ export const createProductionFeatureLeaseRuntime = ({
     return results;
   };
 
-  /**
-   * Close only the exact authenticated realm selected by the coordinator.
-   * Chrome permits one offscreen document, so observing a different current
-   * epoch also proves that the requested old epoch is physically gone.
-   *
-   * @param {string} hostEpoch
-   */
+  /** @param {string} hostEpoch */
   const retirePhysicalHostUnsafe = async (hostEpoch) => {
     const attempts = Math.min(3, recoveryAttempts);
     for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -231,7 +222,6 @@ export const createProductionFeatureLeaseRuntime = ({
         coordinator.confirmHostRetired(hostEpoch);
         return false;
       }
-      // Never destroy a possibly newer realm without exact proof.
       if (observedEpoch !== hostEpoch) return false;
       await hostEffect(closeOffscreen, 'close').catch(() => {});
       try {
@@ -256,14 +246,12 @@ export const createProductionFeatureLeaseRuntime = ({
       (lease) => ['starting', 'active', 'unknown'].includes(lease.status),
     )) return false;
     const exactEpoch = status?.hostEpoch ?? residentHostEpoch;
-    // The serialized prior authenticated epoch remains exact after stop ACK.
     return typeof exactEpoch === 'string' ? retirePhysicalHostUnsafe(exactEpoch) : false;
   };
 
   /** @param {string} hostEpoch @param {readonly any[]} affected */
   const recoverHostLossUnsafe = async (hostEpoch, affected) => {
     if (affected.length === 0) return Object.freeze({ hostEpoch, affected, results: [] });
-    // A fenced frozen generation is retired as a whole realm.
     await retirePhysicalHostUnsafe(hostEpoch);
     const results = [];
     for (const item of affected) {
@@ -393,7 +381,6 @@ export const createProductionFeatureLeaseRuntime = ({
 
   const acquireUnsafe = async (/** @type {string} */ scope, /** @type {any} */ options = {}) => {
     let result = await coordinator.acquire(scope, { ...options, durable: true });
-    // Persist durable promotion after a joined bounded start settles.
     if (result?.ok && OFFSCREEN_SCOPES.has(scope)
         && coordinator.snapshot().leases[scope]?.durable !== true) {
       result = await coordinator.acquire(scope, { ...options, durable: true });
@@ -424,7 +411,6 @@ export const createProductionFeatureLeaseRuntime = ({
     /** @type {string} */ reason = 'feature-disabled') => {
     cancelRecovery(scope);
     durableScopes.delete(scope);
-    // Logical revoke is synchronous; physical cleanup stays serialized.
     const result = coordinator.revoke(scope, reason);
     return withHostLifecycle(() => finishRevocationUnsafe(scope, result));
   };
@@ -437,7 +423,6 @@ export const createProductionFeatureLeaseRuntime = ({
   const lock = () => {
     for (const scope of FEATURE_LEASE_SCOPES) cancelRecovery(scope);
     durableScopes.clear();
-    // A late start receipt cannot defeat synchronous cancellation.
     const results = coordinator.lock();
     return withHostLifecycle(() => finishLockUnsafe(results));
   };
@@ -445,12 +430,6 @@ export const createProductionFeatureLeaseRuntime = ({
   const runTransition = async (/** @type {'initialize'|'unlock'|'resume'} */ transition,
     /** @type {{dwebEnabled?:boolean}} */ options = {}) => {
     const results = await withHostLifecycle(() => runTransitionUnsafe(transition, options));
-    // why only offscreen scopes force realm retirement: an unknown start for a
-    // worker-local scope (goal, recovery, schedule) says nothing about the
-    // physical host's realm. Retiring the shared document for it destroys
-    // every live offscreen lease (a mid-turn controller included) and feeds a
-    // loss/retire loop, because the retirement itself fails the next
-    // transition's worker-local starts with host-lost.
     if (results.some((result) => result?.outcomeKnown === false
         && OFFSCREEN_SCOPES.has(result?.scope))) {
       await retireActiveHost('feature-transition-start-outcome-unknown');
@@ -458,13 +437,11 @@ export const createProductionFeatureLeaseRuntime = ({
     return results;
   };
   const handleHostLoss = (/** @type {string} */ hostEpoch) => {
-    // Retire old authority before close/create IO.
     const affected = coordinator.hostLost(hostEpoch);
     for (const item of affected) durableScopes.delete(item.scope);
     return withHostLifecycle(() => recoverHostLossUnsafe(hostEpoch, affected));
   };
 
-  // Unknown post-dispatch custody retires the exact host before lane reuse.
   const retireActiveHost = (/** @type {string|undefined} */ _reason) => {
     const snapshot = coordinator.snapshot();
     const live = Object.entries(snapshot.leases)
@@ -474,7 +451,6 @@ export const createProductionFeatureLeaseRuntime = ({
     const poisoned = Object.entries(snapshot.leases)
       .find(([scope, state]) => OFFSCREEN_SCOPES.has(scope)
         && typeof state?.poisonedHostEpoch === 'string')?.[1];
-    // Current custody outranks a historical poison marker.
     const epoch = live?.hostEpoch ?? poisoned?.poisonedHostEpoch;
     if (typeof epoch !== 'string') {
       return Promise.resolve(Object.freeze({ hostEpoch: null, affected: [], results: [] }));
@@ -485,7 +461,6 @@ export const createProductionFeatureLeaseRuntime = ({
   const resume = async (/** @type {{dwebEnabled?:boolean}} */ {
     dwebEnabled = false,
   } = {}) => {
-    // Persisted OFF fences stale intent before reconcile.
     if (dwebEnabled) coordinator.enable('dweb');
     else await disable('dweb');
     coordinator.unlock();

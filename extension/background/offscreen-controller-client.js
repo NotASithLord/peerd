@@ -21,9 +21,7 @@ import {
   createControllerKernelQuota,
 } from '../shared/controller-kernel-quota.js';
 import { parseKernelIdentity } from '../shared/kernel-identity.js';
-import {
-  makeBoundedModuleLoader, STARTUP_UNAVAILABLE_USER_FAILURE,
-} from '../shared/bounded-module-load.js';
+import { STARTUP_UNAVAILABLE_USER_FAILURE } from '../shared/bounded-module-load.js';
 import {
   KERNEL_FEATURE_DISPATCH_CAPABILITY,
   KERNEL_FEATURE_EVENT_CAPABILITY,
@@ -502,8 +500,6 @@ const PROMPT_CAPABILITIES = Object.freeze(['prompt.render']);
  * @param {<T>(operation:(lease?:unknown)=>Promise<T>)=>Promise<T>} [deps.withControllerLease]
  * @param {<T>(operation:()=>Promise<T>,options?:{outcomeKnownOnLoss?:boolean,code?:string,onLost?:(error:Error)=>void,lossGraceMs?:number})=>Promise<T>} [deps.withDirectLifetime]
  * @param {typeof import('./direct-controller-client.js').connectDirectController} [deps.connectDirectController]
- * @param {()=>Promise<typeof import('./direct-controller-client.js')>} [deps.loadDirectController]
- * @param {number} [deps.directLoadTimeoutMs]
  * @param {number} [deps.connectTimeoutMs]
  * @param {number} [deps.promptLoadTimeoutMs]
  * @param {(reason:string)=>Promise<any>} [deps.retireHost]
@@ -528,8 +524,6 @@ export const makeSemanticControllerClient = ({
   withControllerLease: withLease,
   withDirectLifetime,
   connectDirectController: directConnector,
-  loadDirectController: directModuleLoader,
-  directLoadTimeoutMs = 10_000,
   connectTimeoutMs = 15_000,
   promptLoadTimeoutMs = 10_000,
   retireHost = async () => {},
@@ -580,12 +574,6 @@ export const makeSemanticControllerClient = ({
     ...(hasFeatureAuthority ? [KERNEL_FEATURE_DISPATCH_CAPABILITY] : []),
     ...(hasFeatureAuthority ? [KERNEL_FEATURE_EVENT_CAPABILITY] : []),
   ]);
-  const loadDirectConnector = typeof directModuleLoader === 'function'
-    ? makeBoundedModuleLoader(directModuleLoader, {
-      timeoutMs: directLoadTimeoutMs,
-      loadCode: 'controller-direct-load-failed',
-      timeoutCode: 'controller-direct-load-timeout',
-    }) : null;
   /** @type {Promise<any> | null} */
   let connecting = null;
   /** @type {any | null} */
@@ -645,14 +633,12 @@ export const makeSemanticControllerClient = ({
 
   const connect = async (/** @type {unknown} */ lease) => {
     if (firefoxDirect) {
-      const connectDirectController = directConnector
-        ?? (await loadDirectConnector?.())?.connectDirectController;
-      if (typeof connectDirectController !== 'function') {
+      if (typeof directConnector !== 'function') {
         throw new ControllerChannelError(
           'Firefox direct controller connector missing', 'direct-connector-missing',
         );
       }
-      return connectDirectController({
+      return directConnector({
         capabilities: [...semanticCapabilities],
         supportedCapabilities: [...semanticCapabilities],
         buildDigest: CONTROLLER_BUILD_DIGEST,
@@ -835,7 +821,6 @@ export const makeSemanticControllerClient = ({
   const renderSystemPromptUnleased = async (/** @type {Record<string, unknown>} */ ctx,
     /** @type {unknown} */ lease) => {
     const assets = await loadPromptAssets();
-    let last;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       let client = null;
       try {
@@ -844,15 +829,15 @@ export const makeSemanticControllerClient = ({
           'prompt.render', { ctx, ...assets }, { timeoutMs: 15_000 },
         );
         if (result?.ok === true && typeof result.prompt === 'string') return result.prompt;
-        last = result;
-      } catch (cause) {
-        last = { error: cause instanceof Error ? cause.message : String(cause) };
-      }
+      } catch {}
       if (client) retire(client);
     }
-    throw new Error(
-      `semantic prompt renderer unavailable: ${last?.error ?? last?.code ?? 'unknown failure'}`,
-    );
+    throw Object.assign(new Error(STARTUP_UNAVAILABLE_USER_FAILURE), {
+      code: 'controller-prompt-startup-failed',
+      outcomeKnown: true,
+      phase: 'startup',
+      retryable: true,
+    });
   };
   const renderSystemPrompt = (/** @type {Record<string, unknown>} */ ctx) =>
     withControllerLease(async (/** @type {unknown} */ lease) => {
@@ -1132,6 +1117,7 @@ export const makeSemanticControllerClient = ({
     callFeature,
     callFeatureEvent,
     withRun,
+    retire: retireActiveOnLifetimeLoss,
     close: () => {
       connectionGeneration += 1;
       connecting = null;

@@ -523,7 +523,7 @@ describe('production semantic controller slice', () => {
     expect(closes).toBe(2);
   });
 
-  test('a frozen Firefox controller import releases its lifetime', async () => {
+  test('a missing Firefox controller connector releases its lifetime', async () => {
     let starts = 0;
     let stops = 0;
     const semantic = makeSemanticControllerClient({
@@ -540,8 +540,6 @@ describe('production semantic controller slice', () => {
         origin: null, target: 'semantic:test:first-party', replayClass: 'A',
       }),
       handleSemanticKernelCall: async () => ({ ok: true }),
-      loadDirectController: async () => new Promise<any>(() => {}),
-      directLoadTimeoutMs: 5,
       withDirectLifetime: async (operation) => {
         starts += 1;
         try { return await operation(); } finally { stops += 1; }
@@ -549,10 +547,10 @@ describe('production semantic controller slice', () => {
       fetchFn: (async () => new Response(TEMPLATE, { status: 200 })) as unknown as typeof fetch,
     });
     await expect(semantic.callTurn({ sessionId: 'session-1' })).resolves.toMatchObject({
-      code: 'controller-direct-load-timeout', outcomeKnown: true,
+      code: 'controller-turn-startup-failed', outcomeKnown: true,
       error: 'Temporarily unavailable. Try again.',
     });
-    expect({ starts, stops }).toEqual({ starts: 1, stops: 1 });
+    expect({ starts, stops }).toEqual({ starts: 2, stops: 2 });
   });
 
   test('a failed lazy controller realm is retired before the visible startup failure returns', async () => {
@@ -584,7 +582,11 @@ describe('production semantic controller slice', () => {
       }],
     });
     await expect(semantic.renderSystemPrompt({ actorType: 'orchestrator' }))
-      .rejects.toThrow('semantic prompt renderer unavailable');
+      .rejects.toMatchObject({
+        message: 'Temporarily unavailable. Try again.',
+        code: 'controller-prompt-startup-failed',
+        outcomeKnown: true, phase: 'startup', retryable: true,
+      });
     expect(retirements).toEqual([
       'controller-host-startup-failed',
       'controller-host-startup-failed',

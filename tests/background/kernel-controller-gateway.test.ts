@@ -13,6 +13,7 @@ const makeState = () => {
   const startedFeature = new Promise<void>((resolve) => { featureStarted = resolve; });
   let featureGrant: any = null;
   let promptCalls = 0;
+  let retired = 0;
   const calls: any[] = [];
   const gateway = createKernelControllerGateway({
     controller: { fixed: true },
@@ -36,10 +37,11 @@ const makeState = () => {
         callFeatureEvent: async (payload: any) => {
           calls.push(['event', payload]);
           const grant = deps.authorizeFeatureCall(payload);
-          return deps.handleFeatureKernelCall('event', {}, { authority: grant });
+          return grant ? { ok: true, grant } : { ok: false };
         },
         renderSystemPrompt: async () => { promptCalls += 1; return 'prompt'; },
         withRun: async (operation: () => Promise<any>) => operation(),
+        retire: () => { retired += 1; },
         close: () => { closed += 1; },
       };
     },
@@ -47,7 +49,7 @@ const makeState = () => {
   return {
     gateway, calls, releaseHeld, releaseFeature, startedFeature,
     featureGrant: () => featureGrant, promptCalls: () => promptCalls,
-    creates: () => creates, closed: () => closed, deps: () => deps,
+    creates: () => creates, closed: () => closed, retired: () => retired, deps: () => deps,
   };
 };
 
@@ -132,6 +134,25 @@ describe('kernel controller gateway', () => {
     state.gateway.bindFeature('repository', owner('feature-repository'));
   });
 
+  test('binds one exact reverse-effect-free production event owner', async () => {
+    const state = makeState();
+    const binding = state.gateway.bindEvents({
+      authorize: (payload: any) => payload.event === 'production/reconcile'
+        ? { target: 'kernel-feature:event:production/reconcile' } : null,
+      handle: async () => ({ ok: false }),
+    });
+    await expect(binding.call({ event: 'production/reconcile' })).resolves.toMatchObject({
+      ok: true,
+      grant: { target: 'kernel-feature:event:production/reconcile' },
+    });
+    await expect(binding.call({ event: 'production/tabs-created' }))
+      .resolves.toEqual({ ok: false });
+    expect(() => state.gateway.bindEvents(owner('feature-event')))
+      .toThrow('kernel-feature-owner-conflict');
+    binding.release();
+    state.gateway.bindEvents(owner('feature-event'));
+  });
+
   test('fences turn prompt and run lifetime with the binding', async () => {
     const state = makeState();
     const binding = state.gateway.bindTurn(owner('turn'));
@@ -175,6 +196,8 @@ describe('kernel controller gateway', () => {
     state.gateway.bindSemantic(owner('semantic')).release();
     state.gateway.bindTurn(owner('turn')).release();
     expect(state.closed()).toBe(0);
+    state.gateway.retire();
+    expect(state.retired()).toBe(1);
     state.gateway.close();
     state.gateway.close();
     expect(state.closed()).toBe(1);

@@ -13,11 +13,14 @@ import {
 } from '../offscreen/controller-shell.js';
 import { isSealedControllerRealm } from '../shared/structured-clone-size.js';
 
-const workerStopped = (/** @type {string} */ code, /** @type {string} */ error) => ({
+const workerStopped = (/** @type {string} */ code, /** @type {string} */ error,
+  /** @type {boolean} */ outcomeKnown = false) => ({
   ok: false,
   code,
   error,
-  outcomeKnown: false,
+  outcomeKnown,
+  phase: outcomeKnown ? 'startup' : 'run',
+  retryable: outcomeKnown,
 });
 
 /**
@@ -192,6 +195,10 @@ export const makeIdleDirectControllerLoader = ({
     };
     port1.onmessageerror = () => close('controller-worker-message-error');
     port1.addEventListener('close', () => close('controller-worker-channel-closed'), { once: true });
+    worker.addEventListener?.('error', () => close('controller-worker-crashed'), { once: true });
+    worker.addEventListener?.(
+      'messageerror', () => close('controller-worker-message-error'), { once: true },
+    );
     port1.start();
     try { worker.postMessage({ type: 'controller-worker/bootstrap' }, [port2]); }
     catch { close('controller-worker-bootstrap-failed'); }
@@ -225,6 +232,7 @@ export const makeIdleDirectControllerLoader = ({
         return workerStopped(
           'controller-worker-unavailable',
           cause instanceof Error ? cause.message : String(cause),
+          true,
         );
       }
     },

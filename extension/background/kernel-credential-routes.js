@@ -6,7 +6,7 @@ import {
   loadDpopJkt,
   makeDpopKeyStore,
   makeOriginCredentialRoutes,
-} from '../peerd-egress/kernel-storage.js';
+} from '/peerd-egress/kernel-credentials.js';
 
 /** @param {Record<string,any>} deps */
 export const makeKernelGitCredentialRoutes = ({ vault, auditLog, isLockedError }) =>

@@ -44,6 +44,7 @@ const makeWorker = (generation: number, terminated: number[]) => ({
     port.start();
     port.postMessage({ type: 'controller-worker/ready', realm: SEALED_REALM });
   },
+  addEventListener: () => {},
   terminate: () => { terminated.push(generation); },
 }) as unknown as Worker;
 
@@ -175,6 +176,114 @@ describe('Firefox direct controller adapter', () => {
     expect(first.epoch).not.toBe(second.epoch);
     expect(terminated).toEqual([1]);
     second.close();
+    expect(terminated).toEqual([1, 2]);
+  });
+
+  test('retires a crashed Worker generation and reports a committed call unknown', async () => {
+    const terminated: number[] = [];
+    const crash: Array<() => void> = [];
+    let generation = 0;
+    const loader = makeIdleDirectControllerLoader({
+      workerUrl: 'moz-extension://id/offscreen/controller-worker.js',
+      idleMs: 60_000,
+      newId: ids('inner-one', 'inner-two'),
+      createWorker: () => {
+        generation += 1;
+        const current = generation;
+        return {
+          postMessage: (_message: any, transfer: Transferable[]) => {
+            const port = transfer[0] as MessagePort;
+            port.onmessage = (event) => {
+              if (event.data.type !== 'controller-worker/call') return;
+              if (current === 1) {
+                queueMicrotask(() => crash[0]?.());
+                return;
+              }
+              port.postMessage({
+                type: 'controller-worker/result',
+                requestId: event.data.requestId,
+                result: { ok: true, generation: current },
+              });
+            };
+            port.start();
+            port.postMessage({ type: 'controller-worker/ready', realm: SEALED_REALM });
+          },
+          addEventListener: (type: string, listener: () => void) => {
+            if (type === 'error') crash.push(listener);
+          },
+          terminate: () => { terminated.push(current); },
+        } as unknown as Worker;
+      },
+    });
+    const controller = await connectController({
+      capabilities: ['state.read'],
+      supportedCapabilities: ['state.read'],
+      loader,
+    });
+    expect(await controller.call('state.read', { sequence: 1 })).toMatchObject({
+      ok: false,
+      code: 'controller-worker-crashed',
+      outcomeKnown: false,
+      phase: 'settled',
+    });
+    expect(await controller.call('state.read', { sequence: 2 }))
+      .toMatchObject({ ok: true, generation: 2 });
+    expect(terminated).toEqual([1]);
+    controller.close();
+    expect(terminated).toEqual([1, 2]);
+  });
+
+  test('recovers from a Worker crash before readiness as a retryable startup failure', async () => {
+    const terminated: number[] = [];
+    let generation = 0;
+    const loader = makeIdleDirectControllerLoader({
+      workerUrl: 'moz-extension://id/offscreen/controller-worker.js',
+      idleMs: 60_000,
+      createWorker: () => {
+        generation += 1;
+        const current = generation;
+        let onError = () => {};
+        return {
+          postMessage: (_message: any, transfer: Transferable[]) => {
+            const port = transfer[0] as MessagePort;
+            if (current === 1) {
+              queueMicrotask(onError);
+              return;
+            }
+            port.onmessage = (event) => {
+              if (event.data.type !== 'controller-worker/call') return;
+              port.postMessage({
+                type: 'controller-worker/result',
+                requestId: event.data.requestId,
+                result: { ok: true, generation: current },
+              });
+            };
+            port.start();
+            port.postMessage({ type: 'controller-worker/ready', realm: SEALED_REALM });
+          },
+          addEventListener: (type: string, listener: () => void) => {
+            if (type === 'error') onError = listener;
+          },
+          terminate: () => { terminated.push(current); },
+        } as unknown as Worker;
+      },
+    });
+    const controller = await connectController({
+      capabilities: ['state.read'],
+      supportedCapabilities: ['state.read'],
+      loader,
+    });
+    expect(await controller.call('state.read', {})).toMatchObject({
+      ok: false,
+      code: 'controller-worker-unavailable',
+      outcomeKnown: true,
+      phase: 'settled',
+      retryable: true,
+    });
+    expect(await controller.call('state.read', {}))
+      .toMatchObject({ ok: true, generation: 2 });
+    expect(terminated).toEqual([1]);
+    controller.close();
     expect(terminated).toEqual([1, 2]);
   });
 });

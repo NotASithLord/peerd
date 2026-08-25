@@ -18,19 +18,43 @@ const inactive = () => Object.freeze({
  * @param {()=>Promise<Record<string,unknown>>|Record<string,unknown>} deps.readSnapshot
  * @param {<T>(operation:()=>Promise<T>)=>Promise<T>} deps.withRun
  * @param {()=>string} [deps.newId]
+ * @param {number} [deps.timeoutMs]
+ * @param {typeof setTimeout} [deps.setTimeoutFn]
+ * @param {typeof clearTimeout} [deps.clearTimeoutFn]
  */
 export const createKernelProductionEvents = ({
   identity, send, readSnapshot, withRun, newId = () => crypto.randomUUID(),
+  timeoutMs = 15_000, setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout,
 }) => {
   if (typeof identity?.bootId !== 'string' || typeof identity?.kernelEpoch !== 'string'
       || typeof send !== 'function' || typeof readSnapshot !== 'function'
-      || typeof withRun !== 'function') {
+      || typeof withRun !== 'function' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new TypeError('kernel-production-events-config-invalid');
   }
   let sequence = 0;
   let running = 0;
   let needsReconcile = true;
   let lane = Promise.resolve();
+  const bounded = (/** @type {Promise<any>} */ operation,
+    /** @type {string} */ code, /** @type {boolean} */ outcomeKnown) => new Promise(
+    (resolve, reject) => {
+      const timer = setTimeoutFn(() => reject(Object.assign(new Error(code), {
+        code, outcomeKnown,
+      })), timeoutMs);
+      operation.then(
+        (value) => { clearTimeoutFn(timer); resolve(value); },
+        (cause) => { clearTimeoutFn(timer); reject(cause); },
+      );
+    },
+  );
+  const failure = (/** @type {unknown} */ cause, /** @type {boolean} */ outcomeKnown,
+    /** @type {'startup'|'run'} */ phase) => Object.freeze({
+    ok: false,
+    code: /** @type {{code?:string}} */ (cause)?.code ?? 'production-event-failed',
+    outcomeKnown,
+    phase,
+    retryable: outcomeKnown,
+  });
   const cleanString = (/** @type {unknown} */ value) => typeof value === 'string'
     && new TextEncoder().encode(value).length <= TAB_STRING_BYTES ? value : undefined;
   const projectTab = (/** @type {any} */ tab, idsOnly = false) => {
@@ -51,7 +75,9 @@ export const createKernelProductionEvents = ({
     });
   };
   const projectSnapshot = async () => {
-    const raw = /** @type {any} */ (await readSnapshot());
+    const raw = /** @type {any} */ (await bounded(
+      Promise.resolve().then(readSnapshot), 'production-snapshot-timeout', true,
+    ));
     const all = Array.isArray(raw?.tabs)
       ? raw.tabs.map((/** @type {any} */ tab) => projectTab(tab)).filter(Boolean) : [];
     let tabs = all;
@@ -110,8 +136,19 @@ export const createKernelProductionEvents = ({
     value: Object.freeze({ ...value }),
   });
   const reconcile = async () => {
-    const snapshot = await projectSnapshot();
-    const result = await send('production/reconcile', envelope(snapshot, newId()));
+    let snapshot;
+    try { snapshot = await projectSnapshot(); }
+    catch (cause) { needsReconcile = true; return failure(cause, true, 'startup'); }
+    let result;
+    try {
+      result = await bounded(
+        Promise.resolve(send('production/reconcile', envelope(snapshot, newId()))),
+        'production-reconcile-timeout', false,
+      );
+    } catch (cause) {
+      needsReconcile = true;
+      return failure(cause, false, 'run');
+    }
     needsReconcile = result?.ok !== true || result?.value?.accepted !== true;
     return result;
   };
@@ -124,7 +161,16 @@ export const createKernelProductionEvents = ({
     }
     const eventId = newId();
     const projected = projectValue(event, value);
-    let result = await send(event, envelope(projected, eventId));
+    let result;
+    try {
+      result = await bounded(
+        Promise.resolve(send(event, envelope(projected, eventId))),
+        'production-event-timeout', false,
+      );
+    } catch (cause) {
+      needsReconcile = true;
+      return failure(cause, false, 'run');
+    }
     if (result?.outcomeKnown === false) {
       needsReconcile = true;
       return result;
@@ -135,7 +181,15 @@ export const createKernelProductionEvents = ({
     needsReconcile = true;
     const settled = await reconcile();
     if (settled?.ok !== true || needsReconcile) return result;
-    result = await send(event, envelope(projected, eventId));
+    try {
+      result = await bounded(
+        Promise.resolve(send(event, envelope(projected, eventId))),
+        'production-event-timeout', false,
+      );
+    } catch (cause) {
+      needsReconcile = true;
+      return failure(cause, false, 'run');
+    }
     if (result?.ok !== true || result?.value?.gap === true) needsReconcile = true;
     return result;
   };

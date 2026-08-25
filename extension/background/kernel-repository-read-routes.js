@@ -9,7 +9,7 @@ import {
   loadDpopJkt,
   makeDpopKeyStore,
   makeOriginCredentialRoutes,
-} from '../peerd-egress/kernel-storage.js';
+} from '/peerd-egress/kernel-credentials.js';
 
 /** @param {unknown} cause @param {string} action @param {boolean} [known] */
 const failed = (cause, action, known) => {

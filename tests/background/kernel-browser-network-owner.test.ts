@@ -127,19 +127,16 @@ describe('kernel browser network owner', () => {
     expect(guard.has(8)).toBe(false);
   });
 
-  test('constructs the authority synchronously and binds live projections later', async () => {
+  test('keeps authority cold and binds a fenced source projection', async () => {
     const calls: any[] = [];
     let config: any;
     let constructions = 0;
-    const relays = {
-      engineTrackersHydrated: Promise.resolve(),
-      externalDrivenTabIds: () => [2, 3], appTabIds: () => [3],
-      isWebActorTab: (tabId: number) => tabId === 2,
-      eventOwners: { reconcileTrackers: async () => { calls.push('live:reconcile'); } },
-    };
+    const identity = { bootId: 'boot-source-a', kernelEpoch: 'kernel-source-a' };
+    const tabs = [{ id: 2, url: 'https://source.test/' }];
     const owner = createKernelBrowserNetworkOwner({
-      firefox: false, browser: {}, dnr: { updateSessionRules() {} },
-      sessionCache: {}, denylist: {}, getRelays: () => null,
+      firefox: false, browser: { tabs: { query: async () => tabs } },
+      dnr: { updateSessionRules() {} }, sessionCache: {}, denylist: {},
+      kernelIdentity: identity,
       createAuthority: (deps: any) => {
         constructions += 1;
         config = deps;
@@ -157,36 +154,53 @@ describe('kernel browser network owner', () => {
       },
     });
 
-    expect(constructions).toBe(1);
+    expect(constructions).toBe(0);
     expect(owner.sourceProjectionReady()).toBe(false);
-    owner.bind(relays);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(config.getExternalTabIds()).toEqual([2, 3]);
-    expect(config.getAppTabIds()).toEqual([3]);
-    expect(config.isWebActorTab(2)).toBe(true);
-    expect(calls).toEqual(['live:reconcile', 'network:projection', 'network:ready']);
+    owner.bind('controller-a');
+    expect(await owner.updateSourceProjection(
+      [[2, 'actor-2']], [{
+        tabId: 2, sessionId: 'actor-2', url: 'https://source.test/',
+        openerTabId: null, cookieStoreId: null,
+      }], { ...identity, generation: 'controller-a', revision: 1 },
+    )).toBe(true);
     expect(owner.sourceProjectionReady()).toBe(true);
     await owner.ensureBrowserNetworkGuard(2, 'https://public.example/');
+    expect(constructions).toBe(1);
+    expect(config.getExternalTabIds()).toEqual([2]);
+    expect(config.getAppTabIds()).toEqual([]);
+    expect(config.isWebActorTab(2)).toBe(true);
     await owner.custody.sync();
     expect(calls).toContainEqual(['ensure', 2, 'https://public.example/']);
     expect(calls).toContain('network:sync');
   });
 
-  test('retries a failed static projection when live relays bind', async () => {
-    const relays = {
-      engineTrackersHydrated: Promise.resolve(), isDrivenSource: () => true,
-      externalDrivenTabIds: () => [7], appTabIds: () => [],
-      eventOwners: { reconcileTrackers: async () => {} },
+  test('rejects stale source generations and revisions', async () => {
+    const identity = { bootId: 'boot-source-b', kernelEpoch: 'kernel-source-b' };
+    const row = {
+      tabId: 7, sessionId: 'actor-7', url: 'https://source.test/',
+      openerTabId: null, cookieStoreId: null,
     };
     const owner = createKernelBrowserNetworkOwner({
-      firefox: false, browser: {}, dnr: {}, sessionCache: {}, denylist: {},
-      getRelays: () => null, createAuthority: () => directAuthority(),
+      firefox: false,
+      browser: { tabs: { query: async () => [{ id: 7, url: row.url }] } },
+      dnr: {}, sessionCache: {}, denylist: {}, kernelIdentity: identity,
+      createAuthority: () => directAuthority(),
     });
     await expect(owner.ensureSourceProjection()).resolves.toBe(false);
-    owner.bind(relays);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(owner.sourceProjectionReady()).toBe(true);
-    expect(owner.relays()?.isDrivenSource(7)).toBe(true);
+    owner.bind('controller-b');
+    expect(await owner.updateSourceProjection(
+      [[7, 'actor-7']], [row], { ...identity, generation: 'retired-one', revision: 1 },
+    )).toBe(false);
+    expect(await owner.updateSourceProjection(
+      [[7, 'actor-7']], [row], { ...identity, generation: 'controller-b', revision: 2 },
+    )).toBe(true);
+    expect(await owner.updateSourceProjection(
+      [], [], { ...identity, generation: 'controller-b', revision: 1 },
+    )).toBe(false);
+    owner.bind('controller-c');
+    expect(await owner.updateSourceProjection(
+      [], [], { ...identity, generation: 'controller-b', revision: 3 },
+    )).toBe(false);
   });
 
   test('contains child ingress through the direct authority without controller demand', async () => {
@@ -219,7 +233,7 @@ describe('kernel browser network owner', () => {
     ]);
   });
 
-  test('ordinary tab lifecycle stays in the direct authority without controller demand', async () => {
+  test('ordinary tab lifecycle stays cold without network work', async () => {
     const calls: any[] = [];
     const owner = createKernelBrowserNetworkOwner({
       firefox: false, browser: {}, dnr: {}, sessionCache: {}, denylist: {},
@@ -237,26 +251,29 @@ describe('kernel browser network owner', () => {
     await owner.onUpdated(2, { status: 'complete' }, { id: 2 });
     await owner.onRemoved(2);
     await owner.reconcile();
-    expect(calls).toEqual([
-      ['created', 2], ['updated', 2], ['removed', 2], ['reconcile'],
-    ]);
+    expect(calls).toEqual([]);
   });
 
   test('bounds a frozen startup proof and closes only a tracker-confirmed child', async () => {
     for (const driven of [false, true]) {
       const calls: any[] = [];
+      const source = {
+        tabId: 7, sessionId: 'actor-7', url: 'https://source.test/',
+        openerTabId: null, cookieStoreId: null,
+      };
       const owner = createKernelBrowserNetworkOwner({
         firefox: false,
         browser: { tabs: {
+          query: async () => [{ id: 7, url: source.url }],
           remove: async (tabId: number) => { calls.push(['remove', tabId]); },
           update: async (tabId: number, patch: any) => { calls.push(['update', tabId, patch]); },
         } },
-        dnr: {}, sessionCache: {}, denylist: {}, loadTimeoutMs: 5,
+        dnr: {}, sessionCache: { sessionGet: async (key: string) => driven
+          ? key === 'webActorTabBindings' ? [[7, 'actor-7']]
+            : key === WEB_ACTOR_SOURCE_PROJECTION_KEY ? [source] : null
+          : key === 'webActorTabBindings' || key === WEB_ACTOR_SOURCE_PROJECTION_KEY
+            ? [] : null }, denylist: {}, loadTimeoutMs: 5,
         startupGuard: { adopt: async () => new Promise(() => {}), release: async () => {} },
-        getRelays: () => ({
-          engineTrackersHydrated: Promise.resolve(), isDrivenSource: () => driven,
-          eventOwners: { reconcileTrackers: async () => {} },
-        }),
         createAuthority: () => directAuthority(),
         onPopupFailed: (event: any) => { calls.push(['failed', event]); },
       });
@@ -274,22 +291,26 @@ describe('kernel browser network owner', () => {
   test('a false startup proof distinguishes driven, ordinary, and unavailable sources', async () => {
     for (const source of ['driven', 'ordinary', 'unavailable'] as const) {
       const calls: any[] = [];
+      const projection = {
+        tabId: 7, sessionId: 'actor-7', url: 'https://source.test/',
+        openerTabId: null, cookieStoreId: null,
+      };
       const owner = createKernelBrowserNetworkOwner({
         firefox: false,
         browser: { tabs: {
+          query: async () => [{ id: 7, url: projection.url }],
           remove: async (tabId: number) => { calls.push(['remove', tabId]); },
           update: async () => {},
         } },
-        dnr: { getSessionRules: async () => [] }, sessionCache: {}, denylist: {},
+        dnr: { getSessionRules: async () => [] },
+        sessionCache: source === 'unavailable' ? {} : {
+          sessionGet: async (key: string) => source === 'driven'
+            ? key === 'webActorTabBindings' ? [[7, 'actor-7']]
+              : key === WEB_ACTOR_SOURCE_PROJECTION_KEY ? [projection] : null
+            : key === 'webActorTabBindings' || key === WEB_ACTOR_SOURCE_PROJECTION_KEY
+              ? [] : null,
+        }, denylist: {},
         startupGuard: { adopt: async () => false, release: async () => {} },
-        getRelays: () => {
-          if (source === 'unavailable') throw new Error('tracker-down');
-          return {
-            engineTrackersHydrated: Promise.resolve(),
-            isDrivenSource: () => source === 'driven',
-            eventOwners: { reconcileTrackers: async () => {} },
-          };
-        },
         createAuthority: () => directAuthority(),
         onPopupFailed: (event: any) => { calls.push(['failed', event]); },
         onError: (error: any) => { calls.push(['error', error]); },
@@ -331,16 +352,21 @@ describe('kernel browser network owner', () => {
 
   test('a timed-out direct authority reports guarded retryable custody', async () => {
     const calls: any[] = [];
+    const source = {
+      tabId: 9, sessionId: 'actor-9', url: 'https://source.test/',
+      openerTabId: null, cookieStoreId: null,
+    };
     const owner = createKernelBrowserNetworkOwner({
-      firefox: false, browser: { tabs: {} }, dnr: {}, sessionCache: {}, denylist: {},
+      firefox: false, browser: { tabs: {
+        query: async () => [{ id: 9, url: source.url }],
+      } }, dnr: {}, sessionCache: {
+        sessionGet: async (key: string) => key === 'webActorTabBindings'
+          ? [[9, 'actor-9']] : key === WEB_ACTOR_SOURCE_PROJECTION_KEY ? [source] : null,
+      }, denylist: {},
       loadTimeoutMs: 5,
       startupGuard: {
         adopt: async () => true, release: async () => {}, isGuarded: () => true,
       },
-      getRelays: () => ({
-        engineTrackersHydrated: Promise.resolve(), isDrivenSource: () => true,
-        eventOwners: { reconcileTrackers: async () => {} },
-      }),
       createAuthority: () => directAuthority({
         onNavigationTarget: async () => new Promise(() => {}),
       }),

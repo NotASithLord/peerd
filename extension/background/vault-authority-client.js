@@ -159,8 +159,6 @@ export const makeVaultAuthorityClient = ({
 
   const retire = (/** @type {unknown} */ cause = 'vault authority retired',
     /** @type {typeof active} */ expected = active) => {
-    // MessagePort close/error delivery is asynchronous. A retired generation's
-    // late close must never tear down the successor connection.
     if (expected && active !== expected) return;
     const prior = active;
     active = null;

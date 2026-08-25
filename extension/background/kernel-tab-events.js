@@ -1,7 +1,4 @@
 // @ts-check
-// Browser-tab authority registration for the native kernel. This module owns
-// only synchronous event ingress; injected custody collaborators retain tab,
-// navigation, network, and recovery semantics without importing feature code.
 
 import { KERNEL_LIFECYCLE_OWNER } from './kernel-lifecycle-events.js';
 import {
@@ -166,17 +163,19 @@ export const createKernelBrowserEventOwners = ({
 
 /** @param {Record<string,any>} deps */
 export const createKernelBrowserNetworkOwner = (deps) => {
-  if (typeof deps?.createAuthority !== 'function' || typeof deps?.getRelays !== 'function') {
+  if (typeof deps?.createAuthority !== 'function' && typeof deps?.loadAuthority !== 'function') {
     throw new TypeError('kernel-browser-network-owner-config-invalid');
   }
   /** @type {any} */ let authority = null;
-  /** @type {Record<string,any>|null} */ let relays = null;
+  /** @type {Promise<any>|null} */ let authorityLoading = null;
   /** @type {Map<number,symbol>} */ const childGenerations = new Map();
   /** @type {Promise<boolean|null>|null} */ let coldQuarantineReading = null;
   let sourceProjectionReady = false;
   /** @type {Promise<void>|null} */ let sourceProjectionLoading = null;
   /** @type {Map<number,string>|null} */ let restoredSources = null;
   /** @type {Promise<boolean>|null} */ let restoredSourcesLoading = null;
+  /** @type {string|null} */ let sourceProjectionGeneration = null;
+  let sourceProjectionRevision = 0;
   const loadTimeoutMs = Number.isFinite(deps.loadTimeoutMs)
     ? Math.max(1, Number(deps.loadTimeoutMs)) : 5_000;
   const bounded = (/** @type {Promise<any>} */ operation, /** @type {string} */ code) =>
@@ -187,16 +186,19 @@ export const createKernelBrowserNetworkOwner = (deps) => {
         (cause) => { clearTimeout(timer); reject(cause); },
       );
     });
-  const restoreSources = () => {
+  const restoreSources = (/** @type {boolean} */ refresh = false) => {
+    if (refresh) restoredSources = null;
     if (restoredSources) return Promise.resolve(true);
-    if (!deps.firefox || typeof deps.sessionCache?.sessionGet !== 'function'
+    if (typeof deps.sessionCache?.sessionGet !== 'function'
         || typeof deps.browser?.tabs?.query !== 'function') return Promise.resolve(false);
     restoredSourcesLoading ??= Promise.all([
       deps.sessionCache.sessionGet('webActorTabBindings'),
       deps.sessionCache.sessionGet(WEB_ACTOR_SOURCE_PROJECTION_KEY),
       deps.browser.tabs.query({}),
     ]).then(([bindings, projection, tabs]) => {
-      const validated = validateWebActorSourceProjection(bindings ?? [], projection, tabs);
+      const validated = validateWebActorSourceProjection(
+        bindings ?? [], projection, tabs, { requireCookieStore: deps.firefox },
+      );
       if (!validated) return false;
       restoredSources = validated;
       return true;
@@ -210,30 +212,23 @@ export const createKernelBrowserNetworkOwner = (deps) => {
     externalDrivenTabIds: () => [...(restoredSources?.keys() ?? [])],
     appTabIds: () => [],
   });
-  if (deps.firefox) void restoreSources();
+  void restoreSources();
   const externalReady = () => {
     if (sourceProjectionReady) return Promise.resolve();
     if (sourceProjectionLoading) return sourceProjectionLoading;
     const attempt = (async () => {
-      try {
-        const current = relays ?? deps.getRelays();
-        if (!current) throw new Error('kernel-browser-network-relays-unavailable');
-        relays = current;
-        await bounded(Promise.resolve(current.engineTrackersHydrated ?? current.engineReady),
-          'kernel-browser-network-trackers-timeout');
-        const reconcile = current.eventOwners.reconcileTrackers
-          ?? current.eventOwners.reconcile;
-        await bounded(Promise.resolve(reconcile()),
-          'kernel-browser-network-reconcile-timeout');
-        if (typeof current.isDrivenSource === 'function') {
-          await bounded(Promise.resolve(deps.startupGuard?.reconcileSources?.(
-            (/** @type {number} */ tabId) => current.isDrivenSource(tabId) === true,
-          )), 'kernel-browser-network-startup-reconcile-timeout');
+      const ready = await restoreSources(true);
+      if (!ready) throw new Error('kernel-browser-network-source-projection-unavailable');
+      await bounded(Promise.resolve(deps.startupGuard?.reconcileSources?.(
+        (/** @type {number} */ tabId) => restoredSources?.has(tabId) ?? null,
+      )), 'kernel-browser-network-startup-reconcile-timeout');
+      sourceProjectionReady = true;
+      if (authority) {
+        const result = await authority.reconcileExternalProjection?.();
+        if (result?.ok === false) {
+          sourceProjectionReady = false;
+          throw new Error('kernel-browser-network-source-reconcile-failed');
         }
-        sourceProjectionReady = true;
-      } catch (cause) {
-        relays = null;
-        throw cause;
       }
     })();
     sourceProjectionLoading = attempt;
@@ -242,34 +237,42 @@ export const createKernelBrowserNetworkOwner = (deps) => {
     }).catch(() => {});
     return attempt;
   };
-  const createAuthority = () => {
-    authority ??= deps.createAuthority({
-        firefox: deps.firefox, browser: deps.browser, dnr: deps.dnr,
-        sessionCache: deps.sessionCache, denylist: deps.denylist,
-        getExternalTabIds: () => [...new Set([
-          ...(relays?.externalDrivenTabIds?.() ?? []),
-          ...(restoredSources?.keys() ?? []),
-        ])],
-        getAppTabIds: () => relays?.appTabIds?.() ?? [],
-        isWebActorTab: (/** @type {number} */ tabId) =>
-          relays?.isWebActorTab?.(tabId) === true
-          || restoredSources?.has(tabId) === true
-          || deps.startupGuard?.hasSourceEvidence?.(tabId) === true,
-        ensureExternalReady: externalReady,
-        audit: deps.audit,
-        onPopupGuarded: (/** @type {{tabId?:number}} */ event) => {
-          if (typeof event?.tabId === 'number') deps.releaseChild?.(event.tabId);
-        },
-        onPopupBlocked: deps.onPopupBlocked,
-        onPopupFailed: deps.onPopupFailed,
-        onPopupBlank: deps.onPopupBlank,
-        startupGuard: deps.startupGuard,
-      });
-    return authority;
+  const authorityConfig = () => ({
+    firefox: deps.firefox, browser: deps.browser, dnr: deps.dnr,
+    sessionCache: deps.sessionCache, denylist: deps.denylist,
+    getExternalTabIds: () => [...(restoredSources?.keys() ?? [])],
+    getAppTabIds: () => [],
+    isWebActorTab: (/** @type {number} */ tabId) =>
+      restoredSources?.has(tabId) === true
+      || deps.startupGuard?.hasSourceEvidence?.(tabId) === true,
+    ensureExternalReady: externalReady,
+    audit: deps.audit,
+    onPopupGuarded: (/** @type {{tabId?:number}} */ event) => {
+      if (typeof event?.tabId === 'number') deps.releaseChild?.(event.tabId);
+    },
+    onPopupBlocked: deps.onPopupBlocked,
+    onPopupFailed: deps.onPopupFailed,
+    onPopupBlank: deps.onPopupBlank,
+    startupGuard: deps.startupGuard,
+  });
+  const get = () => {
+    if (authority) return Promise.resolve(authority);
+    if (authorityLoading) return authorityLoading;
+    const create = deps.createAuthority ?? deps.loadAuthority;
+    const pending = Promise.resolve().then(() => create(authorityConfig())).then((owner) => {
+      if (!owner || typeof owner.status !== 'function') {
+        throw new TypeError('kernel-browser-network-authority-invalid');
+      }
+      authority = owner;
+      return owner;
+    }).finally(() => {
+      if (authorityLoading === pending) authorityLoading = null;
+    });
+    authorityLoading = pending;
+    return pending;
   };
-  const get = () => Promise.resolve(createAuthority());
   const call = (/** @type {string} */ name, /** @type {any[]} */ args = []) =>
-    get().then((owner) => {
+    bounded(get(), `kernel-browser-network-${name}-load-timeout`).then((owner) => {
       const event = args[0];
       const tabId = event?.tabId ?? event?.id;
       if (typeof event?.flowToken === 'symbol' && typeof tabId === 'number'
@@ -278,11 +281,8 @@ export const createKernelBrowserNetworkOwner = (deps) => {
         Promise.resolve(owner[name](...args)), `kernel-browser-network-${name}-timeout`,
       );
     });
-  const loadedCall = (/** @type {string} */ name, /** @type {any[]} */ args = []) => {
-    const owner = createAuthority();
-    return bounded(Promise.resolve().then(() => owner[name](...args)),
-      `kernel-browser-network-${name}-timeout`).then(() => true);
-  };
+  const loadedCall = (/** @type {string} */ name, /** @type {any[]} */ args = []) =>
+    call(name, args).then(() => true);
   const coldQuarantineActive = () => {
     if (typeof deps.dnr?.getSessionRules !== 'function') return Promise.resolve(false);
     coldQuarantineReading ??= bounded(Promise.resolve(deps.dnr.getSessionRules()),
@@ -366,9 +366,6 @@ export const createKernelBrowserNetworkOwner = (deps) => {
   const sourceIsDriven = async (/** @type {any} */ details) => {
     const sourceTabId = sourceFor(details);
     if (typeof sourceTabId !== 'number') return null;
-    if (sourceProjectionReady && typeof relays?.isDrivenSource === 'function') {
-      return relays.isDrivenSource(sourceTabId) === true;
-    }
     if (await restoreSources()) return restoredSources?.has(sourceTabId) === true;
     if (!sourceProjectionReady) {
       try {
@@ -376,9 +373,7 @@ export const createKernelBrowserNetworkOwner = (deps) => {
           'kernel-browser-network-source-classification-timeout');
       } catch { return null; }
     }
-    if (typeof relays?.isDrivenSource !== 'function') return null;
-    try { return relays.isDrivenSource(sourceTabId) === true; }
-    catch { return null; }
+    return restoredSources?.has(sourceTabId) ?? null;
   };
   const handleAbsentProof = async (/** @type {any} */ details,
     /** @type {symbol} */ generation, /** @type {string} */ name,
@@ -439,7 +434,10 @@ export const createKernelBrowserNetworkOwner = (deps) => {
     try { deps.onError?.(cause); } catch {}
     return false;
   };
-  const state = () => createAuthority().status();
+  const state = () => authority?.status() ?? Object.freeze({
+    supported: typeof deps.dnr?.updateSessionRules === 'function',
+    lastError: null, ready: false, tabs: Object.freeze([]), origins: Object.freeze([]),
+  });
   const custody = Object.freeze({
     sync: () => call('syncDenylistNetwork'), state,
     status: state,
@@ -450,18 +448,42 @@ export const createKernelBrowserNetworkOwner = (deps) => {
     try {
       await bounded(Promise.resolve(externalReady()),
         'kernel-browser-network-source-projection-timeout');
-      const result = await createAuthority().reconcileExternalProjection?.();
+      const result = await (await get()).reconcileExternalProjection?.();
       if (result?.ok === false) return false;
-      return sourceProjectionReady;
+      return sourceProjectionReady && restoredSources !== null;
     } catch {
       return false;
     }
   };
-  createAuthority();
+  const updateSourceProjection = async (/** @type {unknown} */ bindings,
+    /** @type {unknown} */ projection, /** @type {any} */ identity) => {
+    if (!identity || identity.bootId !== deps.kernelIdentity?.bootId
+        || identity.kernelEpoch !== deps.kernelIdentity?.kernelEpoch
+        || identity.generation !== sourceProjectionGeneration
+        || !Number.isSafeInteger(identity.revision)
+        || identity.revision <= sourceProjectionRevision) return false;
+    const tabs = await bounded(Promise.resolve(deps.browser.tabs.query({})),
+      'kernel-browser-network-source-tabs-timeout');
+    const validated = validateWebActorSourceProjection(
+      bindings, projection, tabs, { requireCookieStore: deps.firefox },
+    );
+    if (!validated) return false;
+    restoredSources = validated;
+    sourceProjectionRevision = identity.revision;
+    sourceProjectionReady = true;
+    await bounded(Promise.resolve(deps.startupGuard?.reconcileSources?.(
+      (/** @type {number} */ tabId) => restoredSources?.has(tabId) ?? null,
+    )), 'kernel-browser-network-startup-reconcile-timeout');
+    if (authority) {
+      const result = await authority.reconcileExternalProjection?.();
+      if (result?.ok === false) return false;
+    }
+    return true;
+  };
   return Object.freeze({
     call,
     custody,
-    relays: () => relays ?? (restoredSources ? sourceRelays : null),
+    relays: () => restoredSources ? sourceRelays : null,
     sourceProjectionReady: () => sourceProjectionReady || restoredSources !== null,
     waitForSourceProjection: () => sourceProjectionReady
       ? Promise.resolve(true)
@@ -471,6 +493,11 @@ export const createKernelBrowserNetworkOwner = (deps) => {
     flowToken: (/** @type {number} */ tabId) => childGeneration(tabId),
     onCreated(/** @type {any} */ tab) {
       if (typeof tab?.id !== 'number' || typeof tab?.openerTabId !== 'number') {
+        if (!authority) return coldQuarantineActive().then((active) => active
+          ? loadedCall('onCreated', [tab]) : false).catch((cause) => {
+          try { deps.onError?.(cause); } catch {}
+          return false;
+        });
         return loadedCall('onCreated', [tab]).catch((cause) => {
           try { deps.onError?.(cause); } catch {}
           return false;
@@ -493,7 +520,7 @@ export const createKernelBrowserNetworkOwner = (deps) => {
     },
     onNavigationTarget(/** @type {any} */ details) {
       if (typeof details?.tabId !== 'number' || typeof details?.sourceTabId !== 'number') {
-        return loadedCall('onNavigationTarget', [details]);
+        return authority ? loadedCall('onNavigationTarget', [details]) : false;
       }
       const generation = childGeneration(details.tabId, details.flowToken);
       deps.beginOutcome?.(details.sourceTabId, details.tabId, generation);
@@ -513,8 +540,10 @@ export const createKernelBrowserNetworkOwner = (deps) => {
           deps.settleOutcome?.(details.sourceTabId, details.tabId, generation);
         });
     },
-    onUpdated(/** @type {number} */ tabId, /** @type {any} */ changeInfo,
+    async onUpdated(/** @type {number} */ tabId, /** @type {any} */ changeInfo,
       /** @type {any} */ tab) {
+      if (!authority && !deps.startupGuard?.tabIds?.().includes(tabId)
+          && await coldQuarantineActive() !== true) return false;
       return loadedCall('onUpdated', [tabId, changeInfo, tab]);
     },
     onRemoved(/** @type {number} */ tabId) {
@@ -522,17 +551,31 @@ export const createKernelBrowserNetworkOwner = (deps) => {
       childGenerations.delete(tabId);
       const released = deps.startupGuard?.release(tabId, generation) ?? Promise.resolve();
       deps.releaseOutcome?.(tabId);
-      const remove = loadedCall('onRemoved', [tabId]);
-      return Promise.resolve(released).then(() => remove);
+      return Promise.resolve(released).then(() => authority
+        ? loadedCall('onRemoved', [tabId]) : false);
     },
-    reconcile: () => loadedCall('reconcile'),
-    bind(/** @type {Record<string,any>} */ liveRelays) {
-      relays = liveRelays;
+    reconcile: async () => {
+      await restoreSources();
+      await deps.startupGuard?.reconcileSources?.((/** @type {number} */ tabId) =>
+        restoredSources?.has(tabId) ?? null);
+      return authority ? loadedCall('reconcile') : false;
+    },
+    bind(/** @type {string} */ generation) {
+      if (typeof generation !== 'string' || generation.length < 8) {
+        throw new TypeError('kernel-browser-network-projection-generation-invalid');
+      }
+      sourceProjectionGeneration = generation;
+      sourceProjectionRevision = 0;
       sourceProjectionReady = false;
       void Promise.resolve(sourceProjectionLoading).catch(() => {}).then(externalReady)
-        .then(() => createAuthority().reconcileExternalProjection?.())
-        .then(() => createAuthority().ready()).catch(deps.onError ?? (() => {}));
+        .then(get)
+        .then(async (owner) => {
+          await owner.reconcileExternalProjection?.();
+          await owner.ready();
+        })
+        .catch(deps.onError ?? (() => {}));
     },
+    updateSourceProjection,
     ensureBrowserNetworkGuard: (/** @type {number} */ tabId, /** @type {string} */ url) =>
       call('ensureBrowserNetworkGuard', [tabId, url]).catch((cause) => ({
         ok: false, error: cause instanceof Error ? cause.message : String(cause),
@@ -572,12 +615,26 @@ export const createKernelTabCustody = (deps) => {
     if (typeof ingress === 'function') return ingress(...args);
     return Promise.resolve(deps.network.call(name, args)).then(() => true);
   };
+  const production = (/** @type {string} */ event, /** @type {any} */ value) => {
+    const owner = deps.getProductionEvents?.();
+    return owner?.emit?.(event, value);
+  };
   const event = async (/** @type {string} */ name, /** @type {any[]} */ args) => {
     let liveResult;
     try { liveResult = live(name, args); }
     catch (cause) { liveResult = Promise.reject(cause); }
     const handled = await network(name, args);
-    return Promise.all([handled, liveResult]);
+    const projected = name === 'onCreated'
+      ? production('production/tabs-created', { tab: args[0] })
+      : name === 'onUpdated'
+        ? production('production/tabs-updated', {
+          tabId: args[0], change: args[1], tab: args[2],
+        })
+        : name === 'onRemoved'
+          ? production('production/tabs-removed', { tabId: args[0] })
+          : name === 'onNavigationTarget'
+            ? production('production/navigation-target', args[0]) : undefined;
+    return Promise.all([handled, liveResult, projected]);
   };
   return Object.freeze({
     onCreated: (/** @type {any} */ tab) => event('onCreated', [tab]),
@@ -587,7 +644,10 @@ export const createKernelTabCustody = (deps) => {
       deps.child.release(tabId);
       return event('onRemoved', [tabId, removeInfo]);
     },
-    onActivated: (/** @type {any} */ activeInfo) => live('onActivated', [activeInfo]),
+    onActivated: (/** @type {any} */ activeInfo) => Promise.all([
+      live('onActivated', [activeInfo]),
+      production('production/tabs-activated', activeInfo),
+    ]),
     onNavigationTarget: (/** @type {any} */ details) => {
       const flowToken = deps.network?.flowToken?.(details?.tabId);
       const ingress = flowToken ? { ...details, flowToken } : details;

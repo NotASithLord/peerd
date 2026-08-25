@@ -5,6 +5,25 @@ export const KERNEL_ADMINISTRATIVE_ROUTE_NAMES = Object.freeze([
   'memory/init', 'skills/installGit', 'skills/installLocal', 'skills/installManifest',
 ]);
 
+export const KERNEL_DEMAND_SUPPORT_ROUTE_NAMES = Object.freeze([
+  'app/editor/read', 'app/editor/list', 'app/editor/write', 'app/editor/delete',
+  'app/editor-write', 'app/editor-delete',
+  'lifecycle/assert-opfs-writable', 'vm/get-meta',
+  'site-client/list', 'site-client/delete', 'audit/voice-fetch',
+  'denylist/list', 'commands/list', 'composer/files', 'composer/tabs',
+  'settings/update', 'settings/reset',
+  'session/list', 'session/get', 'session/contextSnapshots', 'session/setModel',
+  'permission/set',
+]);
+
+export const KERNEL_CREDENTIAL_ROUTE_NAMES = Object.freeze(
+  'git-cred/list git-cred/set git-cred/delete origin-cred/list origin-cred/set origin-cred/delete'.split(' '),
+);
+
+export const KERNEL_SEMANTIC_OWNER_ROUTE_NAMES = Object.freeze(
+  'actor-isolation/retry actor/spawn agent/send agent/stop actors/count actors/overview app/get-meta apps/favorite apps/list apps/open apps/rename contacts/forget contacts/list contacts/set memory/delete memory/deleteAll memory/export memory/suggestions memory/suggestions/approve memory/suggestions/dismiss memory/write provider/status skills/list skills/remove skills/setEnabled provider/test models/options openrouter/models local-model/catalog local-model/init local-model/probe local-model/status apps/repository/status apps/repository/history apps/repository/diff apps/repository/commit apps/repository/restore apps/repository/branch apps/repository/checkout apps/repository/link apps/repository/fetch apps/repository/push apps/import-git session/archive session/debugBundle session/reset session/switch toolbox/read toolbox/record'.split(' '),
+);
+
 export const KERNEL_EXECUTABLE_SEMANTIC_ROUTE_NAMES = Object.freeze(
   'pod/cancel-io pod/get-meta pod/git pod/web-fetch sw/web-fetch sw/web-fetch-abort export/artifact import/inspect import/apply apps/delete app/actor-chat app/call a2a/call actors/call page/call script/model-call script-run/abort site-fetch/call'.split(' '),
 );

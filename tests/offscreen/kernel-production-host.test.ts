@@ -40,7 +40,6 @@ describe('controller production projection', () => {
     }, {})).resolves.toMatchObject({ accepted: true, reconciled: true });
     await host.events['production/ui-connect']({}, {});
     await host.events['production/ui-quiet']({}, {});
-    await host.events['production/schedules-resume']({}, {});
     await host.events['production/navigation-target']({ sourceTabId: 1, tabId: 2 }, {});
     await expect(host.events['production/tabs-created']({ tab: { id: -1 } }, {}))
       .rejects.toThrow('production-tab-created-invalid');
@@ -49,7 +48,7 @@ describe('controller production projection', () => {
     unsubscribe();
     expect(seen).toEqual([
       'production/reconcile', 'production/ui-connect', 'production/ui-quiet',
-      'production/schedules-resume', 'production/navigation-target',
+      'production/navigation-target',
     ]);
   });
 

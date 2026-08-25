@@ -326,16 +326,13 @@ export const createKernelTurnLiveFactories = (deps) => {
   const persistWebBindings = () => {
     const entries = webActorTabBindings.entries();
     webBindingWrite = webBindingWrite.then(async () => {
-      if (!deps.firefox) {
-        await deps.sessionCache.sessionSet('webActorTabBindings', entries);
-        return;
-      }
       const sourceRows = (await Promise.all(entries.map(async ([tabId, sessionId]) =>
         webActorSourceProjectionRow(
           await deps.browser.tabs.get(tabId).catch(() => null), sessionId,
         )))).filter(Boolean);
       await deps.sessionCache.sessionSet('webActorTabBindings', entries);
       await deps.sessionCache.sessionSet(WEB_ACTOR_SOURCE_PROJECTION_KEY, sourceRows);
+      await deps.updateBrowserSourceProjection(entries, sourceRows);
     }).catch(() => {});
     return webBindingWrite;
   };

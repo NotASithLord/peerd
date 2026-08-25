@@ -10,13 +10,7 @@ export class BrowserNetworkCustodyClosedError extends Error {
 /** @typedef {{ tabId: number, token: string }} BrowserNetworkCustodyClaim */
 /** @typedef {BrowserNetworkCustodyClaim & { added: boolean }} BrowserNetworkDurableClaim */
 
-/**
- * Own durable tab holds and operation-scoped leases for the browser network
- * floor. Persistence is serialized so an older snapshot cannot overwrite a
- * newer close, and hydration records close tombstones before restoring IDs.
- *
- * @param {{ persist: (tabIds: readonly number[]) => Promise<unknown>, makeToken?: () => string }} deps
- */
+/** @param {{persist:(tabIds:readonly number[])=>Promise<unknown>,makeToken?:()=>string}} deps */
 export const createBrowserNetworkCustody = ({ persist, makeToken = () => crypto.randomUUID() }) => {
   const durable = new Set();
   /** @type {Map<number, string>} */
@@ -59,9 +53,6 @@ export const createBrowserNetworkCustody = ({ persist, makeToken = () => crypto.
    * @returns {Promise<BrowserNetworkDurableClaim>}
    */
   const claimDurable = async (tabId, requiredLease) => {
-    // An optimistic Set entry is not durable authority. A second caller that
-    // arrives while its write is pending must share the outcome instead of
-    // mistaking that entry for an already-persisted hold.
     for (;;) {
       if (requiredLease && !isLeaseValid(requiredLease)) {
         throw new BrowserNetworkCustodyClosedError();
@@ -69,8 +60,6 @@ export const createBrowserNetworkCustody = ({ persist, makeToken = () => crypto.
       const pending = pendingDurableAdds.get(tabId);
       if (pending) {
         const claim = await pending.promise;
-        // Never let a caller waiting on an older tab generation silently adopt
-        // a newer tab that reused the same numeric id.
         if (!isDurableClaimValid(claim)
           || (requiredLease && !isLeaseValid(requiredLease))) {
           throw new BrowserNetworkCustodyClosedError();
@@ -89,30 +78,21 @@ export const createBrowserNetworkCustody = ({ persist, makeToken = () => crypto.
       const write = (async () => {
         try {
           await persistDurable();
-          // close() can remove this hold while its add write is pending. The
-          // caller must not continue after the tab lost custody, even if that
-          // first snapshot reached storage successfully.
           if (!isDurableClaimValid(claim)
             || (requiredLease && !isLeaseValid(requiredLease))) {
             throw new BrowserNetworkCustodyClosedError();
           }
           return claim;
         } catch (error) {
-          // A storage API may commit and still reject. Restore both the live
-          // view and the serialized snapshot before any joined caller settles.
-          // A failed cleanup is safe but stale: callers still fail closed and
-          // hydration may restore an extra guarded tab, never omit one.
           if (durableTokens.get(tabId) === claim.token) {
             durableTokens.delete(tabId);
             if (durable.delete(tabId)) {
-              try { await persistDurable(); } catch { /* best-effort rollback */ }
+              try { await persistDurable(); } catch {}
             }
           }
           throw error;
         }
       })();
-      // why: the wrapper is an identity token. Comparing the Promise itself
-      // looks like a missing await to static analysis and obscures the intent.
       const pendingAdd = { promise: write };
       pendingDurableAdds.set(tabId, pendingAdd);
       try {
@@ -128,12 +108,7 @@ export const createBrowserNetworkCustody = ({ persist, makeToken = () => crypto.
     }
   };
 
-  /**
-   * Preserve the original boolean contract for callers that do not need to
-   * retain the tab generation across another asynchronous operation.
-   * @param {number} tabId
-   * @returns {Promise<boolean>}
-   */
+  /** @param {number} tabId @returns {Promise<boolean>} */
   const addDurable = async (tabId) => (await claimDurable(tabId)).added;
 
   return {
@@ -154,11 +129,7 @@ export const createBrowserNetworkCustody = ({ persist, makeToken = () => crypto.
     /** @param {number} tabId */
     addDurable,
 
-    /**
-     * Add or join a durable hold and retain the exact tab generation acquired.
-     * Callers can validate it after an asynchronous DNR synchronization so a
-     * close or numeric tab-id reuse cannot turn stale custody into authority.
-     * @param {number} tabId
+    /** @param {number} tabId
      * @param {BrowserNetworkCustodyClaim} [requiredLease]
      * @returns {Promise<BrowserNetworkDurableClaim>}
      */

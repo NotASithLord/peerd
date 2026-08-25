@@ -13,7 +13,7 @@ const unavailable = (/** @type {string} */ family) => Object.freeze({
 
 /**
  * @param {Object} deps
- * @param {(deps:Record<string,any>)=>Record<string,any>} deps.makeController
+ * @param {(...args:any[])=>any} deps.makeController
  * @param {Record<string,any>} deps.controller
  */
 export const createKernelControllerGateway = ({ makeController, controller }) => {
@@ -47,6 +47,17 @@ export const createKernelControllerGateway = ({ makeController, controller }) =>
     }
     const binding = { cluster, owner, users: 0, retiring: false };
     features.set(cluster, binding);
+    return binding;
+  };
+  const bindEventSlot = (/** @type {any} */ owner) => {
+    if (closed || features.has('event')) {
+      throw new Error('kernel-feature-owner-conflict');
+    }
+    if (typeof owner?.authorize !== 'function' || typeof owner?.handle !== 'function') {
+      throw new TypeError('kernel-feature-owner-invalid');
+    }
+    const binding = { cluster: 'event', owner, users: 0, retiring: false, event: true };
+    features.set('event', binding);
     return binding;
   };
   const release = (/** @type {any} */ binding,
@@ -92,8 +103,9 @@ export const createKernelControllerGateway = ({ makeController, controller }) =>
     const binding = featureCalls.get(payload)?.binding;
     if (!binding || binding.users < 1) return null;
     const grant = binding.owner.authorize(payload);
-    return typeof grant?.target === 'string'
-      && grant.target.startsWith(`kernel-feature:${binding.cluster}:`) ? grant : null;
+    const prefix = binding.event
+      ? 'kernel-feature:event:' : `kernel-feature:${binding.cluster}:`;
+    return typeof grant?.target === 'string' && grant.target.startsWith(prefix) ? grant : null;
   };
   const callFeature = (/** @type {any} */ binding, /** @type {string} */ family,
     /** @type {unknown} */ payload, /** @type {()=>Promise<any>} */ operation) => use(
@@ -141,7 +153,8 @@ export const createKernelControllerGateway = ({ makeController, controller }) =>
         ?? { ok: false, code: 'kernel-operation-denied', outcomeKnown: true },
   });
   if (['callSemantic', 'callTurn', 'callRuntime', 'callFeature', 'callFeatureEvent',
-    'renderSystemPrompt', 'withRun', 'close'].some((name) => typeof client?.[name] !== 'function')) {
+    'renderSystemPrompt', 'withRun', 'close']
+    .some((name) => typeof client?.[name] !== 'function')) {
     try { client?.close?.(); } catch {}
     throw new TypeError('kernel-controller-client-invalid');
   }
@@ -201,8 +214,21 @@ export const createKernelControllerGateway = ({ makeController, controller }) =>
       ),
     });
   };
+  const bindEvents = (/** @type {any} */ owner) => {
+    const binding = bindEventSlot(owner);
+    return Object.freeze({
+      call: (/** @type {unknown} */ payload, /** @type {any} */ options = {}) => callFeature(
+        binding, 'feature-event', payload, () => client.callFeatureEvent(payload, options),
+      ),
+      release: () => release(
+        binding, () => features.get('event'), () => { features.delete('event'); },
+      ),
+    });
+  };
   return Object.freeze({
-    bindSemantic, bindTurn, bindRuntime, bindFeature,
+    bindSemantic, bindTurn, bindRuntime, bindFeature, bindEvents,
+    withRun: (/** @type {()=>Promise<any>} */ operation) => client.withRun(operation),
+    retire: () => client.retire?.(),
     close: () => {
       if (closed) return;
       closed = true;

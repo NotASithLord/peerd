@@ -103,12 +103,8 @@ describe('kernel production event projection', () => {
       await expect(events.emit('production/navigation-target', {
         sourceTabId: 1, tabId: 2,
       })).resolves.toMatchObject({ outcomeKnown: false });
-      await expect(events.emit('production/schedules-resume'))
-        .resolves.toMatchObject({ outcomeKnown: false });
     });
-    expect(applied).toEqual([
-      'production/navigation-target', 'production/schedules-resume',
-    ]);
+    expect(applied).toEqual(['production/navigation-target']);
   });
 
   test('keeps one logical event id across a known retry and reconciles every run', async () => {
@@ -141,6 +137,66 @@ describe('kernel production event projection', () => {
     expect(delta[0].envelope.sequence).not.toBe(delta[1].envelope.sequence);
     expect(deliveries.filter((delivery) => delivery.event === 'production/reconcile'))
       .toHaveLength(3);
+  });
+
+  test('bounds a frozen snapshot and admits a successor reconcile', async () => {
+    let reads = 0;
+    let sends = 0;
+    const events = createKernelProductionEvents({
+      identity: { bootId: 'boot-production-hang-1', kernelEpoch: 'epoch-production-hang-1' },
+      timeoutMs: 5,
+      send: async () => {
+        sends += 1;
+        return { ok: true, outcomeKnown: true, value: { accepted: true } };
+      },
+      readSnapshot: () => {
+        reads += 1;
+        if (reads === 1) return new Promise<any>(() => {});
+        return {
+          tabs: [], activeTabId: null,
+          settings: { ...CHANNEL_DEFAULTS }, uiConnected: false,
+        };
+      },
+      withRun: (operation) => operation(),
+    });
+    await expect(events.run(async () => true)).resolves.toMatchObject({
+      code: 'production-snapshot-timeout', outcomeKnown: true,
+      phase: 'startup', retryable: true,
+    });
+    await expect(events.run(async () => 'ready')).resolves.toBe('ready');
+    expect({ reads, sends }).toEqual({ reads: 2, sends: 1 });
+  });
+
+  test('bounds an unknown delivery without poisoning later deltas', async () => {
+    let frozen = true;
+    const delivered: string[] = [];
+    const events = createKernelProductionEvents({
+      identity: { bootId: 'boot-production-hang-2', kernelEpoch: 'epoch-production-hang-2' },
+      timeoutMs: 5,
+      send: async (event) => {
+        delivered.push(event);
+        if (event === 'production/ui-connect' && frozen) {
+          frozen = false;
+          return new Promise<any>(() => {});
+        }
+        return { ok: true, outcomeKnown: true, value: { accepted: true } };
+      },
+      readSnapshot: () => ({
+        tabs: [], activeTabId: null,
+        settings: { ...CHANNEL_DEFAULTS }, uiConnected: false,
+      }),
+      withRun: (operation) => operation(),
+    });
+    await events.run(async () => {
+      await expect(events.emit('production/ui-connect')).resolves.toMatchObject({
+        code: 'production-event-timeout', outcomeKnown: false, phase: 'run',
+      });
+      await expect(events.emit('production/ui-quiet')).resolves.toMatchObject({ ok: true });
+    });
+    expect(delivered).toEqual([
+      'production/reconcile', 'production/ui-connect',
+      'production/reconcile', 'production/ui-quiet',
+    ]);
   });
 
   test('bounds a high-cardinality snapshot and omits one oversized URL', async () => {
