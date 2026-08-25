@@ -1,7 +1,6 @@
 // @ts-check
 
 import {
-  ACTORS_RUN_MAX_OPS,
   ACTORS_ASK_DEFAULT_TIMEOUT_MS,
   ACTORS_TRACE_ERROR_MAX_CHARS,
   ACTORS_TRACE_TARGET_MAX_CHARS,
@@ -179,9 +178,7 @@ import { makeOffscreenDocClient } from './offscreen-doc-client.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeOffscreenWebClient } from './offscreen-web-client.js';
-import { createScriptRunRegistry } from './script-runs.js';
 import { makeAppActorChatHandler } from './app-actor-chat.js';
-import { createContextSnapshots } from './context-snapshots.js';
 import { makePageCallHandler } from '/peerd-runtime/background.js';
 import { makeActorsRoutes } from './routes/actors.js';
 import { makeOriginLockResolver } from './origin-lock-controller.js';
@@ -204,7 +201,6 @@ import {
   validateAppTabClaim,
 } from './app-actor-policy.js';
 import { sha256Hex } from '/shared/util.js';
-import { createKernelRichEffectAuthority } from './kernel-rich-effect-authority.js';
 import { CHANNEL_DEFAULTS } from '/shared/channel-config.js';
 import { ACTOR_WORKER_PROTOCOL } from '/offscreen/actor-worker-protocol.js';
 import {
@@ -232,16 +228,16 @@ const originOf = (/** @type {string} */ value) => {
 /** @param {Record<string,any>} deps */
 export const createKernelTurnLiveFactories = (deps) => {
   if (!deps?.engine || !deps.browser || !deps.vault || !deps.settingsStore
-      || !deps.seams || !deps.confirmation || !deps.denylist) {
+      || !deps.seams || !deps.confirmation || !deps.denylist
+      || !deps.scriptRuns || !deps.contextSnapshots) {
     throw new TypeError('kernel-turn-live-config-invalid');
   }
   registerTools();
   const engine = deps.engine;
-  const scriptRuns = deps.scriptRuns
-    ?? createScriptRunRegistry({ actorOpLimit: ACTORS_RUN_MAX_OPS });
+  const scriptRuns = deps.scriptRuns;
   const poisonedAppRuntimeTabs = new Set();
   const projection = createActorLiveProjection();
-  const contextSnapshots = createContextSnapshots();
+  const contextSnapshots = deps.contextSnapshots;
   const debuggerPool = createDebuggerPool({ bindTabEvents: false, bindTabRemoval: false });
   const debuggerApiAvailable = () => typeof deps.browser.debugger?.attach === 'function';
   const advancedAutomationOn = () => debuggerApiAvailable()
@@ -2621,26 +2617,10 @@ export const createKernelTurnLiveFactories = (deps) => {
       },
       'a2a/call': a2aCall,
     };
-    const richEffects = createKernelRichEffectAuthority({
-      scriptRuns,
-      sessions: {
-        getMetadata: (/** @type {string} */ sessionId) => shared.sessions.get(sessionId),
-        updateMetadata: (/** @type {string} */ sessionId, /** @type {any} */ patch) =>
-          shared.sessions.update(sessionId, patch),
-      },
-      settingsStore: deps.settingsStore,
-      vault: deps.vault,
-      auditLog: deps.auditLog,
-      contextSnapshots,
-      kv: deps.kv,
-      safeFetch,
-      fetchFn: globalThis.fetch.bind(globalThis),
-    });
     const relays = {
       scriptRuns, validateGeneration, retireStale, dispatchToolCall,
       buildActorContext: buildToolContext, appActorChat, engineTrackersHydrated, engineReady,
       relayRoutes, engineRoutes, eventOwners,
-      handleRichKernelCall: richEffects.handle,
       dwebInbound: dwebAgentOwner.onMessage,
       syncDwebAgentRoom: dwebAgentOwner.syncRoom,
       onDwebStopped: dwebAgentOwner.roomStopped,

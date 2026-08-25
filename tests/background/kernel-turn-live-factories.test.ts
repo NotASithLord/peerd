@@ -3,6 +3,8 @@ import { describe, expect, test } from 'bun:test';
 import { createKernelTurnLiveFactories } from '../../extension/background/kernel-turn-live-factories.js';
 import { createSessionStore, makeTurnSlots } from '../../extension/peerd-runtime/background.js';
 import { buildAppManifest } from '../../extension/peerd-engine/app-manifest.js';
+import { createContextSnapshots } from '../../extension/background/context-snapshots.js';
+import { createScriptRunRegistry } from '../../extension/background/script-runs.js';
 
 const event = () => {
   const listeners = new Set<(...args: any[]) => void>();
@@ -257,6 +259,8 @@ const harness = async (
       sessionSet: async (key: string, value: any) => { cache.set(key, structuredClone(value)); },
     },
     canWrite: () => {}, ready: Promise.resolve(),
+    contextSnapshots: createContextSnapshots(),
+    scriptRuns: createScriptRunRegistry(),
     postChatNote: () => {}, pushState: async () => {},
     dwebEnabled: false, firefox: options.firefox === true,
     firefoxActorLifetime: options.firefoxActorLifetime,
@@ -335,6 +339,8 @@ const dependencies = () => ({
     sessionSet: async () => {},
   },
   canWrite: () => {},
+  contextSnapshots: createContextSnapshots(),
+  scriptRuns: createScriptRunRegistry(),
 });
 
 describe('kernel live turn factories', () => {
