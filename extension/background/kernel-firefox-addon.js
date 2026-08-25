@@ -5,9 +5,63 @@ import {
   makeDrivenChildRequestGuard,
   makeFirefoxDrivenChildMarkerStore,
 } from './driven-child-request-guard.js';
-import { connectDirectController } from './direct-controller-client.js';
-import * as firefoxLifetime from './firefox-storage-keepalive.js';
-import { createFirefoxRepositoryClient } from './repository-local-client.js';
+
+// why: Firefox must evaluate child-request custody at event-page startup, but
+// controller, lifetime, and repository owners have no synchronous listener duty.
+/** @template T @param {()=>Promise<T>} loader */
+const deferredModule = (loader) => {
+  /** @type {Promise<T>|null} */ let pending = null;
+  return () => {
+    pending ??= Promise.resolve().then(loader).catch((cause) => {
+      pending = null;
+      throw cause;
+    });
+    return pending;
+  };
+};
+
+/**
+ * @param {Object} [loaders]
+ * @param {()=>Promise<any>} [loaders.controller]
+ * @param {()=>Promise<any>} [loaders.lifetime]
+ * @param {()=>Promise<any>} [loaders.repository]
+ * @returns {any}
+ */
+export const createKernelFirefoxLazyAddon = ({
+  controller = () => import('./direct-controller-client.js'),
+  lifetime = () => import('./firefox-storage-keepalive.js'),
+  repository = () => import('./repository-local-client.js'),
+} = {}) => {
+  const loadController = deferredModule(controller);
+  const loadLifetime = deferredModule(lifetime);
+  const loadRepository = deferredModule(repository);
+  return Object.freeze(Object.defineProperties({}, {
+    connectDirectController: {
+      enumerable: true,
+      value: async (/** @type {any} */ deps) => {
+        const module = await loadController();
+        if (typeof module.connectDirectController !== 'function') {
+          throw new TypeError('kernel-firefox-controller-invalid');
+        }
+        return module.connectDirectController(deps);
+      },
+    },
+    createFirefoxRepositoryClient: {
+      enumerable: true,
+      value: async (/** @type {any} */ deps) => {
+        const module = await loadRepository();
+        if (typeof module.createFirefoxRepositoryClient !== 'function') {
+          throw new TypeError('kernel-firefox-repository-invalid');
+        }
+        return module.createFirefoxRepositoryClient(deps);
+      },
+    },
+    firefoxLifetime: {
+      enumerable: true,
+      get: loadLifetime,
+    },
+  }));
+};
 
 const root = /** @type {any} */ (globalThis);
 const addonId = Symbol.for('peerd.kernel.firefox-addon.v1');
@@ -47,8 +101,8 @@ export const createKernelFirefoxGuard = (/** @type {any} */ {
     markers: makeFirefoxDrivenChildMarkerStore(storage),
   });
 };
-root[addonId] = Object.freeze(Object.assign(createKernelFirefoxGuard, {
-  connectDirectController,
-  createFirefoxRepositoryClient,
-  firefoxLifetime,
-}));
+Object.defineProperties(
+  createKernelFirefoxGuard,
+  Object.getOwnPropertyDescriptors(createKernelFirefoxLazyAddon()),
+);
+root[addonId] = Object.freeze(createKernelFirefoxGuard);

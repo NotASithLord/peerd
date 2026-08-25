@@ -43,6 +43,7 @@ export const PACKAGED_LAZY_MODULE_ENTRIES = Object.freeze([
   'background/kernel-dweb-route-runtime.js',
   'background/firefox-storage-keepalive.js',
   'background/direct-actor-host.js',
+  'background/repository-local-client.js',
   'peerd-egress/ui.js',
   'offscreen/repository-host.js',
   'offscreen/repository-app-files.js',
