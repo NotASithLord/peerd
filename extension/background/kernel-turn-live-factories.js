@@ -51,8 +51,10 @@ import {
   finalAssistantText,
   formatDocBody,
   getTool,
+  getToolDescriptor,
   GOAL_MAX_ITERATIONS,
   listTools,
+  listToolDescriptors,
   loadSkillTool,
   localStoreSource,
   mainAgentDescriptors,
@@ -85,6 +87,7 @@ import {
   PERMISSION_MODES,
   pinActorCall,
   prepareUserAttachmentsWithDocs,
+  registerMetadataInventory,
   registerTool,
   resolveManifestAllow,
   shapeActorsResult,
@@ -216,6 +219,7 @@ let toolsRegistered = false;
 
 const registerTools = () => {
   if (toolsRegistered) return;
+  registerMetadataInventory();
   for (const tool of [...BUILTIN_TOOLS, ...CLOCK_TOOLS, ...WEB_TOOLS, loadSkillTool]) {
     registerTool(/** @type {any} */ (tool));
   }
@@ -2838,6 +2842,7 @@ export const createKernelTurnLiveFactories = (deps) => {
     skillRegistry, resolveManifestAllow, buildToolContext,
     filterByDwebActive, filterByDwebEnabled, filterDescriptorsByManifest,
     mainAgentDescriptors, listTools, settingsStore: deps.settingsStore,
+    listToolDescriptors,
     DWEB_ENABLED: deps.dwebEnabled, filterByGoalActive,
     dwebEngagedSessions,
     markDwebEngaged: (/** @type {string} */ sessionId) => {
@@ -2845,6 +2850,7 @@ export const createKernelTurnLiveFactories = (deps) => {
     },
     dispatchToolCall, prepareToolCall, settleToolCall,
     maybeNudgeDebuggerGrant, getTool, decideAction,
+    getToolDescriptor,
     listProviders, costOf, makeTurnCostTracker,
     uiConnected, uiPorts: shared.uiPorts, auditLog: deps.auditLog,
     resolveFailoverChain: (/** @type {{provider:string,model:string}} */ start) => {

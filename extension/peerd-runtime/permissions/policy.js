@@ -34,7 +34,7 @@
 //   realization, generalized from terminal Build/Plan to the browser's
 //   bigger surface (DOM + tabs + fetch + shell, not just files).
 
-/** @typedef {import('/shared/tool-types.js').Tool} Tool */
+/** @typedef {ReturnType<typeof import('../tools/metadata/descriptor.js').toToolDescriptor>} Tool */
 /** @typedef {import('/shared/tool-types.js').SideEffect} SideEffect */
 
 // --- Modes (the top axis) --------------------------------------------------

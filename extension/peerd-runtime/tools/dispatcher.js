@@ -13,7 +13,7 @@
 // the same DI / functional-core / imperative-shell pattern we use
 // everywhere else.
 
-import { getTool } from './registry.js';
+import { getTool, getToolDescriptor } from './registry.js';
 import { GATES } from './gates.js';
 import {
   AUTH_BOUNDARY_STOPPED_MESSAGE, AUTH_STATE_UNAVAILABLE_MESSAGE,
@@ -35,7 +35,7 @@ import { retryClassForTool } from '../lifecycle/tool-retry-class.js';
 import { RETRY_CLASSES } from '../lifecycle/retry-class.js';
 import { FAILURE_OUTCOMES } from '../lifecycle/failure-taxonomy.js';
 
-/** @typedef {import('/shared/tool-types.js').Tool} Tool */
+/** @typedef {ReturnType<typeof import('./metadata/descriptor.js').toToolDescriptor>} ToolDescriptor */
 
 /**
  * Resolve a tool's touched origins without letting a throwing origins()
@@ -43,7 +43,7 @@ import { FAILURE_OUTCOMES } from '../lifecycle/failure-taxonomy.js';
  * (and failed closed on throw); here we only want a best-effort list for
  * the human-readable prompt, so swallow and return [].
  *
- * @param {Tool} tool @param {any} args @param {ToolContext} ctx
+ * @param {ToolDescriptor} tool @param {any} args @param {ToolContext} ctx
  * @returns {string[]}
  */
 const safeOrigins = (tool, args, ctx) => {
@@ -56,7 +56,7 @@ const safeOrigins = (tool, args, ctx) => {
  * but normalize defensively so equivalent URL spellings cannot split the
  * sibling-actor replay guard. Non-URL capability addresses remain exact.
  *
- * @param {Tool} tool @param {any} args @param {ToolContext} ctx
+ * @param {ToolDescriptor} tool @param {any} args @param {ToolContext} ctx
  * @returns {string}
  */
 const lifecycleTarget = (tool, args, ctx) => {
@@ -305,6 +305,20 @@ const liveTabUrl = async (ctx) => {
   }
 };
 
+/** @param {DispatchContext} ctx */
+const withToolMetadata = (ctx) => ({
+  ...ctx,
+  /** @param {string} name */
+  getToolMeta: (name) => {
+    const descriptor = getToolDescriptor(name);
+    return descriptor && {
+      sideEffect: descriptor.sideEffect,
+      primitive: descriptor.primitive,
+      origins: descriptor.origins,
+    };
+  },
+});
+
 /** @typedef {import('/shared/tool-types.js').ToolCall} ToolCall */
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
 /** @typedef {import('/shared/tool-types.js').ToolResult} ToolResult */
@@ -362,7 +376,7 @@ const liveTabUrl = async (ctx) => {
  * @returns {Promise<ToolResult | Record<string, any>>}
  */
 export const prepareToolCall = async (call, ctx) => {
-  const tool = getTool(call.name);
+  const tool = getToolDescriptor(call.name);
   if (!tool) {
     return {
       ok: false,
@@ -662,14 +676,7 @@ export const prepareToolCall = async (call, ctx) => {
   // the egress allowlist via ctx augmentation so the default egress hook
   // can reason about a call's footprint without the dispatcher special-
   // casing it.
-  const hookCtx = {
-    ...ctx,
-    /** @param {string} n */
-    getToolMeta: (n) => {
-      const t = getTool(n);
-      return t && { sideEffect: t.sideEffect, primitive: t.primitive, origins: t.origins };
-    },
-  };
+  const hookCtx = withToolMetadata(ctx);
   const pre = await runPreToolUse({ hooks, toolName: call.name, args, ctx: hookCtx });
   hookOutcomes.push(...pre.outcomes);
   if (!pre.allowed) {
@@ -815,26 +822,6 @@ export const prepareToolCall = async (call, ctx) => {
   // outbound messages by it. The UI maps each in-flight tool_use card
   // to its own stream entry; without an id the chunks have no anchor
   // and the renderer drops them.
-  const executeConfirm = /** @type {((prompt: Record<string, any>, signal?: AbortSignal) => Promise<import('/shared/tool-types.js').ConfirmAnswer>) | undefined} */ (
-    ctx.confirm
-  );
-  const execCtx = {
-    ...ctx,
-    toolUseId: call.id,
-    // Tools with their own mandatory consent surface call ctx.confirm from
-    // execute(). Bind those prompts to this exact model dispatch too; a prompt
-    // UUID and session are not enough evidence that the answer covers this
-    // particular tool_use.
-    ...(executeConfirm ? {
-      /** @param {Record<string, any>} prompt @param {AbortSignal} [signal] */
-      confirm: (prompt, signal) => executeConfirm({
-        ...prompt,
-        sessionId: prompt?.sessionId ?? ctx.session?.sessionId ?? null,
-        dispatchId: call.id ?? null,
-      }, signal),
-    } : {}),
-  };
-
   // ---- In-page activity indicator ----------------------------------------
   // why here and not in each tab tool: this is the one place every page-acting
   // call passes through, on every path (main turn, bound actor, the offscreen
@@ -873,8 +860,6 @@ export const prepareToolCall = async (call, ctx) => {
     .includes(call.name)
     && typeof activityTabId === 'number';
   /** @type {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} */
-  const browserChildPolicyNotices = [];
-  /** @type {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} */
   let browserAsyncPolicyNotices = [];
   if (childPolicyEligible && consumeBrowserChildPolicyNotice) {
     const detached = normalizeBrowserChildPolicyNotices(
@@ -891,6 +876,7 @@ export const prepareToolCall = async (call, ctx) => {
   let preExecutionResult = null;
   let preExecutionError = null;
   let preExecutionFailed = false;
+  let browserChildQuarantineArmedTabId;
   try {
     if (quarantineCapable && (ctx.browserChildQuarantineRequired
         || typeof ctx.armBrowserChildQuarantine === 'function')) {
@@ -898,7 +884,7 @@ export const prepareToolCall = async (call, ctx) => {
         ? await ctx.armBrowserChildQuarantine(activityTabId)
         : null;
       if (armed?.ok === true) {
-        Object.assign(execCtx, { browserChildQuarantineArmedTabId: activityTabId });
+        browserChildQuarantineArmedTabId = activityTabId;
       } else preExecutionResult = {
         ok: /** @type {const} */ (false),
         error: armed?.error ?? 'browser_child_quarantine_unavailable',
@@ -913,16 +899,55 @@ export const prepareToolCall = async (call, ctx) => {
   }
   return {
     prepared: true,
-    call, ctx, tool, args, hooks, hookCtx, hookOutcomes, gateResults,
-    tracking, execCtx, activity, activityTabId, start,
-    consumeBrowserChildPolicyNotice, childPolicyEligible, childCapable,
-    browserChildPolicyNotices, browserAsyncPolicyNotices,
+    call, ctx, tool, args, hooks, hookOutcomes, gateResults,
+    tracking, activityTabId, start, childPolicyEligible, childCapable,
+    browserAsyncPolicyNotices,
+    browserChildQuarantineArmedTabId,
     preExecutionResult, preExecutionError, preExecutionFailed,
   };
 };
 
 /** @param {Record<string, any>} prepared */
-const executeInline = (prepared) => prepared.tool.execute(prepared.args, prepared.execCtx);
+const executeInline = (prepared) => {
+  const implementation = getTool(prepared.tool.name);
+  if (!implementation || getToolDescriptor(prepared.tool.name) !== prepared.tool) {
+    return {
+      ok: false,
+      error: `tool_implementation_unavailable:${prepared.tool.name}`,
+      code: 'tool-implementation-unavailable',
+      outcomeKnown: true,
+      outcomeKind: /** @type {const} */ ('pre-effect-failure'),
+      retryable: true,
+    };
+  }
+  return implementation.execute(prepared.args, prepared.execCtx);
+};
+
+/** @param {Record<string, any>} prepared */
+const withExecutionContext = (prepared) => {
+  const { call, ctx } = prepared;
+  const executeConfirm = /** @type {((prompt: Record<string, any>, signal?: AbortSignal) => Promise<import('/shared/tool-types.js').ConfirmAnswer>) | undefined} */ (
+    ctx.confirm
+  );
+  return {
+    ...prepared,
+    execCtx: {
+      ...ctx,
+      toolUseId: call.id,
+      ...(executeConfirm ? {
+        /** @param {Record<string, any>} prompt @param {AbortSignal} [signal] */
+        confirm: (prompt, signal) => executeConfirm({
+          ...prompt,
+          sessionId: prompt?.sessionId ?? ctx.session?.sessionId ?? null,
+          dispatchId: call.id ?? null,
+        }, signal),
+      } : {}),
+      ...(typeof prepared.browserChildQuarantineArmedTabId === 'number'
+        ? { browserChildQuarantineArmedTabId: prepared.browserChildQuarantineArmedTabId }
+        : {}),
+    },
+  };
+};
 
 /**
  * @param {Record<string, any>} prepared
@@ -931,7 +956,7 @@ const executeInline = (prepared) => prepared.tool.execute(prepared.args, prepare
 export const executePreparedToolCall = async (prepared, execute = executeInline) => {
   if (prepared.preExecutionFailed) return { error: prepared.preExecutionError };
   if (prepared.preExecutionResult) return { result: prepared.preExecutionResult };
-  try { return { result: await execute(prepared) }; }
+  try { return { result: await execute(withExecutionContext(prepared)) }; }
   catch (error) { return { error }; }
 };
 
@@ -941,12 +966,18 @@ export const executePreparedToolCall = async (prepared, execute = executeInline)
  * @returns {Promise<ToolResult>}
  */
 export const settleToolCall = async (prepared, execution) => {
-  let {
-    call, ctx, tool, args, hooks, hookCtx, hookOutcomes, gateResults,
-    tracking, activity, activityTabId, start, consumeBrowserChildPolicyNotice,
-    childPolicyEligible, childCapable, browserChildPolicyNotices,
+  const {
+    call, ctx, tool, args, hooks, hookOutcomes, gateResults,
+    tracking, activityTabId, start, childPolicyEligible, childCapable,
     browserAsyncPolicyNotices,
   } = prepared;
+  const hookCtx = withToolMetadata(ctx);
+  const activity = tool.primitive === 'tab' ? ctx.onToolActivity : null;
+  const consumeBrowserChildPolicyNotice = typeof ctx.consumeBrowserChildPolicyNotice === 'function'
+    ? ctx.consumeBrowserChildPolicyNotice
+    : null;
+  /** @type {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} */
+  let browserChildPolicyNotices = [];
   try {
     if (Object.hasOwn(execution, 'error')) throw execution.error;
     let result = execution.result;

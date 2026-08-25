@@ -5,7 +5,12 @@ import {
   prepareToolCall,
   settleToolCall,
 } from '../../../extension/peerd-runtime/tools/dispatcher.js';
-import { clearTools, registerTool } from '../../../extension/peerd-runtime/tools/registry.js';
+import {
+  clearTools,
+  getTool,
+  registerMetadataInventory,
+  registerTool,
+} from '../../../extension/peerd-runtime/tools/registry.js';
 
 const tool = (over: Record<string, unknown> = {}) => ({
   name: 'phase_tool', description: 'phase tool', primitive: 'web', sideEffect: 'read',
@@ -20,7 +25,10 @@ const context = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-afterEach(() => clearTools());
+afterEach(() => {
+  clearTools();
+  registerMetadataInventory([]);
+});
 
 describe('dispatcher phases', () => {
   test('prepare stops before execution and settle owns the durable outcome', async () => {
@@ -51,6 +59,8 @@ describe('dispatcher phases', () => {
       ctx,
     );
     expect(prepared.prepared).toBe(true);
+    expect(prepared.tool).not.toHaveProperty('execute');
+    expect(prepared).not.toHaveProperty('execCtx');
     expect(inlineExecutions).toBe(0);
     expect(events).toEqual(['prepare:lifecycle']);
 
@@ -93,6 +103,74 @@ describe('dispatcher phases', () => {
     expect(events).toEqual(['prepare:quarantine', 'execute']);
   });
 
+  test('inert metadata can authorize, confirm, track, and settle remote execution', async () => {
+    const events: string[] = [];
+    registerMetadataInventory([{
+      name: 'remote_tool', primitive: 'web', sideEffect: 'write',
+      originRule: { kind: 'none' },
+    }]);
+    const prepared: any = await prepareToolCall(
+      { id: 'call-remote', name: 'remote_tool', args: { value: 1 } } as any,
+      context({
+        permission: { mode: 'act', confirmActions: true },
+        confirm: async () => {
+          events.push('confirm');
+          return 'yes_once';
+        },
+        lifecycleUserInitiated: true,
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async ({ tool: descriptor }: any) => {
+            events.push(`prepare:${descriptor.name}:${'execute' in descriptor}`);
+            return { handle: { operationId: 'remote-operation' } };
+          },
+          settleTracking: async (_handle: any, outcome: any) => {
+            events.push(`settle:${outcome.ok}`);
+            return null;
+          },
+        },
+      }) as any,
+    );
+
+    expect(prepared).toMatchObject({ prepared: true, args: { value: 1 } });
+    expect(prepared.tool).not.toHaveProperty('execute');
+    expect(prepared).not.toHaveProperty('execCtx');
+    const execution = await executePreparedToolCall(prepared, async (request) => {
+      events.push(`execute:${request.execCtx.toolUseId}`);
+      expect(request.tool).not.toHaveProperty('execute');
+      return { ok: true, content: 'remote' };
+    });
+    const result: any = await settleToolCall(prepared, execution);
+
+    expect(result).toMatchObject({
+      ok: true,
+      content: 'remote',
+      meta: { toolName: 'remote_tool', primitive: 'web', sideEffect: 'write' },
+    });
+    expect(events).toEqual([
+      'confirm', 'prepare:remote_tool:false', 'execute:call-remote', 'settle:true',
+    ]);
+  });
+
+  test('metadata without a local implementation fails before an effect', async () => {
+    registerMetadataInventory([{
+      name: 'remote_only', primitive: 'web', sideEffect: 'read',
+      originRule: { kind: 'none' },
+    }]);
+    const result: any = await dispatchToolCall(
+      { id: 'call-missing', name: 'remote_only', args: {} } as any,
+      context() as any,
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'tool_implementation_unavailable:remote_only',
+      code: 'tool-implementation-unavailable',
+      outcomeKnown: true,
+      outcomeKind: 'pre-effect-failure',
+      retryable: true,
+    });
+  });
+
   test('the default dispatcher and injected inline seam settle identically', async () => {
     registerTool(tool() as any);
     const inline: any = await dispatchToolCall(
@@ -102,7 +180,13 @@ describe('dispatcher phases', () => {
     const injected: any = await dispatchToolCall(
       { id: 'call-4', name: 'phase_tool', args: { value: 1 } } as any,
       context() as any,
-      { execute: (request) => request.tool.execute(request.args, request.execCtx) },
+      {
+        execute: (request) => {
+          const implementation = getTool(request.tool.name);
+          if (!implementation) throw new Error('tool implementation missing');
+          return implementation.execute(request.args, request.execCtx);
+        },
+      },
     );
     inline.meta.durationMs = 0;
     injected.meta.durationMs = 0;
