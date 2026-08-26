@@ -27,10 +27,26 @@ describe('kernel turn ownership boundaries', () => {
     for (const module of [
       'peerd-runtime/kernel-turn.js',
       'peerd-runtime/loop/turn-driver.js',
+      'peerd-runtime/loop/turn-authority-driver.js',
       'peerd-runtime/loop/goal-runner.js',
       'peerd-runtime/todo/core.js',
     ]) expect(modules.has(module), `authority runtime imports ${module}`).toBe(false);
     expect(existsSync(join(EXTENSION_ROOT, 'peerd-runtime/kernel-turn.js'))).toBe(false);
+    expect(existsSync(join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-driver.js'))).toBe(false);
+  });
+
+  it('links the fixed turn shell through the authority surface, not the semantic owner', async () => {
+    const authorityModules = await modulesFor('background/kernel-turn-authority-adapter.js');
+    expect(authorityModules.has('peerd-runtime/loop/turn-authority-driver.js')).toBe(true);
+
+    const semanticModules = await modulesFor('peerd-runtime/controller-turn-semantics.js');
+    expect(semanticModules.has('peerd-runtime/loop/turn-authority-driver.js')).toBe(false);
+    const semanticSource = readFileSync(
+      join(EXTENSION_ROOT, 'peerd-runtime/controller-turn-semantics.js'), 'utf8',
+    );
+    expect(semanticSource).not.toContain('makeTurnAuthorityDriver');
+    expect(semanticSource).not.toContain('makeTurnCostTracker');
+    expect(semanticSource).not.toContain('detectInterruptedTurn');
   });
 
   it('uses exact transfer custody leaves without a growing aggregate entry', async () => {
@@ -131,7 +147,7 @@ describe('kernel turn ownership boundaries', () => {
     ]) expect(controllerModules.has(module), `controller graph omits ${module}`).toBe(true);
 
     const driver = readFileSync(
-      join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-driver.js'), 'utf8',
+      join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-authority-driver.js'), 'utf8',
     );
     expect(driver).toContain('controller tool projection unavailable');
     for (const fallback of [
@@ -159,7 +175,7 @@ describe('kernel turn ownership boundaries', () => {
     ]) expect(controllerModules.has(module), `controller graph omits ${module}`).toBe(true);
 
     const driver = readFileSync(
-      join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-driver.js'), 'utf8',
+      join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-authority-driver.js'), 'utf8',
     );
     expect(driver).not.toContain('REASONING_BUDGET_TOKENS');
     expect(driver).not.toContain('REASONING_EFFORT_LEVELS');
@@ -191,13 +207,13 @@ describe('kernel turn ownership boundaries', () => {
   });
 
   it('keeps actor prompt, projection, and result shaping out of the orchestrator authority driver', async () => {
-    const modules = await modulesFor('peerd-runtime/loop/turn-driver.js');
+    const modules = await modulesFor('peerd-runtime/loop/turn-authority-driver.js');
     for (const module of [
       'peerd-runtime/actor/capability-manifest.js',
       'peerd-runtime/tools/exposure.js',
     ]) expect(modules.has(module), `orchestrator driver imports ${module}`).toBe(false);
     const source = readFileSync(
-      join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-driver.js'), 'utf8',
+      join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-authority-driver.js'), 'utf8',
     );
     for (const semanticPath of [
       "surface: 'actor'", 'turn/actor-start', 'turn/actor-state',
@@ -208,7 +224,7 @@ describe('kernel turn ownership boundaries', () => {
 
   it('keeps model-facing turn corrections in the sealed prompt renderer', () => {
     const driver = readFileSync(
-      join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-driver.js'), 'utf8',
+      join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-authority-driver.js'), 'utf8',
     );
     const renderer = readFileSync(
       join(EXTENSION_ROOT, 'peerd-runtime/loop/system-prompt.js'), 'utf8',
@@ -262,7 +278,7 @@ describe('kernel turn ownership boundaries', () => {
     ]) expect(controllerModules.has(module), `controller graph omits ${module}`).toBe(true);
 
     const driver = readFileSync(
-      join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-driver.js'), 'utf8',
+      join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-authority-driver.js'), 'utf8',
     );
     expect(driver).not.toContain('buildTemporalBlock');
     expect(driver).not.toContain('buildTemporalContext');

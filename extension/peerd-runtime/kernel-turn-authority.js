@@ -54,6 +54,7 @@ export { makeDispatchTracker, makeFailClosedTracker } from './lifecycle/dispatch
 export { makeEngineLiveness } from './lifecycle/engine-liveness.js';
 export { retryClassForTool } from './lifecycle/tool-retry-class.js';
 export { makePrewalkController } from './loop/prewalk-controller.js';
+export { makeTurnAuthorityDriver } from './loop/turn-authority-driver.js';
 export { assembleDebugBundle, childSessionIdsOf } from './observability/debug-bundle.js';
 export { classifyFailure } from './observability/failure-classify.js';
 export { resolveRuntimeCapabilities } from './runtime-capabilities.js';

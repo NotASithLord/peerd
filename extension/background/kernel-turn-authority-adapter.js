@@ -43,6 +43,7 @@ import {
   makeMeshDispatch,
   makeOriginStateStore,
   makePrewalkController,
+  makeTurnAuthorityDriver,
   makeSignInExcursionAuthorizer,
   makeSignInExcursionRevoker,
   makeSignInOriginAuthorizer,
@@ -144,9 +145,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     confirmActionsFromRecord,
     createSkillRegistry,
     createSuggestionStore,
-    decideAction,
     describeLandingStop,
-    detectInterruptedTurn,
     digestCapture,
     dispatchToolCall,
     DOC_TEXT_MAX_CHARS,
@@ -177,8 +176,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     makeToolboxParseCheck,
     makeToolsCommand,
     makeTrimEnricher,
-    makeTurnCostTracker,
-    makeTurnDriver,
     manifestLabel,
     mergeSources,
     meshCallToOp,
@@ -2929,7 +2926,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
   };
 
   const makeDriver = (/** @type {Record<string,any>} */ assembly) => {
-    const driver = makeTurnDriver(assembly);
+    const driver = makeTurnAuthorityDriver(assembly);
     live.runAgentTurn = driver.runAgentTurn;
     live.maybeAutoResume = driver.maybeAutoResume;
     return driver;
@@ -2939,7 +2936,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     ensureActiveProvider, resolvePermission, sessions: shared.sessions,
     turnSlots: shared.turnSlots,
     memory: shared.memory, browser: deps.browser,
-    skillRegistry, resolveManifestAllow, buildToolContext,
+    skillRegistry, buildToolContext,
     projectToolDescriptors,
     settingsStore: deps.settingsStore,
     DWEB_ENABLED: deps.dwebEnabled,
@@ -2948,16 +2945,10 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       if (sessionId) dwebEngagedSessions.add(sessionId);
     },
     dispatchToolCall, prepareToolCall, settleToolCall,
-    maybeNudgeDebuggerGrant, decideAction,
-    makeTurnCostTracker,
+    maybeNudgeDebuggerGrant,
     uiConnected, uiPorts: shared.uiPorts, auditLog: deps.auditLog,
     postChatNote: deps.postChatNote,
     trimEnricher: live.trimEnricher,
-    currentAppScope: async (/** @type {string} */ sessionId) => {
-      const appId = await engine.appRegistry.getDefaultForSession(sessionId).catch(() => null);
-      return appId ? `app:${appId}` : null;
-    },
-    checkpointMgr, detectInterruptedTurn,
     getDenylist: () => deps.denylist.patterns(),
     drainRecoveryNotices: (/** @type {string} */ sessionId) =>
       lifecycleBoot.drainNoticesFor(sessionId),
