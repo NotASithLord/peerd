@@ -5,6 +5,7 @@
 import { runUserTurn } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
 import { controllerHostsTool } from '/shared/controller-tool-manifest.js';
+import { legacyToolAllowed } from '/shared/legacy-tool-allowlist.js';
 import {
   callModel as callProviderModel,
   contextWindowFor,
@@ -266,6 +267,12 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
         const legacyDispatch = async () => parseJson(await rpc('turn.tool.dispatch', {
           callJson: JSON.stringify(call),
         }), 'tool result');
+        if (!controllerHostsTool(/** @type {any} */ (call)?.name)
+            && !legacyToolAllowed(/** @type {any} */ (call)?.name)) {
+          throw Object.assign(new Error('tool has no execution owner'), {
+            code: 'tool-execution-owner-missing', outcomeKnown: true,
+          });
+        }
         if (typeof executeToolCall !== 'function') {
           if (controllerHostsTool(/** @type {any} */ (call)?.name)) {
             throw Object.assign(new Error('controller tool executor unavailable'), {

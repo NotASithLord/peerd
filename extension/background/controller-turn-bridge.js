@@ -15,6 +15,7 @@ import {
   CONTROLLER_TOOL_MANIFEST,
   controllerHostsTool,
 } from '../shared/controller-tool-manifest.js';
+import { legacyToolAllowed } from '../shared/legacy-tool-allowlist.js';
 
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
@@ -696,6 +697,10 @@ export const makeControllerTurnBridge = ({
             return failed(cause, true);
           }
           if (prepared === null) {
+            if (!legacyToolAllowed(call.name) && !controllerHostsTool(call.name)) {
+              release();
+              return failed('tool has no controller or legacy execution owner', true);
+            }
             run.legacyToolCalls.set(call.id, issued);
             release();
             return known({ mode: 'legacy' });
@@ -912,6 +917,7 @@ export const makeControllerTurnBridge = ({
               error: 'controller-owned tool requires finite execution', outcomeKnown: true,
             };
           }
+          if (!legacyToolAllowed(call.name)) return failed('tool grant mismatch', true);
           if (!issuedToolCall(run, call)
               && !issuedToolCall(run, call, run.legacyToolCalls)) {
             return failed('tool call was not issued by the pinned model stream', true);
