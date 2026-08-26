@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 
@@ -19,6 +19,19 @@ describe('kernel turn ownership boundaries', () => {
       'peerd-runtime/background.js',
       'peerd-runtime/kernel.js',
     ]) expect(modules.has(module), `service worker imports ${module}`).toBe(false);
+  });
+
+  it('uses exact transfer custody leaves without a growing aggregate entry', async () => {
+    const modules = await modulesFor('background/vault-kernel.js');
+    expect(modules.has('peerd-runtime/kernel-transfer.js')).toBe(false);
+    expect(existsSync(join(EXTENSION_ROOT, 'peerd-runtime/kernel-transfer.js'))).toBe(false);
+    for (const entry of [
+      'background/kernel-executable-transfer-live.js',
+      'background/kernel-dweb-route-runtime.js',
+    ]) {
+      expect(readFileSync(join(EXTENSION_ROOT, entry), 'utf8'))
+        .not.toContain('/peerd-runtime/kernel-transfer.js');
+    }
   });
 
   it('keeps the semantic owner free of authority and host dependencies', async () => {

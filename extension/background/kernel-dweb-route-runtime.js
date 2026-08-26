@@ -8,7 +8,7 @@ import {
   shapeSessionsSurface,
   shapeSettingsSurface,
   SurfaceApplyPartialError,
-} from '/peerd-runtime/kernel-transfer.js';
+} from '/peerd-runtime/transfer/self-sync-surfaces.js';
 import { makeDwebRoutes } from './routes/dweb.js';
 import { makeDwebSelfRoutes } from './routes/dweb-self.js';
 import { createDwebRollbackGuard } from './dweb-rollback-guard.js';
