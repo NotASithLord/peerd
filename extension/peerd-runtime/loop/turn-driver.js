@@ -131,7 +131,7 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     settingsStore, DWEB_ENABLED, filterByGoalActive, goalActiveFor,
     dwebEngagedSessions, markDwebEngaged, dispatchToolCall, prepareToolCall, settleToolCall,
     maybeNudgeDebuggerGrant, getToolDescriptor = () => null,
-    decideAction, isKeylessProvider = () => false, costOf, makeTurnCostTracker,
+    decideAction, makeTurnCostTracker,
     uiConnected, uiPorts, auditLog,
     postChatNote, runUserTurn,
     REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
@@ -662,19 +662,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // actor is a SEPARATE session, so makeTurnCostTracker's per-session limitUsd
   // gives N actors N independent caps (the documented P0 cost posture).
   const costSession = turnSession;
-  // why: keyless providers (Ollama) run on the user's own hardware — an
-  // unknown local model id still costs $0, so the pricing fold is told
-  // it's a local provider and resolves a KNOWN zero rate card instead of
-  // "estimate unavailable". Keeps the CostChip honest at $0.00.
-  const costProviderIsLocal = isKeylessProvider(costSession?.provider) === true;
   const costTracker = makeTurnCostTracker({
-    costOf: (/** @type {any} */ model, /** @type {any} */ usage, /** @type {any} */ overrides) =>
-      costOf(/** @type {any} */ (model), /** @type {any} */ (usage), /** @type {any} */ (overrides), { localProvider: costProviderIsLocal }),
-    // why: price against the SESSION's model (the one that actually
-    // produced the usage), not the current Settings selection — an old
-    // chat keeps its original model even if the user later switches.
-    model: costSession?.model,
-    pricingOverrides: settingsStore.get().pricingOverrides,
     limitUsd: settingsStore.get().spendLimitUsd,
     initialSessionCost: costSession?.cost,
     persistCost: (/** @type {any} */ tally) => sessions.setCost(/** @type {any} */ (sessionId), /** @type {any} */ (tally)),
@@ -776,6 +764,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // controller semantics. The worker supplies only the user's overrides;
       // the controller reads a bounded provider projection through model egress.
       contextWindowOverrides: settingsStore.get().contextWindowOverrides,
+      // Pricing tables and provider-local classification are model semantics.
+      // The sealed controller prices each provider usage event; the SW only
+      // validates/folds that bounded amount and retains spend-limit custody.
+      pricingOverrides: settingsStore.get().pricingOverrides,
       // why: one-shot actor delegations (message_actor oneShot) — after the first
       // clean tool round the loop synthesizes the reply from the result and stops,
       // skipping the redundant summarize inference. false for every normal turn.

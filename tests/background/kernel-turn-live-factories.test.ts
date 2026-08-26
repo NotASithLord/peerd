@@ -561,6 +561,7 @@ describe('kernel live turn factories', () => {
         ok: true, started: true,
         newMessages: [{ role: 'assistant', content: 'finished', id: 'done-1', when: 2_000 }],
         usage: { inputTokens: 7, outputTokens: 5 },
+        price: { cost: 0.000096, estimated: true },
       };
     });
     const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });

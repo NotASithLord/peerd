@@ -37,7 +37,9 @@ import { makeInMemorySessions, makeRelayedToolDispatch, runActorLoop, makeActorS
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
 import {
   callModel as callProviderModel,
+  costOf,
   contextWindowFor,
+  providerMetadata,
   providerModelContextWindow,
 } from '/peerd-provider/controller.js';
 import { AGENT_PROGRAM, isExecutionDescription } from '/shared/execution-protocol.js';
@@ -782,7 +784,15 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       // sees BOTH the authoritative Stop signal AND whether any reply came back
       // (signal.aborted && !finalText). A stamp here — ignorant of finalText — would
       // mislabel a turn that produced a real reply just before Stop as 'cancelled'.
-      self.postMessage({ type: 'done', runId, result });
+      self.postMessage({
+        type: 'done', runId,
+        result: {
+          ...result,
+          price: costOf(program.model, result.usage, program.pricingOverrides, {
+            localProvider: providerMetadata(program.provider)?.keyless === true,
+          }),
+        },
+      });
     } catch (e) {
       self.postMessage({ type: 'error', runId, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
     }

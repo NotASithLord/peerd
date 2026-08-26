@@ -52,6 +52,12 @@ const normalize = (value: any): any => {
   return out;
 };
 
+const withoutProjectedPrice = (events: any[]) => events.map((event) => {
+  if (event?.type !== 'usage') return event;
+  const { price: _price, ...rest } = event;
+  return rest;
+});
+
 const drain = async (iterable: AsyncIterable<any>) => {
   const values: any[] = [];
   for await (const value of iterable) values.push(value);
@@ -188,7 +194,9 @@ describe('orchestrator controller turn boundary', () => {
       },
     });
 
-    expect(normalize(controllerEvents)).toEqual(normalize(directEvents));
+    expect(controllerEvents.find((event) => event.type === 'usage')?.price)
+      .toEqual({ cost: 0.000024, estimated: true });
+    expect(normalize(withoutProjectedPrice(controllerEvents))).toEqual(normalize(directEvents));
     expect(normalize(controllerSessions.snapshot())).toEqual(normalize(directSessions.snapshot()));
     expect(normalize(controllerCalls)).toEqual(normalize(directCalls));
     expect(authorityMedia).toEqual(['RAW-IMAGE-BYTES']);

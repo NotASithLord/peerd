@@ -66,7 +66,7 @@ export const normalizeTally = (t) => {
  *
  * @param {CostTally} tally
  * @param {Partial<TokenUsage> | null | undefined} usage  fields read defensively
- * @param {number} cost   USD for THIS usage event (from costOf)
+ * @param {number} cost   USD for THIS usage event, projected by controller semantics
  * @returns {CostTally}
  */
 export const addUsage = (tally, usage, cost) => {

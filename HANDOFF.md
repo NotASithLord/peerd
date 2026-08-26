@@ -76,7 +76,8 @@ relevant baseline.
 ## Current retained state
 
 The deletion-oriented chain is `2f92849`, `58ebb61`, `31afe71`, `4dd2279`,
-`37c91a2`, `7ba4a2d`, and the current staged provider-selection closure.
+`37c91a2`, `7ba4a2d`, `8379fbe`, `d3a99db`, and the current staged
+provider-pricing closure.
 
 - The broad `kernel-transfer.js` aggregate and generic controller tool-effect
   lane are deleted. Orchestrator and isolated actors share exact per-domain
@@ -101,14 +102,17 @@ controller identity literals, the candidate has exactly the same SW inputs and
 byte-identical authority code. The complete fixture appears only in the
 controller graph.
 
-Store-Chrome telemetry for the latest staged checkpoint is 1,303,760 bundled
-SW bytes, 447 inputs and a 347,857-byte minified cold graph. The preceding
-`7ba4a2d` package was 1,306,225 bytes with 449 inputs and the same cold graph.
-`peerd-provider/metadata.js` and `peerd-provider/semantic-metadata.js` are no
-longer reachable through `kernel-turn-live-factories.js`: per-provider runner
-selection comes from the controller-owned `models/options` projection, while
-the SW retains only the fixed egress manifest's credential classification.
-These numbers are observations, not optimization targets.
+Store-Chrome telemetry for the latest staged checkpoint is 1,304,247 bundled
+SW bytes, 447 staged inputs and a 347,857-byte minified cold graph. The
+preceding `d3a99db` package was 1,303,760 bytes with the same staged-input and
+cold-graph counts. The live `kernel-turn-live-factories.js` graph fell from 292
+to 291 modules: `peerd-provider/pricing.js`, `metadata.js` and
+`semantic-metadata.js` are no longer reachable, leaving only the fixed provider
+error types. Provider selection and price projection now occur in the sealed
+controller and isolated actor worker. The SW validates and folds the bounded
+price result and retains session spend-limit custody; a missing or malformed
+price fails closed. The SW still owns the fixed egress manifest's credential
+classification. These numbers are observations, not optimization targets.
 
 The isolated Home harness (only the obsolete byte ceilings relaxed in the
 measurement worktree) passed complete route/event/port and actionable-vault
@@ -116,19 +120,22 @@ readiness: 3.61 seconds from browser launch, 685 ms from worker target, 133 ms
 from Home navigation, and 107 ms for a confirmed forced wake. The assessment
 was green and remains inside the accepted functional envelope.
 
-Verification: 148 focused boundary/security tests passed; static typecheck,
-lint, tscheck coverage and the dweb boundary passed; Store packaging/posture
-passed. The full Bun suite passed 7,507 tests and reproduced only the same five
-inherited failures. The in-browser suite passed 1,000 tests and reproduced only
-the same two inherited UI failures. There are no new failures.
+Verification: 197 focused boundary/security tests and the four controller
+identity/feature-growth tests passed; static typecheck, lint, tscheck coverage
+and the dweb boundary passed; Store packaging/posture passed. The full Bun
+suite passed 7,511 tests and reproduced only the same five inherited failures:
+the session-support cutover, native-entry identity, test-only vault package,
+typed-error minification, and obsolete native cold-size target. The in-browser
+suite passed 1,000 tests and reproduced only the same two inherited UI
+failures. There are no new failures.
 
 The remaining architectural blocker is narrower but real: the SW still reaches
 `controller-turn-semantics.js` through `kernel-turn-live-factories.js`, and that
-owner still supplies provider pricing, the turn driver, legacy
-dispatcher/registry and feature orchestration. The next retained work must move
-one of those real closures to its controller owner and delete its old import in
-the same checkpoint. Do not resume per-domain allowlist churn or introduce a
-generic bridge merely to alter bundle telemetry.
+owner still supplies the turn driver, legacy dispatcher/registry and feature
+orchestration. The next retained work must move one of those real closures to
+its controller owner and delete its old import in the same checkpoint. Do not
+resume per-domain allowlist churn or introduce a generic bridge merely to alter
+bundle telemetry.
 
 ## Completion condition
 

@@ -36,6 +36,7 @@ import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
 import { legacyToolAllowed } from '/shared/legacy-tool-allowlist.js';
 import {
   callModel as callProviderModel,
+  costOf,
   contextWindowFor,
   listProviders,
   planFailoverChain,
@@ -213,7 +214,13 @@ const runControllerTurnWith = async (payload, options) => {
             });
           }
           if (event?.type !== 'rate-limit-pause') streamedContent = true;
-          yield event;
+          const provider = providerMetadata(candidate.provider);
+          yield event?.type === 'usage' ? {
+            ...event,
+            price: costOf(candidate.model, event.usage, ctx.pricingOverrides, {
+              localProvider: provider?.keyless === true,
+            }),
+          } : event;
         }
         failoverLastGood = candidate;
         return;

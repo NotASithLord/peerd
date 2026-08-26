@@ -142,7 +142,7 @@ const controllerCtx = (ctx) => {
     'userText', 'synthetic', 'resume', 'contextMessage', 'reasoning',
     'actorReply', 'contextWindow', 'oneShot', 'maxSteps', 'persistDeltas',
     'preflightReply', 'runtimeCapabilities', 'providerFailoverEnabled',
-    'providerFallbacks', 'contextWindowOverrides',
+    'providerFallbacks', 'contextWindowOverrides', 'pricingOverrides',
   ];
   const out = /** @type {Record<string, unknown>} */ ({});
   for (const key of keys) if (ctx[key] !== undefined) out[key] = ctx[key];
