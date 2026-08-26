@@ -52,23 +52,47 @@ describe('controller runtime build identity', () => {
     cpSync(join(process.cwd(), 'extension'), candidate, { recursive: true });
 
     writeFileSync(join(candidate, 'peerd-runtime/controller-feature-fixture.js'), [
-      '// Representative ordinary tool feature: composes an existing authority class.',
-      "export const CONTROLLER_FEATURE_TOOL_NAMES = Object.freeze(['fixture_feature']);",
+      '// Representative ordinary semantic feature using the existing local authority class.',
+      "export const CONTROLLER_FEATURE_TOOL_NAME = 'fixture_feature';",
+      'export const CONTROLLER_FEATURE_TOOL_POLICY = Object.freeze({',
+      '  name: CONTROLLER_FEATURE_TOOL_NAME,',
+      "  primitive: 'local', sideEffect: false, retryClass: 'A',",
+      "  description: 'Return a controller-owned semantic projection.',",
+      "  schema: Object.freeze({ type: 'object', properties: Object.freeze({}), additionalProperties: false }),",
+      '});',
+      'export const executeControllerFeatureTool = async () => ({',
+      "  ok: true, content: 'controller-only feature',",
+      '});',
       '',
     ].join('\n'));
-    const ownership = join(candidate, 'peerd-runtime/controller-tool-ownership.js');
-    writeFileSync(ownership, readFileSync(ownership, 'utf8')
-      .replace("import {\n", [
-        "import { CONTROLLER_FEATURE_TOOL_NAMES } from './controller-feature-fixture.js';",
+    const localTools = join(candidate, 'peerd-runtime/controller-local-tools.js');
+    writeFileSync(localTools, readFileSync(localTools, 'utf8')
+      .replace("import { executeNow } from './clock/execute.js';", [
+        "import { executeNow } from './clock/execute.js';",
         'import {',
+        '  CONTROLLER_FEATURE_TOOL_NAME, executeControllerFeatureTool,',
+        "} from './controller-feature-fixture.js';",
       ].join('\n'))
       .replace(
-        "  ['dweb', CONTROLLER_DWEB_TOOL_NAMES],\n];",
+        "Object.freeze(['now', 'complete_goal'])",
+        "Object.freeze(['now', 'complete_goal', CONTROLLER_FEATURE_TOOL_NAME])",
+      )
+      .replace(
+        "  if (name === 'now') return executeNow();",
         [
-          "  ['dweb', CONTROLLER_DWEB_TOOL_NAMES],",
-          "  ['local', CONTROLLER_FEATURE_TOOL_NAMES],",
-          '];',
+          "  if (name === 'now') return executeNow();",
+          '  if (name === CONTROLLER_FEATURE_TOOL_NAME) return executeControllerFeatureTool();',
         ].join('\n'),
+      ));
+    const projection = join(candidate, 'peerd-runtime/controller-tool-projection.js');
+    writeFileSync(projection, readFileSync(projection, 'utf8')
+      .replace("import { listToolPolicies } from './tools/metadata/policy.js';", [
+        "import { listToolPolicies } from './tools/metadata/policy.js';",
+        "import { CONTROLLER_FEATURE_TOOL_POLICY } from './controller-feature-fixture.js';",
+      ].join('\n'))
+      .replace(
+        'const descriptors = Object.freeze(listToolPolicies().map(toToolDescriptor));',
+        'const descriptors = Object.freeze([...listToolPolicies(), CONTROLLER_FEATURE_TOOL_POLICY].map(toToolDescriptor));',
       ));
 
     const baselineDigest = await writeControllerBuildIdentity(baseline);
@@ -103,6 +127,13 @@ describe('controller runtime build identity', () => {
     );
     expect([...controllerGraph].some((path) =>
       path.endsWith('/peerd-runtime/controller-feature-fixture.js'))).toBe(true);
+
+    const fixture = readFileSync(
+      join(candidate, 'peerd-runtime/controller-feature-fixture.js'), 'utf8',
+    );
+    expect(fixture).toContain("name: CONTROLLER_FEATURE_TOOL_NAME");
+    expect(fixture).toContain("schema: Object.freeze");
+    expect(fixture).toContain('executeControllerFeatureTool');
 
     expect(readFileSync(join(candidate, 'background/vault-kernel.js'), 'utf8'))
       .toBe(readFileSync(join(baseline, 'background/vault-kernel.js'), 'utf8'));
