@@ -684,6 +684,124 @@ export const runActor = async (job, {
             }), { observeResult: true });
           return;
         }
+        if (m.type === 'repository-read-pod-request') {
+          await relayExactToolMessage(m, 'repository-read-pod-response', () =>
+            sendToSW('repository/read-pod', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              podId: m.podId,
+            }));
+          return;
+        }
+        if (m.type === 'repository-destroy-pod-request') {
+          await relayExactToolMessage(m, 'repository-destroy-pod-response', () =>
+            sendToSW('repository/destroy-pod', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              podId: m.podId,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'repository-read-status-request') {
+          await relayExactToolMessage(m, 'repository-read-status-response', () =>
+            sendToSW('repository/read-status', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'repository-read-history-request') {
+          await relayExactToolMessage(m, 'repository-read-history-response', () =>
+            sendToSW('repository/read-history', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              depth: m.depth,
+            }));
+          return;
+        }
+        if (m.type === 'repository-read-remote-request') {
+          await relayExactToolMessage(m, 'repository-read-remote-response', () =>
+            sendToSW('repository/read-remote', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'repository-read-diff-request') {
+          await relayExactToolMessage(m, 'repository-read-diff-response', () =>
+            sendToSW('repository/read-diff', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              from: m.from, to: m.to,
+            }));
+          return;
+        }
+        if (m.type === 'repository-confirm-restore-request') {
+          await relayExactToolMessage(m, 'repository-confirm-restore-response', () =>
+            sendToSW('repository/confirm-restore', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              to: m.to,
+            }));
+          return;
+        }
+        if (m.type === 'repository-checkpoint-request') {
+          await relayExactToolMessage(m, 'repository-checkpoint-response', () =>
+            sendToSW('repository/checkpoint', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              message: m.message,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'repository-branch-request') {
+          await relayExactToolMessage(m, 'repository-branch-response', () =>
+            sendToSW('repository/branch', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              name: m.name,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'repository-checkout-request') {
+          await relayExactToolMessage(m, 'repository-checkout-response', () =>
+            sendToSW('repository/checkout', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              name: m.name,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'repository-restore-request') {
+          await relayExactToolMessage(m, 'repository-restore-response', () =>
+            sendToSW('repository/restore', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              to: m.to,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'repository-confirm-remote-request') {
+          await relayExactToolMessage(m, 'repository-confirm-remote-response', () =>
+            sendToSW('repository/confirm-remote', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              op: m.op, target: m.target, branch: m.branch,
+            }));
+          return;
+        }
+        if (m.type === 'repository-link-request') {
+          await relayExactToolMessage(m, 'repository-link-response', () =>
+            sendToSW('repository/link', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              url: m.url,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'repository-fetch-request') {
+          await relayExactToolMessage(m, 'repository-fetch-response', () =>
+            sendToSW('repository/fetch', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              target: m.target,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'repository-push-request') {
+          await relayExactToolMessage(m, 'repository-push-response', () =>
+            sendToSW('repository/push', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              target: m.target, branch: m.branch,
+            }), { observeResult: true });
+          return;
+        }
         if (m.type === 'actor-tool-settle-request') {
           await relayExactToolMessage(m, 'actor-tool-settle-response', () =>
             sendToSW('actor/tool-settle', {

@@ -7,7 +7,7 @@ import {
 
 const manifestSource = {
   protocol: TOOL_EXECUTION_PROTOCOL,
-  digest: '36f4a3c453079043fc6adb3143c9299fb0c57928c11a0ac60197ee0b81ba720d',
+  digest: '98cbe4f2fbc50a5beb3a945689afab399c6e0da8b2b3e1fa453de7034130c5fc',
   tools: {
     now: {
       projectionKeys: [],
@@ -70,6 +70,23 @@ const manifestSource = {
       effects: [],
       argumentBytes: 1024 * 1024,
     },
+    pod_destroy: {
+      projectionKeys: [],
+      effects: [],
+    },
+    repo_history: {
+      projectionKeys: ['actorType', 'actorInstanceId'],
+      effects: [],
+      resultBytes: 2 * 1024 * 1024,
+    },
+    repo_version: {
+      projectionKeys: ['actorType', 'actorInstanceId'],
+      effects: [],
+    },
+    repo_remote: {
+      projectionKeys: ['actorType', 'actorInstanceId'],
+      effects: [],
+    },
   },
 };
 
@@ -90,9 +107,11 @@ export const controllerHostsTool = (/** @type {unknown} */ name) =>
 
 const actorTools = new Set(['actor_create', 'actor_tasks', 'actor_cancel', 'message_actor']);
 const podTools = new Set(['pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write']);
+const repositoryTools = new Set(['pod_destroy', 'repo_history', 'repo_version', 'repo_remote']);
 
 export const controllerToolDomain = (/** @type {unknown} */ name) =>
   typeof name !== 'string' ? null
     : actorTools.has(name) ? 'actor'
       : podTools.has(name) ? 'pod'
-        : null;
+        : repositoryTools.has(name) ? 'repository'
+          : null;

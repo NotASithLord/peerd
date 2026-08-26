@@ -18,6 +18,7 @@ import {
 } from '../shared/controller-tool-manifest.js';
 import { legacyToolAllowed } from '../shared/legacy-tool-allowlist.js';
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
+import { createRepositoryToolAuthority } from './repository-tool-authority.js';
 
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
@@ -517,6 +518,19 @@ export const makeControllerTurnBridge = ({
     if (!replayable) entry.pendingIrreversible = Math.max(0, entry.pendingIrreversible - 1);
     if (!replayable) entry.settledIrreversible = true;
     return known(result);
+  };
+  const repositoryExecutionEntry = (
+    /** @type {any} */ run,
+    /** @type {Record<string,any>} */ value,
+    /** @type {string[]} */ tools,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainExecutionEntry(run, value, 'repository', tools, fields);
+    if (!entry) return null;
+    entry.domainState.authority ??= createRepositoryToolAuthority({
+      call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
+    });
+    return entry;
   };
   const assertRunPayload = (/** @type {unknown} */ payload, /** @type {any} */ context) => {
     if (!isRecord(payload) || typeof payload.runId !== 'string') return null;
@@ -1168,6 +1182,104 @@ export const makeControllerTurnBridge = ({
               sessionId: entry.custody.ctx.session?.sessionId, podId: value.podId,
             },
           ));
+        }
+        case 'turn.repository.read-pod': {
+          const entry = repositoryExecutionEntry(run, value, ['pod_destroy'], ['podId']);
+          if (!entry) return failed('repository Pod read authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readPod(value.podId));
+        }
+        case 'turn.repository.destroy-pod': {
+          const entry = repositoryExecutionEntry(run, value, ['pod_destroy'], ['podId']);
+          if (!entry) return failed('repository Pod destroy authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.destroyPod(value.podId));
+        }
+        case 'turn.repository.read-status': {
+          const entry = repositoryExecutionEntry(run, value, ['repo_history'], []);
+          if (!entry) return failed('repository status authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readStatus());
+        }
+        case 'turn.repository.read-history': {
+          const entry = repositoryExecutionEntry(run, value, ['repo_history'], ['depth']);
+          if (!entry) return failed('repository history authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readHistory(value.depth));
+        }
+        case 'turn.repository.read-remote': {
+          const entry = repositoryExecutionEntry(
+            run, value, ['repo_history', 'repo_remote'], [],
+          );
+          if (!entry) return failed('repository remote-read authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readRemote());
+        }
+        case 'turn.repository.read-diff': {
+          const entry = repositoryExecutionEntry(
+            run, value, ['repo_history'], ['from', 'to'],
+          );
+          if (!entry) return failed('repository diff authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readDiff(value.from, value.to));
+        }
+        case 'turn.repository.confirm-restore': {
+          const entry = repositoryExecutionEntry(run, value, ['repo_version'], ['to']);
+          if (!entry) return failed('repository restore confirmation mismatch', true);
+          return runDomainEffect(run, entry, operation, 'control', () =>
+            entry.domainState.authority.confirmRestore(value.to));
+        }
+        case 'turn.repository.checkpoint': {
+          const entry = repositoryExecutionEntry(run, value, ['repo_version'], ['message']);
+          if (!entry) return failed('repository checkpoint authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.checkpoint(value.message));
+        }
+        case 'turn.repository.branch': {
+          const entry = repositoryExecutionEntry(run, value, ['repo_version'], ['name']);
+          if (!entry) return failed('repository branch authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.branch(value.name));
+        }
+        case 'turn.repository.checkout': {
+          const entry = repositoryExecutionEntry(run, value, ['repo_version'], ['name']);
+          if (!entry) return failed('repository checkout authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.checkout(value.name));
+        }
+        case 'turn.repository.restore': {
+          const entry = repositoryExecutionEntry(run, value, ['repo_version'], ['to']);
+          if (!entry) return failed('repository restore authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.restore(value.to));
+        }
+        case 'turn.repository.confirm-remote': {
+          const entry = repositoryExecutionEntry(
+            run, value, ['repo_remote'], ['op', 'target', 'branch'],
+          );
+          if (!entry) return failed('repository remote confirmation mismatch', true);
+          return runDomainEffect(run, entry, operation, 'control', () =>
+            entry.domainState.authority.confirmRemote(value.op, value.target, value.branch));
+        }
+        case 'turn.repository.link': {
+          const entry = repositoryExecutionEntry(run, value, ['repo_remote'], ['url']);
+          if (!entry) return failed('repository link authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.link(value.url));
+        }
+        case 'turn.repository.fetch': {
+          const entry = repositoryExecutionEntry(run, value, ['repo_remote'], ['target']);
+          if (!entry) return failed('repository fetch authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.fetch(value.target));
+        }
+        case 'turn.repository.push': {
+          const entry = repositoryExecutionEntry(
+            run, value, ['repo_remote'], ['target', 'branch'],
+          );
+          if (!entry) return failed('repository push authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.push(value.target, value.branch));
         }
         case 'turn.tool.settle': {
           const entry = run.preparedExecutions.get(value.executionId);

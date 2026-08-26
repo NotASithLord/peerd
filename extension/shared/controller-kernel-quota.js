@@ -52,6 +52,21 @@ const DOMAIN_OPERATIONS = Object.freeze({
   'turn.pod.cancel': { tool: 'pod_cancel', riskClass: 'control' },
   'turn.pod.read-file': { tool: 'pod_read', riskClass: 'read' },
   'turn.pod.write-file': { tool: 'pod_write', riskClass: 'commit' },
+  'turn.repository.read-pod': { tool: 'pod_destroy', riskClass: 'read' },
+  'turn.repository.destroy-pod': { tool: 'pod_destroy', riskClass: 'commit' },
+  'turn.repository.read-status': { tool: 'repo_history', riskClass: 'read' },
+  'turn.repository.read-history': { tool: 'repo_history', riskClass: 'read' },
+  'turn.repository.read-remote': { tools: ['repo_history', 'repo_remote'], riskClass: 'read' },
+  'turn.repository.read-diff': { tool: 'repo_history', riskClass: 'read' },
+  'turn.repository.confirm-restore': { tool: 'repo_version', riskClass: 'control' },
+  'turn.repository.checkpoint': { tool: 'repo_version', riskClass: 'commit' },
+  'turn.repository.branch': { tool: 'repo_version', riskClass: 'commit' },
+  'turn.repository.checkout': { tool: 'repo_version', riskClass: 'commit' },
+  'turn.repository.restore': { tool: 'repo_version', riskClass: 'commit' },
+  'turn.repository.confirm-remote': { tool: 'repo_remote', riskClass: 'control' },
+  'turn.repository.link': { tool: 'repo_remote', riskClass: 'commit' },
+  'turn.repository.fetch': { tool: 'repo_remote', riskClass: 'commit' },
+  'turn.repository.push': { tool: 'repo_remote', riskClass: 'resource' },
 });
 
 const safeSteps = (/** @type {unknown} */ value) => Number.isSafeInteger(value)
@@ -231,6 +246,21 @@ export const createControllerKernelQuota = (
     'turn.pod.cancel': toolBudget,
     'turn.pod.read-file': toolBudget,
     'turn.pod.write-file': toolBudget,
+    'turn.repository.read-pod': toolBudget,
+    'turn.repository.destroy-pod': toolBudget,
+    'turn.repository.read-status': toolBudget,
+    'turn.repository.read-history': toolBudget,
+    'turn.repository.read-remote': toolBudget,
+    'turn.repository.read-diff': toolBudget,
+    'turn.repository.confirm-restore': toolBudget,
+    'turn.repository.checkpoint': toolBudget,
+    'turn.repository.branch': toolBudget,
+    'turn.repository.checkout': toolBudget,
+    'turn.repository.restore': toolBudget,
+    'turn.repository.confirm-remote': toolBudget,
+    'turn.repository.link': toolBudget,
+    'turn.repository.fetch': toolBudget,
+    'turn.repository.push': toolBudget,
     'turn.event': streamBudget + 2 * toolBudget + 8 * steps + 16,
     'turn.abort.finalize': 1,
     'turn.finalize': 1,
@@ -251,7 +281,9 @@ export const createControllerKernelQuota = (
     if (domainPolicy) {
       const execution = typeof value?.executionId === 'string'
         ? toolExecutions.get(value.executionId) : null;
-      if (!execution || execution.toolName !== domainPolicy.tool
+      const allowedTools = 'tools' in domainPolicy
+        ? domainPolicy.tools : [domainPolicy.tool];
+      if (!execution || !allowedTools.includes(execution.toolName)
           || value?.argsDigest !== execution.argsDigest
           || value?.turnGeneration !== execution.turnGeneration) {
         return refusal('kernel-domain-authority-invalid');
@@ -346,7 +378,9 @@ export const createControllerKernelQuota = (
       const effect = record(record(payload)?.value);
       const execution = typeof effect?.executionId === 'string'
         ? toolExecutions.get(effect.executionId) : null;
-      if (!execution || execution.toolName !== domainPolicy.tool
+      const allowedTools = 'tools' in domainPolicy
+        ? domainPolicy.tools : [domainPolicy.tool];
+      if (!execution || !allowedTools.includes(execution.toolName)
           || effect?.argsDigest !== execution.argsDigest
           || effect?.turnGeneration !== execution.turnGeneration) {
         return unknownPendingLoss();
