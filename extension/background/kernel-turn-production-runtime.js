@@ -22,8 +22,15 @@ export const createKernelTurnProductionRuntime = async (deps) => {
       || typeof deps.custody.isActivityStopSender !== 'function') {
     throw new TypeError('kernel-turn-production-config-invalid');
   }
-  for (const key of ['makeDriverDeps', 'makeRouteDeps', 'makeActorRuntime']) {
+  for (const key of [
+    'makeDriverDeps', 'makeRouteDeps', 'makeActorRuntime',
+    'makeDriver', 'makeGoals',
+  ]) {
     requiredFunction(deps.factories, key);
+  }
+  if (!Number.isSafeInteger(deps.factories.goalMaxIterations)
+      || deps.factories.goalMaxIterations < 1) {
+    throw new TypeError('kernel-turn-production-goalMaxIterations-invalid');
   }
   /** @type {any} */
   let runtime = null;
@@ -89,6 +96,7 @@ export const createKernelTurnProductionRuntime = async (deps) => {
       relays,
       makeDriver: deps.factories.makeDriver,
       makeGoals: deps.factories.makeGoals,
+      goalMaxIterations: deps.factories.goalMaxIterations,
       onClose: async () => {
         await releaseCustody();
         await actorRuntime.close?.();

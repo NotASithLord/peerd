@@ -376,8 +376,8 @@ describe('kernel live turn factories', () => {
   test('constructs the complete production factory surface without host effects', () => {
     const factories = createKernelTurnLiveFactories(dependencies());
     expect(Object.keys(factories).sort()).toEqual([
-      'buildToolContext', 'makeActorRuntime', 'makeDriver',
-      'makeDriverDeps', 'makeRouteDeps',
+      'buildToolContext', 'goalMaxIterations', 'makeActorRuntime', 'makeDriver',
+      'makeDriverDeps', 'makeGoals', 'makeRouteDeps',
     ]);
   });
 

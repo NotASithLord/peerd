@@ -1,16 +1,27 @@
 // @ts-check
 
-import {
-  formatTodoBlock,
-  GOAL_MAX_ITERATIONS,
-  makeGoalRunner,
-  makeTurnDriver,
-} from '../peerd-runtime/kernel-turn.js';
-
 const functionAt = (/** @type {Record<string, any>} */ value, /** @type {string} */ key) => {
   if (typeof value?.[key] !== 'function') {
     throw new TypeError(`kernel-turn-runtime-${key}-invalid`);
   }
+};
+
+// why: goal custody needs one stable projection of its persisted checklist,
+// but importing the growing todo semantic module would make this authority
+// assembly scale with feature code again.
+const formatGoalTodoBlock = (/** @type {unknown} */ value) => {
+  if (!Array.isArray(value) || value.length === 0) return '';
+  const todos = /** @type {Array<Record<string,any>>} */ (value);
+  const next = todos.find((todo) => todo.status !== 'done') ?? null;
+  const lines = todos.map((todo) => {
+    const check = todo.status === 'done' ? '[x]' : '[ ]';
+    const validation = todo.validation && todo.status !== 'done'
+      ? ` (verify: ${todo.validation})` : '';
+    const marker = next && todo.id === next.id ? '  ← next' : '';
+    return `${check} ${todo.id}. ${todo.text}${validation}${marker}`;
+  });
+  const done = todos.filter((todo) => todo.status === 'done').length;
+  return [`Plan (${done}/${todos.length} done):`, ...lines].join('\n');
 };
 
 /**
@@ -37,17 +48,20 @@ const functionAt = (/** @type {Record<string, any>} */ value, /** @type {string}
  * }} deps.actorProjection
  * @param {Record<string,any>} [deps.relays]
  * @param {()=>Promise<void>|void} [deps.onClose]
- * @param {typeof makeTurnDriver} [deps.makeDriver]
- * @param {typeof makeGoalRunner} [deps.makeGoals]
+ * @param {(deps:Record<string,any>)=>Record<string,any>} deps.makeDriver
+ * @param {(deps:Record<string,any>)=>Record<string,any>} deps.makeGoals
+ * @param {number} deps.goalMaxIterations
  */
 export const createKernelTurnRuntime = ({
   seams, turnDriverDeps, turnRouteDeps, sessionDeps, isolationDeps,
   goal, ensureReady, actorProjection, onClose = () => {},
   relays = {},
-  makeDriver = makeTurnDriver, makeGoals = makeGoalRunner,
+  makeDriver, makeGoals, goalMaxIterations,
 }) => {
   if (!seams || !turnDriverDeps || !turnRouteDeps || !sessionDeps || !isolationDeps
-      || !goal || !goal.kv || !actorProjection || typeof ensureReady !== 'function') {
+      || !goal || !goal.kv || !actorProjection || typeof ensureReady !== 'function'
+      || typeof makeDriver !== 'function' || typeof makeGoals !== 'function'
+      || !Number.isSafeInteger(goalMaxIterations) || goalMaxIterations < 1) {
     throw new TypeError('kernel-turn-runtime-config-invalid');
   }
   for (const key of ['runUserTurn', 'renderSystemPrompt', 'withRun']) functionAt(seams, key);
@@ -55,7 +69,7 @@ export const createKernelTurnRuntime = ({
     functionAt(goal, key);
   }
   for (const key of ['actorCount', 'actorOverview']) functionAt(actorProjection, key);
-  /** @type {ReturnType<typeof makeGoalRunner>|null} */
+  /** @type {Record<string,any>|null} */
   let goalRunner = null;
   const driver = makeDriver({
     ...turnDriverDeps,
@@ -82,9 +96,9 @@ export const createKernelTurnRuntime = ({
     onEvent: goal.onEvent,
     onRunEnd: goal.onRunEnd,
     hasUnresolvedSideEffects: goal.hasUnresolvedSideEffects,
-    getTodoBlock: goal.getTodoBlock ?? (async (sessionId) =>
-      formatTodoBlock((await turnRouteDeps.sessions.get(sessionId))?.todos)),
-    maxIterations: goal.maxIterations ?? GOAL_MAX_ITERATIONS,
+    getTodoBlock: goal.getTodoBlock ?? (async (/** @type {string} */ sessionId) =>
+      formatGoalTodoBlock((await turnRouteDeps.sessions.get(sessionId))?.todos)),
+    maxIterations: goal.maxIterations ?? goalMaxIterations,
   });
   if (!goalRunner || typeof goalRunner.start !== 'function'
       || typeof goalRunner.stop !== 'function' || typeof goalRunner.resume !== 'function') {
