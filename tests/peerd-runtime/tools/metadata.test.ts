@@ -188,9 +188,7 @@ describe('tool metadata anti-drift', () => {
           expect(ts.isStringLiteral(name)).toBe(true);
           expect(ts.isObjectLiteralExpression(implementation)).toBe(true);
           if (ts.isStringLiteral(name) && ts.isObjectLiteralExpression(implementation)) {
-            // Controller-owned planners may keep composeTool metadata at their
-            // old source path; ownership is the executable graph, not the folder.
-            if (!CONTROLLER_ONLY_TOOL_NAMES.has(name.text)) composed.push(name.text);
+            composed.push(name.text);
             expect(implementation.properties.map((property) => property.name?.getText(parsed)))
               .toEqual(['execute']);
           }
