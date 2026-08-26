@@ -83,9 +83,6 @@ export const createKernelTurnOwner = ({
     }),
     prepareToolCall: (call, ctx, binding) =>
       ctx.toolExecution?.prepare?.(call, binding) ?? null,
-    handleToolEffect: ({ custody, operation, payload, ctx, binding }) =>
-      ctx.toolExecution?.effect?.(custody, operation, payload, binding)
-        ?? { ok: false, code: 'tool-effect-denied', outcomeKnown: true },
     settleToolCall: ({ custody, result, ctx, binding }) => {
       if (typeof ctx.toolExecution?.settle !== 'function') {
         throw new Error('tool execution settlement unavailable');

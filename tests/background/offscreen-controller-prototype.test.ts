@@ -586,7 +586,7 @@ describe('Chrome lazy controller private channel prototype', () => {
           createQuota: replaySafeQuota,
           loadController: async () => ({
             call: async (_capability, _payload, options) => {
-              void options.kernelCall?.('turn.tool.effect', { value: {} });
+              void options.kernelCall?.('state.read', {});
               return { ok: true, outcomeKnown: true };
             },
           }),

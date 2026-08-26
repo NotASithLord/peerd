@@ -55,7 +55,6 @@ export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
   // Fixed-literal dynamic import evaluated only after a committed turn. It is
   // digest-bound separately so the prompt controller stays cold-small.
   'offscreen/controller-turn-runtime.js',
-  'offscreen/controller-tool-runtime.js',
   // Fixed-literal dynamic semantic dispatcher and its reviewed route bodies.
   // It must be bound even though the cold graph collector excludes lazy edges.
   ...SEMANTIC_HOST_BUILD_ENTRIES,

@@ -7,7 +7,7 @@ import {
 
 const manifestSource = {
   protocol: TOOL_EXECUTION_PROTOCOL,
-  digest: '9ad6f3d3cb01cd60f6a474c34e63ab06e4691058e4376267f960fe6ce3845e2e',
+  digest: '7bbbfe8ffd7df3cc15e0015f6053b6976b139720f5e88279ae99b3430a4942f0',
   tools: {
     now: {
       projectionKeys: [],
@@ -19,16 +19,7 @@ const manifestSource = {
     },
     complete_goal: {
       projectionKeys: [],
-      effects: [{
-        method: 'endGoal', operation: 'goal.end', riskClass: 'control',
-        requestSchema: {
-          type: 'object', properties: { summary: { type: 'string' } },
-          required: ['summary'],
-        },
-        resultSchema: {
-          type: 'object', properties: { ended: { type: 'boolean' } }, required: ['ended'],
-        },
-      }],
+      effects: [],
     },
     actor_create: {
       projectionKeys: ['sessionId', 'sessionDepth', 'sessionKind', 'inbound'],
@@ -212,19 +203,10 @@ const manifestSource = {
 
 export const CONTROLLER_TOOL_MANIFEST = compileToolEffectManifest(manifestSource);
 
-// The generic effect host is temporary and may execute only the two tools it
-// already owned. Actor tools use exact named actor authority operations.
-export const CONTROLLER_EFFECT_TOOL_MANIFEST = compileToolEffectManifest({
-  ...manifestSource,
-  tools: {
-    now: manifestSource.tools.now,
-    complete_goal: manifestSource.tools.complete_goal,
-  },
-});
-
 export const controllerHostsTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' && Object.hasOwn(CONTROLLER_TOOL_MANIFEST.tools, name);
 
+const localTools = new Set(['now', 'complete_goal']);
 const actorTools = new Set(['actor_create', 'actor_tasks', 'actor_cancel', 'message_actor']);
 const podTools = new Set(['pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write']);
 const repositoryTools = new Set(['pod_destroy', 'repo_history', 'repo_version', 'repo_remote']);
@@ -254,7 +236,8 @@ const dwebTools = new Set([
 
 export const controllerToolDomain = (/** @type {unknown} */ name) =>
   typeof name !== 'string' ? null
-    : actorTools.has(name) ? 'actor'
+    : localTools.has(name) ? 'local'
+      : actorTools.has(name) ? 'actor'
       : podTools.has(name) ? 'pod'
         : repositoryTools.has(name) ? 'repository'
           : vmTools.has(name) ? 'vm'

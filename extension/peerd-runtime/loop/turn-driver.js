@@ -617,20 +617,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
           manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
         };
       },
-      effect: async (
-        /** @type {any} */ custody,
-        /** @type {string} */ operation,
-        /** @type {any} */ payload,
-      ) => {
-        if (operation !== 'goal.end') {
-          return { ok: false, code: 'tool-effect-denied', outcomeKnown: true };
-        }
-        const complete = custody?.ctx?.completeGoalRun;
-        return {
-          ok: true, outcomeKnown: true,
-          value: { ended: typeof complete === 'function' && complete(payload.summary) === true },
-        };
-      },
       settle: async (/** @type {any} */ custody, /** @type {any} */ reported) => {
         const policy = CONTROLLER_TOOL_MANIFEST.tools[custody?.call?.name];
         if (!policy || !toolExecutionResultAllowed(reported, policy.resultBytes)) {
