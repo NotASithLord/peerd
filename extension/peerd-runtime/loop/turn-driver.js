@@ -47,7 +47,6 @@ import {
 } from '../../shared/controller-tool-manifest.js';
 import { toolExecutionResultAllowed } from '../../shared/tool-execution-protocol.js';
 import { projectToolAuthority } from '../tools/metadata/descriptor.js';
-import { handleSandboxCreateEffect } from '../tools/sandbox-create-effects.js';
 
 const UNKNOWN_TURN_ERROR = 'Turn outcome unknown. Check the session before retrying.';
 
@@ -596,15 +595,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         const toolContext = await getToolContext();
         const prepared = await prepareToolCall(call, toolContext);
         if (prepared?.prepared !== true) return { mode: 'result', result: prepared };
-        const projection = call.name === 'sandbox_create' ? {
-          sessionId: toolContext.session?.sessionId ?? sessionId,
-          dwebEnabled: !!toolContext.dweb,
-        } : {};
         return {
           mode: 'execute',
           custody: prepared,
           args: prepared.args,
-          projection,
+          projection: {},
           manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
         };
       },
@@ -613,21 +608,14 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         /** @type {string} */ operation,
         /** @type {any} */ payload,
       ) => {
-        if (operation === 'goal.end') {
-          const complete = custody?.ctx?.completeGoalRun;
-          return {
-            ok: true, outcomeKnown: true,
-            value: { ended: typeof complete === 'function' && complete(payload.summary) === true },
-          };
+        if (operation !== 'goal.end') {
+          return { ok: false, code: 'tool-effect-denied', outcomeKnown: true };
         }
-        if (CONTROLLER_TOOL_MANIFEST.tools.sandbox_create.effects.some(
-          (/** @type {any} */ effect) => effect.operation === operation,
-        )) {
-          return handleSandboxCreateEffect({ custody, operation, payload, binding: {
-            sessionId, signal: custody?.ctx?.abortSignal, callId: custody?.call?.id,
-          } });
-        }
-        return { ok: false, code: 'tool-effect-denied', outcomeKnown: true };
+        const complete = custody?.ctx?.completeGoalRun;
+        return {
+          ok: true, outcomeKnown: true,
+          value: { ended: typeof complete === 'function' && complete(payload.summary) === true },
+        };
       },
       settle: async (/** @type {any} */ custody, /** @type {any} */ reported) => {
         const policy = CONTROLLER_TOOL_MANIFEST.tools[custody?.call?.name];

@@ -12,19 +12,13 @@ import {
 describe('controller tool manifest', () => {
   test('admits only implemented controller tools', () => {
     const hosted = Object.keys(CONTROLLER_TOOL_MANIFEST.tools);
-    expect(hosted).toEqual(['now', 'complete_goal', 'sandbox_create']);
+    expect(hosted).toEqual(['now', 'complete_goal']);
     expect(hosted).toEqual(Object.keys(CONTROLLER_TOOL_IMPLEMENTATIONS));
     expect(CONTROLLER_TOOL_MANIFEST.tools.now.effects).toEqual([]);
     expect(CONTROLLER_TOOL_MANIFEST.tools.complete_goal.effects.map((effect: any) => effect.operation))
       .toEqual(['goal.end']);
-    expect(CONTROLLER_TOOL_MANIFEST.tools.sandbox_create.effects.map((effect: any) => effect.operation))
-      .toEqual([
-        'sandbox.record.mutate', 'sandbox.tab.ensure', 'sandbox.repository.mutate',
-        'sandbox.app.persist', 'sandbox.app.open', 'sandbox.git.confirm',
-      ]);
     expect(controllerHostsTool('now')).toBe(true);
     expect(controllerHostsTool('complete_goal')).toBe(true);
-    expect(controllerHostsTool('sandbox_create')).toBe(true);
     expect(controllerHostsTool('wait_until')).toBe(false);
     expect(controllerHostsTool('__proto__')).toBe(false);
   });
