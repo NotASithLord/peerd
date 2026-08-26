@@ -1228,22 +1228,24 @@ describe('controller protocol pure validation', () => {
     });
   });
 
-  test('more than 65,536 fragmented model events fit while the 8 MiB rail remains authoritative', () => {
+  test('more than 65,536 fragmented model chunks fit while the 8 MiB rail remains authoritative', () => {
     const quota = createControllerKernelQuota('turn.run', { maxSteps: 1 });
-    const opened = { runId: 'fragmented-stream', value: {} };
-    expect(quota.admit('turn.model.open', opened).ok).toBe(true);
-    expect(quota.observe('turn.model.open', opened, {
-      ok: true, value: { modelId: 'fragmented-model' }, outcomeKnown: true,
+    const opened = { runId: 'fragmented-stream', value: {
+      providerId: 'anthropic', modelId: 'fragmented-model', nativeBody: {},
+    } };
+    expect(quota.admit('turn.model.open-inference', opened).ok).toBe(true);
+    expect(quota.observe('turn.model.open-inference', opened, {
+      ok: true, value: { streamId: 'fragmented-model' }, outcomeKnown: true,
     }).ok).toBe(true);
-    const next = { runId: 'fragmented-stream', value: { modelId: 'fragmented-model' } };
-    const event = { type: 'text-delta', text: 'x' };
+    const next = { runId: 'fragmented-stream', value: { streamId: 'fragmented-model' } };
+    const chunk = new Uint8Array([120]);
     let fragmentRefusal: any = null;
     for (let index = 0; index < 65_537; index += 1) {
-      const admitted = quota.admit('turn.model.next', next);
+      const admitted = quota.admit('turn.model.read-inference', next);
       if (admitted.ok !== true) { fragmentRefusal = { index, phase: 'admit', admitted }; break; }
-      const observed = quota.observe('turn.model.next', next, {
+      const observed = quota.observe('turn.model.read-inference', next, {
         ok: true,
-        value: { modelId: 'fragmented-model', done: false, event },
+        value: { done: false, chunk },
         outcomeKnown: true,
       });
       if (observed.ok !== true) { fragmentRefusal = { index, phase: 'observe', observed }; break; }
@@ -1251,20 +1253,22 @@ describe('controller protocol pure validation', () => {
     expect(fragmentRefusal).toBeNull();
 
     const byteQuota = createControllerKernelQuota('turn.run', { maxSteps: 1 });
-    const byteOpen = { runId: 'byte-stream', value: {} };
-    expect(byteQuota.admit('turn.model.open', byteOpen).ok).toBe(true);
-    expect(byteQuota.observe('turn.model.open', byteOpen, {
-      ok: true, value: { modelId: 'byte-model' }, outcomeKnown: true,
+    const byteOpen = { runId: 'byte-stream', value: {
+      providerId: 'anthropic', modelId: 'byte-model', nativeBody: {},
+    } };
+    expect(byteQuota.admit('turn.model.open-inference', byteOpen).ok).toBe(true);
+    expect(byteQuota.observe('turn.model.open-inference', byteOpen, {
+      ok: true, value: { streamId: 'byte-model' }, outcomeKnown: true,
     }).ok).toBe(true);
-    const byteNext = { runId: 'byte-stream', value: { modelId: 'byte-model' } };
-    const largeEvent = { type: 'text-delta', text: 'x'.repeat(128 * 1024) };
+    const byteNext = { runId: 'byte-stream', value: { streamId: 'byte-model' } };
+    const largeChunk = new Uint8Array(128 * 1024);
     let refused: any = null;
     for (let index = 0; index < 70 && !refused; index += 1) {
-      const admitted = byteQuota.admit('turn.model.next', byteNext);
+      const admitted = byteQuota.admit('turn.model.read-inference', byteNext);
       if (admitted.ok !== true) { refused = admitted; break; }
-      const observed = byteQuota.observe('turn.model.next', byteNext, {
+      const observed = byteQuota.observe('turn.model.read-inference', byteNext, {
         ok: true,
-        value: { modelId: 'byte-model', done: false, event: largeEvent },
+        value: { done: false, chunk: largeChunk },
         outcomeKnown: true,
       });
       if (observed.ok !== true) refused = observed;

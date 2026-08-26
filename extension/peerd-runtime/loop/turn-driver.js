@@ -138,14 +138,11 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     dwebEngagedSessions, markDwebEngaged, dispatchToolCall, prepareToolCall, settleToolCall,
     maybeNudgeDebuggerGrant, getTool, getToolDescriptor = getTool,
     decideAction, listProviders, costOf, makeTurnCostTracker, uiConnected, uiPorts, auditLog,
-    resolveFailoverChain, shouldFailover, callModel, postChatNote, runUserTurn, getSecret,
-    safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
-    contextWindowFor, liveContextWindow, currentAppScope,
+    postChatNote, runUserTurn,
+    REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
+    currentAppScope,
     checkpointMgr, detectInterruptedTurn,
     getDenylist = () => [],
-    // The context inspector's capture hook (optional; a no-op default so the
-    // driver never depends on the debug surface being wired).
-    recordModelCall = () => {},
     // Prewalk (loop/prewalk.js), both optional so actor/test drivers stay
     // inert: reconcilePrewalk applies a pending planning→executing model swap
     // (or restores stale state) at the TURN boundary — before pricing,
@@ -278,15 +275,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // the egress boundary scopes to the FIXED origin for an API actor.
   /** @type {'tab'|'api'|undefined} */
   const actorBacking = isActor ? turnSession.backing : undefined;
-  // Defense in depth: if a future caller bypasses the dedicated-worker
-  // refusal above, no actor loop receives live credential functions.
-  const loopCredentials = isActor
-    ? {
-      getSecret: async () => { throw new ActorCredentialBoundaryError('secret'); },
-      safeFetch: async () => { throw new ActorCredentialBoundaryError('provider-network'); },
-    }
-    : { getSecret, safeFetch };
-
   // DESIGN-17 P1 glass pane. When an actor turn was triggered by a LIVE
   // message_actor (display set; absent on a boot redrain), re-emit its stream as
   // a turn/actor-* family keyed to that tool_use card — the orchestrator renders
@@ -717,93 +705,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     uiPorts.broadcast({ type: 'turn/streaming', sessionId, streaming: true });
   }
 
-  // Provider failover (switch-and-continue). The loop calls this as
-  // callModel each step with the session's {provider, model}. When a
-  // provider stays overloaded past the adapter's own retries, or returns a
-  // hard usage limit, we switch to a configured fallback and keep going —
-  // but ONLY before any model output has streamed this call (a mid-stream
-  // switch would replay deltas the loop already consumed). It composes on
-  // top of the adapter-level retries that run underneath it. `lastGood` is
-  // per-turn: once a fallback works we stay on it for the rest of the turn
-  // rather than re-failing the primary each step. The session record is left
-  // untouched (cost prices against the original model; the next turn starts
-  // fresh from the primary). A no-op pass-through when failover is off or
-  // unconfigured (resolveFailoverChain returns just the primary).
-  /** @type {{ provider: string, model: string } | null} */ let failoverLastGood = null;
-  const callModelWithFailover = async function* (/** @type {any} */ modelArgs) {
-    // Pin the first candidate to the persisted turn record. The loop normally
-    // forwards those same values, but the loop is not the credential boundary:
-    // it must not select another keyed adapter by colliding with broker fields.
-    // Later calls stay on a successful failover candidate for this turn.
-    const start = failoverLastGood ?? {
-      provider: costSession?.provider ?? modelArgs.provider,
-      model: costSession?.model ?? modelArgs.model,
-    };
-    const chain = resolveFailoverChain(start);
-    // The context inspector sees orchestrator turns here. Every actor model
-    // call uses the isolated actor relay.
-    // record() is contractually non-throwing; label with the provider the
-    // call will actually start on.
-    recordModelCall({
-      ...modelArgs,
-      provider: start.provider,
-      model: start.model,
-      sessionId,
-      label: 'main',
-    });
-    // why: the Ollama adapter reads `ollamaHost` to reach a remote daemon (issue
-    // #104). Thread it from settings for every candidate; non-ollama adapters
-    // ignore the extra arg. (The configured host is also on the egress allowlist.)
-    const ollamaHost = settingsStore.get().ollamaHost;
-    let lastErr;
-    for (let i = 0; i < chain.length; i++) {
-      const cand = chain[i];
-      let streamedContent = false;
-      try {
-        // The loop forwards credential fields with every model call. All
-        // broker-owned fields must come AFTER modelArgs. Reversing this order lets the loop
-        // change credential custody, provider choice, or cancellation.
-        for await (const ev of callModel({
-          ...modelArgs,
-          ollamaHost,
-          provider: cand.provider,
-          model: cand.model,
-          signal: abortController.signal,
-          getSecret,
-          safeFetch,
-        })) {
-          // rate-limit-pause is the adapter's pre-stream backoff signal, not
-          // model output — failover stays safe while only those have flowed.
-          if (ev.type !== 'rate-limit-pause') streamedContent = true;
-          yield ev;
-        }
-        failoverLastGood = cand;
-        return;
-      } catch (e) {
-        lastErr = e;
-        const isLast = i === chain.length - 1;
-        const aborted = abortController.signal.aborted
-          || (/** @type {{ name?: string }} */ (e))?.name === 'AbortError';
-        // Can't fail over once real output streamed (would duplicate it);
-        // the PRIMARY only triggers a switch on a failover-worthy error,
-        // while a fallback already in the chain is advanced on any pre-stream
-        // failure (a backup that's also down/keyless shouldn't dead-end).
-        // A Stop is never provider unavailability. Refuse to read another
-        // provider key or emit a misleading failover note after cancellation.
-        if (aborted || streamedContent || isLast) throw e;
-        if (i === 0 && !shouldFailover(e)) throw e;
-        const to = chain[i + 1];
-        auditLog.append({
-          type: 'provider_failover',
-          sessionId,
-          details: { from: cand.provider, to: to.provider, reason: (/** @type {{ name?: string }} */ (e))?.name ?? 'error' },
-        }).catch(() => {});
-        postChatNote(`${cand.provider} unavailable — switching to ${to.provider} and continuing…`);
-      }
-    }
-    throw lastErr;
-  };
-
   try {
     for await (const ev of runUserTurn({
       sessionId,
@@ -827,16 +728,19 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // agent/send (text payloads inlined there). The loop ships the
       // bytes this turn and persists the stripped metadata shape.
       ...(attachments ? { attachments } : {}),
-      // why: the failover wrapper, not the bare registry callModel — so a
-      // persistently-overloaded or out-of-credit provider switches to a
-      // configured fallback mid-turn instead of failing the whole turn.
-      callModel: callModelWithFailover,
+      // Provider selection, failover, encoding, and response interpretation
+      // are controller semantics. The worker passes only user configuration;
+      // the controller proposes a finite plan that model authority pins before
+      // the first egress request.
+      providerFailoverEnabled: settingsStore.get().providerFailoverEnabled === true,
+      providerFallbacks: Array.isArray(settingsStore.get().providerFallbacks)
+        ? [...settingsStore.get().providerFallbacks] : [],
       // Only orchestrator turns reach this driver. Actor sessions are refused
       // above and use the dedicated-worker host.
-      ...loopCredentials,
       sessions,
       getSystemPrompt,
       appendAudit: /** @type {any} */ (auditLog.append),
+      postChatNote,
       tools: toolDescriptors,
       runtimeCapabilities,
       // why: the loop calls this before each model step, then re-renders the
@@ -864,16 +768,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // the cheap summarisation call runs in the finally below, AFTER
       // the stream ends, so it can't race the turn's session writes.
       enrichTrimSummary: (/** @type {any} */ req) => trimEnricher.queue(/** @type {any} */ (req)),
-      // why: the DYNAMIC trim trigger scales to THIS session's model
-      // window. Resolved against the SAME session.model the cost tracker
-      // prices against (an old chat keeps its original model). Resolution
-      // order: user override → live provider value (provider Models APIs,
-      // cached + non-blocking) → static table → null (unknown ⇒ falsy ⇒
-      // planTrim falls back to its message-count backstop).
-      contextWindow: /** @type {any} */ (contextWindowFor(/** @type {any} */ (costSession?.model), {
-        overrides: settingsStore.get().contextWindowOverrides,
-        live: liveContextWindow(/** @type {any} */ (costSession?.provider), /** @type {any} */ (costSession?.model)),
-      })),
+      // Model-window metadata and provider response interpretation are sealed
+      // controller semantics. The worker supplies only the user's overrides;
+      // the controller reads a bounded provider projection through model egress.
+      contextWindowOverrides: settingsStore.get().contextWindowOverrides,
       // why: one-shot actor delegations (message_actor oneShot) — after the first
       // clean tool round the loop synthesizes the reply from the result and stops,
       // skipping the redundant summarize inference. false for every normal turn.

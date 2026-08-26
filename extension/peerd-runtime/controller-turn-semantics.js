@@ -95,14 +95,7 @@ import { WEB_TOOLS } from './tools/web/index.js';
 import { wrapUntrusted } from './tools/prompt-wrap.js';
 import { digestCapture } from './site-clients/digest.js';
 import { drainFetchTapInjected, installFetchTapInjected } from './dom/fetch-tap-injected.js';
-import {
-  callModel,
-  listProviders,
-  listProviderModels,
-  providerModelContextWindow,
-} from '/peerd-provider/registry.js';
-import { contextWindowFor } from '/peerd-provider/context-window.js';
-import { planFailoverChain, shouldFailover } from '/peerd-provider/failover.js';
+import { listProviderMetadata as listProviders } from '/peerd-provider/metadata.js';
 import { costOf } from '/peerd-provider/pricing.js';
 import { parseAppManifest } from '/peerd-engine/app-manifest.js';
 
@@ -118,20 +111,6 @@ const registerTools = () => {
   }
   toolsRegistered = true;
 };
-
-const selectActiveProvider = (/** @type {{providerName?:string,providerModel?:string}} */ settings,
-  /** @type {boolean} */ firefox) => {
-  const providers = listProviders().filter((provider) =>
-    provider.name !== 'local-webgpu' || !firefox);
-  const entry = providers.find((provider) => provider.name === settings.providerName)
-    ?? providers.find((provider) => provider.keyless)
-    ?? providers[0];
-  if (!entry) throw new Error('no-provider');
-  return { name: entry.name, model: settings.providerModel || entry.defaultModel };
-};
-
-const providerSecretName = (/** @type {string} */ name) =>
-  listProviders().find((provider) => provider.name === name)?.vaultSecretName ?? 'anthropic';
 
 const projectActorTurnTools = (/** @type {{
  * kind:string,
@@ -190,7 +169,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   isReadOnlyTool,
   limitExceeded,
   listProviders,
-  listProviderModels,
   listTools,
   listToolDescriptors,
   localStoreSource,
@@ -219,12 +197,10 @@ export const createControllerTurnSemantics = () => Object.freeze({
   parseAppManifest,
   parseSiteHandle,
   PERMISSION_MODES,
-  planFailoverChain,
   pinActorCall,
   prepareToolCall,
   prepareUserAttachmentsWithDocs,
   projectToolAuthority,
-  providerModelContextWindow,
   registerTools,
   REASONING_BUDGET_TOKENS,
   REASONING_EFFORT_LEVELS,
@@ -234,15 +210,11 @@ export const createControllerTurnSemantics = () => Object.freeze({
   resolveWebActorSurface,
   restrictCtxCapabilities,
   safeWebActorSummaryOrigin,
-  selectActiveProvider,
   settleToolCall,
   shapeActorsResult,
   shapeMeshResult,
-  shouldFailover,
   skillRegistrySource,
   siteHandleFor,
-  callModel,
-  contextWindowFor,
   costOf,
   createSuggestionStore,
   describeLandingStop,
@@ -252,7 +224,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   fenceWebActorSummary,
   installFetchTapInjected,
   landingStopCard,
-  providerSecretName,
   projectActorTurnTools,
   wrapUntrusted,
 });

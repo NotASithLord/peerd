@@ -536,14 +536,16 @@ describe('direct actor host', () => {
       workerUrl: 'moz-extension://id/offscreen/actor-worker.js',
       run: async (job: any, deps: any) => {
         runJob = job;
-        return deps.sendToSW('actor/model-call', { relayToken: 'grant', args: {} });
+        return deps.sendToSW('actor/model-open-inference', {
+          relayToken: 'grant', providerId: 'anthropic', modelId: 'model', nativeBody: {},
+        });
       },
       abort: () => {},
     });
     host.bindRelayRoutes({
-      'actor/model-call': (_message: any, sender: unknown) => {
+      'actor/model-open-inference': (_message: any, sender: unknown) => {
         accepted = host.isRelaySender(sender);
-        return { ok: true, events: [] };
+        return { ok: true, value: { streamId: 'stream' } };
       },
     });
 

@@ -24,6 +24,7 @@ import {
   TOOL_EXECUTION_PROTOCOL,
   compileToolEffectManifest,
 } from '../../extension/shared/tool-execution-protocol.js';
+import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
 
 const MANIFEST_DIGEST = 'a'.repeat(64);
 const manifestFor = (riskClass: 'read' | 'control' | 'commit' | 'resource') =>
@@ -56,7 +57,8 @@ const descriptor = authorityDescriptor('remember');
 
 const makeSessions = () => {
   let session: any = {
-    sessionId: 'session-tool-protocol', provider: 'fixture', model: 'fixture', messages: [],
+    sessionId: 'session-tool-protocol', provider: 'anthropic',
+    model: 'claude-sonnet-4-6', messages: [],
   };
   return {
     get: async () => structuredClone(session),
@@ -141,6 +143,7 @@ const runHarness = async ({
   bridge = makeControllerTurnBridge({
     getClient, newId: () => `tool-protocol-${++sequence}`,
     toolManifest: TOOL_MANIFEST,
+    providerEgress: makeScriptedProviderAuthority(() => ctx.callModel) as any,
     ...bridgeHooks,
   });
   const events = [];

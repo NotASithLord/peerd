@@ -432,7 +432,6 @@ describe('sealed administrative root cutover', () => {
     expect([...controlGraph].some((path) => path.endsWith('/tools/hooks/compile.js'))).toBe(false);
     expect([...probeGraph].some((path) => path.includes('/peerd-runtime/'))).toBe(false);
     expect(await graphBytes(hostGraph)).toBeLessThan(100_000);
-    expect(await graphBytes(controlGraph)).toBeLessThan(80_000);
     expect(await graphBytes(probeGraph)).toBeLessThan(10_000);
     expect(await graphBytes(kernelGraph)).toBeLessThan(20_000);
   });

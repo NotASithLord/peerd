@@ -14,13 +14,34 @@ import { DWEB_INBOUND_TOOL_NAMES } from '../../extension/peerd-runtime/actor/cap
 const OFFSCREEN = { id: 'ext', url: 'chrome-extension://ext/offscreen/offscreen.html' };
 const ENGINE_TAB = { id: 'ext', url: 'chrome-extension://ext/engine-tabs/vm-tab/vm-tab.html' };
 
+const inferenceInput = (relayToken: string, over: Record<string, any> = {}) => ({
+  relayToken,
+  providerId: 'anthropic',
+  modelId: 'm',
+  nativeBody: {
+    model: 'm', stream: true, messages: [], system: 'system', max_tokens: 128,
+  },
+  ...over,
+});
+
+const providerEgress = (over: Record<string, any> = {}) => ({
+  openInference: async (input: any, grant: any) => grant.permits(input.providerId, input.modelId)
+    ? {
+        ok: true, outcomeKnown: true,
+        value: { streamId: 'stream-1', status: 200, headers: {}, hasBody: true },
+      }
+    : { ok: false, error: 'model-egress-request-invalid', outcomeKnown: true },
+  readInferenceChunk: async () => ({ ok: true, outcomeKnown: true, value: { done: true } }),
+  cancelInference: async () => ({ ok: true, outcomeKnown: true, value: null }),
+  closeOwner: async () => {},
+  ...over,
+});
+
 const baseDeps = (over: any = {}) => ({
   ensureOffscreen: async () => {},
   isOffscreenSender: (s: any) => s?.url === OFFSCREEN.url,
   sendMessage: async () => ({ ok: true }),
-  callModel: (async function* () {})(),
-  getSecret: async () => 'sk',
-  safeFetch: async () => new Response('x'),
+  providerEgress: providerEgress(),
   sessions: { get: async () => null },
   buildToolContext: async () => ({}),
   dispatchToolCall: async () => ({ ok: true }),
@@ -61,7 +82,10 @@ const clientWithRelay = (over: any = {}) => {
     ) => {
       relay = fn;
       await client.run(
-        { actorSessionId, message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm', ...job } as any,
+        {
+          actorSessionId, message: 'm', systemPrompt: 's', provider: 'anthropic',
+          model: 'm', maxOutputTokens: 4096, ...job,
+        } as any,
         { ...(onEvent ? { onEvent } : {}), ...runOptions },
       );
       return captured;
@@ -226,26 +250,30 @@ describe('run() — Stop-cascade aborted stamping', () => {
     let modelSignal: AbortSignal | undefined;
     let client: ReturnType<typeof makeOffscreenActorClient>;
     client = makeOffscreenActorClient(baseDeps({
-      callModel: async function* ({ signal }: any) {
-        modelSignal = signal;
-        modelStarted?.();
-        await new Promise<void>((resolve) => {
-          if (signal.aborted) resolve();
-          else signal.addEventListener('abort', () => resolve(), { once: true });
-        });
-      },
+      providerEgress: providerEgress({
+        openInference: async (_input: any, grant: any) => {
+          modelSignal = grant.signal;
+          modelStarted?.();
+          await new Promise<void>((resolve) => {
+            if (grant.signal.aborted) resolve();
+            else grant.signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+          return { ok: false, error: 'aborted', outcomeKnown: true };
+        },
+      }),
       sendMessage: async (m: any) => {
         if (m.type !== 'actor/run') return { ok: true };
-        relay = client.routes['actor/model-call']({
-          relayToken: m.job.relayToken, args: { provider: 'anthropic', model: 'm' },
-        }, OFFSCREEN);
+        relay = client.routes['actor/model-open-inference'](
+          inferenceInput(m.job.relayToken), OFFSCREEN,
+        );
         await started;
         return { ok: false, started: true, aborted: true, error: 'actor timed out' };
       },
     }));
 
     const result: any = await client.run({
-      actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm',
+      actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic',
+      model: 'm', maxOutputTokens: 4096,
     } as any);
     const relayResult: any = await relay;
     expect(result.aborted).toBe(true);
@@ -268,10 +296,9 @@ describe('run() — Stop-cascade aborted stamping', () => {
       run: async (job: any, { sendToSW }: any) => {
         relayToken = job.relayToken;
         relayAgain = sendToSW;
-        relayResult = sendToSW('actor/model-call', {
-          relayToken,
-          args: { provider: 'anthropic', model: 'm' },
-        });
+        relayResult = sendToSW(
+          'actor/model-open-inference', inferenceInput(relayToken),
+        );
         await relayResult;
         return { ok: true, started: true, finalText: 'late response' };
       },
@@ -281,17 +308,25 @@ describe('run() — Stop-cascade aborted stamping', () => {
       ensureHost: async () => {},
       isRelaySender: host.isRelaySender,
       sendMessage: host.sendMessage,
-      callModel: async function* ({ signal }: any) {
-        modelSignal = signal;
-        modelStarted?.();
-        await modelRelease;
-        yield { type: 'text_delta', text: 'late provider bytes' };
-      },
+      providerEgress: providerEgress({
+        openInference: async (_input: any, grant: any) => {
+          modelSignal = grant.signal;
+          modelStarted?.();
+          await modelRelease;
+          return grant.signal.aborted
+            ? { ok: false, error: 'aborted', outcomeKnown: true }
+            : {
+                ok: true, outcomeKnown: true,
+                value: { streamId: 'late', status: 200, headers: {}, hasBody: true },
+              };
+        },
+      }),
     }));
     host.bindRelayRoutes(client.routes);
 
     const run = client.run({
-      actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm',
+      actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic',
+      model: 'm', maxOutputTokens: 4096,
     } as any);
     await started;
     host.failKeepAlive(new Error('session heartbeat stopped'));
@@ -306,11 +341,10 @@ describe('run() — Stop-cascade aborted stamping', () => {
     expect(modelSignal?.aborted).toBe(true);
     expect(relayAgain).not.toBeNull();
     const replayResult = await (relayAgain as unknown as (type: string, payload: any) => Promise<any>)(
-      'actor/model-call', {
-      relayToken,
-      args: { provider: 'anthropic', model: 'm' },
-      });
-    expect(replayResult).toEqual({ ok: false, error: 'actor/model-call: unauthorized relay' });
+      'actor/model-open-inference', inferenceInput(relayToken));
+    expect(replayResult).toEqual({
+      ok: false, error: 'actor/model-open-inference: unauthorized relay',
+    });
 
     releaseModel?.();
     expect(relayResult).not.toBeNull();
@@ -592,12 +626,16 @@ describe('relay grant — routes refuse anything without a live token', () => {
     expect(dispatched).toBe(false);   // refused BEFORE any ctx build or dispatch
   });
 
-  test('model-call without a token never reaches the key-bearing provider call', async () => {
+  test('inference open without a token never reaches provider authority', async () => {
     let called = false;
     const client = makeOffscreenActorClient(baseDeps({
-      callModel: async function* () { called = true; yield { type: 'text', text: 'x' }; },
+      providerEgress: providerEgress({
+        openInference: async () => { called = true; return { ok: true }; },
+      }),
     }));
-    const out: any = await client.routes['actor/model-call']({ runId: 'aw-guess', args: {} } as any, OFFSCREEN);
+    const out: any = await client.routes['actor/model-open-inference'](
+      inferenceInput('') as any, OFFSCREEN,
+    );
     expect(out.ok).toBe(false);
     expect(out.error).toContain('unauthorized relay');
     expect(called).toBe(false);
@@ -670,10 +708,12 @@ describe('relay sender pin — a leaked token is useless from any other page', (
   test('an engine tab replaying a LIVE token cannot spend the key', async () => {
     let called = false;
     const { client, during } = clientWithRelay({
-      callModel: async function* () { called = true; yield { type: 'text', text: 'x' }; },
+      providerEgress: providerEgress({
+        openInference: async () => { called = true; return { ok: true }; },
+      }),
     });
     const out: any = await during((relayToken) =>
-      client.routes['actor/model-call']({ relayToken, args: {} }, ENGINE_TAB));
+      client.routes['actor/model-open-inference'](inferenceInput(relayToken), ENGINE_TAB));
     expect(out.ok).toBe(false);
     expect(called).toBe(false);
   });
@@ -693,16 +733,20 @@ describe('relay sender pin — a leaked token is useless from any other page', (
 });
 
 // The actor lane's spend-limit preflight (P0-3): actors spend the user's money on
-// the owning chat session, and this relay is where the key is added — so a session
+// the owning chat session, and this relay is where the key is added, so a session
 // past the hard cap must not be pushed further by delegating to an actor.
-describe('actor/model-call — spend-limit preflight', () => {
+describe('actor/model-open-inference spend-limit preflight', () => {
   test('refuses before the key-bearing call when the owning chat is past the cap', async () => {
     let called = false;
     const { client, during } = clientWithRelay({
-      callModel: async function* () { called = true; yield { type: 'text', text: 'x' }; },
+      providerEgress: providerEgress({
+        openInference: async () => { called = true; return { ok: true }; },
+      }),
       spendRefusalFor: async () => 'actor refused: the session spend limit ($5) is reached',
     });
-    const out: any = await during((relayToken) => client.routes['actor/model-call']({ relayToken, args: {} }, OFFSCREEN));
+    const out: any = await during((relayToken) => client.routes['actor/model-open-inference'](
+      inferenceInput(relayToken), OFFSCREEN,
+    ));
     expect(out.ok).toBe(false);
     expect(out.error).toContain('spend limit');
     expect(called).toBe(false);
@@ -711,44 +755,60 @@ describe('actor/model-call — spend-limit preflight', () => {
   test('proceeds when under the cap, and is asked about the RUN\'s session', async () => {
     const asked: string[] = [];
     const { client, during } = clientWithRelay({
-      callModel: async function* () { yield { type: 'text', text: 'hi' }; },
       spendRefusalFor: async (sid: string) => { asked.push(sid); return null; },
     });
-    const out: any = await during((relayToken) => client.routes['actor/model-call']({ relayToken, args: {} }, OFFSCREEN), 'actor-A');
+    const out: any = await during((relayToken) => client.routes['actor/model-open-inference'](
+      inferenceInput(relayToken), OFFSCREEN,
+    ), 'actor-A');
     expect(out.ok).toBe(true);
     expect(asked).toEqual(['actor-A']);
   });
 });
 
-describe('actor/model-call: trusted run metadata wins over worker args', () => {
-  test('pins provider, model, and Ollama host at the key-bearing boundary', async () => {
+describe('actor inference: the live grant pins provider, model, and output limit', () => {
+  test('refuses a provider/model pair outside the grant', async () => {
     let seen: any = null;
     const { client, during } = clientWithRelay({
-      callModel: async function* (args: any) { seen = args; yield { type: 'text', text: 'ok' }; },
-      sendMessage: undefined,
+      providerEgress: providerEgress({
+        openInference: async (input: any, grant: any) => {
+          seen = { input, grant };
+          return grant.permits(input.providerId, input.modelId)
+            ? { ok: true, value: { streamId: 'x' } }
+            : { ok: false, error: 'model-egress-request-invalid', outcomeKnown: true };
+        },
+      }),
     });
-    // The helper's job is anthropic/model m. The worker-controlled payload tries
-    // to switch all three fields; the live grant must overwrite it.
-    const out: any = await during((relayToken) => client.routes['actor/model-call']({
-      relayToken,
-      args: { provider: 'openai', model: 'expensive-unknown', ollamaHost: 'http://attacker.test' },
-    }, OFFSCREEN));
-    expect(out.ok).toBe(true);
-    expect(seen.provider).toBe('anthropic');
-    expect(seen.model).toBe('m');
-    expect(seen.ollamaHost).toBeUndefined();
+    const out: any = await during((relayToken) => client.routes['actor/model-open-inference'](
+      inferenceInput(relayToken, {
+        providerId: 'openai', modelId: 'expensive-unknown',
+        nativeBody: { model: 'expensive-unknown', stream: true, messages: [] },
+      }), OFFSCREEN,
+    ));
+    expect(out.ok).toBe(false);
+    expect(seen.grant.permits('anthropic', 'm')).toBe(true);
+    expect(seen.grant.permits('openai', 'expensive-unknown')).toBe(false);
   });
 
-  test('forces the SW-stamped output cap over worker args', async () => {
+  test('passes only the SW-stamped output cap to provider authority', async () => {
     let seen: any = null;
     const { client, during } = clientWithRelay({
-      callModel: async function* (args: any) { seen = args; },
+      providerEgress: providerEgress({
+        openInference: async (_input: any, grant: any) => {
+          seen = grant;
+          return { ok: true, value: { streamId: 'x' } };
+        },
+      }),
     });
-    const out: any = await during((relayToken) => client.routes['actor/model-call']({
-      relayToken, args: { maxTokens: Number.MAX_SAFE_INTEGER },
-    }, OFFSCREEN), 'actor-A', undefined, { maxOutputTokens: 512 });
+    const out: any = await during((relayToken) => client.routes['actor/model-open-inference'](
+      inferenceInput(relayToken, {
+        nativeBody: {
+          model: 'm', stream: true, messages: [], system: 'system',
+          max_tokens: Number.MAX_SAFE_INTEGER,
+        },
+      }), OFFSCREEN,
+    ), 'actor-A', undefined, { maxOutputTokens: 512 });
     expect(out.ok).toBe(true);
-    expect(seen.maxTokens).toBe(512);
+    expect(seen.maxOutputTokens).toBe(512);
   });
 });
 
@@ -760,26 +820,31 @@ describe('relay quotas', () => {
     let burst: Promise<any>[] = [];
     let client: ReturnType<typeof makeOffscreenActorClient>;
     client = makeOffscreenActorClient(baseDeps({
-      callModel: async function* ({ signal }: any) {
-        modelCalls += 1;
-        modelStarted();
-        await new Promise<void>((resolve) => {
-          if (signal.aborted) resolve();
-          else signal.addEventListener('abort', () => resolve(), { once: true });
-        });
-      },
+      providerEgress: providerEgress({
+        openInference: async (_input: any, grant: any) => {
+          modelCalls += 1;
+          modelStarted();
+          await new Promise<void>((resolve) => {
+            if (grant.signal.aborted) resolve();
+            else grant.signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+          return { ok: false, error: 'aborted', outcomeKnown: true };
+        },
+      }),
       sendMessage: async (message: any) => {
         if (message.type !== 'actor/run') return { ok: true };
-        burst = Array.from({ length: 5 }, () => client.routes['actor/model-call']({
-          relayToken: message.job.relayToken, args: {},
-        }, OFFSCREEN));
+        burst = Array.from({ length: 5 }, () =>
+          client.routes['actor/model-open-inference'](
+            inferenceInput(message.job.relayToken), OFFSCREEN,
+          ));
         await started;
         return { ok: true, started: true, finalText: 'done' };
       },
     }));
 
     await client.run({
-      actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm',
+      actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic',
+      model: 'm', maxOutputTokens: 4096,
     } as any);
     const results = await Promise.all(burst);
     expect(modelCalls).toBe(1);
@@ -796,12 +861,27 @@ describe('relay quotas', () => {
       maxToolRelaysPerRun: 1,
       sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
       buildToolContext: async () => ({}),
-      callModel: async function* () { modelCalls += 1; },
+      providerEgress: providerEgress({
+        openInference: async () => {
+          modelCalls += 1;
+          return {
+            ok: true, outcomeKnown: true,
+            value: { streamId: 'budget-stream', status: 200, headers: {}, hasBody: true },
+          };
+        },
+      }),
       dispatchToolCall: async () => { toolCalls += 1; return { ok: true }; },
     });
     const results = await during(async (relayToken) => {
-      const firstModel = await client.routes['actor/model-call']({ relayToken, args: {} }, OFFSCREEN);
-      const secondModel = await client.routes['actor/model-call']({ relayToken, args: {} }, OFFSCREEN);
+      const firstModel = await client.routes['actor/model-open-inference'](
+        inferenceInput(relayToken), OFFSCREEN,
+      );
+      await client.routes['actor/model-cancel-inference']({
+        relayToken, streamId: firstModel.value.streamId,
+      }, OFFSCREEN);
+      const secondModel = await client.routes['actor/model-open-inference'](
+        inferenceInput(relayToken), OFFSCREEN,
+      );
       const firstTool = await client.routes['actor/tool-dispatch']({
         relayToken, call: { name: 'vm_boot', args: {} },
       }, OFFSCREEN);
@@ -858,7 +938,10 @@ describe('run(): relay lifetime', () => {
       },
     }));
 
-    await client.run({ actorSessionId: 's1', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' });
+    await client.run({
+      actorSessionId: 's1', message: 'm', systemPrompt: 's', provider: 'anthropic',
+      model: 'm', maxOutputTokens: 4096,
+    });
     await Promise.resolve();
     expect(relaySignal).not.toBeNull();
     expect((relaySignal as unknown as AbortSignal).aborted).toBe(true);
@@ -878,13 +961,14 @@ describe('run(): relay lifetime', () => {
         await preflightGate;
         return null;
       },
-      callModel: async function* () { modelCalled = true; yield { type: 'text', text: 'forbidden' }; },
+      providerEgress: providerEgress({
+        openInference: async () => { modelCalled = true; return { ok: true }; },
+      }),
       sendMessage: async (message: any) => {
         if (message.type === 'actor/run') {
-          routeResult = client.routes['actor/model-call']({
-            relayToken: message.job.relayToken,
-            args: {},
-          }, OFFSCREEN);
+          routeResult = client.routes['actor/model-open-inference'](
+            inferenceInput(message.job.relayToken), OFFSCREEN,
+          );
           await preflightEntered;
           return { ok: true, started: true, finalText: 'host settled' };
         }
@@ -892,7 +976,10 @@ describe('run(): relay lifetime', () => {
       },
     }));
 
-    await client.run({ actorSessionId: 's1', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' });
+    await client.run({
+      actorSessionId: 's1', message: 'm', systemPrompt: 's', provider: 'anthropic',
+      model: 'm', maxOutputTokens: 4096,
+    });
     releasePreflight();
     expect(await routeResult).toEqual({ ok: false, error: 'aborted' });
     expect(modelCalled).toBe(false);

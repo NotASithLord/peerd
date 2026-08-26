@@ -5,6 +5,16 @@
 import { runUserTurn } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
 import { controllerHostsTool } from '/shared/controller-tool-manifest.js';
+import {
+  callModel as callProviderModel,
+  contextWindowFor,
+  listProviders,
+  planFailoverChain,
+  providerMetadata,
+  providerModelContextWindow,
+  shouldFailover,
+} from '/peerd-provider/controller.js';
+import { createControllerModelEgress } from './model-egress-client.js';
 
 const isRecord = (/** @type {unknown} */ value) => value !== null
   && typeof value === 'object' && !Array.isArray(value);
@@ -122,29 +132,81 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
     return promise;
   };
   let classifications = /** @type {Record<string, any>} */ ({ ...input.classifications });
-  /** @type {string|null} */
-  let modelId = null;
-  const cancelModel = async () => {
-    const closing = modelId;
-    modelId = null;
-    if (closing && !options.signal.aborted) {
-      await rpc('turn.model.cancel', { modelId: closing }).catch(() => {});
-    }
+  const modelEgress = createControllerModelEgress({ call: rpc });
+  const providersByName = new Map(listProviders().map((provider) => [provider.name, provider]));
+  const configuredFallbacks = ctx.providerFailoverEnabled === true
+    && Array.isArray(ctx.providerFallbacks)
+    ? ctx.providerFallbacks.flatMap((/** @type {unknown} */ name) => {
+      const provider = typeof name === 'string' ? providersByName.get(name) : null;
+      return provider ? [{ provider: provider.name, model: provider.defaultModel }] : [];
+    }) : [];
+  /** @type {{provider:string,model:string}|null} */
+  let failoverLastGood = null;
+  /** @type {{provider:string,model:string}[]|null} */
+  let boundCandidates = null;
+  const bindCandidates = async (/** @type {{provider:string,model:string}} */ primary) => {
+    if (boundCandidates) return boundCandidates;
+    const candidates = planFailoverChain(primary, configuredFallbacks);
+    const bound = await rpc('turn.model.bind', { candidates });
+    if (!Array.isArray(bound?.candidates)) throw new Error('kernel model plan did not bind');
+    boundCandidates = candidates;
+    return candidates;
   };
   const callModel = async function* (/** @type {Record<string, any>} */ args) {
     const {
       getSecret: _getSecret, safeFetch: _safeFetch, signal: _signal, ...modelRequest
     } = args;
-    const opened = await rpc('turn.model.open', { requestJson: JSON.stringify(modelRequest) });
-    modelId = opened?.modelId;
-    if (typeof modelId !== 'string') throw new Error('kernel model stream did not open');
-    try {
-      while (true) {
-        const next = await rpc('turn.model.next', { modelId });
-        if (next?.done === true) return;
-        yield next?.event;
+    const requestedProvider = String(modelRequest.provider ?? '');
+    const requestedMetadata = providerMetadata(requestedProvider);
+    const requestedModel = String(modelRequest.model ?? '') || requestedMetadata?.defaultModel || '';
+    const primary = failoverLastGood ?? {
+      provider: requestedProvider,
+      model: requestedModel,
+    };
+    await bindCandidates({ provider: requestedProvider, model: requestedModel });
+    const chain = planFailoverChain(primary, configuredFallbacks);
+    let lastError;
+    for (let index = 0; index < chain.length; index += 1) {
+      const candidate = chain[index];
+      let streamedContent = false;
+      try {
+        for await (const event of callProviderModel(/** @type {any} */ ({
+          ...modelRequest,
+          provider: candidate.provider,
+          model: candidate.model,
+          signal: options.signal,
+          modelEgress,
+        }))) {
+          if (event?.type === 'tool-use-start') {
+            await rpc('turn.model.observe-event', {
+              type: event.type, id: event.id, name: event.name,
+            });
+          } else if (event?.type === 'tool-use-delta') {
+            await rpc('turn.model.observe-event', {
+              type: event.type, id: event.id, partialJson: event.partialJson,
+            });
+          }
+          if (event?.type !== 'rate-limit-pause') streamedContent = true;
+          yield event;
+        }
+        failoverLastGood = candidate;
+        return;
+      } catch (cause) {
+        lastError = cause;
+        const final = index === chain.length - 1;
+        const aborted = options.signal.aborted
+          || /** @type {{name?:string}} */ (cause)?.name === 'AbortError';
+        if (aborted || streamedContent || final || (index === 0 && !shouldFailover(cause))) {
+          throw cause;
+        }
+        const next = chain[index + 1];
+        await rpc('turn.model.observe-failover', {
+          from: candidate, to: next,
+          reason: /** @type {{name?:string}} */ (cause)?.name ?? 'error',
+        });
       }
-    } finally { await cancelModel(); }
+    }
+    throw lastError;
   };
   const sessions = {
     get: async (/** @type {string} */ sessionId) => parseJson(
@@ -165,8 +227,22 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
       rpc('turn.session.set-trim', { sessionId, stateJson: JSON.stringify(state) }),
   };
   try {
+    const session = await sessions.get(input.sessionId);
+    const metadata = providerMetadata(session?.provider);
+    const model = String(session?.model ?? '') || metadata?.defaultModel || '';
+    if (!metadata || !model) throw new Error('controller model selection unavailable');
+    await bindCandidates({ provider: metadata.name, model });
+    const liveWindow = await providerModelContextWindow(metadata.name, model, {
+      modelEgress, signal: options.signal,
+    });
+    const contextWindow = contextWindowFor(model, {
+      overrides: isRecord(ctx.contextWindowOverrides)
+        ? /** @type {Record<string,number>} */ (ctx.contextWindowOverrides) : undefined,
+      live: liveWindow ?? undefined,
+    });
     for await (const event of runUserTurn({
       ...ctx,
+      contextWindow,
       sessionId: input.sessionId,
       tools,
       signal: options.signal,
@@ -306,8 +382,6 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
       ...(detail?.retryable === false ? { retryable: false } : {}),
       error: cause instanceof Error ? cause.message : String(cause),
     };
-  } finally {
-    await cancelModel();
   }
 };
 

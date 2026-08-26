@@ -1,9 +1,9 @@
 // @ts-check
 // background/offscreen-actor-client.js: the privileged-host client for EVERY isolated
 // agent loop (the heap split): ephemeral spawned reasoners (spawn.js) AND bound
-// actors (the actor turn). One client, one set of routes (model-call + tool-dispatch
-// + loop-event); a reasoning child grants no tools, so it only ever exercises
-// model-call.
+// actors (the actor turn). Provider semantics stay in the isolated Worker; this
+// client exposes exact inference open/read/cancel authority plus the existing
+// tool-dispatch and loop-event routes.
 //
 // The security-critical route is 'actor/tool-dispatch': the worker's loop asks to run
 // a tool; THIS builds the actor's instance-PINNED, gated tool context and dispatches
@@ -25,9 +25,16 @@
  * @param {() => Promise<void>} [deps.ensureOffscreen] legacy Chrome host alias
  * @param {(msg: object) => Promise<any>} deps.sendMessage
  * @param {(job: object, options: { signal?: AbortSignal, relay: (type: string, payload: any) => any|Promise<any> }) => Promise<any>} [deps.runOnChannel]
- * @param {(args: object) => AsyncIterable<any>} deps.callModel
- * @param {(name: string) => Promise<string | null>} deps.getSecret
- * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} deps.safeFetch
+ * @param {{
+ *   openInference:(input:unknown,grant:object)=>Promise<any>,
+ *   readInferenceChunk:(input:unknown,grant:object)=>Promise<any>,
+ *   cancelInference:(input:unknown,grant:object)=>Promise<any>,
+ *   readModelContext:(input:unknown,grant:object)=>Promise<any>,
+ *   openLocalGeneration:(input:unknown,grant:object)=>Promise<any>,
+ *   readLocalGeneration:(input:unknown,grant:object)=>Promise<any>,
+ *   cancelLocalGeneration:(input:unknown,grant:object)=>Promise<any>,
+ *   closeOwner:(owner:object)=>Promise<void>,
+ * }} deps.providerEgress
  * @param {{ get: (id: string) => Promise<any> }} deps.sessions
  * @param {(opts: object) => Promise<object>} deps.buildToolContext
  * @param {(call: object, ctx: object) => Promise<any>} deps.dispatchToolCall
@@ -77,7 +84,7 @@
  * @param {number} [deps.maxLoopEventsPerRun]
  */
 export const makeOffscreenActorClient = ({
-  ensureHost, ensureOffscreen, sendMessage, runOnChannel, callModel, getSecret, safeFetch,
+  ensureHost, ensureOffscreen, sendMessage, runOnChannel, providerEgress,
   sessions, buildToolContext, dispatchToolCall, pinActorCall, restrictCtxCapabilities, ownedTabFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW, now = Date.now,
   reviewToolAllowed = () => false,
   recordModelCall = () => {},
@@ -101,7 +108,7 @@ export const makeOffscreenActorClient = ({
     ? Math.floor(maxLoopEventsPerRun) : 256;
   let seq = 0;
   /**
-   * @type {Map<string, { runId: string, actorSessionId: string, provider: string, model: string, ollamaHost?: string, maxOutputTokens?: number, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean }>} Firefox relay grants:
+   * @type {Map<string, { runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean }>} Firefox relay grants:
    * token → the identity of the run it was minted for.
    *
    * why a grant and not the message's own `actorSessionId`/`runId`: Firefox binds
@@ -112,7 +119,7 @@ export const makeOffscreenActorClient = ({
    * comes back on every relay call; identity is DERIVED from it, so the payload's claim
    * buys nothing. It is deleted when the run settles, which makes it a liveness check
    * too — a late or replayed relay from a finished run is refused, the same posture
-   * script/model-call gets from its owner check.
+   * an inference stream gets from its owner check.
    *
    * The Worker never receives the token (the runner holds it and stamps it on outbound
    * relays), so it stays a host-side binding, not a secret the untrusted heap can leak.
@@ -123,23 +130,19 @@ export const makeOffscreenActorClient = ({
    * registered on extension-wide runtime messaging.
    */
   const grants = new Map();
-  /** @type {Map<string, Set<AbortController>>} runId → in-flight model-call controllers */
-  const inflight = new Map();
-  /** @type {Set<string>} runIds a Stop/cancel already fired for. why: the actor card
-   * (turn/actor-start) appears BEFORE the worker's first model-call reaches the route,
-   * so a Stop can fire while `inflight` is still empty — aborting nothing, and the
-   * later model-call would run uncancelled. This set closes that race: a model-call for
-   * an already-aborted run is refused, and one already streaming is failed post-hoc even
-   * if its stream fulfilled anyway (a fake / a provider that flushed before cancel). */
+  /** @type {Set<string>} run ids a Stop/cancel already fired for. why: the actor card
+   * appears before its first inference open. This closes the gap in which Stop can
+   * win before a stream exists: a later open is refused, and an admitted stream is
+   * closed through the provider authority's owner token. */
   const abortedRuns = new Set();
   /** @type {Map<string, (ev: object) => void>} runId → onEvent */
   const runOnEvent = new Map();
   /** @type {Map<string, { sessionId: string, label: string }>} runId → identity for the
-   * context inspector: the model-call route only carries runId + body args, so the
+   * context inspector: inference routes carry no session identity, so the
    * session (and a human label for WHOSE call this is) is stashed at run() time. */
   const runMeta = new Map();
   /**
-   * @param {{ actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, ollamaHost?: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, actorSurface?: 'tools'|'code', tabOrigin?: string, origin?: string, inbound?: boolean }} job
+   * @param {{ actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindowOverrides?:Record<string,number>, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, actorSurface?: 'tools'|'code', tabOrigin?: string, origin?: string, inbound?: boolean }} job
    * @param {{ signal?: AbortSignal, onEvent?: (ev: object) => void }} [opts]
    */
   const run = async (job, { signal, onEvent } = {}) => {
@@ -185,9 +188,10 @@ export const makeOffscreenActorClient = ({
       maxOutputTokens: typeof requestedMaxOutputTokens === 'number'
         && Number.isFinite(requestedMaxOutputTokens) && requestedMaxOutputTokens > 0
         ? Math.floor(requestedMaxOutputTokens) : undefined,
+      providerOwner: Object.freeze({ runId }),
       inbound, allowedTools, relaySignal: relayController.signal,
-      modelRelays: 0, toolRelays: 0, loopEvents: 0, modelActive: false,
-      ...(job.ollamaHost ? { ollamaHost: job.ollamaHost } : {}),
+      modelRelays: 0, toolRelays: 0, loopEvents: 0,
+      modelActive: false, modelStreamId: null, contextRead: false,
       ...(job.actorSurface === 'code' || job.actorSurface === 'tools'
         ? { actorSurface: job.actorSurface }
         : {}),
@@ -201,9 +205,9 @@ export const makeOffscreenActorClient = ({
       label: job.actorType ? `actor:${job.actorType}` : `actor d${job.depth ?? 1}`,
     });
     const abortRelays = () => {
-      abortedRuns.add(runId);   // cover a model-call that hasn't reached the route yet
+      abortedRuns.add(runId);   // cover an inference open that has not reached the route yet
       relayController.abort();
-      for (const ac of inflight.get(runId) ?? []) { try { ac.abort(); } catch { /* already */ } }
+      void providerEgress?.closeOwner(grant.providerOwner).catch(() => {});
     };
     const abortRun = () => {
       abortRelays();
@@ -227,7 +231,7 @@ export const makeOffscreenActorClient = ({
         : await sendMessage({ type: 'actor/run', job: { ...job, inbound, tools, runId, relayToken } });
       // Stop / cancel cascade: `signal.aborted` HERE is the authoritative proof a Stop
       // hit THIS run — and the one place it's reliably observable. The worker unwinds an
-      // abort several ways (a rejected relay, a model-error from the SW route, or the
+      // abort several ways (a rejected relay, a stream error, or the
       // 'abort' message) and can even finish CLEANLY (no error event, empty reply) that
       // looks like a natural end at the result shape. Stamp only known no-reply
       // cancellations; unknown custody stays terminal. The caller then renders the actor
@@ -247,13 +251,12 @@ export const makeOffscreenActorClient = ({
       // it already fired under {once:true}); keeps nothing dangling on the turn signal.
       signal?.removeEventListener('abort', abortRun);
       relayController.abort();
-      for (const ac of inflight.get(runId) ?? []) { try { ac.abort(); } catch { /* already */ } }
+      await providerEgress?.closeOwner(grant.providerOwner).catch(() => {});
       // Retiring the grant is what makes it a liveness check: every relay for
       // this run is refused from here on, so a late/replayed one can't dispatch.
       if (!runOnChannel) grants.delete(relayToken);
       runOnEvent.delete(runId);
       runMeta.delete(runId);
-      inflight.delete(runId);
       abortedRuns.delete(runId);
     }
   };
@@ -264,7 +267,7 @@ export const makeOffscreenActorClient = ({
    * token. Every route treats a missing or retired grant as a hard refusal.
    * @param {{ relayToken?: unknown }} [msg]
    * @param {unknown} [sender]  the second argument makeDispatcher hands a handler
-   * @returns {{ runId: string, actorSessionId: string, provider: string, model: string, ollamaHost?: string, maxOutputTokens?: number, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean } | null}
+   * @returns {{ runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean } | null}
    */
   const grantFor = (msg, sender, boundGrant = null) => {
     if (boundGrant) return boundGrant;
@@ -276,29 +279,31 @@ export const makeOffscreenActorClient = ({
 
   const routes = {
     /**
-     * @param {{ relayToken?: string, args?: object }} [msg] - the model call: key+egress added HERE.
-     * @param {unknown} [sender] - must be the offscreen document (see grantFor).
+     * @param {{relayToken?:string,providerId?:string,modelId?:string,nativeBody?:object}} [msg]
+     * @param {unknown} [sender]
+     * @param {any} [boundGrant]
      */
-    'actor/model-call': async (msg = {}, sender = undefined, boundGrant = null) => {
-      // Identity from the offscreen sender + the grant, never from the message:
-      // this route adds the user's key to whatever it forwards, so an
-      // unauthorized caller must not be able to name a run at all.
+    'actor/model-open-inference': async (msg = {}, sender = undefined, boundGrant = null) => {
       const grant = grantFor(msg, sender, boundGrant);
-      if (!grant) return { ok: false, error: 'actor/model-call: unauthorized relay' };
+      if (!grant) return { ok: false, error: 'actor/model-open-inference: unauthorized relay' };
       const { runId } = grant;
-      const args = msg.args;
       const key = runId;
-      // Race guard 1: a Stop that fired BEFORE this call reached the route (the card
-      // appears first) → refuse without ever making the key-bearing request.
       if (grant.relaySignal.aborted || abortedRuns.has(key)) return { ok: false, error: 'aborted' };
       if (grant.modelActive) return {
-        ok: false, error: 'actor/model-call: another model relay is active',
+        ok: false, error: 'actor/model-open-inference: another inference is active',
         code: 'actor_model_relay_busy', outcomeKnown: true, performed: false,
       };
       if (grant.modelRelays >= modelRelayLimit) return {
-        ok: false, error: 'actor/model-call: relay budget exhausted',
+        ok: false, error: 'actor/model-open-inference: relay budget exhausted',
         code: 'actor_model_relay_limit', outcomeKnown: true, performed: false,
       };
+      if (!providerEgress || !Number.isSafeInteger(grant.maxOutputTokens)
+          || /** @type {number} */ (grant.maxOutputTokens) < 1) {
+        return {
+          ok: false, error: 'actor/model-open-inference: authority or output limit unavailable',
+          code: 'actor_model_authority_unavailable', outcomeKnown: true, performed: false,
+        };
+      }
       grant.modelRelays += 1;
       grant.modelActive = true;
       try {
@@ -309,44 +314,218 @@ export const makeOffscreenActorClient = ({
         // walked straight past it.
         if (spendRefusalFor) {
           const refusal = await spendRefusalFor(grant.actorSessionId).catch(() => null);
-          if (refusal) return { ok: false, error: refusal };
+          if (refusal) {
+            grant.modelActive = false;
+            return { ok: false, error: refusal };
+          }
         }
-        // The host may have settled while the spend lookup was in flight. A
-        // token lookup made before settlement is not continuing authority.
-        if (grant.relaySignal.aborted || abortedRuns.has(key)) return { ok: false, error: 'aborted' };
-        const ac = new AbortController();
-        const set = inflight.get(key) ?? new Set();
-        set.add(ac); inflight.set(key, set);
-        // The context inspector sees every delegated model call here: the one
-        // relay every actor and actor heap uses. Identity comes from the
-        // runMeta stash, never the worker's args (a worker must not be able to
-        // relabel whose context this was).
+        if (grant.relaySignal.aborted || abortedRuns.has(key)) {
+          grant.modelActive = false;
+          return { ok: false, error: 'aborted' };
+        }
         const meta = runMeta.get(key);
-        const pinnedArgs = {
-          ...(args ?? {}),
+        if (meta) recordModelCall({
           provider: grant.provider,
           model: grant.model,
-          ollamaHost: grant.ollamaHost,
           maxTokens: grant.maxOutputTokens,
-        };
-        if (meta) recordModelCall({ ...pinnedArgs, sessionId: meta.sessionId, label: meta.label });
-        /** @type {any[]} */
-        const events = [];
-        try {
-          for await (const ev of callModel({ ...pinnedArgs, getSecret, safeFetch, signal: ac.signal })) events.push(ev);
-          // Race guard 2: a Stop that fired DURING the call → honor it even if the stream
-          // still fulfilled (a fake responder, or a provider that flushed before cancel),
-          // so a mid-call abort never delivers a completed turn.
-          if (ac.signal.aborted || abortedRuns.has(key)) return { ok: false, error: 'aborted' };
-          return { ok: true, events };
-        } catch (e) {
-          return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
-        } finally {
-          set.delete(ac); if (set.size === 0) inflight.delete(key);
+          sessionId: meta.sessionId,
+          label: meta.label,
+        });
+        const result = await providerEgress.openInference({
+          providerId: msg.providerId,
+          modelId: msg.modelId,
+          nativeBody: msg.nativeBody,
+        }, {
+          owner: grant.providerOwner,
+          signal: grant.relaySignal,
+          maxOutputTokens: grant.maxOutputTokens,
+          permits: (/** @type {string} */ providerId, /** @type {string} */ modelId) => providerId === grant.provider
+            && modelId === grant.model,
+        });
+        if (grant.relaySignal.aborted || abortedRuns.has(key)) {
+          await providerEgress.closeOwner(grant.providerOwner).catch(() => {});
+          return { ok: false, error: 'aborted' };
         }
-      } finally {
+        if (result?.ok !== true) grant.modelActive = false;
+        else if (typeof result?.value?.streamId !== 'string'
+            || result.value.streamId.length === 0) {
+          grant.modelActive = false;
+          return {
+            ok: false, error: 'actor/model-open-inference: authority returned no stream',
+            code: 'actor_model_stream_invalid', outcomeKnown: true,
+          };
+        }
+        else {
+          grant.modelStreamId = result.value.streamId;
+          if (result.value.hasBody !== true) {
+            await providerEgress.cancelInference({ streamId: grant.modelStreamId }, {
+              owner: grant.providerOwner,
+            }).catch(() => {});
+            grant.modelActive = false;
+            grant.modelStreamId = null;
+          }
+        }
+        return result;
+      } catch (error) {
         grant.modelActive = false;
+        const failure = /** @type {{message?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (error);
+        return {
+          ok: false, error: failure?.message ?? String(error),
+          outcomeKnown: failure?.outcomeKnown === true,
+          ...(failure?.retryable === false || failure?.outcomeKnown !== true
+            ? { retryable: false } : {}),
+        };
       }
+    },
+    /**
+     * @param {{relayToken?:string,streamId?:string}} [msg]
+     * @param {unknown} [sender]
+     * @param {any} [boundGrant]
+     */
+    'actor/model-read-inference-chunk': async (msg = {}, sender = undefined, boundGrant = null) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      if (!grant) return { ok: false, error: 'actor/model-read-inference-chunk: unauthorized relay' };
+      if (!providerEgress || grant.relaySignal.aborted || abortedRuns.has(grant.runId)) {
+        return { ok: false, error: 'aborted' };
+      }
+      if (typeof msg.streamId !== 'string' || msg.streamId !== grant.modelStreamId) {
+        return {
+          ok: false, error: 'actor/model-read-inference-chunk: stream is not active',
+          code: 'actor_model_stream_invalid', outcomeKnown: true,
+        };
+      }
+      const result = await providerEgress.readInferenceChunk({ streamId: msg.streamId }, {
+        owner: grant.providerOwner, signal: grant.relaySignal,
+      });
+      if (result?.ok !== true || result?.value?.done === true) {
+        grant.modelActive = false;
+        grant.modelStreamId = null;
+      }
+      return result;
+    },
+    /**
+     * @param {{relayToken?:string,streamId?:string}} [msg]
+     * @param {unknown} [sender]
+     * @param {any} [boundGrant]
+     */
+    'actor/model-cancel-inference': async (msg = {}, sender = undefined, boundGrant = null) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      if (!grant) return { ok: false, error: 'actor/model-cancel-inference: unauthorized relay' };
+      if (!providerEgress) return {
+        ok: false, error: 'actor/model-cancel-inference: authority unavailable',
+        outcomeKnown: true,
+      };
+      if (typeof msg.streamId !== 'string' || msg.streamId !== grant.modelStreamId) {
+        return {
+          ok: false, error: 'actor/model-cancel-inference: stream is not active',
+          code: 'actor_model_stream_invalid', outcomeKnown: true,
+        };
+      }
+      const result = await providerEgress.cancelInference({ streamId: msg.streamId }, {
+        owner: grant.providerOwner,
+      });
+      grant.modelActive = false;
+      grant.modelStreamId = null;
+      return result;
+    },
+    /** Exact resident-engine generation; it shares the model-call quota but not network fetch.
+     * @param {any} msg @param {unknown} sender @param {any} boundGrant */
+    'actor/model-open-local': async (msg = {}, sender = undefined, boundGrant = null) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      if (!grant || !providerEgress || grant.relaySignal.aborted
+          || abortedRuns.has(grant?.runId)) {
+        return { ok: false, error: 'actor/model-open-local: unauthorized relay' };
+      }
+      if (grant.modelActive || grant.modelRelays >= modelRelayLimit
+          || !Number.isSafeInteger(grant.maxOutputTokens)
+          || /** @type {number} */ (grant.maxOutputTokens) < 1) {
+        return {
+          ok: false, error: 'actor/model-open-local: relay unavailable',
+          code: grant.modelActive ? 'actor_model_relay_busy' : 'actor_model_relay_limit',
+          outcomeKnown: true, performed: false,
+        };
+      }
+      grant.modelRelays += 1;
+      grant.modelActive = true;
+      const result = await providerEgress.openLocalGeneration({
+        providerId: msg.providerId,
+        modelId: msg.modelId,
+        messages: msg.messages,
+        system: msg.system,
+        tools: msg.tools,
+        maxTokens: msg.maxTokens,
+      }, {
+        owner: grant.providerOwner,
+        signal: grant.relaySignal,
+        maxOutputTokens: grant.maxOutputTokens,
+        permits: (/** @type {string} */ providerId, /** @type {string} */ modelId) =>
+          providerId === grant.provider && modelId === grant.model,
+      });
+      if (result?.ok !== true || typeof result?.value?.streamId !== 'string') {
+        grant.modelActive = false;
+        return result;
+      }
+      grant.modelStreamId = result.value.streamId;
+      return result;
+    },
+    /** @param {any} msg @param {unknown} sender @param {any} boundGrant */
+    'actor/model-read-local': async (msg = {}, sender = undefined, boundGrant = null) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      if (!grant || !providerEgress || grant.relaySignal.aborted
+          || msg.streamId !== grant.modelStreamId) {
+        return {
+          ok: false, error: 'actor/model-read-local: stream is not active',
+          code: 'actor_model_stream_invalid', outcomeKnown: true,
+        };
+      }
+      const result = await providerEgress.readLocalGeneration({ streamId: msg.streamId }, {
+        owner: grant.providerOwner,
+      });
+      if (result?.ok !== true || result?.value?.done === true) {
+        grant.modelActive = false;
+        grant.modelStreamId = null;
+      }
+      return result;
+    },
+    /** @param {any} msg @param {unknown} sender @param {any} boundGrant */
+    'actor/model-cancel-local': async (msg = {}, sender = undefined, boundGrant = null) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      if (!grant || !providerEgress || msg.streamId !== grant.modelStreamId) {
+        return {
+          ok: false, error: 'actor/model-cancel-local: stream is not active',
+          code: 'actor_model_stream_invalid', outcomeKnown: true,
+        };
+      }
+      const result = await providerEgress.cancelLocalGeneration({ streamId: msg.streamId }, {
+        owner: grant.providerOwner,
+      });
+      grant.modelActive = false;
+      grant.modelStreamId = null;
+      return result;
+    },
+    /**
+     * @param {{relayToken?:string,providerId?:string,modelId?:string}} [msg]
+     * @param {unknown} [sender]
+     * @param {any} [boundGrant]
+     */
+    'actor/model-read-context': async (msg = {}, sender = undefined, boundGrant = null) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      if (!grant || !providerEgress || grant.contextRead
+          || grant.relaySignal.aborted || abortedRuns.has(grant.runId)
+          || msg.providerId !== grant.provider || msg.modelId !== grant.model) {
+        return {
+          ok: false, error: 'actor/model-read-context: authority refused',
+          code: 'actor_model_context_denied', outcomeKnown: true,
+        };
+      }
+      grant.contextRead = true;
+      return providerEgress.readModelContext({
+        providerId: msg.providerId, modelId: msg.modelId,
+      }, {
+        owner: grant.providerOwner,
+        signal: grant.relaySignal,
+        permitsProvider: (/** @type {string} */ providerId) => providerId === grant.provider,
+      });
     },
     /**
      * @param {{ relayToken?: string, call?: any }} [msg] - SW-side ctx build + gate + dispatch.

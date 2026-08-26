@@ -2,9 +2,8 @@
 // offscreen/actor-runner.js — hosts EVERY offscreen agent loop in dedicated Workers
 // (the heap split): ephemeral spawned reasoners AND bound actors alike (a reasoning
 // child just carries no tools, so its worker never sends a tool-request). Forks one
-// Worker per turn, relays its model-call AND tool-dispatch requests to the SW (which
-// holds the key, engine clients, instance pin, and gate), forwards its loop events,
-// and resolves with the turn result.
+// Worker per turn, relays exact model-authority stream requests and tool-dispatch
+// requests to the SW, forwards loop events, and resolves with the turn result.
 
 import { ACTOR_WORKER_PROTOCOL, ACTOR_WORKER_STARTUP_MS, validActorWorkerRealm } from './actor-worker-protocol.js';
 import {
@@ -42,7 +41,7 @@ export const describeActorExecution = (job, executionId) => describeExecution({
     maxSteps: job.maxSteps,
     maxOutputTokens: job.maxOutputTokens,
     reasoning: job.reasoning,
-    contextWindow: job.contextWindow,
+    contextWindowOverrides: job.contextWindowOverrides,
   },
   input: job.message,
   state: { messages: Array.isArray(job.priorMessages) ? job.priorMessages : [] },
@@ -107,7 +106,7 @@ export const abortActor = (runId) => {
 
 /**
  * Run one BOUND-actor turn in a dedicated Worker.
- * @param {{ runId?: string, relayToken?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, runtimeCapabilities?: object, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabOrigin?: string, origin?: string, inbound?: boolean, preflightReply?: string }} job
+ * @param {{ runId?: string, relayToken?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindowOverrides?:Record<string,number>, runtimeCapabilities?: object, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabOrigin?: string, origin?: string, inbound?: boolean, preflightReply?: string }} job
  * @param {{ workerUrl: string, sendToSW: (type: string, payload: object) => Promise<any>, onRelayDrain?: () => void, createWorker?: (url: string) => Worker, startupMs?: number, relayDrainMs?: number, maxLoopEvents?: number }} deps
  * @returns {Promise<{ ok: boolean, started?: boolean, phase?: string, code?: string, finalText?: string, newMessages?: any[], usage?: object, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean, performed?: boolean, outcomeKnown?: boolean, retryable?: boolean }>}
  */
@@ -307,23 +306,207 @@ export const runActor = async (job, {
           return;
         }
         if (terminal) return;
-        if (m.type === 'model-request') {
+        if (m.type === 'model-open-inference-request') {
           pendingModelRelays += 1;
           try {
-            const resp = await sendToSW('actor/model-call', {
-              ...(relayToken ? { relayToken } : {}), args: m.args,
+            const resp = await sendToSW('actor/model-open-inference', {
+              ...(relayToken ? { relayToken } : {}),
+              providerId: m.providerId,
+              modelId: m.modelId,
+              nativeBody: m.nativeBody,
             });
             if (resp?.outcomeKnown === false) relayedModelUnknown = true;
-            if (!resp?.ok) relayedModelFailure ??= resp?.error ?? 'model call failed';
-            if (!terminal) {
-              if (resp?.ok) w.postMessage({ type: 'model-response', rid: m.rid, events: resp.events ?? [] });
-              else w.postMessage({ type: 'model-error', rid: m.rid, error: resp?.error ?? 'model call failed' });
-            }
+            if (!resp?.ok) relayedModelFailure ??= resp?.error ?? 'model inference open failed';
+            if (!terminal) w.postMessage({
+              type: 'model-open-inference-response', rid: m.rid, reply: resp,
+            });
           } catch (e) {
             const detail = /** @type {{ message?: string, outcomeKnown?: boolean }} */ (e);
             relayedModelUnknown ||= detail?.outcomeKnown !== true;
             relayedModelFailure ??= detail?.message ?? String(e);
-            if (!terminal) w.postMessage({ type: 'model-error', rid: m.rid, error: detail?.message ?? String(e) });
+            if (!terminal) w.postMessage({
+              type: 'model-open-inference-response', rid: m.rid,
+              reply: {
+                ok: false, error: detail?.message ?? String(e),
+                outcomeKnown: detail?.outcomeKnown === true,
+                ...(detail?.outcomeKnown === true ? {} : { retryable: false }),
+              },
+            });
+          } finally {
+            pendingModelRelays -= 1;
+            settleTerminal();
+          }
+          return;
+        }
+        if (m.type === 'model-read-inference-chunk-request') {
+          pendingModelRelays += 1;
+          try {
+            const resp = await sendToSW('actor/model-read-inference-chunk', {
+              ...(relayToken ? { relayToken } : {}), streamId: m.streamId,
+            });
+            if (resp?.outcomeKnown === false) relayedModelUnknown = true;
+            if (!resp?.ok) relayedModelFailure ??= resp?.error ?? 'model inference read failed';
+            if (!terminal) w.postMessage({
+              type: 'model-read-inference-chunk-response', rid: m.rid, reply: resp,
+            });
+          } catch (e) {
+            const detail = /** @type {{ message?: string, outcomeKnown?: boolean }} */ (e);
+            relayedModelUnknown ||= detail?.outcomeKnown !== true;
+            relayedModelFailure ??= detail?.message ?? String(e);
+            if (!terminal) w.postMessage({
+              type: 'model-read-inference-chunk-response', rid: m.rid,
+              reply: {
+                ok: false, error: detail?.message ?? String(e),
+                outcomeKnown: detail?.outcomeKnown === true,
+                ...(detail?.outcomeKnown === true ? {} : { retryable: false }),
+              },
+            });
+          } finally {
+            pendingModelRelays -= 1;
+            settleTerminal();
+          }
+          return;
+        }
+        if (m.type === 'model-cancel-inference-request') {
+          pendingModelRelays += 1;
+          try {
+            const resp = await sendToSW('actor/model-cancel-inference', {
+              ...(relayToken ? { relayToken } : {}), streamId: m.streamId,
+            });
+            if (resp?.outcomeKnown === false) relayedModelUnknown = true;
+            if (!resp?.ok) relayedModelFailure ??= resp?.error ?? 'model inference cancel failed';
+            if (!terminal) w.postMessage({
+              type: 'model-cancel-inference-response', rid: m.rid, reply: resp,
+            });
+          } catch (e) {
+            const detail = /** @type {{ message?: string, outcomeKnown?: boolean }} */ (e);
+            relayedModelUnknown ||= detail?.outcomeKnown !== true;
+            relayedModelFailure ??= detail?.message ?? String(e);
+            if (!terminal) w.postMessage({
+              type: 'model-cancel-inference-response', rid: m.rid,
+              reply: {
+                ok: false, error: detail?.message ?? String(e),
+                outcomeKnown: detail?.outcomeKnown === true,
+                ...(detail?.outcomeKnown === true ? {} : { retryable: false }),
+              },
+            });
+          } finally {
+            pendingModelRelays -= 1;
+            settleTerminal();
+          }
+          return;
+        }
+        if (m.type === 'model-read-context-request') {
+          pendingModelRelays += 1;
+          try {
+            const reply = await sendToSW('actor/model-read-context', {
+              ...(relayToken ? { relayToken } : {}),
+              providerId: m.providerId,
+              modelId: m.modelId,
+            });
+            if (reply?.outcomeKnown === false) relayedModelUnknown = true;
+            if (!terminal) w.postMessage({
+              type: 'model-read-context-response', rid: m.rid, reply,
+            });
+          } catch (cause) {
+            const detail = /** @type {{message?:string,outcomeKnown?:boolean}} */ (cause);
+            if (!terminal) w.postMessage({
+              type: 'model-read-context-response', rid: m.rid,
+              reply: {
+                ok: false, error: detail?.message ?? String(cause),
+                outcomeKnown: detail?.outcomeKnown === true,
+                ...(detail?.outcomeKnown === true ? {} : { retryable: false }),
+              },
+            });
+          } finally {
+            pendingModelRelays -= 1;
+            settleTerminal();
+          }
+          return;
+        }
+        if (m.type === 'model-open-local-request') {
+          pendingModelRelays += 1;
+          try {
+            const reply = await sendToSW('actor/model-open-local', {
+              ...(relayToken ? { relayToken } : {}),
+              providerId: m.providerId,
+              modelId: m.modelId,
+              messages: m.messages,
+              system: m.system,
+              tools: m.tools,
+              maxTokens: m.maxTokens,
+            });
+            if (reply?.outcomeKnown === false) relayedModelUnknown = true;
+            if (!reply?.ok) relayedModelFailure ??= reply?.error ?? 'local model open failed';
+            if (!terminal) w.postMessage({
+              type: 'model-open-local-response', rid: m.rid, reply,
+            });
+          } catch (cause) {
+            const detail = /** @type {{message?:string,outcomeKnown?:boolean}} */ (cause);
+            relayedModelUnknown ||= detail?.outcomeKnown !== true;
+            if (!terminal) w.postMessage({
+              type: 'model-open-local-response', rid: m.rid,
+              reply: {
+                ok: false, error: detail?.message ?? String(cause),
+                outcomeKnown: detail?.outcomeKnown === true,
+                ...(detail?.outcomeKnown === true ? {} : { retryable: false }),
+              },
+            });
+          } finally {
+            pendingModelRelays -= 1;
+            settleTerminal();
+          }
+          return;
+        }
+        if (m.type === 'model-read-local-request') {
+          pendingModelRelays += 1;
+          try {
+            const reply = await sendToSW('actor/model-read-local', {
+              ...(relayToken ? { relayToken } : {}), streamId: m.streamId,
+            });
+            if (reply?.outcomeKnown === false) relayedModelUnknown = true;
+            if (!reply?.ok) relayedModelFailure ??= reply?.error ?? 'local model read failed';
+            if (!terminal) w.postMessage({
+              type: 'model-read-local-response', rid: m.rid, reply,
+            });
+          } catch (cause) {
+            const detail = /** @type {{message?:string,outcomeKnown?:boolean}} */ (cause);
+            relayedModelUnknown ||= detail?.outcomeKnown !== true;
+            if (!terminal) w.postMessage({
+              type: 'model-read-local-response', rid: m.rid,
+              reply: {
+                ok: false, error: detail?.message ?? String(cause),
+                outcomeKnown: detail?.outcomeKnown === true,
+                ...(detail?.outcomeKnown === true ? {} : { retryable: false }),
+              },
+            });
+          } finally {
+            pendingModelRelays -= 1;
+            settleTerminal();
+          }
+          return;
+        }
+        if (m.type === 'model-cancel-local-request') {
+          pendingModelRelays += 1;
+          try {
+            const reply = await sendToSW('actor/model-cancel-local', {
+              ...(relayToken ? { relayToken } : {}), streamId: m.streamId,
+            });
+            if (reply?.outcomeKnown === false) relayedModelUnknown = true;
+            if (!terminal) w.postMessage({
+              type: 'model-cancel-local-response', rid: m.rid, reply,
+            });
+          } catch (cause) {
+            const detail = /** @type {{message?:string,outcomeKnown?:boolean}} */ (cause);
+            relayedModelUnknown ||= detail?.outcomeKnown !== true;
+            if (!terminal) w.postMessage({
+              type: 'model-cancel-local-response', rid: m.rid,
+              reply: {
+                ok: false, error: detail?.message ?? String(cause),
+                outcomeKnown: detail?.outcomeKnown === true,
+                ...(detail?.outcomeKnown === true ? {} : { retryable: false }),
+              },
+            });
           } finally {
             pendingModelRelays -= 1;
             settleTerminal();

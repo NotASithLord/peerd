@@ -21,9 +21,8 @@ import { UnknownProviderError } from './errors.js';
 /** @typedef {import('./format/from-anthropic.js').ProviderEvent} ProviderEvent */
 
 /**
- * The arguments a provider's streaming `call` receives. The superset across
- * adapters — local adapters ignore `getSecret`/`reasoning`, the cloud ones
- * use them; the registry's callModel just threads the caller's args through.
+ * The arguments a provider's streaming `call` receives. Semantic adapters all
+ * share one named model-egress authority; the registry just threads it through.
  * @typedef {Object} CallArgs
  * @property {string} provider
  * @property {readonly InternalMessage[]} messages
@@ -33,8 +32,7 @@ import { UnknownProviderError } from './errors.js';
  * @property {ReadonlyArray<{ name: string, description: string, schema: object }>} [tools]
  * @property {{ enabled?: boolean, budgetTokens?: number, effort?: string }} [reasoning]
  * @property {AbortSignal} [signal]
- * @property {(name: string) => Promise<string | null>} [getSecret]
- * @property {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} [safeFetch]
+ * @property {import('./model-egress.js').ModelEgress} modelEgress
  */
 
 /**
@@ -44,10 +42,8 @@ import { UnknownProviderError } from './errors.js';
  * @typedef {Object} Adapter
  * @property {string} name
  * @property {string} label
- * @property {string | null} [endpoint]
  * @property {string} defaultModel
  * @property {string} [defaultRunnerModel]
- * @property {string | null} [vaultSecretName]
  * @property {boolean} [keyless]
  * @property {(args: any) => AsyncGenerator<ProviderEvent>} call
  * @property {(deps: any) => Promise<Array<{ model: string, label: string }>>} [listModels]
@@ -71,9 +67,9 @@ adapters.set(openaiAdapter.name, openaiAdapter);
 // posture as Anthropic/OpenRouter: the user's own key, encrypted in the vault.
 adapters.set(glmAdapter.name, glmAdapter);
 adapters.set(ollamaAdapter.name, ollamaAdapter);
-// local-webgpu: the on-device runner endpoint (FEATURE-LOCAL-WEBGPU B). Keyless;
-// the call path errors cleanly until the offscreen engine is loaded + wired
-// (setLocalGenerate). The ~25MB engine's store-packaging gate is a §3.4 concern,
+// local-webgpu: the on-device runner (FEATURE-LOCAL-WEBGPU B). Keyless; the
+// call path uses the same exact model-egress interface as cloud providers.
+// The ~25MB engine's store-packaging gate is a §3.4 concern,
 // like the dweb prune.
 adapters.set(localWebgpuAdapter.name, localWebgpuAdapter);
 
@@ -107,7 +103,6 @@ export const listProviders = () =>
     // runs. Falls back to defaultModel if an adapter somehow omits it (every
     // shipped adapter sets one).
     defaultRunnerModel: a.defaultRunnerModel ?? a.defaultModel,
-    vaultSecretName: a.vaultSecretName,
     // keyless: local providers have no API key — the chassis skips vault
     // checks instead of storing a placeholder secret.
     keyless: !!a.keyless,
@@ -123,9 +118,7 @@ export const listProviders = () =>
  * callers can surface the legible message.
  *
  * @param {string} name
- * @param {{ safeFetch: Function, signal?: AbortSignal, ollamaHost?: string }} deps
- *   ollamaHost (issue #104) routes the live inventory to a remote daemon; other
- *   adapters ignore it.
+ * @param {{ modelEgress: import('./model-egress.js').ModelEgress, signal?: AbortSignal }} deps
  * @returns {Promise<Array<{ model: string, label: string }> | null>}
  */
 export const listProviderModels = async (name, deps) => {
@@ -144,8 +137,7 @@ export const listProviderModels = async (name, deps) => {
  *
  * @param {string} name
  * @param {string} model
- * @param {{ getSecret: Function, safeFetch: Function, signal?: AbortSignal, ollamaHost?: string }} deps
- *   ollamaHost (issue #104) routes the live /api/show window to a remote daemon.
+ * @param {{ modelEgress: import('./model-egress.js').ModelEgress, signal?: AbortSignal }} deps
  * @returns {Promise<number | null>}
  */
 export const providerModelContextWindow = async (name, model, deps) => {
@@ -176,8 +168,7 @@ export const providerModelContextWindow = async (name, model, deps) => {
  *   that don't support reasoning accept and ignore it).
  * @param {AbortSignal} [args.signal]
  *   User-driven cancellation; cuts the stream and any retry backoff wait.
- * @param {(name: string) => Promise<string | null>} args.getSecret
- * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} args.safeFetch
+ * @param {import('./model-egress.js').ModelEgress} args.modelEgress
  */
 export const callModel = (args) => {
   const adapter = adapters.get(args.provider);

@@ -127,7 +127,7 @@ export const controllerOperationAllowedAfterCancel = (
   /** @type {string} */ capability,
   /** @type {string} */ operation,
 ) => capability === 'turn.run'
-  && (operation === 'turn.tool.settle'
+  && (operation === 'turn.model.cancel-inference' || operation === 'turn.tool.settle'
     || operation === 'turn.abort.finalize' || operation === 'turn.finalize');
 
 /**
@@ -191,9 +191,14 @@ export const createControllerKernelQuota = (
     'turn.tools.refresh': steps,
     'turn.audit.append': toolBudget + steps + 8,
     'turn.trim.enrich': steps,
-    'turn.model.open': steps,
-    'turn.model.next': streamBudget,
-    'turn.model.cancel': steps,
+    'turn.model.bind': 1,
+    'turn.model.open-inference': 32 * steps,
+    'turn.model.read-inference': streamBudget,
+    'turn.model.cancel-inference': 32 * steps,
+    'turn.model.read-inventory': steps,
+    'turn.model.read-context': steps,
+    'turn.model.observe-event': streamBudget,
+    'turn.model.observe-failover': 8 * steps,
     'turn.tool.prepare': toolBudget,
     'turn.tool.effect': 8 * toolBudget,
     'turn.tool.settle': toolBudget,
@@ -206,21 +211,23 @@ export const createControllerKernelQuota = (
 
   const admit = (/** @type {string} */ operation, /** @type {unknown} */ payload) => {
     if (!allowed.has(operation)) return refusal('kernel-operation-denied');
-    if (!bounded(payload, operation === 'turn.model.next' ? MODEL_EVENT_BYTES : TURN_VALUE_BYTES)) {
+    if (!bounded(payload, operation === 'turn.model.read-inference'
+      ? MODEL_EVENT_BYTES : TURN_VALUE_BYTES)) {
       return refusal('kernel-operation-payload-too-large');
     }
     const used = counts.get(operation) ?? 0;
     const limit = limits[/** @type {keyof typeof limits} */ (operation)];
     if (used >= limit) return refusal('kernel-operation-budget-exhausted');
     const value = record(record(payload)?.value);
-    if (operation === 'turn.model.next' || operation === 'turn.model.cancel') {
-      const modelId = value?.modelId;
-      const model = typeof modelId === 'string' ? models.get(modelId) : null;
+    if (operation === 'turn.model.read-inference'
+        || operation === 'turn.model.cancel-inference') {
+      const streamId = value?.streamId;
+      const model = typeof streamId === 'string' ? models.get(streamId) : null;
       if (!model) return refusal('kernel-model-channel-invalid');
-      if (operation === 'turn.model.next') {
+      if (operation === 'turn.model.read-inference') {
         if (model.pending) return refusal('kernel-model-pull-overlap');
         if (model.events >= MODEL_STREAM_EVENTS || model.bytes >= MODEL_STREAM_BYTES) {
-          models.delete(modelId);
+          models.delete(streamId);
           return refusal('kernel-model-budget-exhausted');
         }
         model.pending = true;
@@ -239,40 +246,41 @@ export const createControllerKernelQuota = (
     const value = record(record(payload)?.value);
     const reply = record(result);
     const replyValue = record(reply?.value);
-    if (!bounded(result, operation === 'turn.model.next' ? MODEL_EVENT_BYTES : TURN_VALUE_BYTES)) {
+    if (!bounded(result, operation === 'turn.model.read-inference'
+      ? MODEL_EVENT_BYTES : TURN_VALUE_BYTES)) {
       if (operation.startsWith('turn.model.')) {
-        const modelId = value?.modelId ?? replyValue?.modelId;
-        if (typeof modelId === 'string') models.delete(modelId);
+        const streamId = value?.streamId ?? replyValue?.streamId;
+        if (typeof streamId === 'string') models.delete(streamId);
       }
       return refusal('kernel-operation-result-too-large', false);
     }
-    if (operation === 'turn.model.open' && reply?.ok === true) {
-      const modelId = replyValue?.modelId;
-      if (typeof modelId !== 'string' || modelId.length < 1 || models.has(modelId)) {
+    if (operation === 'turn.model.open-inference' && reply?.ok === true) {
+      const streamId = replyValue?.streamId;
+      if (typeof streamId !== 'string' || streamId.length < 1 || models.has(streamId)) {
         return refusal('kernel-model-channel-invalid', false);
       }
-      models.set(modelId, { events: 0, bytes: 0, pending: false });
+      models.set(streamId, { events: 0, bytes: 0, pending: false });
     }
-    if (operation === 'turn.model.next') {
-      const modelId = value?.modelId;
-      const model = typeof modelId === 'string' ? models.get(modelId) : null;
+    if (operation === 'turn.model.read-inference') {
+      const streamId = value?.streamId;
+      const model = typeof streamId === 'string' ? models.get(streamId) : null;
       if (!model) return refusal('kernel-model-channel-invalid', false);
       model.pending = false;
       if (reply?.ok !== true || replyValue?.done === true) {
-        models.delete(modelId);
+        models.delete(streamId);
       } else {
-        const eventBytes = controllerPayloadBytes(replyValue?.event);
+        const eventBytes = controllerPayloadBytes(replyValue?.chunk);
         model.events += 1;
         model.bytes += Number.isFinite(eventBytes) ? eventBytes : MODEL_EVENT_BYTES + 1;
         if (model.events > MODEL_STREAM_EVENTS || model.bytes > MODEL_STREAM_BYTES) {
-          models.delete(modelId);
+          models.delete(streamId);
           return refusal('kernel-model-budget-exhausted', false);
         }
       }
     }
-    if (operation === 'turn.model.cancel') {
-      const modelId = value?.modelId;
-      if (typeof modelId === 'string') models.delete(modelId);
+    if (operation === 'turn.model.cancel-inference') {
+      const streamId = value?.streamId;
+      if (typeof streamId === 'string') models.delete(streamId);
     }
     if (operation === 'turn.tool.prepare' && reply?.ok === true
         && typeof replyValue?.requestJson === 'string') {

@@ -33,7 +33,6 @@ export const createKernelTransferLive = async (deps) => {
     normalizeSettingsPatch: deps.normalizeSettingsPatch,
     normalizeVariant,
     normalizeEngine,
-    listProviders: deps.listProviders,
     REASONING_EFFORT_LEVELS: deps.reasoningEffortLevels,
     DWEB_ENABLED: deps.dwebEnabled,
     DEFAULT_SETTINGS: deps.defaultSettings,

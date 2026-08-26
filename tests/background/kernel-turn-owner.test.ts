@@ -5,6 +5,7 @@ import { EXTENSION_DIR } from '../../packaging/lib.ts';
 import { createKernelTurnOwner } from '../../extension/background/kernel-turn-owner.js';
 import { runControllerTurn } from '../../extension/offscreen/controller-turn-runtime.js';
 import { makeAgentSendCustody } from '../../extension/peerd-egress/background.js';
+import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
 
 const until = async (predicate: () => boolean) => {
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -26,7 +27,8 @@ const makeCache = () => {
 
 const makeSessions = () => {
   let record: any = {
-    sessionId: 'root', provider: 'provider', model: 'model', depth: 0, messages: [],
+    sessionId: 'root', provider: 'anthropic', model: 'claude-sonnet-4-6',
+    depth: 0, messages: [],
   };
   const clone = () => structuredClone(record);
   return {
@@ -147,6 +149,13 @@ const makeCalls = () => ({
   events: [] as any[], failures: [] as any[], goals: [] as any[],
 });
 
+const providerAuthorityFor = (calls: Record<string, any>) =>
+  makeScriptedProviderAuthority(() => async function* () {
+    calls.modelCalls += 1;
+    yield { type: 'text-delta', text: 'sealed reply' };
+    yield { type: 'message-stop', stopReason: 'end_turn' };
+  }) as any;
+
 describe('native kernel turn owner', () => {
   test('keeps the turn driver, model loop, and legacy worker outside its static graph', async () => {
     const graph = [...await collectStaticModuleGraph(
@@ -165,6 +174,7 @@ describe('native kernel turn owner', () => {
     let runtime!: ReturnType<typeof makeRuntime>;
     const owner = createKernelTurnOwner({
       createController: makeControllerFactory(calls),
+      providerEgress: providerAuthorityFor(calls),
       loadRuntime: async (seams) => {
         calls.loads += 1;
         runtime = makeRuntime(seams, calls);

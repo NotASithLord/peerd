@@ -18,7 +18,11 @@ import { createKernelRichEffectAuthority } from './kernel-rich-effect-authority.
 import { createKernelSemanticRuntime } from './kernel-semantic-runtime.js';
 import { createKernelSkillPersistence } from './kernel-skill-persistence.js';
 import { createKernelTurnCustody } from './kernel-turn-custody.js';
+import { createLocalModelGenerationAuthority } from './local-model-generation-authority.js';
 import { makeKernelDemandRoutes } from './kernel-demand-routes.js';
+import { createProviderEgressAuthority } from './provider-egress-authority.js';
+import { HARDCODED_ALLOWLIST, makeSafeFetch } from '/peerd-egress/background.js';
+import { costOf, hasPricing } from '/peerd-provider/background.js';
 
 const OPTIONAL_CONTROLLER_ROUTES = new Set([
   'provider/test', 'models/options', 'openrouter/models',
@@ -43,6 +47,25 @@ export const createKernelDemandPlane = (deps) => {
     await deps.browser.tabs.reload(tab.id);
     return true;
   };
+  const providerSafeFetch = makeSafeFetch({
+    getAllowlist: () => {
+      let ollamaOrigin = null;
+      try { ollamaOrigin = new URL(deps.settingsStore.get().ollamaHost).origin; }
+      catch { ollamaOrigin = null; }
+      return ollamaOrigin ? [...HARDCODED_ALLOWLIST, ollamaOrigin] : HARDCODED_ALLOWLIST;
+    },
+    audit: deps.auditLog.append,
+  });
+  const localModelAuthority = !deps.firefox ? createLocalModelGenerationAuthority({
+    featureHost: deps.featureHost,
+    offscreenUrl: deps.offscreenUrl,
+  }) : undefined;
+  const providerEgress = createProviderEgressAuthority({
+    safeFetch: providerSafeFetch,
+    vault: deps.vault,
+    settingsStore: deps.settingsStore,
+    localModelAuthority,
+  });
   const withRepositoryHost = async (/** @type {(lease:any)=>Promise<any>} */ operation) => {
     let entered = false;
     const result = await deps.featureHost.runtime.runWithLease('controller', async (
@@ -126,6 +149,9 @@ export const createKernelDemandPlane = (deps) => {
     contextSnapshots: deps.contextSnapshots,
     kv: deps.kv,
     fetchFn: deps.fetchFn,
+    providerEgress,
+    costOf,
+    hasPricing,
   });
   const loadRichOwner = async (/** @type {any} */ seams) => {
     const sourceProjectionGeneration = crypto.randomUUID();
@@ -134,6 +160,9 @@ export const createKernelDemandPlane = (deps) => {
       ...deps,
       seams,
       turnCustody,
+      providerEgress,
+      resolveProviderSelection: async (/** @type {string|null} */ sessionId = null) =>
+        (await loadControllerOwner()).routes['models/options']({ sessionId }),
       confirmation: deps.confirmation,
       denylist: deps.denylist,
       repositories: support.repositories,
@@ -179,6 +208,7 @@ export const createKernelDemandPlane = (deps) => {
         administrativeControl?.handleKernelCall(operation, payload, context)
           ?? { ok: false, code: 'kernel-operation-denied', outcomeKnown: true },
       handleRichKernelCall: richEffects.handle,
+      providerEgress,
       ensureOffscreen: deps.featureHost.ensureOffscreen,
       retireHost: (/** @type {string} */ reason) =>
         deps.featureHost.runtime.retireActiveHost(reason),
@@ -362,6 +392,8 @@ export const createKernelDemandPlane = (deps) => {
   }
   return Object.freeze({
     routes,
+    projectProviderState: async (/** @type {Record<string,any>} */ snapshot) =>
+      (await loadControllerOwner()).routes['models/state-projection'](snapshot),
     controllerRelays,
     getControllerRelays,
     makeTransferRoutes: executableOwner.makeTransferRoutes,

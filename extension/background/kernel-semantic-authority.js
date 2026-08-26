@@ -2,7 +2,13 @@
 
 import { createKernelMemoryAuthority } from './kernel-memory-authority.js';
 import { createKernelContactsAuthority } from './kernel-contacts-authority.js';
-import { maskProviderKey, PROVIDER_AUTHORITY } from '../shared/provider-authority-policy.js';
+import { PROVIDER_EGRESS_MANIFEST } from './provider-egress-manifest.js';
+
+const maskProviderKey = (/** @type {unknown} */ value) => {
+  const key = String(value ?? '');
+  return key.length <= 11 ? `${key.length} chars`
+    : `${key.slice(0, 7)}…${key.slice(-3)} · ${key.length} chars`;
+};
 
 const MUTATIONS = new Set([
   'semantic.memory.delete-all', 'semantic.memory.write', 'semantic.memory.delete',
@@ -44,14 +50,15 @@ export const createKernelSemanticAuthority = ({
   const contacts = injectedContacts ?? createKernelContactsAuthority({ idb, now });
   const keyStatus = async () => {
     await ready;
-    return Object.fromEntries(await Promise.all(PROVIDER_AUTHORITY.map(async (policy) => {
-      let key = null;
-      try { if (policy.secretName) key = await vault.getSecret(policy.secretName); } catch {}
-      return [policy.name, {
-        hasKey: policy.secretName === null || !!key,
-        keyPreview: key ? maskProviderKey(key) : null,
-      }];
-    })));
+    return Object.fromEntries(await Promise.all(Object.entries(PROVIDER_EGRESS_MANIFEST)
+      .map(async ([provider, policy]) => {
+        let key = null;
+        try { if (policy.credential) key = await vault.getSecret(policy.credential); } catch {}
+        return [provider, {
+          hasKey: policy.credential === null || !!key,
+          keyPreview: key ? maskProviderKey(key) : null,
+        }];
+      })));
   };
   const openApp = async (/** @type {any} */ payload) => {
     if (typeof payload?.appId !== 'string' || !appCatalog) return false;

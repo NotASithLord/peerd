@@ -329,6 +329,8 @@ const providerProjection = createKernelProviderProjection({
   vault,
   browser,
   localModels: !kernelFirefox,
+  projectSemantic: async (/** @type {Record<string,any>} */ snapshot) =>
+    (await loadDemandPlane()).projectProviderState(snapshot),
   pushState: () => pushState(),
 });
 let stateProjectionGeneration = 0;

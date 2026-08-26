@@ -111,6 +111,7 @@ export const createKernelSemanticRuntime = (deps) => {
     offscreenUrl: deps.offscreenUrl,
     localModels: deps.localModels,
     providerProjection: deps.providerProjection,
+    providerEgress: deps.providerEgress,
     pushState: deps.pushState,
     fetchFn: deps.fetchFn,
   }) : null;
@@ -222,6 +223,7 @@ export const createKernelSemanticRuntime = (deps) => {
       },
       loadRuntime: deps.loadTurnRuntime,
       onLoaded: deps.onTurnRuntimeLoaded,
+      providerEgress: deps.providerEgress,
       ...(deps.turnLoadTimeoutMs === undefined ? {} : { loadTimeoutMs: deps.turnLoadTimeoutMs }),
     });
     return turnOwner;

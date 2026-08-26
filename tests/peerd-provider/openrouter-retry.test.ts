@@ -8,6 +8,7 @@
 import { describe, test, expect } from 'bun:test';
 import { callOpenRouter } from '../../extension/peerd-provider/adapters/openrouter.js';
 import { ProviderHttpError } from '../../extension/peerd-provider/errors.js';
+import { makeModelEgress } from './model-egress-fixture';
 
 const stubResponse = (status: number, headers: Record<string, string> = {}, bodyText = '') => ({
   ok: status >= 200 && status < 300,
@@ -31,8 +32,7 @@ const okStreamingResponse = () => {
 const baseArgs = (overrides: Record<string, unknown> = {}) => ({
   messages: [{ role: 'user', content: 'hi', id: 'u', when: 0 }],
   system: 'sys',
-  getSecret: async () => 'sk-or-test',
-  safeFetch: async () => { throw new Error('safeFetch not set'); },
+  modelEgress: makeModelEgress(),
   _sleep: async () => {},
   ...overrides,
 });
@@ -48,24 +48,24 @@ describe('callOpenRouter — retryable status set', () => {
   // api_error must retry, matching the Anthropic adapter).
   test.each([429, 500, 503, 529])('retries %i and recovers on the next attempt', async (status) => {
     let calls = 0;
-    const safeFetch = async () => {
+    const openInference = async () => {
       calls++;
       if (calls === 1) return stubResponse(status, {}, '{"error":{"message":"transient upstream error"}}');
       return okStreamingResponse();
     };
-    const events = await drain(callOpenRouter(baseArgs({ safeFetch }) as any));
+    const events = await drain(callOpenRouter(baseArgs({ modelEgress: makeModelEgress({ openInference }) }) as any));
     expect(calls).toBe(2);
     expect(events[0].type).toBe('rate-limit-pause');
   });
 
   test.each([400, 401, 403, 404])('throws immediately on non-retryable %i', async (status) => {
     let calls = 0;
-    const safeFetch = async () => {
+    const openInference = async () => {
       calls++;
       return stubResponse(status, {}, 'bad');
     };
     let thrown: any;
-    try { await drain(callOpenRouter(baseArgs({ safeFetch }) as any)); }
+    try { await drain(callOpenRouter(baseArgs({ modelEgress: makeModelEgress({ openInference }) }) as any)); }
     catch (e) { thrown = e; }
     expect(calls).toBe(1);
     expect(thrown).toBeInstanceOf(ProviderHttpError);

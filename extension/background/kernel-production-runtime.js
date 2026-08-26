@@ -1,6 +1,5 @@
 // @ts-check
 
-import { listProviders } from '/peerd-provider/background.js';
 import { CHANNEL_DEFAULTS } from '/shared/channel-config.js';
 import { createKernelDwebRouteRuntime } from './kernel-dweb-route-runtime.js';
 import { createKernelRichRuntime } from './kernel-rich-runtime.js';
@@ -98,7 +97,6 @@ export const createKernelProductionRuntime = async (deps) => {
     pushState: deps.pushState,
     settingsStore: deps.settingsStore,
     normalizeSettingsPatch: deps.normalizeSettingsPatch,
-    listProviders,
     reasoningEffortLevels: REASONING_EFFORT_LEVELS,
     dwebEnabled: deps.dwebEnabled,
     defaultSettings: CHANNEL_DEFAULTS,

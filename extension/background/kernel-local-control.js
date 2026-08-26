@@ -1,9 +1,6 @@
 // @ts-check
 
-import {
-  LOCAL_MODEL_LABELS,
-  providerAuthority,
-} from '../shared/provider-authority-policy.js';
+import { providerEgressPolicy } from './provider-egress-manifest.js';
 import {
   LOCAL_MODEL_CHANNEL_OFFER,
   LOCAL_MODEL_CHANNEL_PROTOCOL,
@@ -25,129 +22,14 @@ const failure = (/** @type {string} */ code, /** @type {boolean} */ outcomeKnown
 const same = (/** @type {unknown} */ left, /** @type {unknown} */ right) => {
   try { return JSON.stringify(left) === JSON.stringify(right); } catch { return false; }
 };
-const readJson = async (/** @type {Response} */ response, maxBytes = 512 * 1024) => {
-  const reader = response.body?.getReader();
-  if (!reader) return null;
-  /** @type {Uint8Array[]} */ const chunks = [];
-  let size = 0;
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > maxBytes) {
-      await reader.cancel('provider response too large').catch(() => {});
-      throw new Error('provider-response-too-large');
-    }
-    chunks.push(value);
-  }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  return JSON.parse(new TextDecoder().decode(bytes));
-};
-const ollamaUrl = (/** @type {unknown} */ value) => {
-  try {
-    const origin = new URL(String(value || 'http://localhost:11434'));
-    return ['http:', 'https:'].includes(origin.protocol) && !origin.username && !origin.password
-      ? new URL('/api/tags', origin.origin) : null;
-  } catch { return null; }
-};
-const boundedFetch = async (/** @type {typeof fetch} */ fetchFn, /** @type {string} */ url,
-  /** @type {RequestInit} */ init, /** @type {number} */ timeoutMs,
-  /** @type {number} */ maxBytes,
-  /** @type {Set<AbortController>|null} */ tracked = null) => {
-  const controller = new AbortController();
-  tracked?.add(controller);
-  const forward = () => controller.abort(init.signal?.reason);
-  init.signal?.addEventListener('abort', forward, { once: true });
-  const timer = setTimeout(() => controller.abort('provider-timeout'), timeoutMs);
-  try {
-    const response = await fetchFn(url, {
-      ...init, signal: controller.signal, redirect: 'manual', credentials: 'omit', cache: 'no-store',
-    });
-    const status = response.status;
-    const body = status >= 200 && status < 300 && maxBytes > 0
-      ? await readJson(response, maxBytes) : null;
-    if (body === null) await response.body?.cancel('provider probe complete').catch(() => {});
-    return { status, body };
-  } finally {
-    clearTimeout(timer);
-    tracked?.delete(controller);
-    init.signal?.removeEventListener('abort', forward);
-  }
-};
 
 /** @param {Record<string,any>} deps */
 export const createKernelLocalControl = (deps) => {
-  if (typeof deps.callFeature !== 'function' || !deps.vault || !deps.settingsStore
+  if (typeof deps.callFeature !== 'function' || !deps.settingsStore
       || !deps.auditLog || !deps.featureHost || typeof deps.offscreenUrl !== 'string'
-      || !deps.providerProjection) throw new TypeError('kernel-local-control-config-invalid');
-  const fetchFn = deps.fetchFn ?? globalThis.fetch.bind(globalThis);
-  /** @type {Set<AbortController>} */ const activeFetches = new Set();
-  const providerProbe = async (/** @type {string} */ provider,
-    /** @type {AbortSignal} */ signal) => {
-    const policy = providerAuthority(provider);
-    if (!policy) return { error: 'unknown-provider' };
-    await deps.ready;
-    if (deps.vault.isLocked()) return { error: 'locked' };
-    if (policy.probeKind === 'none') return { error: 'no-live-test' };
-    let key = null;
-    if (policy.secretName) {
-      try { key = await deps.vault.getSecret(policy.secretName); }
-      catch { return { error: 'locked' }; }
-      if (!key) return { error: 'no-key' };
-    }
-    /** @type {string|null} */ let url = policy.probeEndpoint;
-    /** @type {RequestInit} */ let init = { method: 'GET', signal };
-    if (policy.probeKind === 'ollama') {
-      url = ollamaUrl(deps.settingsStore.get().ollamaHost)?.toString() ?? null;
-      if (!url) return { error: 'unreachable' };
-    } else {
-      const anthropic = policy.probeKind === 'anthropic';
-      init = {
-        method: 'POST', signal,
-        headers: anthropic ? {
-          'content-type': 'application/json', 'x-api-key': key,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        } : {
-          'content-type': 'application/json', authorization: `Bearer ${key}`,
-          ...(policy.name === 'openrouter' ? {
-            'http-referer': 'https://peerd.ai', 'x-title': 'peerd.ai',
-            'x-openrouter-categories': 'personal-agent',
-          } : {}),
-        },
-        body: JSON.stringify({
-          model: policy.defaultModel, max_tokens: 1,
-          messages: [{ role: 'user', content: 'hi' }], stream: true,
-        }),
-      };
-    }
-    try {
-      if (!url) return { error: 'unreachable' };
-      const result = await boundedFetch(fetchFn, url, init, 20_000,
-        policy.probeKind === 'ollama' ? 512 * 1024 : 0, activeFetches);
-      if (result.status >= 200 && result.status < 300) {
-        deps.auditLog.append({
-          type: 'provider_validated', details: { provider: policy.name },
-        }).catch(() => {});
-        if (policy.probeKind === 'ollama') {
-          const models = Array.isArray(result.body?.models)
-            ? result.body.models.flatMap((/** @type {any} */ row) =>
-              typeof row?.name === 'string' ? [row.name] : []) : [];
-          deps.providerProjection.observeOllamaStatus({
-            known: true, reachable: true, count: models.length, models,
-          });
-        }
-      }
-      return result;
-    } catch (cause) {
-      throw Object.assign(
-        cause instanceof Error ? cause : new Error('provider-test-unconfirmed'),
-        { code: 'provider-test-unconfirmed', outcomeKnown: false },
-      );
-    }
-  };
+      || !deps.providerProjection || !deps.providerEgress) {
+    throw new TypeError('kernel-local-control-config-invalid');
+  }
   let catalogSignature = '';
   const localModel = async (/** @type {string} */ method, /** @type {any} */ args,
     /** @type {AbortSignal} */ signal) => {
@@ -232,84 +114,91 @@ export const createKernelLocalControl = (deps) => {
     if (context.signal?.aborted) return failure('local-call-aborted', true);
     const message = context.message ?? {};
     if (operation === 'local.provider.test') {
-      if (!same(payload, { provider: message.provider })) {
+      if (payload?.provider !== message.provider || !providerEgressPolicy(payload.provider)
+          || typeof payload.model !== 'string' || !payload.nativeBody
+          || typeof payload.nativeBody !== 'object' || Array.isArray(payload.nativeBody)) {
         return failure('local-effect-substitution', true);
       }
-      return success(await providerProbe(payload.provider, context.signal));
+      const owner = context.authority;
+      const opened = await deps.providerEgress.openInference({
+        providerId: payload.provider,
+        modelId: payload.model,
+        nativeBody: payload.nativeBody,
+      }, {
+        owner,
+        signal: context.signal,
+        maxOutputTokens: 1,
+        permits: (/** @type {string} */ providerId, /** @type {string} */ modelId) =>
+          providerId === payload.provider && modelId === payload.model,
+      });
+      if (opened?.ok !== true) return success({
+        error: opened.code === 'model-egress-credential-missing' ? 'no-key'
+          : opened.code === 'model-egress-credential-unavailable' ? 'locked'
+            : opened.error ?? opened.code,
+        status: null,
+      });
+      const streamId = opened.value.streamId;
+      await deps.providerEgress.cancelInference({ streamId }, { owner }).catch(() => {});
+      const result = {
+        status: opened.value.status,
+        statusText: opened.value.statusText,
+        headers: opened.value.headers,
+      };
+      if (result.status >= 200 && result.status < 300) {
+        deps.auditLog.append({
+          type: 'provider_validated', details: { provider: payload.provider },
+        }).catch(() => {});
+      }
+      return success(result);
     }
     if (operation === 'local.models.snapshot') {
       const sessionId = typeof message.sessionId === 'string' ? message.sessionId : null;
       if (!same(payload, { sessionId })) return failure('local-effect-substitution', true);
       await deps.ready;
-      const settings = deps.settingsStore.get();
       const session = sessionId
         ? await (deps.sessions.getMetadata?.(sessionId) ?? deps.sessions.get(sessionId))
           .catch(() => null) : null;
-      const usable = [];
-      for (const provider of ['anthropic', 'openrouter', 'openai', 'glm', 'ollama', 'local-webgpu']) {
-        const policy = providerAuthority(provider);
-        if (policy?.secretName === null) usable.push(provider);
-        else if (policy?.secretName) {
-          try { if (await deps.vault.getSecret(policy.secretName)) usable.push(provider); } catch {}
-        }
-      }
-      let downloaded = [];
-      if (deps.localModels === true) {
-        try {
-          const value = (await deps.browser.storage.local.get('localModelDownloaded'))
-            ?.localModelDownloaded;
-          downloaded = value === true ? ['gemma-4-e2b'] : Array.isArray(value)
-            ? value.filter((id) => Object.hasOwn(LOCAL_MODEL_LABELS, id)) : [];
-        } catch {}
-      }
-      return success({
-        settings: {
-          providerName: settings.providerName, providerModel: settings.providerModel,
-          openrouterModels: settings.openrouterModels,
-        },
-        session: session && typeof session === 'object'
-          ? { provider: session.provider ?? null, model: session.model ?? null } : null,
-        usable, downloaded, localModels: deps.localModels === true,
-      });
+      return success(await deps.providerProjection.authoritySnapshot(session, false));
     }
     if (operation === 'local.models.ollama') {
-      const url = ollamaUrl(deps.settingsStore.get().ollamaHost);
-      if (!url) return success({ models: [] });
-      try {
-        const result = await boundedFetch(fetchFn, url.toString(), {
-          method: 'GET', signal: context.signal,
-        }, 12_000, 512 * 1024, activeFetches);
-        const models = result.status >= 200 && result.status < 300
-          ? result.body?.models ?? [] : [];
-        const ids = Array.isArray(models) ? models.flatMap((row) =>
-          typeof row?.name === 'string' && row.name ? [row.name] : []) : [];
-        deps.providerProjection.observeOllamaStatus({
-          known: true, reachable: result.status >= 200 && result.status < 300,
-          count: ids.length, models: ids,
-        });
-        return success({ models });
-      } catch {
-        deps.providerProjection.observeOllamaStatus({
-          known: true, reachable: false, count: null, models: null,
-        });
-        return success({ models: [] });
+      const result = await deps.providerEgress.readModelInventory({ providerId: 'ollama' }, {
+        owner: context.authority,
+        signal: context.signal,
+        permitsProvider: (/** @type {string} */ providerId) => providerId === 'ollama',
+      });
+      return result?.ok === true ? result : success({
+        status: null,
+        error: result?.code ?? result?.error ?? 'ollama-unreachable',
+      });
+    }
+    if (operation === 'local.models.observe-ollama') {
+      const models = payload.models === null ? null : Array.isArray(payload.models)
+        ? payload.models.slice(0, 200).filter((/** @type {unknown} */ model) =>
+          typeof model === 'string' && model.length <= 200) : null;
+      if (payload.models !== null && (!models || models.length !== payload.models.length)
+          || payload.count !== null && (!Number.isSafeInteger(payload.count)
+            || payload.count !== models?.length)
+          || typeof payload.known !== 'boolean' || typeof payload.reachable !== 'boolean') {
+        return failure('local-ollama-status-invalid', true);
       }
+      deps.providerProjection.observeOllamaStatus({
+        known: payload.known,
+        reachable: payload.reachable,
+        count: payload.count,
+        models,
+      });
+      return success(null);
     }
     if (operation === 'local.openrouter.models') {
-      await deps.ready;
-      if (deps.vault.isLocked()) return success({ error: 'locked', status: null });
-      let key = null;
-      try { key = await deps.vault.getSecret('openrouter_api_key'); } catch {}
-      /** @type {Record<string,string>} */ const headers = {
-        'http-referer': 'https://peerd.ai', 'x-title': 'peerd.ai',
-        'x-openrouter-categories': 'personal-agent',
-      };
-      if (key) headers.authorization = `Bearer ${key}`;
-      try {
-        return success(await boundedFetch(fetchFn, 'https://openrouter.ai/api/v1/models', {
-          method: 'GET', headers, signal: context.signal,
-        }, 12_000, 4 * 1024 * 1024, activeFetches));
-      } catch { return success({ error: deps.vault.isLocked() ? 'locked' : 'unreachable', status: null }); }
+      const result = await deps.providerEgress.readModelInventory({ providerId: 'openrouter' }, {
+        owner: context.authority,
+        signal: context.signal,
+        permitsProvider: (/** @type {string} */ providerId) => providerId === 'openrouter',
+      });
+      return result?.ok === true ? result : success({
+        status: null,
+        error: result?.code ?? result?.error ?? 'openrouter-unavailable',
+      });
     }
     const methods = {
       'local.model.status': ['status', {
@@ -348,9 +237,6 @@ export const createKernelLocalControl = (deps) => {
   ])));
   return Object.freeze({
     routes, authorize: feature.authorize, handleKernelCall: feature.handleKernelCall,
-    abort: () => {
-      for (const controller of activeFetches) controller.abort('vault-locked');
-      activeFetches.clear();
-    },
+    abort: () => {},
   });
 };

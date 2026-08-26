@@ -5,12 +5,13 @@ import { runControllerTurn } from '../../extension/offscreen/controller-turn-run
 import { CONTROLLER_BUILD_DIGEST } from '../../extension/shared/structured-clone-size.js';
 import { getToolPolicy } from '../../extension/peerd-runtime/tools/metadata/policy.js';
 import { projectToolAuthority, toToolDescriptor } from '../../extension/peerd-runtime/tools/metadata/descriptor.js';
+import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
 
 const clone = <T>(value: T): T => structuredClone(value);
 
 const makeSessions = () => {
   let record: any = {
-    sessionId: 'session-backpressure', provider: 'provider-1', model: 'model-1', messages: [],
+    sessionId: 'session-backpressure', provider: 'anthropic', model: 'claude-sonnet-4-6', messages: [],
   };
   return {
     get: async (sessionId: string) => sessionId === record.sessionId ? clone(record) : undefined,
@@ -51,10 +52,15 @@ const drain = async (iterable: AsyncIterable<any>) => {
 
 const connectHarness = async () => {
   let sequence = 0;
+  let modelCall: any = null;
   let client: Awaited<ReturnType<typeof connectDirectController>>;
   let bridge: ReturnType<typeof makeControllerTurnBridge>;
   const newId = () => `backpressure-id-${++sequence}`;
-  bridge = makeControllerTurnBridge({ getClient: async () => client, newId });
+  bridge = makeControllerTurnBridge({
+    getClient: async () => client,
+    newId,
+    providerEgress: makeScriptedProviderAuthority(() => modelCall) as any,
+  });
   client = await connectDirectController({
     capabilities: ['turn.run'],
     supportedCapabilities: ['turn.run'],
@@ -72,6 +78,10 @@ const connectHarness = async () => {
   });
   return {
     bridge,
+    runUserTurn: (context: any) => {
+      modelCall = context.callModel;
+      return bridge.runUserTurn(context);
+    },
     close: () => {
       client.close();
       bridge.close();
@@ -132,7 +142,7 @@ describe('production direct-controller tool backpressure', () => {
       });
     });
     const abort = new AbortController();
-    const turn = drain(harness.bridge.runUserTurn(makeContext({
+    const turn = drain(harness.runUserTurn(makeContext({
       signal: abort.signal, toolCount: 130, toolDispatch,
     })));
     try {
@@ -174,7 +184,7 @@ describe('production direct-controller tool backpressure', () => {
       });
     });
     const abort = new AbortController();
-    const turn = drain(harness.bridge.runUserTurn(makeContext({
+    const turn = drain(harness.runUserTurn(makeContext({
       signal: abort.signal, toolCount: 130, toolDispatch,
     }))).then(
       (events) => ({ ok: true as const, events }),
@@ -217,7 +227,7 @@ describe('production direct-controller tool backpressure', () => {
       },
     };
     try {
-      const turn = drain(harness.bridge.runUserTurn(context));
+      const turn = drain(harness.runUserTurn(context));
       await modelOpened;
       abort.abort();
       const events = await turn;
@@ -256,7 +266,7 @@ describe('production direct-controller tool backpressure', () => {
       sessions,
     };
     try {
-      const running = drain(harness.bridge.runUserTurn(context)).then(
+      const running = drain(harness.runUserTurn(context)).then(
         (events) => ({ ok: true as const, events, error: null }),
         (error) => ({ ok: false as const, events: [], error }),
       );

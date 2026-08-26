@@ -3,11 +3,11 @@
 import {
   LOCAL_MODEL_LABELS,
   OPENROUTER_POPULAR,
-  PROVIDER_AUTHORITY,
+  PROVIDER_METADATA,
   PROVIDER_MODEL_CATALOG,
   normalizeOpenRouterModels,
-  providerAuthority,
-} from '/shared/provider-authority-policy.js';
+  providerMetadata,
+} from '/peerd-provider/controller.js';
 
 class LocalEffectError extends Error {
   /** @param {string} operation @param {any} result */
@@ -31,6 +31,25 @@ const cleanModels = (/** @type {unknown} */ rows) => Array.isArray(rows)
       const label = typeof source?.label === 'string' ? source.label.trim() : model;
       return model && model.length <= 200 && label.length <= 300 ? [{ model, label }] : [];
     }) : [];
+const projectionJson = (/** @type {any} */ projection) => {
+  if (!projection || !(projection.body instanceof Uint8Array)) return null;
+  try { return JSON.parse(new TextDecoder().decode(projection.body)); }
+  catch { return null; }
+};
+const observeOllama = async (/** @type {any} */ context,
+  /** @type {{status?:number,body?:Uint8Array}|null} */ projection) => {
+  const reachable = !!projection && Number(projection.status) >= 200
+    && Number(projection.status) < 300;
+  const body = reachable ? projectionJson(projection) : null;
+  const models = reachable ? cleanModels(body?.models).map((row) => row.model) : null;
+  await effect(context, 'local.models.observe-ollama', {
+    known: true,
+    reachable,
+    count: models?.length ?? null,
+    models,
+  });
+  return { body, models: models ?? [] };
+};
 
 const modelOptions = async (/** @type {any} */ message, /** @type {any} */ context) => {
   const snapshot = await effect(context, 'local.models.snapshot', {
@@ -39,7 +58,7 @@ const modelOptions = async (/** @type {any} */ message, /** @type {any} */ conte
   const settings = snapshot.settings;
   const lockedProvider = snapshot.session?.provider ?? null;
   /** @type {Array<any>} */ const options = [];
-  for (const provider of PROVIDER_AUTHORITY) {
+  for (const provider of PROVIDER_METADATA) {
     if (!snapshot.localModels && provider.name === 'local-webgpu') continue;
     if (lockedProvider && provider.name !== lockedProvider) continue;
     if (!snapshot.usable.includes(provider.name) && !lockedProvider) continue;
@@ -56,7 +75,8 @@ const modelOptions = async (/** @type {any} */ message, /** @type {any} */ conte
       if (!catalog.length) continue;
     } else if (provider.name === 'ollama') {
       const reply = await effect(context, 'local.models.ollama', {});
-      catalog = cleanModels(reply.models);
+      const observed = await observeOllama(context, reply);
+      catalog = cleanModels(observed.body?.models);
       if (!catalog.length && !lockedProvider) continue;
       if (!catalog.length) catalog = [{ model: provider.defaultModel, label: provider.defaultModel }];
     }
@@ -74,18 +94,77 @@ const modelOptions = async (/** @type {any} */ message, /** @type {any} */ conte
   const active = lockedProvider
     ? { name: lockedProvider, model: snapshot.session?.model }
     : (() => {
-        const selected = providerAuthority(settings.providerName)
-          ?? PROVIDER_AUTHORITY.find((row) => row.name === 'anthropic') ?? PROVIDER_AUTHORITY[0];
-        return { name: selected.name, model: settings.providerModel || selected.defaultModel };
+        const configured = providerMetadata(settings.providerName);
+        if (configured) return {
+          name: configured.name,
+          model: settings.providerModel || configured.defaultModel,
+        };
+        const first = options[0];
+        return first ? { name: first.provider, model: first.model } : { name: '', model: '' };
       })();
+  if (!active.name || !active.model) {
+    return { ok: false, error: 'no-provider', options: [], selected: '',
+      sessionProvider: lockedProvider };
+  }
   const selected = `${active.name}::${active.model}`;
   if (!options.some((row) => row.value === selected)) {
-    const policy = providerAuthority(active.name);
+    const policy = providerMetadata(active.name);
     options.unshift({ provider: active.name, providerLabel: policy?.label ?? active.name,
       model: active.model, label: `${active.model} (${lockedProvider ? 'current' : 'currently unavailable'})`,
       value: selected, ...(!lockedProvider ? { unavailable: true } : {}) });
   }
   return { ok: true, options, selected, sessionProvider: lockedProvider };
+};
+
+const providerStateProjection = (/** @type {any} */ snapshot) => {
+  const settings = snapshot?.settings ?? {};
+  const session = snapshot?.session ?? null;
+  const defaults = providerMetadata(settings.providerName) ?? PROVIDER_METADATA[0];
+  const defaultModel = typeof settings.providerModel === 'string' && settings.providerModel.trim()
+    ? settings.providerModel.trim() : defaults.defaultModel;
+  const selected = providerMetadata(session?.provider ?? defaults.name);
+  const composerModel = typeof session?.model === 'string' && session.model.trim()
+    ? session.model : selected?.name === defaults.name
+      ? defaultModel : selected?.defaultModel ?? '';
+  const credentialReady = !!selected && snapshot.usable?.includes(selected.name);
+  const localReady = selected?.name !== 'local-webgpu'
+    || snapshot.localModels === true && snapshot.downloaded?.includes(composerModel);
+  const liveOllama = snapshot.ollamaStatus ?? null;
+  const ollamaNoModels = selected?.name === 'ollama'
+    && liveOllama?.known && liveOllama.reachable && liveOllama.count === 0;
+  const ollamaModelMissing = selected?.name === 'ollama'
+    && liveOllama?.known && liveOllama.reachable
+    && Array.isArray(liveOllama.models) && liveOllama.models.length > 0
+    && !liveOllama.models.includes(composerModel)
+    && !(!composerModel.split('/').at(-1)?.includes(':')
+      && liveOllama.models.includes(`${composerModel}:latest`));
+  const reason = snapshot.locked === true ? 'vault-locked' : !selected ? 'unknown-provider'
+    : !credentialReady ? 'missing-key'
+      : !localReady ? 'local-model-not-installed'
+        : ollamaNoModels ? 'ollama-no-models'
+          : ollamaModelMissing ? 'ollama-model-missing' : null;
+  return {
+    providers: {
+      current: defaults.name,
+      hasKey: snapshot.usable?.includes(defaults.name) === true,
+      model: defaultModel,
+      defaultRunnerModel: defaults.defaultRunnerModel,
+      configRevision: Number(snapshot.configRevision) || 0,
+    },
+    composer: {
+      provider: selected?.name ?? String(session?.provider ?? ''),
+      model: composerModel,
+      keyless: selected?.keyless === true,
+      credentialReady,
+      localReady,
+      ollamaReady: !ollamaNoModels && !ollamaModelMissing,
+      canSend: reason === null,
+      reason,
+      warning: reason === null && selected?.name === 'ollama'
+        && liveOllama?.known && liveOllama.reachable === false
+        ? 'ollama-unreachable' : null,
+    },
+  };
 };
 
 const modelRoute = (/** @type {string} */ method,
@@ -94,20 +173,35 @@ const modelRoute = (/** @type {string} */ method,
 ) => effect(context, `local.model.${method}`, project(message));
 
 const testProvider = async (/** @type {any} */ message, /** @type {any} */ context) => {
-  const policy = providerAuthority(message.provider);
+  const policy = providerMetadata(message.provider);
   if (!policy) return { ok: false, error: 'unknown-provider' };
-  const result = await effect(context, 'local.provider.test', { provider: policy.name });
+  if (policy.name === 'local-webgpu') return { ok: false, error: 'no-live-test' };
+  if (policy.name === 'ollama') {
+    const observed = await observeOllama(
+      context, await effect(context, 'local.models.ollama', {}),
+    );
+    return observed.models.length > 0 ? {
+      ok: true, reachable: true, models: observed.models.length,
+    } : observed.body ? {
+      ok: false, reachable: true, error: 'no-models', models: 0,
+    } : { ok: false, error: 'unreachable' };
+  }
+  const nativeBody = {
+    model: policy.defaultModel,
+    max_tokens: 1,
+    messages: [{ role: 'user', content: 'hi' }],
+    stream: true,
+    ...(policy.name === 'anthropic' ? { system: '' } : {}),
+  };
+  const result = await effect(context, 'local.provider.test', {
+    provider: policy.name,
+    model: policy.defaultModel,
+    nativeBody,
+  });
   if (result.error) return result;
   if (result.status >= 300 && result.status < 400) return { ok: false, error: 'unreachable' };
   if (result.status < 200 || result.status >= 300) {
     return { ok: false, error: result.status === 401 ? 'invalid-key' : `http-${result.status}` };
-  }
-  if (policy.probeKind === 'ollama') {
-    const models = Array.isArray(result.body?.models)
-      ? result.body.models.filter((/** @type {any} */ row) =>
-        typeof row?.name === 'string' && row.name).length : 0;
-    return models > 0 ? { ok: true, reachable: true, models }
-      : { ok: false, reachable: true, error: 'no-models', models: 0 };
   }
   return { ok: true };
 };
@@ -119,12 +213,14 @@ const listOpenRouterModels = async (/** @type {any} */ context) => {
     ok: false, status: result.status,
     error: result.status === 401 || result.status === 403 ? 'invalid-key' : 'unreachable',
   };
-  return { ok: true, models: normalizeOpenRouterModels(result.body), popular: OPENROUTER_POPULAR };
+  return { ok: true, models: normalizeOpenRouterModels(projectionJson(result)),
+    popular: OPENROUTER_POPULAR };
 };
 
 export const routes = Object.freeze({
   'provider/test': testProvider,
   'models/options': modelOptions,
+  'models/state-projection': (/** @type {any} */ message) => providerStateProjection(message),
   'openrouter/models': (/** @type {any} */ _message, /** @type {any} */ context) =>
     listOpenRouterModels(context),
   'local-model/status': modelRoute('status', ({ model, includeSupport }) => ({

@@ -47,8 +47,10 @@ describe('targeted offscreen actor MessageChannel', () => {
             abort: () => {},
             run: async (job, { sendToSW }) => {
               expect(job.relayToken).toBeUndefined();
-              const reply = await sendToSW('actor/model-call', { args: { messages: [] } });
-              expect(reply).toEqual({ ok: true, events: [] });
+              const reply = await sendToSW('actor/model-open-inference', {
+                providerId: 'anthropic', modelId: 'model', nativeBody: {},
+              });
+              expect(reply).toEqual({ ok: true, value: { streamId: 'stream' } });
               return { ok: true, started: true, finalText: 'done' };
             },
           });
@@ -62,7 +64,7 @@ describe('targeted offscreen actor MessageChannel', () => {
         lease: actorLease,
         relay: async (type, payload) => {
           relayed.push({ type, payload });
-          return { ok: true, events: [] };
+          return { ok: true, value: { streamId: 'stream' } };
         },
       },
     );
@@ -73,7 +75,8 @@ describe('targeted offscreen actor MessageChannel', () => {
     });
     expect(JSON.stringify(offered)).not.toContain('private job');
     expect(relayed).toEqual([{
-      type: 'actor/model-call', payload: { args: { messages: [] } },
+      type: 'actor/model-open-inference',
+      payload: { providerId: 'anthropic', modelId: 'model', nativeBody: {} },
     }]);
   });
 

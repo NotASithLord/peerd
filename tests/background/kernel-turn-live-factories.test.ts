@@ -298,6 +298,10 @@ const harness = async (
       sourceProjections.push(structuredClone({ bindings, projection }));
     },
     providerProjection: { bumpRevision: () => { providerRevision += 1; } },
+    providerEgress: {},
+    resolveProviderSelection: async () => ({
+      ok: true, selected: 'anthropic::claude-sonnet-4-6',
+    }),
     siteCapture: {
       has: (tabId: number) => tabId === 9,
       cancel: async (value: any) => { siteCaptureEvents.push(['cancel', value]); },
@@ -362,6 +366,10 @@ const dependencies = () => ({
   canWrite: () => {},
   contextSnapshots: createContextSnapshots(),
   scriptRuns: createScriptRunRegistry(),
+  providerEgress: {},
+  resolveProviderSelection: async () => ({
+    ok: true, selected: 'anthropic::claude-sonnet-4-6',
+  }),
 });
 
 describe('kernel live turn factories', () => {
