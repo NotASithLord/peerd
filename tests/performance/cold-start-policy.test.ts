@@ -95,7 +95,7 @@ const chromeResult = ({
       clock: 'host-monotonic:node-hrtime',
       lane,
       runtimeTarget: 'release',
-      runtimeSurface: 'sidepanel-tab',
+      runtimeSurface: 'home',
       coldBudgetMode: role === 'candidate' ? 'enforce' : 'measure-only',
       nativeFloor: null,
       sourceCommitSha,
@@ -110,7 +110,7 @@ const chromeResult = ({
     artifact: {
       channel: 'store',
       runtimeTarget: 'release',
-      runtimeSurface: 'sidepanel-tab',
+      runtimeSurface: 'home',
       archiveSha256: HASH.archive,
       treeSha256: HASH.tree,
       channels: {
@@ -170,7 +170,7 @@ const firefoxResult = ({
       clock: 'host-monotonic:node-hrtime',
       lane,
       runtimeTarget: 'release',
-      runtimeSurface: 'sidepanel-tab',
+      runtimeSurface: 'home',
       coldBudgetMode: role === 'candidate' ? 'enforce' : 'measure-only',
       nativeFloor: null,
       sourceCommitSha,
@@ -185,7 +185,7 @@ const firefoxResult = ({
     artifact: {
       channel: 'store',
       runtimeTarget: 'release',
-      runtimeSurface: 'sidepanel-tab',
+      runtimeSurface: 'home',
       archiveSha256: HASH.archive,
       treeSha256: HASH.tree,
       channels: {
@@ -652,7 +652,7 @@ describe('cold-start policy', () => {
       lane: 'device',
       packageVersion: '0.7.3',
       runtimeTarget: 'release',
-      runtimeSurface: 'sidepanel-tab',
+      runtimeSurface: 'home',
       coldBudgetMode: 'enforce',
       nativeFloor: null,
       commitSha: '3'.repeat(40),
@@ -670,7 +670,7 @@ describe('cold-start policy', () => {
       targetCutover: COLD_START_TARGET_CUTOVER,
       options: {
         browser: 'all', allowFailures: false, unsafeNoSandbox: false,
-        runtimeTarget: 'release', runtimeSurface: 'sidepanel-tab', coldBudgetMode: 'enforce',
+        runtimeTarget: 'release', runtimeSurface: 'home', coldBudgetMode: 'enforce',
         enforcement: profile.enforcement,
         graphPolicy: profile.graphPolicy,
         requireTimingTargets: profile.requireTimingTargets,
@@ -702,7 +702,7 @@ describe('cold-start policy', () => {
       lane: 'release',
       packageVersion: '0.7.3',
       runtimeTarget: 'release',
-      runtimeSurface: 'sidepanel-tab',
+      runtimeSurface: 'home',
       coldBudgetMode: 'enforce',
       nativeFloor: null,
       commitSha: '1'.repeat(40),
@@ -717,7 +717,7 @@ describe('cold-start policy', () => {
       targetCutover: COLD_START_TARGET_CUTOVER,
       options: {
         browser: 'all', allowFailures: false, unsafeNoSandbox: false,
-        runtimeTarget: 'release', runtimeSurface: 'sidepanel-tab', coldBudgetMode: 'enforce',
+        runtimeTarget: 'release', runtimeSurface: 'home', coldBudgetMode: 'enforce',
         enforcement: profile.enforcement,
         graphPolicy: profile.graphPolicy,
         requireTimingTargets: profile.requireTimingTargets,
@@ -757,7 +757,7 @@ describe('cold-start policy', () => {
       lane: 'local',
       packageVersion: '0.7.3',
       runtimeTarget: 'release',
-      runtimeSurface: 'sidepanel-tab',
+      runtimeSurface: 'home',
       coldBudgetMode: 'enforce',
       nativeFloor: null,
       commitSha: result.measurement.sourceCommitSha,
@@ -768,7 +768,7 @@ describe('cold-start policy', () => {
       targetCutover: COLD_START_TARGET_CUTOVER,
       options: {
         browser: 'chrome', graphPolicy: 'ratchet', requireTimingTargets: false,
-        runtimeTarget: 'release', runtimeSurface: 'sidepanel-tab', coldBudgetMode: 'enforce',
+        runtimeTarget: 'release', runtimeSurface: 'home', coldBudgetMode: 'enforce',
       },
       results: { chrome: result },
     };
@@ -786,7 +786,7 @@ describe('cold-start policy', () => {
       lane: 'local',
       packageVersion: '0.7.3',
       runtimeTarget: 'release',
-      runtimeSurface: 'sidepanel-tab',
+      runtimeSurface: 'home',
       coldBudgetMode: 'enforce',
       nativeFloor: null,
       commitSha: candidate.measurement.sourceCommitSha,
@@ -800,7 +800,7 @@ describe('cold-start policy', () => {
       targetCutover: COLD_START_TARGET_CUTOVER,
       options: {
         browser: 'chrome', graphPolicy: 'ratchet', requireTimingTargets: false,
-        runtimeTarget: 'release', runtimeSurface: 'sidepanel-tab', coldBudgetMode: 'enforce',
+        runtimeTarget: 'release', runtimeSurface: 'home', coldBudgetMode: 'enforce',
       },
       results: { chrome: candidate },
       baseResults: { chrome: base },

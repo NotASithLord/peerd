@@ -211,6 +211,18 @@ export const buildVaultKernelState = ({
   return state;
 };
 
+// why: a locked worker must answer the first-paint authority route without
+// starting the semantic controller or projecting provider/model metadata.
+// Empty identities are intentional: the vault shell only needs the fixed
+// denial posture, and the rich application cannot mount until unlock.
+export const LOCKED_PROVIDER_AUTHORITY_VIEW = Object.freeze({
+  providers: Object.freeze({ current: '', model: '', hasKey: false }),
+  composer: Object.freeze({
+    provider: '', model: '', keyless: false, credentialReady: false,
+    localReady: false, canSend: false, reason: 'vault-locked',
+  }),
+});
+
 /** @param {any} session @param {unknown} cachedMode @param {unknown} cachedConfirm */
 export const resolveKernelPermission = (session, cachedMode, cachedConfirm) => {
   const rawMode = session?.permissionMode ?? cachedMode ?? 'act';
