@@ -9,12 +9,14 @@ import {
   controllerHostsVmTool,
   controllerHostsNotebookTool,
   controllerHostsAppTool,
+  controllerHostsPersistenceTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
   executeControllerVmTool,
   executeControllerNotebookTool,
   executeControllerAppTool,
+  executeControllerPersistenceTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
@@ -590,6 +592,32 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
             });
             const value = await executeControllerAppTool(
               request.toolName, request.args, appAuthority, request.projection,
+            );
+            execution = {
+              protocol: request.protocol,
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              ok: true,
+              outcomeKnown: true,
+              effectEntered: true,
+              value,
+            };
+          } else if (controllerHostsPersistenceTool(request.toolName)) {
+            const persistenceAuthority = Object.freeze({
+              readMemoryScope: (/** @type {any} */ scope) =>
+                rpc('turn.memory.read-scope', { ...binding, scope }),
+              readMemorySubtree: (/** @type {string} */ workspace,
+                /** @type {string} */ subpath) => rpc('turn.memory.read-subtree', {
+                ...binding, workspace, subpath,
+              }),
+              writeMemory: (/** @type {any} */ scope, /** @type {string} */ body) =>
+                rpc('turn.memory.write', { ...binding, scope, body }),
+              readTodos: () => rpc('turn.todo.read', binding),
+              replaceTodos: (/** @type {string} */ version, /** @type {any[]} */ todos) =>
+                rpc('turn.todo.replace', { ...binding, version, todos }),
+            });
+            const value = await executeControllerPersistenceTool(
+              request.toolName, request.args, request.projection, persistenceAuthority,
             );
             execution = {
               protocol: request.protocol,

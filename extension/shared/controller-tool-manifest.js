@@ -7,7 +7,7 @@ import {
 
 const manifestSource = {
   protocol: TOOL_EXECUTION_PROTOCOL,
-  digest: '133314a427eaa646c683f56ef5b174463bca00f8f859fc2616d1dfe71d263f6b',
+  digest: '5e68bde5e0b3d14ea7ab6157a252d1c3f2e26d4cacc2a2c9ccb2a6a2295f333a',
   tools: {
     now: {
       projectionKeys: [],
@@ -146,6 +146,25 @@ const manifestSource = {
       projectionKeys: ['sessionId', 'actorInstanceId'], effects: [],
       argumentBytes: 1024 * 1024, resultBytes: 2 * 1024 * 1024,
     },
+    read_memory: {
+      projectionKeys: ['sessionId', 'activeTabOrigin', 'goalActive'], effects: [],
+      resultBytes: 2 * 1024 * 1024,
+    },
+    remember: {
+      projectionKeys: ['sessionId', 'activeTabOrigin', 'goalActive'], effects: [],
+      argumentBytes: 1024 * 1024,
+    },
+    todo_init: {
+      projectionKeys: ['sessionId', 'activeTabOrigin', 'goalActive'], effects: [],
+      argumentBytes: 256 * 1024,
+    },
+    todo_check: {
+      projectionKeys: ['sessionId', 'activeTabOrigin', 'goalActive'], effects: [],
+    },
+    todo_add: {
+      projectionKeys: ['sessionId', 'activeTabOrigin', 'goalActive'], effects: [],
+      argumentBytes: 256 * 1024,
+    },
   },
 };
 
@@ -174,6 +193,9 @@ const appTools = new Set([
   'app_write_file', 'app_read_file', 'app_list_files', 'app_delete_file',
   'app_observe', 'app_act', 'app_code',
 ]);
+const persistenceTools = new Set([
+  'read_memory', 'remember', 'todo_init', 'todo_check', 'todo_add',
+]);
 
 export const controllerToolDomain = (/** @type {unknown} */ name) =>
   typeof name !== 'string' ? null
@@ -183,4 +205,5 @@ export const controllerToolDomain = (/** @type {unknown} */ name) =>
           : vmTools.has(name) ? 'vm'
             : notebookTools.has(name) ? 'notebook'
               : appTools.has(name) ? 'app'
-                : null;
+                : persistenceTools.has(name) ? 'persistence'
+                  : null;

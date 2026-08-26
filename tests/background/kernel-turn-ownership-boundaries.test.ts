@@ -225,6 +225,34 @@ describe('kernel turn ownership boundaries', () => {
     }
   });
 
+  it('hosts memory and todo semantics only in controller and isolated-worker graphs', async () => {
+    const persistenceSemanticModules = new Set([
+      'peerd-runtime/controller-persistence-tools.js',
+      'peerd-runtime/tools/defs/read-memory.js',
+      'peerd-runtime/tools/defs/remember.js',
+      'peerd-runtime/tools/defs/todo.js',
+      'peerd-runtime/todo/core.js',
+    ]);
+    for (const entry of [
+      'background/controller-turn-bridge.js',
+      'background/offscreen-actor-client.js',
+    ]) {
+      const modules = await modulesFor(entry);
+      expect([...modules].filter((module) => persistenceSemanticModules.has(module))).toEqual([]);
+    }
+    const legacyOwner = await modulesFor('background/kernel-turn-live-factories.js');
+    for (const module of [
+      'peerd-runtime/controller-persistence-tools.js',
+      'peerd-runtime/tools/defs/read-memory.js',
+      'peerd-runtime/tools/defs/remember.js',
+      'peerd-runtime/tools/defs/todo.js',
+    ]) expect(legacyOwner.has(module), `legacy owner imports ${module}`).toBe(false);
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+      const modules = await modulesFor(entry);
+      for (const module of persistenceSemanticModules) expect(modules.has(module)).toBe(true);
+    }
+  });
+
   it('composes one synchronous owner path without a protocol or dynamic fallback', () => {
     const source = readFileSync(
       join(EXTENSION_ROOT, 'background/kernel-turn-live-factories.js'),

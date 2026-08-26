@@ -31,3 +31,8 @@ export {
   controllerHostsAppTool,
   executeControllerAppTool,
 } from './controller-app-tools.js';
+export {
+  CONTROLLER_PERSISTENCE_TOOL_NAMES,
+  controllerHostsPersistenceTool,
+  executeControllerPersistenceTool,
+} from './controller-persistence-tools.js';

@@ -43,6 +43,7 @@ import {
 } from '../runtime-capabilities.js';
 import {
   CONTROLLER_TOOL_MANIFEST,
+  controllerToolDomain,
   controllerHostsTool,
 } from '../../shared/controller-tool-manifest.js';
 import { toolExecutionResultAllowed } from '../../shared/tool-execution-protocol.js';
@@ -590,7 +591,13 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
               sessionKind: toolContext.session?.kind ?? 'chat',
               inbound: toolContext.inbound === true,
             }
-          : {};
+          : controllerToolDomain(call?.name) === 'persistence'
+            ? {
+                sessionId: toolContext.session?.sessionId,
+                activeTabOrigin: toolContext.activeTab?.origin,
+                goalActive: !!toolContext.todoStore,
+              }
+            : {};
         return {
           mode: 'execute',
           custody: prepared,

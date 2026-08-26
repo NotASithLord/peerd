@@ -27,12 +27,13 @@ import {
 import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
 
 const MANIFEST_DIGEST = 'a'.repeat(64);
+const PROTOCOL_FIXTURE_TOOL = 'request_review';
 const manifestFor = (riskClass: 'read' | 'control' | 'commit' | 'resource') =>
   compileToolEffectManifest({
     protocol: TOOL_EXECUTION_PROTOCOL,
     digest: MANIFEST_DIGEST,
     tools: {
-      remember: {
+      request_review: {
         projectionKeys: ['sessionId'],
         effects: [{
           method: 'writeMemory', operation: 'memory.write', riskClass,
@@ -53,7 +54,7 @@ const TOOL_MANIFEST = manifestFor('commit');
 const authorityDescriptor = (name: string) => projectToolAuthority(
   toToolDescriptor(getToolPolicy(name)),
 );
-const descriptor = authorityDescriptor('remember');
+const descriptor = authorityDescriptor(PROTOCOL_FIXTURE_TOOL);
 
 const makeSessions = () => {
   let session: any = {
@@ -83,7 +84,7 @@ const context = (over: Record<string, unknown> = {}) => {
   const sessions = makeSessions();
   let round = 0;
   return {
-    sessionId: 'session-tool-protocol', userText: 'remember one', sessions,
+    sessionId: 'session-tool-protocol', userText: 'run protocol fixture', sessions,
     tools: [descriptor], refreshTools: async () => [descriptor],
     classifyToolCall: () => ({ actionClass: 'write', confirm: false }),
     toolDispatch: async () => ({ ok: true, content: 'legacy' }),
@@ -96,7 +97,7 @@ const context = (over: Record<string, unknown> = {}) => {
         yield { type: 'message-stop', stopReason: 'end_turn' };
         return;
       }
-      yield { type: 'tool-use-start', id: 'tool-use-1', name: 'remember' };
+      yield { type: 'tool-use-start', id: 'tool-use-1', name: PROTOCOL_FIXTURE_TOOL };
       yield { type: 'tool-use-delta', id: 'tool-use-1', partialJson: '{"fact":"one"}' };
       yield { type: 'tool-use-stop', id: 'tool-use-1' };
       yield { type: 'message-stop', stopReason: 'tool_use' };
@@ -405,6 +406,83 @@ describe('controller turn finite tool protocol', () => {
     }));
   });
 
+  test('executes remember through exact confirmed persistence authority', async () => {
+    const rememberDescriptor = authorityDescriptor('remember');
+    let legacy = 0;
+    let genericExecutor = 0;
+    let write: any = null;
+    let confirmed = 0;
+    let round = 0;
+    const result = await runHarness({
+      ctx: context({
+        tools: [rememberDescriptor], refreshTools: async () => [rememberDescriptor],
+        toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
+        callModel: async function* () {
+          round += 1;
+          if (round > 1) {
+            yield { type: 'message-stop', stopReason: 'end_turn' };
+            return;
+          }
+          yield { type: 'tool-use-start', id: 'tool-remember-1', name: 'remember' };
+          yield {
+            type: 'tool-use-delta', id: 'tool-remember-1',
+            partialJson: '{"scope":"user","body":"approved fact"}',
+          };
+          yield { type: 'tool-use-stop', id: 'tool-remember-1' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      }),
+      bridgeHooks: {
+        toolManifest: CONTROLLER_TOOL_MANIFEST,
+        prepareToolCall: async (call: any) => ({
+          mode: 'execute',
+          custody: {
+            ctx: {
+              session: { sessionId: 'session-tool-protocol' },
+              activeTab: { origin: 'https://example.test' },
+              abortSignal: new AbortController().signal,
+              confirm: async () => { confirmed += 1; return 'yes_once'; },
+              memory: {
+                writeWithConfirm: async (request: any) => {
+                  await request.confirm({
+                    op: 'create', header: 'User memory', addedLines: 1, removedLines: 0,
+                  });
+                  write = { scope: request.scope, body: request.body };
+                  return { rejected: false, op: 'create', id: 'user' };
+                },
+              },
+            },
+          },
+          args: call.args,
+          projection: {
+            sessionId: 'session-tool-protocol',
+            activeTabOrigin: 'https://example.test', goalActive: false,
+          },
+          manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+        }),
+        handleToolEffect: async () => ({
+          ok: false, code: 'tool-effect-denied', outcomeKnown: true,
+        }),
+        settleToolCall: async ({ result: execution }: any) => execution.value,
+      },
+      executeToolCall: async () => { genericExecutor += 1; return {}; },
+    });
+    expect(result.error).toBeNull();
+    expect(write).toEqual({
+      scope: {
+        kind: 'user', workspace: 'https://example.test', subpath: undefined,
+      },
+      body: 'approved fact',
+    });
+    expect(confirmed).toBe(1);
+    expect(legacy).toBe(0);
+    expect(genericExecutor).toBe(0);
+    expect(result.events).toContainEqual(expect.objectContaining({
+      type: 'tool-result',
+      result: expect.objectContaining({ ok: true, content: expect.stringContaining('user') }),
+    }));
+  });
+
   test('retains preparation in the kernel and exposes only exact effect calls', async () => {
     const custody = Object.freeze({ private: true });
     const observed: any[] = [];
@@ -438,7 +516,7 @@ describe('controller turn finite tool protocol', () => {
         expect(request.turnGeneration).toBe(1);
         expect(options.authority).toEqual({
           ownerId: request.runId, sessionId: request.sessionId,
-          target: 'tool:remember', replayClass: 'E',
+          target: `tool:${PROTOCOL_FIXTURE_TOOL}`, replayClass: 'E',
         });
         const effect = await options.kernelCall('memory.write', request.args);
         expect(effect).toEqual({ ok: true, outcomeKnown: true, value: { stored: true } });
@@ -953,7 +1031,7 @@ describe('controller turn finite tool protocol', () => {
       protocol: TOOL_EXECUTION_PROTOCOL,
       executionId: 'execution-1', runId: 'run-12345678', callId: 'call-1',
       sessionId: 'session:test', turnGeneration: 1, attempt: 0,
-      toolName: 'remember', argsDigest: 'b'.repeat(64),
+      toolName: PROTOCOL_FIXTURE_TOOL, argsDigest: 'b'.repeat(64),
       manifestDigest: MANIFEST_DIGEST, args: { fact: 'one' }, projection: {},
     };
     const prepare = { runId: request.runId, value: { callJson: '{}' } };

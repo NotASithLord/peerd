@@ -1008,6 +1008,45 @@ export const runActor = async (job, {
             }), { observeResult: true });
           return;
         }
+        if (m.type === 'memory-read-scope-request') {
+          await relayExactToolMessage(m, 'memory-read-scope-response', () =>
+            sendToSW('memory/read-scope', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              scope: m.scope,
+            }));
+          return;
+        }
+        if (m.type === 'memory-read-subtree-request') {
+          await relayExactToolMessage(m, 'memory-read-subtree-response', () =>
+            sendToSW('memory/read-subtree', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              workspace: m.workspace, subpath: m.subpath,
+            }));
+          return;
+        }
+        if (m.type === 'memory-write-request') {
+          await relayExactToolMessage(m, 'memory-write-response', () =>
+            sendToSW('memory/write', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              scope: m.scope, body: m.body,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'todo-read-request') {
+          await relayExactToolMessage(m, 'todo-read-response', () =>
+            sendToSW('todo/read', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'todo-replace-request') {
+          await relayExactToolMessage(m, 'todo-replace-response', () =>
+            sendToSW('todo/replace', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              version: m.version, todos: m.todos,
+            }), { observeResult: true });
+          return;
+        }
         if (m.type === 'actor-tool-settle-request') {
           await relayExactToolMessage(m, 'actor-tool-settle-response', () =>
             sendToSW('actor/tool-settle', {

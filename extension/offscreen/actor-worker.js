@@ -13,12 +13,14 @@ import {
   controllerHostsVmTool,
   controllerHostsNotebookTool,
   controllerHostsAppTool,
+  controllerHostsPersistenceTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
   executeControllerVmTool,
   executeControllerNotebookTool,
   executeControllerAppTool,
+  executeControllerPersistenceTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { makeInMemorySessions, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
@@ -122,6 +124,11 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'app-observe-response'
       || m.type === 'app-act-response'
       || m.type === 'app-run-code-response'
+      || m.type === 'memory-read-scope-response'
+      || m.type === 'memory-read-subtree-response'
+      || m.type === 'memory-write-response'
+      || m.type === 'todo-read-response'
+      || m.type === 'todo-replace-response'
       || m.type === 'actor-tool-settle-response') {
     toolPending.get(m.rid)?.(m.reply);
     toolPending.delete(m.rid);
@@ -525,6 +532,30 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           result = await executeControllerAppTool(
             prepared.toolName, prepared.args, appAuthority, prepared.projection,
           );
+        } else if (controllerHostsPersistenceTool(prepared.toolName)) {
+          const persistenceAuthority = Object.freeze({
+            readMemoryScope: (/** @type {any} */ scope) => authorityValue(actorToolRequest(
+              'memory-read-scope-request', { executionId, scope },
+            )),
+            readMemorySubtree: (/** @type {string} */ workspace,
+              /** @type {string} */ subpath) => authorityValue(actorToolRequest(
+              'memory-read-subtree-request', { executionId, workspace, subpath },
+            )),
+            writeMemory: (/** @type {any} */ scope, /** @type {string} */ body) =>
+              authorityValue(actorToolRequest(
+                'memory-write-request', { executionId, scope, body },
+              )),
+            readTodos: () => authorityValue(actorToolRequest(
+              'todo-read-request', { executionId },
+            )),
+            replaceTodos: (/** @type {string} */ version, /** @type {any[]} */ todos) =>
+              authorityValue(actorToolRequest(
+                'todo-replace-request', { executionId, version, todos },
+              )),
+          });
+          result = await executeControllerPersistenceTool(
+            prepared.toolName, prepared.args, prepared.projection, persistenceAuthority,
+          );
         } else throw Object.assign(new Error('controller tool has no semantic owner'), {
           code: 'controller-tool-execution-owner-missing', outcomeKnown: true,
         });
@@ -589,6 +620,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         || controllerHostsVmTool(call?.name)
         || controllerHostsNotebookTool(call?.name)
         || controllerHostsAppTool(call?.name)
+        || controllerHostsPersistenceTool(call?.name)
       )
         ? executeActorTool(call) : legacyToolDispatch(call);
       // Phase 3: a WEB/API actor self-fences its own untrusted-provenance rolling

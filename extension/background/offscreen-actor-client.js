@@ -22,6 +22,7 @@ import { createRepositoryToolAuthority } from './repository-tool-authority.js';
 import { createVmToolAuthority } from './vm-tool-authority.js';
 import { createNotebookToolAuthority } from './notebook-tool-authority.js';
 import { createAppToolAuthority } from './app-tool-authority.js';
+import { createPersistenceToolAuthority } from './persistence-tool-authority.js';
 
 const exactKeys = (
   /** @type {unknown} */ value, /** @type {readonly string[]} */ required,
@@ -449,6 +450,19 @@ export const makeOffscreenActorClient = ({
     });
     return entry;
   };
+  const persistenceEntry = (
+    /** @type {any} */ grant,
+    /** @type {any} */ msg,
+    /** @type {string[]} */ tools,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainEntry(grant, msg, 'persistence', tools, fields);
+    if (!entry) return null;
+    entry.domainState.authority ??= createPersistenceToolAuthority({
+      call: entry.prepared.call, ctx: entry.prepared.ctx,
+    });
+    return entry;
+  };
 
   const runDomainEffect = async (
     /** @type {any} */ entry,
@@ -812,6 +826,10 @@ export const makeOffscreenActorClient = ({
       } : domain === 'repository' ? {
         actorType: admittedContext.ctx.actorType,
         actorInstanceId: admittedContext.ctx.actorInstanceId,
+      } : domain === 'persistence' ? {
+        sessionId: admittedContext.ctx.session?.sessionId,
+        activeTabOrigin: admittedContext.ctx.activeTab?.origin,
+        goalActive: !!admittedContext.ctx.todoStore,
       } : { sessionId: admittedContext.ctx.session?.sessionId };
       return {
         ok: true, mode: 'execute', executionId,
@@ -1699,6 +1717,62 @@ export const makeOffscreenActorClient = ({
       if (!entry) return { ok: false, error: 'app/run-code: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/run-code', 'resource', () =>
         entry.domainState.authority.runCode(msg.code, msg.timeoutMs));
+    },
+    'memory/read-scope': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = persistenceEntry(grant, msg, ['read_memory'], ['scope']);
+      if (!entry) return { ok: false, error: 'memory/read-scope: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'memory/read-scope', 'read', () =>
+        entry.domainState.authority.readMemoryScope(msg.scope));
+    },
+    'memory/read-subtree': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = persistenceEntry(
+        grant, msg, ['read_memory'], ['workspace', 'subpath'],
+      );
+      if (!entry) return { ok: false, error: 'memory/read-subtree: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'memory/read-subtree', 'read', () =>
+        entry.domainState.authority.readMemorySubtree(msg.workspace, msg.subpath));
+    },
+    'memory/write': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = persistenceEntry(grant, msg, ['remember'], ['scope', 'body']);
+      if (!entry) return { ok: false, error: 'memory/write: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'memory/write', 'commit', () =>
+        entry.domainState.authority.writeMemory(msg.scope, msg.body));
+    },
+    'todo/read': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = persistenceEntry(
+        grant, msg, ['todo_init', 'todo_check', 'todo_add'], [],
+      );
+      if (!entry) return { ok: false, error: 'todo/read: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'todo/read', 'read', () =>
+        entry.domainState.authority.readTodos());
+    },
+    'todo/replace': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = persistenceEntry(
+        grant, msg, ['todo_init', 'todo_check', 'todo_add'], ['version', 'todos'],
+      );
+      if (!entry) return { ok: false, error: 'todo/replace: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'todo/replace', 'commit', () =>
+        entry.domainState.authority.replaceTodos(msg.version, msg.todos));
     },
     'actor/tool-settle': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
