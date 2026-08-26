@@ -3,18 +3,16 @@
 import {
   applyImport,
   buildExport,
-  createMemoryStore,
-  createSkillRegistry,
-  createSkillStore,
   EXPORT_PASSPHRASE_MIN_LENGTH,
   ExportPassphraseError,
-  exportHooks,
   inspectImport,
-  isCustodySecretName,
-  normalizeEngine,
-  normalizeVariant,
-  saveUserHook,
-} from '/peerd-runtime/kernel-transfer.js';
+} from '/peerd-runtime/transfer/transfer.js';
+import { createMemoryStore } from '/peerd-runtime/memory/store.js';
+import { createSkillRegistry } from '/peerd-runtime/skills/registry.js';
+import { createSkillStore } from '/peerd-runtime/skills/store.js';
+import { exportHooks, saveUserHook } from '/peerd-runtime/tools/hooks/registry.js';
+import { isCustodySecretName } from '/peerd-runtime/transfer/secret-policy.js';
+import { normalizeEngine, normalizeVariant } from '/peerd-runtime/voice/settings.js';
 
 /** @param {Record<string,any>} deps */
 export const createKernelTransferLive = async (deps) => {

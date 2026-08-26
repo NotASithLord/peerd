@@ -35,11 +35,15 @@ may not.
 2. Introduce a frozen explicit allowlist for the temporary legacy tool lane.
    A tool is controller-owned or legacy-owned, never both, and new tools cannot
    enter the legacy lane.
-3. Move cohesive tool domains in dependency order. Each retained checkpoint
-   adds finite named domain effects shared by orchestrator and isolated actors,
-   moves semantic execution out of the service worker, removes the matching
-   privileged context members and imports, and shrinks the allowlist.
-4. When the allowlist reaches zero, delete `turn.tool.dispatch`, the old
+3. Before moving another tool domain, delete broad aggregate edges and
+   duplicate orchestrator/isolated-actor authority wiring. Each retained seam
+   checkpoint must remove superseded service-worker reachability and reduce
+   the actual package or the disposable fixed-authority projection; revert
+   preparation-only changes. Exact per-domain route modules may be shared, but
+   generic dispatch and opaque payload envelopes remain prohibited.
+4. Resume cohesive tool-domain relocation only after the projected authority
+   floor trends downward. When the allowlist reaches zero, delete
+   `turn.tool.dispatch`, the old
    dispatcher/context aggregate, the temporary migration machinery, and every
    synchronous service-worker import of the controller semantic root, provider
    implementations, tool catalog/definitions, turn driver and actor semantics.
