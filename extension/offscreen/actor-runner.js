@@ -912,6 +912,79 @@ export const runActor = async (job, {
             }), { observeResult: true });
           return;
         }
+        if (m.type === 'app-update-request') {
+          await relayExactToolMessage(m, 'app-update-response', () =>
+            sendToSW('app/update', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              appId: m.appId, name: m.name, html: m.html, tags: m.tags,
+              entryFile: m.entryFile,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'app-open-request') {
+          await relayExactToolMessage(m, 'app-open-response', () =>
+            sendToSW('app/open', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              appId: m.appId,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'app-search-request') {
+          await relayExactToolMessage(m, 'app-search-response', () =>
+            sendToSW('app/search', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              query: m.query,
+            }));
+          return;
+        }
+        if (m.type === 'app-read-request') {
+          await relayExactToolMessage(m, 'app-read-response', () =>
+            sendToSW('app/read', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              appId: m.appId,
+            }));
+          return;
+        }
+        if (m.type === 'app-delete-request') {
+          await relayExactToolMessage(m, 'app-delete-response', () =>
+            sendToSW('app/delete', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              appId: m.appId,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'app-write-file-request') {
+          await relayExactToolMessage(m, 'app-write-file-response', () =>
+            sendToSW('app/write-file', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              appId: m.appId, path: m.path, content: m.content,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'app-read-file-request') {
+          await relayExactToolMessage(m, 'app-read-file-response', () =>
+            sendToSW('app/read-file', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              appId: m.appId, path: m.path,
+            }));
+          return;
+        }
+        if (m.type === 'app-list-files-request') {
+          await relayExactToolMessage(m, 'app-list-files-response', () =>
+            sendToSW('app/list-files', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              appId: m.appId,
+            }));
+          return;
+        }
+        if (m.type === 'app-delete-file-request') {
+          await relayExactToolMessage(m, 'app-delete-file-response', () =>
+            sendToSW('app/delete-file', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              appId: m.appId, path: m.path,
+            }), { observeResult: true });
+          return;
+        }
         if (m.type === 'actor-tool-settle-request') {
           await relayExactToolMessage(m, 'actor-tool-settle-response', () =>
             sendToSW('actor/tool-settle', {

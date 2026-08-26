@@ -17,14 +17,12 @@ export const appSearchTool = composeTool("app_search", {
     if (typeof args?.query !== 'string' || !args.query.trim()) {
       return { ok: false, error: 'query_required' };
     }
-    // why: appClient rides the opaque ctx contract (not on ToolContext); narrow
-    // to the one method this tool calls (search returns ranked app hits).
-    const appClient = /** @type {{ search?: (query: string) => Promise<Array<{ app: { id: string, name: string, tags: string[], updatedAt: number }, snippet: string }>> } | undefined} */ (
-      /** @type {any} */ (ctx).appClient);
-    if (!appClient?.search) return { ok: false, error: 'app_not_available' };
+    const authority = /** @type {{ searchApps?: Function } | undefined} */ (
+      /** @type {any} */ (ctx).appAuthority);
+    if (!authority?.searchApps) return { ok: false, error: 'app_not_available' };
     try {
-      const hits = await appClient.search(args.query.trim());
-      const trimmed = hits.slice(0, 20).map((h) => ({
+      const hits = await authority.searchApps(args.query.trim());
+      const trimmed = hits.slice(0, 20).map((/** @type {any} */ h) => ({
         id: h.app.id,
         name: h.app.name,
         tags: h.app.tags,

@@ -21,6 +21,7 @@ import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
 import { createRepositoryToolAuthority } from './repository-tool-authority.js';
 import { createVmToolAuthority } from './vm-tool-authority.js';
 import { createNotebookToolAuthority } from './notebook-tool-authority.js';
+import { createAppToolAuthority } from './app-tool-authority.js';
 
 const exactKeys = (
   /** @type {unknown} */ value, /** @type {readonly string[]} */ required,
@@ -431,6 +432,19 @@ export const makeOffscreenActorClient = ({
     entry.domainState.authority ??= createNotebookToolAuthority({
       call: entry.prepared.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
+    });
+    return entry;
+  };
+  const appEntry = (
+    /** @type {any} */ grant,
+    /** @type {any} */ msg,
+    /** @type {string[]} */ tools,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainEntry(grant, msg, 'app', tools, fields);
+    if (!entry) return null;
+    entry.domainState.authority ??= createAppToolAuthority({
+      call: entry.prepared.call, ctx: entry.prepared.ctx,
     });
     return entry;
   };
@@ -1558,6 +1572,102 @@ export const makeOffscreenActorClient = ({
       if (!entry) return { ok: false, error: 'notebook/destroy: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/destroy', 'commit', () =>
         entry.domainState.authority.destroyNotebook(msg.notebookId));
+    },
+    'app/update': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = appEntry(grant, msg, ['app_update'], [
+        'appId', 'name', 'html', 'tags', 'entryFile',
+      ]);
+      if (!entry) return { ok: false, error: 'app/update: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'app/update', 'commit', () =>
+        entry.domainState.authority.updateApp(
+          msg.appId, msg.name, msg.html, msg.tags, msg.entryFile,
+        ));
+    },
+    'app/open': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = appEntry(grant, msg, ['app_open'], ['appId']);
+      if (!entry) return { ok: false, error: 'app/open: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'app/open', 'resource', () =>
+        entry.domainState.authority.openApp(msg.appId));
+    },
+    'app/search': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = appEntry(grant, msg, ['app_search'], ['query']);
+      if (!entry) return { ok: false, error: 'app/search: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'app/search', 'read', () =>
+        entry.domainState.authority.searchApps(msg.query));
+    },
+    'app/read': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = appEntry(grant, msg, ['app_delete'], ['appId']);
+      if (!entry) return { ok: false, error: 'app/read: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'app/read', 'read', () =>
+        entry.domainState.authority.readApp(msg.appId));
+    },
+    'app/delete': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = appEntry(grant, msg, ['app_delete'], ['appId']);
+      if (!entry) return { ok: false, error: 'app/delete: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'app/delete', 'commit', () =>
+        entry.domainState.authority.deleteApp(msg.appId));
+    },
+    'app/write-file': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = appEntry(
+        grant, msg, ['app_write_file'], ['appId', 'path', 'content'],
+      );
+      if (!entry) return { ok: false, error: 'app/write-file: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'app/write-file', 'commit', () =>
+        entry.domainState.authority.writeFile(msg.appId, msg.path, msg.content));
+    },
+    'app/read-file': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = appEntry(grant, msg, ['app_read_file'], ['appId', 'path']);
+      if (!entry) return { ok: false, error: 'app/read-file: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'app/read-file', 'read', () =>
+        entry.domainState.authority.readFile(msg.appId, msg.path));
+    },
+    'app/list-files': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = appEntry(grant, msg, ['app_list_files'], ['appId']);
+      if (!entry) return { ok: false, error: 'app/list-files: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'app/list-files', 'read', () =>
+        entry.domainState.authority.listFiles(msg.appId));
+    },
+    'app/delete-file': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = appEntry(grant, msg, ['app_delete_file'], ['appId', 'path']);
+      if (!entry) return { ok: false, error: 'app/delete-file: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'app/delete-file', 'commit', () =>
+        entry.domainState.authority.deleteFile(msg.appId, msg.path));
     },
     'actor/tool-settle': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,

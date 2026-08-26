@@ -24,6 +24,7 @@ import { CONTROLLER_POD_TOOL_NAMES } from '../../../extension/peerd-runtime/cont
 import { CONTROLLER_REPOSITORY_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-repository-tools.js';
 import { CONTROLLER_VM_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-vm-tools.js';
 import { CONTROLLER_NOTEBOOK_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-notebook-tools.js';
+import { CONTROLLER_APP_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-app-tools.js';
 
 const { BUILTIN_TOOLS } = await import(
   '../../../extension/peerd-runtime/tools/defs/index.js'
@@ -44,6 +45,7 @@ const CONTROLLER_ONLY_TOOL_NAMES = new Set(
     ...CONTROLLER_REPOSITORY_TOOL_NAMES,
     ...CONTROLLER_VM_TOOL_NAMES,
     ...CONTROLLER_NOTEBOOK_TOOL_NAMES,
+    ...CONTROLLER_APP_TOOL_NAMES,
   ]
     .filter((name) => !EXECUTION_TOOL_NAMES.has(name)),
 );

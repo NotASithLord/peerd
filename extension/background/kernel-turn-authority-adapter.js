@@ -1764,8 +1764,13 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       dispatchToolCall: /** @type {any} */ (dispatchToolCall),
       prepareToolCall: /** @type {any} */ (prepareToolCall),
       settleToolCall: /** @type {any} */ (settleToolCall),
-      reviewToolAllowed: (/** @type {string} */ name) => isReadOnlyTool(name,
-        listTools().map((tool) => ({ name: tool.name, sideEffect: tool.sideEffect }))),
+      // why: controller-owned read tools no longer live in the SW execution
+      // registry. The inert descriptor projection remains the complete source
+      // for the existing reviewer grant until that grant becomes an authority
+      // ledger at the final semantic-root deletion.
+      reviewToolAllowed: (/** @type {string} */ name) => isReadOnlyTool(
+        name, listToolDescriptors(),
+      ),
       pinActorCall, restrictCtxCapabilities,
       ownedTabFor: (/** @type {string} */ sessionId) => webActorTabBindings.tabFor(sessionId),
       EXPOSURE_ACTOR, EXPOSURE_REVIEW,

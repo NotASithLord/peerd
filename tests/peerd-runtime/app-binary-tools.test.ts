@@ -7,9 +7,11 @@ const writeContext = () => {
   return {
     calls,
     ctx: {
-      session: { sessionId: 's-tools' },
-      appClient: {
-        writeFile: async (args: any) => { calls.push(args); return { bytesWritten: 3 }; },
+      appAuthority: {
+        writeFile: async (appId: string | undefined, path: string, content: unknown) => {
+          calls.push({ appId, path, content });
+          return { bytesWritten: 3 };
+        },
       },
     },
   };

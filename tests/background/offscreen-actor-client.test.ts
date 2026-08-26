@@ -1051,11 +1051,11 @@ describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ct
   test('a REVIEW child re-stamps exposure from the PERSISTED record', async () => {
     let seenCtx: any = null;
     const { client, during } = clientWithRelay(subDeps({
-      sessions: { get: async () => ({ kind: 'spawned', parentSessionId: 'p1', depth: 1, grantedTools: ['app_read_file'], review: true }) },
+      sessions: { get: async () => ({ kind: 'spawned', parentSessionId: 'p1', depth: 1, grantedTools: ['app_observe'], review: true }) },
       dispatchToolCall: async (_call: any, ctx: any) => { seenCtx = ctx; return { ok: true }; },
       EXPOSURE_REVIEW: 'review',
     }));
-    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'app_read_file', args: {} } }, OFFSCREEN));
+    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'app_observe', args: {} } }, OFFSCREEN));
     expect(out.ok).toBe(true);
     expect(seenCtx.exposure).toBe('review');
   });
@@ -1369,6 +1369,67 @@ describe('controller-owned repository tools: exact isolated authority', () => {
       result: { ok: false, code: 'tool-outcome-unknown', outcomeKnown: false, retryable: false },
     });
     expect(destroys).toBe(1);
+    expect(legacyDispatches).toBe(0);
+  });
+});
+
+describe('controller-owned App tools: exact isolated authority', () => {
+  test('preserves unknown post-entry App write failure', async () => {
+    let writes = 0;
+    let legacyDispatches = 0;
+    const { client, during } = clientWithRelay({
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'app', instanceId: 'app-1' }) },
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-app-1', kind: 'actor' },
+        appClient: {
+          writeFile: async () => { writes += 1; throw new Error('App write receipt lost'); },
+        },
+      }),
+      dispatchToolCall: async () => { legacyDispatches += 1; return { ok: true }; },
+      prepareToolCall: async (call: any, ctx: any) => ({
+        prepared: true, call, ctx, args: call.args,
+      }),
+      settleToolCall: async (_prepared: any, execution: any) => execution.result,
+    });
+    const observed: any = await during(async (relayToken) => {
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken,
+        call: {
+          id: 'call-app-write', name: 'app_write_file',
+          args: { appId: 'app-1', path: 'main.js', content: 'approved' },
+        },
+      }, OFFSCREEN);
+      const effect = await client.routes['app/write-file']({
+        relayToken, executionId: prepared.executionId,
+        appId: 'app-1', path: 'main.js', content: 'approved',
+      }, OFFSCREEN);
+      const legacy = await client.routes['actor/tool-dispatch']({
+        relayToken,
+        call: {
+          id: 'call-app-write', name: 'app_write_file',
+          args: { appId: 'app-1', path: 'main.js', content: 'approved' },
+        },
+      }, OFFSCREEN);
+      const settled = await client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId,
+        result: { ok: false, error: 'app_write_file_failed: App write receipt lost' },
+      }, OFFSCREEN);
+      return { prepared, effect, legacy, settled };
+    }, 'actor-app-1');
+
+    expect(observed.prepared).toMatchObject({
+      ok: true, mode: 'execute', toolName: 'app_write_file',
+      projection: { sessionId: 'actor-app-1' },
+    });
+    expect(observed.effect).toMatchObject({
+      ok: false, error: 'App write receipt lost', outcomeKnown: false, retryable: false,
+    });
+    expect(observed.legacy.error).toContain('not legacy-owned');
+    expect(observed.settled).toMatchObject({
+      ok: true,
+      result: { ok: false, code: 'tool-outcome-unknown', outcomeKnown: false, retryable: false },
+    });
+    expect(writes).toBe(1);
     expect(legacyDispatches).toBe(0);
   });
 });
