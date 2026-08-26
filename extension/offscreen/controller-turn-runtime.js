@@ -40,6 +40,7 @@ import {
   contextWindowFor,
   listProviders,
   planFailoverChain,
+  providerFailureCode,
   providerMetadata,
   providerModelContextWindow,
   shouldFailover,
@@ -816,11 +817,12 @@ const runControllerTurnWith = async (payload, options) => {
     return { ok: true, outcomeKnown: true };
   } catch (cause) {
     const detail = /** @type {{code?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
+    const modelFailure = providerFailureCode(cause);
     return {
       ok: false,
       code: detail?.outcomeKnown === false && typeof detail.code === 'string' ? detail.code
         : options.signal.aborted ? 'controller-call-aborted'
-        : detail?.code ?? 'turn-run-failed',
+        : modelFailure ?? detail?.code ?? 'turn-run-failed',
       outcomeKnown: detail?.outcomeKnown === false ? false
         : options.signal.aborted && !abortFinalized ? false : !nestedUnknown,
       ...(detail?.retryable === false ? { retryable: false } : {}),

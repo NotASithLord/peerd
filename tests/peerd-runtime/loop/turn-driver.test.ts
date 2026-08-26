@@ -158,6 +158,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   metadataOnly = false,
   runtimeUnsupported = false,
   turnUnknown = false,
+  controllerFailureCode = '',
   goalControl = false,
 } = {}) => {
   const turnAbortController = new AbortController();
@@ -321,7 +322,8 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     isKeylessProvider: () => false,
     costOf: () => ({ usd: 0, known: true }),
     makeTurnCostTracker: () => ({ onUsage: async () => {}, maybeHalt: () => {} }),
-    uiConnected: () => !uiDisconnected && (boundaryFailure || streamBoundaryFailure),
+    uiConnected: () => !uiDisconnected
+      && (boundaryFailure || streamBoundaryFailure || !!controllerFailureCode),
     uiPorts: { broadcast: (message: any) => broadcasts.push(message) },
     auditLog: { append: async (entry: any) => { audits.push(entry); } },
     postChatNote: (note: string) => { chatNotes.push(note); },
@@ -363,6 +365,11 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
           code: 'controller-call-timeout', outcomeKnown: false, retryable: false,
         });
         throw failure;
+      }
+      if (controllerFailureCode) {
+        throw Object.assign(new Error('unprojected provider failure'), {
+          code: controllerFailureCode, outcomeKnown: true,
+        });
       }
       if (boundaryFailure) {
         await ctx.safeFetch('https://provider.invalid');
@@ -540,6 +547,17 @@ describe('runAgentTurn credential custody', () => {
       type: 'turn/error', error: ACTOR_CREDENTIAL_BOUNDARY_FAILURE,
     }));
     expect(fixture.broadcasts.some((message) => message.type === 'turn/actor-done')).toBe(false);
+  });
+
+  test('uses the controller-projected provider failure without provider classes', async () => {
+    const fixture = turnDeps('chat', { controllerFailureCode: 'provider-http-401' });
+    expect(await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'hello' }))
+      .toEqual({ ok: false, stopReason: null });
+    expect(fixture.broadcasts).toContainEqual(expect.objectContaining({
+      type: 'turn/error', sessionId: 's1', error: 'provider-http-401',
+      code: 'provider-http-401',
+    }));
+    expect(JSON.stringify(fixture.broadcasts)).not.toContain('unprojected provider failure');
   });
 
   test('an unknown controller outcome reaches the user as non-retryable custody, not a raw code', async () => {

@@ -22,7 +22,9 @@
 // (a mid-stream switch would replay consumed deltas), so failover composes
 // cleanly with the adapter-level retries that run underneath it.
 
-import { ProviderHttpError, ProviderUsageLimitError } from './errors.js';
+import {
+  ProviderHttpError, ProviderKeyMissingError, ProviderUsageLimitError, UnknownProviderError,
+} from './errors.js';
 
 // HTTP statuses that mean "the provider, not the request, is the problem":
 // overload (529), brief unavailability (503), transient server fault (500).
@@ -46,6 +48,22 @@ export const shouldFailover = (error) => {
   // Persistent overload / server fault after the adapter's own retries.
   if (error instanceof ProviderHttpError) return FAILOVER_HTTP_STATUSES.has(error.status);
   return false;
+};
+
+/**
+ * Stable model-facing failure code. Provider errors are interpreted in the
+ * sealed controller; callers outside that plane need no provider classes.
+ * @param {unknown} error
+ * @returns {string|null}
+ */
+export const providerFailureCode = (error) => {
+  if (error instanceof ProviderKeyMissingError) return 'provider-key-missing';
+  if (error instanceof ProviderUsageLimitError) {
+    return `provider-usage-limit${error.detail ? `: ${error.detail}` : ''}`;
+  }
+  if (error instanceof ProviderHttpError) return `provider-http-${error.status}`;
+  if (error instanceof UnknownProviderError) return 'unknown-provider';
+  return null;
 };
 
 /**

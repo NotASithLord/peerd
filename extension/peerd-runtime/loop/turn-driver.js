@@ -11,16 +11,6 @@
 // helpers, ...). Injecting preserves exact behavior and keeps this module
 // browser-free and testable.
 //
-// EXCEPTION — error CLASSES are imported, not injected: the loop-failure mapping
-// branches on `e instanceof ProviderUsageLimitError` etc. and reads `.detail`/
-// `.status` off the narrowed value. instanceof only narrows against a real
-// constructor type, so these must be imported (an injected `any` defeats the
-// narrowing). They're pure, stable, and lower in the dep graph — import-correct.
-// (VaultLockedError stays injected: it's only thrown, never instanceof-checked.)
-
-import {
-  ProviderHttpError, ProviderKeyMissingError, ProviderUsageLimitError, UnknownProviderError,
-} from '../../peerd-provider/errors.js';
 import {
   ActorCredentialBoundaryError, ACTOR_CREDENTIAL_BOUNDARY_FAILURE, SessionNotFoundError,
 } from '../errors.js';
@@ -38,6 +28,14 @@ import {
 import { toolExecutionResultAllowed } from '../../shared/tool-execution-protocol.js';
 
 const UNKNOWN_TURN_ERROR = 'Turn outcome unknown. Check the session before retrying.';
+const providerFailureFrom = (/** @type {unknown} */ value) => {
+  if (typeof value !== 'string') return null;
+  if (value === 'provider-key-missing' || value === 'unknown-provider'
+      || /^provider-http-[1-5][0-9]{2}$/.test(value)
+      || value === 'provider-usage-limit'
+      || value.startsWith('provider-usage-limit: ')) return value;
+  return null;
+};
 
 /** @param {{url:string,title?:string}} tab */
 const foregroundBlock = ({ url, title }) => [
@@ -736,14 +734,12 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   } catch (e) {
     // Loop-level failure — typed errors get clean labels; anything else
     // surfaces as a generic provider error message.
-    const technicalError = e instanceof ProviderKeyMissingError ? 'provider-key-missing'
-      : e instanceof ProviderUsageLimitError ? `provider-usage-limit${e.detail ? `: ${e.detail}` : ''}`
-      : e instanceof ProviderHttpError ? `provider-http-${e.status}`
-      : e instanceof UnknownProviderError ? 'unknown-provider'
-      : e instanceof SessionNotFoundError ? 'session-not-found'
-      : e instanceof ActorCredentialBoundaryError ? ACTOR_CREDENTIAL_BOUNDARY_FAILURE
-      : (/** @type {{ message?: string }} */ (e))?.message ?? 'unknown-error';
     const detail = /** @type {{code?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (e);
+    const providerFailure = providerFailureFrom(detail?.code);
+    const technicalError = providerFailure
+      ?? (e instanceof SessionNotFoundError ? 'session-not-found'
+      : e instanceof ActorCredentialBoundaryError ? ACTOR_CREDENTIAL_BOUNDARY_FAILURE
+      : (/** @type {{ message?: string }} */ (e))?.message ?? 'unknown-error');
     const outcomeUnknown = detail?.outcomeKnown === false;
     const error = outcomeUnknown ? UNKNOWN_TURN_ERROR : technicalError;
     turnOk = false;

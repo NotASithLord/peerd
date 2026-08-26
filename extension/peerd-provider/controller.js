@@ -13,7 +13,7 @@ export {
   providerModelContextWindow,
 } from './registry.js';
 
-export { planFailoverChain, shouldFailover } from './failover.js';
+export { planFailoverChain, providerFailureCode, shouldFailover } from './failover.js';
 
 export {
   DEFAULT_CONTEXT_WINDOWS,
