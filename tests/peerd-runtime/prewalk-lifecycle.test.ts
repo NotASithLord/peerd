@@ -58,7 +58,9 @@ const rig = (opts: { prewalkEnabled?: boolean; enginePrewalkEnabled?: boolean; e
       isPersisted: async (sid: string) => active.has(sid) || persisted.has(sid),
     },
     settings: { get: () => settings },
-    listProviders: () => [{ name: 'anthropic', defaultRunnerModel: 'claude-haiku-4-5' }],
+    resolveProvider: async () => ({
+      name: 'anthropic', defaultRunnerModel: 'claude-haiku-4-5',
+    }),
     getTool: (name: string) => TOOLS[name],
     appendAudit: (e: any) => { audits.push(e); },
     postChatNote: () => {},

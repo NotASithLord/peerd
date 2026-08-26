@@ -313,7 +313,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
       })
       : undefined,
     decideAction: () => null,
-    listProviders: () => [],
+    isKeylessProvider: () => false,
     costOf: () => ({ usd: 0, known: true }),
     makeTurnCostTracker: () => ({ onUsage: async () => {}, maybeHalt: () => {} }),
     uiConnected: () => !uiDisconnected && (boundaryFailure || streamBoundaryFailure),

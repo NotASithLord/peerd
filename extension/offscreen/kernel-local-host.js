@@ -113,7 +113,10 @@ const modelOptions = async (/** @type {any} */ message, /** @type {any} */ conte
       model: active.model, label: `${active.model} (${lockedProvider ? 'current' : 'currently unavailable'})`,
       value: selected, ...(!lockedProvider ? { unavailable: true } : {}) });
   }
-  return { ok: true, options, selected, sessionProvider: lockedProvider };
+  return {
+    ok: true, options, selected, sessionProvider: lockedProvider,
+    selectedRunnerModel: providerMetadata(active.name)?.defaultRunnerModel ?? '',
+  };
 };
 
 const providerStateProjection = (/** @type {any} */ snapshot) => {
