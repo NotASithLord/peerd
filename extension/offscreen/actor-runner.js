@@ -802,6 +802,61 @@ export const runActor = async (job, {
             }), { observeResult: true });
           return;
         }
+        if (m.type === 'vm-read-request') {
+          await relayExactToolMessage(m, 'vm-read-response', () =>
+            sendToSW('vm/read', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              vmId: m.vmId,
+            }));
+          return;
+        }
+        if (m.type === 'vm-list-request') {
+          await relayExactToolMessage(m, 'vm-list-response', () =>
+            sendToSW('vm/list', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'vm-set-default-request') {
+          await relayExactToolMessage(m, 'vm-set-default-response', () =>
+            sendToSW('vm/set-default', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              vmId: m.vmId,
+            }));
+          return;
+        }
+        if (m.type === 'vm-run-request') {
+          await relayExactToolMessage(m, 'vm-run-response', () =>
+            sendToSW('vm/run', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              command: m.command, timeoutMs: m.timeoutMs, vmId: m.vmId,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'vm-import-file-request') {
+          await relayExactToolMessage(m, 'vm-import-file-response', () =>
+            sendToSW('vm/import-file', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              url: m.url, path: m.path, maxBytes: m.maxBytes,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'vm-write-text-file-request') {
+          await relayExactToolMessage(m, 'vm-write-text-file-response', () =>
+            sendToSW('vm/write-text-file', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              path: m.path, content: m.content,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'vm-destroy-request') {
+          await relayExactToolMessage(m, 'vm-destroy-response', () =>
+            sendToSW('vm/destroy', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              vmId: m.vmId,
+            }), { observeResult: true });
+          return;
+        }
         if (m.type === 'actor-tool-settle-request') {
           await relayExactToolMessage(m, 'actor-tool-settle-response', () =>
             sendToSW('actor/tool-settle', {

@@ -6,9 +6,11 @@ import {
   controllerHostsActorTool,
   controllerHostsPodTool,
   controllerHostsRepositoryTool,
+  controllerHostsVmTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
+  executeControllerVmTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
@@ -460,6 +462,41 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
             const value = await executeControllerRepositoryTool(
               request.toolName, request.args, request.projection, repositoryAuthority,
               { signal: options.signal },
+            );
+            execution = {
+              protocol: request.protocol,
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              ok: true,
+              outcomeKnown: true,
+              effectEntered: true,
+              value,
+            };
+          } else if (controllerHostsVmTool(request.toolName)) {
+            const vmAuthority = Object.freeze({
+              readVm: (/** @type {string} */ vmId) => rpc('turn.vm.read', {
+                ...binding, vmId,
+              }),
+              listVms: () => rpc('turn.vm.list', binding),
+              setDefaultVm: (/** @type {string} */ vmId) => rpc('turn.vm.set-default', {
+                ...binding, vmId,
+              }),
+              runVm: (/** @type {string} */ command, /** @type {number} */ timeoutMs,
+                /** @type {string|undefined} */ vmId) => rpc('turn.vm.run', {
+                ...binding, command, timeoutMs, vmId,
+              }),
+              importFile: (/** @type {string} */ url, /** @type {string} */ path,
+                /** @type {number} */ maxBytes) => rpc('turn.vm.import-file', {
+                ...binding, url, path, maxBytes,
+              }),
+              writeTextFile: (/** @type {string} */ path, /** @type {string} */ content) =>
+                rpc('turn.vm.write-text-file', { ...binding, path, content }),
+              destroyVm: (/** @type {string} */ vmId) => rpc('turn.vm.destroy', {
+                ...binding, vmId,
+              }),
+            });
+            const value = await executeControllerVmTool(
+              request.toolName, request.args, vmAuthority,
             );
             execution = {
               protocol: request.protocol,

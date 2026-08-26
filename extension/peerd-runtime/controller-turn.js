@@ -16,3 +16,8 @@ export {
   controllerHostsRepositoryTool,
   executeControllerRepositoryTool,
 } from './controller-repository-tools.js';
+export {
+  CONTROLLER_VM_TOOL_NAMES,
+  controllerHostsVmTool,
+  executeControllerVmTool,
+} from './controller-vm-tools.js';

@@ -7,7 +7,7 @@ import {
 
 const manifestSource = {
   protocol: TOOL_EXECUTION_PROTOCOL,
-  digest: '98cbe4f2fbc50a5beb3a945689afab399c6e0da8b2b3e1fa453de7034130c5fc',
+  digest: '9dbaa7d7deab902b189c224077508891dc4ab6e2328f76039b0a9612ad845191',
   tools: {
     now: {
       projectionKeys: [],
@@ -87,6 +87,18 @@ const manifestSource = {
       projectionKeys: ['actorType', 'actorInstanceId'],
       effects: [],
     },
+    vm_boot: {
+      projectionKeys: ['sessionId'], effects: [], resultBytes: 2 * 1024 * 1024,
+    },
+    vm_import: {
+      projectionKeys: ['sessionId'], effects: [], argumentBytes: 4 * 1024,
+    },
+    vm_write_file: {
+      projectionKeys: ['sessionId'], effects: [], argumentBytes: 1024 * 1024,
+    },
+    vm_delete: {
+      projectionKeys: ['sessionId'], effects: [],
+    },
   },
 };
 
@@ -108,10 +120,12 @@ export const controllerHostsTool = (/** @type {unknown} */ name) =>
 const actorTools = new Set(['actor_create', 'actor_tasks', 'actor_cancel', 'message_actor']);
 const podTools = new Set(['pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write']);
 const repositoryTools = new Set(['pod_destroy', 'repo_history', 'repo_version', 'repo_remote']);
+const vmTools = new Set(['vm_boot', 'vm_import', 'vm_write_file', 'vm_delete']);
 
 export const controllerToolDomain = (/** @type {unknown} */ name) =>
   typeof name !== 'string' ? null
     : actorTools.has(name) ? 'actor'
       : podTools.has(name) ? 'pod'
         : repositoryTools.has(name) ? 'repository'
+          : vmTools.has(name) ? 'vm'
           : null;
