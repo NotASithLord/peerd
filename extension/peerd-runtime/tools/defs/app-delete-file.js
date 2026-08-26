@@ -10,17 +10,11 @@ export const appDeleteFileTool = composeTool("app_delete_file", {
 
   execute: async (args, ctx) => {
     if (typeof args?.path !== 'string') return { ok: false, error: 'path_required' };
-    // why: appClient rides the opaque ctx contract (not on ToolContext); narrow
-    // to the one method this tool calls.
-    const appClient = /** @type {{ deleteFile?: (opts: { appId?: string, path: string, sessionId?: string }) => Promise<unknown> } | undefined} */ (
-      /** @type {any} */ (ctx).appClient);
-    if (!appClient?.deleteFile) return { ok: false, error: 'app_not_available' };
+    const authority = /** @type {{ deleteFile?: Function } | undefined} */ (
+      /** @type {any} */ (ctx).appAuthority);
+    if (!authority?.deleteFile) return { ok: false, error: 'app_not_available' };
     try {
-      await appClient.deleteFile({
-        appId: args.appId,
-        path: args.path,
-        sessionId: ctx.session?.sessionId,
-      });
+      await authority.deleteFile(args.appId, args.path);
       return { ok: true, content: JSON.stringify({ deleted: args.path }, null, 2) };
     } catch (e) {
       return { ok: false, error: `app_delete_file_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };

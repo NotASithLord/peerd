@@ -53,6 +53,7 @@ describe('kernel turn ownership boundaries', () => {
       'peerd-runtime/controller-repository-tools.js',
       'peerd-runtime/controller-vm-tools.js',
       'peerd-runtime/controller-notebook-tools.js',
+      'peerd-runtime/controller-app-tools.js',
       'peerd-runtime/controller-tools.js',
       'peerd-runtime/semantic.js',
       'peerd-runtime/site-clients/digest.js',
@@ -182,6 +183,33 @@ describe('kernel turn ownership boundaries', () => {
     for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
       const modules = await modulesFor(entry);
       for (const module of notebookSemanticModules) expect(modules.has(module)).toBe(true);
+    }
+  });
+
+  it('hosts App lifecycle/file semantics only in controller and isolated-worker graphs', async () => {
+    const appSemanticModules = new Set([
+      'peerd-runtime/controller-app-tools.js',
+      'peerd-runtime/tools/defs/app-update.js',
+      'peerd-runtime/tools/defs/app-open.js',
+      'peerd-runtime/tools/defs/app-search.js',
+      'peerd-runtime/tools/defs/app-delete.js',
+      'peerd-runtime/tools/defs/app-write-file.js',
+      'peerd-runtime/tools/defs/app-read-file.js',
+      'peerd-runtime/tools/defs/app-list-files.js',
+      'peerd-runtime/tools/defs/app-delete-file.js',
+    ]);
+    const authorityEntries = [
+      'background/kernel-turn-authority-adapter.js',
+      'background/controller-turn-bridge.js',
+      'background/offscreen-actor-client.js',
+    ];
+    for (const entry of authorityEntries) {
+      const modules = await modulesFor(entry);
+      expect([...modules].filter((module) => appSemanticModules.has(module))).toEqual([]);
+    }
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+      const modules = await modulesFor(entry);
+      for (const module of appSemanticModules) expect(modules.has(module)).toBe(true);
     }
   });
 

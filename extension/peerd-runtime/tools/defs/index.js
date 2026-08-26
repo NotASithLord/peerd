@@ -36,14 +36,6 @@ import { sandboxCreateTool }          from './sandbox-create.js';
 import { scriptTool }                  from './script.js';
 import { pageCodeTool }               from './page-code.js';
 import { appCodeTool }                from './app-code.js';
-import { appUpdateTool }              from './app-update.js';
-import { appOpenTool }                from './app-open.js';
-import { appSearchTool }              from './app-search.js';
-import { appDeleteTool }              from './app-delete.js';
-import { appWriteFileTool }           from './app-write-file.js';
-import { appReadFileTool }            from './app-read-file.js';
-import { appListFilesTool }           from './app-list-files.js';
-import { appDeleteFileTool }          from './app-delete-file.js';
 import { appObserveTool }             from './app-observe.js';
 import { appActTool }                 from './app-act.js';
 import { editFileTool }               from './edit-file.js';
@@ -100,14 +92,6 @@ export {
   pageCodeTool,
   // engine (Pod)
   // engine (App)
-  appUpdateTool,
-  appOpenTool,
-  appSearchTool,
-  appDeleteTool,
-  appWriteFileTool,
-  appReadFileTool,
-  appListFilesTool,
-  appDeleteFileTool,
   appCodeTool,
   appObserveTool,
   appActTool,
@@ -203,14 +187,6 @@ export const BUILTIN_TOOLS = Object.freeze([
   readRunCacheTool,
   // engine (Pod)
   // engine (App)
-  appUpdateTool,
-  appOpenTool,
-  appSearchTool,
-  appDeleteTool,
-  appWriteFileTool,
-  appReadFileTool,
-  appListFilesTool,
-  appDeleteFileTool,
   appCodeTool,
   appObserveTool,
   appActTool,

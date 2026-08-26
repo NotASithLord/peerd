@@ -28,8 +28,7 @@ const jsCtx = (file: string) => ({
   notebookAuthority: { readFile: async (_path: string) => file },
 });
 const appCtx = (file: string) => ({
-  session: { sessionId: 'chat-1' },
-  appClient: { readFile: async (_opts: unknown) => file },
+  appAuthority: { readFile: async (_appId: unknown, _path: string) => file },
 });
 
 describe('js_read_file self-paging', () => {

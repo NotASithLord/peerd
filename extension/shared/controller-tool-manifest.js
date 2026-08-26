@@ -7,7 +7,7 @@ import {
 
 const manifestSource = {
   protocol: TOOL_EXECUTION_PROTOCOL,
-  digest: '924a33d92c8595479bd75586cf1543dea1bdf836b753c39ec92d0321115cb084',
+  digest: '08c7e3f5a2932a653451c160cd599ff9ba1f5e405c7624979272f2d56ee73fcd',
   tools: {
     now: {
       projectionKeys: [],
@@ -112,6 +112,30 @@ const manifestSource = {
     js_delete: {
       projectionKeys: ['sessionId'], effects: [],
     },
+    app_update: {
+      projectionKeys: ['sessionId'], effects: [], argumentBytes: 2 * 1024 * 1024,
+    },
+    app_open: {
+      projectionKeys: ['sessionId'], effects: [],
+    },
+    app_search: {
+      projectionKeys: ['sessionId'], effects: [], resultBytes: 2 * 1024 * 1024,
+    },
+    app_delete: {
+      projectionKeys: ['sessionId'], effects: [],
+    },
+    app_write_file: {
+      projectionKeys: ['sessionId'], effects: [], argumentBytes: 1024 * 1024,
+    },
+    app_read_file: {
+      projectionKeys: ['sessionId'], effects: [], resultBytes: 2 * 1024 * 1024,
+    },
+    app_list_files: {
+      projectionKeys: ['sessionId'], effects: [],
+    },
+    app_delete_file: {
+      projectionKeys: ['sessionId'], effects: [],
+    },
   },
 };
 
@@ -135,6 +159,10 @@ const podTools = new Set(['pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'p
 const repositoryTools = new Set(['pod_destroy', 'repo_history', 'repo_version', 'repo_remote']);
 const vmTools = new Set(['vm_boot', 'vm_import', 'vm_write_file', 'vm_delete']);
 const notebookTools = new Set(['js_notebook', 'js_write_file', 'js_read_file', 'js_delete']);
+const appTools = new Set([
+  'app_update', 'app_open', 'app_search', 'app_delete',
+  'app_write_file', 'app_read_file', 'app_list_files', 'app_delete_file',
+]);
 
 export const controllerToolDomain = (/** @type {unknown} */ name) =>
   typeof name !== 'string' ? null
@@ -143,4 +171,5 @@ export const controllerToolDomain = (/** @type {unknown} */ name) =>
         : repositoryTools.has(name) ? 'repository'
           : vmTools.has(name) ? 'vm'
             : notebookTools.has(name) ? 'notebook'
-          : null;
+              : appTools.has(name) ? 'app'
+                : null;

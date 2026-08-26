@@ -9,16 +9,11 @@ import { serializeListResult } from './columnar.js';
 export const appListFilesTool = composeTool("app_list_files", {
 
   execute: async (args, ctx) => {
-    // why: appClient rides the opaque ctx contract (not on ToolContext); narrow
-    // to the one method this tool calls.
-    const appClient = /** @type {{ listFiles?: (opts: { appId?: string, sessionId?: string }) => Promise<Array<{ path: string, size: number }>> } | undefined} */ (
-      /** @type {any} */ (ctx).appClient);
-    if (!appClient?.listFiles) return { ok: false, error: 'app_not_available' };
+    const authority = /** @type {{ listFiles?: Function } | undefined} */ (
+      /** @type {any} */ (ctx).appAuthority);
+    if (!authority?.listFiles) return { ok: false, error: 'app_not_available' };
     try {
-      const files = await appClient.listFiles({
-        appId: args.appId,
-        sessionId: ctx.session?.sessionId,
-      });
+      const files = await authority.listFiles(args.appId);
       return {
         ok: true,
         content: serializeListResult({ count: files.length, files }, 'files'),

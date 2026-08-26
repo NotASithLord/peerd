@@ -14,23 +14,16 @@ const MAX_HTML_CHARS = 1_000_000;
 export const appUpdateTool = composeTool("app_update", {
 
   execute: async (args, ctx) => {
-    // why: appClient rides the opaque ctx contract (not on ToolContext); narrow
-    // to the one method this tool calls.
-    const appClient = /** @type {{ update?: (opts: { appId?: string, name?: string, html?: string, tags?: string[], entryFile?: string, sessionId?: string }) => Promise<{ id: string, name: string, entryFile: string, updatedAt: number } | null | undefined> } | undefined} */ (
-      /** @type {any} */ (ctx).appClient);
-    if (!appClient?.update) return { ok: false, error: 'app_not_available' };
+    const authority = /** @type {{ updateApp?: Function } | undefined} */ (
+      /** @type {any} */ (ctx).appAuthority);
+    if (!authority?.updateApp) return { ok: false, error: 'app_not_available' };
     if (typeof args?.html === 'string' && args.html.length > MAX_HTML_CHARS) {
       return { ok: false, error: `html_too_large: ${args.html.length} > ${MAX_HTML_CHARS}` };
     }
     try {
-      const record = await appClient.update({
-        appId: args.appId,
-        name: args.name,
-        html: args.html,
-        tags: args.tags,
-        entryFile: args.entryFile,
-        sessionId: ctx.session?.sessionId,
-      });
+      const record = await authority.updateApp(
+        args.appId, args.name, args.html, args.tags, args.entryFile,
+      );
       if (!record) return { ok: false, error: 'app_not_found' };
       return {
         ok: true,

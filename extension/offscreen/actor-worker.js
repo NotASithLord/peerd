@@ -12,11 +12,13 @@ import {
   controllerHostsRepositoryTool,
   controllerHostsVmTool,
   controllerHostsNotebookTool,
+  controllerHostsAppTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
   executeControllerVmTool,
   executeControllerNotebookTool,
+  executeControllerAppTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { makeInMemorySessions, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
@@ -108,6 +110,15 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'notebook-write-file-response'
       || m.type === 'notebook-read-file-response'
       || m.type === 'notebook-destroy-response'
+      || m.type === 'app-update-response'
+      || m.type === 'app-open-response'
+      || m.type === 'app-search-response'
+      || m.type === 'app-read-response'
+      || m.type === 'app-delete-response'
+      || m.type === 'app-write-file-response'
+      || m.type === 'app-read-file-response'
+      || m.type === 'app-list-files-response'
+      || m.type === 'app-delete-file-response'
       || m.type === 'actor-tool-settle-response') {
     toolPending.get(m.rid)?.(m.reply);
     toolPending.delete(m.rid);
@@ -450,6 +461,54 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           result = await executeControllerNotebookTool(
             prepared.toolName, prepared.args, notebookAuthority, { signal: abort.signal },
           );
+        } else if (controllerHostsAppTool(prepared.toolName)) {
+          const appAuthority = Object.freeze({
+            updateApp: (
+              /** @type {string|undefined} */ appId,
+              /** @type {string|undefined} */ name,
+              /** @type {string|undefined} */ html,
+              /** @type {string[]|undefined} */ tags,
+              /** @type {string|undefined} */ entryFile,
+            ) => authorityValue(actorToolRequest(
+              'app-update-request', { executionId, appId, name, html, tags, entryFile },
+            )),
+            openApp: (/** @type {string} */ appId) => authorityValue(actorToolRequest(
+              'app-open-request', { executionId, appId },
+            )),
+            searchApps: (/** @type {string} */ query) => authorityValue(actorToolRequest(
+              'app-search-request', { executionId, query },
+            )),
+            readApp: (/** @type {string} */ appId) => authorityValue(actorToolRequest(
+              'app-read-request', { executionId, appId },
+            )),
+            deleteApp: (/** @type {string} */ appId) => authorityValue(actorToolRequest(
+              'app-delete-request', { executionId, appId },
+            )),
+            writeFile: (
+              /** @type {string|undefined} */ appId,
+              /** @type {string} */ path,
+              /** @type {unknown} */ content,
+            ) => authorityValue(actorToolRequest(
+              'app-write-file-request', { executionId, appId, path, content },
+            )),
+            readFile: (
+              /** @type {string|undefined} */ appId, /** @type {string} */ path,
+            ) => authorityValue(actorToolRequest(
+              'app-read-file-request', { executionId, appId, path },
+            )),
+            listFiles: (/** @type {string|undefined} */ appId) =>
+              authorityValue(actorToolRequest(
+                'app-list-files-request', { executionId, appId },
+              )),
+            deleteFile: (
+              /** @type {string|undefined} */ appId, /** @type {string} */ path,
+            ) => authorityValue(actorToolRequest(
+              'app-delete-file-request', { executionId, appId, path },
+            )),
+          });
+          result = await executeControllerAppTool(
+            prepared.toolName, prepared.args, appAuthority,
+          );
         } else throw Object.assign(new Error('controller tool has no semantic owner'), {
           code: 'controller-tool-execution-owner-missing', outcomeKnown: true,
         });
@@ -513,6 +572,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         || controllerHostsRepositoryTool(call?.name)
         || controllerHostsVmTool(call?.name)
         || controllerHostsNotebookTool(call?.name)
+        || controllerHostsAppTool(call?.name)
       )
         ? executeActorTool(call) : legacyToolDispatch(call);
       // Phase 3: a WEB/API actor self-fences its own untrusted-provenance rolling

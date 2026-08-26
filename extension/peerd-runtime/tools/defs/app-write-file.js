@@ -32,18 +32,13 @@ export const appWriteFileTool = composeTool("app_write_file", {
     if (size > MAX_MODEL_APP_FILE_BYTES) {
       return { ok: false, error: `content_too_large: ${size} > ${MAX_MODEL_APP_FILE_BYTES} bytes` };
     }
-    // why: appClient rides the opaque ctx contract (not on ToolContext); narrow
-    // to the one method this tool calls.
-    const appClient = /** @type {{ writeFile?: (opts: { appId?: string, path: string, content: unknown, sessionId?: string }) => Promise<{ bytesWritten?: number }> } | undefined} */ (
-      /** @type {any} */ (ctx).appClient);
-    if (!appClient?.writeFile) return { ok: false, error: 'app_not_available' };
+    const authority = /** @type {{ writeFile?: Function } | undefined} */ (
+      /** @type {any} */ (ctx).appAuthority);
+    if (!authority?.writeFile) return { ok: false, error: 'app_not_available' };
     try {
-      const written = await appClient.writeFile({
-        appId: args.appId,
-        path: args.path,
-        content: hasBinary ? { base64: args.contentBase64 } : args.content,
-        sessionId: ctx.session?.sessionId,
-      });
+      const written = await authority.writeFile(
+        args.appId, args.path, hasBinary ? { base64: args.contentBase64 } : args.content,
+      );
       return {
         ok: true,
         content: JSON.stringify({

@@ -26,3 +26,8 @@ export {
   controllerHostsNotebookTool,
   executeControllerNotebookTool,
 } from './controller-notebook-tools.js';
+export {
+  CONTROLLER_APP_TOOL_NAMES,
+  controllerHostsAppTool,
+  executeControllerAppTool,
+} from './controller-app-tools.js';

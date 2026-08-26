@@ -44,8 +44,7 @@ describe('js_read_file — fenced content', () => {
 describe('app_read_file — fenced content', () => {
   test('the file body comes back inside the untrusted fence, origin naming the app file', async () => {
     const ctx = {
-      session: { sessionId: 's1' },
-      appClient: { readFile: async () => '<h1>from the web</h1>' },
+      appAuthority: { readFile: async () => '<h1>from the web</h1>' },
     };
     const r = await appReadFileTool.execute({ appId: 'app-1', path: 'index.html' }, ctx as any);
     expect(r.ok).toBe(true);

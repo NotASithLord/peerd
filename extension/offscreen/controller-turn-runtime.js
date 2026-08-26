@@ -8,11 +8,13 @@ import {
   controllerHostsRepositoryTool,
   controllerHostsVmTool,
   controllerHostsNotebookTool,
+  controllerHostsAppTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
   executeControllerVmTool,
   executeControllerNotebookTool,
+  executeControllerAppTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
@@ -532,6 +534,55 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
             });
             const value = await executeControllerNotebookTool(
               request.toolName, request.args, notebookAuthority, { signal: options.signal },
+            );
+            execution = {
+              protocol: request.protocol,
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              ok: true,
+              outcomeKnown: true,
+              effectEntered: true,
+              value,
+            };
+          } else if (controllerHostsAppTool(request.toolName)) {
+            const appAuthority = Object.freeze({
+              updateApp: (
+                /** @type {string|undefined} */ appId,
+                /** @type {string|undefined} */ name,
+                /** @type {string|undefined} */ html,
+                /** @type {string[]|undefined} */ tags,
+                /** @type {string|undefined} */ entryFile,
+              ) => rpc('turn.app.update', {
+                ...binding, appId, name, html, tags, entryFile,
+              }),
+              openApp: (/** @type {string} */ appId) => rpc('turn.app.open', {
+                ...binding, appId,
+              }),
+              searchApps: (/** @type {string} */ query) => rpc('turn.app.search', {
+                ...binding, query,
+              }),
+              readApp: (/** @type {string} */ appId) => rpc('turn.app.read', {
+                ...binding, appId,
+              }),
+              deleteApp: (/** @type {string} */ appId) => rpc('turn.app.delete', {
+                ...binding, appId,
+              }),
+              writeFile: (
+                /** @type {string|undefined} */ appId,
+                /** @type {string} */ path,
+                /** @type {unknown} */ content,
+              ) => rpc('turn.app.write-file', { ...binding, appId, path, content }),
+              readFile: (
+                /** @type {string|undefined} */ appId, /** @type {string} */ path,
+              ) => rpc('turn.app.read-file', { ...binding, appId, path }),
+              listFiles: (/** @type {string|undefined} */ appId) =>
+                rpc('turn.app.list-files', { ...binding, appId }),
+              deleteFile: (
+                /** @type {string|undefined} */ appId, /** @type {string} */ path,
+              ) => rpc('turn.app.delete-file', { ...binding, appId, path }),
+            });
+            const value = await executeControllerAppTool(
+              request.toolName, request.args, appAuthority,
             );
             execution = {
               protocol: request.protocol,

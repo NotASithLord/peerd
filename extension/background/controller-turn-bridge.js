@@ -21,6 +21,7 @@ import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
 import { createRepositoryToolAuthority } from './repository-tool-authority.js';
 import { createVmToolAuthority } from './vm-tool-authority.js';
 import { createNotebookToolAuthority } from './notebook-tool-authority.js';
+import { createAppToolAuthority } from './app-tool-authority.js';
 
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
@@ -558,6 +559,19 @@ export const makeControllerTurnBridge = ({
     if (!entry) return null;
     entry.domainState.authority ??= createNotebookToolAuthority({
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
+    });
+    return entry;
+  };
+  const appExecutionEntry = (
+    /** @type {any} */ run,
+    /** @type {Record<string,any>} */ value,
+    /** @type {string[]} */ tools,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainExecutionEntry(run, value, 'app', tools, fields);
+    if (!entry) return null;
+    entry.domainState.authority ??= createAppToolAuthority({
+      call: entry.call, ctx: entry.custody?.ctx,
     });
     return entry;
   };
@@ -1413,6 +1427,70 @@ export const makeControllerTurnBridge = ({
           if (!entry) return failed('Notebook destroy authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.destroyNotebook(value.notebookId));
+        }
+        case 'turn.app.update': {
+          const entry = appExecutionEntry(
+            run, value, ['app_update'], ['appId', 'name', 'html', 'tags', 'entryFile'],
+          );
+          if (!entry) return failed('App update authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.updateApp(
+              value.appId, value.name, value.html, value.tags, value.entryFile,
+            ));
+        }
+        case 'turn.app.open': {
+          const entry = appExecutionEntry(run, value, ['app_open'], ['appId']);
+          if (!entry) return failed('App open authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.openApp(value.appId));
+        }
+        case 'turn.app.search': {
+          const entry = appExecutionEntry(run, value, ['app_search'], ['query']);
+          if (!entry) return failed('App search authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.searchApps(value.query));
+        }
+        case 'turn.app.read': {
+          const entry = appExecutionEntry(run, value, ['app_delete'], ['appId']);
+          if (!entry) return failed('App read authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readApp(value.appId));
+        }
+        case 'turn.app.delete': {
+          const entry = appExecutionEntry(run, value, ['app_delete'], ['appId']);
+          if (!entry) return failed('App delete authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.deleteApp(value.appId));
+        }
+        case 'turn.app.write-file': {
+          const entry = appExecutionEntry(
+            run, value, ['app_write_file'], ['appId', 'path', 'content'],
+          );
+          if (!entry) return failed('App file-write authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.writeFile(value.appId, value.path, value.content));
+        }
+        case 'turn.app.read-file': {
+          const entry = appExecutionEntry(
+            run, value, ['app_read_file'], ['appId', 'path'],
+          );
+          if (!entry) return failed('App file-read authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readFile(value.appId, value.path));
+        }
+        case 'turn.app.list-files': {
+          const entry = appExecutionEntry(run, value, ['app_list_files'], ['appId']);
+          if (!entry) return failed('App file-list authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.listFiles(value.appId));
+        }
+        case 'turn.app.delete-file': {
+          const entry = appExecutionEntry(
+            run, value, ['app_delete_file'], ['appId', 'path'],
+          );
+          if (!entry) return failed('App file-delete authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.deleteFile(value.appId, value.path));
         }
         case 'turn.tool.settle': {
           const entry = run.preparedExecutions.get(value.executionId);

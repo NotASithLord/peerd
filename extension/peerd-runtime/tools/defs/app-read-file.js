@@ -16,17 +16,11 @@ export const appReadFileTool = composeTool("app_read_file", {
 
   execute: async (args, ctx) => {
     if (typeof args?.path !== 'string') return { ok: false, error: 'path_required' };
-    // why: appClient rides the opaque ctx contract (not on ToolContext); narrow
-    // to the one method this tool calls.
-    const appClient = /** @type {{ readFile?: (opts: { appId?: string, path: string, sessionId?: string }) => Promise<string> } | undefined} */ (
-      /** @type {any} */ (ctx).appClient);
-    if (!appClient?.readFile) return { ok: false, error: 'app_not_available' };
+    const authority = /** @type {{ readFile?: Function } | undefined} */ (
+      /** @type {any} */ (ctx).appAuthority);
+    if (!authority?.readFile) return { ok: false, error: 'app_not_available' };
     try {
-      const content = await appClient.readFile({
-        appId: args.appId,
-        path: args.path,
-        sessionId: ctx.session?.sessionId,
-      });
+      const content = await authority.readFile(args.appId, args.path);
       if (args.query !== undefined) {
         if (typeof args.query !== 'string' || !args.query || args.query.length > 500) {
           return { ok: false, error: 'query_must_be_1_to_500_characters' };
