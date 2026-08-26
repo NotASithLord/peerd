@@ -88,8 +88,9 @@ export const dwebGuideTool = composeTool("dweb_guide", {
 
   execute: async (_args, ctx) => {
     // why: narrow the SW-injected ctx.dweb slot — only its presence is checked.
-    const dweb = /** @type {{ dweb?: unknown }} */ (ctx).dweb;
-    if (!dweb) return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
+    if ((/** @type {{dwebAvailable?:unknown}} */ (ctx)).dwebAvailable !== true) {
+      return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
+    }
     // The bulky bridge reference re-ships every turn once it's in history, so a
     // second call this session is pure repetition (schema-diet 6b): return a
     // pointer instead. It has not changed — the earlier result still applies.

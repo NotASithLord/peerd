@@ -7,7 +7,7 @@ import {
 
 const manifestSource = {
   protocol: TOOL_EXECUTION_PROTOCOL,
-  digest: '4d28b80e5a9d510a724ba91cf32133cfb9c1e300388cc9d60b582fd7811726d7',
+  digest: '9ad6f3d3cb01cd60f6a474c34e63ab06e4691058e4376267f960fe6ce3845e2e',
   tools: {
     now: {
       projectionKeys: [],
@@ -200,6 +200,13 @@ const manifestSource = {
     schedule_create: { projectionKeys: [], effects: [], argumentBytes: 64 * 1024 },
     schedule_list: { projectionKeys: [], effects: [], resultBytes: 2 * 1024 * 1024 },
     schedule_cancel: { projectionKeys: [], effects: [], argumentBytes: 4 * 1024 },
+    dweb_discover: { projectionKeys: ['sessionId', 'dwebAvailable'], effects: [] },
+    dweb_share: { projectionKeys: ['sessionId', 'dwebAvailable'], effects: [] },
+    dweb_install: { projectionKeys: ['sessionId', 'dwebAvailable'], effects: [] },
+    dweb_peers: { projectionKeys: ['sessionId', 'dwebAvailable'], effects: [] },
+    dweb_block: { projectionKeys: ['sessionId', 'dwebAvailable'], effects: [] },
+    dweb_discovery: { projectionKeys: ['sessionId', 'dwebAvailable'], effects: [] },
+    dweb_guide: { projectionKeys: ['sessionId', 'dwebAvailable'], effects: [] },
   },
 };
 
@@ -240,6 +247,10 @@ const introspectionTools = new Set([
   'actor_list', 'inspect', 'wait_until', 'load_skill',
 ]);
 const scheduleTools = new Set(['schedule_create', 'schedule_list', 'schedule_cancel']);
+const dwebTools = new Set([
+  'dweb_discover', 'dweb_share', 'dweb_install', 'dweb_peers',
+  'dweb_block', 'dweb_discovery', 'dweb_guide',
+]);
 
 export const controllerToolDomain = (/** @type {unknown} */ name) =>
   typeof name !== 'string' ? null
@@ -253,4 +264,5 @@ export const controllerToolDomain = (/** @type {unknown} */ name) =>
                   : pageTools.has(name) ? 'page'
                     : introspectionTools.has(name) ? 'introspection'
                       : scheduleTools.has(name) ? 'schedule'
-                        : null;
+                        : dwebTools.has(name) ? 'dweb'
+                          : null;

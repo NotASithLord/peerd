@@ -26,6 +26,7 @@ import { createPersistenceToolAuthority } from './persistence-tool-authority.js'
 import { createPageToolAuthority } from './page-tool-authority.js';
 import { createIntrospectionToolAuthority } from './introspection-tool-authority.js';
 import { createScheduleToolAuthority } from './schedule-tool-authority.js';
+import { createDwebToolAuthority } from './dweb-tool-authority.js';
 
 const exactKeys = (
   /** @type {unknown} */ value, /** @type {readonly string[]} */ required,
@@ -506,6 +507,20 @@ export const makeOffscreenActorClient = ({
     });
     return entry;
   };
+  const dwebEntry = (
+    /** @type {any} */ grant,
+    /** @type {any} */ msg,
+    /** @type {string[]} */ tools,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainEntry(grant, msg, 'dweb', tools, fields);
+    if (!entry) return null;
+    entry.domainState.authority ??= createDwebToolAuthority({
+      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      signal: /** @type {any} */ (grant).relaySignal,
+    });
+    return entry;
+  };
 
   const runDomainEffect = async (
     /** @type {any} */ entry,
@@ -877,6 +892,9 @@ export const makeOffscreenActorClient = ({
         sessionId: admittedContext.ctx.session?.sessionId,
         messageCount: admittedContext.ctx.session?.messageCount ?? 0,
         trimCovered: admittedContext.ctx.session?.trimCovered ?? 0,
+      } : domain === 'dweb' ? {
+        sessionId: admittedContext.ctx.session?.sessionId,
+        dwebAvailable: admittedContext.ctx.dweb != null,
       } : { sessionId: admittedContext.ctx.session?.sessionId };
       return {
         ok: true, mode: 'execute', executionId,
@@ -1981,6 +1999,44 @@ export const makeOffscreenActorClient = ({
       if (!entry) return { ok: false, error: 'schedule/cancel-routine: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'schedule/cancel-routine', 'commit', () =>
         entry.domainState.authority.cancelRoutine(msg.id));
+    },
+    'dweb/discover-apps': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['dweb_discover'], []);
+      if (!entry) return { ok: false, error: 'dweb/discover-apps: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'dweb/discover-apps', 'read', () =>
+        entry.domainState.authority.discoverApps());
+    },
+    'dweb/publish-confirmed-app': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['dweb_share'], ['appId']);
+      if (!entry) return { ok: false, error: 'dweb/publish-confirmed-app: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'dweb/publish-confirmed-app', 'commit', () =>
+        entry.domainState.authority.publishConfirmedApp(msg.appId));
+    },
+    'dweb/install-confirmed-app': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['dweb_install'], ['uri', 'name']);
+      if (!entry) return { ok: false, error: 'dweb/install-confirmed-app: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'dweb/install-confirmed-app', 'commit', () =>
+        entry.domainState.authority.installConfirmedApp(msg.uri, msg.name));
+    },
+    'dweb/read-peers': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['dweb_peers'], []);
+      if (!entry) return { ok: false, error: 'dweb/read-peers: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'dweb/read-peers', 'read', () =>
+        entry.domainState.authority.readPeers());
+    },
+    'dweb/set-peer-blocked': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = dwebEntry(
+        grantFor(msg, sender, boundGrant), msg, ['dweb_block'], ['did', 'block', 'reason'],
+      );
+      if (!entry) return { ok: false, error: 'dweb/set-peer-blocked: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'dweb/set-peer-blocked', 'commit', () =>
+        entry.domainState.authority.setPeerBlocked(msg.did, msg.block, msg.reason));
+    },
+    'dweb/set-discovery-enabled': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['dweb_discovery'], ['enabled']);
+      if (!entry) return { ok: false, error: 'dweb/set-discovery-enabled: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'dweb/set-discovery-enabled', 'commit', () =>
+        entry.domainState.authority.setDiscoveryEnabled(msg.enabled));
     },
     'actor/tool-settle': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,

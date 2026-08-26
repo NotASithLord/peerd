@@ -22,13 +22,14 @@ export const dwebBlockTool = composeTool("dweb_block", {
 
   execute: async (args, ctx) => {
     // why: narrow the SW-injected ctx.dweb slot to the one op this tool uses.
-    const dweb = /** @type {{ block: (o: { did: string, block: boolean, reason?: string }) => Promise<{ ok?: boolean, error?: string }> } | null | undefined} */ (
-      /** @type {{ dweb?: unknown }} */ (ctx).dweb);
-    if (!dweb) return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
+    const authority = /** @type {{setPeerBlocked?:(did:string,block:boolean,reason?:string)=>Promise<any>}|undefined} */ (
+      /** @type {{dwebAuthority?:unknown}} */ (ctx).dwebAuthority);
+    if (typeof authority?.setPeerBlocked !== 'function') return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
     const did = String(args?.did ?? '').trim();
     if (!did) return { ok: false, error: 'did_required' };
     const block = args?.block !== false;
-    const r = await dweb.block({ did, block, reason: args?.reason });
+    const r = await authority.setPeerBlocked(did, block, args?.reason);
+    if (r?.error === 'dweb_unavailable') return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
     if (!r?.ok) return { ok: false, error: r?.error ?? 'block_failed' };
     return { ok: true, content: JSON.stringify({ did, blocked: block }, null, 2) };
   },

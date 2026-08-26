@@ -1232,6 +1232,52 @@ export const runActor = async (job, {
             }), { observeResult: true });
           return;
         }
+        if (m.type === 'dweb-discover-apps-request') {
+          await relayExactToolMessage(m, 'dweb-discover-apps-response', () =>
+            sendToSW('dweb/discover-apps', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'dweb-publish-confirmed-app-request') {
+          await relayExactToolMessage(m, 'dweb-publish-confirmed-app-response', () =>
+            sendToSW('dweb/publish-confirmed-app', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              appId: m.appId,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'dweb-install-confirmed-app-request') {
+          await relayExactToolMessage(m, 'dweb-install-confirmed-app-response', () =>
+            sendToSW('dweb/install-confirmed-app', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              uri: m.uri, name: m.name,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'dweb-read-peers-request') {
+          await relayExactToolMessage(m, 'dweb-read-peers-response', () =>
+            sendToSW('dweb/read-peers', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'dweb-set-peer-blocked-request') {
+          await relayExactToolMessage(m, 'dweb-set-peer-blocked-response', () =>
+            sendToSW('dweb/set-peer-blocked', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              did: m.did, block: m.block, reason: m.reason,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'dweb-set-discovery-enabled-request') {
+          await relayExactToolMessage(m, 'dweb-set-discovery-enabled-response', () =>
+            sendToSW('dweb/set-discovery-enabled', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              enabled: m.enabled,
+            }), { observeResult: true });
+          return;
+        }
         if (m.type === 'actor-tool-settle-request') {
           await relayExactToolMessage(m, 'actor-tool-settle-response', () =>
             sendToSW('actor/tool-settle', {

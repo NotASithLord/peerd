@@ -20,13 +20,6 @@ import { toolboxWriteTool } from './defs/toolbox-write.js';
 import { toolboxListTool } from './defs/toolbox-list.js';
 import { toolboxDeleteTool } from './defs/toolbox-delete.js';
 import { requestReviewTool } from './defs/request-review.js';
-import { dwebDiscoverTool } from './defs/dweb-discover.js';
-import { dwebShareTool } from './defs/dweb-share.js';
-import { dwebInstallTool } from './defs/dweb-install.js';
-import { dwebPeersTool } from './defs/dweb-peers.js';
-import { dwebBlockTool } from './defs/dweb-block.js';
-import { dwebDiscoveryTool } from './defs/dweb-discovery.js';
-import { dwebGuideTool } from './defs/dweb-guide.js';
 import { a2aRunTool } from './defs/a2a-run.js';
 
 export const LEGACY_TOOL_IMPLEMENTATIONS = Object.freeze([
@@ -46,12 +39,5 @@ export const LEGACY_TOOL_IMPLEMENTATIONS = Object.freeze([
   toolboxListTool,
   toolboxDeleteTool,
   requestReviewTool,
-  dwebDiscoverTool,
-  dwebShareTool,
-  dwebInstallTool,
-  dwebPeersTool,
-  dwebBlockTool,
-  dwebDiscoveryTool,
-  dwebGuideTool,
   a2aRunTool,
 ]);

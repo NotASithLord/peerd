@@ -37,8 +37,9 @@ export const dwebInstallTool = composeTool("dweb_install", {
   execute: async (args, ctx) => {
     // why: narrow ctx to the dweb-only slots (dweb surface + force-confirm) the
     // SW injects for dweb builds — absent/loosely-typed on the base ToolContext.
-    const dctx = /** @type {DwebInstallCtx} */ (/** @type {unknown} */ (ctx));
-    if (!dctx.dweb) return {
+    const authority = /** @type {{installConfirmedApp?:(uri:string,name?:string)=>Promise<any>}|undefined} */ (
+      /** @type {{dwebAuthority?:unknown}} */ (ctx).dwebAuthority);
+    if (typeof authority?.installConfirmedApp !== 'function') return {
       ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.',
       outcomeKind: 'pre-effect-failure',
     };
@@ -47,20 +48,15 @@ export const dwebInstallTool = composeTool("dweb_install", {
       ok: false, error: 'peerd_uri_required', content: 'A peerd:// uri is required (from dweb_discover).',
       outcomeKind: 'pre-effect-failure',
     };
-    if (dctx.permission?.confirmActions === false && dctx.confirm) {
-      const ans = await dctx.confirm({
-        tool: 'dweb_install', kind: 'dweb_install', origins: [],
-        summary: `Install the app at ${uri.slice(0, 72)}… from a peer? It runs sandboxed, with no extension access.`,
-        sessionId: ctx.session?.sessionId ?? null,
-      }, ctx.abortSignal);
-      if (ans !== 'yes_once' && ans !== 'yes_session') {
-        return {
-          ok: false, error: 'declined', content: 'User declined the install.',
-          outcomeKind: 'pre-effect-failure',
-        };
-      }
-    }
-    const r = await dctx.dweb.install({ uri, name: args?.name });
+    const r = await authority.installConfirmedApp(uri, args?.name);
+    if (r?.error === 'dweb_unavailable') return {
+      ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.',
+      outcomeKind: 'pre-effect-failure',
+    };
+    if (r?.declined === true) return {
+      ok: false, error: 'declined', content: 'User declined the install.',
+      outcomeKind: 'pre-effect-failure',
+    };
     if (!r?.ok) return {
       ok: false,
       error: r?.error ?? 'install_failed',
