@@ -75,8 +75,8 @@ relevant baseline.
 
 ## Current retained state
 
-The deletion-oriented chain is `2f92849`, `58ebb61`, `31afe71`, and `4dd2279`,
-followed by the staged fixed-authority-class checkpoint.
+The deletion-oriented chain is `2f92849`, `58ebb61`, `31afe71`, `4dd2279`,
+`37c91a2`, `7ba4a2d`, and the current staged provider-selection closure.
 
 - The broad `kernel-transfer.js` aggregate and generic controller tool-effect
   lane are deleted. Orchestrator and isolated actors share exact per-domain
@@ -94,18 +94,21 @@ followed by the staged fixed-authority-class checkpoint.
   existing exact handlers still bind owner/session/run, class, arguments,
   cancellation, replay and known/unknown outcome state.
 
-The representative tool-feature fixture adds a semantic tool name to an
-existing controller authority class. After normalizing only generated
+The representative tool-feature fixture now adds a real controller-owned tool
+policy (model-facing description and schema), implementation and ownership row
+using the existing local authority class. After normalizing only generated
 controller identity literals, the candidate has exactly the same SW inputs and
-byte-identical authority code. The fixture itself appears only in the
+byte-identical authority code. The complete fixture appears only in the
 controller graph.
 
-Store-Chrome telemetry for the latest staged checkpoint is 1,305,599 bundled
-SW bytes, 449 inputs and a 347,757-byte minified cold graph. The preceding
-`4dd2279` package was 1,312,985 bytes with the same 449 inputs and cold graph.
-The SW ledger replaces `shared/controller-tool-manifest.js` with
-`shared/controller-authority-manifest.js`; the semantic ownership module is not
-an SW input. These numbers are observations, not optimization targets.
+Store-Chrome telemetry for the latest staged checkpoint is 1,303,760 bundled
+SW bytes, 447 inputs and a 347,857-byte minified cold graph. The preceding
+`7ba4a2d` package was 1,306,225 bytes with 449 inputs and the same cold graph.
+`peerd-provider/metadata.js` and `peerd-provider/semantic-metadata.js` are no
+longer reachable through `kernel-turn-live-factories.js`: per-provider runner
+selection comes from the controller-owned `models/options` projection, while
+the SW retains only the fixed egress manifest's credential classification.
+These numbers are observations, not optimization targets.
 
 The isolated Home harness (only the obsolete byte ceilings relaxed in the
 measurement worktree) passed complete route/event/port and actionable-vault
@@ -119,12 +122,13 @@ passed. The full Bun suite passed 7,507 tests and reproduced only the same five
 inherited failures. The in-browser suite passed 1,000 tests and reproduced only
 the same two inherited UI failures. There are no new failures.
 
-The remaining architectural blocker is unchanged: the SW still reaches
+The remaining architectural blocker is narrower but real: the SW still reaches
 `controller-turn-semantics.js` through `kernel-turn-live-factories.js`, and that
-owner still supplies the turn driver, legacy dispatcher/registry and feature
-orchestration. The next retained work must remove that real semantic reachability
-or stop with the exact minimum executable cut. Do not resume per-domain
-allowlist churn or introduce a generic bridge merely to alter bundle telemetry.
+owner still supplies provider pricing, the turn driver, legacy
+dispatcher/registry and feature orchestration. The next retained work must move
+one of those real closures to its controller owner and delete its old import in
+the same checkpoint. Do not resume per-domain allowlist churn or introduce a
+generic bridge merely to alter bundle telemetry.
 
 ## Completion condition
 

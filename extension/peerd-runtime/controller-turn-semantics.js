@@ -83,7 +83,6 @@ import { makeToolboxParseCheck } from './toolbox/core.js';
 import { wrapUntrusted } from './tools/prompt-wrap.js';
 import { digestCapture } from './site-clients/digest.js';
 import { drainFetchTapInjected, installFetchTapInjected } from './dom/fetch-tap-injected.js';
-import { listProviderMetadata as listProviders } from '/peerd-provider/metadata.js';
 import { costOf } from '/peerd-provider/pricing.js';
 import { parseAppManifest } from '/peerd-engine/app-manifest.js';
 
@@ -134,7 +133,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   GOAL_MAX_ITERATIONS,
   isReadOnlyTool,
   limitExceeded,
-  listProviders,
   localStoreSource,
   mainAgentDescriptors,
   makeAutoMemory,

@@ -131,7 +131,8 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     settingsStore, DWEB_ENABLED, filterByGoalActive, goalActiveFor,
     dwebEngagedSessions, markDwebEngaged, dispatchToolCall, prepareToolCall, settleToolCall,
     maybeNudgeDebuggerGrant, getToolDescriptor = () => null,
-    decideAction, listProviders, costOf, makeTurnCostTracker, uiConnected, uiPorts, auditLog,
+    decideAction, isKeylessProvider = () => false, costOf, makeTurnCostTracker,
+    uiConnected, uiPorts, auditLog,
     postChatNote, runUserTurn,
     REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
     currentAppScope,
@@ -665,8 +666,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // unknown local model id still costs $0, so the pricing fold is told
   // it's a local provider and resolves a KNOWN zero rate card instead of
   // "estimate unavailable". Keeps the CostChip honest at $0.00.
-  const costProviderIsLocal = !!listProviders()
-    .find((/** @type {any} */ p) => p.name === costSession?.provider)?.keyless;
+  const costProviderIsLocal = isKeylessProvider(costSession?.provider) === true;
   const costTracker = makeTurnCostTracker({
     costOf: (/** @type {any} */ model, /** @type {any} */ usage, /** @type {any} */ overrides) =>
       costOf(/** @type {any} */ (model), /** @type {any} */ (usage), /** @type {any} */ (overrides), { localProvider: costProviderIsLocal }),

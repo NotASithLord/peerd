@@ -171,7 +171,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     isReadOnlyTool,
     landingStopCard,
     limitExceeded,
-    listProviders,
     localStoreSource,
     mainAgentDescriptors,
     makeAutoMemory,
@@ -1603,7 +1602,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       if (result.usage) {
         const price = costOf(record.model, result.usage,
           deps.settingsStore.get().pricingOverrides,
-          { localProvider: !!listProviders().find((entry) => entry.name === record.provider)?.keyless });
+          { localProvider: providerEgressPolicy(record.provider)?.credential === null });
         await foldSessionCost(actorSessionId, result.usage, price?.cost ?? 0).catch(() => {});
         if (display && projection.patchBound(display, { cost: price })) {
           post({
@@ -1848,7 +1847,18 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
         isPersisted: (/** @type {string} */ sessionId) =>
           goalRunner?.isPersisted(sessionId) ?? Promise.resolve(false),
       },
-      settings: deps.settingsStore, listProviders,
+      settings: deps.settingsStore,
+      resolveProvider: async (/** @type {string} */ sessionId) => {
+        const selection = await deps.resolveProviderSelection(sessionId);
+        if (selection?.ok !== true || typeof selection.selected !== 'string') return null;
+        const [name, model, extra] = selection.selected.split('::');
+        if (extra !== undefined || !name || !model) return null;
+        return {
+          name,
+          defaultRunnerModel: typeof selection.selectedRunnerModel === 'string'
+            ? selection.selectedRunnerModel : '',
+        };
+      },
       getTool: (/** @type {string} */ name) => toolDescriptorsByName.get(name),
       appendAudit: deps.auditLog.append, postChatNote: deps.postChatNote, now: Date.now,
     });
@@ -2950,7 +2960,9 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     },
     dispatchToolCall, prepareToolCall, settleToolCall,
     maybeNudgeDebuggerGrant, decideAction,
-    listProviders, costOf, makeTurnCostTracker,
+    isKeylessProvider: (/** @type {string} */ providerName) =>
+      providerEgressPolicy(providerName)?.credential === null,
+    costOf, makeTurnCostTracker,
     uiConnected, uiPorts: shared.uiPorts, auditLog: deps.auditLog,
     postChatNote: deps.postChatNote,
     REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS,

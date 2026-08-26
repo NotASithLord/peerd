@@ -141,6 +141,21 @@ describe('kernel turn ownership boundaries', () => {
     ]) expect(driver).not.toContain(fallback);
   });
 
+  it('keeps provider selection and model inventory out of the live turn authority graph', async () => {
+    const authorityModules = await modulesFor('background/kernel-turn-live-factories.js');
+    for (const module of [
+      'peerd-provider/metadata.js',
+      'peerd-provider/registry.js',
+      'peerd-provider/semantic-metadata.js',
+    ]) expect(authorityModules.has(module), `authority graph imports ${module}`).toBe(false);
+
+    const controllerModules = await modulesFor('offscreen/controller-turn-runtime.js');
+    for (const module of [
+      'peerd-provider/metadata.js',
+      'peerd-provider/registry.js',
+    ]) expect(controllerModules.has(module), `controller graph omits ${module}`).toBe(true);
+  });
+
   it('hosts actor tool semantics only in controller and isolated-worker graphs', async () => {
     const actorSemanticModules = new Set([
       'peerd-runtime/controller-actor-tools.js',
