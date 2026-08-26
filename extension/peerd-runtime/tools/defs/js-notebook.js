@@ -16,7 +16,7 @@ import {
   moduleImportPolicyMessage,
   REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE,
   REMOTE_MODULE_RESTRICTED_CODE,
-} from '/peerd-engine/background.js';
+} from '/peerd-engine/errors.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { pushValueBlock } from './value-block.js';
 

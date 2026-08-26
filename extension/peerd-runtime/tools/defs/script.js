@@ -19,12 +19,12 @@ import {
   moduleImportPolicyMessage,
   REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE,
   REMOTE_MODULE_RESTRICTED_CODE,
-} from '/peerd-engine/background.js';
+} from '/peerd-engine/errors.js';
 import { JS_PITFALLS_NOTE, SCRIPT_BUILTINS_NOTE } from './code-style-note.js';
 import { oncePerSession } from './once-per-session.js';
 import { pushValueBlock, serializeValue } from './value-block.js';
 import { SPILL_PAGE_CHARS as RUN_CACHE_SLICE_CHARS } from '../web/spill.js';
-import { MAX_SPILL_TEXT_CHARS } from '../run-cache.js';
+import { MAX_SPILL_TEXT_CHARS } from '../run-cache-policy.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 import {
   renderTraceLines, traceGoalLines, traceErrorDetails,

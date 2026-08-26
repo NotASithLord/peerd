@@ -7,8 +7,8 @@
 // Notebook becomes this chat's current — subsequent js_notebook calls
 // without an explicit `notebook` arg route here.
 
-import { JS_TAB_GROUP_TITLE } from '/background/notebook-client.js';
-import { normalizeGitRemote } from '/peerd-engine/background.js';
+import { ENGINE_TAB_GROUP_TITLE } from '/shared/engine-tab-group.js';
+import { normalizeGitRemote } from '/peerd-engine/repository/remote.js';
 import { oncePerSession } from './once-per-session.js';
 
 // why a Notebook-specific note (the shared CODE_STYLE_NOTE rides the Notebook
@@ -118,7 +118,7 @@ export const createNotebookSandbox = async (args, ctx) => {
     try {
       await jsTabTracker.ensureTab(record.id, {
         active: false,
-        groupTitle: JS_TAB_GROUP_TITLE,
+        groupTitle: ENGINE_TAB_GROUP_TITLE,
       });
     } catch (e) {
       if (jsTabTracker.getTabId?.(record.id) == null) {

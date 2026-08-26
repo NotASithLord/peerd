@@ -12,8 +12,15 @@
 // the barrel pulls in vault/storage, which load the browser polyfill and
 // break this module's unit tests. composer/resolvers.js imports it the
 // same way for the same reason.
-import { findDenylistMatch } from '../../../peerd-egress/denylist/denylist.js';
 import { originOfUrl } from '../metadata/origins.js';
+import {
+  isDenylistedTab,
+  liveDocumentLocationInjected,
+} from '../../dom/browser-target-probe.js';
+export {
+  isDenylistedTab,
+  liveDocumentLocationInjected,
+} from '../../dom/browser-target-probe.js';
 // The one live look at the target document (issues 267 + 276). Deep import for
 // the same reason as above — dom/index.js is fine, but this file is unit-tested
 // without a browser and the barrel is wider than the one function needed.
@@ -88,17 +95,6 @@ export const passwordFieldSignalFromProbe = (value) => {
  *
  * @returns {{ origin: string | null, href: string | null, timeOrigin: number | null }}
  */
-export function liveDocumentLocationInjected() {
-  'use strict';
-  let origin = null;
-  let href = null;
-  let timeOrigin = null;
-  try { origin = location.origin; } catch (e) { origin = null; }
-  try { href = location.href; } catch (e) { href = null; }
-  try { timeOrigin = Number.isFinite(performance.timeOrigin) ? performance.timeOrigin : null; } catch (e) { timeOrigin = null; }
-  return { origin, href, timeOrigin };
-}
-
 /**
  * Ask the document that is ACTUALLY committed in the target tab where it is and
  * bind later work to that exact document. Password observation runs only after
@@ -377,14 +373,6 @@ export const resolveTargetTab = async (args, ctx, options = {}) => {
  * @param {string | undefined} url
  * @param {readonly string[] | undefined} denylist
  */
-export const isDenylistedTab = (url, denylist) => {
-  let hostname = '';
-  // why: erased cast — a missing url throws inside new URL() and is caught
-  // below (returns false), the same outcome the type narrowing would force.
-  try { hostname = new URL(/** @type {string} */ (url)).hostname; } catch { return false; }
-  return !!hostname && !!findDenylistMatch(hostname, denylist ?? []);
-};
-
 /**
  * Model-facing error for a CDP-only capability that has no fallback
  * (page_exec's Trusted-Types evaluation, page_keys' trusted input — the

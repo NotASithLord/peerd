@@ -3,7 +3,7 @@
 import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // app_write_file — write a single file inside an App's OPFS subtree.
 
-import { isBinaryAssetPath, MAX_MODEL_APP_FILE_BYTES } from '/peerd-engine/background.js';
+import { isBinaryAssetPath, MAX_MODEL_APP_FILE_BYTES } from '/peerd-engine/app-assets.js';
 import { base64ByteLength } from '/shared/bundle/bytes.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */

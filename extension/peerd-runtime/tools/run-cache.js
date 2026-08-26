@@ -15,6 +15,9 @@
 // safe to clear, never mixed into a durable store.
 
 import { SPILL_CACHE_MAX_ENTRIES } from './web/spill.js';
+import { MAX_SPILL_TEXT_CHARS } from './run-cache-policy.js';
+
+export { MAX_SPILL_TEXT_CHARS } from './run-cache-policy.js';
 
 const DB_NAME = 'peerd-run-cache';
 // v2 added the createdAt index (body-free eviction below).
@@ -32,8 +35,6 @@ const MAX_ENTRIES = SPILL_CACHE_MAX_ENTRIES;
 // archive: without a ceiling one pathological multi-hundred-MB value would
 // dominate the store (and every context that materializes the record). At the
 // read tool's per-call slice cap this is still hundreds of pages.
-export const MAX_SPILL_TEXT_CHARS = 2_000_000;
-
 /**
  * @typedef {Object} RunCacheRecord
  * @property {string} key             `run:<runId or toolUseId>`

@@ -50,21 +50,21 @@ const sensitive = (origin: string) =>
   classifyOriginSensitivity(origin, { hasVaultSecret: (o: string) => o === 'https://bank.test' }).sensitive;
 
 const numericRefusalSource = () => {
-  const source = readFileSync(new URL('../../../extension/background/kernel-turn-live-factories.js', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../../../extension/background/kernel-turn-authority-adapter.js', import.meta.url), 'utf8');
   const start = source.indexOf('if (!authority.allowed) {');
   const end = source.indexOf('let actorSessionId = webActorTabBindings.resolve(tabId);', start);
   return start >= 0 && end > start ? source.slice(start, end) : '';
 };
 
 const siteResolutionSource = () => {
-  const source = readFileSync(new URL('../../../extension/background/kernel-turn-live-factories.js', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../../../extension/background/kernel-turn-authority-adapter.js', import.meta.url), 'utf8');
   const start = source.indexOf('const siteOrigin = parseSiteHandle(requested);');
   const end = source.indexOf('return null;', start);
   return start >= 0 && end > start ? source.slice(start, end) : '';
 };
 
 const apiResolutionSource = () => {
-  const source = readFileSync(new URL('../../../extension/background/kernel-turn-live-factories.js', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../../../extension/background/kernel-turn-authority-adapter.js', import.meta.url), 'utf8');
   const start = source.indexOf('const siteOrigin = parseSiteHandle(requested);');
   const end = source.indexOf('return null;', start);
   return start >= 0 && end > start ? source.slice(start, end) : '';

@@ -8,7 +8,7 @@
 // VM is set as the current chat's default, so the next vm_boot routes
 // there. The tab is grouped under "peerd".
 
-import { VM_TAB_GROUP_TITLE } from '/background/vm-client.js';
+import { ENGINE_TAB_GROUP_TITLE } from '/shared/engine-tab-group.js';
 
 /**
  * Create a WebVM record + its background tab; returns { id, name, kind, isCurrent }.
@@ -40,7 +40,7 @@ export const createWebVmSandbox = async (args, ctx) => {
     try {
       await vmTabTracker.ensureTab(record.id, {
         active: false,
-        groupTitle: VM_TAB_GROUP_TITLE,
+        groupTitle: ENGINE_TAB_GROUP_TITLE,
       });
     } catch (e) {
       if (vmTabTracker.getTabId?.(record.id) == null) {

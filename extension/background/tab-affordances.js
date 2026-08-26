@@ -19,11 +19,13 @@
 
 import { openHome } from '/shared/open-home.js';
 import { decidePullIn } from './kernel-front-door.js';
-import { pullInHintInjected } from '/peerd-runtime/background.js';
+import {
+  classifyBrowserAutomationTarget,
+  pullInHintInjected,
+} from '/peerd-runtime/authority.js';
 import { matchesDenylist } from '/peerd-egress/background.js';
 import { shouldFollowAgentTab } from './watch-mode.js';
 import { allowedDocumentTarget } from './page-activity.js';
-import { classifyBrowserAutomationTarget } from '/peerd-runtime/background.js';
 
 // The home agent-tab card's Open button draws a fresh brand color each time the
 // card is (re)generated — the sanctioned "peers/actions are the content" accent
