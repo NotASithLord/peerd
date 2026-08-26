@@ -80,6 +80,57 @@ and fresh plus forced-wake cold-start measurements. Existing failures are debt,
 not an excuse to stop: inspect them and prove no-new-failures parity against the
 relevant baseline.
 
+## Current course-correction checkpoint
+
+The retained seam work is `2f92849` followed by `58ebb61`.
+
+- Both service-worker imports of `peerd-runtime/kernel-transfer.js` were
+  replaced by exact transfer, persistence, policy and self-sync custody leaves;
+  the aggregate module was deleted.
+- Orchestrator and isolated-actor relays now bind the same exact per-domain
+  authority implementations. Repeated repository-authority construction was
+  deleted from the actor route table. The remaining host adapters are
+  intentionally distinct: one binds turn-call custody, while the other binds
+  sender-pinned actor grants, relay quotas and run settlement. Collapsing those
+  lifecycle envelopes would require the prohibited generic callback/dispatcher
+  shape.
+- No authority operation or legacy tool was added or removed. The frozen legacy
+  allowlist remains at 17.
+
+Measured from clean commits with Store posture verification:
+
+| Commit/artifact | Store SW bytes | Inputs | Minified cold graph |
+|---|---:|---:|---:|
+| `7ff9fae` decision point | 1,318,602 | 452 | 347,757 |
+| `58ebb61` actual | 1,317,300 | 451 | 347,757 |
+| `7ff9fae` authority-only projection | 1,101,421 | 362 | 347,757 |
+| `58ebb61` authority-only projection | 1,100,140 | 362 | 347,757 |
+
+The actual worker decreased by 1,302 bytes and one input; the projected fixed
+authority floor decreased by 1,281 bytes without adding an input. The exact
+input deleted is `peerd-runtime/kernel-transfer.js`. The current projection
+still removes 89 semantic inputs and 217,160 bundled bytes without removing a
+background authority handler or adding a projection input.
+
+The Home cold harness at `58ebb61`, run from an isolated measurement worktree
+with only the obsolete byte ceilings relaxed, reached full actionable readiness
+in 2.36 seconds from browser launch and 841 ms from worker target. A confirmed
+forced wake reached actionable readiness in 137 ms. Both route-readiness and
+timing assessments passed.
+
+Focused boundary/security verification passed 123 tests with no failures. The
+full Bun run passed 7,532 tests and reproduced only the five inherited failures;
+the in-browser run passed 1,000 tests and reproduced only its two inherited UI
+failures. Typecheck, lint, tscheck coverage, the dweb boundary, and both Store
+posture checks passed. The ordinary packaged-import command still stops at the
+inherited 300 KB Preview cold-graph ceiling rather than an import defect.
+
+Next work remains deletion-first at the three projected semantic roots:
+`kernel-turn-live-factories.js`, `kernel-turn-runtime.js`, and
+`controller-turn-semantics.js`. Do not count further allowlist churn as
+architectural progress unless the same checkpoint makes one of those real
+imports or its superseded aggregate closure disappear.
+
 ## Completion condition
 
 The production Store-Chrome service worker no longer contains provider
